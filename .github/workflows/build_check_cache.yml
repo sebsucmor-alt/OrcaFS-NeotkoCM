@@ -32,13 +32,21 @@ jobs:
         
       - name: set outputs
         id: set_outputs
-        env:
-          # todo: this is mad! refactor other build scripts to use same name
-          dep-folder-name: ${{ inputs.os == 'windows-latest' && '/OrcaSlicer_dep' || inputs.os == 'macos-14' && '' || inputs.os != 'macos-14' && '/destdir' || '' }}
-          output-cmd: ${{ inputs.os == 'windows-latest' && '$env:GITHUB_OUTPUT' || '"$GITHUB_OUTPUT"'}}
+        # FIX: Use bash on all platforms to avoid mixed path separators on Windows.
+        # Previously, Windows used PowerShell which caused paths like:
+        #   C:\...\deps\build/OrcaSlicer_dep  (mixed separators)
+        # This broke cache lookup and caused deps (including OpenVDB) to never be found.
+        shell: bash
         run: |
-          echo cache-key=${{ inputs.os }}-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }} >> ${{ env.output-cmd }}
-          echo cache-path=${{ github.workspace }}/deps/build${{ env.dep-folder-name }} >> ${{ env.output-cmd }}
+          if [ "${{ inputs.os }}" = "windows-latest" ]; then
+            dep_folder="/OrcaSlicer_dep"
+          elif [ "${{ inputs.os }}" = "macos-14" ]; then
+            dep_folder=""
+          else
+            dep_folder="/destdir"
+          fi
+          echo "cache-key=${{ inputs.os }}-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}" >> "$GITHUB_OUTPUT"
+          echo "cache-path=${{ github.workspace }}/deps/build${dep_folder}" >> "$GITHUB_OUTPUT"
             
       - name: load cache
         id: cache_deps
