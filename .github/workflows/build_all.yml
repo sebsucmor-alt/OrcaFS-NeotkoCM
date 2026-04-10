@@ -61,7 +61,7 @@ jobs:
           - os: windows-latest
           - os: macos-14
             arch: arm64
-    uses: ./.github/workflows/build_check_cache.yml
+    uses: ./.github/workflows/build_check_cache.yml@main
     with:
       os: ${{ matrix.os }}
       arch: ${{ matrix.arch }}
