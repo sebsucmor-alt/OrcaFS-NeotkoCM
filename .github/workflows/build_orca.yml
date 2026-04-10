@@ -263,6 +263,15 @@ jobs:
           dir "C:/Program Files (x86)/Windows Kits/10/Include"
           choco install nsis
 
+      - name: Debug - Find OpenVDB in deps (Windows)
+        if: inputs.os == 'windows-latest'
+        shell: cmd
+        run: |
+          echo === Searching for OpenVDB cmake files ===
+          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\cmake" /s /b 2>nul | findstr /i openvdb || echo "No OpenVDB cmake files found"
+          echo === Searching for openvdb headers ===
+          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\include" /s /b 2>nul | findstr /i openvdb || echo "No OpenVDB headers found"
+
       - name: Build slicer Win
         if: inputs.os == 'windows-latest'
         working-directory: ${{ github.workspace }}
