@@ -10,6 +10,12 @@ if (IN_GIT_REPO)
     set(OPENVDB_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_OpenVDB-prefix/src/dep_OpenVDB)
 endif ()
 
+if (NOT MSVC)
+    set(_openvdb_cxx_flags "-Wno-missing-template-arg-list-after-template-kw")
+else()
+    set(_openvdb_cxx_flags "")
+endif()
+
 Snapmaker_Orca_add_cmake_project(OpenVDB
     #  support vs2022, update to 8.2
     URL https://github.com/tamasmeszaros/openvdb/archive/a68fd58d0e2b85f01adeb8b13d7555183ab10aa5.zip 
@@ -25,7 +31,7 @@ Snapmaker_Orca_add_cmake_project(OpenVDB
         -DTBB_STATIC=${_build_static}
         -DOPENVDB_BUILD_VDB_PRINT=ON
         -DDISABLE_DEPENDENCY_VERSION_CHECKS=ON
-        -DCMAKE_CXX_FLAGS="-Wno-missing-template-arg-list-after-template-kw"
+        -DCMAKE_CXX_FLAGS=${_openvdb_cxx_flags}
 )
 
 if (MSVC)
