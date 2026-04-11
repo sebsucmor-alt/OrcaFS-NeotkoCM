@@ -12,8 +12,12 @@ endif ()
 
 if (NOT MSVC)
     set(_openvdb_cxx_flags "-Wno-missing-template-arg-list-after-template-kw")
+    set(_openvdb_build_vdb_print ON)
 else()
     set(_openvdb_cxx_flags "")
+    # Disable vdb_print on MSVC: it fails to link boost::throw_exception
+    # when Boost is built as static and exceptions are not configured uniformly.
+    set(_openvdb_build_vdb_print OFF)
 endif()
 
 Snapmaker_Orca_add_cmake_project(OpenVDB
@@ -29,7 +33,7 @@ Snapmaker_Orca_add_cmake_project(OpenVDB
         -DOPENVDB_CORE_STATIC=${_build_static}
         -DOPENVDB_ENABLE_RPATH:BOOL=OFF
         -DTBB_STATIC=${_build_static}
-        -DOPENVDB_BUILD_VDB_PRINT=ON
+        -DOPENVDB_BUILD_VDB_PRINT=${_openvdb_build_vdb_print}
         -DDISABLE_DEPENDENCY_VERSION_CHECKS=ON
         -DCMAKE_CXX_FLAGS=${_openvdb_cxx_flags}
 )
