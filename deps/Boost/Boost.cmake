@@ -17,6 +17,7 @@ Snapmaker_Orca_add_cmake_project(Boost
     CMAKE_ARGS
         -DBOOST_EXCLUDE_LIBRARIES:STRING=contract|fiber|numpy|stacktrace|wave|test
         -DBOOST_LOCALE_ENABLE_ICU:BOOL=OFF # do not link to libicu, breaks compatibility between distros
+        -DBOOST_LOCALE_ENABLE_ICONV:BOOL=OFF # Iconv not available on Windows
         -DBUILD_TESTING:BOOL=OFF
         "${_context_abi_line}"
         "${_context_arch_line}"
