@@ -10,6 +10,17 @@ if (APPLE AND CMAKE_OSX_ARCHITECTURES)
     set(_context_arch_line "-DBOOST_CONTEXT_ARCHITECTURE:STRING=${CMAKE_OSX_ARCHITECTURES}")
 endif ()
 
+# On Windows/MSVC, disable Boost components that require external libs not present on the runner
+set(_boost_win_flags "")
+if (MSVC)
+    set(_boost_win_flags
+        -DBOOST_LOCALE_ENABLE_ICONV:BOOL=OFF   # Iconv not available on Windows
+        -DBOOST_IOSTREAMS_ENABLE_BZIP2:BOOL=OFF # BZip2 not available on Windows
+        -DBOOST_IOSTREAMS_ENABLE_LZMA:BOOL=OFF  # LZMA not available on Windows
+        -DBOOST_IOSTREAMS_ENABLE_ZSTD:BOOL=OFF  # ZSTD not available on Windows
+    )
+endif()
+
 Snapmaker_Orca_add_cmake_project(Boost
     URL "https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.gz"
     URL_HASH SHA256=4d27e9efed0f6f152dc28db6430b9d3dfb40c0345da7342eaa5a987dde57bd95
@@ -17,10 +28,10 @@ Snapmaker_Orca_add_cmake_project(Boost
     CMAKE_ARGS
         -DBOOST_EXCLUDE_LIBRARIES:STRING=contract|fiber|numpy|stacktrace|wave|test
         -DBOOST_LOCALE_ENABLE_ICU:BOOL=OFF # do not link to libicu, breaks compatibility between distros
-        -DBOOST_LOCALE_ENABLE_ICONV:BOOL=OFF # Iconv not available on Windows
         -DBUILD_TESTING:BOOL=OFF
         "${_context_abi_line}"
         "${_context_arch_line}"
+        ${_boost_win_flags}
 )
 
 set(DEP_Boost_DEPENDS ZLIB)
