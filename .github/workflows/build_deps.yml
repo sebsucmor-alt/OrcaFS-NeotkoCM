@@ -67,38 +67,19 @@ jobs:
       - name: Build on Windows
         if: inputs.os == 'windows-latest'
         working-directory: ${{ github.workspace }}
-        shell: pwsh
+        shell: cmd
         run: |
-          choco install strawberryperl
-          .\build_release_vs2022.bat deps
-          .\build_release_vs2022.bat pack
-          cd "${{ github.workspace }}/deps/build"
-
-      # FIX: Verify that OpenVDB was actually built and is findable after the Windows build.
-      # Previously the build could silently succeed without OpenVDB, causing the main build to fail.
-      - name: Verify OpenVDB on Windows
-        if: inputs.os == 'windows-latest'
-        shell: bash
-        run: |
-          echo "=== Searching for OpenVDB cmake files ==="
-          found_cmake=$(find "${{ github.workspace }}/deps/build/OrcaSlicer_dep" -name "FindOpenVDB.cmake" -o -name "OpenVDBConfig.cmake" -o -name "openvdb-config.cmake" 2>/dev/null | head -5)
-          if [ -z "$found_cmake" ]; then
-            echo "::error::OpenVDB cmake files not found in deps. The dependency build may have failed silently."
-            echo "=== Contents of deps/build/OrcaSlicer_dep ==="
-            find "${{ github.workspace }}/deps/build/OrcaSlicer_dep" -maxdepth 3 -type d 2>/dev/null || echo "Directory not found"
-            exit 1
-          fi
-          echo "OpenVDB cmake files found:"
-          echo "$found_cmake"
-
-          echo "=== Searching for OpenVDB headers ==="
-          found_headers=$(find "${{ github.workspace }}/deps/build/OrcaSlicer_dep" -name "openvdb.h" 2>/dev/null | head -3)
-          if [ -z "$found_headers" ]; then
-            echo "::error::OpenVDB headers not found. The dependency build may be incomplete."
-            exit 1
-          fi
-          echo "OpenVDB headers found:"
-          echo "$found_headers"
+            choco install strawberryperl --yes --no-progress
+            set "PATH=C:\Strawberry\perl\bin;C:\Strawberry\c\bin;%PATH%"
+            where perl || (echo ERROR: perl not found in PATH && exit /b 1)
+            call .\build_release_vs2022.bat deps
+            if %ERRORLEVEL% neq 0 (echo ERROR: deps build failed with code %ERRORLEVEL% && exit /b %ERRORLEVEL%)
+            if not exist "%GITHUB_WORKSPACE%\deps\build\OrcaSlicer_dep\usr\local\include\openvdb\openvdb.h" (
+                echo ERROR: OpenVDB was not installed correctly into deps. Build incomplete.
+                exit /b 1
+            )
+            echo OpenVDB verified OK
+            call .\build_release_vs2022.bat pack
 
       - name: Build on Mac ${{ inputs.arch }}
         if: inputs.os == 'macos-14'

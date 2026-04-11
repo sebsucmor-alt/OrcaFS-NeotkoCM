@@ -1,70 +1,84 @@
 name: Build all
 
 on:
-  push:
-    branches:
-     - main
-     - 2.2.0
-     - release/*
-    paths:
-     - 'deps/**'
-     - 'src/**'
-     - '**/CMakeLists.txt'
-     - 'version.inc'
-     - 'CHANGELOG*.md'
-     - 'RELEASE_NOTES*.md'
-     - 'localization/**'
-     - 'resources/**'
-     - ".github/workflows/build_*.yml"
-     - 'scripts/flatpak/**'
-
-  pull_request:
-    branches:
-     - main
-     - 2.2.0
-     - release/*
-    paths:
-     - 'deps/**'
-     - 'src/**'
-     - '**/CMakeLists.txt'
-     - 'version.inc'
-     - 'CHANGELOG*.md'
-     - 'RELEASE_NOTES*.md'
-     - ".github/workflows/build_*.yml"
-     - 'build_linux.sh'
-     - 'build_release_vs2022.bat'
-     - 'build_release_macos.sh'
-     - 'scripts/flatpak/**'
-
-  workflow_dispatch: # allows for manual dispatch
+  workflow_dispatch: # manual dispatch only
     inputs:
       build-deps-only:
         description: 'Only build dependencies (bypasses caching)'
         type: boolean
         default: false
+      build-windows:
+        description: 'Build Windows'
+        type: boolean
+        default: true
+      build-linux:
+        description: 'Build Linux (Ubuntu 24.04)'
+        type: boolean
+        default: true
+      build-macos:
+        description: 'Build macOS (arm64)'
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-  
+
 
 jobs:
+  # Compute which platforms to build. Outputs a JSON array consumed by the matrix below.
+  # On push/pull_request all three are always built (same behaviour as before).
+  # On workflow_dispatch the user's checkboxes control which ones run.
+  setup:
+    name: Determine build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          # Default: build everything (push / pull_request / schedule)
+          BUILD_WIN=true
+          BUILD_LIN=true
+          BUILD_MAC=true
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BUILD_WIN="${{ inputs.build-windows }}"
+            BUILD_LIN="${{ inputs.build-linux }}"
+            BUILD_MAC="${{ inputs.build-macos }}"
+          fi
+
+          MATRIX='{"include":['
+          SEP=""
+          if [[ "$BUILD_WIN" == "true" ]]; then
+            MATRIX+="${SEP}{\"os\":\"windows-latest\"}"
+            SEP=","
+          fi
+          if [[ "$BUILD_LIN" == "true" ]]; then
+            MATRIX+="${SEP}{\"os\":\"ubuntu-24.04\"}"
+            SEP=","
+          fi
+          if [[ "$BUILD_MAC" == "true" ]]; then
+            MATRIX+="${SEP}{\"os\":\"macos-14\",\"arch\":\"arm64\"}"
+            SEP=","
+          fi
+          MATRIX+=']}'
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+        shell: bash
+
   build_all:
     name: Build All
+    needs: [setup]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
-          - os: windows-latest
-          - os: macos-14
-            arch: arm64
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
-      arch: ${{ matrix.arch }}
+      arch: ${{ matrix.arch || '' }}
       build-deps-only: ${{ inputs.build-deps-only || false }}
       force-build: ${{ github.event_name == 'schedule' }}
     secrets: inherit
