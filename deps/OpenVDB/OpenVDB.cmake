@@ -10,39 +10,22 @@ if (IN_GIT_REPO)
     set(OPENVDB_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_OpenVDB-prefix/src/dep_OpenVDB)
 endif ()
 
-if (NOT MSVC)
-    set(_openvdb_cxx_flags "-Wno-missing-template-arg-list-after-template-kw")
-    set(_openvdb_build_vdb_print ON)
-    set(_openvdb_use_blosc ON)
-else()
-    set(_openvdb_cxx_flags "")
-    # Disable vdb_print on MSVC: it fails to link boost::throw_exception
-    # when Boost is built as static and exceptions are not configured uniformly.
-    set(_openvdb_build_vdb_print OFF)
-    # Disable Blosc on MSVC: blosc symbols are not found when linking the slicer
-    # because GetPrerequisites does not work with static libs on Windows.
-    set(_openvdb_use_blosc OFF)
-    # Tell OpenVDB not to use boost::throw_exception - it's not available
-    # in MSVC static builds without linking boost_exception explicitly
-    set(_openvdb_cxx_flags "/DBOOST_NO_EXCEPTIONS /D_HAS_EXCEPTIONS=0")
-endif()
-
 Snapmaker_Orca_add_cmake_project(OpenVDB
     #  support vs2022, update to 8.2
     URL https://github.com/tamasmeszaros/openvdb/archive/a68fd58d0e2b85f01adeb8b13d7555183ab10aa5.zip 
     URL_HASH SHA256=f353e7b99bd0cbfc27ac9082de51acf32a8bc0b3e21ff9661ecca6f205ec1d81
     DEPENDS dep_TBB dep_Blosc dep_OpenEXR dep_Boost
+    PATCH_COMMAND git apply ${OPENVDB_DIRECTORY_FLAG} --verbose --ignore-space-change --whitespace=fix ${CMAKE_CURRENT_LIST_DIR}/0001-clang19.patch
     CMAKE_ARGS
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON 
         -DOPENVDB_BUILD_PYTHON_MODULE=OFF
-        -DUSE_BLOSC=${_openvdb_use_blosc}
+        -DUSE_BLOSC=ON
         -DOPENVDB_CORE_SHARED=${_build_shared} 
         -DOPENVDB_CORE_STATIC=${_build_static}
         -DOPENVDB_ENABLE_RPATH:BOOL=OFF
         -DTBB_STATIC=${_build_static}
-        -DOPENVDB_BUILD_VDB_PRINT=${_openvdb_build_vdb_print}
-        -DDISABLE_DEPENDENCY_VERSION_CHECKS=ON
-        -DCMAKE_CXX_FLAGS=${_openvdb_cxx_flags}
+        -DOPENVDB_BUILD_VDB_PRINT=ON
+        -DDISABLE_DEPENDENCY_VERSION_CHECKS=ON # Centos6 has old zlib
 )
 
 if (MSVC)
