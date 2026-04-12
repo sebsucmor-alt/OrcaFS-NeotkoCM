@@ -13,11 +13,15 @@ endif ()
 if (NOT MSVC)
     set(_openvdb_cxx_flags "-Wno-missing-template-arg-list-after-template-kw")
     set(_openvdb_build_vdb_print ON)
+    set(_openvdb_use_blosc ON)
 else()
     set(_openvdb_cxx_flags "")
     # Disable vdb_print on MSVC: it fails to link boost::throw_exception
     # when Boost is built as static and exceptions are not configured uniformly.
     set(_openvdb_build_vdb_print OFF)
+    # Disable Blosc on MSVC: blosc symbols are not found when linking the slicer
+    # because GetPrerequisites does not work with static libs on Windows.
+    set(_openvdb_use_blosc OFF)
 endif()
 
 Snapmaker_Orca_add_cmake_project(OpenVDB
@@ -28,7 +32,7 @@ Snapmaker_Orca_add_cmake_project(OpenVDB
     CMAKE_ARGS
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON 
         -DOPENVDB_BUILD_PYTHON_MODULE=OFF
-        -DUSE_BLOSC=ON
+        -DUSE_BLOSC=${_openvdb_use_blosc}
         -DOPENVDB_CORE_SHARED=${_build_shared} 
         -DOPENVDB_CORE_STATIC=${_build_static}
         -DOPENVDB_ENABLE_RPATH:BOOL=OFF

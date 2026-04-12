@@ -279,11 +279,8 @@ jobs:
         if: inputs.os == 'windows-latest'
         shell: cmd
         run: |
-          echo === OpenVDB lib directory contents ===
-          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\*openvdb*" 2>nul || echo No openvdb files in lib
-          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\cmake\OpenVDB\" 2>nul || echo No OpenVDB cmake dir
-          echo === lib root ===
-          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\" /B 2>nul | findstr /i openvdb
+          echo === OpenVDB and Blosc lib files ===
+          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\" /B 2>nul | findstr /i "openvdb blosc boost_exception"
 
       - name: Clean build dir on Windows
         if: inputs.os == 'windows-latest'
