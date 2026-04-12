@@ -275,6 +275,21 @@ jobs:
             exit /b 1
           )
 
+      - name: Clean build dir on Windows
+        if: inputs.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Remove stale CMakeCache to avoid cached variables from previous runs
+          # interfering with OpenVDB and other find_package calls
+          if (Test-Path "${{ github.workspace }}\build\CMakeCache.txt") {
+            Remove-Item "${{ github.workspace }}\build\CMakeCache.txt" -Force
+            Write-Host "Removed stale CMakeCache.txt"
+          }
+          if (Test-Path "${{ github.workspace }}\build\CMakeFiles") {
+            Remove-Item "${{ github.workspace }}\build\CMakeFiles" -Recurse -Force
+            Write-Host "Removed stale CMakeFiles"
+          }
+
       - name: Build slicer Win
         if: inputs.os == 'windows-latest'
         working-directory: ${{ github.workspace }}
