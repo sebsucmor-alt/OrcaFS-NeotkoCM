@@ -176,6 +176,14 @@ endif()
 
 # Append OPENVDB_ROOT or $ENV{OPENVDB_ROOT} if set (prioritize the direct cmake var)
 set(_OPENVDB_ROOT_SEARCH_DIR "")
+if(OPENVDB_ROOT)
+  list(APPEND _OPENVDB_ROOT_SEARCH_DIR ${OPENVDB_ROOT})
+elseif(DEFINED ENV{OPENVDB_ROOT})
+  list(APPEND _OPENVDB_ROOT_SEARCH_DIR $ENV{OPENVDB_ROOT})
+endif()
+if(OPENVDB_LIBRARYDIR)
+  list(APPEND _OPENVDB_ROOT_SEARCH_DIR ${OPENVDB_LIBRARYDIR})
+endif()
 
 # Additionally try and use pkconfig to find OpenVDB
 
