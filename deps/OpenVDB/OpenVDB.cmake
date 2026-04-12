@@ -22,6 +22,9 @@ else()
     # Disable Blosc on MSVC: blosc symbols are not found when linking the slicer
     # because GetPrerequisites does not work with static libs on Windows.
     set(_openvdb_use_blosc OFF)
+    # Tell OpenVDB not to use boost::throw_exception - it's not available
+    # in MSVC static builds without linking boost_exception explicitly
+    set(_openvdb_cxx_flags "/DBOOST_NO_EXCEPTIONS /D_HAS_EXCEPTIONS=0")
 endif()
 
 Snapmaker_Orca_add_cmake_project(OpenVDB
