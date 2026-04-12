@@ -279,8 +279,8 @@ jobs:
         if: inputs.os == 'windows-latest'
         shell: cmd
         run: |
-          echo === OpenVDB and Blosc lib files (recursive) ===
-          dir /S /B "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\" 2>nul | findstr /i "libopenvdb"
+          echo === OpenVDB and Blosc lib files ===
+          dir "${{ github.workspace }}\deps\build\OrcaSlicer_dep\usr\local\lib\" /B 2>nul | findstr /i "openvdb blosc boost_exception"
 
       - name: Clean build dir on Windows
         if: inputs.os == 'windows-latest'
