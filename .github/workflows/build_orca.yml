@@ -303,7 +303,6 @@ jobs:
         env:
           WindowsSdkDir: 'C:\Program Files (x86)\Windows Kits\10\'
           WindowsSDKVersion: '10.0.26100.0\'
-          OPENVDB_ROOT: ${{ github.workspace }}/deps/build/OrcaSlicer_dep/usr/local
         run: .\build_release_vs2022.bat slicer
 
       - name: Create installer Win
