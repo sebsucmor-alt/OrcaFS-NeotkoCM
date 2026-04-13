@@ -865,19 +865,27 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                     cfg.multipass_tool_2.value,
                     cfg.multipass_tool_3.value
                 };
-                std::set<unsigned int> seen;
-                for (int i = 0; i < n; ++i) {
-                    if (raw_tools[i] < 0) continue;
-                    unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
-                    if (seen.insert(t).second)
+                // Register each pass tool in order, including duplicates.
+                // Example: [T3, T2, T3] must schedule 3 purge slots — T3→T2→T3.
+                // has_multipass_repeat_tool prevents the dedup loop below from collapsing them.
+                {
+                    std::set<unsigned int> seen_check;
+                    for (int i = 0; i < n; ++i) {
+                        if (raw_tools[i] < 0) continue;
+                        unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
+                        if (!seen_check.insert(t).second)
+                            layer_tools.has_multipass_repeat_tool = true;
                         layer_tools.extruders.emplace_back(t);
-                }
-                if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
-                    std::ostringstream _s;
-                    _s << "MULTIPASS\tz=" << layer->print_z << "\t+[";
-                    for (auto t : seen) _s << "T" << (t - 1) << " ";
-                    _s << "]";
-                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                    }
+                    if (layer_tools.has_multipass_repeat_tool)
+                        layer_tools.preserve_extruder_order = true; // prevent reorder from rearranging
+                    if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                        std::ostringstream _s;
+                        _s << "MULTIPASS\tz=" << layer->print_z << "\t+[";
+                        for (auto t : seen_check) _s << "T" << (t - 1) << " ";
+                        _s << "]";
+                        NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                    }
                 }
             }
             // NEOTKO_MULTIPASS_TAG_END
@@ -929,6 +937,14 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     const_cast<PrintObject&>(object).object_first_layer_wall_extruders = firstLayerExtruders;
     
     for (auto& layer : m_layer_tools) {
+        // NEOTKO_MULTIPASS_TAG_START
+        // Skip deduplication for MultiPass layers with repeated tools (e.g. T3/T2/T3).
+        // Deduplication would collapse the sequence to [T3,T2] and suppress the second
+        // toolchange back to T3, causing the last pass to never be printed.
+        if (layer.has_multipass_repeat_tool) {
+            // Nothing to do — extruders already in correct order with intended duplicates.
+        } else
+        // NEOTKO_MULTIPASS_TAG_END
         if (layer.preserve_extruder_order)
             remove_duplicates_preserve_order(layer.extruders);
         else

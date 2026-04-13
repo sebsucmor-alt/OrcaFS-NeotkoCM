@@ -6591,7 +6591,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("interlayer_colormix_surface", coInt);
-    def->label = L("Apply ColorMix to");
+    def->label = L("Surface effects");
     def->category = L("Quality");
     def->tooltip = L("0 = Both (top + penultimate layers)\n1 = Top surface only\n2 = Penultimate layers only");
     def->min = 0;
@@ -6703,18 +6703,21 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(-1));
 
     def = this->add("multipass_width_ratio_1", coFloat);
-    def->label = L("Pass 1 width ratio");
-    def->tooltip = L("Line width multiplier for pass 1. Sum of all pass ratios should be ~1.0.");
+    def->label = L("Pass 1 layer ratio");
+    def->tooltip = L("Fraction of layer height occupied by pass 1. "
+                     "Each pass prints at full line width over the same XY path; "
+                     "the ratio controls the sub-layer thickness (and thus mm3/mm). "
+                     "Sum of all active pass ratios should be ~1.0 for a solid layer.");
     def->sidetext = L("ratio"); def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.50));
 
     def = this->add("multipass_width_ratio_2", coFloat);
-    def->label = L("Pass 2 width ratio");
+    def->label = L("Pass 2 layer ratio");
     def->sidetext = L("ratio"); def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.50));
 
     def = this->add("multipass_width_ratio_3", coFloat);
-    def->label = L("Pass 3 width ratio");
+    def->label = L("Pass 3 layer ratio");
     def->sidetext = L("ratio"); def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.34));
 
@@ -6828,7 +6831,7 @@ void PrintConfigDef::init_fff_params()
     // NEOTKO_MULTIPASS_SORTBYRATIO_START
     def = this->add("multipass_sort_by_ratio", coBool);
     def->label = L("Sort passes by ratio");
-    def->tooltip = L("Passes are printed in descending width_ratio order. "
+    def->tooltip = L("Passes are printed in descending layer ratio order (thickest sub-layer first). "
                      "Not applied in Z-blend mode — config position is the print order there.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));

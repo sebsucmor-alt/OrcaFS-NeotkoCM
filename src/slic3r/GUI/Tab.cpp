@@ -333,7 +333,8 @@ private:
 
 // ── MultiPassPreviewPanel ─────────────────────────────────────────────────────
 // Interactive visual preview of the MultiPass pass layout.
-//   • N colored bands proportional to width ratios, with filament color.
+//   • N colored bands proportional to layer ratios (fraction of layer height per pass).
+//     Bands are shown side-by-side for readability; physically passes are Z-stacked.
 //   • Hatch lines at the configured angle inside each band (auto=45°).
 //   • Drag a border between bands → adjusts the two adjacent ratios.
 //   • Scroll wheel inside a band → cycles the fill angle by 5° steps.
@@ -817,8 +818,8 @@ private:
         // ---- LWTS override notice ----
         {
             auto* lbl_ov = new wxStaticText(this, wxID_ANY,
-                _L("\u26a0 MultiPass overrides 'Line Width - Top Surface' for selected surfaces.\n"
-                   "  Each pass prints a narrower line (ratio \u00d7 LWTS) offset to tile without gaps."));
+                _L("\u26a0 MultiPass prints each pass at full line width, stacked on the same XY path.\n"
+                   "  Ratio = fraction of layer height. \u03a3 ratios \u2248 1.0 \u2192 solid layer."));
             lbl_ov->SetForegroundColour(wxColour(180, 80, 0));
             vs->Add(lbl_ov, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
         }
@@ -1125,6 +1126,474 @@ private:
     }
 };
 // NEOTKO_MULTIPASS_TAG_END
+
+// NEOTKO_SURFACE_MIXER_TAG_START
+// Unified Surface Color Mixer dialog.
+// Two independent surface boxes (Top Layer / Penultimate Layer) each with an
+// effect selector (None / Color Mix / Multi-Pass / Path Blend) and an "Edit…"
+// button that opens the respective sub-dialog.  A TD (Transmittance Depth)
+// section with per-filament sliders drives a Beer-Lambert blend preview swatch.
+// TD values are persisted in app_config under neotko_td_1 … neotko_td_4.
+// Effect assignments are written back to the existing config keys on OK.
+class SurfaceColorMixerDialog : public wxDialog
+{
+public:
+    static constexpr int EFF_NONE = 0;
+    static constexpr int EFF_CM   = 1;
+    static constexpr int EFF_MP   = 2;
+    static constexpr int EFF_PB   = 3;
+
+    SurfaceColorMixerDialog(wxWindow* parent,
+                            DynamicPrintConfig* config,
+                            std::function<void(const std::string&)> on_change_cb)
+        : wxDialog(parent, wxID_ANY, _L("Surface Color Mixer"),
+                   wxDefaultPosition, wxDefaultSize,
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+        , m_config(config)
+        , m_on_change(std::move(on_change_cb))
+    {
+        // Filament colors from project config
+        if (auto* o = wxGetApp().preset_bundle->project_config
+                          .option<ConfigOptionStrings>("filament_colour"))
+            m_fcolors = o->values;
+        while (m_fcolors.size() < 4) m_fcolors.push_back("#808080");
+
+        // TD values from app_config
+        auto* ac = wxGetApp().app_config;
+        for (int i = 0; i < 4; ++i) {
+            const std::string key = "neotko_td_" + std::to_string(i + 1);
+            const std::string val = ac ? ac->get(key) : "";
+            float v = 0.f;
+            try { if (!val.empty()) v = std::stof(val); } catch (...) {}
+            m_td[i] = std::max(0.f, std::min(1.f, v));
+        }
+
+        infer_effects();
+        build_ui();
+    }
+
+private:
+    DynamicPrintConfig*                      m_config    = nullptr;
+    std::function<void(const std::string&)>  m_on_change;
+    std::vector<std::string>                 m_fcolors;
+    std::array<float, 4>                     m_td        = {};
+    int                                      m_top_eff   = EFF_NONE;
+    int                                      m_penu_eff  = EFF_NONE;
+
+    wxChoice*      m_combo_top      = nullptr;
+    wxChoice*      m_combo_penu     = nullptr;
+    wxButton*      m_btn_top        = nullptr;
+    wxButton*      m_btn_penu       = nullptr;
+    wxStaticText*  m_lbl_top_sum    = nullptr;
+    wxStaticText*  m_lbl_penu_sum   = nullptr;
+    std::array<wxSlider*,     4>  m_sl_td  = {};
+    std::array<wxStaticText*, 4>  m_lbl_td = {};
+    wxPanel*       m_prev_top       = nullptr;
+    wxPanel*       m_prev_penu      = nullptr;
+
+    // ------------------------------------------------------------------ helpers
+
+    static wxColour hex_to_col(const std::string& hex)
+    {
+        unsigned long rgb = 0;
+        wxString s = wxString::FromUTF8(hex);
+        if (s.StartsWith("#")) s = s.Mid(1);
+        if (!s.ToULong(&rgb, 16)) return wxColour(128, 128, 128);
+        return wxColour((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    }
+
+    void infer_effects()
+    {
+        const bool cm_on  = m_config->opt_bool("interlayer_colormix_enabled");
+        const int  cm_srf = m_config->opt_int ("interlayer_colormix_surface");
+        const bool mp_on  = m_config->opt_bool("multipass_enabled");
+        const int  mp_srf = m_config->opt_int ("multipass_surface");
+        const bool pb_on  = mp_on && m_config->opt_bool("multipass_path_gradient");
+
+        // surface encoding: 0=both, 1=top only, 2=penu only
+        auto for_top  = [](int s) { return s == 0 || s == 1; };
+        auto for_penu = [](int s) { return s == 0 || s == 2; };
+
+        m_top_eff  = EFF_NONE;
+        m_penu_eff = EFF_NONE;
+
+        if      (pb_on && for_top (mp_srf)) m_top_eff  = EFF_PB;
+        else if (mp_on && for_top (mp_srf)) m_top_eff  = EFF_MP;
+        else if (cm_on && for_top (cm_srf)) m_top_eff  = EFF_CM;
+
+        if      (pb_on && for_penu(mp_srf)) m_penu_eff = EFF_PB;
+        else if (mp_on && for_penu(mp_srf)) m_penu_eff = EFF_MP;
+        else if (cm_on && for_penu(cm_srf)) m_penu_eff = EFF_CM;
+    }
+
+    wxString summary_for(int eff, int surface_id) const
+    {
+        if (eff == EFF_NONE) return _L("No effect");
+        if (eff == EFF_CM) {
+            const std::string& pat = (surface_id == 0)
+                ? m_config->opt_string("interlayer_colormix_pattern_top")
+                : m_config->opt_string("interlayer_colormix_pattern_penultimate");
+            return wxString::Format(_L("Pattern: %s"),
+                wxString::FromUTF8(pat.empty() ? "(none)" : pat));
+        }
+        if (eff == EFF_MP || eff == EFF_PB) {
+            int n = 2;
+            if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes")) n = o->value;
+            wxString s = wxString::Format(_L("%d passes"), n);
+            if (eff == EFF_PB) s += _L(" + PathBlend");
+            return s;
+        }
+        return "";
+    }
+
+    wxColour blend_preview(int surface_id) const
+    {
+        const int eff = (surface_id == 0) ? m_top_eff : m_penu_eff;
+        if (eff == EFF_NONE) return GetBackgroundColour();
+
+        struct Pass { int tool_0; float ratio; };
+        std::vector<Pass> passes;
+
+        if (eff == EFF_CM) {
+            const std::string& pat = (surface_id == 0)
+                ? m_config->opt_string("interlayer_colormix_pattern_top")
+                : m_config->opt_string("interlayer_colormix_pattern_penultimate");
+            if (pat.empty()) return wxColour(180, 180, 180);
+            std::map<int, int> cnt;
+            int total = 0;
+            for (char c : pat) {
+                int t = static_cast<int>(c - '1');
+                if (t >= 0 && t < 4) { cnt[t]++; total++; }
+            }
+            if (total == 0) return wxColour(180, 180, 180);
+            for (auto& [t, n] : cnt)
+                passes.push_back({t, static_cast<float>(n) / total});
+        } else {
+            int n = 2;
+            if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes")) n = o->value;
+            const char* rk[3] = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
+            const char* tk[3] = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
+            const float def_r[3] = {0.5f, 0.5f, 0.34f};
+            for (int i = 0; i < std::min(n, 3); ++i) {
+                int   t = 0;   if (auto* o = m_config->option<ConfigOptionInt>  (tk[i])) t = o->value;
+                float r = def_r[i]; if (auto* o = m_config->option<ConfigOptionFloat>(rk[i])) r = o->value;
+                passes.push_back({t, r});
+            }
+        }
+
+        // Beer-Lambert weighted blend: weight_i = ratio_i * TD_i
+        float tr = 0, tg = 0, tb = 0, tw = 0;
+        for (auto& p : passes) {
+            int t = std::max(0, std::min(3, p.tool_0));
+            float td = m_td[t];
+            wxColour col = t < (int)m_fcolors.size() ? hex_to_col(m_fcolors[t]) : wxColour(128, 128, 128);
+            float w = p.ratio * td;
+            tr += col.Red()   * w;
+            tg += col.Green() * w;
+            tb += col.Blue()  * w;
+            tw += w;
+        }
+        if (tw < 1e-6f) return wxColour(180, 180, 180);
+        return wxColour(
+            static_cast<unsigned char>(std::min(255.f, tr / tw)),
+            static_cast<unsigned char>(std::min(255.f, tg / tw)),
+            static_cast<unsigned char>(std::min(255.f, tb / tw)));
+    }
+
+    // ------------------------------------------------------------------ UI update
+
+    void update_ui()
+    {
+        m_top_eff  = m_combo_top ->GetSelection();
+        m_penu_eff = m_combo_penu->GetSelection();
+
+        m_btn_top ->Enable(m_top_eff  != EFF_NONE);
+        m_btn_penu->Enable(m_penu_eff != EFF_NONE);
+
+        m_lbl_top_sum ->SetLabel(summary_for(m_top_eff,  0));
+        m_lbl_penu_sum->SetLabel(summary_for(m_penu_eff, 1));
+        m_lbl_top_sum ->Wrap(160);
+        m_lbl_penu_sum->Wrap(160);
+
+        if (m_prev_top)  { m_prev_top ->SetBackgroundColour(blend_preview(0)); m_prev_top ->Refresh(); }
+        if (m_prev_penu) { m_prev_penu->SetBackgroundColour(blend_preview(1)); m_prev_penu->Refresh(); }
+
+        Layout();
+    }
+
+    // ------------------------------------------------------------------ sub-dialog launchers
+
+    void open_edit_for(int surface_id)
+    {
+        const int eff = (surface_id == 0) ? m_top_eff : m_penu_eff;
+
+        if (eff == EFF_CM) {
+            std::string mixed_defs;
+            if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
+                mixed_defs = o->value;
+            const auto options = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
+            const std::string cur_top  = m_config->opt_string("interlayer_colormix_pattern_top");
+            const std::string cur_penu = m_config->opt_string("interlayer_colormix_pattern_penultimate");
+            const int         cur_srf  = m_config->opt_int   ("interlayer_colormix_surface");
+            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_top, cur_penu, cur_srf);
+            if (dlg.ShowModal() == wxID_OK) {
+                if (auto* o = m_config->option<ConfigOptionString>("interlayer_colormix_pattern_top"))
+                    o->value = dlg.get_top();
+                m_on_change("interlayer_colormix_pattern_top");
+                if (auto* o = m_config->option<ConfigOptionString>("interlayer_colormix_pattern_penultimate"))
+                    o->value = dlg.get_penu();
+                m_on_change("interlayer_colormix_pattern_penultimate");
+                if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface"))
+                    o->value = dlg.get_surface();
+                m_on_change("interlayer_colormix_surface");
+            }
+        } else if (eff == EFF_MP || eff == EFF_PB) {
+            int    cur_passes=2, cur_surface=0;
+            int    cur_tool1=0, cur_tool2=1, cur_tool3=-1;
+            double cur_r1=0.5, cur_r2=0.5, cur_r3=0.34;
+            bool   cur_vary=false;
+            int    cur_a1=-1, cur_a2=-1, cur_a3=-1;
+            int    cur_f1=-1, cur_f2=-1, cur_f3=-1;
+            int    cur_s1=100, cur_s2=100, cur_s3=100;
+            std::string gs1,gs2,gs3,ge1,ge2,ge3;
+            int    pa_mode=0; double pa_val=0.1;
+
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_num_passes"))    cur_passes  =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_surface"))       cur_surface =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_tool_1"))        cur_tool1   =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_tool_2"))        cur_tool2   =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_tool_3"))        cur_tool3   =o->value;
+            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_width_ratio_1")) cur_r1=(double)o->value;
+            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_width_ratio_2")) cur_r2=(double)o->value;
+            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_width_ratio_3")) cur_r3=(double)o->value;
+            if (auto* o=m_config->option<ConfigOptionBool> ("multipass_vary_pattern"))  cur_vary    =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_angle_1"))       cur_a1      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_angle_2"))       cur_a2      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_angle_3"))       cur_a3      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_fan_1"))         cur_f1      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_fan_2"))         cur_f2      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_fan_3"))         cur_f3      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_speed_pct_1"))   cur_s1      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_speed_pct_2"))   cur_s2      =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_speed_pct_3"))   cur_s3      =o->value;
+            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_start_1")) gs1        =o->value;
+            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_start_2")) gs2        =o->value;
+            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_start_3")) gs3        =o->value;
+            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_1"))   ge1        =o->value;
+            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_2"))   ge2        =o->value;
+            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_3"))   ge3        =o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_pa_mode"))        pa_mode    =o->value;
+            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_pa_value"))       pa_val=(double)o->value;
+
+            MultiPassConfigDialog dlg(this,
+                cur_passes, cur_surface,
+                cur_tool1, cur_tool2, cur_tool3,
+                cur_r1, cur_r2, cur_r3, cur_vary,
+                cur_a1, cur_a2, cur_a3,
+                cur_f1, cur_f2, cur_f3,
+                cur_s1, cur_s2, cur_s3,
+                gs1, gs2, gs3, ge1, ge2, ge3,
+                m_fcolors, pa_mode, pa_val);
+            if (dlg.ShowModal() == wxID_OK) {
+                auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v;   m_on_change(k); };
+                auto wb = [&](const char* k, bool v) { if(auto*o=m_config->option<ConfigOptionBool> (k))o->value=v;   m_on_change(k); };
+                auto wf = [&](const char* k, float v){ if(auto*o=m_config->option<ConfigOptionFloat>(k))o->value=v;   m_on_change(k); };
+                auto ws = [&](const char* k, const std::string& v){ if(auto*o=m_config->option<ConfigOptionString>(k))o->value=v; m_on_change(k); };
+                wi("multipass_num_passes",  dlg.get_passes());
+                wi("multipass_surface",     dlg.get_surface());
+                wi("multipass_tool_1",      dlg.get_tool1());
+                wi("multipass_tool_2",      dlg.get_tool2());
+                wi("multipass_tool_3",      dlg.get_tool3());
+                wf("multipass_width_ratio_1", (float)dlg.get_ratio1());
+                wf("multipass_width_ratio_2", (float)dlg.get_ratio2());
+                wf("multipass_width_ratio_3", (float)dlg.get_ratio3());
+                wb("multipass_vary_pattern",dlg.get_vary());
+                wi("multipass_angle_1",     dlg.get_angle1());
+                wi("multipass_angle_2",     dlg.get_angle2());
+                wi("multipass_angle_3",     dlg.get_angle3());
+                wi("multipass_fan_1",       dlg.get_fan1());
+                wi("multipass_fan_2",       dlg.get_fan2());
+                wi("multipass_fan_3",       dlg.get_fan3());
+                wi("multipass_speed_pct_1", dlg.get_speed1());
+                wi("multipass_speed_pct_2", dlg.get_speed2());
+                wi("multipass_speed_pct_3", dlg.get_speed3());
+                ws("multipass_gcode_start_1", dlg.get_gcode_start1());
+                ws("multipass_gcode_start_2", dlg.get_gcode_start2());
+                ws("multipass_gcode_start_3", dlg.get_gcode_start3());
+                ws("multipass_gcode_end_1",   dlg.get_gcode_end1());
+                ws("multipass_gcode_end_2",   dlg.get_gcode_end2());
+                ws("multipass_gcode_end_3",   dlg.get_gcode_end3());
+                wi("multipass_pa_mode",     dlg.get_pa_mode());
+                wf("multipass_pa_value",    (float)dlg.get_pa_value());
+            }
+        }
+        update_ui();
+    }
+
+    // ------------------------------------------------------------------ apply
+
+    void apply_effect_config()
+    {
+        m_top_eff  = m_combo_top ->GetSelection();
+        m_penu_eff = m_combo_penu->GetSelection();
+
+        // ColorMix
+        const bool cm_en = (m_top_eff == EFF_CM || m_penu_eff == EFF_CM);
+        int cm_srf = 0;
+        if (m_top_eff == EFF_CM && m_penu_eff != EFF_CM) cm_srf = 1;
+        else if (m_top_eff != EFF_CM && m_penu_eff == EFF_CM) cm_srf = 2;
+
+        if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_enabled")) o->value = cm_en;
+        m_on_change("interlayer_colormix_enabled");
+        if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface")) o->value = cm_srf;
+        m_on_change("interlayer_colormix_surface");
+
+        // MultiPass / PathBlend
+        const bool top_mp  = (m_top_eff  == EFF_MP || m_top_eff  == EFF_PB);
+        const bool penu_mp = (m_penu_eff == EFF_MP || m_penu_eff == EFF_PB);
+        const bool mp_en   = top_mp || penu_mp;
+        const bool pb_en   = (m_top_eff == EFF_PB || m_penu_eff == EFF_PB);
+        int mp_srf = 0;
+        if (top_mp && !penu_mp) mp_srf = 1;
+        else if (!top_mp && penu_mp) mp_srf = 2;
+
+        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled"))         o->value = mp_en;
+        m_on_change("multipass_enabled");
+        if (auto* o = m_config->option<ConfigOptionInt> ("multipass_surface"))         o->value = mp_srf;
+        m_on_change("multipass_surface");
+        if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient"))   o->value = pb_en;
+        m_on_change("multipass_path_gradient");
+
+        // TD values → app_config
+        auto* ac = wxGetApp().app_config;
+        if (ac) {
+            for (int i = 0; i < 4; ++i) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.3f", m_td[i]);
+                ac->set("neotko_td_" + std::to_string(i + 1), buf);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ UI build
+
+    void build_ui()
+    {
+        const int PAD = 8;
+        auto* vs = new wxBoxSizer(wxVERTICAL);
+
+        // ---- Surface boxes side by side ----
+        auto* hs_surfaces = new wxBoxSizer(wxHORIZONTAL);
+
+        // Build one surface box; surface_id: 0=top, 1=penu
+        auto make_box = [&](const wxString& label, int surface_id, int cur_eff,
+                             wxChoice*& combo_out, wxButton*& btn_out,
+                             wxStaticText*& sum_out, wxPanel*& prev_out)
+        {
+            auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, label);
+
+            auto* combo = new wxChoice(this, wxID_ANY);
+            combo->Append(_L("None"));
+            combo->Append(_L("Color Mix"));
+            combo->Append(_L("Multi-Pass"));
+            combo->Append(_L("Path Blend"));
+            combo->SetSelection(std::max(0, std::min(3, cur_eff)));
+            combo_out = combo;
+            sb->Add(combo, 0, wxEXPAND | wxALL, PAD / 2);
+
+            auto* btn = new wxButton(this, wxID_ANY, _L("Edit\u2026"),
+                                      wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+            btn->Enable(cur_eff != EFF_NONE);
+            btn_out = btn;
+            btn->Bind(wxEVT_BUTTON, [this, surface_id](wxCommandEvent&) {
+                open_edit_for(surface_id);
+            });
+            sb->Add(btn, 0, wxALL, PAD / 2);
+
+            auto* lbl_sum = new wxStaticText(this, wxID_ANY, summary_for(cur_eff, surface_id),
+                                              wxDefaultPosition, wxSize(170, -1));
+            lbl_sum->SetForegroundColour(wxColour(90, 90, 90));
+            lbl_sum->Wrap(170);
+            sum_out = lbl_sum;
+            sb->Add(lbl_sum, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
+
+            auto* prev = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(120, 22));
+            prev->SetBackgroundColour(blend_preview(surface_id));
+            prev->SetToolTip(_L("Beer-Lambert blend preview (uses TD values below)"));
+            prev_out = prev;
+            sb->Add(prev, 0, wxALL | wxEXPAND, PAD / 2);
+
+            combo->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { update_ui(); });
+            return sb;
+        };
+
+        hs_surfaces->Add(make_box(_L("Top Layer"),         0, m_top_eff,
+                                   m_combo_top,  m_btn_top,  m_lbl_top_sum,  m_prev_top),
+                         1, wxEXPAND | wxALL, PAD / 2);
+        hs_surfaces->Add(make_box(_L("Penultimate Layer"), 1, m_penu_eff,
+                                   m_combo_penu, m_btn_penu, m_lbl_penu_sum, m_prev_penu),
+                         1, wxEXPAND | wxALL, PAD / 2);
+        vs->Add(hs_surfaces, 0, wxEXPAND | wxALL, PAD / 2);
+
+        // ---- TD section ----
+        auto* td_sb = new wxStaticBoxSizer(wxVERTICAL, this,
+            _L("Transmittance Depth (TD) — optical transparency per filament"));
+        auto* td_note = new wxStaticText(this, wxID_ANY,
+            _L("TD=0: opaque (color invisible in blend). TD=1: fully visible. Used for preview only."));
+        td_note->SetForegroundColour(wxColour(90, 90, 90));
+        td_sb->Add(td_note, 0, wxALL, PAD / 2);
+
+        auto* td_grid = new wxFlexGridSizer(4, 4, 4, 8); // rows=4, cols=4
+        td_grid->AddGrowableCol(2, 1);
+
+        for (int i = 0; i < 4; ++i) {
+            // color swatch
+            auto* sw = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
+            sw->SetBackgroundColour(i < (int)m_fcolors.size()
+                ? hex_to_col(m_fcolors[i]) : wxColour(128, 128, 128));
+            td_grid->Add(sw, 0, wxALIGN_CENTER_VERTICAL);
+
+            // label
+            td_grid->Add(new wxStaticText(this, wxID_ANY,
+                wxString::Format("T%d", i + 1)),
+                0, wxALIGN_CENTER_VERTICAL);
+
+            // slider
+            int iv = static_cast<int>(m_td[i] * 100.f + 0.5f);
+            auto* sl = new wxSlider(this, wxID_ANY, iv, 0, 100,
+                                     wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
+            m_sl_td[i] = sl;
+            td_grid->Add(sl, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+
+            // value label
+            auto* lbl = new wxStaticText(this, wxID_ANY,
+                wxString::Format("%.2f", m_td[i]),
+                wxDefaultPosition, wxSize(38, -1));
+            m_lbl_td[i] = lbl;
+            td_grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+
+            sl->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent&) {
+                m_td[i] = m_sl_td[i]->GetValue() / 100.f;
+                m_lbl_td[i]->SetLabel(wxString::Format("%.2f", m_td[i]));
+                update_ui();
+            });
+        }
+        td_sb->Add(td_grid, 0, wxEXPAND | wxALL, PAD / 2);
+        vs->Add(td_sb, 0, wxEXPAND | wxALL, PAD / 2);
+
+        // ---- OK / Cancel ----
+        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
+        SetSizerAndFit(vs);
+
+        // Wire OK to apply config
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
+            if (e.GetId() == wxID_OK)
+                apply_effect_config();
+            e.Skip();
+        });
+    }
+};
+// NEOTKO_SURFACE_MIXER_TAG_END
 
 } // anonymous namespace
 // NEOTKO_COLORMIX_TAG_END
@@ -3363,208 +3832,31 @@ void TabPrint::build()
         optgroup->append_single_option_line("neotko_interlayer_nesting_enabled");
         // NEOTKO_NEOWEAVING_TAG_END
 
-        // NEOTKO_COLORMIX_TAG_START - ColorMix & Multi-Pass Blend
-        optgroup = page->new_optgroup(L("ColorMix & Multi-Pass Blend"));
-        optgroup->append_single_option_line("interlayer_colormix_enabled");
+        // NEOTKO_SURFACE_MIXER_TAG_START - Surface Color Mixer (replaces separate ColorMix/MultiPass/PathBlend controls)
+        optgroup = page->new_optgroup(L("Surface Color Mixer"));
         create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
             [this](wxWindow* parent) -> wxSizer* {
-                auto* btn = new wxButton(parent, wxID_ANY, _L("Edit Color Patterns\u2026"),
+                auto* btn = new wxButton(parent, wxID_ANY,
+                                         _L("Edit Surface Color Mixer\u2026"),
                                          wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
                 btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    std::vector<std::string> colors;
-                    if (auto* o = wxGetApp().preset_bundle->project_config
-                                      .option<ConfigOptionStrings>("filament_colour"))
-                        colors = o->values;
-                    std::string mixed_defs;
-                    if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-                        mixed_defs = o->value;
-                    const auto options = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, colors);
-                    const std::string cur_top    = m_config->opt_string("interlayer_colormix_pattern_top");
-                    const std::string cur_penu   = m_config->opt_string("interlayer_colormix_pattern_penultimate");
-                    const int         cur_surface = m_config->opt_int("interlayer_colormix_surface");
-                    ColorMixPatternDialog dlg(wxGetApp().mainframe, options, colors,
-                                              cur_top, cur_penu, cur_surface);
-                    if (dlg.ShowModal() == wxID_OK) {
-                        if (auto* o = m_config->option<ConfigOptionString>("interlayer_colormix_pattern_top"))
-                            o->value = dlg.get_top();
-                        on_value_change("interlayer_colormix_pattern_top", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("interlayer_colormix_pattern_penultimate"))
-                            o->value = dlg.get_penu();
-                        on_value_change("interlayer_colormix_pattern_penultimate", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface"))
-                            o->value = dlg.get_surface();
-                        on_value_change("interlayer_colormix_surface", boost::any());
-                    }
+                    SurfaceColorMixerDialog dlg(
+                        wxGetApp().mainframe,
+                        m_config,
+                        [this](const std::string& key) {
+                            on_value_change(key, boost::any());
+                        });
+                    dlg.ShowModal();
                 });
                 auto* sizer = new wxBoxSizer(wxHORIZONTAL);
                 sizer->Add(btn, 0, wxALL, 3);
                 return sizer;
             });
-        optgroup->append_single_option_line("interlayer_colormix_pattern_top");
-        optgroup->append_single_option_line("interlayer_colormix_pattern_penultimate");
-        optgroup->append_single_option_line("interlayer_colormix_min_length");
-        // NEOTKO_COLORMIX_TAG_END
-        optgroup->append_separator();
-        // NEOTKO_MULTIPASS_TAG_START - MultiPass Blend UI
-        optgroup->append_single_option_line("multipass_enabled");
-        create_line_with_widget(optgroup.get(), "multipass_surface", "",
-            [this](wxWindow* parent) -> wxSizer* {
-                auto* btn = new wxButton(parent, wxID_ANY,
-                                         _L("Edit MultiPass Config\u2026"),
-                                         wxDefaultPosition, wxDefaultSize,
-                                         wxBU_EXACTFIT);
-                btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    int    cur_passes  = 2;
-                    int    cur_surface = 0;
-                    int    cur_tool1   = 0, cur_tool2 = 1, cur_tool3 = -1;
-                    double cur_ratio1  = 0.50, cur_ratio2 = 0.50, cur_ratio3 = 0.34;
-                    bool   cur_vary    = false;
-                    int    cur_angle1 = -1, cur_angle2 = -1, cur_angle3 = -1;
-                    int    cur_fan1  = -1, cur_fan2  = -1, cur_fan3  = -1;
-                    int    cur_spd1  = 100, cur_spd2 = 100, cur_spd3 = 100;
-                    std::string cur_gs1, cur_gs2, cur_gs3, cur_ge1, cur_ge2, cur_ge3;
-                    int    cur_pa_mode  = 0;
-                    double cur_pa_value = 0.1;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes"))   cur_passes  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_surface"))      cur_surface = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_tool_1"))       cur_tool1   = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_tool_2"))       cur_tool2   = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_tool_3"))       cur_tool3   = o->value;
-                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_1")) cur_ratio1 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_2")) cur_ratio2 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_3")) cur_ratio3 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionBool>("multipass_vary_pattern")) cur_vary   = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_angle_1"))      cur_angle1  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_angle_2"))      cur_angle2  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_angle_3"))      cur_angle3  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_fan_1"))        cur_fan1  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_fan_2"))        cur_fan2  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_fan_3"))        cur_fan3  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_speed_pct_1"))  cur_spd1  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_speed_pct_2"))  cur_spd2  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_speed_pct_3"))  cur_spd3  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_start_1")) cur_gs1 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_start_2")) cur_gs2 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_start_3")) cur_gs3 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_end_1"))   cur_ge1 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_end_2"))   cur_ge2 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_end_3"))   cur_ge3 = o->value;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_pa_mode"))          cur_pa_mode  = o->value;
-                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_pa_value"))       cur_pa_value = o->value;
-                    std::vector<std::string> fcolors;
-                    if (auto* o = wxGetApp().preset_bundle->project_config
-                                      .option<ConfigOptionStrings>("filament_colour"))
-                        fcolors = o->values;
-                    MultiPassConfigDialog dlg(wxGetApp().mainframe,
-                                              cur_passes, cur_surface,
-                                              cur_tool1,  cur_tool2,  cur_tool3,
-                                              cur_ratio1, cur_ratio2, cur_ratio3,
-                                              cur_vary,
-                                              cur_angle1, cur_angle2, cur_angle3,
-                                              cur_fan1, cur_fan2, cur_fan3,
-                                              cur_spd1, cur_spd2, cur_spd3,
-                                              cur_gs1, cur_gs2, cur_gs3,
-                                              cur_ge1, cur_ge2, cur_ge3,
-                                              fcolors,
-                                              cur_pa_mode, cur_pa_value);
-                    if (dlg.ShowModal() == wxID_OK) {
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes"))
-                            o->value = dlg.get_passes();
-                        on_value_change("multipass_num_passes", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_surface"))
-                            o->value = dlg.get_surface();
-                        on_value_change("multipass_surface", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_tool_1"))
-                            o->value = dlg.get_tool1();
-                        on_value_change("multipass_tool_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_tool_2"))
-                            o->value = dlg.get_tool2();
-                        on_value_change("multipass_tool_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_tool_3"))
-                            o->value = dlg.get_tool3();
-                        on_value_change("multipass_tool_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_1"))
-                            o->value = dlg.get_ratio1();
-                        on_value_change("multipass_width_ratio_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_2"))
-                            o->value = dlg.get_ratio2();
-                        on_value_change("multipass_width_ratio_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_3"))
-                            o->value = dlg.get_ratio3();
-                        on_value_change("multipass_width_ratio_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionBool>("multipass_vary_pattern"))
-                            o->value = dlg.get_vary();
-                        on_value_change("multipass_vary_pattern", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_angle_1"))
-                            o->value = dlg.get_angle1();
-                        on_value_change("multipass_angle_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_angle_2"))
-                            o->value = dlg.get_angle2();
-                        on_value_change("multipass_angle_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_angle_3"))
-                            o->value = dlg.get_angle3();
-                        on_value_change("multipass_angle_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_fan_1"))
-                            o->value = dlg.get_fan1();
-                        on_value_change("multipass_fan_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_fan_2"))
-                            o->value = dlg.get_fan2();
-                        on_value_change("multipass_fan_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_fan_3"))
-                            o->value = dlg.get_fan3();
-                        on_value_change("multipass_fan_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_speed_pct_1"))
-                            o->value = dlg.get_speed1();
-                        on_value_change("multipass_speed_pct_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_speed_pct_2"))
-                            o->value = dlg.get_speed2();
-                        on_value_change("multipass_speed_pct_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_speed_pct_3"))
-                            o->value = dlg.get_speed3();
-                        on_value_change("multipass_speed_pct_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_start_1"))
-                            o->value = dlg.get_gcode_start1();
-                        on_value_change("multipass_gcode_start_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_start_2"))
-                            o->value = dlg.get_gcode_start2();
-                        on_value_change("multipass_gcode_start_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_start_3"))
-                            o->value = dlg.get_gcode_start3();
-                        on_value_change("multipass_gcode_start_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_end_1"))
-                            o->value = dlg.get_gcode_end1();
-                        on_value_change("multipass_gcode_end_1", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_end_2"))
-                            o->value = dlg.get_gcode_end2();
-                        on_value_change("multipass_gcode_end_2", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionString>("multipass_gcode_end_3"))
-                            o->value = dlg.get_gcode_end3();
-                        on_value_change("multipass_gcode_end_3", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionInt>("multipass_pa_mode"))
-                            o->value = dlg.get_pa_mode();
-                        on_value_change("multipass_pa_mode", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionFloat>("multipass_pa_value"))
-                            o->value = static_cast<float>(dlg.get_pa_value());
-                        on_value_change("multipass_pa_value", boost::any());
-                    }
-                });
-                auto* sizer = new wxBoxSizer(wxHORIZONTAL);
-                sizer->Add(btn, 0, wxALL, 3);
-                return sizer;
-            });
-        optgroup->append_separator();
-        // NEOTKO_MULTIPASS_SORTBYRATIO_START
+        // NEOTKO_SURFACE_MIXER_TAG_END
+        // NEOTKO_MULTIPASS_ZBLEND_START — Z-blend and sort options (still relevant for MultiPass internals)
         optgroup->append_single_option_line("multipass_sort_by_ratio");
-        // NEOTKO_MULTIPASS_SORTBYRATIO_END
-        // NEOTKO_MULTIPASS_ZBLEND_START
         optgroup->append_single_option_line("multipass_z_blend");
         // NEOTKO_MULTIPASS_ZBLEND_END
-        optgroup->append_separator();
-        // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
-        optgroup->append_single_option_line("multipass_path_gradient");
-        optgroup->append_single_option_line("path_gradient_segments");
-        optgroup->append_single_option_line("path_gradient_min_flow_pct");
-        // NEOTKO_MULTIPASS_TAG_END
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");
@@ -3988,29 +4280,12 @@ void TabPrint::toggle_options()
         cb->SetValue(n);
     }
 
-    // NEOTKO_SURFACE_BLEND_TOGGLE — ColorMix / MultiPass mutual exclusion + PathBlend gating
+    // NEOTKO_SURFACE_MIXER_TAG: Effect assignment is managed inside SurfaceColorMixerDialog.
+    // Only toggle the z-blend / sort options that remain visible in the Tab.
     {
-        const bool colormix_on  = m_config->opt_bool("interlayer_colormix_enabled");
         const bool multipass_on = m_config->opt_bool("multipass_enabled");
-        const bool pathblend_on = multipass_on && m_config->opt_bool("multipass_path_gradient");
-
-        // ColorMix sub-options greyed when ColorMix is OFF
-        toggle_option("interlayer_colormix_pattern_top",         colormix_on);
-        toggle_option("interlayer_colormix_pattern_penultimate", colormix_on);
-        toggle_option("interlayer_colormix_min_length",          colormix_on);
-
-        // Mutual exclusion: if one is ON, the other's master toggle is greyed
-        toggle_option("multipass_enabled",           !colormix_on);
-        toggle_option("interlayer_colormix_enabled", !multipass_on);
-
-        // MultiPass sub-options greyed when MultiPass is OFF
         toggle_option("multipass_sort_by_ratio", multipass_on);
         toggle_option("multipass_z_blend",       multipass_on);
-
-        // PathBlend: master greyed if MultiPass OFF; sub-options greyed if PathBlend also OFF
-        toggle_option("multipass_path_gradient",    multipass_on);
-        toggle_option("path_gradient_segments",     pathblend_on);
-        toggle_option("path_gradient_min_flow_pct", pathblend_on);
     }
 }
 

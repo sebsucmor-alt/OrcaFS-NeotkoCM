@@ -621,6 +621,12 @@ private:
     double m_multipass_z_saved_nominal    = 0.0;       ///< m_nominal_z saved before override
     float  m_multipass_z_saved_last_layer = 0.0f;      ///< m_last_layer_z saved before override
     bool   m_multipass_z_active           = false;     ///< True while nozzle is at sub-layer Z
+    // NEOTKO_MULTIPASS_TAG_START — pass cursor for repeated-tool support (e.g. T3/T2/T3)
+    // Resets when layer_id changes; increments on each ZBlend sublayer lookup.
+    // Allows extrude_infill to find pass 0 on the first T3 call and pass 2 on the second.
+    size_t m_multipass_pass_cursor   = 0;
+    size_t m_multipass_pass_last_lid = static_cast<size_t>(-1);
+    // NEOTKO_MULTIPASS_TAG_END
     // NEOTKO_MULTIPASS_ZBLEND_END
     bool m_need_change_layer_lift_z = false;
     int m_start_gcode_filament = -1;

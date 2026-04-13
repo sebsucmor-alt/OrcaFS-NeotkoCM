@@ -590,49 +590,34 @@ bool SurfaceMultiPass::apply(
         NEOTKO_LOG(MULTIPASS, "  SUB role=" << ExtrusionEntity::role_to_string(flat_path->role())
             << " originals=" << originals.size() << " mm3=" << flat_path->mm3_per_mm);
 
-        // Detect perpendicular unit vector from first path segment
-        double perp_x = 0.0, perp_y = 1.0;
-        if (!originals.empty() && originals[0]->polyline.points.size() >= 2) {
-            const Points& pts0 = originals[0]->polyline.points;
-            const double ddx = static_cast<double>(pts0[1].x() - pts0[0].x());
-            const double ddy = static_cast<double>(pts0[1].y() - pts0[0].y());
-            const double seg_len = std::sqrt(ddx*ddx + ddy*ddy);
-            if (seg_len > 1.0) {
-                perp_x = -ddy / seg_len;
-                perp_y =  ddx / seg_len;
-            }
-        }
-
-        const double lwts_mm = originals.empty() ? 0.0
-                                                  : static_cast<double>(originals[0]->width);
-        struct PassInfo { int idx; coord_t shift_x; coord_t shift_y; };
-        std::vector<PassInfo> pass_list;
-        {
-            double total_ratio = 0.0;
-            for (int i = 0; i < n; ++i)
-                if (mp.tool[i] >= 0) total_ratio += mp.width_ratio[i];
-            const double half_total_mm = total_ratio * lwts_mm * 0.5;
-            double cumulative = 0.0;
-            for (int i = 0; i < n; ++i) {
-                if (mp.tool[i] < 0) continue;
-                const double r = mp.width_ratio[i];
-                const double center_mm = (cumulative + r * 0.5) * lwts_mm - half_total_mm;
-                const double units     = center_mm * 1e6;
-                pass_list.push_back({
-                    i,
-                    static_cast<coord_t>(std::round(perp_x * units)),
-                    static_cast<coord_t>(std::round(perp_y * units))
-                });
-                cumulative += r;
-            }
-        }
+        // NEOTKO_MULTIPASS_TAG_START — Beer-Lambert height-based sub-layer model
+        //
+        // Each pass occupies a proportional fraction of the layer height (width_ratio[i]).
+        // Passes are stacked vertically (same XY polyline, different sub-layer thickness)
+        // rather than tiled side-by-side with XY perpendicular offsets.
+        //
+        // For width_ratio = {0.6, 0.4} and layer_height = 0.2 mm:
+        //   Pass 0 (T1): height = 0.12 mm → mm3_per_mm = orig * 0.6  (physically below T2)
+        //   Pass 1 (T2): height = 0.08 mm → mm3_per_mm = orig * 0.4  (on top)
+        //   Total: same XY area covered, sum of flows = 1.0, layer remains solid.
+        //
+        // width is NEVER scaled — each pass covers the full line width so spacing and
+        // collision detection in GCode.cpp remain correct.
+        //
+        // Z positioning within the layer (Beer-Lambert FASE 2):
+        //   Pass 0 z = bottom_z + ratio[0] * layer_height
+        //   Pass 1 z = nominal_z (top of layer)
+        //   Implemented via PathBlend's apply_path() when multipass_path_gradient is ON.
+        //   Without PathBlend, all passes print at nominal_z (stacked extrusion, correct
+        //   total volume, visual mixing depends on filament diffusion).
 
         std::vector<ExtrusionPath*> all_pass_paths;
-        all_pass_paths.reserve(originals.size() * pass_list.size());
+        all_pass_paths.reserve(originals.size() * n);
 
-        for (const auto& pi : pass_list) {
-            const int i = pi.idx;
+        for (int i = 0; i < n; ++i) {
+            if (mp.tool[i] < 0) continue;
             const bool reverse = mp.vary_pattern && (i % 2 == 1);
+            const double ratio = mp.width_ratio[i];
 
             for (auto* orig : originals) {
                 auto* clone = new ExtrusionPath(
@@ -647,20 +632,18 @@ bool SurfaceMultiPass::apply(
                     std::reverse(clone->polyline.points.begin(),
                                  clone->polyline.points.end());
 
-                if (pi.shift_x != 0 || pi.shift_y != 0)
-                    for (auto& pt : clone->polyline.points) {
-                        pt.x() += pi.shift_x;
-                        pt.y() += pi.shift_y;
-                    }
-
-                clone->width      *= mp.width_ratio[i];
-                clone->mm3_per_mm *= mp.width_ratio[i];
+                // Height-based sub-layer: scale height (Z thickness) by ratio.
+                // mm3_per_mm scales proportionally (rectangular cross-section, width fixed).
+                // Width is intentionally NOT modified.
+                clone->height     = static_cast<float>(static_cast<double>(orig->height) * ratio);
+                clone->mm3_per_mm *= ratio;
 
                 SurfaceColorMix::encode_tool_in_path(clone, mp.tool[i]);
 
                 all_pass_paths.push_back(clone);
             }
         }
+        // NEOTKO_MULTIPASS_TAG_END
 
         if (all_pass_paths.empty()) continue;
 
@@ -940,9 +923,14 @@ std::string PathBlendEngine::apply_path(
     const double bottom_z = nominal_z - layer_height;
 
     // This path's fixed Z (Pass 0 only) and flow.
-    // flow_0 + flow_1 = 1.0  →  layer remains solid.
+    // flow_0: clamped from below by min_flow (intentional over-extrusion at the start).
+    // flow_1: always from geometry (1 - surface_t), independent of min_flow.
+    //   Reason: T0 may over-extrude deliberately when min_flow > surface_t, but T1's
+    //   gap is always (1-t)*layer_height — if we used (1-flow_0) instead we'd double the
+    //   boost and push total volume above 1.0, causing measurable over-extrusion artefacts.
     const double flow_0  = std::max(min_flow, surface_t);
-    const double flow    = (pass_idx == 0) ? flow_0 : (1.0 - flow_0);
+    const double flow_1  = 1.0 - surface_t;   // geometry-based, independent of min_flow
+    const double flow    = (pass_idx == 0) ? flow_0 : flow_1;
     const double z_path  = std::clamp(
         bottom_z + surface_t * layer_height, bottom_z, nominal_z);
 

@@ -6678,16 +6678,35 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
                     const size_t lid = m_layer->id();
                     const int    tid = static_cast<int>(m_writer.extruder()->id());
                     const auto&  recs = m_layer->object()->multipass_sublayer_records();
-                    auto it = std::find_if(recs.begin(), recs.end(),
-                        [lid, tid](const MultiPassSubLayerRecord& r) {
-                            return r.layer_id == lid && r.tool_id == tid;
-                        });
-                    if (it != recs.end()) {
-                        m_multipass_z_target = it->print_z;
-                        NEOTKO_LOG(ZBLEND, "extrude_infill: layer=" << lid
-                            << " T" << tid << " sub_z=" << m_multipass_z_target
-                            << " nominal_z=" << m_nominal_z);
+                    // NEOTKO_MULTIPASS_TAG_START — cursor-based record lookup
+                    // find_if by tool_id alone breaks when the same tool appears in multiple
+                    // passes (e.g. T3/T2/T3): it always returns pass 0's Z for T3.
+                    // Instead, iterate records for this layer_id in pass_index order using a
+                    // per-layer cursor. The cursor resets on layer change and advances on each use.
+                    if (lid != m_multipass_pass_last_lid) {
+                        m_multipass_pass_last_lid = lid;
+                        m_multipass_pass_cursor   = 0;
                     }
+                    {
+                        size_t cursor = 0;
+                        for (const auto& rec : recs) {
+                            if (rec.layer_id != lid) continue;
+                            if (cursor == m_multipass_pass_cursor) {
+                                if (rec.tool_id == tid) {
+                                    m_multipass_z_target = rec.print_z;
+                                    NEOTKO_LOG(ZBLEND, "extrude_infill: layer=" << lid
+                                        << " T" << tid
+                                        << " pass_cursor=" << m_multipass_pass_cursor
+                                        << " sub_z=" << m_multipass_z_target
+                                        << " nominal_z=" << m_nominal_z);
+                                }
+                                ++m_multipass_pass_cursor; // advance regardless — keeps in sync with tool sequence
+                                break;
+                            }
+                            ++cursor;
+                        }
+                    }
+                    // NEOTKO_MULTIPASS_TAG_END
                 }
                 if (m_multipass_z_target < DBL_MAX &&
                     std::abs(m_multipass_z_target - m_nominal_z) > 1e-5) {

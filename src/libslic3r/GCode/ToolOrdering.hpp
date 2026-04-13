@@ -141,6 +141,10 @@ public:
     // Used by GCode::process_layer() to skip any planned reorder that would invert
     // the sub-layer-first constraint.
     bool                        has_zblend_order = false;
+    // True when MultiPass uses the same tool in more than one pass (e.g. T3/T2/T3).
+    // Extruder deduplication is skipped for these layers so GCode generates the full
+    // tool sequence including the repeated toolchange (T3→T2→T3 → 3 wipe tower purges).
+    bool                        has_multipass_repeat_tool = false;
     // NEOTKO_MULTIPASS_ZBLEND_TAG_END
     // Number of wipe tower partitions to support the required number of tool switches
     // and to support the wipe tower partitions above this one.

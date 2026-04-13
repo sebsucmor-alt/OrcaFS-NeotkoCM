@@ -1289,13 +1289,30 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         if (m_objects.size() > 1) {
             const SlicingParameters &slicing_params0 = m_objects.front()->slicing_parameters();
             size_t tallest_object_idx  = 0;
-            size_t shortest_object_idx = 0;
+            size_t shortest_object_idx = 0; // NEOTKO_LIBRE: reference for variable-height comparison
+
+            // NEOTKO_LIBRE_TAG_START
+            // Proxy: neotko_disable_bridge_infill is always injected true/false by Plater
+            // mirroring the Libre Mode toggle — safe to use here without GUI dependency.
+            const bool _neotko_libre = !m_objects.empty() && [&]() -> bool {
+                const auto* f = m_objects[0]->config().option<ConfigOptionBool>("neotko_disable_bridge_infill");
+                return f && f->value;
+            }();
+            // NEOTKO_LIBRE_TAG_END
+
             for (size_t i = 1; i < m_objects.size(); ++ i) {
                 const PrintObject       *object         = m_objects[i];
                 const SlicingParameters &slicing_params = object->slicing_parameters();
-                // if (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
-                //     std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON)
-                //     return {L("The prime tower requires that all objects have the same layer heights."), object, "initial_layer_print_height"};
+                // NEOTKO_LIBRE_TAG_START
+                // In Libre Mode objects may intentionally have different layer heights (floating
+                // objects, per-object variable layering) — skip the uniformity check so the wipe
+                // tower is not blocked. Standard mode keeps the strict check.
+                if (!_neotko_libre) {
+                    if (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
+                        std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON)
+                        return {L("The prime tower requires that all objects have the same layer heights."), object, "initial_layer_print_height"};
+                }
+                // NEOTKO_LIBRE_TAG_END
                 if (slicing_params.raft_layers() != slicing_params0.raft_layers())
                     return {L("The prime tower requires that all objects are printed over the same number of raft layers."), object, "raft_layers"};
                 // BBS: support gap can be multiple of object layer height, remove _L()
@@ -1304,16 +1321,25 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
                     return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
-                // if (!equal_layering(slicing_params, slicing_params0))
-                //     return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
+                // NEOTKO_LIBRE_TAG_START
+                if (!_neotko_libre) {
+                    if (!equal_layering(slicing_params, slicing_params0))
+                        return { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
+                }
+                // NEOTKO_LIBRE_TAG_END
                 if (has_custom_layering) {
-                    auto &lh          = layer_height_profile(i);
-                    auto &lh_tallest  = layer_height_profile(tallest_object_idx);
-                    auto &lh_shortest = layer_height_profile(shortest_object_idx);
+                    auto &lh         = layer_height_profile(i);
+                    auto &lh_tallest = layer_height_profile(tallest_object_idx);
                     if (*(lh.end() - 2) > *(lh_tallest.end() - 2))
                         tallest_object_idx = i;
-                    if (*(lh.end() - 2) < *(lh_shortest.end() - 2))
-                        shortest_object_idx = i;
+                    // NEOTKO_LIBRE_TAG_START
+                    // Track shortest object for Libre Mode variable-height profile comparison.
+                    if (_neotko_libre) {
+                        auto &lh_shortest = layer_height_profile(shortest_object_idx);
+                        if (*(lh.end() - 2) < *(lh_shortest.end() - 2))
+                            shortest_object_idx = i;
+                    }
+                    // NEOTKO_LIBRE_TAG_END
                 }
             }
 
@@ -1321,29 +1347,36 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             if (has_custom_layering) {
                 std::vector<std::vector<coordf_t>> layer_z_series;
                 layer_z_series.assign(m_objects.size(), std::vector<coordf_t>());
-               
+
                 for (size_t idx_object = 0; idx_object < m_objects.size(); ++idx_object) {
                     layer_z_series[idx_object] = generate_object_layers(m_objects[idx_object]->slicing_parameters(), layer_height_profiles[idx_object], m_objects[idx_object]->config().precise_z_height.value);
                 }
 
-                // PENDIENTE LIBRE MODE: Este bloque compara todos los perfiles contra shortest_object_idx
-                // como referencia base (altura de capa mínima), pero la lógica de comparación elemento a
-                // elemento puede seguir siendo demasiado estricta para objetos con distinta layer height.
-                // Revisar si hay que interpolar o alinear los perfiles antes de comparar.
-                for (size_t idx_object = 0; idx_object < m_objects.size(); ++idx_object) {
-                    if (idx_object == shortest_object_idx) continue;
-                    // Check that the layer height profiles are equal up to the height of the shortest object.
-                    // The latter case might create a floating point inaccuracy mismatch, so compare
-                    // element-wise using an epsilon check.
-                    size_t         i   = 0;
-                    const coordf_t eps = 0.5 * EPSILON; // layers closer than EPSILON will be merged later. Let's make
-                    // this check a bit more sensitive to make sure we never consider two different layers as one.
-                    while (i < layer_height_profiles[shortest_object_idx].size() && i < layer_height_profiles[idx_object].size()) {
-                        if (std::abs(layer_height_profiles[idx_object][i] - layer_height_profiles[shortest_object_idx][i]) > eps)
-                            return {L("The prime tower is only supported if all objects have the same variable layer height.")};
-                        ++i;
+                // NEOTKO_LIBRE_TAG_START
+                // In Libre Mode objects may have different variable layer height profiles.
+                // Skip the uniformity check — wipe tower uses shortest_object_idx as reference.
+                // In standard mode keep the original strict check against tallest_object_idx.
+                if (!_neotko_libre) {
+                    for (size_t idx_object = 0; idx_object < m_objects.size(); ++idx_object) {
+                        if (idx_object == tallest_object_idx) continue;
+                        // Check that the layer height profiles are equal. This will happen when one object is
+                        // a copy of another, or when a layer height modifier is used the same way on both objects.
+                        // The latter case might create a floating point inaccuracy mismatch, so compare
+                        // element-wise using an epsilon check.
+                        size_t         i   = 0;
+                        const coordf_t eps = 0.5 * EPSILON; // layers closer than EPSILON will be merged later. Let's make
+                        // this check a bit more sensitive to make sure we never consider two different layers as one.
+                        while (i < layer_height_profiles[idx_object].size() && i < layer_height_profiles[tallest_object_idx].size()) {
+                            // BBS: remove the break condition, because a variable layer height object and a new object will not be checked when slicing
+                            //if (i % 2 == 0 && layer_height_profiles[tallest_object_idx][i] > layer_height_profiles[idx_object][layer_height_profiles[idx_object].size() - 2])
+                            //    break;
+                            if (std::abs(layer_height_profiles[idx_object][i] - layer_height_profiles[tallest_object_idx][i]) > eps)
+                                return {L("The prime tower is only supported if all objects have the same variable layer height.")};
+                            ++i;
+                        }
                     }
                 }
+                // NEOTKO_LIBRE_TAG_END
             }
         }
     }
