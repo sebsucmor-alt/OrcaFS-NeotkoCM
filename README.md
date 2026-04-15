@@ -1,6 +1,6 @@
 # OrcaSlicer FullSpectrum — Neotko Feature Pack
 
-> All features in this pack were **conceived and designed by [Neotko](https://github.com/sebsucmor-alt/)** — creator of *Neosanding* (now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura).
+> All features in this pack were **conceived and designed by [Neotko](https://github.com/neotko)** — creator of *Neosanding* (now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura).
 > Implementation assistance: Claude (Anthropic).
 
 ---
@@ -34,11 +34,19 @@ Alternates between multiple filament tools on a per-line basis across top and/or
 - `interlayer_colormix_surface` — apply to top / penultimate / both
 - `interlayer_colormix_pattern_top` — pattern string for top surface
 - `interlayer_colormix_pattern_penultimate` — pattern string for penultimate
-- `interlayer_colormix_min_length` — minimum line length to apply ColorMix
+- `interlayer_colormix_min_length` — minimum line length to apply ColorMix (default **1.0 mm**; formerly 3.0 mm which silently discarded ~60% of paths on complex objects)
 
-**UI**: "Edit Color Patterns…" button opens an interactive dialog with colored filament buttons to build patterns visually.
+**Zone + Filament Filter** (shared across ColorMix, MultiPass, PathBlend — exposed in the Color Mixer dialog):
+- `interlayer_colormix_top_zone` — `0` = All surfaces (default), `1` = Topmost only (the single topmost top layer, i.e. `upper_layer == nullptr`)
+- `interlayer_colormix_penu_zone` — `0` = All penultimate surfaces (default), `1` = Topmost penultimate only (`upper_layer != nullptr && upper_layer->upper_layer == nullptr`)
+- `interlayer_colormix_filament_filter` — `0` = no filter (default), `N` = only process regions whose `solid_infill_filament` equals N (1-indexed). Allows independent effects on multi-material objects.
 
-**Debug**: `ORCA_DEBUG_COLORMIX=1` → `/tmp/neotko_colormix.log`. Look for `MONOTONIC_MODE` entries to confirm Monotonic detection.
+**UI**: "Edit Color Patterns…" button opens an interactive dialog with:
+- Per-surface pattern builder (colored filament buttons)
+- Zone dropdown per surface: **All surfaces** / **Topmost only**
+- "Color Mixer settings" box: **Filament filter** spinner (0–16) and **Min. line length** spinner (0.0–50.0 mm, step 0.5)
+
+**Debug**: `ORCA_DEBUG_COLORMIX=1` → `/tmp/neotko_colormix.log`. Look for `MONOTONIC_MODE` entries to confirm Monotonic detection. `ORCA_DEBUG_COLORMIX=1` also writes `/tmp/neotko_toolorder.log` (per-layer tool assignment summary).
 
 ---
 
@@ -76,7 +84,9 @@ When `multipass_path_gradient` is enabled, a diagonal intra-layer color gradient
 
 **Concept**: Pass 0 (T0) prints each fill path at a fixed Z below nominal — the Z level increases path-by-path across the surface. Flow also increases proportionally. Pass 1 (T1) prints all paths at nominal Z with complementary flow (flow_0 + flow_1 = 1.0, exact conservation). The result is a smooth color gradient across the surface: T1-dominant on one side, T0-dominant on the other.
 
-**Gradient direction**: Computed geometrically — path centroid Y normalised within the layer bounding box (`m_layer->lslices_bboxes` union). Works for any fill angle; direction follows the Y axis of the build plate.
+**Gradient direction**: Computed geometrically — path centroid Y normalised within the **per-surface bounding box** (`m_pathblend_surface_bbox`, a `BoundingBox` member of `GCode` computed fresh per `ExtrusionEntityCollection` in `extrude_infill()` before iterating its paths). Falls back to the layer bbox union if the surface bbox is not defined. This per-surface approach fixes two bugs visible in earlier builds:
+- **angle=0 micro-jumps**: global bbox could span multiple disconnected regions, making `y_max − y_min` tiny → t≈0 for all paths → Z barely moved → wasted material changes.
+- **low-angle (1–10°) gradient vanishing**: global bbox could dwarf a small surface, compressing t into a narrow sub-range and producing a nearly-flat gradient.
 
 **GCode output** (per pass-0 path):
 ```gcode
@@ -89,10 +99,15 @@ G1 Z{nominal_z} F{print_speed} ; restore Z before next travel
 - `multipass_path_gradient` — master switch (requires `multipass_enabled`)
 - `path_gradient_segments` — reserved for future within-path subdivision (default 32)
 - `path_gradient_min_flow_pct` — minimum T0 flow % at the T1-dominant edge (default 5%)
+- `pathblend_invert_gradient` — invert the gradient direction (t → 1−t); useful when print direction makes T0 always start from the near edge (default true)
+- `pathblend_fill_angle` — fixed fill angle override for PathBlend passes, −1 = auto (default −1)
+
+**Zone + Filament Filter**: PathBlend respects `interlayer_colormix_top_zone`, `interlayer_colormix_penu_zone`, and `interlayer_colormix_filament_filter` identically to ColorMix and MultiPass. Filter is evaluated in `_extrude()` before the `any_pathblend` gate.
 
 **Key files**:
 - `src/libslic3r/SurfaceColorMix.hpp/cpp` — `PathBlendEngine::needs_blend()` + `apply_path()`
-- `src/libslic3r/GCode.cpp` — hook in `_extrude()` (~line 7394), `surface_t` geometry computation, z-blend gate (~line 6672)
+- `src/libslic3r/GCode.hpp` — `BoundingBox m_pathblend_surface_bbox` member (per-surface bbox for gradient normalization)
+- `src/libslic3r/GCode.cpp` — per-surface bbox computation in `extrude_infill()`, hook in `_extrude()` (~line 7394), `surface_t` geometry computation, zone+filament filter gate, z-blend gate (~line 6672)
 - `src/libslic3r/PrintConfig.hpp` — keys in `PrintRegionConfig` after `multipass_z_blend`
 - `src/slic3r/GUI/Tab.cpp` — UI wiring after `multipass_z_blend` line
 
@@ -243,7 +258,7 @@ In Libre Mode, the Process panel (ParamsPanel) detaches from the sidebar and flo
 All Neotko engine logic is centralised in:
 - `src/libslic3r/SurfaceColorMix.hpp/.cpp` — ColorMix (Rectilinear + Monotonic), travel optimization, MultiPass apply, PathBlend, `NeoweaveEngine`
 - `src/libslic3r/GCode/ToolOrdering.hpp/.cpp` — tool ordering, Z-blend scheduling
-- `src/libslic3r/Fill/Fill.cpp` — surface grouping, role assignment, MultiPass/ColorMix dispatch
+- `src/libslic3r/Fill/Fill.cpp` — surface grouping, role assignment, MultiPass/ColorMix dispatch, zone+filament filter for `assign_and_group_tools()` and `SurfaceMultiPass::apply()` (via `allow_top`/`allow_penu` params)
 - `src/libslic3r/Fill/FillBase.cpp` — angle lock for Neoweaving Linear
 - `src/libslic3r/Fill/FillRectilinear.cpp` — Monotonic Interlayer Nesting
 - `src/libslic3r/PrintObjectSlice.cpp` — per-volume XY compensation delta injection
@@ -263,7 +278,12 @@ All additions are wrapped in `// NEOTKO_*_TAG_START` / `_END` pairs for easy aud
 | ColorMix + MultiPass + PathBlend UX | ✅ Unified "ColorMix & Multi-Pass Blend" optgroup in Tab.cpp. ColorMix ↔ MultiPass mutual exclusion via `toggle_options()` (hard grey). PathBlend sub-options gated on MultiPass state. "Edit" buttons intentionally always active (pre-configure while disabled). |
 | PathBlend — surface filter bug | ✅ Fixed: `needs_blend()` now respects `multipass_surface`. With `surface=1` (top only) `erSolidInfill` paths are excluded — PathBlend no longer fires on every internal solid infill layer. |
 | PathBlend — penultimate precision | `erSolidInfill` with `surface=0/2` still applies to ALL solid infill layers, not just the Nth-below-top. True penultimate targeting needs layer index context passed into `needs_blend()`. Intentionally deferred — multiple penultimate layers is by design. |
-| PathBlend — refinements | First real-print tests confirm gradient visible. Known issues: gradient direction per-region, within-path Z subdivision (FASE 3.3), interaction with MultiPass flow ratios. |
+| PathBlend — surface_t normalization bug | ✅ Fixed: replaced global `lslices_bboxes` union with `m_pathblend_surface_bbox` (per-surface, computed in `extrude_infill()` before path iteration). Fixes angle=0 micro-jumps and low-angle gradient vanishing on multi-region objects. |
+| PathBlend — invert_gradient + fill_angle wiring | ✅ Fixed: `open_edit_for(EFF_PB)` now reads `pathblend_invert_gradient` and `pathblend_fill_angle` from config before opening dialog, and writes them back on OK. |
+| PathBlend — refinements | First real-print tests confirm gradient visible. Known issues: within-path Z subdivision (FASE 3.3), interaction with MultiPass flow ratios. |
+| ColorMix min_length default too high | ✅ Fixed: default lowered from 3.0 mm to 1.0 mm. The 3 mm threshold silently discarded ~60% of paths on complex objects, causing "empty zone" effects when Topmost only mode was enabled. Now exposed as a spinner in the dialog. |
+| Zone selectors — "All surfaces" vs "Topmost only" | ✅ Implemented: `interlayer_colormix_top_zone` and `interlayer_colormix_penu_zone` config keys gate ColorMix, MultiPass, and PathBlend to only the geometrically topmost surface of their respective role. Dialog has per-surface dropdowns. |
+| Filament filter | ✅ Implemented: `interlayer_colormix_filament_filter` (0=all, N=specific filament by `solid_infill_filament` value). Useful on multi-material objects with independent effects per filament zone. Exposed as spinner in dialog. |
 | Neoweaving Wave + OOM | Pre-reserve `gcode.reserve(n_lines * n_segs * 35)` in `NeoweaveEngine::apply_path()`. |
 | `penultimate_infill_speed` | Key exists, UI hidden. Penultimate currently uses `top_surface_speed`. |
 | MultiPass + ColorMix combined | Concept documented in `SurfaceColorMix.cpp` (CAMINO 2). Not yet implemented. |
@@ -280,6 +300,15 @@ To find all Neotko parameters:
 grep -n "NEOTKO_" src/libslic3r/PrintConfig.hpp | grep "TAG_START"
 grep -n "NEOTKO_" src/libslic3r/Preset.cpp
 ```
+
+New keys added in session 18 (zone + filament filter):
+- `interlayer_colormix_top_zone` — top surface zone selector (0=all, 1=topmost only)
+- `interlayer_colormix_penu_zone` — penultimate surface zone selector (0=all, 1=topmost only)
+- `interlayer_colormix_filament_filter` — filament index filter (0=all, N=specific)
+
+PathBlend keys added in session 17–18:
+- `pathblend_invert_gradient` — invert gradient direction (bool)
+- `pathblend_fill_angle` — fixed fill angle override (int, -1=auto)
 
 All parameters follow the golden rule:
 1. Declared in `PrintConfig.hpp` struct macro
@@ -308,6 +337,7 @@ This feature pack is Neotko's continued work on the same frontier: what happens 
 **Libre Mode** — a runtime physics override that unlocks OrcaSlicer for professional multi-part assembly workflows: floating objects, world-space import, per-volume compensation, temporal linking of parts, and a detachable process panel for multi-monitor setups.
 
 All of this work is open and free. Fork it, improve it, credit it.
+
 -----
 
 Now all the info from the Original FullSpectrum 0.95 (beta)
