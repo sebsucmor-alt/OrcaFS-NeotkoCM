@@ -25,7 +25,15 @@ Alternates between multiple filament tools on a per-line basis across top and/or
 
 **How it works**: A pattern string (e.g. `"1212"`) defines which tool prints each successive fill line. The pattern loops, producing true per-line toolchanges through the wipe tower.
 
-**Fill pattern compatibility**: Works with Rectilinear (single zig-zag → split at direction changes) and Monotonic/MonotonicLine (pre-split paths → tools assigned directly). Detection is automatic: `n_paths > 1` in the sub-collection → Monotonic mode.
+**Fill pattern compatibility — ⚠️ MonotonicLine required for complex objects**:
+
+ColorMix technically fires on Rectilinear and Monotonic as well, but **only MonotonicLine produces correct results on non-trivial geometry** (objects with holes, concavities, asymmetric outlines, or multiple disconnected top regions). The reason:
+
+- **MonotonicLine** ✅ — surface paths are pre-split into individual lines before ColorMix assigns tools. Every path across the full surface is visited in the correct spatial order → toolchanges match the physical surface.
+- **Monotonic** ⚠️ — path reordering for seam avoidance is finalized *after* ColorMix assigns tools → on complex shapes, tools end up assigned in the wrong physical order → visible pattern breaks.
+- **Rectilinear** ⚠️ — same problem on complex shapes; the zig-zag is split at direction changes, which works on a rectangle but fails on anything irregular.
+
+**Users must set the top surface fill pattern to MonotonicLine when using ColorMix.** Detection is automatic: `n_paths > 1` in the sub-collection → Monotonic/MonotonicLine fast path.
 
 **Travel optimization**: After grouping paths by tool, each tool's block is reordered using nearest-neighbor with endpoint flipping (O(n²)), minimizing travel moves between same-tool lines. Implemented in `optimize_tool_block_travel()` in `SurfaceColorMix.cpp`.
 
@@ -256,7 +264,7 @@ In Libre Mode, the Process panel (ParamsPanel) detaches from the sidebar and flo
 ## Architecture
 
 All Neotko engine logic is centralised in:
-- `src/libslic3r/SurfaceColorMix.hpp/.cpp` — ColorMix (Rectilinear + Monotonic), travel optimization, MultiPass apply, PathBlend, `NeoweaveEngine`
+- `src/libslic3r/SurfaceColorMix.hpp/.cpp` — ColorMix (MonotonicLine required for complex shapes; Rectilinear/Monotonic work only on simple geometry), travel optimization, MultiPass apply, PathBlend, `NeoweaveEngine`
 - `src/libslic3r/GCode/ToolOrdering.hpp/.cpp` — tool ordering, Z-blend scheduling
 - `src/libslic3r/Fill/Fill.cpp` — surface grouping, role assignment, MultiPass/ColorMix dispatch, zone+filament filter for `assign_and_group_tools()` and `SurfaceMultiPass::apply()` (via `allow_top`/`allow_penu` params)
 - `src/libslic3r/Fill/FillBase.cpp` — angle lock for Neoweaving Linear
@@ -274,6 +282,7 @@ All additions are wrapped in `// NEOTKO_*_TAG_START` / `_END` pairs for easy aud
 | Issue | Status |
 |-------|--------|
 | Neoweaving Wave mode | ⛔ Disabled — OOM crash on large surfaces (8 GB RAM). Code intact. Fix: pre-reserve string buffer in `NeoweaveEngine::apply_path()` before the wave loop. |
+| ColorMix — fill pattern requirement | ⚠️ **MonotonicLine only** for correct results on complex objects. Rectilinear and Monotonic fire the ColorMix hook but produce wrong toolchange ordering on any non-trivial shape (concavities, holes, asymmetric outlines). Users must set top surface pattern to MonotonicLine. |
 | ColorMix — travel retractions | Paths split by tool cross empty surface space without retraction. Needs retract/unretract injection at tool-block boundaries within the same layer. |
 | ColorMix + MultiPass + PathBlend UX | ✅ Unified "ColorMix & Multi-Pass Blend" optgroup in Tab.cpp. ColorMix ↔ MultiPass mutual exclusion via `toggle_options()` (hard grey). PathBlend sub-options gated on MultiPass state. "Edit" buttons intentionally always active (pre-configure while disabled). |
 | PathBlend — surface filter bug | ✅ Fixed: `needs_blend()` now respects `multipass_surface`. With `surface=1` (top only) `erSolidInfill` paths are excluded — PathBlend no longer fires on every internal solid infill layer. |
