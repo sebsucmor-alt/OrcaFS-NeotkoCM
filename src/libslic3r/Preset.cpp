@@ -848,6 +848,8 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_colormix_tool_c", "interlayer_colormix_tool_d",
     "interlayer_colormix_min_length",
     "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate",
+    "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone",
+    "interlayer_colormix_filament_filter",
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     "multipass_enabled", "multipass_surface", "multipass_num_passes",
@@ -860,14 +862,16 @@ static std::vector<std::string> s_Preset_print_options {
     "multipass_speed_pct_1", "multipass_speed_pct_2", "multipass_speed_pct_3",
     "multipass_gcode_start_1", "multipass_gcode_start_2", "multipass_gcode_start_3",
     "multipass_gcode_end_1", "multipass_gcode_end_2", "multipass_gcode_end_3",
-    "multipass_sort_by_ratio",
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    "multipass_z_blend",
-    // NEOTKO_MULTIPASS_ZBLEND_END
     // NEOTKO_MULTIPASS_TAG_START — PathBlend
     "multipass_path_gradient", "path_gradient_segments", "path_gradient_min_flow_pct",
     // NEOTKO_MULTIPASS_TAG_END
-    // NEOTKO_MULTIPASS_TAG_END
+    // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend
+    "pathblend_num_passes",
+    "pathblend_tool_1", "pathblend_tool_2", "pathblend_tool_3", "pathblend_tool_4",
+    "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3", "pathblend_layer_ratio_4",
+    "pathblend_min_ratio", "pathblend_surface",
+    "pathblend_invert_gradient", "pathblend_fill_angle",
+    // NEOTKO_PATHBLEND_TAG_END
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "detect_overhang_wall", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
     "seam_position", "staggered_inner_seams", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "sparse_infill_pattern", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "top_surface_pattern", "bottom_surface_pattern",
     "infill_direction", "solid_infill_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",

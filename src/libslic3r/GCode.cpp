@@ -5293,7 +5293,7 @@ LayerResult GCode::process_layer(const Print& print,
                                 NEOTKO_LOG(COLORMIX, "COLORMIX_HOOK fired: entities="
                                     << filtered_extrusions->entities.size()
                                     << " layer_id=" << (layer_to_print.object_layer ? layer_to_print.object_layer->id() : 0));
-                                // Build tool buckets preserving Fill.cpp insertion order (sort_by_ratio).
+                                // Build tool buckets preserving Fill.cpp insertion order (config order).
                                 // Use vector+map combo: vector preserves order, map owns collections.
                                 std::vector<unsigned int> colormix_bucket_order;
                                 std::map<unsigned int, std::unique_ptr<ExtrusionEntityCollection>> colormix_buckets;
@@ -6239,10 +6239,6 @@ std::string GCode::change_layer(coordf_t print_z)
 
     m_nominal_z                 = z;
     m_writer.get_position().z() = z;
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    m_multipass_z_active = false;
-    m_multipass_z_target = DBL_MAX;
-    // NEOTKO_MULTIPASS_ZBLEND_END
 
     // forget last wiping path as wiping after raising Z is pointless
     // BBS. Dont forget wiping path to reduce stringing.
@@ -6665,78 +6661,28 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
             if (!extrusions.empty()) {
                 m_config.apply(print.get_print_region(&region - &by_region.front()).config());
                 chain_and_reorder_extrusion_entities(extrusions, &m_last_pos);
-                // NEOTKO_MULTIPASS_ZBLEND_START — look up sub-layer Z from PrintObject records
-                // _compute_multipass_sublayers() computed print_z for each (layer_id, tool_id).
-                // rec.tool_id is 0-based; m_writer.extruder()->id() is also 0-based.
-                m_multipass_z_target = DBL_MAX;
-                // NEOTKO_MULTIPASS_TAG_START — PathBlend handles Z per-segment; skip coarse z-blend when active
-                // NEOTKO_MULTIPASS_TAG_END
-                if (!ironing && m_config.multipass_enabled.value && m_config.multipass_z_blend.value
-                    && !m_config.multipass_path_gradient.value
-                    && m_layer != nullptr && m_layer->object() != nullptr
-                    && m_writer.extruder() != nullptr) {
-                    const size_t lid = m_layer->id();
-                    const int    tid = static_cast<int>(m_writer.extruder()->id());
-                    const auto&  recs = m_layer->object()->multipass_sublayer_records();
-                    // NEOTKO_MULTIPASS_TAG_START — cursor-based record lookup
-                    // find_if by tool_id alone breaks when the same tool appears in multiple
-                    // passes (e.g. T3/T2/T3): it always returns pass 0's Z for T3.
-                    // Instead, iterate records for this layer_id in pass_index order using a
-                    // per-layer cursor. The cursor resets on layer change and advances on each use.
-                    if (lid != m_multipass_pass_last_lid) {
-                        m_multipass_pass_last_lid = lid;
-                        m_multipass_pass_cursor   = 0;
-                    }
-                    {
-                        size_t cursor = 0;
-                        for (const auto& rec : recs) {
-                            if (rec.layer_id != lid) continue;
-                            if (cursor == m_multipass_pass_cursor) {
-                                if (rec.tool_id == tid) {
-                                    m_multipass_z_target = rec.print_z;
-                                    NEOTKO_LOG(ZBLEND, "extrude_infill: layer=" << lid
-                                        << " T" << tid
-                                        << " pass_cursor=" << m_multipass_pass_cursor
-                                        << " sub_z=" << m_multipass_z_target
-                                        << " nominal_z=" << m_nominal_z);
-                                }
-                                ++m_multipass_pass_cursor; // advance regardless — keeps in sync with tool sequence
-                                break;
-                            }
-                            ++cursor;
-                        }
-                    }
-                    // NEOTKO_MULTIPASS_TAG_END
-                }
-                if (m_multipass_z_target < DBL_MAX &&
-                    std::abs(m_multipass_z_target - m_nominal_z) > 1e-5) {
-                    m_multipass_z_saved_nominal    = m_nominal_z;
-                    m_multipass_z_saved_last_layer = m_last_layer_z;
-                    m_nominal_z    = m_multipass_z_target;
-                    m_last_layer_z = static_cast<float>(m_multipass_z_target);
-                    gcode += this->retract(false, false, LiftType::NormalLift);
-                    gcode += m_writer.travel_to_z(m_multipass_z_target, "MultiPass Z sub-layer");
-                    m_multipass_z_active = true;
-                }
-                // NEOTKO_MULTIPASS_ZBLEND_END
                 for (const ExtrusionEntity* fill : extrusions) {
                     auto* eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
                     if (eec) {
+                        // NEOTKO_PATHBLEND_TAG_START — per-surface bbox for surface_t
+                        // Compute Y extent from all PathBlend paths in this collection so that
+                        // each individual surface is normalised independently (not against the
+                        // full layer bbox, which would compress surface_t near 0.5 for any object
+                        // smaller than the print bed, producing micro-jumps at angle=0 and
+                        // vanishing gradient at low angles).
+                        m_pathblend_surface_bbox = BoundingBox();
+                        for (const ExtrusionEntity* ee2 : eec->entities) {
+                            if (const auto* p2 = dynamic_cast<const ExtrusionPath*>(ee2))
+                                if (PathBlendEngine::needs_blend(*p2, m_config))
+                                    m_pathblend_surface_bbox.merge(p2->polyline.bounding_box());
+                        }
+                        // NEOTKO_PATHBLEND_TAG_END
                         for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos).entities)
                             gcode += this->extrude_entity(*ee, extrusion_name);
+                        m_pathblend_surface_bbox = BoundingBox(); // reset after collection
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name);
                 }
-                // NEOTKO_MULTIPASS_ZBLEND_START — restore nominal Z after pass extrusion
-                if (m_multipass_z_active) {
-                    m_nominal_z    = m_multipass_z_saved_nominal;
-                    m_last_layer_z = m_multipass_z_saved_last_layer;
-                    gcode += m_writer.travel_to_z(m_nominal_z, "MultiPass Z restore to nominal");
-                    m_multipass_z_active = false;
-                    NEOTKO_LOG(ZBLEND, "extrude_infill: Z restored to nominal=" << m_nominal_z);
-                }
-                m_multipass_z_target = DBL_MAX;
-                // NEOTKO_MULTIPASS_ZBLEND_END
             }
         }
     return gcode;
@@ -7413,9 +7359,26 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             const bool any_neoweave = (sloped == nullptr) && NeoweaveEngine::needs_weave(path, m_config);
             // NEOTKO_NEOWEAVING_TAG_END
             // NEOTKO_MULTIPASS_TAG_START — PathBlend: force G1 branch (Z+flow gradient, incompatible with arc fitting)
+            // NEOTKO_COLORMIX_TAG_START — zone + filament filter for PathBlend
+            bool _pb_zone_ok = true, _pb_fil_ok = true;
+            if (m_layer != nullptr && PathBlendEngine::needs_blend(path, m_config)) {
+                const ExtrusionRole _pb_role = path.role();
+                const int _pb_zone = (_pb_role == erTopSolidInfill)
+                    ? m_config.interlayer_colormix_top_zone.value
+                    : m_config.interlayer_colormix_penu_zone.value;
+                if (_pb_zone == 1) {
+                    _pb_zone_ok = (_pb_role == erTopSolidInfill)
+                        ? (m_layer->upper_layer == nullptr)
+                        : (m_layer->upper_layer != nullptr && m_layer->upper_layer->upper_layer == nullptr);
+                }
+                const int _pb_ff = m_config.interlayer_colormix_filament_filter.value;
+                if (_pb_ff > 0) _pb_fil_ok = (m_config.solid_infill_filament.value == _pb_ff);
+            }
+            // NEOTKO_COLORMIX_TAG_END
             const bool any_pathblend = !any_neoweave
                 && (sloped == nullptr)
                 && (m_layer != nullptr)
+                && _pb_zone_ok && _pb_fil_ok
                 && PathBlendEngine::needs_blend(path, m_config);
             // NEOTKO_MULTIPASS_TAG_END
             if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || any_neoweave || any_pathblend) {
@@ -7436,41 +7399,99 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                 // NEOTKO_NEOWEAVING_TAG_END
                 // NEOTKO_MULTIPASS_TAG_START — PathBlend apply
                 if (any_pathblend) {
-                    // Determine pass_idx from current extruder vs MultiPass config tool list
+                    // Determine pass_idx from current extruder vs PathBlend tool list.
                     int pass_idx = 0;
                     if (m_writer.extruder() != nullptr) {
                         const int cur_ext = static_cast<int>(m_writer.extruder()->id());
-                        const auto mc     = MultiPassConfig::from_region_config(m_config);
-                        for (int pi = 0; pi < mc.num_passes; ++pi) {
-                            if (mc.tool[pi] == cur_ext) { pass_idx = pi; break; }
+                        const auto pb     = PathBlendPassConfig::from_region_config(m_config);
+                        for (int pi = 0; pi < pb.num_passes; ++pi) {
+                            if (pb.tool[pi] == cur_ext) { pass_idx = pi; break; }
                         }
                     }
                     // surface_t: position of this path in the surface [0..1].
-                    // Use path centroid Y normalised within the layer bbox.
-                    // This gives a gradient direction perpendicular to horizontal fills.
+                    // Prefer m_pathblend_surface_bbox (set per-EEC in extrude_infill) so each
+                    // object is normalised within its own Y extent, not the whole layer.
+                    // Without this, two circles side-by-side both get surface_t ≈ 0.5 → micro-jumps
+                    // at angle=0 and vanishing gradient at low angles.
+                    // Fall back to the full layer bbox only if the per-surface bbox wasn't set.
                     double surface_t = 0.5;
-                    if (m_layer != nullptr && !m_layer->lslices_bboxes.empty()) {
-                        BoundingBox layer_bbox = m_layer->lslices_bboxes.front();
-                        for (const auto& bb : m_layer->lslices_bboxes)
-                            layer_bbox.merge(bb);
-                        double sum_y = 0.0;
-                        for (const auto& pt : path.polyline.points)
-                            sum_y += double(pt.y());
-                        const double cy = sum_y / double(path.polyline.points.size());
-                        const double y_min = double(layer_bbox.min.y());
-                        const double y_max = double(layer_bbox.max.y());
-                        if (y_max > y_min + 1.0)
-                            surface_t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
-                        // Invert: T0 starts thin (small flow) and builds up as paths progress.
-                        // Without inversion, T0 starts heavy at high-Y paths (first printed by slicer).
-                        surface_t = 1.0 - surface_t;
+                    {
+                        BoundingBox ref_bb;
+                        if (m_pathblend_surface_bbox.defined) {
+                            ref_bb = m_pathblend_surface_bbox;
+                        } else if (m_layer != nullptr && !m_layer->lslices_bboxes.empty()) {
+                            ref_bb = m_layer->lslices_bboxes.front();
+                            for (const auto& bb : m_layer->lslices_bboxes)
+                                ref_bb.merge(bb);
+                        }
+                        if (ref_bb.defined) {
+                            const double y_min = double(ref_bb.min.y());
+                            const double y_max = double(ref_bb.max.y());
+                            if (y_max > y_min + 1.0) {
+                                double sum_y = 0.0;
+                                for (const auto& pt : path.polyline.points)
+                                    sum_y += double(pt.y());
+                                const double cy = sum_y / double(path.polyline.points.size());
+                                surface_t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
+                            }
+                        }
+                        // invert_gradient is applied inside PathBlendEngine::apply_path().
+                        // t=0 (min-Y path, printed first) → z=bottom_z with invert=true.
                     }
                     gcode += PathBlendEngine::apply_path(
                         path, m_config, m_writer,
                         m_nominal_z, m_layer->height,
                         F, e_per_mm, pass_idx, surface_t,
                         [this](const Point& p) { return this->point_to_gcode(p); });
+                    // NOTE: No per-path Z restore here.
+                    // apply_path leaves the writer at z_pass (varies per surface_t).
+                    // The subsequent travel_to_xyz uses m_nominal_z as destination and
+                    // naturally lifts Z as part of the travel move — no separate G1 Z
+                    // needed. Emitting an explicit restore + travel was producing a
+                    // micro-zhop (G1 Z<nominal> + G1 XYZ<nominal>) before every travel.
                 } else {
+                // NEOTKO_MULTIPASS_TAG_END
+                // NEOTKO_MULTIPASS_TAG_START — MultiPass Z sub-layer positioning
+                // Each pass i occupies layer slice [cumsum(ratio[0..i-1]), cumsum(ratio[0..i])].
+                // Nozzle steps to bottom_z + cumsum(ratio[0..i-1]) * layer_height before extruding.
+                // Pass 0 → bottom_z (cumsum=0). Last pass → nominal_z (cumsum=1.0, no move emitted).
+                //
+                // NOTE: paths arrive DECODED (COLORMIX_HOOK subtracts the tool encoding before
+                // routing to buckets). Do NOT check path.mm3_per_mm >= 10 here.
+                bool mp_sub_z_active = false;
+                if (m_config.multipass_enabled.value
+                    && (path.role() == erTopSolidInfill || path.role() == erPenultimateInfill)
+                    && m_layer != nullptr
+                    && m_writer.extruder() != nullptr) {
+                    const auto mp     = MultiPassConfig::from_region_config(m_config);
+                    if (SurfaceColorMix::should_process_role(path.role(), mp.surface)) {
+                        const int cur_ext = static_cast<int>(m_writer.extruder()->id());
+                        int pass_idx = -1;
+                        for (int pi = 0; pi < mp.num_passes; ++pi)
+                            if (mp.tool[pi] == cur_ext) { pass_idx = pi; break; }
+                        if (pass_idx >= 0) {
+                            const double bottom_z = m_nominal_z - m_layer->height;
+                            // Cumsum to END of this pass's sub-slice (not start).
+                            // pass 0 → cumsum = ratio[0]  → z above bottom_z
+                            // last pass → cumsum = 1.0    → z = nominal_z exactly
+                            // (Old: cumsum to START put pass 0 at z=bottom_z = previous layer top)
+                            double cumsum = 0.0;
+                            for (int pi = 0; pi <= pass_idx; ++pi)
+                                cumsum += mp.width_ratio[pi];
+                            const double z_sub = bottom_z + cumsum * m_layer->height;
+                            if (std::abs(m_writer.get_position().z() - z_sub) > 1e-5) {
+                                GCodeG1Formatter w;
+                                w.emit_z(z_sub);
+                                w.emit_f(F);
+                                w.emit_comment(GCodeWriter::full_gcode_comment,
+                                               "mp z p" + std::to_string(pass_idx));
+                                gcode += w.string();
+                                m_writer.get_position().z() = z_sub;
+                            }
+                            mp_sub_z_active = (std::abs(z_sub - m_nominal_z) > 1e-5);
+                        }
+                    }
+                }
                 // NEOTKO_MULTIPASS_TAG_END
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
@@ -7504,6 +7525,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     }
                 }
                 // NEOTKO_MULTIPASS_TAG_START
+                // No per-path Z restore: mp_sub_z_active is tracked but the explicit
+                // G1 Z<nominal> after each line was causing micro-zhops (down → extrude →
+                // up → travel-already-at-nominal → down again). travel_to_xyz() uses
+                // m_nominal_z as destination and handles the Z lift naturally.
+                (void)mp_sub_z_active;
                 } // end else (non-pathblend normal G1)
                 // NEOTKO_MULTIPASS_TAG_END
                 // NEOTKO_NEOWEAVING_TAG_START

@@ -567,151 +567,20 @@ void PrintObject::infill()
         if (colormix_unsplittable.load()) {
             this->active_step_add_warning(
                 PrintStateBase::WarningLevel::NON_CRITICAL,
-                L("Surface ColorMix: the top/penultimate fill pattern cannot be split into "
-                  "individual lines. Switch from Monotonic or MonotonicLine to Rectilinear "
-                  "or another non-monotonic pattern for ColorMix to take effect."),
+                L("Surface ColorMix: some surface fill lines are too short or unsplittable. "
+                  "Use Monoline fill pattern for best results, or lower the "
+                  "'Minimum line length' ColorMix setting."),
                 PrintStateBase::SlicingDefaultNotification
             );
         }
         // NEOTKO_COLORMIX_TAG_END
         BOOST_LOG_TRIVIAL(debug) << "Filling layers in parallel - end";
-        // NEOTKO_MULTIPASS_ZBLEND_START
-        // Compute MultiPass Z-blend sub-layer records now that make_fills() has populated
-        // all fill paths. GCode::process_layer() reads these to route each pass to its Z.
-        this->_compute_multipass_sublayers();
-        // NEOTKO_MULTIPASS_ZBLEND_END
         /*  we could free memory now, but this would make this step not idempotent
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */
         this->set_done(posInfill);
     }
 }
-
-// NEOTKO_MULTIPASS_ZBLEND_START
-// ---------------------------------------------------------------------------
-// PrintObject::_compute_multipass_sublayers
-//
-// Called from infill() after make_fills(). For every layer that has at least
-// one region with MultiPass z_blend enabled, computes a MultiPassSubLayerRecord
-// per active pass and appends it to m_multipass_sublayer_records.
-//
-// GCode::process_layer() reads multipass_sublayer_records() to look up the
-// correct print_z for each MultiPass infill pass, instead of computing it on-the-fly.
-// ---------------------------------------------------------------------------
-void PrintObject::_compute_multipass_sublayers()
-{
-    m_multipass_sublayer_records.clear();
-
-    for (const Layer* layer : m_layers) {
-        if (layer->height < 1e-9) continue;   // degenerate layer — skip
-
-        // Find first region with MultiPass z_blend enabled.
-        bool layer_has_zblend = false;
-        MultiPassConfig mp;
-        for (const LayerRegion* layerm : layer->regions()) {
-            if (layerm == nullptr) continue;
-            mp = MultiPassConfig::from_region_config(layerm->region().config());
-            // Check object-level config override (handles per-object UI setting).
-            if (mp.enabled && !mp.z_blend) {
-                const DynamicPrintConfig& obj_cfg = this->model_object()->config.get();
-                if (const ConfigOptionBool* opt =
-                        obj_cfg.option<ConfigOptionBool>("multipass_z_blend"))
-                    mp.z_blend = opt->value;
-            }
-            NEOTKO_LOG(ZBLEND, "  layer_id=" << layer->id()
-                << " mp.enabled=" << mp.enabled
-                << " mp.z_blend=" << mp.z_blend
-                << " mp.num_passes=" << mp.num_passes);
-            if (!mp.enabled || !mp.z_blend) continue;
-            // Count active passes (tool >= 0)
-            int active = 0;
-            for (int i = 0; i < mp.num_passes; ++i)
-                if (mp.tool[i] >= 0) ++active;
-            if (active < 2) continue;   // z_blend with 1 pass is a no-op
-            layer_has_zblend = true;
-            break;
-        }
-        if (!layer_has_zblend) continue;
-
-        // Only create records for FASE2 layers (top/penultimate fills).
-        // Z-blend only makes physical sense where FASE2 produces one EEC per pass.
-        {
-            bool has_fase2_fill = false;
-            for (const LayerRegion* layerm : layer->regions()) {
-                if (layerm == nullptr) continue;
-                for (const ExtrusionEntity* ee : layerm->fills.entities) {
-                    const ExtrusionRole r = ee->role();
-                    if (r == erTopSolidInfill || r == erPenultimateInfill) {
-                        has_fase2_fill = true;
-                        break;
-                    }
-                }
-                if (has_fase2_fill) break;
-            }
-            if (!has_fase2_fill) {
-                NEOTKO_LOG(ZBLEND, "  SKIP layer_id=" << layer->id()
-                    << " (no FASE2 fills — z_blend not applicable)");
-                continue;
-            }
-        }
-
-        NEOTKO_LOG(ZBLEND, "  layer_id=" << layer->id()
-            << " print_z=" << layer->print_z
-            << " height=" << layer->height
-            << " bottom_z=" << (layer->print_z - layer->height));
-
-        // Collect active passes in config order (pass_index = position in config).
-        // For z-blend, print order is ALWAYS config order: pass[0] prints first (lowest sub-Z).
-        // sort_by_ratio is NOT applied here — that belongs to Fill.cpp for width distribution.
-        struct ActivePass { int tool_id; double ratio; };
-        std::vector<ActivePass> passes;
-        for (int i = 0; i < mp.num_passes; ++i) {
-            if (mp.tool[i] < 0) continue;
-            passes.push_back({ mp.tool[i], mp.width_ratio[i] });
-        }
-        if (passes.size() < 2) continue;
-
-        // Normalise ratios so they sum to 1.0
-        double ratio_sum = 0.0;
-        for (const auto& p : passes) ratio_sum += p.ratio;
-        if (ratio_sum < 1e-9) {
-            NEOTKO_LOG(ZBLEND, "    SKIP: ratio_sum=" << ratio_sum << " (degenerate)");
-            continue;
-        }
-        for (auto& p : passes) p.ratio /= ratio_sum;
-
-        // Compute sub-Z for each pass and append records
-        const double bottom_z = layer->print_z - layer->height;
-        double cumulative = 0.0;
-
-        for (size_t pi = 0; pi < passes.size(); ++pi) {
-            const bool is_last = (pi == passes.size() - 1);
-            cumulative += passes[pi].ratio;
-
-            MultiPassSubLayerRecord rec;
-            rec.layer_id   = layer->id();
-            rec.pass_index = static_cast<int>(pi);
-            rec.tool_id    = passes[pi].tool_id;
-            rec.height     = passes[pi].ratio * layer->height;
-            // Last pass always lands at nominal Z regardless of floating-point rounding
-            rec.print_z    = is_last ? layer->print_z
-                                     : std::min(bottom_z + cumulative * layer->height, layer->print_z);
-            m_multipass_sublayer_records.push_back(rec);
-
-            NEOTKO_LOG(ZBLEND, "    pass_index=" << rec.pass_index
-                << " tool=T" << rec.tool_id
-                << " ratio=" << passes[pi].ratio
-                << " print_z=" << rec.print_z
-                << " height=" << rec.height
-                << (is_last ? " [LAST=nominal]" : ""));
-        }
-    }
-
-    BOOST_LOG_TRIVIAL(info) << "MultiPass sublayers computed:"
-                            << " total_records=" << m_multipass_sublayer_records.size();
-    NEOTKO_LOG(ZBLEND, "=== total_records=" << m_multipass_sublayer_records.size());
-}
-// NEOTKO_MULTIPASS_ZBLEND_END
 
 void PrintObject::ironing()
 {

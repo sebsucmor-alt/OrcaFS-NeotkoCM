@@ -612,23 +612,13 @@ private:
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
     coordf_t m_nominal_z;
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    // Sub-layer Z state for MultiPass z-blend. The nozzle descends to m_multipass_z_target
-    // before extruding a pass, then restores m_nominal_z afterwards.
-    // m_nominal_z is temporarily overridden so retract/deretract height calculations are
-    // relative to the actual extrusion Z, not the layer-nominal Z.
-    double m_multipass_z_target           = DBL_MAX;  ///< Sub-layer print_z; DBL_MAX = not active
-    double m_multipass_z_saved_nominal    = 0.0;       ///< m_nominal_z saved before override
-    float  m_multipass_z_saved_last_layer = 0.0f;      ///< m_last_layer_z saved before override
-    bool   m_multipass_z_active           = false;     ///< True while nozzle is at sub-layer Z
-    // NEOTKO_MULTIPASS_TAG_START — pass cursor for repeated-tool support (e.g. T3/T2/T3)
-    // Resets when layer_id changes; increments on each ZBlend sublayer lookup.
-    // Allows extrude_infill to find pass 0 on the first T3 call and pass 2 on the second.
-    size_t m_multipass_pass_cursor   = 0;
-    size_t m_multipass_pass_last_lid = static_cast<size_t>(-1);
-    // NEOTKO_MULTIPASS_TAG_END
-    // NEOTKO_MULTIPASS_ZBLEND_END
     bool m_need_change_layer_lift_z = false;
+    // NEOTKO_PATHBLEND_TAG_START — per-surface Y bbox for correct surface_t normalisation.
+    // Set in extrude_infill() before iterating each EEC; reset afterwards.
+    // When defined, _extrude() uses this instead of the full layer bbox so that
+    // objects placed anywhere on the build plate get the full [0..1] gradient range.
+    BoundingBox m_pathblend_surface_bbox;
+    // NEOTKO_PATHBLEND_TAG_END
     int m_start_gcode_filament = -1;
 
     std::set<unsigned int>                  m_initial_layer_extruders;

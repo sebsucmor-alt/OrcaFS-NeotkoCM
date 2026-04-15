@@ -70,12 +70,15 @@ public:
     // Main entry point. Called from Fill.cpp::make_fills() after surface fill generation.
     // Splits top/penultimate surface paths into individual lines and groups them by tool
     // according to the pattern string (interlayer_colormix_pattern_top / _penultimate).
+    // allow_top / allow_penu: zone filter from Fill.cpp call site — false skips that role.
     // Returns int flags: bit 0 = any path modified, bit 1 = unsplittable fill found.
     static int assign_and_group_tools(
         ExtrusionEntityCollection& fills,
         const PrintRegionConfig&   config,
         ExtrusionRole              role,
-        int                        layer_idx
+        int                        layer_idx,
+        bool                       allow_top  = true,
+        bool                       allow_penu = true
     );
 
     // Check if role matches the surface filter setting.
@@ -130,25 +133,44 @@ struct MultiPassConfig {
     int         speed_pct[3]   = {100, 100, 100};     // 1-200 via M220
     std::string gcode_start[3] = {"", "", ""};
     std::string gcode_end[3]   = {"", "", ""};
-    // NEOTKO_MULTIPASS_SORTBYRATIO_START
-    bool        sort_by_ratio  = true;
-    // NEOTKO_MULTIPASS_SORTBYRATIO_END
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    bool        z_blend        = false;
-    // NEOTKO_MULTIPASS_ZBLEND_END
-
     static MultiPassConfig from_region_config(const PrintRegionConfig& cfg);
 };
+
+// NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
+struct PathBlendPassConfig {
+    bool    enabled        = false;
+    int     surface        = 0;      // 0=both, 1=top, 2=penultimate
+    int     num_passes     = 2;
+    int     tool[4]        = {0, 1, 2, 3};
+    float   layer_ratio[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // ratio at the active extreme of each pass
+    float   min_ratio      = 0.05f;  // minimum extrusion ratio for the leading pass at t=0
+    bool    invert_gradient = true;  // invert t for z calc → ascending z during print (safe)
+    int     fill_angle      = -1;    // -1 = follow top surface angle; 0..359 = override
+
+    // Compute the extrusion ratio for pass `p` at normalized surface position `t` in [0,1].
+    // 2 passes: r0(t)=1-t, r1(t)=t
+    // 3 passes: r0=max(0,1-2t), r1=1-|2t-1|, r2=max(0,2t-1)
+    // 4 passes: linear-hat per tramo, peaks at t=0, 0.333, 0.667, 1.0
+    // min_ratio: applied to pass 0 (dominant at t=0) so it never goes below min_ratio.
+    double ratio_at(int p, double t) const;
+
+    // Build from PrintRegionConfig (reads pathblend_* keys).
+    static PathBlendPassConfig from_region_config(const PrintRegionConfig& cfg);
+};
+// NEOTKO_PATHBLEND_TAG_END
 
 class SurfaceMultiPass {
 public:
     // Called from Fill.cpp::make_fills() BEFORE SurfaceColorMix::assign_and_group_tools().
     // Clones all matching surface paths N times, each with width_ratio[i] and tool[i] encoded.
     // ColorMix skips these paths automatically (mm3_per_mm >= 10.0 guard — CAMINO 1).
+    // allow_top / allow_penu: zone filter from Fill.cpp call site — false skips that role.
     static bool apply(
         ExtrusionEntityCollection& fills,
         const PrintRegionConfig&   config,
-        int                        layer_idx
+        int                        layer_idx,
+        bool                       allow_top  = true,
+        bool                       allow_penu = true
     );
 };
 // NEOTKO_MULTIPASS_TAG_END

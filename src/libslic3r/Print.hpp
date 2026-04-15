@@ -80,19 +80,6 @@ struct SubLayerPlan
     ExPolygons              base_masks;
 };
 
-// NEOTKO_MULTIPASS_ZBLEND_START
-/// One MultiPass infill sub-layer within a nominal layer.
-/// Populated by PrintObject::_compute_multipass_sublayers() after make_fills().
-/// GCode::process_layer() reads these to route each infill pass to its correct Z.
-struct MultiPassSubLayerRecord
-{
-    size_t  layer_id    { 0 };      ///< Layer::id() of the parent nominal layer
-    int     pass_index  { 0 };      ///< 0 = largest ratio (printed first, lowest Z)
-    double  print_z     { 0.0 };    ///< Absolute Z for this pass
-    double  height      { 0.0 };    ///< Effective layer height = width_ratio * nominal_height (normalised)
-    int     tool_id     { -1 };     ///< Extruder index (0-based) for this pass
-};
-// NEOTKO_MULTIPASS_ZBLEND_END
 
 enum SupportNecessaryType {
     NoNeedSupp=0,
@@ -451,11 +438,6 @@ public:
         m_local_z_intervals.clear();
         m_local_z_sublayer_plan.clear();
     }
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    const std::vector<MultiPassSubLayerRecord>& multipass_sublayer_records() const
-        { return m_multipass_sublayer_records; }
-    void clear_multipass_sublayer_records() { m_multipass_sublayer_records.clear(); }
-    // NEOTKO_MULTIPASS_ZBLEND_END
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
@@ -556,11 +538,6 @@ private:
     void prepare_infill();
     void infill();
     void ironing();
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    // Computes MultiPassSubLayerRecord data for all layers that have MultiPass z_blend active.
-    // Called from infill() after make_fills() completes. Result stored in m_multipass_sublayer_records.
-    void _compute_multipass_sublayers();
-    // NEOTKO_MULTIPASS_ZBLEND_END
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
@@ -611,9 +588,6 @@ private:
     SupportLayerPtrs                        m_support_layers;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    std::vector<MultiPassSubLayerRecord>    m_multipass_sublayer_records;
-    // NEOTKO_MULTIPASS_ZBLEND_END
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 

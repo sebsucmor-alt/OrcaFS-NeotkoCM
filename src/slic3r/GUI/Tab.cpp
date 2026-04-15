@@ -60,6 +60,8 @@
 #include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG
 #include <fstream>    // NEOTKO_COLORMIX_TAG (preset save/load)
 #include <functional> // NEOTKO_COLORMIX_TAG (std::function in MultiPassPreviewPanel)
+#include <map>        // NEOTKO_SURFACE_MIXER_TAG (blend_preview)
+#include <cstdio>     // NEOTKO_SURFACE_MIXER_TAG (std::snprintf for TD values)
 
 namespace Slic3r {
 namespace GUI {
@@ -73,36 +75,30 @@ namespace {
 class ColorMixPatternDialog : public wxDialog
 {
 public:
+    // Single pattern — surface (Top/Penu/Both) is controlled by the SurfaceColorMixer combos.
     ColorMixPatternDialog(wxWindow*                                       parent,
                           const std::vector<Slic3r::ColorMixOption>&      options,
                           const std::vector<std::string>&                 filament_colours,
-                          const std::string&                              cur_top,
-                          const std::string&                              cur_penu,
-                          int                                             cur_surface)
-        : wxDialog(parent, wxID_ANY, _L("Edit Color Patterns"),
+                          const std::string&                              cur_pattern)
+        : wxDialog(parent, wxID_ANY, _L("Edit Color Pattern"),
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
         , m_colours(filament_colours)
-        , m_top_pattern(cur_top)
-        , m_penu_pattern(cur_penu)
-        , m_surface(cur_surface)
+        , m_pattern(cur_pattern)
     {
-        build_ui(options, cur_surface);
+        build_ui(options);
     }
 
-    std::string get_top()     const { return m_top_pattern; }
-    std::string get_penu()    const { return m_penu_pattern; }
-    int         get_surface() const { return m_surface; }
+    std::string get_pattern() const { return m_pattern; }
+    // Compatibility aliases — both surfaces share the same pattern now.
+    std::string get_top()     const { return m_pattern; }
+    std::string get_penu()    const { return m_pattern; }
+    int         get_surface() const { return 0; }
 
 private:
     std::vector<std::string> m_colours;
-    std::string   m_top_pattern;
-    std::string   m_penu_pattern;
-    int           m_surface   = 0;
-    wxCheckBox*   m_cb_top    = nullptr;
-    wxCheckBox*   m_cb_penu   = nullptr;
-    wxPanel*      m_top_disp  = nullptr;
-    wxPanel*      m_penu_disp = nullptr;
+    std::string   m_pattern;
+    wxPanel*      m_disp = nullptr;
 
     static wxColour hex_to_colour(const std::string& hex)
     {
@@ -113,16 +109,6 @@ private:
         return wxColour(static_cast<unsigned char>((rgb >> 16) & 0xFF),
                         static_cast<unsigned char>((rgb >>  8) & 0xFF),
                         static_cast<unsigned char>( rgb        & 0xFF));
-    }
-
-    void update_surface()
-    {
-        const bool t = m_cb_top->GetValue();
-        const bool p = m_cb_penu->GetValue();
-        if      (t && p) m_surface = 0;
-        else if (t)      m_surface = 1;
-        else if (p)      m_surface = 2;
-        else             m_surface = 0;
     }
 
     // Draw coloured digit-blocks for a pattern string into dc.
@@ -151,87 +137,59 @@ private:
         }
     }
 
-    // One band row: [label] [F1][F2]... [coloured pattern display] [Clear]
-    wxPanel* make_band_row(wxSizer* vs, const wxString& label,
-                            std::string& pattern, int PAD)
+    void build_ui(const std::vector<Slic3r::ColorMixOption>& /*options*/)
     {
-        auto* row  = new wxBoxSizer(wxHORIZONTAL);
-        row->Add(new wxStaticText(this, wxID_ANY, label,
-                                   wxDefaultPosition, wxSize(36, -1)),
-                 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+        const int PAD = 6;
+        auto* vs = new wxBoxSizer(wxVERTICAL);
 
-        // Pattern display panel — created first so buttons can capture it.
-        auto* disp = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(160, 26));
-        disp->SetMinSize(wxSize(80, 26));
-        disp->SetBackgroundStyle(wxBG_STYLE_PAINT);
-        disp->Bind(wxEVT_PAINT, [this, disp, &pattern](wxPaintEvent&) {
-            wxPaintDC dc(disp);
-            paint_pattern(dc, pattern, disp);
-        });
+        vs->Add(new wxStaticText(this, wxID_ANY,
+                                  _L("Click filaments to build pattern:")),
+                0, wxLEFT|wxTOP|wxBOTTOM, PAD);
 
-        // Filament buttons
+        // Row of filament buttons
+        auto* btn_row = new wxBoxSizer(wxHORIZONTAL);
         for (int i = 0; i < (int)m_colours.size(); i++) {
             auto* b = new wxButton(this, wxID_ANY, wxString::Format("F%d", i + 1),
                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
             b->SetBackgroundColour(hex_to_colour(m_colours[i]));
             b->SetToolTip(wxString::FromUTF8(m_colours[i]));
             int tok = i + 1;
-            b->Bind(wxEVT_BUTTON, [this, &pattern, disp, tok](wxCommandEvent&) {
+            b->Bind(wxEVT_BUTTON, [this, tok](wxCommandEvent&) {
                 if (tok <= 9) {
-                    pattern += std::to_string(tok);
-                    const int needed = (int)pattern.size() * 26 + 8;
-                    if (needed > disp->GetMinWidth()) {
-                        disp->SetMinSize(wxSize(needed, 26));
+                    m_pattern += std::to_string(tok);
+                    const int needed = (int)m_pattern.size() * 26 + 8;
+                    if (needed > m_disp->GetMinWidth()) {
+                        m_disp->SetMinSize(wxSize(needed, 26));
                         Fit();
                     }
-                    disp->Refresh();
+                    m_disp->Refresh();
                 }
             });
-            row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
+            btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
         }
-        row->Add(disp, 0, wxALIGN_CENTER_VERTICAL|wxLEFT|wxRIGHT, 8);
+        vs->Add(btn_row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
 
+        // Pattern display panel
+        const int init_w = std::max(160, (int)m_pattern.size() * 26 + 8);
+        m_disp = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(init_w, 26));
+        m_disp->SetMinSize(wxSize(160, 26));
+        m_disp->SetBackgroundStyle(wxBG_STYLE_PAINT);
+        m_disp->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+            wxPaintDC dc(m_disp);
+            paint_pattern(dc, m_pattern, m_disp);
+        });
+        vs->Add(m_disp, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+
+        // Clear button below pattern display
         auto* bcl = new wxButton(this, wxID_ANY, _L("Clear"),
                                   wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        bcl->Bind(wxEVT_BUTTON, [this, &pattern, disp](wxCommandEvent&) {
-            pattern.clear();
-            disp->SetMinSize(wxSize(80, 26));
+        bcl->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            m_pattern.clear();
+            m_disp->SetMinSize(wxSize(160, 26));
             Fit();
-            disp->Refresh();
+            m_disp->Refresh();
         });
-        row->Add(bcl, 0, wxALIGN_CENTER_VERTICAL);
-
-        vs->Add(row, 0, wxALL, PAD);
-        return disp;
-    }
-
-    void build_ui(const std::vector<Slic3r::ColorMixOption>& /*options*/, int cur_surface)
-    {
-        const int PAD = 6;
-        auto* vs = new wxBoxSizer(wxVERTICAL);
-
-        vs->Add(new wxStaticText(this, wxID_ANY,
-                                  _L("Build pattern \u2014 click filaments to append:")),
-                0, wxLEFT|wxTOP, PAD);
-
-        m_top_disp  = make_band_row(vs, _L("Top"),  m_top_pattern,  PAD);
-        m_penu_disp = make_band_row(vs, _L("Pen."), m_penu_pattern, PAD);
-
-        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxALL, PAD);
-
-        vs->Add(new wxStaticText(this, wxID_ANY, _L("Select ColorMix Area")),
-                0, wxLEFT|wxBOTTOM, PAD);
-
-        const bool top_on  = (cur_surface == 0 || cur_surface == 1);
-        const bool penu_on = (cur_surface == 0 || cur_surface == 2);
-        m_cb_top  = new wxCheckBox(this, wxID_ANY, _L("Top surface"));
-        m_cb_penu = new wxCheckBox(this, wxID_ANY, _L("Penultimate"));
-        m_cb_top->SetValue(top_on);
-        m_cb_penu->SetValue(penu_on);
-        m_cb_top->Bind(wxEVT_CHECKBOX,  [this](wxCommandEvent&) { update_surface(); });
-        m_cb_penu->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_surface(); });
-        vs->Add(m_cb_top,  0, wxLEFT|wxBOTTOM, PAD);
-        vs->Add(m_cb_penu, 0, wxLEFT|wxBOTTOM, PAD);
+        vs->Add(bcl, 0, wxLEFT|wxBOTTOM, PAD);
 
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
                 0, wxALL|wxALIGN_RIGHT, PAD);
@@ -558,7 +516,7 @@ public:
     int    get_tool1()   const { return m_sc_tool[0]->GetValue(); }
     int    get_tool2()   const { return m_sc_tool[1]->GetValue(); }
     int    get_tool3()   const { return m_sc_tool[2]->GetValue(); }
-    bool   get_vary()    const { return m_cb_vary->GetValue(); }
+    bool   get_vary()    const { return m_cb_vary ? m_cb_vary->GetValue() : false; }
 
     double get_ratio(int idx, double fallback) const {
         return m_tc_ratio[idx] ? m_tc_ratio[idx]->get_value() : fallback;
@@ -892,7 +850,7 @@ private:
                                "Different angles per pass = NeoSanding cross-hatch."));
             grid->Add(hdr, 0, wxALIGN_CENTER_VERTICAL);
         }
-        grid->Add(new wxStaticText(this, wxID_ANY, _L("Width ratio\n(\u00d7 LWTS)")), 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(new wxStaticText(this, wxID_ANY, _L("% of layer\n(height ratio)")), 0, wxALIGN_CENTER_VERTICAL);
         grid->Add(new wxStaticText(this, wxID_ANY, _L("Fan PWM\n(-1=off)")),  0, wxALIGN_CENTER_VERTICAL);
         grid->Add(new wxStaticText(this, wxID_ANY, _L("Speed %\n(100=off)")), 0, wxALIGN_CENTER_VERTICAL);
 
@@ -997,7 +955,7 @@ private:
         // ---- Flow sum display + auto-fill button ----
         {
             auto* row_sum = new wxBoxSizer(wxHORIZONTAL);
-            row_sum->Add(new wxStaticText(this, wxID_ANY, _L("Flow sum (active passes):")),
+            row_sum->Add(new wxStaticText(this, wxID_ANY, _L("Normalize to layer height:")),
                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
             m_lbl_sum = new wxStaticText(this, wxID_ANY, "\u03a3 = ?");
             row_sum->Add(m_lbl_sum, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
@@ -1017,7 +975,7 @@ private:
         }
         {
             auto* hint = new wxStaticText(this, wxID_ANY,
-                _L("Sum \u2248 1.0 = full surface coverage with correct flow. Passes are offset to tile without gaps."));
+                _L("\u03a3 \u2248 1.0 = full layer height covered. Each pass occupies its ratio of the layer height."));
             hint->SetForegroundColour(wxColour(100, 100, 100));
             vs->Add(hint, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
         }
@@ -1057,16 +1015,6 @@ private:
             gcgrid->Add(m_tc_gend[i], 1, wxEXPAND|wxALIGN_CENTER_VERTICAL);
         }
         vs->Add(gcgrid, 0, wxEXPAND|wxALL, PAD);
-
-        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
-
-        // ---- Vary pattern ----
-        m_cb_vary = new wxCheckBox(this, wxID_ANY,
-                                    _L("Alternate pass direction (180\u00b0 flip)"));
-        m_cb_vary->SetValue(cur_vary);
-        m_cb_vary->SetToolTip(_L("Reverses path traversal order on odd passes.\n"
-                                  "Disable if using Monotonic infill."));
-        vs->Add(m_cb_vary, 0, wxALL, PAD);
 
         vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
 
@@ -1126,6 +1074,175 @@ private:
     }
 };
 // NEOTKO_MULTIPASS_TAG_END
+
+// NEOTKO_PATHBLEND_TAG_START
+// Minimal dialog for configuring MultiPathBlend (Opción 4).
+// Controls: num_passes (1-4), tool per pass (0-based index), min_ratio (%).
+// Surface filter is set by SurfaceColorMixerDialog combos — not duplicated here.
+class PathBlendDialog : public wxDialog
+{
+public:
+    PathBlendDialog(wxWindow* parent,
+                    int   cur_passes,
+                    int   cur_t1, int cur_t2, int cur_t3, int cur_t4,
+                    float cur_min_ratio,
+                    bool  cur_invert   = true,
+                    int   cur_angle    = -1,
+                    const std::vector<std::string>& fcolors = {})
+        : wxDialog(parent, wxID_ANY, _L("PathBlend Settings"),
+                   wxDefaultPosition, wxDefaultSize,
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+    {
+        const int PAD = 8;
+        auto* vs = new wxBoxSizer(wxVERTICAL);
+
+        // --- Number of passes ---
+        auto* row_passes = new wxBoxSizer(wxHORIZONTAL);
+        row_passes->Add(new wxStaticText(this, wxID_ANY, _L("Passes:")),
+                        0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+        m_sc_passes = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                                     wxDefaultPosition, wxSize(60,-1),
+                                     wxSP_ARROW_KEYS, 1, 2, std::clamp(cur_passes,1,2));
+        row_passes->Add(m_sc_passes, 0, wxALIGN_CENTER_VERTICAL);
+        vs->Add(row_passes, 0, wxALL, PAD);
+
+        // --- Tool grid (4 rows, always visible, disabled beyond num_passes) ---
+        const int init_tools[4] = {cur_t1, cur_t2, cur_t3, cur_t4};
+
+        // Helper: tool index → filament color
+        auto pb_hex_col = [&fcolors](int t) -> wxColour {
+            if (t >= 0 && t < (int)fcolors.size() && !fcolors[t].empty()) {
+                unsigned long rgb = 0;
+                wxString s = wxString::FromUTF8(fcolors[t]);
+                if (s.StartsWith("#")) s = s.Mid(1);
+                s.ToULong(&rgb, 16);
+                return wxColour((rgb>>16)&0xFF,(rgb>>8)&0xFF,rgb&0xFF);
+            }
+            return wxColour(128, 128, 128);
+        };
+
+        // 3 columns: label | spinctrl | color swatch (updates on change)
+        auto* grid = new wxFlexGridSizer(4, 3, 4, 8);
+
+        for (int i = 0; i < 4; ++i) {
+            grid->Add(new wxStaticText(this, wxID_ANY,
+                wxString::Format(_L("Pass %d:"), i+1)),
+                0, wxALIGN_CENTER_VERTICAL);
+
+            const int init_t = std::clamp(init_tools[i], 0, 15);
+            m_sc_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                                           wxDefaultPosition, wxSize(60,-1),
+                                           wxSP_ARROW_KEYS, 0, 15, init_t);
+            grid->Add(m_sc_tool[i], 0, wxALIGN_CENTER_VERTICAL);
+
+            // Swatch initialized from the actual tool color (not row index)
+            m_swatch_pb[i] = new ColorSwatch(this, pb_hex_col(init_t));
+            grid->Add(m_swatch_pb[i], 0, wxALIGN_CENTER_VERTICAL);
+
+            // Update swatch when the tool index changes
+            m_sc_tool[i]->Bind(wxEVT_SPINCTRL,
+                [this, i, fcolors_cap = fcolors](wxSpinEvent& e) {
+                    if (!m_swatch_pb[i]) return;
+                    const int t = e.GetValue();
+                    if (t >= 0 && t < (int)fcolors_cap.size() && !fcolors_cap[t].empty()) {
+                        unsigned long rgb = 0;
+                        wxString s = wxString::FromUTF8(fcolors_cap[t]);
+                        if (s.StartsWith("#")) s = s.Mid(1);
+                        s.ToULong(&rgb, 16);
+                        m_swatch_pb[i]->set_color(wxColour((rgb>>16)&0xFF,(rgb>>8)&0xFF,rgb&0xFF));
+                    } else {
+                        m_swatch_pb[i]->set_color(wxColour(128, 128, 128));
+                    }
+                });
+        }
+        vs->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        update_tool_enable(m_sc_passes->GetValue());
+
+        // --- Min ratio slider ---
+        auto* row_min = new wxBoxSizer(wxHORIZONTAL);
+        row_min->Add(new wxStaticText(this, wxID_ANY, _L("Min ratio % (pass 0 floor):")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+        int init_pct = static_cast<int>(std::clamp(cur_min_ratio, 0.01f, 0.50f) * 100.f + 0.5f);
+        m_sl_min = new wxSlider(this, wxID_ANY, init_pct, 1, 50,
+                                 wxDefaultPosition, wxSize(140,-1), wxSL_HORIZONTAL);
+        m_lbl_min = new wxStaticText(this, wxID_ANY,
+                                      wxString::Format("%d%%", init_pct),
+                                      wxDefaultPosition, wxSize(36,-1));
+        row_min->Add(m_sl_min,  0, wxALIGN_CENTER_VERTICAL);
+        row_min->Add(m_lbl_min, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+        vs->Add(row_min, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        // --- Ascending Z / invert gradient ---
+        m_cb_invert = new wxCheckBox(this, wxID_ANY, _L("Ascending Z direction (safe)"));
+        m_cb_invert->SetValue(cur_invert);
+        m_cb_invert->SetToolTip(_L(
+            "When checked: pass 0 nozzle ascends during printing (starts at bottom_z, ends at nominal_z).\n"
+            "Uncheck only if your slicer prints low-Y paths first (rare).\n"
+            "Ascending direction prevents collisions with already-printed material."));
+        vs->Add(m_cb_invert, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        // --- Fill angle override ---
+        {
+            auto* row_ang = new wxBoxSizer(wxHORIZONTAL);
+            row_ang->Add(new wxStaticText(this, wxID_ANY, _L("Fill angle (-1 = follow top surface):")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            const int safe_ang = (cur_angle >= -1 && cur_angle <= 359) ? cur_angle : -1;
+            m_sc_angle_pb = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                                            wxDefaultPosition, wxSize(70,-1),
+                                            wxSP_ARROW_KEYS, -1, 359, safe_ang);
+            m_sc_angle_pb->SetToolTip(_L(
+                "-1 = follow the top surface fill angle setting.\n"
+                "0–359 = custom fill angle for PathBlend lines only."));
+            row_ang->Add(m_sc_angle_pb, 0, wxALIGN_CENTER_VERTICAL);
+            vs->Add(row_ang, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        }
+
+        // note
+        auto* note = new wxStaticText(this, wxID_ANY,
+            _L("Gradient is automatic. Surface filter (top/penu) is set in the Surface Mixer combos."));
+        note->SetForegroundColour(wxColour(90, 90, 90));
+        note->Wrap(320);
+        vs->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
+        SetSizerAndFit(vs);
+
+        // --- Bindings ---
+        m_sc_passes->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) {
+            update_tool_enable(m_sc_passes->GetValue());
+        });
+        m_sl_min->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
+            m_lbl_min->SetLabel(wxString::Format("%d%%", m_sl_min->GetValue()));
+        });
+    }
+
+    int   get_num_passes()  const { return m_sc_passes->GetValue(); }
+    int   get_tool(int i)   const {
+        return (i >= 0 && i < 4 && m_sc_tool[i]) ? m_sc_tool[i]->GetValue() : i;
+    }
+    float get_min_ratio()   const {
+        return static_cast<float>(m_sl_min->GetValue()) / 100.f;
+    }
+    bool  get_invert()      const { return m_cb_invert ? m_cb_invert->GetValue() : true; }
+    int   get_fill_angle()  const { return m_sc_angle_pb ? m_sc_angle_pb->GetValue() : -1; }
+
+private:
+    wxSpinCtrl*   m_sc_passes       = nullptr;
+    wxSpinCtrl*   m_sc_tool[4]      = {nullptr, nullptr, nullptr, nullptr};
+    ColorSwatch*  m_swatch_pb[4]    = {nullptr, nullptr, nullptr, nullptr};
+    wxSlider*     m_sl_min          = nullptr;
+    wxStaticText* m_lbl_min         = nullptr;
+    wxCheckBox*   m_cb_invert       = nullptr;
+    wxSpinCtrl*   m_sc_angle_pb     = nullptr;
+
+    void update_tool_enable(int n) {
+        for (int i = 0; i < 4; ++i) {
+            if (m_sc_tool[i])    m_sc_tool[i]->Enable(i < n);
+            if (m_swatch_pb[i])  m_swatch_pb[i]->Enable(i < n);
+        }
+    }
+};
+// NEOTKO_PATHBLEND_TAG_END
 
 // NEOTKO_SURFACE_MIXER_TAG_START
 // Unified Surface Color Mixer dialog.
@@ -1190,6 +1307,12 @@ private:
     std::array<wxStaticText*, 4>  m_lbl_td = {};
     wxPanel*       m_prev_top       = nullptr;
     wxPanel*       m_prev_penu      = nullptr;
+    // NEOTKO_COLORMIX_TAG_START — zone + filament filter + min_length controls
+    wxChoice*         m_choice_top_zone      = nullptr;
+    wxChoice*         m_choice_penu_zone     = nullptr;
+    wxSpinCtrl*       m_sc_filament_filter   = nullptr;
+    wxSpinCtrlDouble* m_sc_min_length        = nullptr;
+    // NEOTKO_COLORMIX_TAG_END
 
     // ------------------------------------------------------------------ helpers
 
@@ -1208,7 +1331,9 @@ private:
         const int  cm_srf = m_config->opt_int ("interlayer_colormix_surface");
         const bool mp_on  = m_config->opt_bool("multipass_enabled");
         const int  mp_srf = m_config->opt_int ("multipass_surface");
-        const bool pb_on  = mp_on && m_config->opt_bool("multipass_path_gradient");
+        // PathBlend is now independent of MultiPass — uses its own surface key.
+        const bool pb_on  = m_config->opt_bool("multipass_path_gradient");
+        const int  pb_srf = m_config->opt_int ("pathblend_surface");
 
         // surface encoding: 0=both, 1=top only, 2=penu only
         auto for_top  = [](int s) { return s == 0 || s == 1; };
@@ -1217,11 +1342,11 @@ private:
         m_top_eff  = EFF_NONE;
         m_penu_eff = EFF_NONE;
 
-        if      (pb_on && for_top (mp_srf)) m_top_eff  = EFF_PB;
+        if      (pb_on && for_top (pb_srf)) m_top_eff  = EFF_PB;
         else if (mp_on && for_top (mp_srf)) m_top_eff  = EFF_MP;
         else if (cm_on && for_top (cm_srf)) m_top_eff  = EFF_CM;
 
-        if      (pb_on && for_penu(mp_srf)) m_penu_eff = EFF_PB;
+        if      (pb_on && for_penu(pb_srf)) m_penu_eff = EFF_PB;
         else if (mp_on && for_penu(mp_srf)) m_penu_eff = EFF_MP;
         else if (cm_on && for_penu(cm_srf)) m_penu_eff = EFF_CM;
     }
@@ -1236,12 +1361,15 @@ private:
             return wxString::Format(_L("Pattern: %s"),
                 wxString::FromUTF8(pat.empty() ? "(none)" : pat));
         }
-        if (eff == EFF_MP || eff == EFF_PB) {
+        if (eff == EFF_MP) {
             int n = 2;
             if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes")) n = o->value;
-            wxString s = wxString::Format(_L("%d passes"), n);
-            if (eff == EFF_PB) s += _L(" + PathBlend");
-            return s;
+            return wxString::Format(_L("%d passes"), n);
+        }
+        if (eff == EFF_PB) {
+            int n = 2;
+            if (auto* o = m_config->option<ConfigOptionInt>("pathblend_num_passes")) n = o->value;
+            return wxString::Format(_L("PathBlend: %d passes"), n);
         }
         return "";
     }
@@ -1268,16 +1396,27 @@ private:
             if (total == 0) return wxColour(180, 180, 180);
             for (auto& [t, n] : cnt)
                 passes.push_back({t, static_cast<float>(n) / total});
-        } else {
+        } else if (eff == EFF_MP) {
             int n = 2;
             if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes")) n = o->value;
             const char* rk[3] = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
             const char* tk[3] = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
             const float def_r[3] = {0.5f, 0.5f, 0.34f};
             for (int i = 0; i < std::min(n, 3); ++i) {
-                int   t = 0;   if (auto* o = m_config->option<ConfigOptionInt>  (tk[i])) t = o->value;
+                int   t = 0;     if (auto* o = m_config->option<ConfigOptionInt>  (tk[i])) t = o->value;
                 float r = def_r[i]; if (auto* o = m_config->option<ConfigOptionFloat>(rk[i])) r = o->value;
                 passes.push_back({t, r});
+            }
+        } else if (eff == EFF_PB) {
+            // PathBlend: equal-weight preview (actual ratios are dynamic at runtime).
+            int n = 2;
+            if (auto* o = m_config->option<ConfigOptionInt>("pathblend_num_passes")) n = o->value;
+            n = std::clamp(n, 1, 4);
+            const char* tk[4] = {"pathblend_tool_1","pathblend_tool_2","pathblend_tool_3","pathblend_tool_4"};
+            const float equal_r = 1.0f / static_cast<float>(n);
+            for (int i = 0; i < n; ++i) {
+                int t = i; if (auto* o = m_config->option<ConfigOptionInt>(tk[i])) t = o->value;
+                passes.push_back({t, equal_r});
             }
         }
 
@@ -1332,22 +1471,20 @@ private:
             if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
                 mixed_defs = o->value;
             const auto options = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
-            const std::string cur_top  = m_config->opt_string("interlayer_colormix_pattern_top");
-            const std::string cur_penu = m_config->opt_string("interlayer_colormix_pattern_penultimate");
-            const int         cur_srf  = m_config->opt_int   ("interlayer_colormix_surface");
-            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_top, cur_penu, cur_srf);
+            // Each surface has its own independent pattern.
+            // surface_id 0 = Top, 1 = Penultimate.
+            const char* pat_key = (surface_id == 0)
+                ? "interlayer_colormix_pattern_top"
+                : "interlayer_colormix_pattern_penultimate";
+            const std::string cur_pat = m_config->opt_string(pat_key);
+            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat);
             if (dlg.ShowModal() == wxID_OK) {
-                if (auto* o = m_config->option<ConfigOptionString>("interlayer_colormix_pattern_top"))
-                    o->value = dlg.get_top();
-                m_on_change("interlayer_colormix_pattern_top");
-                if (auto* o = m_config->option<ConfigOptionString>("interlayer_colormix_pattern_penultimate"))
-                    o->value = dlg.get_penu();
-                m_on_change("interlayer_colormix_pattern_penultimate");
-                if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface"))
-                    o->value = dlg.get_surface();
-                m_on_change("interlayer_colormix_surface");
+                if (auto* o = m_config->option<ConfigOptionString>(pat_key))
+                    o->value = dlg.get_pattern();
+                m_on_change(pat_key);
+                // interlayer_colormix_surface is set by the outer dialog combos, not here.
             }
-        } else if (eff == EFF_MP || eff == EFF_PB) {
+        } else if (eff == EFF_MP) {
             int    cur_passes=2, cur_surface=0;
             int    cur_tool1=0, cur_tool2=1, cur_tool3=-1;
             double cur_r1=0.5, cur_r2=0.5, cur_r3=0.34;
@@ -1426,6 +1563,37 @@ private:
                 wi("multipass_pa_mode",     dlg.get_pa_mode());
                 wf("multipass_pa_value",    (float)dlg.get_pa_value());
             }
+        } else if (eff == EFF_PB) {
+            int   cur_passes = 2;
+            int   cur_t[4]   = {0, 1, 2, 3};
+            float cur_min    = 0.05f;
+            bool  cur_invert = true;
+            int   cur_angle  = -1;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_num_passes"))     cur_passes  = o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_1"))          cur_t[0]    = o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_2"))          cur_t[1]    = o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_3"))          cur_t[2]    = o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_4"))          cur_t[3]    = o->value;
+            if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_min_ratio"))       cur_min     = static_cast<float>(o->value);
+            if (auto* o=m_config->option<ConfigOptionBool> ("pathblend_invert_gradient")) cur_invert  = o->value;
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_fill_angle"))      cur_angle   = o->value;
+
+            PathBlendDialog dlg(this, cur_passes,
+                                cur_t[0], cur_t[1], cur_t[2], cur_t[3],
+                                cur_min, cur_invert, cur_angle, m_fcolors);
+            if (dlg.ShowModal() == wxID_OK) {
+                auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v; m_on_change(k); };
+                auto wf = [&](const char* k, float v){ if(auto*o=m_config->option<ConfigOptionFloat>(k))o->value=v; m_on_change(k); };
+                auto wb = [&](const char* k, bool v) { if(auto*o=m_config->option<ConfigOptionBool> (k))o->value=v; m_on_change(k); };
+                wi("pathblend_num_passes",    dlg.get_num_passes());
+                wi("pathblend_tool_1",        dlg.get_tool(0));
+                wi("pathblend_tool_2",        dlg.get_tool(1));
+                wi("pathblend_tool_3",        dlg.get_tool(2));
+                wi("pathblend_tool_4",        dlg.get_tool(3));
+                wf("pathblend_min_ratio",     dlg.get_min_ratio());
+                wb("pathblend_invert_gradient", dlg.get_invert());
+                wi("pathblend_fill_angle",    dlg.get_fill_angle());
+            }
         }
         update_ui();
     }
@@ -1448,21 +1616,52 @@ private:
         if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface")) o->value = cm_srf;
         m_on_change("interlayer_colormix_surface");
 
-        // MultiPass / PathBlend
-        const bool top_mp  = (m_top_eff  == EFF_MP || m_top_eff  == EFF_PB);
-        const bool penu_mp = (m_penu_eff == EFF_MP || m_penu_eff == EFF_PB);
+        // MultiPass (EFF_MP only — PathBlend is now independent)
+        const bool top_mp  = (m_top_eff  == EFF_MP);
+        const bool penu_mp = (m_penu_eff == EFF_MP);
         const bool mp_en   = top_mp || penu_mp;
-        const bool pb_en   = (m_top_eff == EFF_PB || m_penu_eff == EFF_PB);
         int mp_srf = 0;
         if (top_mp && !penu_mp) mp_srf = 1;
         else if (!top_mp && penu_mp) mp_srf = 2;
 
-        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled"))         o->value = mp_en;
+        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled"))       o->value = mp_en;
         m_on_change("multipass_enabled");
-        if (auto* o = m_config->option<ConfigOptionInt> ("multipass_surface"))         o->value = mp_srf;
+        if (auto* o = m_config->option<ConfigOptionInt> ("multipass_surface"))       o->value = mp_srf;
         m_on_change("multipass_surface");
-        if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient"))   o->value = pb_en;
+
+        // PathBlend (EFF_PB only — independent surface key, independent enable)
+        const bool top_pb  = (m_top_eff  == EFF_PB);
+        const bool penu_pb = (m_penu_eff == EFF_PB);
+        const bool pb_en   = top_pb || penu_pb;
+        int pb_srf = 0;
+        if (top_pb && !penu_pb) pb_srf = 1;
+        else if (!top_pb && penu_pb) pb_srf = 2;
+
+        if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient")) o->value = pb_en;
         m_on_change("multipass_path_gradient");
+        if (auto* o = m_config->option<ConfigOptionInt> ("pathblend_surface"))       o->value = pb_srf;
+        m_on_change("pathblend_surface");
+
+        // NEOTKO_COLORMIX_TAG_START — write zone, filament filter, min_length
+        {
+            auto wi_z = [&](const char* k, int v) {
+                if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
+                m_on_change(k);
+            };
+            auto wf_z = [&](const char* k, double v) {
+                if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
+                m_on_change(k);
+            };
+            wi_z("interlayer_colormix_top_zone",
+                 m_choice_top_zone  ? m_choice_top_zone->GetSelection()  : 0);
+            wi_z("interlayer_colormix_penu_zone",
+                 m_choice_penu_zone ? m_choice_penu_zone->GetSelection() : 0);
+            wi_z("interlayer_colormix_filament_filter",
+                 m_sc_filament_filter ? m_sc_filament_filter->GetValue() : 0);
+            wf_z("interlayer_colormix_min_length",
+                 m_sc_min_length ? m_sc_min_length->GetValue() : 1.0);
+        }
+        // NEOTKO_COLORMIX_TAG_END
 
         // TD values → app_config
         auto* ac = wxGetApp().app_config;
@@ -1509,6 +1708,33 @@ private:
                 open_edit_for(surface_id);
             });
             sb->Add(btn, 0, wxALL, PAD / 2);
+
+            // NEOTKO_COLORMIX_TAG_START — zone selector per surface
+            {
+                const char* zone_key = (surface_id == 0)
+                    ? "interlayer_colormix_top_zone"
+                    : "interlayer_colormix_penu_zone";
+                int cur_zone = 0;
+                if (auto* o = m_config->option<ConfigOptionInt>(zone_key)) cur_zone = o->value;
+                cur_zone = std::clamp(cur_zone, 0, 1);
+
+                auto* zone_row = new wxBoxSizer(wxHORIZONTAL);
+                zone_row->Add(new wxStaticText(this, wxID_ANY, _L("Zone:")),
+                              0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                auto* zone_ch = new wxChoice(this, wxID_ANY);
+                zone_ch->Append(_L("All surfaces"));
+                zone_ch->Append(_L("Topmost only"));
+                zone_ch->SetSelection(cur_zone);
+                zone_ch->SetToolTip(surface_id == 0
+                    ? _L("All top surfaces — or only the single topmost top surface of the object.")
+                    : _L("All penultimate surfaces — or only the topmost penultimate surface of the object."));
+                zone_row->Add(zone_ch, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+                sb->Add(zone_row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
+
+                if (surface_id == 0) m_choice_top_zone  = zone_ch;
+                else                 m_choice_penu_zone = zone_ch;
+            }
+            // NEOTKO_COLORMIX_TAG_END
 
             auto* lbl_sum = new wxStaticText(this, wxID_ANY, summary_for(cur_eff, surface_id),
                                               wxDefaultPosition, wxSize(170, -1));
@@ -1580,6 +1806,59 @@ private:
         }
         td_sb->Add(td_grid, 0, wxEXPAND | wxALL, PAD / 2);
         vs->Add(td_sb, 0, wxEXPAND | wxALL, PAD / 2);
+
+        // NEOTKO_COLORMIX_TAG_START — filament filter + ColorMix min_length (shared settings)
+        {
+            auto* shared_sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Color Mixer settings"));
+
+            // ---- Filament filter row ----
+            {
+                int cur_ff = 0;
+                if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_filament_filter"))
+                    cur_ff = o->value;
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Filament filter:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                m_sc_filament_filter = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(65, -1),
+                    wxSP_ARROW_KEYS, 0, 16, std::clamp(cur_ff, 0, 16));
+                m_sc_filament_filter->SetToolTip(
+                    _L("0 = apply to all filaments (no filter).\n"
+                       "N = apply effect only to regions whose base solid-infill extruder is filament N.\n"
+                       "Useful in Assembled multi-material objects to target a specific colour region."));
+                row->Add(m_sc_filament_filter, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("(0 = all)")),
+                         0, wxALIGN_CENTER_VERTICAL);
+                shared_sb->Add(row, 0, wxEXPAND | wxALL, PAD / 2);
+            }
+
+            // ---- ColorMix minimum line length ----
+            {
+                double cur_ml = 1.0;
+                if (auto* o = m_config->option<ConfigOptionFloat>("interlayer_colormix_min_length"))
+                    cur_ml = o->value;
+                cur_ml = std::max(0.0, std::min(50.0, cur_ml));
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("ColorMix min. line length:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                m_sc_min_length = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(75, -1),
+                    wxSP_ARROW_KEYS, 0.0, 50.0, cur_ml, 0.5);
+                m_sc_min_length->SetDigits(1);
+                m_sc_min_length->SetToolTip(
+                    _L("ColorMix skips lines shorter than this value — they keep the region's default tool.\n"
+                       "Higher values = fewer tool changes but more uncoloured gaps near edges.\n"
+                       "0 = colour every line regardless of length.\n"
+                       "Tip: if you see empty zones, lower this value."));
+                row->Add(m_sc_min_length, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("mm")),
+                         0, wxALIGN_CENTER_VERTICAL);
+                shared_sb->Add(row, 0, wxEXPAND | wxALL, PAD / 2);
+            }
+
+            vs->Add(shared_sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        }
+        // NEOTKO_COLORMIX_TAG_END
 
         // ---- OK / Cancel ----
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
@@ -3834,6 +4113,35 @@ void TabPrint::build()
 
         // NEOTKO_SURFACE_MIXER_TAG_START - Surface Color Mixer (replaces separate ColorMix/MultiPass/PathBlend controls)
         optgroup = page->new_optgroup(L("Surface Color Mixer"));
+
+        // Row 1: Enable checkbox — separate line, ABOVE the Edit button.
+        // Checked = at least one effect is active. Unchecking disables all three effects.
+        create_line_with_widget(optgroup.get(), "interlayer_colormix_enabled", "",
+            [this](wxWindow* parent) -> wxSizer* {
+                const bool any_on = m_config->opt_bool("interlayer_colormix_enabled")
+                                 || m_config->opt_bool("multipass_enabled")
+                                 || m_config->opt_bool("multipass_path_gradient");
+                auto* cb = new wxCheckBox(parent, wxID_ANY, _L("Enable Surface Color Mixer"));
+                cb->SetValue(any_on);
+                cb->SetToolTip(_L("Enable surface color effects (Color Mix, Multi-Pass, Path Blend). "
+                                  "Uncheck to disable all effects for this preset."));
+                cb->Bind(wxEVT_CHECKBOX, [this, cb](wxCommandEvent&) {
+                    if (!cb->GetValue()) {
+                        if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_enabled")) o->value = false;
+                        on_value_change("interlayer_colormix_enabled", boost::any());
+                        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled")) o->value = false;
+                        on_value_change("multipass_enabled", boost::any());
+                        if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient")) o->value = false;
+                        on_value_change("multipass_path_gradient", boost::any());
+                    }
+                    // Checking ON does nothing here — user must open Edit to configure effects.
+                });
+                auto* sz = new wxBoxSizer(wxHORIZONTAL);
+                sz->Add(cb, 0, wxALIGN_CENTER_VERTICAL);
+                return sz;
+            });
+
+        // Row 2: Edit button — separate line below the Enable checkbox.
         create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
             [this](wxWindow* parent) -> wxSizer* {
                 auto* btn = new wxButton(parent, wxID_ANY,
@@ -3848,15 +4156,11 @@ void TabPrint::build()
                         });
                     dlg.ShowModal();
                 });
-                auto* sizer = new wxBoxSizer(wxHORIZONTAL);
-                sizer->Add(btn, 0, wxALL, 3);
-                return sizer;
+                auto* sz = new wxBoxSizer(wxHORIZONTAL);
+                sz->Add(btn, 0, wxALL, 3);
+                return sz;
             });
         // NEOTKO_SURFACE_MIXER_TAG_END
-        // NEOTKO_MULTIPASS_ZBLEND_START — Z-blend and sort options (still relevant for MultiPass internals)
-        optgroup->append_single_option_line("multipass_sort_by_ratio");
-        optgroup->append_single_option_line("multipass_z_blend");
-        // NEOTKO_MULTIPASS_ZBLEND_END
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");
@@ -4281,12 +4585,6 @@ void TabPrint::toggle_options()
     }
 
     // NEOTKO_SURFACE_MIXER_TAG: Effect assignment is managed inside SurfaceColorMixerDialog.
-    // Only toggle the z-blend / sort options that remain visible in the Tab.
-    {
-        const bool multipass_on = m_config->opt_bool("multipass_enabled");
-        toggle_option("multipass_sort_by_ratio", multipass_on);
-        toggle_option("multipass_z_blend",       multipass_on);
-    }
 }
 
 void TabPrint::update()

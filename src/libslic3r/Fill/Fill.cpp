@@ -1332,6 +1332,25 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     mp         = MultiPassConfig::from_region_config(mp_cfg);
                     is_mp_fill = SurfaceColorMix::should_process_role(
                         surface_fill.params.extrusion_role, mp.surface);
+                    // NEOTKO_COLORMIX_TAG_START — Zone + filament filter (FASE2 MultiPass)
+                    if (is_mp_fill) {
+                        const ExtrusionRole _role = surface_fill.params.extrusion_role;
+                        const int _zone = (_role == erTopSolidInfill)
+                            ? mp_cfg.interlayer_colormix_top_zone.value
+                            : mp_cfg.interlayer_colormix_penu_zone.value;
+                        if (_zone == 1) {
+                            const bool _in_zone = (_role == erTopSolidInfill)
+                                ? (this->upper_layer == nullptr)
+                                : (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
+                            if (!_in_zone) is_mp_fill = false;
+                        }
+                        if (is_mp_fill) {
+                            const int _ff = mp_cfg.interlayer_colormix_filament_filter.value;
+                            if (_ff > 0 && mp_cfg.solid_infill_filament.value != _ff)
+                                is_mp_fill = false;
+                        }
+                    }
+                    // NEOTKO_COLORMIX_TAG_END
                 }
 
                 NEOTKO_LOG(MULTIPASS, "FASE2_CHECK layer=" << f->layer_id
@@ -1348,18 +1367,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     const float min_spacing  = flow_height * float(M_PI / 4.) + 1e-4f;
                     // debug: use NEOTKO_LOG(MULTIPASS, ...) inline below
 
-                    // NEOTKO_MULTIPASS_SORTBYRATIO_START
+                    // Passes print in config order (0, 1, 2...).
                     std::vector<int> pass_order(n);
                     std::iota(pass_order.begin(), pass_order.end(), 0);
-                    if (mp.sort_by_ratio) {
-                        std::stable_sort(pass_order.begin(), pass_order.end(),
-                            [&mp](int a, int b) {
-                                const double ra = (mp.tool[a] >= 0) ? mp.width_ratio[a] : -1.0;
-                                const double rb = (mp.tool[b] >= 0) ? mp.width_ratio[b] : -1.0;
-                                return ra > rb;
-                            });
-                    }
-                    // NEOTKO_MULTIPASS_SORTBYRATIO_END
 
                     for (int oi = 0; oi < n; ++oi) {
                         const int i = pass_order[oi];
@@ -1400,6 +1410,22 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     f->angle   = base_angle;
                     f->spacing = base_spacing;
                 } else {
+                    // NEOTKO_PATHBLEND_TAG_START — angle override for PathBlend surfaces
+                    // If PathBlend is active and pathblend_fill_angle >= 0, use that angle
+                    // instead of the top surface fill angle.
+                    if (!surface_fill.params.bridge &&
+                        (surface_fill.params.extrusion_role == erTopSolidInfill ||
+                         surface_fill.params.extrusion_role == erPenultimateInfill) &&
+                        layerm->region().config().multipass_path_gradient.value) {
+                        const PathBlendPassConfig pb_ang =
+                            PathBlendPassConfig::from_region_config(layerm->region().config());
+                        if (SurfaceColorMix::should_process_role(
+                                surface_fill.params.extrusion_role, pb_ang.surface) &&
+                            pb_ang.fill_angle >= 0) {
+                            f->angle = Geometry::deg2rad(static_cast<float>(pb_ang.fill_angle));
+                        }
+                    }
+                    // NEOTKO_PATHBLEND_TAG_END
                     // BBS: make fill
                     f->fill_surface_extrusion(&surface_fill.surface,
                         params,
@@ -1410,37 +1436,128 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		}
     }
 
+    // NEOTKO_PATHBLEND_TAG_START — PathBlend FASE2 path duplication
+    // For PathBlend surfaces: clone each surface path N times (one per pass), encoding
+    // the pass tool in mm3_per_mm (same trick as MultiPass / ColorMix).
+    // Flow is NOT scaled — PathBlendEngine::apply_path() applies the gradient at GCode time.
+    // COLORMIX_HOOK (GCode.cpp) detects mm3_per_mm >= 10, decodes tool, routes to buckets.
+    for (LayerRegion *layerm : m_regions) {
+        if (layerm->fills.entities.empty()) continue;
+        const auto& reg_cfg = layerm->region().config();
+        if (!reg_cfg.multipass_path_gradient.value) continue;
+        const PathBlendPassConfig pb = PathBlendPassConfig::from_region_config(reg_cfg);
+        if (pb.num_passes < 1) continue;
+
+        // Collect sub-collections to process (avoid iterator invalidation).
+        std::vector<ExtrusionEntityCollection*> to_process;
+        for (auto* e : layerm->fills.entities)
+            if (auto* sub = dynamic_cast<ExtrusionEntityCollection*>(e))
+                to_process.push_back(sub);
+
+        for (auto* sub : to_process) {
+            if (sub->entities.empty()) continue;
+            ExtrusionPath* first_path = nullptr;
+            for (auto* e : sub->entities)
+                if ((first_path = dynamic_cast<ExtrusionPath*>(e))) break;
+            if (!first_path) continue;
+            if (first_path->mm3_per_mm >= 10.0) continue; // skip already-encoded (MultiPass)
+            if (!SurfaceColorMix::should_process_role(first_path->role(), pb.surface)) continue;
+
+            // NEOTKO_COLORMIX_TAG_START — Zone + filament filter (PathBlend FASE2)
+            {
+                const ExtrusionRole _role = first_path->role();
+                const int _zone = (_role == erTopSolidInfill)
+                    ? reg_cfg.interlayer_colormix_top_zone.value
+                    : reg_cfg.interlayer_colormix_penu_zone.value;
+                if (_zone == 1) {
+                    const bool _in_zone = (_role == erTopSolidInfill)
+                        ? (this->upper_layer == nullptr)
+                        : (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
+                    if (!_in_zone) continue;
+                }
+                const int _ff = reg_cfg.interlayer_colormix_filament_filter.value;
+                if (_ff > 0 && reg_cfg.solid_infill_filament.value != _ff) continue;
+            }
+            // NEOTKO_COLORMIX_TAG_END
+
+            // Gather originals, then build N encoded copies.
+            std::vector<ExtrusionPath*> originals;
+            for (auto* e : sub->entities)
+                if (auto* p = dynamic_cast<ExtrusionPath*>(e))
+                    originals.push_back(p);
+            if (originals.empty()) continue;
+
+            // Save debug info before deleting originals (first_path becomes dangling after delete).
+            const int    saved_role      = (int)first_path->role();
+            const size_t saved_originals = originals.size();
+
+            std::vector<ExtrusionPath*> new_paths;
+            for (int pi = 0; pi < pb.num_passes; ++pi) {
+                const int tool = pb.tool[pi];
+                if (tool < 0) continue;
+                for (auto* orig : originals) {
+                    ExtrusionPath* clone = new ExtrusionPath(*orig);
+                    SurfaceColorMix::encode_tool_in_path(clone, tool);
+                    new_paths.push_back(clone);
+                }
+            }
+            if (new_paths.empty()) continue;
+
+            for (auto* e : sub->entities) delete e;
+            sub->entities.clear();
+            sub->no_sort = true;
+            for (auto* p : new_paths)
+                sub->entities.push_back(p);
+
+            NEOTKO_LOG(MULTIPASS, "PATHBLEND_FASE2 layer=" << this->id()
+                << " role=" << saved_role
+                << " originals=" << saved_originals
+                << " passes=" << pb.num_passes
+                << " total_paths=" << new_paths.size());
+        }
+    }
+    // NEOTKO_PATHBLEND_TAG_END
+
     // NEOTKO_MULTIPASS_TAG_START — SurfaceMultiPass::apply() CAMINO 1/1c fallback
     // FASE 2 (above) encodes tool into mm3_per_mm >= 10.0 for MultiPass surfaces.
     // SurfaceMultiPass::apply() detects this guard and skips already-encoded paths,
     // making it a no-op for FASE 2 regions. Kept as fallback for edge cases.
     for (LayerRegion *layerm : m_regions) {
-        if (!layerm->fills.entities.empty()) {
-            SurfaceMultiPass::apply(
-                layerm->fills,
-                layerm->region().config(),
-                (int)this->id()
-            );
-        }
+        if (layerm->fills.entities.empty()) continue;
+        const auto& _mp_cfg = layerm->region().config();
+        // Zone filter: skip roles blocked by zone selector
+        const bool _top_ok  = (_mp_cfg.interlayer_colormix_top_zone.value  == 0) || (this->upper_layer == nullptr);
+        const bool _penu_ok = (_mp_cfg.interlayer_colormix_penu_zone.value == 0) ||
+            (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
+        if (!_top_ok && !_penu_ok) continue;
+        // Filament filter
+        const int _ff_mp = _mp_cfg.interlayer_colormix_filament_filter.value;
+        if (_ff_mp > 0 && _mp_cfg.solid_infill_filament.value != _ff_mp) continue;
+        SurfaceMultiPass::apply(layerm->fills, _mp_cfg, (int)this->id(), _top_ok, _penu_ok);
     }
     // NEOTKO_MULTIPASS_TAG_END
 
     // NEOTKO_COLORMIX_TAG_START — Apply Surface ColorMix to top/penultimate layers
     // assign_and_group_tools() splits each zig-zag path into individual lines,
     // assigns tools cyclically, and reorders by tool group.
+    // allow_top / allow_penu carry the zone filter so each role is gated independently.
     // Returns COLORMIX_FLAG_UNSPLITTABLE if monotonic pattern prevents line splitting.
     bool any_unsplittable = false;
     for (LayerRegion *layerm : m_regions) {
-        if (!layerm->fills.entities.empty()) {
-            int flags = SurfaceColorMix::assign_and_group_tools(
-                layerm->fills,
-                layerm->region().config(),
-                erNone,
-                (int)this->id()
-            );
-            if (flags & COLORMIX_FLAG_UNSPLITTABLE)
-                any_unsplittable = true;
-        }
+        if (layerm->fills.entities.empty()) continue;
+        const auto& _cm_cfg = layerm->region().config();
+        // Filament filter
+        const int _ff_cm = _cm_cfg.interlayer_colormix_filament_filter.value;
+        if (_ff_cm > 0 && _cm_cfg.solid_infill_filament.value != _ff_cm) continue;
+        // Zone filter per role
+        const bool _cm_top_ok  = (_cm_cfg.interlayer_colormix_top_zone.value  == 0) || (this->upper_layer == nullptr);
+        const bool _cm_penu_ok = (_cm_cfg.interlayer_colormix_penu_zone.value == 0) ||
+            (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
+        if (!_cm_top_ok && !_cm_penu_ok) continue;
+        int flags = SurfaceColorMix::assign_and_group_tools(
+            layerm->fills, _cm_cfg, erNone, (int)this->id(), _cm_top_ok, _cm_penu_ok);
+        if (flags & COLORMIX_FLAG_UNSPLITTABLE)
+            any_unsplittable = true;
     }
     // NEOTKO_COLORMIX_TAG_END
 

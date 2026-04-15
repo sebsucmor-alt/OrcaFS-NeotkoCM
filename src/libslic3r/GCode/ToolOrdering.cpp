@@ -868,21 +868,36 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 // Register each pass tool in order, including duplicates.
                 // Example: [T3, T2, T3] must schedule 3 purge slots — T3→T2→T3.
                 // has_multipass_repeat_tool prevents the dedup loop below from collapsing them.
+                //
+                // CRITICAL: Use INSERT AT FRONT, not emplace_back.
+                // When two objects share a layer (e.g. a PathBlend cube and a MultiPass cube),
+                // collect_extruders() is called per-object. If the PathBlend object is processed
+                // first, its tools (T1,T2) are already in extruders[] before MultiPass runs.
+                // Appending T0,T1,T2 would give [T1,T2,T0,T1,T2] → dedup → [T1,T2,T0] (wrong).
+                // Prepending T0,T1,T2 gives [T0,T1,T2,T1,T2] → dedup → [T0,T1,T2] (correct).
                 {
                     std::set<unsigned int> seen_check;
+                    std::vector<unsigned int> mp_tools_to_prepend;
                     for (int i = 0; i < n; ++i) {
                         if (raw_tools[i] < 0) continue;
                         unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
                         if (!seen_check.insert(t).second)
                             layer_tools.has_multipass_repeat_tool = true;
-                        layer_tools.extruders.emplace_back(t);
+                        mp_tools_to_prepend.push_back(t);
                     }
-                    if (layer_tools.has_multipass_repeat_tool)
-                        layer_tools.preserve_extruder_order = true; // prevent reorder from rearranging
+                    // Prepend MultiPass tools to ensure they lead the extruder sequence.
+                    layer_tools.extruders.insert(layer_tools.extruders.begin(),
+                        mp_tools_to_prepend.begin(), mp_tools_to_prepend.end());
+                    // Always preserve config pass order — do NOT let sort_remove_duplicates
+                    // reorder tools numerically (T1→T2→T3). Pass order matters for stacking.
+                    layer_tools.preserve_extruder_order = true;
                     if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                        // Log in actual config order (not sorted) to reflect print sequence.
                         std::ostringstream _s;
                         _s << "MULTIPASS\tz=" << layer->print_z << "\t+[";
-                        for (auto t : seen_check) _s << "T" << (t - 1) << " ";
+                        for (int i = 0; i < n; ++i) {
+                            if (raw_tools[i] >= 0) _s << "T" << raw_tools[i] << " ";
+                        }
                         _s << "]";
                         NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
                     }
@@ -890,45 +905,58 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             }
             // NEOTKO_MULTIPASS_TAG_END
 
-            // NEOTKO_MULTIPASS_ZBLEND_TAG_START
-            // For z-blend layers: collect min pass_index per tool into m_zblend_tool_pass_idx.
-            // Called once per region per layer — accumulates MIN(pass_index) per tool across
-            // all regions/objects. pass_index = position in user config (0 = first = lowest Z).
-            // tool IDs stored as 0-based: reorder_extruders_for_minimum_flush_volume() runs
-            // AFTER reorder_extruders() converts lt.extruders to 0-based (lines 1007-1012).
-            if (has_top_surface_infill
-                && region.config().multipass_enabled.value
-                && region.config().multipass_z_blend.value)
-            {
-                const auto& recs = object.multipass_sublayer_records();
-                bool any_rec = false;
-                for (const auto& rec : recs) {
-                    if (rec.layer_id == layer->id() && rec.tool_id >= 0) {
-                        // rec.tool_id is already 0-based; lt.extruders are 0-based at reorder time
-                        unsigned int tid = static_cast<unsigned int>(rec.tool_id);
-                        auto& tool_map = m_zblend_tool_pass_idx[layer->print_z];
-                        auto tit = tool_map.find(tid);
-                        if (tit == tool_map.end())
-                            tool_map[tid] = rec.pass_index;
-                        else
-                            tit->second = std::min(tit->second, rec.pass_index);
-                        any_rec = true;
+            // NEOTKO_PATHBLEND_TAG_START
+            // Register PathBlend tools so ToolOrdering generates prime tower purges
+            // between PathBlend tool changes. Independent of MultiPass.
+            if (has_top_surface_infill && region.config().multipass_path_gradient.value) {
+                const auto& cfg = region.config();
+                const int n = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
+                const int raw_tools[4] = {
+                    cfg.pathblend_tool_1.value,
+                    cfg.pathblend_tool_2.value,
+                    cfg.pathblend_tool_3.value,
+                    cfg.pathblend_tool_4.value,
+                };
+                // Apply surface filter: skip if this layer's role doesn't match.
+                // has_top_surface_infill covers both erTopSolidInfill and erPenultimateInfill,
+                // so filtering by pathblend_surface here would need per-role checks; for now
+                // register tools whenever the layer has FASE2 fills (conservative).
+                std::set<unsigned int> seen_check;
+                for (int i = 0; i < n; ++i) {
+                    if (raw_tools[i] < 0) continue;
+                    unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
+                    if (!seen_check.insert(t).second)
+                        layer_tools.has_multipass_repeat_tool = true;
+                    layer_tools.extruders.emplace_back(t);
+                }
+                // Record pass ordering constraints: pass i must precede pass j (i<j).
+                // These are enforced post-dedup (see the loop below) to fix cases where
+                // MultiPass prepend placed a shared tool (e.g. T1) before a PathBlend
+                // pass-0 tool (e.g. T0), inverting the gradient pass order.
+                for (int i = 0; i < n - 1; ++i) {
+                    if (raw_tools[i] < 0) continue;
+                    for (int j = i + 1; j < n; ++j) {
+                        if (raw_tools[j] < 0) continue;
+                        unsigned int ti = static_cast<unsigned int>(raw_tools[i] + 1);
+                        unsigned int tj = static_cast<unsigned int>(raw_tools[j] + 1);
+                        if (ti != tj)
+                            layer_tools.neotko_ordering_constraints.emplace_back(ti, tj);
                     }
                 }
-                if (any_rec) {
-                    layer_tools.has_zblend_order = true;
-                    if (NeoDebug::enabled(NeoDebug::ZBLEND)) {
-                        for (const auto& rec : recs) {
-                            if (rec.layer_id == layer->id() && rec.tool_id >= 0)
-                                NEOTKO_LOG(ZBLEND, "ZBLEND_COLLECT z=" << layer->print_z
-                                    << " pass" << rec.pass_index
-                                    << "=T" << rec.tool_id
-                                    << "@Z=" << rec.print_z);
-                        }
-                    }
+                // Always preserve PathBlend pass order (pass 0 must print before pass 1).
+                // This mirrors the unconditional set in MultiPass above.
+                layer_tools.preserve_extruder_order = true;
+                if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                    std::ostringstream _s;
+                    _s << "PATHBLEND\tz=" << layer->print_z << "\t+[";
+                    for (int i = 0; i < n; ++i)
+                        if (raw_tools[i] >= 0) _s << "T" << raw_tools[i] << " ";
+                    _s << "]";
+                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
                 }
             }
-            // NEOTKO_MULTIPASS_ZBLEND_TAG_END
+            // NEOTKO_PATHBLEND_TAG_END
+
         }
         layerCount++;
     }
@@ -949,6 +977,31 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             remove_duplicates_preserve_order(layer.extruders);
         else
             sort_remove_duplicates(layer.extruders);
+
+        // NEOTKO_PATHBLEND_TAG_START — enforce PathBlend pass-ordering constraints post-dedup.
+        // MultiPass prepend can place a shared tool (e.g. T1) before a PathBlend pass-0
+        // tool (e.g. T0), inverting the gradient pass order.  Walk each constraint (a,b)
+        // meaning "a must appear before b" and move a to just before b if violated.
+        for (auto& [before, after] : layer.neotko_ordering_constraints) {
+            auto it_before = std::find(layer.extruders.begin(), layer.extruders.end(), before);
+            auto it_after  = std::find(layer.extruders.begin(), layer.extruders.end(), after);
+            if (it_before == layer.extruders.end() || it_after == layer.extruders.end())
+                continue;
+            if (it_before > it_after) {
+                // Violation: 'before' appears after 'after'. Move 'before' to just before 'after'.
+                layer.extruders.erase(it_before);
+                it_after = std::find(layer.extruders.begin(), layer.extruders.end(), after);
+                layer.extruders.insert(it_after, before);
+            }
+        }
+        if (!layer.neotko_ordering_constraints.empty() && NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+            std::ostringstream _s;
+            _s << "FINAL_ORDER\tz=" << layer.print_z << "\t[";
+            for (unsigned int t : layer.extruders) _s << "T" << (t > 0 ? t - 1 : 0) << " ";
+            _s << "]";
+            NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+        }
+        // NEOTKO_PATHBLEND_TAG_END
 
         // make sure that there are some tools for each object layer (e.g. tall wiping object will result in empty extruders vector)
         if (layer.extruders.empty() && layer.has_object)
@@ -1344,57 +1397,6 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         current_extruder_id = lt.extruders.back();
     }
 
-    // NEOTKO_MULTIPASS_ZBLEND_TAG_START
-    // Post-processing override: enforce user-defined config-order tool sequence for
-    // z-blend layers. Must run AFTER the wipe-volume minimisation loop above so the
-    // wipe tower sees this corrected order when fill_wipe_tower_partitions() runs.
-    //
-    // Physical constraint: for MultiPass z-blend, the sub-layer tool (lower print_z)
-    // must always print first. The wipe-volume optimiser does not know about this
-    // constraint, so we override its result here.
-    //
-    // m_zblend_tool_pass_idx: nominal_z → { tool_id (0-based) → min pass_index }.
-    // Sorting by pass_index ascending gives the explicit user-defined print order.
-    if (!m_zblend_tool_pass_idx.empty()) {
-        for (LayerTools& lt : m_layer_tools) {
-            auto it = m_zblend_tool_pass_idx.find(lt.print_z);
-            if (it == m_zblend_tool_pass_idx.end())
-                continue;
-            const std::map<unsigned int, int>& tool_map = it->second;
-            // Sort tools by their minimum pass_index (config order) ascending.
-            std::vector<std::pair<int, unsigned int>> sorted_tools; // {min_pass_idx, tool_id}
-            sorted_tools.reserve(tool_map.size());
-            for (const auto& [tid, min_pidx] : tool_map)
-                sorted_tools.push_back({min_pidx, tid});
-            std::sort(sorted_tools.begin(), sorted_tools.end()); // ascending pass_index
-            // Build corrected order: z-blend tools first (config order = ascending pass_idx),
-            // then any remaining extruders (e.g. standard wall filament if present).
-            std::vector<unsigned int> ordered;
-            ordered.reserve(lt.extruders.size());
-            for (const auto& [min_pidx, tid] : sorted_tools)
-                if (std::find(lt.extruders.begin(), lt.extruders.end(), tid) != lt.extruders.end())
-                    ordered.push_back(tid);
-            for (unsigned int t : lt.extruders)
-                if (std::find(ordered.begin(), ordered.end(), t) == ordered.end())
-                    ordered.push_back(t);  // append non-zblend extruders unchanged
-
-            if (ordered.size() == lt.extruders.size()) {
-                NEOTKO_LOG(ZBLEND, "ZBLEND_REORDER z=" << lt.print_z
-                    << ": before=[" << [&](){
-                        std::string s; for (auto t : lt.extruders) s += "T" + std::to_string(t) + " ";
-                        return s; }()
-                    << "] after=[" << [&](){
-                        std::string s; for (auto t : ordered) s += "T" + std::to_string(t) + " ";
-                        return s; }() << "]");
-                lt.extruders = ordered;
-            } else {
-                NEOTKO_LOG(ZBLEND, "ZBLEND_REORDER z=" << lt.print_z
-                    << ": SIZE MISMATCH ordered=" << ordered.size()
-                    << " extruders=" << lt.extruders.size() << " — skipped");
-            }
-        }
-    }
-    // NEOTKO_MULTIPASS_ZBLEND_TAG_END
 }
 
 // Layers are marked for infinite skirt aka draft shield. Not all the layers have to be printed.

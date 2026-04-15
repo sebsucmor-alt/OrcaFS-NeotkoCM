@@ -1114,6 +1114,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,   interlayer_colormix_min_length))
     ((ConfigOptionString,  interlayer_colormix_pattern_top))
     ((ConfigOptionString,  interlayer_colormix_pattern_penultimate))
+    ((ConfigOptionInt,     interlayer_colormix_top_zone))
+    ((ConfigOptionInt,     interlayer_colormix_penu_zone))
+    ((ConfigOptionInt,     interlayer_colormix_filament_filter))
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     ((ConfigOptionBool,    multipass_enabled))
@@ -1143,15 +1146,26 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,  multipass_gcode_end_1))
     ((ConfigOptionString,  multipass_gcode_end_2))
     ((ConfigOptionString,  multipass_gcode_end_3))
-    ((ConfigOptionBool,    multipass_sort_by_ratio))
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    ((ConfigOptionBool,    multipass_z_blend))
-    // NEOTKO_MULTIPASS_ZBLEND_END
     // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
     ((ConfigOptionBool,    multipass_path_gradient))
     ((ConfigOptionInt,     path_gradient_segments))
     ((ConfigOptionInt,     path_gradient_min_flow_pct))
     // NEOTKO_MULTIPASS_TAG_END
+    // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
+    ((ConfigOptionInt,     pathblend_num_passes))
+    ((ConfigOptionInt,     pathblend_tool_1))
+    ((ConfigOptionInt,     pathblend_tool_2))
+    ((ConfigOptionInt,     pathblend_tool_3))
+    ((ConfigOptionInt,     pathblend_tool_4))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_1))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_2))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_3))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_4))
+    ((ConfigOptionFloat,   pathblend_min_ratio))
+    ((ConfigOptionInt,     pathblend_surface))
+    ((ConfigOptionBool,    pathblend_invert_gradient))
+    ((ConfigOptionInt,     pathblend_fill_angle))
+    // NEOTKO_PATHBLEND_TAG_END
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))
     ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))

@@ -219,7 +219,9 @@ int SurfaceColorMix::assign_and_group_tools(
     ExtrusionEntityCollection& fills,
     const PrintRegionConfig& config,
     ExtrusionRole /*role — detected internally per path*/,
-    int layer_idx
+    int layer_idx,
+    bool allow_top,
+    bool allow_penu
 ) {
     NEOTKO_LOG(COLORMIX, "ENTRY layer=" << layer_idx
         << " enabled=" << config.interlayer_colormix_enabled.value
@@ -262,6 +264,10 @@ int SurfaceColorMix::assign_and_group_tools(
         // Surface filter
         if (!should_process_role(first_path->role(), surface)) continue;
 
+        // Zone filter (allow_top / allow_penu from call site — interlayer_colormix_*_zone)
+        if (!allow_top  && first_path->role() == erTopSolidInfill)    continue;
+        if (!allow_penu && first_path->role() == erPenultimateInfill)  continue;
+
         // Resolve tool list from role-specific pattern (fallback to legacy slots if invalid)
         const std::string& pattern_str = (first_path->role() == erTopSolidInfill)
             ? config.interlayer_colormix_pattern_top.value
@@ -302,6 +308,9 @@ int SurfaceColorMix::assign_and_group_tools(
             }
         }
 
+        NEOTKO_LOG(COLORMIX, "  RAW_LINES layer=" << layer_idx
+            << " collected=" << raw_lines.size() << "/" << n_paths
+            << " min_len=" << min_length_mm << "mm");
         if (raw_lines.size() < 2) {
             any_unsplittable = true;
             continue;
@@ -510,12 +519,6 @@ MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg
     c.gcode_end[0]   = cfg.multipass_gcode_end_1.value;
     c.gcode_end[1]   = cfg.multipass_gcode_end_2.value;
     c.gcode_end[2]   = cfg.multipass_gcode_end_3.value;
-    // NEOTKO_MULTIPASS_SORTBYRATIO_START
-    c.sort_by_ratio  = cfg.multipass_sort_by_ratio.value;
-    // NEOTKO_MULTIPASS_SORTBYRATIO_END
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    c.z_blend        = cfg.multipass_z_blend.value;
-    // NEOTKO_MULTIPASS_ZBLEND_END
     return c;
 }
 
@@ -535,7 +538,9 @@ MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg
 bool SurfaceMultiPass::apply(
     ExtrusionEntityCollection& fills,
     const PrintRegionConfig&   config,
-    int                        layer_idx)
+    int                        layer_idx,
+    bool                       allow_top,
+    bool                       allow_penu)
 {
     const auto mp = MultiPassConfig::from_region_config(config);
     if (!mp.enabled) return false;
@@ -570,6 +575,10 @@ bool SurfaceMultiPass::apply(
 
         // Surface filter
         if (!SurfaceColorMix::should_process_role(flat_path->role(), mp.surface)) continue;
+
+        // Zone filter (allow_top / allow_penu from call site — interlayer_colormix_*_zone)
+        if (!allow_top  && flat_path->role() == erTopSolidInfill)   continue;
+        if (!allow_penu && flat_path->role() == erPenultimateInfill) continue;
 
         // FASE 2 guard: skip if paths were already generated + encoded inline in Fill.cpp.
         {
@@ -881,20 +890,78 @@ std::string NeoweaveEngine::restore_z(
 }
 // NEOTKO_NEOWEAVING_TAG_END
 
-// NEOTKO_MULTIPASS_TAG_START — PathBlend implementation
+// NEOTKO_PATHBLEND_TAG_START — PathBlendPassConfig implementation
+
+double PathBlendPassConfig::ratio_at(int p, double t) const
+{
+    if (p < 0 || p >= num_passes) return 0.0;
+    double r = 0.0;
+    if (num_passes == 1) {
+        // Single-pass: T2 fades IN from min_ratio (t=0, base shows through) to 1.0 (t=1, full coverage).
+        // Combined with Z staircase → visual blend from base color into T2 across the surface.
+        r = static_cast<double>(min_ratio) + (1.0 - static_cast<double>(min_ratio)) * t;
+    } else if (num_passes == 2) {
+        // Pass 0 (T0, dominant at t=0): apply min_ratio floor so it never
+        // under-extrudes on very thin paths at the top of the surface.
+        // Pass 1 (T1, dominant at t=1): ALWAYS pure geometry (t), independent
+        // of min_ratio. Using (1 - flow_0) instead would propagate the min_ratio
+        // boost into T1 causing over-extrusion when t < min_ratio. See original.
+        if (p == 0) {
+            r = std::max(static_cast<double>(min_ratio), 1.0 - t);
+        } else {
+            r = t;  // pure geometry — never touched by min_ratio
+        }
+        return r;  // early-return: min_ratio floor already applied above, don't double-apply below
+    } else if (num_passes == 3) {
+        if      (p == 0) r = std::max(0.0, 1.0 - 2.0 * t);
+        else if (p == 1) r = 1.0 - std::abs(2.0 * t - 1.0);
+        else             r = std::max(0.0, 2.0 * t - 1.0);
+    } else { // 4 passes — linear-hat, peaks at t = 0, 0.333, 0.667, 1.0
+        const double step   = 1.0 / 3.0;
+        const double center = p * step;
+        r = std::max(0.0, 1.0 - std::abs(t - center) / step);
+    }
+    // min_ratio floor only for pass 0 (the pass dominant at t=0).
+    // Not applied to the 2-pass case (handled above with early return).
+    if (p == 0) r = std::max(static_cast<double>(min_ratio), r);
+    return r;
+}
+
+PathBlendPassConfig PathBlendPassConfig::from_region_config(const PrintRegionConfig& cfg)
+{
+    PathBlendPassConfig c;
+    c.enabled        = cfg.multipass_path_gradient.value; // existing enable key; PathBlend now independent of multipass_enabled
+    c.surface        = cfg.pathblend_surface.value;
+    c.num_passes     = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
+    c.tool[0]        = cfg.pathblend_tool_1.value;
+    c.tool[1]        = cfg.pathblend_tool_2.value;
+    c.tool[2]        = cfg.pathblend_tool_3.value;
+    c.tool[3]        = cfg.pathblend_tool_4.value;
+    c.layer_ratio[0] = static_cast<float>(cfg.pathblend_layer_ratio_1.value);
+    c.layer_ratio[1] = static_cast<float>(cfg.pathblend_layer_ratio_2.value);
+    c.layer_ratio[2] = static_cast<float>(cfg.pathblend_layer_ratio_3.value);
+    c.layer_ratio[3] = static_cast<float>(cfg.pathblend_layer_ratio_4.value);
+    c.min_ratio        = static_cast<float>(
+        std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.5));
+    c.invert_gradient  = cfg.pathblend_invert_gradient.value;
+    c.fill_angle       = cfg.pathblend_fill_angle.value;
+    return c;
+}
+// NEOTKO_PATHBLEND_TAG_END
+
+// NEOTKO_MULTIPASS_TAG_START — PathBlend engine implementation
 bool PathBlendEngine::needs_blend(const ExtrusionPath& path,
                                    const PrintRegionConfig& cfg)
 {
-    if (!cfg.multipass_path_gradient.value || !cfg.multipass_enabled.value)
+    // PathBlend is now independent of MultiPass — only check its own enable flag.
+    if (!cfg.multipass_path_gradient.value)
         return false;
-    // Respect multipass_surface filter: 0=both, 1=top only, 2=penultimate only.
-    // erSolidInfill covers all internal solid fills — not just the penultimate layer —
-    // so surface=1 must explicitly exclude it to avoid blending every solid infill layer.
-    const int  surface   = cfg.multipass_surface.value;
+    // Surface filter from pathblend_surface (0=both, 1=top only, 2=penultimate only).
+    const int  surface   = cfg.pathblend_surface.value;
     const bool want_top  = (surface == 0 || surface == 1);
     const bool want_penu = (surface == 0 || surface == 2);
-    if (want_top  && path.role() == erTopSolidInfill) return true;
-    if (want_penu && path.role() == erSolidInfill)    return true;
+    if (want_top  && path.role() == erTopSolidInfill)    return true;
+    if (want_penu && path.role() == erPenultimateInfill) return true;
     return false;
 }
 
@@ -910,80 +977,85 @@ std::string PathBlendEngine::apply_path(
     double                                    surface_t,
     const std::function<Vec2d(const Point&)>& point_to_gcode)
 {
-    // surface_t [0..1] — position of this path in the surface.
-    // 0 = first path (T1 dominates, T0 nearly absent at bottom).
-    // 1 = last path  (T0 fills full layer height, T1 absent).
-    //
-    // Each path has CONSTANT Z and CONSTANT flow — the "staircase" is
-    // across paths, not within a path. With enough paths (50+) it reads
-    // as a smooth diagonal gradient when viewed from the side.
+    // Gradient model (restored from path_blend_fixed.cpp):
+    //   - surface_t [0..1]: position of this path within the surface (0=first, 1=last).
+    //   - Pass 0 (T0): steps Z DOWN to bottom_z + surface_t * layer_height so each
+    //     successive path sits slightly higher — this is the diagonal staircase that
+    //     reads as a smooth gradient with 50+ paths.  Flow = ratio_at(0, surface_t).
+    //   - Pass N-1 (TN): stays at nominal_z (pass never changes Z). Flow = ratio_at(N-1, t).
+    //   - Intermediate passes (3/4-pass mode): Z evenly spaced between bottom and top,
+    //     but anchored to surface_t so the "peak" of each pass tracks across the surface.
+    //   - The Z for pass 0 is VARIABLE per path (surface_t-driven), NOT fixed per pass.
+    //     The old "fixed Z per pass" formula produced a flat band per tool instead of a
+    //     diagonal gradient — that was the visible bug.
 
-    const double min_flow = std::clamp(
-        cfg.path_gradient_min_flow_pct.value / 100.0, 0.0, 0.5);
-    const double bottom_z = nominal_z - layer_height;
+    const PathBlendPassConfig pb = PathBlendPassConfig::from_region_config(cfg);
 
-    // This path's fixed Z (Pass 0 only) and flow.
-    // flow_0: clamped from below by min_flow (intentional over-extrusion at the start).
-    // flow_1: always from geometry (1 - surface_t), independent of min_flow.
-    //   Reason: T0 may over-extrude deliberately when min_flow > surface_t, but T1's
-    //   gap is always (1-t)*layer_height — if we used (1-flow_0) instead we'd double the
-    //   boost and push total volume above 1.0, causing measurable over-extrusion artefacts.
-    const double flow_0  = std::max(min_flow, surface_t);
-    const double flow_1  = 1.0 - surface_t;   // geometry-based, independent of min_flow
-    const double flow    = (pass_idx == 0) ? flow_0 : flow_1;
-    const double z_path  = std::clamp(
-        bottom_z + surface_t * layer_height, bottom_z, nominal_z);
+    if (pass_idx < 0 || pass_idx >= pb.num_passes) return "";
+
+    // invert_gradient=true: invert surface_t so that the nozzle ASCENDS during pass 0.
+    // When Orca prints high-Y paths first, raw surface_t starts near 1.0 and descends.
+    // Without inversion z would descend too (collision risk). With inversion t_eff starts
+    // near 0.0 → z starts at bottom_z and ascends → safe.
+    const double t_eff = pb.invert_gradient ? (1.0 - surface_t) : surface_t;
+
+    const double flow = pb.ratio_at(pass_idx, t_eff);
+    if (flow < 1e-9) return "";  // this pass contributes nothing at this t — skip
 
     const auto& pts = path.polyline.points;
     if (pts.size() < 2) return "";
-    if (flow < 1e-9)   return "";   // nothing to extrude at this pass/position
+
+    const double bottom_z = nominal_z - layer_height;
+
+    // Z calculation — t_eff-driven staircase for all pass counts.
+    //   pass 0   → bottom_z + t_eff * layer_height  (diagonal, direction controlled by invert_gradient)
+    //   pass N-1 → nominal_z
+    //   passes 1..N-2 → linearly interpolated
+    // For num_passes == 1 we use the same diagonal as pass 0 of a 2-pass setup.
+    // With invert_gradient=true (default): low t_eff = high raw_t = first printed path → z starts
+    // at bottom_z and ascends as printing progresses → safe, no collision.
+    double z_pass;
+    {
+        const double z_bottom_anchor = bottom_z + t_eff * layer_height;
+        if (pb.num_passes == 1) {
+            z_pass = z_bottom_anchor;
+        } else {
+            const double frac = static_cast<double>(pass_idx) / static_cast<double>(pb.num_passes - 1);
+            z_pass = z_bottom_anchor + frac * (nominal_z - z_bottom_anchor);
+        }
+        z_pass = std::clamp(z_pass, bottom_z, nominal_z);
+    }
 
     std::string gcode;
 
-    if (pass_idx == 0) {
-        // Step Z down to this path's level (below nominal) — use print speed
-        // so the Z step is smooth (not a high-speed travel Z that could ring).
-        if (std::abs(writer.get_position().z() - z_path) > 1e-5) {
-            GCodeG1Formatter w;
-            w.emit_z(z_path);
-            w.emit_f(F);
-            w.emit_comment(GCodeWriter::full_gcode_comment, "pb0 step");
-            gcode += w.string();
-            writer.get_position().z() = z_path;
-        }
+    // Step Z to this pass's level using print speed (smooth, avoids Z-axis ringing).
+    if (std::abs(writer.get_position().z() - z_pass) > 1e-5) {
+        GCodeG1Formatter w;
+        w.emit_z(z_pass);
+        w.emit_f(F);
+        w.emit_comment(GCodeWriter::full_gcode_comment,
+                       "pb" + std::to_string(pass_idx) + " step");
+        gcode += w.string();
+        writer.get_position().z() = z_pass;
+    }
 
-        // Extrude all segments at constant z_path and constant flow.
-        for (size_t i = 1; i < pts.size(); ++i) {
-            const double seg_l = (pts[i] - pts[i-1]).cast<double>().norm()
-                                 * SCALING_FACTOR;
-            if (seg_l < 1e-6) continue;
-            const double dE = e_per_mm * seg_l * flow;
-            gcode += writer.extrude_to_xy(point_to_gcode(pts[i]), dE, "pb0");
-        }
-
-        // No Z restore here. The next path's step-down handles Z adjustment
-        // (up or down) relative to current z_path. Emitting G1 Z{nominal} after
-        // every path creates a full down→extrude→up cycle that loads the Z axis
-        // unnecessarily — the nozzle will never collide because the next printed
-        // path is always at z_path_next ≥ 0 (same surface, short lateral travel).
-
-    } else {
-        // Pass 1 (T1): stays at nominal Z, complementary flow.
-        for (size_t i = 1; i < pts.size(); ++i) {
-            const double seg_l = (pts[i] - pts[i-1]).cast<double>().norm()
-                                 * SCALING_FACTOR;
-            if (seg_l < 1e-6) continue;
-            const double dE = e_per_mm * seg_l * flow;
-            gcode += writer.extrude_to_xy(point_to_gcode(pts[i]), dE, "pb1");
-        }
+    // Extrude all segments at constant z_pass and constant flow.
+    for (size_t i = 1; i < pts.size(); ++i) {
+        const double seg_l = (pts[i] - pts[i-1]).cast<double>().norm() * SCALING_FACTOR;
+        if (seg_l < 1e-6) continue;
+        gcode += writer.extrude_to_xy(
+            point_to_gcode(pts[i]),
+            e_per_mm * seg_l * flow,
+            "pb" + std::to_string(pass_idx));
     }
 
     NEOTKO_LOG(MULTIPASS,
         "PathBlend"
         << " layer="  << (int)(nominal_z * 1000) << "um"
-        << " pass="   << pass_idx
-        << " t="      << surface_t
-        << " z_path=" << z_path
+        << " pass="   << pass_idx << "/" << pb.num_passes
+        << " t_raw="  << surface_t
+        << " t_eff="  << t_eff
+        << " z_pass=" << z_pass
         << " flow="   << flow
         << " pts="    << pts.size());
 

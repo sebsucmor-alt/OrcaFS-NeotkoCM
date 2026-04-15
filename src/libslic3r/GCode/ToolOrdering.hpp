@@ -6,7 +6,6 @@
 #include "../libslic3r.h"
 #include "../MixedFilament.hpp"
 
-#include <map>      // NEOTKO_MULTIPASS_ZBLEND — m_zblend_tool_pass_idx
 #include <utility>
 
 #include <boost/container/small_vector.hpp>
@@ -135,17 +134,17 @@ public:
     // Due to the support layers possibly interleaving the object layers,
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
-    // NEOTKO_MULTIPASS_ZBLEND_TAG_START
-    // True when this layer requires ascending-Z tool ordering (sub-layer tool first).
-    // Set by ToolOrdering::collect_extruders() when multipass_z_blend is active.
-    // Used by GCode::process_layer() to skip any planned reorder that would invert
-    // the sub-layer-first constraint.
-    bool                        has_zblend_order = false;
+    // NEOTKO_MULTIPASS_TAG_START
     // True when MultiPass uses the same tool in more than one pass (e.g. T3/T2/T3).
     // Extruder deduplication is skipped for these layers so GCode generates the full
     // tool sequence including the repeated toolchange (T3→T2→T3 → 3 wipe tower purges).
     bool                        has_multipass_repeat_tool = false;
-    // NEOTKO_MULTIPASS_ZBLEND_TAG_END
+    // Ordering constraints added by PathBlend: each (a,b) means tool a must appear
+    // before tool b in the final extruder sequence.  Enforced after deduplication so
+    // that MultiPass prepend + PathBlend constraints both win simultaneously.
+    // Values are 1-based to match extruders[] at the point they are populated.
+    std::vector<std::pair<unsigned int, unsigned int>> neotko_ordering_constraints;
+    // NEOTKO_MULTIPASS_TAG_END
     // Number of wipe tower partitions to support the required number of tool switches
     // and to support the wipe tower partitions above this one.
     size_t                      wipe_tower_partitions = 0;
@@ -261,14 +260,6 @@ private:
     float                       m_mixed_layer_height_a    = 0.f;
     float                       m_mixed_layer_height_b    = 0.f;
     float                       m_mixed_base_layer_height = 0.2f;
-    // NEOTKO_MULTIPASS_ZBLEND_TAG_START
-    // Map: nominal print_z → { tool_id (0-based, matching lt.extruders at reorder time) → min pass_index }.
-    // Accumulated in collect_extruders() for all MultiPass z-blend layers.
-    // Sorting by pass_index ascending gives the user-defined print order (config position):
-    //   pass[0] → prints first (lowest sub-Z),  pass[N-1] → prints last (nominal Z).
-    // Applied in reorder_extruders_for_minimum_flush_volume() as a post-processing override.
-    std::map<double, std::map<unsigned int, int>> m_zblend_tool_pass_idx;
-    // NEOTKO_MULTIPASS_ZBLEND_TAG_END
 };
 
 } // namespace SLic3r

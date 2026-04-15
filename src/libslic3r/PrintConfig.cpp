@@ -6419,6 +6419,114 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(5));
     // NEOTKO_MULTIPASS_TAG_END
 
+    // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
+    def = this->add("pathblend_num_passes", coInt);
+    def->label = L("PathBlend num passes");
+    def->category = L("Quality");
+    def->tooltip = L("Number of gradient passes (1-4). Each pass maps to a tool; the blend "
+                     "is computed automatically from surface_t.");
+    def->min  = 1;
+    def->max  = 4;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("pathblend_tool_1", coInt);
+    def->label = L("PathBlend tool 1");
+    def->category = L("Quality");
+    def->min  = 0;
+    def->max  = 15;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("pathblend_tool_2", coInt);
+    def->label = L("PathBlend tool 2");
+    def->category = L("Quality");
+    def->min  = 0;
+    def->max  = 15;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("pathblend_tool_3", coInt);
+    def->label = L("PathBlend tool 3");
+    def->category = L("Quality");
+    def->min  = 0;
+    def->max  = 15;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("pathblend_tool_4", coInt);
+    def->label = L("PathBlend tool 4");
+    def->category = L("Quality");
+    def->min  = 0;
+    def->max  = 15;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(3));
+
+    // Note: ConfigDef::min/max are int in this fork — do NOT use sub-integer float bounds.
+    def = this->add("pathblend_layer_ratio_1", coFloat);
+    def->label = L("PathBlend layer ratio 1");
+    def->category = L("Quality");
+    def->tooltip = L("Layer height ratio for pass 1 at its active extreme (0.05–5.0).");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("pathblend_layer_ratio_2", coFloat);
+    def->label = L("PathBlend layer ratio 2");
+    def->category = L("Quality");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("pathblend_layer_ratio_3", coFloat);
+    def->label = L("PathBlend layer ratio 3");
+    def->category = L("Quality");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("pathblend_layer_ratio_4", coFloat);
+    def->label = L("PathBlend layer ratio 4");
+    def->category = L("Quality");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("pathblend_min_ratio", coFloat);
+    def->label = L("PathBlend min ratio");
+    def->category = L("Quality");
+    def->tooltip = L("Minimum extrusion ratio for the leading pass at t=0. "
+                     "Prevents zero-extrusion gaps. Default 0.05. Range enforced by UI.");
+    // No min/max: ConfigDef bounds are int — sub-integer float bounds truncate to 0 and fail validation.
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(0.05));
+
+    def = this->add("pathblend_surface", coInt);
+    def->label = L("PathBlend surface");
+    def->category = L("Quality");
+    def->tooltip = L("0 = top + penultimate, 1 = top only, 2 = penultimate only.");
+    def->min  = 0;
+    def->max  = 2;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("pathblend_invert_gradient", coBool);
+    def->label = L("Ascending Z direction (safe)");
+    def->category = L("Quality");
+    def->tooltip = L("When enabled, the Z staircase for pass 0 ascends during printing "
+                     "(nozzle moves up, not down). Recommended to avoid collisions with "
+                     "already-printed material. Disable only if your slicer prints low-Y "
+                     "paths first.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("pathblend_fill_angle", coInt);
+    def->label = L("Fill angle override (PathBlend)");
+    def->category = L("Quality");
+    def->tooltip = L("Fill angle in degrees for PathBlend surfaces. -1 = follow top surface "
+                     "fill angle. 0–359 = custom fixed angle for PathBlend lines.");
+    def->min  = -1;
+    def->max  = 359;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(-1));
+    // NEOTKO_PATHBLEND_TAG_END
+
     // NEOTKO_MULTIPASS_TAG_START — Neotko Neoweaving
     def = this->add("interlayer_neoweave_enabled", coBool);
     def->label = L("Enable Neotko Neoweaving");
@@ -6640,15 +6748,17 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(-1));
 
     def = this->add("interlayer_colormix_min_length", coFloat);
-    def->label = L("Minimum line length");
+    def->label = L("Minimum line length (ColorMix)");
     def->category = L("Quality");
-    def->tooltip = L("Lines shorter than this are printed with the default extruder. "
-                     "Prevents excessive tool changes. Set to 0 to apply to all lines.");
+    def->tooltip = L("ColorMix skips lines shorter than this value — they are printed with the "
+                     "region's default extruder instead of being split by tool.\n"
+                     "Higher values = fewer tool changes but more uncoloured gaps.\n"
+                     "Set to 0 to colour every line regardless of length.");
     def->sidetext = "mm";
     def->min = 0;
     def->max = 50.0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(3.0));
+    def->set_default_value(new ConfigOptionFloat(1.0));
 
     def = this->add("interlayer_colormix_pattern_top", coString);
     def->label = L("Top surface pattern");
@@ -6664,6 +6774,40 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Tool sequence for penultimate layer lines. Same format as top surface pattern.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString("12"));
+
+    def = this->add("interlayer_colormix_top_zone", coInt);
+    def->label = L("Top surface zone");
+    def->category = L("Quality");
+    def->tooltip = L("Which top surfaces receive the effect.\n"
+                     "0 = All top surfaces (any layer where a top surface exists).\n"
+                     "1 = Topmost only (highest Z top surface of the object).");
+    def->min  = 0;
+    def->max  = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("interlayer_colormix_penu_zone", coInt);
+    def->label = L("Penultimate surface zone");
+    def->category = L("Quality");
+    def->tooltip = L("Which penultimate surfaces receive the effect.\n"
+                     "0 = All penultimate surfaces.\n"
+                     "1 = Topmost penultimate only (immediately below the topmost top layer).");
+    def->min  = 0;
+    def->max  = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("interlayer_colormix_filament_filter", coInt);
+    def->label = L("Filament filter");
+    def->category = L("Quality");
+    def->tooltip = L("Restrict the effect to regions whose base extruder matches this filament.\n"
+                     "0 = apply to all filaments (no filter).\n"
+                     "N = apply only when the region solid-infill extruder is filament N (1-indexed).\n"
+                     "Useful in Assembled multi-material objects to target specific colour regions.");
+    def->min  = 0;
+    def->max  = 16;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
     // NEOTKO_COLORMIX_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
@@ -6828,24 +6972,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
-    // NEOTKO_MULTIPASS_SORTBYRATIO_START
-    def = this->add("multipass_sort_by_ratio", coBool);
-    def->label = L("Sort passes by ratio");
-    def->tooltip = L("Passes are printed in descending layer ratio order (thickest sub-layer first). "
-                     "Not applied in Z-blend mode — config position is the print order there.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-    // NEOTKO_MULTIPASS_SORTBYRATIO_END
-
-    // NEOTKO_MULTIPASS_ZBLEND_START
-    def = this->add("multipass_z_blend", coBool);
-    def->label = L("MultiPass Z-blend (sub-layer Z)");
-    def->tooltip = L("Each MultiPass pass is printed at a proportional Z height within the layer. "
-                     "The pass with the largest ratio prints lowest; the last pass lands at nominal Z. "
-                     "Physical invariant: lowest-Z pass always prints first.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-    // NEOTKO_MULTIPASS_ZBLEND_END
     // NEOTKO_MULTIPASS_TAG_END
 }
 
