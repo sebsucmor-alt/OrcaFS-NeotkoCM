@@ -19,6 +19,10 @@ on:
         description: 'Build macOS (arm64)'
         type: boolean
         default: true
+      publish-release:
+        description: 'Publish GitHub Release after build'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -86,7 +90,7 @@ jobs:
   publish_release:
     name: Publish Release
     needs: [build_all]
-    if: ${{ !cancelled() && needs.build_all.result == 'success' && github.event_name != 'pull_request' && github.repository != 'Snapmaker/OrcaSlicer' && inputs.build-deps-only != true }}
+    if: ${{ !cancelled() && needs.build_all.result == 'success' && github.event_name != 'pull_request' && github.repository != 'Snapmaker/OrcaSlicer' && inputs.build-deps-only != true && inputs.publish-release == true }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
