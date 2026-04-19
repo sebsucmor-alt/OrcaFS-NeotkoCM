@@ -1479,23 +1479,6 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
             ->active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL, warning, PrintStateBase::SlicingEmptyGcodeLayers);
     }
 
-    // NEOTKO_MULTIPASS_TAG_START — append virtual sublayer entries from MultiPass
-    // Shared objects (BBS dedup) skip infill() → m_multipass_sublayers is empty.
-    // Fall back to the original object's sublayer data; mp_object stays as &object
-    // so that instances() gives the correct XY shift for this copy.
-    const PrintObject* mp_src = object.get_shared_object() ? object.get_shared_object() : &object;
-    for (size_t layer_id = 0; layer_id < mp_src->multipass_sublayers().size(); ++layer_id) {
-        for (const MultiPassSubLayer& sub : mp_src->multipass_sublayers()[layer_id]) {
-            LayerToPrint ltp;
-            ltp.mp_sublayer  = &sub;
-            ltp.mp_object    = &object;
-            ltp.mp_layer_id  = layer_id;
-            ltp.mp_print_z   = sub.print_z;
-            layers_to_print.push_back(ltp);
-        }
-    }
-    // NEOTKO_MULTIPASS_TAG_END
-
     return layers_to_print;
 }
 
@@ -4478,56 +4461,6 @@ LayerResult GCode::process_layer(const Print& print,
         layer_ptr = object_layer;
     else if (support_layer != nullptr)
         layer_ptr = support_layer;
-
-    // NEOTKO_MULTIPASS_TAG_START — sublayer-only group: all entries are virtual MP sublayers
-    if (layer_ptr == nullptr) {
-        size_t   sub_layer_id = 0;
-        coordf_t sub_print_z  = 0.;
-        for (const LayerToPrint& ltp : layers) {
-            if (ltp.mp_sublayer) { sub_layer_id = ltp.mp_layer_id; sub_print_z = ltp.mp_print_z; break; }
-        }
-        LayerResult result{"", sub_layer_id, false, last_layer};
-        std::string gcode;
-        for (const LayerToPrint& ltp : layers) {
-            if (!ltp.mp_sublayer || !ltp.mp_object) continue;
-            const MultiPassSubLayer& sub = *ltp.mp_sublayer;
-            if (sub.fills.entities.empty()) continue;
-            const unsigned int tool_0based = static_cast<unsigned int>(sub.tool_id);
-            if (m_writer.need_toolchange(tool_0based))
-                gcode += this->set_extruder(tool_0based, sub.print_z);
-            const double sz = sub.print_z + m_config.z_offset.value;
-            m_nominal_z    = sz;
-            m_last_layer_z = float(sz);
-            m_layer        = nullptr;
-            if (std::abs(m_writer.get_position().z() - sz) > EPSILON) {
-                gcode += this->retract(false, false, LiftType::NormalLift);
-                gcode += m_writer.travel_to_z(sz, "mp sublayer z");
-            }
-            m_config.apply(ltp.mp_object->config(), true);
-            for (const PrintInstance& inst : ltp.mp_object->instances()) {
-                this->set_origin(unscale(inst.shift));
-                // extrude_entity in this fork does not handle ExtrusionEntityCollection —
-                // unpack one level manually so only Path/MultiPath/Loop reach it.
-                for (const ExtrusionEntity* e : sub.fills.entities) {
-                    if (!e) continue;
-                    if (const auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
-                        for (const ExtrusionEntity* ee : coll->entities)
-                            if (ee) gcode += this->extrude_entity(*ee, "mp sublayer");
-                    } else {
-                        gcode += this->extrude_entity(*e, "mp sublayer");
-                    }
-                }
-            }
-        }
-        // NEOTKO_MULTIPASS_TAG — flag that a sublayer group may have left the
-        // writer at a different tool than the wipe tower expects for the next
-        // real layer (wipe tower plans from the previous real layer's last tool).
-        m_after_mp_sublayer = true;
-        result.gcode = std::move(gcode);
-        return result;
-    }
-    // NEOTKO_MULTIPASS_TAG_END
-
     const Layer& layer = *layer_ptr;
     LayerResult  result{{}, layer.id(), false, last_layer};
     if (layer_tools.extruders.empty())
@@ -5685,61 +5618,37 @@ LayerResult GCode::process_layer(const Print& print,
     // regardless of which object's paths arrived first.
     // Non-multipass tools (perimeters, supports, other infill) are appended after the
     // multipass tools, preserving their original relative order.
-    //
-    // IMPORTANT: Skip reorder when wipe tower is active.
-    // The wipe tower is pre-planned by ToolOrdering with the original layer_tools.extruders
-    // sequence. Reordering layer_extruders here after the fact desynchronises the expected
-    // tool-change sequence (initial_tool → new_tool per slot) and causes:
-    //   "Wipe tower generation failed, possibly due to empty first layer."
-    // When wipe tower is on, the colormix_bucket_order fix (earlier in this function)
-    // already guarantees per-object pass ordering — that is sufficient.
-    //
-    // Also: use the config from the actual layer objects rather than m_config, which
-    // at this point still reflects the last object processed in the *previous* layer.
-    // With multiple variants, m_config may belong to a non-multipass object.
-    if (!has_wipe_tower) {
-        // Collect multipass config from the first layer object that has multipass enabled.
-        // All objects sharing multipass in a layer are expected to use the same pass config
-        // (mixing pass orders across objects in one layer is not a supported scenario).
-        const PrintRegionConfig* mp_region_cfg = nullptr;
-        for (const LayerToPrint& ltp : layers) {
-            if (!ltp.object_layer) continue;
-            for (const LayerRegion* lr : ltp.object_layer->regions()) {
-                if (lr->region().config().multipass_enabled.value) {
-                    mp_region_cfg = &lr->region().config();
-                    break;
-                }
-            }
-            if (mp_region_cfg) break;
-        }
-
-        if (mp_region_cfg) {
-            const MultiPassConfig mp = MultiPassConfig::from_region_config(*mp_region_cfg);
-            const int n_mp = std::max(1, std::min(3, mp.num_passes));
-            std::vector<unsigned int> reordered;
-            reordered.reserve(layer_extruders.size());
-            // First: multipass tools in config order (tool[0], tool[1], tool[2]).
-            // Skip tools not present in this layer and avoid duplicates (two passes
-            // sharing the same physical tool would otherwise appear twice).
-            for (int pi = 0; pi < n_mp; ++pi) {
-                if (mp.tool[pi] < 0) continue;
-                const unsigned int tid = static_cast<unsigned int>(mp.tool[pi]);
-                if (std::find(layer_extruders.begin(), layer_extruders.end(), tid) != layer_extruders.end())
-                    if (std::find(reordered.begin(), reordered.end(), tid) == reordered.end())
-                        reordered.push_back(tid);
-            }
-            // Then: any remaining tools (perimeters, supports, solid infill on other
-            // extruders) in their original layer_tools order.
-            for (unsigned int tid : layer_extruders)
+    // This assumes a uniform multipass config across objects in the layer — consistent
+    // with how the rest of the pipeline reads multipass config (always from m_config,
+    // never per-region), so two objects with contradictory pass orders are not a
+    // supported scenario elsewhere either.
+    if (m_config.multipass_enabled.value) {
+        const MultiPassConfig mp = MultiPassConfig::from_region_config(m_config);
+        const int n_mp = std::max(1, std::min(3, mp.num_passes));
+        std::vector<unsigned int> reordered;
+        reordered.reserve(layer_extruders.size());
+        // First: multipass tools in config order (tool[0], tool[1], tool[2]).
+        // Skip tools not present in this layer and avoid duplicates (two passes
+        // sharing the same physical tool would otherwise appear twice).
+        for (int pi = 0; pi < n_mp; ++pi) {
+            if (mp.tool[pi] < 0) continue;
+            const unsigned int tid = static_cast<unsigned int>(mp.tool[pi]);
+            if (std::find(layer_extruders.begin(), layer_extruders.end(), tid) != layer_extruders.end())
                 if (std::find(reordered.begin(), reordered.end(), tid) == reordered.end())
                     reordered.push_back(tid);
-            layer_extruders = std::move(reordered);
-            NEOTKO_LOG(TOOLORDER,
-                "MULTIPASS_REORDER passes=" << n_mp
-                << " order=[" << [&]{ std::string s; for (size_t i=0;i<layer_extruders.size();++i){if(i)s+=","; s+="T"+std::to_string(layer_extruders[i]);} return s; }()
-                << "]");
         }
+        // Then: any remaining tools (perimeters, supports, solid infill on other
+        // extruders) in their original layer_tools order.
+        for (unsigned int tid : layer_extruders)
+            if (std::find(reordered.begin(), reordered.end(), tid) == reordered.end())
+                reordered.push_back(tid);
+        layer_extruders = std::move(reordered);
+        NEOTKO_LOG(TOOLORDER,
+            "MULTIPASS_REORDER passes=" << n_mp
+            << " order=[" << [&]{ std::string s; for (size_t i=0;i<layer_extruders.size();++i){if(i)s+=","; s+="T"+std::to_string(layer_extruders[i]);} return s; }()
+            << "]");
     }
+
     if (!local_z_pass_refs.empty()) {
         const int local_z_phase_b_start_extruder =
             (has_wipe_tower && m_writer.extruder() != nullptr) ? int(m_writer.extruder()->id()) : -1;
@@ -5909,23 +5818,6 @@ LayerResult GCode::process_layer(const Print& print,
         }
         gcode += "; local-z phase-b perimeter passes end\n";
     }
-    // NEOTKO_MULTIPASS_TAG_START — restore wipe tower expected initial after sublayer group.
-    // The wipe tower was planned assuming layer_extruders.front() is already the current tool
-    // (= last tool of the previous real layer). A MultiPass sublayer group running immediately
-    // before this real layer may have changed the tool via direct set_extruder, leaving the
-    // writer at a different tool than what the wipe tower expects as the layer initial.
-    // Restore the expected initial here via direct set_extruder (no wipe tower purge) so that
-    // need_toolchange(layer_extruders.front()) returns false and the first tool_change() call
-    // in the loop below correctly skips the "initial" slot instead of consuming it.
-    if (m_after_mp_sublayer && has_wipe_tower && !layer_extruders.empty() && m_writer.extruder() != nullptr) {
-        const unsigned int expected_initial = layer_extruders.front();
-        if (m_writer.need_toolchange(expected_initial)) {
-            gcode += this->set_extruder(expected_initial, print_z);
-        }
-    }
-    m_after_mp_sublayer = false; // reset regardless — real layer is now starting
-    // NEOTKO_MULTIPASS_TAG_END
-
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_extruders) {
         if (print.config().skirt_type == stCombined && !print.skirt().empty())

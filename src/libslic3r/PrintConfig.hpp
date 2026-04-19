@@ -1117,6 +1117,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_top_zone))
     ((ConfigOptionInt,     interlayer_colormix_penu_zone))
     ((ConfigOptionInt,     interlayer_colormix_filament_filter))
+    ((ConfigOptionBool,    interlayer_colormix_use_virtual))
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     ((ConfigOptionBool,    multipass_enabled))

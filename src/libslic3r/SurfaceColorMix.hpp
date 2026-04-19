@@ -56,6 +56,11 @@ struct ColorMixOption {
     std::string pattern;        // "12", "1221", "123" etc.
     std::string display_color;  // "#RRGGBB" blended or filament color
     bool        is_physical = false;
+    int         filament_id = 0; // 1-based: 1..N = physical, N+1.. = virtual mixed
+    // tool_weights: 0-based physical tool index → normalized weight [0..1].
+    // Only populated for virtual (is_physical=false) options.
+    // Used by MultiPass "Normalize to MixedColor %" to set layer_ratio per pass.
+    std::map<int,float> tool_weights;
 };
 
 // assign_and_group_tools return flags
@@ -71,14 +76,20 @@ public:
     // Splits top/penultimate surface paths into individual lines and groups them by tool
     // according to the pattern string (interlayer_colormix_pattern_top / _penultimate).
     // allow_top / allow_penu: zone filter from Fill.cpp call site — false skips that role.
+    // mgr / num_physical: optional MixedFilament manager for virtual-digit recipe expansion.
+    //   When mgr != nullptr and use_virtual is ON, digits '5'-'9' expand to physical tools
+    //   (component_a + component_b of the named virtual filament). Physical indices are
+    //   encoded directly — GCode decode needs no per-layer virtual resolution.
     // Returns int flags: bit 0 = any path modified, bit 1 = unsplittable fill found.
     static int assign_and_group_tools(
-        ExtrusionEntityCollection& fills,
-        const PrintRegionConfig&   config,
-        ExtrusionRole              role,
-        int                        layer_idx,
-        bool                       allow_top  = true,
-        bool                       allow_penu = true
+        ExtrusionEntityCollection&  fills,
+        const PrintRegionConfig&    config,
+        ExtrusionRole               role,
+        int                         layer_idx,
+        bool                        allow_top     = true,
+        bool                        allow_penu    = true,
+        const MixedFilamentManager* mgr           = nullptr,
+        size_t                      num_physical  = 0
     );
 
     // Check if role matches the surface filter setting.
@@ -95,6 +106,12 @@ public:
         const std::vector<std::string>& filament_colours);
 
     static std::string mixed_filament_to_pattern(const MixedFilament& mf);
+
+    // Returns the normalized blend weights for a virtual MixedFilament recipe.
+    // Key: 0-based physical tool index.  Value: fraction [0..1] of total blend.
+    // Used by MultiPass "Normalize to MixedColor %" to set layer_ratio per pass.
+    static std::map<int,float> extract_recipe_weights(
+        const MixedFilament& mf, size_t num_physical);
     // NEOTKO_COLORMIX_TAG_END
 
 private:

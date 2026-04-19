@@ -213,6 +213,16 @@ class ConstSupportLayerPtrsAdaptor : public ConstVectorOfPtrsAdaptor<SupportLaye
     ConstSupportLayerPtrsAdaptor(const SupportLayerPtrs *data) : ConstVectorOfPtrsAdaptor<SupportLayer>(data) {}
 };
 
+// NEOTKO_MULTIPASS_TAG_START — Virtual sublayer for MultiPass Z-stacking
+struct MultiPassSubLayer {
+    coordf_t                  print_z  = 0.;  // absolute Z of this sub-layer
+    float                     height   = 0.f; // extrusion height H_sub = H * ratio
+    int                       tool_id  = 0;   // 0-based physical extruder
+    int                       pass_idx = 0;   // 0-based position in MultiPassConfig
+    ExtrusionEntityCollection fills;          // paths — tool stored directly, no mm3 encoding
+};
+// NEOTKO_MULTIPASS_TAG_END
+
 // Single instance of a PrintObject.
 // As multiple PrintObjects may be generated for a single ModelObject (their instances differ in rotation around Z),
 // ModelObject's instancess will be distributed among these multiple PrintObjects.
@@ -349,6 +359,10 @@ public:
     void                         configBrimWidth(double m)      {m_config.brim_width.value = m; }
     ConstLayerPtrsAdaptor        layers() const         { return ConstLayerPtrsAdaptor(&m_layers); }
     ConstSupportLayerPtrsAdaptor support_layers() const { return ConstSupportLayerPtrsAdaptor(&m_support_layers); }
+    // NEOTKO_MULTIPASS_TAG_START
+    const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
+    std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
+    // NEOTKO_MULTIPASS_TAG_END
     const Transform3d&           trafo() const          { return m_trafo; }
     // Trafo with the center_offset() applied after the transformation, to center the object in XY before slicing.
     Transform3d                  trafo_centered() const
@@ -586,6 +600,9 @@ private:
     SlicingParameters                       m_slicing_params;
     LayerPtrs                               m_layers;
     SupportLayerPtrs                        m_support_layers;
+    // NEOTKO_MULTIPASS_TAG_START
+    std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers; // indexed by layer_idx
+    // NEOTKO_MULTIPASS_TAG_END
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // BBS

@@ -810,11 +810,10 @@ bool SurfaceMultiPass::apply(
         // Passes are stacked vertically (same XY polyline, different sub-layer thickness)
         // rather than tiled side-by-side with XY perpendicular offsets.
         //
-        // For width_ratio = {0.6, 0.4} and layer_height = 0.2 mm, W = 0.4 mm:
-        //   Pass 0 (T1): H_sub=0.12 → mm3 = 0.12×(0.4−0.2146×0.12) ≈ stadium(0.4,0.12)
-        //   Pass 1 (T2): H_sub=0.08 → mm3 = 0.08×(0.4−0.2146×0.08) ≈ stadium(0.4,0.08)
-        //   Total: Σ A_sub_i ≈ A_orig + ε  (ε = stadium non-linearity overhead, ~6-8%)
-        //   Each pass extrudes exactly what an independent thin layer of that height would.
+        // For width_ratio = {0.6, 0.4} and layer_height = 0.2 mm:
+        //   Pass 0 (T1): height = 0.12 mm → mm3_per_mm = orig * 0.6  (physically below T2)
+        //   Pass 1 (T2): height = 0.08 mm → mm3_per_mm = orig * 0.4  (on top)
+        //   Total: same XY area covered, sum of flows = 1.0, layer remains solid.
         //
         // width is NEVER scaled — each pass covers the full line width so spacing and
         // collision detection in GCode.cpp remain correct.
@@ -847,48 +846,11 @@ bool SurfaceMultiPass::apply(
                     std::reverse(clone->polyline.points.begin(),
                                  clone->polyline.points.end());
 
-                // NEOTKO_MULTIPASS_TAG_START
-                // Each MultiPass sub-layer is a genuine independent thin layer at its own Z.
-                // Conceptually equivalent to Variable Layer Height: slice the full layer into
-                // N physical laminae of heights H×ratio[i] and stack them back.
-                //
-                // Flow::mm3_per_mm() uses the FDM stadium cross-section model:
-                //   A(W, H) = H × (W − H × (1 − π/4))      [= H×(W−H×0.2146)]
-                // This is NON-LINEAR in H: A_sub ≠ A_orig × ratio.
-                //
-                // WRONG (old code): clone->mm3_per_mm *= ratio
-                //   Assumes rectangular cross-section (A ∝ H). Under-extrudes every pass:
-                //   thin passes by ~10%, thick passes by ~5%.
-                //
-                // CORRECT: compute A_sub directly from H_sub using the same formula.
-                //   Width stays fixed — the slicer's XY polylines are reused as-is.
-                //
-                // Note: Σ A_sub_i is slightly greater than A_orig (the rounded bead ends
-                // are paid N times instead of 1). This is the physically correct behavior
-                // when printing N independent thin laminae — identical to what Variable
-                // Layer Height would produce if each slice were a real slicer layer.
-                {
-                    const double W     = static_cast<double>(orig->width);
-                    const double H     = static_cast<double>(orig->height);
-                    const double H_sub = H * ratio;
-                    // k = 1 − π/4 ≈ 0.2146.  Stadium area: A = H × (W − k×H)
-                    // Guard: requires W > H (normal FDM bead). If violated (bridge / bad
-                    // config), fall back to naive linear scaling so we never go negative.
-                    constexpr double k = 1.0 - 0.25 * M_PI;   // matches Flow.cpp exactly
-                    const double A_orig = H     * (W - k * H);
-                    const double A_sub  = H_sub * (W - k * H_sub);
-                    if (A_orig > 1e-9 && W > H + 1e-6) {
-                        clone->mm3_per_mm = static_cast<float>(
-                            static_cast<double>(orig->mm3_per_mm) * (A_sub / A_orig));
-                    } else {
-                        // Degenerate (W ≤ H, bridge, or near-zero area): linear fallback.
-                        clone->mm3_per_mm = static_cast<float>(
-                            static_cast<double>(orig->mm3_per_mm) * ratio);
-                    }
-                    clone->height = static_cast<float>(H_sub);
-                }
-                // Width is intentionally NOT modified — XY polylines reused verbatim.
-                // NEOTKO_MULTIPASS_TAG_END
+                // Height-based sub-layer: scale height (Z thickness) by ratio.
+                // mm3_per_mm scales proportionally (rectangular cross-section, width fixed).
+                // Width is intentionally NOT modified.
+                clone->height     = static_cast<float>(static_cast<double>(orig->height) * ratio);
+                clone->mm3_per_mm *= ratio;
 
                 SurfaceColorMix::encode_tool_in_path(clone, mp.tool[i]);
 
@@ -1236,67 +1198,34 @@ std::string PathBlendEngine::apply_path(
 
     if (pass_idx < 0 || pass_idx >= pb.num_passes) return "";
 
+    // invert_gradient=true: invert surface_t so that the nozzle ASCENDS during pass 0.
+    // When Orca prints high-Y paths first, raw surface_t starts near 1.0 and descends.
+    // Without inversion z would descend too (collision risk). With inversion t_eff starts
+    // near 0.0 → z starts at bottom_z and ascends → safe.
+    const double t_eff = pb.invert_gradient ? (1.0 - surface_t) : surface_t;
+
+    const double flow = pb.ratio_at(pass_idx, t_eff);
+    if (flow < 1e-9) return "";  // this pass contributes nothing at this t — skip
+
     const auto& pts = path.polyline.points;
     if (pts.size() < 2) return "";
 
     const double bottom_z = nominal_z - layer_height;
 
-    // NEOTKO_FIX: Two separate behaviours depending on whether MultiPass is active.
-    //
-    // ── MULTIPASS MODE ──────────────────────────────────────────────────────────
-    // Each pass clone was already created in SurfaceMultiPass::apply() with:
-    //   clone->height     = orig->height * ratio[i]
-    //   clone->mm3_per_mm = stadium(W, H*ratio[i]) / stadium(W, H) * orig->mm3_per_mm
-    //                       (stadium cross-section correction — NOT naive ×ratio)
-    // The extruded volume is correct for that sub-height bead geometry.
-    // flow must be 1.0 here — any further scaling causes under/over-extrusion.
-    //
-    // Z must be the TOP surface of each sub-layer, stacked from bottom_z upward
-    // using ACCUMULATED ratios.  The t_eff staircase must NOT be used here:
-    //   Pass 0: z = bottom_z + ratio[0] * layer_height
-    //   Pass 1: z = bottom_z + (ratio[0]+ratio[1]) * layer_height
-    //   Pass k: z = bottom_z + sum(ratio[0..k]) * layer_height
-    //   Last:   z = nominal_z  (guard against fp drift)
-    //
-    // Example — 3 passes at 33% each, layer_height=0.2 mm:
-    //   Pass 0 (T0): z = bottom_z + 0.067   ← lowest physical sub-layer
-    //   Pass 1 (T1): z = bottom_z + 0.133
-    //   Pass 2 (T2): z = nominal_z = bottom_z + 0.200  ← topmost
-    //
-    // ── STANDALONE PATHBLEND MODE (multipass disabled) ───────────────────────────
-    // No prior mm3 scaling.  Use the original t_eff staircase + ratio_at() flow
-    // to blend two tools visually across the surface via a diagonal Z sweep.
-    double flow;
+    // Z calculation — t_eff-driven staircase for all pass counts.
+    //   pass 0   → bottom_z + t_eff * layer_height  (diagonal, direction controlled by invert_gradient)
+    //   pass N-1 → nominal_z
+    //   passes 1..N-2 → linearly interpolated
+    // For num_passes == 1 we use the same diagonal as pass 0 of a 2-pass setup.
+    // With invert_gradient=true (default): low t_eff = high raw_t = first printed path → z starts
+    // at bottom_z and ascends as printing progresses → safe, no collision.
     double z_pass;
-
-    if (cfg.multipass_enabled.value) {
-        // Multipass: volume already scaled, so flow = 1.0 and Z = stacked sub-layer top.
-        flow = 1.0;
-
-        const MultiPassConfig mp = MultiPassConfig::from_region_config(cfg);
-        const int n_mp = std::max(1, std::min(3, mp.num_passes));
-        const int clamped_idx = std::min(pass_idx, n_mp - 1);
-
-        double z_accum = bottom_z;
-        for (int i = 0; i <= clamped_idx; ++i)
-            z_accum += mp.width_ratio[i] * layer_height;
-
-        // Last pass snaps to nominal_z to avoid floating-point drift.
-        z_pass = (clamped_idx >= n_mp - 1) ? nominal_z
-                                            : std::clamp(z_accum, bottom_z, nominal_z);
-    } else {
-        // Standalone PathBlend: surface_t staircase + ratio_at() gradient flow.
-        // invert_gradient flips t so the nozzle ascends during pass 0 (collision safety).
-        const double t_eff = pb.invert_gradient ? (1.0 - surface_t) : surface_t;
-        flow = pb.ratio_at(pass_idx, t_eff);
-        if (flow < 1e-9) return "";  // pass contributes nothing at this t — skip
-
+    {
         const double z_bottom_anchor = bottom_z + t_eff * layer_height;
         if (pb.num_passes == 1) {
             z_pass = z_bottom_anchor;
         } else {
-            const double frac = static_cast<double>(pass_idx)
-                              / static_cast<double>(pb.num_passes - 1);
+            const double frac = static_cast<double>(pass_idx) / static_cast<double>(pb.num_passes - 1);
             z_pass = z_bottom_anchor + frac * (nominal_z - z_bottom_anchor);
         }
         z_pass = std::clamp(z_pass, bottom_z, nominal_z);
@@ -1327,13 +1256,13 @@ std::string PathBlendEngine::apply_path(
 
     NEOTKO_LOG(MULTIPASS,
         "PathBlend"
-        << " layer="     << (int)(nominal_z * 1000) << "um"
-        << " mode="      << (cfg.multipass_enabled.value ? "multipass" : "standalone")
-        << " pass="      << pass_idx << "/" << pb.num_passes
-        << " t_raw="     << surface_t
-        << " z_pass="    << z_pass
-        << " flow="      << flow
-        << " pts="       << pts.size());
+        << " layer="  << (int)(nominal_z * 1000) << "um"
+        << " pass="   << pass_idx << "/" << pb.num_passes
+        << " t_raw="  << surface_t
+        << " t_eff="  << t_eff
+        << " z_pass=" << z_pass
+        << " flow="   << flow
+        << " pts="    << pts.size());
 
     return gcode;
 }

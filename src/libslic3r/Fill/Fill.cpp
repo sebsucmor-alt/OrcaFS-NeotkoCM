@@ -1317,9 +1317,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 params.density = f->print_object_config->internal_bridge_density.get_abs_value(1.0);
                 params.dont_adjust = true;
             }
-			// NEOTKO_MULTIPASS_TAG_START — FASE 2: per-pass fill generation
+			// NEOTKO_MULTIPASS_TAG_START — FASE 2: per-pass fill generation (Z stacking)
             // For MultiPass top/penultimate surfaces: call fill_surface_extrusion() N times,
-            // once per active pass, each with its own fill angle and line spacing.
+            // once per active pass, each with its own fill angle (spacing unchanged).
             // SurfaceMultiPass::apply() below skips already-encoded paths (FASE 2 guard).
             {
                 const auto& mp_cfg   = layerm->region().config();
@@ -1360,55 +1360,70 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     << " is_mp_fill=" << is_mp_fill);
 
                 if (is_mp_fill) {
-                    const int   n            = std::max(1, std::min(3, mp.num_passes));
-                    const float base_angle   = surface_fill.params.angle;
-                    const float base_spacing = surface_fill.params.spacing;
-                    const float flow_height  = params.flow.height();
-                    const float min_spacing  = flow_height * float(M_PI / 4.) + 1e-4f;
-                    // debug: use NEOTKO_LOG(MULTIPASS, ...) inline below
+                    const int   n          = std::max(1, std::min(3, mp.num_passes));
+                    const float base_angle = surface_fill.params.angle;
+                    // NEOTKO_MULTIPASS_TAG_START — Virtual sublayers: each pass → MultiPassSubLayer
+                    // Beer-Lambert stadium model: A(W,H) = H*(W - H*(1-π/4)) [matches Flow.cpp]
+                    constexpr double k_mp = 1.0 - 0.25 * M_PI;
+                    auto& sublayer_slot   = this->object()->multipass_sublayers()[this->id()];
 
-                    // Passes print in config order (0, 1, 2...).
-                    std::vector<int> pass_order(n);
-                    std::iota(pass_order.begin(), pass_order.end(), 0);
-
-                    for (int oi = 0; oi < n; ++oi) {
-                        const int i = pass_order[oi];
+                    for (int i = 0; i < n; ++i) {
                         if (mp.tool[i] < 0) continue;
 
                         f->angle = (mp.angle[i] >= 0)
                             ? Geometry::deg2rad(static_cast<float>(mp.angle[i]))
-                            : base_angle;
+                            : base_angle + float(i % 2) * float(M_PI / 2);
 
-                        const float raw_spacing  = base_spacing * static_cast<float>(mp.width_ratio[i]);
-                        const float pass_spacing = std::max(raw_spacing, min_spacing);
-                        const float actual_ratio = pass_spacing / base_spacing;
-                        f->spacing = pass_spacing;
+                        ExtrusionEntityCollection temp;
+                        f->fill_surface_extrusion(&surface_fill.surface, params, temp.entities);
 
-                        const size_t prev_count = layerm->fills.entities.size();
-                        f->fill_surface_extrusion(&surface_fill.surface, params,
-                                                   layerm->fills.entities);
-
-                        for (size_t j = prev_count; j < layerm->fills.entities.size(); ++j) {
-                            auto* coll = dynamic_cast<ExtrusionEntityCollection*>(
-                                layerm->fills.entities[j]);
+                        const double ratio = mp.width_ratio[i];
+                        for (auto* e : temp.entities) {
+                            auto* coll = dynamic_cast<ExtrusionEntityCollection*>(e);
                             if (!coll) continue;
-                            for (auto* e : coll->entities) {
-                                if (auto* path = dynamic_cast<ExtrusionPath*>(e)) {
-                                    path->width      *= actual_ratio;
-                                    path->mm3_per_mm *= actual_ratio;
-                                    SurfaceColorMix::encode_tool_in_path(path, mp.tool[i]);
+                            for (auto* ee : coll->entities) {
+                                if (auto* path = dynamic_cast<ExtrusionPath*>(ee)) {
+                                    const double W      = path->width;
+                                    const double H      = path->height;
+                                    const double H_sub  = H * ratio;
+                                    const double A_orig = H     * (W - k_mp * H);
+                                    const double A_sub  = H_sub * (W - k_mp * H_sub);
+                                    if (A_orig > 1e-9 && W > H + 1e-6)
+                                        path->mm3_per_mm = float(path->mm3_per_mm * (A_sub / A_orig));
+                                    else
+                                        path->mm3_per_mm = float(path->mm3_per_mm * ratio);
+                                    path->height = float(H_sub);
                                 }
                             }
                         }
 
-                        NEOTKO_LOG(MULTIPASS, "  pass" << i << ": T" << mp.tool[i]
-                            << " angle=" << (f->angle * 180.0f / float(M_PI)) << "deg"
-                            << " spacing=" << f->spacing
-                            << " new_paths=" << (layerm->fills.entities.size() - prev_count));
-                    }
+                        double cumsum = 0.0;
+                        for (int pi = 0; pi <= i; ++pi) cumsum += mp.width_ratio[pi];
+                        const bool   is_last_pass = (i == n - 1);
+                        // Float rounding in ratios (e.g. 0.396+0.417+0.188=1.001) makes
+                        // cumsum slightly >1 → bottom_z + cumsum*h - 2ε = nominal_z exactly.
+                        // Fix: last pass always uses nominal_z-2ε directly, bypassing cumsum.
+                        const double sub_print_z  = is_last_pass
+                            ? (this->bottom_z() + this->height - 2.0 * EPSILON)
+                            : (this->bottom_z() + cumsum * this->height);
 
-                    f->angle   = base_angle;
-                    f->spacing = base_spacing;
+                        MultiPassSubLayer sub;
+                        sub.print_z  = sub_print_z;
+                        sub.height   = float(this->height * ratio);
+                        sub.tool_id  = mp.tool[i];
+                        sub.pass_idx = i;
+                        const size_t n_paths = temp.entities.size();
+                        sub.fills    = std::move(temp);
+                        sublayer_slot.push_back(std::move(sub));
+
+                        NEOTKO_LOG(MULTIPASS, "  SUBLAYER pass" << i << ": T" << mp.tool[i]
+                            << " print_z=" << sub_print_z
+                            << " height=" << (this->height * ratio)
+                            << " n_paths=" << n_paths);
+                    }
+                    // NEOTKO_MULTIPASS_TAG_END
+
+                    f->angle = base_angle;
                 } else {
                     // NEOTKO_PATHBLEND_TAG_START — angle override for PathBlend surfaces
                     // If PathBlend is active and pathblend_fill_angle >= 0, use that angle
@@ -1554,8 +1569,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         const bool _cm_penu_ok = (_cm_cfg.interlayer_colormix_penu_zone.value == 0) ||
             (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
         if (!_cm_top_ok && !_cm_penu_ok) continue;
+        // Pass MixedFilamentManager for virtual-digit recipe expansion (use_virtual gate).
+        // When OFF, mgr stays null → build_tool_list_from_pattern uses only '1'-'4'.
+        const MixedFilamentManager* _cm_mgr = nullptr;
+        size_t _cm_num_phys = 0;
+        if (_cm_cfg.interlayer_colormix_use_virtual.value) {
+            const Print* _print = this->object()->print();
+            _cm_mgr      = &_print->mixed_filament_manager();
+            _cm_num_phys = _print->config().filament_colour.size();
+        }
         int flags = SurfaceColorMix::assign_and_group_tools(
-            layerm->fills, _cm_cfg, erNone, (int)this->id(), _cm_top_ok, _cm_penu_ok);
+            layerm->fills, _cm_cfg, erNone, (int)this->id(), _cm_top_ok, _cm_penu_ok,
+            _cm_mgr, _cm_num_phys);
         if (flags & COLORMIX_FLAG_UNSPLITTABLE)
             any_unsplittable = true;
     }

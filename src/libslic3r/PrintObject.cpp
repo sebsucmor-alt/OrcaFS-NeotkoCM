@@ -548,6 +548,9 @@ void PrintObject::infill()
         const auto& support_fill_octree = this->m_adaptive_fill_octrees.second;
 
         BOOST_LOG_TRIVIAL(debug) << "Filling layers in parallel - start";
+        // NEOTKO_MULTIPASS_TAG_START — pre-size sublayer slots before parallel fill loop
+        m_multipass_sublayers.assign(m_layers.size(), {});
+        // NEOTKO_MULTIPASS_TAG_END
         // NEOTKO_COLORMIX_TAG_START
         // Collect ColorMix unsplittable flag across all layers (parallel).
         // make_fills() returns true if any region had a monotonic fill that

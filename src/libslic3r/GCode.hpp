@@ -41,6 +41,7 @@ class GCode;
 namespace { struct Item; }
 struct PrintInstance;
 class ConstPrintObjectPtrsAdaptor;
+struct MultiPassSubLayer; // NEOTKO_MULTIPASS_TAG — defined in Print.hpp
 
 class OozePrevention {
 public:
@@ -252,10 +253,17 @@ public:
     // public, so that it could be accessed by free helper functions from GCode.cpp
     struct LayerToPrint
     {
-        LayerToPrint() : object_layer(nullptr), support_layer(nullptr), original_object(nullptr) {}
-        const Layer* 		object_layer;
-        const SupportLayer* support_layer;
-        const PrintObject*  original_object; //BBS: used for shared object logic
+        LayerToPrint() : object_layer(nullptr), support_layer(nullptr), original_object(nullptr),
+                         mp_sublayer(nullptr), mp_object(nullptr), mp_layer_id(0), mp_print_z(0.) {}
+        const Layer*             object_layer;
+        const SupportLayer*      support_layer;
+        const PrintObject*       original_object; //BBS: used for shared object logic
+        // NEOTKO_MULTIPASS_TAG_START — virtual sublayer fields (MultiPassSubLayer forward-declared)
+        const MultiPassSubLayer* mp_sublayer;  // non-null → this entry is a virtual MP sublayer
+        const PrintObject*       mp_object;    // owning PrintObject for mp_sublayer
+        size_t                   mp_layer_id;  // source layer index in multipass_sublayers()
+        coordf_t                 mp_print_z;   // cached print_z (avoids dereferencing in header)
+        // NEOTKO_MULTIPASS_TAG_END
         const Layer* 		layer()   const
         {
             if (object_layer != nullptr)
@@ -269,10 +277,16 @@ public:
 
         const PrintObject* 	object()   const
         {
+            // NEOTKO_MULTIPASS_TAG_START
+            if (mp_sublayer != nullptr) return mp_object;
+            // NEOTKO_MULTIPASS_TAG_END
             return (this->layer() != nullptr) ? this->layer()->object() : nullptr;
         }
         coordf_t            print_z() const
         {
+            // NEOTKO_MULTIPASS_TAG_START
+            if (mp_sublayer != nullptr) return mp_print_z;  // cached, no dereference needed
+            // NEOTKO_MULTIPASS_TAG_END
             coordf_t sum_z = 0.;
             size_t count = 0;
             if (object_layer != nullptr) {
@@ -613,6 +627,9 @@ private:
     unsigned int m_toolchange_count;
     coordf_t m_nominal_z;
     bool m_need_change_layer_lift_z = false;
+    // NEOTKO_MULTIPASS_TAG — set after a sublayer group changes the tool so that the
+    // next real layer can restore the wipe-tower expected initial before its loop.
+    bool m_after_mp_sublayer = false;
     // NEOTKO_PATHBLEND_TAG_START — per-surface Y bbox for correct surface_t normalisation.
     // Set in extrude_infill() before iterating each EEC; reset afterwards.
     // When defined, _extrude() uses this instead of the full layer bbox so that

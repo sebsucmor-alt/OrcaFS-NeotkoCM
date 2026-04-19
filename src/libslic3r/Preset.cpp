@@ -850,6 +850,7 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate",
     "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone",
     "interlayer_colormix_filament_filter",
+    "interlayer_colormix_use_virtual",
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     "multipass_enabled", "multipass_surface", "multipass_num_passes",

@@ -6808,6 +6808,14 @@ void PrintConfigDef::init_fff_params()
     def->max  = 16;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("interlayer_colormix_use_virtual", coBool);
+    def->label = L("Use virtual (mixed) filaments");
+    def->category = L("Quality");
+    def->tooltip = L("Enables pattern digits 5-9 to reference Mixed Filament virtual colors. "
+                     "When off, only physical tools 1-4 are recognised in the pattern string.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_COLORMIX_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend

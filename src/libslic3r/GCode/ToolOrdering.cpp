@@ -349,6 +349,13 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
             zs.emplace_back(layer->print_z);
         for (auto layer : object.support_layers())
             zs.emplace_back(layer->print_z);
+        // NEOTKO_MULTIPASS_TAG_START — include virtual sublayer z values
+        // Shared objects skip infill() → empty sublayers; use original's Z values.
+        const PrintObject& mp_src_to = object.get_shared_object() ? *object.get_shared_object() : object;
+        for (const auto& layer_subs : mp_src_to.multipass_sublayers())
+            for (const MultiPassSubLayer& sub : layer_subs)
+                zs.emplace_back(sub.print_z);
+        // NEOTKO_MULTIPASS_TAG_END
         this->initialize_layers(zs);
     }
     double max_layer_height = calc_max_layer_height(object.print()->config(), object.config().layer_height);
@@ -417,6 +424,11 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
                 zs.emplace_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.emplace_back(layer->print_z);
+            // NEOTKO_MULTIPASS_TAG_START — include virtual sublayer z values
+            for (const auto& layer_subs : object->multipass_sublayers())
+                for (const MultiPassSubLayer& sub : layer_subs)
+                    zs.emplace_back(sub.print_z);
+            // NEOTKO_MULTIPASS_TAG_END
 
             // Find first object layer that is not empty and save its print_z
             for (const Layer* layer : object->layers())
@@ -634,26 +646,87 @@ void ToolOrdering::initialize_layers(std::vector<coordf_t> &zs)
 }
 
 // NEOTKO_COLORMIX_TAG_START
-// Parse a colormix pattern string into unique 1-based tool IDs for layer_tools.extruders.
-// Pattern chars '1'–'4' → 0-based tool index (char - '1') → +1 for 1-based storage.
-// Duplicate tools within the pattern are collapsed to one entry (first-occurrence order).
-// Falls back to legacy tool_a/b/c/d slots if fewer than 2 valid entries result.
+// Extract full physical tool list from a MixedFilament recipe — 1-based version.
+// Mirrors extract_recipe_tools() in SurfaceColorMix.cpp (0-based).
+// Priority: manual_pattern > gradient_component_ids > component_a/b only.
+static std::vector<unsigned int> extract_recipe_tools_1based(
+    const MixedFilament& mf, size_t num_physical)
+{
+    std::vector<unsigned int> tools;
+    std::set<unsigned int> seen;
+    auto add = [&](unsigned int phys_1based) {
+        if (phys_1based >= 1 && phys_1based <= (unsigned)num_physical)
+            if (seen.insert(phys_1based).second) tools.push_back(phys_1based);
+    };
+    if (!mf.manual_pattern.empty()) {
+        for (char c : mf.manual_pattern) {
+            if (c == ',')      continue;
+            if (c == '1')      add(mf.component_a);
+            else if (c == '2') add(mf.component_b);
+            else if (c >= '3' && c <= '9')
+                add(static_cast<unsigned int>(c - '0'));
+        }
+    } else if (!mf.gradient_component_ids.empty()) {
+        for (char c : mf.gradient_component_ids) {
+            if (c >= '1' && c <= '9')
+                add(static_cast<unsigned int>(c - '0'));
+        }
+    } else {
+        add(mf.component_a);
+        add(mf.component_b);
+    }
+    return tools;
+}
+
+// Parse a colormix pattern string into unique 1-based PHYSICAL tool IDs for layer_tools.extruders.
+// Physical digits '1'–'4' → 1-based physical tool IDs.
+// Virtual digits '5'–'9' → RECIPE EXPANSION via extract_recipe_tools_1based():
+//   The full recipe (manual_pattern / gradient_component_ids / component_a+b) of the
+//   named MixedFilament is expanded to all unique physical tool IDs.
+//   This mirrors SurfaceColorMix::build_tool_list_from_pattern() so the wipe tower
+//   sees every tool ColorMix will actually switch between.
+// Falls back to legacy tool_a/b/c/d slots when fewer than 2 distinct tools result.
 static std::vector<unsigned int> parse_colormix_pattern_1based(
     const std::string& pattern,
-    int tool_a, int tool_b, int tool_c, int tool_d)
+    int tool_a, int tool_b, int tool_c, int tool_d,
+    const LayerTools* lt = nullptr)
 {
     std::vector<unsigned int> tools;
     std::set<unsigned int>    seen;
     for (char c : pattern) {
         if (c >= '1' && c <= '4') {
-            unsigned int t = static_cast<unsigned int>(c - '1') + 1u; // 0-based → 1-based
+            // Physical tool: digit → 1-based ID.
+            unsigned int t = static_cast<unsigned int>(c - '1') + 1u;
             if (seen.insert(t).second)
                 tools.push_back(t);
+        } else if (c >= '5' && c <= '9'
+                   && lt != nullptr
+                   && lt->mixed_mgr != nullptr
+                   && lt->num_physical > 0) {
+            // Virtual MixedFilament digit: expand full blend recipe.
+            unsigned int virtual_id = static_cast<unsigned int>(c - '0');
+            const MixedFilament* mf = lt->mixed_mgr->mixed_filament_from_id(
+                virtual_id, lt->num_physical);
+            if (mf) {
+                auto recipe = extract_recipe_tools_1based(*mf, lt->num_physical);
+                if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                    std::ostringstream _s;
+                    _s << "RECIPE_EXPAND digit='" << c << "' virtual_id=" << virtual_id
+                       << " layer_idx=" << lt->layer_index << " → [";
+                    for (size_t i = 0; i < recipe.size(); ++i)
+                        _s << (i?",":"") << "T" << recipe[i];
+                    _s << "]";
+                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                }
+                for (unsigned int t : recipe)
+                    if (seen.insert(t).second) tools.push_back(t);
+            }
         }
     }
     if (tools.size() >= 2)
         return tools;
-    // Fallback to legacy A/B/C/D slots
+    // Fewer than 2 distinct physical tools — fall back to legacy A/B/C/D slots.
+    // Mirrors PATTERN_FALLBACK in SurfaceColorMix::build_tool_list_from_pattern().
     tools.clear(); seen.clear();
     auto add = [&](int v) {
         if (v >= 0) {
@@ -833,9 +906,11 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 const int tool_c  = cfg.interlayer_colormix_tool_c.value;
                 const int tool_d  = cfg.interlayer_colormix_tool_d.value;
                 auto tools_top = parse_colormix_pattern_1based(
-                    cfg.interlayer_colormix_pattern_top.value, tool_a, tool_b, tool_c, tool_d);
+                    cfg.interlayer_colormix_pattern_top.value,
+                    tool_a, tool_b, tool_c, tool_d, &layer_tools);
                 auto tools_pen = parse_colormix_pattern_1based(
-                    cfg.interlayer_colormix_pattern_penultimate.value, tool_a, tool_b, tool_c, tool_d);
+                    cfg.interlayer_colormix_pattern_penultimate.value,
+                    tool_a, tool_b, tool_c, tool_d, &layer_tools);
                 // Insert union (deduplicated) into layer_tools.extruders
                 std::set<unsigned int> emplace_set;
                 auto emplace_once = [&](unsigned int t) {
@@ -854,56 +929,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             }
             // NEOTKO_COLORMIX_TAG_END
 
-            // NEOTKO_MULTIPASS_TAG_START
-            // Register MultiPass tools so ToolOrdering generates prime tower purges
-            // between MultiPass tool changes. raw_tools are 0-based → +1 for 1-based.
-            if (has_top_surface_infill && region.config().multipass_enabled.value) {
-                const auto& cfg = region.config();
-                const int n = std::max(1, std::min(3, cfg.multipass_num_passes.value));
-                const int raw_tools[3] = {
-                    cfg.multipass_tool_1.value,
-                    cfg.multipass_tool_2.value,
-                    cfg.multipass_tool_3.value
-                };
-                // Register each pass tool in order, including duplicates.
-                // Example: [T3, T2, T3] must schedule 3 purge slots — T3→T2→T3.
-                // has_multipass_repeat_tool prevents the dedup loop below from collapsing them.
-                //
-                // CRITICAL: Use INSERT AT FRONT, not emplace_back.
-                // When two objects share a layer (e.g. a PathBlend cube and a MultiPass cube),
-                // collect_extruders() is called per-object. If the PathBlend object is processed
-                // first, its tools (T1,T2) are already in extruders[] before MultiPass runs.
-                // Appending T0,T1,T2 would give [T1,T2,T0,T1,T2] → dedup → [T1,T2,T0] (wrong).
-                // Prepending T0,T1,T2 gives [T0,T1,T2,T1,T2] → dedup → [T0,T1,T2] (correct).
-                {
-                    std::set<unsigned int> seen_check;
-                    std::vector<unsigned int> mp_tools_to_prepend;
-                    for (int i = 0; i < n; ++i) {
-                        if (raw_tools[i] < 0) continue;
-                        unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
-                        if (!seen_check.insert(t).second)
-                            layer_tools.has_multipass_repeat_tool = true;
-                        mp_tools_to_prepend.push_back(t);
-                    }
-                    // Prepend MultiPass tools to ensure they lead the extruder sequence.
-                    layer_tools.extruders.insert(layer_tools.extruders.begin(),
-                        mp_tools_to_prepend.begin(), mp_tools_to_prepend.end());
-                    // Always preserve config pass order — do NOT let sort_remove_duplicates
-                    // reorder tools numerically (T1→T2→T3). Pass order matters for stacking.
-                    layer_tools.preserve_extruder_order = true;
-                    if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
-                        // Log in actual config order (not sorted) to reflect print sequence.
-                        std::ostringstream _s;
-                        _s << "MULTIPASS\tz=" << layer->print_z << "\t+[";
-                        for (int i = 0; i < n; ++i) {
-                            if (raw_tools[i] >= 0) _s << "T" << raw_tools[i] << " ";
-                        }
-                        _s << "]";
-                        NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
-                    }
-                }
-            }
-            // NEOTKO_MULTIPASS_TAG_END
+            // NEOTKO_MULTIPASS_TAG — MultiPass tools now registered via sublayers below.
 
             // NEOTKO_PATHBLEND_TAG_START
             // Register PathBlend tools so ToolOrdering generates prime tower purges
@@ -925,9 +951,8 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 for (int i = 0; i < n; ++i) {
                     if (raw_tools[i] < 0) continue;
                     unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
-                    if (!seen_check.insert(t).second)
-                        layer_tools.has_multipass_repeat_tool = true;
-                    layer_tools.extruders.emplace_back(t);
+                    if (seen_check.insert(t).second)
+                        layer_tools.extruders.emplace_back(t);  // unique tools only
                 }
                 // Record pass ordering constraints: pass i must precede pass j (i<j).
                 // These are enforced post-dedup (see the loop below) to fix cases where
@@ -961,17 +986,37 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         layerCount++;
     }
 
+    // NEOTKO_MULTIPASS_TAG_START — register virtual sublayer tools at their own z
+    // Each MultiPassSubLayer occupies its own LayerTools entry (z already inserted by
+    // initialize_layers). One tool per sublayer → no intra-sublayer ordering conflict.
+    // Shared objects have empty sublayers; use the original's data (same geometry).
+    const PrintObject& mp_src_ce = object.get_shared_object() ? *object.get_shared_object() : object;
+    for (const auto& layer_subs : mp_src_ce.multipass_sublayers()) {
+        for (const MultiPassSubLayer& sub : layer_subs) {
+            LayerTools& lt = this->tools_for_layer(sub.print_z);
+            lt.is_mp_sublayer = true; // blocks wipe_tower_partitions propagation in fill_wipe_tower_partitions
+            // extruders intentionally NOT populated — sublayer handler reads sub.tool_id directly.
+            // Empty extruders → first_extruder() skips sublayers → correct wipe tower initial tool.
+            // has_object intentionally NOT set — sublayer toolchanges bypass the wipe tower
+            if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                std::ostringstream _s;
+                _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << sub.tool_id << " ]";
+                NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+            }
+        }
+    }
+    // NEOTKO_MULTIPASS_TAG_END
+
     sort_remove_duplicates(firstLayerExtruders);
     const_cast<PrintObject&>(object).object_first_layer_wall_extruders = firstLayerExtruders;
     
     for (auto& layer : m_layer_tools) {
         // NEOTKO_MULTIPASS_TAG_START
-        // Skip deduplication for MultiPass layers with repeated tools (e.g. T3/T2/T3).
-        // Deduplication would collapse the sequence to [T3,T2] and suppress the second
-        // toolchange back to T3, causing the last pass to never be printed.
-        if (layer.has_multipass_repeat_tool) {
-            // Nothing to do — extruders already in correct order with intended duplicates.
-        } else
+        // MultiPass/PathBlend use preserve_extruder_order so their configured pass sequence
+        // is maintained. Deduplication always runs: the COLORMIX_HOOK routes all paths with
+        // the same tool_id into one by_extruder bucket, so there is only one GCode toolchange
+        // per unique tool per layer — duplicates in the extruder list would cause the
+        // WipeTower to plan more purges than GCode actually emits.
         // NEOTKO_MULTIPASS_TAG_END
         if (layer.preserve_extruder_order)
             remove_duplicates_preserve_order(layer.extruders);
@@ -1178,6 +1223,13 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             last_extruder = lt.extruders.back();
         }
     }
+
+    // NEOTKO_MULTIPASS_TAG_START — sublayer entries must not inflate wipe_tower_partitions
+    // at real layers below. Their toolchanges are handled directly in the sublayer handler,
+    // not by the wipe tower.
+    for (LayerTools& lt : m_layer_tools)
+        if (lt.is_mp_sublayer) lt.wipe_tower_partitions = 0;
+    // NEOTKO_MULTIPASS_TAG_END
 
     // Propagate the wipe tower partitions down to support the upper partitions by the lower partitions.
     for (int i = int(m_layer_tools.size()) - 2; i >= 0; -- i)

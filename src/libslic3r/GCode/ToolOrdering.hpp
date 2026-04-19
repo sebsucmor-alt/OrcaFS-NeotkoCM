@@ -134,11 +134,8 @@ public:
     // Due to the support layers possibly interleaving the object layers,
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
+    bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer, no wipe tower
     // NEOTKO_MULTIPASS_TAG_START
-    // True when MultiPass uses the same tool in more than one pass (e.g. T3/T2/T3).
-    // Extruder deduplication is skipped for these layers so GCode generates the full
-    // tool sequence including the repeated toolchange (T3→T2→T3 → 3 wipe tower purges).
-    bool                        has_multipass_repeat_tool = false;
     // Ordering constraints added by PathBlend: each (a,b) means tool a must appear
     // before tool b in the final extruder sequence.  Enforced after deduplication so
     // that MultiPass prepend + PathBlend constraints both win simultaneously.

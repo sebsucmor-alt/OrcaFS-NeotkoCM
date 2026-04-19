@@ -62,6 +62,9 @@
 #include <functional> // NEOTKO_COLORMIX_TAG (std::function in MultiPassPreviewPanel)
 #include <map>        // NEOTKO_SURFACE_MIXER_TAG (blend_preview)
 #include <cstdio>     // NEOTKO_SURFACE_MIXER_TAG (std::snprintf for TD values)
+#include <numeric>    // NEOTKO_MULTIPASS_TAG (std::iota in Beer-Lambert suggest)
+#include <cmath>      // NEOTKO_MULTIPASS_TAG (std::cbrt, std::pow in mp_rgb_to_lab)
+#include <algorithm>  // NEOTKO_MULTIPASS_TAG (std::next_permutation, std::stable_sort)
 
 namespace Slic3r {
 namespace GUI {
@@ -76,16 +79,28 @@ class ColorMixPatternDialog : public wxDialog
 {
 public:
     // Single pattern — surface (Top/Penu/Both) is controlled by the SurfaceColorMixer combos.
+    // use_virtual: when true, virtual Mixed Filament buttons are shown and pattern digits
+    // 5-9 are accepted (requires interlayer_colormix_use_virtual=true in config, C0 gate).
     ColorMixPatternDialog(wxWindow*                                       parent,
                           const std::vector<Slic3r::ColorMixOption>&      options,
                           const std::vector<std::string>&                 filament_colours,
-                          const std::string&                              cur_pattern)
+                          const std::string&                              cur_pattern,
+                          bool                                            use_virtual = false)
         : wxDialog(parent, wxID_ANY, _L("Edit Color Pattern"),
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
         , m_colours(filament_colours)
         , m_pattern(cur_pattern)
+        , m_use_virtual(use_virtual)
     {
+        // Build digit→color map from options so paint_pattern() handles both
+        // physical (digits '1'-'4') and virtual (digits '5'-'9') uniformly.
+        for (const auto& opt : options) {
+            if (opt.filament_id >= 1 && opt.filament_id <= 9) {
+                char digit = static_cast<char>('0' + opt.filament_id);
+                m_digit_colors[digit] = hex_to_colour(opt.display_color);
+            }
+        }
         build_ui(options);
     }
 
@@ -96,9 +111,11 @@ public:
     int         get_surface() const { return 0; }
 
 private:
-    std::vector<std::string> m_colours;
-    std::string   m_pattern;
-    wxPanel*      m_disp = nullptr;
+    std::vector<std::string>     m_colours;
+    std::string                  m_pattern;
+    bool                         m_use_virtual = false;
+    wxPanel*                     m_disp = nullptr;
+    std::map<char, wxColour>     m_digit_colors; // digit '1'-'9' → display color
 
     static wxColour hex_to_colour(const std::string& hex)
     {
@@ -112,6 +129,7 @@ private:
     }
 
     // Draw coloured digit-blocks for a pattern string into dc.
+    // Uses m_digit_colors so both physical and virtual digits render with the right color.
     void paint_pattern(wxPaintDC& dc, const std::string& pat, wxPanel* p)
     {
         wxRect r = p->GetClientRect();
@@ -121,9 +139,8 @@ private:
         int x = 0;
         dc.SetFont(GetFont());
         for (char c : pat) {
-            int idx = static_cast<int>(c - '1');
-            wxColour col = (idx >= 0 && idx < (int)m_colours.size())
-                           ? hex_to_colour(m_colours[idx]) : wxColour(128, 128, 128);
+            auto it = m_digit_colors.find(c);
+            wxColour col = (it != m_digit_colors.end()) ? it->second : wxColour(128, 128, 128);
             dc.SetBrush(wxBrush(col));
             dc.SetPen(*wxBLACK_PEN);
             dc.DrawRectangle(x, 0, BW, r.height);
@@ -137,7 +154,19 @@ private:
         }
     }
 
-    void build_ui(const std::vector<Slic3r::ColorMixOption>& /*options*/)
+    void append_digit(int filament_id)
+    {
+        if (filament_id < 1 || filament_id > 9) return;
+        m_pattern += static_cast<char>('0' + filament_id);
+        const int needed = (int)m_pattern.size() * 26 + 8;
+        if (needed > m_disp->GetMinWidth()) {
+            m_disp->SetMinSize(wxSize(needed, 26));
+            Fit();
+        }
+        m_disp->Refresh();
+    }
+
+    void build_ui(const std::vector<Slic3r::ColorMixOption>& options)
     {
         const int PAD = 6;
         auto* vs = new wxBoxSizer(wxVERTICAL);
@@ -146,27 +175,50 @@ private:
                                   _L("Click filaments to build pattern:")),
                 0, wxLEFT|wxTOP|wxBOTTOM, PAD);
 
-        // Row of filament buttons
         auto* btn_row = new wxBoxSizer(wxHORIZONTAL);
-        for (int i = 0; i < (int)m_colours.size(); i++) {
-            auto* b = new wxButton(this, wxID_ANY, wxString::Format("F%d", i + 1),
+
+        // Physical filament buttons — always shown (existing behaviour).
+        for (const auto& opt : options) {
+            if (!opt.is_physical || opt.filament_id < 1 || opt.filament_id > 9) continue;
+            auto* b = new wxButton(this, wxID_ANY, wxString::FromUTF8(opt.label),
                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            b->SetBackgroundColour(hex_to_colour(m_colours[i]));
-            b->SetToolTip(wxString::FromUTF8(m_colours[i]));
-            int tok = i + 1;
-            b->Bind(wxEVT_BUTTON, [this, tok](wxCommandEvent&) {
-                if (tok <= 9) {
-                    m_pattern += std::to_string(tok);
-                    const int needed = (int)m_pattern.size() * 26 + 8;
-                    if (needed > m_disp->GetMinWidth()) {
-                        m_disp->SetMinSize(wxSize(needed, 26));
-                        Fit();
-                    }
-                    m_disp->Refresh();
-                }
-            });
+            b->SetBackgroundColour(hex_to_colour(opt.display_color));
+            b->SetToolTip(wxString::FromUTF8(opt.display_color));
+            int fid = opt.filament_id;
+            b->Bind(wxEVT_BUTTON, [this, fid](wxCommandEvent&) { append_digit(fid); });
             btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
         }
+
+        // Virtual (Mixed Filament) buttons — shown only when use_virtual gate is ON.
+        // NEOTKO_COLORMIX_TAG_START — virtual filament buttons
+        if (m_use_virtual) {
+            bool separator_added = false;
+            for (const auto& opt : options) {
+                if (opt.is_physical || opt.filament_id < 1 || opt.filament_id > 9) continue;
+                if (!separator_added) {
+                    // Vertical line separator between physical and virtual groups.
+                    auto* sep = new wxStaticLine(this, wxID_ANY,
+                                                 wxDefaultPosition, wxDefaultSize,
+                                                 wxLI_VERTICAL);
+                    btn_row->Add(sep, 0, wxEXPAND|wxLEFT|wxRIGHT, 4);
+                    separator_added = true;
+                }
+                // Short label: strip "Mixed (" prefix for compact buttons.
+                wxString short_lbl = wxString::FromUTF8(opt.label);
+                if (short_lbl.StartsWith("Mixed (") && short_lbl.EndsWith(")"))
+                    short_lbl = short_lbl.Mid(7, short_lbl.Len() - 8); // "F1+F2"
+                auto* b = new wxButton(this, wxID_ANY, short_lbl,
+                                       wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+                b->SetBackgroundColour(hex_to_colour(opt.display_color));
+                b->SetToolTip(wxString::FromUTF8(opt.label)
+                              + wxString::Format(" [digit %d]", opt.filament_id));
+                int fid = opt.filament_id;
+                b->Bind(wxEVT_BUTTON, [this, fid](wxCommandEvent&) { append_digit(fid); });
+                btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
+            }
+        }
+        // NEOTKO_COLORMIX_TAG_END
+
         vs->Add(btn_row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
 
         // Pattern display panel
@@ -476,6 +528,151 @@ private:
     }
 };
 
+// NEOTKO_MULTIPASS_TAG_START — Beer-Lambert TD helpers
+// Used by MultiPassConfigDialog (single-layer suggest) and
+// SurfaceColorMixerDialog (joint Top+Penultimate suggest).
+// All helpers are pure functions, no wxWidgets dependency.
+
+struct MpLabColor { double L, a, b; };
+
+static MpLabColor mp_rgb_to_lab(double r, double g, double b)
+{
+    auto lin = [](double c) {
+        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+    };
+    const double rl = lin(r), gl = lin(g), bl = lin(b);
+    const double X = rl*0.4124564 + gl*0.3575761 + bl*0.1804375;
+    const double Y = rl*0.2126729 + gl*0.7151522 + bl*0.0721750;
+    const double Z = rl*0.0193339 + gl*0.1191920 + bl*0.9503041;
+    const double xn = X / 0.95047, yn = Y, zn = Z / 1.08883;
+    auto f = [](double t) { return t > 0.008856 ? std::cbrt(t) : 7.787*t + 16.0/116.0; };
+    return { 116.0*f(yn) - 16.0, 500.0*(f(xn) - f(yn)), 200.0*(f(yn) - f(zn)) };
+}
+
+static double mp_delta_e(const MpLabColor& a, const MpLabColor& b)
+{
+    return std::sqrt((a.L-b.L)*(a.L-b.L) + (a.a-b.a)*(a.a-b.a) + (a.b-b.b)*(a.b-b.b));
+}
+
+// Beer-Lambert stack. layers = bottom-to-top [{r,g,b} in [0..1], td in [0..1], ratio].
+// bg_r/g/b: background color (black for single layer; penultimate result for top-layer mode).
+struct MpBLLayer { double r, g, b, td, ratio; };
+
+static std::tuple<double,double,double> mp_beer_blend(
+    const std::vector<MpBLLayer>& layers,
+    double bg_r = 0.0, double bg_g = 0.0, double bg_b = 0.0)
+{
+    double r = bg_r, g = bg_g, bv = bg_b;
+    for (const auto& lyr : layers) {
+        if (lyr.td < 1e-6) { r = lyr.r; g = lyr.g; bv = lyr.b; continue; }
+        const double t  = std::pow(0.1, lyr.ratio / lyr.td);
+        const double op = 1.0 - t;
+        r  = lyr.r * op + r  * t;
+        g  = lyr.g * op + g  * t;
+        bv = lyr.b * op + bv * t;
+    }
+    return {r, g, bv};
+}
+
+struct MpSuggestResult {
+    std::vector<int>    order;    // permutation of [0..n-1], bottom→top
+    std::vector<double> ratios;   // layer ratio per pass in that order
+    double              score  = std::numeric_limits<double>::max();
+    double              res_r  = 0.5, res_g = 0.5, res_b = 0.5; // simulated result color
+};
+
+// Exhaustive permutation + ratio grid search for a single layer (or joint two-layer mode).
+// pass_colors: per-pass {r,g,b}; tds: per-pass TD [0..1].
+// joint_two_layers: if true, simulates same passes on TWO stacked layers (Top+Penultimate mode):
+//   bg_after_penu = beer_blend(passes, black)
+//   result        = beer_blend(passes, bg=bg_after_penu)
+// bg_r/g/b: only used when joint_two_layers==false (external background).
+static MpSuggestResult mp_suggest(
+    const std::vector<std::array<double,3>>& pass_colors,
+    const std::vector<double>&               tds,
+    double target_r, double target_g, double target_b,
+    double min_ratio         = 0.05,
+    bool   joint_two_layers  = false,
+    double bg_r = 0.0, double bg_g = 0.0, double bg_b = 0.0)
+{
+    const int n = static_cast<int>(pass_colors.size());
+    if (n == 0) return {};
+
+    const MpLabColor tlab = mp_rgb_to_lab(target_r, target_g, target_b);
+    static constexpr int STEPS = 16;
+
+    std::vector<int> perm(n);
+    std::iota(perm.begin(), perm.end(), 0);
+
+    MpSuggestResult best;
+    best.order.resize(n);  std::iota(best.order.begin(), best.order.end(), 0);
+    best.ratios.assign(n, 1.0 / n);
+
+    auto blend_result = [&](const std::vector<MpBLLayer>& stack)
+        -> std::tuple<double,double,double>
+    {
+        if (joint_two_layers) {
+            auto [pr,pg,pb] = mp_beer_blend(stack);
+            return mp_beer_blend(stack, pr, pg, pb);
+        }
+        return mp_beer_blend(stack, bg_r, bg_g, bg_b);
+    };
+
+    do {
+        // Build ordered layer descriptors for this permutation
+        std::vector<MpBLLayer> tmpl(n);
+        for (int i = 0; i < n; ++i)
+            tmpl[i] = { pass_colors[perm[i]][0], pass_colors[perm[i]][1],
+                        pass_colors[perm[i]][2], tds[perm[i]], 0.0 /*ratio filled below*/ };
+
+        if (n == 1) {
+            tmpl[0].ratio = 1.0;
+            auto [r,g,bv] = blend_result(tmpl);
+            const double sc = mp_delta_e(mp_rgb_to_lab(r,g,bv), tlab);
+            if (sc < best.score) {
+                best.score=sc; best.order=perm; best.ratios={1.0};
+                best.res_r=r; best.res_g=g; best.res_b=bv;
+            }
+        } else if (n == 2) {
+            const double mr = std::max(min_ratio, 0.01);
+            for (int s = 0; s <= STEPS; ++s) {
+                const double r0 = mr + (1.0 - 2.0*mr) * s / STEPS;
+                const double r1 = 1.0 - r0;
+                if (r1 < mr - 1e-9) continue;
+                tmpl[0].ratio = r0; tmpl[1].ratio = r1;
+                auto [r,g,bv] = blend_result(tmpl);
+                const double sc = mp_delta_e(mp_rgb_to_lab(r,g,bv), tlab);
+                if (sc < best.score) {
+                    best.score=sc; best.order=perm; best.ratios={r0,r1};
+                    best.res_r=r; best.res_g=g; best.res_b=bv;
+                }
+            }
+        } else { // n == 3
+            const double mr = std::max(min_ratio, 0.01);
+            for (int s0 = 0; s0 <= STEPS; ++s0) {
+                const double r0     = mr + (1.0 - 3.0*mr) * s0 / STEPS;
+                const double r1_max = 1.0 - r0 - mr;
+                if (r1_max < mr - 1e-9) continue;
+                for (int s1 = 0; s1 <= STEPS; ++s1) {
+                    const double r1 = mr + (r1_max - mr) * s1 / STEPS;
+                    const double r2 = 1.0 - r0 - r1;
+                    if (r2 < mr - 1e-9) continue;
+                    tmpl[0].ratio=r0; tmpl[1].ratio=r1; tmpl[2].ratio=r2;
+                    auto [r,g,bv] = blend_result(tmpl);
+                    const double sc = mp_delta_e(mp_rgb_to_lab(r,g,bv), tlab);
+                    if (sc < best.score) {
+                        best.score=sc; best.order=perm; best.ratios={r0,r1,r2};
+                        best.res_r=r; best.res_g=g; best.res_b=bv;
+                    }
+                }
+            }
+        }
+    } while (std::next_permutation(perm.begin(), perm.end()));
+
+    return best;
+}
+// NEOTKO_MULTIPASS_TAG_END
+
 class MultiPassConfigDialog : public wxDialog
 {
 public:
@@ -491,6 +688,7 @@ public:
                           const std::string& cur_gs1, const std::string& cur_gs2, const std::string& cur_gs3,
                           const std::string& cur_ge1, const std::string& cur_ge2, const std::string& cur_ge3,
                           const std::vector<std::string>& filament_colours = {},
+                          const std::vector<Slic3r::ColorMixOption>& mix_options = {},
                           int    cur_pa_mode  = 0,
                           double cur_pa_value = 0.1)
         : wxDialog(parent, wxID_ANY, _L("MultiPass Blend Settings"),
@@ -498,6 +696,7 @@ public:
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
         , m_surface(cur_surface)
         , m_colours(filament_colours)
+        , m_mix_options(mix_options)
     {
         const int angles[3] = {cur_angle1, cur_angle2, cur_angle3};
         const int fans[3]   = {cur_fan1, cur_fan2, cur_fan3};
@@ -513,9 +712,11 @@ public:
 
     int    get_passes()  const { return m_sc_passes->GetValue(); }
     int    get_surface() const { return m_surface; }
-    int    get_tool1()   const { return m_sc_tool[0]->GetValue(); }
-    int    get_tool2()   const { return m_sc_tool[1]->GetValue(); }
-    int    get_tool3()   const { return m_sc_tool[2]->GetValue(); }
+    // Spinners display F-notation (F1=1, F2=2, …); config stores 0-based (T0=0, T1=1, …).
+    // Pass 3: display 0 = disabled → stored -1.
+    int    get_tool1()   const { return m_sc_tool[0]->GetValue() - 1; }
+    int    get_tool2()   const { return m_sc_tool[1]->GetValue() - 1; }
+    int    get_tool3()   const { const int v = m_sc_tool[2]->GetValue(); return v > 0 ? v - 1 : -1; }
     bool   get_vary()    const { return m_cb_vary ? m_cb_vary->GetValue() : false; }
 
     double get_ratio(int idx, double fallback) const {
@@ -586,12 +787,17 @@ private:
     wxCheckBox*           m_cb_top     = nullptr;
     wxCheckBox*           m_cb_penu    = nullptr;
     wxCheckBox*           m_cb_vary    = nullptr;
+    // NEOTKO_MULTIPASS_TAG_START — TD spinners (one per pass, synced with neotko_td_N in app_config)
+    wxSpinCtrlDouble* m_sc_td[3]       = {nullptr, nullptr, nullptr};
+    // NEOTKO_MULTIPASS_TAG_END
     wxStaticText*         m_lbl_sum    = nullptr;
     wxRadioButton*        m_rb_pa[3]   = {nullptr, nullptr, nullptr};
     wxTextCtrl*           m_tc_pa_val  = nullptr;
     MultiPassPreviewPanel* m_preview   = nullptr;
-    wxComboBox*           m_preset_combo = nullptr;
-    std::vector<std::pair<wxString, wxString>> m_presets;
+    wxComboBox*           m_preset_combo  = nullptr;
+    wxComboBox*           m_combo_mixed   = nullptr; // NEOTKO: MixedColor normalize picker
+    std::vector<Slic3r::ColorMixOption>          m_mix_options;
+    std::vector<std::pair<wxString, wxString>>   m_presets;
     std::vector<wxWindow*> m_pass3_widgets;
 
     void update_surface()
@@ -638,10 +844,11 @@ private:
         const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
         MultiPassPreviewPanel::PassData pd[3];
         for (int i = 0; i < 3; ++i) {
-            pd[i].tool  = m_sc_tool[i]  ? m_sc_tool[i]->GetValue()   : i;
+            const int fv = m_sc_tool[i] ? m_sc_tool[i]->GetValue() : i + 1; // F-notation
+            pd[i].tool  = fv;
             pd[i].ratio = m_tc_ratio[i] ? m_tc_ratio[i]->get_value() : 0.5;
             pd[i].angle = m_sc_angle[i] ? m_sc_angle[i]->GetValue()  : -1;
-            const int t = pd[i].tool;
+            const int t = fv > 0 ? fv - 1 : -1; // 0-based for color lookup
             if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
                 pd[i].color = wxColour(m_colours[t]);
             else
@@ -661,7 +868,9 @@ private:
         ai("passes",  m_sc_passes ? m_sc_passes->GetValue() : 2);
         ai("surface", m_surface);
         for (int i = 0; i < 3; ++i) {
-            ai(wxString::Format("t%d",   i).c_str(), m_sc_tool[i]  ? m_sc_tool[i]->GetValue()   : 0);
+            // Store 0-based tool index (not raw spinner F-value) for format stability.
+            // Pass 3: spinner 0 = disabled → store -1. Passes 1&2: spinner F→ store F-1.
+            ai(wxString::Format("t%d", i).c_str(), m_sc_tool[i] ? (m_sc_tool[i]->GetValue() > 0 ? m_sc_tool[i]->GetValue() - 1 : -1) : (i < 2 ? 0 : -1));
             af(wxString::Format("r%d",   i).c_str(), m_tc_ratio[i] ? m_tc_ratio[i]->get_value() : 0.5);
             ai(wxString::Format("a%d",   i).c_str(), m_sc_angle[i] ? m_sc_angle[i]->GetValue()  : -1);
             ai(wxString::Format("fan%d", i).c_str(), m_sc_fan[i]   ? m_sc_fan[i]->GetValue()    : -1);
@@ -696,7 +905,12 @@ private:
             else if (key=="pa_val" && m_tc_pa_val)
                 m_tc_pa_val->ChangeValue(wxString::Format("%.3f", dv));
             else for (int i = 0; i < 3; ++i) {
-                if (key==wxString::Format("t%d",i)   && m_sc_tool[i])  m_sc_tool[i]->SetValue(lv);
+                if (key==wxString::Format("t%d",i) && m_sc_tool[i]) {
+                    // Stored as 0-based index (-1=disabled). Convert to F-notation for spinner.
+                    // Clamp to spinner's [min,max] so invalid stored values don't OOB.
+                    const int fv = (lv >= 0) ? static_cast<int>(lv) + 1 : 0;
+                    m_sc_tool[i]->SetValue(std::clamp(fv, m_sc_tool[i]->GetMin(), m_sc_tool[i]->GetMax()));
+                }
                 else if (key==wxString::Format("r%d",i)   && m_tc_ratio[i]) m_tc_ratio[i]->set_value(dv,true);
                 else if (key==wxString::Format("a%d",i)   && m_sc_angle[i]) m_sc_angle[i]->SetValue(lv);
                 else if (key==wxString::Format("fan%d",i) && m_sc_fan[i])   m_sc_fan[i]->SetValue(lv);
@@ -839,8 +1053,8 @@ private:
 
         grid->Add(new wxStaticText(this, wxID_ANY, _L("Pass")),    0, wxALIGN_CENTER_VERTICAL);
         {
-            auto* hdr = new wxStaticText(this, wxID_ANY, _L("Tool [T0\u2013T3]"));
-            hdr->SetToolTip(_L("Tool index (0-based). Swatch shows filament color."));
+            auto* hdr = new wxStaticText(this, wxID_ANY, _L("Filament [F1\u2013FN]"));
+            hdr->SetToolTip(_L("Filament number (1-based: F1 = T0, F2 = T1, \u2026). Matches MixedColor F-notation.\nPass 3: 0 = disabled."));
             grid->Add(hdr, 0, wxALIGN_CENTER_VERTICAL);
         }
         {
@@ -856,8 +1070,12 @@ private:
 
         const int    tools_def[3]  = {t1, t2, t3};
         const double ratios_def[3] = {r1, r2, r3};
-        const int    tool_min[3]   = {0, 0, -1};
+        // F-notation: F1=T0, F2=T1 … FN=T(N-1).  Pass 3 uses 0 = "disabled".
+        // tool_min: passes 1&2 require at least F1; pass 3 can be 0 (off).
+        const int    tool_min[3]   = {1, 1, 0};
+        const int    max_tool      = std::max(4, (int)m_colours.size());
 
+        // tool_color always takes a 0-based physical index.
         auto tool_color = [this](int t) -> wxColour {
             if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
                 return wxColour(m_colours[t]);
@@ -870,21 +1088,69 @@ private:
             if (i == 2) m_pass3_widgets.push_back(lbl);
             grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
 
-            const int safe_tool = std::max(tool_min[i], std::min(3, tools_def[i]));
+            // Convert stored 0-based tool index to F-notation (1-based display).
+            // Pass 3: stored -1 (disabled) → display 0; stored N → display N+1.
+            const int stored_t  = tools_def[i];
+            const int display_t = (stored_t >= 0) ? (stored_t + 1) : 0;
+            const int safe_tool = std::clamp(display_t, tool_min[i], max_tool);
             m_sc_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
                                            wxDefaultPosition, wxSize(50,-1),
-                                           wxSP_ARROW_KEYS, tool_min[i], 3, safe_tool);
-            m_swatch[i] = new ColorSwatch(this, tool_color(safe_tool));
+                                           wxSP_ARROW_KEYS, tool_min[i], max_tool, safe_tool);
+            // Swatch uses 0-based index → subtract 1 from F-notation; 0 → gray.
+            m_swatch[i] = new ColorSwatch(this, tool_color(safe_tool > 0 ? safe_tool - 1 : -1));
+            // NEOTKO_MULTIPASS_TAG_START — TD spinner: reads neotko_td_{tool+1} from app_config
+            {
+                double init_td = 0.1;
+                if (stored_t >= 0) {
+                    auto* ac = wxGetApp().app_config;
+                    const std::string td_val = ac ? ac->get("neotko_td_" + std::to_string(stored_t + 1)) : "";
+                    try { if (!td_val.empty()) init_td = std::stod(td_val); } catch (...) {}
+                    init_td = std::clamp(init_td, 0.0, 1.0);
+                }
+                m_sc_td[i] = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+                                                   wxDefaultPosition, wxSize(58,-1),
+                                                   wxSP_ARROW_KEYS, 0.0, 1.0, init_td, 0.01);
+                m_sc_td[i]->SetDigits(2);
+                m_sc_td[i]->SetToolTip(_L("TD (Transmission Distance) for this pass's filament.\n"
+                                           "0 = fully opaque, 1 = highly translucent.\n"
+                                           "Synced with the Beer-Lambert TD sliders in Surface Color Mixer.\n"
+                                           "Used by 'Suggest (TD + %)' to compute optimal pass order and ratios."));
+                m_sc_td[i]->Bind(wxEVT_TEXT, [this, i](wxCommandEvent&) {
+                    if (!m_sc_tool[i] || !m_sc_td[i]) return;
+                    const int fv = m_sc_tool[i]->GetValue();
+                    if (fv <= 0) return;
+                    auto* ac = wxGetApp().app_config;
+                    if (ac) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%.3f", m_sc_td[i]->GetValue());
+                        ac->set("neotko_td_" + std::to_string(fv), buf);
+                    }
+                });
+            }
+            // NEOTKO_MULTIPASS_TAG_END
             auto* tool_cell = new wxBoxSizer(wxHORIZONTAL);
             tool_cell->Add(m_sc_tool[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 3);
-            tool_cell->Add(m_swatch[i],  0, wxALIGN_CENTER_VERTICAL);
+            tool_cell->Add(m_swatch[i],  0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+            tool_cell->Add(new wxStaticText(this, wxID_ANY, _L("TD:")), 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
+            tool_cell->Add(m_sc_td[i],   0, wxALIGN_CENTER_VERTICAL);
             if (i == 2) {
                 m_pass3_widgets.push_back(m_sc_tool[i]);
                 m_pass3_widgets.push_back(m_swatch[i]);
+                m_pass3_widgets.push_back(m_sc_td[i]);
             }
             grid->Add(tool_cell, 0, wxALIGN_CENTER_VERTICAL);
             m_sc_tool[i]->Bind(wxEVT_SPINCTRL, [this, i, tool_color](wxSpinEvent& e) {
-                if (m_swatch[i]) m_swatch[i]->set_color(tool_color(e.GetValue()));
+                const int fv = e.GetValue(); // F-notation (1-based); 0 = disabled (pass 3 only)
+                if (m_swatch[i]) m_swatch[i]->set_color(tool_color(fv > 0 ? fv - 1 : -1));
+                // NEOTKO_MULTIPASS_TAG_START — reload TD for newly selected tool
+                if (m_sc_td[i] && fv > 0) {
+                    auto* ac = wxGetApp().app_config;
+                    const std::string td_val = ac ? ac->get("neotko_td_" + std::to_string(fv)) : "";
+                    double v = 0.1;
+                    try { if (!td_val.empty()) v = std::stod(td_val); } catch (...) {}
+                    m_sc_td[i]->SetValue(std::clamp(v, 0.0, 1.0));
+                }
+                // NEOTKO_MULTIPASS_TAG_END
             });
 
             const int safe_angle = (angles[i] >= -1 && angles[i] <= 359) ? angles[i] : -1;
@@ -973,6 +1239,201 @@ private:
             row_sum->Add(btn_eq, 0, wxALIGN_CENTER_VERTICAL);
             vs->Add(row_sum, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
         }
+        // NEOTKO_MULTIPASS_TAG_START — "Normalize to MixedColor %" row
+        if (!m_mix_options.empty()) {
+            auto* row_mc = new wxBoxSizer(wxHORIZONTAL);
+            row_mc->Add(new wxStaticText(this, wxID_ANY, _L("From MixedColor:")),
+                        0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+            wxArrayString combo_labels;
+            for (auto& opt : m_mix_options)
+                combo_labels.Add(wxString::FromUTF8(opt.label));
+            m_combo_mixed = new wxComboBox(this, wxID_ANY, combo_labels.empty() ? wxString() : combo_labels[0],
+                                           wxDefaultPosition, wxSize(160, -1),
+                                           combo_labels, wxCB_READONLY);
+            m_combo_mixed->SetToolTip(_L("Select a virtual MixedColor filament to read its blend recipe."));
+            row_mc->Add(m_combo_mixed, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+            auto* btn_mc = new wxButton(this, wxID_ANY, _L("Normalize %"),
+                                        wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+            btn_mc->SetToolTip(_L("Apply the selected MixedColor recipe proportions as layer_ratio for each pass.\n"
+                                  "Pass order (and tools) are kept as you set them; only the ratios are updated."));
+            btn_mc->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                if (!m_combo_mixed) return;
+                const int sel = m_combo_mixed->GetSelection();
+                if (sel < 0 || sel >= (int)m_mix_options.size()) return;
+                const auto& opt = m_mix_options[sel];
+                if (opt.tool_weights.empty()) return;
+
+                const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
+
+                // For each active pass, look up its tool in the recipe weights.
+                // If the tool is not in the recipe, weight = 0 (pass gets 0 flow).
+                std::vector<double> raw(passes, 0.0);
+                for (int i = 0; i < passes; ++i) {
+                    if (!m_sc_tool[i]) continue;
+                    const int tool_0based = m_sc_tool[i]->GetValue() - 1; // spinner is 1-based
+                    auto it = opt.tool_weights.find(tool_0based);
+                    if (it != opt.tool_weights.end())
+                        raw[i] = static_cast<double>(it->second);
+                }
+
+                // Normalize so Σ = 1.0
+                double total = 0.0;
+                for (double v : raw) total += v;
+                if (total < 1e-9) {
+                    wxMessageBox(_L("None of the current pass tools appear in the selected recipe.\n"
+                                    "Assign tools that match the recipe first."),
+                                 _L("Normalize — no match"), wxOK | wxICON_INFORMATION, this);
+                    return;
+                }
+                for (double& v : raw) v /= total;
+
+                // Push values into the ratio text controls
+                for (int i = 0; i < passes; ++i)
+                    if (m_tc_ratio[i])
+                        m_tc_ratio[i]->SetValue(wxString::Format("%.3f", raw[i]));
+                update_sum_display();
+            });
+            row_mc->Add(btn_mc, 0, wxALIGN_CENTER_VERTICAL);
+            vs->Add(row_mc, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
+        }
+        // NEOTKO_MULTIPASS_TAG_END
+        // NEOTKO_MULTIPASS_TAG_START — "Suggest (TD + %)" Beer-Lambert optimizer
+        {
+            auto* row_td = new wxBoxSizer(wxHORIZONTAL);
+            auto* btn_suggest = new wxButton(this, wxID_ANY, _L("Suggest (TD + %)"),
+                                             wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+            btn_suggest->SetToolTip(_L(
+                "Uses Beer-Lambert optics to find the optimal pass ORDER and layer RATIOS.\n"
+                "If a MixedColor is selected above: simulates the blend and minimises ΔE vs. that target colour.\n"
+                "Otherwise: sorts passes by TD ascending (most opaque first = pass 1 base coat).\n"
+                "TD values are read from the spinners next to each filament selector.\n"
+                "Also reorders angles, fan, speed and GCode entries to match the new order."));
+
+            // Result swatch + ΔE label (updated after each calculation)
+            auto* swatch_result = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(22,22));
+            swatch_result->SetBackgroundColour(wxColour(128,128,128));
+            swatch_result->SetToolTip(_L("Simulated result colour after Beer-Lambert blend."));
+            auto* lbl_de = new wxStaticText(this, wxID_ANY, _L("  ΔE: ---"));
+
+            btn_suggest->Bind(wxEVT_BUTTON, [this, swatch_result, lbl_de](wxCommandEvent&) {
+                const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
+                if (passes < 2) return;
+
+                struct PassState {
+                    int tool_0; double ratio, td; int angle, fan, speed;
+                    std::string gs, ge;
+                };
+                std::vector<PassState> states(passes);
+                for (int i = 0; i < passes; ++i) {
+                    states[i].tool_0 = m_sc_tool[i]  ? m_sc_tool[i]->GetValue() - 1 : i;
+                    states[i].ratio  = m_tc_ratio[i]  ? m_tc_ratio[i]->get_value()  : 0.5;
+                    states[i].td     = m_sc_td[i]     ? m_sc_td[i]->GetValue()      : 0.1;
+                    states[i].angle  = m_sc_angle[i]  ? m_sc_angle[i]->GetValue()   : -1;
+                    states[i].fan    = m_sc_fan[i]    ? m_sc_fan[i]->GetValue()     : -1;
+                    states[i].speed  = m_sc_speed[i]  ? m_sc_speed[i]->GetValue()   : 100;
+                    states[i].gs     = m_tc_gstart[i] ? m_tc_gstart[i]->GetValue().ToStdString() : "";
+                    states[i].ge     = m_tc_gend[i]   ? m_tc_gend[i]->GetValue().ToStdString()   : "";
+                }
+
+                // Build per-pass color + TD arrays
+                std::vector<std::array<double,3>> colors(passes);
+                std::vector<double> tds(passes);
+                for (int i = 0; i < passes; ++i) {
+                    const int t = states[i].tool_0;
+                    wxColour wc = (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
+                                  ? wxColour(m_colours[t]) : wxColour(128,128,128);
+                    colors[i] = {wc.Red()/255.0, wc.Green()/255.0, wc.Blue()/255.0};
+                    tds[i]    = std::max(0.01, states[i].td);
+                }
+
+                MpSuggestResult res;
+                bool used_bl = false;
+
+                // Try Beer-Lambert with MixedColor target
+                if (m_combo_mixed) {
+                    const int sel = m_combo_mixed->GetSelection();
+                    if (sel >= 0 && sel < (int)m_mix_options.size()) {
+                        const std::string& dc = m_mix_options[sel].display_color;
+                        if (dc.size() >= 7 && dc[0] == '#') {
+                            unsigned long rgb = 0;
+                            if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16)) {
+                                res = mp_suggest(colors, tds,
+                                                 ((rgb>>16)&0xFF)/255.0,
+                                                 ((rgb>> 8)&0xFF)/255.0,
+                                                 ( rgb     &0xFF)/255.0,
+                                                 0.05, false);
+                                used_bl = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!used_bl) {
+                    // Simple TD-ascending sort (most opaque → pass 1)
+                    res.order.resize(passes); std::iota(res.order.begin(), res.order.end(), 0);
+                    std::stable_sort(res.order.begin(), res.order.end(),
+                        [&states](int a, int b){ return states[a].td < states[b].td; });
+                    res.ratios.assign(passes, 1.0 / passes);
+                    // Compute simulated result with these ratios
+                    std::vector<MpBLLayer> stack;
+                    for (int idx : res.order)
+                        stack.push_back({colors[idx][0], colors[idx][1], colors[idx][2],
+                                         tds[idx], res.ratios[0]});
+                    auto [r,g,bv] = mp_beer_blend(stack);
+                    res.res_r=r; res.res_g=g; res.res_b=bv;
+                    res.score = 999.0;
+                }
+
+                // Apply reordering to all spinners
+                std::vector<PassState> reordered;
+                reordered.reserve(passes);
+                for (int idx : res.order) reordered.push_back(states[idx]);
+
+                for (int i = 0; i < passes; ++i) {
+                    const auto& s = reordered[i];
+                    if (m_sc_tool[i])  m_sc_tool[i]->SetValue(s.tool_0 + 1);
+                    if (m_tc_ratio[i]) m_tc_ratio[i]->set_value(res.ratios[i], true);
+                    if (m_sc_angle[i]) m_sc_angle[i]->SetValue(s.angle);
+                    if (m_sc_fan[i])   m_sc_fan[i]->SetValue(s.fan);
+                    if (m_sc_speed[i]) m_sc_speed[i]->SetValue(s.speed);
+                    if (m_sc_td[i])    m_sc_td[i]->SetValue(s.td);
+                    if (m_tc_gstart[i]) m_tc_gstart[i]->SetValue(wxString::FromUTF8(s.gs));
+                    if (m_tc_gend[i])   m_tc_gend[i]->SetValue(wxString::FromUTF8(s.ge));
+                    const int t = s.tool_0;
+                    if (m_swatch[i]) {
+                        m_swatch[i]->set_color((t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
+                                               ? wxColour(m_colours[t]) : wxColour(128,128,128));
+                    }
+                }
+                update_sum_display();
+                update_preview();
+
+                // Update inline result display
+                const wxColour rc(static_cast<unsigned char>(std::clamp(res.res_r*255,0.0,255.0)),
+                                  static_cast<unsigned char>(std::clamp(res.res_g*255,0.0,255.0)),
+                                  static_cast<unsigned char>(std::clamp(res.res_b*255,0.0,255.0)));
+                swatch_result->SetBackgroundColour(rc);
+                swatch_result->Refresh();
+                const wxString de_str = used_bl
+                    ? wxString::Format(_L("  ΔE: %.1f"), res.score)
+                    : _L("  (sorted by TD)");
+                lbl_de->SetLabel(de_str);
+                if (used_bl)
+                    lbl_de->SetForegroundColour(res.score < 5.0  ? wxColour(30,140,30) :
+                                                res.score < 10.0 ? wxColour(190,130,0) :
+                                                                   wxColour(180,40,40));
+                else
+                    lbl_de->SetForegroundColour(wxColour(80,80,80));
+                lbl_de->Refresh();
+                Layout();
+            });
+
+            row_td->Add(btn_suggest, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+            row_td->Add(swatch_result, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+            row_td->Add(lbl_de, 1, wxALIGN_CENTER_VERTICAL);
+            vs->Add(row_td, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
+        }
+        // NEOTKO_MULTIPASS_TAG_END
         {
             auto* hint = new wxStaticText(this, wxID_ANY,
                 _L("\u03a3 \u2248 1.0 = full layer height covered. Each pass occupies its ratio of the layer height."));
@@ -1077,7 +1538,7 @@ private:
 
 // NEOTKO_PATHBLEND_TAG_START
 // Minimal dialog for configuring MultiPathBlend (Opción 4).
-// Controls: num_passes (1-4), tool per pass (0-based index), min_ratio (%).
+// Controls: num_passes (1-4), filament per pass (F-notation: F1=T0, displayed 1-based, stored 0-based), min_ratio (%).
 // Surface filter is set by SurfaceColorMixerDialog combos — not duplicated here.
 class PathBlendDialog : public wxDialog
 {
@@ -1121,29 +1582,34 @@ public:
             return wxColour(128, 128, 128);
         };
 
-        // 3 columns: label | spinctrl | color swatch (updates on change)
+        // 3 columns: label | spinctrl (F1-based) | color swatch (updates on change)
+        // F-notation: F1 = T0, F2 = T1, … — consistent with MixedColor and ColorMix.
+        // Stored config values are 0-based; displayed here as 1-based Fn.
         auto* grid = new wxFlexGridSizer(4, 3, 4, 8);
+        const int pb_max_tool = std::max(4, (int)fcolors.size()); // F1..FN
 
         for (int i = 0; i < 4; ++i) {
             grid->Add(new wxStaticText(this, wxID_ANY,
                 wxString::Format(_L("Pass %d:"), i+1)),
                 0, wxALIGN_CENTER_VERTICAL);
 
-            const int init_t = std::clamp(init_tools[i], 0, 15);
+            // Convert stored 0-based index to F-notation (1-based) for display.
+            const int init_t = std::clamp(init_tools[i] + 1, 1, pb_max_tool);
             m_sc_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
                                            wxDefaultPosition, wxSize(60,-1),
-                                           wxSP_ARROW_KEYS, 0, 15, init_t);
+                                           wxSP_ARROW_KEYS, 1, pb_max_tool, init_t);
+            m_sc_tool[i]->SetToolTip(_L("Filament number (F1 = T0, F2 = T1, \u2026). Matches MixedColor F-notation."));
             grid->Add(m_sc_tool[i], 0, wxALIGN_CENTER_VERTICAL);
 
-            // Swatch initialized from the actual tool color (not row index)
-            m_swatch_pb[i] = new ColorSwatch(this, pb_hex_col(init_t));
+            // Swatch: pb_hex_col takes 0-based; init_t is 1-based → subtract 1.
+            m_swatch_pb[i] = new ColorSwatch(this, pb_hex_col(init_t - 1));
             grid->Add(m_swatch_pb[i], 0, wxALIGN_CENTER_VERTICAL);
 
-            // Update swatch when the tool index changes
+            // Update swatch when the filament number changes
             m_sc_tool[i]->Bind(wxEVT_SPINCTRL,
                 [this, i, fcolors_cap = fcolors](wxSpinEvent& e) {
                     if (!m_swatch_pb[i]) return;
-                    const int t = e.GetValue();
+                    const int t = e.GetValue() - 1; // F-notation → 0-based for color lookup
                     if (t >= 0 && t < (int)fcolors_cap.size() && !fcolors_cap[t].empty()) {
                         unsigned long rgb = 0;
                         wxString s = wxString::FromUTF8(fcolors_cap[t]);
@@ -1217,8 +1683,9 @@ public:
     }
 
     int   get_num_passes()  const { return m_sc_passes->GetValue(); }
+    // Spinners display F-notation (F1=1, F2=2, …); config stores 0-based (T0=0, T1=1, …).
     int   get_tool(int i)   const {
-        return (i >= 0 && i < 4 && m_sc_tool[i]) ? m_sc_tool[i]->GetValue() : i;
+        return (i >= 0 && i < 4 && m_sc_tool[i]) ? m_sc_tool[i]->GetValue() - 1 : i;
     }
     float get_min_ratio()   const {
         return static_cast<float>(m_sl_min->GetValue()) / 100.f;
@@ -1312,7 +1779,16 @@ private:
     wxChoice*         m_choice_penu_zone     = nullptr;
     wxSpinCtrl*       m_sc_filament_filter   = nullptr;
     wxSpinCtrlDouble* m_sc_min_length        = nullptr;
+    wxCheckBox*       m_chk_use_virtual      = nullptr;
     // NEOTKO_COLORMIX_TAG_END
+    // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint optimizer)
+    wxComboBox*    m_bs_combo_target = nullptr; // virtual MixedColor target picker
+    wxRadioButton* m_bs_rb_top      = nullptr; // "Top layer only" mode
+    wxRadioButton* m_bs_rb_joint    = nullptr; // "Top + Penultimate" mode
+    wxPanel*       m_bs_swatch      = nullptr; // simulated result colour
+    wxStaticText*  m_bs_lbl_score   = nullptr; // "ΔE: X.X" inline result
+    std::vector<Slic3r::ColorMixOption> m_bs_mix_opts; // virtual-only options cache
+    // NEOTKO_MULTIPASS_TAG_END
 
     // ------------------------------------------------------------------ helpers
 
@@ -1477,7 +1953,10 @@ private:
                 ? "interlayer_colormix_pattern_top"
                 : "interlayer_colormix_pattern_penultimate";
             const std::string cur_pat = m_config->opt_string(pat_key);
-            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat);
+            bool use_virtual = false;
+            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+                use_virtual = o->value;
+            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat, use_virtual);
             if (dlg.ShowModal() == wxID_OK) {
                 if (auto* o = m_config->option<ConfigOptionString>(pat_key))
                     o->value = dlg.get_pattern();
@@ -1522,6 +2001,21 @@ private:
             if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_pa_mode"))        pa_mode    =o->value;
             if (auto* o=m_config->option<ConfigOptionFloat>("multipass_pa_value"))       pa_val=(double)o->value;
 
+            // NEOTKO_MULTIPASS_TAG_START — build virtual-only ColorMixOption list for "Normalize to MixedColor %"
+            std::vector<Slic3r::ColorMixOption> mp_mix_opts;
+            {
+                std::string mp_mixed_defs;
+                if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
+                    mp_mixed_defs = o->value;
+                if (!mp_mixed_defs.empty()) {
+                    auto all = Slic3r::SurfaceColorMix::get_mix_options(mp_mixed_defs, m_fcolors);
+                    for (auto& opt : all)
+                        if (!opt.is_physical)
+                            mp_mix_opts.push_back(opt);
+                }
+            }
+            // NEOTKO_MULTIPASS_TAG_END
+
             MultiPassConfigDialog dlg(this,
                 cur_passes, cur_surface,
                 cur_tool1, cur_tool2, cur_tool3,
@@ -1530,7 +2024,7 @@ private:
                 cur_f1, cur_f2, cur_f3,
                 cur_s1, cur_s2, cur_s3,
                 gs1, gs2, gs3, ge1, ge2, ge3,
-                m_fcolors, pa_mode, pa_val);
+                m_fcolors, mp_mix_opts, pa_mode, pa_val);
             if (dlg.ShowModal() == wxID_OK) {
                 auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v;   m_on_change(k); };
                 auto wb = [&](const char* k, bool v) { if(auto*o=m_config->option<ConfigOptionBool> (k))o->value=v;   m_on_change(k); };
@@ -1660,6 +2154,11 @@ private:
                  m_sc_filament_filter ? m_sc_filament_filter->GetValue() : 0);
             wf_z("interlayer_colormix_min_length",
                  m_sc_min_length ? m_sc_min_length->GetValue() : 1.0);
+            // NEOTKO_COLORMIX_TAG_START — use_virtual write-back
+            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+                o->value = m_chk_use_virtual && m_chk_use_virtual->GetValue();
+            m_on_change("interlayer_colormix_use_virtual");
+            // NEOTKO_COLORMIX_TAG_END
         }
         // NEOTKO_COLORMIX_TAG_END
 
@@ -1856,9 +2355,207 @@ private:
                 shared_sb->Add(row, 0, wxEXPAND | wxALL, PAD / 2);
             }
 
+            // ---- Use virtual (Mixed Filament) colors ----
+            // NEOTKO_COLORMIX_TAG_START — use_virtual checkbox
+            {
+                bool cur_uv = false;
+                if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+                    cur_uv = o->value;
+                m_chk_use_virtual = new wxCheckBox(this, wxID_ANY,
+                    _L("Use Mixed Filament colors in pattern"));
+                m_chk_use_virtual->SetValue(cur_uv);
+                m_chk_use_virtual->SetToolTip(
+                    _L("When enabled, the pattern editor shows Mixed Filament virtual colors\n"
+                       "(e.g. 'F1+F2') as clickable buttons alongside physical filaments.\n"
+                       "Pattern digits 5-9 reference these virtual colors.\n"
+                       "Requires Mixed Filaments to be defined in the filament panel."));
+                shared_sb->Add(m_chk_use_virtual, 0, wxALL, PAD / 2);
+            }
+            // NEOTKO_COLORMIX_TAG_END
+
             vs->Add(shared_sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
         }
         // NEOTKO_COLORMIX_TAG_END
+
+        // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint Top+Penultimate optimizer)
+        {
+            // Build virtual-only MixedColor options from mixed_filament_definitions
+            {
+                std::string mixed_defs;
+                if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
+                    mixed_defs = o->value;
+                if (!mixed_defs.empty()) {
+                    auto all = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
+                    for (auto& opt : all)
+                        if (!opt.is_physical)
+                            m_bs_mix_opts.push_back(opt);
+                }
+            }
+
+            auto* bs_sb = new wxStaticBoxSizer(wxVERTICAL, this,
+                _L("Blend Suggestion \u2014 Beer-Lambert optimizer"));
+
+            auto* note = new wxStaticText(this, wxID_ANY,
+                _L("Calculates optimal pass ORDER and layer RATIOS to approximate a MixedColor target.\n"
+                   "Top only: single layer blend.  Top + Penultimate: same passes on both layers\n"
+                   "(doubles physical material \u2014 allows smaller per-pass ratios)."));
+            note->SetForegroundColour(wxColour(80,80,80));
+            bs_sb->Add(note, 0, wxALL, PAD/2);
+
+            // ---- Target picker row ----
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Target colour:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+                wxArrayString labels;
+                for (auto& opt : m_bs_mix_opts)
+                    labels.Add(wxString::FromUTF8(opt.label));
+                if (labels.IsEmpty()) labels.Add(_L("(no MixedColor defined)"));
+                m_bs_combo_target = new wxComboBox(this, wxID_ANY,
+                    labels.IsEmpty() ? wxString() : labels[0],
+                    wxDefaultPosition, wxSize(180,-1), labels, wxCB_READONLY);
+                m_bs_combo_target->SetToolTip(_L("Select the virtual MixedColor whose display colour is the blend target."));
+                m_bs_combo_target->Enable(!m_bs_mix_opts.empty());
+                row->Add(m_bs_combo_target, 1, wxALIGN_CENTER_VERTICAL);
+                bs_sb->Add(row, 0, wxEXPAND|wxALL, PAD/2);
+            }
+
+            // ---- Mode radio buttons ----
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Mode:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 8);
+                m_bs_rb_top = new wxRadioButton(this, wxID_ANY, _L("Top layer only"),
+                                                wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
+                m_bs_rb_joint = new wxRadioButton(this, wxID_ANY,
+                    _L("Top + Penultimate  (same passes on both \u2192 double material)"));
+                m_bs_rb_joint->SetValue(true); // default: joint mode
+                m_bs_rb_top->SetToolTip(_L("MultiPass applies to top surface only (multipass_surface=1)."));
+                m_bs_rb_joint->SetToolTip(_L(
+                    "MultiPass applies to both top AND penultimate (multipass_surface=0).\n"
+                    "The same passes run twice \u2014 Beer-Lambert models this as a stacked double layer.\n"
+                    "Enables smaller per-pass ratios while maintaining physical adhesion."));
+                row->Add(m_bs_rb_top,   0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
+                row->Add(m_bs_rb_joint, 0, wxALIGN_CENTER_VERTICAL);
+                bs_sb->Add(row, 0, wxALL, PAD/2);
+            }
+
+            // ---- Calculate button + result display ----
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                auto* btn_calc = new wxButton(this, wxID_ANY, _L("Calculate \u25b6"),
+                                              wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+                btn_calc->Enable(!m_bs_mix_opts.empty());
+
+                m_bs_swatch = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(22,22));
+                m_bs_swatch->SetBackgroundColour(wxColour(128,128,128));
+                m_bs_swatch->SetToolTip(_L("Simulated blend colour after Beer-Lambert optimisation."));
+
+                m_bs_lbl_score = new wxStaticText(this, wxID_ANY, _L("  ΔE: ---"));
+                m_bs_lbl_score->SetToolTip(_L("CIE76 colour distance between simulated result and target.\n"
+                                              "<5 excellent, 5\u201310 good, >10 poor approximation."));
+
+                btn_calc->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                    if (m_bs_mix_opts.empty() || !m_bs_combo_target) return;
+                    const int sel = m_bs_combo_target->GetSelection();
+                    if (sel < 0 || sel >= (int)m_bs_mix_opts.size()) return;
+
+                    const auto& opt = m_bs_mix_opts[sel];
+                    const std::string& dc = opt.display_color;
+                    if (dc.size() < 7 || dc[0] != '#') return;
+                    unsigned long rgb = 0;
+                    if (!wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16)) return;
+                    const double tr = ((rgb>>16)&0xFF)/255.0;
+                    const double tg = ((rgb>> 8)&0xFF)/255.0;
+                    const double tb = ( rgb     &0xFF)/255.0;
+
+                    // Read current pass config from m_config
+                    int   passes = 2, cur_t[3] = {0,1,-1};
+                    float cur_r[3] = {0.5f,0.5f,0.34f};
+                    if (auto* o = m_config->option<ConfigOptionInt>  ("multipass_num_passes"))    passes   = o->value;
+                    if (auto* o = m_config->option<ConfigOptionInt>  ("multipass_tool_1"))        cur_t[0] = o->value;
+                    if (auto* o = m_config->option<ConfigOptionInt>  ("multipass_tool_2"))        cur_t[1] = o->value;
+                    if (auto* o = m_config->option<ConfigOptionInt>  ("multipass_tool_3"))        cur_t[2] = o->value;
+                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_1")) cur_r[0] = o->value;
+                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_2")) cur_r[1] = o->value;
+                    if (auto* o = m_config->option<ConfigOptionFloat>("multipass_width_ratio_3")) cur_r[2] = o->value;
+                    passes = std::clamp(passes, 1, 3);
+
+                    // Build per-pass color + TD arrays
+                    std::vector<std::array<double,3>> colors(passes);
+                    std::vector<double> tds(passes);
+                    auto* ac = wxGetApp().app_config;
+                    for (int i = 0; i < passes; ++i) {
+                        const int t = cur_t[i];
+                        wxColour wc = (t >= 0 && t < (int)m_fcolors.size() && !m_fcolors[t].empty())
+                                      ? hex_to_col(m_fcolors[t]) : wxColour(128,128,128);
+                        colors[i] = {wc.Red()/255.0, wc.Green()/255.0, wc.Blue()/255.0};
+                        // TD: read from m_td if in range, else from app_config
+                        double td = 0.1;
+                        if (t >= 0 && t < 4) {
+                            td = static_cast<double>(m_td[t]);
+                        } else if (t >= 0 && ac) {
+                            const std::string tv = ac->get("neotko_td_" + std::to_string(t+1));
+                            try { if (!tv.empty()) td = std::stod(tv); } catch(...) {}
+                        }
+                        tds[i] = std::max(0.01, td);
+                    }
+
+                    const bool joint = m_bs_rb_joint && m_bs_rb_joint->GetValue();
+                    const MpSuggestResult res = mp_suggest(colors, tds, tr, tg, tb,
+                                                           0.05, joint);
+
+                    // Write suggested config: reordered tools + optimised ratios
+                    const char* tool_keys[3]  = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
+                    const char* ratio_keys[3] = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
+                    for (int i = 0; i < passes; ++i) {
+                        const int orig_idx = res.order[i];
+                        const int new_tool = cur_t[orig_idx];
+                        if (auto* o = m_config->option<ConfigOptionInt>  (tool_keys[i]))  o->value = new_tool;
+                        m_on_change(tool_keys[i]);
+                        if (auto* o = m_config->option<ConfigOptionFloat>(ratio_keys[i])) o->value = static_cast<float>(res.ratios[i]);
+                        m_on_change(ratio_keys[i]);
+                    }
+
+                    // Activate MultiPass on the appropriate surface(s)
+                    const int new_srf = joint ? 0 : 1; // 0=both, 1=top only
+                    if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled")) o->value = true;
+                    m_on_change("multipass_enabled");
+                    if (auto* o = m_config->option<ConfigOptionInt> ("multipass_surface")) o->value = new_srf;
+                    m_on_change("multipass_surface");
+
+                    // Update combos to reflect MultiPass activation
+                    if (m_combo_top)  m_combo_top->SetSelection(EFF_MP);
+                    if (m_combo_penu) m_combo_penu->SetSelection(joint ? EFF_MP : m_penu_eff);
+                    m_top_eff  = EFF_MP;
+                    if (joint) m_penu_eff = EFF_MP;
+
+                    // Update inline result display
+                    const wxColour rc(
+                        static_cast<unsigned char>(std::clamp(res.res_r*255.0,0.0,255.0)),
+                        static_cast<unsigned char>(std::clamp(res.res_g*255.0,0.0,255.0)),
+                        static_cast<unsigned char>(std::clamp(res.res_b*255.0,0.0,255.0)));
+                    if (m_bs_swatch) { m_bs_swatch->SetBackgroundColour(rc); m_bs_swatch->Refresh(); }
+                    if (m_bs_lbl_score) {
+                        m_bs_lbl_score->SetLabel(wxString::Format(_L("  ΔE: %.1f"), res.score));
+                        m_bs_lbl_score->SetForegroundColour(
+                            res.score < 5.0  ? wxColour(30,140,30) :
+                            res.score < 10.0 ? wxColour(190,130,0) : wxColour(180,40,40));
+                        m_bs_lbl_score->Refresh();
+                    }
+                    update_ui();
+                    Layout();
+                });
+
+                row->Add(btn_calc,       0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+                row->Add(m_bs_swatch,    0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                row->Add(m_bs_lbl_score, 1, wxALIGN_CENTER_VERTICAL);
+                bs_sb->Add(row, 0, wxALL, PAD/2);
+            }
+
+            vs->Add(bs_sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        }
+        // NEOTKO_MULTIPASS_TAG_END
 
         // ---- OK / Cancel ----
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
