@@ -23,6 +23,19 @@ on:
         description: 'Publish GitHub Release after build'
         type: boolean
         default: false
+      # ── Release metadata (only used when publish-release is true) ──────────
+      release-tag:
+        description: 'Release tag (e.g. v2.3.0). Leave empty to auto-detect from version.inc'
+        type: string
+        default: ''
+      release-title:
+        description: 'Release title. Leave empty to use default title'
+        type: string
+        default: ''
+      release-notes:
+        description: 'Release notes / changelog (Markdown). Leave empty to auto-detect from CHANGELOG file'
+        type: string
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -106,29 +119,48 @@ jobs:
       id: release_meta
       shell: bash
       run: |
-        ref_name="${GITHUB_REF_NAME}"
-        safe_ref=$(printf '%s' "$ref_name" | tr '/ ' '--' | tr -cd '[:alnum:]._-' )
+        # ── Version (always read from version.inc as the source of truth) ───
         version=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
-        tag="v${version}"
-        title="Snapmaker Orca Full Spectrum v${version}"
 
-        notes_content=""
-        for notes_file in \
-          "CHANGELOG_v${version}.md" \
-          "RELEASE_NOTES_v${version}.md"; do
-          if [ -f "$notes_file" ]; then
-            notes_content=$(cat "$notes_file")
-            break
+        # ── Tag ─────────────────────────────────────────────────────────────
+        # Use the manual input if provided, otherwise fall back to version.inc
+        if [[ -n "${{ inputs.release-tag }}" ]]; then
+          tag="${{ inputs.release-tag }}"
+        else
+          tag="v${version}"
+        fi
+
+        # ── Title ───────────────────────────────────────────────────────────
+        # Use the manual input if provided, otherwise build the default title
+        if [[ -n "${{ inputs.release-title }}" ]]; then
+          title="${{ inputs.release-title }}"
+        else
+          title="Snapmaker Orca Full Spectrum v${version}"
+        fi
+
+        # ── Release notes ───────────────────────────────────────────────────
+        # Priority: 1) manual input  2) CHANGELOG/RELEASE_NOTES file  3) auto-generated
+        if [[ -n "${{ inputs.release-notes }}" ]]; then
+          notes_content="${{ inputs.release-notes }}"
+        else
+          notes_content=""
+          for notes_file in \
+            "CHANGELOG_v${version}.md" \
+            "RELEASE_NOTES_v${version}.md"; do
+            if [ -f "$notes_file" ]; then
+              notes_content=$(cat "$notes_file")
+              break
+            fi
+          done
+
+          if [ -z "$notes_content" ]; then
+            printf -v notes_content '%s\n\n%s\n%s\n%s\n\n%s' \
+              "Automated build for ${GITHUB_REPOSITORY}." \
+              "- Ref: ${GITHUB_REF_NAME}" \
+              "- Commit: ${GITHUB_SHA}" \
+              "- Version: V${version}" \
+              "macOS artifacts published from this fork are unsigned and not notarized."
           fi
-        done
-
-        if [ -z "$notes_content" ]; then
-          printf -v notes_content '%s\n\n%s\n%s\n%s\n\n%s' \
-            "Automated build for ${GITHUB_REPOSITORY}." \
-            "- Ref: ${GITHUB_REF_NAME}" \
-            "- Commit: ${GITHUB_SHA}" \
-            "- Version: V${version}" \
-            "macOS artifacts published from this fork are unsigned and not notarized."
         fi
 
         {
