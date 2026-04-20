@@ -1146,13 +1146,26 @@ double PathBlendPassConfig::ratio_at(int p, double t) const
     } else if (num_passes == 2) {
         // Pass 0 (T0, dominant at t=0): apply min_ratio floor so it never
         // under-extrudes on very thin paths at the top of the surface.
-        // Pass 1 (T1, dominant at t=1): ALWAYS pure geometry (t), independent
-        // of min_ratio. Using (1 - flow_0) instead would propagate the min_ratio
-        // boost into T1 causing over-extrusion when t < min_ratio. See original.
+        // Pass 1 (T1, dominant at t=1): exact complement of pass 0 actual flow.
+        //
+        // NEOTKO_FIX: pass 1 was previously `r = t` (pure geometry), which ignored
+        // the min_ratio boost applied to pass 0. When min_ratio > 0 and t < min_ratio,
+        // pass 0 deposits more than (1-t), but pass 1 still deposited t → sum > 1 →
+        // over-extrusion. Pass 1 must mirror the actual pass 0 output so that for
+        // every path: flow_0 + flow_1 == 1.0 exactly.
+        //
+        // Visually: pass 1 fills the gap left by pass 0 up to Z_nom.
+        // When pass 0 has deposited almost nothing (t≈0, left of surface), pass 1
+        // fills almost the full layer. When pass 0 has deposited everything (t≈1,
+        // right of surface), pass 1 deposits nothing. Sum is always 1.0.
+        //
+        // multipass_enabled path is NOT affected: it uses flow=1.0 unconditionally
+        // and never reaches ratio_at(). This fix is standalone PathBlend only.
         if (p == 0) {
             r = std::max(static_cast<double>(min_ratio), 1.0 - t);
         } else {
-            r = t;  // pure geometry — never touched by min_ratio
+            // Complement of the actual pass 0 flow (accounts for min_ratio floor).
+            r = 1.0 - std::max(static_cast<double>(min_ratio), 1.0 - t);
         }
         return r;  // early-return: min_ratio floor already applied above, don't double-apply below
     } else if (num_passes == 3) {

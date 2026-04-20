@@ -1662,6 +1662,12 @@ wxBoxSizer* MainFrame::create_side_tools()
             const bool next = !wxGetApp().app_config->get_bool("neotko_libre_mode");
             wxGetApp().app_config->set_bool("neotko_libre_mode", next);
             wxGetApp().app_config->save();
+            // NEOTKO_LIBRE_TAG_START — update slicing pipeline cache immediately after toggle
+            // Must happen before any schedule_background_process() triggered below,
+            // so the cache is consistent when update_background_process() runs.
+            if (m_plater)
+                m_plater->set_neotko_libre_cached(next);
+            // NEOTKO_LIBRE_TAG_END
             m_neotko_libre_btn->SetLabel(next ? "Neotko LM: On" : "Neotko LM: Off");
             m_neotko_libre_btn->Refresh();
             // Show/hide refresh button with LM state

@@ -390,6 +390,10 @@ public:
     // NEOTKO_LIBRE_TAG_START
     void float_params_panel(bool do_float);
     void save_window_layout();
+    // Sets the cached Libre Mode state used by the slicing pipeline.
+    // Call this from MainFrame toggle button AFTER app_config->set_bool(),
+    // and BEFORE any schedule_background_process() is triggered.
+    void set_neotko_libre_cached(bool v);
     // NEOTKO_LIBRE_TAG_END
 
     // Called after the Preferences dialog is closed and the program settings are saved.

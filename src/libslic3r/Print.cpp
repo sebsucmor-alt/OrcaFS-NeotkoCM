@@ -1294,10 +1294,45 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             // NEOTKO_LIBRE_TAG_START
             // Proxy: neotko_disable_bridge_infill is always injected true/false by Plater
             // mirroring the Libre Mode toggle — safe to use here without GUI dependency.
-            const bool _neotko_libre = !m_objects.empty() && [&]() -> bool {
-                const auto* f = m_objects[0]->config().option<ConfigOptionBool>("neotko_disable_bridge_infill");
-                return f && f->value;
+            //
+            // BUG FIX (move/copy race): Previously read only m_objects[0], which could be a
+            // freshly added/copied object whose config hasn't been populated by Print::apply()
+            // yet in this cycle — causing _neotko_libre=false and a spurious prime tower error.
+            // Fix: scan ALL objects; if any one has the flag set, Libre Mode is active.
+            // Rationale: Plater always injects neotko_disable_bridge_infill into _libre_cfg
+            // before apply(), but apply() distributes config to existing objects first — a brand
+            // new PrintObject (from copy/move) may not have received it yet when validate() runs.
+            // A second apply() cycle fixes it (why "moving again" resolved the bug), but now we
+            // don't rely on that — any object with the flag is sufficient proof LM is on.
+            const bool _neotko_libre = [&]() -> bool {
+                for (const PrintObject* obj : m_objects) {
+                    const auto* f = obj->config().option<ConfigOptionBool>("neotko_disable_bridge_infill");
+                    if (f && f->value) return true;
+                }
+                return false;
             }();
+            // DEBUG — NEOTKO_LIBRE_TAG — remove when bug confirmed fixed
+            // Dumps per-object flag state to /tmp/libre_validate.log when ORCA_DEBUG_LIBRE=1
+            // Each line: [validate_libre] obj=<name> flag=<0/1/missing> → result _neotko_libre=<0/1>
+            // If any line shows flag=0 or flag=missing AND _neotko_libre=0 while LM is ON → race confirmed.
+            do {
+                const char* _dbg_env = std::getenv("ORCA_DEBUG_LIBRE");
+                if (!_dbg_env || _dbg_env[0] != '1') break;
+                FILE* _dbg_f = fopen("/tmp/libre_validate.log", "a");
+                if (!_dbg_f) break;
+                fprintf(_dbg_f, "[validate_libre] --- validate() called, m_objects=%zu  _neotko_libre=%d ---\n",
+                    m_objects.size(), (int)_neotko_libre);
+                for (size_t _di = 0; _di < m_objects.size(); ++_di) {
+                    const PrintObject* _dobj = m_objects[_di];
+                    const auto* _df = _dobj->config().option<ConfigOptionBool>("neotko_disable_bridge_infill");
+                    const char* _dname = _dobj->model_object() ? _dobj->model_object()->name.c_str() : "?";
+                    if (!_df)
+                        fprintf(_dbg_f, "[validate_libre]   obj[%zu]=%s  flag=MISSING\n", _di, _dname);
+                    else
+                        fprintf(_dbg_f, "[validate_libre]   obj[%zu]=%s  flag=%d\n", _di, _dname, (int)_df->value);
+                }
+                fclose(_dbg_f);
+            } while(0);
             // NEOTKO_LIBRE_TAG_END
 
             for (size_t i = 1; i < m_objects.size(); ++ i) {

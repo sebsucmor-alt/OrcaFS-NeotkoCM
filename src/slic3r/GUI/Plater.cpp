@@ -8544,6 +8544,20 @@ struct Plater::priv
     size_t m_last_auto_gradient_prompt_physical_count = 0;
     bool   m_last_auto_gradient_prompt_accepted = false;
 
+    // NEOTKO_LIBRE_TAG_START — cached Libre Mode state
+    // app_config->get_bool("neotko_libre_mode") can return stale/wrong values mid-cycle
+    // because Preferences checkbox writes app_config on panel refresh, and save() can
+    // race with update_background_process(). This cache is the single source of truth
+    // inside the slicing pipeline. It is set ONLY via set_neotko_libre_cached() which
+    // must be called from the toggle button handler in MainFrame after set_bool().
+    // Initialized in priv constructor from app_config (safe: no concurrent access yet).
+    bool m_neotko_libre_cached = false;
+    void set_neotko_libre_cached(bool v) {
+        m_neotko_libre_cached = v;
+        BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_LIBRE] set_neotko_libre_cached → " << v;
+    }
+    // NEOTKO_LIBRE_TAG_END
+
     priv(Plater *q, MainFrame *main_frame);
     ~priv();
     bool confirm_auto_generated_gradients(wxWindow *parent, size_t num_physical);
@@ -9053,6 +9067,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     , partplate_list(this->q, &model)
 {
     m_is_dark = wxGetApp().app_config->get("dark_color_mode") == "1";
+    // NEOTKO_LIBRE_TAG_START — init cache from app_config (safe: single-threaded at ctor time)
+    m_neotko_libre_cached = wxGetApp().app_config->get_bool("neotko_libre_mode");
+    BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_LIBRE] priv ctor: m_neotko_libre_cached=" << m_neotko_libre_cached;
+    // NEOTKO_LIBRE_TAG_END
 
     m_aui_mgr.SetManagedWindow(q);
     m_aui_mgr.SetDockSizeConstraint(1, 1);
@@ -11863,9 +11881,24 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // Must always set the value (ON or OFF) so Print::apply() doesn't inherit a stale true
     // from a previous Libre Mode slice (neotko_disable_bridge_infill is not in s_Preset_print_options
     // so full_config() never resets it — we must do it explicitly every schedule).
+    //
+    // FIX: use m_neotko_libre_cached instead of app_config->get_bool() directly.
+    // app_config is written by the Preferences checkbox on panel refresh/init, which can
+    // race with update_background_process() and write "0" over the real value.
+    // m_neotko_libre_cached is only updated by set_neotko_libre_cached() from the
+    // MainFrame toggle button handler — the single intentional write path.
+    //
+    // DEBUG LOG: visible in OrcaSlicer console/log when BOOST log level >= info.
+    // Shows the cached value used for injection each cycle.
+    // If you see this toggling 0/1 without user input → something is calling
+    // set_neotko_libre_cached() unexpectedly. Check MainFrame toggle handler.
+    BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_LIBRE] update_background_process: "
+        << "cached=" << m_neotko_libre_cached
+        << "  app_config_live=" << wxGetApp().app_config->get_bool("neotko_libre_mode")
+        << "  (using cached)";
     DynamicPrintConfig _libre_cfg = wxGetApp().preset_bundle->full_config();
     _libre_cfg.set_key_value("neotko_disable_bridge_infill",
-        new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_libre_mode")));
+        new ConfigOptionBool(m_neotko_libre_cached));
     Print::ApplyStatus invalidated = background_process.apply(this->model, _libre_cfg);
     // NEOTKO_LIBRE_TAG_END
 
@@ -18273,6 +18306,10 @@ void Plater::reset_window_layout() { p->reset_window_layout(); }
 // NEOTKO_LIBRE_TAG_START
 void Plater::float_params_panel(bool do_float) { p->float_params_panel(do_float); }
 void Plater::save_window_layout()              { p->save_window_layout(); }
+// NEOTKO_LIBRE_TAG_START — Libre Mode cache setter (called from MainFrame toggle button)
+// This is the ONLY place that should update the cached LM state used by the slicing pipeline.
+// After calling this, the next schedule_background_process() will inject the correct value.
+void Plater::set_neotko_libre_cached(bool v)   { p->set_neotko_libre_cached(v); }
 // NEOTKO_LIBRE_TAG_END
 
 //BBS
@@ -21123,7 +21160,12 @@ void Plater::apply_background_progress()
     int plate_index = p->partplate_list.get_curr_plate_index();
     bool result_valid = part_plate->is_slice_result_valid();
     //always apply the current plate's print
-    Print::ApplyStatus invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+    // NEOTKO_LIBRE_TAG_START — inject cached libre state to avoid full_config() race
+    DynamicPrintConfig _libre_cfg_abp = wxGetApp().preset_bundle->full_config();
+    _libre_cfg_abp.set_key_value("neotko_disable_bridge_infill", new ConfigOptionBool(p->m_neotko_libre_cached));
+    BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_LIBRE] apply_background_progress: cached=" << p->m_neotko_libre_cached;
+    Print::ApplyStatus invalidated = p->background_process.apply(this->model(), _libre_cfg_abp);
+    // NEOTKO_LIBRE_TAG_END
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ") % __LINE__ % plate_index % invalidated % result_valid;
     if (invalidated & PrintBase::APPLY_STATUS_INVALIDATED)
@@ -21162,7 +21204,14 @@ int Plater::select_plate(int plate_index, bool need_slice)
         part_plate->get_print(&print, &gcode_result, NULL);
 
         //always apply the current plate's print
-        invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+        // NEOTKO_LIBRE_TAG_START — inject cached libre state to avoid full_config() race
+        {
+            DynamicPrintConfig _libre_cfg_sp = wxGetApp().preset_bundle->full_config();
+            _libre_cfg_sp.set_key_value("neotko_disable_bridge_infill", new ConfigOptionBool(p->m_neotko_libre_cached));
+            BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_LIBRE] select_plate apply: cached=" << p->m_neotko_libre_cached;
+            invalidated = p->background_process.apply(this->model(), _libre_cfg_sp);
+        }
+        // NEOTKO_LIBRE_TAG_END
         bool model_fits, validate_err;
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ")%__LINE__ %plate_index  %invalidated %result_valid;
@@ -21477,7 +21526,14 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
 
             part_plate->get_print(&print, &gcode_result, NULL);
             //always apply the current plate's print
-            invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+            // NEOTKO_LIBRE_TAG_START — inject cached libre state to avoid full_config() race
+            {
+                DynamicPrintConfig _libre_cfg_sp2 = wxGetApp().preset_bundle->full_config();
+                _libre_cfg_sp2.set_key_value("neotko_disable_bridge_infill", new ConfigOptionBool(p->m_neotko_libre_cached));
+                BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_LIBRE] select_plate apply2: cached=" << p->m_neotko_libre_cached;
+                invalidated = p->background_process.apply(this->model(), _libre_cfg_sp2);
+            }
+            // NEOTKO_LIBRE_TAG_END
             bool model_fits, validate_err;
             validate_current_plate(model_fits, validate_err);
 
