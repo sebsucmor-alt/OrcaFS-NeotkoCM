@@ -870,7 +870,7 @@ static std::vector<std::string> s_Preset_print_options {
     "pathblend_num_passes",
     "pathblend_tool_1", "pathblend_tool_2", "pathblend_tool_3", "pathblend_tool_4",
     "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3", "pathblend_layer_ratio_4",
-    "pathblend_min_ratio", "pathblend_surface",
+    "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface",
     "pathblend_invert_gradient", "pathblend_fill_angle",
     // NEOTKO_PATHBLEND_TAG_END
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "detect_overhang_wall", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",

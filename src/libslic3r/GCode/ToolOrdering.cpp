@@ -742,6 +742,10 @@ static std::vector<unsigned int> parse_colormix_pattern_1based(
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches)
 {
+    // NEOTKO_MULTIPASS_TAG — reset before repopulating; collect_extruders may be called
+    // once per object in multi-object prints, and we don't want stale entries.
+    m_mp_sublayer_extruders.clear();
+
     for (LayerTools &layer_tools : m_layer_tools) {
         layer_tools.mixed_mgr                = m_mixed_mgr;
         layer_tools.num_physical             = m_num_physical;
@@ -997,7 +1001,12 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             lt.is_mp_sublayer = true; // blocks wipe_tower_partitions propagation in fill_wipe_tower_partitions
             // extruders intentionally NOT populated — sublayer handler reads sub.tool_id directly.
             // Empty extruders → first_extruder() skips sublayers → correct wipe tower initial tool.
-            // has_object intentionally NOT set — sublayer toolchanges bypass the wipe tower
+            // has_object intentionally NOT set — sublayer toolchanges bypass the wipe tower.
+            // NEOTKO_MULTIPASS_TAG — record the 0-based tool so collect_extruder_statistics()
+            // can inject it into m_all_printing_extruders. GCodeWriter::set_extruders() is called
+            // with all_extruders(), so without this the Extruder object for this tool_id is never
+            // initialized → crash in Extruder::travel_slope() / retraction_length() etc.
+            m_mp_sublayer_extruders.push_back(static_cast<unsigned int>(sub.tool_id));
             if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
                 std::ostringstream _s;
                 _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << sub.tool_id << " ]";
@@ -1286,8 +1295,11 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     for (unsigned int i=0; i+1<m_layer_tools.size(); ++i) {
         LayerTools& lt = m_layer_tools[i];
         LayerTools& lt_next = m_layer_tools[i+1];
+        // NEOTKO_MULTIPASS_TAG — sublayers have empty extruders by design; skip the
+        // extruder-continuity check for this pair but do NOT abort — real layers after
+        // the first sublayer would never get has_wipe_tower=true with a break here.
         if (lt.extruders.empty() || lt_next.extruders.empty())
-            break;
+            continue;
         if (!lt_next.has_wipe_tower && (lt_next.extruders.front() != lt.extruders.back() || lt_next.extruders.size() > 1))
             lt_next.has_wipe_tower = true;
         // We should also check that the next wipe tower layer is no further than max_layer_height:
@@ -1330,6 +1342,14 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
         append(m_all_printing_extruders, lt.extruders);
         sort_remove_duplicates(m_all_printing_extruders);
     }
+
+    // NEOTKO_MULTIPASS_TAG — inject MultiPass sublayer tools into m_all_printing_extruders.
+    // These tools never appear in any LayerTools::extruders (intentional, to keep the wipe
+    // tower unaware), but GCodeWriter::set_extruders() is initialized from all_extruders(),
+    // so without this the Extruder objects for sublayer tools are never created → crash.
+    for (unsigned int t : m_mp_sublayer_extruders)
+        m_all_printing_extruders.push_back(t);
+    sort_remove_duplicates(m_all_printing_extruders);
 
     if (prime_multi_material && ! m_all_printing_extruders.empty()) {
         // Reorder m_all_printing_extruders in the sequence they will be primed, the last one will be m_first_printing_extruder.

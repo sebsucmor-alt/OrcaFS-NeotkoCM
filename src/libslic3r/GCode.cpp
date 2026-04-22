@@ -4492,6 +4492,12 @@ LayerResult GCode::process_layer(const Print& print,
             if (!ltp.mp_sublayer || !ltp.mp_object) continue;
             const MultiPassSubLayer& sub = *ltp.mp_sublayer;
             if (sub.fills.entities.empty()) continue;
+            // NEOTKO_MULTIPASS_TAG — apply object config FIRST so that set_extruder()
+            // and retract() read valid filament vectors (retract_length, filament_start_gcode,
+            // pressure_advance…). Moving this after set_extruder caused EXC_BAD_ACCESS in
+            // Extruder::retraction_length because m_config still held the previous object's
+            // config with potentially different vector sizes or invalidated pointers.
+            m_config.apply(ltp.mp_object->config(), true);
             const unsigned int tool_0based = static_cast<unsigned int>(sub.tool_id);
             if (m_writer.need_toolchange(tool_0based))
                 gcode += this->set_extruder(tool_0based, sub.print_z);
@@ -4503,7 +4509,6 @@ LayerResult GCode::process_layer(const Print& print,
                 gcode += this->retract(false, false, LiftType::NormalLift);
                 gcode += m_writer.travel_to_z(sz, "mp sublayer z");
             }
-            m_config.apply(ltp.mp_object->config(), true);
             for (const PrintInstance& inst : ltp.mp_object->instances()) {
                 this->set_origin(unscale(inst.shift));
                 // extrude_entity in this fork does not handle ExtrusionEntityCollection —

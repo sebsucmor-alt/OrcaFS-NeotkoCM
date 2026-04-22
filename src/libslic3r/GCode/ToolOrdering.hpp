@@ -245,6 +245,12 @@ private:
     unsigned int               m_last_printing_extruder  = (unsigned int)-1;
     // All extruders, which extrude some material over m_layer_tools.
     std::vector<unsigned int>  m_all_printing_extruders;
+    // NEOTKO_MULTIPASS_TAG — 0-based extruder IDs used exclusively in MultiPass sublayers.
+    // These are NOT added to any LayerTools::extruders (to keep the wipe tower unaware),
+    // but must be registered with GCodeWriter::set_extruders() so Extruder objects are
+    // initialized before the sublayer handler calls set_extruder() / retract() / travel().
+    // Populated in collect_extruders(); consumed in collect_extruder_statistics().
+    std::vector<unsigned int>  m_mp_sublayer_extruders;
     std::unordered_map<uint32_t, std::vector<uint8_t>> m_tool_order_cache;
     const DynamicPrintConfig*  m_print_full_config = nullptr;
     const PrintConfig*         m_print_config_ptr = nullptr;

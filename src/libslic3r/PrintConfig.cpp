@@ -6497,6 +6497,25 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionFloat(0.05));
 
+    def = this->add("pathblend_max_ratio", coFloat);
+    def->label = L("PathBlend max ratio");
+    def->category = L("Quality");
+    def->tooltip = L("Maximum extrusion ratio cap for the dominant pass at its peak (t=0 for pass 0). "
+                     "100% = full extrusion (default). Lower values reduce peak flow; pass 1 fills "
+                     "the complement so total flow stays 1.0.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("pathblend_ease_mode", coInt);
+    def->label = L("PathBlend gradient curve");
+    def->category = L("Quality");
+    def->tooltip = L("Easing function for the blend gradient. "
+                     "0=Linear, 1=Ease In (t²), 2=Ease Out (1-(1-t)²), 3=Ease In/Out (smoothstep).");
+    def->min  = 0;
+    def->max  = 3;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("pathblend_surface", coInt);
     def->label = L("PathBlend surface");
     def->category = L("Quality");

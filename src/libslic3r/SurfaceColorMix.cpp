@@ -1138,36 +1138,37 @@ std::string NeoweaveEngine::restore_z(
 double PathBlendPassConfig::ratio_at(int p, double t) const
 {
     if (p < 0 || p >= num_passes) return 0.0;
+
+    // Apply easing curve to t before any ratio calculation.
+    // Pass 1 is always the exact complement of pass 0, so easing is mirrored automatically.
+    // ease_mode: 0=Linear (no-op), 1=EaseIn (t²), 2=EaseOut (1-(1-t)²), 3=EaseInOut (smoothstep).
+    switch (ease_mode) {
+        case 1: t = t * t;                    break;  // Ease In
+        case 2: t = 1.0 - (1.0-t)*(1.0-t);   break;  // Ease Out
+        case 3: t = t * t * (3.0 - 2.0 * t); break;  // Ease In/Out (smoothstep)
+        default: break;                                // Linear: t unchanged
+    }
+
+    const double mn = static_cast<double>(min_ratio);
+    const double mx = static_cast<double>(max_ratio);  // cap for dominant pass at peak
     double r = 0.0;
+
     if (num_passes == 1) {
-        // Single-pass: T2 fades IN from min_ratio (t=0, base shows through) to 1.0 (t=1, full coverage).
+        // Single-pass: T2 fades IN from min_ratio (t=0, base shows through) to max_ratio (t=1).
         // Combined with Z staircase → visual blend from base color into T2 across the surface.
-        r = static_cast<double>(min_ratio) + (1.0 - static_cast<double>(min_ratio)) * t;
+        r = mn + (mx - mn) * t;
     } else if (num_passes == 2) {
-        // Pass 0 (T0, dominant at t=0): apply min_ratio floor so it never
-        // under-extrudes on very thin paths at the top of the surface.
-        // Pass 1 (T1, dominant at t=1): exact complement of pass 0 actual flow.
+        // Pass 0 (T0, dominant at t=0): clamped to [min_ratio, max_ratio].
+        // Pass 1 (T1): exact complement of actual pass 0 → flow_0 + flow_1 == 1.0 always.
         //
-        // NEOTKO_FIX: pass 1 was previously `r = t` (pure geometry), which ignored
-        // the min_ratio boost applied to pass 0. When min_ratio > 0 and t < min_ratio,
-        // pass 0 deposits more than (1-t), but pass 1 still deposited t → sum > 1 →
-        // over-extrusion. Pass 1 must mirror the actual pass 0 output so that for
-        // every path: flow_0 + flow_1 == 1.0 exactly.
-        //
-        // Visually: pass 1 fills the gap left by pass 0 up to Z_nom.
-        // When pass 0 has deposited almost nothing (t≈0, left of surface), pass 1
-        // fills almost the full layer. When pass 0 has deposited everything (t≈1,
-        // right of surface), pass 1 deposits nothing. Sum is always 1.0.
-        //
-        // multipass_enabled path is NOT affected: it uses flow=1.0 unconditionally
-        // and never reaches ratio_at(). This fix is standalone PathBlend only.
+        // NEOTKO_FIX: pass 1 must mirror the *real* pass 0 output (after clamp),
+        // not raw (1-t), to preserve the sum==1.0 invariant when min/max are active.
         if (p == 0) {
-            r = std::max(static_cast<double>(min_ratio), 1.0 - t);
+            r = std::clamp(1.0 - t, mn, mx);
         } else {
-            // Complement of the actual pass 0 flow (accounts for min_ratio floor).
-            r = 1.0 - std::max(static_cast<double>(min_ratio), 1.0 - t);
+            r = 1.0 - std::clamp(1.0 - t, mn, mx);
         }
-        return r;  // early-return: min_ratio floor already applied above, don't double-apply below
+        return r;  // early-return: clamp already applied, don't double-apply below
     } else if (num_passes == 3) {
         if      (p == 0) r = std::max(0.0, 1.0 - 2.0 * t);
         else if (p == 1) r = 1.0 - std::abs(2.0 * t - 1.0);
@@ -1177,9 +1178,10 @@ double PathBlendPassConfig::ratio_at(int p, double t) const
         const double center = p * step;
         r = std::max(0.0, 1.0 - std::abs(t - center) / step);
     }
-    // min_ratio floor only for pass 0 (the pass dominant at t=0).
-    // Not applied to the 2-pass case (handled above with early return).
-    if (p == 0) r = std::max(static_cast<double>(min_ratio), r);
+    // For 3/4-pass: floor pass 0 at min_ratio, cap last pass at max_ratio.
+    // Not applied to 2-pass (handled above with early return).
+    if (p == 0)              r = std::max(mn, r);
+    if (p == num_passes - 1) r = std::min(mx, r);
     return r;
 }
 
@@ -1198,7 +1200,10 @@ PathBlendPassConfig PathBlendPassConfig::from_region_config(const PrintRegionCon
     c.layer_ratio[2] = static_cast<float>(cfg.pathblend_layer_ratio_3.value);
     c.layer_ratio[3] = static_cast<float>(cfg.pathblend_layer_ratio_4.value);
     c.min_ratio        = static_cast<float>(
-        std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.5));
+        std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.49));
+    c.max_ratio        = static_cast<float>(
+        std::clamp(cfg.pathblend_max_ratio.value, 0.51, 1.0));
+    c.ease_mode        = std::clamp(cfg.pathblend_ease_mode.value, 0, 3);
     c.invert_gradient  = cfg.pathblend_invert_gradient.value;
     c.fill_angle       = cfg.pathblend_fill_angle.value;
     return c;

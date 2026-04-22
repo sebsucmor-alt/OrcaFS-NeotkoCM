@@ -1547,6 +1547,8 @@ public:
                     int   cur_passes,
                     int   cur_t1, int cur_t2, int cur_t3, int cur_t4,
                     float cur_min_ratio,
+                    float cur_max_ratio = 1.0f,
+                    int   cur_ease_mode = 0,
                     bool  cur_invert   = true,
                     int   cur_angle    = -1,
                     const std::vector<std::string>& fcolors = {})
@@ -1554,6 +1556,7 @@ public:
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
     {
+        m_ease_mode = std::clamp(cur_ease_mode, 0, 3);
         const int PAD = 8;
         auto* vs = new wxBoxSizer(wxVERTICAL);
 
@@ -1638,6 +1641,69 @@ public:
         row_min->Add(m_lbl_min, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
         vs->Add(row_min, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
 
+        // --- Max ratio slider ---
+        auto* row_max = new wxBoxSizer(wxHORIZONTAL);
+        row_max->Add(new wxStaticText(this, wxID_ANY, _L("Max ratio % (pass 0 peak cap):")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+        int init_max_pct = static_cast<int>(std::clamp(cur_max_ratio, 0.51f, 1.00f) * 100.f + 0.5f);
+        m_sl_max = new wxSlider(this, wxID_ANY, init_max_pct, 51, 100,
+                                 wxDefaultPosition, wxSize(140,-1), wxSL_HORIZONTAL);
+        m_sl_max->SetToolTip(_L(
+            "Cap for the dominant pass at its peak (t=0).\n"
+            "100% = full extrusion (default). Lower values reduce peak flow;\n"
+            "pass 1 fills the complement so total flow stays 1.0."));
+        m_lbl_max = new wxStaticText(this, wxID_ANY,
+                                      wxString::Format("%d%%", init_max_pct),
+                                      wxDefaultPosition, wxSize(36,-1));
+        row_max->Add(m_sl_max,  0, wxALIGN_CENTER_VERTICAL);
+        row_max->Add(m_lbl_max, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+        vs->Add(row_max, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        // --- Gradient easing buttons ---
+        {
+            vs->Add(new wxStaticText(this, wxID_ANY, _L("Gradient curve:")),
+                    0, wxLEFT | wxRIGHT | wxTOP, PAD);
+            auto* row_ease = new wxBoxSizer(wxHORIZONTAL);
+            const wxString ease_labels[4] = {
+                _L("Linear"), _L("Ease In"), _L("Ease Out"), _L("Ease In/Out")
+            };
+            const wxString ease_tips[4] = {
+                _L("Linear: uniform transition."),
+                _L("Ease In: slow start, fast end (t\u00b2)."),
+                _L("Ease Out: fast start, slow end (1-(1-t)\u00b2)."),
+                _L("Ease In/Out: S-curve (smoothstep).")
+            };
+            for (int i = 0; i < 4; ++i) {
+                m_btn_ease[i] = new wxButton(this, wxID_ANY, ease_labels[i],
+                                              wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+                m_btn_ease[i]->SetToolTip(ease_tips[i]);
+                row_ease->Add(m_btn_ease[i], 0, wxRIGHT, 3);
+            }
+            vs->Add(row_ease, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+            // Highlight active button
+            auto refresh_ease = [this]() {
+                const wxColour active_bg(60, 120, 220);
+                const wxColour active_fg(*wxWHITE);
+                const wxColour normal_bg(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+                const wxColour normal_fg(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNTEXT));
+                for (int i = 0; i < 4; ++i) {
+                    if (!m_btn_ease[i]) continue;
+                    const bool on = (i == m_ease_mode);
+                    m_btn_ease[i]->SetBackgroundColour(on ? active_bg : normal_bg);
+                    m_btn_ease[i]->SetForegroundColour(on ? active_fg : normal_fg);
+                    m_btn_ease[i]->Refresh();
+                }
+            };
+            for (int i = 0; i < 4; ++i) {
+                m_btn_ease[i]->Bind(wxEVT_BUTTON, [this, i, refresh_ease](wxCommandEvent&) {
+                    m_ease_mode = i;
+                    refresh_ease();
+                });
+            }
+            refresh_ease();
+        }
+
         // --- Ascending Z / invert gradient ---
         m_cb_invert = new wxCheckBox(this, wxID_ANY, _L("Ascending Z direction (safe)"));
         m_cb_invert->SetValue(cur_invert);
@@ -1680,6 +1746,9 @@ public:
         m_sl_min->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
             m_lbl_min->SetLabel(wxString::Format("%d%%", m_sl_min->GetValue()));
         });
+        m_sl_max->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
+            m_lbl_max->SetLabel(wxString::Format("%d%%", m_sl_max->GetValue()));
+        });
     }
 
     int   get_num_passes()  const { return m_sc_passes->GetValue(); }
@@ -1690,6 +1759,10 @@ public:
     float get_min_ratio()   const {
         return static_cast<float>(m_sl_min->GetValue()) / 100.f;
     }
+    float get_max_ratio()   const {
+        return static_cast<float>(m_sl_max->GetValue()) / 100.f;
+    }
+    int   get_ease_mode()   const { return m_ease_mode; }
     bool  get_invert()      const { return m_cb_invert ? m_cb_invert->GetValue() : true; }
     int   get_fill_angle()  const { return m_sc_angle_pb ? m_sc_angle_pb->GetValue() : -1; }
 
@@ -1699,6 +1772,10 @@ private:
     ColorSwatch*  m_swatch_pb[4]    = {nullptr, nullptr, nullptr, nullptr};
     wxSlider*     m_sl_min          = nullptr;
     wxStaticText* m_lbl_min         = nullptr;
+    wxSlider*     m_sl_max          = nullptr;
+    wxStaticText* m_lbl_max         = nullptr;
+    wxButton*     m_btn_ease[4]     = {nullptr, nullptr, nullptr, nullptr};
+    int           m_ease_mode       = 0;
     wxCheckBox*   m_cb_invert       = nullptr;
     wxSpinCtrl*   m_sc_angle_pb     = nullptr;
 
@@ -2061,6 +2138,8 @@ private:
             int   cur_passes = 2;
             int   cur_t[4]   = {0, 1, 2, 3};
             float cur_min    = 0.05f;
+            float cur_max    = 1.00f;
+            int   cur_ease   = 0;
             bool  cur_invert = true;
             int   cur_angle  = -1;
             if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_num_passes"))     cur_passes  = o->value;
@@ -2069,12 +2148,14 @@ private:
             if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_3"))          cur_t[2]    = o->value;
             if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_4"))          cur_t[3]    = o->value;
             if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_min_ratio"))       cur_min     = static_cast<float>(o->value);
+            if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_max_ratio"))       cur_max     = static_cast<float>(o->value);
+            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_ease_mode"))       cur_ease    = o->value;
             if (auto* o=m_config->option<ConfigOptionBool> ("pathblend_invert_gradient")) cur_invert  = o->value;
             if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_fill_angle"))      cur_angle   = o->value;
 
             PathBlendDialog dlg(this, cur_passes,
                                 cur_t[0], cur_t[1], cur_t[2], cur_t[3],
-                                cur_min, cur_invert, cur_angle, m_fcolors);
+                                cur_min, cur_max, cur_ease, cur_invert, cur_angle, m_fcolors);
             if (dlg.ShowModal() == wxID_OK) {
                 auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v; m_on_change(k); };
                 auto wf = [&](const char* k, float v){ if(auto*o=m_config->option<ConfigOptionFloat>(k))o->value=v; m_on_change(k); };
@@ -2085,6 +2166,8 @@ private:
                 wi("pathblend_tool_3",        dlg.get_tool(2));
                 wi("pathblend_tool_4",        dlg.get_tool(3));
                 wf("pathblend_min_ratio",     dlg.get_min_ratio());
+                wf("pathblend_max_ratio",     dlg.get_max_ratio());
+                wi("pathblend_ease_mode",     dlg.get_ease_mode());
                 wb("pathblend_invert_gradient", dlg.get_invert());
                 wi("pathblend_fill_angle",    dlg.get_fill_angle());
             }

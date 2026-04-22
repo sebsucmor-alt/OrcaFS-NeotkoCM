@@ -1163,6 +1163,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,   pathblend_layer_ratio_3))
     ((ConfigOptionFloat,   pathblend_layer_ratio_4))
     ((ConfigOptionFloat,   pathblend_min_ratio))
+    ((ConfigOptionFloat,   pathblend_max_ratio))
+    ((ConfigOptionInt,     pathblend_ease_mode))
     ((ConfigOptionInt,     pathblend_surface))
     ((ConfigOptionBool,    pathblend_invert_gradient))
     ((ConfigOptionInt,     pathblend_fill_angle))

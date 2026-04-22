@@ -161,6 +161,8 @@ struct PathBlendPassConfig {
     int     tool[4]        = {0, 1, 2, 3};
     float   layer_ratio[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // ratio at the active extreme of each pass
     float   min_ratio      = 0.05f;  // minimum extrusion ratio for the leading pass at t=0
+    float   max_ratio      = 1.00f;  // maximum extrusion ratio cap for the dominant pass at its peak
+    int     ease_mode      = 0;      // 0=Linear, 1=EaseIn (t²), 2=EaseOut (1-(1-t)²), 3=EaseInOut (smoothstep)
     bool    invert_gradient = true;  // invert t for z calc → ascending z during print (safe)
     int     fill_angle      = -1;    // -1 = follow top surface angle; 0..359 = override
 
