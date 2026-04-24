@@ -619,6 +619,13 @@ std::vector<ColorMixOption> SurfaceColorMix::get_mix_options(
 
     if (!mixed_defs.empty()) {
         MixedFilamentManager mgr;
+        // auto_generate must run before load_custom_entries so that auto rows
+        // (custom=false) in the serialised data find their match in auto_rows_by_pair.
+        // Without it every row is skipped ("auto row missing after regenerate").
+        const bool was_auto = MixedFilamentManager::auto_generate_enabled();
+        MixedFilamentManager::set_auto_generate_enabled(true);
+        mgr.auto_generate(filament_colours);
+        MixedFilamentManager::set_auto_generate_enabled(was_auto);
         mgr.load_custom_entries(mixed_defs, filament_colours);
 
         auto get_color = [&](unsigned int id) -> std::string {
