@@ -6999,6 +6999,116 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
+    // NEOTKO_MULTIPASS_PRIME_TAG
+    def = this->add("multipass_prime_volume", coFloat);
+    def->label = L("Pass prime volume");
+    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each MultiPass sublayer "
+                     "toolchange. Set to 0 to disable. Requires the prime tower to be "
+                     "active. Uses the same Local-Z reserve mechanism as dithering.");
+    def->sidetext = L("mm³");
+    def->min = 0; def->max = 200; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.f));
+
+    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
+    def = this->add("penultimate_multipass_enabled", coBool);
+    def->label = L("Enable Penultimate MultiPass");
+    def->category = L("Quality");
+    def->tooltip = L("Re-prints the penultimate surface N times with different tools "
+                     "and reduced line width, independently of the Top Surface MultiPass config.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("penultimate_multipass_num_passes", coInt);
+    def->label = L("Penultimate passes");
+    def->min = 1; def->max = 3; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("penultimate_multipass_tool_1", coInt);
+    def->label = L("Penu pass 1 tool");
+    def->sidetext = L("T0-T3"); def->min = 0; def->max = 3; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("penultimate_multipass_tool_2", coInt);
+    def->label = L("Penu pass 2 tool");
+    def->sidetext = L("T0-T3"); def->min = 0; def->max = 3; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("penultimate_multipass_tool_3", coInt);
+    def->label = L("Penu pass 3 tool (-1 = off)");
+    def->sidetext = L("T0-T3 or -1"); def->min = -1; def->max = 3; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_width_ratio_1", coFloat);
+    def->label = L("Penu pass 1 layer ratio");
+    def->sidetext = L("ratio"); def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.50));
+
+    def = this->add("penultimate_multipass_width_ratio_2", coFloat);
+    def->label = L("Penu pass 2 layer ratio");
+    def->sidetext = L("ratio"); def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.50));
+
+    def = this->add("penultimate_multipass_width_ratio_3", coFloat);
+    def->label = L("Penu pass 3 layer ratio");
+    def->sidetext = L("ratio"); def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.34));
+
+    def = this->add("penultimate_multipass_angle_1", coInt);
+    def->label = L("Penu pass 1 fill angle");
+    def->sidetext = L("deg  (-1=auto)"); def->mode = comAdvanced;
+    def->min = -1; def->max = 359;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_angle_2", coInt);
+    def->label = L("Penu pass 2 fill angle");
+    def->sidetext = L("deg  (-1=auto)"); def->mode = comAdvanced;
+    def->min = -1; def->max = 359;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_angle_3", coInt);
+    def->label = L("Penu pass 3 fill angle");
+    def->sidetext = L("deg  (-1=auto)"); def->mode = comAdvanced;
+    def->min = -1; def->max = 359;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_gcode_start_1", coString);
+    def->label = L("Penu pass 1 start GCode");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("penultimate_multipass_gcode_start_2", coString);
+    def->label = L("Penu pass 2 start GCode");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("penultimate_multipass_gcode_start_3", coString);
+    def->label = L("Penu pass 3 start GCode");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("penultimate_multipass_gcode_end_1", coString);
+    def->label = L("Penu pass 1 end GCode");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("penultimate_multipass_gcode_end_2", coString);
+    def->label = L("Penu pass 2 end GCode");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("penultimate_multipass_gcode_end_3", coString);
+    def->label = L("Penu pass 3 end GCode");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("penultimate_multipass_prime_volume", coFloat);
+    def->label = L("Penu pass prime volume");
+    def->tooltip = L("Volume (mm³) to purge before each Penultimate MultiPass sublayer toolchange. "
+                     "Set to 0 to disable.");
+    def->sidetext = L("mm³");
+    def->min = 0; def->max = 200; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.f));
+
     // NEOTKO_MULTIPASS_TAG_END
 }
 

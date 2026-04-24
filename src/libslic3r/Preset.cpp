@@ -863,6 +863,15 @@ static std::vector<std::string> s_Preset_print_options {
     "multipass_speed_pct_1", "multipass_speed_pct_2", "multipass_speed_pct_3",
     "multipass_gcode_start_1", "multipass_gcode_start_2", "multipass_gcode_start_3",
     "multipass_gcode_end_1", "multipass_gcode_end_2", "multipass_gcode_end_3",
+    "multipass_prime_volume",  // NEOTKO_MULTIPASS_PRIME_TAG
+    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
+    "penultimate_multipass_enabled", "penultimate_multipass_num_passes",
+    "penultimate_multipass_tool_1", "penultimate_multipass_tool_2", "penultimate_multipass_tool_3",
+    "penultimate_multipass_width_ratio_1", "penultimate_multipass_width_ratio_2", "penultimate_multipass_width_ratio_3",
+    "penultimate_multipass_angle_1", "penultimate_multipass_angle_2", "penultimate_multipass_angle_3",
+    "penultimate_multipass_gcode_start_1", "penultimate_multipass_gcode_start_2", "penultimate_multipass_gcode_start_3",
+    "penultimate_multipass_gcode_end_1", "penultimate_multipass_gcode_end_2", "penultimate_multipass_gcode_end_3",
+    "penultimate_multipass_prime_volume",
     // NEOTKO_MULTIPASS_TAG_START — PathBlend
     "multipass_path_gradient", "path_gradient_segments", "path_gradient_min_flow_pct",
     // NEOTKO_MULTIPASS_TAG_END

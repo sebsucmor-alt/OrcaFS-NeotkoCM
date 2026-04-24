@@ -4499,8 +4499,28 @@ LayerResult GCode::process_layer(const Print& print,
             // config with potentially different vector sizes or invalidated pointers.
             m_config.apply(ltp.mp_object->config(), true);
             const unsigned int tool_0based = static_cast<unsigned int>(sub.tool_id);
-            if (m_writer.need_toolchange(tool_0based))
-                gcode += this->set_extruder(tool_0based, sub.print_z);
+            if (m_writer.need_toolchange(tool_0based)) {
+                // NEOTKO_MULTIPASS_PRIME_TAG — prime on wipe tower before sublayer toolchange.
+                // Uses the Local-Z reserve mechanism (same as dithering_local_z_mode).
+                // m_config.apply() is guaranteed to have run above, so multipass_prime_volume
+                // and all filament vectors are valid before tool_change() / set_extruder().
+                // When prime is disabled (multipass_prime_volume == 0) or wipe tower is absent,
+                // fall through to set_extruder directly — identical to the previous behaviour.
+                const float mp_pv = m_config.option<ConfigOptionFloat>("multipass_prime_volume")
+                                        ? (float)m_config.option<ConfigOptionFloat>("multipass_prime_volume")->value
+                                        : 0.f;
+                if (m_wipe_tower && mp_pv > 0.f) {
+                    // local_z_nominal_layer_z = sub.print_z: the wipe tower purges at the
+                    // sublayer's actual Z. The tower is sparse at this intermediate Z → safe.
+                    gcode += m_wipe_tower->tool_change(*this, int(tool_0based),
+                                                       /*finish_layer=*/false,
+                                                       /*local_z_unplanned=*/true,
+                                                       /*local_z_nominal_layer_z=*/
+                                                       sub.print_z + m_config.z_offset.value);
+                } else {
+                    gcode += this->set_extruder(tool_0based, sub.print_z);
+                }
+            }
             const double sz = sub.print_z + m_config.z_offset.value;
             m_nominal_z    = sz;
             m_last_layer_z = float(sz);

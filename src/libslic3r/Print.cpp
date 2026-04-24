@@ -3007,6 +3007,59 @@ void Print::_make_wipe_tower()
                     }
                 }
 
+                // NEOTKO_MULTIPASS_PRIME_TAG — reserve Local-Z slots for MultiPass sublayer primes.
+                //
+                // Timing: plan_local_z_reserve always modifies m_plan.back() and asserts
+                // m_plan.back().z <= z_par. We must call it HERE (while processing the wipe-tower
+                // layer that will still be m_layer_idx when the sublayers execute) by searching
+                // FORWARD for any sublayer group that immediately follows this layer.
+                //
+                // When the sublayer group executes in GCode.cpp, m_layer_idx == cur_idx because
+                // next_layer() is only called for has_wipe_tower layers, and no such layer runs
+                // between this layer and the sublayers (any intervening real layers have no wipe
+                // tower and do not advance m_layer_idx).
+                {
+                    const auto& all_lt = m_wipe_tower_data.tool_ordering.layer_tools();
+                    const size_t cur_idx = size_t(&layer_tools - all_lt.data());
+
+                    // Scan forward: count mp_prime_slots from sublayers in the group immediately
+                    // following this layer. Skip any has_wipe_tower=false real layers between us
+                    // and the sublayers (they don't advance m_layer_idx so slots belong here).
+                    size_t mp_slots = 0;
+                    for (size_t si = cur_idx + 1; si < all_lt.size(); ++si) {
+                        const LayerTools& slt = all_lt[si];
+                        if (slt.is_mp_sublayer) {
+                            mp_slots += slt.mp_prime_slots;
+                        } else if (!slt.has_wipe_tower) {
+                            // Real layer with no wipe tower — skip, doesn't advance m_layer_idx.
+                        } else {
+                            break; // Next wipe-tower layer — sublayers past this belong to it.
+                        }
+                    }
+
+                    if (mp_slots > 0) {
+                        // Get prime volume: max over all objects' first-layer regions.
+                        float mp_prime_vol = 0.f;
+                        for (const PrintObject* obj : m_objects) {
+                            if (obj->layers().empty()) continue;
+                            for (const LayerRegion* lr : obj->layers().front()->regions())
+                                mp_prime_vol = std::max(mp_prime_vol,
+                                    (float)lr->region().config().multipass_prime_volume.value);
+                        }
+
+                        if (mp_prime_vol > 0.f) {
+                            // Reserve at THIS layer's Z — m_plan.back() is already here and
+                            // m_layer_idx will equal cur_idx when the sublayers execute.
+                            wipe_tower.plan_local_z_reserve(
+                                (float) layer_tools.print_z,
+                                (float) layer_tools.wipe_tower_layer_height,
+                                mp_slots,
+                                mp_prime_vol);
+                        }
+                    }
+                }
+                // NEOTKO_MULTIPASS_PRIME_TAG_END
+
                 layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
                 if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
                     break;

@@ -696,34 +696,60 @@ std::map<int,float> SurfaceColorMix::extract_recipe_weights(
 // ---------------------------------------------------------------------------
 // MultiPassConfig::from_region_config
 // ---------------------------------------------------------------------------
-MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg)
+// role == erPenultimateInfill  → reads penultimate_multipass_* keys (independent config)
+// any other role               → reads multipass_* keys (top surface config, legacy default)
+MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg, ExtrusionRole role)
 {
     MultiPassConfig c;
-    c.enabled        = cfg.multipass_enabled.value;
-    c.surface        = cfg.multipass_surface.value;
-    c.num_passes     = cfg.multipass_num_passes.value;
-    c.tool[0]        = cfg.multipass_tool_1.value;
-    c.tool[1]        = cfg.multipass_tool_2.value;
-    c.tool[2]        = cfg.multipass_tool_3.value;
-    c.width_ratio[0] = cfg.multipass_width_ratio_1.value;
-    c.width_ratio[1] = cfg.multipass_width_ratio_2.value;
-    c.width_ratio[2] = cfg.multipass_width_ratio_3.value;
-    c.vary_pattern   = cfg.multipass_vary_pattern.value;
-    c.angle[0]       = cfg.multipass_angle_1.value;
-    c.angle[1]       = cfg.multipass_angle_2.value;
-    c.angle[2]       = cfg.multipass_angle_3.value;
-    c.fan[0]         = cfg.multipass_fan_1.value;
-    c.fan[1]         = cfg.multipass_fan_2.value;
-    c.fan[2]         = cfg.multipass_fan_3.value;
-    c.speed_pct[0]   = cfg.multipass_speed_pct_1.value;
-    c.speed_pct[1]   = cfg.multipass_speed_pct_2.value;
-    c.speed_pct[2]   = cfg.multipass_speed_pct_3.value;
-    c.gcode_start[0] = cfg.multipass_gcode_start_1.value;
-    c.gcode_start[1] = cfg.multipass_gcode_start_2.value;
-    c.gcode_start[2] = cfg.multipass_gcode_start_3.value;
-    c.gcode_end[0]   = cfg.multipass_gcode_end_1.value;
-    c.gcode_end[1]   = cfg.multipass_gcode_end_2.value;
-    c.gcode_end[2]   = cfg.multipass_gcode_end_3.value;
+    if (role == erPenultimateInfill) {
+        c.enabled        = cfg.penultimate_multipass_enabled.value;
+        c.surface        = 2; // penultimate only — no surface filter needed
+        c.num_passes     = cfg.penultimate_multipass_num_passes.value;
+        c.tool[0]        = cfg.penultimate_multipass_tool_1.value;
+        c.tool[1]        = cfg.penultimate_multipass_tool_2.value;
+        c.tool[2]        = cfg.penultimate_multipass_tool_3.value;
+        c.width_ratio[0] = cfg.penultimate_multipass_width_ratio_1.value;
+        c.width_ratio[1] = cfg.penultimate_multipass_width_ratio_2.value;
+        c.width_ratio[2] = cfg.penultimate_multipass_width_ratio_3.value;
+        c.vary_pattern   = false;
+        c.angle[0]       = cfg.penultimate_multipass_angle_1.value;
+        c.angle[1]       = cfg.penultimate_multipass_angle_2.value;
+        c.angle[2]       = cfg.penultimate_multipass_angle_3.value;
+        c.fan[0]         = -1; c.fan[1] = -1; c.fan[2] = -1;
+        c.speed_pct[0]   = 100; c.speed_pct[1] = 100; c.speed_pct[2] = 100;
+        c.gcode_start[0] = cfg.penultimate_multipass_gcode_start_1.value;
+        c.gcode_start[1] = cfg.penultimate_multipass_gcode_start_2.value;
+        c.gcode_start[2] = cfg.penultimate_multipass_gcode_start_3.value;
+        c.gcode_end[0]   = cfg.penultimate_multipass_gcode_end_1.value;
+        c.gcode_end[1]   = cfg.penultimate_multipass_gcode_end_2.value;
+        c.gcode_end[2]   = cfg.penultimate_multipass_gcode_end_3.value;
+    } else {
+        c.enabled        = cfg.multipass_enabled.value;
+        c.surface        = cfg.multipass_surface.value;
+        c.num_passes     = cfg.multipass_num_passes.value;
+        c.tool[0]        = cfg.multipass_tool_1.value;
+        c.tool[1]        = cfg.multipass_tool_2.value;
+        c.tool[2]        = cfg.multipass_tool_3.value;
+        c.width_ratio[0] = cfg.multipass_width_ratio_1.value;
+        c.width_ratio[1] = cfg.multipass_width_ratio_2.value;
+        c.width_ratio[2] = cfg.multipass_width_ratio_3.value;
+        c.vary_pattern   = cfg.multipass_vary_pattern.value;
+        c.angle[0]       = cfg.multipass_angle_1.value;
+        c.angle[1]       = cfg.multipass_angle_2.value;
+        c.angle[2]       = cfg.multipass_angle_3.value;
+        c.fan[0]         = cfg.multipass_fan_1.value;
+        c.fan[1]         = cfg.multipass_fan_2.value;
+        c.fan[2]         = cfg.multipass_fan_3.value;
+        c.speed_pct[0]   = cfg.multipass_speed_pct_1.value;
+        c.speed_pct[1]   = cfg.multipass_speed_pct_2.value;
+        c.speed_pct[2]   = cfg.multipass_speed_pct_3.value;
+        c.gcode_start[0] = cfg.multipass_gcode_start_1.value;
+        c.gcode_start[1] = cfg.multipass_gcode_start_2.value;
+        c.gcode_start[2] = cfg.multipass_gcode_start_3.value;
+        c.gcode_end[0]   = cfg.multipass_gcode_end_1.value;
+        c.gcode_end[1]   = cfg.multipass_gcode_end_2.value;
+        c.gcode_end[2]   = cfg.multipass_gcode_end_3.value;
+    }
     return c;
 }
 

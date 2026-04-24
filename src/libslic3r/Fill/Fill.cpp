@@ -1325,32 +1325,55 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 const auto& mp_cfg   = layerm->region().config();
                 MultiPassConfig     mp;
                 bool                is_mp_fill = false;
+                // NEOTKO_MULTIPASS_SURFACES_TAG — bifurcate enabled check by role:
+                // Top surface uses multipass_enabled; Penultimate uses its own key.
                 if (!surface_fill.params.bridge &&
                     (surface_fill.params.extrusion_role == erTopSolidInfill ||
-                     surface_fill.params.extrusion_role == erPenultimateInfill) &&
-                    mp_cfg.multipass_enabled.value) {
-                    mp         = MultiPassConfig::from_region_config(mp_cfg);
-                    is_mp_fill = SurfaceColorMix::should_process_role(
-                        surface_fill.params.extrusion_role, mp.surface);
-                    // NEOTKO_COLORMIX_TAG_START — Zone + filament filter (FASE2 MultiPass)
-                    if (is_mp_fill) {
-                        const ExtrusionRole _role = surface_fill.params.extrusion_role;
-                        const int _zone = (_role == erTopSolidInfill)
-                            ? mp_cfg.interlayer_colormix_top_zone.value
-                            : mp_cfg.interlayer_colormix_penu_zone.value;
-                        if (_zone == 1) {
-                            const bool _in_zone = (_role == erTopSolidInfill)
-                                ? (this->upper_layer == nullptr)
-                                : (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
-                            if (!_in_zone) is_mp_fill = false;
-                        }
-                        if (is_mp_fill) {
-                            const int _ff = mp_cfg.interlayer_colormix_filament_filter.value;
-                            if (_ff > 0 && mp_cfg.solid_infill_filament.value != _ff)
-                                is_mp_fill = false;
-                        }
+                     surface_fill.params.extrusion_role == erPenultimateInfill)) {
+                    const ExtrusionRole _mp_role = surface_fill.params.extrusion_role;
+                    const bool _mp_on = (_mp_role == erTopSolidInfill)
+                        ? mp_cfg.multipass_enabled.value
+                        : mp_cfg.penultimate_multipass_enabled.value;
+                    if (_mp_on) {
+                        mp         = MultiPassConfig::from_region_config(mp_cfg, _mp_role);
+                        is_mp_fill = (_mp_role == erTopSolidInfill)
+                            ? SurfaceColorMix::should_process_role(_mp_role, mp.surface)
+                            : true; // penultimate_multipass_enabled already gated above
                     }
-                    // NEOTKO_COLORMIX_TAG_END
+                }
+                // NEOTKO_COLORMIX_TAG_START — Zone + filament filter (FASE2 MultiPass)
+                if (is_mp_fill) {
+                    const ExtrusionRole _role = surface_fill.params.extrusion_role;
+                    const int _zone = (_role == erTopSolidInfill)
+                        ? mp_cfg.interlayer_colormix_top_zone.value
+                        : mp_cfg.interlayer_colormix_penu_zone.value;
+                    if (_zone == 1) {
+                        const bool _in_zone = (_role == erTopSolidInfill)
+                            ? (this->upper_layer == nullptr)
+                            : (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
+                        if (!_in_zone) is_mp_fill = false;
+                    }
+                    if (is_mp_fill) {
+                        const int _ff = mp_cfg.interlayer_colormix_filament_filter.value;
+                        if (_ff > 0 && mp_cfg.solid_infill_filament.value != _ff)
+                            is_mp_fill = false;
+                    }
+                }
+                // NEOTKO_COLORMIX_TAG_END
+
+                // NEOTKO_MULTIPASS_MINLAYER_TAG — MultiPass forbidden on first object layer.
+                // Guarantees at least one real layer has called next_layer() before sublayer
+                // handler runs → m_layer_idx is valid for Local-Z prime slot lookup.
+                if (is_mp_fill) {
+                    const size_t layer_idx_in_object =
+                        this->id() - this->object()->get_layer(0)->id();
+                    if (layer_idx_in_object == 0) {
+                        is_mp_fill = false;
+                        BOOST_LOG_TRIVIAL(warning)
+                            << "[MultiPass] Disabled on first object layer (layer_height="
+                            << this->height << " mm). MultiPass starts from layer 2.";
+                        NEOTKO_LOG(MULTIPASS, "FASE2_CHECK: is_mp_fill forced=false (first layer hardlock)");
+                    }
                 }
 
                 NEOTKO_LOG(MULTIPASS, "FASE2_CHECK layer=" << f->layer_id
@@ -1370,14 +1393,14 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     for (int i = 0; i < n; ++i) {
                         if (mp.tool[i] < 0) continue;
 
+                        const double ratio = mp.width_ratio[i];
+
                         f->angle = (mp.angle[i] >= 0)
                             ? Geometry::deg2rad(static_cast<float>(mp.angle[i]))
                             : base_angle + float(i % 2) * float(M_PI / 2);
 
                         ExtrusionEntityCollection temp;
                         f->fill_surface_extrusion(&surface_fill.surface, params, temp.entities);
-
-                        const double ratio = mp.width_ratio[i];
                         for (auto* e : temp.entities) {
                             auto* coll = dynamic_cast<ExtrusionEntityCollection*>(e);
                             if (!coll) continue;

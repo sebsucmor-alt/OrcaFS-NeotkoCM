@@ -135,6 +135,10 @@ public:
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
     bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer, no wipe tower
+    // NEOTKO_MULTIPASS_PRIME_TAG — number of Local-Z wipe tower slots to reserve for
+    // this sublayer's prime. 0 = prime disabled. Set in collect_extruders() from
+    // multipass_prime_volume config. Consumed in Print.cpp wipe tower planning loop.
+    size_t                      mp_prime_slots  = 0;
     // NEOTKO_MULTIPASS_TAG_START
     // Ordering constraints added by PathBlend: each (a,b) means tool a must appear
     // before tool b in the final extruder sequence.  Enforced after deduplication so
@@ -215,7 +219,11 @@ public:
 
 private:
     void				initialize_layers(std::vector<coordf_t> &zs);
-    void 				collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches);
+    // NEOTKO_MULTIPASS_PRIME_TAG — global_mp_prime_vol: when >= 0 it overrides the per-object
+    // multipass_prime_volume look-up (used by the multi-object Print constructor so all objects
+    // share the same global maximum and all sublayers get prime_slot assigned consistently).
+    // Pass -1.f (default) to keep the original per-object look-up (single-object path).
+    void 				collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches, float global_mp_prime_vol = -1.f);
     void				reorder_extruders(unsigned int last_extruder_id);
     // BBS
     void                reorder_extruders(std::vector<unsigned int> tool_order_layer0);

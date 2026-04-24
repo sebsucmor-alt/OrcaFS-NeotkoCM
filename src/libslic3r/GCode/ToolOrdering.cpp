@@ -458,9 +458,21 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         per_layer_extruder_switches = custom_tool_changes(print.model().get_curr_plate_custom_gcodes(), num_filaments);
 	}
 
-    // Collect extruders reuqired to print the layers.
+    // Collect extruders required to print the layers.
+    // NEOTKO_MULTIPASS_PRIME_TAG — pre-compute the global maximum multipass_prime_volume across
+    // ALL objects so every object's sublayers receive prime_slot consistently.  Without this,
+    // an object whose own config has volume=0 would skip prime even when another object in the
+    // same print has prime enabled — causing some sublayer toolchanges to fire without priming.
+    float global_mp_prime_vol = 0.f;
+    for (const PrintObject* obj : print.objects()) {
+        const PrintObject& src = obj->get_shared_object() ? *obj->get_shared_object() : *obj;
+        if (src.layers().empty()) continue;
+        for (const LayerRegion* lr : src.layers().front()->regions())
+            global_mp_prime_vol = std::max(global_mp_prime_vol,
+                (float)lr->region().config().multipass_prime_volume.value);
+    }
     for (auto object : print.objects())
-        this->collect_extruders(*object, per_layer_extruder_switches);
+        this->collect_extruders(*object, per_layer_extruder_switches, global_mp_prime_vol);
 
     // Reorder the extruders to minimize tool switches.
     std::vector<unsigned int> first_layer_tool_order;
@@ -740,11 +752,15 @@ static std::vector<unsigned int> parse_colormix_pattern_1based(
 // NEOTKO_COLORMIX_TAG_END
 
 // Collect extruders reuqired to print layers.
-void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches)
+void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches, float global_mp_prime_vol)
 {
-    // NEOTKO_MULTIPASS_TAG — reset before repopulating; collect_extruders may be called
-    // once per object in multi-object prints, and we don't want stale entries.
-    m_mp_sublayer_extruders.clear();
+    // NEOTKO_MULTIPASS_TAG — do NOT clear m_mp_sublayer_extruders here.
+    // In multi-object prints collect_extruders() is called once per object;
+    // clearing here would erase entries from previous objects, leaving sublayer
+    // tools uninitialized in GCodeWriter → null m_config crash.
+    // m_mp_sublayer_extruders starts empty at ToolOrdering construction and
+    // accumulates across all objects; sort_remove_duplicates in
+    // collect_extruder_statistics() handles any duplicates.
 
     for (LayerTools &layer_tools : m_layer_tools) {
         layer_tools.mixed_mgr                = m_mixed_mgr;
@@ -995,6 +1011,27 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     // initialize_layers). One tool per sublayer → no intra-sublayer ordering conflict.
     // Shared objects have empty sublayers; use the original's data (same geometry).
     const PrintObject& mp_src_ce = object.get_shared_object() ? *object.get_shared_object() : object;
+
+    // NEOTKO_MULTIPASS_PRIME_TAG — resolve effective prime volume for this object's sublayers.
+    // If global_mp_prime_vol >= 0 it was pre-computed by the multi-object Print constructor as
+    // the maximum across ALL objects; use it directly so every object's sublayers get
+    // prime_slot assigned consistently even when individual objects have volume = 0.
+    // If global_mp_prime_vol < 0 (single-object path) fall back to per-object look-up.
+    // One slot per sublayer is reserved conservatively; the Local-Z fallback absorbs
+    // the case where no actual toolchange occurs (need_toolchange returns false).
+    float mp_prime_vol = 0.f;
+    if (global_mp_prime_vol >= 0.f) {
+        // Multi-object path: caller already computed the global maximum.
+        mp_prime_vol = global_mp_prime_vol;
+    } else {
+        // Single-object path: compute from this object's regions.
+        if (!mp_src_ce.layers().empty()) {
+            for (const LayerRegion* layerm : mp_src_ce.layers().front()->regions())
+                mp_prime_vol = std::max(mp_prime_vol,
+                    (float)layerm->region().config().multipass_prime_volume.value);
+        }
+    }
+
     for (const auto& layer_subs : mp_src_ce.multipass_sublayers()) {
         for (const MultiPassSubLayer& sub : layer_subs) {
             LayerTools& lt = this->tools_for_layer(sub.print_z);
@@ -1007,9 +1044,18 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // with all_extruders(), so without this the Extruder object for this tool_id is never
             // initialized → crash in Extruder::travel_slope() / retraction_length() etc.
             m_mp_sublayer_extruders.push_back(static_cast<unsigned int>(sub.tool_id));
+            // NEOTKO_MULTIPASS_PRIME_TAG — accumulate 1 slot per sublayer when prime is enabled.
+            // Use += instead of = so that when two objects have sublayers at the same Z
+            // (z-collision), each gets its own reserved slot in plan_local_z_reserve.
+            // With = 1 only one slot was reserved regardless of how many sublayers share
+            // the same LayerTools, causing all but the first toolchange at that Z to
+            // execute without a prime tower purge.
+            if (mp_prime_vol > 0.f)
+                lt.mp_prime_slots += 1;
             if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
                 std::ostringstream _s;
-                _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << sub.tool_id << " ]";
+                _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << sub.tool_id << " ]"
+                   << (lt.mp_prime_slots > 0 ? " prime_slot=" + std::to_string(lt.mp_prime_slots) : "");
                 NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
             }
         }

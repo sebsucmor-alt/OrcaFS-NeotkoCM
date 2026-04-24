@@ -690,7 +690,16 @@ public:
                           const std::vector<std::string>& filament_colours = {},
                           const std::vector<Slic3r::ColorMixOption>& mix_options = {},
                           int    cur_pa_mode  = 0,
-                          double cur_pa_value = 0.1)
+                          double cur_pa_value = 0.1,
+                          double cur_prime_volume = 0.0,
+                          double cur_layer_height = 0.0,  // NEOTKO_MULTIPASS_MINLAYER_TAG
+                          // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent config
+                          bool   penu_enabled = false,
+                          int    penu_passes  = 2,
+                          int    penu_t1 = 0,  int penu_t2 = 1,  int penu_t3 = -1,
+                          double penu_r1 = 0.5, double penu_r2 = 0.5, double penu_r3 = 0.34,
+                          int    penu_a1 = -1,  int penu_a2 = -1,  int penu_a3 = -1,
+                          double penu_prime_vol = 0.0)
         : wxDialog(parent, wxID_ANY, _L("MultiPass Blend Settings"),
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
@@ -703,11 +712,15 @@ public:
         const int spds[3]   = {cur_spd1, cur_spd2, cur_spd3};
         const std::string gs[3] = {cur_gs1, cur_gs2, cur_gs3};
         const std::string ge[3] = {cur_ge1, cur_ge2, cur_ge3};
+        const int penu_tools[3]  = {penu_t1, penu_t2, penu_t3};
+        const double penu_ratios[3] = {penu_r1, penu_r2, penu_r3};
+        const int penu_angles[3] = {penu_a1, penu_a2, penu_a3};
         build_ui(cur_passes, cur_surface,
                  cur_tool1, cur_tool2, cur_tool3,
                  cur_ratio1, cur_ratio2, cur_ratio3,
                  cur_vary, angles, fans, spds, gs, ge,
-                 cur_pa_mode, cur_pa_value);
+                 cur_pa_mode, cur_pa_value, cur_prime_volume, cur_layer_height,
+                 penu_enabled, penu_passes, penu_tools, penu_ratios, penu_angles, penu_prime_vol);
     }
 
     int    get_passes()  const { return m_sc_passes->GetValue(); }
@@ -772,6 +785,32 @@ public:
         return std::max(0.0, v);
     }
 
+    // NEOTKO_MULTIPASS_PRIME_TAG
+    double get_prime_volume() const {
+        return m_sc_prime ? std::max(0.0, m_sc_prime->GetValue()) : 0.0;
+    }
+
+    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface getters
+    bool   get_penu_enabled() const { return m_cb_penu_enabled ? m_cb_penu_enabled->GetValue() : false; }
+    int    get_penu_passes()  const { return m_sc_penu_passes  ? m_sc_penu_passes->GetValue()  : 2; }
+    int    get_penu_tool(int i) const {
+        if (!m_sc_penu_tool[i]) return (i < 2) ? i : -1;
+        const int v = m_sc_penu_tool[i]->GetValue();
+        return (i == 2 && v == 0) ? -1 : v - 1;
+    }
+    int    get_penu_tool1()  const { return get_penu_tool(0); }
+    int    get_penu_tool2()  const { return get_penu_tool(1); }
+    int    get_penu_tool3()  const { return get_penu_tool(2); }
+    double get_penu_ratio(int i) const { return m_tc_penu_ratio[i] ? m_tc_penu_ratio[i]->get_value() : 0.5; }
+    double get_penu_ratio1() const { return get_penu_ratio(0); }
+    double get_penu_ratio2() const { return get_penu_ratio(1); }
+    double get_penu_ratio3() const { return get_penu_ratio(2); }
+    int    get_penu_angle(int i) const { return m_sc_penu_angle[i] ? m_sc_penu_angle[i]->GetValue() : -1; }
+    int    get_penu_angle1() const { return get_penu_angle(0); }
+    int    get_penu_angle2() const { return get_penu_angle(1); }
+    int    get_penu_angle3() const { return get_penu_angle(2); }
+    double get_penu_prime()  const { return m_sc_penu_prime ? std::max(0.0, m_sc_penu_prime->GetValue()) : 0.0; }
+
 private:
     int                      m_surface      = 0;
     std::vector<std::string> m_colours;
@@ -793,6 +832,16 @@ private:
     wxStaticText*         m_lbl_sum    = nullptr;
     wxRadioButton*        m_rb_pa[3]   = {nullptr, nullptr, nullptr};
     wxTextCtrl*           m_tc_pa_val  = nullptr;
+    wxSpinCtrlDouble*     m_sc_prime   = nullptr; // NEOTKO_MULTIPASS_PRIME_TAG
+    double                m_layer_height = 0.0;   // NEOTKO_MULTIPASS_MINLAYER_TAG
+    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent section
+    wxCheckBox*           m_cb_penu_enabled  = nullptr;
+    wxSpinCtrl*           m_sc_penu_passes   = nullptr;
+    wxSpinCtrl*           m_sc_penu_tool[3]  = {nullptr, nullptr, nullptr};
+    DragTextCtrl*         m_tc_penu_ratio[3] = {nullptr, nullptr, nullptr};
+    wxSpinCtrl*           m_sc_penu_angle[3] = {nullptr, nullptr, nullptr};
+    wxSpinCtrlDouble*     m_sc_penu_prime    = nullptr;
+    std::vector<wxWindow*> m_penu_pass3_widgets;
     MultiPassPreviewPanel* m_preview   = nullptr;
     wxComboBox*           m_preset_combo  = nullptr;
     wxComboBox*           m_combo_mixed   = nullptr; // NEOTKO: MixedColor normalize picker
@@ -956,8 +1005,17 @@ private:
                   const int angles[3],
                   const int fans[3], const int spds[3],
                   const std::string gs[3], const std::string ge[3],
-                  int cur_pa_mode = 0, double cur_pa_value = 0.1)
+                  int cur_pa_mode = 0, double cur_pa_value = 0.1,
+                  double cur_prime_volume = 0.0,
+                  double cur_layer_height = 0.0,  // NEOTKO_MULTIPASS_MINLAYER_TAG
+                  // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface
+                  bool penu_enabled = false, int penu_passes = 2,
+                  const int penu_tools[3] = nullptr,
+                  const double penu_ratios[3] = nullptr,
+                  const int penu_angles[3] = nullptr,
+                  double penu_prime_vol = 0.0)
     {
+        m_layer_height = cur_layer_height; // NEOTKO_MULTIPASS_MINLAYER_TAG
         const int PAD = 6;
         auto* vs = new wxBoxSizer(wxVERTICAL);
 
@@ -1164,7 +1222,11 @@ private:
 
             const double safe_ratio = (ratios_def[i] > 0.0 && ratios_def[i] < 10.0)
                                       ? ratios_def[i] : (i == 2 ? 0.34 : 0.50);
-            m_tc_ratio[i] = new DragTextCtrl(this, safe_ratio, 0.05, 5.0, 0.01);
+            // NEOTKO_MULTIPASS_MINLAYER_TAG — minimum ratio so each pass height ≥ 0.04mm.
+            const double min_r = (m_layer_height > 1e-6)
+                ? std::max(0.05, 0.04 / m_layer_height)
+                : 0.05;
+            m_tc_ratio[i] = new DragTextCtrl(this, std::max(safe_ratio, min_r), min_r, 5.0, 0.01);
             if (i == 2) m_pass3_widgets.push_back(m_tc_ratio[i]);
             grid->Add(m_tc_ratio[i], 0, wxALIGN_CENTER_VERTICAL);
 
@@ -1529,14 +1591,155 @@ private:
             vs->Add(lbl_pa, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
         }
 
+        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
+
+        // NEOTKO_MULTIPASS_PRIME_TAG — Wipe tower prime volume spinner
+        {
+            auto* prime_row = new wxBoxSizer(wxHORIZONTAL);
+            prime_row->Add(new wxStaticText(this, wxID_ANY,
+                _L("Wipe tower prime (mm\u00b3):")),
+                0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 8);
+            const double safe_pv = (cur_prime_volume >= 0.0 && cur_prime_volume <= 200.0)
+                                   ? cur_prime_volume : 0.0;
+            m_sc_prime = new wxSpinCtrlDouble(this, wxID_ANY,
+                wxEmptyString, wxDefaultPosition, wxSize(80, -1),
+                wxSP_ARROW_KEYS, 0.0, 200.0, safe_pv, 1.0);
+            m_sc_prime->SetToolTip(_L("Volume (mm\u00b3) to purge on the wipe tower before each "
+                                      "MultiPass sublayer toolchange.\n"
+                                      "0 = disabled (default). Requires prime tower active."));
+            prime_row->Add(m_sc_prime, 0, wxALIGN_CENTER_VERTICAL);
+            auto* prime_hint = new wxStaticText(this, wxID_ANY,
+                _L("  (0 = disabled, requires prime tower)"));
+            prime_hint->SetForegroundColour(wxColour(100, 100, 100));
+            prime_row->Add(prime_hint, 0, wxALIGN_CENTER_VERTICAL|wxLEFT, 4);
+            vs->Add(prime_row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+        }
+        // NEOTKO_MULTIPASS_PRIME_TAG_END
+
+        // NEOTKO_MULTIPASS_MINLAYER_TAG — Layer height info + minimum ratio warning
+        if (m_layer_height > 1e-6) {
+            vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
+            const double min_r = std::max(0.05, 0.04 / m_layer_height);
+            wxString info_text;
+            if (m_layer_height < 0.04) {
+                info_text = wxString::Format(
+                    _L("\u26a0 Layer height %.3f mm is below 0.04 mm — passes thinner than\n"
+                       "0.04 mm may not extrude reliably. Increase layer height."),
+                    m_layer_height);
+            } else {
+                info_text = wxString::Format(
+                    _L("Layer height: %.3f mm  \u2502  Min pass ratio: %.2f (= 0.04 mm min height)"),
+                    m_layer_height, min_r);
+            }
+            auto* lbl_lh = new wxStaticText(this, wxID_ANY, info_text);
+            lbl_lh->SetForegroundColour(
+                (m_layer_height < 0.04) ? wxColour(200, 30, 30) : wxColour(100, 100, 100));
+            vs->Add(lbl_lh, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+        }
+        // NEOTKO_MULTIPASS_MINLAYER_TAG_END
+
+        // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent section
+        {
+            vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
+            auto* penu_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Penultimate Surface"));
+
+            // Enabled checkbox
+            m_cb_penu_enabled = new wxCheckBox(this, wxID_ANY, _L("Enable independent Penultimate MultiPass"));
+            m_cb_penu_enabled->SetValue(penu_enabled);
+            penu_box->Add(m_cb_penu_enabled, 0, wxALL, PAD);
+
+            // Passes + sum label
+            auto* pr1 = new wxBoxSizer(wxHORIZONTAL);
+            pr1->Add(new wxStaticText(this, wxID_ANY, _L("Passes:")),
+                     0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+            const int safe_pp = (penu_passes >= 1 && penu_passes <= 3) ? penu_passes : 2;
+            m_sc_penu_passes = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                                              wxDefaultPosition, wxSize(60, -1),
+                                              wxSP_ARROW_KEYS, 1, 3, safe_pp);
+            pr1->Add(m_sc_penu_passes, 0, wxALIGN_CENTER_VERTICAL);
+            penu_box->Add(pr1, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+
+            // Per-pass rows: Tool | Ratio | Angle
+            const int def_tools[3]  = {0, 1, -1};
+            const double def_ratios[3] = {0.5, 0.5, 0.34};
+            const int def_angles[3] = {-1, -1, -1};
+            for (int i = 0; i < 3; ++i) {
+                const int   pt = penu_tools  ? penu_tools[i]  : def_tools[i];
+                const double pr = penu_ratios ? penu_ratios[i] : def_ratios[i];
+                const int   pa = penu_angles ? penu_angles[i] : def_angles[i];
+
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(this, wxID_ANY,
+                          wxString::Format(_L("Pass %d:"), i + 1)),
+                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+
+                // Tool spinner (F-notation: 0=disabled for pass 3, 1-based otherwise)
+                const int fv = (pt >= 0) ? pt + 1 : 0;
+                m_sc_penu_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(55, -1), wxSP_ARROW_KEYS,
+                    (i < 2) ? 1 : 0, 4, std::max((i < 2) ? 1 : 0, fv));
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Tool:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                row->Add(m_sc_penu_tool[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
+
+                // Ratio drag-text
+                const double min_r = (m_layer_height > 1e-6) ? std::max(0.05, 0.04 / m_layer_height) : 0.05;
+                m_tc_penu_ratio[i] = new DragTextCtrl(this, std::max(pr, min_r), min_r, 5.0, 0.01);
+                m_tc_penu_ratio[i]->SetMinSize(wxSize(60, -1));
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Ratio:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                row->Add(m_tc_penu_ratio[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
+
+                // Angle spinner
+                const int safe_pa = (pa >= -1 && pa <= 359) ? pa : -1;
+                m_sc_penu_angle[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, -1, 359, safe_pa);
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Angle:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                row->Add(m_sc_penu_angle[i], 0, wxALIGN_CENTER_VERTICAL);
+
+                penu_box->Add(row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+                if (i == 2) {
+                    m_penu_pass3_widgets.push_back(m_sc_penu_tool[i]);
+                    m_penu_pass3_widgets.push_back(m_tc_penu_ratio[i]);
+                    m_penu_pass3_widgets.push_back(m_sc_penu_angle[i]);
+                }
+            }
+
+            // Prime volume
+            {
+                auto* ppr = new wxBoxSizer(wxHORIZONTAL);
+                ppr->Add(new wxStaticText(this, wxID_ANY, _L("Prime volume (mm\u00b3):")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 8);
+                const double safe_ppv = (penu_prime_vol >= 0.0 && penu_prime_vol <= 200.0)
+                                        ? penu_prime_vol : 0.0;
+                m_sc_penu_prime = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS,
+                    0.0, 200.0, safe_ppv, 1.0);
+                ppr->Add(m_sc_penu_prime, 0, wxALIGN_CENTER_VERTICAL);
+                penu_box->Add(ppr, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+            }
+
+            // Enable/disable pass-3 widgets based on penu_passes
+            const bool p3_on = (safe_pp >= 3);
+            for (auto* w : m_penu_pass3_widgets) if (w) w->Enable(p3_on);
+
+            m_sc_penu_passes->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&) {
+                const bool on = (m_sc_penu_passes->GetValue() >= 3);
+                for (auto* w : m_penu_pass3_widgets) if (w) w->Enable(on);
+                Layout();
+            });
+
+            vs->Add(penu_box, 0, wxEXPAND|wxALL, PAD);
+        }
+        // NEOTKO_MULTIPASS_SURFACES_TAG_END
+
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
                 0, wxALL|wxALIGN_RIGHT, PAD);
         SetSizerAndFit(vs);
     }
 };
 // NEOTKO_MULTIPASS_TAG_END
-
-// NEOTKO_PATHBLEND_TAG_START
 // Minimal dialog for configuring MultiPathBlend (Opción 4).
 // Controls: num_passes (1-4), filament per pass (F-notation: F1=T0, displayed 1-based, stored 0-based), min_ratio (%).
 // Surface filter is set by SurfaceColorMixerDialog combos — not duplicated here.
@@ -1880,10 +2083,12 @@ private:
 
     void infer_effects()
     {
-        const bool cm_on  = m_config->opt_bool("interlayer_colormix_enabled");
-        const int  cm_srf = m_config->opt_int ("interlayer_colormix_surface");
-        const bool mp_on  = m_config->opt_bool("multipass_enabled");
-        const int  mp_srf = m_config->opt_int ("multipass_surface");
+        const bool cm_on     = m_config->opt_bool("interlayer_colormix_enabled");
+        const int  cm_srf    = m_config->opt_int ("interlayer_colormix_surface");
+        const bool mp_on     = m_config->opt_bool("multipass_enabled");         // top only
+        const int  mp_srf    = m_config->opt_int ("multipass_surface");
+        // NEOTKO_MULTIPASS_SURFACES_TAG: Penultimate MultiPass now has its own enabled key.
+        const bool penu_mp_on = m_config->opt_bool("penultimate_multipass_enabled");
         // PathBlend is now independent of MultiPass — uses its own surface key.
         const bool pb_on  = m_config->opt_bool("multipass_path_gradient");
         const int  pb_srf = m_config->opt_int ("pathblend_surface");
@@ -1895,13 +2100,13 @@ private:
         m_top_eff  = EFF_NONE;
         m_penu_eff = EFF_NONE;
 
-        if      (pb_on && for_top (pb_srf)) m_top_eff  = EFF_PB;
-        else if (mp_on && for_top (mp_srf)) m_top_eff  = EFF_MP;
-        else if (cm_on && for_top (cm_srf)) m_top_eff  = EFF_CM;
+        if      (pb_on  && for_top(pb_srf))  m_top_eff  = EFF_PB;
+        else if (mp_on  && for_top(mp_srf))  m_top_eff  = EFF_MP;
+        else if (cm_on  && for_top(cm_srf))  m_top_eff  = EFF_CM;
 
-        if      (pb_on && for_penu(pb_srf)) m_penu_eff = EFF_PB;
-        else if (mp_on && for_penu(mp_srf)) m_penu_eff = EFF_MP;
-        else if (cm_on && for_penu(cm_srf)) m_penu_eff = EFF_CM;
+        if      (pb_on     && for_penu(pb_srf)) m_penu_eff = EFF_PB;
+        else if (penu_mp_on)                    m_penu_eff = EFF_MP;
+        else if (cm_on     && for_penu(cm_srf)) m_penu_eff = EFF_CM;
     }
 
     wxString summary_for(int eff, int surface_id) const
@@ -1916,7 +2121,10 @@ private:
         }
         if (eff == EFF_MP) {
             int n = 2;
-            if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes")) n = o->value;
+            // NEOTKO_MULTIPASS_SURFACES_TAG: penultimate reads its own num_passes key
+            const char* np_key = (surface_id == 0)
+                ? "multipass_num_passes" : "penultimate_multipass_num_passes";
+            if (auto* o = m_config->option<ConfigOptionInt>(np_key)) n = o->value;
             return wxString::Format(_L("%d passes"), n);
         }
         if (eff == EFF_PB) {
@@ -1950,13 +2158,20 @@ private:
             for (auto& [t, n] : cnt)
                 passes.push_back({t, static_cast<float>(n) / total});
         } else if (eff == EFF_MP) {
+            // NEOTKO_MULTIPASS_SURFACES_TAG: use correct prefix per surface
+            const bool is_penu = (surface_id != 0);
+            const char* np_key = is_penu ? "penultimate_multipass_num_passes" : "multipass_num_passes";
             int n = 2;
-            if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes")) n = o->value;
-            const char* rk[3] = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
-            const char* tk[3] = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
+            if (auto* o = m_config->option<ConfigOptionInt>(np_key)) n = o->value;
+            const char* rk_top[3]  = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
+            const char* tk_top[3]  = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
+            const char* rk_penu[3] = {"penultimate_multipass_width_ratio_1","penultimate_multipass_width_ratio_2","penultimate_multipass_width_ratio_3"};
+            const char* tk_penu[3] = {"penultimate_multipass_tool_1","penultimate_multipass_tool_2","penultimate_multipass_tool_3"};
+            const char** rk = is_penu ? rk_penu : rk_top;
+            const char** tk = is_penu ? tk_penu : tk_top;
             const float def_r[3] = {0.5f, 0.5f, 0.34f};
             for (int i = 0; i < std::min(n, 3); ++i) {
-                int   t = 0;     if (auto* o = m_config->option<ConfigOptionInt>  (tk[i])) t = o->value;
+                int   t = 0;        if (auto* o = m_config->option<ConfigOptionInt>  (tk[i])) t = o->value;
                 float r = def_r[i]; if (auto* o = m_config->option<ConfigOptionFloat>(rk[i])) r = o->value;
                 passes.push_back({t, r});
             }
@@ -2077,6 +2292,10 @@ private:
             if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_3"))   ge3        =o->value;
             if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_pa_mode"))        pa_mode    =o->value;
             if (auto* o=m_config->option<ConfigOptionFloat>("multipass_pa_value"))       pa_val=(double)o->value;
+            double cur_prime_vol = 0.0; // NEOTKO_MULTIPASS_PRIME_TAG
+            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_prime_volume"))   cur_prime_vol=(double)o->value;
+            double cur_layer_height = 0.0; // NEOTKO_MULTIPASS_MINLAYER_TAG
+            if (auto* o=m_config->option<ConfigOptionFloat>("layer_height"))             cur_layer_height=(double)o->value;
 
             // NEOTKO_MULTIPASS_TAG_START — build virtual-only ColorMixOption list for "Normalize to MixedColor %"
             std::vector<Slic3r::ColorMixOption> mp_mix_opts;
@@ -2093,6 +2312,26 @@ private:
             }
             // NEOTKO_MULTIPASS_TAG_END
 
+            // NEOTKO_MULTIPASS_SURFACES_TAG — read penultimate independent config
+            bool   penu_enabled_cur = false;
+            int    penu_passes_cur  = 2;
+            int    penu_t1_cur=0, penu_t2_cur=1, penu_t3_cur=-1;
+            double penu_r1_cur=0.5, penu_r2_cur=0.5, penu_r3_cur=0.34;
+            int    penu_a1_cur=-1, penu_a2_cur=-1, penu_a3_cur=-1;
+            double penu_prime_cur=0.0;
+            if (auto*o=m_config->option<ConfigOptionBool>  ("penultimate_multipass_enabled"))       penu_enabled_cur=o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_num_passes"))    penu_passes_cur =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_1"))        penu_t1_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_2"))        penu_t2_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_3"))        penu_t3_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_1")) penu_r1_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_2")) penu_r2_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_3")) penu_r3_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_1"))       penu_a1_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_2"))       penu_a2_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_3"))       penu_a3_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_prime_volume"))  penu_prime_cur=(double)o->value;
+
             MultiPassConfigDialog dlg(this,
                 cur_passes, cur_surface,
                 cur_tool1, cur_tool2, cur_tool3,
@@ -2101,7 +2340,13 @@ private:
                 cur_f1, cur_f2, cur_f3,
                 cur_s1, cur_s2, cur_s3,
                 gs1, gs2, gs3, ge1, ge2, ge3,
-                m_fcolors, mp_mix_opts, pa_mode, pa_val);
+                m_fcolors, mp_mix_opts, pa_mode, pa_val,
+                cur_prime_vol, cur_layer_height,
+                penu_enabled_cur, penu_passes_cur,
+                penu_t1_cur, penu_t2_cur, penu_t3_cur,
+                penu_r1_cur, penu_r2_cur, penu_r3_cur,
+                penu_a1_cur, penu_a2_cur, penu_a3_cur,
+                penu_prime_cur);
             if (dlg.ShowModal() == wxID_OK) {
                 auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v;   m_on_change(k); };
                 auto wb = [&](const char* k, bool v) { if(auto*o=m_config->option<ConfigOptionBool> (k))o->value=v;   m_on_change(k); };
@@ -2133,6 +2378,20 @@ private:
                 ws("multipass_gcode_end_3",   dlg.get_gcode_end3());
                 wi("multipass_pa_mode",     dlg.get_pa_mode());
                 wf("multipass_pa_value",    (float)dlg.get_pa_value());
+                wf("multipass_prime_volume",(float)dlg.get_prime_volume()); // NEOTKO_MULTIPASS_PRIME_TAG
+                // NEOTKO_MULTIPASS_SURFACES_TAG — write penultimate independent config
+                wb("penultimate_multipass_enabled",       dlg.get_penu_enabled());
+                wi("penultimate_multipass_num_passes",    dlg.get_penu_passes());
+                wi("penultimate_multipass_tool_1",        dlg.get_penu_tool1());
+                wi("penultimate_multipass_tool_2",        dlg.get_penu_tool2());
+                wi("penultimate_multipass_tool_3",        dlg.get_penu_tool3());
+                wf("penultimate_multipass_width_ratio_1", (float)dlg.get_penu_ratio1());
+                wf("penultimate_multipass_width_ratio_2", (float)dlg.get_penu_ratio2());
+                wf("penultimate_multipass_width_ratio_3", (float)dlg.get_penu_ratio3());
+                wi("penultimate_multipass_angle_1",       dlg.get_penu_angle1());
+                wi("penultimate_multipass_angle_2",       dlg.get_penu_angle2());
+                wi("penultimate_multipass_angle_3",       dlg.get_penu_angle3());
+                wf("penultimate_multipass_prime_volume",  (float)dlg.get_penu_prime());
             }
         } else if (eff == EFF_PB) {
             int   cur_passes = 2;
@@ -2193,18 +2452,21 @@ private:
         if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface")) o->value = cm_srf;
         m_on_change("interlayer_colormix_surface");
 
-        // MultiPass (EFF_MP only — PathBlend is now independent)
+        // MultiPass — NEOTKO_MULTIPASS_SURFACES_TAG: Top and Penultimate are now independent.
+        // multipass_enabled controls Top Surface only.
+        // penultimate_multipass_enabled controls Penultimate independently.
         const bool top_mp  = (m_top_eff  == EFF_MP);
         const bool penu_mp = (m_penu_eff == EFF_MP);
-        const bool mp_en   = top_mp || penu_mp;
-        int mp_srf = 0;
-        if (top_mp && !penu_mp) mp_srf = 1;
-        else if (!top_mp && penu_mp) mp_srf = 2;
 
-        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled"))       o->value = mp_en;
+        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled"))          o->value = top_mp;
         m_on_change("multipass_enabled");
-        if (auto* o = m_config->option<ConfigOptionInt> ("multipass_surface"))       o->value = mp_srf;
-        m_on_change("multipass_surface");
+        // multipass_surface is always 1 (top only) since penu has its own key
+        if (top_mp) {
+            if (auto* o = m_config->option<ConfigOptionInt>("multipass_surface"))       o->value = 1;
+            m_on_change("multipass_surface");
+        }
+        if (auto* o = m_config->option<ConfigOptionBool>("penultimate_multipass_enabled")) o->value = penu_mp;
+        m_on_change("penultimate_multipass_enabled");
 
         // PathBlend (EFF_PB only — independent surface key, independent enable)
         const bool top_pb  = (m_top_eff  == EFF_PB);
@@ -4900,6 +5162,7 @@ void TabPrint::build()
             [this](wxWindow* parent) -> wxSizer* {
                 const bool any_on = m_config->opt_bool("interlayer_colormix_enabled")
                                  || m_config->opt_bool("multipass_enabled")
+                                 || m_config->opt_bool("penultimate_multipass_enabled")  // NEOTKO_MULTIPASS_SURFACES_TAG
                                  || m_config->opt_bool("multipass_path_gradient");
                 auto* cb = new wxCheckBox(parent, wxID_ANY, _L("Enable Surface Color Mixer"));
                 cb->SetValue(any_on);
@@ -4911,6 +5174,8 @@ void TabPrint::build()
                         on_value_change("interlayer_colormix_enabled", boost::any());
                         if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled")) o->value = false;
                         on_value_change("multipass_enabled", boost::any());
+                        if (auto* o = m_config->option<ConfigOptionBool>("penultimate_multipass_enabled")) o->value = false; // NEOTKO_MULTIPASS_SURFACES_TAG
+                        on_value_change("penultimate_multipass_enabled", boost::any());
                         if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient")) o->value = false;
                         on_value_change("multipass_path_gradient", boost::any());
                     }

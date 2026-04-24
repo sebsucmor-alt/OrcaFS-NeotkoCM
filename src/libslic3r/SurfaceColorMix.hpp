@@ -150,7 +150,10 @@ struct MultiPassConfig {
     int         speed_pct[3]   = {100, 100, 100};     // 1-200 via M220
     std::string gcode_start[3] = {"", "", ""};
     std::string gcode_end[3]   = {"", "", ""};
-    static MultiPassConfig from_region_config(const PrintRegionConfig& cfg);
+    // role: erTopSolidInfill → reads multipass_* keys (top surface config)
+    //       erPenultimateInfill → reads penultimate_multipass_* keys
+    static MultiPassConfig from_region_config(const PrintRegionConfig& cfg,
+                                              ExtrusionRole role = erTopSolidInfill);
 };
 
 // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
