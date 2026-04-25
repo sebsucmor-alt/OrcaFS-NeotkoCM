@@ -6834,7 +6834,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enables pattern digits 5-9 to reference Mixed Filament virtual colors. "
                      "When off, only physical tools 1-4 are recognised in the pattern string.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionBool(true));
     // NEOTKO_COLORMIX_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend

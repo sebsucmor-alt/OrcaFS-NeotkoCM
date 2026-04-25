@@ -561,19 +561,31 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 #endif
         if (evt.CmdDown() && evt.GetKeyCode() == 'R') { if (m_slice_enable) { wxGetApp().plater()->update(true, true); wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE)); this->m_tabpanel->SetSelection(tpPreview); } return; }
         if (evt.CmdDown() && evt.ShiftDown() && evt.GetKeyCode() == 'G') {
-            m_plater->apply_background_progress();
-            m_print_enable = get_enable_print_status();
-            m_print_btn->Enable(m_print_enable);
-            if (m_print_enable) {
-                if (wxGetApp().preset_bundle->use_bbl_network())
-                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_PLATE));
-                else
-                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
+            // NEOTKO_LIBRE_TAG_START — Cmd+Shift+G is Temporal Link "select group" in LM; skip print/send
+            if (!wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+            // NEOTKO_LIBRE_TAG_END
+                m_plater->apply_background_progress();
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                if (m_print_enable) {
+                    if (wxGetApp().preset_bundle->use_bbl_network())
+                        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_PLATE));
+                    else
+                        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
+                }
+            // NEOTKO_LIBRE_TAG_START
             }
+            // NEOTKO_LIBRE_TAG_END
             evt.Skip();
             return;
         }
-        else if (evt.CmdDown() && evt.GetKeyCode() == 'G') { if (can_export_gcode()) { wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); } evt.Skip(); return; }
+        else if (evt.CmdDown() && evt.GetKeyCode() == 'G') {
+            // NEOTKO_LIBRE_TAG_START — Cmd+G is Temporal Link "link objects" in LM; skip export gcode
+            if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+            // NEOTKO_LIBRE_TAG_END
+                if (can_export_gcode()) { wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); }
+            evt.Skip(); return;
+        }
         if (evt.CmdDown() && evt.GetKeyCode() == 'J') { m_printhost_queue_dlg->Show(); return; }
         if (evt.CmdDown() && evt.GetKeyCode() == 'N') { m_plater->new_project(); return;}
         if (evt.CmdDown() && evt.GetKeyCode() == 'O') { m_plater->load_project(); return;}

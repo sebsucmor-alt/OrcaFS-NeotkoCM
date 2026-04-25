@@ -554,24 +554,34 @@ static double mp_delta_e(const MpLabColor& a, const MpLabColor& b)
     return std::sqrt((a.L-b.L)*(a.L-b.L) + (a.a-b.a)*(a.a-b.a) + (a.b-b.b)*(a.b-b.b));
 }
 
-// Beer-Lambert stack. layers = bottom-to-top [{r,g,b} in [0..1], td in [0..1], ratio].
-// bg_r/g/b: background color (black for single layer; penultimate result for top-layer mode).
+// Beer-Lambert stack. layers = bottom-to-top [{r,g,b} in sRGB [0..1], td, ratio].
+// bg_r/g/b: background sRGB (black = 0,0,0 for single layer).
+// Internally converts sRGB→linear before Beer-Lambert (physically correct),
+// returns sRGB output so callers / mp_rgb_to_lab remain unchanged.
 struct MpBLLayer { double r, g, b, td, ratio; };
 
 static std::tuple<double,double,double> mp_beer_blend(
     const std::vector<MpBLLayer>& layers,
     double bg_r = 0.0, double bg_g = 0.0, double bg_b = 0.0)
 {
-    double r = bg_r, g = bg_g, bv = bg_b;
+    auto to_lin = [](double c) {
+        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+    };
+    auto to_srgb = [](double c) -> double {
+        c = std::max(0.0, std::min(1.0, c));
+        return c <= 0.0031308 ? 12.92 * c : 1.055 * std::pow(c, 1.0 / 2.4) - 0.055;
+    };
+    double r = to_lin(bg_r), g = to_lin(bg_g), bv = to_lin(bg_b);
     for (const auto& lyr : layers) {
-        if (lyr.td < 1e-6) { r = lyr.r; g = lyr.g; bv = lyr.b; continue; }
+        const double lr = to_lin(lyr.r), lg = to_lin(lyr.g), lb = to_lin(lyr.b);
+        if (lyr.td < 1e-6) { r = lr; g = lg; bv = lb; continue; }
         const double t  = std::pow(0.1, lyr.ratio / lyr.td);
         const double op = 1.0 - t;
-        r  = lyr.r * op + r  * t;
-        g  = lyr.g * op + g  * t;
-        bv = lyr.b * op + bv * t;
+        r  = lr * op + r  * t;
+        g  = lg * op + g  * t;
+        bv = lb * op + bv * t;
     }
-    return {r, g, bv};
+    return { to_srgb(r), to_srgb(g), to_srgb(bv) };
 }
 
 struct MpSuggestResult {
@@ -856,6 +866,7 @@ private:
     MultiPassPreviewPanel* m_preview   = nullptr;
     wxComboBox*           m_preset_combo  = nullptr;
     wxComboBox*           m_combo_mixed   = nullptr; // NEOTKO: MixedColor normalize picker
+    wxPanel*              m_swatch_mixed  = nullptr; // colour of selected MixedColor
     std::vector<Slic3r::ColorMixOption>          m_mix_options;
     std::vector<std::pair<wxString, wxString>>   m_presets;
     std::vector<wxWindow*> m_pass3_widgets;
@@ -1147,16 +1158,16 @@ private:
             m_swatch[i] = new ColorSwatch(this, tool_color(safe_tool > 0 ? safe_tool - 1 : -1));
             // NEOTKO_MULTIPASS_TAG_START — TD spinner: reads neotko_td_{tool+1} from app_config
             {
-                double init_td = 0.1;
+                double init_td = 0.5;
                 if (stored_t >= 0) {
                     auto* ac = wxGetApp().app_config;
                     const std::string td_val = ac ? ac->get("neotko_td_" + std::to_string(stored_t + 1)) : "";
                     try { if (!td_val.empty()) init_td = std::stod(td_val); } catch (...) {}
-                    init_td = std::clamp(init_td, 0.0, 1.0);
+                    init_td = std::clamp(init_td, 0.01, 10.0);
                 }
                 m_sc_td[i] = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
-                                                   wxDefaultPosition, wxSize(58,-1),
-                                                   wxSP_ARROW_KEYS, 0.0, 1.0, init_td, 0.01);
+                                                   wxDefaultPosition, wxSize(62,-1),
+                                                   wxSP_ARROW_KEYS, 0.01, 10.0, init_td, 0.05);
                 m_sc_td[i]->SetDigits(2);
                 m_sc_td[i]->SetToolTip(_L("TD (Tinting Density) for this pass's filament.\n"
                                            "0.1=highly opaque, 0.5-3=semi-opaque, 3-7=translucent, 7-10+=highly translucent.\n"
@@ -1194,9 +1205,9 @@ private:
                 if (m_sc_td[i] && fv > 0) {
                     auto* ac = wxGetApp().app_config;
                     const std::string td_val = ac ? ac->get("neotko_td_" + std::to_string(fv)) : "";
-                    double v = 0.1;
+                    double v = 0.5;
                     try { if (!td_val.empty()) v = std::stod(td_val); } catch (...) {}
-                    m_sc_td[i]->SetValue(std::clamp(v, 0.0, 1.0));
+                    m_sc_td[i]->SetValue(std::clamp(v, 0.01, 10.0));
                 }
                 // NEOTKO_MULTIPASS_TAG_END
             });
@@ -1303,7 +1314,32 @@ private:
                                            wxDefaultPosition, wxSize(160, -1),
                                            combo_labels, wxCB_READONLY);
             m_combo_mixed->SetToolTip(_L("Select a virtual MixedColor filament to read its blend recipe."));
-            row_mc->Add(m_combo_mixed, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+            row_mc->Add(m_combo_mixed, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+
+            // Colour swatch for the selected MixedColor
+            m_swatch_mixed = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
+            m_swatch_mixed->SetToolTip(_L("Display colour of the selected MixedColor."));
+            auto update_swatch_mixed = [this]() {
+                if (!m_swatch_mixed) return;
+                const int sel = m_combo_mixed ? m_combo_mixed->GetSelection() : -1;
+                wxColour c(128,128,128);
+                if (sel >= 0 && sel < (int)m_mix_options.size()) {
+                    const std::string& dc = m_mix_options[sel].display_color;
+                    if (dc.size() >= 7 && dc[0] == '#') {
+                        unsigned long rgb = 0;
+                        if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
+                            c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
+                    }
+                }
+                m_swatch_mixed->SetBackgroundColour(c);
+                m_swatch_mixed->Refresh();
+            };
+            update_swatch_mixed();
+            m_combo_mixed->Bind(wxEVT_COMBOBOX, [update_swatch_mixed](wxCommandEvent&) {
+                update_swatch_mixed();
+            });
+            row_mc->Add(m_swatch_mixed, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+
             auto* btn_mc = new wxButton(this, wxID_ANY, _L("Normalize %"),
                                         wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
             btn_mc->SetToolTip(_L("Apply the selected MixedColor recipe proportions as layer_ratio for each pass.\n"
@@ -1371,6 +1407,52 @@ private:
                 const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
                 if (passes < 2) return;
 
+                // NEOTKO_MULTIPASS_TAG_START — auto-populate tools from MixedColor recipe
+                if (m_combo_mixed) {
+                    const int sel = m_combo_mixed->GetSelection();
+                    if (sel >= 0 && sel < (int)m_mix_options.size()) {
+                        const auto& tw = m_mix_options[sel].tool_weights;
+                        if (!tw.empty()) {
+                            // Sort tools by weight descending: dominant first
+                            std::vector<std::pair<int,float>> sorted_tw(tw.begin(), tw.end());
+                            std::stable_sort(sorted_tw.begin(), sorted_tw.end(),
+                                [](const auto& a, const auto& b){ return a.second > b.second; });
+                            // Pattern: 2-pass→[dom,sec], 3-pass→[dom,sec,dom]
+                            const int t_dom = sorted_tw[0].first;
+                            const int t_sec = sorted_tw.size() > 1 ? sorted_tw[1].first : t_dom;
+                            std::vector<int> pattern;
+                            if (passes == 2)      pattern = {t_dom, t_sec};
+                            else if (passes == 3) pattern = {t_dom, t_sec, t_dom};
+                            else {
+                                pattern.resize(passes);
+                                for (int i = 0; i < passes; ++i)
+                                    pattern[i] = (i % 2 == 0) ? t_dom : t_sec;
+                            }
+                            auto* ac = wxGetApp().app_config;
+                            for (int i = 0; i < passes; ++i) {
+                                const int fv = pattern[i] + 1; // 1-based F-notation
+                                if (m_sc_tool[i]) {
+                                    m_sc_tool[i]->SetValue(fv);
+                                    if (m_swatch[i])
+                                        m_swatch[i]->set_color(
+                                            (pattern[i] >= 0 && pattern[i] < (int)m_colours.size()
+                                             && !m_colours[pattern[i]].empty())
+                                            ? wxColour(m_colours[pattern[i]])
+                                            : wxColour(128,128,128));
+                                }
+                                if (m_sc_td[i] && fv > 0) {
+                                    const std::string td_key = "neotko_td_" + std::to_string(fv);
+                                    const std::string td_val = ac ? ac->get(td_key) : "";
+                                    double v = 0.5;
+                                    try { if (!td_val.empty()) v = std::stod(td_val); } catch (...) {}
+                                    m_sc_td[i]->SetValue(std::clamp(v, 0.01, 10.0));
+                                }
+                            }
+                        }
+                    }
+                }
+                // NEOTKO_MULTIPASS_TAG_END
+
                 struct PassState {
                     int tool_0; double ratio, td; int angle, fan, speed;
                     std::string gs, ge;
@@ -1379,7 +1461,7 @@ private:
                 for (int i = 0; i < passes; ++i) {
                     states[i].tool_0 = m_sc_tool[i]  ? m_sc_tool[i]->GetValue() - 1 : i;
                     states[i].ratio  = m_tc_ratio[i]  ? m_tc_ratio[i]->get_value()  : 0.5;
-                    states[i].td     = m_sc_td[i]     ? m_sc_td[i]->GetValue()      : 0.1;
+                    states[i].td     = m_sc_td[i]     ? m_sc_td[i]->GetValue()      : 0.5;
                     states[i].angle  = m_sc_angle[i]  ? m_sc_angle[i]->GetValue()   : -1;
                     states[i].fan    = m_sc_fan[i]    ? m_sc_fan[i]->GetValue()     : -1;
                     states[i].speed  = m_sc_speed[i]  ? m_sc_speed[i]->GetValue()   : 100;
@@ -2028,7 +2110,7 @@ public:
             const std::string val = ac ? ac->get(key) : "";
             float v = 0.f;
             try { if (!val.empty()) v = std::stof(val); } catch (...) {}
-            m_td[i] = std::max(0.f, std::min(1.f, v));
+            m_td[i] = std::max(0.01f, std::min(10.f, v));
         }
 
         infer_effects();
@@ -2068,11 +2150,12 @@ private:
     wxPanel*       m_stacked_swatch  = nullptr;
     wxStaticText*  m_lbl_opacity_top = nullptr;
     // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint optimizer)
-    wxComboBox*    m_bs_combo_target = nullptr; // virtual MixedColor target picker
-    wxRadioButton* m_bs_rb_top      = nullptr; // "Top layer only" mode
-    wxRadioButton* m_bs_rb_joint    = nullptr; // "Top + Penultimate" mode
-    wxPanel*       m_bs_swatch      = nullptr; // simulated result colour
-    wxStaticText*  m_bs_lbl_score   = nullptr; // "ΔE: X.X" inline result
+    wxComboBox*    m_bs_combo_target  = nullptr; // virtual MixedColor target picker
+    wxPanel*       m_bs_swatch_target = nullptr; // colour of selected target MixedColor
+    wxRadioButton* m_bs_rb_top       = nullptr; // "Top layer only" mode
+    wxRadioButton* m_bs_rb_joint     = nullptr; // "Top + Penultimate" mode
+    wxPanel*       m_bs_swatch       = nullptr; // simulated result colour
+    wxStaticText*  m_bs_lbl_score    = nullptr; // "ΔE: X.X" inline result
     std::vector<Slic3r::ColorMixOption> m_bs_mix_opts; // virtual-only options cache
     // NEOTKO_MULTIPASS_TAG_END
 
@@ -2118,6 +2201,21 @@ private:
                 m_bs_combo_target->Append(wxString::FromUTF8(opt.label));
             m_bs_combo_target->SetSelection(0);
             m_bs_combo_target->Enable(true);
+        }
+
+        // Sync target swatch to new selection
+        if (m_bs_swatch_target) {
+            wxColour c(128,128,128);
+            if (!m_bs_mix_opts.empty()) {
+                const std::string& dc = m_bs_mix_opts[0].display_color;
+                if (dc.size() >= 7 && dc[0] == '#') {
+                    unsigned long rgb = 0;
+                    if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
+                        c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
+                }
+            }
+            m_bs_swatch_target->SetBackgroundColour(c);
+            m_bs_swatch_target->Refresh();
         }
 
         // Refresh TD sliders in case filament list changed
@@ -2867,7 +2965,7 @@ private:
                          0, wxALIGN_CENTER_VERTICAL);
 
             const int iv = static_cast<int>(m_td[i] * 100.f + 0.5f);
-            auto* sl = new wxSlider(this, wxID_ANY, iv, 0, 100,
+            auto* sl = new wxSlider(this, wxID_ANY, iv, 1, 1000,
                                      wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
             m_sl_td[i] = sl;
             td_grid->Add(sl, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
@@ -2989,7 +3087,7 @@ private:
             more_vs->Add(row, 0, wxEXPAND | wxBOTTOM, 4);
         }
         {
-            bool cur_uv = false;
+            bool cur_uv = true;
             if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
                 cur_uv = o->value;
             m_chk_use_virtual = new wxCheckBox(more_panel, wxID_ANY,
@@ -3074,7 +3172,32 @@ private:
                     wxDefaultPosition, wxSize(180,-1), labels, wxCB_READONLY);
                 m_bs_combo_target->SetToolTip(_L("Select the virtual MixedColor whose display colour is the blend target."));
                 m_bs_combo_target->Enable(!m_bs_mix_opts.empty());
-                row->Add(m_bs_combo_target, 1, wxALIGN_CENTER_VERTICAL);
+                row->Add(m_bs_combo_target, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+
+                // Colour swatch for the selected target MixedColor
+                m_bs_swatch_target = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(18,18));
+                m_bs_swatch_target->SetToolTip(_L("Display colour of the selected MixedColor target."));
+                auto update_bs_target_swatch = [this]() {
+                    if (!m_bs_swatch_target) return;
+                    const int sel = m_bs_combo_target ? m_bs_combo_target->GetSelection() : -1;
+                    wxColour c(128,128,128);
+                    if (sel >= 0 && sel < (int)m_bs_mix_opts.size()) {
+                        const std::string& dc = m_bs_mix_opts[sel].display_color;
+                        if (dc.size() >= 7 && dc[0] == '#') {
+                            unsigned long rgb = 0;
+                            if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
+                                c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
+                        }
+                    }
+                    m_bs_swatch_target->SetBackgroundColour(c);
+                    m_bs_swatch_target->Refresh();
+                };
+                update_bs_target_swatch();
+                m_bs_combo_target->Bind(wxEVT_COMBOBOX, [update_bs_target_swatch](wxCommandEvent&) {
+                    update_bs_target_swatch();
+                });
+                row->Add(m_bs_swatch_target, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+
                 auto* btn_refresh = new wxButton(this, wxID_ANY, L"\u21BA",
                     wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
                 btn_refresh->SetToolTip(_L("Refresh — re-read Mixed Filament definitions from the current project."));
@@ -3164,7 +3287,7 @@ private:
                     auto* ac = wxGetApp().app_config;
                     auto get_td = [&](int t) -> double {
                         if (t >= 0 && t < 4) return std::max(0.01, (double)m_td[t]);
-                        double v = 0.1;
+                        double v = 0.5;
                         if (t >= 0 && ac) {
                             const std::string s = ac->get("neotko_td_" + std::to_string(t+1));
                             try { if (!s.empty()) v = std::stod(s); } catch(...) {}

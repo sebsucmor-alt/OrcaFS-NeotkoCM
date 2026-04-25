@@ -6,6 +6,7 @@
 #include "../libslic3r.h"
 #include "../MixedFilament.hpp"
 
+#include <set>
 #include <utility>
 
 #include <boost/container/small_vector.hpp>
@@ -136,9 +137,14 @@ public:
     bool 						has_wipe_tower = false;
     bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer, no wipe tower
     // NEOTKO_MULTIPASS_PRIME_TAG — number of Local-Z wipe tower slots to reserve for
-    // this sublayer's prime. 0 = prime disabled. Set in collect_extruders() from
-    // multipass_prime_volume config. Consumed in Print.cpp wipe tower planning loop.
+    // this sublayer's prime. 0 = prime disabled. Finalized from mp_tools_set after all
+    // collect_extruders() calls complete. Consumed in Print.cpp wipe tower planning loop.
     size_t                      mp_prime_slots  = 0;
+    // Temp set used during ToolOrdering construction to accumulate unique tool IDs at this
+    // sublayer Z. After all collect_extruders() calls, mp_prime_slots = mp_tools_set.size()
+    // and the set is cleared. This ensures we reserve one slot per unique tool, not one
+    // per object — avoiding O(N_objects) prime tower bloat when all objects share a config.
+    std::set<unsigned int>      mp_tools_set;
     // NEOTKO_MULTIPASS_TAG_START
     // Ordering constraints added by PathBlend: each (a,b) means tool a must appear
     // before tool b in the final extruder sequence.  Enforced after deduplication so

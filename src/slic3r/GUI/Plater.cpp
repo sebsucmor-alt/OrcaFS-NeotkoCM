@@ -12300,8 +12300,10 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     new_volume->fuzzy_skin_facets.assign(old_volume->fuzzy_skin_facets);
     std::swap(old_model_object->volumes[volume_idx], old_model_object->volumes.back());
     old_model_object->delete_volume(old_model_object->volumes.size() - 1);
-    if (!sinking)
+    // NEOTKO_LIBRE_TAG_START — In LM, keep floating objects at their Z after mesh replacement
+    if (!sinking && !libre_mode_on())
         old_model_object->ensure_on_bed();
+    // NEOTKO_LIBRE_TAG_END
     old_model_object->sort_volumes(true);
 
     // if object has just one volume, rename object too
@@ -12705,7 +12707,9 @@ void Plater::priv::reload_from_disk()
                     new_volume->convert_from_meters();
                 std::swap(old_model_object->volumes[vol_idx], old_model_object->volumes.back());
                 old_model_object->delete_volume(old_model_object->volumes.size() - 1);
-                if (!sinking) old_model_object->ensure_on_bed();
+                // NEOTKO_LIBRE_TAG_START — In LM, keep floating objects at their Z after reload
+                if (!sinking && !libre_mode_on()) old_model_object->ensure_on_bed();
+                // NEOTKO_LIBRE_TAG_END
                 old_model_object->sort_volumes(wxGetApp().app_config->get("order_volumes") == "1");
 
                 sla::reproject_points_and_holes(old_model_object);
@@ -12777,8 +12781,10 @@ void Plater::priv::reload_from_disk()
                     new_volume->convert_from_meters();
                 std::swap(old_model_object->volumes[sel_v.volume_idx], old_model_object->volumes.back());
                 old_model_object->delete_volume(old_model_object->volumes.size() - 1);
-                if (!sinking)
+                // NEOTKO_LIBRE_TAG_START — In LM, keep floating objects at their Z after reload
+                if (!sinking && !libre_mode_on())
                     old_model_object->ensure_on_bed();
+                // NEOTKO_LIBRE_TAG_END
                 old_model_object->sort_volumes(true);
 
                 sla::reproject_points_and_holes(old_model_object);

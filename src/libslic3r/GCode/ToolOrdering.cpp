@@ -363,6 +363,15 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
     // Collect extruders reuqired to print the layers.
     this->collect_extruders(object, std::vector<std::pair<double, unsigned int>>());
 
+    // NEOTKO_MULTIPASS_PRIME_TAG — finalize mp_prime_slots from unique tool sets.
+    // Must run after collect_extruders() so mp_tools_set is fully populated.
+    for (LayerTools& lt : m_layer_tools) {
+        if (lt.is_mp_sublayer && !lt.mp_tools_set.empty()) {
+            lt.mp_prime_slots = lt.mp_tools_set.size();
+            lt.mp_tools_set.clear();
+        }
+    }
+
     // BBS
     // Reorder the extruders to minimize tool switches.
     std::vector<unsigned int> first_layer_tool_order;
@@ -473,6 +482,17 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
     }
     for (auto object : print.objects())
         this->collect_extruders(*object, per_layer_extruder_switches, global_mp_prime_vol);
+
+    // NEOTKO_MULTIPASS_PRIME_TAG — finalize mp_prime_slots from unique tool sets.
+    // Must run AFTER all collect_extruders() calls so every object has contributed its
+    // sublayer tools to mp_tools_set. mp_prime_slots = number of unique tools at that Z,
+    // not number of objects — avoids O(N_objects) wipe tower size explosion.
+    for (LayerTools& lt : m_layer_tools) {
+        if (lt.is_mp_sublayer && !lt.mp_tools_set.empty()) {
+            lt.mp_prime_slots = lt.mp_tools_set.size();
+            lt.mp_tools_set.clear();
+        }
+    }
 
     // Reorder the extruders to minimize tool switches.
     std::vector<unsigned int> first_layer_tool_order;
@@ -1044,18 +1064,19 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // with all_extruders(), so without this the Extruder object for this tool_id is never
             // initialized → crash in Extruder::travel_slope() / retraction_length() etc.
             m_mp_sublayer_extruders.push_back(static_cast<unsigned int>(sub.tool_id));
-            // NEOTKO_MULTIPASS_PRIME_TAG — accumulate 1 slot per sublayer when prime is enabled.
-            // Use += instead of = so that when two objects have sublayers at the same Z
-            // (z-collision), each gets its own reserved slot in plan_local_z_reserve.
-            // With = 1 only one slot was reserved regardless of how many sublayers share
-            // the same LayerTools, causing all but the first toolchange at that Z to
-            // execute without a prime tower purge.
+            // NEOTKO_MULTIPASS_PRIME_TAG — record this tool in the per-Z unique-tool set.
+            // mp_prime_slots is NOT set here; it is finalized from mp_tools_set.size() after
+            // ALL collect_extruders() calls complete (see finalization blocks in constructors).
+            // Using a set instead of a counter fixes O(N_objects) prime tower bloat: with 20
+            // identical objects all using T0 at sublayer Z1, we need exactly 1 prime slot,
+            // not 20. The z-collision case (two objects with different tools at the same Z)
+            // is still handled correctly — both tools land in the set → slots=2.
             if (mp_prime_vol > 0.f)
-                lt.mp_prime_slots += 1;
+                lt.mp_tools_set.insert(static_cast<unsigned int>(sub.tool_id));
             if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
                 std::ostringstream _s;
                 _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << sub.tool_id << " ]"
-                   << (lt.mp_prime_slots > 0 ? " prime_slot=" + std::to_string(lt.mp_prime_slots) : "");
+                   << (mp_prime_vol > 0.f ? " tools_at_z=" + std::to_string(lt.mp_tools_set.size()) : "");
                 NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
             }
         }

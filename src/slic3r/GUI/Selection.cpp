@@ -1593,7 +1593,10 @@ void Selection::scale_and_translate(const Vec3d &scale, const Vec3d &world_trans
         synchronize_unselected_volumes();
 #endif // !DISABLE_INSTANCES_SYNCH
 
-    ensure_on_bed();
+    // NEOTKO_LIBRE_TAG_START — In Libre Mode (FFF) allow floating objects: skip bed snap during scale/mirror drag
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        ensure_on_bed();
+    // NEOTKO_LIBRE_TAG_END
     set_bounding_boxes_dirty();
     if (wxGetApp().plater()->canvas3D()->get_canvas_type() != GLCanvas3D::ECanvasType::CanvasAssembleView) {
         wxGetApp().plater()->canvas3D()->requires_check_outside_state();

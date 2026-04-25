@@ -3132,7 +3132,10 @@ void ObjectList::boolean()
     ModelVolume* new_volume = new_object->add_volume(mesh);
 
     // BBS: ensure on bed but no need to ensure locate in the center around origin
-    new_object->ensure_on_bed();
+    // NEOTKO_LIBRE_TAG_START — In LM, boolean result keeps its Z (source objects may be floating)
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        new_object->ensure_on_bed();
+    // NEOTKO_LIBRE_TAG_END
     new_object->center_around_origin();
     new_object->translate_instances(-new_object->origin_translation);
     new_object->origin_translation = Vec3d::Zero();
@@ -4064,7 +4067,10 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
                     m_objects_model->UpdateWarningIcon(parent, get_warning_icon_name(obj->get_object_stl_stats()));
                 }
 #endif
-                wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
+                // NEOTKO_LIBRE_TAG_START — In LM, keep floating objects at their Z after volume deletion
+                if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+                    wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
+                // NEOTKO_LIBRE_TAG_END
             }
             else
                 m_objects_model->Delete(m_objects_model->GetItemByInstanceId(item->obj_idx, item->sub_obj_idx));

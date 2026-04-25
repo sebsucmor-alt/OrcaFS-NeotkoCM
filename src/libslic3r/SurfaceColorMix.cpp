@@ -627,6 +627,10 @@ std::vector<ColorMixOption> SurfaceColorMix::get_mix_options(
         mgr.auto_generate(filament_colours);
         MixedFilamentManager::set_auto_generate_enabled(was_auto);
         mgr.load_custom_entries(mixed_defs, filament_colours);
+        // Mirror PrintApply.cpp: compute ratio_a/ratio_b from mix_b_percent so that
+        // mixed_filament_to_pattern() and extract_recipe_tools() dither correctly.
+        // Mode 0 (LayerCycle/Simple) is the correct default — bounds unused in this mode.
+        mgr.apply_gradient_settings(0, 0.0f, 1.0f, false);
 
         auto get_color = [&](unsigned int id) -> std::string {
             if (id >= 1 && id <= filament_colours.size())
@@ -645,17 +649,27 @@ std::vector<ColorMixOption> SurfaceColorMix::get_mix_options(
             //   digit '5' (for 4-physical setup) → tool_idx 4 → virtual ID 5.
             opt.filament_id = num_physical + virtual_counter + 1;
             opt.pattern      = mixed_filament_to_pattern(mf);
-            opt.label        = "Mixed (F" + std::to_string(mf.component_a)
-                             + "+F" + std::to_string(mf.component_b) + ")";
+            {
+                const int pct_b = std::max(0, std::min(100, mf.mix_b_percent));
+                const int pct_a = 100 - pct_b;
+                opt.label = "Mixed " + std::to_string(virtual_counter + 1)
+                          + ": F" + std::to_string(mf.component_a)
+                          + "+F" + std::to_string(mf.component_b)
+                          + " (" + std::to_string(pct_a) + "%/"
+                          + std::to_string(pct_b) + "%)";
+            }
             opt.tool_weights = SurfaceColorMix::extract_recipe_weights(mf, (size_t)num_physical);
 
             if (!mf.display_color.empty()) {
                 opt.display_color = mf.display_color;
             } else {
+                // Use mix_b_percent directly — ratio_a/ratio_b may be stale (not serialized).
+                const int ra = std::max(0, 100 - mf.mix_b_percent);
+                const int rb = mf.mix_b_percent;
                 opt.display_color = MixedFilamentManager::blend_color(
                     get_color(mf.component_a),
                     get_color(mf.component_b),
-                    mf.ratio_a, mf.ratio_b);
+                    ra, rb);
             }
             result.push_back(std::move(opt));
             ++virtual_counter;
