@@ -2157,6 +2157,7 @@ private:
     wxPanel*       m_bs_swatch       = nullptr; // simulated result colour
     wxStaticText*  m_bs_lbl_score    = nullptr; // "ΔE: X.X" inline result
     std::vector<Slic3r::ColorMixOption> m_bs_mix_opts; // virtual-only options cache
+    wxCheckBox*    m_mp_perim_override = nullptr; // NEOTKO_MULTIPASS_TAG: perimeter override checkbox
     // NEOTKO_MULTIPASS_TAG_END
 
     // ------------------------------------------------------------------ helpers
@@ -2671,6 +2672,11 @@ private:
         }
         if (auto* o = m_config->option<ConfigOptionBool>("penultimate_multipass_enabled")) o->value = penu_mp;
         m_on_change("penultimate_multipass_enabled");
+        // NEOTKO_MULTIPASS_TAG_START — Perimeter Override write-back
+        if (auto* o = m_config->option<ConfigOptionBool>("multipass_perimeter_override"))
+            o->value = m_mp_perim_override && m_mp_perim_override->GetValue();
+        m_on_change("multipass_perimeter_override");
+        // NEOTKO_MULTIPASS_TAG_END
 
         // PathBlend (EFF_PB only — independent surface key, independent enable)
         const bool top_pb  = (m_top_eff  == EFF_PB);
@@ -3225,6 +3231,20 @@ private:
                 row->Add(m_bs_rb_joint, 0, wxALIGN_CENTER_VERTICAL);
                 bs_sb->Add(row, 0, wxALL, PAD/2);
             }
+
+            // NEOTKO_MULTIPASS_TAG_START — Perimeter Override checkbox
+            {
+                const bool cur_perim_ov = m_config->opt_bool("multipass_perimeter_override");
+                m_mp_perim_override = new wxCheckBox(this, wxID_ANY,
+                    _L("MultiPass Perimeter Override"));
+                m_mp_perim_override->SetValue(cur_perim_ov);
+                m_mp_perim_override->SetToolTip(_L(
+                    "When enabled, perimeters are suppressed at the real layer Z and "
+                    "re-printed once per MultiPass sublayer using that sublayer's tool.\n"
+                    "Gives perimeter walls the same per-pass color blending as the top surface fill."));
+                bs_sb->Add(m_mp_perim_override, 0, wxALL, PAD/2);
+            }
+            // NEOTKO_MULTIPASS_TAG_END
 
             // ---- Calculate button + result display ----
             {

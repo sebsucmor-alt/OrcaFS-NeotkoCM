@@ -429,28 +429,6 @@ static inline Point wipe_tower_point_to_object_point(GCode& gcodegen, const Vec2
     return Point(scale_(wipe_tower_pt.x() - gcodegen.origin()(0)), scale_(wipe_tower_pt.y() - gcodegen.origin()(1)));
 }
 
-// NEOTKO_MULTIPASS_TAG_START — WipeTower mismatch bypass helper
-// Selectable via: export ORCA_WIPETOWER_FIX=B|C|D
-//   B — force requested tool into tcr (wrong purge volume, correct tool, no crash)
-//   C — skip wipe entirely for this toolchange (no purge, correct tool, no crash)
-//   D — scan forward in plan for a TCR whose new_tool matches requested (best purge match)
-//   unset / other — original behaviour (throw)
-enum class WTMismatchAction { THROW, B_FORCE, C_SKIP, D_SCAN };
-
-static WTMismatchAction neotko_wt_mismatch_action()
-{
-    static WTMismatchAction s_action = []() {
-        const char* v = std::getenv("ORCA_WIPETOWER_FIX");
-        if (!v)             return WTMismatchAction::THROW;
-        if (v[0] == 'B')    return WTMismatchAction::B_FORCE;
-        if (v[0] == 'C')    return WTMismatchAction::C_SKIP;
-        if (v[0] == 'D')    return WTMismatchAction::D_SCAN;
-        return WTMismatchAction::THROW;
-    }();
-    return s_action;
-}
-// NEOTKO_MULTIPASS_TAG_END
-
 std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_extruder_id, double z) const
 {
     // NEOTKO_MULTIPASS_TAG_START — WipeTower logging
@@ -482,67 +460,16 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                      << " tc_idx=" << m_tool_change_idx
                      << " requested=T" << new_extruder_id
                      << " expected=T" << tcr.new_tool
-                     << " initial=T" << tcr.initial_tool
-                     << " fix=" << ([] {
-                            switch (neotko_wt_mismatch_action()) {
-                                case WTMismatchAction::B_FORCE: return "B_FORCE";
-                                case WTMismatchAction::C_SKIP:  return "C_SKIP";
-                                case WTMismatchAction::D_SCAN:  return "D_SCAN";
-                                default:                        return "THROW";
-                            }
-                        })();
+                     << " initial=T" << tcr.initial_tool;
             NeoDebug::write(NeoDebug::WIPETOWER, mismatch.str());
         }
     }
     // NEOTKO_MULTIPASS_TAG_END
 
-    // NEOTKO_MULTIPASS_TAG_START — WipeTower mismatch bypass (ORCA_WIPETOWER_FIX)
-    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool) {
-        const WTMismatchAction action = neotko_wt_mismatch_action();
-        if (action == WTMismatchAction::C_SKIP) {
-            // Opción C: skip wipe, no purge emitted. Tool stays as requested.
-            NeoDebug::write(NeoDebug::WIPETOWER,
-                "WT_FIX_C(BBL): skipping wipe tower TCR, no purge emitted");
-            return std::string();
-        }
-        if (action == WTMismatchAction::D_SCAN) {
-            // Opción D: scan forward for a TCR with new_tool == new_extruder_id.
-            // Falls through to normal execution with the matched TCR if found,
-            // otherwise falls back to B_FORCE behaviour.
-            if (m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size()) {
-                const auto& layer_tcs = m_tool_changes[m_layer_idx];
-                for (size_t i = (size_t)m_tool_change_idx; i < layer_tcs.size(); ++i) {
-                    if (layer_tcs[i].new_tool == new_extruder_id) {
-                        NeoDebug::write(NeoDebug::WIPETOWER,
-                            std::string("WT_FIX_D(BBL): matched TCR at idx=") + std::to_string(i)
-                            + " T" + std::to_string(layer_tcs[i].initial_tool)
-                            + "→T" + std::to_string(layer_tcs[i].new_tool));
-                        // Use matched TCR — new_extruder_id already matches new_tool, no mismatch
-                        return append_tcr(gcodegen, layer_tcs[i], new_extruder_id, z);
-                    }
-                }
-                NeoDebug::write(NeoDebug::WIPETOWER,
-                    "WT_FIX_D(BBL): no matching TCR found, falling back to B_FORCE");
-            }
-            // Fall through to B_FORCE
-        }
-        if (action == WTMismatchAction::B_FORCE || action == WTMismatchAction::D_SCAN) {
-            // Opción B: force new_extruder_id into tcr by const_cast.
-            // Purge gcode was generated for a different transition — volume may be off,
-            // but no crash and tool ends up correct.
-            NeoDebug::write(NeoDebug::WIPETOWER,
-                std::string("WT_FIX_B(BBL): forcing new_tool=T") + std::to_string(new_extruder_id)
-                + " (was T" + std::to_string(tcr.new_tool) + ")");
-            const_cast<WipeTower::ToolChangeResult&>(tcr).new_tool = new_extruder_id;
-            // Fall through to normal execution below
-        } else {
-            // THROW (default, no env var set)
-            throw Slic3r::InvalidArgument(Slic3r::format(
-                "Error: WipeTowerIntegration::append_tcr unexpected toolchange: layer_idx=%1% tool_change_idx=%2% requested=%3% expected=%4% initial=%5%",
-                m_layer_idx, m_tool_change_idx, new_extruder_id, tcr.new_tool, tcr.initial_tool));
-        }
-    }
-    // NEOTKO_MULTIPASS_TAG_END
+    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
+        throw Slic3r::InvalidArgument(Slic3r::format(
+            "Error: WipeTowerIntegration::append_tcr unexpected toolchange: layer_idx=%1% tool_change_idx=%2% requested=%3% expected=%4% initial=%5%",
+            m_layer_idx, m_tool_change_idx, new_extruder_id, tcr.new_tool, tcr.initial_tool));
 
     std::string gcode;
 
@@ -830,62 +757,16 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                      << " tc_idx=" << m_tool_change_idx
                      << " requested=T" << new_extruder_id
                      << " expected=T" << tcr.new_tool
-                     << " initial=T" << tcr.initial_tool
-                     << " fix=" << ([] {
-                            switch (neotko_wt_mismatch_action()) {
-                                case WTMismatchAction::B_FORCE: return "B_FORCE";
-                                case WTMismatchAction::C_SKIP:  return "C_SKIP";
-                                case WTMismatchAction::D_SCAN:  return "D_SCAN";
-                                default:                        return "THROW";
-                            }
-                        })();
+                     << " initial=T" << tcr.initial_tool;
             NeoDebug::write(NeoDebug::WIPETOWER, mismatch.str());
         }
     }
     // NEOTKO_MULTIPASS_TAG_END
 
-    // NEOTKO_MULTIPASS_TAG_START — WipeTower mismatch bypass (ORCA_WIPETOWER_FIX)
-    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool) {
-        const WTMismatchAction action = neotko_wt_mismatch_action();
-        if (action == WTMismatchAction::C_SKIP) {
-            // Opción C: skip wipe, no purge emitted. Tool stays as requested.
-            NeoDebug::write(NeoDebug::WIPETOWER,
-                "WT_FIX_C(nonBBL): skipping wipe tower TCR, no purge emitted");
-            return std::string();
-        }
-        if (action == WTMismatchAction::D_SCAN) {
-            // Opción D: scan forward for a TCR with new_tool == new_extruder_id.
-            if (m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size()) {
-                const auto& layer_tcs = m_tool_changes[m_layer_idx];
-                for (size_t i = (size_t)m_tool_change_idx; i < layer_tcs.size(); ++i) {
-                    if (layer_tcs[i].new_tool == new_extruder_id) {
-                        NeoDebug::write(NeoDebug::WIPETOWER,
-                            std::string("WT_FIX_D(nonBBL): matched TCR at idx=") + std::to_string(i)
-                            + " T" + std::to_string(layer_tcs[i].initial_tool)
-                            + "→T" + std::to_string(layer_tcs[i].new_tool));
-                        return append_tcr2(gcodegen, layer_tcs[i], new_extruder_id, z);
-                    }
-                }
-                NeoDebug::write(NeoDebug::WIPETOWER,
-                    "WT_FIX_D(nonBBL): no matching TCR found, falling back to B_FORCE");
-            }
-            // Fall through to B_FORCE
-        }
-        if (action == WTMismatchAction::B_FORCE || action == WTMismatchAction::D_SCAN) {
-            // Opción B: force new_extruder_id into tcr.
-            NeoDebug::write(NeoDebug::WIPETOWER,
-                std::string("WT_FIX_B(nonBBL): forcing new_tool=T") + std::to_string(new_extruder_id)
-                + " (was T" + std::to_string(tcr.new_tool) + ")");
-            const_cast<WipeTower::ToolChangeResult&>(tcr).new_tool = new_extruder_id;
-            // Fall through to normal execution below
-        } else {
-            // THROW (default)
-            throw Slic3r::InvalidArgument(Slic3r::format(
-                "Error: WipeTowerIntegration::append_tcr unexpected toolchange: layer_idx=%1% tool_change_idx=%2% requested=%3% expected=%4% initial=%5%",
-                m_layer_idx, m_tool_change_idx, new_extruder_id, tcr.new_tool, tcr.initial_tool));
-        }
-    }
-    // NEOTKO_MULTIPASS_TAG_END
+    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
+        throw Slic3r::InvalidArgument(Slic3r::format(
+            "Error: WipeTowerIntegration::append_tcr unexpected toolchange: layer_idx=%1% tool_change_idx=%2% requested=%3% expected=%4% initial=%5%",
+            m_layer_idx, m_tool_change_idx, new_extruder_id, tcr.new_tool, tcr.initial_tool));
 
     std::string gcode;
 
@@ -4669,30 +4550,6 @@ LayerResult GCode::process_layer(const Print& print,
     else if (support_layer != nullptr)
         layer_ptr = support_layer;
 
-    // NEOTKO_MULTIPASS_TAG_START — trace: detect mixed groups (real layer + mp_sublayer at same Z)
-    if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
-        bool has_real = (layer_ptr != nullptr);
-        bool has_sub  = false;
-        for (const LayerToPrint& l : layers)
-            if (l.mp_sublayer) { has_sub = true; break; }
-        if (has_real && has_sub) {
-            const coordf_t pz = layer_ptr ? layer_ptr->print_z : 0.;
-            std::ostringstream _oss;
-            _oss << "PHANTOM_TRACE[GCode] MIXED GROUP at z=" << pz
-                 << " real_ltp=" << (has_real ? "yes" : "no")
-                 << " sub_ltp=" << (has_sub ? "yes" : "no")
-                 << " layer_tools.extruders=[";
-            for (size_t _i = 0; _i < layer_tools.extruders.size(); ++_i) {
-                if (_i) _oss << ",";
-                _oss << "T" << layer_tools.extruders[_i];
-            }
-            _oss << "] mp_perim_override_active=" << layer_tools.mp_perim_override_active
-                 << " is_mp_sublayer=" << layer_tools.is_mp_sublayer;
-            NeoDebug::write(NeoDebug::WIPETOWER, _oss.str());
-        }
-    }
-    // NEOTKO_MULTIPASS_TAG_END
-
     // NEOTKO_MULTIPASS_TAG_START — sublayer-only group: all entries are virtual MP sublayers
     if (layer_ptr == nullptr) {
         size_t   sub_layer_id = 0;
@@ -6179,42 +6036,12 @@ LayerResult GCode::process_layer(const Print& print,
         const unsigned int expected_initial = layer_extruders.front();
         if (m_writer.need_toolchange(expected_initial)) {
             gcode += this->set_extruder(expected_initial, print_z);
-            // NEOTKO_MULTIPASS_TAG_START — sync WT plan index after out-of-plan toolchange
-            // set_extruder() changed the tool without going through the WT plan. If the WT
-            // plan's next pending TCR targets exactly expected_initial, advance the index
-            // so the next tool_change() call sees the correct (subsequent) TCR instead of
-            // trying to re-execute the transition that was just handled by set_extruder.
-            m_wipe_tower->skip_planned_toolchange_to((int)expected_initial);
-            if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
-                std::ostringstream _oss;
-                _oss << "PHANTOM_TRACE[GCode] m_after_mp_sublayer recovery:"
-                     << " set_extruder(T" << expected_initial << ")"
-                     << " + skip_planned_toolchange_to(T" << expected_initial << ")"
-                     << " z=" << print_z;
-                NeoDebug::write(NeoDebug::WIPETOWER, _oss.str());
-            }
-            // NEOTKO_MULTIPASS_TAG_END
         }
     }
     m_after_mp_sublayer = false; // reset regardless — real layer is now starting
     // NEOTKO_MULTIPASS_TAG_END
 
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
-    // NEOTKO_MULTIPASS_TAG_START — trace: log layer_extruders list once per layer when WT active
-    if (has_wipe_tower && NeoDebug::enabled(NeoDebug::WIPETOWER)) {
-        std::ostringstream _oss;
-        _oss << "PHANTOM_TRACE[GCode] extruder_loop z=" << print_z
-             << " layer_extruders=[";
-        for (size_t _i = 0; _i < layer_extruders.size(); ++_i) {
-            if (_i) _oss << ",";
-            _oss << "T" << layer_extruders[_i];
-        }
-        _oss << "] current_tool=T" << (m_writer.extruder() ? (int)m_writer.extruder()->id() : -1)
-             << " m_after_mp_sublayer=" << m_after_mp_sublayer
-             << " is_mp_sublayer=" << layer_tools.is_mp_sublayer;
-        NeoDebug::write(NeoDebug::WIPETOWER, _oss.str());
-    }
-    // NEOTKO_MULTIPASS_TAG_END
     for (unsigned int extruder_id : layer_extruders) {
         if (print.config().skirt_type == stCombined && !print.skirt().empty())
             gcode += generate_skirt(print, print.skirt(), Point(0, 0), layer.object()->config().skirt_start_angle, layer_tools, layer,

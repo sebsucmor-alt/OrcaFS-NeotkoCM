@@ -219,7 +219,8 @@ struct MultiPassSubLayer {
     float                     height   = 0.f; // extrusion height H_sub = H * ratio
     int                       tool_id  = 0;   // 0-based physical extruder
     int                       pass_idx = 0;   // 0-based position in MultiPassConfig
-    ExtrusionEntityCollection fills;          // paths — tool stored directly, no mm3 encoding
+    ExtrusionEntityCollection fills;          // infill paths — tool stored directly, no mm3 encoding
+    ExtrusionEntityCollection perimeters;     // cloned+scaled perimeter paths (multipass_perimeter_override only)
 };
 // NEOTKO_MULTIPASS_TAG_END
 

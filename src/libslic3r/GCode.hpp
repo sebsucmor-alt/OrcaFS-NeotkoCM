@@ -118,6 +118,20 @@ public:
     bool is_first_print() const { return m_is_first_print;}
     void set_is_first_print(bool is) { m_is_first_print = is; }
 
+    // NEOTKO_MULTIPASS_TAG_START
+    // Called when the m_after_mp_sublayer recovery block uses set_extruder() to
+    // restore the printer to the expected initial tool of the current layer, bypassing
+    // the normal WT toolchange path. If the WT plan's next pending TCR targets exactly
+    // new_tool_id as its new_tool, advance m_tool_change_idx past it — otherwise the
+    // next tool_change() call would attempt to re-do the same transition and mismatch.
+    void skip_planned_toolchange_to(int new_tool_id) {
+        if (m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size() &&
+            (size_t)m_tool_change_idx < m_tool_changes[m_layer_idx].size() &&
+            (int)m_tool_changes[m_layer_idx][m_tool_change_idx].new_tool == new_tool_id)
+            ++m_tool_change_idx;
+    }
+    // NEOTKO_MULTIPASS_TAG_END
+
     bool enable_timelapse_print() const { return m_enable_timelapse_print; }
 
 private:

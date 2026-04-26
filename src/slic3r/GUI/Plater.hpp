@@ -585,6 +585,10 @@ public:
     void break_link_selected_objects();
     void break_link_all_in_group();
     void select_link_group();
+    // Copy/Paste Process Settings
+    void copy_process_settings();
+    void paste_process_settings();
+    bool has_process_settings_clipboard() const;
     // NEOTKO_LIBRE_TAG_END
     // find all empty cells on the plate and won't overlap with exclusion areas
     static std::vector<Vec2f> get_empty_cells(const Vec2f step);

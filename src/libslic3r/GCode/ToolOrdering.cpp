@@ -75,6 +75,27 @@ bool has_grouped_manual_pattern(const MixedFilamentManager *mixed_mgr,
     return normalized.find(',') != std::string::npos;
 }
 
+// NEOTKO_MULTIPASS_TAG_START — resolve MixedFilament to component_a, bypassing cycling.
+// Used when multipass_perimeter_override is active so WipeTower and GCode see a single
+// stable physical tool regardless of the layer_index cycling pattern.
+static unsigned int resolve_mixed_component_a(const MixedFilamentManager* mgr,
+                                               size_t                      num_physical,
+                                               unsigned int                filament_id_1based)
+{
+    if (mgr && mgr->is_mixed(filament_id_1based, num_physical)) {
+        const MixedFilament* mf = mgr->mixed_filament_from_id(filament_id_1based, num_physical);
+        if (mf) {
+            NeoDebug::write(NeoDebug::TOOLORDER,
+                std::string("MP_PERIM_OVERRIDE_BLOCK: mixed_id=") + std::to_string(filament_id_1based)
+                + " → component_a=" + std::to_string(mf->component_a)
+                + " (cycling suppressed)");
+            return mf->component_a;
+        }
+    }
+    return filament_id_1based;
+}
+// NEOTKO_MULTIPASS_TAG_END
+
 void append_unique_preserve_order(std::vector<unsigned int> &dst, unsigned int value)
 {
     if (std::find(dst.begin(), dst.end(), value) == dst.end())
@@ -258,6 +279,12 @@ bool LayerTools::is_extruder_order(unsigned int a, unsigned int b) const
 // Resolve a 1-based filament ID through the mixed-filament manager for this layer.
 unsigned int LayerTools::resolve_mixed_1based(unsigned int filament_id) const
 {
+    // NEOTKO_MULTIPASS_TAG_START — when MultiPass perimeter override is active, bypass
+    // height-based MixedFilament cycling. WipeTower cannot reconcile per-layer Z cycling
+    // with sublayer toolchanges; use component_a for a stable, consistent tool assignment.
+    if (mp_perim_override_active)
+        return resolve_mixed_component_a(mixed_mgr, num_physical, filament_id);
+    // NEOTKO_MULTIPASS_TAG_END
     return resolve_mixed_with_layer_heights(mixed_mgr,
                                             num_physical,
                                             filament_id,
@@ -480,6 +507,37 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
             global_mp_prime_vol = std::max(global_mp_prime_vol,
                 (float)lr->region().config().multipass_prime_volume.value);
     }
+    // NEOTKO_MULTIPASS_TAG_START — pre-mark LayerTools entries where MP sublayers are populated
+    // AND perimeter_override is active. Must run BEFORE all collect_extruders() calls so that
+    // MixedFilament objects (iterated before the MP object) already see the blocking flag and
+    // resolve to component_a on those layers. Checking sublayer presence (not config flags)
+    // ensures only layers where MultiPass actually fires (top/penultimate) are blocked, not
+    // every layer of the MP object (which would happen with a plain multipass_enabled check).
+    for (const PrintObject* obj : print.objects()) {
+        const PrintObject& src = obj->get_shared_object() ? *obj->get_shared_object() : *obj;
+        if (src.multipass_sublayers().empty()) continue;
+        int li = 0;
+        for (const Layer* lyr : src.layers()) {
+            if (li < (int)src.multipass_sublayers().size() &&
+                !src.multipass_sublayers()[li].empty()) {
+                for (const LayerRegion* lr : lyr->regions()) {
+                    if (lr->region().config().multipass_perimeter_override.value) {
+                        LayerTools& lt = this->tools_for_layer(lyr->print_z);
+                        if (!lt.mp_perim_override_active) {
+                            lt.mp_perim_override_active = true;
+                            NeoDebug::write(NeoDebug::TOOLORDER,
+                                std::string("MP_PERIM_OVERRIDE_PREPASS: print_z=") + std::to_string(lyr->print_z)
+                                + " → MixedFilament pre-blocked (sublayers + perimeter_override)");
+                        }
+                        break;
+                    }
+                }
+            }
+            ++li;
+        }
+    }
+    // NEOTKO_MULTIPASS_TAG_END
+
     for (auto object : print.objects())
         this->collect_extruders(*object, per_layer_extruder_switches, global_mp_prime_vol);
 
@@ -824,6 +882,9 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     int layerCount = 0;
     std::vector<int> firstLayerExtruders;
     firstLayerExtruders.clear();
+    // NEOTKO_MULTIPASS_TAG_START — source for sublayer presence check (shared-object aware)
+    const PrintObject& mp_src_loop = object.get_shared_object() ? *object.get_shared_object() : object;
+    // NEOTKO_MULTIPASS_TAG_END
 
     // Collect the object extruders.
     for (auto layer : object.layers()) {
@@ -832,6 +893,28 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         layer_tools.layer_index       = layerCount;
         layer_tools.object_layer_count = int(object.layers().size());
         layer_tools.layer_height      = layer->height;
+
+        // NEOTKO_MULTIPASS_TAG_START — detect layers with populated MP sublayers + perimeter_override
+        // to block MixedFilament cycling. Uses sublayer presence (not config flags) so only
+        // top/penultimate layers where MultiPass actually fires are blocked. Config flags like
+        // multipass_enabled are per-region and would match ALL layers of the MP object, incorrectly
+        // blocking MixedFilament on non-surface layers. OR-accumulated; only set, never cleared.
+        if (!layer_tools.mp_perim_override_active) {
+            const bool layer_has_mp_subs =
+                (layerCount < (int)mp_src_loop.multipass_sublayers().size() &&
+                 !mp_src_loop.multipass_sublayers()[layerCount].empty());
+            if (layer_has_mp_subs) {
+                for (const LayerRegion* lr : layer->regions())
+                    if (lr->region().config().multipass_perimeter_override.value)
+                        { layer_tools.mp_perim_override_active = true; break; }
+            }
+            if (layer_tools.mp_perim_override_active)
+                NeoDebug::write(NeoDebug::TOOLORDER,
+                    std::string("MP_PERIM_OVERRIDE_ACTIVE: layer_idx=") + std::to_string(layerCount)
+                    + " print_z=" + std::to_string(layer->print_z)
+                    + " → MixedFilament cycling blocked (sublayers present + perimeter_override)");
+        }
+        // NEOTKO_MULTIPASS_TAG_END
 
         // Override extruder with the next 
     	for (; it_per_layer_extruder_override != per_layer_extruder_switches.end() && it_per_layer_extruder_override->first < layer->print_z + EPSILON; ++ it_per_layer_extruder_override)
@@ -856,9 +939,14 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
                 if (something_nonoverriddable){
                     const unsigned int configured_wall = (extruder_override == 0) ? region.config().wall_filament.value : extruder_override;
-                    unsigned int       wall_ext        = resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height));
-                    const unsigned int grouped_id =
-                        grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_wall);
+                    // NEOTKO_MULTIPASS_TAG_START — block MixedFilament cycling when perimeter override active
+                    unsigned int wall_ext = layer_tools.mp_perim_override_active
+                        ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, configured_wall)
+                        : resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height));
+                    // NEOTKO_MULTIPASS_TAG_END
+                    const unsigned int grouped_id = layer_tools.mp_perim_override_active
+                        ? 0u  // skip grouped pattern cycling when override is active
+                        : grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_wall);
                     if (grouped_id != 0) {
                         const std::vector<unsigned int> ordered =
                             m_mixed_mgr->ordered_perimeter_extruders(grouped_id,
@@ -918,18 +1006,22 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
             if (something_nonoverriddable || !m_print_config_ptr) {
             	if (extruder_override == 0) {
+                    // NEOTKO_MULTIPASS_TAG_START — block MixedFilament cycling for fills when override active
 	                if (has_solid_infill)
-	                    layer_tools.extruders.emplace_back(resolve_mixed(region.config().solid_infill_filament,
-                                                                         layerCount,
-                                                                         float(layer->print_z),
-                                                                         float(layer->height)));
+	                    layer_tools.extruders.emplace_back(
+                            layer_tools.mp_perim_override_active
+                                ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, region.config().solid_infill_filament)
+                                : resolve_mixed(region.config().solid_infill_filament, layerCount, float(layer->print_z), float(layer->height)));
 	                if (has_sparse_infill)
 	                    layer_tools.extruders.emplace_back(layer_tools.sparse_infill_filament(region) + 1);
+                    // NEOTKO_MULTIPASS_TAG_END
             	} else if (has_solid_infill || has_sparse_infill)
-            		layer_tools.extruders.emplace_back(resolve_mixed(extruder_override,
-                                                                      layerCount,
-                                                                      float(layer->print_z),
-                                                                      float(layer->height)));
+                    // NEOTKO_MULTIPASS_TAG_START
+            		layer_tools.extruders.emplace_back(
+                        layer_tools.mp_perim_override_active
+                            ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, extruder_override)
+                            : resolve_mixed(extruder_override, layerCount, float(layer->print_z), float(layer->height)));
+                    // NEOTKO_MULTIPASS_TAG_END
             }
             if (has_solid_infill || has_sparse_infill)
                 layer_tools.has_object = true;
@@ -1023,6 +1115,22 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // NEOTKO_PATHBLEND_TAG_END
 
         }
+        // NEOTKO_MULTIPASS_TAG_START — trace: detect MixedFilament extruders leaking into sublayer LayerTools
+        if (layer_tools.is_mp_sublayer && !layer_tools.extruders.empty()) {
+            std::ostringstream _oss;
+            _oss << "PHANTOM_TRACE[ToolOrdering] collect_extruders added to is_mp_sublayer LayerTools:"
+                 << " z=" << layer->print_z
+                 << " obj=" << &object
+                 << " mp_perim_override_active=" << layer_tools.mp_perim_override_active
+                 << " extruders=[";
+            for (size_t _i = 0; _i < layer_tools.extruders.size(); ++_i) {
+                if (_i) _oss << ",";
+                _oss << "T" << (layer_tools.extruders[_i] > 0 ? layer_tools.extruders[_i] - 1 : 0);
+            }
+            _oss << "]";
+            NEOTKO_LOG(MULTIPASS, _oss.str());
+        }
+        // NEOTKO_MULTIPASS_TAG_END
         layerCount++;
     }
 

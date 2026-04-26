@@ -31,6 +31,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_PENULTIMATE", "/tmp/neotko_penultimate.log" },
         { "ORCA_DEBUG_TOOLORDER",   "/tmp/neotko_toolorder.log"   },
         { "ORCA_DEBUG_ZBLEND",      "/tmp/neotko_zblend.log"      },
+        { "ORCA_DEBUG_WIPETOWER",   "/tmp/neotko_wipetower.log"   },
     };
 
     bool enabled(Channel c)

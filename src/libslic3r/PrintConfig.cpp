@@ -7009,6 +7009,16 @@ void PrintConfigDef::init_fff_params()
     def->min = 0; def->max = 200; def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5.f));
 
+    // NEOTKO_MULTIPASS_TAG_START — Perimeter Override
+    def = this->add("multipass_perimeter_override", coBool);
+    def->label = L("Perimeter Override");
+    def->tooltip = L("When enabled, perimeters are suppressed at the real layer Z and re-printed "
+                     "once per MultiPass sublayer using that sublayer's tool. "
+                     "Gives perimeter walls the same per-pass color blending as the top surface fill.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+    // NEOTKO_MULTIPASS_TAG_END
+
     // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
     def = this->add("penultimate_multipass_enabled", coBool);
     def->label = L("Enable Penultimate MultiPass");

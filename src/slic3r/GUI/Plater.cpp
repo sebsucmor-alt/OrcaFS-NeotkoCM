@@ -8989,12 +8989,16 @@ public:
     // Maps ModelObject::id().id → link group id (>0). Objects sharing an id move together.
     std::map<size_t, int>               m_link_groups;
     int                                 m_next_link_group_id { 1 };
+    // Clipboard for Copy/Paste Process Settings (per-object config overrides).
+    DynamicPrintConfig                  m_process_settings_clipboard;
 
     void rebuild_link_groups_from_model();
     void link_selected_objects();
     void break_link_selected_objects();   // removes selected objects from their groups
     void break_link_all_in_group();       // removes the entire group of selected objects
     void select_link_group();             // Ctrl+Shift+G: select all objects in the same group
+    void copy_process_settings();
+    void paste_process_settings();
     // NEOTKO_LIBRE_TAG_END
 };
 
@@ -14528,6 +14532,169 @@ void Plater::priv::break_link_all_in_group()
         }
     }
     object_list_changed();
+}
+
+// NEOTKO_LIBRE_TAG_START — CopyPasteFilter helpers
+static std::string process_copy_filter_path()
+{
+    return Slic3r::data_dir() + "/neotko_process_copy_filter.json";
+}
+
+// Writes a JSON file with ALL print config keys set to true (first-run auto-generate).
+// Uses Preset::print_options() so the file is complete regardless of what the source object had.
+// Never overwrites an existing file.
+static void save_default_process_filter()
+{
+    const std::string path = process_copy_filter_path();
+    if (boost::filesystem::exists(path))
+        return;
+    try {
+        nlohmann::json j;
+        j["_comment"] = "Set a key to false to exclude it from Paste Process Settings. "
+                        "Filter is applied on paste so you can change it without re-copying.";
+        for (const auto& key : Preset::print_options())
+            j[key] = true;
+        std::ofstream f(path);
+        f << j.dump(2);
+    } catch (...) {}
+}
+
+// Returns key→bool map from the filter file. Empty map = file absent = pass all keys.
+static std::map<std::string, bool> load_process_copy_filter()
+{
+    const std::string path = process_copy_filter_path();
+    if (!boost::filesystem::exists(path))
+        return {};
+    try {
+        std::ifstream f(path);
+        nlohmann::json j;
+        f >> j;
+        std::map<std::string, bool> result;
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            if (it.key() == "_comment") continue;
+            if (it->is_boolean())
+                result[it.key()] = it->get<bool>();
+        }
+        return result;
+    } catch (...) {
+        return {};
+    }
+}
+// NEOTKO_LIBRE_TAG_END — CopyPasteFilter helpers
+
+void Plater::priv::copy_process_settings()
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode")) return;
+
+    const bool _dbg = (getenv("ORCA_DEBUG_LIBRE") != nullptr);
+    FILE* _f = _dbg ? fopen("/tmp/neotko_libre.log", "a") : nullptr;
+
+    // Try GL selection first; right-click clears it, so fall back to obj_list.
+    int src_idx = -1;
+    {
+        const auto& instances = get_curr_selection().get_selected_object_instances();
+        for (const auto& [obj_idx, inst_idx] : instances) {
+            if (obj_idx >= 0 && (size_t)obj_idx < model.objects.size()) { src_idx = obj_idx; break; }
+        }
+    }
+    if (src_idx < 0)
+        src_idx = wxGetApp().obj_list()->get_selected_obj_idx();
+
+    if (_f) fprintf(_f, "[COPY_PROCESS] src_idx=%d\n", src_idx);
+
+    if (src_idx < 0 || (size_t)src_idx >= model.objects.size()) {
+        if (_f) { fprintf(_f, "[COPY_PROCESS] no valid object\n"); fclose(_f); }
+        return;
+    }
+
+    ModelObject* src = model.objects[src_idx];
+    m_process_settings_clipboard = src->config.get();
+
+    // Auto-generate filter file on first use (no-op if it already exists).
+    save_default_process_filter();
+
+    if (_f) {
+        fprintf(_f, "[COPY_PROCESS] src='%s'  keys=%zu\n",
+                src->name.c_str(), m_process_settings_clipboard.size());
+        for (const auto& key : m_process_settings_clipboard.keys())
+            fprintf(_f, "[COPY_PROCESS]   key: %s\n", key.c_str());
+        const std::string fp = process_copy_filter_path();
+        fprintf(_f, "[COPY_PROCESS] filter_file=%s exists=%s\n",
+                fp.c_str(), boost::filesystem::exists(fp) ? "yes" : "no");
+        fclose(_f);
+    }
+}
+
+void Plater::priv::paste_process_settings()
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode")) return;
+    if (m_process_settings_clipboard.empty()) return;
+
+    const bool _dbg = (getenv("ORCA_DEBUG_LIBRE") != nullptr);
+    FILE* _f = _dbg ? fopen("/tmp/neotko_libre.log", "a") : nullptr;
+
+    std::vector<size_t> changed_idxs;
+    {
+        // Try GL selection first; right-click clears it, so fall back to obj_list.
+        const auto& instances = get_curr_selection().get_selected_object_instances();
+        for (const auto& [obj_idx, inst_idx] : instances) {
+            if (obj_idx < 0 || (size_t)obj_idx >= model.objects.size()) continue;
+            size_t uidx = (size_t)obj_idx;
+            if (std::find(changed_idxs.begin(), changed_idxs.end(), uidx) != changed_idxs.end()) continue;
+            changed_idxs.push_back(uidx);
+        }
+        if (changed_idxs.empty()) {
+            // Fallback: obj_list multi-selection (covers both single and multi right-click)
+            std::vector<int> obj_idxs, vol_idxs;
+            wxGetApp().obj_list()->get_selection_indexes(obj_idxs, vol_idxs);
+            for (int idx : obj_idxs) {
+                if (idx < 0 || (size_t)idx >= model.objects.size()) continue;
+                size_t uidx = (size_t)idx;
+                if (std::find(changed_idxs.begin(), changed_idxs.end(), uidx) != changed_idxs.end()) continue;
+                changed_idxs.push_back(uidx);
+            }
+        }
+    }
+    if (changed_idxs.empty()) { if (_f) { fprintf(_f, "[PASTE_PROCESS] no objects selected\n"); fclose(_f); } return; }
+
+    if (_f) {
+        fprintf(_f, "[PASTE_PROCESS] clipboard keys=%zu, pasting to %zu object(s)\n",
+                m_process_settings_clipboard.size(), changed_idxs.size());
+        for (const auto& key : m_process_settings_clipboard.keys())
+            fprintf(_f, "[PASTE_PROCESS]   key: %s\n", key.c_str());
+    }
+
+    // Build filtered config: start from full clipboard, remove keys set to false.
+    DynamicPrintConfig filtered = m_process_settings_clipboard;
+    {
+        const auto filter = load_process_copy_filter();
+        if (!filter.empty()) {
+            for (const auto& [k, v] : filter)
+                if (!v) filtered.erase(k);
+            if (_f) {
+                size_t excluded = 0;
+                for (const auto& [k, v] : filter) if (!v) ++excluded;
+                fprintf(_f, "[PASTE_PROCESS] filter active: %zu excluded, %zu applied\n",
+                        excluded, filtered.size());
+            }
+        } else {
+            if (_f) fprintf(_f, "[PASTE_PROCESS] no filter file — pasting all keys\n");
+        }
+    }
+
+    take_snapshot("Paste Process Settings");
+    for (size_t uidx : changed_idxs) {
+        ModelObject* dst = model.objects[uidx];
+        dst->config.assign_config(filtered);
+        if (_f) fprintf(_f, "[PASTE_PROCESS]   -> applied to '%s' (obj_idx=%zu)\n", dst->name.c_str(), uidx);
+    }
+
+    if (_f) { fclose(_f); }
+
+    q->changed_objects(changed_idxs);
+    wxGetApp().params_panel()->notify_object_config_changed();
 }
 
 // Ctrl+Shift+G / menu: select all objects that share a link group with the currently selected object(s).
@@ -20987,6 +21154,9 @@ void Plater::link_selected_objects()          { p->link_selected_objects(); }
 void Plater::break_link_selected_objects()    { p->break_link_selected_objects(); }
 void Plater::break_link_all_in_group()        { p->break_link_all_in_group(); }
 void Plater::select_link_group()              { p->select_link_group(); }
+void Plater::copy_process_settings()          { p->copy_process_settings(); }
+void Plater::paste_process_settings()         { p->paste_process_settings(); }
+bool Plater::has_process_settings_clipboard() const { return !p->m_process_settings_clipboard.empty(); }
 // NEOTKO_LIBRE_TAG_END
 void Plater::optimize_rotation()
 {

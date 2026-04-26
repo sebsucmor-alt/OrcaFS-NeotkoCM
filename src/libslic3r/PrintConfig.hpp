@@ -1149,6 +1149,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,  multipass_gcode_end_3))
     // NEOTKO_MULTIPASS_PRIME_TAG — prime volume for sublayer toolchanges via Local-Z reserve
     ((ConfigOptionFloat,   multipass_prime_volume))
+    // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: re-print perimeters at each sublayer Z
+    ((ConfigOptionBool,    multipass_perimeter_override))
+    // NEOTKO_MULTIPASS_TAG_END
     // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
     ((ConfigOptionBool,    penultimate_multipass_enabled))
     ((ConfigOptionInt,     penultimate_multipass_num_passes))

@@ -136,6 +136,10 @@ public:
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
     bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer, no wipe tower
+    // NEOTKO_MULTIPASS_TAG_START — when multipass_perimeter_override is active, MixedFilament
+    // height-based cycling is blocked so WipeTower and GCode agree on a single stable tool.
+    bool                        mp_perim_override_active = false;
+    // NEOTKO_MULTIPASS_TAG_END
     // NEOTKO_MULTIPASS_PRIME_TAG — number of Local-Z wipe tower slots to reserve for
     // this sublayer's prime. 0 = prime disabled. Finalized from mp_tools_set after all
     // collect_extruders() calls complete. Consumed in Print.cpp wipe tower planning loop.

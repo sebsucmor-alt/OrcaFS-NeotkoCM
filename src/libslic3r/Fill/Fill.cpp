@@ -1185,6 +1185,33 @@ void export_group_fills_to_svg(const char *path, const std::vector<SurfaceFill> 
 }
 #endif
 
+// NEOTKO_MULTIPASS_TAG_START — helper: recursively scale mm3_per_mm + height by ratio
+// Used by perimeter override to match the Beer-Lambert stadium correction applied to fills.
+static void neotko_mp_scale_perim(ExtrusionEntity* e, double ratio, double k_mp)
+{
+    if (auto* path = dynamic_cast<ExtrusionPath*>(e)) {
+        const double W = path->width, H = path->height, H_sub = H * ratio;
+        const double A_orig = H     * (W - k_mp * H);
+        const double A_sub  = H_sub * (W - k_mp * H_sub);
+        path->mm3_per_mm = float(path->mm3_per_mm *
+            ((A_orig > 1e-9 && W > H + 1e-6) ? (A_sub / A_orig) : ratio));
+        path->height = float(H_sub);
+    } else if (auto* loop = dynamic_cast<ExtrusionLoop*>(e)) {
+        for (ExtrusionPath& p : loop->paths) {
+            const double W = p.width, H = p.height, H_sub = H * ratio;
+            const double A_orig = H     * (W - k_mp * H);
+            const double A_sub  = H_sub * (W - k_mp * H_sub);
+            p.mm3_per_mm = float(p.mm3_per_mm *
+                ((A_orig > 1e-9 && W > H + 1e-6) ? (A_sub / A_orig) : ratio));
+            p.height = float(H_sub);
+        }
+    } else if (auto* coll = dynamic_cast<ExtrusionEntityCollection*>(e)) {
+        for (ExtrusionEntity* ee : coll->entities)
+            neotko_mp_scale_perim(ee, ratio, k_mp);
+    }
+}
+// NEOTKO_MULTIPASS_TAG_END
+
 // friend to Layer
 bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator)
 {
@@ -1437,6 +1464,21 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         sub.pass_idx = i;
                         const size_t n_paths = temp.entities.size();
                         sub.fills    = std::move(temp);
+
+                        // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: clone region perimeters into sublayer
+                        if (mp_cfg.multipass_perimeter_override.value) {
+                            for (const LayerRegion* lr : this->regions()) {
+                                for (const ExtrusionEntity* pe : lr->perimeters.entities) {
+                                    ExtrusionEntity* cloned = pe->clone();
+                                    neotko_mp_scale_perim(cloned, ratio, k_mp);
+                                    sub.perimeters.entities.push_back(cloned);
+                                }
+                            }
+                            NEOTKO_LOG(MULTIPASS, "  SUBLAYER perimeters cloned: "
+                                << sub.perimeters.entities.size() << " entities for pass " << i);
+                        }
+                        // NEOTKO_MULTIPASS_TAG_END
+
                         sublayer_slot.push_back(std::move(sub));
 
                         NEOTKO_LOG(MULTIPASS, "  SUBLAYER pass" << i << ": T" << mp.tool[i]

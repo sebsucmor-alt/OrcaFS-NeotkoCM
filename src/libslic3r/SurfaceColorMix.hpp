@@ -36,7 +36,8 @@ namespace NeoDebug {
         PENULTIMATE = 2,
         TOOLORDER   = 3,
         ZBLEND      = 4,
-        CH_COUNT    = 5
+        WIPETOWER   = 5,
+        CH_COUNT    = 6
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).

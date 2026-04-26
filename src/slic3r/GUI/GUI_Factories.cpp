@@ -1687,10 +1687,12 @@ wxMenu* MenuFactory::object_menu()
     append_menu_item_edit_text(&m_object_menu);
     append_menu_item_edit_svg(&m_object_menu);
     append_menu_item_change_filament(&m_object_menu);
-    // NEOTKO_LIBRE_TAG_START — Temporal Link: break items for single-object menu
+    // NEOTKO_LIBRE_TAG_START — Temporal Link + Copy/Paste Process Settings (single-object menu)
+    // Guard: items are appended to the persistent m_object_menu — skip if already present.
     {
         auto* ac = wxGetApp().app_config;
-        if (ac && ac->get_bool("neotko_libre_mode")) {
+        if (ac && ac->get_bool("neotko_libre_mode") &&
+            m_object_menu.FindItem(_devL("Select Grouped (Ctrl+Shift+G)")) == wxNOT_FOUND) {
             m_object_menu.AppendSeparator();
             append_menu_item(&m_object_menu, wxID_ANY,
                 _devL("Select Grouped (Ctrl+Shift+G)"),
@@ -1707,6 +1709,17 @@ wxMenu* MenuFactory::object_menu()
                 _devL("Remove this object from its link group"),
                 [](wxCommandEvent&) { plater()->break_link_selected_objects(); }, "", &m_object_menu,
                 []() { return true; }, m_parent);
+            m_object_menu.AppendSeparator();
+            append_menu_item(&m_object_menu, wxID_ANY,
+                _devL("Copy Process Settings"),
+                _devL("Copy all per-object overrides (speed, quality, width…) from this object"),
+                [](wxCommandEvent&) { plater()->copy_process_settings(); }, "", &m_object_menu,
+                []() { return true; }, m_parent);
+            append_menu_item(&m_object_menu, wxID_ANY,
+                _devL("Paste Process Settings"),
+                _devL("Apply the copied process settings to this object"),
+                [](wxCommandEvent&) { plater()->paste_process_settings(); }, "", &m_object_menu,
+                []() { return plater()->has_process_settings_clipboard(); }, m_parent);
         }
     }
     // NEOTKO_LIBRE_TAG_END
@@ -1807,6 +1820,12 @@ wxMenu* MenuFactory::multi_selection_menu()
                     _devL("Remove only the selected objects from their link group"),
                     [](wxCommandEvent&) { plater()->break_link_selected_objects(); }, "", menu,
                     []() { return true; }, m_parent);
+                menu->AppendSeparator();
+                append_menu_item(menu, wxID_ANY,
+                    _devL("Paste Process Settings"),
+                    _devL("Apply the copied process settings to all selected objects"),
+                    [](wxCommandEvent&) { plater()->paste_process_settings(); }, "", menu,
+                    []() { return plater()->has_process_settings_clipboard(); }, m_parent);
                 menu->AppendSeparator();
             }
         }

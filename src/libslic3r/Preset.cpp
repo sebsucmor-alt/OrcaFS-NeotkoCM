@@ -864,6 +864,7 @@ static std::vector<std::string> s_Preset_print_options {
     "multipass_gcode_start_1", "multipass_gcode_start_2", "multipass_gcode_start_3",
     "multipass_gcode_end_1", "multipass_gcode_end_2", "multipass_gcode_end_3",
     "multipass_prime_volume",  // NEOTKO_MULTIPASS_PRIME_TAG
+    "multipass_perimeter_override",  // NEOTKO_MULTIPASS_TAG
     // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
     "penultimate_multipass_enabled", "penultimate_multipass_num_passes",
     "penultimate_multipass_tool_1", "penultimate_multipass_tool_2", "penultimate_multipass_tool_3",

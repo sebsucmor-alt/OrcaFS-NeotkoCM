@@ -4,6 +4,10 @@
 
 This fork adds a set of surface quality, color blending and workflow features on top of OrcaSlicer FullSpectrum (Snapmaker base). This guide explains what each feature does and how to use it — no programming knowledge required.
 
+<a href="https://www.buymeacoffee.com/Neotko">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-red.png" alt="Buy Me a Coffee" height="60" width="217">
+</a>
+
 ---
 
 ## Table of Contents
@@ -13,6 +17,7 @@ This fork adds a set of surface quality, color blending and workflow features on
    - 1b. [MultiPass Blend — multiple passes per layer](#1b-multipass-blend--multiple-passes-per-layer)
    - 1c. [PathBlend — smooth gradient across the surface](#1c-pathblend--smooth-gradient-across-the-surface)
    - 1d. [Zone and filament filters](#1d-zone-and-filament-filters)
+   - 1e. [TD Preview and Blend Suggestion](#1e-td-preview-and-blend-suggestion)
 2. [Neoweaving — mechanical interlocking of layers](#2-neoweaving--mechanical-interlocking-of-layers)
 3. [Penultimate Top Layers](#3-penultimate-top-layers)
 4. [Monotonic Interlayer Nesting](#4-monotonic-interlayer-nesting)
@@ -29,17 +34,26 @@ This fork adds a set of surface quality, color blending and workflow features on
 
 ## 1. Surface Color Mixer
 
-The Surface Color Mixer is the umbrella feature for everything that happens on **top and penultimate surfaces** when you have more than one filament loaded. It lives under **Quality → ColorMix & Multi-Pass Blend** in the process settings, and has a single "Edit…" button that opens a dialog where you configure everything.
+The Surface Color Mixer is the umbrella feature for everything that happens on **top and penultimate surfaces** when you have more than one filament loaded. It lives under **Quality → ColorMix & Multi-Pass Blend** in the process settings, and has a single "Edit…" button that opens the dialog.
 
-Three different effects are available. You pick one per surface (Top and Penultimate independently):
+### Dialog layout
 
-| Effect | What it does |
-|--------|-------------|
-| **ColorMix** | Alternates filaments line by line following a repeating pattern you define |
-| **MultiPass** | Reprints the same surface multiple times, each pass with its own filament, angle, speed and fan |
-| **PathBlend** | Creates a smooth color gradient across the surface by blending two or more filaments proportionally |
+The dialog has two independent **zone cards** — one for the **Top** surface and one for the **Penultimate** surface. Each zone is configured entirely on its own.
 
-ColorMix and MultiPass are mutually exclusive (you can only have one active at a time). PathBlend works on top of MultiPass and can be used alongside it.
+At the top of each zone card are four **pill buttons**:
+
+| Pill | Effect |
+|------|--------|
+| **None** | No effect on this surface — normal single-filament top fill |
+| **ColorMix** | Alternates filaments line by line following a repeating pattern |
+| **MultiPass** | Reprints the surface 1–3 times, each pass with its own filament, angle, speed and Z |
+| **PathBlend** | Creates a smooth color gradient across the surface |
+
+Click a pill to select the effect for that zone. A **mini-preview** below the pills shows a visual representation of what the selected effect will produce. Click **Advanced…** to open the configuration dialog for the selected effect (disabled when None is selected).
+
+Below the two zone cards there is a **TD Preview** section (collapsable) and a compact **Filament** section. These are described in §1d and §1e.
+
+ColorMix and MultiPass are mutually exclusive within the same zone. PathBlend is independent and can be configured for either zone regardless of whether MultiPass is active on the other zone.
 
 ---
 
@@ -53,9 +67,9 @@ The result is a striped or woven color effect on the top surface, without any ma
 
 **How to set it up**
 
-1. Open **Quality → ColorMix & Multi-Pass Blend → Edit Color Patterns…**
-2. In the dialog, choose **ColorMix** for the Top surface, the Penultimate surface, or both.
-3. Click the colored filament buttons to build your pattern visually. The pattern is just a string of tool numbers (`1`, `2`, `3`…) that repeats.
+1. Open **Quality → ColorMix & Multi-Pass Blend → Edit…**
+2. In the dialog, click the **ColorMix** pill for the Top surface, the Penultimate surface, or both.
+3. Click **Advanced…** to open the pattern editor. Click the colored filament buttons to build your pattern visually. The pattern is just a string of tool numbers (`1`, `2`, `3`…) that repeats.
 4. Set the **Zone** (see §1d) and **Min. line length** if needed.
 5. Click OK and slice normally.
 
@@ -77,11 +91,12 @@ ColorMix **only works correctly with the MonotonicLine fill pattern**. This is n
 
 **What it does**
 
-Instead of printing the top surface once, MultiPass prints it **2 or 3 times** (configurable) within the same layer. Each pass:
+Instead of printing the top surface once, MultiPass prints it **1, 2, or 3 times** within the same layer. Each pass:
 - Uses a **different filament** (optional — you can repeat tools)
 - Has its own **fill angle** (e.g. pass 1 at 0°, pass 2 at 90°, creating a cross-hatch)
 - Has its own **speed** and **fan** settings
 - Has its own **line width ratio** — each pass is narrower so they tile together without over-extruding (the sum of ratios should be around 1.0 for full coverage)
+- Prints at a **slightly different Z height** proportional to its width ratio — passes are physically stacked as thin virtual sub-layers within the same nominal layer, which improves adhesion and color separation
 
 **Common uses**
 - **Cross-hatch texture**: two passes at perpendicular angles with two different colors
@@ -90,13 +105,25 @@ Instead of printing the top surface once, MultiPass prints it **2 or 3 times** (
 
 **How to set it up**
 
-1. Open **Edit…** → choose **MultiPass** for the desired surface.
-2. Set the number of passes (1, 2 or 3).
-3. For each pass: pick a tool, set the width ratio, angle, fan and speed.
-4. The Σ indicator in the dialog shows the sum of all ratios — aim for ~1.0 for full coverage.
-5. OK → slice.
+1. Open **Edit…** → click the **MultiPass** pill for the desired zone (Top or Penultimate).
+2. Click **Advanced…** to open the MultiPass configuration dialog for that zone.
+3. Set the number of passes (1, 2 or 3).
+4. For each pass: pick a tool, set the width ratio, angle, fan and speed.
+5. The **Σ** indicator in the dialog shows the sum of all ratios — aim for ~1.0 for full coverage.
+6. OK → slice.
 
-**1-pass mode**: With a single pass at ratio < 1.0, MultiPass deposits a controlled low-flow layer over the existing surface. Useful for glazing or experimental material effects without adding a full extra layer.
+**Additional per-pass options**
+
+| Option | What it does |
+|--------|-------------|
+| **GCode start / end** | Custom GCode script injected before or after each individual pass |
+| **PA mode / PA value** | Override Pressure Advance for a specific pass (useful for passes with very different speeds or widths) |
+| **Vary pattern** | Shifts the fill pattern slightly between passes to reduce moire effects |
+| **Prime volume** | Amount of filament (mm³) to prime through the wipe tower before the first sublayer of this zone. Prevents underextrusion at the start of a pass after a toolchange. Default: **5 mm³**. Set to 0 to disable. |
+
+**1-pass mode**: With a single pass at ratio < 1.0, MultiPass deposits a controlled low-flow layer over the existing surface at a precise Z offset. Useful for glazing or experimental material effects without adding a full extra layer.
+
+**Top and Penultimate are independent**: MultiPass on the Top zone and MultiPass on the Penultimate zone each have their own filament, ratio, angle and prime volume settings. Changing one does not affect the other.
 
 ---
 
@@ -110,26 +137,37 @@ This is done entirely within a single layer — no extra layers are needed. The 
 
 With 3 or 4 passes, three or four filaments can blend across the surface in sequence.
 
-**Gradient direction**: The gradient always runs across the **Y axis of the build plate** (front-to-back). Rotate your object on the bed to change which direction the gradient crosses the surface.
-
-**Invert gradient**: The "Invert gradient" toggle flips which tool dominates on which side, without rotating the object.
+PathBlend is **independent of MultiPass** — it does not require MultiPass to be enabled. You can activate PathBlend directly from its pill in either zone.
 
 **How to set it up**
 
-1. Open **Edit…** → choose **PathBlend** for the desired surface.
-2. Pick the number of passes (2 = two tools; 3 or 4 = more tools, more complex gradient).
-3. Assign a filament to each pass slot (T1, T2…).
-4. Set **Min ratio** — the minimum flow percentage of the receding filament at the extreme edges (default 5%). Keeping this above 0 means both filaments are always present to some degree across the full surface.
-5. Use **Fill angle** to override the fill direction if needed (−1 = auto).
-6. OK → slice.
+1. Open **Edit…** → click the **PathBlend** pill for the desired zone.
+2. Click **Advanced…** to open the PathBlend configuration dialog.
+3. Pick the number of passes (2–4) and assign a filament to each slot (T1, T2…).
+4. Configure the gradient options (see table below).
+5. OK → slice.
 
-**Note**: PathBlend works best on surfaces with many fill lines (high infill density, wide surfaces). On very small surfaces with only a handful of lines, the gradient will be very coarse (just a few steps).
+**PathBlend options**
+
+| Option | What it does |
+|--------|-------------|
+| **Num passes** | 2, 3, or 4 filaments in the gradient |
+| **Min ratio** | Minimum flow percentage of the receding filament at the extreme edges (default 5%). Keeping this above 0 means both filaments are always present to some degree across the full surface. |
+| **Max ratio** | Maximum flow of the dominant filament at the peak of its range (51–100%). Reducing this ensures neither filament ever overwhelms the other, keeping a minimum presence of both at all points in the gradient. |
+| **Ease mode** | Controls the acceleration curve of the gradient: **Linear** (uniform), **Ease In** (slow start), **Ease Out** (slow end), **Ease In-Out** (slow at both ends, fast in the middle). |
+| **Invert gradient** | Flips which tool dominates on which side, without rotating the object. |
+| **Fill angle** | Override the fill direction (−1 = auto). |
+| **Surface** | Apply to Top only, Penultimate only, or both. |
+
+**Gradient direction**: The gradient always runs across the **Y axis of the build plate** (front-to-back). Rotate your object on the bed to change which direction the gradient crosses the surface.
+
+**Note**: PathBlend works best on surfaces with many fill lines (high infill density, wide surfaces). On very small surfaces with only a handful of lines, the gradient will be coarse. Within-path subdivision for finer gradients is planned for a future version.
 
 ---
 
 ### 1d. Zone and filament filters
 
-These filters appear in the **Color Mixer settings** box at the bottom of the Edit dialog. They apply to whichever effect is active (ColorMix, MultiPass, or PathBlend) on each surface.
+These controls appear in the **Filament** section at the bottom of the Surface Color Mixer dialog. They apply to whichever effect is active on each surface.
 
 #### Zone — All surfaces vs. Topmost only
 
@@ -154,6 +192,50 @@ On multi-material objects, different regions may already be assigned to differen
 - `N` = effect applies only to regions whose solid infill filament is N
 
 **Example**: If your object has a red body (filament 1) and a white logo (filament 2), set the filament filter to `1` to apply ColorMix only to the red regions, leaving the white logo untouched.
+
+---
+
+### 1e. TD Preview and Blend Suggestion
+
+The **TD Preview** section (collapsable, at the bottom of the Surface Color Mixer dialog) lets you visualize and calculate how your filaments will visually combine when one layer sits on top of another.
+
+#### Transmission Density (TD)
+
+Each filament has a **Transmission Density** (TD) value that describes how opaque it is:
+
+| TD range | Type |
+|----------|------|
+| 0.1 – 0.5 | Highly opaque — 1–2 passes cover the lower color completely |
+| 0.5 – 3.0 | Opaque-translucent — some of the lower layer shows through |
+| 3.0 – 7.0 | Translucent — needs several passes to block the lower layer |
+| 7.0 – 10+ | Highly translucent — the lower color is almost always visible |
+
+**Low TD = opaque. High TD = translucent.**
+
+There are four **TD sliders** (one per filament slot). These are saved per machine, not per print — they describe your actual filaments, not the current print profile.
+
+#### Color preview
+
+Below the TD sliders, three swatches show:
+
+- **Top swatch** — the blended visual result of the Top surface passes (all filaments and ratios combined, weighted by their TD)
+- **Penu swatch** — the blended visual result of the Penultimate surface passes
+- **Result swatch** — the final visual result as it will appear on the print: the Penultimate color showing through the Top passes according to their opacity
+
+An **opacity_top** label shows the computed opacity of the Top layer stack (0 = fully transparent, 1 = fully opaque).
+
+#### Blend Suggestion — Calculate
+
+The **Calculate** button computes a suggested MultiPass configuration to reproduce a target mixed color as closely as possible.
+
+**How it works:**
+1. Select a **MixedColor** target from the dropdown (these are the virtual blended colors you have created in the mixer).
+2. The target color's recipe (which filaments and in what proportions) is read.
+3. Using the Beer-Lambert inverse formula, the slicer computes what **width ratios** each pass needs so that the combined optical result (at the current TD values) matches the target color.
+4. The suggested passes are split between Top and Penultimate zones if both are active, or assigned to Top only.
+5. A **ΔE** swatch shows how close the calculated result is to the target: green = very close, orange = acceptable, red = significant difference.
+
+Click **Apply** to write the suggested ratios and tool assignments into the current MultiPass configuration. You can then fine-tune from there.
 
 ---
 
@@ -329,6 +411,9 @@ When importing:
 | Feature | Location in UI |
 |---------|---------------|
 | ColorMix / MultiPass / PathBlend | Quality → ColorMix & Multi-Pass Blend → **Edit…** |
+| Effect pill (None/ColorMix/MultiPass/PathBlend) | Surface Color Mixer dialog — pill buttons per zone card |
+| Advanced config (per effect) | Surface Color Mixer dialog → **Advanced…** button |
+| TD Preview + Blend Suggestion | Surface Color Mixer dialog → **TD Preview** (collapsable) |
 | Neoweaving | Quality → Neotko Neoweaving |
 | Penultimate layers | Strength → Top/bottom shells → Penultimate top layers |
 | Libre Mode toggle | **Top toolbar** (main window button) |
@@ -350,6 +435,14 @@ If the pattern is correct, the next most common cause is the **Min. line length*
 
 The smoothness of the gradient depends on how many fill lines the surface has. A small surface with 5 lines can only have 5 gradient steps. Increasing infill density, widening the surface, or using a smaller line width gives the slicer more lines to work with. PathBlend cannot subdivide individual lines (that feature is planned for a future version).
 
+**Q: The PathBlend gradient is too abrupt at the edges, I want it to accelerate gradually.**
+
+Use the **Ease mode** option in the PathBlend Advanced dialog. **Ease In-Out** gives the smoothest perceptual result — the gradient starts slow, accelerates in the middle, and slows again at the far edge. **Ease In** or **Ease Out** apply the curve to one side only.
+
+**Q: I want both filaments always present across the full gradient, never fading out completely.**
+
+Use the **Min ratio** slider to set a minimum flow floor for the receding filament. A value of 0.10 (10%) means the receding filament never drops below 10% flow even at the extreme edge. **Max ratio** does the same for the dominant filament — reducing it below 1.0 keeps the receding filament present everywhere in the gradient.
+
 **Q: Neoweaving is making my printer move Z very rapidly — is that normal?**
 
 Yes. Neoweaving requires rapid Z moves between successive lines on the same layer. If your printer's Z axis is slow or has significant inertia, reduce the **Amplitude** or enable the **Speed %** override for neoweaved lines to give it more time. Start with an amplitude of 0.05 mm and work up.
@@ -360,7 +453,7 @@ Check that the sum of all pass **width ratios** adds up to approximately 1.0. If
 
 **Q: Can I use ColorMix and MultiPass at the same time?**
 
-Not on the same surface — they are mutually exclusive per surface. However, you can apply ColorMix to the top surface and MultiPass to the penultimate surface, or vice versa, since the two surfaces are configured independently.
+Not on the same zone — they are mutually exclusive per zone (only one pill can be active at a time). However, you can apply ColorMix to the Top zone and MultiPass to the Penultimate zone, or vice versa, since the two zones are configured independently.
 
 **Q: Do I need Libre Mode ON to print normally?**
 
@@ -369,6 +462,14 @@ No. Libre Mode is OFF by default and everything works normally without it. Libre
 **Q: My `.factory` file imported but all objects are in the wrong position.**
 
 Try enabling Libre Mode before importing. With Libre Mode OFF, the slicer re-centers objects to the build plate, which loses the relative positioning from the Simplify3D project.
+
+**Q: The TD Preview swatches don't match what I see on the printed part.**
+
+TD values are per-machine (per filament spool), not per print profile. Make sure you have calibrated the TD sliders to match your actual filaments. Start by printing a single-color top surface, then a two-color blend, and adjust the TD values until the Result swatch matches the printed result.
+
+**Q: What does the ΔE indicator on the Blend Suggestion mean?**
+
+ΔE is a perceptual color difference measure. A value below ~5 is generally indistinguishable to the eye. Values above 10–15 indicate the suggested ratios will produce a visible difference from the target color — usually because the available filaments cannot accurately reproduce the target, or because the TD values need calibration.
 
 All of this work is open and free. Fork it, improve it, credit it.
 
