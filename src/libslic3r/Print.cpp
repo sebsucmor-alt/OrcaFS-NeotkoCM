@@ -14,6 +14,7 @@
 #include "GCode.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
+#include "NeoTower.hpp"  // NEOTKO_NEOTOWER_TAG
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
 #include "Model.hpp"
@@ -2730,13 +2731,122 @@ void Print::finalize_first_layer_convex_hull()
     m_first_layer_convex_hull = Geometry::convex_hull(m_first_layer_convex_hull.points);
 }
 
+// NEOTKO_LIBRE_TAG_START
+// Returns true if any print region has Neotko multi-tool features active.
+// Iterates m_print_regions (flat list, always populated before has_wipe_tower() is called).
+// Called from has_wipe_tower() — must be safe to call before slicing completes.
+static bool neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions)
+{
+    for (const PrintRegion* region : print_regions) {
+        if (region == nullptr) continue;
+        const PrintRegionConfig& rc = region->config();
+        if (rc.multipass_enabled.value)             return true;
+        if (rc.penultimate_multipass_enabled.value) return true;
+        if (rc.multipass_path_gradient.value)       return true;
+        if (rc.interlayer_colormix_enabled.value)   return true;
+    }
+    // NEOTKO_WIPETOWER_DEBUG_TAG_START
+    {
+        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
+        if (_wt_dbg) {
+            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
+            _wt_log << "[neotko_any_multi_tool_active] → false"
+                    << "  (regions=" << print_regions.size() << ")\n";
+            _wt_log.flush();
+        }
+    }
+    // NEOTKO_WIPETOWER_DEBUG_TAG_END
+    return false;
+}
+
+// Returns the number of unique virtual tool_ids used across all MultiPass sublayers
+// of all PrintObjects in the print. MultiPass assigns different tool_ids (0-based) to
+// each pass even with 1 physical filament.
+// If no sublayers exist yet (pre-slice), returns 0 — callers must handle that case.
+// Used to give wipe_tower_data() and _make_wipe_tower() the correct "filament count"
+// so they don't produce depth=0 or abort due to apparent single-extruder setup.
+static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects)
+{
+    std::set<int> tool_ids;
+    for (const PrintObject* obj : objects)
+        for (const auto& layer_sublayers : obj->multipass_sublayers())
+            for (const MultiPassSubLayer& sub : layer_sublayers)
+                tool_ids.insert(sub.tool_id);
+    return tool_ids.size();
+}
+
+// Returns the number of virtual tools Neotko features will use, estimated purely from
+// region config — safe to call pre-slice when m_multipass_sublayers is still empty.
+// multipass_num_passes / penultimate_multipass_num_passes are the configured pass counts.
+// interlayer_colormix always implies ≥2 tools (tool_a + tool_b at minimum).
+// Used as fallback in wipe_tower_data() and _make_wipe_tower() when vtool_cnt == 0.
+static size_t neotko_estimated_virtual_tool_count(const PrintRegionPtrs& print_regions)
+{
+    size_t max_tools = 0;
+    for (const PrintRegion* region : print_regions) {
+        if (region == nullptr) continue;
+        const PrintRegionConfig& rc = region->config();
+        if (rc.multipass_enabled.value) {
+            const size_t cnt = std::max<size_t>(2, (size_t)rc.multipass_num_passes.value);
+            max_tools = std::max(max_tools, cnt);
+        }
+        // NEOTKO_LIBRE_TAG_START — PathBlend uses pathblend_num_passes, not multipass_num_passes
+        if (rc.multipass_path_gradient.value) {
+            const size_t cnt = std::max<size_t>(2, (size_t)rc.pathblend_num_passes.value);
+            max_tools = std::max(max_tools, cnt);
+        }
+        // NEOTKO_LIBRE_TAG_END
+        if (rc.penultimate_multipass_enabled.value) {
+            const size_t cnt = std::max<size_t>(2, (size_t)rc.penultimate_multipass_num_passes.value);
+            max_tools = std::max(max_tools, cnt);
+        }
+        if (rc.interlayer_colormix_enabled.value)
+            max_tools = std::max<size_t>(max_tools, 2);
+    }
+    // NEOTKO_WIPETOWER_DEBUG_TAG_START
+    {
+        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
+        if (_wt_dbg) {
+            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
+            _wt_log << "[neotko_estimated_virtual_tool_count]"
+                    << "  regions=" << print_regions.size()
+                    << "  → max_tools=" << max_tools << "\n";
+            for (const PrintRegion* r : print_regions) {
+                if (!r) continue;
+                const PrintRegionConfig& rc = r->config();
+                _wt_log << "    region:"
+                        << " mp_en="        << rc.multipass_enabled.value
+                        << " mp_passes="    << rc.multipass_num_passes.value
+                        << " pb_gradient="  << rc.multipass_path_gradient.value
+                        << " pb_passes="    << rc.pathblend_num_passes.value
+                        << " penu_en="      << rc.penultimate_multipass_enabled.value
+                        << " penu_passes="  << rc.penultimate_multipass_num_passes.value
+                        << " colormix_en="  << rc.interlayer_colormix_enabled.value
+                        << "\n";
+            }
+            _wt_log.flush();
+        }
+    }
+    // NEOTKO_WIPETOWER_DEBUG_TAG_END
+    return max_tools;
+}
+// NEOTKO_LIBRE_TAG_END
+
 // Wipe tower support.
 bool Print::has_wipe_tower() const
 {
+    // NEOTKO_LIBRE_TAG_START
+    // MultiPass/ColorMix/PathBlend need the prime tower even with 1 physical filament
+    // and even if enable_prime_tower is disabled — sublayer priming has no other purge path.
+    // This check must be OUTSIDE the enable_prime_tower guard so single-filament MultiPass
+    // prints don't silently skip the tower just because the user never toggled the setting.
+    if (!m_config.spiral_mode.value && neotko_any_multi_tool_active(m_print_regions))
+        return true;
+    // NEOTKO_LIBRE_TAG_END
+
     if (m_config.enable_prime_tower.value == true) {
         if (enable_timelapse_print())
             return true;
-
         return !m_config.spiral_mode.value && m_config.filament_diameter.values.size() > 1;
     }
     return false;
@@ -2767,7 +2877,21 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
             if (filaments_cnt == 1 && enable_timelapse_print()) {
                 const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume / (layer_height * width);
             } else {
-                const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume * (filaments_cnt - 1) / (layer_height * width);
+                // NEOTKO_LIBRE_TAG_START
+                // With 1 physical filament + Neotko multi-tool features, filaments_cnt==1 makes
+                // depth = wipe_volume * (1-1) = 0, so the tower box doesn't render in the preview.
+                // Post-slice: use real virtual tool count from m_multipass_sublayers.
+                // Pre-slice (sublayers still empty, vtool_cnt==0): use config-estimated count
+                // (multipass_num_passes / penultimate_multipass_num_passes) so the tower
+                // placeholder has a non-zero depth and is visible in the plater preview.
+                size_t effective_cnt = filaments_cnt;
+                if (filaments_cnt == 1 && neotko_any_multi_tool_active(m_print_regions)) {
+                    const size_t vtool_cnt = neotko_virtual_tool_count(m_objects);
+                    const size_t ecfg_cnt  = neotko_estimated_virtual_tool_count(m_print_regions);
+                    effective_cnt = std::max({(size_t)2, vtool_cnt, ecfg_cnt});
+                }
+                // NEOTKO_LIBRE_TAG_END
+                const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume * (effective_cnt - 1) / (layer_height * width);
             }
         }
         const_cast<Print *>(this)->m_wipe_tower_data.brim_width = m_config.prime_tower_brim_width;
@@ -2810,9 +2934,98 @@ void Print::_make_wipe_tower()
     // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2 ? true : false);
 
-    if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
+    // NEOTKO_LIBRE_TAG_START
+    // ToolOrdering::has_wipe_tower() returns false when only 1 physical extruder is seen,
+    // even if Neotko virtual tools (MultiPass passes) are active and require purging.
+    // Post-slice: use real vtool_cnt from m_multipass_sublayers.
+    // Pre-slice (vtool_cnt==0): use config-estimated count so the gate doesn't abort early.
+    const size_t neotko_vtool  = neotko_virtual_tool_count(m_objects);
+    const size_t neotko_ecfg   = neotko_estimated_virtual_tool_count(m_print_regions);
+    const bool neotko_forces_tower = neotko_any_multi_tool_active(m_print_regions) &&
+                                     (neotko_vtool >= 2 || neotko_ecfg >= 2);
+    // NEOTKO_WIPETOWER_DEBUG_TAG_START
+    {
+        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
+        if (_wt_dbg) {
+            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
+            _wt_log << "\n=== _make_wipe_tower() gate ===\n"
+                    << "  tool_ordering.has_wipe_tower() = "
+                    << m_wipe_tower_data.tool_ordering.has_wipe_tower() << "\n"
+                    << "  neotko_vtool (post-slice)      = " << neotko_vtool << "\n"
+                    << "  neotko_ecfg  (pre-slice est.)  = " << neotko_ecfg  << "\n"
+                    << "  neotko_any_multi_tool_active   = "
+                    << neotko_any_multi_tool_active(m_print_regions) << "\n"
+                    << "  neotko_forces_tower            = " << neotko_forces_tower << "\n"
+                    << "  → gate result: "
+                    << (!m_wipe_tower_data.tool_ordering.has_wipe_tower() && !neotko_forces_tower
+                        ? "ABORT (no tower generated)" : "PASS (tower will be built)") << "\n";
+            _wt_log.flush();
+        }
+    }
+    // NEOTKO_WIPETOWER_DEBUG_TAG_END
+    // NEOTKO_LIBRE_TAG_END
+    if (!m_wipe_tower_data.tool_ordering.has_wipe_tower() && !neotko_forces_tower)
         // Don't generate any wipe tower.
         return;
+
+    // NEOTKO_NEOTOWER_TAG_START
+    // Activates if explicitly enabled (neotko_wipe_tower=true) OR when neotko_forces_tower
+    // (single-filament MultiPass/PathBlend/ColorMix requires purging WipeTower2 cannot handle).
+    // Positioned here so ToolOrdering is already built and neotko_forces_tower is computed.
+    if (NeoTower::is_enabled(m_config) || neotko_forces_tower) {
+        m_neo_tower = std::make_unique<NeoTower>(
+            m_config,
+            m_default_region_config,
+            m_plate_index,
+            m_origin,
+            WipeTower2::extract_wipe_volumes(m_config),
+            m_wipe_tower_data.tool_ordering.first_extruder());
+
+        // NEOTKO_NEOTOWER_TAG_START: pre-TC structural layers
+        // When only one physical filament is used (single-filament MultiPass /
+        // PathBlend / ColorMix), the ToolOrdering never sets has_wipe_tower=true
+        // for layers before the first real toolchange (no filament switch →
+        // ToolOrdering skips those layers).  Without has_wt=true, GCode won't
+        // call the tower at those layers, NeoTower generates no structural events
+        // there, and the tower has no physical base → first-TC layer floats in air.
+        //
+        // Fix: find the first has_wt=true non-sublayer LayerTools (the first
+        // real-TC layer), then force has_wipe_tower=true on all non-sublayer
+        // layers that precede it and have at least one extruder.  collect_all_events()
+        // will then generate T→T structural (finish_layer) events for those
+        // layers, and GCode will call get_finish_layer() at them.
+        {
+            ToolOrdering& too = m_wipe_tower_data.tool_ordering;
+            double first_tc_z = std::numeric_limits<double>::max();
+            for (const LayerTools& lt : too) {
+                if (lt.is_mp_sublayer) continue;
+                if (lt.has_wipe_tower) {
+                    first_tc_z = lt.print_z;
+                    break;
+                }
+            }
+            if (first_tc_z < std::numeric_limits<double>::max()) {
+                for (LayerTools& lt : too.layer_tools()) {
+                    if (lt.is_mp_sublayer) continue;
+                    if (lt.print_z < first_tc_z - 1e-5 && !lt.extruders.empty())
+                        lt.has_wipe_tower = true;
+                }
+            }
+        }
+        // NEOTKO_NEOTOWER_TAG_END
+
+        m_neo_tower->collect_and_plan(*this);
+        m_neo_tower->generate(m_wipe_tower_data.tool_changes);
+
+        m_wipe_tower_data.depth            = m_neo_tower->get_depth();
+        m_wipe_tower_data.brim_width       = m_neo_tower->get_brim_width();
+        m_wipe_tower_data.height           = m_neo_tower->get_height();
+        m_wipe_tower_data.used_filament    = m_neo_tower->get_used_filament();
+        m_wipe_tower_data.number_of_toolchanges = m_neo_tower->get_number_of_toolchanges();
+        // z_and_depth_pairs: NeoTower v1 leaves empty — cone-wall GL preview not implemented.
+        return;
+    }
+    // NEOTKO_NEOTOWER_TAG_END
 
     // Check whether there are any layers in m_tool_ordering, which are marked with has_wipe_tower,
     // they print neither object, nor support. These layers are above the raft and below the object, and they
@@ -2824,7 +3037,7 @@ void Print::_make_wipe_tower()
         // Find the first wipe tower layer, which does not have a counterpart in an object or a support layer.
         for (size_t i = 0; i < idx_end; ++ i) {
             const LayerTools &lt = m_wipe_tower_data.tool_ordering.layer_tools()[i];
-            if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support) {
+            if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support && !lt.is_mp_sublayer) { // NEOTKO_MULTIPASS_TAG — skip sublayers: fake support insertion breaks multi-object merge
                 idx_begin = i;
                 break;
             }
@@ -2838,7 +3051,7 @@ void Print::_make_wipe_tower()
             // Find the stopper of the sequence of wipe tower layers, which do not have a counterpart in an object or a support layer.
             for (size_t i = idx_begin; i < idx_end; ++ i) {
                 LayerTools &lt = const_cast<LayerTools&>(m_wipe_tower_data.tool_ordering.layer_tools()[i]);
-                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support))
+                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support && !lt.is_mp_sublayer)) // NEOTKO_MULTIPASS_TAG
                     break;
                 lt.has_support = true;
                 // Insert the new support layer.
@@ -3007,62 +3220,47 @@ void Print::_make_wipe_tower()
                     }
                 }
 
-                // NEOTKO_MULTIPASS_PRIME_TAG — reserve Local-Z slots for MultiPass sublayer primes.
+                // NEOTKO_MULTIPASS_PRIME_TAG — reserve Local-Z slot for this sublayer's own prime.
                 //
-                // Timing: plan_local_z_reserve always modifies m_plan.back() and asserts
-                // m_plan.back().z <= z_par. We must call it HERE (while processing the wipe-tower
-                // layer that will still be m_layer_idx when the sublayers execute) by searching
-                // FORWARD for any sublayer group that immediately follows this layer.
+                // Each sublayer group has has_wipe_tower=true, so GCode.cpp calls next_layer()
+                // once per sublayer group. Therefore m_layer_idx at execution time equals the
+                // wipe-tower layer index of THIS sublayer — plan the slot here, not on the
+                // preceding real layer (the old forward-scan approach was off-by-N_sublayers).
                 //
-                // When the sublayer group executes in GCode.cpp, m_layer_idx == cur_idx because
-                // next_layer() is only called for has_wipe_tower layers, and no such layer runs
-                // between this layer and the sublayers (any intervening real layers have no wipe
-                // tower and do not advance m_layer_idx).
-                {
-                    const auto& all_lt = m_wipe_tower_data.tool_ordering.layer_tools();
-                    const size_t cur_idx = size_t(&layer_tools - all_lt.data());
-
-                    // Scan forward: count mp_prime_slots from sublayers in the group immediately
-                    // following this layer. Skip any has_wipe_tower=false real layers between us
-                    // and the sublayers (they don't advance m_layer_idx so slots belong here).
-                    size_t mp_slots = 0;
-                    for (size_t si = cur_idx + 1; si < all_lt.size(); ++si) {
-                        const LayerTools& slt = all_lt[si];
-                        if (slt.is_mp_sublayer) {
-                            mp_slots += slt.mp_prime_slots;
-                        } else if (!slt.has_wipe_tower) {
-                            // Real layer with no wipe tower — skip, doesn't advance m_layer_idx.
-                        } else {
-                            break; // Next wipe-tower layer — sublayers past this belong to it.
-                        }
+                // plan_local_z_reserve modifies m_plan.back(), which is the wipe-tower entry
+                // just created by plan_toolchange above for this sublayer Z — safe to call.
+                if (!NeoTower::is_enabled(m_config) && layer_tools.is_mp_sublayer &&
+                    layer_tools.mp_prime_slots > 0) {
+                    float mp_prime_vol = 0.f;
+                    for (const PrintObject* obj : m_objects) {
+                        if (obj->layers().empty()) continue;
+                        for (const LayerRegion* lr : obj->layers().front()->regions())
+                            mp_prime_vol = std::max(mp_prime_vol,
+                                (float)lr->region().config().multipass_prime_volume.value);
                     }
-
-                    if (mp_slots > 0) {
-                        // Get prime volume: max over all objects' first-layer regions.
-                        float mp_prime_vol = 0.f;
-                        for (const PrintObject* obj : m_objects) {
-                            if (obj->layers().empty()) continue;
-                            for (const LayerRegion* lr : obj->layers().front()->regions())
-                                mp_prime_vol = std::max(mp_prime_vol,
-                                    (float)lr->region().config().multipass_prime_volume.value);
-                        }
-
-                        if (mp_prime_vol > 0.f) {
-                            // Reserve at THIS layer's Z — m_plan.back() is already here and
-                            // m_layer_idx will equal cur_idx when the sublayers execute.
-                            wipe_tower.plan_local_z_reserve(
-                                (float) layer_tools.print_z,
-                                (float) layer_tools.wipe_tower_layer_height,
-                                mp_slots,
-                                mp_prime_vol);
-                        }
+                    if (mp_prime_vol > 0.f) {
+                        wipe_tower.plan_local_z_reserve(
+                            (float)layer_tools.print_z,
+                            (float)layer_tools.wipe_tower_layer_height,
+                            layer_tools.mp_prime_slots,
+                            mp_prime_vol);
                     }
                 }
                 // NEOTKO_MULTIPASS_PRIME_TAG_END
 
                 layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
-                if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
-                    break;
+                // NEOTKO_MULTIPASS_PRIME_TAG — break only when no has_wipe_tower layer follows.
+                // The original condition checked the *immediate* next layer's wipe_partitions,
+                // which fired prematurely when has_wt=0 real layers separated real layers from
+                // MP sublayer groups (sublayers have has_wt=1 and need to be visited here too).
+                {
+                    const auto& all_lt_break = m_wipe_tower_data.tool_ordering.layer_tools();
+                    const LayerTools* lt_cur = &layer_tools;
+                    const auto next_wt = std::find_if(lt_cur + 1,
+                                                      all_lt_break.data() + all_lt_break.size(),
+                                                      [](const LayerTools& lt){ return lt.has_wipe_tower; });
+                    if (next_wt == all_lt_break.data() + all_lt_break.size()) break;
+                }
             }
         }
 

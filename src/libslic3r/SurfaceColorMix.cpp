@@ -733,12 +733,16 @@ MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg
         c.width_ratio[0] = cfg.penultimate_multipass_width_ratio_1.value;
         c.width_ratio[1] = cfg.penultimate_multipass_width_ratio_2.value;
         c.width_ratio[2] = cfg.penultimate_multipass_width_ratio_3.value;
-        c.vary_pattern   = false;
+        c.vary_pattern   = cfg.penultimate_multipass_vary_pattern.value;
         c.angle[0]       = cfg.penultimate_multipass_angle_1.value;
         c.angle[1]       = cfg.penultimate_multipass_angle_2.value;
         c.angle[2]       = cfg.penultimate_multipass_angle_3.value;
-        c.fan[0]         = -1; c.fan[1] = -1; c.fan[2] = -1;
-        c.speed_pct[0]   = 100; c.speed_pct[1] = 100; c.speed_pct[2] = 100;
+        c.fan[0]         = cfg.penultimate_multipass_fan_1.value;
+        c.fan[1]         = cfg.penultimate_multipass_fan_2.value;
+        c.fan[2]         = cfg.penultimate_multipass_fan_3.value;
+        c.speed_pct[0]   = cfg.penultimate_multipass_speed_pct_1.value;
+        c.speed_pct[1]   = cfg.penultimate_multipass_speed_pct_2.value;
+        c.speed_pct[2]   = cfg.penultimate_multipass_speed_pct_3.value;
         c.gcode_start[0] = cfg.penultimate_multipass_gcode_start_1.value;
         c.gcode_start[1] = cfg.penultimate_multipass_gcode_start_2.value;
         c.gcode_start[2] = cfg.penultimate_multipass_gcode_start_3.value;
@@ -775,195 +779,6 @@ MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg
     return c;
 }
 
-// ---------------------------------------------------------------------------
-// SurfaceMultiPass::apply
-//
-// CAMINO 1c (current): perpendicular-offset tiling.
-//   Each pass gets a narrower line width (ratio × LWTS) and its polyline
-//   points are shifted perpendicularly so passes tile the surface without gaps.
-//   offset_i = (Σ_{j<i} ratio_j + ratio_i/2 - Σ_all/2) × LWTS
-//   For Σ ratios = 1.0 → adjacent strips exactly fill the original LWTS width.
-//
-// CAMINO 2 (future combination with ColorMix):
-//   Clone paths N times WITHOUT encoding tool (only apply width_ratio).
-//   Store clones in separate sub-collections. Let ColorMix iterate each sub-collection.
-// ---------------------------------------------------------------------------
-bool SurfaceMultiPass::apply(
-    ExtrusionEntityCollection& fills,
-    const PrintRegionConfig&   config,
-    int                        layer_idx,
-    bool                       allow_top,
-    bool                       allow_penu)
-{
-    const auto mp = MultiPassConfig::from_region_config(config);
-    if (!mp.enabled) return false;
-
-    const int n = std::max(1, std::min(3, mp.num_passes));
-    bool any_modified = false;
-
-    if (NeoDebug::enabled(NeoDebug::MULTIPASS)) {
-        std::ostringstream _s;
-        _s << "=== MULTIPASS Layer " << layer_idx
-           << " passes=" << n << " surface=" << mp.surface
-           << " vary=" << mp.vary_pattern << " fills=" << fills.entities.size();
-        for (int i = 0; i < n; ++i) {
-            if (mp.tool[i] < 0) { _s << "\n  pass" << i << ": DISABLED"; continue; }
-            _s << "\n  pass" << i << ": T" << mp.tool[i]
-               << " ratio=" << mp.width_ratio[i]
-               << (mp.vary_pattern && i%2==1 ? " REVERSED" : "");
-        }
-        NeoDebug::write(NeoDebug::MULTIPASS, _s.str());
-    }
-
-    for (auto* top_entity : fills.entities) {
-        auto* sub = dynamic_cast<ExtrusionEntityCollection*>(top_entity);
-        if (!sub || sub->entities.empty()) continue;
-
-        ExtrusionPath* flat_path = nullptr;
-        for (auto* e : sub->entities) {
-            flat_path = dynamic_cast<ExtrusionPath*>(e);
-            if (flat_path) break;
-        }
-        if (!flat_path) continue;
-
-        // Surface filter
-        if (!SurfaceColorMix::should_process_role(flat_path->role(), mp.surface)) continue;
-
-        // Zone filter (allow_top / allow_penu from call site — interlayer_colormix_*_zone)
-        if (!allow_top  && flat_path->role() == erTopSolidInfill)   continue;
-        if (!allow_penu && flat_path->role() == erPenultimateInfill) continue;
-
-        // FASE 2 guard: skip if paths were already generated + encoded inline in Fill.cpp.
-        {
-            bool already_encoded = false;
-            for (auto* e : sub->entities)
-                if (auto* p = dynamic_cast<ExtrusionPath*>(e))
-                    if (p->mm3_per_mm >= 10.0) { already_encoded = true; break; }
-            if (already_encoded) continue;
-        }
-
-        std::vector<ExtrusionPath*> originals;
-        for (auto* e : sub->entities) {
-            if (auto* p = dynamic_cast<ExtrusionPath*>(e))
-                originals.push_back(p);
-        }
-        if (originals.empty()) continue;
-
-        NEOTKO_LOG(MULTIPASS, "  SUB role=" << ExtrusionEntity::role_to_string(flat_path->role())
-            << " originals=" << originals.size() << " mm3=" << flat_path->mm3_per_mm);
-
-        // NEOTKO_MULTIPASS_TAG_START — Beer-Lambert height-based sub-layer model
-        //
-        // Each pass occupies a proportional fraction of the layer height (width_ratio[i]).
-        // Passes are stacked vertically (same XY polyline, different sub-layer thickness)
-        // rather than tiled side-by-side with XY perpendicular offsets.
-        //
-        // For width_ratio = {0.6, 0.4} and layer_height = 0.2 mm, W = 0.4 mm:
-        //   Pass 0 (T1): H_sub=0.12 → mm3 = 0.12×(0.4−0.2146×0.12) ≈ stadium(0.4,0.12)
-        //   Pass 1 (T2): H_sub=0.08 → mm3 = 0.08×(0.4−0.2146×0.08) ≈ stadium(0.4,0.08)
-        //   Total: Σ A_sub_i ≈ A_orig + ε  (ε = stadium non-linearity overhead, ~6-8%)
-        //   Each pass extrudes exactly what an independent thin layer of that height would.
-        //
-        // width is NEVER scaled — each pass covers the full line width so spacing and
-        // collision detection in GCode.cpp remain correct.
-        //
-        // Z positioning within the layer (Beer-Lambert FASE 2):
-        //   Pass 0 z = bottom_z + ratio[0] * layer_height
-        //   Pass 1 z = nominal_z (top of layer)
-        //   Implemented via PathBlend's apply_path() when multipass_path_gradient is ON.
-        //   Without PathBlend, all passes print at nominal_z (stacked extrusion, correct
-        //   total volume, visual mixing depends on filament diffusion).
-
-        std::vector<ExtrusionPath*> all_pass_paths;
-        all_pass_paths.reserve(originals.size() * n);
-
-        for (int i = 0; i < n; ++i) {
-            if (mp.tool[i] < 0) continue;
-            const bool reverse = mp.vary_pattern && (i % 2 == 1);
-            const double ratio = mp.width_ratio[i];
-
-            for (auto* orig : originals) {
-                auto* clone = new ExtrusionPath(
-                    orig->role(),
-                    orig->mm3_per_mm,
-                    orig->width,
-                    orig->height
-                );
-                clone->polyline = orig->polyline;
-
-                if (reverse)
-                    std::reverse(clone->polyline.points.begin(),
-                                 clone->polyline.points.end());
-
-                // NEOTKO_MULTIPASS_TAG_START
-                // Each MultiPass sub-layer is a genuine independent thin layer at its own Z.
-                // Conceptually equivalent to Variable Layer Height: slice the full layer into
-                // N physical laminae of heights H×ratio[i] and stack them back.
-                //
-                // Flow::mm3_per_mm() uses the FDM stadium cross-section model:
-                //   A(W, H) = H × (W − H × (1 − π/4))      [= H×(W−H×0.2146)]
-                // This is NON-LINEAR in H: A_sub ≠ A_orig × ratio.
-                //
-                // WRONG (old code): clone->mm3_per_mm *= ratio
-                //   Assumes rectangular cross-section (A ∝ H). Under-extrudes every pass:
-                //   thin passes by ~10%, thick passes by ~5%.
-                //
-                // CORRECT: compute A_sub directly from H_sub using the same formula.
-                //   Width stays fixed — the slicer's XY polylines are reused as-is.
-                //
-                // Note: Σ A_sub_i is slightly greater than A_orig (the rounded bead ends
-                // are paid N times instead of 1). This is the physically correct behavior
-                // when printing N independent thin laminae — identical to what Variable
-                // Layer Height would produce if each slice were a real slicer layer.
-                {
-                    const double W     = static_cast<double>(orig->width);
-                    const double H     = static_cast<double>(orig->height);
-                    const double H_sub = H * ratio;
-                    // k = 1 − π/4 ≈ 0.2146.  Stadium area: A = H × (W − k×H)
-                    // Guard: requires W > H (normal FDM bead). If violated (bridge / bad
-                    // config), fall back to naive linear scaling so we never go negative.
-                    constexpr double k = 1.0 - 0.25 * M_PI;   // matches Flow.cpp exactly
-                    const double A_orig = H     * (W - k * H);
-                    const double A_sub  = H_sub * (W - k * H_sub);
-                    if (A_orig > 1e-9 && W > H + 1e-6) {
-                        clone->mm3_per_mm = static_cast<float>(
-                            static_cast<double>(orig->mm3_per_mm) * (A_sub / A_orig));
-                    } else {
-                        // Degenerate (W ≤ H, bridge, or near-zero area): linear fallback.
-                        clone->mm3_per_mm = static_cast<float>(
-                            static_cast<double>(orig->mm3_per_mm) * ratio);
-                    }
-                    clone->height = static_cast<float>(H_sub);
-                }
-                // Width is intentionally NOT modified — XY polylines reused verbatim.
-                // NEOTKO_MULTIPASS_TAG_END
-
-                SurfaceColorMix::encode_tool_in_path(clone, mp.tool[i]);
-
-                all_pass_paths.push_back(clone);
-            }
-        }
-        // NEOTKO_MULTIPASS_TAG_END
-
-        if (all_pass_paths.empty()) continue;
-
-        for (auto* e : sub->entities) delete e;
-        sub->entities.clear();
-        sub->no_sort = true;
-        for (auto* p : all_pass_paths)
-            sub->entities.push_back(p);
-
-        NEOTKO_LOG(MULTIPASS, "  HOOK FIRED: entities=" << sub->entities.size() << " no_sort=1");
-        any_modified = true;
-    }
-
-    if (any_modified)
-        NEOTKO_LOG(MULTIPASS, "");
-
-    return any_modified;
-}
-
-// NEOTKO_MULTIPASS_TAG_END
 
 // NEOTKO_NEOWEAVING_TAG_START
 // NeoweaveEngine — Z-axis interdigitation logic extracted from GCode.cpp.
@@ -1310,7 +1125,7 @@ std::string PathBlendEngine::apply_path(
     // NEOTKO_FIX: Two separate behaviours depending on whether MultiPass is active.
     //
     // ── MULTIPASS MODE ──────────────────────────────────────────────────────────
-    // Each pass clone was already created in SurfaceMultiPass::apply() with:
+    // Each pass clone is created in Fill.cpp FASE 2 per-pass fill generation with:
     //   clone->height     = orig->height * ratio[i]
     //   clone->mm3_per_mm = stadium(W, H*ratio[i]) / stadium(W, H) * orig->mm3_per_mm
     //                       (stadium cross-section correction — NOT naive ×ratio)

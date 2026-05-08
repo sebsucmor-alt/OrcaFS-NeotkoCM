@@ -713,6 +713,11 @@ public:
                           int    penu_t1 = 0,  int penu_t2 = 1,  int penu_t3 = -1,
                           double penu_r1 = 0.5, double penu_r2 = 0.5, double penu_r3 = 0.34,
                           int    penu_a1 = -1,  int penu_a2 = -1,  int penu_a3 = -1,
+                          int    penu_f1 = -1,  int penu_f2 = -1,  int penu_f3 = -1,
+                          int    penu_s1 = 100, int penu_s2 = 100, int penu_s3 = 100,
+                          bool   penu_vary = false,
+                          std::string penu_gs1 = {}, std::string penu_gs2 = {}, std::string penu_gs3 = {},
+                          std::string penu_ge1 = {}, std::string penu_ge2 = {}, std::string penu_ge3 = {},
                           double penu_prime_vol = 0.0)
         : wxDialog(parent, wxID_ANY,
                    zone == SurfaceZone::TOP
@@ -730,15 +735,20 @@ public:
         const int spds[3]   = {cur_spd1, cur_spd2, cur_spd3};
         const std::string gs[3] = {cur_gs1, cur_gs2, cur_gs3};
         const std::string ge[3] = {cur_ge1, cur_ge2, cur_ge3};
-        const int penu_tools[3]  = {penu_t1, penu_t2, penu_t3};
+        const int penu_tools[3]   = {penu_t1, penu_t2, penu_t3};
         const double penu_ratios[3] = {penu_r1, penu_r2, penu_r3};
-        const int penu_angles[3] = {penu_a1, penu_a2, penu_a3};
+        const int penu_angles[3]  = {penu_a1, penu_a2, penu_a3};
+        const int penu_fans[3]    = {penu_f1, penu_f2, penu_f3};
+        const int penu_speeds[3]  = {penu_s1, penu_s2, penu_s3};
+        const std::string penu_gs[3] = {penu_gs1, penu_gs2, penu_gs3};
+        const std::string penu_ge[3] = {penu_ge1, penu_ge2, penu_ge3};
         build_ui(cur_passes, cur_surface,
                  cur_tool1, cur_tool2, cur_tool3,
                  cur_ratio1, cur_ratio2, cur_ratio3,
                  cur_vary, angles, fans, spds, gs, ge,
                  cur_pa_mode, cur_pa_value, cur_prime_volume, cur_layer_height,
-                 penu_enabled, penu_passes, penu_tools, penu_ratios, penu_angles, penu_prime_vol);
+                 penu_enabled, penu_passes, penu_tools, penu_ratios, penu_angles,
+                 penu_fans, penu_speeds, penu_vary, penu_gs, penu_ge, penu_prime_vol);
     }
 
     int    get_passes()  const { return m_sc_passes ? m_sc_passes->GetValue() : 2; }
@@ -831,6 +841,27 @@ public:
     int    get_penu_angle2() const { return get_penu_angle(1); }
     int    get_penu_angle3() const { return get_penu_angle(2); }
     double get_penu_prime()  const { return m_sc_penu_prime ? std::max(0.0, m_sc_penu_prime->GetValue()) : 0.0; }
+    int    get_penu_fan(int i)  const { return m_sc_penu_fan[i]   ? m_sc_penu_fan[i]->GetValue()   : -1; }
+    int    get_penu_fan1()  const { return get_penu_fan(0); }
+    int    get_penu_fan2()  const { return get_penu_fan(1); }
+    int    get_penu_fan3()  const { return get_penu_fan(2); }
+    int    get_penu_speed(int i) const { return m_sc_penu_speed[i] ? m_sc_penu_speed[i]->GetValue() : 100; }
+    int    get_penu_speed1() const { return get_penu_speed(0); }
+    int    get_penu_speed2() const { return get_penu_speed(1); }
+    int    get_penu_speed3() const { return get_penu_speed(2); }
+    bool   get_penu_vary()  const { return m_cb_penu_vary ? m_cb_penu_vary->GetValue() : false; }
+    std::string get_penu_gcode_start(int i) const {
+        return m_tc_penu_gstart[i] ? m_tc_penu_gstart[i]->GetValue().ToStdString() : "";
+    }
+    std::string get_penu_gcode_start1() const { return get_penu_gcode_start(0); }
+    std::string get_penu_gcode_start2() const { return get_penu_gcode_start(1); }
+    std::string get_penu_gcode_start3() const { return get_penu_gcode_start(2); }
+    std::string get_penu_gcode_end(int i) const {
+        return m_tc_penu_gend[i] ? m_tc_penu_gend[i]->GetValue().ToStdString() : "";
+    }
+    std::string get_penu_gcode_end1() const { return get_penu_gcode_end(0); }
+    std::string get_penu_gcode_end2() const { return get_penu_gcode_end(1); }
+    std::string get_penu_gcode_end3() const { return get_penu_gcode_end(2); }
 
 private:
     int                      m_surface      = 0;
@@ -857,11 +888,16 @@ private:
     // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent section
     wxCheckBox*           m_cb_penu_enabled  = nullptr;
     wxSpinCtrl*           m_sc_penu_passes   = nullptr;
-    wxSpinCtrl*           m_sc_penu_tool[3]  = {nullptr, nullptr, nullptr};
-    ColorSwatch*          m_swatch_penu[3]   = {nullptr, nullptr, nullptr};
-    DragTextCtrl*         m_tc_penu_ratio[3] = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*           m_sc_penu_angle[3] = {nullptr, nullptr, nullptr};
-    wxSpinCtrlDouble*     m_sc_penu_prime    = nullptr;
+    wxSpinCtrl*           m_sc_penu_tool[3]   = {nullptr, nullptr, nullptr};
+    ColorSwatch*          m_swatch_penu[3]    = {nullptr, nullptr, nullptr};
+    DragTextCtrl*         m_tc_penu_ratio[3]  = {nullptr, nullptr, nullptr};
+    wxSpinCtrl*           m_sc_penu_angle[3]  = {nullptr, nullptr, nullptr};
+    wxSpinCtrl*           m_sc_penu_fan[3]    = {nullptr, nullptr, nullptr};
+    wxSpinCtrl*           m_sc_penu_speed[3]  = {nullptr, nullptr, nullptr};
+    wxCheckBox*           m_cb_penu_vary      = nullptr;
+    wxTextCtrl*           m_tc_penu_gstart[3] = {nullptr, nullptr, nullptr};
+    wxTextCtrl*           m_tc_penu_gend[3]   = {nullptr, nullptr, nullptr};
+    wxSpinCtrlDouble*     m_sc_penu_prime     = nullptr;
     std::vector<wxWindow*> m_penu_pass3_widgets;
     MultiPassPreviewPanel* m_preview   = nullptr;
     wxComboBox*           m_preset_combo  = nullptr;
@@ -1025,6 +1061,11 @@ private:
                   const int penu_tools[3] = nullptr,
                   const double penu_ratios[3] = nullptr,
                   const int penu_angles[3] = nullptr,
+                  const int penu_fans[3] = nullptr,
+                  const int penu_speeds[3] = nullptr,
+                  bool penu_vary = false,
+                  const std::string penu_gs[3] = nullptr,
+                  const std::string penu_ge[3] = nullptr,
                   double penu_prime_vol = 0.0)
     {
         m_layer_height = cur_layer_height; // NEOTKO_MULTIPASS_MINLAYER_TAG
@@ -1726,32 +1767,37 @@ private:
             pr1->Add(m_sc_penu_passes, 0, wxALIGN_CENTER_VERTICAL);
             penu_box->Add(pr1, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
 
-            // Per-pass rows: Tool | Ratio | Angle
-            const int def_tools[3]  = {0, 1, -1};
+            // Per-pass rows: Tool | Ratio | Angle | Fan | Speed | GCode start | GCode end
+            const int def_tools[3]   = {0, 1, -1};
             const double def_ratios[3] = {0.5, 0.5, 0.34};
-            const int def_angles[3] = {-1, -1, -1};
+            const int def_angles[3]  = {-1, -1, -1};
+            const int def_fans[3]    = {-1, -1, -1};
+            const int def_speeds[3]  = {100, 100, 100};
+            auto penu_tool_color = [this](int t) -> wxColour {
+                if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
+                    return wxColour(m_colours[t]);
+                return wxColour(160, 160, 160);
+            };
             for (int i = 0; i < 3; ++i) {
-                const int   pt = penu_tools  ? penu_tools[i]  : def_tools[i];
-                const double pr = penu_ratios ? penu_ratios[i] : def_ratios[i];
-                const int   pa = penu_angles ? penu_angles[i] : def_angles[i];
+                const int    pt  = penu_tools  ? penu_tools[i]  : def_tools[i];
+                const double pr  = penu_ratios ? penu_ratios[i] : def_ratios[i];
+                const int    pa  = penu_angles ? penu_angles[i] : def_angles[i];
+                const int    pf  = penu_fans   ? penu_fans[i]   : def_fans[i];
+                const int    ps  = penu_speeds  ? penu_speeds[i] : def_speeds[i];
+                const std::string pgs = (penu_gs && !penu_gs[i].empty()) ? penu_gs[i] : "";
+                const std::string pge = (penu_ge && !penu_ge[i].empty()) ? penu_ge[i] : "";
 
                 auto* row = new wxBoxSizer(wxHORIZONTAL);
                 row->Add(new wxStaticText(this, wxID_ANY,
                           wxString::Format(_L("Pass %d:"), i + 1)),
                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
 
-                // Tool spinner (F-notation: 0=disabled for pass 3, 1-based otherwise)
-                const int fv = (pt >= 0) ? pt + 1 : 0;
+                // Tool spinner + swatch
+                const int fv    = (pt >= 0) ? pt + 1 : 0;
                 const int max_t = std::max(4, (int)m_colours.size());
                 m_sc_penu_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
                     wxDefaultPosition, wxSize(55, -1), wxSP_ARROW_KEYS,
                     (i < 2) ? 1 : 0, max_t, std::clamp(fv, (i < 2) ? 1 : 0, max_t));
-                // Color swatch
-                auto penu_tool_color = [this](int t) -> wxColour {
-                    if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
-                        return wxColour(m_colours[t]);
-                    return wxColour(160, 160, 160);
-                };
                 m_swatch_penu[i] = new ColorSwatch(this, penu_tool_color(fv > 0 ? fv - 1 : -1));
                 m_sc_penu_tool[i]->Bind(wxEVT_SPINCTRL, [this, i, penu_tool_color](wxSpinEvent& e) {
                     const int v = e.GetValue();
@@ -1760,7 +1806,7 @@ private:
                 row->Add(new wxStaticText(this, wxID_ANY, _L("Tool:")),
                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
                 row->Add(m_sc_penu_tool[i],  0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 3);
-                row->Add(m_swatch_penu[i],   0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
+                row->Add(m_swatch_penu[i],   0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
 
                 // Ratio drag-text
                 const double min_r = (m_layer_height > 1e-6) ? std::max(0.05, 0.04 / m_layer_height) : 0.05;
@@ -1768,7 +1814,7 @@ private:
                 m_tc_penu_ratio[i]->SetMinSize(wxSize(60, -1));
                 row->Add(new wxStaticText(this, wxID_ANY, _L("Ratio:")),
                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_tc_penu_ratio[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
+                row->Add(m_tc_penu_ratio[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
 
                 // Angle spinner
                 const int safe_pa = (pa >= -1 && pa <= 359) ? pa : -1;
@@ -1776,15 +1822,67 @@ private:
                     wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, -1, 359, safe_pa);
                 row->Add(new wxStaticText(this, wxID_ANY, _L("Angle:")),
                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_sc_penu_angle[i], 0, wxALIGN_CENTER_VERTICAL);
+                row->Add(m_sc_penu_angle[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
+
+                // Fan spinner
+                const int safe_pf = (pf >= -1 && pf <= 255) ? pf : -1;
+                m_sc_penu_fan[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, -1, 255, safe_pf);
+                m_sc_penu_fan[i]->SetToolTip(_L("Fan PWM 0-255. -1 = no change."));
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Fan:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                row->Add(m_sc_penu_fan[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
+
+                // Speed spinner
+                const int safe_ps = (ps >= 1 && ps <= 200) ? ps : 100;
+                m_sc_penu_speed[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 1, 200, safe_ps);
+                m_sc_penu_speed[i]->SetToolTip(_L("Speed multiplier via M220. 100 = no change."));
+                row->Add(new wxStaticText(this, wxID_ANY, _L("Spd%:")),
+                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                row->Add(m_sc_penu_speed[i], 0, wxALIGN_CENTER_VERTICAL);
 
                 penu_box->Add(row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+
+                // GCode start/end row
+                auto* gcrow = new wxBoxSizer(wxHORIZONTAL);
+                m_tc_penu_gstart[i] = new wxTextCtrl(this, wxID_ANY,
+                    wxString::FromUTF8(pgs), wxDefaultPosition, wxSize(140, -1));
+                m_tc_penu_gstart[i]->SetToolTip(_L("GCode emitted before this pass begins."));
+                m_tc_penu_gend[i] = new wxTextCtrl(this, wxID_ANY,
+                    wxString::FromUTF8(pge), wxDefaultPosition, wxSize(140, -1));
+                m_tc_penu_gend[i]->SetToolTip(_L("GCode emitted after this pass completes."));
+                gcrow->Add(new wxStaticText(this, wxID_ANY,
+                           wxString::Format(_L("P%d GCode:"), i + 1)),
+                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
+                gcrow->Add(new wxStaticText(this, wxID_ANY, _L("Start:")),
+                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
+                gcrow->Add(m_tc_penu_gstart[i], 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
+                gcrow->Add(new wxStaticText(this, wxID_ANY, _L("End:")),
+                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
+                gcrow->Add(m_tc_penu_gend[i], 1, wxALIGN_CENTER_VERTICAL);
+                penu_box->Add(gcrow, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+
                 if (i == 2) {
                     m_penu_pass3_widgets.push_back(m_sc_penu_tool[i]);
                     m_penu_pass3_widgets.push_back(m_swatch_penu[i]);
                     m_penu_pass3_widgets.push_back(m_tc_penu_ratio[i]);
                     m_penu_pass3_widgets.push_back(m_sc_penu_angle[i]);
+                    m_penu_pass3_widgets.push_back(m_sc_penu_fan[i]);
+                    m_penu_pass3_widgets.push_back(m_sc_penu_speed[i]);
+                    m_penu_pass3_widgets.push_back(m_tc_penu_gstart[i]);
+                    m_penu_pass3_widgets.push_back(m_tc_penu_gend[i]);
                 }
+            }
+
+            // Vary pattern checkbox
+            {
+                auto* vrow = new wxBoxSizer(wxHORIZONTAL);
+                m_cb_penu_vary = new wxCheckBox(this, wxID_ANY, _L("Alternate pass direction"));
+                m_cb_penu_vary->SetValue(penu_vary);
+                m_cb_penu_vary->SetToolTip(_L("Each successive pass reverses the polyline traversal order (180 deg flip)."));
+                vrow->Add(m_cb_penu_vary, 0, wxALIGN_CENTER_VERTICAL);
+                penu_box->Add(vrow, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
             }
 
             // Prime volume
@@ -2513,24 +2611,43 @@ private:
             // NEOTKO_MULTIPASS_TAG_END
 
             // NEOTKO_MULTIPASS_SURFACES_TAG — read penultimate independent config
+            // NEOTKO_MULTIPASS_SURFACES_TAG — read penultimate independent config
             bool   penu_enabled_cur = false;
             int    penu_passes_cur  = 2;
             int    penu_t1_cur=0, penu_t2_cur=1, penu_t3_cur=-1;
             double penu_r1_cur=0.5, penu_r2_cur=0.5, penu_r3_cur=0.34;
             int    penu_a1_cur=-1, penu_a2_cur=-1, penu_a3_cur=-1;
+            int    penu_f1_cur=-1, penu_f2_cur=-1, penu_f3_cur=-1;
+            int    penu_s1_cur=100, penu_s2_cur=100, penu_s3_cur=100;
+            bool   penu_vary_cur=false;
+            std::string penu_gs1_cur,penu_gs2_cur,penu_gs3_cur;
+            std::string penu_ge1_cur,penu_ge2_cur,penu_ge3_cur;
             double penu_prime_cur=0.0;
-            if (auto*o=m_config->option<ConfigOptionBool>  ("penultimate_multipass_enabled"))       penu_enabled_cur=o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_num_passes"))    penu_passes_cur =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_1"))        penu_t1_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_2"))        penu_t2_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_3"))        penu_t3_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_1")) penu_r1_cur=(double)o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_2")) penu_r2_cur=(double)o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_3")) penu_r3_cur=(double)o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_1"))       penu_a1_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_2"))       penu_a2_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_3"))       penu_a3_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_prime_volume"))  penu_prime_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionBool>  ("penultimate_multipass_enabled"))         penu_enabled_cur=o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_num_passes"))      penu_passes_cur =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_1"))          penu_t1_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_2"))          penu_t2_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_3"))          penu_t3_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_1"))   penu_r1_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_2"))   penu_r2_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_3"))   penu_r3_cur=(double)o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_1"))         penu_a1_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_2"))         penu_a2_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_3"))         penu_a3_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_fan_1"))           penu_f1_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_fan_2"))           penu_f2_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_fan_3"))           penu_f3_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_speed_pct_1"))     penu_s1_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_speed_pct_2"))     penu_s2_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_speed_pct_3"))     penu_s3_cur     =o->value;
+            if (auto*o=m_config->option<ConfigOptionBool>  ("penultimate_multipass_vary_pattern"))    penu_vary_cur   =o->value;
+            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_start_1"))   penu_gs1_cur    =o->value;
+            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_start_2"))   penu_gs2_cur    =o->value;
+            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_start_3"))   penu_gs3_cur    =o->value;
+            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_1"))     penu_ge1_cur    =o->value;
+            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_2"))     penu_ge2_cur    =o->value;
+            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_3"))     penu_ge3_cur    =o->value;
+            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_prime_volume"))    penu_prime_cur=(double)o->value;
 
             const SurfaceZone zone = (surface_id == 0) ? SurfaceZone::TOP : SurfaceZone::PENULTIMATE;
             MultiPassConfigDialog dlg(this,
@@ -2548,6 +2665,11 @@ private:
                 penu_t1_cur, penu_t2_cur, penu_t3_cur,
                 penu_r1_cur, penu_r2_cur, penu_r3_cur,
                 penu_a1_cur, penu_a2_cur, penu_a3_cur,
+                penu_f1_cur, penu_f2_cur, penu_f3_cur,
+                penu_s1_cur, penu_s2_cur, penu_s3_cur,
+                penu_vary_cur,
+                penu_gs1_cur, penu_gs2_cur, penu_gs3_cur,
+                penu_ge1_cur, penu_ge2_cur, penu_ge3_cur,
                 penu_prime_cur);
             if (dlg.ShowModal() == wxID_OK) {
                 auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v;   m_on_change(k); };
@@ -2596,6 +2718,19 @@ private:
                     wi("penultimate_multipass_angle_1",       dlg.get_penu_angle1());
                     wi("penultimate_multipass_angle_2",       dlg.get_penu_angle2());
                     wi("penultimate_multipass_angle_3",       dlg.get_penu_angle3());
+                    wi("penultimate_multipass_fan_1",         dlg.get_penu_fan1());
+                    wi("penultimate_multipass_fan_2",         dlg.get_penu_fan2());
+                    wi("penultimate_multipass_fan_3",         dlg.get_penu_fan3());
+                    wi("penultimate_multipass_speed_pct_1",   dlg.get_penu_speed1());
+                    wi("penultimate_multipass_speed_pct_2",   dlg.get_penu_speed2());
+                    wi("penultimate_multipass_speed_pct_3",   dlg.get_penu_speed3());
+                    wb("penultimate_multipass_vary_pattern",  dlg.get_penu_vary());
+                    ws("penultimate_multipass_gcode_start_1", dlg.get_penu_gcode_start1());
+                    ws("penultimate_multipass_gcode_start_2", dlg.get_penu_gcode_start2());
+                    ws("penultimate_multipass_gcode_start_3", dlg.get_penu_gcode_start3());
+                    ws("penultimate_multipass_gcode_end_1",   dlg.get_penu_gcode_end1());
+                    ws("penultimate_multipass_gcode_end_2",   dlg.get_penu_gcode_end2());
+                    ws("penultimate_multipass_gcode_end_3",   dlg.get_penu_gcode_end3());
                     wf("penultimate_multipass_prime_volume",  (float)dlg.get_penu_prime());
                 }
             }
@@ -5960,6 +6095,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("single_extruder_multi_material_priming", "multimaterial_settings_prime_tower");
+        // NEOTKO_NEOTOWER_TAG_START
+        optgroup->append_single_option_line("neotko_wipe_tower");
+        // NEOTKO_NEOTOWER_TAG_END
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");
         optgroup->append_single_option_line("wall_filament", "multimaterial_settings_filament_for_features#walls");
@@ -6145,6 +6283,23 @@ void TabPrint::toggle_options()
         }
         cb->SetValue(n);
     }
+
+    // NEOTKO_LIBRE_TAG_START — Support options always accessible in Libre Mode
+    // ConfigManipulation gates these on have_support_interface / have_prime_tower.
+    // In LM we want them always visible and editable regardless of those conditions,
+    // so we override here AFTER toggle_print_fff_options() has already run.
+    {
+        auto* ac = wxGetApp().app_config;
+        if (ac && ac->get_bool("neotko_libre_mode")) {
+            toggle_line("support_top_z_distance",          true);
+            toggle_option("support_top_z_distance",        true);
+            toggle_line("support_interface_spacing",       true);
+            toggle_option("support_interface_spacing",     true);
+            toggle_line("independent_support_layer_height", true);
+            toggle_option("independent_support_layer_height", true);
+        }
+    }
+    // NEOTKO_LIBRE_TAG_END
 
     // NEOTKO_SURFACE_MIXER_TAG: Effect assignment is managed inside SurfaceColorMixerDialog.
 }

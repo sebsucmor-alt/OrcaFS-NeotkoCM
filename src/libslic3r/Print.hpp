@@ -14,6 +14,9 @@
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
+// NEOTKO_NEOTOWER_TAG_START
+#include "NeoTower.hpp"
+// NEOTKO_NEOTOWER_TAG_END
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
@@ -215,10 +218,14 @@ class ConstSupportLayerPtrsAdaptor : public ConstVectorOfPtrsAdaptor<SupportLaye
 
 // NEOTKO_MULTIPASS_TAG_START — Virtual sublayer for MultiPass Z-stacking
 struct MultiPassSubLayer {
-    coordf_t                  print_z  = 0.;  // absolute Z of this sub-layer
-    float                     height   = 0.f; // extrusion height H_sub = H * ratio
-    int                       tool_id  = 0;   // 0-based physical extruder
-    int                       pass_idx = 0;   // 0-based position in MultiPassConfig
+    coordf_t                  print_z    = 0.;                 // absolute Z of this sub-layer
+    float                     height     = 0.f;                // extrusion height H_sub = H * ratio
+    int                       tool_id    = 0;                  // 0-based physical extruder
+    int                       pass_idx   = 0;                  // 0-based position in MultiPassConfig
+    ExtrusionRole             role       = erTopSolidInfill;   // role for ;TYPE: visualizer comment
+    int                       speed_pct  = 100;                // M220 Sxx override (100 = no change)
+    std::string               gcode_start;                     // injected before fills
+    std::string               gcode_end;                       // injected after fills
     ExtrusionEntityCollection fills;          // infill paths — tool stored directly, no mm3 encoding
     ExtrusionEntityCollection perimeters;     // cloned+scaled perimeter paths (multipass_perimeter_override only)
 };
@@ -1118,6 +1125,12 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    // NEOTKO_NEOTOWER_TAG_START
+    std::unique_ptr<NeoTower>               m_neo_tower;
+public:
+    NeoTower*                               neo_tower() { return m_neo_tower.get(); }
+private:
+    // NEOTKO_NEOTOWER_TAG_END
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

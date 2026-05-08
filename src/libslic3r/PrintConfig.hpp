@@ -1171,6 +1171,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,  penultimate_multipass_gcode_end_2))
     ((ConfigOptionString,  penultimate_multipass_gcode_end_3))
     ((ConfigOptionFloat,   penultimate_multipass_prime_volume))
+    ((ConfigOptionBool,    penultimate_multipass_vary_pattern))
+    ((ConfigOptionInt,     penultimate_multipass_fan_1))
+    ((ConfigOptionInt,     penultimate_multipass_fan_2))
+    ((ConfigOptionInt,     penultimate_multipass_fan_3))
+    ((ConfigOptionInt,     penultimate_multipass_speed_pct_1))
+    ((ConfigOptionInt,     penultimate_multipass_speed_pct_2))
+    ((ConfigOptionInt,     penultimate_multipass_speed_pct_3))
     // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
     ((ConfigOptionBool,    multipass_path_gradient))
     ((ConfigOptionInt,     path_gradient_segments))
@@ -1541,6 +1548,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               nozzle_temperature_range_high))
     ((ConfigOptionFloats,             wipe_distance))
     ((ConfigOptionBool,               enable_prime_tower))
+    // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner
+    ((ConfigOptionBool,               neotko_wipe_tower))
+    // NEOTKO_NEOTOWER_TAG_END
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
     ((ConfigOptionFloats,             wipe_tower_x))
     ((ConfigOptionFloats,             wipe_tower_y))

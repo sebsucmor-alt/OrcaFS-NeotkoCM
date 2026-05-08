@@ -8,6 +8,7 @@
 #include <sstream>
 #include <utility>
 #include <algorithm>
+#include <unordered_map>
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -122,6 +123,16 @@ public:
     WipeTower::ToolChangeResult tool_change(size_t new_tool);
     WipeTower::ToolChangeResult local_z_tool_change(size_t new_tool, const WipeTower::box_coordinates& cleaning_box, float wipe_volume);
     void set_current_tool(size_t tool) { m_current_tool = tool; }
+
+    // NEOTKO_NEOTOWER_TAG: cross-group tool state correction.
+    // Called by NeoTower::collect_and_plan() before generate() to override m_current_tool
+    // at the start of a specific plan layer.  Used when a sublayer identity event (T→T)
+    // creates a gap between chain_tool and ev.old_tool — WipeTower2's internal tool
+    // counter would otherwise remain at the wrong tool through that layer and corrupt
+    // all subsequent TCRs in the same z-group.
+    void set_tool_override(size_t plan_li, unsigned int tool) {
+        m_tool_overrides[plan_li] = tool;
+    }
 
 	// Fill the unfilled space with a sparse infill.
 	// Call this method only if layer_finished() is false.
@@ -307,6 +318,10 @@ private:
 
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
+
+    // NEOTKO_NEOTOWER_TAG: per-plan-layer m_current_tool overrides set by NeoTower
+    // before generate() to correct cross-group tool state gaps.
+    std::unordered_map<size_t, unsigned int> m_tool_overrides;
 
 	// This sums height of all extruded layers, not counting the layers which
 	// will be later removed when the "no_sparse_layers" is used.

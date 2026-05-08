@@ -504,6 +504,38 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         apply(config, &new_conf);
         is_msg_dlg_already_exist = false;
     }
+
+    // NEOTKO_LIBRE_TAG_START
+    // Warn user if Neotko multi-tool features are active but Prime Tower is disabled.
+    // We do NOT force enable_prime_tower — user must opt in explicitly.
+    // Uses config->has() before opt_bool() to be null-safe (config may be local_config).
+    {
+        const bool neotko_multi_tool =
+            (config->has("multipass_enabled")             && config->opt_bool("multipass_enabled")) ||
+            (config->has("penultimate_multipass_enabled") && config->opt_bool("penultimate_multipass_enabled")) ||
+            (config->has("multipass_path_gradient")       && config->opt_bool("multipass_path_gradient")) ||
+            (config->has("interlayer_colormix_enabled")   && config->opt_bool("interlayer_colormix_enabled"));
+
+        const bool prime_tower_off = !config->opt_bool("enable_prime_tower");
+
+        if (neotko_multi_tool && prime_tower_off && !is_msg_dlg_already_exist) {
+            MessageDialog dialog(m_msg_dlg_parent,
+                _L("MultiPass / ColorMix / PathBlend require Prime Tower for correct purging between tools.\n"
+                   "Do you want to enable Prime Tower now?"),
+                _L("Prime Tower required"),
+                wxICON_WARNING | wxYES | wxNO);
+            is_msg_dlg_already_exist = true;
+            const auto answer = dialog.ShowModal();
+            is_msg_dlg_already_exist = false;
+
+            if (answer == wxID_YES) {
+                DynamicPrintConfig new_conf = *config;
+                new_conf.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+                apply(config, &new_conf);
+            }
+        }
+    }
+    // NEOTKO_LIBRE_TAG_END
 }
 
 void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::vector<std::string> const &keys, std::map<ObjectBase *, ModelConfig *> const &configs)
@@ -680,10 +712,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : { "support_style", "support_base_pattern",
         "support_base_pattern_spacing", "support_expansion", "support_angle",
         "support_interface_pattern", "support_interface_top_layers", "support_interface_bottom_layers",
-        "bridge_no_support", "max_bridge_length", "support_top_z_distance", "support_bottom_z_distance",
+        "bridge_no_support", "max_bridge_length", "support_bottom_z_distance",
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
         "support_object_xy_distance", "support_object_first_layer_gap"/*, "independent_support_layer_height"*/})
         toggle_field(el, have_support_material);
+    // NEOTKO_LIBRE_TAG_START — Support options: enable with LM even without support_interface_filament
+    {
+        auto* ac = wxGetApp().app_config;
+        const bool lm = ac && ac->get_bool("neotko_libre_mode");
+        toggle_field("support_top_z_distance", have_support_material || lm);
+    }
+    // NEOTKO_LIBRE_TAG_END
     toggle_field("support_threshold_angle", have_support_material && is_auto(support_type));
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
     //toggle_field("support_closing_radius", have_support_material && support_style == smsSnug);
@@ -719,7 +758,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing" })
         toggle_line(el, has_support_ironing);
     // Orca: Force solid support interface when using support ironing
-    toggle_field("support_interface_spacing", have_support_material && have_support_interface && !has_support_ironing);
+    // NEOTKO_LIBRE_TAG_START — Support options: enable with LM even without support_interface_filament
+    {
+        auto* ac = wxGetApp().app_config;
+        const bool lm = ac && ac->get_bool("neotko_libre_mode");
+        toggle_field("support_interface_spacing", (have_support_material && have_support_interface && !has_support_ironing) || lm);
+    }
+    // NEOTKO_LIBRE_TAG_END
 
     bool have_skirt_height = have_skirt &&
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
@@ -758,7 +803,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     int preheat_steps = config->opt_int("preheat_steps");
     toggle_line("preheat_steps", have_ooze_prevention && (preheat_steps > 0));
 
-    bool have_prime_tower = config->opt_bool("enable_prime_tower");
+    // NEOTKO_LIBRE_TAG_START
+    // When Neotko multi-tool features are active, Prime Tower controls must be visible
+    // even with a single physical filament (engine will generate the tower via has_wipe_tower()).
+    const bool neotko_multi_tool_ui =
+        (config->has("multipass_enabled")             && config->opt_bool("multipass_enabled")) ||
+        (config->has("penultimate_multipass_enabled") && config->opt_bool("penultimate_multipass_enabled")) ||
+        (config->has("multipass_path_gradient")       && config->opt_bool("multipass_path_gradient")) ||
+        (config->has("interlayer_colormix_enabled")   && config->opt_bool("interlayer_colormix_enabled"));
+    bool have_prime_tower = config->opt_bool("enable_prime_tower") || neotko_multi_tool_ui;
+    // NEOTKO_LIBRE_TAG_END
     for (auto el : { "prime_tower_width", "prime_tower_brim_width"})
         toggle_line(el, have_prime_tower);
 
@@ -801,7 +855,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_field(el, have_prime_tower);
 
     // BBS: MusangKing - Hide "Independent support layer height" option
-    toggle_line("independent_support_layer_height", have_support_material && !have_prime_tower);
+    // NEOTKO_LIBRE_TAG_START — Support options: enable with LM even without support_interface_filament
+    {
+        auto* ac = wxGetApp().app_config;
+        const bool lm = ac && ac->get_bool("neotko_libre_mode");
+        toggle_line("independent_support_layer_height", (have_support_material && !have_prime_tower) || lm);
+    }
+    // NEOTKO_LIBRE_TAG_END
 
     bool have_avoid_crossing_perimeters = config->opt_bool("reduce_crossing_wall");
     toggle_line("max_travel_detour_distance", have_avoid_crossing_perimeters);

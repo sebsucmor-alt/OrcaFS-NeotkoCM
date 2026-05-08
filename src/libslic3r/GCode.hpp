@@ -13,6 +13,9 @@
 #include "GCode/FanMover.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
+// NEOTKO_NEOTOWER_TAG_START
+#include "NeoTower.hpp"
+// NEOTKO_NEOTOWER_TAG_END
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/SeamPlacer.hpp"
@@ -126,9 +129,15 @@ public:
     // next tool_change() call would attempt to re-do the same transition and mismatch.
     void skip_planned_toolchange_to(int new_tool_id) {
         if (m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size() &&
-            (size_t)m_tool_change_idx < m_tool_changes[m_layer_idx].size() &&
-            (int)m_tool_changes[m_layer_idx][m_tool_change_idx].new_tool == new_tool_id)
-            ++m_tool_change_idx;
+            (size_t)m_tool_change_idx < m_tool_changes[m_layer_idx].size()) {
+            const auto& tc = m_tool_changes[m_layer_idx][m_tool_change_idx];
+            // Only skip real tool transitions (initial→new where initial≠new).
+            // Structural T→T fills must NOT be skipped — they carry NeoTower
+            // structural finish_layer content and will be consumed by the
+            // finish_layer call that follows the extruder_loop.
+            if ((int)tc.new_tool == new_tool_id && (int)tc.initial_tool != (int)tc.new_tool)
+                ++m_tool_change_idx;
+        }
     }
     // NEOTKO_MULTIPASS_TAG_END
 
@@ -613,6 +622,9 @@ private:
     std::unique_ptr<AdaptivePAProcessor>      m_pa_processor;
 
     std::unique_ptr<WipeTowerIntegration> m_wipe_tower;
+    // NEOTKO_NEOTOWER_TAG_START — non-owning; NeoTower instance owned by Print::m_neo_tower
+    NeoTower*                             m_neo_tower = nullptr;
+    // NEOTKO_NEOTOWER_TAG_END
 
     std::unique_ptr<SmallAreaInfillFlowCompensator> m_small_area_infill_flow_compensator;
     

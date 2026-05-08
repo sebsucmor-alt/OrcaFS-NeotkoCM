@@ -6659,6 +6659,18 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_NEOWEAVING_TAG_END
 
+    // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner
+    def = this->add("neotko_wipe_tower", coBool);
+    def->label = L("NeoTower (post-slice wipe tower)");
+    def->category = L("Prime tower");
+    def->tooltip = L("Replace the standard WipeTower2 planner with NeoTower, a post-slice wipe tower "
+                     "that sees every toolchange (including MultiPass sublayer primes) before committing "
+                     "to any geometry. Produces a globally-optimised, fixed-footprint square tower.\n\n"
+                     "Requires enable_prime_tower to be active.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+    // NEOTKO_NEOTOWER_TAG_END
+
     // Infill Neoweaving
     def = this->add("infill_neoweave_enabled", coEnum);
     def->label = L("Infill Neoweaving");
@@ -7118,6 +7130,56 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = L("mm³");
     def->min = 0; def->max = 200; def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5.f));
+
+    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate: independent fan / speed / vary
+    def = this->add("penultimate_multipass_vary_pattern", coBool);
+    def->label = L("Penu alternate pass direction");
+    def->tooltip = L("Each successive penultimate pass reverses the polyline traversal order (180 deg flip).");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("penultimate_multipass_fan_1", coInt);
+    def->label = L("Penu pass 1 fan speed");
+    def->tooltip = L("Fan speed (0-255) for penultimate pass 1. -1 = no change.");
+    def->sidetext = L("PWM"); def->mode = comAdvanced;
+    def->min = -1; def->max = 255;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_fan_2", coInt);
+    def->label = L("Penu pass 2 fan speed");
+    def->tooltip = L("Fan speed (0-255) for penultimate pass 2. -1 = no change.");
+    def->sidetext = L("PWM"); def->mode = comAdvanced;
+    def->min = -1; def->max = 255;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_fan_3", coInt);
+    def->label = L("Penu pass 3 fan speed");
+    def->tooltip = L("Fan speed (0-255) for penultimate pass 3. -1 = no change.");
+    def->sidetext = L("PWM"); def->mode = comAdvanced;
+    def->min = -1; def->max = 255;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("penultimate_multipass_speed_pct_1", coInt);
+    def->label = L("Penu pass 1 speed %");
+    def->tooltip = L("Print speed multiplier via M220 for penultimate pass 1. 100 = no change.");
+    def->sidetext = L("%"); def->mode = comAdvanced;
+    def->min = 1; def->max = 200;
+    def->set_default_value(new ConfigOptionInt(100));
+
+    def = this->add("penultimate_multipass_speed_pct_2", coInt);
+    def->label = L("Penu pass 2 speed %");
+    def->tooltip = L("Print speed multiplier via M220 for penultimate pass 2. 100 = no change.");
+    def->sidetext = L("%"); def->mode = comAdvanced;
+    def->min = 1; def->max = 200;
+    def->set_default_value(new ConfigOptionInt(100));
+
+    def = this->add("penultimate_multipass_speed_pct_3", coInt);
+    def->label = L("Penu pass 3 speed %");
+    def->tooltip = L("Print speed multiplier via M220 for penultimate pass 3. 100 = no change.");
+    def->sidetext = L("%"); def->mode = comAdvanced;
+    def->min = 1; def->max = 200;
+    def->set_default_value(new ConfigOptionInt(100));
+    // NEOTKO_MULTIPASS_SURFACES_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_END
 }

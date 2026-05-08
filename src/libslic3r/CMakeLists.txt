@@ -244,6 +244,10 @@ set(lisbslic3r_sources
     GCode/WipeTower2.hpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
+    # NEOTKO_NEOTOWER_TAG_START
+    NeoTower.hpp
+    NeoTower.cpp
+    # NEOTKO_NEOTOWER_TAG_END
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/Bicubic.hpp

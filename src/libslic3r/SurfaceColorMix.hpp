@@ -182,21 +182,6 @@ struct PathBlendPassConfig {
 };
 // NEOTKO_PATHBLEND_TAG_END
 
-class SurfaceMultiPass {
-public:
-    // Called from Fill.cpp::make_fills() BEFORE SurfaceColorMix::assign_and_group_tools().
-    // Clones all matching surface paths N times, each with width_ratio[i] and tool[i] encoded.
-    // ColorMix skips these paths automatically (mm3_per_mm >= 10.0 guard — CAMINO 1).
-    // allow_top / allow_penu: zone filter from Fill.cpp call site — false skips that role.
-    static bool apply(
-        ExtrusionEntityCollection& fills,
-        const PrintRegionConfig&   config,
-        int                        layer_idx,
-        bool                       allow_top  = true,
-        bool                       allow_penu = true
-    );
-};
-// NEOTKO_MULTIPASS_TAG_END
 
 // NEOTKO_NEOWEAVING_TAG_START
 // Neotko Neoweaving — Z-axis interdigitation during extrusion.

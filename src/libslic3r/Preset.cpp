@@ -842,6 +842,7 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_neoweave_amplitude", "interlayer_neoweave_period", "interlayer_neoweave_max_z_speed", "interlayer_neoweave_min_length",
     "neoweave_penultimate_layers", "neoweave_speed_pct",
     "neotko_interlayer_nesting_enabled", // NEOTKO_NEOWEAVING_TAG — Feature 14: Monotonic Interlayer Nesting
+    "neotko_wipe_tower", // NEOTKO_NEOTOWER_TAG — NeoTower post-slice wipe tower planner
     // NEOTKO_COLORMIX_TAG_START
     "interlayer_colormix_enabled", "interlayer_colormix_surface",
     "interlayer_colormix_tool_a", "interlayer_colormix_tool_b",
@@ -873,6 +874,9 @@ static std::vector<std::string> s_Preset_print_options {
     "penultimate_multipass_gcode_start_1", "penultimate_multipass_gcode_start_2", "penultimate_multipass_gcode_start_3",
     "penultimate_multipass_gcode_end_1", "penultimate_multipass_gcode_end_2", "penultimate_multipass_gcode_end_3",
     "penultimate_multipass_prime_volume",
+    "penultimate_multipass_vary_pattern",
+    "penultimate_multipass_fan_1", "penultimate_multipass_fan_2", "penultimate_multipass_fan_3",
+    "penultimate_multipass_speed_pct_1", "penultimate_multipass_speed_pct_2", "penultimate_multipass_speed_pct_3",
     // NEOTKO_MULTIPASS_TAG_START — PathBlend
     "multipass_path_gradient", "path_gradient_segments", "path_gradient_min_flow_pct",
     // NEOTKO_MULTIPASS_TAG_END

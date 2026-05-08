@@ -1573,41 +1573,6 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             }
     }
 
-    // NEOTKO_NEOTOWER_TAG_START — structural gap fill before MP sublayer blocks.
-    //
-    // A real layer immediately preceding a MultiPass sublayer block may have
-    // has_wipe_tower=false when it is a single-tool layer (wipe_tower_partitions=0,
-    // extruders.size()=1). NeoTower's section-1c gates on has_wipe_tower, so it
-    // skips such layers, creating a structural gap before the first sublayer prime.
-    // Example: z=9.65→9.9166 instead of z=9.65→9.85→9.9166 with layer_height=0.2.
-    //
-    // Fix: mark the nearest preceding real layer before any sublayer block as
-    // has_wipe_tower=true so NeoTower emits a structural TCR for it and
-    // GCode.cpp's next_layer() consumes it in sync (preserving 1-to-1 mapping).
-    //
-    // Gate: presence of is_mp_sublayer entries (not config key — 'neotko_wipe_tower'
-    // is not reliably visible in this config context, as confirmed by log line 1).
-    // WipeTower2 never generates sublayer entries → safe to run unconditionally
-    // when sublayers exist.
-    {
-        const bool has_any_sublayer = std::any_of(
-            m_layer_tools.begin(), m_layer_tools.end(),
-            [](const LayerTools& lt) { return lt.is_mp_sublayer; });
-        if (has_any_sublayer) {
-            for (size_t i = 1; i < m_layer_tools.size(); ++i) {
-                if (!m_layer_tools[i].is_mp_sublayer) continue;
-                // Find nearest preceding real (non-sublayer) layer.
-                for (int j = (int)i - 1; j >= 0; --j) {
-                    if (m_layer_tools[j].is_mp_sublayer) continue;
-                    if (!m_layer_tools[j].has_wipe_tower)
-                        m_layer_tools[j].has_wipe_tower = true;
-                    break; // only the nearest real layer needs correction
-                }
-            }
-        }
-    }
-    // NEOTKO_NEOTOWER_TAG_END
-
     // Calculate the wipe_tower_layer_height values.
     coordf_t wipe_tower_print_z_last = 0.;
     for (LayerTools &lt : m_layer_tools)

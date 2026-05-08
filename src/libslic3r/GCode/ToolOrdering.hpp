@@ -135,9 +135,7 @@ public:
     // Due to the support layers possibly interleaving the object layers,
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
-    bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer, no wipe tower
-    // NEOTKO_MULTIPASS_TAG_START — when multipass_perimeter_override is active, MixedFilament
-    // height-based cycling is blocked so WipeTower and GCode agree on a single stable tool.
+    bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer
     bool                        mp_perim_override_active = false;
     // NEOTKO_MULTIPASS_TAG_END
     // NEOTKO_MULTIPASS_PRIME_TAG — number of Local-Z wipe tower slots to reserve for
@@ -225,7 +223,15 @@ public:
     std::vector<LayerTools>::const_iterator end()   const { return m_layer_tools.end(); }
     bool 				empty()       const { return m_layer_tools.empty(); }
     std::vector<LayerTools>& layer_tools() { return m_layer_tools; }
-    bool 				has_wipe_tower() const { return ! m_layer_tools.empty() && m_first_printing_extruder != (unsigned int)-1 && m_layer_tools.front().has_wipe_tower; }
+    bool 				has_wipe_tower() const {
+        if (m_layer_tools.empty() || m_first_printing_extruder == (unsigned int)-1) return false;
+        if (m_layer_tools.front().has_wipe_tower) return true;
+        // NEOTKO_MULTIPASS_TAG — single-filament MultiPass: regular layers have no tool change
+        // (has_wt=0 on front), but sublayers always need prime purge via the wipe tower.
+        for (const LayerTools& lt : m_layer_tools)
+            if (lt.has_wipe_tower && lt.is_mp_sublayer) return true;
+        return false;
+    }
 
 private:
     void				initialize_layers(std::vector<coordf_t> &zs);
@@ -237,7 +243,7 @@ private:
     void				reorder_extruders(unsigned int last_extruder_id);
     // BBS
     void                reorder_extruders(std::vector<unsigned int> tool_order_layer0);
-    void 				fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height);
+    void 				fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height, const char* call_context = nullptr);
     bool                insert_wipe_tower_extruder();   
     void                mark_skirt_layers(const PrintConfig &config, coordf_t max_layer_height);
     void 				collect_extruder_statistics(bool prime_multi_material);

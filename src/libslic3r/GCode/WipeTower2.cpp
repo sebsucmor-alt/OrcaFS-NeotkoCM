@@ -1351,8 +1351,8 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
 
 void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
 {
-    // while (m_filpar.size() < idx+1)   // makes sure the required element is in the vector
-    m_filpar.push_back(FilamentParameters());
+    while (m_filpar.size() < idx+1)   // makes sure the required element is in the vector
+        m_filpar.push_back(FilamentParameters());
 
     m_filpar[idx].material = config.filament_type.get_at(idx);
     m_filpar[idx].is_soluble = config.wipe_tower_filament == 0 ? config.filament_soluble.get_at(idx) :
@@ -2272,7 +2272,15 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
 {
     assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON); // refuses to add a layer below the last one
 
-    if (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par) // if we moved to a new layer, we'll add it to m_plan first
+    // NEOTKO_FIX s49: use a tighter epsilon for new-layer creation.
+    // WT_EPSILON = 1e-3f was too large: the last sublayer of a MultiPass group sits ~0.0002mm
+    // below the nominal real-layer z (e.g. 9.8498 vs 9.85, diff = 0.0002mm < 0.001mm).
+    // With WT_EPSILON, WipeTower2 merges the sublayer z-group and the real-layer z-group into
+    // ONE plan entry, mixing incompatible tool-change chains and generating wrong TCRs for all
+    // subsequent real layers.  Using 1e-4f ensures 0.0002mm > epsilon so they stay separate.
+    // Real consecutive layer-heights are ≥ 0.05mm >> 1e-4mm, so no legitimate layers merge.
+    constexpr float WT_LAYER_Z_EPS = 1e-4f;
+    if (m_plan.empty() || m_plan.back().z + WT_LAYER_Z_EPS < z_par) // if we moved to a new layer, we'll add it to m_plan first
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
     if (m_first_layer_idx == size_t(-1) && (!m_no_sparse_layers || old_tool != new_tool || m_plan.size() == 1))
@@ -2309,7 +2317,9 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
 
     assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON);
 
-    if (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par)
+    // NEOTKO_FIX s49: same tighter epsilon as plan_toolchange — see comment there.
+    constexpr float WT_LAYER_Z_EPS = 1e-4f;
+    if (m_plan.empty() || m_plan.back().z + WT_LAYER_Z_EPS < z_par)
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
     const float mini_wipe_depth = m_local_z_wipe_tower_purge_lines * m_perimeter_width * m_extra_spacing_wipe;
@@ -2490,6 +2500,16 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
 
         if (m_layer_info->depth < m_wipe_tower_depth - m_perimeter_width)
             m_y_shift = (m_wipe_tower_depth - m_layer_info->depth - m_perimeter_width) / 2.f;
+
+        // NEOTKO_NEOTOWER_TAG: apply cross-group tool state override if registered.
+        // NeoTower sets these before generate() when a sublayer identity event (T→T)
+        // leaves m_current_tool at the wrong value for the next plan layer.
+        {
+            const size_t _plan_li = static_cast<size_t>(m_layer_info - m_plan.begin());
+            auto _ov = m_tool_overrides.find(_plan_li);
+            if (_ov != m_tool_overrides.end())
+                m_current_tool = _ov->second;
+        }
 
         int                         idx = first_toolchange_to_nonsoluble(layer.tool_changes);
         WipeTower::ToolChangeResult finish_layer_tcr;

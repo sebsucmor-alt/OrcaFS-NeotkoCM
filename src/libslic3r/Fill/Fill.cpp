@@ -1347,7 +1347,6 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 			// NEOTKO_MULTIPASS_TAG_START — FASE 2: per-pass fill generation (Z stacking)
             // For MultiPass top/penultimate surfaces: call fill_surface_extrusion() N times,
             // once per active pass, each with its own fill angle (spacing unchanged).
-            // SurfaceMultiPass::apply() below skips already-encoded paths (FASE 2 guard).
             {
                 const auto& mp_cfg   = layerm->region().config();
                 MultiPassConfig     mp;
@@ -1404,6 +1403,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 }
 
                 NEOTKO_LOG(MULTIPASS, "FASE2_CHECK layer=" << f->layer_id
+                    << " print_z=" << this->print_z
                     << " role=" << (int)surface_fill.params.extrusion_role
                     << " bridge=" << surface_fill.params.bridge
                     << " mp_enabled=" << mp_cfg.multipass_enabled.value
@@ -1421,6 +1421,19 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         if (mp.tool[i] < 0) continue;
 
                         const double ratio = mp.width_ratio[i];
+
+                        // NEOTKO_MULTIPASS_MINLAYER_TAG — skip passes thinner than minimum printable height.
+                        // Opción B (not implemented): renormalize remaining active passes so sum == 1.0,
+                        // preventing over-extrusion when a constrained pass is skipped and others are uncapped.
+                        {
+                            const float sub_height_mm = float(this->height * ratio);
+                            if (sub_height_mm < 0.04f) {
+                                BOOST_LOG_TRIVIAL(warning) << "NEOTKO_MULTIPASS_MINLAYER: pass " << i
+                                    << " sub_height=" << sub_height_mm << "mm < 0.04mm — skipping";
+                                continue;
+                            }
+                        }
+                        // NEOTKO_MULTIPASS_MINLAYER_TAG
 
                         f->angle = (mp.angle[i] >= 0)
                             ? Geometry::deg2rad(static_cast<float>(mp.angle[i]))
@@ -1458,10 +1471,14 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             : (this->bottom_z() + cumsum * this->height);
 
                         MultiPassSubLayer sub;
-                        sub.print_z  = sub_print_z;
-                        sub.height   = float(this->height * ratio);
-                        sub.tool_id  = mp.tool[i];
-                        sub.pass_idx = i;
+                        sub.print_z   = sub_print_z;
+                        sub.height    = float(this->height * ratio);
+                        sub.tool_id   = mp.tool[i];
+                        sub.pass_idx  = i;
+                        sub.role      = surface_fill.params.extrusion_role;
+                        sub.speed_pct = mp.speed_pct[i];
+                        sub.gcode_start = mp.gcode_start[i];
+                        sub.gcode_end   = mp.gcode_end[i];
                         const size_t n_paths = temp.entities.size();
                         sub.fills    = std::move(temp);
 
@@ -1598,24 +1615,6 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     }
     // NEOTKO_PATHBLEND_TAG_END
 
-    // NEOTKO_MULTIPASS_TAG_START — SurfaceMultiPass::apply() CAMINO 1/1c fallback
-    // FASE 2 (above) encodes tool into mm3_per_mm >= 10.0 for MultiPass surfaces.
-    // SurfaceMultiPass::apply() detects this guard and skips already-encoded paths,
-    // making it a no-op for FASE 2 regions. Kept as fallback for edge cases.
-    for (LayerRegion *layerm : m_regions) {
-        if (layerm->fills.entities.empty()) continue;
-        const auto& _mp_cfg = layerm->region().config();
-        // Zone filter: skip roles blocked by zone selector
-        const bool _top_ok  = (_mp_cfg.interlayer_colormix_top_zone.value  == 0) || (this->upper_layer == nullptr);
-        const bool _penu_ok = (_mp_cfg.interlayer_colormix_penu_zone.value == 0) ||
-            (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
-        if (!_top_ok && !_penu_ok) continue;
-        // Filament filter
-        const int _ff_mp = _mp_cfg.interlayer_colormix_filament_filter.value;
-        if (_ff_mp > 0 && _mp_cfg.solid_infill_filament.value != _ff_mp) continue;
-        SurfaceMultiPass::apply(layerm->fills, _mp_cfg, (int)this->id(), _top_ok, _penu_ok);
-    }
-    // NEOTKO_MULTIPASS_TAG_END
 
     // NEOTKO_COLORMIX_TAG_START — Apply Surface ColorMix to top/penultimate layers
     // assign_and_group_tools() splits each zig-zag path into individual lines,
