@@ -789,7 +789,10 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
 
     // Register all extruders so WipeTower2's m_filpar is fully populated.
     std::set<size_t> all_tools;
-    all_tools.insert(effective_initial);  // NEOTKO_NEOTOWER_TAG
+    all_tools.insert(0);             // ← AÑADIR ESTO
+    // WipeTower2::filament_area() = m_filpar[0].filament_area (hardcoded).
+    // T0 MUST always be initialized regardless of which tools are actually used.
+    all_tools.insert(effective_initial);
     for (const NeoTowerEvent& ev : m_events) {
         all_tools.insert(ev.old_tool);
         all_tools.insert(ev.new_tool);

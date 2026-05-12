@@ -141,6 +141,30 @@ public:
     }
     // NEOTKO_MULTIPASS_TAG_END
 
+    // NEOTKO_NEOTOWER_TAG_START — Bug: nominal post-sublayer layer has no WT plan entry.
+    // When a sublayer group is dispatched as separate layers_to_print entries, each calls
+    // next_layer(), leaving m_layer_idx pointing to the NEXT real TC layer by the time
+    // the nominal GCode layer (e.g. z=2.28) starts. The finish_layer=true call in its
+    // extruder_loop would incorrectly dispatch that future TC. Fix: detect the mismatch
+    // in the phantom recovery block, undo the premature m_layer_idx advance, and suppress
+    // the finish_layer dispatch for that one extruder_loop pass.
+    // Note: no NEOTKO_LOG here — method is inline in .hpp which lacks NeoDebug includes.
+    // Tracing happens in is_empty_wipe_tower_gcode() in GCode.cpp where NEOTKO_LOG compiles.
+    bool m_suppress_finish_layer = false;
+
+    void suppress_finish_layer_if_future_layer(float nominal_print_z) {
+        if (m_layer_idx < 0 || m_layer_idx >= (int)m_tool_changes.size()) return;
+        if (m_tool_changes[m_layer_idx].empty()) return;
+        const float wt_z = (float)m_tool_changes[m_layer_idx].front().print_z;
+        // Threshold: 5e-4f (0.0005mm) is well below any real LH gap (min ≥0.04mm)
+        // and well above the sublayer↔real-layer gap (~0.0002mm).
+        if (wt_z > nominal_print_z + 5e-4f) {
+            --m_layer_idx;
+            m_suppress_finish_layer = true;
+        }
+    }
+    // NEOTKO_NEOTOWER_TAG_END
+
     bool enable_timelapse_print() const { return m_enable_timelapse_print; }
 
 private:

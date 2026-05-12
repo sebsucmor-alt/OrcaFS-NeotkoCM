@@ -1586,6 +1586,21 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
 
 bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extruder_id, bool finish_layer)
 {
+    // NEOTKO_NEOTOWER_TAG_START — suppress spurious finish_layer on nominal post-sublayer layer.
+    // m_suppress_finish_layer is set by suppress_finish_layer_if_future_layer() when the
+    // phantom recovery detects that m_layer_idx already points to a future TC layer.
+    // Only suppress when finish_layer=true and no real toolchange is needed — if
+    // need_toolchange=true there IS real content to dispatch and we must not suppress it.
+    if (m_suppress_finish_layer && finish_layer
+            && !gcodegen.writer().need_toolchange(extruder_id)) {
+        NEOTKO_LOG(WIPETOWER,
+            "IS_EMPTY_WT: suppress finish_layer (nominal post-sublayer)"
+            " layer=" << m_layer_idx << " ext=T" << extruder_id);
+        m_suppress_finish_layer = false;
+        return true;  // empty → tool_change NOT called, tc_idx NOT advanced
+    }
+    // NEOTKO_NEOTOWER_TAG_END
+
     assert(m_layer_idx >= 0);
     if (m_layer_idx >= (int) m_tool_changes.size())
         return true;
@@ -6516,6 +6531,11 @@ LayerResult GCode::process_layer(const Print& print,
             }
             // NEOTKO_MULTIPASS_TAG_END
         }
+        // NEOTKO_NEOTOWER_TAG_START — detect nominal post-sublayer: no independent WT plan entry.
+        // Called unconditionally (regardless of whether a phantom tool-switch was needed)
+        // because the m_layer_idx advance happens even when current_tool already matches.
+        m_wipe_tower->suppress_finish_layer_if_future_layer((float)print_z);
+        // NEOTKO_NEOTOWER_TAG_END
     }
     m_after_mp_sublayer = false; // reset regardless — real layer is now starting
     // NEOTKO_MULTIPASS_TAG_END
