@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <utility>
 
@@ -63,6 +64,12 @@ struct MixedFilament
     // Optional Local-Z cap for this mixed row. 0 disables the cap.
     int local_z_max_sublayers = 0;
 
+    // Additional XY surface offsets, in mm, applied when this mixed row
+    // resolves to component A or B for an entire layer. Positive values
+    // contract inward; negative values expand outward.
+    float component_a_surface_offset = 0.f;
+    float component_b_surface_offset = 0.f;
+
     // Whether this mixed filament is enabled (available for assignment).
     bool enabled = true;
 
@@ -82,6 +89,7 @@ struct MixedFilament
 
     bool operator==(const MixedFilament &rhs) const
     {
+        constexpr float k_surface_offset_epsilon = 1e-6f;
         return component_a == rhs.component_a &&
                component_b == rhs.component_b &&
                stable_id   == rhs.stable_id   &&
@@ -94,6 +102,8 @@ struct MixedFilament
                pointillism_all_filaments == rhs.pointillism_all_filaments &&
                distribution_mode == rhs.distribution_mode &&
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
+               std::abs(component_a_surface_offset - rhs.component_a_surface_offset) <= k_surface_offset_epsilon &&
+               std::abs(component_b_surface_offset - rhs.component_b_surface_offset) <= k_surface_offset_epsilon &&
                enabled      == rhs.enabled &&
                deleted      == rhs.deleted &&
                custom       == rhs.custom &&
@@ -101,6 +111,38 @@ struct MixedFilament
     }
     bool operator!=(const MixedFilament &rhs) const { return !(*this == rhs); }
 };
+
+struct MixedFilamentPreviewSettings
+{
+    double nominal_layer_height { 0.2 };
+    double mixed_lower_bound { 0.04 };
+    double mixed_upper_bound { 0.16 };
+    double preferred_a_height { 0.0 };
+    double preferred_b_height { 0.0 };
+    bool   local_z_mode { false };
+    bool   local_z_direct_multicolor { false };
+    size_t wall_loops { 1 };
+};
+
+struct MixedFilamentDisplayContext
+{
+    size_t                       num_physical { 0 };
+    std::vector<std::string>     physical_colors;
+    std::vector<double>          nozzle_diameters;
+    MixedFilamentPreviewSettings preview_settings;
+    bool                         component_bias_enabled { false };
+};
+
+int mixed_filament_effective_local_z_preview_mix_b_percent(const MixedFilament               &mf,
+                                                           const MixedFilamentPreviewSettings &preview_settings);
+bool mixed_filament_supports_bias_apparent_color(const MixedFilament               &mf,
+                                                 const MixedFilamentPreviewSettings &preview_settings,
+                                                 bool                                bias_mode_enabled);
+std::pair<int, int> mixed_filament_apparent_pair_percentages(const MixedFilament               &mf,
+                                                             const MixedFilamentPreviewSettings &preview_settings,
+                                                             const std::vector<double>          &nozzle_diameters,
+                                                             bool                                bias_mode_enabled);
+std::string compute_mixed_filament_display_color(const MixedFilament &entry, const MixedFilamentDisplayContext &context);
 
 // ---------------------------------------------------------------------------
 // MixedFilamentManager
@@ -191,6 +233,12 @@ public:
                                                       float        layer_height_a = 0.f,
                                                       float        layer_height_b = 0.f,
                                                       float        base_layer_height = 0.2f) const;
+    float component_surface_offset(unsigned int filament_id,
+                                   size_t       num_physical,
+                                   int          layer_index,
+                                   float        layer_print_z = 0.f,
+                                   float        layer_height  = 0.f,
+                                   bool         force_height_weighted = false) const;
     std::vector<unsigned int> ordered_perimeter_extruders(unsigned int filament_id,
                                                           size_t       num_physical,
                                                           int          layer_index,
@@ -213,6 +261,17 @@ public:
     static std::string blend_color(const std::string &color_a,
                                    const std::string &color_b,
                                    int ratio_a, int ratio_b);
+    static float max_component_surface_offset_mm(float reference_width_mm = 0.4f);
+    static float max_pair_bias_mm(float reference_width_mm = 0.4f);
+    static std::pair<float, float> surface_offset_pair_from_signed_bias(float bias_mm,
+                                                                        float reference_width_mm = 0.4f);
+    static float bias_ui_value_from_surface_offsets(float component_a_surface_offset,
+                                                    float component_b_surface_offset,
+                                                    float reference_width_mm = 0.4f);
+    static int apparent_mix_b_percent(int   mix_b_percent,
+                                      float component_a_surface_offset,
+                                      float component_b_surface_offset,
+                                      float reference_width_mm = 0.4f);
 
     // ---- Accessors ------------------------------------------------------
 
@@ -226,6 +285,7 @@ public:
 
     // Return the display colours of all enabled mixed filaments (in order).
     std::vector<std::string> display_colors() const;
+    void set_display_context(const MixedFilamentDisplayContext &context);
 
 private:
     // Convert a 1-based virtual ID to a 0-based index into m_mixed.
@@ -244,6 +304,7 @@ private:
     float                      m_height_upper_bound  = 0.16f;
     bool                       m_advanced_dithering  = false;
     uint64_t                   m_next_stable_id      = 1;
+    MixedFilamentDisplayContext m_display_context;
 };
 
 } // namespace Slic3r

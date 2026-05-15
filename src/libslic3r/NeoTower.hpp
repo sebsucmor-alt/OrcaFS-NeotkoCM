@@ -108,7 +108,7 @@ struct NeoTowerSlot {
     // Volume to purge (mm³).
     float  wipe_volume = 0.f;
 
-    // Index into NeoTower::m_events for traceability.
+    // Index into merged all_events (plan-local) for traceability.
     size_t event_idx   = 0;
 };
 
@@ -183,6 +183,12 @@ public:
     // Phase 1 + 2  (call once, after Print::process() completes)
     // -----------------------------------------------------------------------
     void collect_and_plan(const Print& print);
+
+    // NEOTKO_NEOTOWER_TAG_START — hardening P3
+    // Validate plan structure after collect_and_plan(). Logs warnings for
+    // invariant violations. V1–V5, V7.
+    void validate_plan() const;
+    // NEOTKO_NEOTOWER_TAG_END
 
     // -----------------------------------------------------------------------
     // Phase 3: fill result with ToolChangeResults.
@@ -277,7 +283,15 @@ private:
     size_t                                 m_initial_tool    = 0;
 
     // Phase 1 output.
+    // NEOTKO_NEOTOWER_TAG_START — hardening P5
+    // Separated event channels:
+    //   m_events:        ONLY real TCs (old_tool != new_tool). Indexed by m_tcr_index.
+    //   m_growth_events: ONLY identity events (old_tool == new_tool). Indexed by
+    //                    m_finish_layer_index.
+    // Invariant: every event is in exactly one bucket. validate_plan() V8 checks this.
     std::vector<NeoTowerEvent>             m_events;
+    std::vector<NeoTowerEvent>             m_growth_events;
+    // NEOTKO_NEOTOWER_TAG_END
 
     // Phase 2 output.
     NeoTowerPlan                           m_plan;
@@ -291,6 +305,25 @@ private:
     // O(1) structural-layer lookup: z_um → {layer_idx, slot_idx} into m_result.
     // Only populated for structural events (old_tool == new_tool, !is_sublayer).
     std::unordered_map<uint64_t, std::pair<size_t, size_t>> m_finish_layer_index;
+
+    // NEOTKO_MPSCHEDULER_TAG — Z redirect for scheduler-fused events.
+    // When the scheduler merges multiple sublayer events at distinct z_actual
+    // into a single NeoTowerEvent at z_max, GCode still calls get_tcr() with
+    // each original z_actual. This map redirects those lookups.
+    // key: make_key(z_original, old, new) → value: make_key(z_fused, old, new)
+    std::unordered_map<uint64_t, uint64_t> m_z_redirect;
+    // Same for identity events: z_um(z_original) → z_um(z_fused)
+    std::unordered_map<uint64_t, uint64_t> m_z_redirect_finish;
+
+    // NEOTKO_NEOTOWER_TAG — bridge merged TCRs.
+    // When a bridge TC exists (chain_tool ≠ ev.old_tool), generate() produces
+    // slot[i]=bridge(chain→old) and slot[i+1]=real(old→new) at the same wt2_li.
+    // GCode calls get_tcr(z, chain_tool, new_tool) in one shot — it doesn't know
+    // to call the bridge first.  We synthesize a merged TCR: initial=chain_tool,
+    // new_tool=real.new_tool, gcode=bridge.gcode+real.gcode.
+    // key: make_key(z, bridge.from_tool, real.new_tool) → index into m_merged_tcrs.
+    std::vector<WipeTower::ToolChangeResult>      m_merged_tcrs;
+    std::unordered_map<uint64_t, size_t>          m_merged_index;
 
     // Statistics (populated during generate()).
     int                m_num_toolchanges = 0;

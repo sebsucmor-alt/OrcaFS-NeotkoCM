@@ -4201,9 +4201,10 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("mixed_filament_height_lower_bound", coFloat);
-    def->label = L("Mixed filament lower height bound");
+    def->label = L("Local-Z lower height bound");
     def->category = L("Others");
-    def->tooltip = L("Lower bound used by the height-weighted mixed filament gradient mode.\n\n"
+    def->tooltip = L("Lower bound used when Local-Z mixed-filament dithering chooses per-color sublayer heights.\n\n"
+                     "Smaller values let Local-Z use thinner sublayers for a color when needed.\n\n"
                      "Detailed mixed filament setting explanations will be published once the project wiki is available.");
     def->sidetext = "mm";
     def->min = 0.01;
@@ -4211,9 +4212,10 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.04));
 
     def = this->add("mixed_filament_height_upper_bound", coFloat);
-    def->label = L("Mixed filament upper height bound");
+    def->label = L("Local-Z upper height bound");
     def->category = L("Others");
-    def->tooltip = L("Upper bound used by the height-weighted mixed filament gradient mode.\n\n"
+    def->tooltip = L("Upper bound used when Local-Z mixed-filament dithering chooses per-color sublayer heights.\n\n"
+                     "Larger values let Local-Z use thicker sublayers for a color when needed.\n\n"
                      "Detailed mixed filament setting explanations will be published once the project wiki is available.");
     def->sidetext = "mm";
     def->min = 0.01;
@@ -4252,6 +4254,15 @@ void PrintConfigDef::init_fff_params()
     def->min = 0.;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_component_bias_enabled", coBool);
+    def->label = L("Enable mixed filament bias");
+    def->category = L("Others");
+    def->tooltip = L("Show and apply the per-row mixed filament Bias control.\n\n"
+                     "When enabled, the selected filament in a mixed pair is recessed slightly so the other component becomes more visible.\n\n"
+                     "Bias is ignored for grouped wall patterns, same-layer pointillisme, and Local Z dithering.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("mixed_filament_surface_indentation", coFloat);
     def->label = L("Selective Expansion contraction");
@@ -4299,6 +4310,22 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Use Variable Layers for Color Blending\n\n"
                      "Blend colors by varying layer heights instead of using a fixed ratio of equal-height layers. This only affects blended color zones; non-blended areas keep their nominal layer height and cadence when possible.\n\n"
                      "This setting increases color blending smoothness by splitting each blended layer according to the blend ratio. For example, a 66/33 blend at 0.12 mm layer height will print as one 0.08 mm layer and one 0.04 mm layer. At 0.20 mm layer height, a 75/25 blend will print as one 0.15 mm layer and one 0.05 mm layer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("dithering_local_z_whole_objects", coBool);
+    def->label = L("Apply Local-Z to whole mixed objects");
+    def->category = L("Others");
+    def->tooltip = L("Experimental. Extend Local-Z dithering beyond painted mixed zones so mixed wall regions can use Local-Z across the whole object.\n\n"
+                     "This also lets Local-Z continue through default mixed walls around painted areas instead of limiting the effect strictly to painted masks.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("dithering_local_z_direct_multicolor", coBool);
+    def->label = L("Use direct multicolor Local-Z solver");
+    def->category = L("Others");
+    def->tooltip = L("Experimental. For mixed rows with 3 or more physical filaments, allocate Local-Z sublayers directly across all components with carry-over error between layers instead of collapsing them into pair cadence.\n\n"
+                     "This can reduce visible banding in multicolor Local-Z blends at the cost of more toolchanges. It is ignored when explicit Local-Z A/B heights are set.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8423,7 +8450,7 @@ std::map<std::string, std::string> DynamicPrintConfig::validate(bool under_cli)
 
 std::string DynamicPrintConfig::get_filament_type(std::string &displayed_filament_type, int id)
 {
-    auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_id"));
+    auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_ids"));
     auto* filament_type = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_type"));
     auto* filament_is_support = dynamic_cast<const ConfigOptionBools*>(this->option("filament_is_support"));
 

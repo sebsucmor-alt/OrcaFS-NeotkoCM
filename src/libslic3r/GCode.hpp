@@ -15,6 +15,7 @@
 #include "GCode/SpiralVase.hpp"
 // NEOTKO_NEOTOWER_TAG_START
 #include "NeoTower.hpp"
+#include "NeoTowerZ.hpp"  // NEOTKO_NEOTOWER_TAG — hardening P2
 // NEOTKO_NEOTOWER_TAG_END
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
@@ -83,6 +84,7 @@ public:
         const Vec3d                                                  plate_origin,
         const std::vector<WipeTower::ToolChangeResult>              &priming,
         const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
+        const std::vector<std::vector<WipeTower::ToolChangeResult>> &local_z_tool_changes,
         const std::vector<std::vector<WipeTower::box_coordinates>>  &local_z_reserve_boxes,
         const WipeTower::ToolChangeResult                           &final_purge) :
         m_left(/*float(print_config.wipe_tower_x.value)*/ 0.f),
@@ -92,10 +94,12 @@ public:
         m_extruder_offsets(print_config.extruder_offset.values),
         m_priming(priming),
         m_tool_changes(tool_changes),
+        m_local_z_tool_changes(local_z_tool_changes),
         m_local_z_reserve_boxes(local_z_reserve_boxes),
         m_final_purge(final_purge),
         m_layer_idx(-1),
         m_tool_change_idx(0),
+        m_local_z_tool_change_idx(local_z_tool_changes.size(), 0),
         m_local_z_reserve_slot_idx(local_z_reserve_boxes.size(), 0),
         m_plate_origin(plate_origin),
         m_single_extruder_multi_material(print_config.single_extruder_multi_material),
@@ -107,9 +111,46 @@ public:
     void next_layer() {
         ++ m_layer_idx;
         m_tool_change_idx = 0;
+        if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_tool_change_idx.size())
+            m_local_z_tool_change_idx[size_t(m_layer_idx)] = 0;
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_reserve_slot_idx.size())
             m_local_z_reserve_slot_idx[size_t(m_layer_idx)] = 0;
     }
+
+    // NEOTKO_NEOTOWER_TAG_START — sync_to_z: z-aware plan layer lookup (replaces
+    // next_layer() + suppress_finish_layer_if_future_layer() for NeoTower).
+    //
+    // Root cause of bugs 00_, 01_, 02_: next_layer() increments m_layer_idx
+    // blindly, but layers_to_print has more has_wipe_tower entries than wt2 plan
+    // entries (sublayer layers get has_wipe_tower=true via fill_wipe_tower_partitions
+    // propagation).  This desync causes suppress to cascade, exhausting tc_idx on
+    // real TC layers.
+    //
+    // Fix: search m_tool_changes by z with Z_EPS_PLAN (1e-4f < SUBLAYER_GAP 2e-4f)
+    // to find the correct plan entry.  When no plan entry matches, suppress
+    // finish_layer for this layer (structural-only — no TC or finish_layer content).
+    void sync_to_z(float nominal_print_z) {
+        m_suppress_finish_layer = false;
+        const int start = std::max(0, m_layer_idx);
+        for (int i = start; i < (int)m_tool_changes.size(); ++i) {
+            if (m_tool_changes[i].empty()) continue;
+            const float pz = (float)m_tool_changes[i].front().print_z;
+            if (std::abs(pz - nominal_print_z) <= NeoTowerZ::Z_EPS_PLAN) {
+                m_layer_idx = i;
+                m_tool_change_idx = 0;
+                if (size_t(m_layer_idx) < m_local_z_tool_change_idx.size())
+                    m_local_z_tool_change_idx[size_t(m_layer_idx)] = 0;
+                if (size_t(m_layer_idx) < m_local_z_reserve_slot_idx.size())
+                    m_local_z_reserve_slot_idx[size_t(m_layer_idx)] = 0;
+                return;
+            }
+            if (pz > nominal_print_z + NeoTowerZ::Z_EPS_FUTURE_TC)
+                break;  // no point scanning further
+        }
+        // No plan entry at this z → suppress finish_layer (empty structural layer).
+        m_suppress_finish_layer = true;
+    }
+    // NEOTKO_NEOTOWER_TAG_END
     // If local_z_unplanned is true, emit a wipe/toolchange without consuming the preplanned
     // per-layer wipe-tower sequence (used by Local-Z phase-b extra toolchanges).
     std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer, bool local_z_unplanned = false,
@@ -122,7 +163,7 @@ public:
     void set_is_first_print(bool is) { m_is_first_print = is; }
 
     // NEOTKO_MULTIPASS_TAG_START
-    // Called when the m_after_mp_sublayer recovery block uses set_extruder() to
+    // Called when the MP group recovery block (P4) uses set_extruder() to
     // restore the printer to the expected initial tool of the current layer, bypassing
     // the normal WT toolchange path. If the WT plan's next pending TCR targets exactly
     // new_tool_id as its new_tool, advance m_tool_change_idx past it — otherwise the
@@ -152,15 +193,51 @@ public:
     // Tracing happens in is_empty_wipe_tower_gcode() in GCode.cpp where NEOTKO_LOG compiles.
     bool m_suppress_finish_layer = false;
 
+    // TODO P5-cleanup: with identity events in a separate channel and tc_idx
+    // counting only real TCs, this suppress mechanism may be redundant. Verify
+    // with regression suite (especially Bug 9, Bug 11 scenarios) before removing.
     void suppress_finish_layer_if_future_layer(float nominal_print_z) {
         if (m_layer_idx < 0 || m_layer_idx >= (int)m_tool_changes.size()) return;
         if (m_tool_changes[m_layer_idx].empty()) return;
         const float wt_z = (float)m_tool_changes[m_layer_idx].front().print_z;
-        // Threshold: 5e-4f (0.0005mm) is well below any real LH gap (min ≥0.04mm)
-        // and well above the sublayer↔real-layer gap (~0.0002mm).
-        if (wt_z > nominal_print_z + 5e-4f) {
+        // NEOTKO_NEOTOWER_TAG — hardening P2: central epsilon
+        if (wt_z > nominal_print_z + NeoTowerZ::Z_EPS_FUTURE_TC) {
             --m_layer_idx;
-            m_suppress_finish_layer = true;
+            // NEOTKO_NEOTOWER_TAG — Bug 01_ fix: after rewinding, check whether the
+            // rewound plan layer IS the current print_z (a real TC layer for this z).
+            //
+            // Original code always exhausted tc_idx and set m_suppress_finish_layer=true.
+            // This was correct for post-sublayer nominal layers (e.g. z=2.28) where the
+            // rewound layer is ALSO a future layer (e.g. plan[K-1]=z=2.48 > z=2.28).
+            //
+            // But at z=2.48 (a real TC layer), m_layer_idx pointed to plan[K]=z=2.68
+            // (future), so suppress fired and rewound to plan[K-1]=z=2.48.  The old code
+            // then exhausted plan[K-1] and set suppress=true → IS_EMPTY_WT returned true
+            // → the real TC (T2→T0) was silently skipped → tool stayed wrong for all
+            // upper objects.
+            //
+            // Fix: if the rewound layer's z matches the current print_z, this IS the real
+            // TC layer — do NOT exhaust tc_idx (next_layer() already reset it to 0) and
+            // do NOT set m_suppress_finish_layer.  The TC will be dispatched normally.
+            // Only exhaust+suppress when the rewound layer is ALSO a future layer.
+            if (m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size()) {
+                const bool rewound_is_future =
+                    !m_tool_changes[m_layer_idx].empty() &&
+                    (float)m_tool_changes[m_layer_idx].front().print_z
+                        > nominal_print_z + NeoTowerZ::Z_EPS_FUTURE_TC;
+                if (rewound_is_future) {
+                    // Rewound layer is still a future layer → original behaviour:
+                    // exhaust tc_idx so any bypass of m_suppress_finish_layer hits the
+                    // "empty first layer" guard instead of silently mis-dispatching.
+                    m_tool_change_idx = (int)m_tool_changes[m_layer_idx].size();
+                    m_suppress_finish_layer = true;
+                }
+                // else: rewound layer z ≈ nominal_print_z → real TC layer.
+                // tc_idx was reset to 0 by next_layer() — keep it.
+                // m_suppress_finish_layer stays false — IS_EMPTY_WT dispatches normally.
+            } else {
+                m_suppress_finish_layer = true;
+            }
         }
     }
     // NEOTKO_NEOTOWER_TAG_END
@@ -184,11 +261,13 @@ private:
     // Reference to cached values at the Printer class.
     const std::vector<WipeTower::ToolChangeResult>              &m_priming;
     const std::vector<std::vector<WipeTower::ToolChangeResult>> &m_tool_changes;
+    const std::vector<std::vector<WipeTower::ToolChangeResult>> &m_local_z_tool_changes;
     const std::vector<std::vector<WipeTower::box_coordinates>>  &m_local_z_reserve_boxes;
     const WipeTower::ToolChangeResult                           &m_final_purge;
     // Current layer index.
     int                                                          m_layer_idx;
     int                                                          m_tool_change_idx;
+    std::vector<size_t>                                          m_local_z_tool_change_idx;
     std::vector<size_t>                                          m_local_z_reserve_slot_idx;
     double                                                       m_last_wipe_tower_print_z = 0.f;
 
@@ -677,9 +756,56 @@ private:
     unsigned int m_toolchange_count;
     coordf_t m_nominal_z;
     bool m_need_change_layer_lift_z = false;
-    // NEOTKO_MULTIPASS_TAG — set after a sublayer group changes the tool so that the
-    // next real layer can restore the wipe-tower expected initial before its loop.
-    bool m_after_mp_sublayer = false;
+    // NEOTKO_MULTIPASS_TAG_START — hardening P4
+    // MultiPass group lifecycle. Replaces m_after_mp_sublayer + m_mp_sublayer_tools.
+    //
+    // Lifecycle per nominal layer with MP sublayers:
+    //   mp_group.begin(z_nominal)
+    //     ├── mp_group.add_pass(tool) × N
+    //     └── mp_group.end(expected_initial, needs_tc) → Action
+    struct MpGroupState {
+        enum class Action { NoAction, BareRecover, WipeTowerPurge };
+
+        bool active() const { return m_active; }
+        bool was_active() const { return m_was_active_last_layer; }
+
+        void begin(float z_nominal) {
+            m_active = true;
+            m_tools.clear();
+            m_z_nominal = z_nominal;
+        }
+
+        void add_pass(unsigned int tool) {
+            m_active = true;
+            m_tools.insert(tool);
+        }
+
+        Action end(unsigned int expected_initial, bool writer_needs_toolchange) {
+            Action result;
+            if (!writer_needs_toolchange) {
+                result = Action::NoAction;
+            } else if (m_tools.count(expected_initial) > 0) {
+                result = Action::BareRecover;
+            } else {
+                result = Action::WipeTowerPurge;
+            }
+            m_was_active_last_layer = m_active;
+            m_active = false;
+            return result;
+        }
+
+        const std::set<unsigned int>& tools() const { return m_tools; }
+        float z_nominal() const { return m_z_nominal; }
+
+    private:
+        bool m_active = false;
+        bool m_was_active_last_layer = false;
+        std::set<unsigned int> m_tools;
+        float m_z_nominal = 0.f;
+    };
+
+    MpGroupState m_mp_group;
+    // NEOTKO_MULTIPASS_TAG_END
     // NEOTKO_PATHBLEND_TAG_START — per-surface Y bbox for correct surface_t normalisation.
     // Set in extrude_infill() before iterating each EEC; reset afterwards.
     // When defined, _extrude() uses this instead of the full layer bbox so that
