@@ -849,9 +849,16 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_colormix_tool_c", "interlayer_colormix_tool_d",
     "interlayer_colormix_min_length",
     "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate",
+    "interlayer_colormix_mode", "interlayer_colormix_pct_a",
+    "interlayer_colormix_pct_b", "interlayer_colormix_easing",
+    "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines",
+    "interlayer_colormix_overlap", "interlayer_colormix_invert",
+    "interlayer_colormix_band_count_a", "interlayer_colormix_band_count_b",
+    "interlayer_colormix_band_count_c", "interlayer_colormix_band_count_d",
     "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone",
     "interlayer_colormix_filament_filter",
     "interlayer_colormix_use_virtual",
+    "surface_color_mix_lane_mode",  // NEOTKO_COLORMIX_TAG — s58
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     "multipass_enabled", "multipass_surface", "multipass_num_passes",
@@ -873,7 +880,7 @@ static std::vector<std::string> s_Preset_print_options {
     "penultimate_multipass_angle_1", "penultimate_multipass_angle_2", "penultimate_multipass_angle_3",
     "penultimate_multipass_gcode_start_1", "penultimate_multipass_gcode_start_2", "penultimate_multipass_gcode_start_3",
     "penultimate_multipass_gcode_end_1", "penultimate_multipass_gcode_end_2", "penultimate_multipass_gcode_end_3",
-    "penultimate_multipass_prime_volume",
+    // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume removed (unified to multipass_prime_volume).
     "penultimate_multipass_vary_pattern",
     "penultimate_multipass_fan_1", "penultimate_multipass_fan_2", "penultimate_multipass_fan_3",
     "penultimate_multipass_speed_pct_1", "penultimate_multipass_speed_pct_2", "penultimate_multipass_speed_pct_3",

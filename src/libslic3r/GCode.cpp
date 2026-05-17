@@ -6129,6 +6129,43 @@ LayerResult GCode::process_layer(const Print& print,
                                         }
                                     }
                                 }
+                                // NEOTKO_PATHBLEND_TAG — s58 fix: pre-populate bucket order
+                                // for PathBlend exactly like MultiPass above.  Without this,
+                                // bucket_order was filled by first-appearance after
+                                // chain_and_reorder may have shuffled the clones, which often
+                                // ended up printing pass 1 (T_top) BEFORE pass 0 (T_bottom).
+                                // That caused two visible bugs:
+                                //   - "primera pasada después de la segunda" (pass 0 prints over
+                                //     pass 1's z=nominal_z deposit → drag / smear).
+                                //   - "segunda pasada incompleta" (pass 1 printed first across
+                                //     full surface with flow=t, then pass 0 printed at variable
+                                //     z hiding/lifting the t-low region).
+                                // Toggling pathblend_fill_angle from 0→1 accidentally fixed it
+                                // by changing the fill engine's path order, which is exactly
+                                // the symptom of a non-deterministic bucket ordering.
+                                else if (m_config.option<ConfigOptionBool>(
+                                            "multipass_path_gradient")
+                                         && m_config.option<ConfigOptionBool>(
+                                                "multipass_path_gradient")->value) {
+                                    const PathBlendPassConfig pb =
+                                        PathBlendPassConfig::from_region_config(m_config);
+                                    const int n_pb = std::max(1, std::min(4, pb.num_passes));
+                                    for (int pi = 0; pi < n_pb; ++pi) {
+                                        if (pb.tool[pi] < 0) continue;
+                                        const unsigned int tid = static_cast<unsigned int>(pb.tool[pi]);
+                                        if (colormix_buckets.find(tid) == colormix_buckets.end()) {
+                                            colormix_buckets[tid] = std::make_unique<ExtrusionEntityCollection>();
+                                            colormix_buckets[tid]->no_sort = true;
+                                            colormix_bucket_order.push_back(tid);
+                                        }
+                                    }
+                                    NEOTKO_LOG(COLORMIX,
+                                        "PB_BUCKET_ORDER_FIXED: pre-populated by pathblend_tool_*"
+                                        << " (passes=" << n_pb
+                                        << " tool[0]=" << pb.tool[0]
+                                        << " tool[1]=" << pb.tool[1]
+                                        << ")");
+                                }
 
                                 auto decode_one_path = [&](const ExtrusionPath* cp) {
                                     ExtrusionPath decoded(*cp);
@@ -6859,6 +6896,49 @@ LayerResult GCode::process_layer(const Print& print,
         auto it = std::find(layer_extruders.begin(), layer_extruders.end(), unsigned(nominal_layer_start_extruder));
         if (it != layer_extruders.end())
             std::rotate(layer_extruders.begin(), it, layer_extruders.end());
+    }
+
+    // NEOTKO_PATHBLEND_TAG — s58 Fix B: record real print order of PathBlend tools
+    // for this layer.  Consumed by _extrude() to compute pass_idx from physical
+    // print order rather than the config tool[] order, so the first extruder
+    // physically printed is always pass 0 (z=bottom) and the last is pass N-1
+    // (z=nominal_z) — guaranteeing monotonic Z across passes regardless of which
+    // tool the writer entered the layer with.
+    m_pathblend_print_order.clear();
+    m_pathblend_max_z_per_pass.clear();  // NEOTKO_PATHBLEND_TAG s58 Bug 2 safety reset
+    {
+        const PrintRegionConfig* pb_cfg = nullptr;
+        for (const LayerToPrint& ltp_pb : layers) {
+            if (!ltp_pb.object_layer) continue;
+            for (const LayerRegion* lr : ltp_pb.object_layer->regions()) {
+                if (lr->region().config().multipass_path_gradient.value) {
+                    pb_cfg = &lr->region().config();
+                    break;
+                }
+            }
+            if (pb_cfg) break;
+        }
+        if (pb_cfg) {
+            const PathBlendPassConfig pb =
+                PathBlendPassConfig::from_region_config(*pb_cfg);
+            std::set<unsigned int> pb_tools;
+            for (int pi = 0; pi < pb.num_passes; ++pi)
+                if (pb.tool[pi] >= 0)
+                    pb_tools.insert(static_cast<unsigned int>(pb.tool[pi]));
+            for (unsigned int ext : layer_extruders)
+                if (pb_tools.count(ext))
+                    m_pathblend_print_order.push_back(ext);
+            if (NeoDebug::enabled(NeoDebug::COLORMIX) && !m_pathblend_print_order.empty()) {
+                std::ostringstream s;
+                s << "PB_PRINT_ORDER z=" << print_z << " order=[";
+                for (size_t i = 0; i < m_pathblend_print_order.size(); ++i) {
+                    if (i) s << ",";
+                    s << "T" << m_pathblend_print_order[i];
+                }
+                s << "]";
+                NEOTKO_LOG(COLORMIX, s.str());
+            }
+        }
     }
     // NEOTKO_MULTIPASS_TAG_START — restore wipe tower expected initial after sublayer group.
     // The wipe tower was planned assuming layer_extruders.front() is already the current tool
@@ -7902,6 +7982,28 @@ std::string GCode::extrude_perimeters(const Print&                              
 }
 
 // Chain the paths hierarchically by a greedy algorithm to minimize a travel distance.
+// NEOTKO_PATHBLEND_TAG — s59 stable signature for a polyline.
+// Survives copies of the surrounding ExtrusionPath (which extrude_entity does
+// internally), unlike the original pointer key.  Mixes first-point coords,
+// last-point coords and point count into a 64-bit value.
+static inline uint64_t pb_polyline_signature(const Polyline& pl)
+{
+    if (pl.points.empty()) return 0u;
+    const Point& a = pl.points.front();
+    const Point& b = pl.points.back();
+    auto mix = [](uint64_t h, uint64_t v) {
+        h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+        return h;
+    };
+    uint64_t h = 0xCBF29CE484222325ull;
+    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(a.x())));
+    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(a.y())));
+    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(b.x())));
+    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(b.y())));
+    h = mix(h, static_cast<uint64_t>(pl.points.size()));
+    return h;
+}
+
 std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing)
 {
     std::string          gcode;
@@ -7927,15 +8029,197 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
                         // smaller than the print bed, producing micro-jumps at angle=0 and
                         // vanishing gradient at low angles).
                         m_pathblend_surface_bbox = BoundingBox();
+                        m_pathblend_path_t.clear();  // NEOTKO_COLORMIX_TAG s58: per-path lane-mode t
+                        m_pathblend_polyline_t.clear();  // NEOTKO_PATHBLEND_TAG s59: polyline-keyed t
+                        // NEOTKO_PATHBLEND_TAG — s59 Bug 2 same-z carry-over fix.
+                        // The per-pass max-z safety tracker MUST reset per EEC, not just
+                        // per layer.  When two objects share the same nominal_z (e.g. two
+                        // circles at z=2.08), the first EEC's pass-0 climbed bottom→nominal
+                        // correctly; the second EEC's pass-0 tried to start again at
+                        // bottom_z but inherited max_reached=nominal_z from EEC #1 →
+                        // every path was clamped flat to nominal → the second surface
+                        // lost its gradient entirely (visible as "only one circle has
+                        // PathBlend").  Between EECs the nozzle travels (with Z-lift),
+                        // so the in-EEC monotonic-Z guarantee does not need to persist
+                        // across surface boundaries — only within a surface.
+                        m_pathblend_max_z_per_pass.clear();
+                        std::vector<const ExtrusionPath*> pb_paths;
                         for (const ExtrusionEntity* ee2 : eec->entities) {
                             if (const auto* p2 = dynamic_cast<const ExtrusionPath*>(ee2))
-                                if (PathBlendEngine::needs_blend(*p2, m_config))
+                                if (PathBlendEngine::needs_blend(*p2, m_config)) {
                                     m_pathblend_surface_bbox.merge(p2->polyline.bounding_box());
+                                    pb_paths.push_back(p2);
+                                }
+                        }
+                        // NEOTKO_COLORMIX_TAG — s58 Fix A: PathBlend lane mode (1/2/3).
+                        // Pre-compute surface_t per path with `compute_t_per_line` which
+                        // returns t directly in [0, 1] normalised against the actual lane
+                        // range observed (not a fixed slot count — that was Bug 1: t never
+                        // reached 1.0 → pass N-1 paths near t=0 had flow=0 and got skipped
+                        // by the apply_path guard, producing visible gaps).
+                        // Consumed inside the loop that calls PathBlendEngine::apply_path
+                        // (~line 8697); falls back to the legacy Y-bbox formula when the
+                        // map is empty or a path isn't found.
+                        if (!pb_paths.empty()) {
+                            const int lane_mode = m_config.option<ConfigOptionInt>(
+                                "surface_color_mix_lane_mode")
+                                ? m_config.option<ConfigOptionInt>("surface_color_mix_lane_mode")->value
+                                : kLaneMode_Default;
+                            if (lane_mode != kLaneMode_Default) {
+                                struct PBLine { Polyline pl; float width; };
+                                std::vector<PBLine> raw;
+                                raw.reserve(pb_paths.size());
+                                for (const auto* p : pb_paths)
+                                    raw.push_back({ p->polyline, p->width });
+                                std::string lane_dbg;
+                                std::vector<double> t_per = compute_t_per_line(
+                                    raw, lane_mode,
+                                    NeoDebug::enabled(NeoDebug::COLORMIX) ? &lane_dbg : nullptr);
+                                if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                                    NEOTKO_LOG(COLORMIX,
+                                        "PB_LANE_MODE mode=" << lane_mode
+                                        << " (" << lane_dbg << ") paths=" << pb_paths.size());
+                                }
+                                for (size_t i = 0; i < pb_paths.size(); ++i) {
+                                    const double t = std::clamp(t_per[i], 0.0, 1.0);
+                                    m_pathblend_path_t[pb_paths[i]] = t;
+                                    m_pathblend_polyline_t[
+                                        pb_polyline_signature(pb_paths[i]->polyline)] = t;
+                                }
+                            } else {
+                                // NEOTKO_PATHBLEND_TAG — s59 Bug 2 root-cause fix.
+                                // With lane_mode=Default the map was left empty, the
+                                // t-ascending sort below was skipped, and paths came out
+                                // in chained_path_from() travel order — descending in t
+                                // for some objects → pass 0 nozzle descended in Z →
+                                // PATHBLEND_SAFETY clamped z_pass to max_reached, killing
+                                // the gradient and leaving the print "locked" at nominal_z.
+                                // Populate the map using the same Y-bbox centroid formula
+                                // used by the apply_path call-site fallback (see _extrude
+                                // around L8888), so the sort runs unconditionally and the
+                                // surface_t the sort uses matches the one fed into
+                                // apply_path. Pass 0 is then guaranteed to climb from
+                                // bottom_z → nominal_z, "Z menor → Z mayor" always.
+                                if (m_pathblend_surface_bbox.defined) {
+                                    const double y_min = double(m_pathblend_surface_bbox.min.y());
+                                    const double y_max = double(m_pathblend_surface_bbox.max.y());
+                                    if (y_max > y_min + 1.0) {
+                                        for (const auto* p : pb_paths) {
+                                            if (p->polyline.points.empty()) continue;
+                                            double sum_y = 0.0;
+                                            for (const auto& pt : p->polyline.points)
+                                                sum_y += double(pt.y());
+                                            const double cy = sum_y / double(p->polyline.points.size());
+                                            const double t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
+                                            m_pathblend_path_t[p] = t;
+                                            m_pathblend_polyline_t[
+                                                pb_polyline_signature(p->polyline)] = t;
+                                        }
+                                        if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                                            NEOTKO_LOG(COLORMIX,
+                                                "PB_T_FROM_BBOX (lane_mode=Default) paths="
+                                                << pb_paths.size()
+                                                << " y_min=" << y_min << " y_max=" << y_max);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         // NEOTKO_PATHBLEND_TAG_END
-                        for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos).entities)
-                            gcode += this->extrude_entity(*ee, extrusion_name);
+
+                        // NEOTKO_COLORMIX_TAG — s58 Fix B: monotonic Z within each pass.
+                        // When PathBlend lane mode is active, paths printed in
+                        // chained_path_from() order have non-monotonic surface_t, causing
+                        // the nozzle to bounce up and down in Z within pass 0 (z = bottom +
+                        // t * h varies per path) → drag through previously deposited
+                        // material.  Force t-ascending order (or descending if
+                        // invert_gradient) so Z climbs monotonically within each pass.
+                        // Trade-off: lose chained_path's travel optimisation, gain print
+                        // quality (no drag).  For PathBlend this is non-negotiable.
+                        if (!m_pathblend_path_t.empty()) {
+                            // NEOTKO_PATHBLEND_TAG — s58 Fix A: separate PathBlend paths
+                            // (which have a registered t) from non-PathBlend ones (perimeters,
+                            // fallback-extruder paths mixed into this bucket via COLORMIX_HOOK
+                            // decode).  Without this split, the ~36 non-PB paths sat at the
+                            // default t=0.5 and broke the Z monotony within the pass.
+                            std::vector<ExtrusionEntity*> ent_pb;
+                            std::vector<ExtrusionEntity*> ent_other;
+                            ent_pb.reserve(eec->entities.size());
+                            for (ExtrusionEntity* e : eec->entities) {
+                                bool has_t = false;
+                                if (const auto* p = dynamic_cast<const ExtrusionPath*>(e))
+                                    has_t = (m_pathblend_path_t.count(p) > 0);
+                                (has_t ? ent_pb : ent_other).push_back(e);
+                            }
+                            // NEOTKO_PATHBLEND_TAG — s58 Fix D: ALWAYS sort ascending by t
+                            // (= surface_t).  Z direction is decoupled from invert_gradient
+                            // in apply_path (see SurfaceColorMix.cpp), so the nozzle always
+                            // climbs Z monotonically from bottom_z (t=0) to nominal_z (t=1).
+                            // The invert flag now only flips the colour gradient (which side
+                            // gets which pass's tool predominantly), it never changes Z.
+                            std::stable_sort(ent_pb.begin(), ent_pb.end(),
+                                [&](const ExtrusionEntity* a, const ExtrusionEntity* b) {
+                                    auto t_for = [&](const ExtrusionEntity* e) -> double {
+                                        if (const auto* p = dynamic_cast<const ExtrusionPath*>(e)) {
+                                            // Prefer stable polyline-signature key (survives
+                                            // extrude_entity's internal path copy); pointer
+                                            // map is kept as a secondary fallback.
+                                            auto it2 = m_pathblend_polyline_t.find(
+                                                pb_polyline_signature(p->polyline));
+                                            if (it2 != m_pathblend_polyline_t.end()) return it2->second;
+                                            auto it = m_pathblend_path_t.find(p);
+                                            if (it != m_pathblend_path_t.end()) return it->second;
+                                        }
+                                        return 0.5;
+                                    };
+                                    return t_for(a) < t_for(b);  // ascending → Z ascends
+                                });
+                            if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                                // NEOTKO_PATHBLEND_TAG — s59 diagnostic: show map spread
+                                // and the first/last entries in ent_pb after sort so we
+                                // can tell whether the sort actually reordered (i.e. did
+                                // ent_pb[0] end up at the lowest t and ent_pb.back() at
+                                // the highest t?  If not, lookup is missing for some
+                                // paths and the comparator falls back to 0.5 → stable_sort
+                                // preserves original order → first path may have high t
+                                // → safety clamp pins z for the rest of the pass).
+                                double t_map_min = 1.1, t_map_max = -0.1;
+                                for (const auto& kv : m_pathblend_path_t) {
+                                    if (kv.second < t_map_min) t_map_min = kv.second;
+                                    if (kv.second > t_map_max) t_map_max = kv.second;
+                                }
+                                auto t_of = [&](const ExtrusionEntity* e) -> double {
+                                    if (const auto* p = dynamic_cast<const ExtrusionPath*>(e)) {
+                                        auto it2 = m_pathblend_polyline_t.find(
+                                            pb_polyline_signature(p->polyline));
+                                        if (it2 != m_pathblend_polyline_t.end()) return it2->second;
+                                        auto it = m_pathblend_path_t.find(p);
+                                        if (it != m_pathblend_path_t.end()) return it->second;
+                                    }
+                                    return -1.0; // sentinel: lookup MISS
+                                };
+                                double t_first = ent_pb.empty() ? -2.0 : t_of(ent_pb.front());
+                                double t_last  = ent_pb.empty() ? -2.0 : t_of(ent_pb.back());
+                                NEOTKO_LOG(COLORMIX,
+                                    "PB_SORT_BY_T (z-ascending always)"
+                                    << " pb_paths=" << ent_pb.size()
+                                    << " other_paths=" << ent_other.size()
+                                    << " map_size=" << m_pathblend_path_t.size()
+                                    << " map_t=[" << t_map_min << ".." << t_map_max << "]"
+                                    << " sorted_first_t=" << t_first
+                                    << " sorted_last_t="  << t_last);
+                            }
+                            // PB paths first (sorted by t), then non-PB paths preserving order.
+                            for (ExtrusionEntity* ee : ent_pb)
+                                gcode += this->extrude_entity(*ee, extrusion_name);
+                            for (ExtrusionEntity* ee : ent_other)
+                                gcode += this->extrude_entity(*ee, extrusion_name);
+                        } else {
+                            for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos).entities)
+                                gcode += this->extrude_entity(*ee, extrusion_name);
+                        }
                         m_pathblend_surface_bbox = BoundingBox(); // reset after collection
+                        m_pathblend_path_t.clear();               // NEOTKO_COLORMIX_TAG s58 reset
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name);
                 }
@@ -8655,50 +8939,116 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                 // NEOTKO_NEOWEAVING_TAG_END
                 // NEOTKO_MULTIPASS_TAG_START — PathBlend apply
                 if (any_pathblend) {
-                    // Determine pass_idx from current extruder vs PathBlend tool list.
+                    // Determine pass_idx.
+                    // NEOTKO_PATHBLEND_TAG — s58 Fix B: prefer REAL print order over
+                    // config tool[] order.  When the writer entered the layer with
+                    // pathblend_tool_2 (e.g. T3 from a previous layer), the rotation
+                    // in process_layer puts T3 first → T3 is physically printed
+                    // before T2.  Using config-based pass_idx (pb.tool[1]==T3 →
+                    // pass_idx=1) made the first-printed extruder go to z=nominal_z,
+                    // dragging the nozzle through fresh material on the way down to
+                    // pass 0.  Using print-order pass_idx guarantees the first
+                    // extruder printed is always pass 0 (z=bottom) → monotonic Z.
                     int pass_idx = 0;
                     if (m_writer.extruder() != nullptr) {
                         const int cur_ext = static_cast<int>(m_writer.extruder()->id());
-                        const auto pb     = PathBlendPassConfig::from_region_config(m_config);
-                        for (int pi = 0; pi < pb.num_passes; ++pi) {
-                            if (pb.tool[pi] == cur_ext) { pass_idx = pi; break; }
+                        bool by_print_order = false;
+                        if (!m_pathblend_print_order.empty()) {
+                            for (size_t i = 0; i < m_pathblend_print_order.size(); ++i) {
+                                if (static_cast<int>(m_pathblend_print_order[i]) == cur_ext) {
+                                    pass_idx = static_cast<int>(i);
+                                    by_print_order = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!by_print_order) {
+                            // Fallback: config tool[] order (legacy, used when
+                            // m_pathblend_print_order wasn't populated for any reason).
+                            const auto pb = PathBlendPassConfig::from_region_config(m_config);
+                            for (int pi = 0; pi < pb.num_passes; ++pi) {
+                                if (pb.tool[pi] == cur_ext) { pass_idx = pi; break; }
+                            }
                         }
                     }
                     // surface_t: position of this path in the surface [0..1].
-                    // Prefer m_pathblend_surface_bbox (set per-EEC in extrude_infill) so each
-                    // object is normalised within its own Y extent, not the whole layer.
-                    // Without this, two circles side-by-side both get surface_t ≈ 0.5 → micro-jumps
-                    // at angle=0 and vanishing gradient at low angles.
-                    // Fall back to the full layer bbox only if the per-surface bbox wasn't set.
+                    // NEOTKO_COLORMIX_TAG — s58: lane mode lookup.
+                    // When the user selected a non-Default lane mode, extrude_infill()
+                    // pre-computed a per-path t into m_pathblend_path_t.  If the current
+                    // path is in that map, use it directly.  Otherwise fall back to the
+                    // legacy Y-bbox formula below.
                     double surface_t = 0.5;
+                    // NEOTKO_PATHBLEND_TAG — s59 diagnostic: tag the source of surface_t
+                    // so the multipass log can tell HIT(map) from MISS→bbox-Y from MISS→0.5.
+                    // Critical for diagnosing why some EECs (lane modes on circles) leave Z
+                    // pinned: if t_src=MAP and t varies but Z is still constant in gcode,
+                    // the bug is in apply_path/safety; if t_src=BBOX_Y, the map lookup is
+                    // missing and the sort comparator is also failing → original order
+                    // preserved → first path may have high t → safety clamps the rest.
+                    const char* t_src = "DEFAULT0.5";
                     {
-                        BoundingBox ref_bb;
-                        if (m_pathblend_surface_bbox.defined) {
-                            ref_bb = m_pathblend_surface_bbox;
-                        } else if (m_layer != nullptr && !m_layer->lslices_bboxes.empty()) {
-                            ref_bb = m_layer->lslices_bboxes.front();
-                            for (const auto& bb : m_layer->lslices_bboxes)
-                                ref_bb.merge(bb);
+                        // NEOTKO_PATHBLEND_TAG — s59: prefer polyline-signature key.
+                        // extrude_entity() internally copies the ExtrusionPath, so &path
+                        // here is a fresh stack address that never matches the original
+                        // pointer stored in m_pathblend_path_t.  The signature key is
+                        // computed from polyline values (first/last point + size), which
+                        // survive the copy unchanged.
+                        const uint64_t sig = pb_polyline_signature(path.polyline);
+                        auto it_sig = m_pathblend_polyline_t.find(sig);
+                        bool got_t = false;
+                        if (it_sig != m_pathblend_polyline_t.end()) {
+                            surface_t = it_sig->second;
+                            t_src = "MAP_SIG";
+                            got_t = true;
+                        } else {
+                            auto it = m_pathblend_path_t.find(&path);
+                            if (it != m_pathblend_path_t.end()) {
+                                surface_t = it->second;
+                                t_src = "MAP_PTR";
+                                got_t = true;
+                            }
                         }
-                        if (ref_bb.defined) {
-                            const double y_min = double(ref_bb.min.y());
-                            const double y_max = double(ref_bb.max.y());
-                            if (y_max > y_min + 1.0) {
-                                double sum_y = 0.0;
-                                for (const auto& pt : path.polyline.points)
-                                    sum_y += double(pt.y());
-                                const double cy = sum_y / double(path.polyline.points.size());
-                                surface_t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
+                        if (!got_t) {
+                            // Legacy formula: use per-EEC bbox over Y axis.
+                            BoundingBox ref_bb;
+                            if (m_pathblend_surface_bbox.defined) {
+                                ref_bb = m_pathblend_surface_bbox;
+                            } else if (m_layer != nullptr && !m_layer->lslices_bboxes.empty()) {
+                                ref_bb = m_layer->lslices_bboxes.front();
+                                for (const auto& bb : m_layer->lslices_bboxes)
+                                    ref_bb.merge(bb);
+                            }
+                            if (ref_bb.defined) {
+                                const double y_min = double(ref_bb.min.y());
+                                const double y_max = double(ref_bb.max.y());
+                                if (y_max > y_min + 1.0) {
+                                    double sum_y = 0.0;
+                                    for (const auto& pt : path.polyline.points)
+                                        sum_y += double(pt.y());
+                                    const double cy = sum_y / double(path.polyline.points.size());
+                                    surface_t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
+                                    t_src = "BBOX_Y";
+                                }
                             }
                         }
                         // invert_gradient is applied inside PathBlendEngine::apply_path().
                         // t=0 (min-Y path, printed first) → z=bottom_z with invert=true.
+                        if (NeoDebug::enabled(NeoDebug::MULTIPASS)) {
+                            NEOTKO_LOG(MULTIPASS,
+                                "PB_T_SRC " << t_src
+                                << " surface_t=" << surface_t
+                                << " path_ptr=" << static_cast<const void*>(&path)
+                                << " map_size=" << m_pathblend_path_t.size());
+                        }
                     }
                     gcode += PathBlendEngine::apply_path(
                         path, m_config, m_writer,
                         m_nominal_z, m_layer->height,
                         F, e_per_mm, pass_idx, surface_t,
-                        [this](const Point& p) { return this->point_to_gcode(p); });
+                        [this](const Point& p) { return this->point_to_gcode(p); },
+                        // NEOTKO_PATHBLEND_TAG s58 Bug 2 safety: pass the per-pass max-z
+                        // tracker so apply_path enforces monotonic Z ascent within each pass.
+                        &m_pathblend_max_z_per_pass);
                     // NOTE: No per-path Z restore here.
                     // apply_path leaves the writer at z_pass (varies per surface_t).
                     // The subsequent travel_to_xyz uses m_nominal_z as destination and

@@ -1037,12 +1037,61 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 const int tool_b  = cfg.interlayer_colormix_tool_b.value;
                 const int tool_c  = cfg.interlayer_colormix_tool_c.value;
                 const int tool_d  = cfg.interlayer_colormix_tool_d.value;
-                auto tools_top = parse_colormix_pattern_1based(
-                    cfg.interlayer_colormix_pattern_top.value,
-                    tool_a, tool_b, tool_c, tool_d, &layer_tools);
-                auto tools_pen = parse_colormix_pattern_1based(
-                    cfg.interlayer_colormix_pattern_penultimate.value,
-                    tool_a, tool_b, tool_c, tool_d, &layer_tools);
+                // NEOTKO_COLORMIX_TAG — s59 surface-gate fix.
+                // interlayer_colormix_surface: 0=Both, 1=Top only, 2=Penultimate only.
+                // Previously both patterns were parsed unconditionally, so the
+                // unused pattern's DEFAULT ("12" → T0/T1) leaked T0+T1 into
+                // layer_tools.extruders. With Top-only configs that defaulted the
+                // penultimate pattern (or vice versa), this caused the wipe tower
+                // to fire extra purges at colormix heights (the "wipe de 12"
+                // residue user reported). Gate each pattern on the surface mode.
+                const int surf_mode = cfg.interlayer_colormix_surface.value;
+                const bool want_top = (surf_mode == 0 || surf_mode == 1);
+                const bool want_pen = (surf_mode == 0 || surf_mode == 2);
+                std::vector<unsigned int> tools_top, tools_pen;
+                // NEOTKO_COLORMIX_TAG — s60 numeric gradient modes.
+                // When in any numeric mode (1-3), the string pattern is ignored;
+                // only the tools actually used (tool_a/b/c/d filtered by mode-
+                // specific rules) participate. Register those directly so the
+                // wipe tower sees the correct (small) extruder set instead of
+                // parsing whatever default pattern string is sitting there.
+                const int cm_mode = cfg.interlayer_colormix_mode.value;
+                auto tools_for_mode = [&]() -> std::vector<unsigned int> {
+                    std::vector<unsigned int> v;
+                    auto add = [&](int t) {
+                        if (t < 0) return;
+                        const unsigned int u = static_cast<unsigned int>(t + 1);
+                        if (std::find(v.begin(), v.end(), u) == v.end())
+                            v.push_back(u);
+                    };
+                    if (cm_mode == 1) {                  // Linear 2-color
+                        add(tool_a); add(tool_b);
+                    } else if (cm_mode == 2) {           // Linear 3-color
+                        add(tool_a); add(tool_b); add(tool_c);
+                    } else if (cm_mode == 3) {           // Custom bands
+                        if (cfg.interlayer_colormix_band_count_a.value > 0) add(tool_a);
+                        if (cfg.interlayer_colormix_band_count_b.value > 0) add(tool_b);
+                        if (cfg.interlayer_colormix_band_count_c.value > 0) add(tool_c);
+                        if (cfg.interlayer_colormix_band_count_d.value > 0) add(tool_d);
+                    }
+                    return v;
+                };
+                if (want_top) {
+                    if (cm_mode >= 1 && cm_mode <= 3)
+                        tools_top = tools_for_mode();
+                    else
+                        tools_top = parse_colormix_pattern_1based(
+                            cfg.interlayer_colormix_pattern_top.value,
+                            tool_a, tool_b, tool_c, tool_d, &layer_tools);
+                }
+                if (want_pen) {
+                    if (cm_mode >= 1 && cm_mode <= 3)
+                        tools_pen = tools_for_mode();
+                    else
+                        tools_pen = parse_colormix_pattern_1based(
+                            cfg.interlayer_colormix_pattern_penultimate.value,
+                            tool_a, tool_b, tool_c, tool_d, &layer_tools);
+                }
                 // Insert union (deduplicated) into layer_tools.extruders
                 std::set<unsigned int> emplace_set;
                 auto emplace_once = [&](unsigned int t) {

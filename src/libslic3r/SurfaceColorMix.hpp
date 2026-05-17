@@ -16,6 +16,9 @@
 #include <string>
 #include <sstream>    // NEOTKO_DEBUG: NEOTKO_LOG macro uses std::ostringstream
 #include <functional> // NEOTKO_NEOWEAVING: std::function for point_to_gcode callback
+#include <algorithm>  // NEOTKO_COLORMIX s58: std::sort/min/max in lane mode helpers
+#include <cmath>      // NEOTKO_COLORMIX s58: std::atan2, std::sqrt, std::abs
+#include <limits>     // NEOTKO_COLORMIX s58: std::numeric_limits
 
 namespace Slic3r {
 
@@ -100,6 +103,76 @@ public:
     // Encode tool index in mm3_per_mm: original + (tool_idx + 1) * 10.0
     // Decode in GCode.cpp: tool = floor(mm3_per_mm / 10.0) - 1
     static void encode_tool_in_path(ExtrusionPath* path, int tool_idx);
+
+    // NEOTKO_COLORMIX_TAG — s60 numeric gradient.
+    //
+    // Easing curves applied to the position fraction t ∈ [0,1] BEFORE the dither
+    // decision. The curve shapes WHERE in the gradient the colour transitions
+    // happen, not WHETHER they happen (the per-window frequency is preserved
+    // globally — easing redistributes locally).
+    enum ColormixEasing : int {
+        kColormixEasing_Linear      = 0,
+        kColormixEasing_EaseIn      = 1,
+        kColormixEasing_EaseOut     = 2,
+        kColormixEasing_EaseInOut   = 3,
+        kColormixEasing_Gamma       = 4,
+        kColormixEasing_HardBand    = 5,
+    };
+
+    // Apply easing curve to a linear t ∈ [0,1].
+    // For Gamma mode, `gamma` is the exponent (1.0 = linear).
+    static double colormix_easing_apply(double t, int easing, double gamma = 1.0);
+
+    // Bresenham-style dithered tool sequence for "Linear 2-color" mode.
+    //   n_lines : total number of lines to place tools onto (the actual line
+    //             count of the surface being processed)
+    //   tool_a  : 0-based physical tool index for the majority/start side
+    //   tool_b  : 0-based physical tool index for the minority/end side
+    //   pct_a   : 0-100 — fraction of lines assigned to tool A
+    //   easing  : ColormixEasing enum (default Linear)
+    //   gamma   : exponent for kColormixEasing_Gamma (else ignored)
+    // Returns a vector<int> of length n_lines.
+    static std::vector<int> build_dithered_tools_2color(
+        int n_lines, int tool_a, int tool_b, int pct_a,
+        int easing = kColormixEasing_Linear, double gamma = 1.0);
+
+    // Bresenham-style dithered sequence for "Linear 3-color" mode.
+    // pct_a + pct_b + pct_c = 100 (pct_c = 100 - pct_a - pct_b, clamped >= 0).
+    // The gradient morphs A → B → C across the surface; B is concentrated in
+    // the middle of the sequence with proportional density.
+    //   overlap : 0.0..1.0 — how much each colour bleeds into its neighbour's
+    //             zone. 0 = hard 3-band split; 1 = strong overlap (every
+    //             colour sprinkles throughout the sequence). Default 0.6 keeps
+    //             the gradient direction visible while softening the bands.
+    static std::vector<int> build_dithered_tools_3color(
+        int n_lines, int tool_a, int tool_b, int tool_c,
+        int pct_a, int pct_b,
+        int easing = kColormixEasing_Linear, double gamma = 1.0,
+        double overlap = 0.6);
+
+    // Custom hard-band sequence: emits `cnt_a` of tool_a, then `cnt_b` of tool_b,
+    // then `cnt_c` of tool_c, then `cnt_d` of tool_d, cycling until n_lines is
+    // reached. Skips bands with count == 0. No dither — clean blocks.
+    static std::vector<int> build_custom_bands(
+        int n_lines,
+        int tool_a, int cnt_a,
+        int tool_b, int cnt_b,
+        int tool_c, int cnt_c,
+        int tool_d, int cnt_d);
+
+    // Geometric estimate of fill-line count for a surface.
+    //   area_mm2          : surface area in mm²
+    //   line_width_mm     : actual extrusion line width (top_solid_infill_line_width)
+    //   overlap_fraction  : infill_overlap (0..1) — fraction of width that overlaps
+    //   pattern_factor    : 1.0 for rectilinear/monotonic (default), 0.85 for
+    //                       concentric / archimedean (paths follow contours).
+    // Returns an integer estimate. ±~15% on irregular shapes — good enough for
+    // UI feedback "≈ N lines". Cost: O(1).
+    static int estimate_surface_line_count(
+        double area_mm2,
+        double line_width_mm,
+        double overlap_fraction = 0.0,
+        double pattern_factor   = 1.0);
 
     // NEOTKO_COLORMIX_TAG_START - MixedFilament UI helpers
     static std::vector<ColorMixOption> get_mix_options(
@@ -278,10 +351,335 @@ public:
         double                                    e_per_mm,
         int                                       pass_idx,
         double                                    surface_t,
-        const std::function<Vec2d(const Point&)>& point_to_gcode
+        const std::function<Vec2d(const Point&)>& point_to_gcode,
+        // NEOTKO_PATHBLEND_TAG — s58 Bug 2 safety: optional out-param tracking
+        // the max z reached so far per pass_idx within the current layer.  When
+        // provided, this function clamps z_pass to max(z_pass, (*max_z_per_pass)[pass_idx])
+        // and updates the map.  Effect: nozzle never descends within a pass —
+        // only ascends or stays flat.  Prevents the dangerous "start high z +
+        // low flow, end low z + high flow" pattern that risks drag/lifts.
+        // Caller must reset the map at the start of each real layer.
+        std::map<int, double>*                    max_z_per_pass = nullptr
     );
 };
 // NEOTKO_MULTIPASS_TAG_END
+
+// ===========================================================================
+// NEOTKO_COLORMIX_TAG — s58 lane distribution helpers (modes 1/2/3).
+// Shared between SurfaceColorMix (ColorMix) and GCode.cpp (PathBlend) so both
+// engines respect the same `surface_color_mix_lane_mode` config key.
+// Header-defined as templates so the caller can pass any RawLine-like type
+// exposing `.pl` (Polyline) and `.width` (float).  See PrintConfig.hpp for
+// the kLaneMode_* constants and full mode description.
+// ===========================================================================
+struct LaneVec2 { double x = 0.0, y = 0.0; };
+
+inline LaneVec2 lane_centroid(const Polyline& pl) {
+    LaneVec2 c{0.0, 0.0};
+    if (pl.points.empty()) return c;
+    for (const auto& pt : pl.points) {
+        c.x += static_cast<double>(pt.x());
+        c.y += static_cast<double>(pt.y());
+    }
+    c.x /= static_cast<double>(pl.points.size());
+    c.y /= static_cast<double>(pl.points.size());
+    return c;
+}
+
+inline LaneVec2 lane_direction(const Polyline& pl) {
+    if (pl.points.size() < 2) return {1.0, 0.0};
+    double dx = static_cast<double>(pl.points.back().x() - pl.points.front().x());
+    double dy = static_cast<double>(pl.points.back().y() - pl.points.front().y());
+    double n = std::sqrt(dx*dx + dy*dy);
+    if (n < 1e-6) return {1.0, 0.0};
+    return {dx/n, dy/n};
+}
+
+inline double lane_angle_mod_pi(const Polyline& pl) {
+    auto d = lane_direction(pl);
+    double a = std::atan2(d.y, d.x);
+    while (a <  0.0) a += M_PI;
+    while (a >= M_PI) a -= M_PI;
+    return a;
+}
+
+template <class RawLineT>
+inline size_t lane_pick_reference(const std::vector<RawLineT>& raw_lines) {
+    size_t best = 0;
+    double best_len = -1.0;
+    for (size_t i = 0; i < raw_lines.size(); ++i) {
+        double len = raw_lines[i].pl.length();
+        if (len > best_len) { best_len = len; best = i; }
+    }
+    return best;
+}
+
+// Compute slot_per_line[i] in [0, n_slots) for all lines, according to lane_mode.
+// debug_summary (optional) receives a short human-readable label for logs.
+template <class RawLineT>
+inline std::vector<int> compute_slot_per_line(
+    const std::vector<RawLineT>& raw_lines,
+    int n_slots,
+    int lane_mode,
+    std::string* debug_summary = nullptr)
+{
+    const int n = static_cast<int>(raw_lines.size());
+    std::vector<int> slot_per_line(n, 0);
+    if (n_slots <= 0 || n <= 0) return slot_per_line;
+
+    if (lane_mode == kLaneMode_Default) {
+        for (int i = 0; i < n; ++i) slot_per_line[i] = i % n_slots;
+        if (debug_summary) *debug_summary = "Default";
+        return slot_per_line;
+    }
+
+    const size_t ref = lane_pick_reference(raw_lines);
+    const LaneVec2 fill_dir = lane_direction(raw_lines[ref].pl);
+    const LaneVec2 perp{-fill_dir.y, fill_dir.x};
+    const double width_mm = static_cast<double>(raw_lines[0].width);
+    const double spacing_scaled = std::max(1.0, width_mm * 1e6);
+
+    auto proj_of = [&](size_t i) -> double {
+        LaneVec2 c = lane_centroid(raw_lines[i].pl);
+        return c.x * perp.x + c.y * perp.y;
+    };
+
+    if (lane_mode == kLaneMode_GeoSort) {
+        std::vector<int> order(n);
+        for (int i = 0; i < n; ++i) order[i] = i;
+        std::sort(order.begin(), order.end(),
+                  [&](int a, int b) { return proj_of(a) < proj_of(b); });
+        for (int rank = 0; rank < n; ++rank)
+            slot_per_line[order[rank]] = rank % n_slots;
+        if (debug_summary) *debug_summary = "GeoSort";
+        return slot_per_line;
+    }
+
+    if (lane_mode == kLaneMode_LaneQuant) {
+        std::vector<int> lane(n, 0);
+        int min_lane = std::numeric_limits<int>::max();
+        for (int i = 0; i < n; ++i) {
+            lane[i] = static_cast<int>(std::llround(proj_of(i) / spacing_scaled));
+            min_lane = std::min(min_lane, lane[i]);
+        }
+        for (int i = 0; i < n; ++i) {
+            const int rel = lane[i] - min_lane;
+            slot_per_line[i] = ((rel % n_slots) + n_slots) % n_slots;
+        }
+        if (debug_summary) {
+            int max_lane = std::numeric_limits<int>::min();
+            for (int i = 0; i < n; ++i) max_lane = std::max(max_lane, lane[i]);
+            std::ostringstream s;
+            s << "LaneQuant lanes=" << (max_lane - min_lane + 1)
+              << " spacing_mm=" << width_mm;
+            *debug_summary = s.str();
+        }
+        return slot_per_line;
+    }
+
+    if (lane_mode == kLaneMode_DirCluster) {
+        constexpr double kAngleThresh = M_PI / 12.0; // 15°
+        auto angle_dist = [](double a, double b) -> double {
+            double d = std::abs(a - b);
+            if (d > M_PI / 2.0) d = M_PI - d;
+            return d;
+        };
+        std::vector<double> angle_per_line(n);
+        for (int i = 0; i < n; ++i)
+            angle_per_line[i] = lane_angle_mod_pi(raw_lines[i].pl);
+
+        std::vector<double> cluster_angles;
+        std::vector<int>    cluster_of(n, 0);
+        for (int i = 0; i < n; ++i) {
+            int best = -1; double best_d = 1e9;
+            for (size_t c = 0; c < cluster_angles.size(); ++c) {
+                double d = angle_dist(angle_per_line[i], cluster_angles[c]);
+                if (d < kAngleThresh && d < best_d) { best_d = d; best = static_cast<int>(c); }
+            }
+            if (best < 0) {
+                cluster_angles.push_back(angle_per_line[i]);
+                best = static_cast<int>(cluster_angles.size()) - 1;
+            }
+            cluster_of[i] = best;
+        }
+
+        const int K = static_cast<int>(cluster_angles.size());
+        std::vector<int> lane_per_line(n, 0);
+        std::vector<int> min_lane_per_cluster(K, std::numeric_limits<int>::max());
+        for (int i = 0; i < n; ++i) {
+            const double ang = cluster_angles[cluster_of[i]];
+            const LaneVec2 cperp{-std::sin(ang), std::cos(ang)};
+            LaneVec2 c = lane_centroid(raw_lines[i].pl);
+            const double proj = c.x * cperp.x + c.y * cperp.y;
+            const int lane = static_cast<int>(std::llround(proj / spacing_scaled));
+            lane_per_line[i] = lane;
+            min_lane_per_cluster[cluster_of[i]] =
+                std::min(min_lane_per_cluster[cluster_of[i]], lane);
+        }
+        for (int i = 0; i < n; ++i) {
+            const int rel = lane_per_line[i] - min_lane_per_cluster[cluster_of[i]];
+            slot_per_line[i] = ((rel % n_slots) + n_slots) % n_slots;
+        }
+        if (debug_summary) {
+            std::ostringstream s;
+            s << "DirCluster K=" << K << " angles=[";
+            for (int c = 0; c < K; ++c) {
+                if (c) s << ",";
+                s << int(std::round(cluster_angles[c] * 180.0 / M_PI)) << "deg";
+            }
+            s << "]";
+            *debug_summary = s.str();
+        }
+        return slot_per_line;
+    }
+
+    // Unknown mode → safe fallback.
+    for (int i = 0; i < n; ++i) slot_per_line[i] = i % n_slots;
+    if (debug_summary) *debug_summary = "UnknownMode->Default";
+    return slot_per_line;
+}
+
+// NEOTKO_COLORMIX_TAG — s58 Bug 1 fix: continuous t [0,1] per line.
+// Same family as compute_slot_per_line but returns a fractional t in [0, 1]
+// normalised against the actual lane range observed, NOT against a fixed slot
+// count.  PathBlend uses this t directly as `surface_t` so it MUST cover the
+// full [0, 1] range — otherwise pass N-1 paths near t=0 get flow=0 and are
+// skipped by the apply_path guard (`if (flow < 1e-9) return "";`), producing
+// visible gaps in the second pass.
+//
+// Modes:
+//   0 Default     — t = i / (n - 1)                       (no geometry)
+//   1 GeoSort     — t = rank(⊥proj) / (n - 1)             (sort-based)
+//   2 LaneQuant   — t = (lane - min_lane) / (max - min)   (geometric, global)
+//   3 DirCluster  — t = (lane_c - min_c) / (max_c - min_c) per cluster
+//                   (intra-cluster gradient; clusters are independent)
+template <class RawLineT>
+inline std::vector<double> compute_t_per_line(
+    const std::vector<RawLineT>& raw_lines,
+    int lane_mode,
+    std::string* debug_summary = nullptr)
+{
+    const int n = static_cast<int>(raw_lines.size());
+    std::vector<double> t_per_line(n, 0.0);
+    if (n <= 0) return t_per_line;
+    if (n == 1) { t_per_line[0] = 0.5; return t_per_line; }
+
+    if (lane_mode == kLaneMode_Default) {
+        const double denom = static_cast<double>(n - 1);
+        for (int i = 0; i < n; ++i) t_per_line[i] = static_cast<double>(i) / denom;
+        if (debug_summary) *debug_summary = "Default";
+        return t_per_line;
+    }
+
+    const size_t ref = lane_pick_reference(raw_lines);
+    const LaneVec2 fill_dir = lane_direction(raw_lines[ref].pl);
+    const LaneVec2 perp{-fill_dir.y, fill_dir.x};
+    const double width_mm = static_cast<double>(raw_lines[0].width);
+    const double spacing_scaled = std::max(1.0, width_mm * 1e6);
+
+    auto proj_of = [&](size_t i) -> double {
+        LaneVec2 c = lane_centroid(raw_lines[i].pl);
+        return c.x * perp.x + c.y * perp.y;
+    };
+
+    if (lane_mode == kLaneMode_GeoSort) {
+        std::vector<int> order(n);
+        for (int i = 0; i < n; ++i) order[i] = i;
+        std::sort(order.begin(), order.end(),
+                  [&](int a, int b) { return proj_of(a) < proj_of(b); });
+        const double denom = static_cast<double>(n - 1);
+        for (int rank = 0; rank < n; ++rank)
+            t_per_line[order[rank]] = static_cast<double>(rank) / denom;
+        if (debug_summary) *debug_summary = "GeoSort";
+        return t_per_line;
+    }
+
+    if (lane_mode == kLaneMode_LaneQuant) {
+        std::vector<int> lane(n, 0);
+        int min_l = std::numeric_limits<int>::max();
+        int max_l = std::numeric_limits<int>::min();
+        for (int i = 0; i < n; ++i) {
+            lane[i] = static_cast<int>(std::llround(proj_of(i) / spacing_scaled));
+            min_l = std::min(min_l, lane[i]);
+            max_l = std::max(max_l, lane[i]);
+        }
+        const double range = std::max(1.0, static_cast<double>(max_l - min_l));
+        for (int i = 0; i < n; ++i)
+            t_per_line[i] = static_cast<double>(lane[i] - min_l) / range;
+        if (debug_summary) {
+            std::ostringstream s;
+            s << "LaneQuant lanes=" << (max_l - min_l + 1)
+              << " spacing_mm=" << width_mm;
+            *debug_summary = s.str();
+        }
+        return t_per_line;
+    }
+
+    if (lane_mode == kLaneMode_DirCluster) {
+        constexpr double kAngleThresh = M_PI / 12.0; // 15°
+        auto angle_dist = [](double a, double b) -> double {
+            double d = std::abs(a - b);
+            if (d > M_PI / 2.0) d = M_PI - d;
+            return d;
+        };
+        std::vector<double> angle_per_line(n);
+        for (int i = 0; i < n; ++i)
+            angle_per_line[i] = lane_angle_mod_pi(raw_lines[i].pl);
+
+        std::vector<double> cluster_angles;
+        std::vector<int>    cluster_of(n, 0);
+        for (int i = 0; i < n; ++i) {
+            int best = -1; double best_d = 1e9;
+            for (size_t c = 0; c < cluster_angles.size(); ++c) {
+                double d = angle_dist(angle_per_line[i], cluster_angles[c]);
+                if (d < kAngleThresh && d < best_d) { best_d = d; best = static_cast<int>(c); }
+            }
+            if (best < 0) {
+                cluster_angles.push_back(angle_per_line[i]);
+                best = static_cast<int>(cluster_angles.size()) - 1;
+            }
+            cluster_of[i] = best;
+        }
+
+        const int K = static_cast<int>(cluster_angles.size());
+        std::vector<int> lane_per_line(n, 0);
+        std::vector<int> min_lane_per_c(K, std::numeric_limits<int>::max());
+        std::vector<int> max_lane_per_c(K, std::numeric_limits<int>::min());
+        for (int i = 0; i < n; ++i) {
+            const double ang = cluster_angles[cluster_of[i]];
+            const LaneVec2 cperp{-std::sin(ang), std::cos(ang)};
+            LaneVec2 c = lane_centroid(raw_lines[i].pl);
+            const double proj = c.x * cperp.x + c.y * cperp.y;
+            const int lane = static_cast<int>(std::llround(proj / spacing_scaled));
+            lane_per_line[i] = lane;
+            min_lane_per_c[cluster_of[i]] = std::min(min_lane_per_c[cluster_of[i]], lane);
+            max_lane_per_c[cluster_of[i]] = std::max(max_lane_per_c[cluster_of[i]], lane);
+        }
+        for (int i = 0; i < n; ++i) {
+            const int c = cluster_of[i];
+            const double range = std::max(1.0,
+                static_cast<double>(max_lane_per_c[c] - min_lane_per_c[c]));
+            t_per_line[i] = static_cast<double>(lane_per_line[i] - min_lane_per_c[c]) / range;
+        }
+        if (debug_summary) {
+            std::ostringstream s;
+            s << "DirCluster K=" << K << " angles=[";
+            for (int c = 0; c < K; ++c) {
+                if (c) s << ",";
+                s << int(std::round(cluster_angles[c] * 180.0 / M_PI)) << "deg";
+            }
+            s << "]";
+            *debug_summary = s.str();
+        }
+        return t_per_line;
+    }
+
+    // Unknown mode → safe fallback.
+    const double denom = static_cast<double>(n - 1);
+    for (int i = 0; i < n; ++i) t_per_line[i] = static_cast<double>(i) / denom;
+    if (debug_summary) *debug_summary = "UnknownMode->Default";
+    return t_per_line;
+}
 
 } // namespace Slic3r
 

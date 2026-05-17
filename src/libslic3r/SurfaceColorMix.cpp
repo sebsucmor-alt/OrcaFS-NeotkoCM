@@ -16,6 +16,7 @@
 #include <limits>
 #include <set>      // NEOTKO_COLORMIX: unique-tool check in build_tool_list_from_pattern
 #include <mutex>    // NEOTKO_DEBUG: NeoDebug::write thread safety
+#include <numeric>  // NEOTKO_COLORMIX s58: std::iota for lane_mode sort indices
 
 namespace Slic3r {
 
@@ -295,6 +296,10 @@ static std::vector<int> extract_recipe_tools(const MixedFilament& mf, size_t num
 }
 
 // ---------------------------------------------------------------------------
+// NEOTKO_COLORMIX_TAG — s58: lane distribution helpers (modes 1/2/3) moved to
+// SurfaceColorMix.hpp so GCode.cpp can reuse them for PathBlend. See the header
+// for the `compute_slot_per_line()` template and its companion helpers.
+
 // Build tool list from a pattern string (e.g. "12", "1221", "123").
 // Digits '1'-'4': user 1-based → internal 0-based physical tool index.
 // Digits '5'-'9' (use_virtual ON + mgr provided): RECIPE EXPANSION.
@@ -318,10 +323,16 @@ static std::vector<int> build_tool_list_from_pattern(
                              && num_physical > 0;
     for (char c : pattern) {
         if (c >= '1' && c <= '4') {
-            // Physical tool: 1-based digit → 0-based index.
-            int idx = static_cast<int>(c - '1');
-            if (std::find(tools.begin(), tools.end(), idx) == tools.end())
-                tools.push_back(idx);
+            // NEOTKO_COLORMIX_TAG — s58: preserve repetitions for physical tools.
+            // Previously this branch deduped via std::find, collapsing
+            //   "1111111122222222" → [T0,T1] (cycle 2) → fine T0/T1 alternation.
+            // Now repetitions widen bands ("1122" = 2-band; "112" ≠ "12"), matching
+            // the existing behaviour for virtual MixedFilament digits below
+            // ("Append without dedup — repetitions carry the weighting").
+            // This is the foundation for upcoming numeric-gradient pattern support.
+            // The fallback `unique_tools.size() < 2` check still uses std::set, so it
+            // correctly counts uniques regardless of repetitions.
+            tools.push_back(static_cast<int>(c - '1'));
         } else if (c >= '5' && c <= '9' && use_virtual) {
             // Virtual MixedFilament: append full recipe sequence (repetitions preserved).
             // The sequence encodes blend ratios: "112233" → [T0,T0,T1,T1,T2,T2] cycles
@@ -439,10 +450,61 @@ int SurfaceColorMix::assign_and_group_tools(
         if (!allow_penu && first_path->role() == erPenultimateInfill)  continue;
 
         // Resolve tool list from role-specific pattern (fallback to legacy slots if invalid)
-        const std::string& pattern_str = (first_path->role() == erTopSolidInfill)
-            ? config.interlayer_colormix_pattern_top.value
-            : config.interlayer_colormix_pattern_penultimate.value;
-        const std::vector<int> tools = build_tool_list_from_pattern(pattern_str, config, mgr, num_physical);
+        // NEOTKO_COLORMIX_TAG — s60: mode-aware tool resolution.
+        // mode=0 (legacy)     → parse the pattern string as before.
+        // mode=1 (Linear2)    → preflight {tool_a, tool_b}; dither post-raw_lines.
+        // mode=2 (Linear3)    → preflight {tool_a, tool_b, tool_c}; dither post-raw_lines.
+        // mode=3 (CustomBands)→ preflight the non-zero-count tools; bands post-raw_lines.
+        // For modes 1-3 we only need a "preflight" tools[] (at least 2 entries)
+        // to pass the `tools.size() < 2` guard. The per-line decisions are
+        // computed AFTER raw_lines is known.
+        std::vector<int> tools;
+        const int cm_mode = config.interlayer_colormix_mode.value;
+        auto fallback_to_pattern_string = [&]() {
+            const std::string& pattern_str = (first_path->role() == erTopSolidInfill)
+                ? config.interlayer_colormix_pattern_top.value
+                : config.interlayer_colormix_pattern_penultimate.value;
+            tools = build_tool_list_from_pattern(pattern_str, config, mgr, num_physical);
+        };
+        if (cm_mode == 1) {
+            const int t_a = config.interlayer_colormix_tool_a.value;
+            const int t_b = config.interlayer_colormix_tool_b.value;
+            if (t_a >= 0 && t_b >= 0 && t_a != t_b) {
+                tools.push_back(t_a);
+                tools.push_back(t_b);
+            } else fallback_to_pattern_string();
+        } else if (cm_mode == 2) {
+            const int t_a = config.interlayer_colormix_tool_a.value;
+            const int t_b = config.interlayer_colormix_tool_b.value;
+            const int t_c = config.interlayer_colormix_tool_c.value;
+            // For Linear3 we need at least 2 distinct tools; tool_c may equal a/b
+            // (effectively collapses to a 2-stop ramp at one end).
+            if (t_a >= 0 && t_b >= 0 && t_c >= 0 && (t_a != t_b || t_b != t_c)) {
+                tools.push_back(t_a);
+                tools.push_back(t_b);
+                tools.push_back(t_c);
+            } else fallback_to_pattern_string();
+        } else if (cm_mode == 3) {
+            const int t_a = config.interlayer_colormix_tool_a.value;
+            const int t_b = config.interlayer_colormix_tool_b.value;
+            const int t_c = config.interlayer_colormix_tool_c.value;
+            const int t_d = config.interlayer_colormix_tool_d.value;
+            const int c_a = config.interlayer_colormix_band_count_a.value;
+            const int c_b = config.interlayer_colormix_band_count_b.value;
+            const int c_c = config.interlayer_colormix_band_count_c.value;
+            const int c_d = config.interlayer_colormix_band_count_d.value;
+            // NEOTKO_COLORMIX_TAG — s60: tool_c/_d default to -1 ("off") in the
+            // legacy config. Treat a negative tool index as "skip this slot"
+            // even if a band count is configured for it — otherwise the slot
+            // silently encoded T0 and the user saw "C/D didn't apply".
+            if (c_a > 0 && t_a >= 0) tools.push_back(t_a);
+            if (c_b > 0 && t_b >= 0) tools.push_back(t_b);
+            if (c_c > 0 && t_c >= 0) tools.push_back(t_c);
+            if (c_d > 0 && t_d >= 0) tools.push_back(t_d);
+            if (tools.size() < 2) fallback_to_pattern_string();
+        } else {
+            fallback_to_pattern_string();
+        }
         if (tools.size() < 2) continue;
 
         // Collect lines:
@@ -486,6 +548,99 @@ int SurfaceColorMix::assign_and_group_tools(
             continue;
         }
 
+        // NEOTKO_COLORMIX_TAG — s60: build per-line tool sequence for modes 1-3.
+        // We do this AFTER raw_lines is known so the sequence length matches
+        // the actual line count of THIS surface. Multi-surface objects get
+        // proportional gradients per island automatically — small surfaces
+        // with few lines get a coarser but still balanced sequence.
+        //
+        // min_surface_lines guard: tiny surfaces fall back to single-tool (A)
+        // rather than show a degenerate 1-of-3 split. Set to 0 to disable.
+        //
+        // Replacing `tools` with a length == raw_lines.size() vector means
+        // slot_per_line[i] = i below — each line has its own decision. The
+        // lane_mode (GeoSort/LaneQuant/DirCluster) still maps geometric line
+        // index → position in the sequence → the gradient axis follows the
+        // chosen geometry, not the emission order.
+        if (cm_mode >= 1 && cm_mode <= 3) {
+            const int min_lines = config.interlayer_colormix_min_surface_lines.value;
+            const int n         = static_cast<int>(raw_lines.size());
+            const int easing    = config.interlayer_colormix_easing.value;
+            const double gamma  = config.interlayer_colormix_gamma.value;
+            if (min_lines > 0 && n < min_lines) {
+                // Fall back to single tool (Tool A) for tiny surfaces.
+                const int t_a = config.interlayer_colormix_tool_a.value;
+                tools.assign(static_cast<size_t>(n), t_a);
+                NEOTKO_LOG(COLORMIX, "DITHER_MIN_LINES_FALLBACK layer=" << layer_idx
+                    << " n=" << n << " < min=" << min_lines << " → all T" << t_a);
+            } else if (cm_mode == 1 && tools.size() == 2) {
+                const int t_a   = tools[0];
+                const int t_b   = tools[1];
+                const int pct_a = config.interlayer_colormix_pct_a.value;
+                tools = build_dithered_tools_2color(n, t_a, t_b, pct_a, easing, gamma);
+                if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                    int count_a = 0, count_b = 0;
+                    for (int t : tools) (t == t_a ? count_a : count_b)++;
+                    NEOTKO_LOG(COLORMIX, "DITHER_2COLOR layer=" << layer_idx
+                        << " n=" << tools.size()
+                        << " T" << t_a << "=" << count_a
+                        << " T" << t_b << "=" << count_b
+                        << " pct_a=" << pct_a << "% easing=" << easing);
+                }
+            } else if (cm_mode == 2 && tools.size() == 3) {
+                const int t_a   = tools[0];
+                const int t_b   = tools[1];
+                const int t_c   = tools[2];
+                const int pct_a = config.interlayer_colormix_pct_a.value;
+                const int pct_b = config.interlayer_colormix_pct_b.value;
+                const double overlap = config.interlayer_colormix_overlap.value;
+                tools = build_dithered_tools_3color(n, t_a, t_b, t_c, pct_a, pct_b,
+                                                    easing, gamma, overlap);
+                if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                    int ca = 0, cb = 0, cc = 0;
+                    for (int t : tools) { if (t == t_a) ca++; else if (t == t_b) cb++; else if (t == t_c) cc++; }
+                    NEOTKO_LOG(COLORMIX, "DITHER_3COLOR layer=" << layer_idx
+                        << " n=" << tools.size()
+                        << " T" << t_a << "=" << ca
+                        << " T" << t_b << "=" << cb
+                        << " T" << t_c << "=" << cc
+                        << " pct_a=" << pct_a << "% pct_b=" << pct_b << "% easing=" << easing);
+                }
+            } else if (cm_mode == 3) {
+                // Custom bands: ignore easing (hard blocks by definition).
+                const int t_a = config.interlayer_colormix_tool_a.value;
+                const int t_b = config.interlayer_colormix_tool_b.value;
+                const int t_c = config.interlayer_colormix_tool_c.value;
+                const int t_d = config.interlayer_colormix_tool_d.value;
+                const int c_a = config.interlayer_colormix_band_count_a.value;
+                const int c_b = config.interlayer_colormix_band_count_b.value;
+                const int c_c = config.interlayer_colormix_band_count_c.value;
+                const int c_d = config.interlayer_colormix_band_count_d.value;
+                tools = build_custom_bands(n, t_a, c_a, t_b, c_b, t_c, c_c, t_d, c_d);
+                if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                    NEOTKO_LOG(COLORMIX, "CUSTOM_BANDS layer=" << layer_idx
+                        << " n=" << tools.size()
+                        << " cycle=[T" << t_a << "x" << c_a
+                        << ", T" << t_b << "x" << c_b
+                        << ", T" << t_c << "x" << c_c
+                        << ", T" << t_d << "x" << c_d << "]");
+                }
+            }
+
+            // NEOTKO_COLORMIX_TAG — s60: invert applies AFTER dither/band gen.
+            // We flip the order of the entire per-line sequence so that the
+            // gradient runs in the opposite direction without the user having
+            // to swap tool slots or pct values manually. Equivalent visual
+            // result, single-checkbox UX.
+            if (config.interlayer_colormix_invert.value && tools.size() > 1) {
+                std::reverse(tools.begin(), tools.end());
+                if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                    NEOTKO_LOG(COLORMIX, "INVERT_GRADIENT layer=" << layer_idx
+                        << " n=" << tools.size() << " (reversed sequence)");
+                }
+            }
+        }
+
         if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
             std::ostringstream _s;
             _s << "SPLIT layer=" << layer_idx
@@ -499,14 +654,31 @@ int SurfaceColorMix::assign_and_group_tools(
         }
 
         // NEOTKO_COLORMIX_TAG_START - unique-tool block merge
-        // Distribute lines cyclically by pattern slot, then group by UNIQUE tool_id.
-        // unique_tool_order tracks first-occurrence so first tool in pattern prints first.
+        // Distribute lines according to surface_color_mix_lane_mode (s58):
+        //   0 = Default     — slot = path_idx % n_slots         (legacy)
+        //   1 = GeoSort     — sort by ⊥ projection              (Opt A)
+        //   2 = LaneQuant   — quantized lane per midpoint       (Opt B)
+        //   3 = DirCluster  — cluster by direction + LaneQuant  (Opt C)
+        // Then group by UNIQUE tool_id; unique_tool_order = first-occurrence order
+        // so the first tool in the pattern prints first.
         const int n_slots = static_cast<int>(tools.size());
+        const int lane_mode = config.surface_color_mix_lane_mode.value;
+        std::string lane_summary;
+        std::vector<int> slot_per_line =
+            compute_slot_per_line(raw_lines, n_slots, lane_mode,
+                                  NeoDebug::enabled(NeoDebug::COLORMIX) ? &lane_summary : nullptr);
+
+        if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+            NEOTKO_LOG(COLORMIX, "LANE_MODE mode=" << lane_mode
+                << " (" << lane_summary << ") layer=" << layer_idx
+                << " lines=" << raw_lines.size() << " slots=" << n_slots);
+        }
+
         std::vector<int> unique_tool_order;
         std::map<int, std::vector<ExtrusionPath*>> tool_blocks;
 
         for (int path_idx = 0; path_idx < (int)raw_lines.size(); ++path_idx) {
-            int slot     = path_idx % n_slots;
+            int slot     = slot_per_line[path_idx];
             int tool_idx = tools[slot];
 
             if (tool_blocks.find(tool_idx) == tool_blocks.end())
@@ -545,6 +717,250 @@ int SurfaceColorMix::assign_and_group_tools(
     if (any_modified)    flags |= COLORMIX_FLAG_MODIFIED;
     if (any_unsplittable) flags |= COLORMIX_FLAG_UNSPLITTABLE;
     return flags;
+}
+
+// ---------------------------------------------------------------------------
+// NEOTKO_COLORMIX_TAG — s60 numeric gradient (Step 1 of UX plan).
+// Bresenham-style dither for "Linear 2-color" mode.
+//
+// Mathematical core: we want exactly `count_b = round(n_lines * pct_b/100)`
+// instances of tool B distributed amongst `n_lines - count_b` instances of
+// tool A, with the local frequency of B at position i approximating
+// `pct_b/100`.  Bresenham's line algorithm achieves this with a single
+// integer accumulator — no random sampling, no quality knobs, perfectly
+// deterministic, optimal distribution.
+//
+// Compared to a hard band split ("AAA…BBB…") this gives the eye a smooth
+// transition: at any sub-window of length W, the fraction of B is within
+// 1/W of the target ratio.  Visually reads as a continuous gradient.
+//
+// Edge cases:
+//   pct_a = 0   → all tool_b
+//   pct_a = 100 → all tool_a
+//   n_lines <= 0 → empty vector
+// ---------------------------------------------------------------------------
+// Apply easing curve to a position t ∈ [0,1]. The returned value is also in
+// [0,1] and acts as the "effective t" that the dither uses to decide which
+// tool wins. Linear (default) is the identity; other curves bias the
+// transition zone toward one end of the gradient.
+double SurfaceColorMix::colormix_easing_apply(double t, int easing, double gamma)
+{
+    t = std::clamp(t, 0.0, 1.0);
+    switch (easing) {
+    case kColormixEasing_EaseIn:    return t * t;
+    case kColormixEasing_EaseOut:   return 1.0 - (1.0 - t) * (1.0 - t);
+    case kColormixEasing_EaseInOut: return t * t * (3.0 - 2.0 * t); // smoothstep
+    case kColormixEasing_Gamma:     {
+        const double g = std::clamp(gamma, 0.1, 10.0);
+        return std::pow(t, g);
+    }
+    case kColormixEasing_HardBand:
+        // Step at t=0.5 — no transition zone, two clean halves.
+        return (t < 0.5) ? 0.0 : 1.0;
+    case kColormixEasing_Linear:
+    default:                        return t;
+    }
+}
+
+// Bresenham 2-color dither with easing.
+//
+// Algorithm: target_b_count(i) = (i+1) * pct_b / 100 in the LINEAR case.
+// With easing, we replace the linear ramp by `easing(t) * pct_b * n / 100`,
+// where t = i / (n-1). This way the cumulative count of B at position i is
+// shaped by the easing curve — Bresenham still picks A or B based on whether
+// the running count is ahead of or behind the target, giving optimally
+// distributed emission for any monotonic ramp.
+std::vector<int> SurfaceColorMix::build_dithered_tools_2color(
+    int n_lines, int tool_a, int tool_b, int pct_a, int easing, double gamma)
+{
+    std::vector<int> out;
+    if (n_lines <= 0) return out;
+    out.reserve(static_cast<size_t>(n_lines));
+
+    const int p_a = std::clamp(pct_a, 0, 100);
+    const int p_b = 100 - p_a;
+    if (p_b == 0) { out.assign(static_cast<size_t>(n_lines), tool_a); return out; }
+    if (p_a == 0) { out.assign(static_cast<size_t>(n_lines), tool_b); return out; }
+
+    // Total B emissions we want across the whole sequence.
+    const double total_b_d = static_cast<double>(n_lines) * static_cast<double>(p_b) / 100.0;
+    const int    total_b   = static_cast<int>(std::lround(total_b_d));
+
+    // Walk the sequence, comparing emitted_b vs target_b(i). Easing reshapes
+    // the target curve so emissions cluster where the easing function rises
+    // fastest. Standard Bresenham fast-path when easing==Linear.
+    int emitted_b = 0;
+    const double denom = std::max(1.0, static_cast<double>(n_lines - 1));
+    for (int i = 0; i < n_lines; ++i) {
+        const double t_lin = (n_lines == 1) ? 0.5 : (static_cast<double>(i) / denom);
+        const double t_eff = colormix_easing_apply(t_lin, easing, gamma);
+        // target_b: how many B emissions we should have by position i (inclusive),
+        // scaled so that target_b(n-1) == total_b. Bias by half so the first
+        // and last picks aren't both A on symmetric ratios.
+        const double target_b = t_eff * static_cast<double>(total_b)
+                              + (t_eff - 0.5) * 0.0; // (centring already handled by ceil/lround)
+        const int    need_b   = static_cast<int>(std::lround(target_b));
+        if (emitted_b < need_b && emitted_b < total_b) {
+            out.push_back(tool_b);
+            ++emitted_b;
+        } else {
+            out.push_back(tool_a);
+        }
+    }
+    return out;
+}
+
+// 3-color dither: morphs A → B → C across the sequence.
+// Internally we run two independent Bresenham trackers (one for B, one for C)
+// whose target curves are shaped so that:
+//   - Tool A dominates at t=0
+//   - Tool B peaks around the middle
+//   - Tool C dominates at t=1
+// The simplest reproducible way: split the sequence in two halves along the
+// "A→B transition" and "B→C transition" markers using cumulative pct mass.
+// At each step we pick whichever of {A, B, C} is most behind its expected
+// share — a 3-way Bresenham. Optimal distribution; deterministic.
+std::vector<int> SurfaceColorMix::build_dithered_tools_3color(
+    int n_lines, int tool_a, int tool_b, int tool_c,
+    int pct_a, int pct_b, int easing, double gamma, double overlap)
+{
+    std::vector<int> out;
+    if (n_lines <= 0) return out;
+    out.reserve(static_cast<size_t>(n_lines));
+
+    int p_a = std::clamp(pct_a, 0, 100);
+    int p_b = std::clamp(pct_b, 0, 100 - p_a);
+    int p_c = 100 - p_a - p_b;
+
+    // Target totals across the whole sequence.
+    const double n = static_cast<double>(n_lines);
+    const int target_a_total = static_cast<int>(std::lround(n * p_a / 100.0));
+    const int target_b_total = static_cast<int>(std::lround(n * p_b / 100.0));
+    const int target_c_total = n_lines - target_a_total - target_b_total;
+
+    // Weight halfwidth controls how much each colour bleeds into its
+    // neighbour's zone.
+    //   ov=0.0  → halfwidth=0.5 → triangular weights → hard 3-band split
+    //   ov=1.0  → halfwidth=1.0 → strong overlap, every colour appears in
+    //                              every position (with locally varying odds)
+    // Anchors: A @ t=0, B @ t=0.5, C @ t=1. We use a hat function for each:
+    //   w_x(t) = max(0, halfwidth - |t - anchor_x|) / halfwidth
+    // This is a generalised triangle whose support is [anchor - halfwidth,
+    // anchor + halfwidth] clipped to [0,1]. The Bresenham deficit logic
+    // below still drives the cumulative counts toward (p_a, p_b, p_c) so the
+    // GLOBAL ratios are preserved exactly — only the LOCAL distribution
+    // changes shape with overlap.
+    const double halfwidth = 0.5 + std::clamp(overlap, 0.0, 1.0) * 0.5;
+
+    // Pre-compute cumulative weight sums per tool across the whole sequence.
+    // The expected emissions of tool x by position i is then
+    //   expected_x(i) = cum_x[i] / area_x * target_x_total
+    // which (a) starts at 0, (b) reaches target_x_total at i = n-1, (c) grows
+    // monotonically and proportionally to where the tool's weight is non-zero.
+    // This eliminates the "extra A band at the end" glitch that the previous
+    // (cum_pos-based) target curves produced once a tool exhausted its quota.
+    std::vector<double> cum_a(n_lines), cum_b(n_lines), cum_c(n_lines);
+    double sum_a = 0.0, sum_b = 0.0, sum_c = 0.0;
+    const double denom = std::max(1.0, static_cast<double>(n_lines - 1));
+    for (int i = 0; i < n_lines; ++i) {
+        const double t_lin = (n_lines == 1) ? 0.5 : (static_cast<double>(i) / denom);
+        const double t_eff = colormix_easing_apply(t_lin, easing, gamma);
+        auto hat = [&](double anchor) -> double {
+            return std::max(0.0, halfwidth - std::abs(t_eff - anchor)) / halfwidth;
+        };
+        sum_a += hat(0.0);
+        sum_b += hat(0.5);
+        sum_c += hat(1.0);
+        cum_a[i] = sum_a;
+        cum_b[i] = sum_b;
+        cum_c[i] = sum_c;
+    }
+    const double area_a = std::max(1e-9, sum_a);
+    const double area_b = std::max(1e-9, sum_b);
+    const double area_c = std::max(1e-9, sum_c);
+
+    int emitted_a = 0, emitted_b = 0, emitted_c = 0;
+    for (int i = 0; i < n_lines; ++i) {
+        const double exp_a = (cum_a[i] / area_a) * static_cast<double>(target_a_total);
+        const double exp_b = (cum_b[i] / area_b) * static_cast<double>(target_b_total);
+        const double exp_c = (cum_c[i] / area_c) * static_cast<double>(target_c_total);
+
+        // Tool with the largest deficit wins, sinking exhausted tools so the
+        // tail-fill bias (A reappearing near t=1) cannot happen.
+        const double def_a = (emitted_a < target_a_total) ? (exp_a - emitted_a) : -1e9;
+        const double def_b = (emitted_b < target_b_total) ? (exp_b - emitted_b) : -1e9;
+        const double def_c = (emitted_c < target_c_total) ? (exp_c - emitted_c) : -1e9;
+
+        if (def_a >= def_b && def_a >= def_c)      { out.push_back(tool_a); ++emitted_a; }
+        else if (def_b >= def_c)                   { out.push_back(tool_b); ++emitted_b; }
+        else                                       { out.push_back(tool_c); ++emitted_c; }
+    }
+    return out;
+}
+
+// Custom hard bands. Cycles through up to 4 (tool, count) pairs (zero counts
+// are skipped) until n_lines is reached. Useful when the user wants explicit
+// banded gradients ("first 30 lines A, then 15 B, then 30 A again, repeat").
+std::vector<int> SurfaceColorMix::build_custom_bands(
+    int n_lines,
+    int tool_a, int cnt_a,
+    int tool_b, int cnt_b,
+    int tool_c, int cnt_c,
+    int tool_d, int cnt_d)
+{
+    std::vector<int> out;
+    if (n_lines <= 0) return out;
+    out.reserve(static_cast<size_t>(n_lines));
+
+    struct Band { int tool; int count; };
+    std::vector<Band> bands;
+    // NEOTKO_COLORMIX_TAG — s60: skip slots with tool index < 0 ("off") in
+    // addition to count == 0. Prevents the silent T0-fallback that happened
+    // when the legacy config left tool_c/_d at their -1 default but the user
+    // configured band counts for those slots.
+    if (cnt_a > 0 && tool_a >= 0) bands.push_back({tool_a, cnt_a});
+    if (cnt_b > 0 && tool_b >= 0) bands.push_back({tool_b, cnt_b});
+    if (cnt_c > 0 && tool_c >= 0) bands.push_back({tool_c, cnt_c});
+    if (cnt_d > 0 && tool_d >= 0) bands.push_back({tool_d, cnt_d});
+
+    if (bands.empty()) {
+        const int t = (tool_a >= 0) ? tool_a : 0;
+        out.assign(static_cast<size_t>(n_lines), t);
+        return out;
+    }
+
+    int produced = 0;
+    while (produced < n_lines) {
+        for (const Band& b : bands) {
+            for (int j = 0; j < b.count && produced < n_lines; ++j, ++produced)
+                out.push_back(b.tool);
+            if (produced >= n_lines) break;
+        }
+    }
+    return out;
+}
+
+// Geometric estimate of line count for a surface.
+//   line_spacing = line_width * (1 - overlap)
+//   For rectilinear at "best case" angle the line count ~ √area / spacing.
+//   For irregular shapes we apply a pattern_factor and a √2 correction so
+//   the estimate matches typical slicer output within ±15%.
+int SurfaceColorMix::estimate_surface_line_count(
+    double area_mm2,
+    double line_width_mm,
+    double overlap_fraction,
+    double pattern_factor)
+{
+    if (area_mm2 <= 0.0 || line_width_mm <= 0.0) return 0;
+    const double overlap = std::clamp(overlap_fraction, 0.0, 0.99);
+    const double spacing = line_width_mm * (1.0 - overlap);
+    if (spacing <= 1e-6) return 0;
+    // sqrt(area) / spacing × √2 ≈ diagonal traversal of a square of area=area_mm2.
+    const double side = std::sqrt(std::max(0.0, area_mm2));
+    const double n = side * std::sqrt(2.0) / spacing * std::clamp(pattern_factor, 0.5, 1.5);
+    if (n < 0.0) return 0;
+    if (n > 1e6) return 1000000; // sanity cap
+    return static_cast<int>(std::lround(n));
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,7 +1515,8 @@ std::string PathBlendEngine::apply_path(
     double                                    e_per_mm,
     int                                       pass_idx,
     double                                    surface_t,
-    const std::function<Vec2d(const Point&)>& point_to_gcode)
+    const std::function<Vec2d(const Point&)>& point_to_gcode,
+    std::map<int, double>*                    max_z_per_pass)
 {
     // Gradient model (restored from path_blend_fixed.cpp):
     //   - surface_t [0..1]: position of this path within the surface (0=first, 1=last).
@@ -1167,12 +1584,46 @@ std::string PathBlendEngine::apply_path(
                                             : std::clamp(z_accum, bottom_z, nominal_z);
     } else {
         // Standalone PathBlend: surface_t staircase + ratio_at() gradient flow.
-        // invert_gradient flips t so the nozzle ascends during pass 0 (collision safety).
-        const double t_eff = pb.invert_gradient ? (1.0 - surface_t) : surface_t;
-        flow = pb.ratio_at(pass_idx, t_eff);
-        if (flow < 1e-9) return "";  // pass contributes nothing at this t — skip
+        // NEOTKO_PATHBLEND_TAG — s58 Fix D: decouple Z direction from invert_gradient.
+        // Z always ascends with surface_t (Y_min → bottom_z, Y_max → nominal_z).
+        // The invert flag now only flips which side has which colour gradient — it
+        // does NOT affect Z direction anymore.  Rationale: the user requested
+        // "always start at the lowest Z and go up" to avoid collisions, with
+        // invert_gradient acting solely as a gradient inverter.
+        //
+        // NEOTKO_PATHBLEND_TAG — s59 flow-direction fix.
+        // The previous default (invert=false → t_flow=surface_t) made pass-0 flow
+        // start HIGH at low Z and decrease toward high Z — visually "high → low".
+        // This contradicts the physical build-up expectation: pass 0 is the
+        // bottom sub-layer, so its flow should be LOW at the start of the gradient
+        // (t=0, just a thin foundation) and ramp UP toward t=1 (the side where
+        // pass 0 visually dominates).  Default-OFF now produces ascending flow
+        // along the same axis as ascending Z (label: "Ascending Z direction (safe)"
+        // — both Z and flow ascend together).  ON inverts the flow gradient only
+        // (Z always ascends since s58 Fix D).
+        const double t_z    = surface_t;                                  // for Z
+        const double t_flow = pb.invert_gradient ? surface_t
+                                                  : (1.0 - surface_t);    // s59 flip
+        flow = pb.ratio_at(pass_idx, t_flow);
 
-        const double z_bottom_anchor = bottom_z + t_eff * layer_height;
+        // NEOTKO_PATHBLEND_TAG — s58 Fix C: 0.04mm-equivalent minimum flow per pass.
+        // Mirrors MultiPass MinLayer Rule 1 (each sub-height ≥ 0.04mm).  Without
+        // this floor, the last pass at t_flow=0 had flow=0 and got skipped by the
+        // guard below, leaving visible gaps in the second pass.  Renormalises so
+        // the sum across passes never exceeds 1.0 (no over-extrusion).
+        const double min_flow_04mm = std::max(0.05, 0.04 / layer_height);
+        flow = std::max(flow, min_flow_04mm);
+        {
+            double total_flow = 0.0;
+            for (int p = 0; p < pb.num_passes; ++p)
+                total_flow += std::max(static_cast<double>(pb.ratio_at(p, t_flow)),
+                                       min_flow_04mm);
+            if (total_flow > 1.0)
+                flow /= total_flow;
+        }
+        if (flow < 1e-9) return "";  // safety; floor should normally prevent this
+
+        const double z_bottom_anchor = bottom_z + t_z * layer_height;
         if (pb.num_passes == 1) {
             z_pass = z_bottom_anchor;
         } else {
@@ -1181,6 +1632,27 @@ std::string PathBlendEngine::apply_path(
             z_pass = z_bottom_anchor + frac * (nominal_z - z_bottom_anchor);
         }
         z_pass = std::clamp(z_pass, bottom_z, nominal_z);
+    }
+
+    // NEOTKO_PATHBLEND_TAG — s58 Bug 2 SAFETY: enforce monotonic Z ascent per pass.
+    // If max_z_per_pass is provided (by GCode caller), never let z_pass drop below
+    // the maximum z already reached for this pass_idx within the current layer.
+    // Effect: nozzle either ascends or stays flat — never descends mid-pass.
+    // Prevents the dangerous "high z + low flow → low z + high flow" pattern that
+    // would otherwise drag the nozzle through fresh extrusion (real-print hazard).
+    // The visual gradient may flatten in regions where path order isn't ideal, but
+    // the print stays safe.  See PATHBLEND.md "Bug 2 safety" for full context.
+    if (max_z_per_pass != nullptr) {
+        auto it_mz = max_z_per_pass->find(pass_idx);
+        if (it_mz != max_z_per_pass->end() && it_mz->second > z_pass + 1e-5) {
+            NEOTKO_LOG(MULTIPASS, "PATHBLEND_SAFETY z-clamp pass=" << pass_idx
+                << " requested=" << z_pass
+                << " max_reached=" << it_mz->second
+                << " (preventing dangerous descent)");
+            z_pass = it_mz->second;
+        }
+        (*max_z_per_pass)[pass_idx] = std::max(
+            (it_mz != max_z_per_pass->end() ? it_mz->second : z_pass), z_pass);
     }
 
     std::string gcode;

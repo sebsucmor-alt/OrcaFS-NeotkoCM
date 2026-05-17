@@ -54,6 +54,19 @@ enum class NeoweaveFilter {
 static constexpr int kColormixSurface_Both        = 0;
 static constexpr int kColormixSurface_Top         = 1;
 static constexpr int kColormixSurface_Penultimate = 2;
+
+// NEOTKO_COLORMIX_TAG — s58 lane distribution mode.
+// Controls how SurfaceColorMix (and PathBlend) maps pattern slots to extrusion lines:
+//   0 = Default     — slot = path_idx % n_slots  (legacy behaviour, unchanged)
+//   1 = GeoSort     — sort lines by perpendicular projection, slot = ord % n_slots
+//   2 = LaneQuant   — slot = quantized lane(midpoint) % n_slots  (fragments of the
+//                     same visual stripe share a tool — most "geometric" mode)
+//   3 = DirCluster  — cluster lines by dominant direction, apply LaneQuant per cluster
+//                     (handles sub-regions where the fill engine rotated direction)
+static constexpr int kLaneMode_Default    = 0;
+static constexpr int kLaneMode_GeoSort    = 1;
+static constexpr int kLaneMode_LaneQuant  = 2;
+static constexpr int kLaneMode_DirCluster = 3;
 // NEOTKO_COLORMIX_TAG_END
 // NEOTKO_MULTIPASS_TAG_END
 
@@ -1114,10 +1127,25 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,   interlayer_colormix_min_length))
     ((ConfigOptionString,  interlayer_colormix_pattern_top))
     ((ConfigOptionString,  interlayer_colormix_pattern_penultimate))
+    ((ConfigOptionInt,     interlayer_colormix_mode))
+    ((ConfigOptionInt,     interlayer_colormix_pct_a))
+    ((ConfigOptionInt,     interlayer_colormix_pct_b))
+    ((ConfigOptionInt,     interlayer_colormix_easing))
+    ((ConfigOptionFloat,   interlayer_colormix_gamma))
+    ((ConfigOptionInt,     interlayer_colormix_min_surface_lines))
+    ((ConfigOptionFloat,   interlayer_colormix_overlap))
+    ((ConfigOptionBool,    interlayer_colormix_invert))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_a))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_b))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_c))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_d))
     ((ConfigOptionInt,     interlayer_colormix_top_zone))
     ((ConfigOptionInt,     interlayer_colormix_penu_zone))
     ((ConfigOptionInt,     interlayer_colormix_filament_filter))
     ((ConfigOptionBool,    interlayer_colormix_use_virtual))
+    // NEOTKO_COLORMIX_TAG — s58: line distribution mode (kLaneMode_* in this file).
+    // Affects ColorMix (Top + Penultimate) AND PathBlend.
+    ((ConfigOptionInt,     surface_color_mix_lane_mode))
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     ((ConfigOptionBool,    multipass_enabled))
@@ -1170,7 +1198,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,  penultimate_multipass_gcode_end_1))
     ((ConfigOptionString,  penultimate_multipass_gcode_end_2))
     ((ConfigOptionString,  penultimate_multipass_gcode_end_3))
-    ((ConfigOptionFloat,   penultimate_multipass_prime_volume))
+    // NEOTKO_MULTIPASS_PRIME_TAG — s58: removed. Unified into `multipass_prime_volume` (global).
+    // ((ConfigOptionFloat,   penultimate_multipass_prime_volume))
     ((ConfigOptionBool,    penultimate_multipass_vary_pattern))
     ((ConfigOptionInt,     penultimate_multipass_fan_1))
     ((ConfigOptionInt,     penultimate_multipass_fan_2))

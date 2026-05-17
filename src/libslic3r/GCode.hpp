@@ -811,6 +811,65 @@ private:
     // When defined, _extrude() uses this instead of the full layer bbox so that
     // objects placed anywhere on the build plate get the full [0..1] gradient range.
     BoundingBox m_pathblend_surface_bbox;
+
+    // NEOTKO_COLORMIX_TAG — s58 per-path pre-computed surface_t for PathBlend.
+    // Populated by extrude_infill() before iterating an EEC when
+    // surface_color_mix_lane_mode != Default.  Each PathBlend-eligible path gets
+    // a t in [0..1] computed according to the chosen lane mode (1=GeoSort,
+    // 2=LaneQuant, 3=DirCluster) projected perpendicular to the fill direction.
+    // When the map is empty OR the path is missing, extrude_path falls back to
+    // the legacy Y-bbox formula.
+    std::map<const ExtrusionPath*, double> m_pathblend_path_t;
+
+    // NEOTKO_PATHBLEND_TAG — s59 path-pointer mismatch fix.
+    // extrude_entity() → extrude_path() → _extrude(path) receives a LOCAL COPY of
+    // the ExtrusionPath (always at the same stack address per iteration), not the
+    // original pointer stored in eec->entities.  Looking up m_pathblend_path_t
+    // with &path therefore always misses → _extrude falls back to the bbox-Y
+    // formula.  For Default lane mode the map is also populated with bbox-Y t,
+    // so the result happens to match.  For lane modes 1/2/3 the map holds
+    // geometric t (perpendicular projection) but _extrude returns bbox-Y t —
+    // print order (set by the sort) and Z (set by _extrude's t) diverge → the
+    // first path written has bbox-Y t ≈ 0.85, max-z safety pins z for the rest
+    // of the pass → no Z gradient.
+    //
+    // Fix: key the map by a stable signature derived from the polyline values
+    // (first point + last point + size).  Polyline values survive copies; only
+    // the container address changes.  Collisions among distinct PB paths in the
+    // same EEC are extremely unlikely (fill segments rarely share both endpoints).
+    std::map<uint64_t, double> m_pathblend_polyline_t;
+
+    // NEOTKO_PATHBLEND_TAG — s58 Fix B: PathBlend extruders in their REAL print
+    // order (= post-rotation layer_extruders order, filtered to pathblend tools).
+    // Populated in process_layer right after the rotation that puts current_tool
+    // first.  Consumed inside _extrude() to compute pass_idx as the index of the
+    // current extruder in this vector — i.e. "the Nth tool printed in this layer
+    // is pass N" — instead of using the config tool[] order.
+    //
+    // Why: when the writer enters a PathBlend layer with the WRONG tool (e.g.
+    // entered as T3 but config says pass 0 = T2), the layer_extruders rotation
+    // puts T3 first, so T3 is the first extruder physically printed.  Treating
+    // the first-printed extruder as pass 0 (z=bottom) instead of pass 1
+    // (z=nominal_z) eliminates the "primera pasada después de la segunda" bug:
+    // the nozzle always climbs Z monotonically across passes.
+    std::vector<unsigned int> m_pathblend_print_order;
+
+    // NEOTKO_PATHBLEND_TAG — s58 Bug 2 safety: max-z reached per (layer, pass).
+    // PathBlend's standalone mode can produce dangerous gcode where, within a
+    // single pass, the nozzle starts at HIGH z with LOW flow and ENDS at LOW z
+    // with HIGH flow.  As Z descends, the high-flow extrusions are emitted BELOW
+    // the previously-extruded thin top, risking lifts/blobs/print failures.
+    //
+    // SAFETY: track the maximum z reached so far per (layer_index, pass_idx).
+    // In PathBlendEngine::apply_path, if the new z_pass would be lower than the
+    // recorded max for this pass within this layer, clamp z to that max.  The
+    // nozzle then never descends within a pass — only ascends or stays flat.
+    // The user explicitly requested this safety after observing the dangerous
+    // pattern in real prints (log02b, circulo-02.gcode).
+    //
+    // Reset at the start of every real layer in process_layer.
+    // Key: pass_idx (int).  Value: max z reached so far (mm).
+    std::map<int, double> m_pathblend_max_z_per_pass;
     // NEOTKO_PATHBLEND_TAG_END
     int m_start_gcode_filament = -1;
 

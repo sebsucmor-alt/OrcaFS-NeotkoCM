@@ -75,6 +75,85 @@ namespace GUI {
 // Surface values: 0=Both, 1=Top only, 2=Penultimate only.
 namespace {
 
+// NEOTKO_COLORMIX_TAG — s60: GradientStripPanel
+// Paints a horizontal strip showing the actual colours produced by the current
+// gradient settings. Each line in the dither sequence becomes one 1-px-wide
+// vertical stripe coloured with the chosen filament. This gives the user the
+// visual feedback they asked for ("represención del gradiente que se está
+// creando") instead of the abstract digit-string preview.
+class GradientStripPanel : public wxPanel {
+public:
+    GradientStripPanel(wxWindow* parent, int width = 360, int height = 28)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(width, height))
+    {
+        SetMinSize(wxSize(width, height));
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        Bind(wxEVT_PAINT, &GradientStripPanel::on_paint, this);
+    }
+    void set_sequence(const std::vector<int>& tool_seq,
+                      const std::vector<wxColour>& tool_colors)
+    {
+        m_seq    = tool_seq;
+        m_colors = tool_colors;
+        Refresh();
+    }
+private:
+    std::vector<int>      m_seq;
+    std::vector<wxColour> m_colors;
+
+    void on_paint(wxPaintEvent&) {
+        wxPaintDC dc(this);
+        const wxSize sz = GetSize();
+        dc.SetBackground(wxBrush(wxColour(45, 45, 45)));
+        dc.Clear();
+        if (m_seq.empty()) {
+            dc.SetTextForeground(wxColour(150, 150, 150));
+            dc.DrawText("(no preview)", 6, sz.y / 2 - 8);
+            return;
+        }
+        const int n = (int)m_seq.size();
+        const double sw = double(sz.x) / double(n);
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        for (int i = 0; i < n; ++i) {
+            const int tool = m_seq[i];
+            wxColour c = (tool >= 0 && tool < (int)m_colors.size())
+                ? m_colors[tool] : wxColour(160, 160, 160);
+            dc.SetBrush(wxBrush(c));
+            const int x0 = (int)std::floor(i * sw);
+            const int x1 = (int)std::ceil((i + 1) * sw);
+            dc.DrawRectangle(x0, 0, std::max(1, x1 - x0), sz.y);
+        }
+        // Thin border
+        dc.SetPen(wxPen(wxColour(30, 30, 30), 1));
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.DrawRectangle(0, 0, sz.x, sz.y);
+    }
+};
+
+// NEOTKO_MULTIPASS_TAG — ColorSwatch (forward-moved from below to be visible
+// from ColorMixPatternDialog::build_gradient_section). Small coloured panel
+// used in the gradient slot pickers.
+class ColorSwatch : public wxPanel {
+    wxColour m_col;
+public:
+    ColorSwatch(wxWindow* parent, const wxColour& col)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(16, 16))
+        , m_col(col.IsOk() ? col : wxColour(160, 160, 160))
+    {
+        Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+            wxPaintDC dc(this);
+            dc.SetBrush(wxBrush(m_col));
+            dc.SetPen(wxPen(wxColour(80, 80, 80)));
+            const wxSize sz = GetSize();
+            dc.DrawRectangle(0, 0, sz.x, sz.y);
+        });
+    }
+    void set_color(const wxColour& c) {
+        m_col = c.IsOk() ? c : wxColour(160, 160, 160);
+        Refresh();
+    }
+};
+
 class ColorMixPatternDialog : public wxDialog
 {
 public:
@@ -85,13 +164,18 @@ public:
                           const std::vector<Slic3r::ColorMixOption>&      options,
                           const std::vector<std::string>&                 filament_colours,
                           const std::string&                              cur_pattern,
-                          bool                                            use_virtual = false)
-        : wxDialog(parent, wxID_ANY, _L("Edit Color Pattern"),
+                          bool                                            use_virtual = false,
+                          DynamicPrintConfig*                             cfg = nullptr,
+                          int                                             surface_id = 0)
+        : wxDialog(parent, wxID_ANY,
+                   surface_id == 0 ? _L("ColorMix — Top surface") : _L("ColorMix — Penultimate"),
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
         , m_colours(filament_colours)
         , m_pattern(cur_pattern)
         , m_use_virtual(use_virtual)
+        , m_cfg(cfg)
+        , m_surface_id(surface_id)
     {
         // Build digit→color map from options so paint_pattern() handles both
         // physical (digits '1'-'4') and virtual (digits '5'-'9') uniformly.
@@ -101,6 +185,9 @@ public:
                 m_digit_colors[digit] = hex_to_colour(opt.display_color);
             }
         }
+        // Pull current gradient config values from m_cfg (read-only here;
+        // write-back happens in get_*() accessors consumed by open_edit_for).
+        if (m_cfg) load_grad_from_config();
         build_ui(options);
     }
 
@@ -110,12 +197,135 @@ public:
     std::string get_penu()    const { return m_pattern; }
     int         get_surface() const { return 0; }
 
+    // NEOTKO_COLORMIX_TAG — s60: gradient getters consumed by open_edit_for()
+    // after the dialog closes with OK. Each returns the value as edited in the
+    // dialog widgets; the caller writes them back to DynamicPrintConfig.
+    int    get_grad_mode()       const { return m_choice_grad_mode  ? m_choice_grad_mode->GetSelection() : m_grad_mode; }
+    int    get_grad_pct_a()      const { return m_sl_pct_a          ? m_sl_pct_a->GetValue()             : m_grad_pct_a; }
+    int    get_grad_pct_b()      const { return m_sl_pct_b          ? m_sl_pct_b->GetValue()             : m_grad_pct_b; }
+    int    get_grad_easing()     const { return m_choice_easing     ? m_choice_easing->GetSelection()    : m_grad_easing; }
+    double get_grad_gamma()      const { return m_sc_gamma          ? m_sc_gamma->GetValue()             : m_grad_gamma; }
+    int    get_grad_min_lines()  const { return m_sc_min_lines      ? m_sc_min_lines->GetValue()         : m_grad_min_lines; }
+    double get_grad_overlap()    const { return m_sl_overlap        ? m_sl_overlap->GetValue() / 100.0   : m_grad_overlap; }
+    bool   get_grad_invert()     const { return m_chk_invert        ? m_chk_invert->GetValue()           : m_grad_invert; }
+    int    get_grad_band_a()     const { return m_sc_band_a         ? m_sc_band_a->GetValue()            : m_grad_band_a; }
+    int    get_grad_band_b()     const { return m_sc_band_b         ? m_sc_band_b->GetValue()            : m_grad_band_b; }
+    int    get_grad_band_c()     const { return m_sc_band_c         ? m_sc_band_c->GetValue()            : m_grad_band_c; }
+    int    get_grad_band_d()     const { return m_sc_band_d         ? m_sc_band_d->GetValue()            : m_grad_band_d; }
+    int    get_tool_a()          const { return m_choice_tool_a     ? m_choice_tool_a->GetSelection()    : m_tool_a; }
+    int    get_tool_b()          const { return m_choice_tool_b     ? m_choice_tool_b->GetSelection()    : m_tool_b; }
+    int    get_tool_c()          const { return m_choice_tool_c     ? m_choice_tool_c->GetSelection()    : m_tool_c; }
+    int    get_tool_d()          const { return m_choice_tool_d     ? m_choice_tool_d->GetSelection()    : m_tool_d; }
+
 private:
     std::vector<std::string>     m_colours;
     std::string                  m_pattern;
     bool                         m_use_virtual = false;
+    DynamicPrintConfig*          m_cfg         = nullptr;
+    int                          m_surface_id  = 0; // 0 = Top, 1 = Penultimate
     wxPanel*                     m_disp = nullptr;
     std::map<char, wxColour>     m_digit_colors; // digit '1'-'9' → display color
+
+    // ── Gradient state (mirrors config; populated by load_grad_from_config) ──
+    int    m_grad_mode      = 0;
+    int    m_grad_pct_a     = 50;
+    int    m_grad_pct_b     = 33;
+    int    m_grad_easing    = 0;
+    double m_grad_gamma     = 1.0;
+    int    m_grad_min_lines = 3;
+    double m_grad_overlap   = 0.6;
+    bool   m_grad_invert    = false;
+    int    m_grad_band_a    = 10;
+    int    m_grad_band_b    = 10;
+    int    m_grad_band_c    = 0;
+    int    m_grad_band_d    = 0;
+    int    m_tool_a         = 0;
+    int    m_tool_b         = 1;
+    int    m_tool_c         = 2;
+    int    m_tool_d         = 3;
+
+    // Gradient widget pointers (created in build_ui when m_cfg != nullptr).
+    wxStaticBoxSizer* m_gd_sb            = nullptr;
+    wxChoice*         m_choice_grad_mode = nullptr;
+    wxChoice*         m_choice_tool_a    = nullptr;
+    wxChoice*         m_choice_tool_b    = nullptr;
+    wxChoice*         m_choice_tool_c    = nullptr;
+    wxChoice*         m_choice_tool_d    = nullptr;
+    ColorSwatch*      m_sw_tool_a        = nullptr;
+    ColorSwatch*      m_sw_tool_b        = nullptr;
+    ColorSwatch*      m_sw_tool_c        = nullptr;
+    ColorSwatch*      m_sw_tool_d        = nullptr;
+    wxSlider*         m_sl_pct_a         = nullptr;
+    wxSlider*         m_sl_pct_b         = nullptr;
+    wxStaticText*     m_lbl_pct_a        = nullptr;
+    wxStaticText*     m_lbl_pct_b        = nullptr;
+    wxStaticText*     m_lbl_pct_c        = nullptr;
+    wxChoice*         m_choice_easing    = nullptr;
+    wxSpinCtrlDouble* m_sc_gamma         = nullptr;
+    wxSpinCtrl*       m_sc_min_lines     = nullptr;
+    wxSpinCtrl*       m_sc_band_a        = nullptr;
+    wxSpinCtrl*       m_sc_band_b        = nullptr;
+    wxSpinCtrl*       m_sc_band_c        = nullptr;
+    wxSpinCtrl*       m_sc_band_d        = nullptr;
+    wxStaticText*     m_lbl_preview      = nullptr;
+    wxStaticText*     m_lbl_lines_est    = nullptr;
+    wxPanel*          m_panel_linear     = nullptr;
+    wxPanel*          m_panel_bands      = nullptr;
+    wxStaticText*     m_lbl_mf_lock_note = nullptr; // shown when pattern is using a MixedFilament digit
+    GradientStripPanel* m_strip          = nullptr; // visual colour preview
+    wxSlider*         m_sl_overlap       = nullptr; // s60: color overlap slider
+    wxStaticText*     m_lbl_overlap      = nullptr;
+    wxCheckBox*       m_chk_invert       = nullptr; // s60: invert gradient direction
+
+    void load_grad_from_config()
+    {
+        if (!m_cfg) return;
+        auto gi = [&](const char* k, int def) -> int {
+            auto* o = m_cfg->option<ConfigOptionInt>(k);
+            return o ? o->value : def;
+        };
+        auto gf = [&](const char* k, double def) -> double {
+            auto* o = m_cfg->option<ConfigOptionFloat>(k);
+            return o ? o->value : def;
+        };
+        auto gb = [&](const char* k, bool def) -> bool {
+            auto* o = m_cfg->option<ConfigOptionBool>(k);
+            return o ? o->value : def;
+        };
+        m_grad_mode      = gi("interlayer_colormix_mode", 0);
+        m_grad_pct_a     = gi("interlayer_colormix_pct_a", 50);
+        m_grad_pct_b     = gi("interlayer_colormix_pct_b", 33);
+        m_grad_easing    = gi("interlayer_colormix_easing", 0);
+        m_grad_gamma     = gf("interlayer_colormix_gamma", 1.0);
+        m_grad_min_lines = gi("interlayer_colormix_min_surface_lines", 3);
+        m_grad_overlap   = gf("interlayer_colormix_overlap", 0.6);
+        m_grad_invert    = gb("interlayer_colormix_invert", false);
+        m_grad_band_a    = gi("interlayer_colormix_band_count_a", 10);
+        m_grad_band_b    = gi("interlayer_colormix_band_count_b", 10);
+        m_grad_band_c    = gi("interlayer_colormix_band_count_c", 0);
+        m_grad_band_d    = gi("interlayer_colormix_band_count_d", 0);
+        // Legacy config defaulted tool_c/_d to -1 ("off"). Treat any negative
+        // value as "user hasn't configured this slot yet" and default it to a
+        // sensible physical index in the dialog (2, 3) so the slot picker
+        // shows a real tool. On save, the chosen tool index is written back —
+        // never -1 — so the s60 SurfaceColorMix path always sees a real slot.
+        m_tool_a         = gi("interlayer_colormix_tool_a", 0);
+        if (m_tool_a < 0) m_tool_a = 0;
+        m_tool_b         = gi("interlayer_colormix_tool_b", 1);
+        if (m_tool_b < 0) m_tool_b = 1;
+        m_tool_c         = gi("interlayer_colormix_tool_c", 2);
+        if (m_tool_c < 0) m_tool_c = 2;
+        m_tool_d         = gi("interlayer_colormix_tool_d", 3);
+        if (m_tool_d < 0) m_tool_d = 3;
+    }
+
+    // Is the current pattern using a virtual MixedFilament digit (5-9)? If
+    // yes, gray out the gradient section — MixedFilament IS the pattern and
+    // mixing it with a numeric dither produces unpredictable results.
+    bool pattern_uses_mixed_filament() const {
+        for (char c : m_pattern) if (c >= '5' && c <= '9') return true;
+        return false;
+    }
 
     static wxColour hex_to_colour(const std::string& hex)
     {
@@ -164,6 +374,8 @@ private:
             Fit();
         }
         m_disp->Refresh();
+        refresh_grad_lock(); // a newly-appended virtual digit (5-9) locks gradient
+        refresh_grad_preview(); // strip should reflect the pattern in legacy mode
     }
 
     void build_ui(const std::vector<Slic3r::ColorMixOption>& options)
@@ -240,12 +452,425 @@ private:
             m_disp->SetMinSize(wxSize(160, 26));
             Fit();
             m_disp->Refresh();
+            this->refresh_grad_lock();   // pattern changed → re-evaluate MF gray-out
+            this->refresh_grad_preview(); // strip should reflect empty pattern
         });
         vs->Add(bcl, 0, wxLEFT|wxBOTTOM, PAD);
+
+        // ── Gradient section (numeric dither) — s60. ────────────────────────
+        // Only built when m_cfg is provided AND the dialog is in ColorMix
+        // context (the caller passes m_cfg from SurfaceColorMixerDialog).
+        // For MultiPass/PathBlend roles the dialog is never opened, so this
+        // is always safe to add when m_cfg != nullptr.
+        if (m_cfg) build_gradient_section(vs, options);
 
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
                 0, wxALL|wxALIGN_RIGHT, PAD);
         SetSizerAndFit(vs);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // NEOTKO_COLORMIX_TAG — s60: Gradient (numeric dither) section.
+    // Inserted into the per-role ColorMix Advanced dialog. Edits 14 config
+    // keys (mode, pct_a/b, easing, gamma, min_lines, band_a/b/c/d, tool_a/b/c/d)
+    // that apply to the active surface(s). Tool slots A/B/C/D are exposed as
+    // wxChoice combos showing the physical tool index (T0/T1/…) and a colour
+    // swatch — the user picks WHICH physical tool occupies each slot, then
+    // the gradient/bands controls reference the slot.
+    // ────────────────────────────────────────────────────────────────────────
+    void build_gradient_section(wxBoxSizer* vs, const std::vector<Slic3r::ColorMixOption>& options)
+    {
+        const int PAD = 6;
+        m_gd_sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Gradient (numeric dither)"));
+
+        // ── Style row (friendlier than "Mode") ───────────────────────────
+        {
+            wxArrayString labels;
+            labels.Add(_L("Custom text pattern  (use the colour buttons above)"));
+            labels.Add(_L("Smooth blend — 2 colours"));
+            labels.Add(_L("Smooth blend — 3 colours"));
+            labels.Add(_L("Stripes — manual band sizes"));
+            m_choice_grad_mode = new wxChoice(this, wxID_ANY,
+                wxDefaultPosition, wxSize(360, -1), labels);
+            m_choice_grad_mode->SetSelection(std::clamp(m_grad_mode, 0, 3));
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(this, wxID_ANY, _L("Style:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            row->Add(m_choice_grad_mode, 1, wxALIGN_CENTER_VERTICAL);
+            m_gd_sb->Add(row, 0, wxEXPAND | wxALL, PAD / 2);
+        }
+
+        // ── Tool slots A/B/C/D picker row ──────────────────────────────
+        wxArrayString tool_labels;
+        std::vector<wxColour> tool_colors_for_idx;
+        for (const auto& opt : options) {
+            if (!opt.is_physical) continue;
+            if (opt.filament_id < 1 || opt.filament_id > 4) continue;
+            const int idx = opt.filament_id - 1;
+            while ((int)tool_colors_for_idx.size() <= idx)
+                tool_colors_for_idx.push_back(wxColour(160,160,160));
+            tool_colors_for_idx[idx] = hex_to_colour(opt.display_color);
+            tool_labels.Add(wxString::Format("T%d", idx));
+        }
+        if (tool_labels.IsEmpty()) {
+            for (int i = 0; i < 4; ++i) {
+                tool_labels.Add(wxString::Format("T%d", i));
+                tool_colors_for_idx.push_back(wxColour(160,160,160));
+            }
+        }
+        auto colour_for_tool = [tool_colors_for_idx](int t) -> wxColour {
+            if (t >= 0 && t < (int)tool_colors_for_idx.size()) return tool_colors_for_idx[t];
+            return wxColour(160,160,160);
+        };
+        {
+            auto* sb_tools = new wxStaticBoxSizer(wxHORIZONTAL, this, _L("Colours used"));
+            auto make_slot = [&](const wxString& slot_lbl, int cur_tool,
+                                 wxChoice*& out_choice, ColorSwatch*& out_swatch)
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(this, wxID_ANY, slot_lbl),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                out_choice = new wxChoice(this, wxID_ANY,
+                    wxDefaultPosition, wxSize(60, -1), tool_labels);
+                const int sel = std::clamp(cur_tool, 0, (int)tool_labels.GetCount() - 1);
+                out_choice->SetSelection(sel);
+                row->Add(out_choice, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                out_swatch = new ColorSwatch(this, colour_for_tool(sel));
+                row->Add(out_swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+                out_choice->Bind(wxEVT_CHOICE, [this, out_choice, out_swatch, colour_for_tool](wxCommandEvent&) {
+                    out_swatch->set_color(colour_for_tool(out_choice->GetSelection()));
+                    this->refresh_grad_preview();
+                });
+                sb_tools->Add(row, 0, wxALIGN_CENTER_VERTICAL);
+            };
+            make_slot(_L("Color 1:"), m_tool_a, m_choice_tool_a, m_sw_tool_a);
+            make_slot(_L("Color 2:"), m_tool_b, m_choice_tool_b, m_sw_tool_b);
+            make_slot(_L("Color 3:"), m_tool_c, m_choice_tool_c, m_sw_tool_c);
+            make_slot(_L("Color 4:"), m_tool_d, m_choice_tool_d, m_sw_tool_d);
+            m_gd_sb->Add(sb_tools, 0, wxEXPAND | wxALL, PAD / 2);
+        }
+
+        // ── Linear panel (modes 1 + 2) ─────────────────────────────────
+        m_panel_linear = new wxPanel(this);
+        {
+            auto* pv = new wxBoxSizer(wxVERTICAL);
+            auto add_pct_row = [&](const wxString& tag, int init_v,
+                                   wxSlider*& out_sl, wxStaticText*& out_lbl)
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY, tag),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                out_sl = new wxSlider(m_panel_linear, wxID_ANY, init_v, 0, 100,
+                    wxDefaultPosition, wxSize(220, -1), wxSL_HORIZONTAL);
+                out_lbl = new wxStaticText(m_panel_linear, wxID_ANY,
+                    wxString::Format("%d%%", init_v));
+                row->Add(out_sl, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(out_lbl, 0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            };
+            add_pct_row(_L("How much Color 1:"), m_grad_pct_a, m_sl_pct_a, m_lbl_pct_a);
+            add_pct_row(_L("How much Color 2 (3-colour blend only):"),
+                        m_grad_pct_b, m_sl_pct_b, m_lbl_pct_b);
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                            _L("Color 3 fills the rest (auto):")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                m_lbl_pct_c = new wxStaticText(m_panel_linear, wxID_ANY, "17%");
+                row->Add(m_lbl_pct_c, 0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            }
+            // ── Color overlap slider (controls how much colours bleed) ──
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                            _L("Color overlap (soft ← hard zones):")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                const int init_ov_pct = static_cast<int>(std::lround(m_grad_overlap * 100.0));
+                m_sl_overlap = new wxSlider(m_panel_linear, wxID_ANY,
+                    init_ov_pct, 0, 100,
+                    wxDefaultPosition, wxSize(180, -1), wxSL_HORIZONTAL);
+                m_sl_overlap->SetToolTip(_L(
+                    "0%   = hard zones (sharp bands)\n"
+                    "60% = default — soft transitions, colours sprinkle into "
+                    "neighbours\n"
+                    "100% = strong overlap — every colour appears throughout"));
+                m_lbl_overlap = new wxStaticText(m_panel_linear, wxID_ANY,
+                    wxString::Format("%d%%", init_ov_pct));
+                row->Add(m_sl_overlap, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(m_lbl_overlap, 0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            }
+            {
+                wxArrayString ease_labels;
+                ease_labels.Add(_L("Even — same density everywhere"));
+                ease_labels.Add(_L("Slow start"));
+                ease_labels.Add(_L("Slow end"));
+                ease_labels.Add(_L("S-curve (smooth start & end)"));
+                ease_labels.Add(_L("Custom shape (set γ →)"));
+                ease_labels.Add(_L("Hard step"));
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                            _L("Transition shape:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                m_choice_easing = new wxChoice(m_panel_linear, wxID_ANY,
+                    wxDefaultPosition, wxSize(180, -1), ease_labels);
+                m_choice_easing->SetSelection(std::clamp(m_grad_easing, 0, 5));
+                row->Add(m_choice_easing, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("γ:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                m_sc_gamma = new wxSpinCtrlDouble(m_panel_linear, wxID_ANY,
+                    wxEmptyString, wxDefaultPosition, wxSize(80, -1),
+                    wxSP_ARROW_KEYS, 0.1, 10.0,
+                    std::clamp(m_grad_gamma, 0.1, 10.0), 0.1);
+                m_sc_gamma->SetDigits(2);
+                m_sc_gamma->SetToolTip(_L(
+                    "Only used when Transition shape = \"Custom shape\".\n"
+                    "γ = 1   linear\n"
+                    "γ > 1   delays the change toward the end\n"
+                    "γ < 1   pushes the change toward the start"));
+                row->Add(m_sc_gamma, 0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            }
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                            _L("Skip tiny areas — fewer than N lines use Color 1 only:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                m_sc_min_lines = new wxSpinCtrl(m_panel_linear, wxID_ANY,
+                    wxString::Format("%d", m_grad_min_lines),
+                    wxDefaultPosition, wxSize(80, -1),
+                    wxSP_ARROW_KEYS, 0, 100, m_grad_min_lines);
+                row->Add(m_sc_min_lines, 0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            }
+            // ── Visual gradient preview ─────────────────────────────────
+            {
+                // Header row: label on the left, "Invert direction ⇆" toggle
+                // on the right. Placing the invert toggle next to the preview
+                // makes the cause/effect immediately visible — flip the box
+                // and the strip flips with it.
+                auto* hdr = new wxBoxSizer(wxHORIZONTAL);
+                hdr->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                            _L("Preview of the resulting gradient:")),
+                         1, wxALIGN_CENTER_VERTICAL);
+                m_chk_invert = new wxCheckBox(m_panel_linear, wxID_ANY,
+                    _L("Invert direction ⇆"));
+                m_chk_invert->SetValue(m_grad_invert);
+                m_chk_invert->SetToolTip(_L(
+                    "Reverses the gradient order. Useful when the lower layer's\n"
+                    "natural fill direction makes the gradient look mirrored —\n"
+                    "flipping this is faster than swapping Color 1 / Color 2."));
+                hdr->Add(m_chk_invert, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
+                pv->Add(hdr, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
+
+                m_strip = new GradientStripPanel(m_panel_linear, 360, 32);
+                pv->Add(m_strip, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
+                m_lbl_lines_est = new wxStaticText(m_panel_linear, wxID_ANY,
+                    _L("On a 60×60 mm surface — about: —"));
+                m_lbl_lines_est->SetForegroundColour(wxColour(100, 100, 100));
+                pv->Add(m_lbl_lines_est, 0, wxEXPAND | wxLEFT | wxRIGHT, 4);
+
+                // The legacy ASCII preview is hidden by default — the strip
+                // above is the new visual feedback. We keep the widget alive
+                // (Tools that read it during refresh_grad_preview).
+                m_lbl_preview = new wxStaticText(m_panel_linear, wxID_ANY, "");
+                m_lbl_preview->Hide();
+                pv->Add(m_lbl_preview, 0);
+            }
+            m_panel_linear->SetSizer(pv);
+            m_gd_sb->Add(m_panel_linear, 0, wxEXPAND | wxALL, PAD / 2);
+        }
+
+        // ── Custom bands panel (mode 3) ────────────────────────────────
+        m_panel_bands = new wxPanel(this);
+        {
+            auto* pv = new wxBoxSizer(wxVERTICAL);
+            auto make_band_row = [&](const wxString& slot_lbl, int cur_tool,
+                                     int init_count, wxSpinCtrl*& out_spin)
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_bands, wxID_ANY,
+                            wxString::Format("%s  T%d", slot_lbl, cur_tool)),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                row->Add(new ColorSwatch(m_panel_bands, colour_for_tool(cur_tool)),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(new wxStaticText(m_panel_bands, wxID_ANY, _L("count:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                out_spin = new wxSpinCtrl(m_panel_bands, wxID_ANY,
+                    wxString::Format("%d", init_count),
+                    wxDefaultPosition, wxSize(80, -1),
+                    wxSP_ARROW_KEYS, 0, 200, init_count);
+                row->Add(out_spin, 0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            };
+            make_band_row(_L("Color 1"), m_tool_a, m_grad_band_a, m_sc_band_a);
+            make_band_row(_L("Color 2"), m_tool_b, m_grad_band_b, m_sc_band_b);
+            make_band_row(_L("Color 3"), m_tool_c, m_grad_band_c, m_sc_band_c);
+            make_band_row(_L("Color 4"), m_tool_d, m_grad_band_d, m_sc_band_d);
+            auto* note = new wxStaticText(m_panel_bands, wxID_ANY,
+                _L("Stripes repeat: [Color 1 × count, Color 2 × count, …] until\n"
+                   "the surface is filled. Set count = 0 to skip a colour."));
+            note->SetForegroundColour(wxColour(100, 100, 100));
+            pv->Add(note, 0, wxEXPAND | wxALL, 2);
+            m_panel_bands->SetSizer(pv);
+            m_gd_sb->Add(m_panel_bands, 0, wxEXPAND | wxALL, PAD / 2);
+        }
+
+        // ── MixedFilament gray-out note (hidden by default) ────────────
+        m_lbl_mf_lock_note = new wxStaticText(this, wxID_ANY,
+            _L("⚠ Pattern uses a MixedFilament digit (5-9). Gradient options "
+               "are disabled — the MixedFilament IS the pattern."));
+        m_lbl_mf_lock_note->SetForegroundColour(wxColour(180, 100, 0));
+        m_lbl_mf_lock_note->Hide();
+        m_gd_sb->Add(m_lbl_mf_lock_note, 0, wxEXPAND | wxALL, 4);
+
+        vs->Add(m_gd_sb, 0, wxEXPAND | wxALL, PAD / 2);
+
+        // ── Listeners ──────────────────────────────────────────────────
+        m_choice_grad_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+            refresh_grad_visibility();
+            refresh_grad_preview();
+        });
+        m_sl_pct_a->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        m_sl_pct_b->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        if (m_sl_overlap)
+            m_sl_overlap->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        if (m_chk_invert)
+            m_chk_invert->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        m_choice_easing->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        m_sc_gamma->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { refresh_grad_preview(); });
+        m_sc_band_a->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+        m_sc_band_b->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+        m_sc_band_c->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+        m_sc_band_d->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+
+        refresh_grad_visibility();
+        refresh_grad_preview();
+        refresh_grad_lock();
+    }
+
+    void refresh_grad_visibility()
+    {
+        if (!m_choice_grad_mode) return;
+        const int m = m_choice_grad_mode->GetSelection();
+        const bool linear = (m == 1 || m == 2);
+        const bool bands  = (m == 3);
+        if (m_panel_linear) m_panel_linear->Show(linear);
+        if (m_panel_bands)  m_panel_bands ->Show(bands);
+        const bool b_active = (m == 2);
+        if (m_sl_pct_b)  m_sl_pct_b ->Enable(b_active);
+        if (m_lbl_pct_b) m_lbl_pct_b->Enable(b_active);
+        if (m_lbl_pct_c) m_lbl_pct_c->Enable(b_active);
+        Layout(); Fit();
+    }
+
+    void refresh_grad_preview()
+    {
+        if (!m_choice_grad_mode) return;
+        const int mode    = m_choice_grad_mode->GetSelection();
+        const int pct_a   = m_sl_pct_a ? m_sl_pct_a->GetValue() : m_grad_pct_a;
+        const int pct_b   = m_sl_pct_b ? m_sl_pct_b->GetValue() : m_grad_pct_b;
+        const int easing  = m_choice_easing ? m_choice_easing->GetSelection() : m_grad_easing;
+        const double gamma= m_sc_gamma ? m_sc_gamma->GetValue() : m_grad_gamma;
+        const double overlap = m_sl_overlap ? m_sl_overlap->GetValue() / 100.0 : m_grad_overlap;
+        if (m_lbl_pct_a) m_lbl_pct_a->SetLabel(wxString::Format("%d%%", pct_a));
+        if (m_lbl_pct_b) m_lbl_pct_b->SetLabel(wxString::Format("%d%%", pct_b));
+        if (m_lbl_pct_c) {
+            const int pct_c = std::max(0, 100 - pct_a - pct_b);
+            m_lbl_pct_c->SetLabel(wxString::Format("%d%%", pct_c));
+        }
+        if (m_lbl_overlap) {
+            const int ov_pct = m_sl_overlap ? m_sl_overlap->GetValue() : (int)std::lround(overlap * 100);
+            m_lbl_overlap->SetLabel(wxString::Format("%d%%", ov_pct));
+        }
+
+        // Build the colour table for the strip preview. We map LOCAL slot
+        // indices 0..3 to whatever physical tool the user has assigned via
+        // the slot pickers, then look up the filament colour. This guarantees
+        // the strip shows the actual print colours, not generic placeholders.
+        auto pick_color = [&](int slot_idx) -> wxColour {
+            int tool = 0;
+            switch (slot_idx) {
+                case 0: tool = m_choice_tool_a ? m_choice_tool_a->GetSelection() : m_tool_a; break;
+                case 1: tool = m_choice_tool_b ? m_choice_tool_b->GetSelection() : m_tool_b; break;
+                case 2: tool = m_choice_tool_c ? m_choice_tool_c->GetSelection() : m_tool_c; break;
+                case 3: tool = m_choice_tool_d ? m_choice_tool_d->GetSelection() : m_tool_d; break;
+            }
+            if (tool >= 0 && tool < (int)m_colours.size())
+                return hex_to_colour(m_colours[tool]);
+            return wxColour(160, 160, 160);
+        };
+        std::vector<wxColour> slot_colors {
+            pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
+
+        std::vector<int> seq;
+        const int N = 240; // wider strip = more detail
+        if (mode == 1) {
+            seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(
+                N, 0, 1, pct_a, easing, gamma);
+        } else if (mode == 2) {
+            seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(
+                N, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
+        } else if (mode == 3) {
+            const int ca = m_sc_band_a ? m_sc_band_a->GetValue() : 0;
+            const int cb = m_sc_band_b ? m_sc_band_b->GetValue() : 0;
+            const int cc = m_sc_band_c ? m_sc_band_c->GetValue() : 0;
+            const int cd = m_sc_band_d ? m_sc_band_d->GetValue() : 0;
+            seq = Slic3r::SurfaceColorMix::build_custom_bands(
+                N, 0, ca, 1, cb, 2, cc, 3, cd);
+        } else {
+            // Pattern-string mode: render the actual pattern (if any) so the
+            // user sees its real colour layout. Map each digit 1..4 to slot
+            // 0..3 (digits 5-9 are MixedFilament — show as neutral grey).
+            for (char c : m_pattern) {
+                if (c >= '1' && c <= '4') seq.push_back(c - '1');
+                else                       seq.push_back(-1); // unknown → grey
+            }
+            if (seq.empty()) seq.push_back(-1);
+        }
+        // s60: invert mirrors the sequence so the strip preview matches what
+        // the slicer will produce when the checkbox is enabled.
+        const bool invert = m_chk_invert ? m_chk_invert->GetValue() : m_grad_invert;
+        if (invert && seq.size() > 1)
+            std::reverse(seq.begin(), seq.end());
+        if (m_strip) m_strip->set_sequence(seq, slot_colors);
+
+        // Keep the hidden ASCII preview in sync for tools that read it.
+        if (m_lbl_preview) {
+            std::string preview;
+            for (int t : seq)
+                preview += (t < 0 ? '?' : static_cast<char>('1' + std::clamp(t, 0, 3)));
+            m_lbl_preview->SetLabel(wxString::FromUTF8(preview));
+        }
+
+        if (m_lbl_lines_est && m_cfg) {
+            double lw = 0.4;
+            if (auto* o = m_cfg->option<ConfigOptionFloatOrPercent>("top_surface_line_width"))
+                if (!o->percent) lw = std::max(0.05, o->value);
+            const int est = Slic3r::SurfaceColorMix::estimate_surface_line_count(
+                60.0 * 60.0, lw, 0.0, 1.0);
+            m_lbl_lines_est->SetLabel(wxString::Format(
+                _L("On a 60×60 mm surface — about %d lines  (filament width %.2f mm)"),
+                est, lw));
+        }
+    }
+
+    void refresh_grad_lock()
+    {
+        const bool locked = pattern_uses_mixed_filament();
+        if (m_panel_linear) m_panel_linear->Enable(!locked);
+        if (m_panel_bands)  m_panel_bands ->Enable(!locked);
+        if (m_choice_grad_mode) m_choice_grad_mode->Enable(!locked);
+        if (m_choice_tool_a) m_choice_tool_a->Enable(!locked);
+        if (m_choice_tool_b) m_choice_tool_b->Enable(!locked);
+        if (m_choice_tool_c) m_choice_tool_c->Enable(!locked);
+        if (m_choice_tool_d) m_choice_tool_d->Enable(!locked);
+        if (m_lbl_mf_lock_note) {
+            m_lbl_mf_lock_note->Show(locked);
+            Layout(); Fit();
+        }
     }
 };
 
@@ -253,28 +878,8 @@ private:
 // Grid dialog: num_passes, surface (checkboxes), per-pass tool+ratio+fan+speed+gcode, vary_pattern.
 // Uses wxSpinCtrl (int) + wxTextCtrl (float/string) — wxSpinCtrlDouble crashes on macOS.
 // No wxMemoryDC, no Line{""} — safe on Snapmaker fork.
-// NEOTKO_MULTIPASS_TAG_START — ColorSwatch: small colored panel showing tool filament color.
-// Uses wxPaintDC for safe rendering on macOS.
-class ColorSwatch : public wxPanel {
-    wxColour m_col;
-public:
-    ColorSwatch(wxWindow* parent, const wxColour& col)
-        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(16, 16))
-        , m_col(col.IsOk() ? col : wxColour(160, 160, 160))
-    {
-        Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-            wxPaintDC dc(this);
-            dc.SetBrush(wxBrush(m_col));
-            dc.SetPen(wxPen(wxColour(80, 80, 80)));
-            const wxSize sz = GetSize();
-            dc.DrawRectangle(0, 0, sz.x, sz.y);
-        });
-    }
-    void set_color(const wxColour& c) {
-        m_col = c.IsOk() ? c : wxColour(160, 160, 160);
-        Refresh();
-    }
-};
+// NEOTKO_MULTIPASS_TAG — ColorSwatch class moved above ColorMixPatternDialog
+// (see top of namespace) so the gradient sub-section can use it.
 
 // ── DragTextCtrl ─────────────────────────────────────────────────────────────
 // wxTextCtrl with click+drag and scroll-wheel value editing.
@@ -1164,8 +1769,10 @@ private:
             grid->Add(hdr, 0, wxALIGN_CENTER_VERTICAL);
         }
         grid->Add(new wxStaticText(this, wxID_ANY, _L("% of layer\n(height ratio)")), 0, wxALIGN_CENTER_VERTICAL);
-        grid->Add(new wxStaticText(this, wxID_ANY, _L("Fan PWM\n(-1=off)")),  0, wxALIGN_CENTER_VERTICAL);
-        grid->Add(new wxStaticText(this, wxID_ANY, _L("Speed %\n(100=off)")), 0, wxALIGN_CENTER_VERTICAL);
+        // NEOTKO_MULTIPASS_TAG — s58: Fan PWM / Speed % headers hidden (controls below also hidden).
+        // Backend config keys preserved for preset compatibility.
+        // grid->Add(new wxStaticText(this, wxID_ANY, _L("Fan PWM\n(-1=off)")),  0, wxALIGN_CENTER_VERTICAL);
+        // grid->Add(new wxStaticText(this, wxID_ANY, _L("Speed %\n(100=off)")), 0, wxALIGN_CENTER_VERTICAL);
 
         const int    tools_def[3]  = {t1, t2, t3};
         const double ratios_def[3] = {r1, r2, r3};
@@ -1272,21 +1879,12 @@ private:
             if (i == 2) m_pass3_widgets.push_back(m_tc_ratio[i]);
             grid->Add(m_tc_ratio[i], 0, wxALIGN_CENTER_VERTICAL);
 
-            const int safe_fan = (fans[i] >= -1 && fans[i] <= 255) ? fans[i] : -1;
-            m_sc_fan[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                          wxDefaultPosition, wxSize(60,-1),
-                                          wxSP_ARROW_KEYS, -1, 255, safe_fan);
-            m_sc_fan[i]->SetToolTip(_L("Fan PWM 0-255. -1 = no change for this pass."));
-            if (i == 2) m_pass3_widgets.push_back(m_sc_fan[i]);
-            grid->Add(m_sc_fan[i], 0, wxALIGN_CENTER_VERTICAL);
-
-            const int safe_spd = (spds[i] >= 1 && spds[i] <= 200) ? spds[i] : 100;
-            m_sc_speed[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                            wxDefaultPosition, wxSize(60,-1),
-                                            wxSP_ARROW_KEYS, 1, 200, safe_spd);
-            m_sc_speed[i]->SetToolTip(_L("Speed multiplier via M220. 100 = no change."));
-            if (i == 2) m_pass3_widgets.push_back(m_sc_speed[i]);
-            grid->Add(m_sc_speed[i], 0, wxALIGN_CENTER_VERTICAL);
+            // NEOTKO_MULTIPASS_TAG — s58: Fan / Speed widgets hidden (not added to grid).
+            // The wxSpinCtrl members stay nullptr; read/write code at lines ~973/1013/1507/1572
+            // already handles nullptr via the `m_sc_fan[i] ? ... : -1` guards.
+            m_sc_fan[i]   = nullptr;
+            m_sc_speed[i] = nullptr;
+            (void)fans; (void)spds;  // silence unused-param warnings
         }
         vs->Add(grid, 0, wxALL, PAD);
 
@@ -1617,42 +2215,14 @@ private:
         }
         update_sum_display();
 
-        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
-
-        // ---- Custom GCode section ----
-        vs->Add(new wxStaticText(this, wxID_ANY, _L("Custom GCode per pass (optional):")),
-                0, wxALL, PAD);
-        auto* gcgrid = new wxFlexGridSizer(3 /*cols*/, PAD, PAD);
-        gcgrid->AddGrowableCol(1, 1);
-        gcgrid->AddGrowableCol(2, 1);
-
-        gcgrid->Add(new wxStaticText(this, wxID_ANY, wxEmptyString), 0, wxALIGN_CENTER_VERTICAL);
-        gcgrid->Add(new wxStaticText(this, wxID_ANY, _L("Start GCode")), 0, wxALIGN_CENTER_VERTICAL);
-        gcgrid->Add(new wxStaticText(this, wxID_ANY, _L("End GCode")),   0, wxALIGN_CENTER_VERTICAL);
-
+        // NEOTKO_MULTIPASS_TAG — s58: Custom GCode per-pass section hidden.
+        // Members m_tc_gstart / m_tc_gend stay nullptr; read/write at lines
+        // ~990/1019/1509/1575 already guards with `m_tc_gstart[i] ? ... : ""`.
         for (int i = 0; i < 3; ++i) {
-            auto* lbl2 = new wxStaticText(this, wxID_ANY,
-                                           wxString::Format(_L("Pass %d:"), i+1));
-            if (i == 2) m_pass3_widgets.push_back(lbl2);
-            gcgrid->Add(lbl2, 0, wxALIGN_CENTER_VERTICAL);
-
-            m_tc_gstart[i] = new wxTextCtrl(this, wxID_ANY,
-                                              wxString(gs[i]),
-                                              wxDefaultPosition, wxSize(160,-1));
-            m_tc_gstart[i]->SetToolTip(_L("GCode emitted before pass begins (e.g. M104 S220)."));
-            if (i == 2) m_pass3_widgets.push_back(m_tc_gstart[i]);
-            gcgrid->Add(m_tc_gstart[i], 1, wxEXPAND|wxALIGN_CENTER_VERTICAL);
-
-            m_tc_gend[i] = new wxTextCtrl(this, wxID_ANY,
-                                            wxString(ge[i]),
-                                            wxDefaultPosition, wxSize(160,-1));
-            m_tc_gend[i]->SetToolTip(_L("GCode emitted after pass completes."));
-            if (i == 2) m_pass3_widgets.push_back(m_tc_gend[i]);
-            gcgrid->Add(m_tc_gend[i], 1, wxEXPAND|wxALIGN_CENTER_VERTICAL);
+            m_tc_gstart[i] = nullptr;
+            m_tc_gend[i]   = nullptr;
         }
-        vs->Add(gcgrid, 0, wxEXPAND|wxALL, PAD);
-
-        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
+        (void)gs; (void)ge;  // silence unused-param warnings
 
         // ---- Pressure Advance (PA) section ----
         vs->Add(new wxStaticText(this, wxID_ANY, _L("Pressure Advance (PA) during MultiPass:")),
@@ -1706,27 +2276,12 @@ private:
 
         vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
 
-        // NEOTKO_MULTIPASS_PRIME_TAG — Wipe tower prime volume spinner
-        {
-            auto* prime_row = new wxBoxSizer(wxHORIZONTAL);
-            prime_row->Add(new wxStaticText(this, wxID_ANY,
-                _L("Wipe tower prime (mm\u00b3):")),
-                0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 8);
-            const double safe_pv = (cur_prime_volume >= 0.0 && cur_prime_volume <= 200.0)
-                                   ? cur_prime_volume : 0.0;
-            m_sc_prime = new wxSpinCtrlDouble(this, wxID_ANY,
-                wxEmptyString, wxDefaultPosition, wxSize(80, -1),
-                wxSP_ARROW_KEYS, 0.0, 200.0, safe_pv, 1.0);
-            m_sc_prime->SetToolTip(_L("Volume (mm\u00b3) to purge on the wipe tower before each "
-                                      "MultiPass sublayer toolchange.\n"
-                                      "0 = disabled (default). Requires prime tower active."));
-            prime_row->Add(m_sc_prime, 0, wxALIGN_CENTER_VERTICAL);
-            auto* prime_hint = new wxStaticText(this, wxID_ANY,
-                _L("  (0 = disabled, requires prime tower)"));
-            prime_hint->SetForegroundColour(wxColour(100, 100, 100));
-            prime_row->Add(prime_hint, 0, wxALIGN_CENTER_VERTICAL|wxLEFT, 4);
-            vs->Add(prime_row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-        }
+        // NEOTKO_MULTIPASS_PRIME_TAG — s58: Wipe tower prime spinner moved OUT of this dialog
+        // to the global Print Settings optgroup (Tab.cpp, right below `neotko_wipe_tower`).
+        // The config key `multipass_prime_volume` is now global (applies to both Top and
+        // Penultimate; `penultimate_multipass_prime_volume` is removed).
+        // m_sc_prime stays nullptr; get_prime_volume() guards it.
+        (void)cur_prime_volume;
         // NEOTKO_MULTIPASS_PRIME_TAG_END
 
         // NEOTKO_MULTIPASS_MINLAYER_TAG — Layer height info + minimum ratio warning
@@ -1824,54 +2379,22 @@ private:
                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
                 row->Add(m_sc_penu_angle[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
 
-                // Fan spinner
-                const int safe_pf = (pf >= -1 && pf <= 255) ? pf : -1;
-                m_sc_penu_fan[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                    wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, -1, 255, safe_pf);
-                m_sc_penu_fan[i]->SetToolTip(_L("Fan PWM 0-255. -1 = no change."));
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Fan:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_sc_penu_fan[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
-
-                // Speed spinner
-                const int safe_ps = (ps >= 1 && ps <= 200) ? ps : 100;
-                m_sc_penu_speed[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                    wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 1, 200, safe_ps);
-                m_sc_penu_speed[i]->SetToolTip(_L("Speed multiplier via M220. 100 = no change."));
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Spd%:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_sc_penu_speed[i], 0, wxALIGN_CENTER_VERTICAL);
+                // NEOTKO_MULTIPASS_TAG — s58: Fan / Speed / GCode per-pass widgets hidden.
+                // Members stay nullptr; read/write code guards with `m_sc_penu_fan[i] ? ...`.
+                m_sc_penu_fan[i]    = nullptr;
+                m_sc_penu_speed[i]  = nullptr;
+                m_tc_penu_gstart[i] = nullptr;
+                m_tc_penu_gend[i]   = nullptr;
+                (void)pf; (void)ps; (void)pgs; (void)pge;  // silence unused-var warnings
 
                 penu_box->Add(row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-
-                // GCode start/end row
-                auto* gcrow = new wxBoxSizer(wxHORIZONTAL);
-                m_tc_penu_gstart[i] = new wxTextCtrl(this, wxID_ANY,
-                    wxString::FromUTF8(pgs), wxDefaultPosition, wxSize(140, -1));
-                m_tc_penu_gstart[i]->SetToolTip(_L("GCode emitted before this pass begins."));
-                m_tc_penu_gend[i] = new wxTextCtrl(this, wxID_ANY,
-                    wxString::FromUTF8(pge), wxDefaultPosition, wxSize(140, -1));
-                m_tc_penu_gend[i]->SetToolTip(_L("GCode emitted after this pass completes."));
-                gcrow->Add(new wxStaticText(this, wxID_ANY,
-                           wxString::Format(_L("P%d GCode:"), i + 1)),
-                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                gcrow->Add(new wxStaticText(this, wxID_ANY, _L("Start:")),
-                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
-                gcrow->Add(m_tc_penu_gstart[i], 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-                gcrow->Add(new wxStaticText(this, wxID_ANY, _L("End:")),
-                           0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
-                gcrow->Add(m_tc_penu_gend[i], 1, wxALIGN_CENTER_VERTICAL);
-                penu_box->Add(gcrow, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
 
                 if (i == 2) {
                     m_penu_pass3_widgets.push_back(m_sc_penu_tool[i]);
                     m_penu_pass3_widgets.push_back(m_swatch_penu[i]);
                     m_penu_pass3_widgets.push_back(m_tc_penu_ratio[i]);
                     m_penu_pass3_widgets.push_back(m_sc_penu_angle[i]);
-                    m_penu_pass3_widgets.push_back(m_sc_penu_fan[i]);
-                    m_penu_pass3_widgets.push_back(m_sc_penu_speed[i]);
-                    m_penu_pass3_widgets.push_back(m_tc_penu_gstart[i]);
-                    m_penu_pass3_widgets.push_back(m_tc_penu_gend[i]);
+                    // Fan/Speed/GCode hidden — not pushed.
                 }
             }
 
@@ -1885,19 +2408,9 @@ private:
                 penu_box->Add(vrow, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
             }
 
-            // Prime volume
-            {
-                auto* ppr = new wxBoxSizer(wxHORIZONTAL);
-                ppr->Add(new wxStaticText(this, wxID_ANY, _L("Prime volume (mm\u00b3):")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 8);
-                const double safe_ppv = (penu_prime_vol >= 0.0 && penu_prime_vol <= 200.0)
-                                        ? penu_prime_vol : 0.0;
-                m_sc_penu_prime = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
-                    wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS,
-                    0.0, 200.0, safe_ppv, 1.0);
-                ppr->Add(m_sc_penu_prime, 0, wxALIGN_CENTER_VERTICAL);
-                penu_box->Add(ppr, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-            }
+            // NEOTKO_MULTIPASS_PRIME_TAG — s58: Penu prime spinner moved OUT (global setting now).
+            // m_sc_penu_prime stays nullptr; get_penu_prime() guards it.
+            (void)penu_prime_vol;
 
             // Enable/disable pass-3 widgets based on penu_passes
             const bool p3_on = (safe_pp >= 3);
@@ -2086,8 +2599,9 @@ public:
             refresh_ease();
         }
 
-        // --- Ascending Z / invert gradient ---
-        m_cb_invert = new wxCheckBox(this, wxID_ANY, _L("Ascending Z direction (safe)"));
+        // --- Flow gradient direction (s59: rename — default OFF is safe ascending,
+        // ON reverses to high→low flow which is the unsafe / "drag risk" mode).
+        m_cb_invert = new wxCheckBox(this, wxID_ANY, _L("Reverse Flow Max to Min (unsafe)"));
         m_cb_invert->SetValue(cur_invert);
         m_cb_invert->SetToolTip(_L(
             "When checked: pass 0 nozzle ascends during printing (starts at bottom_z, ends at nominal_z).\n"
@@ -2241,7 +2755,9 @@ private:
     wxSpinCtrl*       m_sc_filament_filter   = nullptr;
     wxSpinCtrlDouble* m_sc_min_length        = nullptr;
     wxCheckBox*       m_chk_use_virtual      = nullptr;
-    // NEOTKO_COLORMIX_TAG_END
+    // NEOTKO_COLORMIX_TAG — s58: lane distribution mode (global, affects ColorMix + PathBlend).
+    wxChoice*         m_choice_lane_mode     = nullptr;
+    // NEOTKO_COLORMIX_TAG — s60: gradient UI moved to ColorMixPatternDialog.
     // NEOTKO_MULTIPASS_SURFACES_TAG — stacked preview swatches (Top × Penu Beer-Lambert)
     wxPanel*       m_stacked_sw_top  = nullptr;
     wxPanel*       m_stacked_sw_penu = nullptr;
@@ -2546,11 +3062,44 @@ private:
             bool use_virtual = false;
             if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
                 use_virtual = o->value;
-            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat, use_virtual);
+            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat, use_virtual,
+                                       m_config, surface_id);
             if (dlg.ShowModal() == wxID_OK) {
                 if (auto* o = m_config->option<ConfigOptionString>(pat_key))
                     o->value = dlg.get_pattern();
                 m_on_change(pat_key);
+
+                // NEOTKO_COLORMIX_TAG — s60: gradient write-back from the sub-dialog.
+                // Per-region keys: even though we opened for one role, these settings
+                // apply globally to whichever surface(s) have ColorMix active
+                // (interlayer_colormix_surface). A future improvement would split
+                // them into top/penu variants for true per-role gradients.
+                auto wi = [&](const char* k, int v) {
+                    if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
+                    m_on_change(k);
+                };
+                auto wf = [&](const char* k, double v) {
+                    if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
+                    m_on_change(k);
+                };
+                wi("interlayer_colormix_mode",          dlg.get_grad_mode());
+                wi("interlayer_colormix_pct_a",         dlg.get_grad_pct_a());
+                wi("interlayer_colormix_pct_b",         dlg.get_grad_pct_b());
+                wi("interlayer_colormix_easing",        dlg.get_grad_easing());
+                wf("interlayer_colormix_gamma",         dlg.get_grad_gamma());
+                wi("interlayer_colormix_min_surface_lines", dlg.get_grad_min_lines());
+                wf("interlayer_colormix_overlap",       dlg.get_grad_overlap());
+                if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_invert"))
+                    o->value = dlg.get_grad_invert();
+                m_on_change("interlayer_colormix_invert");
+                wi("interlayer_colormix_band_count_a",  dlg.get_grad_band_a());
+                wi("interlayer_colormix_band_count_b",  dlg.get_grad_band_b());
+                wi("interlayer_colormix_band_count_c",  dlg.get_grad_band_c());
+                wi("interlayer_colormix_band_count_d",  dlg.get_grad_band_d());
+                wi("interlayer_colormix_tool_a",        dlg.get_tool_a());
+                wi("interlayer_colormix_tool_b",        dlg.get_tool_b());
+                wi("interlayer_colormix_tool_c",        dlg.get_tool_c());
+                wi("interlayer_colormix_tool_d",        dlg.get_tool_d());
                 // interlayer_colormix_surface is set by the outer dialog combos, not here.
             }
         } else if (eff == EFF_MP) {
@@ -2647,7 +3196,11 @@ private:
             if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_1"))     penu_ge1_cur    =o->value;
             if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_2"))     penu_ge2_cur    =o->value;
             if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_3"))     penu_ge3_cur    =o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_prime_volume"))    penu_prime_cur=(double)o->value;
+            // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume removed.
+            // The unified `multipass_prime_volume` is now read into both cur_prime_vol and
+            // penu_prime_cur so the (vestigial) dialog parameter still has a sensible value
+            // until the dialog's prime field is fully cleaned up.
+            penu_prime_cur = cur_prime_vol;
 
             const SurfaceZone zone = (surface_id == 0) ? SurfaceZone::TOP : SurfaceZone::PENULTIMATE;
             MultiPassConfigDialog dlg(this,
@@ -2704,7 +3257,10 @@ private:
                     ws("multipass_gcode_end_3",   dlg.get_gcode_end3());
                     wi("multipass_pa_mode",     dlg.get_pa_mode());
                     wf("multipass_pa_value",    (float)dlg.get_pa_value());
-                    wf("multipass_prime_volume",(float)dlg.get_prime_volume()); // NEOTKO_MULTIPASS_PRIME_TAG
+                    // NEOTKO_MULTIPASS_PRIME_TAG — s58: prime is managed by the global
+                    // optgroup setting (multipass_prime_volume) below `neotko_wipe_tower`,
+                    // not from this dialog. Dialog's get_prime_volume() returns 0 (nullptr
+                    // guard), writing it here would clobber the user's global setting.
                 } else {
                     // NEOTKO_MULTIPASS_SURFACES_TAG — PENULTIMATE zone: write penu keys only
                     wb("penultimate_multipass_enabled",       dlg.get_penu_enabled());
@@ -2731,7 +3287,8 @@ private:
                     ws("penultimate_multipass_gcode_end_1",   dlg.get_penu_gcode_end1());
                     ws("penultimate_multipass_gcode_end_2",   dlg.get_penu_gcode_end2());
                     ws("penultimate_multipass_gcode_end_3",   dlg.get_penu_gcode_end3());
-                    wf("penultimate_multipass_prime_volume",  (float)dlg.get_penu_prime());
+                    // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume
+                    // removed; the global `multipass_prime_volume` covers Top + Penu.
                 }
             }
         } else if (eff == EFF_PB) {
@@ -2849,6 +3406,10 @@ private:
                 o->value = m_chk_use_virtual && m_chk_use_virtual->GetValue();
             m_on_change("interlayer_colormix_use_virtual");
             // NEOTKO_COLORMIX_TAG_END
+
+            // NEOTKO_COLORMIX_TAG — s60: numeric gradient write-back was here.
+            // Now handled inside ColorMixPatternDialog (sub-dialog opened by
+            // the Advanced button per role) where the controls live.
         }
         // NEOTKO_COLORMIX_TAG_END
 
@@ -2925,14 +3486,20 @@ private:
         }
         if (sum < 1e-6f) sum = 1.f;
 
+        // NEOTKO_MULTIPASS_TAG — s58 UX fix:
+        // Draw passes in reverse so pass 0 (printed FIRST, physically at the
+        // bottom of the layer) appears at the BOTTOM of the preview, and the
+        // last pass (printed last, physically on top) appears at the TOP.
+        // Previously the preview was inverted vs reality.
         int y = 0;
-        for (int i = 0; i < n; ++i) {
+        for (int i = n - 1; i >= 0; --i) {
             int t = 0;
             if (auto* o = m_config->option<ConfigOptionInt>(tk[i])) t = o->value;
             wxColour col(120, 120, 120);
             if (t >= 0 && t < (int)m_fcolors.size() && !m_fcolors[t].empty())
                 col = hex_to_col(m_fcolors[t]);
-            const int band_h = (i < n - 1)
+            // Last drawn (i==0, bottom-most band) fills the remaining height.
+            const int band_h = (i > 0)
                 ? static_cast<int>(ratios[i] / sum * sz.y + 0.5f)
                 : sz.y - y;
             dc.SetBrush(wxBrush(col));
@@ -3273,6 +3840,76 @@ private:
 
         // 3. Filament section (TD sliders + More collapsible)
         vs->Add(create_filament_section(), 0, wxEXPAND | wxALL, PAD / 2);
+
+        // NEOTKO_COLORMIX_TAG_START — s58 Line distribution mode (global setting).
+        // Controls how SurfaceColorMix and PathBlend map pattern slots to extrusion
+        // lines.  Default (0) is the legacy behaviour (slot = path_idx % n_slots).
+        // Modes 1/2/3 are experimental geometric distribution strategies; see the
+        // tooltips for details.  Affects all four combinations of
+        // (ColorMix/PathBlend) × (Top/Penultimate).
+        {
+            auto* lm_sb = new wxStaticBoxSizer(wxVERTICAL, this,
+                _L("Line distribution mode"));
+            auto* lm_row = new wxBoxSizer(wxHORIZONTAL);
+
+            wxArrayString lm_labels;
+            lm_labels.Add(_L("Default — line index (safe, original)"));
+            lm_labels.Add(_L("GeoSort (A) — sort by perpendicular position"));
+            lm_labels.Add(_L("LaneQuant (B) — quantize to geometric lanes"));
+            lm_labels.Add(_L("DirCluster (C) — cluster by direction, then quantize"));
+
+            int cur_lm = 0;
+            if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
+                cur_lm = std::clamp(o->value, 0, 3);
+
+            m_choice_lane_mode = new wxChoice(this, wxID_ANY,
+                wxDefaultPosition, wxSize(320, -1), lm_labels);
+            m_choice_lane_mode->SetSelection(cur_lm);
+            m_choice_lane_mode->SetToolTip(
+                _L("How pattern slots are assigned to individual extrusion lines.\n\n"
+                   "0 Default — slot = line_index mod n_slots.\n"
+                   "  Legacy behaviour. Pattern can break visually on irregular shapes\n"
+                   "  (corners, concavities, narrow regions) because line order isn't\n"
+                   "  always proportional to geometric position.\n\n"
+                   "1 GeoSort — sort lines by position perpendicular to fill direction.\n"
+                   "  Rayas más ordenadas; fragmentos del mismo carril aún pueden recibir\n"
+                   "  colores distintos.\n\n"
+                   "2 LaneQuant — slot = quantized geometric lane.\n"
+                   "  Fragmentos del mismo carril reciben el mismo color → rayas continuas.\n"
+                   "  Más robusto para formas irregulares.\n\n"
+                   "3 DirCluster — agrupa primero por dirección de fill, luego LaneQuant\n"
+                   "  por cluster. Maneja casos donde el motor de fill rotó la dirección\n"
+                   "  en sub-regiones del contorno.\n\n"
+                   "Aplica a ColorMix + PathBlend en Top + Penultimate."));
+
+            m_choice_lane_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+                if (!m_choice_lane_mode) return;
+                const int v = std::clamp(m_choice_lane_mode->GetSelection(), 0, 3);
+                if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
+                    o->value = v;
+                m_on_change("surface_color_mix_lane_mode");
+                // Update mini-previews — they don't change shape but it triggers a
+                // redraw so the user gets immediate visual feedback.
+                if (m_prev_top)  m_prev_top->Refresh();
+                if (m_prev_penu) m_prev_penu->Refresh();
+            });
+
+            lm_row->Add(new wxStaticText(this, wxID_ANY, _L("Mode:")),
+                        0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            lm_row->Add(m_choice_lane_mode, 1, wxALIGN_CENTER_VERTICAL);
+            lm_sb->Add(lm_row, 0, wxEXPAND | wxALL, PAD / 2);
+
+            auto* lm_note = new wxStaticText(this, wxID_ANY,
+                _L("Experimental. Default = original behaviour (no risk).\n"
+                   "Modes A/B/C improve pattern fidelity on irregular shapes."));
+            lm_note->SetForegroundColour(wxColour(100, 100, 100));
+            lm_sb->Add(lm_note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
+
+            vs->Add(lm_sb, 0, wxEXPAND | wxALL, PAD / 2);
+        }
+        // NEOTKO_COLORMIX_TAG_END
+
+        // NEOTKO_COLORMIX_TAG — s60: Gradient section MOVED to ColorMixPatternDialog (sub-dialog opened by Advanced button per role).
 
         // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint Top+Penultimate optimizer)
         {
@@ -5894,6 +6531,9 @@ void TabPrint::build()
                 sz->Add(btn, 0, wxALL, 3);
                 return sz;
             });
+        // NEOTKO_COLORMIX_TAG — s60: numeric gradient controls live INSIDE the
+        // Surface Color Mixer dialog (Gradient section). The optgroup is only
+        // for the master enable + dialog launcher.
         // NEOTKO_SURFACE_MIXER_TAG_END
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
@@ -6134,6 +6774,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("single_extruder_multi_material_priming", "multimaterial_settings_prime_tower");
         // NEOTKO_NEOTOWER_TAG_START
         optgroup->append_single_option_line("neotko_wipe_tower");
+        // NEOTKO_MULTIPASS_PRIME_TAG — s58: SurfaceColorMix wipe reserve (unified).
+        // Was previously buried inside MultiPassConfigDialog as two separate fields
+        // (multipass_prime_volume + penultimate_multipass_prime_volume).  Now a single
+        // global setting under NeoTower.
+        optgroup->append_single_option_line("multipass_prime_volume");
         // NEOTKO_NEOTOWER_TAG_END
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");

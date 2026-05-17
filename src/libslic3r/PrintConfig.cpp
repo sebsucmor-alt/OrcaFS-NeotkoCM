@@ -6552,15 +6552,25 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // NEOTKO_PATHBLEND_TAG — s58 Fix D: invert_gradient is now a COLOUR-ONLY inverter.
+    // Z direction is always ascending (nozzle climbs from bottom_z at Y_min to
+    // nominal_z at Y_max) regardless of this flag — prevents drag and collisions.
+    // The flag now only controls which pass's tool dominates each side of the
+    // gradient (Y_min vs Y_max in the per-surface bounding box).
     def = this->add("pathblend_invert_gradient", coBool);
-    def->label = L("Ascending Z direction (safe)");
+    def->label = L("Reverse Flow Max to Min (unsafe)");
     def->category = L("Quality");
-    def->tooltip = L("When enabled, the Z staircase for pass 0 ascends during printing "
-                     "(nozzle moves up, not down). Recommended to avoid collisions with "
-                     "already-printed material. Disable only if your slicer prints low-Y "
-                     "paths first.");
+    def->tooltip = L("Flips which side of the gradient is dominated by which tool.\n"
+                     "Does NOT change Z direction — the nozzle always ascends from\n"
+                     "bottom_z (Y_min) to nominal_z (Y_max).\n\n"
+                     "OFF (default): pass-0 tool's flow ramps from LOW at Y_min to HIGH\n"
+                     "at Y_max — both Z and flow ascend along the same axis (safe).\n"
+                     "ON: pass-0 tool's flow ramps from HIGH at Y_min to LOW at Y_max.\n\n"
+                     "Useful when the gradient direction looks 'backwards' on a\n"
+                     "specific object orientation but you don't want to swap the\n"
+                     "config tools manually.");
     def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBool(true));
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("pathblend_fill_angle", coInt);
     def->label = L("Fill angle override (PathBlend)");
@@ -6765,6 +6775,23 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // NEOTKO_COLORMIX_TAG — s58 line distribution mode.
+    // Controls slot-to-line mapping for ColorMix and PathBlend (Top + Penultimate).
+    def = this->add("surface_color_mix_lane_mode", coInt);
+    def->label = L("Line distribution mode");
+    def->category = L("Quality");
+    def->tooltip = L("How pattern slots are mapped to extrusion lines.\n"
+                     "0 = Default — slot = line_index % n_slots (legacy, safest)\n"
+                     "1 = GeoSort — sort lines by position perpendicular to fill direction\n"
+                     "2 = LaneQuant — quantize each line to a 'lane' so fragmented stripes "
+                     "stay the same colour (most geometric)\n"
+                     "3 = DirCluster — cluster lines by direction first, then LaneQuant per "
+                     "cluster (handles sub-regions where the fill engine rotated direction)");
+    def->min = 0;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("interlayer_colormix_tool_a", coInt);
     def->label = L("First tool (A)");
     def->category = L("Quality");
@@ -6832,6 +6859,162 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Tool sequence for penultimate layer lines. Same format as top surface pattern.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString("12"));
+
+    // NEOTKO_COLORMIX_TAG — s60 numeric gradient mode (Step 1 of UX plan).
+    // 0 = Legacy pattern string (interlayer_colormix_pattern_top/_penultimate)
+    // 1 = Linear 2-color dithered gradient (tool_a + tool_b, percent split)
+    //     The dither is generated per-surface at slice time, sized to match
+    //     the actual line count of that surface — small surfaces get fewer
+    //     lines proportionally, large surfaces get a finer gradient. Uses a
+    //     Bresenham-style error-diffusion to spread tool B amongst tool A so
+    //     there is no hard band transition. Future modes (2=Linear3, 3=Custom
+    //     bands) will be added in subsequent steps.
+    def = this->add("interlayer_colormix_mode", coInt);
+    def->label = L("Pattern mode");
+    def->category = L("Quality");
+    def->tooltip = L("How the per-line tool sequence is built.\n"
+                     "0 = Pattern string (legacy: use the Top/Penultimate string fields).\n"
+                     "1 = Linear 2-color dithered (tool_a + tool_b at pct_a%).\n"
+                     "2 = Linear 3-color dithered (tool_a + tool_b + tool_c at pct_a%/pct_b%).\n"
+                     "3 = Custom bands (band_count_a/b/c/d — explicit hard band counts).");
+    def->min = 0;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("interlayer_colormix_pct_a", coInt);
+    def->label = L("Tool A percent");
+    def->category = L("Quality");
+    def->tooltip = L("Percent of lines assigned to Tool A (0-100).\n"
+                     "Linear 2-color: Tool B receives the remaining 100 - pct_a percent.\n"
+                     "Linear 3-color: Tool A receives pct_a; Tool B receives pct_b; Tool C receives 100-pct_a-pct_b.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(50));
+
+    def = this->add("interlayer_colormix_pct_b", coInt);
+    def->label = L("Tool B percent (Linear 3-color)");
+    def->category = L("Quality");
+    def->tooltip = L("Percent of lines assigned to Tool B in Linear 3-color mode (0-100).\n"
+                     "Tool C receives 100 - pct_a - pct_b. The dialog clamps pct_b so that\n"
+                     "pct_a + pct_b <= 100.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(33));
+
+    def = this->add("interlayer_colormix_easing", coInt);
+    def->label = L("Gradient easing");
+    def->category = L("Quality");
+    def->tooltip = L("Shape of the dither probability curve across the surface.\n"
+                     "0 = Linear (constant ratio across the gradient)\n"
+                     "1 = Ease-In (slow start, dense Tool B at the end)\n"
+                     "2 = Ease-Out (fast start, dense Tool B at the beginning)\n"
+                     "3 = Ease-In-Out (smoothstep — symmetric, soft on both ends)\n"
+                     "4 = Gamma (use the gamma value below)\n"
+                     "5 = Hard band (no dither — A then B in clean blocks)");
+    def->min = 0;
+    def->max = 5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("interlayer_colormix_gamma", coFloat);
+    def->label = L("Gradient gamma");
+    def->category = L("Quality");
+    def->tooltip = L("Gamma exponent for the easing curve (only used when Easing = 4).\n"
+                     "γ = 1.0 equals Linear. γ > 1 biases the gradient toward Tool A.\n"
+                     "γ < 1 biases toward Tool B.");
+    def->min = 0.1;
+    def->max = 10.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    // NEOTKO_COLORMIX_TAG — s60: invert gradient direction.
+    // Reverses the per-line tool sequence after dither/band generation. Useful
+    // when the slicer's natural fill order on a given object goes the wrong
+    // way visually relative to what the user expects — toggling this saves the
+    // hassle of swapping tool slots or pct values manually.
+    def = this->add("interlayer_colormix_invert", coBool);
+    def->label = L("Invert gradient direction");
+    def->category = L("Quality");
+    def->tooltip = L("Reverses the order of the generated dither / band sequence.\n"
+                     "Use this when the lower layer's natural fill direction makes the\n"
+                     "gradient look mirrored — flipping this checkbox is faster than\n"
+                     "swapping Color 1 / Color 2 manually.\n"
+                     "Has no effect in Pattern-string mode (mode 0).");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_COLORMIX_TAG — s60: how much the colour zones overlap.
+    // Default triangular weights (0.5) give hard 3-zone bands. Wider overlap
+    // (closer to 1.0) lets each colour sprinkle into the neighbouring zones,
+    // producing the smooth dithered look users expect from a "gradient".
+    def = this->add("interlayer_colormix_overlap", coFloat);
+    def->label = L("Color overlap");
+    def->category = L("Quality");
+    def->tooltip = L("How much each colour bleeds into its neighbour's zone in Linear modes.\n"
+                     "0.0 = hard zones (sharp band transitions)\n"
+                     "1.0 = strong overlap (every colour sprinkles throughout the gradient)\n"
+                     "Default 0.6 keeps the gradient direction visible while softening the\n"
+                     "transitions so they don't look like 3 hard bands.");
+    def->min = 0.0;
+    def->max = 1.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.6));
+
+    def = this->add("interlayer_colormix_min_surface_lines", coInt);
+    def->label = L("Min surface lines");
+    def->category = L("Quality");
+    def->tooltip = L("Surfaces with fewer than this many lines fall back to a single tool "
+                     "(Tool A) instead of attempting a gradient. Prevents tiny tops from "
+                     "showing a degenerate 1-of-3 split. Set to 0 to never fall back.");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(3));
+
+    def = this->add("interlayer_colormix_band_count_a", coInt);
+    def->label = L("Custom band — count A");
+    def->category = L("Quality");
+    def->tooltip = L("Number of consecutive lines assigned to Tool A in a custom-bands cycle.\n"
+                     "Only used when Pattern mode = 3 (Custom bands).");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(10));
+
+    def = this->add("interlayer_colormix_band_count_b", coInt);
+    def->label = L("Custom band — count B");
+    def->category = L("Quality");
+    def->tooltip = L("Number of consecutive lines assigned to Tool B in a custom-bands cycle.\n"
+                     "Set to 0 to skip this tool.");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(10));
+
+    def = this->add("interlayer_colormix_band_count_c", coInt);
+    def->label = L("Custom band — count C");
+    def->category = L("Quality");
+    def->tooltip = L("Number of consecutive lines assigned to Tool C in a custom-bands cycle.\n"
+                     "Set to 0 to skip this tool.");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("interlayer_colormix_band_count_d", coInt);
+    def->label = L("Custom band — count D");
+    def->category = L("Quality");
+    def->tooltip = L("Number of consecutive lines assigned to Tool D in a custom-bands cycle.\n"
+                     "Set to 0 to skip this tool.");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("interlayer_colormix_top_zone", coInt);
     def->label = L("Top surface zone");
@@ -7039,11 +7222,15 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionString(""));
 
     // NEOTKO_MULTIPASS_PRIME_TAG
+    // NEOTKO_MULTIPASS_PRIME_TAG — s58: relabeled as a global SurfaceColorMix wipe reserve.
+    // Applies to both Top and Penultimate sublayer primes (MultiPass + ColorMix + PathBlend).
+    // The legacy `penultimate_multipass_prime_volume` is removed; this key is the single source.
     def = this->add("multipass_prime_volume", coFloat);
-    def->label = L("Pass prime volume");
-    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each MultiPass sublayer "
-                     "toolchange. Set to 0 to disable. Requires the prime tower to be "
-                     "active. Uses the same Local-Z reserve mechanism as dithering.");
+    def->label = L("SurfaceColorMix wipe reserve");
+    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each SurfaceColorMix "
+                     "sublayer toolchange (MultiPass / ColorMix / PathBlend, Top + Penultimate). "
+                     "Set to 0 to disable. Requires a wipe tower (NeoTower or prime tower) active. "
+                     "Lower values = thinner / shorter wipe tower; higher values = better purge.");
     def->sidetext = L("mm³");
     def->min = 0; def->max = 200; def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5.f));
@@ -7150,13 +7337,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
-    def = this->add("penultimate_multipass_prime_volume", coFloat);
-    def->label = L("Penu pass prime volume");
-    def->tooltip = L("Volume (mm³) to purge before each Penultimate MultiPass sublayer toolchange. "
-                     "Set to 0 to disable.");
-    def->sidetext = L("mm³");
-    def->min = 0; def->max = 200; def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.f));
+    // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume removed.
+    // Unified into the global `multipass_prime_volume` (defined above, line ~7042).
 
     // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate: independent fan / speed / vary
     def = this->add("penultimate_multipass_vary_pattern", coBool);
