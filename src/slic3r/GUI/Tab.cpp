@@ -277,45 +277,58 @@ private:
     wxStaticText*     m_lbl_overlap      = nullptr;
     wxCheckBox*       m_chk_invert       = nullptr; // s60: invert gradient direction
 
+    // NEOTKO_COLORMIX_TAG — s61: role-aware config key prefix.
+    // m_surface_id 0 = Top → reads/writes the original (top-role) keys.
+    // m_surface_id 1 = Penultimate → reads/writes the `_penu_` mirror keys.
+    // Returns the full config key string for a given base name. Pattern keys
+    // (`pattern_top` / `pattern_penultimate`) are NOT routed through this —
+    // they keep their explicit names and the caller picks the right one.
+    std::string grad_key(const char* base) const {
+        std::string out = "interlayer_colormix_";
+        if (m_surface_id == 1) out += "penu_";
+        out += base;
+        return out;
+    }
+
     void load_grad_from_config()
     {
         if (!m_cfg) return;
-        auto gi = [&](const char* k, int def) -> int {
+        auto gi = [&](const std::string& k, int def) -> int {
             auto* o = m_cfg->option<ConfigOptionInt>(k);
             return o ? o->value : def;
         };
-        auto gf = [&](const char* k, double def) -> double {
+        auto gf = [&](const std::string& k, double def) -> double {
             auto* o = m_cfg->option<ConfigOptionFloat>(k);
             return o ? o->value : def;
         };
-        auto gb = [&](const char* k, bool def) -> bool {
+        auto gb = [&](const std::string& k, bool def) -> bool {
             auto* o = m_cfg->option<ConfigOptionBool>(k);
             return o ? o->value : def;
         };
-        m_grad_mode      = gi("interlayer_colormix_mode", 0);
-        m_grad_pct_a     = gi("interlayer_colormix_pct_a", 50);
-        m_grad_pct_b     = gi("interlayer_colormix_pct_b", 33);
-        m_grad_easing    = gi("interlayer_colormix_easing", 0);
-        m_grad_gamma     = gf("interlayer_colormix_gamma", 1.0);
-        m_grad_min_lines = gi("interlayer_colormix_min_surface_lines", 3);
-        m_grad_overlap   = gf("interlayer_colormix_overlap", 0.6);
-        m_grad_invert    = gb("interlayer_colormix_invert", false);
-        m_grad_band_a    = gi("interlayer_colormix_band_count_a", 10);
-        m_grad_band_b    = gi("interlayer_colormix_band_count_b", 10);
-        m_grad_band_c    = gi("interlayer_colormix_band_count_c", 0);
-        m_grad_band_d    = gi("interlayer_colormix_band_count_d", 0);
+        m_grad_mode      = gi(grad_key("mode"), 0);
+        m_grad_pct_a     = gi(grad_key("pct_a"), 50);
+        m_grad_pct_b     = gi(grad_key("pct_b"), 33);
+        m_grad_easing    = gi(grad_key("easing"), 0);
+        m_grad_gamma     = gf(grad_key("gamma"), 1.0);
+        m_grad_min_lines = gi(grad_key("min_surface_lines"), 3);
+        m_grad_overlap   = gf(grad_key("overlap"), 0.6);
+        m_grad_invert    = gb(grad_key("invert"), false);
+        m_grad_band_a    = gi(grad_key("band_count_a"), 10);
+        m_grad_band_b    = gi(grad_key("band_count_b"), 10);
+        m_grad_band_c    = gi(grad_key("band_count_c"), 0);
+        m_grad_band_d    = gi(grad_key("band_count_d"), 0);
         // Legacy config defaulted tool_c/_d to -1 ("off"). Treat any negative
         // value as "user hasn't configured this slot yet" and default it to a
         // sensible physical index in the dialog (2, 3) so the slot picker
         // shows a real tool. On save, the chosen tool index is written back —
         // never -1 — so the s60 SurfaceColorMix path always sees a real slot.
-        m_tool_a         = gi("interlayer_colormix_tool_a", 0);
+        m_tool_a         = gi(grad_key("tool_a"), 0);
         if (m_tool_a < 0) m_tool_a = 0;
-        m_tool_b         = gi("interlayer_colormix_tool_b", 1);
+        m_tool_b         = gi(grad_key("tool_b"), 1);
         if (m_tool_b < 0) m_tool_b = 1;
-        m_tool_c         = gi("interlayer_colormix_tool_c", 2);
+        m_tool_c         = gi(grad_key("tool_c"), 2);
         if (m_tool_c < 0) m_tool_c = 2;
-        m_tool_d         = gi("interlayer_colormix_tool_d", 3);
+        m_tool_d         = gi(grad_key("tool_d"), 3);
         if (m_tool_d < 0) m_tool_d = 3;
     }
 
@@ -3069,37 +3082,44 @@ private:
                     o->value = dlg.get_pattern();
                 m_on_change(pat_key);
 
-                // NEOTKO_COLORMIX_TAG — s60: gradient write-back from the sub-dialog.
-                // Per-region keys: even though we opened for one role, these settings
-                // apply globally to whichever surface(s) have ColorMix active
-                // (interlayer_colormix_surface). A future improvement would split
-                // them into top/penu variants for true per-role gradients.
-                auto wi = [&](const char* k, int v) {
+                // NEOTKO_COLORMIX_TAG — s61: per-role gradient write-back.
+                // surface_id 0 (Top) → original "interlayer_colormix_*" keys.
+                // surface_id 1 (Penu) → "interlayer_colormix_penu_*" mirrors.
+                // The dialog already read+edited the right set via grad_key();
+                // here we write back using the same prefix so Top and Pen never
+                // bleed into each other.
+                const std::string grad_prefix = (surface_id == 1)
+                    ? std::string("interlayer_colormix_penu_")
+                    : std::string("interlayer_colormix_");
+                auto wi = [&](const std::string& k, int v) {
                     if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
                     m_on_change(k);
                 };
-                auto wf = [&](const char* k, double v) {
+                auto wf = [&](const std::string& k, double v) {
                     if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
                     m_on_change(k);
                 };
-                wi("interlayer_colormix_mode",          dlg.get_grad_mode());
-                wi("interlayer_colormix_pct_a",         dlg.get_grad_pct_a());
-                wi("interlayer_colormix_pct_b",         dlg.get_grad_pct_b());
-                wi("interlayer_colormix_easing",        dlg.get_grad_easing());
-                wf("interlayer_colormix_gamma",         dlg.get_grad_gamma());
-                wi("interlayer_colormix_min_surface_lines", dlg.get_grad_min_lines());
-                wf("interlayer_colormix_overlap",       dlg.get_grad_overlap());
-                if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_invert"))
-                    o->value = dlg.get_grad_invert();
-                m_on_change("interlayer_colormix_invert");
-                wi("interlayer_colormix_band_count_a",  dlg.get_grad_band_a());
-                wi("interlayer_colormix_band_count_b",  dlg.get_grad_band_b());
-                wi("interlayer_colormix_band_count_c",  dlg.get_grad_band_c());
-                wi("interlayer_colormix_band_count_d",  dlg.get_grad_band_d());
-                wi("interlayer_colormix_tool_a",        dlg.get_tool_a());
-                wi("interlayer_colormix_tool_b",        dlg.get_tool_b());
-                wi("interlayer_colormix_tool_c",        dlg.get_tool_c());
-                wi("interlayer_colormix_tool_d",        dlg.get_tool_d());
+                wi(grad_prefix + "mode",              dlg.get_grad_mode());
+                wi(grad_prefix + "pct_a",             dlg.get_grad_pct_a());
+                wi(grad_prefix + "pct_b",             dlg.get_grad_pct_b());
+                wi(grad_prefix + "easing",            dlg.get_grad_easing());
+                wf(grad_prefix + "gamma",             dlg.get_grad_gamma());
+                wi(grad_prefix + "min_surface_lines", dlg.get_grad_min_lines());
+                wf(grad_prefix + "overlap",           dlg.get_grad_overlap());
+                {
+                    const std::string k_inv = grad_prefix + "invert";
+                    if (auto* o = m_config->option<ConfigOptionBool>(k_inv))
+                        o->value = dlg.get_grad_invert();
+                    m_on_change(k_inv);
+                }
+                wi(grad_prefix + "band_count_a",      dlg.get_grad_band_a());
+                wi(grad_prefix + "band_count_b",      dlg.get_grad_band_b());
+                wi(grad_prefix + "band_count_c",      dlg.get_grad_band_c());
+                wi(grad_prefix + "band_count_d",      dlg.get_grad_band_d());
+                wi(grad_prefix + "tool_a",            dlg.get_tool_a());
+                wi(grad_prefix + "tool_b",            dlg.get_tool_b());
+                wi(grad_prefix + "tool_c",            dlg.get_tool_c());
+                wi(grad_prefix + "tool_d",            dlg.get_tool_d());
                 // interlayer_colormix_surface is set by the outer dialog combos, not here.
             }
         } else if (eff == EFF_MP) {

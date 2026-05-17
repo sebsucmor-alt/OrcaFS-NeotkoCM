@@ -1012,10 +1012,15 @@ PRINT_CONFIG_CLASS_DEFINE(
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
-// NEOTKO_NEOTOWER_TAG_START — split to avoid MSVC C1009 (macros nested too deeply).
-// PrintRegionConfigBase holds the upstream/BBS/Orca entries; PrintRegionConfig (derived
-// below) adds the NEOTKO entries. FullPrintConfig and all consumers keep using
-// PrintRegionConfig unchanged via public inheritance.
+// NEOTKO_COLORMIX_TAG — s61: PrintRegionConfig has crossed the ~256-entry
+// limit that MSVC accepts inside a single PRINT_CONFIG_CLASS_DEFINE macro
+// (error C1009 "macros nested too deeply" on GitHub Actions Windows runner).
+// We split the class in two: PrintRegionConfigBase holds upstream / Orca
+// entries up through top_surface_speed; PrintRegionConfig itself becomes a
+// PRINT_CONFIG_CLASS_DERIVED_DEFINE that inherits Base and adds all the
+// NEOTKO + BBS keys (Neoweave, MultiPass, ColorMix, PathBlend, …). No `.cpp`
+// callers need changes — `config.<any_key>` still works thanks to inheritance.
+// IMPORTANT: future per-region keys must go in the derived block, not Base.
 PRINT_CONFIG_CLASS_DEFINE(
     PrintRegionConfigBase,
 
@@ -1105,9 +1110,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, top_surface_speed))
 )
 
-// NEOTKO_NEOTOWER_TAG — derived class adds all NEOTKO entries to PrintRegionConfig.
-// Split required to keep each BOOST_PP_SEQ_FOR_EACH expansion under MSVC's macro
-// nesting limit (~255). Base has ~80 upstream entries; derived has the NEOTKO ones.
+// NEOTKO_COLORMIX_TAG — s61: derived part of PrintRegionConfig (see split note
+// above). All NEOTKO + BBS per-region keys live here so the BOOST_PP_SEQ
+// expansion stays under MSVC's macro-nesting limit.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintRegionConfig,
     (PrintRegionConfigBase),
@@ -1148,6 +1153,23 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_min_surface_lines))
     ((ConfigOptionFloat,   interlayer_colormix_overlap))
     ((ConfigOptionBool,    interlayer_colormix_invert))
+    // NEOTKO_COLORMIX_TAG — s61: per-role penultimate-surface variants.
+    ((ConfigOptionInt,     interlayer_colormix_penu_mode))
+    ((ConfigOptionInt,     interlayer_colormix_penu_pct_a))
+    ((ConfigOptionInt,     interlayer_colormix_penu_pct_b))
+    ((ConfigOptionInt,     interlayer_colormix_penu_easing))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_gamma))
+    ((ConfigOptionInt,     interlayer_colormix_penu_min_surface_lines))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_overlap))
+    ((ConfigOptionBool,    interlayer_colormix_penu_invert))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_a))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_b))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_c))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_d))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_a))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_b))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_c))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_d))
     ((ConfigOptionInt,     interlayer_colormix_band_count_a))
     ((ConfigOptionInt,     interlayer_colormix_band_count_b))
     ((ConfigOptionInt,     interlayer_colormix_band_count_c))

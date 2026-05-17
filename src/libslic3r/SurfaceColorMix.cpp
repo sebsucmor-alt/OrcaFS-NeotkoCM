@@ -449,6 +449,56 @@ int SurfaceColorMix::assign_and_group_tools(
         if (!allow_top  && first_path->role() == erTopSolidInfill)    continue;
         if (!allow_penu && first_path->role() == erPenultimateInfill)  continue;
 
+        // NEOTKO_COLORMIX_TAG — s61: per-role gradient view.
+        // Pick the top-role or penultimate-role config keys based on the actual
+        // ExtrusionRole of this surface. The dialog edits each set
+        // independently; out of the box the defaults match so old presets
+        // behave the same on both roles.
+        const bool gv_is_top = (first_path->role() == erTopSolidInfill);
+        struct GV {
+            int    cm_mode, pct_a, pct_b, easing, min_lines;
+            double gamma, overlap;
+            bool   invert;
+            int    band_a, band_b, band_c, band_d;
+            int    tool_a, tool_b, tool_c, tool_d;
+        };
+        GV gv;
+        if (gv_is_top) {
+            gv.cm_mode   = config.interlayer_colormix_mode.value;
+            gv.pct_a     = config.interlayer_colormix_pct_a.value;
+            gv.pct_b     = config.interlayer_colormix_pct_b.value;
+            gv.easing    = config.interlayer_colormix_easing.value;
+            gv.gamma     = config.interlayer_colormix_gamma.value;
+            gv.min_lines = config.interlayer_colormix_min_surface_lines.value;
+            gv.overlap   = config.interlayer_colormix_overlap.value;
+            gv.invert    = config.interlayer_colormix_invert.value;
+            gv.band_a    = config.interlayer_colormix_band_count_a.value;
+            gv.band_b    = config.interlayer_colormix_band_count_b.value;
+            gv.band_c    = config.interlayer_colormix_band_count_c.value;
+            gv.band_d    = config.interlayer_colormix_band_count_d.value;
+            gv.tool_a    = config.interlayer_colormix_tool_a.value;
+            gv.tool_b    = config.interlayer_colormix_tool_b.value;
+            gv.tool_c    = config.interlayer_colormix_tool_c.value;
+            gv.tool_d    = config.interlayer_colormix_tool_d.value;
+        } else {
+            gv.cm_mode   = config.interlayer_colormix_penu_mode.value;
+            gv.pct_a     = config.interlayer_colormix_penu_pct_a.value;
+            gv.pct_b     = config.interlayer_colormix_penu_pct_b.value;
+            gv.easing    = config.interlayer_colormix_penu_easing.value;
+            gv.gamma     = config.interlayer_colormix_penu_gamma.value;
+            gv.min_lines = config.interlayer_colormix_penu_min_surface_lines.value;
+            gv.overlap   = config.interlayer_colormix_penu_overlap.value;
+            gv.invert    = config.interlayer_colormix_penu_invert.value;
+            gv.band_a    = config.interlayer_colormix_penu_band_count_a.value;
+            gv.band_b    = config.interlayer_colormix_penu_band_count_b.value;
+            gv.band_c    = config.interlayer_colormix_penu_band_count_c.value;
+            gv.band_d    = config.interlayer_colormix_penu_band_count_d.value;
+            gv.tool_a    = config.interlayer_colormix_penu_tool_a.value;
+            gv.tool_b    = config.interlayer_colormix_penu_tool_b.value;
+            gv.tool_c    = config.interlayer_colormix_penu_tool_c.value;
+            gv.tool_d    = config.interlayer_colormix_penu_tool_d.value;
+        }
+
         // Resolve tool list from role-specific pattern (fallback to legacy slots if invalid)
         // NEOTKO_COLORMIX_TAG — s60: mode-aware tool resolution.
         // mode=0 (legacy)     → parse the pattern string as before.
@@ -459,48 +509,36 @@ int SurfaceColorMix::assign_and_group_tools(
         // to pass the `tools.size() < 2` guard. The per-line decisions are
         // computed AFTER raw_lines is known.
         std::vector<int> tools;
-        const int cm_mode = config.interlayer_colormix_mode.value;
+        const int cm_mode = gv.cm_mode;
         auto fallback_to_pattern_string = [&]() {
-            const std::string& pattern_str = (first_path->role() == erTopSolidInfill)
+            const std::string& pattern_str = gv_is_top
                 ? config.interlayer_colormix_pattern_top.value
                 : config.interlayer_colormix_pattern_penultimate.value;
             tools = build_tool_list_from_pattern(pattern_str, config, mgr, num_physical);
         };
         if (cm_mode == 1) {
-            const int t_a = config.interlayer_colormix_tool_a.value;
-            const int t_b = config.interlayer_colormix_tool_b.value;
-            if (t_a >= 0 && t_b >= 0 && t_a != t_b) {
-                tools.push_back(t_a);
-                tools.push_back(t_b);
+            if (gv.tool_a >= 0 && gv.tool_b >= 0 && gv.tool_a != gv.tool_b) {
+                tools.push_back(gv.tool_a);
+                tools.push_back(gv.tool_b);
             } else fallback_to_pattern_string();
         } else if (cm_mode == 2) {
-            const int t_a = config.interlayer_colormix_tool_a.value;
-            const int t_b = config.interlayer_colormix_tool_b.value;
-            const int t_c = config.interlayer_colormix_tool_c.value;
             // For Linear3 we need at least 2 distinct tools; tool_c may equal a/b
             // (effectively collapses to a 2-stop ramp at one end).
-            if (t_a >= 0 && t_b >= 0 && t_c >= 0 && (t_a != t_b || t_b != t_c)) {
-                tools.push_back(t_a);
-                tools.push_back(t_b);
-                tools.push_back(t_c);
+            if (gv.tool_a >= 0 && gv.tool_b >= 0 && gv.tool_c >= 0
+                && (gv.tool_a != gv.tool_b || gv.tool_b != gv.tool_c)) {
+                tools.push_back(gv.tool_a);
+                tools.push_back(gv.tool_b);
+                tools.push_back(gv.tool_c);
             } else fallback_to_pattern_string();
         } else if (cm_mode == 3) {
-            const int t_a = config.interlayer_colormix_tool_a.value;
-            const int t_b = config.interlayer_colormix_tool_b.value;
-            const int t_c = config.interlayer_colormix_tool_c.value;
-            const int t_d = config.interlayer_colormix_tool_d.value;
-            const int c_a = config.interlayer_colormix_band_count_a.value;
-            const int c_b = config.interlayer_colormix_band_count_b.value;
-            const int c_c = config.interlayer_colormix_band_count_c.value;
-            const int c_d = config.interlayer_colormix_band_count_d.value;
             // NEOTKO_COLORMIX_TAG — s60: tool_c/_d default to -1 ("off") in the
             // legacy config. Treat a negative tool index as "skip this slot"
             // even if a band count is configured for it — otherwise the slot
             // silently encoded T0 and the user saw "C/D didn't apply".
-            if (c_a > 0 && t_a >= 0) tools.push_back(t_a);
-            if (c_b > 0 && t_b >= 0) tools.push_back(t_b);
-            if (c_c > 0 && t_c >= 0) tools.push_back(t_c);
-            if (c_d > 0 && t_d >= 0) tools.push_back(t_d);
+            if (gv.band_a > 0 && gv.tool_a >= 0) tools.push_back(gv.tool_a);
+            if (gv.band_b > 0 && gv.tool_b >= 0) tools.push_back(gv.tool_b);
+            if (gv.band_c > 0 && gv.tool_c >= 0) tools.push_back(gv.tool_c);
+            if (gv.band_d > 0 && gv.tool_d >= 0) tools.push_back(gv.tool_d);
             if (tools.size() < 2) fallback_to_pattern_string();
         } else {
             fallback_to_pattern_string();
@@ -563,25 +601,33 @@ int SurfaceColorMix::assign_and_group_tools(
         // index → position in the sequence → the gradient axis follows the
         // chosen geometry, not the emission order.
         if (cm_mode >= 1 && cm_mode <= 3) {
-            const int min_lines = config.interlayer_colormix_min_surface_lines.value;
+            // NEOTKO_COLORMIX_TAG — s61 BUG FIX: route ALL dither parameters
+            // through the per-role `gv` view. Previously these were read with
+            // `config.interlayer_colormix_*` directly which always returned
+            // the TOP role values regardless of the actual surface role →
+            // Penultimate surfaces silently used Top's pct, easing, gamma,
+            // overlap, band counts. With this fix Top and Penu are truly
+            // independent end-to-end.
+            const int min_lines = gv.min_lines;
             const int n         = static_cast<int>(raw_lines.size());
-            const int easing    = config.interlayer_colormix_easing.value;
-            const double gamma  = config.interlayer_colormix_gamma.value;
+            const int easing    = gv.easing;
+            const double gamma  = gv.gamma;
             if (min_lines > 0 && n < min_lines) {
                 // Fall back to single tool (Tool A) for tiny surfaces.
-                const int t_a = config.interlayer_colormix_tool_a.value;
-                tools.assign(static_cast<size_t>(n), t_a);
+                tools.assign(static_cast<size_t>(n), gv.tool_a);
                 NEOTKO_LOG(COLORMIX, "DITHER_MIN_LINES_FALLBACK layer=" << layer_idx
-                    << " n=" << n << " < min=" << min_lines << " → all T" << t_a);
+                    << " role=" << (gv_is_top ? "Top" : "Penu")
+                    << " n=" << n << " < min=" << min_lines << " → all T" << gv.tool_a);
             } else if (cm_mode == 1 && tools.size() == 2) {
                 const int t_a   = tools[0];
                 const int t_b   = tools[1];
-                const int pct_a = config.interlayer_colormix_pct_a.value;
+                const int pct_a = gv.pct_a;
                 tools = build_dithered_tools_2color(n, t_a, t_b, pct_a, easing, gamma);
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     int count_a = 0, count_b = 0;
                     for (int t : tools) (t == t_a ? count_a : count_b)++;
                     NEOTKO_LOG(COLORMIX, "DITHER_2COLOR layer=" << layer_idx
+                        << " role=" << (gv_is_top ? "Top" : "Penu")
                         << " n=" << tools.size()
                         << " T" << t_a << "=" << count_a
                         << " T" << t_b << "=" << count_b
@@ -591,39 +637,38 @@ int SurfaceColorMix::assign_and_group_tools(
                 const int t_a   = tools[0];
                 const int t_b   = tools[1];
                 const int t_c   = tools[2];
-                const int pct_a = config.interlayer_colormix_pct_a.value;
-                const int pct_b = config.interlayer_colormix_pct_b.value;
-                const double overlap = config.interlayer_colormix_overlap.value;
+                const int pct_a = gv.pct_a;
+                const int pct_b = gv.pct_b;
+                const double overlap = gv.overlap;
                 tools = build_dithered_tools_3color(n, t_a, t_b, t_c, pct_a, pct_b,
                                                     easing, gamma, overlap);
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     int ca = 0, cb = 0, cc = 0;
                     for (int t : tools) { if (t == t_a) ca++; else if (t == t_b) cb++; else if (t == t_c) cc++; }
                     NEOTKO_LOG(COLORMIX, "DITHER_3COLOR layer=" << layer_idx
+                        << " role=" << (gv_is_top ? "Top" : "Penu")
                         << " n=" << tools.size()
                         << " T" << t_a << "=" << ca
                         << " T" << t_b << "=" << cb
                         << " T" << t_c << "=" << cc
-                        << " pct_a=" << pct_a << "% pct_b=" << pct_b << "% easing=" << easing);
+                        << " pct_a=" << pct_a << "% pct_b=" << pct_b
+                        << "% easing=" << easing << " overlap=" << overlap);
                 }
             } else if (cm_mode == 3) {
                 // Custom bands: ignore easing (hard blocks by definition).
-                const int t_a = config.interlayer_colormix_tool_a.value;
-                const int t_b = config.interlayer_colormix_tool_b.value;
-                const int t_c = config.interlayer_colormix_tool_c.value;
-                const int t_d = config.interlayer_colormix_tool_d.value;
-                const int c_a = config.interlayer_colormix_band_count_a.value;
-                const int c_b = config.interlayer_colormix_band_count_b.value;
-                const int c_c = config.interlayer_colormix_band_count_c.value;
-                const int c_d = config.interlayer_colormix_band_count_d.value;
-                tools = build_custom_bands(n, t_a, c_a, t_b, c_b, t_c, c_c, t_d, c_d);
+                tools = build_custom_bands(n,
+                    gv.tool_a, gv.band_a,
+                    gv.tool_b, gv.band_b,
+                    gv.tool_c, gv.band_c,
+                    gv.tool_d, gv.band_d);
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     NEOTKO_LOG(COLORMIX, "CUSTOM_BANDS layer=" << layer_idx
+                        << " role=" << (gv_is_top ? "Top" : "Penu")
                         << " n=" << tools.size()
-                        << " cycle=[T" << t_a << "x" << c_a
-                        << ", T" << t_b << "x" << c_b
-                        << ", T" << t_c << "x" << c_c
-                        << ", T" << t_d << "x" << c_d << "]");
+                        << " cycle=[T" << gv.tool_a << "x" << gv.band_a
+                        << ", T" << gv.tool_b << "x" << gv.band_b
+                        << ", T" << gv.tool_c << "x" << gv.band_c
+                        << ", T" << gv.tool_d << "x" << gv.band_d << "]");
                 }
             }
 
@@ -632,10 +677,17 @@ int SurfaceColorMix::assign_and_group_tools(
             // gradient runs in the opposite direction without the user having
             // to swap tool slots or pct values manually. Equivalent visual
             // result, single-checkbox UX.
-            if (config.interlayer_colormix_invert.value && tools.size() > 1) {
+            // NEOTKO_COLORMIX_TAG — s61 BUG FIX: was reading the TOP-only key
+            // (`interlayer_colormix_invert`) regardless of role, so a
+            // Penultimate surface with invert toggled in the Penu dialog was
+            // ignored (and vice versa: a Top invert leaked into Penu). Now
+            // uses `gv.invert` which was loaded from the role-correct key in
+            // the per-role view struct at the top of the loop.
+            if (gv.invert && tools.size() > 1) {
                 std::reverse(tools.begin(), tools.end());
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     NEOTKO_LOG(COLORMIX, "INVERT_GRADIENT layer=" << layer_idx
+                        << " role=" << (gv_is_top ? "Top" : "Penu")
                         << " n=" << tools.size() << " (reversed sequence)");
                 }
             }

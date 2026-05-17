@@ -1055,38 +1055,70 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 // specific rules) participate. Register those directly so the
                 // wipe tower sees the correct (small) extruder set instead of
                 // parsing whatever default pattern string is sitting there.
-                const int cm_mode = cfg.interlayer_colormix_mode.value;
-                auto tools_for_mode = [&]() -> std::vector<unsigned int> {
+                // NEOTKO_COLORMIX_TAG — s61: per-role gradient config. Each role
+                // (top / penultimate) reads its own mode + tools + band counts.
+                // Top uses the original keys; Penultimate uses the `_penu_`
+                // mirrors added in s61. Defaults match so an unconfigured
+                // preset behaves identically on both roles.
+                auto tools_for_role = [&](bool top_role) -> std::vector<unsigned int> {
+                    const int role_mode = top_role
+                        ? cfg.interlayer_colormix_mode.value
+                        : cfg.interlayer_colormix_penu_mode.value;
+                    const int role_ta = top_role
+                        ? cfg.interlayer_colormix_tool_a.value
+                        : cfg.interlayer_colormix_penu_tool_a.value;
+                    const int role_tb = top_role
+                        ? cfg.interlayer_colormix_tool_b.value
+                        : cfg.interlayer_colormix_penu_tool_b.value;
+                    const int role_tc = top_role
+                        ? cfg.interlayer_colormix_tool_c.value
+                        : cfg.interlayer_colormix_penu_tool_c.value;
+                    const int role_td = top_role
+                        ? cfg.interlayer_colormix_tool_d.value
+                        : cfg.interlayer_colormix_penu_tool_d.value;
+                    const int role_ca = top_role
+                        ? cfg.interlayer_colormix_band_count_a.value
+                        : cfg.interlayer_colormix_penu_band_count_a.value;
+                    const int role_cb = top_role
+                        ? cfg.interlayer_colormix_band_count_b.value
+                        : cfg.interlayer_colormix_penu_band_count_b.value;
+                    const int role_cc = top_role
+                        ? cfg.interlayer_colormix_band_count_c.value
+                        : cfg.interlayer_colormix_penu_band_count_c.value;
+                    const int role_cd = top_role
+                        ? cfg.interlayer_colormix_band_count_d.value
+                        : cfg.interlayer_colormix_penu_band_count_d.value;
                     std::vector<unsigned int> v;
                     auto add = [&](int t) {
                         if (t < 0) return;
                         const unsigned int u = static_cast<unsigned int>(t + 1);
-                        if (std::find(v.begin(), v.end(), u) == v.end())
-                            v.push_back(u);
+                        if (std::find(v.begin(), v.end(), u) == v.end()) v.push_back(u);
                     };
-                    if (cm_mode == 1) {                  // Linear 2-color
-                        add(tool_a); add(tool_b);
-                    } else if (cm_mode == 2) {           // Linear 3-color
-                        add(tool_a); add(tool_b); add(tool_c);
-                    } else if (cm_mode == 3) {           // Custom bands
-                        if (cfg.interlayer_colormix_band_count_a.value > 0) add(tool_a);
-                        if (cfg.interlayer_colormix_band_count_b.value > 0) add(tool_b);
-                        if (cfg.interlayer_colormix_band_count_c.value > 0) add(tool_c);
-                        if (cfg.interlayer_colormix_band_count_d.value > 0) add(tool_d);
+                    if (role_mode == 1) {                 // Linear 2-color
+                        add(role_ta); add(role_tb);
+                    } else if (role_mode == 2) {          // Linear 3-color
+                        add(role_ta); add(role_tb); add(role_tc);
+                    } else if (role_mode == 3) {          // Custom bands
+                        if (role_ca > 0) add(role_ta);
+                        if (role_cb > 0) add(role_tb);
+                        if (role_cc > 0) add(role_tc);
+                        if (role_cd > 0) add(role_td);
                     }
                     return v;
                 };
+                const int cm_mode_top = cfg.interlayer_colormix_mode.value;
+                const int cm_mode_pen = cfg.interlayer_colormix_penu_mode.value;
                 if (want_top) {
-                    if (cm_mode >= 1 && cm_mode <= 3)
-                        tools_top = tools_for_mode();
+                    if (cm_mode_top >= 1 && cm_mode_top <= 3)
+                        tools_top = tools_for_role(true);
                     else
                         tools_top = parse_colormix_pattern_1based(
                             cfg.interlayer_colormix_pattern_top.value,
                             tool_a, tool_b, tool_c, tool_d, &layer_tools);
                 }
                 if (want_pen) {
-                    if (cm_mode >= 1 && cm_mode <= 3)
-                        tools_pen = tools_for_mode();
+                    if (cm_mode_pen >= 1 && cm_mode_pen <= 3)
+                        tools_pen = tools_for_role(false);
                     else
                         tools_pen = parse_colormix_pattern_1based(
                             cfg.interlayer_colormix_pattern_penultimate.value,

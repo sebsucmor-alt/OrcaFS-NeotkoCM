@@ -7016,6 +7016,90 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // NEOTKO_COLORMIX_TAG — s61: per-role gradient configs.
+    // 16 mirror keys with `penu_` infix that override the (top-role) keys
+    // above when the slicer is processing a Penultimate surface. Defaults
+    // match the top defaults so out-of-the-box behaviour is unchanged for
+    // anyone who only ever edited via the Top dialog. The Penultimate
+    // dialog edits these directly; SurfaceColorMix and ToolOrdering pick
+    // the prefix based on `first_path->role()` at slice time.
+    auto add_penu_int = [this](const char* k, int def_v, int mn, int mx,
+                                const char* lbl, const char* tip) {
+        ConfigOptionDef* d = this->add(k, coInt);
+        d->label = L(lbl);
+        d->category = L("Quality");
+        d->tooltip = L(tip);
+        d->min = mn; d->max = mx; d->mode = comAdvanced;
+        d->set_default_value(new ConfigOptionInt(def_v));
+    };
+    auto add_penu_float = [this](const char* k, double def_v, double mn, double mx,
+                                  const char* lbl, const char* tip) {
+        ConfigOptionDef* d = this->add(k, coFloat);
+        d->label = L(lbl);
+        d->category = L("Quality");
+        d->tooltip = L(tip);
+        d->min = mn; d->max = mx; d->mode = comAdvanced;
+        d->set_default_value(new ConfigOptionFloat(def_v));
+    };
+    auto add_penu_bool = [this](const char* k, bool def_v,
+                                 const char* lbl, const char* tip) {
+        ConfigOptionDef* d = this->add(k, coBool);
+        d->label = L(lbl);
+        d->category = L("Quality");
+        d->tooltip = L(tip);
+        d->mode = comAdvanced;
+        d->set_default_value(new ConfigOptionBool(def_v));
+    };
+    add_penu_int  ("interlayer_colormix_penu_mode",          0,  0,   3,
+                   "Pattern mode (Penultimate)",
+                   "Pattern mode used for Penultimate surfaces. Same encoding as the "
+                   "top variant (0=string, 1=Linear2, 2=Linear3, 3=Custom bands).");
+    add_penu_int  ("interlayer_colormix_penu_pct_a",         50, 0,  100,
+                   "Tool A percent (Penultimate)",
+                   "Penultimate-surface variant of Tool A percent.");
+    add_penu_int  ("interlayer_colormix_penu_pct_b",         33, 0,  100,
+                   "Tool B percent (Penultimate)",
+                   "Penultimate-surface variant of Tool B percent.");
+    add_penu_int  ("interlayer_colormix_penu_easing",        0,  0,   5,
+                   "Gradient easing (Penultimate)",
+                   "Penultimate-surface variant of the easing curve.");
+    add_penu_float("interlayer_colormix_penu_gamma",         1.0, 0.1, 10.0,
+                   "Gradient gamma (Penultimate)",
+                   "Penultimate-surface variant of gamma (used when easing = 4).");
+    add_penu_int  ("interlayer_colormix_penu_min_surface_lines", 3, 0, 100,
+                   "Min surface lines (Penultimate)",
+                   "Penultimate-surface variant of the min-lines fallback.");
+    add_penu_float("interlayer_colormix_penu_overlap",       0.6, 0.0, 1.0,
+                   "Color overlap (Penultimate)",
+                   "Penultimate-surface variant of the colour overlap.");
+    add_penu_bool ("interlayer_colormix_penu_invert",        false,
+                   "Invert gradient direction (Penultimate)",
+                   "Penultimate-surface variant of the invert flag.");
+    add_penu_int  ("interlayer_colormix_penu_band_count_a", 10, 0, 200,
+                   "Custom band — count A (Penultimate)",
+                   "Penultimate-surface variant of Custom band A count.");
+    add_penu_int  ("interlayer_colormix_penu_band_count_b", 10, 0, 200,
+                   "Custom band — count B (Penultimate)",
+                   "Penultimate-surface variant of Custom band B count.");
+    add_penu_int  ("interlayer_colormix_penu_band_count_c",  0, 0, 200,
+                   "Custom band — count C (Penultimate)",
+                   "Penultimate-surface variant of Custom band C count.");
+    add_penu_int  ("interlayer_colormix_penu_band_count_d",  0, 0, 200,
+                   "Custom band — count D (Penultimate)",
+                   "Penultimate-surface variant of Custom band D count.");
+    add_penu_int  ("interlayer_colormix_penu_tool_a", 0, -1, 3,
+                   "First tool (A, Penultimate)",
+                   "Penultimate-surface variant of First tool (A).");
+    add_penu_int  ("interlayer_colormix_penu_tool_b", 1, -1, 3,
+                   "Second tool (B, Penultimate)",
+                   "Penultimate-surface variant of Second tool (B).");
+    add_penu_int  ("interlayer_colormix_penu_tool_c", 2, -1, 3,
+                   "Third tool (C, Penultimate)",
+                   "Penultimate-surface variant of Third tool (C). Defaults to 2 (was -1=off).");
+    add_penu_int  ("interlayer_colormix_penu_tool_d", 3, -1, 3,
+                   "Fourth tool (D, Penultimate)",
+                   "Penultimate-surface variant of Fourth tool (D). Defaults to 3 (was -1=off).");
+
     def = this->add("interlayer_colormix_top_zone", coInt);
     def->label = L("Top surface zone");
     def->category = L("Quality");
@@ -8944,8 +9028,12 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
         return 1; \
     }
+// NEOTKO_COLORMIX_TAG — s61: PrintRegionConfigBase added here because the
+// MSVC-driven split introduced a Base class that has its own static cache.
+// Without this entry the linker reports "undefined virtual thunk to
+// PrintRegionConfigBase::keys() const" on macOS (and similar on Linux).
 PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintConfig, FullPrintConfig,
+    PrintObjectConfig, PrintRegionConfigBase, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintConfig, FullPrintConfig,
     SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
 static int print_config_static_initialized = print_config_static_initializer();
 
