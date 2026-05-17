@@ -1012,8 +1012,12 @@ PRINT_CONFIG_CLASS_DEFINE(
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
+// NEOTKO_NEOTOWER_TAG_START — split to avoid MSVC C1009 (macros nested too deeply).
+// PrintRegionConfigBase holds the upstream/BBS/Orca entries; PrintRegionConfig (derived
+// below) adds the NEOTKO entries. FullPrintConfig and all consumers keep using
+// PrintRegionConfig unchanged via public inheritance.
 PRINT_CONFIG_CLASS_DEFINE(
-    PrintRegionConfig,
+    PrintRegionConfigBase,
 
     ((ConfigOptionInt,                  bottom_shell_layers))
     ((ConfigOptionFloat,                bottom_shell_thickness))
@@ -1099,6 +1103,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
     ((ConfigOptionFloat, top_surface_speed))
+)
+
+// NEOTKO_NEOTOWER_TAG — derived class adds all NEOTKO entries to PrintRegionConfig.
+// Split required to keep each BOOST_PP_SEQ_FOR_EACH expansion under MSVC's macro
+// nesting limit (~255). Base has ~80 upstream entries; derived has the NEOTKO ones.
+PRINT_CONFIG_CLASS_DERIVED_DEFINE(
+    PrintRegionConfig,
+    (PrintRegionConfigBase),
+
     // NEOTKO_MULTIPASS_TAG_START — Neoweaving
     ((ConfigOptionBool,                   interlayer_neoweave_enabled))
     ((ConfigOptionEnum<NeoweaveMode>,     interlayer_neoweave_mode))
