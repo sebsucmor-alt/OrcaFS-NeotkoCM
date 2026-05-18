@@ -218,7 +218,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
     m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmSegmentation));
     // NEOTKO_PROFILE_TAG — Opción 4 Fase B: 3D Painter for SurfaceEffectProfile (placeholder MMU icon).
-    m_gizmos.emplace_back(new GLGizmoColorMixPainter(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::ColorMixPainter));
+    m_gizmos.emplace_back(new GLGizmoColorMixPainter(m_parent, m_is_dark ? "mmu_surfacecolormix_dark.svg" : "mmu_surfacecolormix.svg", EType::ColorMixPainter));
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent, m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg", EType::Emboss));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
     m_gizmos.emplace_back(new GLGizmoMeasure(m_parent, m_is_dark ? "toolbar_measure_dark.svg" : "toolbar_measure.svg", EType::Measure));
