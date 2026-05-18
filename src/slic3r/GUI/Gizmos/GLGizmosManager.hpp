@@ -84,6 +84,7 @@ public:
         Seam,
         FuzzySkin,
         MmSegmentation,
+        ColorMixPainter, // NEOTKO_PROFILE_TAG
         Emboss,
         Svg,
         Measure,

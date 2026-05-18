@@ -5,6 +5,7 @@
 #include "ClipperUtils.hpp"
 #include "ParameterUtils.hpp"
 #include "../SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG — NeoDebug + NEOTKO_LOG
+#include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — painter mode
 
 // #define SLIC3R_DEBUG
 
@@ -516,20 +517,32 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
     for (const PrintObject* obj : print.objects()) {
         const PrintObject& src = obj->get_shared_object() ? *obj->get_shared_object() : *obj;
         if (src.multipass_sublayers().empty()) continue;
+        // NEOTKO_PROFILE_TAG — Fase F: in painter mode the perim_override flag
+        // comes from the painted profile's MP payload, not from the preset
+        // region config (which is suppressed by painter_mode_obj).
+        const bool _po_painter_mode =
+            SurfaceColorMix::object_has_any_colormix_paint(src.model_object());
         int li = 0;
         for (const Layer* lyr : src.layers()) {
             if (li < (int)src.multipass_sublayers().size() &&
                 !src.multipass_sublayers()[li].empty()) {
-                for (const LayerRegion* lr : lyr->regions()) {
-                    if (lr->region().config().multipass_perimeter_override.value) {
-                        LayerTools& lt = this->tools_for_layer(lyr->print_z);
-                        if (!lt.mp_perim_override_active) {
-                            lt.mp_perim_override_active = true;
-                            NeoDebug::write(NeoDebug::TOOLORDER,
-                                std::string("MP_PERIM_OVERRIDE_PREPASS: print_z=") + std::to_string(lyr->print_z)
-                                + " → MixedFilament pre-blocked (sublayers + perimeter_override)");
-                        }
-                        break;
+                bool perim_ov = false;
+                if (_po_painter_mode) {
+                    perim_ov = SurfaceColorMix::any_painted_profile_has_perim_override(
+                        &src, lyr->print_z, lyr->height);
+                } else {
+                    for (const LayerRegion* lr : lyr->regions())
+                        if (lr->region().config().multipass_perimeter_override.value)
+                            { perim_ov = true; break; }
+                }
+                if (perim_ov) {
+                    LayerTools& lt = this->tools_for_layer(lyr->print_z);
+                    if (!lt.mp_perim_override_active) {
+                        lt.mp_perim_override_active = true;
+                        NeoDebug::write(NeoDebug::TOOLORDER,
+                            std::string("MP_PERIM_OVERRIDE_PREPASS: print_z=") + std::to_string(lyr->print_z)
+                            + (_po_painter_mode ? " [painter]" : "")
+                            + " → MixedFilament pre-blocked (sublayers + perimeter_override)");
                     }
                 }
             }
@@ -832,6 +845,14 @@ static std::vector<unsigned int> parse_colormix_pattern_1based(
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches, float global_mp_prime_vol)
 {
+    // NEOTKO_PROFILE_TAG — Fase D: ColorMix Painter takeover.
+    // If the object has ANY paint, ignore preset SCM settings for this object;
+    // only painted profiles drive the registered tools. MUST stay in sync with
+    // the SLICE-side decision in SurfaceColorMix::assign_and_group_tools — any
+    // mismatch crashes the wipe tower ("unexpected toolchange").
+    const bool painter_mode_obj =
+        SurfaceColorMix::object_has_any_colormix_paint(object.model_object());
+
     // NEOTKO_MULTIPASS_TAG — do NOT clear m_mp_sublayer_extruders here.
     // In multi-object prints collect_extruders() is called once per object;
     // clearing here would erase entries from previous objects, leaving sublayer
@@ -904,14 +925,23 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 (layerCount < (int)mp_src_loop.multipass_sublayers().size() &&
                  !mp_src_loop.multipass_sublayers()[layerCount].empty());
             if (layer_has_mp_subs) {
-                for (const LayerRegion* lr : layer->regions())
-                    if (lr->region().config().multipass_perimeter_override.value)
-                        { layer_tools.mp_perim_override_active = true; break; }
+                // NEOTKO_PROFILE_TAG — Fase F: painter mode reads perim_override
+                // from the painted profile's MP payload, not the preset region.
+                if (painter_mode_obj) {
+                    if (SurfaceColorMix::any_painted_profile_has_perim_override(
+                            &object, layer->print_z, layer->height))
+                        layer_tools.mp_perim_override_active = true;
+                } else {
+                    for (const LayerRegion* lr : layer->regions())
+                        if (lr->region().config().multipass_perimeter_override.value)
+                            { layer_tools.mp_perim_override_active = true; break; }
+                }
             }
             if (layer_tools.mp_perim_override_active)
                 NeoDebug::write(NeoDebug::TOOLORDER,
                     std::string("MP_PERIM_OVERRIDE_ACTIVE: layer_idx=") + std::to_string(layerCount)
                     + " print_z=" + std::to_string(layer->print_z)
+                    + (painter_mode_obj ? " [painter]" : "")
                     + " → MixedFilament cycling blocked (sublayers present + perimeter_override)");
         }
         // NEOTKO_MULTIPASS_TAG_END
@@ -1031,7 +1061,54 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // accounts for them and generates prime tower purges between colormix tools.
             // layer_tools.extruders is 1-based at this stage; reorder_extruders() converts
             // to 0-based later. parse_colormix_pattern_1based() returns 1-based IDs.
-            if (has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
+
+            // NEOTKO_PROFILE_TAG — Fase D painter mode:
+            // If any paint on the object, ignore preset SCM and register tools
+            // from the per-layer painted profile (top/penu). Stays in sync
+            // with SurfaceColorMix::assign_and_group_tools.
+            if (painter_mode_obj && has_top_surface_infill) {
+                const double print_z   = layer->print_z;
+                const double height    = layer->height;
+                const double z_top_min  = print_z - height;
+                const double z_top_max  = print_z;
+                const double z_penu_min = print_z;
+                const double z_penu_max = print_z + height;
+                const int top_slot  = SurfaceColorMix::dominant_painted_slot_in_z_range(
+                    &object, z_top_min,  z_top_max);
+                const int penu_slot = SurfaceColorMix::dominant_painted_slot_in_z_range(
+                    &object, z_penu_min, z_penu_max);
+                const SurfaceEffectProfile* top_p  = nullptr;
+                const SurfaceEffectProfile* penu_p = nullptr;
+                if (const int pid = SurfaceColorMix::profile_id_for_slot(&object, top_slot); pid)
+                    top_p = SurfaceEffectProfileManager::get().find(pid);
+                if (const int pid = SurfaceColorMix::profile_id_for_slot(&object, penu_slot); pid)
+                    penu_p = SurfaceEffectProfileManager::get().find(pid);
+
+                std::vector<unsigned int> tools_top, tools_pen;
+                if (top_p  && top_p->colormix.present)
+                    tools_top = SurfaceColorMix::painted_profile_tools_1based(*top_p,  true);
+                if (penu_p && penu_p->colormix.present)
+                    tools_pen = SurfaceColorMix::painted_profile_tools_1based(*penu_p, false);
+
+                std::set<unsigned int> emplace_set;
+                auto emplace_once = [&](unsigned int t) {
+                    if (emplace_set.insert(t).second)
+                        layer_tools.extruders.emplace_back(t);
+                };
+                for (auto t : tools_top) emplace_once(t);
+                for (auto t : tools_pen) emplace_once(t);
+
+                if (NeoDebug::enabled(NeoDebug::TOOLORDER) && !emplace_set.empty()) {
+                    std::ostringstream _s;
+                    _s << "COLORMIX_PAINT\tz=" << layer->print_z
+                       << "\ttop_slot=" << top_slot << " penu_slot=" << penu_slot
+                       << "\t+[";
+                    for (auto t : emplace_set) _s << "T" << (t > 0 ? t - 1 : 0) << " ";
+                    _s << "]";
+                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                }
+            } else
+            if (!painter_mode_obj && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
                 const auto& cfg   = region.config();
                 const int tool_a  = cfg.interlayer_colormix_tool_a.value;
                 const int tool_b  = cfg.interlayer_colormix_tool_b.value;
@@ -1147,15 +1224,63 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // NEOTKO_PATHBLEND_TAG_START
             // Register PathBlend tools so ToolOrdering generates prime tower purges
             // between PathBlend tool changes. Independent of MultiPass.
-            if (has_top_surface_infill && region.config().multipass_path_gradient.value) {
-                const auto& cfg = region.config();
-                const int n = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
-                const int raw_tools[4] = {
-                    cfg.pathblend_tool_1.value,
-                    cfg.pathblend_tool_2.value,
-                    cfg.pathblend_tool_3.value,
-                    cfg.pathblend_tool_4.value,
-                };
+            // NEOTKO_PROFILE_TAG — Fase G: in painter mode use painted profile
+            // tools per role; preset reads are suppressed for painted objects.
+            int n = 0;
+            int raw_tools[4] = {-1, -1, -1, -1};
+            bool pb_should_register = false;
+            if (has_top_surface_infill) {
+                if (painter_mode_obj) {
+                    const double print_z   = layer->print_z;
+                    const double height    = layer->height;
+                    const int top_slot  = SurfaceColorMix::dominant_painted_slot_in_z_range(
+                        &object, print_z - height, print_z);
+                    const int penu_slot = SurfaceColorMix::dominant_painted_slot_in_z_range(
+                        &object, print_z, print_z + height);
+                    // Pick the first profile with a present PathBlend payload
+                    // (top role takes priority). PathBlend single-set keys
+                    // make per-role mixing here impractical; the painted
+                    // profile that "owns" the layer wins.
+                    const SurfaceEffectProfile* pb_p = nullptr;
+                    for (int slot : {top_slot, penu_slot}) {
+                        if (slot <= 0) continue;
+                        const int pid = SurfaceColorMix::profile_id_for_slot(&object, slot);
+                        if (!pid) continue;
+                        const auto* p = SurfaceEffectProfileManager::get().find(pid);
+                        if (p && p->pathblend.present) { pb_p = p; break; }
+                    }
+                    if (pb_p) {
+                        const PathBlendPassConfig pb =
+                            SurfaceColorMix::pathblend_from_profile_payload(pb_p->pathblend);
+                        if (pb.enabled && pb.num_passes >= 1) {
+                            n = std::clamp(pb.num_passes, 1, 4);
+                            raw_tools[0] = pb.tool[0];
+                            raw_tools[1] = pb.tool[1];
+                            raw_tools[2] = pb.tool[2];
+                            raw_tools[3] = pb.tool[3];
+                            pb_should_register = true;
+                            if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                                std::ostringstream _s;
+                                _s << "PATHBLEND_PAINT\tz=" << layer->print_z
+                                   << "\tprofile='" << pb_p->name << "'\t+[";
+                                for (int i = 0; i < n; ++i)
+                                    if (raw_tools[i] >= 0) _s << "T" << raw_tools[i] << " ";
+                                _s << "]";
+                                NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                            }
+                        }
+                    }
+                } else if (region.config().multipass_path_gradient.value) {
+                    const auto& cfg = region.config();
+                    n = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
+                    raw_tools[0] = cfg.pathblend_tool_1.value;
+                    raw_tools[1] = cfg.pathblend_tool_2.value;
+                    raw_tools[2] = cfg.pathblend_tool_3.value;
+                    raw_tools[3] = cfg.pathblend_tool_4.value;
+                    pb_should_register = true;
+                }
+            }
+            if (pb_should_register) {
                 // Apply surface filter: skip if this layer's role doesn't match.
                 // has_top_surface_infill covers both erTopSolidInfill and erPenultimateInfill,
                 // so filtering by pathblend_surface here would need per-role checks; for now

@@ -8,6 +8,9 @@
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "PrintConfig.hpp"
+#include "Print.hpp"                  // NEOTKO_PROFILE_TAG — PrintObject access
+#include "Model.hpp"                  // NEOTKO_PROFILE_TAG — ModelObject/Volume access
+#include "SurfaceEffectProfile.hpp"   // NEOTKO_PROFILE_TAG — painted-profile lookup
 #include "GCodeWriter.hpp"  // NEOTKO_NEOWEAVING_TAG — must be outside namespace Slic3r
 #include <cstdlib>
 #include <fstream>
@@ -33,6 +36,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_TOOLORDER",   "/tmp/neotko_toolorder.log"   },
         { "ORCA_DEBUG_ZBLEND",      "/tmp/neotko_zblend.log"      },
         { "ORCA_DEBUG_WIPETOWER",   "/tmp/neotko_wipetower.log"   },
+        { "ORCA_DEBUG_PROFILE",     "/tmp/neotko_profile.log"     }, // NEOTKO_PROFILE_TAG
     };
 
     bool enabled(Channel c)
@@ -394,6 +398,241 @@ bool SurfaceColorMix::should_process_role(ExtrusionRole role, int surface)
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// NEOTKO_PROFILE_TAG — Fase D: painted-profile slot resolution.
+//
+// `dominant_painted_slot_in_z_range` counts, per slot 1..15, the upward-facing
+// painted triangles whose max_z lies inside [z_min, z_max] (with a tiny fp
+// tolerance). Returns the slot with the highest count, or 0 if none.
+//
+// Caller passes the layer's *vertical extent* in print-frame coords, NOT a
+// (target, tol) pair — this is critical because the mesh's natural top of a
+// step typically sits BELOW the layer's print_z (which marks the layer's top
+// boundary). e.g. a step ending at mesh z=2.0 belongs to the layer at
+// print_z=2.05; querying around 2.05 with a small tolerance misses 2.0.
+// By querying the whole layer span [layer_print_z - layer_height, layer_print_z]
+// we catch the mesh-top wherever it falls within that slab.
+//
+// Frames: mesh vertices live in volume-local space; we compose
+//   print_frame = po->trafo() * mv->get_matrix() * mesh_vertex
+// before comparing Z.
+//
+// NOTE on `used_states`: we deliberately do NOT gate the scan on
+// `data.used_states[slot]` — `set_triangle_from_string` (the 3mf load path)
+// does not populate that array, so a freshly loaded .3mf would always read
+// "all states unused" and the override would never fire. Iterating all 15
+// slots via get_facets() is robust to both fresh-paint and load-from-3mf.
+// ---------------------------------------------------------------------------
+int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
+                                                       double z_min, double z_max)
+{
+    if (!po) return 0;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return 0;
+
+    const Transform3d trafo = po->trafo();
+    const double z_tol = 0.02; // fp slack around the layer extent
+
+    int counts[16] = {0};
+    bool any_painted = false;
+
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        const Transform3d vt = trafo * mv->get_matrix();
+        for (int slot = 1; slot < 16; ++slot) {
+            const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
+                *mv, static_cast<EnforcerBlockerType>(slot));
+            if (its.indices.empty()) continue;
+            for (const auto& tri : its.indices) {
+                const Vec3f& v0f = its.vertices[tri[0]];
+                const Vec3f& v1f = its.vertices[tri[1]];
+                const Vec3f& v2f = its.vertices[tri[2]];
+                const Vec3d v0 = vt * Vec3d(v0f.x(), v0f.y(), v0f.z());
+                const Vec3d v1 = vt * Vec3d(v1f.x(), v1f.y(), v1f.z());
+                const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
+                const Vec3d e1 = v1 - v0, e2 = v2 - v0;
+                const Vec3d n  = e1.cross(e2);
+                if (n.z() <= 0.0) continue; // upward-facing only
+                const double max_z = std::max({v0.z(), v1.z(), v2.z()});
+                if (max_z >= z_min - z_tol && max_z <= z_max + z_tol) {
+                    counts[slot]++;
+                    any_painted = true;
+                }
+            }
+        }
+    }
+
+    if (!any_painted) return 0;
+    int best_slot = 0, best_count = 0;
+    for (int s = 1; s < 16; ++s)
+        if (counts[s] > best_count) { best_count = counts[s]; best_slot = s; }
+    return best_slot;
+}
+
+// Resolve the SurfaceEffectProfile id for a painted slot on the print's model.
+// Slot tables live per-ModelVolume; we pick the first model_part with a
+// non-zero entry at that slot (the gizmo keeps them consistent across volumes
+// of the same object).
+int SurfaceColorMix::profile_id_for_slot(const PrintObject* po, int slot)
+{
+    if (!po || slot <= 0 || slot >= 16) return 0;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return 0;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        if (mv->colormix_slot_to_profile_id[slot] != 0)
+            return mv->colormix_slot_to_profile_id[slot];
+    }
+    return 0;
+}
+
+// NEOTKO_PROFILE_TAG — true if any model_part volume has at least one slot
+// (1..15) mapped to a profile id. Flips the slicer into painter mode.
+bool SurfaceColorMix::object_has_any_colormix_paint(const ModelObject* mo)
+{
+    if (!mo) return false;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        for (int s = 1; s < 16; ++s)
+            if (mv->colormix_slot_to_profile_id[s] != 0)
+                return true;
+    }
+    return false;
+}
+
+// NEOTKO_PROFILE_TAG — Penu role autonomy detection (s66 polish).
+bool SurfaceColorMix::object_painter_wants_penu(const ModelObject* mo)
+{
+    if (!mo) return false;
+    auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+    std::set<int> profile_ids_seen;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        for (int s = 1; s < 16; ++s) {
+            const int pid = mv->colormix_slot_to_profile_id[s];
+            if (pid <= 0) continue;
+            if (!profile_ids_seen.insert(pid).second) continue;
+            const SurfaceEffectProfile* p = mgr.find(pid);
+            if (!p) continue;
+            // MultiPass — penu enabled?
+            if (p->multipass.present) {
+                auto it = p->multipass.kv.find("penultimate_multipass_enabled");
+                if (it != p->multipass.kv.end() &&
+                    (it->second == "1" || it->second == "true"))
+                    return true;
+            }
+            // ColorMix — surface 0=Both / 2=Penu only → wants penu.
+            if (p->colormix.present) {
+                auto it = p->colormix.kv.find("interlayer_colormix_surface");
+                if (it != p->colormix.kv.end()) {
+                    const int v = std::atoi(it->second.c_str());
+                    if (v == 0 || v == 2) return true;
+                }
+            }
+            // PathBlend — same surface enum semantics.
+            if (p->pathblend.present) {
+                auto it = p->pathblend.kv.find("pathblend_surface");
+                if (it != p->pathblend.kv.end()) {
+                    const int v = std::atoi(it->second.c_str());
+                    if (v == 0 || v == 2) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// NEOTKO_PROFILE_TAG — derive the 1-based tool list for a given painted
+// profile + role. This MUST stay in sync with the gv-build path in
+// `assign_and_group_tools` so that ToolOrdering registers exactly the tools
+// the SLICE will end up assigning (otherwise the wipe-tower plan diverges
+// from runtime and we get the "unexpected toolchange" mismatch error).
+//
+// Source of truth — payload keys per role:
+//   * mode / tool_a..d / band_count_a..d: prefixed (`` or `_penu_`)
+//   * pattern strings: NOT prefixed — `pattern_top` / `pattern_penultimate`
+//
+// Behavior mirrors SurfaceColorMix.cpp gv consumption + ToolOrdering.cpp
+// `tools_for_role` + `parse_colormix_pattern_1based`.
+std::vector<unsigned int> SurfaceColorMix::painted_profile_tools_1based(
+    const SurfaceEffectProfile& p, bool top_role)
+{
+    std::vector<unsigned int> out;
+    if (!p.colormix.present) return out;
+
+    const auto& kv = p.colormix.kv;
+    const std::string prefix = top_role
+        ? std::string("interlayer_colormix_")
+        : std::string("interlayer_colormix_penu_");
+
+    auto kv_get = [&](const std::string& full_key) -> std::string {
+        auto it = kv.find(full_key);
+        return it == kv.end() ? std::string() : it->second;
+    };
+    auto get_int = [&](const char* base, int dflt) -> int {
+        const std::string s = kv_get(prefix + base);
+        if (s.empty()) return dflt;
+        try { return std::stoi(s); } catch (...) { return dflt; }
+    };
+
+    const int mode    = get_int("mode",            0);
+    const int tool_a  = get_int("tool_a",          0);
+    const int tool_b  = get_int("tool_b",          1);
+    const int tool_c  = get_int("tool_c",         -1);
+    const int tool_d  = get_int("tool_d",         -1);
+    const int band_a  = get_int("band_count_a",    0);
+    const int band_b  = get_int("band_count_b",    0);
+    const int band_c  = get_int("band_count_c",    0);
+    const int band_d  = get_int("band_count_d",    0);
+
+    auto add_phys = [&](int t) {
+        if (t < 0) return;
+        unsigned int u = static_cast<unsigned int>(t + 1);
+        if (std::find(out.begin(), out.end(), u) == out.end())
+            out.push_back(u);
+    };
+
+    if (mode == 1) {                     // Linear 2-color
+        if (tool_a >= 0 && tool_b >= 0 && tool_a != tool_b) {
+            add_phys(tool_a); add_phys(tool_b);
+            return out;
+        }
+        // else fall through to legacy
+    } else if (mode == 2) {              // Linear 3-color
+        if (tool_a >= 0 && tool_b >= 0 && tool_c >= 0
+            && (tool_a != tool_b || tool_b != tool_c)) {
+            add_phys(tool_a); add_phys(tool_b); add_phys(tool_c);
+            return out;
+        }
+    } else if (mode == 3) {              // Custom bands
+        if (band_a > 0 && tool_a >= 0) add_phys(tool_a);
+        if (band_b > 0 && tool_b >= 0) add_phys(tool_b);
+        if (band_c > 0 && tool_c >= 0) add_phys(tool_c);
+        if (band_d > 0 && tool_d >= 0) add_phys(tool_d);
+        if (out.size() >= 2) return out;
+        out.clear();
+        // fall through to legacy
+    }
+
+    // mode == 0 (or fallback): parse the pattern string for this role, then
+    // fall back to tool_a/b/c/d if fewer than 2 distinct physical tools.
+    const std::string pattern = kv_get(top_role
+        ? std::string("interlayer_colormix_pattern_top")
+        : std::string("interlayer_colormix_pattern_penultimate"));
+    for (char c : pattern)
+        if (c >= '1' && c <= '4')
+            add_phys(static_cast<int>(c - '1'));
+    if (out.size() >= 2) return out;
+
+    // Legacy A/B/C/D fallback.
+    out.clear();
+    add_phys(tool_a);
+    add_phys(tool_b);
+    if (tool_c >= 0) add_phys(tool_c);
+    if (tool_d >= 0) add_phys(tool_d);
+    return out;
+}
+
 int SurfaceColorMix::assign_and_group_tools(
     ExtrusionEntityCollection& fills,
     const PrintRegionConfig& config,
@@ -402,13 +641,71 @@ int SurfaceColorMix::assign_and_group_tools(
     bool allow_top,
     bool allow_penu,
     const MixedFilamentManager* mgr,
-    size_t num_physical
+    size_t num_physical,
+    const PrintObject* print_object,
+    double layer_print_z,
+    double layer_height
 ) {
     NEOTKO_LOG(COLORMIX, "ENTRY layer=" << layer_idx
         << " enabled=" << config.interlayer_colormix_enabled.value
         << " fills_size=" << fills.entities.size());
 
-    if (!config.interlayer_colormix_enabled.value)
+    // NEOTKO_PROFILE_TAG — Fase D (final design): painter-mode takeover.
+    //
+    // If the object has ANY painted slot (any volume's colormix_slot_to_profile_id
+    // is non-zero), we enter PAINTER MODE for this object:
+    //   * preset's interlayer_colormix_enabled/surface/zone/filament_filter
+    //     are IGNORED — the painter decides everything
+    //   * a layer/role only gets colormix if a painted profile resolves there
+    //   * the profile's own values (mode, pct, easing, tools, pattern, …) drive
+    //     the effect for that fill
+    //
+    // Otherwise (no paint anywhere on the object) we run PRESET MODE, which is
+    // the original pipeline — the preset controls everything as before.
+    //
+    // ToolOrdering mirrors the same painter_mode_obj logic so its tool list
+    // registration matches the SLICE output. They MUST stay in sync; any
+    // divergence triggers a wipe-tower "unexpected toolchange" crash.
+    const ModelObject* model_object =
+        print_object ? print_object->model_object() : nullptr;
+    const bool painter_mode_obj = object_has_any_colormix_paint(model_object);
+    const SurfaceEffectProfile* painted_top_profile  = nullptr;
+    const SurfaceEffectProfile* painted_penu_profile = nullptr;
+    if (print_object && layer_height > 0.0) {
+        // NEOTKO_PROFILE_TAG — Fase D: query the layer's vertical EXTENT, not
+        // a single Z plane. The slicer treats the layer whose print_z is the
+        // first ≥ mesh_top as the "top surface" layer — so for a step ending
+        // at mesh z=2.0 inside layer L with print_z=2.05 and height=0.2, the
+        // painted triangle's max_z=2.0 lives inside L's slab [1.85, 2.05].
+        //   top role  at L: paint inside this layer's slab
+        //                   → [print_z - height, print_z]
+        //   penu role at L: paint inside the slab ONE LAYER ABOVE
+        //                   → [print_z, print_z + height]
+        const double z_top_min  = layer_print_z - layer_height;
+        const double z_top_max  = layer_print_z;
+        const double z_penu_min = layer_print_z;
+        const double z_penu_max = layer_print_z + layer_height;
+        const int top_slot  = dominant_painted_slot_in_z_range(print_object, z_top_min,  z_top_max);
+        const int penu_slot = dominant_painted_slot_in_z_range(print_object, z_penu_min, z_penu_max);
+        if (const int pid = profile_id_for_slot(print_object, top_slot); pid)
+            painted_top_profile = SurfaceEffectProfileManager::get().find(pid);
+        if (const int pid = profile_id_for_slot(print_object, penu_slot); pid)
+            painted_penu_profile = SurfaceEffectProfileManager::get().find(pid);
+        if (top_slot || penu_slot)
+            NEOTKO_LOG(PROFILE, "SLICE layer=" << layer_idx
+                << " z=" << layer_print_z << " h=" << layer_height
+                << " painter_mode=" << (painter_mode_obj ? "1" : "0")
+                << " top_range=[" << z_top_min << "," << z_top_max << "]"
+                << " top_slot=" << top_slot << " penu_slot=" << penu_slot
+                << " top_profile=" << (painted_top_profile ? painted_top_profile->name : "<none>")
+                << " penu_profile=" << (painted_penu_profile ? painted_penu_profile->name : "<none>"));
+    }
+
+    // NEOTKO_PROFILE_TAG — Fase D: painter-mode bypasses preset enable gate.
+    // In painter mode we still proceed even with enabled=false; the per-sub
+    // loop below filters out layers/roles that don't have a painted profile.
+    // In preset mode the original gate is preserved.
+    if (!painter_mode_obj && !config.interlayer_colormix_enabled.value)
         return 0;
 
     const double min_length_mm = config.interlayer_colormix_min_length.value;
@@ -442,19 +739,33 @@ int SurfaceColorMix::assign_and_group_tools(
         }
         if (!first_path) continue;
 
-        // Surface filter
-        if (!should_process_role(first_path->role(), surface)) continue;
+        // NEOTKO_PROFILE_TAG — Fase D (final): split painter / preset modes.
+        const bool gv_is_top_role = (first_path->role() == erTopSolidInfill);
+        const SurfaceEffectProfile* eff_profile =
+            gv_is_top_role ? painted_top_profile : painted_penu_profile;
+        const bool painted_override =
+            eff_profile && eff_profile->colormix.present;
 
-        // Zone filter (allow_top / allow_penu from call site — interlayer_colormix_*_zone)
-        if (!allow_top  && first_path->role() == erTopSolidInfill)    continue;
-        if (!allow_penu && first_path->role() == erPenultimateInfill)  continue;
+        if (painter_mode_obj) {
+            // Painter mode: only process top/penu roles AND only if this layer
+            // has a painted profile for the role. The painter decides where —
+            // preset's surface/zone/filter gates do not apply.
+            const ExtrusionRole r = first_path->role();
+            if (r != erTopSolidInfill && r != erPenultimateInfill) continue;
+            if (!painted_override) continue;
+        } else {
+            // Preset mode (original gates).
+            if (!should_process_role(first_path->role(), surface)) continue;
+            if (!allow_top  && first_path->role() == erTopSolidInfill)    continue;
+            if (!allow_penu && first_path->role() == erPenultimateInfill)  continue;
+        }
 
         // NEOTKO_COLORMIX_TAG — s61: per-role gradient view.
         // Pick the top-role or penultimate-role config keys based on the actual
         // ExtrusionRole of this surface. The dialog edits each set
         // independently; out of the box the defaults match so old presets
         // behave the same on both roles.
-        const bool gv_is_top = (first_path->role() == erTopSolidInfill);
+        // (gv_is_top_role already declared above, before the role-filter gates.)
         struct GV {
             int    cm_mode, pct_a, pct_b, easing, min_lines;
             double gamma, overlap;
@@ -463,7 +774,7 @@ int SurfaceColorMix::assign_and_group_tools(
             int    tool_a, tool_b, tool_c, tool_d;
         };
         GV gv;
-        if (gv_is_top) {
+        if (gv_is_top_role) {
             gv.cm_mode   = config.interlayer_colormix_mode.value;
             gv.pct_a     = config.interlayer_colormix_pct_a.value;
             gv.pct_b     = config.interlayer_colormix_pct_b.value;
@@ -499,6 +810,57 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_d    = config.interlayer_colormix_penu_tool_d.value;
         }
 
+        // NEOTKO_PROFILE_TAG — Fase D: painted-profile override.
+        // The profile's ColorMix payload was snapshot-taken with the full key
+        // set (top + _penu_). We pick the matching subset for this role and
+        // overlay its values on top of the preset-loaded gv.
+        if (painted_override) {
+            const auto& kv = eff_profile->colormix.kv;
+            const std::string prefix = gv_is_top_role
+                ? std::string("interlayer_colormix_")
+                : std::string("interlayer_colormix_penu_");
+            auto get_int = [&](const char* base, int dflt) -> int {
+                auto it = kv.find(prefix + base);
+                if (it == kv.end()) return dflt;
+                try { return std::stoi(it->second); } catch (...) { return dflt; }
+            };
+            auto get_dbl = [&](const char* base, double dflt) -> double {
+                auto it = kv.find(prefix + base);
+                if (it == kv.end()) return dflt;
+                try { return std::stod(it->second); } catch (...) { return dflt; }
+            };
+            auto get_bool = [&](const char* base, bool dflt) -> bool {
+                auto it = kv.find(prefix + base);
+                if (it == kv.end()) return dflt;
+                return (it->second == "1" || it->second == "true");
+            };
+            gv.cm_mode   = get_int ("mode",              gv.cm_mode);
+            gv.pct_a     = get_int ("pct_a",             gv.pct_a);
+            gv.pct_b     = get_int ("pct_b",             gv.pct_b);
+            gv.easing    = get_int ("easing",            gv.easing);
+            gv.gamma     = get_dbl ("gamma",             gv.gamma);
+            gv.min_lines = get_int ("min_surface_lines", gv.min_lines);
+            gv.overlap   = get_dbl ("overlap",           gv.overlap);
+            gv.invert    = get_bool("invert",            gv.invert);
+            gv.band_a    = get_int ("band_count_a",      gv.band_a);
+            gv.band_b    = get_int ("band_count_b",      gv.band_b);
+            gv.band_c    = get_int ("band_count_c",      gv.band_c);
+            gv.band_d    = get_int ("band_count_d",      gv.band_d);
+            gv.tool_a    = get_int ("tool_a",            gv.tool_a);
+            gv.tool_b    = get_int ("tool_b",            gv.tool_b);
+            gv.tool_c    = get_int ("tool_c",            gv.tool_c);
+            gv.tool_d    = get_int ("tool_d",            gv.tool_d);
+            NEOTKO_LOG(PROFILE, "OVERRIDE layer=" << layer_idx
+                << " role=" << (gv_is_top_role ? "Top" : "Penu")
+                << " profile='" << eff_profile->name << "' (id=" << eff_profile->id << ")"
+                << " mode=" << gv.cm_mode << " pct_a=" << gv.pct_a
+                << " pct_b=" << gv.pct_b << " easing=" << gv.easing
+                << " tools=[" << gv.tool_a << "," << gv.tool_b
+                << "," << gv.tool_c << "," << gv.tool_d << "]"
+                << " bands=[" << gv.band_a << "," << gv.band_b
+                << "," << gv.band_c << "," << gv.band_d << "]");
+        }
+
         // Resolve tool list from role-specific pattern (fallback to legacy slots if invalid)
         // NEOTKO_COLORMIX_TAG — s60: mode-aware tool resolution.
         // mode=0 (legacy)     → parse the pattern string as before.
@@ -511,12 +873,25 @@ int SurfaceColorMix::assign_and_group_tools(
         std::vector<int> tools;
         const int cm_mode = gv.cm_mode;
         auto fallback_to_pattern_string = [&]() {
-            const std::string& pattern_str = gv_is_top
+            const std::string& pattern_str = gv_is_top_role
                 ? config.interlayer_colormix_pattern_top.value
                 : config.interlayer_colormix_pattern_penultimate.value;
             tools = build_tool_list_from_pattern(pattern_str, config, mgr, num_physical);
         };
-        if (cm_mode == 1) {
+
+        // NEOTKO_PROFILE_TAG — Fase D (final): in painter mode the painted
+        // profile is the single source of truth for the tool list. We must
+        // use the SAME helper that ToolOrdering uses (`painted_profile_tools_1based`)
+        // so the registered tools match what SLICE actually consumes — otherwise
+        // the legacy fallback path (`build_tool_list(config)`) reads the
+        // preset's tool_a/b/c/d which can be different from the profile's
+        // (e.g., preset has [0,1,2,3] but profile has [0,1,-1,-1] → 4 vs 2
+        // tools → wipe-tower MISMATCH crash).
+        if (painted_override) {
+            const auto tools_1b = painted_profile_tools_1based(*eff_profile, gv_is_top_role);
+            for (auto t : tools_1b)
+                if (t > 0) tools.push_back(int(t) - 1); // back to 0-based for gv path
+        } else if (cm_mode == 1) {
             if (gv.tool_a >= 0 && gv.tool_b >= 0 && gv.tool_a != gv.tool_b) {
                 tools.push_back(gv.tool_a);
                 tools.push_back(gv.tool_b);
@@ -616,7 +991,7 @@ int SurfaceColorMix::assign_and_group_tools(
                 // Fall back to single tool (Tool A) for tiny surfaces.
                 tools.assign(static_cast<size_t>(n), gv.tool_a);
                 NEOTKO_LOG(COLORMIX, "DITHER_MIN_LINES_FALLBACK layer=" << layer_idx
-                    << " role=" << (gv_is_top ? "Top" : "Penu")
+                    << " role=" << (gv_is_top_role ? "Top" : "Penu")
                     << " n=" << n << " < min=" << min_lines << " → all T" << gv.tool_a);
             } else if (cm_mode == 1 && tools.size() == 2) {
                 const int t_a   = tools[0];
@@ -627,7 +1002,7 @@ int SurfaceColorMix::assign_and_group_tools(
                     int count_a = 0, count_b = 0;
                     for (int t : tools) (t == t_a ? count_a : count_b)++;
                     NEOTKO_LOG(COLORMIX, "DITHER_2COLOR layer=" << layer_idx
-                        << " role=" << (gv_is_top ? "Top" : "Penu")
+                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
                         << " n=" << tools.size()
                         << " T" << t_a << "=" << count_a
                         << " T" << t_b << "=" << count_b
@@ -646,7 +1021,7 @@ int SurfaceColorMix::assign_and_group_tools(
                     int ca = 0, cb = 0, cc = 0;
                     for (int t : tools) { if (t == t_a) ca++; else if (t == t_b) cb++; else if (t == t_c) cc++; }
                     NEOTKO_LOG(COLORMIX, "DITHER_3COLOR layer=" << layer_idx
-                        << " role=" << (gv_is_top ? "Top" : "Penu")
+                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
                         << " n=" << tools.size()
                         << " T" << t_a << "=" << ca
                         << " T" << t_b << "=" << cb
@@ -663,7 +1038,7 @@ int SurfaceColorMix::assign_and_group_tools(
                     gv.tool_d, gv.band_d);
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     NEOTKO_LOG(COLORMIX, "CUSTOM_BANDS layer=" << layer_idx
-                        << " role=" << (gv_is_top ? "Top" : "Penu")
+                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
                         << " n=" << tools.size()
                         << " cycle=[T" << gv.tool_a << "x" << gv.band_a
                         << ", T" << gv.tool_b << "x" << gv.band_b
@@ -687,7 +1062,7 @@ int SurfaceColorMix::assign_and_group_tools(
                 std::reverse(tools.begin(), tools.end());
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     NEOTKO_LOG(COLORMIX, "INVERT_GRADIENT layer=" << layer_idx
-                        << " role=" << (gv_is_top ? "Top" : "Penu")
+                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
                         << " n=" << tools.size() << " (reversed sequence)");
                 }
             }
@@ -1246,6 +1621,158 @@ MultiPassConfig MultiPassConfig::from_region_config(const PrintRegionConfig& cfg
     }
     return c;
 }
+
+
+// NEOTKO_PROFILE_TAG_START — Fase F painter-mode MultiPass override.
+//
+// Build a MultiPassConfig from a profile's `multipass` payload kv map
+// without going through a temporary PrintRegionConfig. Symmetric with
+// `painted_profile_tools_1based` — keeps allocation off the per-region hot
+// path. `role == erPenultimateInfill` reads `penultimate_multipass_*` keys;
+// any other role reads top `multipass_*` keys. Missing keys → struct
+// defaults.
+MultiPassConfig SurfaceColorMix::multipass_from_profile_payload(
+    const SurfaceEffectPayload& payload, ExtrusionRole role)
+{
+    MultiPassConfig c;
+    auto gi = [&](const char* k, int def) {
+        auto it = payload.kv.find(k);
+        return (it == payload.kv.end()) ? def : std::atoi(it->second.c_str());
+    };
+    auto gf = [&](const char* k, double def) {
+        auto it = payload.kv.find(k);
+        return (it == payload.kv.end()) ? def : std::atof(it->second.c_str());
+    };
+    auto gb = [&](const char* k, bool def) {
+        auto it = payload.kv.find(k);
+        if (it == payload.kv.end()) return def;
+        // ConfigOptionBool::serialize emits "1" / "0".
+        return it->second == "1" || it->second == "true";
+    };
+    auto gs = [&](const char* k) -> std::string {
+        auto it = payload.kv.find(k);
+        return (it == payload.kv.end()) ? std::string() : it->second;
+    };
+
+    if (role == erPenultimateInfill) {
+        c.enabled        = gb("penultimate_multipass_enabled", false);
+        c.surface        = 2; // penu-only; matches from_region_config
+        c.num_passes     = gi("penultimate_multipass_num_passes", 2);
+        c.tool[0]        = gi("penultimate_multipass_tool_1",  0);
+        c.tool[1]        = gi("penultimate_multipass_tool_2",  1);
+        c.tool[2]        = gi("penultimate_multipass_tool_3", -1);
+        c.width_ratio[0] = gf("penultimate_multipass_width_ratio_1", 0.50);
+        c.width_ratio[1] = gf("penultimate_multipass_width_ratio_2", 0.50);
+        c.width_ratio[2] = gf("penultimate_multipass_width_ratio_3", 0.34);
+        c.vary_pattern   = gb("penultimate_multipass_vary_pattern", false);
+        c.angle[0]       = gi("penultimate_multipass_angle_1", -1);
+        c.angle[1]       = gi("penultimate_multipass_angle_2", -1);
+        c.angle[2]       = gi("penultimate_multipass_angle_3", -1);
+        c.fan[0]         = gi("penultimate_multipass_fan_1", -1);
+        c.fan[1]         = gi("penultimate_multipass_fan_2", -1);
+        c.fan[2]         = gi("penultimate_multipass_fan_3", -1);
+        c.speed_pct[0]   = gi("penultimate_multipass_speed_pct_1", 100);
+        c.speed_pct[1]   = gi("penultimate_multipass_speed_pct_2", 100);
+        c.speed_pct[2]   = gi("penultimate_multipass_speed_pct_3", 100);
+        c.gcode_start[0] = gs("penultimate_multipass_gcode_start_1");
+        c.gcode_start[1] = gs("penultimate_multipass_gcode_start_2");
+        c.gcode_start[2] = gs("penultimate_multipass_gcode_start_3");
+        c.gcode_end[0]   = gs("penultimate_multipass_gcode_end_1");
+        c.gcode_end[1]   = gs("penultimate_multipass_gcode_end_2");
+        c.gcode_end[2]   = gs("penultimate_multipass_gcode_end_3");
+    } else {
+        c.enabled        = gb("multipass_enabled", false);
+        c.surface        = gi("multipass_surface", 0);
+        c.num_passes     = gi("multipass_num_passes", 2);
+        c.tool[0]        = gi("multipass_tool_1",  0);
+        c.tool[1]        = gi("multipass_tool_2",  1);
+        c.tool[2]        = gi("multipass_tool_3", -1);
+        c.width_ratio[0] = gf("multipass_width_ratio_1", 0.50);
+        c.width_ratio[1] = gf("multipass_width_ratio_2", 0.50);
+        c.width_ratio[2] = gf("multipass_width_ratio_3", 0.34);
+        c.vary_pattern   = gb("multipass_vary_pattern", false);
+        c.angle[0]       = gi("multipass_angle_1", -1);
+        c.angle[1]       = gi("multipass_angle_2", -1);
+        c.angle[2]       = gi("multipass_angle_3", -1);
+        c.fan[0]         = gi("multipass_fan_1", -1);
+        c.fan[1]         = gi("multipass_fan_2", -1);
+        c.fan[2]         = gi("multipass_fan_3", -1);
+        c.speed_pct[0]   = gi("multipass_speed_pct_1", 100);
+        c.speed_pct[1]   = gi("multipass_speed_pct_2", 100);
+        c.speed_pct[2]   = gi("multipass_speed_pct_3", 100);
+        c.gcode_start[0] = gs("multipass_gcode_start_1");
+        c.gcode_start[1] = gs("multipass_gcode_start_2");
+        c.gcode_start[2] = gs("multipass_gcode_start_3");
+        c.gcode_end[0]   = gs("multipass_gcode_end_1");
+        c.gcode_end[1]   = gs("multipass_gcode_end_2");
+        c.gcode_end[2]   = gs("multipass_gcode_end_3");
+    }
+    return c;
+}
+
+bool SurfaceColorMix::painted_perim_override_from_profile(
+    const SurfaceEffectPayload& payload)
+{
+    auto it = payload.kv.find("multipass_perimeter_override");
+    if (it == payload.kv.end()) return false;
+    return it->second == "1" || it->second == "true";
+}
+
+PathBlendPassConfig SurfaceColorMix::pathblend_from_profile_payload(
+    const SurfaceEffectPayload& payload)
+{
+    PathBlendPassConfig c;
+    auto gi = [&](const char* k, int def) {
+        auto it = payload.kv.find(k);
+        return (it == payload.kv.end()) ? def : std::atoi(it->second.c_str());
+    };
+    auto gf = [&](const char* k, double def) {
+        auto it = payload.kv.find(k);
+        return (it == payload.kv.end()) ? def : std::atof(it->second.c_str());
+    };
+    auto gb = [&](const char* k, bool def) {
+        auto it = payload.kv.find(k);
+        if (it == payload.kv.end()) return def;
+        return it->second == "1" || it->second == "true";
+    };
+
+    c.enabled         = gb("multipass_path_gradient", false);
+    c.surface         = gi("pathblend_surface", 0);
+    c.num_passes      = std::clamp(gi("pathblend_num_passes", 2), 1, 4);
+    c.tool[0]         = gi("pathblend_tool_1", 0);
+    c.tool[1]         = gi("pathblend_tool_2", 1);
+    c.tool[2]         = gi("pathblend_tool_3", 2);
+    c.tool[3]         = gi("pathblend_tool_4", 3);
+    c.layer_ratio[0]  = static_cast<float>(gf("pathblend_layer_ratio_1", 1.0));
+    c.layer_ratio[1]  = static_cast<float>(gf("pathblend_layer_ratio_2", 1.0));
+    c.layer_ratio[2]  = static_cast<float>(gf("pathblend_layer_ratio_3", 1.0));
+    c.layer_ratio[3]  = static_cast<float>(gf("pathblend_layer_ratio_4", 1.0));
+    c.min_ratio       = static_cast<float>(std::clamp(gf("pathblend_min_ratio", 0.05), 0.01, 0.49));
+    c.max_ratio       = static_cast<float>(std::clamp(gf("pathblend_max_ratio", 1.0),  0.51, 1.0));
+    c.ease_mode       = std::clamp(gi("pathblend_ease_mode", 0), 0, 3);
+    c.invert_gradient = gb("pathblend_invert_gradient", true);
+    c.fill_angle      = gi("pathblend_fill_angle", -1);
+    return c;
+}
+
+bool SurfaceColorMix::any_painted_profile_has_perim_override(
+    const PrintObject* po, double print_z, double height)
+{
+    if (po == nullptr) return false;
+    const int top_slot  = dominant_painted_slot_in_z_range(po, print_z - height, print_z);
+    const int penu_slot = dominant_painted_slot_in_z_range(po, print_z, print_z + height);
+    auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+    for (int slot : {top_slot, penu_slot}) {
+        if (slot <= 0) continue;
+        const int pid = profile_id_for_slot(po, slot);
+        if (!pid) continue;
+        const SurfaceEffectProfile* p = mgr.find(pid);
+        if (p && p->multipass.present && painted_perim_override_from_profile(p->multipass))
+            return true;
+    }
+    return false;
+}
+// NEOTKO_PROFILE_TAG_END
 
 
 // NEOTKO_NEOWEAVING_TAG_START

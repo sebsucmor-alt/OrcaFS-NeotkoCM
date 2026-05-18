@@ -24,6 +24,7 @@
 #include "Time.hpp"
 #include "GCode/ExtrusionProcessor.hpp"
 #include "SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG — NeoDebug + NEOTKO_LOG
+#include "SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — painter-mode PB gate
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -8043,10 +8044,73 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
                         // so the in-EEC monotonic-Z guarantee does not need to persist
                         // across surface boundaries — only within a surface.
                         m_pathblend_max_z_per_pass.clear();
+                        // NEOTKO_PROFILE_TAG — Fase G fix: painter-mode PB
+                        // path acceptance. Replaces the preset-only
+                        // `needs_blend` check with a per-role decision based
+                        // on which painted profile covers this layer's Z.
+                        //
+                        // Two effects in one block:
+                        //  (a) PB_LEAK_BLOCK — if painter mode + no painted PB
+                        //      profile anywhere at this Z, skip PB entirely
+                        //      (CM-only painted area must not get PB flow).
+                        //  (b) per-role override — if painter mode + painted
+                        //      profile has PB on top role, accept top paths
+                        //      regardless of preset's `pathblend_surface`.
+                        //      Same for penu. Fixes the case where preset
+                        //      surface=1 (Top only) but user painted PB on
+                        //      penu — without this override, penu paths get
+                        //      rejected by `needs_blend`, never enter pb_paths,
+                        //      never receive flow gradient, and both passes
+                        //      print at nominal_z (pass 0 invisible under
+                        //      pass 1).
+                        bool _gc_pb_painter_mode = false;
+                        bool _gc_pb_painter_block = false;
+                        bool _gc_pb_paint_top  = false;
+                        bool _gc_pb_paint_penu = false;
+                        if (m_layer && m_layer->object()) {
+                            const PrintObject* _po = m_layer->object();
+                            const bool _pmo = SurfaceColorMix::object_has_any_colormix_paint(
+                                _po->model_object());
+                            if (_pmo) {
+                                _gc_pb_painter_mode = true;
+                                const double _pz = m_layer->print_z;
+                                const double _ph = m_layer->height;
+                                const int _top_slot  = SurfaceColorMix::dominant_painted_slot_in_z_range(_po, _pz - _ph, _pz);
+                                const int _penu_slot = SurfaceColorMix::dominant_painted_slot_in_z_range(_po, _pz, _pz + _ph);
+                                auto profile_has_pb = [&](int slot) -> bool {
+                                    if (slot <= 0) return false;
+                                    const int pid = SurfaceColorMix::profile_id_for_slot(_po, slot);
+                                    const auto* p = SurfaceEffectProfileManager::get().find(pid);
+                                    return (p && p->pathblend.present);
+                                };
+                                _gc_pb_paint_top  = profile_has_pb(_top_slot);
+                                _gc_pb_paint_penu = profile_has_pb(_penu_slot);
+                                if (!_gc_pb_paint_top && !_gc_pb_paint_penu) {
+                                    _gc_pb_painter_block = true;
+                                    NEOTKO_LOG(COLORMIX, "PB_LEAK_BLOCK painter_mode z="
+                                        << _pz << " (no painted PB profile at this layer)");
+                                } else if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+                                    NEOTKO_LOG(COLORMIX, "PB_PAINT_ACCEPT z=" << _pz
+                                        << " top_pb=" << (_gc_pb_paint_top ? 1 : 0)
+                                        << " penu_pb=" << (_gc_pb_paint_penu ? 1 : 0));
+                                }
+                            }
+                        }
+                        auto _gc_accept_pb_path = [&](const ExtrusionPath& p) -> bool {
+                            if (_gc_pb_painter_mode) {
+                                // Painter mode: bypass preset surface filter;
+                                // accept per painted-profile presence per role.
+                                if (p.role() == erTopSolidInfill)    return _gc_pb_paint_top;
+                                if (p.role() == erPenultimateInfill) return _gc_pb_paint_penu;
+                                return false;
+                            }
+                            return PathBlendEngine::needs_blend(p, m_config);
+                        };
                         std::vector<const ExtrusionPath*> pb_paths;
                         for (const ExtrusionEntity* ee2 : eec->entities) {
+                            if (_gc_pb_painter_block) break;
                             if (const auto* p2 = dynamic_cast<const ExtrusionPath*>(ee2))
-                                if (PathBlendEngine::needs_blend(*p2, m_config)) {
+                                if (_gc_accept_pb_path(*p2)) {
                                     m_pathblend_surface_bbox.merge(p2->polyline.bounding_box());
                                     pb_paths.push_back(p2);
                                 }

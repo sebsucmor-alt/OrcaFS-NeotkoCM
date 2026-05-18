@@ -2431,6 +2431,17 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 return false;
             if (!model_volume1.fuzzy_skin_facets.equals(model_volume2.fuzzy_skin_facets))
                 return false;
+            // NEOTKO_PROFILE_TAG — re-slice when the ColorMix Painter paint
+            // changes or the slot→profile mapping is edited. Without this,
+            // Print::apply() considers the volume identical to its previous
+            // snapshot and skips re-slicing (the user reports first-slice
+            // does nothing; only save+reload triggers reprocessing).
+            if (!model_volume1.color_mix_paint_facets.equals(model_volume2.color_mix_paint_facets))
+                return false;
+            for (int s = 0; s < 16; ++s)
+                if (model_volume1.colormix_slot_to_profile_id[s]
+                    != model_volume2.colormix_slot_to_profile_id[s])
+                    return false;
             if (model_volume1.config.get() != model_volume2.config.get())
                 return false;
         }

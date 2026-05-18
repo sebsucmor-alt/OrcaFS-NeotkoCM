@@ -21,6 +21,7 @@
 #include "SVG.hpp"
 //BBS
 #include "ShortestPath.hpp"
+#include "SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — orphan slot warning
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
 
 //! macro used to mark string used at localization, return same string
@@ -814,6 +815,35 @@ void PrintObject::slice()
         return;
     //BBS: add flag to reload scene for shell rendering
     m_print->set_status(5, L("Slicing mesh"), PrintBase::SlicingStatus::RELOAD_SCENE);
+    // NEOTKO_PROFILE_TAG — Fase G polish: detect orphan painted slots
+    // (Surface Effect Painter slots whose target profile id no longer
+    // exists in the manager — e.g. user deleted a profile after painting).
+    // Emit a non-critical slicing warning so the user knows the painted
+    // areas will print with no effect.
+    if (this->model_object()) {
+        std::set<std::pair<int, int>> orphan_slots; // (slot, missing_pid)
+        for (const ModelVolume* mv : this->model_object()->volumes) {
+            if (!mv || !mv->is_model_part()) continue;
+            for (int slot = 1; slot < 16; ++slot) {
+                const int pid = mv->colormix_slot_to_profile_id[slot];
+                if (pid <= 0) continue;
+                if (!SurfaceEffectProfileManager::get().find(pid))
+                    orphan_slots.insert({slot, pid});
+            }
+        }
+        if (!orphan_slots.empty()) {
+            std::string msg = "Object '" + this->model_object()->name
+                + "' has painted regions referencing deleted Surface Effect Profile(s):";
+            for (const auto& [slot, pid] : orphan_slots)
+                msg += " slot " + std::to_string(slot)
+                     + "→profile#" + std::to_string(pid) + ";";
+            msg += " these regions will print with no surface effect."
+                   " Re-paint with an existing profile or restore the deleted one.";
+            this->active_step_add_warning(
+                PrintStateBase::WarningLevel::NON_CRITICAL, msg);
+            BOOST_LOG_TRIVIAL(warning) << "[NEOTKO_PROFILE] " << msg;
+        }
+    }
     std::vector<coordf_t> layer_height_profile;
     this->update_layer_height_profile(*this->model_object(), m_slicing_params, layer_height_profile, this);
     m_print->throw_if_canceled();

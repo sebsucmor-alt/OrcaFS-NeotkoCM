@@ -30,8 +30,11 @@ namespace Slic3r {
 //   ORCA_DEBUG_PENULTIMATE  — Penultimate surface classification pipeline
 //   ORCA_DEBUG_TOOLORDER    — ToolOrdering ColorMix/MultiPass extruder registration
 //   ORCA_DEBUG_ZBLEND       — ZBlend sub-layer computation
+//   ORCA_DEBUG_PROFILE      — Surface Effect Profile / 3D Painter pipeline
+//                             (manager add/remove, 3mf I/O, painter UI,
+//                              Fase D painted-slot resolution + gv override)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
-// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend}.log
+// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile}.log
 namespace NeoDebug {
     enum Channel : int {
         COLORMIX    = 0,
@@ -40,7 +43,8 @@ namespace NeoDebug {
         TOOLORDER   = 3,
         ZBLEND      = 4,
         WIPETOWER   = 5,
-        CH_COUNT    = 6
+        PROFILE     = 6, // NEOTKO_PROFILE_TAG
+        CH_COUNT    = 7
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).
@@ -52,6 +56,12 @@ namespace NeoDebug {
 
 class PrintRegionConfig;
 class ExtrusionEntityCollection;
+class PrintObject;            // NEOTKO_PROFILE_TAG
+class ModelObject;            // NEOTKO_PROFILE_TAG
+struct SurfaceEffectProfile;  // NEOTKO_PROFILE_TAG
+struct SurfaceEffectPayload;  // NEOTKO_PROFILE_TAG — Fase F
+struct MultiPassConfig;       // NEOTKO_PROFILE_TAG — Fase F (defined below)
+struct PathBlendPassConfig;   // NEOTKO_PROFILE_TAG — Fase G (defined below)
 
 // NEOTKO_COLORMIX_TAG_START
 // Represents one selectable option in the ColorMix pattern picker UI.
@@ -93,12 +103,89 @@ public:
         bool                        allow_top     = true,
         bool                        allow_penu    = true,
         const MixedFilamentManager* mgr           = nullptr,
-        size_t                      num_physical  = 0
+        size_t                      num_physical  = 0,
+        // NEOTKO_PROFILE_TAG — Fase D: per-layer painted-profile override.
+        // When `print_object` is non-null, the function checks for triangles
+        // painted via the ColorMix Painter at layer Z (top role) or one layer
+        // up (penu role); if a dominant slot is found, its profile overrides
+        // the preset gradient view for this layer's fills.
+        const PrintObject*          print_object  = nullptr,
+        double                      layer_print_z = 0.0,
+        double                      layer_height  = 0.0
     );
 
     // Check if role matches the surface filter setting.
     // surface: 0=Both, 1=Top only, 2=Penultimate only (kColormixSurface_* constants)
     static bool should_process_role(ExtrusionRole role, int surface);
+
+    // NEOTKO_PROFILE_TAG — Fase D painter-mode helpers (shared with ToolOrdering).
+    //
+    // `object_has_any_colormix_paint`: returns true if any model_part volume of
+    // the object has a non-zero slot in its colormix_slot_to_profile_id table.
+    // This flips the slicer into "painter mode": preset SCM settings are
+    // ignored, only painted profiles drive the effect.
+    //
+    // `dominant_painted_slot_in_z_range`: scans painted facets and returns the
+    // most-painted slot whose upward-facing triangles have max_z inside the
+    // provided z range. Returns 0 if none.
+    //
+    // `profile_id_for_slot`: maps slot index (1..15) → SurfaceEffectProfile id
+    // by reading the first model_part's slot table. 0 if unmapped.
+    //
+    // `painted_profile_tools_1based`: produces the 1-based tool list that the
+    // SLICE pipeline would assign for a given profile + role. ToolOrdering
+    // calls this to register the same tools the SLICE will use, keeping the
+    // wipe-tower plan in sync.
+    static bool object_has_any_colormix_paint(const ModelObject* mo);
+    static int  dominant_painted_slot_in_z_range(const PrintObject* po,
+                                                  double z_min, double z_max);
+    static int  profile_id_for_slot(const PrintObject* po, int slot);
+    static std::vector<unsigned int> painted_profile_tools_1based(
+        const SurfaceEffectProfile& p, bool top_role);
+
+    // NEOTKO_PROFILE_TAG — Fase F painter-mode MultiPass override.
+    //
+    // `multipass_from_profile_payload`: handwritten kv → MultiPassConfig
+    // builder (avoids a per-region-per-layer PrintRegionConfig copy on the
+    // hot path). `role == erPenultimateInfill` reads `penultimate_multipass_*`
+    // keys; any other role reads top `multipass_*` keys.
+    //
+    // `painted_perim_override_from_profile`: returns the profile's
+    // `multipass_perimeter_override` value (top-role key), defaulting to
+    // false if absent. Used by ToolOrdering to decide whether to register
+    // mp_perim_override_active in painter mode.
+    static MultiPassConfig multipass_from_profile_payload(
+        const SurfaceEffectPayload& payload, ExtrusionRole role);
+    static bool             painted_perim_override_from_profile(
+        const SurfaceEffectPayload& payload);
+
+    // NEOTKO_PROFILE_TAG — Fase F: returns true if any painted profile that
+    // covers this layer's top/penu Z range carries
+    // `multipass_perimeter_override=true`. ToolOrdering uses this to set
+    // `mp_perim_override_active` in painter mode without falling back to the
+    // preset region config (which is suppressed under painter mode).
+    static bool             any_painted_profile_has_perim_override(
+        const PrintObject* po, double print_z, double height);
+
+    // NEOTKO_PROFILE_TAG — Fase G painter-mode PathBlend override.
+    // Mirror of `multipass_from_profile_payload`. Reads pathblend_* keys
+    // from the kv map. PathBlendPassConfig defaults are used for absent
+    // keys (struct defaults match PrintConfig defaults).
+    static PathBlendPassConfig pathblend_from_profile_payload(
+        const SurfaceEffectPayload& payload);
+
+    // NEOTKO_PROFILE_TAG — Penu role autonomy (s66 polish):
+    // returns true if ANY painted profile on the object has penultimate
+    // activity declared in its payloads. Used by PrintObject's
+    // vertical-shells discovery to force-classify penultimate solid
+    // surfaces when the preset's `penultimate_top_layers` is 0 but the
+    // painter wants them.
+    //
+    // Activity detection:
+    //   - multipass.kv has `penultimate_multipass_enabled` == "1", OR
+    //   - colormix.present AND interlayer_colormix_surface ∈ {0, 2}, OR
+    //   - pathblend.present AND pathblend_surface ∈ {0, 2}.
+    static bool             object_painter_wants_penu(const ModelObject* mo);
 
     // Encode tool index in mm3_per_mm: original + (tool_idx + 1) * 10.0
     // Decode in GCode.cpp: tool = floor(mm3_per_mm / 10.0) - 1

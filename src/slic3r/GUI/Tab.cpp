@@ -23,6 +23,8 @@
 #include <wx/imaglist.h>
 #include <wx/settings.h>
 #include <wx/filedlg.h>
+#include <wx/textdlg.h> // NEOTKO_PROFILE_TAG: wxTextEntryDialog
+#include <wx/listbox.h> // NEOTKO_PROFILE_TAG: wxListBox
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -58,7 +60,9 @@
 #endif // WIN32
 
 #include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG
+#include "libslic3r/SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
 #include <fstream>    // NEOTKO_COLORMIX_TAG (preset save/load)
+#include <sstream>    // NEOTKO_PROFILE_TAG: std::ostringstream for MP payload serialisation
 #include <functional> // NEOTKO_COLORMIX_TAG (std::function in MultiPassPreviewPanel)
 #include <map>        // NEOTKO_SURFACE_MIXER_TAG (blend_preview)
 #include <cstdio>     // NEOTKO_SURFACE_MIXER_TAG (std::snprintf for TD values)
@@ -1713,7 +1717,16 @@ private:
             vs->Add(lbl_ov, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
         }
 
-        // ---- Preset bar ----
+        // NEOTKO_PROFILE_TAG — Fase G cleanup: MP dialog's internal preset bar
+        // (combo + Save/Delete writing ~/.orca_mp_presets.txt) is disabled.
+        // The SurfaceEffectProfile system (Save as profile… below) is the
+        // single source of truth for MP recipes. The old preset bar shipped
+        // for early MP testing and would now confuse users with two parallel
+        // "save MP" flows. Code kept under #if 0 for reference; the
+        // collect_state/apply_state/load_presets/save_presets_file helpers
+        // and m_preset_combo / m_presets members are now unused.
+#if 0
+        // ---- Preset bar (DISABLED — superseded by SurfaceEffectProfile) ----
         {
             auto* row_p = new wxBoxSizer(wxHORIZONTAL);
             row_p->Add(new wxStaticText(this, wxID_ANY, _L("Preset:")),
@@ -1760,6 +1773,7 @@ private:
                 for (auto& [n, d] : m_presets) if (n == sel) { apply_state(d); break; }
             });
         }
+#endif
 
         // ---- Interactive preview panel ----
         m_preview = new MultiPassPreviewPanel(this);
@@ -2439,6 +2453,121 @@ private:
         }
         // NEOTKO_MULTIPASS_SURFACES_TAG_END
 
+        // NEOTKO_PROFILE_TAG_START — Fase F1: Save current dialog state as a
+        // MultiPass-only Surface Effect Profile (colormix payload stays absent).
+        // The profile becomes available to the 3D Painter, where painting it
+        // overrides the preset's MultiPass for the painted area.
+        {
+            wxBoxSizer* prof_row = new wxBoxSizer(wxHORIZONTAL);
+            wxButton* btn_save = new wxButton(this, wxID_ANY, _L("Save as profile…"));
+            prof_row->Add(btn_save, 0);
+            vs->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+            btn_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                wxTextEntryDialog ned(this, _L("Profile name:"),
+                                      _L("Save MultiPass profile"));
+                if (ned.ShowModal() != wxID_OK) return;
+                const std::string name = ned.GetValue().ToStdString();
+                if (name.empty()) return;
+
+                // NEOTKO_PROFILE_TAG — Fase F1 fix: write straight into the
+                // SurfaceEffectPayload kv map. The earlier
+                // `new_from_defaults_keys(multipass_keys())` path sometimes
+                // produced an empty config (per-region keys not surfaced from
+                // FullPrintConfig defaults on every build), in which case the
+                // typed writers silently no-op'd and `snapshot_keys` returned
+                // present=false → painter mode read "no MP payload" and fell
+                // back to CM. Serialising manually here matches how
+                // ConfigOption*::serialize emits values (bool→"1"/"0",
+                // int→%d, float→%g, string→raw) so the inverse parse in
+                // `multipass_from_profile_payload` round-trips exactly.
+                Slic3r::SurfaceEffectPayload mp_payload;
+                mp_payload.present = true;
+                auto wi = [&](const char* k, int v) {
+                    mp_payload.kv[k] = std::to_string(v);
+                };
+                auto wb = [&](const char* k, bool v) {
+                    mp_payload.kv[k] = v ? "1" : "0";
+                };
+                auto wf = [&](const char* k, double v) {
+                    std::ostringstream os;
+                    os.imbue(std::locale::classic());
+                    os << v;
+                    mp_payload.kv[k] = os.str();
+                };
+                auto ws = [&](const char* k, const std::string& v) {
+                    mp_payload.kv[k] = v;
+                };
+                // Top role — saved profile enables MP on top by default.
+                wb("multipass_enabled",          true);
+                wi("multipass_surface",          get_surface());
+                wi("multipass_num_passes",       get_passes());
+                wi("multipass_tool_1",           get_tool1());
+                wi("multipass_tool_2",           get_tool2());
+                wi("multipass_tool_3",           get_tool3());
+                wf("multipass_width_ratio_1",    get_ratio1());
+                wf("multipass_width_ratio_2",    get_ratio2());
+                wf("multipass_width_ratio_3",    get_ratio3());
+                wb("multipass_vary_pattern",     get_vary());
+                wi("multipass_angle_1",          get_angle1());
+                wi("multipass_angle_2",          get_angle2());
+                wi("multipass_angle_3",          get_angle3());
+                wi("multipass_pa_mode",          get_pa_mode());
+                wf("multipass_pa_value",         get_pa_value());
+                wi("multipass_fan_1",            get_fan1());
+                wi("multipass_fan_2",            get_fan2());
+                wi("multipass_fan_3",            get_fan3());
+                wi("multipass_speed_pct_1",      get_speed1());
+                wi("multipass_speed_pct_2",      get_speed2());
+                wi("multipass_speed_pct_3",      get_speed3());
+                ws("multipass_gcode_start_1",    get_gcode_start1());
+                ws("multipass_gcode_start_2",    get_gcode_start2());
+                ws("multipass_gcode_start_3",    get_gcode_start3());
+                ws("multipass_gcode_end_1",      get_gcode_end1());
+                ws("multipass_gcode_end_2",      get_gcode_end2());
+                ws("multipass_gcode_end_3",      get_gcode_end3());
+                // multipass_perimeter_override + multipass_path_gradient live in
+                // SCM dialog widgets, not here — keep defaults from new_from_defaults_keys.
+                // Penultimate role
+                wb("penultimate_multipass_enabled",     get_penu_enabled());
+                wi("penultimate_multipass_num_passes",  get_penu_passes());
+                wi("penultimate_multipass_tool_1",      get_penu_tool1());
+                wi("penultimate_multipass_tool_2",      get_penu_tool2());
+                wi("penultimate_multipass_tool_3",      get_penu_tool3());
+                wf("penultimate_multipass_width_ratio_1", get_penu_ratio1());
+                wf("penultimate_multipass_width_ratio_2", get_penu_ratio2());
+                wf("penultimate_multipass_width_ratio_3", get_penu_ratio3());
+                wb("penultimate_multipass_vary_pattern", get_penu_vary());
+                wi("penultimate_multipass_angle_1",     get_penu_angle1());
+                wi("penultimate_multipass_angle_2",     get_penu_angle2());
+                wi("penultimate_multipass_angle_3",     get_penu_angle3());
+                wi("penultimate_multipass_fan_1",       get_penu_fan1());
+                wi("penultimate_multipass_fan_2",       get_penu_fan2());
+                wi("penultimate_multipass_fan_3",       get_penu_fan3());
+                wi("penultimate_multipass_speed_pct_1", get_penu_speed1());
+                wi("penultimate_multipass_speed_pct_2", get_penu_speed2());
+                wi("penultimate_multipass_speed_pct_3", get_penu_speed3());
+                ws("penultimate_multipass_gcode_start_1", get_penu_gcode_start1());
+                ws("penultimate_multipass_gcode_start_2", get_penu_gcode_start2());
+                ws("penultimate_multipass_gcode_start_3", get_penu_gcode_start3());
+                ws("penultimate_multipass_gcode_end_1",   get_penu_gcode_end1());
+                ws("penultimate_multipass_gcode_end_2",   get_penu_gcode_end2());
+                ws("penultimate_multipass_gcode_end_3",   get_penu_gcode_end3());
+
+                Slic3r::SurfaceEffectProfile prof;
+                prof.name = name;
+                prof.multipass = std::move(mp_payload);
+                // colormix / pathblend payloads stay present=false.
+                const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(prof));
+                wxMessageBox(wxString::Format(_L("Saved MultiPass profile #%d (%zu keys)."),
+                                              new_id,
+                                              (size_t)Slic3r::SurfaceEffectProfileManager::get()
+                                                  .find(new_id)->multipass.kv.size()),
+                             _L("Surface Effect Profile"),
+                             wxOK | wxICON_INFORMATION, this);
+            });
+        }
+        // NEOTKO_PROFILE_TAG_END
+
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
                 0, wxALL|wxALIGN_RIGHT, PAD);
         SetSizerAndFit(vs);
@@ -2644,6 +2773,67 @@ public:
         note->SetForegroundColour(wxColour(90, 90, 90));
         note->Wrap(320);
         vs->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        // NEOTKO_PROFILE_TAG_START — Fase G1: Save current dialog state as a
+        // PathBlend-only Surface Effect Profile (colormix / multipass payloads
+        // stay absent). The profile becomes available to the 3D Painter, where
+        // painting it overrides the preset's PathBlend on the painted area.
+        {
+            wxBoxSizer* prof_row = new wxBoxSizer(wxHORIZONTAL);
+            wxButton* btn_save = new wxButton(this, wxID_ANY, _L("Save as profile…"));
+            prof_row->Add(btn_save, 0);
+            vs->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+            btn_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                wxTextEntryDialog ned(this, _L("Profile name:"),
+                                      _L("Save PathBlend profile"));
+                if (ned.ShowModal() != wxID_OK) return;
+                const std::string name = ned.GetValue().ToStdString();
+                if (name.empty()) return;
+
+                Slic3r::SurfaceEffectPayload pb_payload;
+                pb_payload.present = true;
+                auto wi = [&](const char* k, int v) {
+                    pb_payload.kv[k] = std::to_string(v);
+                };
+                auto wb = [&](const char* k, bool v) {
+                    pb_payload.kv[k] = v ? "1" : "0";
+                };
+                auto wf = [&](const char* k, double v) {
+                    std::ostringstream os;
+                    os.imbue(std::locale::classic());
+                    os << v;
+                    pb_payload.kv[k] = os.str();
+                };
+                // Saved profile activates PathBlend by default (mirrors MP
+                // dialog save semantics: dialog open → user intends to use it).
+                wb("multipass_path_gradient",  true);
+                wi("pathblend_num_passes",     get_num_passes());
+                wi("pathblend_tool_1",         get_tool(0));
+                wi("pathblend_tool_2",         get_tool(1));
+                wi("pathblend_tool_3",         get_tool(2));
+                wi("pathblend_tool_4",         get_tool(3));
+                wf("pathblend_min_ratio",      get_min_ratio());
+                wf("pathblend_max_ratio",      get_max_ratio());
+                wi("pathblend_ease_mode",      get_ease_mode());
+                wb("pathblend_invert_gradient", get_invert());
+                wi("pathblend_fill_angle",     get_fill_angle());
+                // pathblend_surface / pathblend_layer_ratio_* not exposed in
+                // this dialog — kept out of the payload so the painter-mode
+                // builder falls back to struct defaults.
+
+                Slic3r::SurfaceEffectProfile prof;
+                prof.name = name;
+                prof.pathblend = std::move(pb_payload);
+                const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(prof));
+                wxMessageBox(wxString::Format(_L("Saved PathBlend profile #%d (%zu keys)."),
+                                              new_id,
+                                              (size_t)Slic3r::SurfaceEffectProfileManager::get()
+                                                  .find(new_id)->pathblend.kv.size()),
+                             _L("Surface Effect Profile"),
+                             wxOK | wxICON_INFORMATION, this);
+            });
+        }
+        // NEOTKO_PROFILE_TAG_END
 
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
         SetSizerAndFit(vs);
@@ -2882,8 +3072,11 @@ private:
         else if (mp_on  && for_top(mp_srf))  m_top_eff  = EFF_MP;
         else if (cm_on  && for_top(cm_srf))  m_top_eff  = EFF_CM;
 
-        if      (pb_on     && for_penu(pb_srf)) m_penu_eff = EFF_PB;
-        else if (penu_mp_on)                    m_penu_eff = EFF_MP;
+        // NEOTKO_PROFILE_TAG — PB on Penu disabled UX-side. Skip PB candidate
+        // for penu pill; if a loaded payload says penu=PB, demote silently to
+        // MP if penu MP enabled, else CM if penu CM enabled, else None.
+        /* if (pb_on && for_penu(pb_srf)) m_penu_eff = EFF_PB; — DISABLED */
+        if      (penu_mp_on)                    m_penu_eff = EFF_MP;
         else if (cm_on     && for_penu(cm_srf)) m_penu_eff = EFF_CM;
     }
 
@@ -3391,8 +3584,9 @@ private:
         // NEOTKO_MULTIPASS_TAG_END
 
         // PathBlend (EFF_PB only — independent surface key, independent enable)
+        // NEOTKO_PROFILE_TAG — PB on Penu disabled. Pretend penu PB is never on.
         const bool top_pb  = (m_top_eff  == EFF_PB);
-        const bool penu_pb = (m_penu_eff == EFF_PB);
+        const bool penu_pb = false; // (m_penu_eff == EFF_PB) — DISABLED
         const bool pb_en   = top_pb || penu_pb;
         int pb_srf = 0;
         if (top_pb && !penu_pb) pb_srf = 1;
@@ -3593,6 +3787,15 @@ private:
                 else                  m_penu_eff = i;
                 update_ui();
             });
+            // NEOTKO_PROFILE_TAG — PB on Penu is disabled (known issue: penu
+            // PathBlend gradient inverts on the second-stair surface and the
+            // engine wasn't validated for that path). Hide the Penu PB pill
+            // to prevent users selecting it. The struct + payload support
+            // remain — re-enable when penu PB is fully validated.
+            if (surface_id == 1 && i == EFF_PB) {
+                pills[i]->Hide();
+                continue;
+            }
             pill_row->Add(pills[i], 0, wxRIGHT, 3);
         }
         sb->Add(pill_row, 0, wxALL, PAD);
@@ -4210,6 +4413,281 @@ private:
             vs->Add(bs_sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
         }
         // NEOTKO_MULTIPASS_TAG_END
+
+        // NEOTKO_PROFILE_TAG_START — Fase A: Save/Manage Surface Effect Profiles.
+        // Snapshot ONLY the ColorMix payload for now; the profile struct already
+        // reserves PathBlend (Fase G) and MultiPass (Fase F) payloads.
+        {
+            wxBoxSizer* prof_row = new wxBoxSizer(wxHORIZONTAL);
+            wxButton* btn_save_prof = new wxButton(this, wxID_ANY, _L("Save as profile…"));
+            wxButton* btn_mgr_prof  = new wxButton(this, wxID_ANY, _L("Manage profiles…"));
+            prof_row->Add(btn_save_prof, 0, wxRIGHT, PAD);
+            prof_row->Add(btn_mgr_prof,  0);
+            vs->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+            btn_save_prof->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                wxTextEntryDialog dlg(this, _L("Profile name:"),
+                                      _L("Save Surface Effect Profile"));
+                if (dlg.ShowModal() != wxID_OK) return;
+                const std::string name = dlg.GetValue().ToStdString();
+                if (name.empty()) return;
+
+                // NEOTKO_PROFILE_TAG — Fase F1: snapshot only effects that are
+                // currently enabled. Otherwise a profile saved with MP pill OFF
+                // would carry an MP payload with `multipass_enabled=0`, which
+                // painter mode reads as "explicitly disabled" and suppresses MP
+                // even when the user wanted ONLY ColorMix in that profile.
+                // NEOTKO_PROFILE_TAG — Fase G fix: read pill state (live UI).
+                // m_config only updates on OK, so Save before OK would otherwise
+                // snapshot the LAST applied state, not what the user sees.
+                // We also override the per-effect enable flags in the captured
+                // kv so they reflect pill state, without mutating m_config
+                // (which would persist across Cancel).
+                const bool _cm_on = (m_top_eff == EFF_CM) || (m_penu_eff == EFF_CM);
+                const bool _mp_on = (m_top_eff == EFF_MP) || (m_penu_eff == EFF_MP);
+                // NEOTKO_PROFILE_TAG — PB on Penu disabled UX-side: only top counts.
+                const bool _pb_on = (m_top_eff == EFF_PB);
+                Slic3r::SurfaceEffectProfile p;
+                p.name = name;
+                // NEOTKO_PROFILE_TAG — Fase G fix: also force the per-effect
+                // surface enum (0=Both / 1=Top only / 2=Penu only) in the
+                // captured kv. Otherwise a profile saved with top=PB+penu=None
+                // would inherit whatever pathblend_surface was last in m_config
+                // (often 0=Both), and Loading would phantom-fill the penu pill.
+                auto surface_enum = [&](int eff) -> std::string {
+                    const bool top = (m_top_eff  == eff);
+                    // NEOTKO_PROFILE_TAG — PB on Penu disabled: clamp penu→false for PB.
+                    const bool pen = (eff == EFF_PB) ? false : (m_penu_eff == eff);
+                    if (top && pen) return "0"; // Both
+                    if (top)        return "1"; // Top only
+                    return "2";                 // Penu only
+                };
+                if (_cm_on) {
+                    p.colormix = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
+                        *m_config, Slic3r::SurfaceEffectProfileManager::colormix_keys());
+                    p.colormix.kv["interlayer_colormix_enabled"] = "1";
+                    p.colormix.kv["interlayer_colormix_surface"] = surface_enum(EFF_CM);
+                }
+                if (_mp_on) {
+                    p.multipass = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
+                        *m_config, Slic3r::SurfaceEffectProfileManager::multipass_keys());
+                    // Mark per-role enabled based on which pill is on.
+                    p.multipass.kv["multipass_enabled"] =
+                        (m_top_eff == EFF_MP) ? "1" : "0";
+                    p.multipass.kv["penultimate_multipass_enabled"] =
+                        (m_penu_eff == EFF_MP) ? "1" : "0";
+                    // multipass_surface still kept for legacy reads — sync to pills.
+                    p.multipass.kv["multipass_surface"] = surface_enum(EFF_MP);
+                }
+                if (_pb_on) {
+                    p.pathblend = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
+                        *m_config, Slic3r::SurfaceEffectProfileManager::pathblend_keys());
+                    p.pathblend.kv["multipass_path_gradient"] = "1";
+                    p.pathblend.kv["pathblend_surface"] = surface_enum(EFF_PB);
+                }
+                const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(p));
+                const auto* added = Slic3r::SurfaceEffectProfileManager::get().find(new_id);
+                wxMessageBox(wxString::Format(_L("Saved profile #%d (CM:%zu, MP:%zu, PB:%zu keys)."),
+                                              new_id,
+                                              (size_t)added->colormix.kv.size(),
+                                              (size_t)added->multipass.kv.size(),
+                                              (size_t)added->pathblend.kv.size()),
+                             _L("Surface Effect Profile"), wxOK | wxICON_INFORMATION, this);
+            });
+
+            btn_mgr_prof->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+                wxDialog mdlg(this, wxID_ANY, _L("Manage Surface Effect Profiles"),
+                              wxDefaultPosition, wxSize(420, 320),
+                              wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+                wxBoxSizer* ms = new wxBoxSizer(wxVERTICAL);
+                wxListBox*  lb = new wxListBox(&mdlg, wxID_ANY);
+
+                auto refill = [&]() {
+                    lb->Clear();
+                    for (const auto& p : mgr.list()) {
+                        wxString label = wxString::Format("#%d  %s  [CM:%s PB:%s MP:%s]",
+                            p.id,
+                            wxString::FromUTF8(p.name),
+                            p.colormix.present  ? "*" : "-",
+                            p.pathblend.present ? "*" : "-",
+                            p.multipass.present ? "*" : "-");
+                        lb->Append(label, reinterpret_cast<void*>((intptr_t)p.id));
+                    }
+                };
+                refill();
+
+                // NEOTKO_PROFILE_TAG — two button rows: edit ops + actions.
+                wxBoxSizer* br_edit = new wxBoxSizer(wxHORIZONTAL);
+                wxButton* btn_load = new wxButton(&mdlg, wxID_ANY, _L("Load into dialog"));
+                wxButton* btn_upd  = new wxButton(&mdlg, wxID_ANY, _L("Update from current"));
+                br_edit->Add(btn_load, 0, wxRIGHT, 6);
+                br_edit->Add(btn_upd,  0);
+
+                wxBoxSizer* br = new wxBoxSizer(wxHORIZONTAL);
+                wxButton* btn_ren = new wxButton(&mdlg, wxID_ANY, _L("Rename"));
+                wxButton* btn_del = new wxButton(&mdlg, wxID_ANY, _L("Delete"));
+                wxButton* btn_cls = new wxButton(&mdlg, wxID_CLOSE, _L("Close"));
+                br->Add(btn_ren, 0, wxRIGHT, 6);
+                br->Add(btn_del, 0, wxRIGHT, 6);
+                br->AddStretchSpacer(1);
+                br->Add(btn_cls, 0);
+
+                ms->Add(lb,      1, wxEXPAND | wxALL, 8);
+                ms->Add(br_edit, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+                ms->Add(br,      0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+                mdlg.SetSizer(ms);
+
+                auto selected_id = [&]() -> int {
+                    const int sel = lb->GetSelection();
+                    if (sel == wxNOT_FOUND) return 0;
+                    return (int)(intptr_t)lb->GetClientData(sel);
+                };
+
+                // NEOTKO_PROFILE_TAG — Load: restore the profile's ColorMix payload
+                // into the active SCM config so the user can edit it in the dialog.
+                // After this the user can tweak values and use "Update from current"
+                // (below) to commit the changes back to this same profile, or
+                // "Save as profile…" to fork it into a new one.
+                btn_load->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
+                    const int id = selected_id();
+                    if (id == 0) return;
+                    const auto* p = mgr.find(id);
+                    if (!p) return;
+                    if (!p->colormix.present && !p->multipass.present && !p->pathblend.present) return;
+                    if (p->colormix.present)
+                        Slic3r::SurfaceEffectProfileManager::restore_keys(*m_config, p->colormix);
+                    // NEOTKO_PROFILE_TAG — Fase F1: restore MultiPass keys too so the
+                    // MP sub-dialog (re-opened later) sees the loaded values.
+                    if (p->multipass.present)
+                        Slic3r::SurfaceEffectProfileManager::restore_keys(*m_config, p->multipass);
+                    // NEOTKO_PROFILE_TAG — Fase G1: restore PathBlend keys.
+                    if (p->pathblend.present)
+                        Slic3r::SurfaceEffectProfileManager::restore_keys(*m_config, p->pathblend);
+                    // Notify config-listeners for every restored key so other panes
+                    // refresh too (filament filter, surface combo, etc.).
+                    if (p->colormix.present)
+                        for (const auto& kv : p->colormix.kv)
+                            m_on_change(kv.first);
+                    if (p->multipass.present)
+                        for (const auto& kv : p->multipass.kv)
+                            m_on_change(kv.first);
+                    if (p->pathblend.present)
+                        for (const auto& kv : p->pathblend.kv)
+                            m_on_change(kv.first);
+                    // Push restored values back into the visible widgets — they
+                    // were built from m_config at dialog creation and don't poll
+                    // for external changes. The advanced sub-dialog
+                    // (ColorMixPatternDialog) re-reads m_config when opened, so
+                    // numeric gradient values appear correctly there.
+                    if (m_choice_top_zone)
+                        m_choice_top_zone->SetSelection(
+                            m_config->opt_int("interlayer_colormix_top_zone"));
+                    if (m_choice_penu_zone)
+                        m_choice_penu_zone->SetSelection(
+                            m_config->opt_int("interlayer_colormix_penu_zone"));
+                    if (m_sc_filament_filter)
+                        m_sc_filament_filter->SetValue(
+                            m_config->opt_int("interlayer_colormix_filament_filter"));
+                    if (m_sc_min_length)
+                        m_sc_min_length->SetValue(
+                            m_config->opt_float("interlayer_colormix_min_length"));
+                    if (m_chk_use_virtual)
+                        m_chk_use_virtual->SetValue(
+                            m_config->opt_bool("interlayer_colormix_use_virtual"));
+                    infer_effects();
+                    update_ui();
+                    Layout();
+                });
+
+                // NEOTKO_PROFILE_TAG — Update from current: re-snapshot the dialog's
+                // live config and overwrite the selected profile's ColorMix payload.
+                // Keeps the profile id/name; only the payload is replaced.
+                btn_upd->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
+                    const int id = selected_id();
+                    if (id == 0) return;
+                    auto* p = mgr.find_mut(id);
+                    if (!p) return;
+                    if (wxMessageBox(
+                            wxString::Format(_L("Overwrite profile '%s' with the "
+                                                "current dialog settings?"),
+                                             wxString::FromUTF8(p->name)),
+                            _L("Update profile"),
+                            wxYES_NO | wxICON_QUESTION, &mdlg) != wxYES)
+                        return;
+                    // NEOTKO_PROFILE_TAG — Fase F1: snapshot only effects that
+                    // are currently enabled; effects toggled OFF clear their
+                    // payload from the profile. Matches Save semantics: profile
+                    // = bundle of currently-active settings.
+                    // NEOTKO_PROFILE_TAG — Fase G fix: same pill-state read as
+                    // SCM Save. Pre-OK Update must reflect what the user sees.
+                    const bool _u_cm_on = (m_top_eff == EFF_CM) || (m_penu_eff == EFF_CM);
+                    const bool _u_mp_on = (m_top_eff == EFF_MP) || (m_penu_eff == EFF_MP);
+                    // NEOTKO_PROFILE_TAG — PB on Penu disabled UX-side: only top counts.
+                    const bool _u_pb_on = (m_top_eff == EFF_PB);
+                    auto u_surface_enum = [&](int eff) -> std::string {
+                        const bool top = (m_top_eff  == eff);
+                        // NEOTKO_PROFILE_TAG — PB on Penu disabled.
+                        const bool pen = (eff == EFF_PB) ? false : (m_penu_eff == eff);
+                        if (top && pen) return "0";
+                        if (top)        return "1";
+                        return "2";
+                    };
+                    if (_u_cm_on) {
+                        p->colormix = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
+                            *m_config, Slic3r::SurfaceEffectProfileManager::colormix_keys());
+                        p->colormix.kv["interlayer_colormix_enabled"] = "1";
+                        p->colormix.kv["interlayer_colormix_surface"] = u_surface_enum(EFF_CM);
+                    } else {
+                        p->colormix = Slic3r::SurfaceEffectPayload{};
+                    }
+                    if (_u_mp_on) {
+                        p->multipass = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
+                            *m_config, Slic3r::SurfaceEffectProfileManager::multipass_keys());
+                        p->multipass.kv["multipass_enabled"] =
+                            (m_top_eff == EFF_MP) ? "1" : "0";
+                        p->multipass.kv["penultimate_multipass_enabled"] =
+                            (m_penu_eff == EFF_MP) ? "1" : "0";
+                        p->multipass.kv["multipass_surface"] = u_surface_enum(EFF_MP);
+                    } else {
+                        p->multipass = Slic3r::SurfaceEffectPayload{};
+                    }
+                    if (_u_pb_on) {
+                        p->pathblend = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
+                            *m_config, Slic3r::SurfaceEffectProfileManager::pathblend_keys());
+                        p->pathblend.kv["multipass_path_gradient"] = "1";
+                        p->pathblend.kv["pathblend_surface"] = u_surface_enum(EFF_PB);
+                    } else {
+                        p->pathblend = Slic3r::SurfaceEffectPayload{};
+                    }
+                    refill();
+                });
+
+                btn_ren->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+                    const int id = selected_id();
+                    if (id == 0) return;
+                    const auto* p = mgr.find(id);
+                    wxTextEntryDialog td(&mdlg, _L("New name:"), _L("Rename profile"),
+                                         wxString::FromUTF8(p ? p->name : ""));
+                    if (td.ShowModal() == wxID_OK)
+                        mgr.rename(id, td.GetValue().ToStdString());
+                    refill();
+                });
+                btn_del->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+                    const int id = selected_id();
+                    if (id == 0) return;
+                    if (wxMessageBox(_L("Delete this profile?"), _L("Confirm"),
+                                     wxYES_NO | wxICON_QUESTION, &mdlg) == wxYES) {
+                        mgr.remove(id);
+                        refill();
+                    }
+                });
+                btn_cls->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { mdlg.EndModal(wxID_CLOSE); });
+
+                mdlg.ShowModal();
+            });
+        }
+        // NEOTKO_PROFILE_TAG_END
 
         // ---- OK / Cancel ----
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);

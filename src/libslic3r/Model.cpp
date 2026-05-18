@@ -1834,6 +1834,11 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
             vol->seam_facets.assign(volume->seam_facets);
             vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
             vol->fuzzy_skin_facets.assign(volume->fuzzy_skin_facets);
+            // NEOTKO_PROFILE_TAG
+            vol->color_mix_paint_facets.assign(volume->color_mix_paint_facets);
+            std::copy(std::begin(volume->colormix_slot_to_profile_id),
+                      std::end  (volume->colormix_slot_to_profile_id),
+                      std::begin(vol->colormix_slot_to_profile_id));
 
             // Perform conversion only if the target "imperial" state is different from the current one.
             // This check supports conversion of "mixed" set of volumes, each with different "imperial" state.
@@ -1946,6 +1951,10 @@ void ModelVolume::reset_extra_facets()
     this->seam_facets.reset();
     this->mmu_segmentation_facets.reset();
     this->fuzzy_skin_facets.reset();
+    // NEOTKO_PROFILE_TAG
+    this->color_mix_paint_facets.reset();
+    std::fill(std::begin(this->colormix_slot_to_profile_id),
+              std::end  (this->colormix_slot_to_profile_id), 0);
 }
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
@@ -2050,6 +2059,13 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                 if (new_vol->mmu_segmentation_facets.timestamp() == volume->mmu_segmentation_facets.timestamp())
                     new_vol->mmu_segmentation_facets.reset(); // BBS: let next assign take effect
                 new_vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
+                // NEOTKO_PROFILE_TAG — mirror color_mix paint facets + slot table
+                if (new_vol->color_mix_paint_facets.timestamp() == volume->color_mix_paint_facets.timestamp())
+                    new_vol->color_mix_paint_facets.reset();
+                new_vol->color_mix_paint_facets.assign(volume->color_mix_paint_facets);
+                std::copy(std::begin(volume->colormix_slot_to_profile_id),
+                          std::end  (volume->colormix_slot_to_profile_id),
+                          std::begin(new_vol->colormix_slot_to_profile_id));
             }
 
             // BBS: clear volume's config, as we already set them into object
@@ -2716,6 +2732,7 @@ size_t ModelVolume::split(unsigned int max_extruders)
             this->supported_facets.reset();
             this->seam_facets.reset();
             this->fuzzy_skin_facets.reset();
+            this->color_mix_paint_facets.reset(); // NEOTKO_PROFILE_TAG
         }
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
@@ -2777,6 +2794,7 @@ void ModelVolume::assign_new_unique_ids_recursive()
     seam_facets.set_new_unique_id();
     mmu_segmentation_facets.set_new_unique_id();
     fuzzy_skin_facets.set_new_unique_id();
+    color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG
 }
 
 void ModelVolume::rotate(double angle, Axis axis)
@@ -3648,6 +3666,22 @@ bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObjec
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.mmu_segmentation_facets.timestamp_matches(mv_new.mmu_segmentation_facets); });
+}
+
+// NEOTKO_PROFILE_TAG — change detector for the ColorMix Painter so paint or
+// slot-table edits force a re-slice instead of hitting the apply() cache.
+bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    return model_property_changed(mo, mo_new,
+        [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
+        [](const ModelVolume &mv_old, const ModelVolume &mv_new) {
+            if (!mv_old.color_mix_paint_facets.timestamp_matches(mv_new.color_mix_paint_facets))
+                return false;
+            for (int s = 0; s < 16; ++s)
+                if (mv_old.colormix_slot_to_profile_id[s] != mv_new.colormix_slot_to_profile_id[s])
+                    return false;
+            return true;
+        });
 }
 
 bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new)

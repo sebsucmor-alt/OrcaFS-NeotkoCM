@@ -22,6 +22,7 @@
 //#include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSeam.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMmuSegmentation.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoColorMixPainter.hpp" // NEOTKO_PROFILE_TAG
 #include "slic3r/GUI/Gizmos/GLGizmoSimplify.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
@@ -162,6 +163,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case(EType::MmSegmentation):
             gizmo->set_icon_filename(m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg");
             break;
+        case(EType::ColorMixPainter): // NEOTKO_PROFILE_TAG — placeholder icon
+            gizmo->set_icon_filename(m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg");
+            break;
         case(EType::FuzzySkin):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg");
             break;
@@ -213,6 +217,8 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSeam(m_parent, m_is_dark ? "toolbar_seam_dark.svg" : "toolbar_seam.svg", EType::Seam));
     m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
     m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmSegmentation));
+    // NEOTKO_PROFILE_TAG — Opción 4 Fase B: 3D Painter for SurfaceEffectProfile (placeholder MMU icon).
+    m_gizmos.emplace_back(new GLGizmoColorMixPainter(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::ColorMixPainter));
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent, m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg", EType::Emboss));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
     m_gizmos.emplace_back(new GLGizmoMeasure(m_parent, m_is_dark ? "toolbar_measure_dark.svg" : "toolbar_measure.svg", EType::Measure));
@@ -495,6 +501,7 @@ bool GLGizmosManager::is_paint_gizmo()
 {
     return m_current == EType::FdmSupports ||
            m_current == EType::MmSegmentation ||
+           m_current == EType::ColorMixPainter || // NEOTKO_PROFILE_TAG
            m_current == EType::FuzzySkin ||
            m_current == EType::Seam;
 }
@@ -1428,6 +1435,8 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Text";
     case GLGizmosManager::EType::MmSegmentation:
         return "Color Painting";
+    case GLGizmosManager::EType::ColorMixPainter: // NEOTKO_PROFILE_TAG
+        return "ColorMix Painter";
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";
     default:

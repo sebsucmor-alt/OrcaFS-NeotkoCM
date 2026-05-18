@@ -2,6 +2,8 @@
 #include "../Exception.hpp"
 #include "../Model.hpp"
 #include "../MixedFilament.hpp"
+#include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
+#include "../SurfaceColorMix.hpp"      // NEOTKO_PROFILE_TAG — NEOTKO_LOG + NeoDebug::PROFILE
 #include "../Preset.hpp"
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
@@ -278,6 +280,64 @@ static constexpr const char* CUSTOM_SUPPORTS_ATTR = "paint_supports";
 static constexpr const char* CUSTOM_FUZZY_SKIN_ATTR  = "paint_fuzzy_skin";
 static constexpr const char* CUSTOM_SEAM_ATTR = "paint_seam";
 static constexpr const char* MMU_SEGMENTATION_ATTR = "paint_color";
+// NEOTKO_PROFILE_TAG — Surface Effect Profile painter:
+//   * per-triangle 4-bit slot encoded as XML attribute (same hex format as MMU)
+//   * per-volume slot→profile id table (16 ints, comma-separated metadata tag)
+static constexpr const char* COLORMIX_PAINT_ATTR     = "paint_colormix";
+static constexpr const char* COLORMIX_SLOT_TABLE_KEY = "colormix_slot_to_profile_id";
+
+// NEOTKO_PROFILE_TAG — base64 wrapper for the colormix_profiles JSON blob.
+// `xml_unescape` only decodes &lt; &gt; &amp; — not &quot; or &apos; — so JSON
+// strings containing '"' would not round-trip through the metadata path. Base64
+// uses only XML-safe characters [A-Z a-z 0-9 + / =], so we encode at the 3mf
+// boundary and keep the in-memory representation as plain JSON.
+static inline std::string colormix_profiles_b64_encode(const std::string& json)
+{
+    if (json.empty()) return std::string();
+    std::string out;
+    out.resize(boost::beast::detail::base64::encoded_size(json.size()));
+    out.resize(boost::beast::detail::base64::encode(&out[0], json.data(), json.size()));
+    return out;
+}
+static inline std::string colormix_profiles_b64_decode(const std::string& b64)
+{
+    if (b64.empty()) return std::string();
+    std::string out;
+    out.resize(boost::beast::detail::base64::decoded_size(b64.size()));
+    const auto pr = boost::beast::detail::base64::decode(&out[0], b64.data(), b64.size());
+    out.resize(pr.first);
+    return out;
+}
+
+// Parse "1,2,0,3,0,..." (up to 16 ints) into slots[]. Missing entries left as 0.
+static inline void parse_colormix_slot_table(const std::string& csv, int (&slots)[16])
+{
+    for (int& s : slots) s = 0;
+    size_t i = 0, start = 0, idx = 0;
+    while (i <= csv.size() && idx < 16) {
+        if (i == csv.size() || csv[i] == ',') {
+            try { slots[idx++] = std::stoi(csv.substr(start, i - start)); }
+            catch (...) { slots[idx++] = 0; }
+            start = i + 1;
+        }
+        ++i;
+    }
+}
+// Serialize iff at least one slot is non-zero; otherwise returns empty string
+// (callers skip the metadata write entirely in that case).
+static inline std::string serialize_colormix_slot_table(const int (&slots)[16])
+{
+    bool any = false;
+    for (int s : slots) if (s != 0) { any = true; break; }
+    if (!any) return std::string();
+    std::string out;
+    out.reserve(48);
+    for (int i = 0; i < 16; ++i) {
+        if (i) out += ',';
+        out += std::to_string(slots[i]);
+    }
+    return out;
+}
 // BBS
 static constexpr const char* FACE_PROPERTY_ATTR = "face_property";
 
@@ -709,6 +769,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             std::vector<std::string> custom_seam;
             std::vector<std::string> mmu_segmentation;
             std::vector<std::string> fuzzy_skin;
+            std::vector<std::string> colormix_paint; // NEOTKO_PROFILE_TAG — per-tri painter
             // BBS
             std::vector<std::string> face_properties;
 
@@ -729,6 +790,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 custom_seam.clear();
                 mmu_segmentation.clear();
                 fuzzy_skin.clear();
+                colormix_paint.clear(); // NEOTKO_PROFILE_TAG
             }
         };
 
@@ -3651,6 +3713,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             m_curr_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
             m_curr_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
             m_curr_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));
+            m_curr_object->geometry.colormix_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, COLORMIX_PAINT_ATTR)); // NEOTKO_PROFILE_TAG
             // BBS
             m_curr_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
         }
@@ -4814,6 +4877,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume->seam_facets.reserve(triangles_count);
                 volume->mmu_segmentation_facets.reserve(triangles_count);
                 volume->fuzzy_skin_facets.reserve(triangles_count);
+                volume->color_mix_paint_facets.reserve(triangles_count); // NEOTKO_PROFILE_TAG
+                const bool has_colormix_paint = !sub_object->geometry.colormix_paint.empty();
                 for (size_t i=0; i<triangles_count; ++i) {
                     assert(i < sub_object->geometry.custom_supports.size());
                     assert(i < sub_object->geometry.custom_seam.size());
@@ -4827,6 +4892,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         volume->mmu_segmentation_facets.set_triangle_from_string(i, sub_object->geometry.mmu_segmentation[i]);
                     if (!sub_object->geometry.fuzzy_skin[i].empty())
                         volume->fuzzy_skin_facets.set_triangle_from_string(i, sub_object->geometry.fuzzy_skin[i]);
+                    if (has_colormix_paint && i < sub_object->geometry.colormix_paint.size()
+                        && !sub_object->geometry.colormix_paint[i].empty())
+                        volume->color_mix_paint_facets.set_triangle_from_string(i, sub_object->geometry.colormix_paint[i]);
                 }
                 volume->supported_facets.shrink_to_fit();
                 volume->seam_facets.shrink_to_fit();
@@ -4834,6 +4902,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume->mmu_segmentation_facets.touch();
                 volume->fuzzy_skin_facets.shrink_to_fit();
                 volume->fuzzy_skin_facets.touch();
+                volume->color_mix_paint_facets.shrink_to_fit(); // NEOTKO_PROFILE_TAG
+                volume->color_mix_paint_facets.touch();
             }
 
             volume->set_type(volume_data->part_type);
@@ -4870,6 +4940,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_meters = metadata.value == "1";
                 else if ((metadata.key == MATRIX_KEY) || (metadata.key == MESH_SHARED_KEY))
                     continue;
+                else if (metadata.key == COLORMIX_SLOT_TABLE_KEY) // NEOTKO_PROFILE_TAG
+                    parse_colormix_slot_table(metadata.value, volume->colormix_slot_to_profile_id);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -4975,6 +5047,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             volume->supported_facets.reserve(triangles_count);
             volume->seam_facets.reserve(triangles_count);
             volume->mmu_segmentation_facets.reserve(triangles_count);
+            volume->color_mix_paint_facets.reserve(triangles_count); // NEOTKO_PROFILE_TAG
+            const bool has_colormix_paint = !geometry.colormix_paint.empty();
             for (size_t i=0; i<triangles_count; ++i) {
                 size_t index = volume_data.first_triangle_id + i;
                 assert(index < geometry.custom_supports.size());
@@ -4986,10 +5060,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->seam_facets.set_triangle_from_string(i, geometry.custom_seam[index]);
                 if (! geometry.mmu_segmentation[index].empty())
                     volume->mmu_segmentation_facets.set_triangle_from_string(i, geometry.mmu_segmentation[index]);
+                if (has_colormix_paint && index < geometry.colormix_paint.size()
+                    && !geometry.colormix_paint[index].empty())
+                    volume->color_mix_paint_facets.set_triangle_from_string(i, geometry.colormix_paint[index]);
             }
             volume->supported_facets.shrink_to_fit();
             volume->seam_facets.shrink_to_fit();
             volume->mmu_segmentation_facets.shrink_to_fit();
+            volume->color_mix_paint_facets.shrink_to_fit(); // NEOTKO_PROFILE_TAG
 
             volume->set_type(volume_data.part_type);
 
@@ -5018,6 +5096,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_inches = metadata.value == "1";
                 else if (metadata.key == SOURCE_IN_METERS)
                     volume->source.is_converted_from_meters = metadata.value == "1";
+                else if (metadata.key == COLORMIX_SLOT_TABLE_KEY) // NEOTKO_PROFILE_TAG
+                    parse_colormix_slot_table(metadata.value, volume->colormix_slot_to_profile_id);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -5293,6 +5373,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             current_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
             current_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
             current_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));
+            current_object->geometry.colormix_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, COLORMIX_PAINT_ATTR)); // NEOTKO_PROFILE_TAG
             // BBS
             current_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
         }
@@ -6603,6 +6684,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
             }
 
+            // NEOTKO_PROFILE_TAG — persist Surface Effect Profiles into the 3mf as
+            // a single project-level metadata entry (base64-encoded JSON). Stored
+            // under key "colormix_profiles_b64" to make the encoding explicit and
+            // leave room for a future raw-JSON key if escape behavior is fixed.
+            {
+                const std::string profiles_json = Slic3r::SurfaceEffectProfileManager::get().to_json();
+                if (!profiles_json.empty()
+                    && Slic3r::SurfaceEffectProfileManager::get().size() > 0) {
+                    metadata_item_map["colormix_profiles_b64"] = colormix_profiles_b64_encode(profiles_json);
+                    NEOTKO_LOG(PROFILE, "3MF save: " << Slic3r::SurfaceEffectProfileManager::get().size()
+                        << " profiles, json_bytes=" << profiles_json.size()
+                        << " b64_bytes=" << metadata_item_map["colormix_profiles_b64"].size());
+                }
+            }
+
             // store metadata info
             for (auto item : metadata_item_map) {
                 BOOST_LOG_TRIVIAL(info) << "bbs_3mf: save key= " << item.first << ", value = " << item.second;
@@ -6673,7 +6769,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 if ((shared_volume->supported_facets.equals(volume->supported_facets))
                                     && (shared_volume->seam_facets.equals(volume->seam_facets))
                                     && (shared_volume->mmu_segmentation_facets.equals(volume->mmu_segmentation_facets))
-                                    && (shared_volume->fuzzy_skin_facets.equals(volume->fuzzy_skin_facets)))
+                                    && (shared_volume->fuzzy_skin_facets.equals(volume->fuzzy_skin_facets))
+                                    && (shared_volume->color_mix_paint_facets.equals(volume->color_mix_paint_facets))) // NEOTKO_PROFILE_TAG
                                 {
                                     auto data = iter->second.first;
                                     const_cast<_BBS_3MF_Exporter *>(this)->m_volume_paths.insert({volume, {data->sub_path, data->volumes_objectID.find(iter->second.second)->second}});
@@ -7085,6 +7182,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     output_buffer += CUSTOM_FUZZY_SKIN_ATTR;
                     output_buffer += "=\"";
                     output_buffer += fuzzy_skin_painting_data_string;
+                    output_buffer += "\"";
+                }
+
+                // NEOTKO_PROFILE_TAG — colormix painter per-triangle slot
+                std::string colormix_paint_data_string = volume->color_mix_paint_facets.get_triangle_as_string(i);
+                if (!colormix_paint_data_string.empty()) {
+                    output_buffer += " ";
+                    output_buffer += COLORMIX_PAINT_ATTR;
+                    output_buffer += "=\"";
+                    output_buffer += colormix_paint_data_string;
                     output_buffer += "\"";
                 }
 
@@ -7606,6 +7713,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             // stores volume's config data
                             for (const std::string& key : volume->config.keys()) {
                                 stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
+                            }
+
+                            // NEOTKO_PROFILE_TAG — colormix painter slot table
+                            {
+                                const std::string slot_csv = serialize_colormix_slot_table(volume->colormix_slot_to_profile_id);
+                                if (!slot_csv.empty())
+                                    stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\""
+                                           << COLORMIX_SLOT_TABLE_KEY << "\" " << VALUE_ATTR << "=\""
+                                           << slot_csv << "\"/>\n";
                             }
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape;
@@ -8507,6 +8623,31 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
     importer.log_errors();
     //BBS: remove legacy project logic currently
     //handle_legacy_project_loaded(importer.version(), *config);
+
+    // NEOTKO_PROFILE_TAG — restore Surface Effect Profile list from the 3mf.
+    // Prefer the base64-encoded blob (current format); fall back to raw JSON for
+    // 3mfs written by earlier test builds.
+    if (res && model && model->model_info) {
+        const auto& items = model->model_info->metadata_items;
+        std::string json;
+        bool from_b64 = false;
+        if (auto it = items.find("colormix_profiles_b64"); it != items.end() && !it->second.empty()) {
+            json = colormix_profiles_b64_decode(it->second);
+            from_b64 = true;
+        } else if (auto it2 = items.find("colormix_profiles"); it2 != items.end() && !it2->second.empty()) {
+            json = it2->second;
+        }
+        NEOTKO_LOG(PROFILE, "3MF load: source=" << (from_b64 ? "b64" : "raw")
+            << " json_bytes=" << json.size());
+        if (!json.empty()) {
+            if (!Slic3r::SurfaceEffectProfileManager::get().from_json(json)) {
+                BOOST_LOG_TRIVIAL(warning) << "Failed to parse colormix_profiles from 3mf";
+                NEOTKO_LOG(PROFILE, "3MF load: PARSE FAILED");
+            }
+        } else {
+            NEOTKO_LOG(PROFILE, "3MF load: no colormix_profiles metadata in 3mf");
+        }
+    }
     return res;
 }
 

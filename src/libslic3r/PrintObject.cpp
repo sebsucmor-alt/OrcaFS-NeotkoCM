@@ -2174,7 +2174,22 @@ void PrintObject::discover_vertical_shells()
                     ExPolygons new_penultimate_solid;
                     ExPolygons new_internal_solid_bottom;
                     {
-                        const int penultimate_layers = this->config().penultimate_top_layers.value;
+                        // NEOTKO_PROFILE_TAG — Fase F polish: penu role autonomy.
+                        // When preset's penultimate_top_layers=0 but a painted
+                        // profile on this object declares penu activity (MP
+                        // penu enabled / CM surface 0|2 / PB surface 0|2),
+                        // force-classify 2 penu layers so the painter mode
+                        // override has surfaces to apply on. Without this, an
+                        // object whose preset has no penu config but is painted
+                        // with a penu-enabled profile would get top role only.
+                        int penultimate_layers = this->config().penultimate_top_layers.value;
+                        if (penultimate_layers == 0 &&
+                            SurfaceColorMix::object_painter_wants_penu(this->model_object())) {
+                            penultimate_layers = 2;
+                            NEOTKO_LOG(PROFILE, "PENU_AUTONOMY object='"
+                                << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
+                                << "' forced penultimate_top_layers=2 (painted profile declares penu)");
+                        }
                         if (penultimate_layers > 0) {
                             int layers_below_top = -1;
                             for (int i = idx_layer + 1; i < (int)m_layers.size(); ++i) {

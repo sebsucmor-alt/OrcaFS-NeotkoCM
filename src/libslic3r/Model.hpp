@@ -884,6 +884,15 @@ public:
     // List of mesh facets painted for fuzzy skin.
     FacetsAnnotation    fuzzy_skin_facets;
 
+    // NEOTKO_PROFILE_TAG_START — Opción 4 Fase B (3D Painter)
+    // Per-triangle slot 0..15 stored via TriangleSelector (4-bit width, like MMU).
+    // 0 = unpainted (use preset region config), 1..15 = painted slots.
+    FacetsAnnotation    color_mix_paint_facets;
+    // Slot → SurfaceEffectProfile id mapping. Index 0 unused (slot 0 = unpainted).
+    // 16 entries to align with the 4-bit triangle state range.
+    int                 colormix_slot_to_profile_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    // NEOTKO_PROFILE_TAG_END
+
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
     mutable Timestamp        mmuseg_ts;
@@ -1752,6 +1761,8 @@ bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo
 // Test whether the now ModelObject has newer MMU segmentation data than the old one.
 // The function assumes that volumes list is synchronized.
 extern bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+// NEOTKO_PROFILE_TAG — ColorMix Painter re-slice trigger.
+extern bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // Test whether the now ModelObject has newer fuzzy skin data than the old one.
 // The function assumes that volumes list is synchronized.

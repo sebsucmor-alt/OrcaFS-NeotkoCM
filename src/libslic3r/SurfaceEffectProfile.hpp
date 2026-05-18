@@ -1,0 +1,94 @@
+// NEOTKO_PROFILE_TAG_START
+// SurfaceEffectProfile — snapshot de un Surface Color Mixer configurado.
+// Fase A (Opción 4 — 3D Painter): solo se rellena el payload ColorMix.
+// La estructura ya reserva slots para PathBlend (Fase G) y MultiPass (Fase F)
+// para que el manager / serializer / gizmo no se reescriban más tarde.
+#ifndef slic3r_SurfaceEffectProfile_hpp_
+#define slic3r_SurfaceEffectProfile_hpp_
+
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace Slic3r {
+
+class DynamicPrintConfig;
+
+enum class SurfaceEffectKind : uint8_t {
+    ColorMix  = 1,
+    PathBlend = 2,
+    MultiPass = 3,
+};
+
+// Each payload stores serialized config-key -> serialized-value strings
+// (via DynamicPrintConfig::opt_serialize / set_deserialize_strict).
+// `present` distinguishes "empty default" from "user-saved snapshot".
+struct SurfaceEffectPayload {
+    bool                               present = false;
+    std::map<std::string, std::string> kv;
+};
+
+struct SurfaceEffectProfile {
+    int                  id = 0;            // assigned by manager, 1-based
+    std::string          name;
+    uint32_t             preview_argb = 0;  // swatch hint for the 3D painter
+
+    SurfaceEffectPayload colormix;          // Fase A: lo único que se rellena
+    SurfaceEffectPayload pathblend;         // Fase G — placeholder
+    SurfaceEffectPayload multipass;         // Fase F — placeholder
+};
+
+class SurfaceEffectProfileManager
+{
+public:
+    static SurfaceEffectProfileManager& get();
+
+    // Mutators — `add` assigns an id, returns it.
+    int  add(SurfaceEffectProfile profile);
+    bool remove(int id);
+    bool rename(int id, const std::string& new_name);
+
+    // Accessors
+    const SurfaceEffectProfile*               find(int id) const;
+    SurfaceEffectProfile*                     find_mut(int id);            // NEOTKO_PROFILE_TAG — edit support
+    const std::vector<SurfaceEffectProfile>&  list() const { return m_profiles; }
+    size_t                                    size() const { return m_profiles.size(); }
+    void                                      clear();
+
+    // Snapshot helpers — Fase A only fills ColorMix; the others stay `present=false`.
+    // The caller picks which keys to snapshot (so we keep the manager engine-agnostic).
+    static SurfaceEffectPayload snapshot_keys(const DynamicPrintConfig& cfg,
+                                              const std::vector<std::string>& keys);
+    static void                  restore_keys (DynamicPrintConfig& cfg,
+                                              const SurfaceEffectPayload& payload);
+
+    // Canonical ColorMix key list (top + _penu_ variants + global flags).
+    // Used by Tab.cpp "Save as profile" and future 3mf serializer.
+    static const std::vector<std::string>& colormix_keys();
+
+    // NEOTKO_PROFILE_TAG — Fase F: canonical MultiPass key list (top +
+    // penultimate_ mirror). Excludes `multipass_prime_volume` (print-wide,
+    // not per-profile).
+    static const std::vector<std::string>& multipass_keys();
+
+    // NEOTKO_PROFILE_TAG — Fase G: canonical PathBlend key list. Includes
+    // `multipass_path_gradient` as the master enable flag (per-region in the
+    // preset; in a profile it carries the "use PathBlend for this paint"
+    // intent).
+    static const std::vector<std::string>& pathblend_keys();
+
+    // JSON round-trip — placeholder for Fase C (3mf integration). Empty for now.
+    std::string to_json() const;
+    bool        from_json(const std::string& text);
+
+private:
+    SurfaceEffectProfileManager() = default;
+    std::vector<SurfaceEffectProfile> m_profiles;
+    int                               m_next_id = 1;
+};
+
+} // namespace Slic3r
+
+#endif // slic3r_SurfaceEffectProfile_hpp_
+// NEOTKO_PROFILE_TAG_END
