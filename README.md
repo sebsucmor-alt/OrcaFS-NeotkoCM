@@ -18,6 +18,7 @@ This fork adds a set of surface quality, color blending and workflow features on
    - 1c. [PathBlend — smooth gradient across the surface](#1c-pathblend--smooth-gradient-across-the-surface)
    - 1d. [Zone and filament filters](#1d-zone-and-filament-filters)
    - 1e. [TD Preview and Blend Suggestion](#1e-td-preview-and-blend-suggestion)
+   - 1f. [Line Distribution Mode (CM + PB)](#1f-line-distribution-mode-cm--pb)
 2. [Neoweaving — mechanical interlocking of layers](#2-neoweaving--mechanical-interlocking-of-layers)
 3. [Penultimate Top Layers](#3-penultimate-top-layers)
 4. [Monotonic Interlayer Nesting](#4-monotonic-interlayer-nesting)
@@ -29,6 +30,14 @@ This fork adds a set of surface quality, color blending and workflow features on
    - 5e. [Bridge infill disable](#5e-bridge-infill-disable)
    - 5f. [Detachable Process Panel](#5f-detachable-process-panel)
 6. [S3DFactory — Simplify3D project import](#6-s3dfactory--simplify3d-project-import)
+7. [Surface Effect Profiles & 3D Painter](#7-surface-effect-profiles--3d-painter)
+   - 7a. [Saving profiles from the dialogs](#7a-saving-profiles-from-the-dialogs)
+   - 7b. [Managing profiles (load, update, rename, delete)](#7b-managing-profiles-load-update-rename-delete)
+   - 7c. [The ColorMix Painter gizmo](#7c-the-colormix-painter-gizmo)
+   - 7d. [Painter mode at slice time](#7d-painter-mode-at-slice-time)
+   - 7e. [Penu role autonomy](#7e-penu-role-autonomy)
+   - 7f. [Profile persistence and 3MF round-trip](#7f-profile-persistence-and-3mf-round-trip)
+   - 7g. [Known limitation — PathBlend on Penu](#7g-known-limitation--pathblend-on-penu)
 
 ---
 
@@ -61,29 +70,65 @@ ColorMix and MultiPass are mutually exclusive within the same zone. PathBlend is
 
 **What it does**
 
-ColorMix alternates which filament prints each fill line on a top or penultimate surface. You define a *pattern* — for example `1212` — and the slicer loops that pattern across all lines in the surface. Line 1 → T1, line 2 → T2, line 3 → T1, line 4 → T2, and so on. Each real toolchange goes through the wipe tower exactly as normal.
+ColorMix decides which filament prints each fill line on a top or penultimate surface, line by line. With the right configuration it can produce stripes, dithered gradients, hard color bands, or repeating custom patterns. Every real toolchange goes through the wipe tower exactly as normal.
 
-The result is a striped or woven color effect on the top surface, without any manual toolchange programming.
+ColorMix has **five pattern modes**, selectable from the Advanced dialog. Top and Penultimate surfaces are configured independently — each can be in a different mode.
 
-**How to set it up**
+#### Pattern modes
+
+| Mode | What it produces | When to use |
+|------|------------------|-------------|
+| **0 — Pattern string** (legacy) | You write a string of tool numbers (`1212`, `11223`, `1234`) and the slicer loops it across lines. Line 1 → T1, line 2 → T2, etc. | Repeating geometric patterns where you want exact, predictable stripes. |
+| **1 — Linear 2-color (dithered)** | Two filaments distributed across the surface with a percentage split (e.g. 60% T0, 40% T1). The mix uses Bresenham-style dithering so the transition looks smooth, not blocky. | Two-color gradients (sky → ground, light → dark). The most common use. |
+| **2 — Linear 3-color (dithered)** | Three filaments at configurable percentages (e.g. 40% / 30% / 30%). T1 is concentrated in the middle of the gradient, T0 and T2 dominate the outer thirds. | Three-stop gradients (sunset / spectrum-like effects). |
+| **3 — Custom bands** | Explicit hard-band counts: emit N lines of tool A, then M of tool B, then K of tool C, then L of tool D, cycling. | Repeating multi-band patterns when you want exact line counts per band, not a percentage. |
+
+(Modes 4 and 5 of the **Easing** dropdown are separate — see below.)
+
+#### Gradient shape — Easing curves (Linear modes)
+
+The **Easing** dropdown (Linear 2-color and 3-color modes only) controls how the colour density transitions across the surface:
+
+| Easing | Behaviour |
+|--------|-----------|
+| **0 — Linear** | Constant ratio across the gradient. Default for crisp stripes. |
+| **1 — Ease-In** | Slow start, fast end (t²). Tool B becomes dense at the far edge. |
+| **2 — Ease-Out** | Fast start, slow end (1−(1−t)²). Tool B dense at the start. |
+| **3 — Ease-In-Out** | Smoothstep — symmetric, gentle at both ends, fast in the middle. Most natural-looking soft transitions. |
+| **4 — Gamma** | Custom power curve using the **Gamma** value below. γ = 1.0 = linear, γ > 1 biases toward Tool A, γ < 1 biases toward Tool B. |
+| **5 — Hard band** | No dither — clean blocks of A then B with no probabilistic mixing. |
+
+#### Other gradient controls
+
+| Control | What it does |
+|---------|-------------|
+| **Color overlap** (0.0–1.0) | How much each colour bleeds into its neighbour's zone in Linear 3-color mode. `0.0` = hard 3-zone split. `1.0` = strong overlap (every colour sprinkles throughout). Default `0.6`. |
+| **Invert gradient direction** | Reverses the per-line tool sequence after dither/band generation. Use when the slicer's natural fill direction looks mirrored relative to what you want — easier than swapping tools manually. No effect in Pattern-string mode. |
+| **Min surface lines** | Surfaces with fewer than N fill lines fall back to a single tool (Tool A) instead of producing a degenerate split. Default `3`. Set to `0` to never fall back. |
+| **Min. line length** | Fill lines shorter than this (mm) are skipped — prevents toolchanges on tiny path segments. Default `1.0 mm`. |
+
+#### How to set it up
 
 1. Open **Quality → ColorMix & Multi-Pass Blend → Edit…**
-2. In the dialog, click the **ColorMix** pill for the Top surface, the Penultimate surface, or both.
-3. Click **Advanced…** to open the pattern editor. Click the colored filament buttons to build your pattern visually. The pattern is just a string of tool numbers (`1`, `2`, `3`…) that repeats.
-4. Set the **Zone** (see §1d) and **Min. line length** if needed.
-5. Click OK and slice normally.
+2. Click the **ColorMix** pill for the Top surface, the Penultimate surface, or both.
+3. Click **Advanced…** to open the pattern editor.
+4. Pick a **Pattern mode** (0–3). The dialog reveals only the controls relevant to that mode.
+5. Configure tools, percentages, easing, and gradient options as needed.
+6. Set the **Zone** (see §1d), **Min surface lines**, and **Min. line length**.
+7. Choose a **Line distribution mode** (see §1f below) for how slots are mapped to physical lines.
+8. Click OK and slice.
+
+The **strip preview** in the dialog shows a real-time preview of what the chosen mode will produce on a typical top surface — colors, dither pattern, band ratios all rendered to scale.
 
 **⚠️ Required fill pattern: Monotonic Line**
 
-ColorMix **only works correctly with the MonotonicLine fill pattern**. This is not a preference — it is a technical requirement for complex objects.
+ColorMix **only works correctly with the MonotonicLine fill pattern**. This is a technical requirement for complex objects.
 
-- **MonotonicLine** ✅ — the slicer pre-splits the surface into individual straight paths before ColorMix runs. Every path in every region of the surface is visited and assigned a tool, including irregular, concave, or asymmetric shapes.
-- **Monotonic** ⚠️ — works acceptably on simple convex surfaces (a square, a circle). On complex objects with holes, concavities, or multiple disconnected regions, the path ordering is finalized *after* ColorMix assigns tools, so toolchanges end up in the wrong sequence visually.
-- **Rectilinear** ⚠️ — similar problem. Works on simple shapes but fails visually on anything more complex than a basic rectangle.
+- **MonotonicLine** ✅ — the slicer pre-splits the surface into individual straight paths before ColorMix runs. Every path is visited and assigned a tool, including irregular, concave, or asymmetric shapes.
+- **Monotonic** ⚠️ — works acceptably on simple convex surfaces (a square, a circle). On complex objects with holes, concavities, or disconnected regions, the path ordering is finalised *after* ColorMix assigns tools, so visual toolchanges end up in the wrong sequence.
+- **Rectilinear** ⚠️ — same problem. Works on simple shapes; fails visually on anything more complex than a basic rectangle.
 
 **Set your top surface fill pattern to MonotonicLine before enabling ColorMix.** The setting is in Quality → Top surface pattern.
-
-**Min. line length**: Very short fill lines (from curved or complex surfaces) are skipped to avoid pointless toolchanges. Default is **1.0 mm**. You can raise it if you want fewer toolchanges on small features, or lower it toward 0 to apply the pattern everywhere.
 
 ---
 
@@ -163,6 +208,8 @@ PathBlend is **independent of MultiPass** — it does not require MultiPass to b
 
 **Note**: PathBlend works best on surfaces with many fill lines (high infill density, wide surfaces). On very small surfaces with only a handful of lines, the gradient will be coarse. Within-path subdivision for finer gradients is planned for a future version.
 
+**Line distribution**: PathBlend uses the same **Line distribution mode** as ColorMix (see §1f). If your top surface has holes, islands or rotated sub-regions and the gradient looks broken or patchy across the gaps, try setting the mode to **LaneQuant** (2) or **DirCluster** (3).
+
 ---
 
 ### 1d. Zone and filament filters
@@ -236,6 +283,47 @@ The **Calculate** button computes a suggested MultiPass configuration to reprodu
 5. A **ΔE** swatch shows how close the calculated result is to the target: green = very close, orange = acceptable, red = significant difference.
 
 Click **Apply** to write the suggested ratios and tool assignments into the current MultiPass configuration. You can then fine-tune from there.
+
+---
+
+### 1f. Line Distribution Mode (CM + PB)
+
+**What it does**
+
+The **Line distribution mode** controls *how* the slicer maps your colour assignments (ColorMix slots or PathBlend pass slots) to the **physical fill lines** on a real surface. It does not change the gradient/pattern itself — only how the slots find which lines belong to which "lane" in space.
+
+Different surface geometries need different mappings. A flat rectangle is easy: line index = position. But a top surface with concavities, holes, or rotated sub-regions can have lines printed in an order that doesn't match their spatial position, which makes a gradient look wrong even when the math is correct.
+
+The setting lives in **Quality → Line distribution mode** (Advanced visibility) and affects **both ColorMix and PathBlend** at the same time.
+
+#### The four modes
+
+| Mode | Algorithm | Best for |
+|------|-----------|----------|
+| **0 — Default** | `slot = line_index % n_slots`. Legacy behaviour. Uses raw print order. | Simple rectangular surfaces. Repeating Pattern-string mode. Anything where print order ≈ spatial order. |
+| **1 — GeoSort** | Sort lines geometrically by their centroid position perpendicular to the fill direction *before* assigning slots. | Surfaces where print order is scrambled but the spatial direction is clean. Typical mid-complexity tops. |
+| **2 — LaneQuant** | Quantise each line into a discrete "lane" by perpendicular position, then collapse lines in the same lane to the same slot. Most geometric — fragmented stripes stay the same colour. | Surfaces with **holes, concavities, or disconnected sub-regions**. When a stripe is broken into multiple physical fragments by an island, LaneQuant keeps them all the same colour. The recommended default for complex top surfaces. |
+| **3 — DirCluster** | Detect groups of lines that share a fill direction (the slicer sometimes rotates direction for sub-regions to avoid bridge angles), cluster them, then run LaneQuant inside each cluster independently. | Surfaces where the fill engine rotated direction within the same layer (e.g. multiple disconnected islands at different angles). Each sub-region keeps its own coherent gradient instead of one global lane grid. |
+
+#### How to choose
+
+There is no single best mode for every print. A rough decision tree:
+
+1. **Plain rectangular tops, simple shapes** → leave as **Default** (0).
+2. **Top has a single visible gradient direction but the result looks scrambled** → try **GeoSort** (1).
+3. **Top has holes, islands, or concavities; gradient breaks into "wrong colour" patches** → use **LaneQuant** (2). This is the most common upgrade from Default.
+4. **Object has multiple disconnected top regions or the slicer rotated fill direction per region** → use **DirCluster** (3).
+
+**Quick rule**: If the gradient looks visually wrong, increase the mode number by one and re-slice. Each step adds geometric awareness at the cost of slightly more compute.
+
+#### Interaction with ColorMix and PathBlend
+
+- **ColorMix**: the lane mode decides which physical line gets which slot from the dither sequence or pattern string. With LaneQuant or DirCluster, fragmented stripes survive across holes.
+- **PathBlend**: the lane mode decides each line's `surface_t` (position 0..1 in the gradient). With LaneQuant, two fragments at the same spatial Y get the same `surface_t`, so they print the same flow ratio and the gradient stays coherent across the gap.
+
+**Default mode and PathBlend**: when PathBlend is on with mode = Default (0), the slicer falls back to a Y-axis bounding-box centroid for `surface_t`. This is the safe path and works for most prints, but it produces coarser gradients when the surface has irregular shape. LaneQuant gives noticeably smoother gradients on irregular tops.
+
+**Tip**: the setting is per-print-profile but applies to the **entire object's top + penu surfaces**. If you have mixed-complexity surfaces in one object, pick the mode that satisfies the most complex one — the others won't be hurt.
 
 ---
 
@@ -406,11 +494,148 @@ When importing:
 
 ---
 
+## 7. Surface Effect Profiles & 3D Painter
+
+**What it does**
+
+This system lets you **save your Surface Color Mixer configurations as named profiles**, then **paint them directly onto specific surfaces of your 3D model** using a brush-based gizmo. Different parts of the same object can have different effects (e.g. one stair step uses ColorMix with a red/blue stripe pattern, another stair uses MultiPass with three filaments, a third uses PathBlend gradient).
+
+Profiles are saved inside the **3MF project file**, so they travel with the print. Painted areas are saved per-volume facet annotations, again persisted in the 3MF.
+
+At slice time, when an object has any painted facets, **painter mode activates**: the preset Surface Color Mixer settings are ignored for that object, and each painted area is rendered using its own profile. Unpainted areas of a painted object get **no surface effect**. Painted areas of an unpainted object fall back to preset mode.
+
+This is the cleanest way to apply **multiple, different surface effects to a single object** without splitting the mesh or duplicating geometry.
+
+---
+
+### 7a. Saving profiles from the dialogs
+
+Every effect dialog has a **"Save as profile…"** button:
+
+| Dialog | What it captures |
+|--------|-----------------|
+| **Surface Color Mixer** (the main dialog) | Captures **whichever effects are currently active in the pills**. CM+MP, CM only, MP only, PB only, etc. The saved profile is a bundle of every enabled effect on Top/Penultimate. |
+| **MultiPass Advanced** | Captures **MultiPass settings only** (Top + Penu MP keys). No ColorMix or PathBlend in the saved profile. |
+| **PathBlend Advanced** | Captures **PathBlend settings only**. No ColorMix or MultiPass in the saved profile. |
+
+**How it works**
+
+1. Configure the effect(s) you want in the dialog (pick pills, click Advanced, set values).
+2. Click **Save as profile…** at the bottom of the dialog.
+3. Enter a name (e.g. "Red-Blue Stripe", "MP3-Gradient", "PB Linear").
+4. A confirmation popup shows how many keys were captured per effect (e.g. `Saved profile #5 (CM:41, MP:53, PB:0 keys)`).
+
+**Effect on the saved profile**
+
+- The profile records **which surfaces (Top, Penu, or Both)** the effect was active on, based on the pill state when you clicked Save. If only the Top pill had MP on, the saved profile applies MP to top only, never to penu.
+- Effects with their pill set to **None** are **not** captured.
+- The MP and PB dialogs always save the effect they belong to as Top-active by default, since the dialog itself implies intent.
+
+---
+
+### 7b. Managing profiles (load, update, rename, delete)
+
+In the Surface Color Mixer dialog, next to "Save as profile…" there is a **Manage profiles…** button. Opens a list dialog with:
+
+| Button | Behaviour |
+|--------|-----------|
+| **Load into dialog** | Restores the selected profile's values into the SCM dialog. The pills, zone settings, filament filter, and Advanced sub-dialog values all switch to match the profile. From here you can tweak and re-save. |
+| **Update from current** | Overwrites the selected profile's payloads with whatever is currently active in the SCM pills. Effects toggled off in the pills are cleared from the profile. |
+| **Rename** | Edit the profile name. |
+| **Delete** | Remove the profile from the manager. Painted areas referencing this profile become "orphan" — they will print with no effect (see warning below). |
+| **Close** | Dismisses the dialog. |
+
+The profile list shows each profile with a tag `[CM:* PB:* MP:*]` where `*` means the payload is present, `-` means absent. Quick visual check of what each profile contains.
+
+**Orphan warning**: If you delete a profile that has painted areas in your model, the slicer will emit a **non-critical slicing warning** at slice time: *"Object 'X' has painted regions referencing deleted Surface Effect Profile(s)…"*. The slice continues without error — those areas just get no effect. To fix, either re-paint with an existing profile or re-create the deleted profile.
+
+---
+
+### 7c. The ColorMix Painter gizmo
+
+The painter lives in the **left-side gizmo toolbar** in the 3D view, next to the FuzzySkin, Seam, and MMU segmentation gizmos. The icon is a placeholder (reuses MMU's for now).
+
+**How to use**
+
+1. Click the **ColorMix Painter** gizmo (or its keyboard shortcut, if assigned).
+2. The right panel shows a **scrollable list of all Surface Effect Profiles** currently loaded.
+3. Click a profile name to select it as the active brush.
+4. Pick a paint tool from the toolbar:
+   - **Circle** — paints triangles inside a circular cursor
+   - **Sphere** — 3D sphere selector
+   - **Triangle** — single-triangle precision
+   - **Smart Fill** (default) — flood-fills coplanar triangles up to a configurable angle threshold (default 1.5°). This is the primary tool for painting flat top surfaces in one click.
+5. Click on the model surface. Painted triangles change colour to indicate the active slot.
+6. Switch profiles and paint again — different profiles paint different slots automatically.
+
+Up to **15 different profiles** can be painted on a single object (slot 0 is reserved as "unpainted"). Slots are auto-assigned the first time you paint with a profile.
+
+**Erase**: Use the eraser tool (or switch to no-profile mode) to clear painted triangles. Cleared triangles return to "unpainted" — they will use the preset mode if the object becomes entirely unpainted, or no effect if any paint remains.
+
+**Smart Fill angle**: Lower angle = more selective (only very-coplanar triangles), higher angle = more inclusive (catches curved surfaces). The default 1.5° is ideal for flat staircase steps and similar geometry.
+
+---
+
+### 7d. Painter mode at slice time
+
+When an object has **any painted facets**, the slicer auto-switches that object to **painter mode**. The rules are:
+
+| Situation | What applies |
+|-----------|--------------|
+| Object has zero painted facets | **Preset mode** — Surface Color Mixer dialog values apply normally |
+| Object has painted facets — painted area | **Painted profile** applies. Preset is fully ignored for that area. |
+| Object has painted facets — **unpainted** area | **No effect** applies to that area (preset is suppressed for the whole object). |
+
+This "all or nothing" rule (called *Q1 = absolute*) prevents the unintuitive situation where painted areas mix preset and profile effects. If you want preset behaviour back on an object, simply erase all painted facets from it.
+
+**Per-surface resolution**: For each top/penultimate fill at each layer, the slicer looks up the dominant painted slot in the layer's Z range and uses that profile's payload. If multiple profiles are painted at the same Z (e.g. left half PB34, right half PB12), each region gets its own effect.
+
+**Tool registration**: The wipe-tower planner uses the same painted-profile lookup as the slice itself, so the wipe tower plan and the actual G-code stay in sync — no "unexpected toolchange" errors from divergence.
+
+---
+
+### 7e. Penu role autonomy
+
+The **Penultimate top layers** setting (§3) is normally `0` in the default preset, meaning penultimate surfaces are not classified separately from regular solid infill.
+
+When you paint a profile that has **MultiPass penu enabled** or **ColorMix surface = Both/Penu** on an object, the slicer auto-detects this and **forces** the penultimate classification to 2 layers for that object, regardless of the preset value. This way, the painter's penu profile actually has surfaces to apply on.
+
+You'll see a `PENU_AUTONOMY object='…'` line in the debug log when this kicks in. No user action needed.
+
+---
+
+### 7f. Profile persistence and 3MF round-trip
+
+Everything is saved inside the 3MF project file:
+
+- **The profile manager** (the list of named profiles and their effect payloads) is stored as a project-level metadata entry (`colormix_profiles_b64` — base64-wrapped JSON to survive XML escaping).
+- **Per-volume slot tables** (which slot index maps to which profile id) are stored as a per-volume metadata key.
+- **Per-triangle paint** (which slot is painted on each facet) is stored as a per-triangle attribute (`paint_colormix`), mirroring how MMU painting works.
+
+When you open a 3MF, all three pieces are restored. The painter list, the painted facets, and the slot→profile mapping all come back exactly as you saved them.
+
+**Sharing**: Profiles only live inside the 3MF they were saved with. There is no global profile library across projects. To reuse a set of profiles, save them in a template 3MF and open it as a starting point.
+
+---
+
+### 7g. Known limitation — PathBlend on Penu
+
+PathBlend's penultimate surface support has a known gradient-direction bug on the second-stair penu surface of multi-stair objects. The slice-time clone path inverts the pass order for the second stair, so pass 0 paints on top of pass 1 instead of underneath, breaking the gradient.
+
+For this reason, **the PathBlend pill is hidden on the Penultimate zone card** in the Surface Color Mixer dialog. PathBlend is only selectable on the Top zone. Profiles saved before this restriction was added are loaded with their penu PathBlend intent silently demoted: if penu also has MP or CM enabled, those apply; otherwise penu is set to None.
+
+The underlying engine supports penu PB (the struct, payload, and 3mf I/O are all in place). When the gradient-direction bug is resolved, the pill can be re-enabled.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
 |---------|---------------|
 | ColorMix / MultiPass / PathBlend | Quality → ColorMix & Multi-Pass Blend → **Edit…** |
+| Line distribution mode (CM + PB) | Quality → **Line distribution mode** (Advanced) |
+| ColorMix pattern mode (Linear 2/3, Custom bands, Pattern string) | SCM dialog → **Advanced…** on ColorMix pill |
+| Easing / gamma / overlap / invert | ColorMix Advanced dialog (Linear modes only) |
 | Effect pill (None/ColorMix/MultiPass/PathBlend) | Surface Color Mixer dialog — pill buttons per zone card |
 | Advanced config (per effect) | Surface Color Mixer dialog → **Advanced…** button |
 | TD Preview + Blend Suggestion | Surface Color Mixer dialog → **TD Preview** (collapsable) |
@@ -420,6 +645,11 @@ When importing:
 | Temporal Link (group) | Select objects → **Ctrl+G** |
 | Temporal Link (select group) | Right-click object → **Select Grouped** or **Ctrl+Shift+G** |
 | S3DFactory import | File → Import → Import 3D model → select `.factory` |
+| Save as profile | Bottom of SCM / MultiPass / PathBlend dialogs — **Save as profile…** button |
+| Manage profiles (load / update / rename / delete) | Surface Color Mixer dialog → **Manage profiles…** button |
+| 3D Painter | Left-side gizmo toolbar → **ColorMix Painter** icon |
+| Painter — pick brush | Gizmo right panel toolbar (Circle / Sphere / Triangle / SmartFill) |
+| Painter — pick profile | Scrollable profile list inside the gizmo's right panel |
 
 ---
 
@@ -434,6 +664,23 @@ If the pattern is correct, the next most common cause is the **Min. line length*
 **Q: I set PathBlend but the gradient looks like just one or two steps, not smooth.**
 
 The smoothness of the gradient depends on how many fill lines the surface has. A small surface with 5 lines can only have 5 gradient steps. Increasing infill density, widening the surface, or using a smaller line width gives the slicer more lines to work with. PathBlend cannot subdivide individual lines (that feature is planned for a future version).
+
+**Q: My top surface has holes or concave shapes and the ColorMix stripes look fragmented or wrong across the gaps.**
+
+Change the **Line distribution mode** (Quality, Advanced) to **LaneQuant (2)** or **DirCluster (3)**. Default mode uses raw print order, which scrambles when the slicer routes lines around an island. LaneQuant quantises lines by spatial position so stripes broken into multiple physical fragments stay the same colour. DirCluster handles the extra case where the slicer rotated fill direction inside sub-regions. See §1f.
+
+**Q: PathBlend gradient looks coarse or "stepped" on an irregular surface.**
+
+Default line distribution falls back to a bounding-box centroid for the gradient position, which can be coarse on non-rectangular shapes. Switch the **Line distribution mode** to **LaneQuant (2)**. Each line is then assigned its own spatial position in the gradient and the transitions become noticeably smoother. See §1f.
+
+**Q: What's the difference between ColorMix's Pattern modes 1, 2, 3?**
+
+- **Pattern string (0)** is the legacy mode where you write `1212` or similar and the slicer loops it.
+- **Linear 2-color (1)** is the most common — pick two tools and a percentage split (`pct_a`). Dither makes the transition smooth.
+- **Linear 3-color (2)** does the same with three tools and two percentages. The middle tool concentrates in the centre of the surface.
+- **Custom bands (3)** lets you say "10 lines of T0, then 5 of T1, then 3 of T2, repeat" — explicit hard-band counts, no dithering.
+
+For a smooth two-colour gradient choose mode 1 with an easing other than Linear. For exact engineering-style stripes choose mode 0 or 3.
 
 **Q: The PathBlend gradient is too abrupt at the edges, I want it to accelerate gradually.**
 
@@ -467,6 +714,28 @@ Try enabling Libre Mode before importing. With Libre Mode OFF, the slicer re-cen
 
 TD values are per-machine (per filament spool), not per print profile. Make sure you have calibrated the TD sliders to match your actual filaments. Start by printing a single-color top surface, then a two-color blend, and adjust the TD values until the Result swatch matches the printed result.
 
+**Q: I painted a profile on a stair but at slice time it doesn't apply.**
+
+Check the slicing notification panel for a non-critical warning like *"Object 'X' has painted regions referencing deleted Surface Effect Profile(s)…"*. That means the profile you painted with was deleted from the manager (e.g. you opened a 3MF where the profile no longer exists, or hit Delete in Manage Profiles). Re-create the profile with the same name or re-paint with an existing one.
+
+If there's no warning, confirm the object actually has painted facets (use the painter gizmo — painted triangles are colour-tinted). An object with zero paint falls back to preset mode.
+
+**Q: I painted MultiPass with penu config but only the top surface gets the effect.**
+
+The penu surface needs to exist for the painter to apply its penu profile. By default, **Penultimate top layers** is 0 (no penu surfaces). When you paint a profile that declares penu activity, the slicer auto-forces 2 penu layers for that object (Penu role autonomy, §7e). If you still see top-only, check the `ORCA_DEBUG_PROFILE=1` log for a `PENU_AUTONOMY` line — if absent, the profile's payload may not be marking penu enabled. Re-open the SCM dialog, ensure the penu MP pill is ON, and re-save.
+
+**Q: Why is the PathBlend pill hidden on the Penultimate zone card?**
+
+There is a known gradient-direction bug specific to penu PathBlend on multi-stair objects (the second stair inverts pass order). The pill is hidden until that bug is resolved. The Top zone PathBlend works correctly and is selectable normally. See §7g.
+
+**Q: Can a single object have ColorMix on one part, MultiPass on another, and PathBlend on a third?**
+
+Yes — that is exactly what the 3D Painter is for. Save each effect as its own profile, then paint each face/area of the model with the appropriate profile. At slice time, each painted area renders with its own profile. Unpainted parts of the object get no effect. See §7.
+
+**Q: I opened a 3MF made on another machine and the profiles came back, but my live preset is unchanged. Is that correct?**
+
+Yes. Profiles are project-scoped — they live inside the 3MF only, separate from your preset library. Loading a project restores its profiles into the manager for that session, but does not modify your default preset. Save the project as a template if you want the profiles available as a starting point for new prints.
+
 **Q: What does the ΔE indicator on the Blend Suggestion mean?**
 
 ΔE is a perceptual color difference measure. A value below ~5 is generally indistinguishable to the eye. Values above 10–15 indicate the suggested ratios will produce a visible difference from the target color — usually because the available filaments cannot accurately reproduce the target, or because the TD values need calibration.
@@ -475,9 +744,11 @@ All of this work is open and free. Fork it, improve it, credit it.
 
 -----
 
-Now all the info from the Original FullSpectrum 0.95 (beta)
+Now all the info from the Original FullSpectrum 0.99
 
-<h1> <p "font-size:200px;"> Full Spectrum</p> </h1>
+-----
+
+<h1> <p "font-size:200px;"> Snapmaker Orca FullSpectrum</p> </h1>
 
 ### A Snapmaker Orca Fork with Mixed-Color Filament Support
 
@@ -495,18 +766,14 @@ If you find this fun or interesting!
 
 ## ⚠️ **IMPORTANT DISCLAIMER** ⚠️
 
-**This fork is currently in active development and has NOT been tested on actual hardware! **
+**This fork is currently in active development and has been tested on actual hardware.**
 
-- **Not Production Ready**: The mixed-color filament feature is experimental and untested
-- **No U1 Access**: Development is being done without access to a Snapmaker U1 printer
-- **Help Needed**: If you have a U1 and are willing to test this fork, please reach out!
-- **Use at Your Own Risk**: This software may produce incorrect G-code or unexpected behavior
-
-**I am actively seeking testers with Snapmaker U1 printers to help validate and improve this feature.**
+- **Use at Your Own Risk**: As with any slicer fork, please review critical prints and generated G-code before production use
+- **Project Compatibility Warning**: Some `.3mf` files created with older FullSpectrum builds may not open or migrate cleanly in newer versions because mixed-filament data and project serialization have changed over time
 
 ---
 
-**Full Spectrum** is an open source slicer for FDM printers based on Snapmaker Orca and OrcaSlicer, optimized for Snapmaker's U1 multi-color 3D printer with independent tool heads. This fork adds support for virtual mixed-color filaments, enabling you to create new colors by alternating layers between physical filaments.
+**Snapmaker Orca FullSpectrum** is an open source slicer for FDM printers based on Snapmaker Orca and OrcaSlicer, optimized for Snapmaker's U1 multi-color 3D printer with independent tool heads. This fork adds support for virtual mixed-color filaments, enabling you to create new colors by alternating layers between physical filaments.
  
 
 
@@ -514,12 +781,12 @@ If you find this fun or interesting!
 
 ### Stable Release
 📥 **[Download the Latest Stable Release](https://github.com/ratdoux/OrcaSlicer-FullSpectrum/releases)**  
-Visit our GitHub Releases page for the latest stable version of Full Spectrum, recommended for most users.
+Visit our GitHub Releases page for the latest stable version of Snapmaker Orca FullSpectrum, recommended for most users.
 
 # Features
 
 ## Mixed-Color Filaments
-Full Spectrum includes support for **virtual mixed-color filaments** designed for the Snapmaker U1 multi-color printer with independent print heads.
+Snapmaker Orca FullSpectrum includes support for **virtual mixed-color filaments** designed for the Snapmaker U1 multi-color printer with independent print heads.
 
 ### How It Works
 - **Create new colors by mixing**: Combine two physical filaments to create a new color appearance through layer alternation
@@ -531,6 +798,7 @@ Full Spectrum includes support for **virtual mixed-color filaments** designed fo
 - Visual preview showing the additive color blend
 - Enable/disable individual mixed filaments
 - Per-layer resolution control with customizable ratios
+- Optional per-pair Bias control for slightly recessing one component to push the apparent color toward the other
 - Seamless integration with the existing filament management system
 
 ### Using Mixed Filaments
@@ -544,8 +812,18 @@ Full Spectrum includes support for **virtual mixed-color filaments** designed fo
 4. Mixed filaments can be assigned to objects just like physical filaments
 5. During slicing, the mixed filament resolves to alternating layers of its components
 
+### Bias Control
+Snapmaker Orca FullSpectrum also includes an optional **Bias** control for mixed filament pairs. When enabled in **Print Settings -> Others -> Mixed Filaments**, each mixed row gets a compact inline Bias value:
+
+- **Positive Bias** recesses the second filament in the pair
+- **Negative Bias** recesses the first filament in the pair
+- This lets you shift the apparent color without changing the nominal layer cadence
+- The inline preview updates to show the estimated apparent mix shift
+
+Example: for a pair like `F1 + F2`, a positive bias makes `F2` sit slightly lower, so `F1` visually dominates more. A negative bias does the opposite and recesses `F1`.
+
 ### Dithering Settings
-Full Spectrum includes advanced dithering controls to fine-tune the layer alternation behavior for mixed filaments. These settings are found in **Others → Dithering** in the print settings:
+Snapmaker Orca FullSpectrum includes advanced dithering controls to fine-tune the layer alternation behavior for mixed filaments. These settings are found in **Others → Dithering** in the print settings:
 
 #### Dithering Cadence Height A & B
 - **What it does**: Controls the height (in mm) of each alternating segment for the two component filaments
@@ -570,7 +848,7 @@ These settings give you precise control over how your mixed colors appear in the
 
 # How to install
 **Windows**: 
-1.  Download the installer for your preferred version from the [releases page](https://github.com/Snapmaker/OrcaSlicer/releases).
+1.  Download the installer for your preferred version from the [releases page](https://github.com/ratdoux/OrcaSlicer-FullSpectrum/releases).
     - *For convenience there is also a portable build available.*
     - *If you have troubles to run the build, you might need to install following runtimes:*
       - [MicrosoftEdgeWebView2RuntimeInstallerX64](https://github.com/SoftFever/OrcaSlicer/releases/download/v1.0.10-sf2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe)
@@ -645,7 +923,7 @@ resolution: 0.1
 
 
 ## Some background
-**Full Spectrum** is forked from Snapmaker Orca, which is originally forked from Orca Slicer by SoftFever.
+**Snapmaker Orca FullSpectrum** is forked from Snapmaker Orca, which is originally forked from Orca Slicer by SoftFever.
 
 Orca Slicer was originally forked from Bambu Studio, it was previously known as BambuStudio-SoftFever.
 Bambu Studio is forked from [PrusaSlicer](https://github.com/prusa3d/PrusaSlicer) by Prusa Research, which is from [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranellucci and the RepRap community. 
@@ -657,7 +935,7 @@ Special thanks to [u/Aceman11100](https://www.reddit.com/user/Aceman11100/) for 
 
 
 # License
-Full Spectrum is licensed under the GNU Affero General Public License, version 3. Full Spectrum is based on Snapmaker Orca.
+Snapmaker Orca FullSpectrum is licensed under the GNU Affero General Public License, version 3. Snapmaker Orca FullSpectrum is based on Snapmaker Orca.
 
 Snapmaker Orca is licensed under the GNU Affero General Public License, version 3. Snapmaker Orca is based on Orca Slicer by SoftFever.
 
@@ -678,6 +956,6 @@ The Bambu networking plugin is based on non-free libraries from BambuLab. It is 
 Filament color blending is powered by [FilamentMixer](https://github.com/justinh-rahb/filament-mixer), an openly licensed library.
 
 # Feedback & Contribution
-We greatly value feedback and contributions from our users. Your feedback will help us to further develop Full Spectrum for our community.
+We greatly value feedback and contributions from our users. Your feedback will help us to further develop Snapmaker Orca FullSpectrum for our community.
 - To submit a bug or feature request, file an issue in GitHub Issues.
 - To contribute some code, make sure you have read and followed our guidelines for contributing.
