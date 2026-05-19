@@ -145,10 +145,10 @@ struct NeoTowerPlan {
     float tower_x     = 0.f;
     float tower_y     = 0.f;
 
-    // Square footprint: width == depth. Fixed for the whole print.
+    // Rectangular footprint: fixed width, decoupled calculated depth.
     // Computed from max wipe volume + perimeter allowance.
     float tower_width = 0.f;
-    float tower_depth = 0.f;  // == tower_width
+    float tower_depth = 0.f;  // decoupled rectangular depth
 
     // All layers, ascending Z.
     std::vector<NeoTowerLayer> layers;

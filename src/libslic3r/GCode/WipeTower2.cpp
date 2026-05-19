@@ -2343,19 +2343,20 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
 
     // this is an actual toolchange - let's calculate depth to reserve on the wipe tower
     float width             = m_wipe_tower_width - 3 * m_perimeter_width;
+    float height_for_depth  = std::max(layer_height_par, m_filpar[old_tool].nozzle_diameter * 0.5f);
     float length_to_extrude = volume_to_length(0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(),
                                                                        m_filpar[old_tool].ramming_speed.end(), 0.f),
-                                               m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator, layer_height_par);
+                                               m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator, height_for_depth);
     // Orca: Set ramming depth to 0 if ramming is disabled.
     float ramming_depth   = m_enable_filament_ramming ? ((int(length_to_extrude / width) + 1) *
                                                        (m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator *
                                                         m_filpar[old_tool].ramming_step_multiplicator) *
-                                                       m_extra_spacing_ramming) :
+                                                        m_extra_spacing_ramming) :
                                                         0;
     float first_wipe_line = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
 
-    float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height_par);
-    float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height_par, m_perimeter_width, m_extra_flow,
+    float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, height_for_depth);
+    float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, height_for_depth, m_perimeter_width, m_extra_flow,
                                              m_extra_spacing_wipe, width);
 
     m_plan.back().tool_changes.push_back(
@@ -2376,18 +2377,19 @@ void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, un
         return;
 
     float width             = m_wipe_tower_width - 3 * m_perimeter_width;
+    float height_for_depth  = std::max(layer_height_par, m_filpar[old_tool].nozzle_diameter * 0.5f);
     float length_to_extrude = volume_to_length(0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(),
                                                                        m_filpar[old_tool].ramming_speed.end(), 0.f),
-                                               m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator, layer_height_par);
+                                               m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator, height_for_depth);
     float ramming_depth     = m_enable_filament_ramming ? ((int(length_to_extrude / width) + 1) *
                                                        (m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator *
                                                         m_filpar[old_tool].ramming_step_multiplicator) *
-                                                       m_extra_spacing_ramming) :
+                                                        m_extra_spacing_ramming) :
                                                         0;
     float first_wipe_line   = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
 
-    float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height_par);
-    float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height_par, m_perimeter_width, m_extra_flow,
+    float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, height_for_depth);
+    float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, height_for_depth, m_perimeter_width, m_extra_flow,
                                              m_extra_spacing_wipe, width);
 
     m_plan.back().local_z_tool_changes.push_back(
@@ -2407,10 +2409,11 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
     if (m_plan.empty() || m_plan.back().z + WT_LAYER_Z_EPS < z_par)
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
+    float height_for_depth      = std::max(layer_height_par, m_filpar[0].nozzle_diameter * 0.5f);
     const float mini_wipe_depth = m_local_z_wipe_tower_purge_lines * m_perimeter_width * m_extra_spacing_wipe;
     const float wipe_width      = std::max(0.f, m_wipe_tower_width - 3.f * m_perimeter_width);
     const float wiping_depth    = wipe_width > WT_EPSILON ?
-                                      get_wipe_depth(std::max(0.f, wipe_volume), layer_height_par, m_perimeter_width, m_extra_flow,
+                                      get_wipe_depth(std::max(0.f, wipe_volume), height_for_depth, m_perimeter_width, m_extra_flow,
                                                      m_extra_spacing_wipe, wipe_width) :
                                       0.f;
 
@@ -2429,7 +2432,7 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
                 continue;
 
             const float ramming_volume = 0.25f * std::accumulate(filament.ramming_speed.begin(), filament.ramming_speed.end(), 0.f);
-            const float length_to_extrude = volume_to_length(ramming_volume, line_width, layer_height_par);
+            const float length_to_extrude = volume_to_length(ramming_volume, line_width, height_for_depth);
             const float ramming_depth =
                 (float(int(length_to_extrude / wipe_width) + 1) * line_step);
             max_ramming_depth = std::max(max_ramming_depth, ramming_depth);
@@ -2490,14 +2493,15 @@ void WipeTower2::save_on_last_wipe()
             if (i == idx) {
                 float width = m_wipe_tower_width - 3 * m_perimeter_width; // width we draw into
 
+                float height_for_depth         = std::max(m_layer_info->height, m_filpar[toolchange.new_tool].nozzle_diameter * 0.5f);
                 float volume_to_save           = length_to_volume(finish_layer().total_extrusion_length_in_plane(), m_perimeter_width,
-                                                                  m_layer_info->height);
+                                                                  height_for_depth);
                 float volume_left_to_wipe      = std::max(m_filpar[toolchange.new_tool].filament_minimal_purge_on_wipe_tower,
                                                           toolchange.wipe_volume_total - volume_to_save);
                 float volume_we_need_depth_for = std::max(0.f, volume_left_to_wipe - length_to_volume(toolchange.first_wipe_line,
                                                                                                       m_perimeter_width * m_extra_flow,
-                                                                                                      m_layer_info->height));
-                float depth_to_wipe = get_wipe_depth(volume_we_need_depth_for, m_layer_info->height, m_perimeter_width, m_extra_flow,
+                                                                                                      height_for_depth));
+                float depth_to_wipe = get_wipe_depth(volume_we_need_depth_for, height_for_depth, m_perimeter_width, m_extra_flow,
                                                      m_extra_spacing_wipe, width);
 
                 toolchange.required_depth = toolchange.ramming_depth + depth_to_wipe;

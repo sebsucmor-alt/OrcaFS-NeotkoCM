@@ -142,8 +142,11 @@ void NeoTower::collect_all_events(const Print& print)
     // ------------------------------------------------------------------
     float mp_prime_vol = 0.f;
     for (const PrintObject* obj : print.objects()) {
-        if (obj->layers().empty()) continue;
-        for (const LayerRegion* lr : obj->layers().front()->regions())
+        const PrintObject& src = obj->get_shared_object()
+                                 ? *obj->get_shared_object() : *obj;
+        if (src.multipass_sublayers().empty()) continue;   // ← solo objetos con MP activo
+        if (src.layers().empty()) continue;
+        for (const LayerRegion* lr : src.layers().front()->regions())
             mp_prime_vol = std::max(mp_prime_vol,
                 static_cast<float>(lr->region().config().multipass_prime_volume.value));
     }
@@ -193,9 +196,32 @@ void NeoTower::collect_all_events(const Print& print)
     // would see them.
     // ------------------------------------------------------------------
     {
-        size_t current_tool = tool_ordering.first_extruder();
-        if (current_tool == (size_t)-1)
-            current_tool = m_initial_tool;
+        // NEOTKO_NEOTOWER_TAG — brim fix Bug B (s66): mirror GCode's initial_extruder_id logic.
+        // GCode.cpp (line ~2913) sets:
+        //   initial_extruder_id = (!is_bbl && has_wt && !single_extruder_priming)
+        //                         ? all_extruders().back()   // non-BBL default: start on last extruder
+        //                         : first_extruder()
+        // For non-BBL with wipe tower, the writer starts on all_extruders().back(), NOT first_extruder().
+        // NeoTower was using first_extruder() → planned T0→T3 as [0][0].
+        // GCode arrives with writer=T3 → calls get_tcr(z, T3, T0) → hits [0][1] → brim in [0][0] lost.
+        // Fix: use the same initial tool as GCode so the first planned TC matches what GCode dispatches.
+        const bool is_bbl_1a      = print.is_BBL_printer();
+        const bool has_wt_1a      = tool_ordering.has_wipe_tower();
+        const bool semm_priming   = cfg.single_extruder_multi_material_priming.value;
+        size_t current_tool;
+        if (!is_bbl_1a && has_wt_1a && !semm_priming && !tool_ordering.all_extruders().empty())
+            current_tool = tool_ordering.all_extruders().back();
+        else {
+            current_tool = tool_ordering.first_extruder();
+            if (current_tool == (size_t)-1)
+                current_tool = m_initial_tool;
+        }
+        NT_LOG("1a initial current_tool=T" << current_tool
+            << " is_bbl=" << is_bbl_1a << " has_wt=" << has_wt_1a
+            << " semm=" << semm_priming
+            << " all_ext_back=" << (tool_ordering.all_extruders().empty() ? -1
+                                    : (int)tool_ordering.all_extruders().back())
+            << " first_ext=" << (int)tool_ordering.first_extruder());
 
         bool first_real_layer_1a = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
 
@@ -278,10 +304,14 @@ void NeoTower::collect_all_events(const Print& print)
             }
 
             for (const unsigned int ext_id : rotated_ext) {
-                bool is_first_on_first = first_lt &&
-                    ext_id == tool_ordering.all_extruders().back();
-
-                if (!is_first_on_first && ext_id == (unsigned int)current_tool)
+                // NEOTKO_NEOTOWER_TAG — brim fix Bug B (s66): is_first_on_first removed.
+                // Previously this flag forced a TC for all_extruders().back() even when
+                // ext_id == current_tool, generating a phantom T0→T3 that GCode never
+                // dispatches (GCode starts on T3 and only calls T3→T0).
+                // Now current_tool is initialized to all_extruders().back() for non-BBL,
+                // so the normal skip (ext_id == current_tool) correctly suppresses T3→T3
+                // and the loop generates exactly the TCs GCode will dispatch.
+                if (ext_id == (unsigned int)current_tool)
                     continue; // no toolchange
 
                 // Wipe volume: use the matrix passed at construction (already built from
@@ -1035,7 +1065,10 @@ void NeoTower::collect_all_events(const Print& print)
                     && last.old_tool == ev.old_tool
                     && last.new_tool == ev.new_tool;
                 if (same_key) {
-                    last.wipe_volume += ev.wipe_volume;
+                    last.wipe_volume = std::max(last.wipe_volume, ev.wipe_volume);
+                    //last.wipe_volume += ev.wipe_volume; WIPETOWER EDIT FIX
+                    //La lógica correcta: cuando dos objetos distintos generan el mismo TC T0→T1 en z=0.65, la wipe tower solo necesita purgar una vez con el volumen suficiente para el peor caso — max(vol_obj_A, vol_obj_B). Sumar implicaría que el nozzle necesita purgar por ambos objetos secuencialmente, lo cual no es el comportamiento del wipe tower.
+                    //Esto afecta tanto a ColorMix (múltiples objetos con dither en el mismo layer generan eventos idénticos) como a MultiPass (múltiples objetos con las mismas passes generan sublayer TCs idénticos). Ambos casos degeneran con += cuando hay más de un objeto en el print.
                     continue;
                 }
             }
@@ -1115,11 +1148,11 @@ void NeoTower::plan()
         if (d > max_depth) max_depth = d;
     }
 
-    // Final tower_width: max_depth + 2 perimeters, clamped to at least config width.
+    // Final tower dimensions: decoupled width (from config) and depth (from calculations).
     float cfg_width = static_cast<float>(m_print_config->prime_tower_width);
-    float computed  = max_depth + 2.f * m_perimeter_width;
-    m_plan.tower_width = std::max(cfg_width, computed);
-    m_plan.tower_depth = m_plan.tower_width; // square
+    float computed_depth = max_depth + 2.f * m_perimeter_width;
+    m_plan.tower_width = cfg_width;
+    m_plan.tower_depth = computed_depth; // rectangular - decoupled from width
 
     // ------------------------------------------------------------------
     // Group events by z_nominal into NeoTowerLayers.
@@ -1209,7 +1242,17 @@ float NeoTower::wipe_depth_for_volume(float wipe_volume, float slot_height) cons
                              * usable_width;
     if (vol_per_mm <= 0.f) return 10.f;
 
-    return std::max(2.f * m_perimeter_width, wipe_volume / vol_per_mm);
+    // NEOTKO_NEOTOWER_TAG: Fix unit mismatch.
+    // wipe_volume / vol_per_mm gives the dimensionless count of lines required.
+    // To convert it to a physical depth in mm, we must multiply by the line spacing
+    // (perimeter_width * extra_spacing_wipe). Without this, the calculated depth
+    // was inflated by a factor of 1 / perimeter_width (typically 2.0x).
+    const float extra_spacing_wipe = (static_cast<float>(m_print_config->wipe_tower_extra_spacing.value) / 100.f) *
+                                     (static_cast<float>(m_print_config->wipe_tower_extra_flow.value) / 100.f);
+    const float line_spacing = m_perimeter_width * extra_spacing_wipe;
+    const float calculated_depth = (wipe_volume / vol_per_mm) * line_spacing;
+
+    return std::max(2.f * m_perimeter_width, calculated_depth);
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,19 +1319,43 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     //
     // m_initial_tool comes from ToolOrdering::first_extruder() which can differ
     // from the actual extruder GCode has active when it first calls the tower.
-    // GCode's current_tool at layer 0 == old_tool of the first real-layer event.
-    // When they differ the brim lands in a TCR that GCode never dispatches
-    // (because it queries get_tcr(z, old=GCode_current, ...) → tc_idx that
-    // points to the no-brim slot), leaving the first layer with only a thin
-    // perimeter instead of the full brim base.
+    // GCode's current_tool at layer 0 is the chain-start of the first real layer:
+    // the tool whose old_tool does NOT appear as new_tool of any other event at
+    // the same (minimum) z.  That tool is the one GCode starts on, so the brim
+    // TCR must have it as initial_tool.
     //
-    // Fix: derive effective_initial from the first real-layer TC event and use
-    // it for both the WipeTower2 constructor and chain_tool initialisation.
+    // IMPORTANT: do NOT derive effective_initial from m_events[0].old_tool after
+    // sort_events().  sort_events() sorts by (z_actual, old_tool, new_tool), so
+    // it puts T0→T2 before T3→T0 at the same z, making effective_initial=T0
+    // even when GCode starts at T3.  The chain-start detection below is
+    // order-independent and always produces the correct result.
     size_t effective_initial = m_initial_tool;
-    for (const NeoTowerEvent& ev : m_events) {
-        if (!ev.is_sublayer && ev.old_tool != ev.new_tool) {
-            effective_initial = ev.old_tool;
-            break;
+    {
+        // Find the minimum z among non-sublayer, old!=new events.
+        float min_z = std::numeric_limits<float>::max();
+        for (const NeoTowerEvent& ev : m_events)
+            if (!ev.is_sublayer && ev.old_tool != ev.new_tool)
+                min_z = std::min(min_z, ev.z_actual);
+
+        if (min_z < std::numeric_limits<float>::max()) {
+            // Collect new_tool values at min_z (= "consumed" tools — someone
+            // transitions INTO them, so they are NOT the chain start).
+            std::set<size_t> consumed;
+            for (const NeoTowerEvent& ev : m_events)
+                if (!ev.is_sublayer && ev.old_tool != ev.new_tool
+                        && std::abs(ev.z_actual - min_z) < 1e-5f)
+                    consumed.insert(ev.new_tool);
+
+            // The chain-start old_tool is the one NOT consumed by any other
+            // event at min_z.  There is exactly one such tool in a valid chain.
+            for (const NeoTowerEvent& ev : m_events) {
+                if (!ev.is_sublayer && ev.old_tool != ev.new_tool
+                        && std::abs(ev.z_actual - min_z) < 1e-5f
+                        && consumed.find(ev.old_tool) == consumed.end()) {
+                    effective_initial = ev.old_tool;
+                    break;
+                }
+            }
         }
     }
     // NEOTKO_NEOTOWER_TAG_END
