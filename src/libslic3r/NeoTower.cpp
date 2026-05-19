@@ -1554,7 +1554,10 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 for (size_t k = 0; k < grp_size; ++k) {
                     if (used[k]) continue;
                     const NeoTowerEvent& ev = all_events[ei + k];
-                    if (ev.old_tool != ev.new_tool)
+                    // NEOTKO_NEOTOWER_TAG — brim fix: phantom events (m_initial→effective)
+                    // must not influence section1a_initial detection.  Exclude them from
+                    // grp_new_tools so they don't hide the real chain-start tool.
+                    if (ev.old_tool != ev.new_tool && !is_phantom_init(ei + k))
                         grp_new_tools.insert(static_cast<unsigned>(ev.new_tool));
                 }
                 int section1a_initial = chain_tool;
@@ -1562,6 +1565,8 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                     if (used[k]) continue;
                     const NeoTowerEvent& ev = all_events[ei + k];
                     if (ev.old_tool == ev.new_tool) continue; // skip identity
+                    // NEOTKO_NEOTOWER_TAG — brim fix: phantom is not a real chain start.
+                    if (is_phantom_init(ei + k)) continue;
                     if (grp_new_tools.find(static_cast<unsigned>(ev.old_tool)) == grp_new_tools.end()) {
                         section1a_initial = static_cast<int>(ev.old_tool);
                         break;
@@ -1628,8 +1633,12 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 if (!used[k]) ordered.push_back(ei + k);
             }
 
+            // NEOTKO_NEOTOWER_TAG — brim fix: skip phantom init events so wt2's
+            // m_current_tool stays consistent and the first real TC at layer 0
+            // retains the brim-generating position (si=0 of wt2_li=0).
             for (size_t evi : ordered)
-                feed_event(evi);
+                if (!is_phantom_init(evi))
+                    feed_event(evi);
         }
 
         first_zgrp_done = true;  // NEOTKO_NEOTOWER_TAG: disable phantom guard after first group
