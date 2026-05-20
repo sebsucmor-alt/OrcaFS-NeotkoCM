@@ -280,6 +280,9 @@ private:
     wxSlider*         m_sl_overlap       = nullptr; // s60: color overlap slider
     wxStaticText*     m_lbl_overlap      = nullptr;
     wxCheckBox*       m_chk_invert       = nullptr; // s60: invert gradient direction
+    wxButton*         m_btn_invert       = nullptr; // button to invert/reverse custom pattern string
+    bool                         m_mixed_filament_selected = false;
+    std::vector<wxButton*>       m_physical_buttons;
 
     // NEOTKO_COLORMIX_TAG — s61: role-aware config key prefix.
     // m_surface_id 0 = Top → reads/writes the original (top-role) keys.
@@ -397,6 +400,21 @@ private:
 
     void build_ui(const std::vector<Slic3r::ColorMixOption>& options)
     {
+        m_mixed_filament_selected = false;
+        if (!m_pattern.empty()) {
+            for (const auto& opt : options) {
+                if (!opt.is_physical) {
+                    std::string rev = opt.pattern;
+                    std::reverse(rev.begin(), rev.end());
+                    if (opt.pattern == m_pattern || rev == m_pattern) {
+                        m_mixed_filament_selected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        m_physical_buttons.clear();
+
         const int PAD = 6;
         auto* vs = new wxBoxSizer(wxVERTICAL);
 
@@ -416,6 +434,7 @@ private:
             int fid = opt.filament_id;
             b->Bind(wxEVT_BUTTON, [this, fid](wxCommandEvent&) { append_digit(fid); });
             btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
+            m_physical_buttons.push_back(b);
         }
 
         // Virtual (Mixed Filament) buttons — shown only when use_virtual gate is ON.
@@ -441,8 +460,19 @@ private:
                 b->SetBackgroundColour(hex_to_colour(opt.display_color));
                 b->SetToolTip(wxString::FromUTF8(opt.label)
                               + wxString::Format(" [digit %d]", opt.filament_id));
-                int fid = opt.filament_id;
-                b->Bind(wxEVT_BUTTON, [this, fid](wxCommandEvent&) { append_digit(fid); });
+                std::string recipe = opt.pattern;
+                b->Bind(wxEVT_BUTTON, [this, recipe](wxCommandEvent&) {
+                    m_pattern = recipe;
+                    m_mixed_filament_selected = true;
+                    const int needed = (int)m_pattern.size() * 26 + 8;
+                    if (needed > m_disp->GetMinWidth()) {
+                        m_disp->SetMinSize(wxSize(needed, 26));
+                        Fit();
+                    }
+                    m_disp->Refresh();
+                    this->refresh_grad_lock();
+                    this->refresh_grad_preview();
+                });
                 btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
             }
         }
@@ -461,18 +491,34 @@ private:
         });
         vs->Add(m_disp, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
 
-        // Clear button below pattern display
+        // Action buttons row below pattern display
+        auto* btn_action_row = new wxBoxSizer(wxHORIZONTAL);
+
         auto* bcl = new wxButton(this, wxID_ANY, _L("Clear"),
                                   wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
         bcl->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             m_pattern.clear();
+            m_mixed_filament_selected = false;
             m_disp->SetMinSize(wxSize(160, 26));
             Fit();
             m_disp->Refresh();
             this->refresh_grad_lock();   // pattern changed → re-evaluate MF gray-out
             this->refresh_grad_preview(); // strip should reflect empty pattern
         });
-        vs->Add(bcl, 0, wxLEFT|wxBOTTOM, PAD);
+        btn_action_row->Add(bcl, 0, wxRIGHT, 12); // Premium 12px spacing to prevent clutter
+
+        m_btn_invert = new wxButton(this, wxID_ANY, _L("Invert"),
+                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        m_btn_invert->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            if (!m_pattern.empty()) {
+                std::reverse(m_pattern.begin(), m_pattern.end());
+                m_disp->Refresh();
+                this->refresh_grad_preview();
+            }
+        });
+        btn_action_row->Add(m_btn_invert, 0, 0, 0);
+
+        vs->Add(btn_action_row, 0, wxLEFT|wxBOTTOM, PAD);
 
         // ── Gradient section (numeric dither) — s60. ────────────────────────
         // Only built when m_cfg is provided AND the dialog is in ColorMix
@@ -483,6 +529,7 @@ private:
 
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
                 0, wxALL|wxALIGN_RIGHT, PAD);
+        this->refresh_grad_lock();
         SetSizerAndFit(vs);
     }
 
@@ -876,7 +923,7 @@ private:
 
     void refresh_grad_lock()
     {
-        const bool locked = pattern_uses_mixed_filament();
+        const bool locked = pattern_uses_mixed_filament() || m_mixed_filament_selected;
         if (m_panel_linear) m_panel_linear->Enable(!locked);
         if (m_panel_bands)  m_panel_bands ->Enable(!locked);
         if (m_choice_grad_mode) m_choice_grad_mode->Enable(!locked);
@@ -885,8 +932,19 @@ private:
         if (m_choice_tool_c) m_choice_tool_c->Enable(!locked);
         if (m_choice_tool_d) m_choice_tool_d->Enable(!locked);
         if (m_lbl_mf_lock_note) {
+            if (m_mixed_filament_selected) {
+                m_lbl_mf_lock_note->SetLabel(_L("⚠ A MixedFilament recipe is active. Gradient options are disabled — the MixedFilament IS the pattern."));
+            } else {
+                m_lbl_mf_lock_note->SetLabel(_L("⚠ Pattern uses a MixedFilament digit (5-9). Gradient options are disabled — the MixedFilament IS the pattern."));
+            }
             m_lbl_mf_lock_note->Show(locked);
             Layout(); Fit();
+        }
+        for (auto* btn : m_physical_buttons) {
+            if (btn) btn->Enable(!m_mixed_filament_selected);
+        }
+        if (m_btn_invert) {
+            m_btn_invert->Enable(m_mixed_filament_selected);
         }
     }
 };
