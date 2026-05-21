@@ -6117,8 +6117,12 @@ LayerResult GCode::process_layer(const Print& print,
                                 // ordering across objects.
                                 // ColormMix (non-multipass) falls back to first-appearance order as
                                 // before — it has no fixed pass concept.
-                                if (m_config.multipass_enabled.value) {
-                                    const MultiPassConfig mp = MultiPassConfig::from_region_config(m_config);
+                                // NEOTKO_PATHBLEND_TAG — s69 cross-object fix:
+                                // read the CURRENT region's config, not the
+                                // stale global m_config (not re-applied per
+                                // object during this island-building phase).
+                                if (region.config().multipass_enabled.value) {
+                                    const MultiPassConfig mp = MultiPassConfig::from_region_config(region.config());
                                     const int n_mp = std::max(1, std::min(3, mp.num_passes));
                                     for (int pi = 0; pi < n_mp; ++pi) {
                                         if (mp.tool[pi] < 0) continue;
@@ -6144,12 +6148,21 @@ LayerResult GCode::process_layer(const Print& print,
                                 // Toggling pathblend_fill_angle from 0→1 accidentally fixed it
                                 // by changing the fill engine's path order, which is exactly
                                 // the symptom of a non-deterministic bucket ordering.
-                                else if (m_config.option<ConfigOptionBool>(
-                                            "multipass_path_gradient")
-                                         && m_config.option<ConfigOptionBool>(
-                                                "multipass_path_gradient")->value) {
+                                else if (region.config().multipass_path_gradient.value) {
+                                    // NEOTKO_PATHBLEND_TAG — s69 miniblob: detect the
+                                    // surface role of these encoded paths so the
+                                    // per-zone PB blob (top vs penu) is read correctly.
+                                    ExtrusionRole _pb_role = erTopSolidInfill;
+                                    for (const ExtrusionEntity* ce : filtered_extrusions->entities) {
+                                        const ExtrusionPath* fp = dynamic_cast<const ExtrusionPath*>(ce);
+                                        if (fp == nullptr)
+                                            if (const auto* sub = dynamic_cast<const ExtrusionEntityCollection*>(ce))
+                                                for (const ExtrusionEntity* se : sub->entities)
+                                                    if ((fp = dynamic_cast<const ExtrusionPath*>(se)) != nullptr) break;
+                                        if (fp != nullptr) { _pb_role = fp->role(); break; }
+                                    }
                                     const PathBlendPassConfig pb =
-                                        PathBlendPassConfig::from_region_config(m_config);
+                                        PathBlendPassConfig::from_region_config(region.config(), _pb_role);
                                     const int n_pb = std::max(1, std::min(4, pb.num_passes));
                                     for (int pi = 0; pi < n_pb; ++pi) {
                                         if (pb.tool[pi] < 0) continue;
@@ -6899,43 +6912,38 @@ LayerResult GCode::process_layer(const Print& print,
             std::rotate(layer_extruders.begin(), it, layer_extruders.end());
     }
 
-    // NEOTKO_PATHBLEND_TAG — s58 Fix B: record real print order of PathBlend tools
-    // for this layer.  Consumed by _extrude() to compute pass_idx from physical
-    // print order rather than the config tool[] order, so the first extruder
-    // physically printed is always pass 0 (z=bottom) and the last is pass N-1
-    // (z=nominal_z) — guaranteeing monotonic Z across passes regardless of which
-    // tool the writer entered the layer with.
-    m_pathblend_print_order.clear();
+    // NEOTKO_PATHBLEND_TAG — s58 Fix B / s69: record the layer's PHYSICAL print
+    // order (post-rotation layer_extruders).  _extrude() filters this per-region
+    // by the current region's PathBlend tool set, so multiple objects with
+    // different PathBlend tool sets at the same Z stay independent.  Before s69
+    // this list was pre-filtered by a single (first-found) PB region's tools,
+    // which cross-contaminated objects: a penu-PB object using {T1,T2} inherited
+    // another object's {T1,T3} order → its ramp pass (pass 0) was omitted.
+    m_pathblend_layer_extruders = layer_extruders;
     m_pathblend_max_z_per_pass.clear();  // NEOTKO_PATHBLEND_TAG s58 Bug 2 safety reset
-    {
-        const PrintRegionConfig* pb_cfg = nullptr;
+    if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
+        // Log the per-region PathBlend print order for every PB region at this z.
         for (const LayerToPrint& ltp_pb : layers) {
             if (!ltp_pb.object_layer) continue;
             for (const LayerRegion* lr : ltp_pb.object_layer->regions()) {
-                if (lr->region().config().multipass_path_gradient.value) {
-                    pb_cfg = &lr->region().config();
-                    break;
-                }
-            }
-            if (pb_cfg) break;
-        }
-        if (pb_cfg) {
-            const PathBlendPassConfig pb =
-                PathBlendPassConfig::from_region_config(*pb_cfg);
-            std::set<unsigned int> pb_tools;
-            for (int pi = 0; pi < pb.num_passes; ++pi)
-                if (pb.tool[pi] >= 0)
-                    pb_tools.insert(static_cast<unsigned int>(pb.tool[pi]));
-            for (unsigned int ext : layer_extruders)
-                if (pb_tools.count(ext))
-                    m_pathblend_print_order.push_back(ext);
-            if (NeoDebug::enabled(NeoDebug::COLORMIX) && !m_pathblend_print_order.empty()) {
+                if (lr == nullptr || !lr->region().config().multipass_path_gradient.value)
+                    continue;
+                const PathBlendPassConfig pb =
+                    PathBlendPassConfig::from_region_config(lr->region().config());
+                std::set<unsigned int> pb_tools;
+                for (int pi = 0; pi < pb.num_passes; ++pi)
+                    if (pb.tool[pi] >= 0)
+                        pb_tools.insert(static_cast<unsigned int>(pb.tool[pi]));
                 std::ostringstream s;
-                s << "PB_PRINT_ORDER z=" << print_z << " order=[";
-                for (size_t i = 0; i < m_pathblend_print_order.size(); ++i) {
-                    if (i) s << ",";
-                    s << "T" << m_pathblend_print_order[i];
-                }
+                s << "PB_PRINT_ORDER z=" << print_z
+                  << " region=" << lr->region().print_region_id() << " order=[";
+                bool first = true;
+                for (unsigned int ext : layer_extruders)
+                    if (pb_tools.count(ext)) {
+                        if (!first) s << ",";
+                        s << "T" << ext;
+                        first = false;
+                    }
                 s << "]";
                 NEOTKO_LOG(COLORMIX, s.str());
             }
@@ -8069,9 +8077,19 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
                         bool _gc_pb_paint_penu = false;
                         if (m_layer && m_layer->object()) {
                             const PrintObject* _po = m_layer->object();
-                            const bool _pmo = SurfaceColorMix::object_has_any_colormix_paint(
-                                _po->model_object());
-                            if (_pmo) {
+                            // NEOTKO_PROFILE_TAG — MMU exclusion: never apply PathBlend
+                            // to an MMU-painted object; MMU owns its surfaces.
+                            const bool _gc_mm_painted = _po->model_object() != nullptr
+                                && _po->model_object()->is_mm_painted();
+                            const bool _pmo = !_gc_mm_painted
+                                && SurfaceColorMix::object_has_any_colormix_paint(
+                                       _po->model_object());
+                            if (_gc_mm_painted) {
+                                _gc_pb_painter_mode  = true;
+                                _gc_pb_painter_block = true;
+                                NEOTKO_LOG(COLORMIX, "PB_LEAK_BLOCK mmu_painted z="
+                                    << m_layer->print_z << " (MMU object — PathBlend suppressed)");
+                            } else if (_pmo) {
                                 _gc_pb_painter_mode = true;
                                 const double _pz = m_layer->print_z;
                                 const double _ph = m_layer->height;
@@ -9016,20 +9034,35 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     int pass_idx = 0;
                     if (m_writer.extruder() != nullptr) {
                         const int cur_ext = static_cast<int>(m_writer.extruder()->id());
+                        // NEOTKO_PATHBLEND_TAG — s69 cross-object fix: derive
+                        // pass_idx from the physical layer print order filtered
+                        // by THIS region's PathBlend tool set.  m_config is
+                        // region-correct here (extrude_infill applied it), so
+                        // objects with different PB tool sets no longer
+                        // contaminate each other's pass ordering.
+                        const auto pb = PathBlendPassConfig::from_region_config(m_config, path.role());
+                        std::set<int> pb_tools;
+                        for (int pi = 0; pi < pb.num_passes; ++pi)
+                            if (pb.tool[pi] >= 0)
+                                pb_tools.insert(pb.tool[pi]);
                         bool by_print_order = false;
-                        if (!m_pathblend_print_order.empty()) {
-                            for (size_t i = 0; i < m_pathblend_print_order.size(); ++i) {
-                                if (static_cast<int>(m_pathblend_print_order[i]) == cur_ext) {
-                                    pass_idx = static_cast<int>(i);
+                        if (!m_pathblend_layer_extruders.empty() && !pb_tools.empty()) {
+                            int rank = 0;
+                            for (unsigned int ext : m_pathblend_layer_extruders) {
+                                if (!pb_tools.count(static_cast<int>(ext)))
+                                    continue;
+                                if (static_cast<int>(ext) == cur_ext) {
+                                    pass_idx = rank;
                                     by_print_order = true;
                                     break;
                                 }
+                                ++rank;
                             }
                         }
                         if (!by_print_order) {
                             // Fallback: config tool[] order (legacy, used when
-                            // m_pathblend_print_order wasn't populated for any reason).
-                            const auto pb = PathBlendPassConfig::from_region_config(m_config);
+                            // the current extruder is not in the physical order
+                            // for any reason).
                             for (int pi = 0; pi < pb.num_passes; ++pi) {
                                 if (pb.tool[pi] == cur_ext) { pass_idx = pi; break; }
                             }
@@ -9106,7 +9139,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                         }
                     }
                     gcode += PathBlendEngine::apply_path(
-                        path, m_config, m_writer,
+                        path, m_config, path.role(), m_writer,
                         m_nominal_z, m_layer->height,
                         F, e_per_mm, pass_idx, surface_t,
                         [this](const Point& p) { return this->point_to_gcode(p); },

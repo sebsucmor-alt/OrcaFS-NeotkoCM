@@ -853,6 +853,15 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     const bool painter_mode_obj =
         SurfaceColorMix::object_has_any_colormix_paint(object.model_object());
 
+    // NEOTKO_PROFILE_TAG — MMU exclusion. MMU-painted objects are owned by MMU
+    // segmentation; ColorMix/PathBlend tool registration must be suppressed for
+    // them so the wipe-tower plan matches the SLICE side (which also skips them).
+    const bool object_is_mm_painted =
+        object.model_object() != nullptr && object.model_object()->is_mm_painted();
+    if (object_is_mm_painted)
+        NEOTKO_LOG(TOOLORDER, "MMU_SKIP ColorMix/PathBlend tool registration"
+            << " — object is MMU-painted (kept in sync with SLICE)");
+
     // NEOTKO_MULTIPASS_TAG — do NOT clear m_mp_sublayer_extruders here.
     // In multi-object prints collect_extruders() is called once per object;
     // clearing here would erase entries from previous objects, leaving sublayer
@@ -974,6 +983,11 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                         ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, configured_wall)
                         : resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height));
                     // NEOTKO_MULTIPASS_TAG_END
+                    // NEOTKO_MULTIPASS_TAG — s68 diag: trace MMU painted-region filament → tool.
+                    NEOTKO_LOG(TOOLORDER, "MMU_RESOLVE wall layer=" << layerCount
+                        << " configured=" << configured_wall
+                        << " num_physical=" << m_num_physical
+                        << " resolved=" << wall_ext);
                     const unsigned int grouped_id = layer_tools.mp_perim_override_active
                         ? 0u  // skip grouped pattern cycling when override is active
                         : grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_wall);
@@ -1108,7 +1122,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                     NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
                 }
             } else
-            if (!painter_mode_obj && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
+            if (!painter_mode_obj && !object_is_mm_painted && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
                 const auto& cfg   = region.config();
                 const int tool_a  = cfg.interlayer_colormix_tool_a.value;
                 const int tool_b  = cfg.interlayer_colormix_tool_b.value;
@@ -1270,7 +1284,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                             }
                         }
                     }
-                } else if (region.config().multipass_path_gradient.value) {
+                } else if (!object_is_mm_painted && region.config().multipass_path_gradient.value) {
                     const auto& cfg = region.config();
                     n = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
                     raw_tools[0] = cfg.pathblend_tool_1.value;

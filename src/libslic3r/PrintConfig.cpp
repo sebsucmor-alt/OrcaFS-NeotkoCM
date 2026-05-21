@@ -6581,6 +6581,20 @@ void PrintConfigDef::init_fff_params()
     def->max  = 359;
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInt(-1));
+
+    // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings (JSON).
+    // Hidden keys, written/read by the PathBlend dialog per zone (Top/Penu),
+    // never shown in optgroups.  Empty default → from_region_config() reads the
+    // flat pathblend_* keys (back-compat).
+    def = this->add("pathblend_top", coString);
+    def->label = L("PathBlend settings (Top)");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("pathblend_penu", coString);
+    def->label = L("PathBlend settings (Penultimate)");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
     // NEOTKO_PATHBLEND_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — Neotko Neoweaving
@@ -7141,6 +7155,21 @@ void PrintConfigDef::init_fff_params()
                      "When off, only physical tools 1-4 are recognised in the pattern string.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("interlayer_colormix_angle", coInt);
+    def->label = L("Infill angle override");
+    def->category = L("Quality");
+    def->tooltip = L("Override standard infill rotation angle on layers where ColorMix is active.\n"
+                     "-1 = Use standard (default/OrcaSlicer settings).\n"
+                     "0 to 359 = Override with this angle in degrees.");
+    def->min = -1;
+    def->max = 359;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    add_penu_int  ("interlayer_colormix_penu_angle", -1, -1, 359,
+                   "Infill angle override (Penultimate)",
+                   "Penultimate-surface variant of Infill angle override.");
     // NEOTKO_COLORMIX_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend

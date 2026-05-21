@@ -20,6 +20,7 @@
 #include <set>      // NEOTKO_COLORMIX: unique-tool check in build_tool_list_from_pattern
 #include <mutex>    // NEOTKO_DEBUG: NeoDebug::write thread safety
 #include <numeric>  // NEOTKO_COLORMIX s58: std::iota for lane_mode sort indices
+#include <nlohmann/json.hpp> // NEOTKO_PATHBLEND_TAG s69: miniblob JSON round-trip
 
 namespace Slic3r {
 
@@ -668,6 +669,17 @@ int SurfaceColorMix::assign_and_group_tools(
     // divergence triggers a wipe-tower "unexpected toolchange" crash.
     const ModelObject* model_object =
         print_object ? print_object->model_object() : nullptr;
+
+    // NEOTKO_PROFILE_TAG — MMU exclusion. A multi-material-painted object is
+    // controlled entirely by MMU segmentation; re-encoding its top/penu fills
+    // here (preset OR painter mode) clobbers the per-region extruder assignment
+    // MMU produced. MMU owns the surface — ColorMix steps aside completely.
+    if (model_object && model_object->is_mm_painted()) {
+        NEOTKO_LOG(COLORMIX, "MMU_SKIP ColorMix layer=" << layer_idx
+            << " — object is MMU-painted, ColorMix suppressed (MMU owns surfaces)");
+        return 0;
+    }
+
     const bool painter_mode_obj = object_has_any_colormix_paint(model_object);
     const SurfaceEffectProfile* painted_top_profile  = nullptr;
     const SurfaceEffectProfile* painted_penu_profile = nullptr;
@@ -2043,30 +2055,96 @@ double PathBlendPassConfig::ratio_at(int p, double t) const
     return r;
 }
 
-PathBlendPassConfig PathBlendPassConfig::from_region_config(const PrintRegionConfig& cfg)
+// NEOTKO_PATHBLEND_TAG — s69 miniblob: JSON round-trip for the per-zone blob.
+// The blob carries only the per-zone settings; enable + surface are the shared
+// scope keys, applied by from_region_config() from the live config.
+std::string PathBlendPassConfig::to_blob_json() const
 {
+    nlohmann::json j;
+    j["num_passes"]      = num_passes;
+    j["tool"]            = nlohmann::json::array({ tool[0], tool[1], tool[2], tool[3] });
+    j["layer_ratio"]     = nlohmann::json::array({ layer_ratio[0], layer_ratio[1],
+                                                   layer_ratio[2], layer_ratio[3] });
+    j["min_ratio"]       = min_ratio;
+    j["max_ratio"]       = max_ratio;
+    j["ease_mode"]       = ease_mode;
+    j["invert_gradient"] = invert_gradient;
+    j["fill_angle"]      = fill_angle;
+    return j.dump();
+}
+
+PathBlendPassConfig PathBlendPassConfig::from_blob_json(const std::string& blob)
+{
+    PathBlendPassConfig c;  // defaults
+    if (blob.empty()) return c;
+    try {
+        nlohmann::json j = nlohmann::json::parse(blob);
+        if (j.is_object()) {
+            auto gi = [&](const char* k, int def) {
+                return (j.contains(k) && j[k].is_number()) ? j[k].get<int>() : def; };
+            auto gf = [&](const char* k, double def) {
+                return (j.contains(k) && j[k].is_number()) ? j[k].get<double>() : def; };
+            auto gbool = [&](const char* k, bool def) {
+                return (j.contains(k) && j[k].is_boolean()) ? j[k].get<bool>() : def; };
+            c.num_passes = std::clamp(gi("num_passes", 2), 1, 4);
+            if (j.contains("tool") && j["tool"].is_array())
+                for (int i = 0; i < 4 && i < (int) j["tool"].size(); ++i)
+                    if (j["tool"][i].is_number()) c.tool[i] = j["tool"][i].get<int>();
+            if (j.contains("layer_ratio") && j["layer_ratio"].is_array())
+                for (int i = 0; i < 4 && i < (int) j["layer_ratio"].size(); ++i)
+                    if (j["layer_ratio"][i].is_number())
+                        c.layer_ratio[i] = static_cast<float>(j["layer_ratio"][i].get<double>());
+            c.min_ratio       = static_cast<float>(std::clamp(gf("min_ratio", 0.05), 0.01, 0.49));
+            c.max_ratio       = static_cast<float>(std::clamp(gf("max_ratio", 1.0),  0.51, 1.0));
+            c.ease_mode       = std::clamp(gi("ease_mode", 0), 0, 3);
+            c.invert_gradient = gbool("invert_gradient", true);
+            c.fill_angle      = gi("fill_angle", -1);
+        }
+    } catch (const std::exception& e) {
+        NEOTKO_LOG(MULTIPASS, "PB_BLOB parse error: " << e.what()
+            << " — using PathBlend defaults");
+    }
+    return c;
+}
+
+PathBlendPassConfig PathBlendPassConfig::from_region_config(const PrintRegionConfig& cfg,
+                                                            ExtrusionRole role)
+{
+    // NEOTKO_PATHBLEND_TAG — s69 miniblob: a non-empty per-zone JSON blob
+    // overrides the flat pathblend_* keys, so Top and Penultimate PathBlend
+    // hold independent settings.  Empty blob → legacy flat-key path.
+    const std::string& blob = (role == erPenultimateInfill)
+        ? cfg.pathblend_penu.value
+        : cfg.pathblend_top.value;
     PathBlendPassConfig c;
-    c.enabled        = cfg.multipass_path_gradient.value; // existing enable key; PathBlend now independent of multipass_enabled
-    c.surface        = cfg.pathblend_surface.value;
-    c.num_passes     = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
-    c.tool[0]        = cfg.pathblend_tool_1.value;
-    c.tool[1]        = cfg.pathblend_tool_2.value;
-    c.tool[2]        = cfg.pathblend_tool_3.value;
-    c.tool[3]        = cfg.pathblend_tool_4.value;
-    c.layer_ratio[0] = static_cast<float>(cfg.pathblend_layer_ratio_1.value);
-    c.layer_ratio[1] = static_cast<float>(cfg.pathblend_layer_ratio_2.value);
-    c.layer_ratio[2] = static_cast<float>(cfg.pathblend_layer_ratio_3.value);
-    c.layer_ratio[3] = static_cast<float>(cfg.pathblend_layer_ratio_4.value);
-    c.min_ratio        = static_cast<float>(
-        std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.49));
-    c.max_ratio        = static_cast<float>(
-        std::clamp(cfg.pathblend_max_ratio.value, 0.51, 1.0));
-    c.ease_mode        = std::clamp(cfg.pathblend_ease_mode.value, 0, 3);
-    c.invert_gradient  = cfg.pathblend_invert_gradient.value;
-    c.fill_angle       = cfg.pathblend_fill_angle.value;
+    if (!blob.empty()) {
+        c = from_blob_json(blob);
+    } else {
+        // Legacy / back-compat: flat pathblend_* keys (original behaviour).
+        c.num_passes     = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
+        c.tool[0]        = cfg.pathblend_tool_1.value;
+        c.tool[1]        = cfg.pathblend_tool_2.value;
+        c.tool[2]        = cfg.pathblend_tool_3.value;
+        c.tool[3]        = cfg.pathblend_tool_4.value;
+        c.layer_ratio[0] = static_cast<float>(cfg.pathblend_layer_ratio_1.value);
+        c.layer_ratio[1] = static_cast<float>(cfg.pathblend_layer_ratio_2.value);
+        c.layer_ratio[2] = static_cast<float>(cfg.pathblend_layer_ratio_3.value);
+        c.layer_ratio[3] = static_cast<float>(cfg.pathblend_layer_ratio_4.value);
+        c.min_ratio      = static_cast<float>(
+            std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.49));
+        c.max_ratio      = static_cast<float>(
+            std::clamp(cfg.pathblend_max_ratio.value, 0.51, 1.0));
+        c.ease_mode      = std::clamp(cfg.pathblend_ease_mode.value, 0, 3);
+        c.invert_gradient = cfg.pathblend_invert_gradient.value;
+        c.fill_angle     = cfg.pathblend_fill_angle.value;
+    }
+    // enable + surface are shared scope keys — never stored in the per-zone blob.
+    c.enabled = cfg.multipass_path_gradient.value; // PathBlend independent of multipass_enabled
+    c.surface = cfg.pathblend_surface.value;
     return c;
 }
 // NEOTKO_PATHBLEND_TAG_END
+
 
 // NEOTKO_MULTIPASS_TAG_START — PathBlend engine implementation
 bool PathBlendEngine::needs_blend(const ExtrusionPath& path,
@@ -2087,6 +2165,7 @@ bool PathBlendEngine::needs_blend(const ExtrusionPath& path,
 std::string PathBlendEngine::apply_path(
     const ExtrusionPath&                      path,
     const PrintRegionConfig&                  cfg,
+    ExtrusionRole                             role,
     GCodeWriter&                              writer,
     double                                    nominal_z,
     double                                    layer_height,
@@ -2109,7 +2188,7 @@ std::string PathBlendEngine::apply_path(
     //     The old "fixed Z per pass" formula produced a flat band per tool instead of a
     //     diagonal gradient — that was the visible bug.
 
-    const PathBlendPassConfig pb = PathBlendPassConfig::from_region_config(cfg);
+    const PathBlendPassConfig pb = PathBlendPassConfig::from_region_config(cfg, role);
 
     if (pass_idx < 0 || pass_idx >= pb.num_passes) return "";
 
@@ -2146,11 +2225,18 @@ std::string PathBlendEngine::apply_path(
     double flow;
     double z_pass;
 
-    if (cfg.multipass_enabled.value) {
+    // NEOTKO_PATHBLEND_TAG — s68: role-correct MultiPass gate. The penultimate
+    // surface owns an independent enable flag + width ratios; reading the top
+    // keys here stacked the penu PB+MP combo on the wrong sub-layer heights and
+    // mis-gated it (penu printed only pass 1 when top MP was off).
+    const bool _mp_on = (role == erPenultimateInfill)
+        ? cfg.penultimate_multipass_enabled.value
+        : cfg.multipass_enabled.value;
+    if (_mp_on) {
         // Multipass: volume already scaled, so flow = 1.0 and Z = stacked sub-layer top.
         flow = 1.0;
 
-        const MultiPassConfig mp = MultiPassConfig::from_region_config(cfg);
+        const MultiPassConfig mp = MultiPassConfig::from_region_config(cfg, role);
         const int n_mp = std::max(1, std::min(3, mp.num_passes));
         const int clamped_idx = std::min(pass_idx, n_mp - 1);
 
@@ -2260,7 +2346,8 @@ std::string PathBlendEngine::apply_path(
     NEOTKO_LOG(MULTIPASS,
         "PathBlend"
         << " layer="     << (int)(nominal_z * 1000) << "um"
-        << " mode="      << (cfg.multipass_enabled.value ? "multipass" : "standalone")
+        << " mode="      << (_mp_on ? "multipass" : "standalone")
+        << " role="      << (role == erPenultimateInfill ? "penu" : "top")
         << " pass="      << pass_idx << "/" << pb.num_passes
         << " t_raw="     << surface_t
         << " z_pass="    << z_pass

@@ -2343,7 +2343,21 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
 
     // this is an actual toolchange - let's calculate depth to reserve on the wipe tower
     float width             = m_wipe_tower_width - 3 * m_perimeter_width;
+    // NEOTKO_NEOTOWER_TAG_START — s67 wipe-tower depth flooring.
+    // WipeTower depth planning (volume_to_length / length_to_volume / get_wipe_depth)
+    // divides the purge volume by the layer height. MultiPass / Local-Z synthetic
+    // sublayers can carry microscopic heights (e.g. 0.04mm vs nominal 0.2mm) → the
+    // divisor shrinks ~5x → wiping_depth inflates ~5x. Multiple synthetic events at
+    // the same Z then SUM, and plan_tower() propagates that giant depth downward to
+    // every layer → the tower becomes huge and mostly empty grid ("air").
+    // Fix: floor the height used for DEPTH MATH ONLY to 50% of the nozzle diameter
+    // (~0.2mm for a 0.4mm nozzle). This bounds the footprint estimate without
+    // touching the real physical layer height — the G-code E values still use the
+    // true micro-sublayer height, so extrusion/flow are 100% unchanged.
+    // Applied identically in plan_local_z_toolchange / plan_local_z_reserve /
+    // save_on_last_wipe below.
     float height_for_depth  = std::max(layer_height_par, m_filpar[old_tool].nozzle_diameter * 0.5f);
+    // NEOTKO_NEOTOWER_TAG_END
     float length_to_extrude = volume_to_length(0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(),
                                                                        m_filpar[old_tool].ramming_speed.end(), 0.f),
                                                m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator, height_for_depth);
@@ -2377,6 +2391,9 @@ void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, un
         return;
 
     float width             = m_wipe_tower_width - 3 * m_perimeter_width;
+    // NEOTKO_NEOTOWER_TAG — s67 wipe-tower depth flooring (see plan_toolchange for
+    // the full rationale). Floor the depth-math height to nozzle_diameter*0.5 so
+    // Local-Z sublayer micro-heights cannot inflate the planned Y footprint.
     float height_for_depth  = std::max(layer_height_par, m_filpar[old_tool].nozzle_diameter * 0.5f);
     float length_to_extrude = volume_to_length(0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(),
                                                                        m_filpar[old_tool].ramming_speed.end(), 0.f),
@@ -2409,6 +2426,9 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
     if (m_plan.empty() || m_plan.back().z + WT_LAYER_Z_EPS < z_par)
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
+    // NEOTKO_NEOTOWER_TAG — s67 wipe-tower depth flooring (see plan_toolchange for
+    // the full rationale). plan_local_z_reserve has no explicit old_tool, so the
+    // floor uses the base extruder's nozzle diameter (m_filpar[0]).
     float height_for_depth      = std::max(layer_height_par, m_filpar[0].nozzle_diameter * 0.5f);
     const float mini_wipe_depth = m_local_z_wipe_tower_purge_lines * m_perimeter_width * m_extra_spacing_wipe;
     const float wipe_width      = std::max(0.f, m_wipe_tower_width - 3.f * m_perimeter_width);
@@ -2493,6 +2513,10 @@ void WipeTower2::save_on_last_wipe()
             if (i == idx) {
                 float width = m_wipe_tower_width - 3 * m_perimeter_width; // width we draw into
 
+                // NEOTKO_NEOTOWER_TAG — s67 wipe-tower depth flooring (see plan_toolchange
+                // for the full rationale). save_on_last_wipe recomputes depth from the
+                // real layer height; floor it to nozzle_diameter*0.5 of the incoming tool
+                // so the last-wipe saving does not distort a thin-layer footprint.
                 float height_for_depth         = std::max(m_layer_info->height, m_filpar[toolchange.new_tool].nozzle_diameter * 0.5f);
                 float volume_to_save           = length_to_volume(finish_layer().total_extrusion_length_in_plane(), m_perimeter_width,
                                                                   height_for_depth);

@@ -1178,6 +1178,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_penu_zone))
     ((ConfigOptionInt,     interlayer_colormix_filament_filter))
     ((ConfigOptionBool,    interlayer_colormix_use_virtual))
+    ((ConfigOptionInt,     interlayer_colormix_angle))
+    ((ConfigOptionInt,     interlayer_colormix_penu_angle))
     // NEOTKO_COLORMIX_TAG — s58: line distribution mode (kLaneMode_* in this file).
     // Affects ColorMix (Top + Penultimate) AND PathBlend.
     ((ConfigOptionInt,     surface_color_mix_lane_mode))
@@ -1263,6 +1265,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     pathblend_surface))
     ((ConfigOptionBool,    pathblend_invert_gradient))
     ((ConfigOptionInt,     pathblend_fill_angle))
+    // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings as a JSON
+    // blob.  Empty default → from_region_config() falls back to the flat
+    // pathblend_* keys (back-compat).  Lets Top and Penultimate PathBlend hold
+    // independent settings without 14 mirror keys.
+    ((ConfigOptionString,  pathblend_top))
+    ((ConfigOptionString,  pathblend_penu))
     // NEOTKO_PATHBLEND_TAG_END
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))

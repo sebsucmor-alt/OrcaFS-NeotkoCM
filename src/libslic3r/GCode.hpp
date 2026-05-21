@@ -839,12 +839,14 @@ private:
     // same EEC are extremely unlikely (fill segments rarely share both endpoints).
     std::map<uint64_t, double> m_pathblend_polyline_t;
 
-    // NEOTKO_PATHBLEND_TAG — s58 Fix B: PathBlend extruders in their REAL print
-    // order (= post-rotation layer_extruders order, filtered to pathblend tools).
-    // Populated in process_layer right after the rotation that puts current_tool
-    // first.  Consumed inside _extrude() to compute pass_idx as the index of the
-    // current extruder in this vector — i.e. "the Nth tool printed in this layer
-    // is pass N" — instead of using the config tool[] order.
+    // NEOTKO_PATHBLEND_TAG — s58 Fix B / s69 multi-object fix: the layer's
+    // extruders in their REAL physical print order (= post-rotation
+    // layer_extruders).  Populated in process_layer right after the rotation
+    // that puts current_tool first.  Consumed inside _extrude() to compute
+    // pass_idx: the order is filtered there by the CURRENT region's PathBlend
+    // tool set (PathBlendPassConfig::from_region_config(m_config) — region-correct
+    // inside extrude_infill) and pass_idx = rank of the current extruder among
+    // those tools.
     //
     // Why: when the writer enters a PathBlend layer with the WRONG tool (e.g.
     // entered as T3 but config says pass 0 = T2), the layer_extruders rotation
@@ -852,7 +854,14 @@ private:
     // the first-printed extruder as pass 0 (z=bottom) instead of pass 1
     // (z=nominal_z) eliminates the "primera pasada después de la segunda" bug:
     // the nozzle always climbs Z monotonically across passes.
-    std::vector<unsigned int> m_pathblend_print_order;
+    //
+    // s69: this used to be PRE-FILTERED by a single PB region's tools, picked as
+    // the first PB region across ALL objects' layers.  With 3+ objects where two
+    // had PathBlend with DIFFERENT tool sets, the penultimate object inherited
+    // the other object's tool list → its pass 0 had no matching rank → ramp pass
+    // omitted.  Storing the raw order and filtering per-region in _extrude fixes
+    // the cross-object contamination.
+    std::vector<unsigned int> m_pathblend_layer_extruders;
 
     // NEOTKO_PATHBLEND_TAG — s58 Bug 2 safety: max-z reached per (layer, pass).
     // PathBlend's standalone mode can produce dangerous gcode where, within a

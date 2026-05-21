@@ -220,6 +220,7 @@ public:
     int    get_tool_b()          const { return m_choice_tool_b     ? m_choice_tool_b->GetSelection()    : m_tool_b; }
     int    get_tool_c()          const { return m_choice_tool_c     ? m_choice_tool_c->GetSelection()    : m_tool_c; }
     int    get_tool_d()          const { return m_choice_tool_d     ? m_choice_tool_d->GetSelection()    : m_tool_d; }
+    int    get_grad_angle()      const { return m_sc_angle           ? m_sc_angle->GetValue()              : m_grad_angle; }
 
 private:
     std::vector<std::string>     m_colours;
@@ -247,6 +248,7 @@ private:
     int    m_tool_b         = 1;
     int    m_tool_c         = 2;
     int    m_tool_d         = 3;
+    int    m_grad_angle     = -1; // -1 = Auto (use OrcaSlicer defaults)
 
     // Gradient widget pointers (created in build_ui when m_cfg != nullptr).
     wxStaticBoxSizer* m_gd_sb            = nullptr;
@@ -281,6 +283,7 @@ private:
     wxStaticText*     m_lbl_overlap      = nullptr;
     wxCheckBox*       m_chk_invert       = nullptr; // s60: invert gradient direction
     wxButton*         m_btn_invert       = nullptr; // button to invert/reverse custom pattern string
+    wxSpinCtrl*       m_sc_angle         = nullptr; // infill angle override spin control
     bool                         m_mixed_filament_selected = false;
     std::vector<wxButton*>       m_physical_buttons;
 
@@ -337,6 +340,7 @@ private:
         if (m_tool_c < 0) m_tool_c = 2;
         m_tool_d         = gi(grad_key("tool_d"), 3);
         if (m_tool_d < 0) m_tool_d = 3;
+        m_grad_angle     = gi(grad_key("angle"), -1);
     }
 
     // Is the current pattern using a virtual MixedFilament digit (5-9)? If
@@ -789,6 +793,29 @@ private:
         m_lbl_mf_lock_note->SetForegroundColour(wxColour(180, 100, 0));
         m_lbl_mf_lock_note->Hide();
         m_gd_sb->Add(m_lbl_mf_lock_note, 0, wxEXPAND | wxALL, 4);
+
+        // ── Infill angle override ─────────────────────────────────────────
+        // -1 = Auto (standard OrcaSlicer solid_infill_direction/rotate_template).
+        // >= 0 = Force this fixed angle (degrees) on all ColorMix-active layers.
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(this, wxID_ANY, _L("Infill angle override:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_sc_angle = new wxSpinCtrl(this, wxID_ANY,
+                wxString::Format("%d", m_grad_angle),
+                wxDefaultPosition, wxSize(80, -1),
+                wxSP_ARROW_KEYS, -1, 359, m_grad_angle);
+            m_sc_angle->SetToolTip(_L(
+                "-1 = Auto — use standard solid infill rotation settings.\n"
+                "0 to 359 = Force this fixed angle in degrees on all layers\n"
+                "where ColorMix is active, overriding solid_infill_direction\n"
+                "and any rotation template."));
+            row->Add(m_sc_angle, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            auto* lbl_auto = new wxStaticText(this, wxID_ANY, _L("(-1 = Auto)"));
+            lbl_auto->SetForegroundColour(wxColour(120, 120, 120));
+            row->Add(lbl_auto, 0, wxALIGN_CENTER_VERTICAL);
+            m_gd_sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
+        }
 
         vs->Add(m_gd_sb, 0, wxEXPAND | wxALL, PAD / 2);
 
@@ -3130,11 +3157,10 @@ private:
         else if (mp_on  && for_top(mp_srf))  m_top_eff  = EFF_MP;
         else if (cm_on  && for_top(cm_srf))  m_top_eff  = EFF_CM;
 
-        // NEOTKO_PROFILE_TAG — PB on Penu disabled UX-side. Skip PB candidate
-        // for penu pill; if a loaded payload says penu=PB, demote silently to
-        // MP if penu MP enabled, else CM if penu CM enabled, else None.
-        /* if (pb_on && for_penu(pb_srf)) m_penu_eff = EFF_PB; — DISABLED */
-        if      (penu_mp_on)                    m_penu_eff = EFF_MP;
+        // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled (engine refactor of
+        // PathBlendEngine::apply_path made it role-aware).
+        if      (pb_on && for_penu(pb_srf))     m_penu_eff = EFF_PB;
+        else if (penu_mp_on)                    m_penu_eff = EFF_MP;
         else if (cm_on     && for_penu(cm_srf)) m_penu_eff = EFF_CM;
     }
 
@@ -3371,6 +3397,7 @@ private:
                 wi(grad_prefix + "tool_b",            dlg.get_tool_b());
                 wi(grad_prefix + "tool_c",            dlg.get_tool_c());
                 wi(grad_prefix + "tool_d",            dlg.get_tool_d());
+                wi(grad_prefix + "angle",             dlg.get_grad_angle());
                 // interlayer_colormix_surface is set by the outer dialog combos, not here.
             }
         } else if (eff == EFF_MP) {
@@ -3563,6 +3590,11 @@ private:
                 }
             }
         } else if (eff == EFF_PB) {
+            // NEOTKO_PATHBLEND_TAG — s69 miniblob: PathBlend Top and Penultimate
+            // each keep an independent settings blob (pathblend_top /
+            // pathblend_penu).  surface_id 0 = Top, 1 = Penultimate.  Editing one
+            // zone no longer touches the other.
+            const char* _pb_zkey = (surface_id == 0) ? "pathblend_top" : "pathblend_penu";
             int   cur_passes = 2;
             int   cur_t[4]   = {0, 1, 2, 3};
             float cur_min    = 0.05f;
@@ -3570,34 +3602,50 @@ private:
             int   cur_ease   = 0;
             bool  cur_invert = true;
             int   cur_angle  = -1;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_num_passes"))     cur_passes  = o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_1"))          cur_t[0]    = o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_2"))          cur_t[1]    = o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_3"))          cur_t[2]    = o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_4"))          cur_t[3]    = o->value;
-            if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_min_ratio"))       cur_min     = static_cast<float>(o->value);
-            if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_max_ratio"))       cur_max     = static_cast<float>(o->value);
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_ease_mode"))       cur_ease    = o->value;
-            if (auto* o=m_config->option<ConfigOptionBool> ("pathblend_invert_gradient")) cur_invert  = o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_fill_angle"))      cur_angle   = o->value;
+            std::string _pb_blob;
+            if (auto* o = m_config->option<ConfigOptionString>(_pb_zkey)) _pb_blob = o->value;
+            if (!_pb_blob.empty()) {
+                // This zone already has saved settings — read them from the blob.
+                const PathBlendPassConfig _pbc = PathBlendPassConfig::from_blob_json(_pb_blob);
+                cur_passes = _pbc.num_passes;
+                cur_t[0] = _pbc.tool[0]; cur_t[1] = _pbc.tool[1];
+                cur_t[2] = _pbc.tool[2]; cur_t[3] = _pbc.tool[3];
+                cur_min  = _pbc.min_ratio;  cur_max = _pbc.max_ratio;
+                cur_ease = _pbc.ease_mode;  cur_invert = _pbc.invert_gradient;
+                cur_angle = _pbc.fill_angle;
+            } else {
+                // First open / legacy preset — seed from the flat pathblend_* keys.
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_num_passes"))     cur_passes  = o->value;
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_1"))          cur_t[0]    = o->value;
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_2"))          cur_t[1]    = o->value;
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_3"))          cur_t[2]    = o->value;
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_4"))          cur_t[3]    = o->value;
+                if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_min_ratio"))       cur_min     = static_cast<float>(o->value);
+                if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_max_ratio"))       cur_max     = static_cast<float>(o->value);
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_ease_mode"))       cur_ease    = o->value;
+                if (auto* o=m_config->option<ConfigOptionBool> ("pathblend_invert_gradient")) cur_invert  = o->value;
+                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_fill_angle"))      cur_angle   = o->value;
+            }
 
             PathBlendDialog dlg(this, cur_passes,
                                 cur_t[0], cur_t[1], cur_t[2], cur_t[3],
                                 cur_min, cur_max, cur_ease, cur_invert, cur_angle, m_fcolors);
             if (dlg.ShowModal() == wxID_OK) {
-                auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v; m_on_change(k); };
-                auto wf = [&](const char* k, float v){ if(auto*o=m_config->option<ConfigOptionFloat>(k))o->value=v; m_on_change(k); };
-                auto wb = [&](const char* k, bool v) { if(auto*o=m_config->option<ConfigOptionBool> (k))o->value=v; m_on_change(k); };
-                wi("pathblend_num_passes",    dlg.get_num_passes());
-                wi("pathblend_tool_1",        dlg.get_tool(0));
-                wi("pathblend_tool_2",        dlg.get_tool(1));
-                wi("pathblend_tool_3",        dlg.get_tool(2));
-                wi("pathblend_tool_4",        dlg.get_tool(3));
-                wf("pathblend_min_ratio",     dlg.get_min_ratio());
-                wf("pathblend_max_ratio",     dlg.get_max_ratio());
-                wi("pathblend_ease_mode",     dlg.get_ease_mode());
-                wb("pathblend_invert_gradient", dlg.get_invert());
-                wi("pathblend_fill_angle",    dlg.get_fill_angle());
+                // Serialize this zone's settings into its own JSON blob key.
+                PathBlendPassConfig _pbc;
+                _pbc.num_passes      = dlg.get_num_passes();
+                _pbc.tool[0]         = dlg.get_tool(0);
+                _pbc.tool[1]         = dlg.get_tool(1);
+                _pbc.tool[2]         = dlg.get_tool(2);
+                _pbc.tool[3]         = dlg.get_tool(3);
+                _pbc.min_ratio       = dlg.get_min_ratio();
+                _pbc.max_ratio       = dlg.get_max_ratio();
+                _pbc.ease_mode       = dlg.get_ease_mode();
+                _pbc.invert_gradient = dlg.get_invert();
+                _pbc.fill_angle      = dlg.get_fill_angle();
+                if (auto* o = m_config->option<ConfigOptionString>(_pb_zkey))
+                    o->value = _pbc.to_blob_json();
+                m_on_change(_pb_zkey);
             }
         }
         update_ui();
@@ -3642,9 +3690,9 @@ private:
         // NEOTKO_MULTIPASS_TAG_END
 
         // PathBlend (EFF_PB only — independent surface key, independent enable)
-        // NEOTKO_PROFILE_TAG — PB on Penu disabled. Pretend penu PB is never on.
+        // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
         const bool top_pb  = (m_top_eff  == EFF_PB);
-        const bool penu_pb = false; // (m_penu_eff == EFF_PB) — DISABLED
+        const bool penu_pb = (m_penu_eff == EFF_PB);
         const bool pb_en   = top_pb || penu_pb;
         int pb_srf = 0;
         if (top_pb && !penu_pb) pb_srf = 1;
@@ -3845,15 +3893,9 @@ private:
                 else                  m_penu_eff = i;
                 update_ui();
             });
-            // NEOTKO_PROFILE_TAG — PB on Penu is disabled (known issue: penu
-            // PathBlend gradient inverts on the second-stair surface and the
-            // engine wasn't validated for that path). Hide the Penu PB pill
-            // to prevent users selecting it. The struct + payload support
-            // remain — re-enable when penu PB is fully validated.
-            if (surface_id == 1 && i == EFF_PB) {
-                pills[i]->Hide();
-                continue;
-            }
+            // NEOTKO_PROFILE_TAG — s68: Penu PB pill re-enabled. The engine
+            // (PathBlendEngine::apply_path) is now role-aware so penu PB+MP
+            // stacks on the penultimate sub-layers, not the top stack.
             pill_row->Add(pills[i], 0, wxRIGHT, 3);
         }
         sb->Add(pill_row, 0, wxALL, PAD);
@@ -4503,8 +4545,8 @@ private:
                 // (which would persist across Cancel).
                 const bool _cm_on = (m_top_eff == EFF_CM) || (m_penu_eff == EFF_CM);
                 const bool _mp_on = (m_top_eff == EFF_MP) || (m_penu_eff == EFF_MP);
-                // NEOTKO_PROFILE_TAG — PB on Penu disabled UX-side: only top counts.
-                const bool _pb_on = (m_top_eff == EFF_PB);
+                // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
+                const bool _pb_on = (m_top_eff == EFF_PB) || (m_penu_eff == EFF_PB);
                 Slic3r::SurfaceEffectProfile p;
                 p.name = name;
                 // NEOTKO_PROFILE_TAG — Fase G fix: also force the per-effect
@@ -4514,8 +4556,7 @@ private:
                 // (often 0=Both), and Loading would phantom-fill the penu pill.
                 auto surface_enum = [&](int eff) -> std::string {
                     const bool top = (m_top_eff  == eff);
-                    // NEOTKO_PROFILE_TAG — PB on Penu disabled: clamp penu→false for PB.
-                    const bool pen = (eff == EFF_PB) ? false : (m_penu_eff == eff);
+                    const bool pen = (m_penu_eff == eff);
                     if (top && pen) return "0"; // Both
                     if (top)        return "1"; // Top only
                     return "2";                 // Penu only
@@ -4681,12 +4722,11 @@ private:
                     // SCM Save. Pre-OK Update must reflect what the user sees.
                     const bool _u_cm_on = (m_top_eff == EFF_CM) || (m_penu_eff == EFF_CM);
                     const bool _u_mp_on = (m_top_eff == EFF_MP) || (m_penu_eff == EFF_MP);
-                    // NEOTKO_PROFILE_TAG — PB on Penu disabled UX-side: only top counts.
-                    const bool _u_pb_on = (m_top_eff == EFF_PB);
+                    // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
+                    const bool _u_pb_on = (m_top_eff == EFF_PB) || (m_penu_eff == EFF_PB);
                     auto u_surface_enum = [&](int eff) -> std::string {
                         const bool top = (m_top_eff  == eff);
-                        // NEOTKO_PROFILE_TAG — PB on Penu disabled.
-                        const bool pen = (eff == EFF_PB) ? false : (m_penu_eff == eff);
+                        const bool pen = (m_penu_eff == eff);
                         if (top && pen) return "0";
                         if (top)        return "1";
                         return "2";

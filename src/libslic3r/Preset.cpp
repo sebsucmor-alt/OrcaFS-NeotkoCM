@@ -867,6 +867,7 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone",
     "interlayer_colormix_filament_filter",
     "interlayer_colormix_use_virtual",
+    "interlayer_colormix_angle", "interlayer_colormix_penu_angle",
     "surface_color_mix_lane_mode",  // NEOTKO_COLORMIX_TAG — s58
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
@@ -902,6 +903,8 @@ static std::vector<std::string> s_Preset_print_options {
     "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3", "pathblend_layer_ratio_4",
     "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface",
     "pathblend_invert_gradient", "pathblend_fill_angle",
+    // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings blobs
+    "pathblend_top", "pathblend_penu",
     // NEOTKO_PATHBLEND_TAG_END
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "detect_overhang_wall", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
     "seam_position", "staggered_inner_seams", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "sparse_infill_pattern", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "top_surface_pattern", "bottom_surface_pattern",

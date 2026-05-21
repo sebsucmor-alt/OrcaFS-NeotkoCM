@@ -337,8 +337,20 @@ struct PathBlendPassConfig {
     // min_ratio: applied to pass 0 (dominant at t=0) so it never goes below min_ratio.
     double ratio_at(int p, double t) const;
 
-    // Build from PrintRegionConfig (reads pathblend_* keys).
-    static PathBlendPassConfig from_region_config(const PrintRegionConfig& cfg);
+    // Build from PrintRegionConfig.  NEOTKO_PATHBLEND_TAG — s69 miniblob: when
+    // the per-zone blob key (pathblend_top / pathblend_penu, selected by `role`)
+    // is non-empty it is parsed; otherwise the flat pathblend_* keys are read
+    // (back-compat).  enable + surface are always the shared scope keys
+    // (multipass_path_gradient / pathblend_surface).
+    static PathBlendPassConfig from_region_config(const PrintRegionConfig& cfg,
+                                                  ExtrusionRole role = erTopSolidInfill);
+
+    // NEOTKO_PATHBLEND_TAG — s69 miniblob JSON round-trip for the per-zone blob.
+    // to_blob_json() serializes the per-zone settings (everything except the
+    // shared enable/surface scope).  from_blob_json() parses one; an empty or
+    // invalid blob yields a default-constructed config.
+    std::string                to_blob_json() const;
+    static PathBlendPassConfig from_blob_json(const std::string& blob);
 };
 // NEOTKO_PATHBLEND_TAG_END
 
@@ -431,6 +443,11 @@ public:
     static std::string apply_path(
         const ExtrusionPath&                      path,
         const PrintRegionConfig&                  cfg,
+        // NEOTKO_PATHBLEND_TAG — s68: explicit role. erPenultimateInfill reads
+        // the penultimate_multipass_* keys; any other role reads multipass_*.
+        // Without this the MULTIPASS-mode branch always used the TOP stack,
+        // breaking the PB+MP combo on the penultimate surface.
+        ExtrusionRole                             role,
         GCodeWriter&                              writer,
         double                                    nominal_z,
         double                                    layer_height,

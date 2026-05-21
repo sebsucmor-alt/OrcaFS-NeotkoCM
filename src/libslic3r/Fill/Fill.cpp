@@ -1360,11 +1360,17 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 const ModelObject* _mp_mo = (this->object() != nullptr)
                     ? this->object()->model_object() : nullptr;
                 const bool _mp_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_mp_mo);
+                // NEOTKO_PROFILE_TAG — MMU exclusion: MMU-painted objects are owned
+                // by MMU segmentation; MultiPass (preset or painter) must not touch them.
+                const bool _mp_mm_painted = (_mp_mo != nullptr && _mp_mo->is_mm_painted());
+                if (_mp_mm_painted)
+                    NEOTKO_LOG(MULTIPASS, "MMU_SKIP MultiPass z=" << this->print_z
+                        << " — object is MMU-painted, MultiPass suppressed");
                 const SurfaceEffectProfile* _mp_profile = nullptr; // resolved per role below
                 // NEOTKO_PROFILE_TAG_END
                 // NEOTKO_MULTIPASS_SURFACES_TAG — bifurcate enabled check by role:
                 // Top surface uses multipass_enabled; Penultimate uses its own key.
-                if (!surface_fill.params.bridge &&
+                if (!surface_fill.params.bridge && !_mp_mm_painted &&
                     (surface_fill.params.extrusion_role == erTopSolidInfill ||
                      surface_fill.params.extrusion_role == erPenultimateInfill)) {
                     const ExtrusionRole _mp_role = surface_fill.params.extrusion_role;
@@ -1577,7 +1583,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     // NEOTKO_PROFILE_TAG — Fase G: in painter mode, read the
                     // fill_angle from the painted profile's PathBlend payload
                     // (preset's multipass_path_gradient flag is suppressed).
-                    if (!surface_fill.params.bridge &&
+                    if (!surface_fill.params.bridge && !_mp_mm_painted &&
                         (surface_fill.params.extrusion_role == erTopSolidInfill ||
                          surface_fill.params.extrusion_role == erPenultimateInfill)) {
                         if (_mp_painter_mode) {
@@ -1600,7 +1606,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             }
                         } else if (layerm->region().config().multipass_path_gradient.value) {
                             const PathBlendPassConfig pb_ang =
-                                PathBlendPassConfig::from_region_config(layerm->region().config());
+                                PathBlendPassConfig::from_region_config(
+                                    layerm->region().config(),
+                                    surface_fill.params.extrusion_role);
                             if (SurfaceColorMix::should_process_role(
                                     surface_fill.params.extrusion_role, pb_ang.surface) &&
                                 pb_ang.fill_angle >= 0) {
@@ -1609,6 +1617,53 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         }
                     }
                     // NEOTKO_PATHBLEND_TAG_END
+                    // NEOTKO_COLORMIX_TAG_START — angle override for ColorMix surfaces
+                    // When interlayer_colormix_angle (Top) or interlayer_colormix_penu_angle
+                    // (Penultimate) is >= 0 AND ColorMix is active for this layer/role,
+                    // override f->angle completely — bypassing solid_infill_direction and
+                    // solid_infill_rotate_template on these layers only.
+                    if (!surface_fill.params.bridge && !_mp_mm_painted &&
+                        (surface_fill.params.extrusion_role == erTopSolidInfill ||
+                         surface_fill.params.extrusion_role == erPenultimateInfill)) {
+                        const auto& _cm_cfg_angle = layerm->region().config();
+                        bool _cm_angle_active = false;
+                        if (_mp_painter_mode) {
+                            // Painter mode: active if a painted profile resolves at this layer/role
+                            const ExtrusionRole _role = surface_fill.params.extrusion_role;
+                            const PrintObject* _po = this->object();
+                            const int _slot = (_role == erTopSolidInfill)
+                                ? SurfaceColorMix::dominant_painted_slot_in_z_range(
+                                      _po, this->print_z - this->height, this->print_z)
+                                : SurfaceColorMix::dominant_painted_slot_in_z_range(
+                                      _po, this->print_z, this->print_z + this->height);
+                            if (_slot > 0) {
+                                const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
+                                _cm_angle_active = (_pid > 0);
+                            }
+                        } else if (_cm_cfg_angle.interlayer_colormix_enabled.value) {
+                            // Preset mode: apply zone + filament filter identical to assign_and_group_tools
+                            const int _ff = _cm_cfg_angle.interlayer_colormix_filament_filter.value;
+                            const bool _ff_ok = (_ff <= 0) || (_cm_cfg_angle.solid_infill_filament.value == _ff);
+                            if (_ff_ok) {
+                                if (surface_fill.params.extrusion_role == erTopSolidInfill) {
+                                    _cm_angle_active = (_cm_cfg_angle.interlayer_colormix_top_zone.value == 0) ||
+                                                       (this->upper_layer == nullptr);
+                                } else {
+                                    _cm_angle_active = (_cm_cfg_angle.interlayer_colormix_penu_zone.value == 0) ||
+                                                       (this->upper_layer != nullptr &&
+                                                        this->upper_layer->upper_layer == nullptr);
+                                }
+                            }
+                        }
+                        if (_cm_angle_active) {
+                            const int _cm_angle = (surface_fill.params.extrusion_role == erTopSolidInfill)
+                                ? _cm_cfg_angle.interlayer_colormix_angle.value
+                                : _cm_cfg_angle.interlayer_colormix_penu_angle.value;
+                            if (_cm_angle >= 0)
+                                f->angle = Geometry::deg2rad(static_cast<float>(_cm_angle));
+                        }
+                    }
+                    // NEOTKO_COLORMIX_TAG_END
                     // BBS: make fill
                     f->fill_surface_extrusion(&surface_fill.surface,
                         params,
@@ -1632,15 +1687,21 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     const ModelObject* _pb_mo = (this->object() != nullptr)
         ? this->object()->model_object() : nullptr;
     const bool _pb_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_pb_mo);
+    // NEOTKO_PROFILE_TAG — MMU exclusion: skip PathBlend entirely for MMU-painted objects.
+    const bool _pb_mm_painted = (_pb_mo != nullptr && _pb_mo->is_mm_painted());
+    if (_pb_mm_painted)
+        NEOTKO_LOG(MULTIPASS, "MMU_SKIP PathBlend z=" << this->print_z
+            << " — object is MMU-painted, PathBlend suppressed");
     // NEOTKO_PROFILE_TAG_END
     for (LayerRegion *layerm : m_regions) {
+        if (_pb_mm_painted) break;
         if (layerm->fills.entities.empty()) continue;
         const auto& reg_cfg = layerm->region().config();
         // NEOTKO_PROFILE_TAG — Fase G: in preset mode require the enable flag;
         // in painter mode the per-profile flag drives it per region.
         if (!_pb_painter_mode && !reg_cfg.multipass_path_gradient.value) continue;
-        const PathBlendPassConfig preset_pb = PathBlendPassConfig::from_region_config(reg_cfg);
-        if (!_pb_painter_mode && preset_pb.num_passes < 1) continue;
+        // NEOTKO_PATHBLEND_TAG — s69 miniblob: the per-zone PB config is resolved
+        // per sub-collection below — from_region_config() needs the surface role.
 
         // Collect sub-collections to process (avoid iterator invalidation).
         std::vector<ExtrusionEntityCollection*> to_process;
@@ -1658,7 +1719,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 
             // NEOTKO_PROFILE_TAG_START — Fase G: pick pb per role (painter)
             // or fall back to the region preset (preset mode).
-            PathBlendPassConfig pb = preset_pb;
+            // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PB config by role
+            // (Top → pathblend_top blob / Penu → pathblend_penu blob, with the
+            // flat pathblend_* keys as back-compat fallback).
+            PathBlendPassConfig pb = _pb_painter_mode
+                ? PathBlendPassConfig{}
+                : PathBlendPassConfig::from_region_config(reg_cfg, first_path->role());
             const SurfaceEffectProfile* _pb_profile = nullptr;
             if (_pb_painter_mode) {
                 const ExtrusionRole _role = first_path->role();

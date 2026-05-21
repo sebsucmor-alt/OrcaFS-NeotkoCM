@@ -225,11 +225,14 @@ public:
     std::vector<LayerTools>& layer_tools() { return m_layer_tools; }
     bool 				has_wipe_tower() const {
         if (m_layer_tools.empty() || m_first_printing_extruder == (unsigned int)-1) return false;
-        if (m_layer_tools.front().has_wipe_tower) return true;
-        // NEOTKO_MULTIPASS_TAG — single-filament MultiPass: regular layers have no tool change
-        // (has_wt=0 on front), but sublayers always need prime purge via the wipe tower.
+        // NEOTKO_NEOTOWER_TAG — s68: the tower is needed if ANY layer has a toolchange,
+        // not just the front layer. The old check (front().has_wipe_tower, plus MP
+        // sublayers only) wrongly skipped the tower for a plain MMU object whose colour
+        // change starts above layer 0 — front has 1 extruder, no MP sublayers → the object
+        // printed in a single colour. This any-layer scan also covers the previous cases:
+        // front-layer toolchanges and single-filament MultiPass sublayer prime purges.
         for (const LayerTools& lt : m_layer_tools)
-            if (lt.has_wipe_tower && lt.is_mp_sublayer) return true;
+            if (lt.has_wipe_tower) return true;
         return false;
     }
 
