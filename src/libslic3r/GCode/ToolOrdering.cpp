@@ -965,6 +965,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         // What extruders are required to print this object layer?
         for (const LayerRegion *layerm : layer->regions()) {
             const PrintRegion &region = layerm->region();
+            unsigned int region_wall_ext = 0;
 
             if (! layerm->perimeters.entities.empty()) {
                 bool something_nonoverriddable = true;
@@ -983,6 +984,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                         ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, configured_wall)
                         : resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height));
                     // NEOTKO_MULTIPASS_TAG_END
+                    region_wall_ext = wall_ext;
                     // NEOTKO_MULTIPASS_TAG — s68 diag: trace MMU painted-region filament → tool.
                     NEOTKO_LOG(TOOLORDER, "MMU_RESOLVE wall layer=" << layerCount
                         << " configured=" << configured_wall
@@ -1235,104 +1237,13 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
             // NEOTKO_MULTIPASS_TAG — MultiPass tools now registered via sublayers below.
 
-            // NEOTKO_PATHBLEND_TAG_START
-            // Register PathBlend tools so ToolOrdering generates prime tower purges
-            // between PathBlend tool changes. Independent of MultiPass.
-            // NEOTKO_PROFILE_TAG — Fase G: in painter mode use painted profile
-            // tools per role; preset reads are suppressed for painted objects.
-            int n = 0;
-            int raw_tools[4] = {-1, -1, -1, -1};
-            bool pb_should_register = false;
-            if (has_top_surface_infill) {
-                if (painter_mode_obj) {
-                    const double print_z   = layer->print_z;
-                    const double height    = layer->height;
-                    const int top_slot  = SurfaceColorMix::dominant_painted_slot_in_z_range(
-                        &object, print_z - height, print_z);
-                    const int penu_slot = SurfaceColorMix::dominant_painted_slot_in_z_range(
-                        &object, print_z, print_z + height);
-                    // Pick the first profile with a present PathBlend payload
-                    // (top role takes priority). PathBlend single-set keys
-                    // make per-role mixing here impractical; the painted
-                    // profile that "owns" the layer wins.
-                    const SurfaceEffectProfile* pb_p = nullptr;
-                    for (int slot : {top_slot, penu_slot}) {
-                        if (slot <= 0) continue;
-                        const int pid = SurfaceColorMix::profile_id_for_slot(&object, slot);
-                        if (!pid) continue;
-                        const auto* p = SurfaceEffectProfileManager::get().find(pid);
-                        if (p && p->pathblend.present) { pb_p = p; break; }
-                    }
-                    if (pb_p) {
-                        const PathBlendPassConfig pb =
-                            SurfaceColorMix::pathblend_from_profile_payload(pb_p->pathblend);
-                        if (pb.enabled && pb.num_passes >= 1) {
-                            n = std::clamp(pb.num_passes, 1, 4);
-                            raw_tools[0] = pb.tool[0];
-                            raw_tools[1] = pb.tool[1];
-                            raw_tools[2] = pb.tool[2];
-                            raw_tools[3] = pb.tool[3];
-                            pb_should_register = true;
-                            if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
-                                std::ostringstream _s;
-                                _s << "PATHBLEND_PAINT\tz=" << layer->print_z
-                                   << "\tprofile='" << pb_p->name << "'\t+[";
-                                for (int i = 0; i < n; ++i)
-                                    if (raw_tools[i] >= 0) _s << "T" << raw_tools[i] << " ";
-                                _s << "]";
-                                NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
-                            }
-                        }
-                    }
-                } else if (!object_is_mm_painted && region.config().multipass_path_gradient.value) {
-                    const auto& cfg = region.config();
-                    n = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
-                    raw_tools[0] = cfg.pathblend_tool_1.value;
-                    raw_tools[1] = cfg.pathblend_tool_2.value;
-                    raw_tools[2] = cfg.pathblend_tool_3.value;
-                    raw_tools[3] = cfg.pathblend_tool_4.value;
-                    pb_should_register = true;
-                }
-            }
-            if (pb_should_register) {
-                // Apply surface filter: skip if this layer's role doesn't match.
-                // has_top_surface_infill covers both erTopSolidInfill and erPenultimateInfill,
-                // so filtering by pathblend_surface here would need per-role checks; for now
-                // register tools whenever the layer has FASE2 fills (conservative).
-                std::set<unsigned int> seen_check;
-                for (int i = 0; i < n; ++i) {
-                    if (raw_tools[i] < 0) continue;
-                    unsigned int t = static_cast<unsigned int>(raw_tools[i] + 1); // 1-based
-                    if (seen_check.insert(t).second)
-                        layer_tools.extruders.emplace_back(t);  // unique tools only
-                }
-                // Record pass ordering constraints: pass i must precede pass j (i<j).
-                // These are enforced post-dedup (see the loop below) to fix cases where
-                // MultiPass prepend placed a shared tool (e.g. T1) before a PathBlend
-                // pass-0 tool (e.g. T0), inverting the gradient pass order.
-                for (int i = 0; i < n - 1; ++i) {
-                    if (raw_tools[i] < 0) continue;
-                    for (int j = i + 1; j < n; ++j) {
-                        if (raw_tools[j] < 0) continue;
-                        unsigned int ti = static_cast<unsigned int>(raw_tools[i] + 1);
-                        unsigned int tj = static_cast<unsigned int>(raw_tools[j] + 1);
-                        if (ti != tj)
-                            layer_tools.neotko_ordering_constraints.emplace_back(ti, tj);
-                    }
-                }
-                // Always preserve PathBlend pass order (pass 0 must print before pass 1).
-                // This mirrors the unconditional set in MultiPass above.
-                layer_tools.preserve_extruder_order = true;
-                if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
-                    std::ostringstream _s;
-                    _s << "PATHBLEND\tz=" << layer->print_z << "\t+[";
-                    for (int i = 0; i < n; ++i)
-                        if (raw_tools[i] >= 0) _s << "T" << raw_tools[i] << " ";
-                    _s << "]";
-                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
-                }
-            }
-            // NEOTKO_PATHBLEND_TAG_END
+            // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the PathBlend tool
+            // registration block was DELETED. PathBlend tools are now registered
+            // via the MultiPass sublayer path below (one tool per sublayer, own
+            // print_z) exactly like ColorMix/MultiPass — so NeoTower plans the
+            // toolchanges with zero PathBlend special cases. This removes the
+            // has_pathblend_chain / pathblend_body_equals_cap / pathblend_body_needs_return
+            // cram that produced "append_tcr unexpected toolchange" crashes (s73-s76).
 
         }
         // NEOTKO_MULTIPASS_TAG_START — trace: detect MixedFilament extruders leaking into sublayer LayerTools
@@ -1391,19 +1302,20 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // can inject it into m_all_printing_extruders. GCodeWriter::set_extruders() is called
             // with all_extruders(), so without this the Extruder object for this tool_id is never
             // initialized → crash in Extruder::travel_slope() / retraction_length() etc.
-            m_mp_sublayer_extruders.push_back(static_cast<unsigned int>(sub.tool_id));
-            // NEOTKO_MULTIPASS_PRIME_TAG — record this tool in the per-Z unique-tool set.
-            // mp_prime_slots is NOT set here; it is finalized from mp_tools_set.size() after
-            // ALL collect_extruders() calls complete (see finalization blocks in constructors).
-            // Using a set instead of a counter fixes O(N_objects) prime tower bloat: with 20
-            // identical objects all using T0 at sublayer Z1, we need exactly 1 prime slot,
-            // not 20. The z-collision case (two objects with different tools at the same Z)
-            // is still handled correctly — both tools land in the set → slots=2.
+            // NEOTKO_SANDWICH_TAG — each sublayer is single-tool. A ColorMix
+            // lámina is emitted as N separate bucket sublayers (Fill.cpp FASE 2),
+            // each at its own print_z → its own LayerTools entry, registered and
+            // scheduled exactly like a MultiPass pass. No multi-tool sublayers.
+            const unsigned int _sub_tool = static_cast<unsigned int>(sub.tool_id);
+            // NEOTKO_MULTIPASS_PRIME_TAG — record the tool in the per-Z unique-tool set.
+            // mp_prime_slots is finalized from mp_tools_set.size() after ALL
+            // collect_extruders() calls complete (see finalization blocks).
+            m_mp_sublayer_extruders.push_back(_sub_tool);
             if (mp_prime_vol > 0.f)
-                lt.mp_tools_set.insert(static_cast<unsigned int>(sub.tool_id));
+                lt.mp_tools_set.insert(_sub_tool);
             if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
                 std::ostringstream _s;
-                _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << sub.tool_id << " ]"
+                _s << "MULTIPASS\tz=" << sub.print_z << "\t+[T" << _sub_tool << " ]"
                    << (mp_prime_vol > 0.f ? " tools_at_z=" + std::to_string(lt.mp_tools_set.size()) : "");
                 NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
             }
@@ -1421,36 +1333,18 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         // the same tool_id into one by_extruder bucket, so there is only one GCode toolchange
         // per unique tool per layer — duplicates in the extruder list would cause the
         // WipeTower to plan more purges than GCode actually emits.
+        //
+        // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the PathBlend dedup
+        // exception (has_pathblend_chain / body_equals_cap / body_needs_return)
+        // and the pass-ordering-constraints fix-up were DELETED. PathBlend tools
+        // no longer land in the real-layer extruder list (they are sublayers), so
+        // the standard dedup path applies with no PB special-casing.
         // NEOTKO_MULTIPASS_TAG_END
-        if (layer.preserve_extruder_order)
+        if (layer.preserve_extruder_order) {
             remove_duplicates_preserve_order(layer.extruders);
-        else
+        } else {
             sort_remove_duplicates(layer.extruders);
-
-        // NEOTKO_PATHBLEND_TAG_START — enforce PathBlend pass-ordering constraints post-dedup.
-        // MultiPass prepend can place a shared tool (e.g. T1) before a PathBlend pass-0
-        // tool (e.g. T0), inverting the gradient pass order.  Walk each constraint (a,b)
-        // meaning "a must appear before b" and move a to just before b if violated.
-        for (auto& [before, after] : layer.neotko_ordering_constraints) {
-            auto it_before = std::find(layer.extruders.begin(), layer.extruders.end(), before);
-            auto it_after  = std::find(layer.extruders.begin(), layer.extruders.end(), after);
-            if (it_before == layer.extruders.end() || it_after == layer.extruders.end())
-                continue;
-            if (it_before > it_after) {
-                // Violation: 'before' appears after 'after'. Move 'before' to just before 'after'.
-                layer.extruders.erase(it_before);
-                it_after = std::find(layer.extruders.begin(), layer.extruders.end(), after);
-                layer.extruders.insert(it_after, before);
-            }
         }
-        if (!layer.neotko_ordering_constraints.empty() && NeoDebug::enabled(NeoDebug::TOOLORDER)) {
-            std::ostringstream _s;
-            _s << "FINAL_ORDER\tz=" << layer.print_z << "\t[";
-            for (unsigned int t : layer.extruders) _s << "T" << (t > 0 ? t - 1 : 0) << " ";
-            _s << "]";
-            NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
-        }
-        // NEOTKO_PATHBLEND_TAG_END
 
         // make sure that there are some tools for each object layer (e.g. tall wiping object will result in empty extruders vector)
         if (layer.extruders.empty() && layer.has_object)

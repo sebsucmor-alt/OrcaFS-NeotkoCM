@@ -50,7 +50,7 @@ public:
 
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
-    void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f);
+    void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, bool skip_ramming = false);
     void plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f);
     void plan_local_z_reserve(float z_par, float layer_height_par, size_t reserve_slot_count, float wipe_volume = 0.f);
 
@@ -302,8 +302,15 @@ private:
             float first_wipe_line;
             float wipe_volume;
 			float wipe_volume_total;
-            ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f)
-            : old_tool{old}, new_tool{newtool}, required_depth{depth}, ramming_depth{ramming_depth}, first_wipe_line{fwl}, wipe_volume{wv}, wipe_volume_total{wv} {}
+            // NEOTKO_MPSCHEDULER_TAG s79b — when true, toolchange_Unload still TRAVELS to the
+            // tower (keeps the drip-control visit) but SKIPS the ramming extrusion, so the
+            // before-print wipe fills the whole box instead of the after-print ramming eating
+            // it. Set for sandwich sublayer TCs (multi-tool: the machine macro does the real
+            // swap, so the tower ramming is redundant and was starving the useful pre-print
+            // wipe in the small sandwich box). Body real-layer TCs keep ramming (skip=false).
+            bool  skip_ramming = false;
+            ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f, bool skip_ram=false)
+            : old_tool{old}, new_tool{newtool}, required_depth{depth}, ramming_depth{ramming_depth}, first_wipe_line{fwl}, wipe_volume{wv}, wipe_volume_total{wv}, skip_ramming{skip_ram} {}
 		};
 		float z;		// z position of the layer
 		float height;	// layer height

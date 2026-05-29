@@ -219,18 +219,40 @@ class ConstSupportLayerPtrsAdaptor : public ConstVectorOfPtrsAdaptor<SupportLaye
     ConstSupportLayerPtrsAdaptor(const SupportLayerPtrs *data) : ConstVectorOfPtrsAdaptor<SupportLayer>(data) {}
 };
 
+// NEOTKO_SANDWICH_TAG — opaque declaration of the Sandwich pass-kind enum
+// (full definition in SurfaceColorMix.hpp). Fixed underlying type → complete
+// type here, so MultiPassSubLayer::effect can be declared without the heavy
+// SurfaceColorMix.hpp include. 1 == SurfacePassKind::Solid.
+enum class SurfacePassKind : int;
+
 // NEOTKO_MULTIPASS_TAG_START — Virtual sublayer for MultiPass Z-stacking
 struct MultiPassSubLayer {
     coordf_t                  print_z    = 0.;                 // absolute Z of this sub-layer
     float                     height     = 0.f;                // extrusion height H_sub = H * ratio
     int                       tool_id    = 0;                  // 0-based physical extruder
     int                       pass_idx   = 0;                  // 0-based position in MultiPassConfig
+    // NEOTKO_SANDWICH_TAG — effect kind of this pass (informational / debug).
+    // A ColorMix lámina is emitted as N separate single-tool bucket sublayers
+    // (Fill.cpp FASE 2), so the GCode handler / ToolOrdering / NeoTower treat
+    // every sublayer uniformly — exactly like a MultiPass pass — regardless of
+    // `effect`. 1 == SurfacePassKind::Solid.
+    SurfacePassKind           effect     = static_cast<SurfacePassKind>(1); // Solid
     ExtrusionRole             role       = erTopSolidInfill;   // role for ;TYPE: visualizer comment
     int                       speed_pct  = 100;                // M220 Sxx override (100 = no change)
     std::string               gcode_start;                     // injected before fills
     std::string               gcode_end;                       // injected after fills
     ExtrusionEntityCollection fills;          // infill paths — tool stored directly, no mm3 encoding
     ExtrusionEntityCollection perimeters;     // cloned+scaled perimeter paths (multipass_perimeter_override only)
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend ramp/cap as a sublayer.
+    // pathblend_pass: -1 = not a PathBlend sublayer (Solid/ColorMix — emitted flat by
+    // the GCode handler); 0 = ramp (variable-Z), 1 = cap (Full only). When >= 0 the
+    // handler routes `fills` through PathBlendEngine::apply_path() using `pathblend_blob`
+    // (PathBlendPassConfig::to_blob_json(), decoded at dispatch — avoids pulling the
+    // heavy SurfaceColorMix.hpp into Print.hpp) + `role` + this pass index. This keeps
+    // the variable-Z geometry identical to the legacy engine while the SCHEDULING
+    // (one tool per sublayer, own print_z) joins the proven MultiPass/ColorMix model.
+    int                       pathblend_pass = -1;
+    std::string               pathblend_blob;
 };
 // NEOTKO_MULTIPASS_TAG_END
 

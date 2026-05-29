@@ -119,6 +119,11 @@ public:
     // Zero based extruder IDs, ordered to minimize tool switches.
     std::vector<unsigned int> 	extruders;
     bool                        preserve_extruder_order = false;
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: has_pathblend_chain /
+    // pathblend_cap_tool / pathblend_body_equals_cap / pathblend_body_needs_return
+    // / pathblend_body_tool were DELETED. PathBlend no longer registers tools into
+    // the real-layer extruder list; it is compiled into MultiPass sublayers, so the
+    // wipe-tower scheduling needs zero PathBlend-specific dedup/return bookkeeping.
     // If per layer extruder switches are inserted by the G-code preview slider, this value contains the new (1 based) extruder, with which the whole object layer is being printed with.
     // If not overriden, it is set to 0.
     unsigned int 				extruder_override = 0;
@@ -147,13 +152,10 @@ public:
     // and the set is cleared. This ensures we reserve one slot per unique tool, not one
     // per object — avoiding O(N_objects) prime tower bloat when all objects share a config.
     std::set<unsigned int>      mp_tools_set;
-    // NEOTKO_MULTIPASS_TAG_START
-    // Ordering constraints added by PathBlend: each (a,b) means tool a must appear
-    // before tool b in the final extruder sequence.  Enforced after deduplication so
-    // that MultiPass prepend + PathBlend constraints both win simultaneously.
-    // Values are 1-based to match extruders[] at the point they are populated.
-    std::vector<std::pair<unsigned int, unsigned int>> neotko_ordering_constraints;
-    // NEOTKO_MULTIPASS_TAG_END
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: neotko_ordering_constraints
+    // DELETED. It was populated only by the (now-removed) PathBlend real-layer
+    // registration block; PathBlend pass order is now intrinsic to the sublayer
+    // pass_idx sequence, so no post-dedup constraint fix-up is needed.
     // Number of wipe tower partitions to support the required number of tool switches
     // and to support the wipe tower partitions above this one.
     size_t                      wipe_tower_partitions = 0;

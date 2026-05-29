@@ -906,6 +906,8 @@ static std::vector<std::string> s_Preset_print_options {
     // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings blobs
     "pathblend_top", "pathblend_penu",
     // NEOTKO_PATHBLEND_TAG_END
+    // NEOTKO_SANDWICH_TAG — pass-stack blob keys
+    "neotko_surface_passes_top", "neotko_surface_passes_penu",
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "detect_overhang_wall", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
     "seam_position", "staggered_inner_seams", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "sparse_infill_pattern", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "top_surface_pattern", "bottom_surface_pattern",
     "infill_direction", "solid_infill_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",

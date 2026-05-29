@@ -83,6 +83,13 @@ struct NeoTowerEvent {
 
     // True for MultiPass virtual sublayer events.
     bool   is_sublayer  = false;
+
+    // NEOTKO_MPSCHEDULER_TAG s79b — sandwich-context TC: the tower visit must still happen
+    // (drip control), but the ramming EXTRUSION is skipped so the deposit lands in the
+    // before-print wipe instead of the after-print ramming. Set for sublayer band TCs and
+    // the post-sandwich perimeter recovery TC. Body real-layer TCs leave this false (they
+    // keep full ramming — their box is large enough that ramming doesn't starve the wipe).
+    bool   no_ramming   = false;
 };
 
 // ---------------------------------------------------------------------------

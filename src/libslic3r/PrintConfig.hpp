@@ -1272,6 +1272,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,  pathblend_top))
     ((ConfigOptionString,  pathblend_penu))
     // NEOTKO_PATHBLEND_TAG_END
+    // NEOTKO_SANDWICH_TAG_START — Sandwich pass-stack blob (1 coString JSON per zone).
+    // Empty default → SurfacePassStack::synthesize_from_legacy() rebuilds the
+    // stack from the legacy multipass_*/interlayer_colormix_*/pathblend_* keys.
+    ((ConfigOptionString,  neotko_surface_passes_top))
+    ((ConfigOptionString,  neotko_surface_passes_penu))
+    // NEOTKO_SANDWICH_TAG_END
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))
     ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))

@@ -25,6 +25,8 @@
 #include <wx/filedlg.h>
 #include <wx/textdlg.h> // NEOTKO_PROFILE_TAG: wxTextEntryDialog
 #include <wx/listbox.h> // NEOTKO_PROFILE_TAG: wxListBox
+#include <wx/radiobox.h> // NEOTKO_SANDWICH_TAG: wxRadioBox slot selector
+#include <wx/menu.h>     // NEOTKO_SANDWICH_TAG: wxMenu tool picker
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -2659,43 +2661,48 @@ private:
     }
 };
 // NEOTKO_MULTIPASS_TAG_END
-// Minimal dialog for configuring MultiPathBlend (Opción 4).
-// Controls: num_passes (1-4), filament per pass (F-notation: F1=T0, displayed 1-based, stored 0-based), min_ratio (%).
-// Surface filter is set by SurfaceColorMixerDialog combos — not duplicated here.
+// NEOTKO_SANDWICH_TAG — Fase 5 s73: PathBlendDialog class is dead code.
+// PathBlend is now edited inline in the SandwichDialog row (kind selector
+// Half/Full + floor_mm spinner + mid_end_mm field + ease cycler + chip
+// tool pickers). Wrapped in #if 0 to remove it from the build without
+// the bulk-delete risk; remove physically in a follow-up cleanup.
+#if 0
 class PathBlendDialog : public wxDialog
 {
 public:
     PathBlendDialog(wxWindow* parent,
-                    int   cur_passes,
-                    int   cur_t1, int cur_t2, int cur_t3, int cur_t4,
-                    float cur_min_ratio,
-                    float cur_max_ratio = 1.0f,
-                    int   cur_ease_mode = 0,
-                    bool  cur_invert   = true,
-                    int   cur_angle    = -1,
+                    const Slic3r::PathBlendPassConfig& cur,
+                    double layer_height_mm,
                     const std::vector<std::string>& fcolors = {})
         : wxDialog(parent, wxID_ANY, _L("PathBlend Settings"),
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+        , m_layer_height_mm(std::max(0.04, layer_height_mm))
     {
-        m_ease_mode = std::clamp(cur_ease_mode, 0, 3);
+        m_ease_mode = std::clamp(cur.ease_mode, 0, 3);
         const int PAD = 8;
         auto* vs = new wxBoxSizer(wxVERTICAL);
 
-        // --- Number of passes ---
-        auto* row_passes = new wxBoxSizer(wxHORIZONTAL);
-        row_passes->Add(new wxStaticText(this, wxID_ANY, _L("Passes:")),
-                        0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-        m_sc_passes = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                     wxDefaultPosition, wxSize(60,-1),
-                                     wxSP_ARROW_KEYS, 1, 2, std::clamp(cur_passes,1,2));
-        row_passes->Add(m_sc_passes, 0, wxALIGN_CENTER_VERTICAL);
-        vs->Add(row_passes, 0, wxALL, PAD);
+        // --- Mode (Half / Full) ---
+        {
+            auto* row_mode = new wxBoxSizer(wxHORIZONTAL);
+            wxString choices[2] = { _L("Half (ramp only, semi-fill)"),
+                                    _L("Full (ramp + cap)") };
+            m_rb_mode = new wxRadioBox(this, wxID_ANY, _L("Mode"),
+                                       wxDefaultPosition, wxDefaultSize,
+                                       2, choices, 1, wxRA_SPECIFY_ROWS);
+            m_rb_mode->SetSelection(
+                (cur.mode == Slic3r::PathBlendPassConfig::Mode::Full) ? 1 : 0);
+            row_mode->Add(m_rb_mode, 0);
+            vs->Add(row_mode, 0, wxALL, PAD);
+        }
 
-        // --- Tool grid (4 rows, always visible, disabled beyond num_passes) ---
-        const int init_tools[4] = {cur_t1, cur_t2, cur_t3, cur_t4};
+        // --- Tools (bottom + top, Fase 5 s72) ---
+        // Stored config values are 0-based; displayed here as 1-based Fn.
+        const int init_tools[2] = { cur.tool_bottom,
+                                    (cur.tool_top < 0 ? 0 : cur.tool_top) };
 
-        // Helper: tool index → filament color
+        // Helper: tool index -> filament color
         auto pb_hex_col = [&fcolors](int t) -> wxColour {
             if (t >= 0 && t < (int)fcolors.size() && !fcolors[t].empty()) {
                 unsigned long rgb = 0;
@@ -2708,22 +2715,22 @@ public:
         };
 
         // 3 columns: label | spinctrl (F1-based) | color swatch (updates on change)
-        // F-notation: F1 = T0, F2 = T1, … — consistent with MixedColor and ColorMix.
-        // Stored config values are 0-based; displayed here as 1-based Fn.
-        auto* grid = new wxFlexGridSizer(4, 3, 4, 8);
+        // F-notation: F1 = T0, F2 = T1, ... (1-based Fn).
+        auto* grid = new wxFlexGridSizer(2, 3, 4, 8);
         const int pb_max_tool = std::max(4, (int)fcolors.size()); // F1..FN
+        const wxString tool_lbl[2] = { _L("Ramp tool (bottom):"),
+                                       _L("Cap tool (top):") };
 
-        for (int i = 0; i < 4; ++i) {
-            grid->Add(new wxStaticText(this, wxID_ANY,
-                wxString::Format(_L("Pass %d:"), i+1)),
-                0, wxALIGN_CENTER_VERTICAL);
+        for (int i = 0; i < 2; ++i) {
+            grid->Add(new wxStaticText(this, wxID_ANY, tool_lbl[i]),
+                      0, wxALIGN_CENTER_VERTICAL);
 
             // Convert stored 0-based index to F-notation (1-based) for display.
             const int init_t = std::clamp(init_tools[i] + 1, 1, pb_max_tool);
             m_sc_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
                                            wxDefaultPosition, wxSize(60,-1),
                                            wxSP_ARROW_KEYS, 1, pb_max_tool, init_t);
-            m_sc_tool[i]->SetToolTip(_L("Filament number (F1 = T0, F2 = T1, \u2026). Matches MixedColor F-notation."));
+            m_sc_tool[i]->SetToolTip(_L("Filament number (F1 = T0, F2 = T1, ...). Matches MixedColor F-notation."));
             grid->Add(m_sc_tool[i], 0, wxALIGN_CENTER_VERTICAL);
 
             // Swatch: pb_hex_col takes 0-based; init_t is 1-based → subtract 1.
@@ -2747,39 +2754,57 @@ public:
                 });
         }
         vs->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        update_tool_enable(m_sc_passes->GetValue());
 
-        // --- Min ratio slider ---
-        auto* row_min = new wxBoxSizer(wxHORIZONTAL);
-        row_min->Add(new wxStaticText(this, wxID_ANY, _L("Min ratio % (pass 0 floor):")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-        int init_pct = static_cast<int>(std::clamp(cur_min_ratio, 0.01f, 0.50f) * 100.f + 0.5f);
-        m_sl_min = new wxSlider(this, wxID_ANY, init_pct, 1, 50,
-                                 wxDefaultPosition, wxSize(140,-1), wxSL_HORIZONTAL);
-        m_lbl_min = new wxStaticText(this, wxID_ANY,
-                                      wxString::Format("%d%%", init_pct),
-                                      wxDefaultPosition, wxSize(36,-1));
-        row_min->Add(m_sl_min,  0, wxALIGN_CENTER_VERTICAL);
-        row_min->Add(m_lbl_min, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-        vs->Add(row_min, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        // --- Heights (mm) - explicit geometry replaces min_ratio/max_ratio ---
+        // floor: Z of the ramp at t=0 (low end), >= 0.01.
+        // mid_end: Z of the ramp at t=1 (high end), >= floor. In Full mode it
+        // also satisfies mid_end <= H - 0.04 (cap thickness >= 0.04 mm).
+        const double H = m_layer_height_mm;
+        const double mid_max_full = std::max(0.01, H - 0.04);
+        const double mid_max_half = H;
+        const double init_floor   = std::clamp((double)cur.floor_mm,   0.01, H);
+        const double init_mid     = std::clamp((double)cur.mid_end_mm,
+                                              init_floor,
+                                              (cur.mode == Slic3r::PathBlendPassConfig::Mode::Full)
+                                                  ? mid_max_full : mid_max_half);
 
-        // --- Max ratio slider ---
-        auto* row_max = new wxBoxSizer(wxHORIZONTAL);
-        row_max->Add(new wxStaticText(this, wxID_ANY, _L("Max ratio % (pass 0 peak cap):")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-        int init_max_pct = static_cast<int>(std::clamp(cur_max_ratio, 0.51f, 1.00f) * 100.f + 0.5f);
-        m_sl_max = new wxSlider(this, wxID_ANY, init_max_pct, 51, 100,
-                                 wxDefaultPosition, wxSize(140,-1), wxSL_HORIZONTAL);
-        m_sl_max->SetToolTip(_L(
-            "Cap for the dominant pass at its peak (t=0).\n"
-            "100% = full extrusion (default). Lower values reduce peak flow;\n"
-            "pass 1 fills the complement so total flow stays 1.0."));
-        m_lbl_max = new wxStaticText(this, wxID_ANY,
-                                      wxString::Format("%d%%", init_max_pct),
-                                      wxDefaultPosition, wxSize(36,-1));
-        row_max->Add(m_sl_max,  0, wxALIGN_CENTER_VERTICAL);
-        row_max->Add(m_lbl_max, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-        vs->Add(row_max, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        auto* h_grid = new wxFlexGridSizer(2, 2, 4, 8);
+        h_grid->Add(new wxStaticText(this, wxID_ANY,
+            wxString::Format(_L("Floor mm (ramp at t=0, layer H=%.2f):"), H)),
+            0, wxALIGN_CENTER_VERTICAL);
+        m_sc_floor = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+                                          wxDefaultPosition, wxSize(80, -1),
+                                          wxSP_ARROW_KEYS, 0.01, H, init_floor, 0.005);
+        m_sc_floor->SetDigits(3);
+        h_grid->Add(m_sc_floor, 0, wxALIGN_CENTER_VERTICAL);
+        h_grid->Add(new wxStaticText(this, wxID_ANY, _L("Mid-end mm (ramp at t=1):")),
+                    0, wxALIGN_CENTER_VERTICAL);
+        m_sc_mid_end = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+                                            wxDefaultPosition, wxSize(80, -1),
+                                            wxSP_ARROW_KEYS, init_floor, H, init_mid, 0.005);
+        m_sc_mid_end->SetDigits(3);
+        h_grid->Add(m_sc_mid_end, 0, wxALIGN_CENTER_VERTICAL);
+        vs->Add(h_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        // Cross-control: floor and mid_end never cross; mid_end ceiling tightens
+        // to H-0.04 when Full (cap >= 0.04). Tool-top is meaningful only in Full.
+        auto reclamp_heights = [this, H]() {
+            const bool full = (m_rb_mode && m_rb_mode->GetSelection() == 1);
+            const double mid_max = full ? std::max(0.01, H - 0.04) : H;
+            const double floor_v = m_sc_floor->GetValue();
+            if (m_sc_mid_end->GetValue() < floor_v) m_sc_mid_end->SetValue(floor_v);
+            if (m_sc_mid_end->GetValue() > mid_max) m_sc_mid_end->SetValue(mid_max);
+            m_sc_mid_end->SetRange(floor_v, mid_max);
+            if (m_sc_tool[1])   m_sc_tool[1]->Enable(full);
+            if (m_swatch_pb[1]) m_swatch_pb[1]->Enable(full);
+        };
+        m_sc_floor->Bind(wxEVT_SPINCTRLDOUBLE,
+            [reclamp_heights](wxSpinDoubleEvent&) { reclamp_heights(); });
+        m_sc_mid_end->Bind(wxEVT_SPINCTRLDOUBLE,
+            [reclamp_heights](wxSpinDoubleEvent&) { reclamp_heights(); });
+        m_rb_mode->Bind(wxEVT_RADIOBOX,
+            [reclamp_heights](wxCommandEvent&) { reclamp_heights(); });
+        reclamp_heights();
 
         // --- Gradient easing buttons ---
         {
@@ -2826,28 +2851,20 @@ public:
             refresh_ease();
         }
 
-        // --- Flow gradient direction (s59: rename — default OFF is safe ascending,
-        // ON reverses to high→low flow which is the unsafe / "drag risk" mode).
-        m_cb_invert = new wxCheckBox(this, wxID_ANY, _L("Reverse Flow Max to Min (unsafe)"));
-        m_cb_invert->SetValue(cur_invert);
-        m_cb_invert->SetToolTip(_L(
-            "When checked: pass 0 nozzle ascends during printing (starts at bottom_z, ends at nominal_z).\n"
-            "Uncheck only if your slicer prints low-Y paths first (rare).\n"
-            "Ascending direction prevents collisions with already-printed material."));
-        vs->Add(m_cb_invert, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
         // --- Fill angle override ---
+        // (invert_gradient dropped in Fase 5: heights are explicit, so the
+        // ramp direction is fixed by the floor/mid_end signs — no toggle.)
         {
             auto* row_ang = new wxBoxSizer(wxHORIZONTAL);
             row_ang->Add(new wxStaticText(this, wxID_ANY, _L("Fill angle (-1 = follow top surface):")),
                          0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            const int safe_ang = (cur_angle >= -1 && cur_angle <= 359) ? cur_angle : -1;
+            const int safe_ang = (cur.fill_angle >= -1 && cur.fill_angle <= 359) ? cur.fill_angle : -1;
             m_sc_angle_pb = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
                                             wxDefaultPosition, wxSize(70,-1),
                                             wxSP_ARROW_KEYS, -1, 359, safe_ang);
             m_sc_angle_pb->SetToolTip(_L(
                 "-1 = follow the top surface fill angle setting.\n"
-                "0–359 = custom fill angle for PathBlend lines only."));
+                "0-359 = custom fill angle for PathBlend lines only."));
             row_ang->Add(m_sc_angle_pb, 0, wxALIGN_CENTER_VERTICAL);
             vs->Add(row_ang, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
         }
@@ -2922,54 +2939,64 @@ public:
 
         vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
         SetSizerAndFit(vs);
-
-        // --- Bindings ---
-        m_sc_passes->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) {
-            update_tool_enable(m_sc_passes->GetValue());
-        });
-        m_sl_min->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
-            m_lbl_min->SetLabel(wxString::Format("%d%%", m_sl_min->GetValue()));
-        });
-        m_sl_max->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
-            m_lbl_max->SetLabel(wxString::Format("%d%%", m_sl_max->GetValue()));
-        });
     }
 
-    int   get_num_passes()  const { return m_sc_passes->GetValue(); }
-    // Spinners display F-notation (F1=1, F2=2, …); config stores 0-based (T0=0, T1=1, …).
+    // ---- Fase 5 (s72) accessors over the new geometry model ----
+    Slic3r::PathBlendPassConfig get_config() const
+    {
+        Slic3r::PathBlendPassConfig out;
+        out.mode        = (m_rb_mode && m_rb_mode->GetSelection() == 1)
+                          ? Slic3r::PathBlendPassConfig::Mode::Full
+                          : Slic3r::PathBlendPassConfig::Mode::Half;
+        out.floor_mm    = static_cast<float>(m_sc_floor   ? m_sc_floor->GetValue()   : 0.01);
+        out.mid_end_mm  = static_cast<float>(m_sc_mid_end ? m_sc_mid_end->GetValue() : 0.05);
+        // Spinners display F-notation (F1=1, F2=2, ...); stored 0-based.
+        out.tool_bottom = m_sc_tool[0] ? (m_sc_tool[0]->GetValue() - 1) : 0;
+        out.tool_top    = (out.mode == Slic3r::PathBlendPassConfig::Mode::Full && m_sc_tool[1])
+                          ? (m_sc_tool[1]->GetValue() - 1) : -1;
+        out.ease_mode   = m_ease_mode;
+        out.fill_angle  = m_sc_angle_pb ? m_sc_angle_pb->GetValue() : -1;
+        out.sync_legacy_view();
+        return out;
+    }
+
+    // Legacy getters kept for the "Save as profile..." button below, which
+    // still writes the painter's legacy kv payload (back-compat with Fase G
+    // profiles saved before Fase 5; painter reads via from_payload helper that
+    // converts on read).
+    int   get_num_passes()  const { return (m_rb_mode && m_rb_mode->GetSelection() == 1) ? 2 : 1; }
     int   get_tool(int i)   const {
-        return (i >= 0 && i < 4 && m_sc_tool[i]) ? m_sc_tool[i]->GetValue() - 1 : i;
+        if (i == 0 && m_sc_tool[0]) return m_sc_tool[0]->GetValue() - 1;
+        if (i == 1 && m_sc_tool[1] && get_num_passes() >= 2)
+            return m_sc_tool[1]->GetValue() - 1;
+        return -1;
     }
     float get_min_ratio()   const {
-        return static_cast<float>(m_sl_min->GetValue()) / 100.f;
+        const double H = std::max(0.04, m_layer_height_mm);
+        return static_cast<float>(std::clamp((m_sc_floor ? m_sc_floor->GetValue() : 0.01) / H,
+                                             0.01, 0.49));
     }
     float get_max_ratio()   const {
-        return static_cast<float>(m_sl_max->GetValue()) / 100.f;
+        const double H = std::max(0.04, m_layer_height_mm);
+        return static_cast<float>(std::clamp((m_sc_mid_end ? m_sc_mid_end->GetValue() : 0.05) / H,
+                                             0.51, 1.0));
     }
     int   get_ease_mode()   const { return m_ease_mode; }
-    bool  get_invert()      const { return m_cb_invert ? m_cb_invert->GetValue() : true; }
+    bool  get_invert()      const { return true; }   // dropped in Fase 5; safe default
     int   get_fill_angle()  const { return m_sc_angle_pb ? m_sc_angle_pb->GetValue() : -1; }
 
 private:
-    wxSpinCtrl*   m_sc_passes       = nullptr;
-    wxSpinCtrl*   m_sc_tool[4]      = {nullptr, nullptr, nullptr, nullptr};
-    ColorSwatch*  m_swatch_pb[4]    = {nullptr, nullptr, nullptr, nullptr};
-    wxSlider*     m_sl_min          = nullptr;
-    wxStaticText* m_lbl_min         = nullptr;
-    wxSlider*     m_sl_max          = nullptr;
-    wxStaticText* m_lbl_max         = nullptr;
-    wxButton*     m_btn_ease[4]     = {nullptr, nullptr, nullptr, nullptr};
-    int           m_ease_mode       = 0;
-    wxCheckBox*   m_cb_invert       = nullptr;
-    wxSpinCtrl*   m_sc_angle_pb     = nullptr;
-
-    void update_tool_enable(int n) {
-        for (int i = 0; i < 4; ++i) {
-            if (m_sc_tool[i])    m_sc_tool[i]->Enable(i < n);
-            if (m_swatch_pb[i])  m_swatch_pb[i]->Enable(i < n);
-        }
-    }
+    double            m_layer_height_mm = 0.20;
+    wxRadioBox*       m_rb_mode         = nullptr;
+    wxSpinCtrl*       m_sc_tool[2]      = {nullptr, nullptr};
+    ColorSwatch*      m_swatch_pb[2]    = {nullptr, nullptr};
+    wxSpinCtrlDouble* m_sc_floor        = nullptr;
+    wxSpinCtrlDouble* m_sc_mid_end      = nullptr;
+    wxButton*         m_btn_ease[4]     = {nullptr, nullptr, nullptr, nullptr};
+    int               m_ease_mode       = 0;
+    wxSpinCtrl*       m_sc_angle_pb     = nullptr;
 };
+#endif // NEOTKO_SANDWICH_TAG Fase 5 s73 — PathBlendDialog dead code wrap
 // NEOTKO_PATHBLEND_TAG_END
 
 // NEOTKO_SURFACE_MIXER_TAG_START
@@ -3590,63 +3617,17 @@ private:
                 }
             }
         } else if (eff == EFF_PB) {
-            // NEOTKO_PATHBLEND_TAG — s69 miniblob: PathBlend Top and Penultimate
-            // each keep an independent settings blob (pathblend_top /
-            // pathblend_penu).  surface_id 0 = Top, 1 = Penultimate.  Editing one
-            // zone no longer touches the other.
-            const char* _pb_zkey = (surface_id == 0) ? "pathblend_top" : "pathblend_penu";
-            int   cur_passes = 2;
-            int   cur_t[4]   = {0, 1, 2, 3};
-            float cur_min    = 0.05f;
-            float cur_max    = 1.00f;
-            int   cur_ease   = 0;
-            bool  cur_invert = true;
-            int   cur_angle  = -1;
-            std::string _pb_blob;
-            if (auto* o = m_config->option<ConfigOptionString>(_pb_zkey)) _pb_blob = o->value;
-            if (!_pb_blob.empty()) {
-                // This zone already has saved settings — read them from the blob.
-                const PathBlendPassConfig _pbc = PathBlendPassConfig::from_blob_json(_pb_blob);
-                cur_passes = _pbc.num_passes;
-                cur_t[0] = _pbc.tool[0]; cur_t[1] = _pbc.tool[1];
-                cur_t[2] = _pbc.tool[2]; cur_t[3] = _pbc.tool[3];
-                cur_min  = _pbc.min_ratio;  cur_max = _pbc.max_ratio;
-                cur_ease = _pbc.ease_mode;  cur_invert = _pbc.invert_gradient;
-                cur_angle = _pbc.fill_angle;
-            } else {
-                // First open / legacy preset — seed from the flat pathblend_* keys.
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_num_passes"))     cur_passes  = o->value;
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_1"))          cur_t[0]    = o->value;
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_2"))          cur_t[1]    = o->value;
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_3"))          cur_t[2]    = o->value;
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_tool_4"))          cur_t[3]    = o->value;
-                if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_min_ratio"))       cur_min     = static_cast<float>(o->value);
-                if (auto* o=m_config->option<ConfigOptionFloat>("pathblend_max_ratio"))       cur_max     = static_cast<float>(o->value);
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_ease_mode"))       cur_ease    = o->value;
-                if (auto* o=m_config->option<ConfigOptionBool> ("pathblend_invert_gradient")) cur_invert  = o->value;
-                if (auto* o=m_config->option<ConfigOptionInt>  ("pathblend_fill_angle"))      cur_angle   = o->value;
-            }
-
-            PathBlendDialog dlg(this, cur_passes,
-                                cur_t[0], cur_t[1], cur_t[2], cur_t[3],
-                                cur_min, cur_max, cur_ease, cur_invert, cur_angle, m_fcolors);
-            if (dlg.ShowModal() == wxID_OK) {
-                // Serialize this zone's settings into its own JSON blob key.
-                PathBlendPassConfig _pbc;
-                _pbc.num_passes      = dlg.get_num_passes();
-                _pbc.tool[0]         = dlg.get_tool(0);
-                _pbc.tool[1]         = dlg.get_tool(1);
-                _pbc.tool[2]         = dlg.get_tool(2);
-                _pbc.tool[3]         = dlg.get_tool(3);
-                _pbc.min_ratio       = dlg.get_min_ratio();
-                _pbc.max_ratio       = dlg.get_max_ratio();
-                _pbc.ease_mode       = dlg.get_ease_mode();
-                _pbc.invert_gradient = dlg.get_invert();
-                _pbc.fill_angle      = dlg.get_fill_angle();
-                if (auto* o = m_config->option<ConfigOptionString>(_pb_zkey))
-                    o->value = _pbc.to_blob_json();
-                m_on_change(_pb_zkey);
-            }
+            // NEOTKO_SANDWICH_TAG — Fase 5 (s72): the PathBlend popup
+            // (PathBlendDialog) is gone. PathBlend is now edited through the
+            // Sandwich editor with draggable floor/mid_end heights in mm and
+            // Half / Full mode selection on the row. The pill stays here for
+            // back-compat of the old SurfaceColorMixerDialog: clicking it just
+            // redirects the user to the new editor.
+            wxMessageBox(_L("PathBlend is now edited from the Sandwich editor.\n\n"
+                            "Open the Sandwich editor and choose 'PathBlend Half' "
+                            "or 'PathBlend Full' as the pass kind."),
+                         _L("PathBlend moved"),
+                         wxOK | wxICON_INFORMATION, this);
         }
         update_ui();
     }
@@ -4800,6 +4781,1440 @@ private:
     }
 };
 // NEOTKO_SURFACE_MIXER_TAG_END
+
+// NEOTKO_SANDWICH_TAG_START — Fase 3: SandwichDialog
+// ===========================================================================
+// SandwichDialog — additive editor for the per-zone pass-stack ("sandwich").
+//
+// Independent of the ~4000-line SurfaceColorMixerDialog: it does NOT touch it.
+// SurfaceColorMixerDialog keeps editing the legacy keys; this dialog edits the
+// 2 blob keys `neotko_surface_passes_top` / `_penu`. The engine's resolve()
+// reads the blob first and only falls back to synthesize_from_legacy() when the
+// blob is empty — so writing "" here restores legacy behaviour.
+//
+// A zone (Top, and an independent Penultimate) is a stack of 1..3 passes; each
+// pass has a Z-ratio and a kind (None/Solid/ColorMix/PathBlend). Slot rule:
+//   1 slot    → ColorMix or PathBlend only
+//   2-3 slots → any kind
+// PathBlend collapses the zone to a single full-height pass (legacy engine).
+// ===========================================================================
+class SandwichDialog : public wxDialog
+{
+    using Kind = Slic3r::SurfacePassKind;
+    static constexpr int TOOL_MENU_BASE = 1700;
+
+public:
+    SandwichDialog(wxWindow* parent,
+                   DynamicPrintConfig* config,
+                   std::function<void(const std::string&)> on_change_cb)
+        : wxDialog(parent, wxID_ANY, _L("Sandwich Editor"),
+                   wxDefaultPosition, wxDefaultSize,
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+        , m_config(config)
+        , m_on_change(std::move(on_change_cb))
+    {
+        if (auto* o = wxGetApp().preset_bundle->project_config
+                          .option<ConfigOptionStrings>("filament_colour"))
+            m_fcolors = o->values;
+        while (m_fcolors.size() < 4) m_fcolors.push_back("#808080");
+
+        // Load the current state of both zones (blob, or synthesized legacy).
+        m_stack[0] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
+        m_stack[1] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
+        for (int z = 0; z < 2; ++z)
+            sanitize_stack(z);
+
+        build_ui();
+    }
+
+private:
+    DynamicPrintConfig*                     m_config = nullptr;
+    std::function<void(const std::string&)> m_on_change;
+    std::vector<std::string>                m_fcolors;
+
+    Slic3r::SurfacePassStack m_stack[2];     // 0 = Top, 1 = Penultimate
+
+    // Everything is inline per row — no shared "Advanced" panel. The fill angle
+    // is a per-row field bound to that pass's own SurfacePass.angle. fan/speed/
+    // gcode of SurfacePass are kept in the data model (round-trip, "forgotten
+    // box") but have no widgets — they do nothing for a Solid pass.
+    struct ZoneUI {
+        wxCheckBox*   enable_chk = nullptr;
+        wxCheckBox*   perim_chk  = nullptr;
+        wxRadioBox*   slots_rb   = nullptr;
+        wxPanel*      ratio_bar  = nullptr;   // stacked draggable Z-ratio bar
+        wxPanel*      rows_host  = nullptr;
+        wxBoxSizer*   rows_sizer = nullptr;
+        wxStaticText* sum_lbl    = nullptr;
+        wxButton*     norm_btn   = nullptr;
+        std::vector<wxPanel*>          row_panel;
+        std::vector<wxPanel*>          chips;
+        std::vector<wxStaticText*>     badge;
+        std::vector<wxChoice*>         kind_choice;
+        std::vector<wxSpinCtrlDouble*> ratio_spin;
+        std::vector<wxStaticText*>     angle_lbl;   // Solid only
+        std::vector<wxTextCtrl*>       angle_txt;   // Solid only
+        std::vector<wxPanel*>          preview;
+        std::vector<wxButton*>         adv_btn;     // ColorMix / PathBlend
+        std::vector<wxStaticText*>     minlbl;      // "< 0.04 mm" warning
+        // NEOTKO_SANDWICH_TAG — Fase 5 s73: KindEntry encodes Kind + PB mode
+        // so the kind selector can list "PathBlend Half" and "PathBlend Full"
+        // as distinct entries while both map to Kind::PathBlend internally.
+        struct KindEntry {
+            Kind     kind;
+            int      pb_mode;  // 0 = Half, 1 = Full; -1 for non-PB kinds
+            wxString label;
+        };
+        std::vector<KindEntry>         kindlist;    // choice-index -> KindEntry
+    };
+    ZoneUI m_ui[2];
+
+    // ratio-bar drag state: which zone / which internal boundary is held.
+    int m_drag_zone  = -1;
+    int m_drag_bound = -1;
+
+    // ----------------------------------------------------------- small helpers
+    // Layer height (mm) — pass heights are shown as ratio × this.
+    double layer_height_mm() const
+    {
+        if (auto* o = m_config->option<ConfigOptionFloat>("layer_height"))
+            if (o->value > 0.001) return o->value;
+        return 0.2;
+    }
+    static constexpr double kMinPassMM = 0.04;   // engine MinLayer rule
+
+    wxColour tool_colour(int t) const
+    {
+        if (t >= 0 && t < (int)m_fcolors.size() && !m_fcolors[t].empty()) {
+            unsigned long rgb = 0;
+            wxString s = wxString::FromUTF8(m_fcolors[t]);
+            if (s.StartsWith("#")) s = s.Mid(1);
+            if (s.ToULong(&rgb, 16))
+                return wxColour((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+        }
+        return wxColour(128, 128, 128);
+    }
+
+    static wxString kind_name(Kind k)
+    {
+        switch (k) {
+            case Kind::None:      return _L("None");
+            case Kind::Solid:     return _L("Solid");
+            case Kind::ColorMix:  return _L("ColorMix");
+            case Kind::PathBlend: return _L("PathBlend");
+        }
+        return wxEmptyString;
+    }
+    static wxString kind_badge(Kind k)
+    {
+        switch (k) {
+            case Kind::None:      return "NONE";
+            case Kind::Solid:     return "SOLID";
+            case Kind::ColorMix:  return "COLORMIX";
+            case Kind::PathBlend: return "PATHBLEND";
+        }
+        return wxEmptyString;
+    }
+    static wxColour kind_colour(Kind k)
+    {
+        switch (k) {
+            case Kind::None:      return wxColour(110, 110, 110);
+            case Kind::Solid:     return wxColour(214, 124, 48);
+            case Kind::ColorMix:  return wxColour(72, 110, 200);
+            case Kind::PathBlend: return wxColour(150, 88, 178);
+        }
+        return wxColour(110, 110, 110);
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73: PB badge text reflects Half/Full mode.
+    static wxString kind_badge_for(const Slic3r::SurfacePass& p)
+    {
+        if (p.kind != Kind::PathBlend) return kind_badge(p.kind);
+        const auto it = p.pathblend.kv.find("blob");
+        if (it == p.pathblend.kv.end() || it->second.empty()) return "PB FULL";
+        const Slic3r::PathBlendPassConfig pbc =
+            Slic3r::PathBlendPassConfig::from_blob_json(it->second);
+        return (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half) ? "PB HALF" : "PB FULL";
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73: kind entries with explicit Half/Full
+    // PathBlend distinction. Selecting either PB entry collapses the stack to
+    // a single PB pass with the chosen mode (handled in on_kind_change).
+    static std::vector<ZoneUI::KindEntry> kind_entries_for_slots(int n)
+    {
+        using PBMode = Slic3r::PathBlendPassConfig::Mode;
+        std::vector<ZoneUI::KindEntry> out;
+        if (n > 1) {
+            out.push_back({ Kind::None,      -1, _L("None") });
+            out.push_back({ Kind::Solid,     -1, _L("Solid") });
+        }
+        out.push_back({ Kind::ColorMix,  -1,                _L("ColorMix") });
+        out.push_back({ Kind::PathBlend, (int)PBMode::Half, _L("PathBlend Half") });
+        out.push_back({ Kind::PathBlend, (int)PBMode::Full, _L("PathBlend Full") });
+        return out;
+    }
+
+    // Read the per-zone ColorMix gradient tools (for chip previews only).
+    std::vector<int> colormix_tools(int z) const
+    {
+        const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
+                                         : "interlayer_colormix_";
+        std::vector<int> out;
+        for (const char* s : { "tool_a", "tool_b", "tool_c", "tool_d" })
+            if (auto* o = m_config->option<ConfigOptionInt>(pre + s))
+                if (o->value >= 0) out.push_back(o->value);
+        if (out.empty()) out = { 0, 1 };
+        return out;
+    }
+    std::vector<int> pathblend_tools(int z) const
+    {
+        const char* zkey = (z == 1) ? "pathblend_penu" : "pathblend_top";
+        std::string blob;
+        if (auto* o = m_config->option<ConfigOptionString>(zkey)) blob = o->value;
+        std::vector<int> out;
+        if (!blob.empty()) {
+            const Slic3r::PathBlendPassConfig pb =
+                Slic3r::PathBlendPassConfig::from_blob_json(blob);
+            for (int i = 0; i < pb.num_passes && i < 4; ++i)
+                if (pb.tool[i] >= 0) out.push_back(pb.tool[i]);
+        }
+        if (out.empty()) out = { 0, 1 };
+        return out;
+    }
+
+    // Force a stack into a valid shape (1..3 passes, slot rule, PathBlend solo).
+    void sanitize_stack(int z)
+    {
+        Slic3r::SurfacePassStack& st = m_stack[z];
+        if ((int)st.passes.size() > Slic3r::SurfacePassStack::kMaxPasses)
+            st.passes.resize(Slic3r::SurfacePassStack::kMaxPasses);
+        // PathBlend is always a single full-height pass.
+        bool has_pb = false;
+        for (const auto& p : st.passes)
+            if (p.kind == Kind::PathBlend) has_pb = true;
+        if (has_pb && st.passes.size() > 1) {
+            Slic3r::SurfacePass pb;
+            pb.kind = Kind::PathBlend; pb.ratio = 1.0;
+            st.passes.assign(1, pb);
+        }
+        if (st.passes.size() == 1 &&
+            (st.passes[0].kind == Kind::Solid || st.passes[0].kind == Kind::None))
+            st.passes[0].kind = Kind::ColorMix;   // lone Solid/None is meaningless
+        if (st.passes.empty())
+            st.enabled = false;                   // nothing to show
+    }
+
+    // ------------------------------------------------------------------- build
+    void build_ui()
+    {
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        root->Add(build_zone(0, _L("Top layer")),
+                  0, wxEXPAND | wxALL, 6);
+        root->Add(build_zone(1, _L("Penultimate layer")),
+                  0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+
+        root->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
+        auto* btns = CreateButtonSizer(wxOK | wxCANCEL);
+        if (btns) root->Add(btns, 0, wxEXPAND | wxALL, 8);
+
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
+            if (e.GetId() == wxID_OK) commit();
+            e.Skip();
+        });
+
+        SetSizerAndFit(root);
+        SetMinSize(wxSize(560, 420));
+        for (int z = 0; z < 2; ++z) { refresh_rows(z); sync_zone_enabled(z); }
+        Layout();
+    }
+
+    wxSizer* build_zone(int z, const wxString& title)
+    {
+        auto* box = new wxStaticBoxSizer(wxVERTICAL, this, title);
+        wxWindow* boxw = box->GetStaticBox();
+
+        // header — Enabled checkbox + 1/2/3 slot selector
+        auto* hdr = new wxBoxSizer(wxHORIZONTAL);
+        m_ui[z].enable_chk = new wxCheckBox(boxw, wxID_ANY, _L("Enabled"));
+        m_ui[z].enable_chk->SetValue(m_stack[z].enabled && !m_stack[z].passes.empty());
+        m_ui[z].enable_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
+            const bool on = m_ui[z].enable_chk->GetValue();
+            m_stack[z].enabled = on;
+            if (on && m_stack[z].passes.empty()) {
+                Slic3r::SurfacePass p;
+                p.kind = Kind::ColorMix; p.ratio = 1.0;
+                m_stack[z].passes.push_back(p);
+            }
+            refresh_rows(z);
+            sync_zone_enabled(z);
+        });
+        hdr->Add(m_ui[z].enable_chk, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 16);
+
+        wxArrayString slots; slots.Add("1"); slots.Add("2"); slots.Add("3");
+        m_ui[z].slots_rb = new wxRadioBox(boxw, wxID_ANY, _L("Passes"),
+                                          wxDefaultPosition, wxDefaultSize,
+                                          slots, 3, wxRA_SPECIFY_COLS);
+        const int n0 = std::max(1, (int)m_stack[z].passes.size());
+        m_ui[z].slots_rb->SetSelection(std::min(3, n0) - 1);
+        m_ui[z].slots_rb->Bind(wxEVT_RADIOBOX, [this, z](wxCommandEvent&) {
+            set_slot_count(z, m_ui[z].slots_rb->GetSelection() + 1);
+        });
+        hdr->Add(m_ui[z].slots_rb, 0, wxALIGN_CENTER_VERTICAL);
+
+        m_ui[z].perim_chk = new wxCheckBox(boxw, wxID_ANY, _L("Perimeter override"));
+        m_ui[z].perim_chk->SetValue(m_stack[z].perimeter_override);
+        m_ui[z].perim_chk->SetToolTip(_L("Clone the walls into every Solid pass of "
+                                         "this zone (MultiPass perimeter override)."));
+        m_ui[z].perim_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
+            m_stack[z].perimeter_override = m_ui[z].perim_chk->GetValue();
+        });
+        hdr->Add(m_ui[z].perim_chk, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 16);
+        box->Add(hdr, 0, wxALL, 6);
+
+        // rows host — kMaxPasses fixed row panels, shown/hidden by slot count.
+        m_ui[z].rows_host  = new wxPanel(boxw);
+        m_ui[z].rows_sizer = new wxBoxSizer(wxVERTICAL);
+        m_ui[z].rows_host->SetSizer(m_ui[z].rows_sizer);
+        const int kMax = Slic3r::SurfacePassStack::kMaxPasses;
+        m_ui[z].row_panel  .assign(kMax, nullptr);
+        m_ui[z].chips      .assign(kMax, nullptr);
+        m_ui[z].badge      .assign(kMax, nullptr);
+        m_ui[z].kind_choice.assign(kMax, nullptr);
+        m_ui[z].ratio_spin .assign(kMax, nullptr);
+        m_ui[z].angle_lbl  .assign(kMax, nullptr);
+        m_ui[z].angle_txt  .assign(kMax, nullptr);
+        m_ui[z].preview    .assign(kMax, nullptr);
+        m_ui[z].adv_btn    .assign(kMax, nullptr);
+        m_ui[z].minlbl     .assign(kMax, nullptr);
+        for (int idx = kMax - 1; idx >= 0; --idx)   // top of stack drawn first
+            m_ui[z].rows_sizer->Add(build_row(z, idx), 0,
+                                    wxEXPAND | wxTOP | wxBOTTOM, 3);
+
+        // stacked draggable Z-ratio bar, left of the rows (drag the dividers).
+        m_ui[z].ratio_bar = new wxPanel(boxw, wxID_ANY,
+                                        wxDefaultPosition, wxSize(30, -1));
+        m_ui[z].ratio_bar->SetToolTip(
+            _L("Drag the dividers to split the layer height between passes."));
+        m_ui[z].ratio_bar->Bind(wxEVT_PAINT,
+            [this, z](wxPaintEvent&) { paint_ratio_bar(z); });
+        m_ui[z].ratio_bar->Bind(wxEVT_LEFT_DOWN,
+            [this, z](wxMouseEvent& e) { ratio_bar_down(z, e); });
+        m_ui[z].ratio_bar->Bind(wxEVT_MOTION,
+            [this, z](wxMouseEvent& e) { ratio_bar_motion(z, e); });
+        m_ui[z].ratio_bar->Bind(wxEVT_LEFT_UP,
+            [this, z](wxMouseEvent& e) { ratio_bar_up(z, e); });
+        m_ui[z].ratio_bar->Bind(wxEVT_MOUSE_CAPTURE_LOST,
+            [this](wxMouseCaptureLostEvent&) { m_drag_zone = -1; m_drag_bound = -1; });
+
+        auto* mid = new wxBoxSizer(wxHORIZONTAL);
+        mid->Add(m_ui[z].ratio_bar, 0, wxEXPAND | wxRIGHT, 5);
+        mid->Add(m_ui[z].rows_host, 1, wxEXPAND);
+        box->Add(mid, 0, wxEXPAND | wxLEFT | wxRIGHT, 6);
+
+        // footer — ratio sum + normalize
+        auto* foot = new wxBoxSizer(wxHORIZONTAL);
+        m_ui[z].sum_lbl = new wxStaticText(boxw, wxID_ANY, wxEmptyString);
+        foot->Add(m_ui[z].sum_lbl, 1, wxALIGN_CENTER_VERTICAL);
+        m_ui[z].norm_btn = new wxButton(boxw, wxID_ANY, _L("Normalize"),
+                                        wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        m_ui[z].norm_btn->Bind(wxEVT_BUTTON, [this, z](wxCommandEvent&) { normalize(z); });
+        foot->Add(m_ui[z].norm_btn, 0, wxLEFT, 8);
+        box->Add(foot, 0, wxEXPAND | wxALL, 6);
+        return box;
+    }
+
+    // --------------------------------------------------------------- row build
+    // The 3 row panels are built ONCE and never destroyed — only shown/hidden
+    // and re-synced. Destroying child windows from inside an event handler
+    // (the old rebuild approach) freed NSViews that AppKit still drew → crash.
+    void refresh_rows(int z)
+    {
+        ZoneUI& u = m_ui[z];
+        const int n = (int)m_stack[z].passes.size();
+        u.kindlist = kind_entries_for_slots(n);
+
+        for (int idx = 0; idx < (int)u.row_panel.size(); ++idx) {
+            const bool vis = idx < n;
+            if (u.row_panel[idx]) u.row_panel[idx]->Show(vis);
+            if (!vis) continue;
+            const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+
+            // repopulate the kind choice for the current slot rule
+            u.kind_choice[idx]->Clear();
+            for (const auto& e : u.kindlist)
+                u.kind_choice[idx]->Append(e.label);
+            // Select the entry that matches kind + (for PB) mode in the blob.
+            int sel = 0;
+            int pb_mode_cur = (int)Slic3r::PathBlendPassConfig::Mode::Full;
+            if (p.kind == Kind::PathBlend) {
+                const auto it_blob = p.pathblend.kv.find("blob");
+                const std::string blob = (it_blob != p.pathblend.kv.end())
+                    ? it_blob->second : std::string();
+                if (!blob.empty()) {
+                    const Slic3r::PathBlendPassConfig pbc =
+                        Slic3r::PathBlendPassConfig::from_blob_json(blob);
+                    pb_mode_cur = (int)pbc.mode;
+                }
+            }
+            for (size_t i = 0; i < u.kindlist.size(); ++i) {
+                if (u.kindlist[i].kind != p.kind) continue;
+                if (p.kind == Kind::PathBlend) {
+                    if (u.kindlist[i].pb_mode == pb_mode_cur) { sel = (int)i; break; }
+                } else {
+                    sel = (int)i; break;
+                }
+            }
+            u.kind_choice[idx]->SetSelection(sel);
+
+            // NEOTKO_SANDWICH_TAG — Fase 5 s73: ratio_spin shows floor_mm for PB.
+            if (p.kind == Kind::PathBlend) {
+                Slic3r::PathBlendPassConfig pbc;
+                const auto it_blob = p.pathblend.kv.find("blob");
+                if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
+                    pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
+                u.ratio_spin[idx]->SetValue(pbc.floor_mm);
+            } else {
+                u.ratio_spin[idx]->SetValue(p.ratio * layer_height_mm());
+            }
+            sync_row_widgets(z, idx);
+        }
+        u.rows_host->Enable(m_stack[z].enabled);
+        u.rows_host->Layout();
+        update_sum(z);
+        if (GetSizer()) { GetSizer()->Layout(); Fit(); }
+    }
+
+    // Per-row sync that does NOT touch the kind choice items, so it is safe to
+    // call from inside the choice's own event handler. Updates badge, the
+    // angle field (Solid only) and the advanced button (ColorMix / PathBlend).
+    void sync_row_widgets(int z, int idx)
+    {
+        ZoneUI& u = m_ui[z];
+        if (idx >= (int)m_stack[z].passes.size()) return;
+        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+
+        u.badge[idx]->SetLabel(kind_badge_for(p));   // NEOTKO_SANDWICH_TAG s73
+        u.badge[idx]->SetBackgroundColour(kind_colour(p.kind));
+        u.badge[idx]->Refresh();
+
+        // NEOTKO_SANDWICH_TAG — Fase 5 s73: per-row inline PathBlend repurpose.
+        // Solid -> spinner = Z mm (pass height), angle field = fill angle.
+        // PathBlend -> spinner = floor_mm, angle field = mid_end_mm (label
+        // changes from "angle:" to "mid:"). Ease + tools picked via adv_btn
+        // and chip clicks. The kind selector decides Half vs Full.
+        const bool is_solid = (p.kind == Kind::Solid);
+        const bool is_pb    = (p.kind == Kind::PathBlend);
+
+        // Angle/Mid field is visible for Solid and PathBlend.
+        u.angle_lbl[idx]->Show(is_solid || is_pb);
+        u.angle_txt[idx]->Show(is_solid || is_pb);
+        // Default to enabled; the PB-Half branch below disables when needed.
+        u.angle_lbl[idx]->Enable(true);
+        u.angle_txt[idx]->Enable(true);
+        if (is_solid) {
+            u.angle_lbl[idx]->SetLabel(_L("angle:"));
+            u.angle_txt[idx]->ChangeValue(wxString::Format("%d", p.angle));
+        } else if (is_pb) {
+            u.angle_lbl[idx]->SetLabel(_L("mid mm:"));
+            Slic3r::PathBlendPassConfig pbc;
+            const auto it_blob = p.pathblend.kv.find("blob");
+            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
+                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
+            u.angle_txt[idx]->ChangeValue(wxString::Format("%.3f", pbc.mid_end_mm));
+            // NEOTKO_SANDWICH_TAG — Fase 5 s73: in Half mode mid is forced to
+            // the layer height (no cap), so the field is disabled to make the
+            // constraint visible to the user.
+            const bool half = (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half);
+            u.angle_txt[idx]->Enable(!half);
+            u.angle_lbl[idx]->Enable(!half);
+        }
+
+        // adv_btn: "Edit gradient..." for ColorMix; ease-mode cycler for PB;
+        // hidden for Solid/None.
+        wxButton* adv = u.adv_btn[idx];
+        if (p.kind == Kind::ColorMix) {
+            adv->SetLabel(_L("Edit gradient…")); adv->Show(true);
+        } else if (is_pb) {
+            static const wxString ease_names[4] = {
+                _L("Mode: Linear"), _L("Mode: Ease In"),
+                _L("Mode: Ease Out"), _L("Mode: Ease In/Out")
+            };
+            Slic3r::PathBlendPassConfig pbc;
+            const auto it_blob = p.pathblend.kv.find("blob");
+            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
+                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
+            const int em = std::clamp(pbc.ease_mode, 0, 3);
+            adv->SetLabel(ease_names[em]);
+            adv->Show(true);
+        } else {
+            adv->Show(false);
+        }
+
+        // Ratio spinner label changes: "Z mm:" normally, "floor mm:" for PB.
+        // The spinner itself is at index 0 of its sizer (we just retitle via the
+        // spinner's value, the static label is at row sizer position).
+        // The label widget isn't stored separately; we keep the static text "Z mm:"
+        // in build_row and instead use the tooltip + spinner range to disambiguate.
+        // For PB, the spinner value shows floor_mm directly (refresh_rows handles).
+
+        // min-layer warning: only meaningful for Solid/ColorMix sub-bands. PB
+        // doesn't go through the sublayer MinLayer gate (its floor can be 0.01).
+        const double mm = p.ratio * layer_height_mm();
+        const bool thin = (!is_pb) && (mm < kMinPassMM - 1e-9);
+        if (u.minlbl[idx]) {
+            u.minlbl[idx]->SetLabel(thin
+                ? _L("⚠ < 0,04 mm — pasada apagada (su altura se reparte al guardar)")
+                : wxString());
+            u.minlbl[idx]->Show(thin);
+        }
+        u.row_panel[idx]->SetBackgroundColour(
+            thin ? wxColour(48, 40, 32) : wxColour(60, 60, 60));
+
+        u.chips[idx]->Refresh();
+        u.preview[idx]->Refresh();
+        u.row_panel[idx]->Refresh();
+        u.row_panel[idx]->Layout();
+    }
+
+    // Builds one fixed row panel (widgets only — values synced by refresh_rows).
+    wxPanel* build_row(int z, int idx)
+    {
+        ZoneUI& u = m_ui[z];
+        auto* row = new wxPanel(u.rows_host);
+        row->SetBackgroundColour(wxColour(60, 60, 60));
+        auto* rv = new wxBoxSizer(wxVERTICAL);
+        auto* rh = new wxBoxSizer(wxHORIZONTAL);
+
+        auto* chip = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(78, 22));
+        chip->Bind(wxEVT_PAINT, [this, z, idx](wxPaintEvent&) { paint_chip(z, idx); });
+        chip->Bind(wxEVT_LEFT_DOWN, [this, z, idx](wxMouseEvent& ev) {
+            if (idx >= (int)m_stack[z].passes.size()) return;
+            const Kind k = m_stack[z].passes[idx].kind;
+            if (k == Kind::Solid) {
+                pick_solid_tool(z, idx);
+            } else if (k == Kind::PathBlend) {
+                // NEOTKO_SANDWICH_TAG — Fase 5 s73: chip is painted in 2 halves
+                // for PB Full. Click in upper half -> cap tool; lower half ->
+                // ramp tool. Half mode: any click -> ramp (only one tool).
+                wxPanel* w = m_ui[z].chips[idx];
+                const int slot = (w && ev.GetY() < w->GetClientSize().y / 2) ? 1 : 0;
+                pick_pathblend_tool(z, idx, slot);
+            }
+        });
+        rh->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, 4);
+
+        auto* badge = new wxStaticText(row, wxID_ANY, wxEmptyString,
+            wxDefaultPosition, wxSize(82, 20), wxALIGN_CENTRE_HORIZONTAL);
+        badge->SetForegroundColour(*wxWHITE);
+        rh->Add(badge, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+
+        auto* choice = new wxChoice(row, wxID_ANY);
+        choice->Bind(wxEVT_CHOICE, [this, z, idx](wxCommandEvent&) {
+            const int sel = m_ui[z].kind_choice[idx]->GetSelection();
+            if (sel >= 0 && sel < (int)m_ui[z].kindlist.size())
+                on_kind_change(z, idx, m_ui[z].kindlist[sel]);  // KindEntry
+        });
+        rh->Add(choice, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+
+        // pass height in mm (= ratio × layer_height). Editing one rescales the
+        // others so the stack always fills the layer.
+        rh->Add(new wxStaticText(row, wxID_ANY, _L("Z mm:")),
+                0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
+        auto* ratio = new wxSpinCtrlDouble(row, wxID_ANY, wxEmptyString,
+            wxDefaultPosition, wxSize(78, -1), wxSP_ARROW_KEYS,
+            0.0, 5.0, 0.1, 0.02);
+        ratio->SetDigits(2);
+        ratio->Bind(wxEVT_SPINCTRLDOUBLE,
+            [this, z, idx](wxSpinDoubleEvent&) { on_height_edit(z, idx); });
+        rh->Add(ratio, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+
+        // fill angle — per-pass, Solid only. Editable + mouse-wheel rotation.
+        auto* albl = new wxStaticText(row, wxID_ANY, _L("angle:"));
+        rh->Add(albl, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
+        auto* atxt = new wxTextCtrl(row, wxID_ANY, "-1",
+            wxDefaultPosition, wxSize(48, -1), wxTE_PROCESS_ENTER);
+        atxt->SetToolTip(_L("-1 = auto. Scroll the wheel over the box below to rotate."));
+        atxt->Bind(wxEVT_MOUSEWHEEL,
+            [this, z, idx](wxMouseEvent& e) { on_angle_wheel(z, idx, e); });
+        atxt->Bind(wxEVT_TEXT_ENTER,
+            [this, z, idx](wxCommandEvent&) { store_angle(z, idx); });
+        atxt->Bind(wxEVT_KILL_FOCUS,
+            [this, z, idx](wxFocusEvent& e) { store_angle(z, idx); e.Skip(); });
+        rh->Add(atxt, 0, wxALIGN_CENTER_VERTICAL);
+        rv->Add(rh, 0, wxEXPAND | wxALL, 3);
+
+        // preview box — Solid shows the fill-angle hatch (wheel rotates it here).
+        auto* prev = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(-1, 20));
+        prev->Bind(wxEVT_PAINT, [this, z, idx](wxPaintEvent&) { paint_preview(z, idx); });
+        prev->Bind(wxEVT_MOUSEWHEEL,
+            [this, z, idx](wxMouseEvent& e) { on_angle_wheel(z, idx, e); });
+        rv->Add(prev, 0, wxEXPAND | wxLEFT | wxRIGHT, 3);
+
+        // adv_btn: ColorMix -> open gradient dialog. PathBlend -> cycle ease_mode.
+        // (Fase 5 s73: PB popup deleted; ease cycles inline on this button.)
+        auto* adv = new wxButton(row, wxID_ANY, _L("Edit…"),
+                                 wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        adv->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
+            if (idx >= (int)m_stack[z].passes.size()) return;
+            const Kind k = m_stack[z].passes[idx].kind;
+            if (k == Kind::ColorMix) {
+                open_colormix_for(z, idx);
+            } else if (k == Kind::PathBlend) {
+                cycle_pathblend_ease(z, idx);
+            }
+        });
+        rv->Add(adv, 0, wxLEFT | wxTOP | wxBOTTOM, 3);
+
+        // min-layer warning — shown when this pass's height < 0.04 mm.
+        auto* minl = new wxStaticText(row, wxID_ANY, wxEmptyString);
+        minl->SetForegroundColour(wxColour(220, 150, 60));
+        rv->Add(minl, 0, wxLEFT | wxBOTTOM, 3);
+        minl->Hide();
+
+        row->SetSizer(rv);
+
+        u.row_panel[idx]   = row;
+        u.chips[idx]       = chip;
+        u.badge[idx]       = badge;
+        u.kind_choice[idx] = choice;
+        u.ratio_spin[idx]  = ratio;
+        u.angle_lbl[idx]   = albl;
+        u.angle_txt[idx]   = atxt;
+        u.preview[idx]     = prev;
+        u.adv_btn[idx]     = adv;
+        u.minlbl[idx]      = minl;
+        return row;
+    }
+
+    // ------------------------------------------------------------- interaction
+    void set_slot_count(int z, int n)
+    {
+        n = std::clamp(n, 1, Slic3r::SurfacePassStack::kMaxPasses);
+        auto& ps = m_stack[z].passes;
+
+        bool has_pb = false;
+        for (const auto& p : ps) if (p.kind == Kind::PathBlend) has_pb = true;
+        if (has_pb && n > 1)                       // PathBlend can't be multi-pass
+            for (auto& p : ps) p.kind = Kind::Solid;
+
+        if ((int)ps.size() < n) {
+            while ((int)ps.size() < n) {
+                Slic3r::SurfacePass p;
+                p.kind = Kind::Solid;
+                ps.push_back(p);
+            }
+        } else if ((int)ps.size() > n) {
+            ps.resize(n);
+        }
+        if (n == 1 && (ps[0].kind == Kind::Solid || ps[0].kind == Kind::None))
+            ps[0].kind = Kind::ColorMix;            // lone Solid/None is meaningless
+
+        const double even = 1.0 / n;
+        for (auto& p : ps) p.ratio = even;
+
+        if (m_ui[z].slots_rb) m_ui[z].slots_rb->SetSelection(n - 1);
+        refresh_rows(z);
+    }
+
+    void on_kind_change(int z, int idx, const ZoneUI::KindEntry& e)
+    {
+        if (e.kind == Kind::PathBlend) {
+            // NEOTKO_SANDWICH_TAG — Fase 5 s73: Half/Full distinction lives in
+            // the blob (pb.mode), not in the enum. Collapse the zone to a
+            // single PB pass and write the blob with the chosen mode.
+            // Deferred via CallAfter: refresh_rows() repopulates the wxChoice
+            // that is firing this very event — safer done after dispatch.
+            const int pb_mode = e.pb_mode;
+            CallAfter([this, z, pb_mode]() {
+                const char* zkey = (z == 0) ? "pathblend_top" : "pathblend_penu";
+                // Preserve other PB fields (floor/mid_end/tools/ease) when
+                // re-selecting; only override the mode.
+                Slic3r::PathBlendPassConfig pbc;
+                if (auto* o = m_config->option<ConfigOptionString>(zkey))
+                    pbc = Slic3r::PathBlendPassConfig::from_blob_json(o->value);
+                pbc.mode = static_cast<Slic3r::PathBlendPassConfig::Mode>(pb_mode);
+                // NEOTKO_SANDWICH_TAG — Fase 5 s73: pb_apply_constraints
+                // re-clamps floor/mid for the new mode (Half forces mid=H,
+                // Full caps mid at H-0.04 and ensures mid > floor strictly).
+                pb_apply_constraints(pbc, layer_height_mm());
+                pbc.sync_legacy_view();
+                const std::string blob = pbc.to_blob_json();
+                if (auto* o = m_config->option<ConfigOptionString>(zkey))
+                    o->value = blob;
+                m_on_change(zkey);
+
+                Slic3r::SurfacePass pb;
+                pb.kind = Kind::PathBlend; pb.ratio = 1.0;
+                pb.pathblend.present = true;
+                pb.pathblend.kv["blob"] = blob;
+                m_stack[z].passes.assign(1, pb);
+                if (m_ui[z].slots_rb) m_ui[z].slots_rb->SetSelection(0);
+                refresh_rows(z);
+            });
+            return;
+        }
+        // Non-PB: slot count unchanged → kind choice items stay valid; update
+        // only this row's widgets without repopulating the choice that just
+        // fired this event.
+        m_stack[z].passes[idx].kind = e.kind;
+        sync_row_widgets(z, idx);
+        if (GetSizer()) { GetSizer()->Layout(); Fit(); }
+    }
+
+    void pick_solid_tool(int z, int idx)
+    {
+        wxMenu menu;
+        const int n = std::max(1, (int)m_fcolors.size());
+        for (int t = 0; t < n; ++t)
+            menu.Append(TOOL_MENU_BASE + t, wxString::Format(_L("Tool T%d"), t + 1));
+        const int sel = GetPopupMenuSelectionFromUser(menu);
+        if (sel == wxID_NONE) return;
+        m_stack[z].passes[idx].solid_tool = sel - TOOL_MENU_BASE;
+        if (idx < (int)m_ui[z].chips.size())   m_ui[z].chips[idx]->Refresh();
+        if (idx < (int)m_ui[z].preview.size()) m_ui[z].preview[idx]->Refresh();
+    }
+
+    // Edited one pass's height (mm) → set its ratio, rescale the others so the
+    // stack still fills the layer, then re-sync every row.
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73: for PathBlend, the spinner means
+    // floor_mm (not ratio) — delegate to on_pathblend_floor_edit.
+    void on_height_edit(int z, int idx)
+    {
+        auto& ps = m_stack[z].passes;
+        const int n = (int)ps.size();
+        if (idx < 0 || idx >= n || !m_ui[z].ratio_spin[idx]) return;
+        if (ps[idx].kind == Kind::PathBlend) {
+            on_pathblend_floor_edit(z, idx);
+            return;
+        }
+        const double LH = layer_height_mm();
+        double newR = std::clamp(m_ui[z].ratio_spin[idx]->GetValue() / LH, 0.0, 1.0);
+
+        double othersOld = 0;
+        for (int j = 0; j < n; ++j)
+            if (j != idx) othersOld += std::max(0.0, ps[j].ratio);
+        ps[idx].ratio = newR;
+        if (n > 1) {
+            const double target = 1.0 - newR;
+            if (othersOld > 1e-6) {
+                const double k = target / othersOld;
+                for (int j = 0; j < n; ++j)
+                    if (j != idx) ps[j].ratio = std::max(0.0, ps[j].ratio) * k;
+            } else {
+                const double ev = target / (n - 1);
+                for (int j = 0; j < n; ++j) if (j != idx) ps[j].ratio = ev;
+            }
+        }
+        sync_heights(z);
+    }
+
+    // Push m_stack ratios back into every row's spin + warning + bar.
+    void sync_heights(int z)
+    {
+        const double LH = layer_height_mm();
+        const int n = (int)m_stack[z].passes.size();
+        for (int i = 0; i < n; ++i) {
+            if (m_ui[z].ratio_spin[i])
+                m_ui[z].ratio_spin[i]->SetValue(m_stack[z].passes[i].ratio * LH);
+            sync_row_widgets(z, i);
+        }
+        if (m_ui[z].ratio_bar) m_ui[z].ratio_bar->Refresh();
+        update_sum(z);
+        if (GetSizer()) { GetSizer()->Layout(); Fit(); }
+    }
+
+    void normalize(int z)
+    {
+        auto& ps = m_stack[z].passes;
+        double sum = 0;
+        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
+        if (sum < 1e-6) return;
+        for (auto& p : ps) p.ratio = std::max(0.0, p.ratio) / sum;
+        sync_heights(z);
+    }
+
+    void update_sum(int z)
+    {
+        ZoneUI& u = m_ui[z];
+        if (!u.sum_lbl) return;
+        const double LH = layer_height_mm();
+        const int n = (int)m_stack[z].passes.size();
+        double mm = 0;
+        for (int i = 0; i < n; ++i) mm += std::max(0.0, m_stack[z].passes[i].ratio) * LH;
+        u.sum_lbl->SetLabel(wxString::Format(_L("Layer height: %.2f mm   (Σ %.2f)"),
+                                             LH, mm));
+        const bool ok = std::abs(mm - LH) < 0.005;
+        u.sum_lbl->SetForegroundColour(ok ? wxColour(150, 150, 150)
+                                          : wxColour(220, 150, 60));
+        u.sum_lbl->Refresh();
+        if (u.ratio_bar) u.ratio_bar->Refresh();
+    }
+
+    void sync_zone_enabled(int z)
+    {
+        const bool on = m_stack[z].enabled;
+        if (m_ui[z].slots_rb)  m_ui[z].slots_rb->Enable(on);
+        if (m_ui[z].rows_host) m_ui[z].rows_host->Enable(on);
+        if (m_ui[z].norm_btn)  m_ui[z].norm_btn->Enable(on);
+        if (m_ui[z].perim_chk) m_ui[z].perim_chk->Enable(on);
+        if (m_ui[z].ratio_bar) { m_ui[z].ratio_bar->Enable(on); m_ui[z].ratio_bar->Refresh(); }
+    }
+
+    // ---------------------------------------------------- per-pass fill angle
+    // Each Solid pass owns its own SurfacePass.angle, edited inline on its row.
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73: for PathBlend, the same widget edits
+    // mid_end_mm (label "mid mm:" in sync_row_widgets). Delegate accordingly.
+    void store_angle(int z, int idx)
+    {
+        if (idx >= (int)m_stack[z].passes.size()) return;
+        Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+        if (!m_ui[z].angle_txt[idx]) return;
+        if (p.kind == Kind::PathBlend) {
+            on_pathblend_mid_edit(z, idx);
+            return;
+        }
+        if (p.kind != Kind::Solid) return;
+        long v = -1;
+        if (!m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false).ToLong(&v))
+            v = -1;
+        if (v < 0) v = -1; else if (v > 359) v = 359;
+        p.angle = (int)v;
+        m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", (int)v));
+        m_ui[z].preview[idx]->Refresh();
+    }
+
+    void on_angle_wheel(int z, int idx, wxMouseEvent& e)
+    {
+        if (idx >= (int)m_stack[z].passes.size()) { e.Skip(); return; }
+        Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+        if (p.kind == Kind::PathBlend) {
+            Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
+            // Half: mid is locked to H — wheel does nothing on this field.
+            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half) return;
+            // Full: nudge mid_end_mm by 0.01. pb_apply_constraints clamps to
+            // [floor + ε, H - 0.04].
+            const double step = (e.GetWheelRotation() > 0) ? 0.01 : -0.01;
+            pbc.mid_end_mm += (float)step;
+            write_pb_blob(z, idx, pbc);
+            return;
+        }
+        if (p.kind != Kind::Solid) { e.Skip(); return; }
+        const int step = (e.GetWheelRotation() > 0) ? 5 : -5;
+        int a = p.angle;
+        if (a < 0) a = (step > 0) ? 0 : -1;          // leave / stay at auto
+        else { a += step; if (a < 0) a = -1; else a %= 360; }
+        p.angle = a;
+        m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
+        m_ui[z].preview[idx]->Refresh();
+    }
+
+    // ---------------------------------------------------- PathBlend helpers
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73: inline PathBlend editing helpers.
+    // Read/write the per-zone PB blob (pathblend_top / pathblend_penu), update
+    // both the live config (so the engine sees it) and the SurfacePass kv
+    // (so the dialog round-trips on save).
+
+    Slic3r::PathBlendPassConfig read_pb_blob(int z) const
+    {
+        const char* zkey = (z == 0) ? "pathblend_top" : "pathblend_penu";
+        std::string blob;
+        if (auto* o = m_config->option<ConfigOptionString>(zkey)) blob = o->value;
+        return Slic3r::PathBlendPassConfig::from_blob_json(blob);
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73 UX hardening: enforce physical sanity
+    // on (floor_mm, mid_end_mm) before any write reaches the engine.
+    //   Half: mid_end_mm is the layer top; there is no cap. Forced mid = H.
+    //   Full: cap = top 0,04 mm of flow → mid_end ≤ H − 0,04. Ramp must exist
+    //         (mid > floor strictly); equal values would mean two flat layers,
+    //         which is the MultiPass use-case, not PathBlend.
+    static void pb_apply_constraints(Slic3r::PathBlendPassConfig& pbc, double H)
+    {
+        constexpr float kRampGap = 0.001f;  // strict mid > floor (anti-equality)
+        constexpr float kCapMin  = 0.04f;   // Full: cap flow minimum on top
+        H = std::max(0.04, H);
+        if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
+            const float floor_max = std::max(0.01f, (float)H - kCapMin - kRampGap);
+            pbc.floor_mm   = std::clamp(pbc.floor_mm, 0.01f, floor_max);
+            const float mid_min = pbc.floor_mm + kRampGap;
+            const float mid_max = std::max(mid_min, (float)H - kCapMin);
+            pbc.mid_end_mm = std::clamp(pbc.mid_end_mm, mid_min, mid_max);
+        } else {  // Half
+            const float floor_max = std::max(0.01f, (float)H - kRampGap);
+            pbc.floor_mm   = std::clamp(pbc.floor_mm, 0.01f, floor_max);
+            pbc.mid_end_mm = (float)H;  // ramp goes to layer top; no cap
+        }
+    }
+
+    void write_pb_blob(int z, int idx, const Slic3r::PathBlendPassConfig& pbc_in)
+    {
+        Slic3r::PathBlendPassConfig pbc = pbc_in;
+        pb_apply_constraints(pbc, layer_height_mm());
+        pbc.sync_legacy_view();
+        const std::string blob = pbc.to_blob_json();
+        const char* zkey = (z == 0) ? "pathblend_top" : "pathblend_penu";
+        if (auto* o = m_config->option<ConfigOptionString>(zkey))
+            o->value = blob;
+        m_on_change(zkey);
+        if (idx >= 0 && idx < (int)m_stack[z].passes.size()) {
+            Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+            p.pathblend.present = true;
+            p.pathblend.kv["blob"] = blob;
+        }
+        // Re-sync the row widgets so spinners / badge / preview reflect the change.
+        if (idx >= 0 && idx < (int)m_ui[z].ratio_spin.size() && m_ui[z].ratio_spin[idx])
+            m_ui[z].ratio_spin[idx]->SetValue(pbc.floor_mm);
+        if (idx >= 0 && idx < (int)m_ui[z].angle_txt.size() && m_ui[z].angle_txt[idx])
+            m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%.3f", pbc.mid_end_mm));
+        if (idx >= 0 && idx < (int)m_ui[z].chips.size())   m_ui[z].chips[idx]->Refresh();
+        if (idx >= 0 && idx < (int)m_ui[z].preview.size()) m_ui[z].preview[idx]->Refresh();
+        if (idx >= 0 && idx < (int)m_ui[z].badge.size())   sync_row_widgets(z, idx);
+    }
+
+    // The ratio_spin for a PB row carries floor_mm. pb_apply_constraints
+    // (in write_pb_blob) enforces the per-mode clamp and bumps mid_end if the
+    // new floor crosses it.
+    void on_pathblend_floor_edit(int z, int idx)
+    {
+        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
+        if (!m_ui[z].ratio_spin[idx]) return;
+        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
+        pbc.floor_mm = (float)m_ui[z].ratio_spin[idx]->GetValue();
+        // If user pushed floor above current mid, bump mid up so the ramp
+        // survives the strict mid>floor rule in pb_apply_constraints.
+        if (pbc.mid_end_mm <= pbc.floor_mm) pbc.mid_end_mm = pbc.floor_mm + 0.001f;
+        write_pb_blob(z, idx, pbc);
+    }
+
+    // The angle_txt for a PB row carries mid_end_mm. In Half mode the field is
+    // read-only (mid is forced to H) — ignore edits and just refresh.
+    void on_pathblend_mid_edit(int z, int idx)
+    {
+        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
+        if (!m_ui[z].angle_txt[idx]) return;
+        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
+        if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half) {
+            write_pb_blob(z, idx, pbc);  // re-syncs widget to forced mid=H
+            return;
+        }
+        double v = 0;
+        wxString txt = m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false);
+        if (!txt.ToDouble(&v)) v = pbc.mid_end_mm;
+        pbc.mid_end_mm = (float)v;
+        write_pb_blob(z, idx, pbc);
+    }
+
+    // adv_btn click on a PB row cycles the ease_mode (Linear -> EaseIn ->
+    // EaseOut -> EaseInOut -> Linear ...).
+    void cycle_pathblend_ease(int z, int idx)
+    {
+        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
+        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
+        pbc.ease_mode = (pbc.ease_mode + 1) % 4;
+        write_pb_blob(z, idx, pbc);
+    }
+
+    // chip click on a PB row picks the tool for slot 0 (ramp/bottom) or slot 1
+    // (cap/top). Only slot 0 is meaningful in Half mode.
+    void pick_pathblend_tool(int z, int idx, int slot)
+    {
+        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
+        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
+        if (slot == 1 && pbc.mode != Slic3r::PathBlendPassConfig::Mode::Full) return;
+        wxMenu menu;
+        const int n = std::max(1, (int)m_fcolors.size());
+        for (int t = 0; t < n; ++t)
+            menu.Append(TOOL_MENU_BASE + t, wxString::Format(_L("Tool T%d"), t + 1));
+        const int sel = GetPopupMenuSelectionFromUser(menu);
+        if (sel == wxID_NONE) return;
+        const int tool = sel - TOOL_MENU_BASE;
+        if (slot == 0) pbc.tool_bottom = tool;
+        else           pbc.tool_top    = tool;
+        write_pb_blob(z, idx, pbc);
+    }
+
+    // ColorMix gradient editor — reuses ColorMixPatternDialog, writing the
+    // per-zone legacy gradient keys (the engine reads the region config for a
+    // ColorMix pass; see REVAMP_SANDWICH §C Fase 2 limitation).
+    void open_colormix_for(int z, int idx)
+    {
+        std::string mixed_defs;
+        if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
+            mixed_defs = o->value;
+        const auto options =
+            Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
+        const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
+                                       : "interlayer_colormix_pattern_penultimate";
+        const std::string cur_pat = m_config->opt_string(pat_key);
+        bool use_virtual = false;
+        if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+            use_virtual = o->value;
+        ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat,
+                                  use_virtual, m_config, z);
+        if (dlg.ShowModal() != wxID_OK) return;
+
+        if (auto* o = m_config->option<ConfigOptionString>(pat_key))
+            o->value = dlg.get_pattern();
+        m_on_change(pat_key);
+        const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
+                                        : std::string("interlayer_colormix_");
+        auto wi = [&](const std::string& k, int v) {
+            if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
+            m_on_change(k);
+        };
+        auto wf = [&](const std::string& k, double v) {
+            if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
+            m_on_change(k);
+        };
+        wi(gp + "mode",              dlg.get_grad_mode());
+        wi(gp + "pct_a",             dlg.get_grad_pct_a());
+        wi(gp + "pct_b",             dlg.get_grad_pct_b());
+        wi(gp + "easing",            dlg.get_grad_easing());
+        wf(gp + "gamma",             dlg.get_grad_gamma());
+        wi(gp + "min_surface_lines", dlg.get_grad_min_lines());
+        wf(gp + "overlap",           dlg.get_grad_overlap());
+        {
+            const std::string k = gp + "invert";
+            if (auto* o = m_config->option<ConfigOptionBool>(k))
+                o->value = dlg.get_grad_invert();
+            m_on_change(k);
+        }
+        wi(gp + "band_count_a", dlg.get_grad_band_a());
+        wi(gp + "band_count_b", dlg.get_grad_band_b());
+        wi(gp + "band_count_c", dlg.get_grad_band_c());
+        wi(gp + "band_count_d", dlg.get_grad_band_d());
+        wi(gp + "tool_a",       dlg.get_tool_a());
+        wi(gp + "tool_b",       dlg.get_tool_b());
+        wi(gp + "tool_c",       dlg.get_tool_c());
+        wi(gp + "tool_d",       dlg.get_tool_d());
+        wi(gp + "angle",        dlg.get_grad_angle());
+        if (idx >= 0 && idx < (int)m_ui[z].chips.size()) {
+            m_ui[z].chips[idx]->Refresh();
+            m_ui[z].preview[idx]->Refresh();
+        }
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 5 s73: open_pathblend_for removed.
+    // Everything is edited inline on the row (kind selector Half/Full,
+    // floor_mm spinner, mid_end_mm field, ease cycler button, chip click
+    // tool pickers). The PathBlendDialog popup class is also unused (kept
+    // in the file as dead code; safe to delete in a follow-up cleanup).
+
+    // ---------------------------------------------------------------- painting
+    void paint_chip(int z, int idx)
+    {
+        wxPanel* w = m_ui[z].chips[idx];
+        if (!w) return;
+        wxPaintDC dc(w);
+        if (idx >= (int)m_stack[z].passes.size()) return;  // hidden row
+        const wxSize sz = w->GetClientSize();
+        dc.SetBrush(wxBrush(wxColour(45, 45, 45)));
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.DrawRectangle(0, 0, sz.x, sz.y);
+
+        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+
+        // NEOTKO_SANDWICH_TAG — Fase 5 s73: PathBlend chip = 2 stacked halves
+        // (top half = cap tool, bottom half = ramp tool) so the click handler
+        // can pick the slot from the Y coordinate. Half mode hides the cap
+        // half (only ramp visible).
+        if (p.kind == Kind::PathBlend) {
+            Slic3r::PathBlendPassConfig pbc;
+            const auto it_blob = p.pathblend.kv.find("blob");
+            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
+                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
+            const int half_h = sz.y / 2;
+            dc.SetPen(wxPen(wxColour(20, 20, 20)));
+            // Bottom half = ramp (always present).
+            dc.SetBrush(wxBrush(tool_colour(pbc.tool_bottom)));
+            dc.DrawRectangle(1, half_h, sz.x - 2, sz.y - half_h - 1);
+            // Top half = cap (Full only).
+            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
+                dc.SetBrush(wxBrush(tool_colour(pbc.tool_top)));
+                dc.DrawRectangle(1, 1, sz.x - 2, half_h - 1);
+            }
+            // Labels: T# in white on each half.
+            dc.SetTextForeground(*wxWHITE);
+            wxFont f = dc.GetFont(); f.SetPointSize(7); dc.SetFont(f);
+            dc.DrawText(wxString::Format("T%d", pbc.tool_bottom + 1), 3, half_h + 1);
+            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full)
+                dc.DrawText(wxString::Format("T%d", pbc.tool_top + 1), 3, 2);
+            return;
+        }
+
+        std::vector<int> tools;
+        if      (p.kind == Kind::Solid)     tools = { p.solid_tool };
+        else if (p.kind == Kind::ColorMix)  tools = colormix_tools(z);
+        if (tools.empty()) return;
+
+        const int cw = std::min(20, sz.x / (int)tools.size());
+        int x = 1;
+        for (size_t i = 0; i < tools.size() && x + cw <= sz.x; ++i) {
+            dc.SetBrush(wxBrush(tool_colour(tools[i])));
+            dc.SetPen(wxPen(wxColour(20, 20, 20)));
+            dc.DrawRectangle(x, 2, cw - 2, sz.y - 4);
+            if (p.kind == Kind::Solid) {
+                dc.SetTextForeground(*wxWHITE);
+                wxFont f = dc.GetFont(); f.SetPointSize(7); dc.SetFont(f);
+                dc.DrawText(wxString::Format("T%d", tools[i] + 1), x + 2, 4);
+            }
+            x += cw;
+        }
+    }
+
+    void paint_preview(int z, int idx)
+    {
+        wxPanel* w = m_ui[z].preview[idx];
+        if (!w) return;
+        wxPaintDC dc(w);
+        if (idx >= (int)m_stack[z].passes.size()) return;  // hidden row
+        const wxSize sz = w->GetClientSize();
+        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+        dc.SetPen(*wxTRANSPARENT_PEN);
+
+        if (p.kind == Kind::Solid) {
+            // tool colour + hatch lines showing the fill angle (auto = 45°)
+            const wxColour base = tool_colour(p.solid_tool);
+            dc.SetBrush(wxBrush(base));
+            dc.DrawRectangle(0, 0, sz.x, sz.y);
+            const bool   autom = (p.angle < 0);
+            const double PI    = 3.14159265358979323846;
+            const double rad   = (autom ? 45.0 : (double)p.angle) * PI / 180.0;
+            const double dx = std::cos(rad), dy = -std::sin(rad);
+            const double nx = -dy,           ny = dx;
+            const bool   light_bg = (base.Red() + base.Green() + base.Blue() > 384);
+            dc.SetPen(wxPen(light_bg ? wxColour(40, 40, 40)
+                                     : wxColour(225, 225, 225), 1));
+            const int cx = sz.x / 2, cy = sz.y / 2;
+            const int R  = sz.x + sz.y;
+            for (int off = -R; off <= R; off += 6) {
+                const double ox = cx + off * nx, oy = cy + off * ny;
+                dc.DrawLine((int)(ox - dx * R), (int)(oy - dy * R),
+                            (int)(ox + dx * R), (int)(oy + dy * R));
+            }
+        } else if (p.kind == Kind::ColorMix) {
+            // Banded strip from the zone's real gradient config (tools + band
+            // counts). Falls back to a smooth 2-tool gradient when no bands.
+            const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
+                                             : "interlayer_colormix_";
+            const char* tk[4] = { "tool_a", "tool_b", "tool_c", "tool_d" };
+            const char* bk[4] = { "band_count_a", "band_count_b",
+                                  "band_count_c", "band_count_d" };
+            std::vector<std::pair<int,int>> bands;   // (tool, count)
+            int total = 0;
+            for (int i = 0; i < 4; ++i) {
+                int tool = -1, cnt = 0;
+                if (auto* o = m_config->option<ConfigOptionInt>(pre + tk[i])) tool = o->value;
+                if (auto* o = m_config->option<ConfigOptionInt>(pre + bk[i])) cnt  = o->value;
+                if (tool >= 0 && cnt > 0) { bands.push_back({ tool, cnt }); total += cnt; }
+            }
+            if (bands.empty() || total <= 0) {
+                const std::vector<int> t = colormix_tools(z);
+                const wxColour a = tool_colour(t.front());
+                const wxColour b = tool_colour(t.back());
+                for (int x = 0; x < sz.x; ++x) {
+                    const double f = sz.x > 1 ? (double)x / (sz.x - 1) : 0.0;
+                    dc.SetPen(wxPen(wxColour(
+                        (int)(a.Red()   + f * (b.Red()   - a.Red())),
+                        (int)(a.Green() + f * (b.Green() - a.Green())),
+                        (int)(a.Blue()  + f * (b.Blue()  - a.Blue())))));
+                    dc.DrawLine(x, 0, x, sz.y);
+                }
+            } else {
+                int x = 0;
+                for (size_t i = 0; i < bands.size(); ++i) {
+                    const int bw = (i + 1 == bands.size())
+                        ? (sz.x - x)
+                        : (int)std::round((double)sz.x * bands[i].second / total);
+                    dc.SetBrush(wxBrush(tool_colour(bands[i].first)));
+                    dc.SetPen(*wxTRANSPARENT_PEN);
+                    dc.DrawRectangle(x, 0, bw, sz.y);
+                    x += bw;
+                }
+            }
+        } else if (p.kind == Kind::PathBlend) {
+            // NEOTKO_SANDWICH_TAG — Fase 5 s73: preview reflects the actual
+            // v=2 geometry (floor_mm, mid_end_mm, mode, ease_mode).
+            //   - Dark grey background = the whole layer [0..H].
+            //   - For Full: a flat cap rectangle from mid_end up to H, tool_top color.
+            //   - The ramp: filled polygon from (t=0, floor) up to (t=1, mid_end),
+            //     with vertices following the easing curve (visible steps).
+            //   - Half: no cap rectangle; the area above the ramp stays dark.
+            //   - Horizontal indicator lines at floor and mid_end.
+            //
+            // Coordinate convention: y=0 is top of the panel = nominal_z. y=sz.y
+            // is bottom = bottom_z. Z increases upward visually.
+            Slic3r::PathBlendPassConfig pbc;
+            const auto it_blob = p.pathblend.kv.find("blob");
+            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
+                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
+
+            const double H = std::max(0.04, layer_height_mm());
+            const double floor_frac   = std::clamp((double)pbc.floor_mm   / H, 0.0, 1.0);
+            const double mid_end_frac = std::clamp((double)pbc.mid_end_mm / H, 0.0, 1.0);
+            auto y_from_frac = [&](double f) -> int {
+                return (int)std::round((1.0 - f) * (double)sz.y);
+            };
+
+            // Background = dark grey (= unfilled / above-ramp area in Half).
+            dc.SetBrush(wxBrush(wxColour(40, 40, 40)));
+            dc.DrawRectangle(0, 0, sz.x, sz.y);
+
+            // Cap (Full only): flat band from mid_end up to nominal.
+            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
+                const int y_mid = y_from_frac(mid_end_frac);
+                const int y_top = y_from_frac(1.0);
+                if (y_mid > y_top) {
+                    dc.SetBrush(wxBrush(tool_colour(pbc.tool_top)));
+                    dc.DrawRectangle(0, y_top, sz.x, y_mid - y_top);
+                }
+            }
+
+            // Ramp: polygon following the easing curve from (t=0, floor) to (t=1, mid_end).
+            // Steps = 16 (enough to make the easing curve visible without aliasing).
+            const int steps = 16;
+            std::vector<wxPoint> poly;
+            poly.reserve(steps + 3);
+            poly.push_back(wxPoint(0, sz.y));      // bottom-left corner
+            for (int i = 0; i <= steps; ++i) {
+                const double t_raw = (double)i / (double)steps;
+                double t = t_raw;
+                switch (pbc.ease_mode) {
+                    case 1: t = t * t;                       break; // EaseIn
+                    case 2: t = 1.0 - (1.0 - t) * (1.0 - t); break; // EaseOut
+                    case 3: t = t * t * (3.0 - 2.0 * t);     break; // EaseInOut
+                    default: break;                                  // Linear
+                }
+                const double z_frac = floor_frac + t * (mid_end_frac - floor_frac);
+                const int x = (int)std::round(t_raw * (double)sz.x);
+                poly.push_back(wxPoint(x, y_from_frac(z_frac)));
+            }
+            poly.push_back(wxPoint(sz.x, sz.y));   // bottom-right corner
+            dc.SetBrush(wxBrush(tool_colour(pbc.tool_bottom)));
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.DrawPolygon((int)poly.size(), poly.data());
+
+            // Horizontal indicator lines + mm labels.
+            dc.SetPen(wxPen(wxColour(200, 200, 200), 1, wxPENSTYLE_DOT));
+            dc.SetTextForeground(wxColour(220, 220, 220));
+            wxFont f = dc.GetFont(); f.SetPointSize(6); dc.SetFont(f);
+            const int y_floor = y_from_frac(floor_frac);
+            dc.DrawLine(0, y_floor, sz.x, y_floor);
+            dc.DrawText(wxString::Format("%.2f", pbc.floor_mm), 2, std::min(y_floor, sz.y - 8));
+            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
+                const int y_mid = y_from_frac(mid_end_frac);
+                dc.DrawLine(0, y_mid, sz.x, y_mid);
+                dc.DrawText(wxString::Format("%.2f", pbc.mid_end_mm),
+                            2, std::max(y_mid - 8, 0));
+            }
+        } else { // None — diagonal grey hatch
+            dc.SetBrush(wxBrush(wxColour(70, 70, 70)));
+            dc.DrawRectangle(0, 0, sz.x, sz.y);
+            dc.SetPen(wxPen(wxColour(110, 110, 110)));
+            for (int x = -sz.y; x < sz.x; x += 7)
+                dc.DrawLine(x, sz.y, x + sz.y, 0);
+        }
+    }
+
+    // -------------------------------------------------- stacked Z-ratio bar
+    // Representative colour of a pass for the stacked bar.
+    wxColour seg_colour(int z, int idx) const
+    {
+        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
+        if (p.kind == Kind::Solid)     return tool_colour(p.solid_tool);
+        if (p.kind == Kind::ColorMix)  return tool_colour(colormix_tools(z).front());
+        if (p.kind == Kind::PathBlend) return tool_colour(pathblend_tools(z).front());
+        return wxColour(90, 90, 90);                       // None
+    }
+
+    void paint_ratio_bar(int z)
+    {
+        wxPanel* w = m_ui[z].ratio_bar;
+        if (!w) return;
+        wxPaintDC dc(w);
+        const wxSize sz = w->GetClientSize();
+        dc.SetBrush(wxBrush(wxColour(30, 30, 30)));
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.DrawRectangle(0, 0, sz.x, sz.y);
+
+        const auto& ps = m_stack[z].passes;
+        const int n = (int)ps.size();
+        if (n == 0 || !m_stack[z].enabled) return;
+        double sum = 0;
+        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
+        if (sum < 1e-6) sum = 1.0;
+
+        wxFont f = dc.GetFont(); f.SetPointSize(7); dc.SetFont(f);
+        double acc = 0.0;
+        for (int dp = 0; dp < n; ++dp) {            // dp 0 = top of stack
+            const int idx  = n - 1 - dp;
+            const double fr = std::max(0.0, ps[idx].ratio) / sum;
+            const int y0 = (int)std::round(acc * sz.y);
+            acc += fr;
+            const int y1 = (dp == n - 1) ? sz.y : (int)std::round(acc * sz.y);
+            dc.SetBrush(wxBrush(seg_colour(z, idx)));
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.DrawRectangle(0, y0, sz.x, y1 - y0);
+            dc.SetTextForeground(*wxWHITE);
+            wxFont sf = dc.GetFont(); sf.SetPointSize(7); dc.SetFont(sf);
+            dc.DrawText(wxString::Format("%.2f", fr * layer_height_mm()),
+                        2, y0 + 2);
+            if (dp != n - 1) {                      // draggable divider
+                dc.SetPen(wxPen(wxColour(235, 235, 235), 2));
+                dc.DrawLine(0, y1, sz.x, y1);
+            }
+        }
+    }
+
+    void ratio_bar_down(int z, wxMouseEvent& e)
+    {
+        const auto& ps = m_stack[z].passes;
+        const int n = (int)ps.size();
+        if (n < 2 || !m_stack[z].enabled) return;
+        const int h = m_ui[z].ratio_bar->GetClientSize().y;
+        double sum = 0;
+        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
+        if (sum < 1e-6 || h <= 0) return;
+        double acc = 0;
+        for (int k = 0; k < n - 1; ++k) {           // boundary k = below display pos k
+            acc += std::max(0.0, ps[n - 1 - k].ratio) / sum;
+            if (std::abs(e.GetY() - (int)std::round(acc * h)) <= 6) {
+                m_drag_zone = z; m_drag_bound = k;
+                m_ui[z].ratio_bar->CaptureMouse();
+                return;
+            }
+        }
+    }
+
+    void ratio_bar_motion(int z, wxMouseEvent& e)
+    {
+        if (m_drag_zone != z || m_drag_bound < 0 || !e.Dragging()) return;
+        auto& ps = m_stack[z].passes;
+        const int n = (int)ps.size();
+        const int k = m_drag_bound;
+        if (k < 0 || k >= n - 1) return;
+        const int h = m_ui[z].ratio_bar->GetClientSize().y;
+        if (h <= 0) return;
+        double sum = 0;
+        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
+        if (sum < 1e-6) return;
+
+        const int idxA = n - 1 - k;                 // pass above the divider
+        const int idxB = n - 2 - k;                 // pass below
+        double topAcc = 0;                          // fraction above pass A
+        for (int kk = 0; kk < k; ++kk)
+            topAcc += std::max(0.0, ps[n - 1 - kk].ratio) / sum;
+        const double comb = (std::max(0.0, ps[idxA].ratio)
+                           + std::max(0.0, ps[idxB].ratio)) / sum;
+        // minimum drag fraction = 0.04 mm so the bar can't create a sub-min pass.
+        const double minF = std::min(0.45, kMinPassMM / layer_height_mm());
+        double aFrac = (double)e.GetY() / h - topAcc;
+        aFrac = std::clamp(aFrac, minF, std::max(minF, comb - minF));
+        ps[idxA].ratio = aFrac * sum;               // keeps Σ unchanged
+        ps[idxB].ratio = (comb - aFrac) * sum;
+
+        const double LH = layer_height_mm();
+        if (m_ui[z].ratio_spin[idxA])
+            m_ui[z].ratio_spin[idxA]->SetValue(ps[idxA].ratio / sum * LH);
+        if (m_ui[z].ratio_spin[idxB])
+            m_ui[z].ratio_spin[idxB]->SetValue(ps[idxB].ratio / sum * LH);
+        sync_row_widgets(z, idxA);
+        sync_row_widgets(z, idxB);
+        m_ui[z].ratio_bar->Refresh();
+        update_sum(z);
+    }
+
+    void ratio_bar_up(int z, wxMouseEvent&)
+    {
+        if (m_drag_zone == z && m_ui[z].ratio_bar
+            && m_ui[z].ratio_bar->HasCapture())
+            m_ui[z].ratio_bar->ReleaseMouse();
+        m_drag_zone = -1; m_drag_bound = -1;
+    }
+
+    // ----------------------------------------------------------------- commit
+    void commit()
+    {
+        // flush any angle field still being typed into its pass
+        for (int z = 0; z < 2; ++z)
+            for (int idx = 0; idx < (int)m_stack[z].passes.size(); ++idx)
+                if (m_stack[z].passes[idx].kind == Kind::Solid)
+                    store_angle(z, idx);
+        const double LH = layer_height_mm();
+        for (int z = 0; z < 2; ++z) {
+            Slic3r::SurfacePassStack& st = m_stack[z];
+            // read heights (mm) from spins back into ratios
+            for (size_t i = 0; i < m_ui[z].ratio_spin.size() &&
+                               i < st.passes.size(); ++i)
+                st.passes[i].ratio = m_ui[z].ratio_spin[i]->GetValue() / LH;
+
+            // fold sub-0.04 mm passes into the rest: set them to ratio 0 (the
+            // engine skips a 0-ratio pass cleanly, no Z gap) and redistribute
+            // their share to the passes that ARE ≥ 0.04 mm.
+            double lost = 0, keepSum = 0;
+            for (auto& p : st.passes) {
+                if (p.ratio * LH < kMinPassMM - 1e-9) { lost += std::max(0.0, p.ratio); p.ratio = 0.0; }
+                else keepSum += std::max(0.0, p.ratio);
+            }
+            if (lost > 0 && keepSum > 1e-6)
+                for (auto& p : st.passes)
+                    if (p.ratio > 0) p.ratio += lost * (p.ratio / keepSum);
+
+            // normalize to Σ = 1.0
+            double sum = 0;
+            for (const auto& p : st.passes) sum += std::max(0.0, p.ratio);
+            if (sum > 1e-6)
+                for (auto& p : st.passes) p.ratio = std::max(0.0, p.ratio) / sum;
+            else if (!st.passes.empty())
+                for (auto& p : st.passes) p.ratio = 1.0 / st.passes.size();
+
+            const char* key = (z == 0) ? "neotko_surface_passes_top"
+                                       : "neotko_surface_passes_penu";
+            const std::string json = st.to_json();   // "" when disabled/empty
+            if (auto* o = m_config->option<ConfigOptionString>(key))
+                o->value = json;
+            m_on_change(key);
+        }
+
+        // Sync the legacy enable gates the engine still needs:
+        //  - a ColorMix pass needs interlayer_colormix_enabled (bucketing gate)
+        //  - a PathBlend pass routes through the legacy GCode engine
+        // Disabled zones also clear their MultiPass enable so a stale legacy key
+        // can't resurrect the zone via synthesize_from_legacy().
+        auto has = [&](int z, Kind k) {
+            if (!m_stack[z].enabled) return false;
+            for (const auto& p : m_stack[z].passes)
+                if (p.kind == k) return true;
+            return false;
+        };
+        const bool cm_t = has(0, Kind::ColorMix),  cm_p = has(1, Kind::ColorMix);
+        const bool pb_t = has(0, Kind::PathBlend), pb_p = has(1, Kind::PathBlend);
+        auto wb = [&](const char* k, bool v) {
+            if (auto* o = m_config->option<ConfigOptionBool>(k)) o->value = v;
+            m_on_change(k);
+        };
+        auto wi = [&](const char* k, int v) {
+            if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
+            m_on_change(k);
+        };
+        wb("interlayer_colormix_enabled", cm_t || cm_p);
+        if (cm_t || cm_p)
+            wi("interlayer_colormix_surface", (cm_t && cm_p) ? 0 : (cm_t ? 1 : 2));
+        wb("multipass_path_gradient", pb_t || pb_p);
+        if (pb_t || pb_p)
+            wi("pathblend_surface", (pb_t && pb_p) ? 0 : (pb_t ? 1 : 2));
+        if (!m_stack[0].enabled) wb("multipass_enabled", false);
+        if (!m_stack[1].enabled) wb("penultimate_multipass_enabled", false);
+
+        // Perimeter override: FASE 2 reads the legacy region key
+        // `multipass_perimeter_override` (shared, not the per-stack blob flag),
+        // so mirror it here or the Sandwich checkbox does nothing.
+        const bool perim = (m_stack[0].enabled && m_stack[0].perimeter_override)
+                        || (m_stack[1].enabled && m_stack[1].perimeter_override);
+        wb("multipass_perimeter_override", perim);
+    }
+};
+// NEOTKO_SANDWICH_TAG_END
 
 } // anonymous namespace
 // NEOTKO_COLORMIX_TAG_END
@@ -7125,6 +8540,23 @@ void TabPrint::build()
                 });
                 auto* sz = new wxBoxSizer(wxHORIZONTAL);
                 sz->Add(btn, 0, wxALL, 3);
+                // NEOTKO_SANDWICH_TAG — Fase 3: launcher for the pass-stack
+                // editor, additive next to the legacy dialog button.
+                auto* sw_btn = new wxButton(parent, wxID_ANY,
+                                            _L("Sandwich editor…"),
+                                            wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+                sw_btn->SetToolTip(_L("Edit the per-layer effect stack (Top and "
+                                      "Penultimate) as a sandwich of passes."));
+                sw_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                    SandwichDialog dlg(
+                        wxGetApp().mainframe,
+                        m_config,
+                        [this](const std::string& key) {
+                            on_value_change(key, boost::any());
+                        });
+                    dlg.ShowModal();
+                });
+                sz->Add(sw_btn, 0, wxALL, 3);
                 return sz;
             });
         // NEOTKO_COLORMIX_TAG — s60: numeric gradient controls live INSIDE the

@@ -3110,8 +3110,10 @@ ModelVolumeType type_from_string(const std::string &s)
                     stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"name\" " << VALUE_ATTR << "=\"" << xml_escape(obj->name) << "\"/>\n";
 
                 // stores object's config data
+                // NEOTKO_SANDWICH_TAG — xml_escape the value (see bbs_3mf.cpp):
+                // coString keys can hold JSON; a raw " breaks the XML attribute.
                 for (const std::string& key : obj->config.keys()) {
-                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.opt_serialize(key) << "\"/>\n";
+                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape(obj->config.opt_serialize(key)) << "\"/>\n";
                 }
                 // NEOTKO_LIBRE_TAG — Temporal Link persistence
                 if (obj->link_group_id > 0)

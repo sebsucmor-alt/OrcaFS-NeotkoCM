@@ -1730,6 +1730,17 @@ bool SurfaceColorMix::painted_perim_override_from_profile(
     return it->second == "1" || it->second == "true";
 }
 
+// NEOTKO_SANDWICH_TAG — Fase 5 (s72): forward declaration of the legacy→v=2
+// converter used below. The full definition lives next to the blob round-trip
+// helpers (PathBlendPassConfig::from_blob_json).
+static PathBlendPassConfig pathblend_convert_legacy_to_v2(int   legacy_num_passes,
+                                                          int   legacy_tool_first,
+                                                          int   legacy_tool_last,
+                                                          float legacy_min_ratio,
+                                                          float legacy_max_ratio,
+                                                          int   legacy_ease_mode,
+                                                          int   legacy_fill_angle);
+
 PathBlendPassConfig SurfaceColorMix::pathblend_from_profile_payload(
     const SurfaceEffectPayload& payload)
 {
@@ -1748,22 +1759,27 @@ PathBlendPassConfig SurfaceColorMix::pathblend_from_profile_payload(
         return it->second == "1" || it->second == "true";
     };
 
-    c.enabled         = gb("multipass_path_gradient", false);
-    c.surface         = gi("pathblend_surface", 0);
-    c.num_passes      = std::clamp(gi("pathblend_num_passes", 2), 1, 4);
-    c.tool[0]         = gi("pathblend_tool_1", 0);
-    c.tool[1]         = gi("pathblend_tool_2", 1);
-    c.tool[2]         = gi("pathblend_tool_3", 2);
-    c.tool[3]         = gi("pathblend_tool_4", 3);
-    c.layer_ratio[0]  = static_cast<float>(gf("pathblend_layer_ratio_1", 1.0));
-    c.layer_ratio[1]  = static_cast<float>(gf("pathblend_layer_ratio_2", 1.0));
-    c.layer_ratio[2]  = static_cast<float>(gf("pathblend_layer_ratio_3", 1.0));
-    c.layer_ratio[3]  = static_cast<float>(gf("pathblend_layer_ratio_4", 1.0));
-    c.min_ratio       = static_cast<float>(std::clamp(gf("pathblend_min_ratio", 0.05), 0.01, 0.49));
-    c.max_ratio       = static_cast<float>(std::clamp(gf("pathblend_max_ratio", 1.0),  0.51, 1.0));
-    c.ease_mode       = std::clamp(gi("pathblend_ease_mode", 0), 0, 3);
-    c.invert_gradient = gb("pathblend_invert_gradient", true);
-    c.fill_angle      = gi("pathblend_fill_angle", -1);
+    // NEOTKO_SANDWICH_TAG — Fase 5 (s72): convert the painter profile's legacy
+    // PathBlend payload (`pathblend_min_ratio` / `pathblend_max_ratio` / etc.)
+    // to the new geometry model. The painter (Fase G) still writes the legacy
+    // keys into `SurfaceEffectPayload.kv` so painted profiles saved before s72
+    // keep working; the read side normalises everything to the v=2 in-memory
+    // representation here.
+    const int legacy_np = std::clamp(gi("pathblend_num_passes", 2), 1, 4);
+    const int legacy_t0 = gi("pathblend_tool_1", 0);
+    const int legacy_tlast = (legacy_np >= 4) ? gi("pathblend_tool_4", 3)
+                          : (legacy_np == 3) ? gi("pathblend_tool_3", 2)
+                          : (legacy_np == 2) ? gi("pathblend_tool_2", 1)
+                                              : legacy_t0;
+    c = pathblend_convert_legacy_to_v2(
+        legacy_np, legacy_t0, legacy_tlast,
+        static_cast<float>(std::clamp(gf("pathblend_min_ratio", 0.05), 0.01, 0.49)),
+        static_cast<float>(std::clamp(gf("pathblend_max_ratio", 1.0),  0.51, 1.0)),
+        std::clamp(gi("pathblend_ease_mode", 0), 0, 3),
+        gi("pathblend_fill_angle", -1));
+    c.enabled = gb("multipass_path_gradient", false);
+    c.surface = gi("pathblend_surface", 0);
+    c.sync_legacy_view();
     return c;
 }
 
@@ -2005,105 +2021,144 @@ std::string NeoweaveEngine::restore_z(
 
 // NEOTKO_PATHBLEND_TAG_START — PathBlendPassConfig implementation
 
-double PathBlendPassConfig::ratio_at(int p, double t) const
+// NEOTKO_SANDWICH_TAG — Fase 5 (s72): sync the legacy view (num_passes/tool[])
+// from the geometry fields (mode/tool_bottom/tool_top). Called automatically
+// by from_region_config / from_blob_json after writing the geometry fields,
+// so existing iterating callers (GCode COLORMIX_HOOK pre-seed, ToolOrdering,
+// Fill.cpp PB block) keep reading the right tools without per-call awareness
+// of Half vs Full.
+void PathBlendPassConfig::sync_legacy_view()
 {
-    if (p < 0 || p >= num_passes) return 0.0;
-
-    // Apply easing curve to t before any ratio calculation.
-    // Pass 1 is always the exact complement of pass 0, so easing is mirrored automatically.
-    // ease_mode: 0=Linear (no-op), 1=EaseIn (t²), 2=EaseOut (1-(1-t)²), 3=EaseInOut (smoothstep).
-    switch (ease_mode) {
-        case 1: t = t * t;                    break;  // Ease In
-        case 2: t = 1.0 - (1.0-t)*(1.0-t);   break;  // Ease Out
-        case 3: t = t * t * (3.0 - 2.0 * t); break;  // Ease In/Out (smoothstep)
-        default: break;                                // Linear: t unchanged
+    if (mode == Mode::Full) {
+        num_passes = 2;
+        tool[0] = tool_bottom;
+        tool[1] = tool_top;
+    } else { // Half
+        num_passes = 1;
+        tool[0] = tool_bottom;
+        tool[1] = -1;
     }
-
-    const double mn = static_cast<double>(min_ratio);
-    const double mx = static_cast<double>(max_ratio);  // cap for dominant pass at peak
-    double r = 0.0;
-
-    if (num_passes == 1) {
-        // Single-pass: T2 fades IN from min_ratio (t=0, base shows through) to max_ratio (t=1).
-        // Combined with Z staircase → visual blend from base color into T2 across the surface.
-        r = mn + (mx - mn) * t;
-    } else if (num_passes == 2) {
-        // Pass 0 (T0, dominant at t=0): clamped to [min_ratio, max_ratio].
-        // Pass 1 (T1): exact complement of actual pass 0 → flow_0 + flow_1 == 1.0 always.
-        //
-        // NEOTKO_FIX: pass 1 must mirror the *real* pass 0 output (after clamp),
-        // not raw (1-t), to preserve the sum==1.0 invariant when min/max are active.
-        if (p == 0) {
-            r = std::clamp(1.0 - t, mn, mx);
-        } else {
-            r = 1.0 - std::clamp(1.0 - t, mn, mx);
-        }
-        return r;  // early-return: clamp already applied, don't double-apply below
-    } else if (num_passes == 3) {
-        if      (p == 0) r = std::max(0.0, 1.0 - 2.0 * t);
-        else if (p == 1) r = 1.0 - std::abs(2.0 * t - 1.0);
-        else             r = std::max(0.0, 2.0 * t - 1.0);
-    } else { // 4 passes — linear-hat, peaks at t = 0, 0.333, 0.667, 1.0
-        const double step   = 1.0 / 3.0;
-        const double center = p * step;
-        r = std::max(0.0, 1.0 - std::abs(t - center) / step);
-    }
-    // For 3/4-pass: floor pass 0 at min_ratio, cap last pass at max_ratio.
-    // Not applied to 2-pass (handled above with early return).
-    if (p == 0)              r = std::max(mn, r);
-    if (p == num_passes - 1) r = std::min(mx, r);
-    return r;
+    tool[2] = -1;
+    tool[3] = -1;
 }
 
 // NEOTKO_PATHBLEND_TAG — s69 miniblob: JSON round-trip for the per-zone blob.
 // The blob carries only the per-zone settings; enable + surface are the shared
 // scope keys, applied by from_region_config() from the live config.
+// NEOTKO_SANDWICH_TAG — Fase 5 (s72): blob v=2 schema. The Sandwich UX edits
+// the new geometry fields directly (mode/floor_mm/mid_end_mm/tool_bottom/
+// tool_top); the legacy view is synced for downstream iterators.
 std::string PathBlendPassConfig::to_blob_json() const
 {
     nlohmann::json j;
-    j["num_passes"]      = num_passes;
-    j["tool"]            = nlohmann::json::array({ tool[0], tool[1], tool[2], tool[3] });
-    j["layer_ratio"]     = nlohmann::json::array({ layer_ratio[0], layer_ratio[1],
-                                                   layer_ratio[2], layer_ratio[3] });
-    j["min_ratio"]       = min_ratio;
-    j["max_ratio"]       = max_ratio;
-    j["ease_mode"]       = ease_mode;
-    j["invert_gradient"] = invert_gradient;
-    j["fill_angle"]      = fill_angle;
+    j["v"]           = 2;
+    j["mode"]        = (mode == Mode::Full) ? "full" : "half";
+    j["floor_mm"]    = floor_mm;
+    j["mid_end_mm"]  = mid_end_mm;
+    j["tool_bottom"] = tool_bottom;
+    j["tool_top"]    = tool_top;
+    j["ease_mode"]   = ease_mode;
+    j["fill_angle"]  = fill_angle;
     return j.dump();
+}
+
+// Helper — convert a legacy (v=1 / flat-keys) representation to the new
+// geometry model. Lossy: 3/4-pass PathBlend collapses to Full keeping only
+// tool[0] and tool[num_passes-1]; min_ratio/max_ratio map to floor/mid_end
+// fractions of the unit interval and the dialog will clamp once layer_height
+// is known. Pre-release, accepted by the user as a one-way conversion.
+static PathBlendPassConfig pathblend_convert_legacy_to_v2(int   legacy_num_passes,
+                                                          int   legacy_tool_first,
+                                                          int   legacy_tool_last,
+                                                          float legacy_min_ratio,
+                                                          float legacy_max_ratio,
+                                                          int   legacy_ease_mode,
+                                                          int   legacy_fill_angle)
+{
+    PathBlendPassConfig c;
+    c.mode        = (legacy_num_passes <= 1)
+                  ? PathBlendPassConfig::Mode::Half
+                  : PathBlendPassConfig::Mode::Full;
+    // min_ratio / max_ratio are fractions of layer_height in the legacy model.
+    // The dialog re-clamps once H is known; here we just translate the numbers
+    // so a 0.20mm-layer preset comes through with sensible defaults.
+    const double H_default = 0.20; // assumed when no layer context yet
+    c.floor_mm    = static_cast<float>(std::clamp(double(legacy_min_ratio) * H_default,
+                                                  0.01, H_default - 0.04));
+    c.mid_end_mm  = static_cast<float>(std::clamp(double(legacy_max_ratio) * H_default,
+                                                  double(c.floor_mm), H_default - 0.04));
+    if (c.mid_end_mm < c.floor_mm) c.mid_end_mm = c.floor_mm;
+    c.tool_bottom = legacy_tool_first;
+    c.tool_top    = (c.mode == PathBlendPassConfig::Mode::Full) ? legacy_tool_last : -1;
+    c.ease_mode   = std::clamp(legacy_ease_mode, 0, 3);
+    c.fill_angle  = legacy_fill_angle;
+    c.sync_legacy_view();
+    return c;
 }
 
 PathBlendPassConfig PathBlendPassConfig::from_blob_json(const std::string& blob)
 {
-    PathBlendPassConfig c;  // defaults
+    PathBlendPassConfig c;  // defaults: Full, floor=0.01, mid_end=0.05
+    c.sync_legacy_view();
     if (blob.empty()) return c;
     try {
         nlohmann::json j = nlohmann::json::parse(blob);
-        if (j.is_object()) {
-            auto gi = [&](const char* k, int def) {
-                return (j.contains(k) && j[k].is_number()) ? j[k].get<int>() : def; };
-            auto gf = [&](const char* k, double def) {
-                return (j.contains(k) && j[k].is_number()) ? j[k].get<double>() : def; };
-            auto gbool = [&](const char* k, bool def) {
-                return (j.contains(k) && j[k].is_boolean()) ? j[k].get<bool>() : def; };
-            c.num_passes = std::clamp(gi("num_passes", 2), 1, 4);
-            if (j.contains("tool") && j["tool"].is_array())
-                for (int i = 0; i < 4 && i < (int) j["tool"].size(); ++i)
-                    if (j["tool"][i].is_number()) c.tool[i] = j["tool"][i].get<int>();
-            if (j.contains("layer_ratio") && j["layer_ratio"].is_array())
-                for (int i = 0; i < 4 && i < (int) j["layer_ratio"].size(); ++i)
-                    if (j["layer_ratio"][i].is_number())
-                        c.layer_ratio[i] = static_cast<float>(j["layer_ratio"][i].get<double>());
-            c.min_ratio       = static_cast<float>(std::clamp(gf("min_ratio", 0.05), 0.01, 0.49));
-            c.max_ratio       = static_cast<float>(std::clamp(gf("max_ratio", 1.0),  0.51, 1.0));
-            c.ease_mode       = std::clamp(gi("ease_mode", 0), 0, 3);
-            c.invert_gradient = gbool("invert_gradient", true);
-            c.fill_angle      = gi("fill_angle", -1);
+        if (!j.is_object()) return c;
+
+        auto gi = [&](const char* k, int def) {
+            return (j.contains(k) && j[k].is_number()) ? j[k].get<int>() : def; };
+        auto gf = [&](const char* k, double def) {
+            return (j.contains(k) && j[k].is_number()) ? j[k].get<double>() : def; };
+
+        const int  version  = gi("v", 1); // missing "v" → legacy v=1
+        const bool is_v2 = (version >= 2)
+                        || j.contains("mode")
+                        || j.contains("floor_mm")
+                        || j.contains("mid_end_mm");
+
+        if (is_v2) {
+            // v=2: read geometry fields directly.
+            std::string mode_str = (j.contains("mode") && j["mode"].is_string())
+                                   ? j["mode"].get<std::string>() : "full";
+            c.mode        = (mode_str == "half") ? Mode::Half : Mode::Full;
+            c.floor_mm    = static_cast<float>(gf("floor_mm",   0.01));
+            c.mid_end_mm  = static_cast<float>(gf("mid_end_mm", 0.05));
+            c.tool_bottom = gi("tool_bottom", 0);
+            c.tool_top    = gi("tool_top",    1);
+            c.ease_mode   = std::clamp(gi("ease_mode", 0), 0, 3);
+            c.fill_angle  = gi("fill_angle", -1);
+            // Hard constraint: floor >= 0.01.
+            if (c.floor_mm   < 0.01f)         c.floor_mm   = 0.01f;
+            if (c.mid_end_mm < c.floor_mm)    c.mid_end_mm = c.floor_mm;
+        } else {
+            // v=1 legacy: num_passes / tool[] / layer_ratio / min/max / invert.
+            int   legacy_np   = std::clamp(gi("num_passes", 2), 1, 4);
+            int   legacy_t0   = 0;
+            int   legacy_tlast = 1;
+            if (j.contains("tool") && j["tool"].is_array()) {
+                if ((int)j["tool"].size() > 0 && j["tool"][0].is_number())
+                    legacy_t0 = j["tool"][0].get<int>();
+                if ((int)j["tool"].size() > std::max(0, legacy_np - 1) &&
+                    j["tool"][legacy_np - 1].is_number())
+                    legacy_tlast = j["tool"][legacy_np - 1].get<int>();
+            }
+            const float legacy_min   = static_cast<float>(
+                std::clamp(gf("min_ratio", 0.05), 0.01, 0.49));
+            const float legacy_max   = static_cast<float>(
+                std::clamp(gf("max_ratio", 1.0),  0.51, 1.0));
+            const int   legacy_ease  = std::clamp(gi("ease_mode", 0), 0, 3);
+            const int   legacy_angle = gi("fill_angle", -1);
+            c = pathblend_convert_legacy_to_v2(legacy_np, legacy_t0, legacy_tlast,
+                                               legacy_min, legacy_max,
+                                               legacy_ease, legacy_angle);
+            // (sync already done inside the helper)
+            return c;
         }
     } catch (const std::exception& e) {
         NEOTKO_LOG(MULTIPASS, "PB_BLOB parse error: " << e.what()
             << " — using PathBlend defaults");
     }
+    c.sync_legacy_view();
     return c;
 }
 
@@ -2112,7 +2167,11 @@ PathBlendPassConfig PathBlendPassConfig::from_region_config(const PrintRegionCon
 {
     // NEOTKO_PATHBLEND_TAG — s69 miniblob: a non-empty per-zone JSON blob
     // overrides the flat pathblend_* keys, so Top and Penultimate PathBlend
-    // hold independent settings.  Empty blob → legacy flat-key path.
+    // hold independent settings.
+    //
+    // NEOTKO_SANDWICH_TAG — Fase 5 (s72): from_blob_json transparently handles
+    // both v=2 (new Fase 5 schema) and v=1 (s69 legacy) blobs. When the blob
+    // is empty, the flat pathblend_* keys are read once and converted to v=2.
     const std::string& blob = (role == erPenultimateInfill)
         ? cfg.pathblend_penu.value
         : cfg.pathblend_top.value;
@@ -2120,31 +2179,314 @@ PathBlendPassConfig PathBlendPassConfig::from_region_config(const PrintRegionCon
     if (!blob.empty()) {
         c = from_blob_json(blob);
     } else {
-        // Legacy / back-compat: flat pathblend_* keys (original behaviour).
-        c.num_passes     = std::clamp(cfg.pathblend_num_passes.value, 1, 4);
-        c.tool[0]        = cfg.pathblend_tool_1.value;
-        c.tool[1]        = cfg.pathblend_tool_2.value;
-        c.tool[2]        = cfg.pathblend_tool_3.value;
-        c.tool[3]        = cfg.pathblend_tool_4.value;
-        c.layer_ratio[0] = static_cast<float>(cfg.pathblend_layer_ratio_1.value);
-        c.layer_ratio[1] = static_cast<float>(cfg.pathblend_layer_ratio_2.value);
-        c.layer_ratio[2] = static_cast<float>(cfg.pathblend_layer_ratio_3.value);
-        c.layer_ratio[3] = static_cast<float>(cfg.pathblend_layer_ratio_4.value);
-        c.min_ratio      = static_cast<float>(
-            std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.49));
-        c.max_ratio      = static_cast<float>(
-            std::clamp(cfg.pathblend_max_ratio.value, 0.51, 1.0));
-        c.ease_mode      = std::clamp(cfg.pathblend_ease_mode.value, 0, 3);
-        c.invert_gradient = cfg.pathblend_invert_gradient.value;
-        c.fill_angle     = cfg.pathblend_fill_angle.value;
+        // Legacy fallback: flat pathblend_* keys → convert to v=2 once.
+        c = pathblend_convert_legacy_to_v2(
+            std::clamp(cfg.pathblend_num_passes.value, 1, 4),
+            cfg.pathblend_tool_1.value,
+            // Pick tool[num_passes-1] as the cap tool.
+            (cfg.pathblend_num_passes.value >= 4) ? cfg.pathblend_tool_4.value :
+            (cfg.pathblend_num_passes.value == 3) ? cfg.pathblend_tool_3.value :
+            (cfg.pathblend_num_passes.value == 2) ? cfg.pathblend_tool_2.value :
+                                                    cfg.pathblend_tool_1.value,
+            static_cast<float>(std::clamp(cfg.pathblend_min_ratio.value, 0.01, 0.49)),
+            static_cast<float>(std::clamp(cfg.pathblend_max_ratio.value, 0.51, 1.0)),
+            std::clamp(cfg.pathblend_ease_mode.value, 0, 3),
+            cfg.pathblend_fill_angle.value);
     }
     // enable + surface are shared scope keys — never stored in the per-zone blob.
     c.enabled = cfg.multipass_path_gradient.value; // PathBlend independent of multipass_enabled
     c.surface = cfg.pathblend_surface.value;
+    c.sync_legacy_view();
     return c;
 }
 // NEOTKO_PATHBLEND_TAG_END
 
+// NEOTKO_SANDWICH_TAG_START
+// ===========================================================================
+// SurfacePassStack — JSON serialization + legacy synthesis (Fase 0).
+// ===========================================================================
+namespace {
+    nlohmann::json sandwich_payload_to_json(const SurfaceEffectPayload& p) {
+        nlohmann::json j;
+        j["present"] = p.present;
+        j["kv"]      = p.kv;
+        return j;
+    }
+    SurfaceEffectPayload sandwich_payload_from_json(const nlohmann::json& j) {
+        SurfaceEffectPayload out;
+        if (j.is_object()) {
+            if (j.contains("present") && j["present"].is_boolean())
+                out.present = j["present"].get<bool>();
+            if (j.contains("kv") && j["kv"].is_object())
+                for (auto it = j["kv"].begin(); it != j["kv"].end(); ++it)
+                    if (it.value().is_string())
+                        out.kv[it.key()] = it.value().get<std::string>();
+        }
+        return out;
+    }
+} // anon namespace
+
+bool SurfacePassStack::all_solid() const
+{
+    for (const SurfacePass& p : passes)
+        if (p.kind != SurfacePassKind::Solid) return false;
+    return true;
+}
+
+std::string SurfacePassStack::to_json() const
+{
+    // Empty/disabled stack → "" so the config key stays at its empty default
+    // and synthesize_from_legacy() remains authoritative for untouched presets.
+    if (!enabled || passes.empty())
+        return std::string();
+
+    nlohmann::json root;
+    root["v"]                  = 1;
+    root["enabled"]            = enabled;
+    root["perimeter_override"] = perimeter_override;
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : passes) {
+        nlohmann::json e;
+        e["kind"]        = static_cast<int>(p.kind);
+        e["ratio"]       = p.ratio;
+        e["solid_tool"]  = p.solid_tool;
+        e["angle"]       = p.angle;
+        e["fan"]         = p.fan;
+        e["speed_pct"]   = p.speed_pct;
+        e["gcode_start"] = p.gcode_start;
+        e["gcode_end"]   = p.gcode_end;
+        e["colormix"]    = sandwich_payload_to_json(p.colormix);
+        e["pathblend"]   = sandwich_payload_to_json(p.pathblend);
+        arr.push_back(std::move(e));
+    }
+    root["passes"] = std::move(arr);
+    return root.dump();
+}
+
+SurfacePassStack SurfacePassStack::from_json(const std::string& text)
+{
+    SurfacePassStack st;
+    if (text.empty()) return st;
+
+    nlohmann::json root;
+    try { root = nlohmann::json::parse(text); }
+    catch (const std::exception& e) {
+        NEOTKO_LOG(MULTIPASS, "SANDWICH from_json parse error: " << e.what());
+        return st;
+    }
+    if (!root.is_object() || !root.contains("passes") || !root["passes"].is_array())
+        return st;
+
+    if (root.contains("enabled") && root["enabled"].is_boolean())
+        st.enabled = root["enabled"].get<bool>();
+    if (root.contains("perimeter_override") && root["perimeter_override"].is_boolean())
+        st.perimeter_override = root["perimeter_override"].get<bool>();
+
+    for (const auto& e : root["passes"]) {
+        if (!e.is_object()) continue;
+        if (static_cast<int>(st.passes.size()) >= kMaxPasses) break; // slots cap
+        SurfacePass p;
+        if (e.contains("kind") && e["kind"].is_number_integer()) {
+            const int k = e["kind"].get<int>();
+            if (k >= 0 && k <= 3) p.kind = static_cast<SurfacePassKind>(k);
+        }
+        if (e.contains("ratio")       && e["ratio"].is_number())             p.ratio      = e["ratio"].get<double>();
+        if (e.contains("solid_tool")  && e["solid_tool"].is_number_integer()) p.solid_tool = e["solid_tool"].get<int>();
+        if (e.contains("angle")       && e["angle"].is_number_integer())     p.angle      = e["angle"].get<int>();
+        if (e.contains("fan")         && e["fan"].is_number_integer())       p.fan        = e["fan"].get<int>();
+        if (e.contains("speed_pct")   && e["speed_pct"].is_number_integer()) p.speed_pct  = e["speed_pct"].get<int>();
+        if (e.contains("gcode_start") && e["gcode_start"].is_string())       p.gcode_start = e["gcode_start"].get<std::string>();
+        if (e.contains("gcode_end")   && e["gcode_end"].is_string())         p.gcode_end   = e["gcode_end"].get<std::string>();
+        if (e.contains("colormix"))   p.colormix  = sandwich_payload_from_json(e["colormix"]);
+        if (e.contains("pathblend"))  p.pathblend = sandwich_payload_from_json(e["pathblend"]);
+        st.passes.push_back(std::move(p));
+    }
+    return st;
+}
+
+SurfacePassStack SurfacePassStack::synthesize_from_legacy(const PrintRegionConfig& cfg,
+                                                          ExtrusionRole role)
+{
+    SurfacePassStack st;
+    const bool is_penu = (role == erPenultimateInfill);
+
+    // Legacy effects are mutually exclusive per surface in practice; priority
+    // MultiPass > ColorMix > PathBlend mirrors the FASE 2 dispatch order.
+    const bool mp_on = is_penu ? cfg.penultimate_multipass_enabled.value
+                               : cfg.multipass_enabled.value;
+    if (mp_on) {
+        const MultiPassConfig mp = MultiPassConfig::from_region_config(cfg, role);
+        if (SurfaceColorMix::should_process_role(role, mp.surface)) {
+            // Keep ALL n passes including tool<0 (disabled pass): the FASE 2
+            // loop's `if (tool<0) continue` still skips them, but their ratio
+            // stays in the cumulative Z sum — byte-equivalent to classic MultiPass.
+            const int n = std::max(1, std::min(SurfacePassStack::kMaxPasses, mp.num_passes));
+            for (int i = 0; i < n; ++i) {
+                SurfacePass p;
+                p.kind        = SurfacePassKind::Solid;
+                p.ratio       = mp.width_ratio[i];
+                p.solid_tool  = mp.tool[i];
+                p.angle       = mp.angle[i];
+                p.fan         = mp.fan[i];
+                p.speed_pct   = mp.speed_pct[i];
+                p.gcode_start = mp.gcode_start[i];
+                p.gcode_end   = mp.gcode_end[i];
+                st.passes.push_back(std::move(p));
+            }
+            st.enabled            = true;
+            st.perimeter_override = cfg.multipass_perimeter_override.value;
+            return st;
+        }
+    }
+
+    // ColorMix legacy → single full-height ColorMix pass. Empty kv → the engine
+    // reads the region preset config directly (legacy assign_and_group_tools).
+    if (cfg.interlayer_colormix_enabled.value) {
+        const int surf = cfg.interlayer_colormix_surface.value; // 0 both,1 top,2 penu
+        const bool want = (surf == 0) || (is_penu ? surf == 2 : surf == 1);
+        if (want) {
+            SurfacePass p;
+            p.kind  = SurfacePassKind::ColorMix;
+            p.ratio = 1.0;
+            p.colormix.present = true;     // kv empty → preset-config fallback
+            st.passes.push_back(std::move(p));
+            st.enabled = true;
+            return st;
+        }
+    }
+
+    // PathBlend legacy → single full-height PathBlend pass.
+    // from_region_config(cfg, role) ABSORBS the s69 pathblend_top/penu miniblob:
+    // a non-empty per-zone JSON blob overrides the flat pathblend_* keys.
+    if (cfg.multipass_path_gradient.value) {
+        const int surf = cfg.pathblend_surface.value;
+        const bool want = (surf == 0) || (is_penu ? surf == 2 : surf == 1);
+        if (want) {
+            const PathBlendPassConfig pb =
+                PathBlendPassConfig::from_region_config(cfg, role);
+            SurfacePass p;
+            p.kind  = SurfacePassKind::PathBlend;
+            p.ratio = 1.0;
+            p.pathblend.present   = true;
+            p.pathblend.kv["blob"] = pb.to_blob_json(); // s69 miniblob schema
+            st.passes.push_back(std::move(p));
+            st.enabled = true;
+            return st;
+        }
+    }
+
+    return st; // disabled, empty
+}
+
+SurfacePassStack SurfacePassStack::resolve(const PrintRegionConfig& cfg,
+                                           ExtrusionRole role)
+{
+    const std::string& blob = (role == erPenultimateInfill)
+        ? cfg.neotko_surface_passes_penu.value
+        : cfg.neotko_surface_passes_top.value;
+    SurfacePassStack st = SurfacePassStack::from_json(blob);
+    if (st.passes.empty())
+        st = SurfacePassStack::synthesize_from_legacy(cfg, role);
+    return st;
+}
+
+// NEOTKO_SANDWICH_TAG — Fase 3 UX: DynamicPrintConfig overload of resolve().
+// The SandwichDialog edits a DynamicPrintConfig; synthesize_from_legacy() needs
+// a typed PrintRegionConfig. Copy the overlapping keys across and delegate —
+// no engine-logic change, purely additive.
+SurfacePassStack SurfacePassStack::resolve_for_zone(const DynamicPrintConfig& cfg,
+                                                    bool penu)
+{
+    PrintRegionConfig rc;
+    rc.apply(cfg, true /* ignore keys absent from PrintRegionConfig */);
+    return SurfacePassStack::resolve(rc, penu ? erPenultimateInfill
+                                              : erTopSolidInfill);
+}
+
+MultiPassConfig SurfacePassStack::to_multipass_config(ExtrusionRole role) const
+{
+    MultiPassConfig c;
+    c.enabled      = enabled && !passes.empty();
+    c.surface      = (role == erPenultimateInfill) ? 2 : 0;
+    c.num_passes   = std::min<int>(SurfacePassStack::kMaxPasses,
+                                   static_cast<int>(passes.size()));
+    c.vary_pattern = false;
+    for (int i = 0; i < c.num_passes; ++i) {
+        const SurfacePass& p = passes[i];
+        // Non-Solid passes encode tool = -1 → the FASE 2 loop skips them.
+        c.tool[i]        = (p.kind == SurfacePassKind::Solid) ? p.solid_tool : -1;
+        c.width_ratio[i] = p.ratio;
+        c.angle[i]       = p.angle;
+        c.fan[i]         = p.fan;
+        c.speed_pct[i]   = p.speed_pct;
+        c.gcode_start[i] = p.gcode_start;
+        c.gcode_end[i]   = p.gcode_end;
+    }
+    return c;
+}
+
+SurfacePassStack SurfacePassStack::from_multipass_config(const MultiPassConfig& mp)
+{
+    SurfacePassStack st;
+    st.enabled = mp.enabled;
+    const int n = std::max(1, std::min(SurfacePassStack::kMaxPasses, mp.num_passes));
+    for (int i = 0; i < n; ++i) {
+        SurfacePass p;
+        p.kind        = SurfacePassKind::Solid;
+        p.ratio       = mp.width_ratio[i];
+        p.solid_tool  = mp.tool[i];
+        p.angle       = mp.angle[i];
+        p.fan         = mp.fan[i];
+        p.speed_pct   = mp.speed_pct[i];
+        p.gcode_start = mp.gcode_start[i];
+        p.gcode_end   = mp.gcode_end[i];
+        st.passes.push_back(std::move(p));
+    }
+    return st;
+}
+
+// Recursive walk: clone each leaf entity, decode its mm3 tool, route to a bucket.
+static void sandwich_bucket_visit(
+    const ExtrusionEntity* e, int default_tool,
+    std::vector<std::pair<int, ExtrusionEntityCollection>>& buckets)
+{
+    if (!e) return;
+    if (const auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
+        for (const ExtrusionEntity* c : coll->entities)
+            sandwich_bucket_visit(c, default_tool, buckets);
+        return;
+    }
+    ExtrusionEntity* cl = e->clone();
+    int tool = default_tool;
+    if (auto* p = dynamic_cast<ExtrusionPath*>(cl)) {
+        if (p->mm3_per_mm >= 10.0) {
+            const int t = static_cast<int>(std::floor(p->mm3_per_mm / 10.0)) - 1;
+            if (t >= 0) {
+                tool = t;
+                p->mm3_per_mm -= static_cast<double>(t + 1) * 10.0;
+            }
+        }
+    }
+    ExtrusionEntityCollection* dst = nullptr;
+    for (auto& b : buckets)
+        if (b.first == tool) { dst = &b.second; break; }
+    if (!dst) {
+        buckets.emplace_back(tool, ExtrusionEntityCollection());
+        dst = &buckets.back().second;
+    }
+    dst->entities.push_back(cl);
+}
+
+std::vector<std::pair<int, ExtrusionEntityCollection>>
+SurfaceColorMix::eec_to_tool_buckets(const ExtrusionEntityCollection& encoded,
+                                     int default_tool)
+{
+    std::vector<std::pair<int, ExtrusionEntityCollection>> buckets;
+    for (const ExtrusionEntity* e : encoded.entities)
+        sandwich_bucket_visit(e, default_tool, buckets);
+    return buckets;
+}
+// NEOTKO_SANDWICH_TAG_END
 
 // NEOTKO_MULTIPASS_TAG_START — PathBlend engine implementation
 bool PathBlendEngine::needs_blend(const ExtrusionPath& path,
@@ -2176,137 +2518,108 @@ std::string PathBlendEngine::apply_path(
     const std::function<Vec2d(const Point&)>& point_to_gcode,
     std::map<int, double>*                    max_z_per_pass)
 {
-    // Gradient model (restored from path_blend_fixed.cpp):
-    //   - surface_t [0..1]: position of this path within the surface (0=first, 1=last).
-    //   - Pass 0 (T0): steps Z DOWN to bottom_z + surface_t * layer_height so each
-    //     successive path sits slightly higher — this is the diagonal staircase that
-    //     reads as a smooth gradient with 50+ paths.  Flow = ratio_at(0, surface_t).
-    //   - Pass N-1 (TN): stays at nominal_z (pass never changes Z). Flow = ratio_at(N-1, t).
-    //   - Intermediate passes (3/4-pass mode): Z evenly spaced between bottom and top,
-    //     but anchored to surface_t so the "peak" of each pass tracks across the surface.
-    //   - The Z for pass 0 is VARIABLE per path (surface_t-driven), NOT fixed per pass.
-    //     The old "fixed Z per pass" formula produced a flat band per tool instead of a
-    //     diagonal gradient — that was the visible bug.
+    // NEOTKO_SANDWICH_TAG — Fase 5 (s72): geometry-driven PathBlend.
+    //
+    // Gradient model:
+    //   - surface_t [0..1]: position of this path within the surface (0=t-low, 1=t-high).
+    //   - Pass 0 (RAMPA, tool_bottom): diagonal Z from `floor` (t=0) to `mid_end` (t=1).
+    //     Flow at each path is the ramp's local thickness fraction of the layer
+    //     height — `(floor_mm + t*(mid_end_mm - floor_mm)) / H`.
+    //   - Pass 1 (TAPA, tool_top, Full only): flat at nominal_z. Flow = complement of
+    //     ramp = `1 - ramp_thickness / H` so total deposited volume ≈ 1.0×.
+    //   - Half mode (no cap): pass_idx >= 1 paths never reach here (sync_legacy_view
+    //     sets num_passes=1 so the FASE 2 clone loop skips pi >= 1). Total flow < 1.0
+    //     is intentional — the authorised semi-fill exception.
+    //   - PathBlend lives alone in the Sandwich (Fase 5 UX) → no MultiPass coexistence.
+    //     The old "_mp_on" branch is unreachable here; removed.
 
     const PathBlendPassConfig pb = PathBlendPassConfig::from_region_config(cfg, role);
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: delegate to the pb-overload so
+    // the geometry lives in a single place. The MultiPass-sublayer dispatch calls
+    // the overload directly with a pb decoded from the sublayer's stored blob.
+    return apply_path(path, pb, role, writer, nominal_z, layer_height,
+                      F, e_per_mm, pass_idx, surface_t, point_to_gcode, max_z_per_pass);
+}
 
+std::string PathBlendEngine::apply_path(
+    const ExtrusionPath&                      path,
+    const PathBlendPassConfig&                pb,
+    ExtrusionRole                             role,
+    GCodeWriter&                              writer,
+    double                                    nominal_z,
+    double                                    layer_height,
+    double                                    F,
+    double                                    e_per_mm,
+    int                                       pass_idx,
+    double                                    surface_t,
+    const std::function<Vec2d(const Point&)>& point_to_gcode,
+    std::map<int, double>*                    max_z_per_pass)
+{
     if (pass_idx < 0 || pass_idx >= pb.num_passes) return "";
 
     const auto& pts = path.polyline.points;
     if (pts.size() < 2) return "";
 
     const double bottom_z = nominal_z - layer_height;
+    const double H        = layer_height;
 
-    // NEOTKO_FIX: Two separate behaviours depending on whether MultiPass is active.
-    //
-    // ── MULTIPASS MODE ──────────────────────────────────────────────────────────
-    // Each pass clone is created in Fill.cpp FASE 2 per-pass fill generation with:
-    //   clone->height     = orig->height * ratio[i]
-    //   clone->mm3_per_mm = stadium(W, H*ratio[i]) / stadium(W, H) * orig->mm3_per_mm
-    //                       (stadium cross-section correction — NOT naive ×ratio)
-    // The extruded volume is correct for that sub-height bead geometry.
-    // flow must be 1.0 here — any further scaling causes under/over-extrusion.
-    //
-    // Z must be the TOP surface of each sub-layer, stacked from bottom_z upward
-    // using ACCUMULATED ratios.  The t_eff staircase must NOT be used here:
-    //   Pass 0: z = bottom_z + ratio[0] * layer_height
-    //   Pass 1: z = bottom_z + (ratio[0]+ratio[1]) * layer_height
-    //   Pass k: z = bottom_z + sum(ratio[0..k]) * layer_height
-    //   Last:   z = nominal_z  (guard against fp drift)
-    //
-    // Example — 3 passes at 33% each, layer_height=0.2 mm:
-    //   Pass 0 (T0): z = bottom_z + 0.067   ← lowest physical sub-layer
-    //   Pass 1 (T1): z = bottom_z + 0.133
-    //   Pass 2 (T2): z = nominal_z = bottom_z + 0.200  ← topmost
-    //
-    // ── STANDALONE PATHBLEND MODE (multipass disabled) ───────────────────────────
-    // No prior mm3 scaling.  Use the original t_eff staircase + ratio_at() flow
-    // to blend two tools visually across the surface via a diagonal Z sweep.
-    double flow;
-    double z_pass;
-
-    // NEOTKO_PATHBLEND_TAG — s68: role-correct MultiPass gate. The penultimate
-    // surface owns an independent enable flag + width ratios; reading the top
-    // keys here stacked the penu PB+MP combo on the wrong sub-layer heights and
-    // mis-gated it (penu printed only pass 1 when top MP was off).
-    const bool _mp_on = (role == erPenultimateInfill)
-        ? cfg.penultimate_multipass_enabled.value
-        : cfg.multipass_enabled.value;
-    if (_mp_on) {
-        // Multipass: volume already scaled, so flow = 1.0 and Z = stacked sub-layer top.
-        flow = 1.0;
-
-        const MultiPassConfig mp = MultiPassConfig::from_region_config(cfg, role);
-        const int n_mp = std::max(1, std::min(3, mp.num_passes));
-        const int clamped_idx = std::min(pass_idx, n_mp - 1);
-
-        double z_accum = bottom_z;
-        for (int i = 0; i <= clamped_idx; ++i)
-            z_accum += mp.width_ratio[i] * layer_height;
-
-        // Last pass snaps to nominal_z to avoid floating-point drift.
-        z_pass = (clamped_idx >= n_mp - 1) ? nominal_z
-                                            : std::clamp(z_accum, bottom_z, nominal_z);
-    } else {
-        // Standalone PathBlend: surface_t staircase + ratio_at() gradient flow.
-        // NEOTKO_PATHBLEND_TAG — s58 Fix D: decouple Z direction from invert_gradient.
-        // Z always ascends with surface_t (Y_min → bottom_z, Y_max → nominal_z).
-        // The invert flag now only flips which side has which colour gradient — it
-        // does NOT affect Z direction anymore.  Rationale: the user requested
-        // "always start at the lowest Z and go up" to avoid collisions, with
-        // invert_gradient acting solely as a gradient inverter.
-        //
-        // NEOTKO_PATHBLEND_TAG — s59 flow-direction fix.
-        // The previous default (invert=false → t_flow=surface_t) made pass-0 flow
-        // start HIGH at low Z and decrease toward high Z — visually "high → low".
-        // This contradicts the physical build-up expectation: pass 0 is the
-        // bottom sub-layer, so its flow should be LOW at the start of the gradient
-        // (t=0, just a thin foundation) and ramp UP toward t=1 (the side where
-        // pass 0 visually dominates).  Default-OFF now produces ascending flow
-        // along the same axis as ascending Z (label: "Ascending Z direction (safe)"
-        // — both Z and flow ascend together).  ON inverts the flow gradient only
-        // (Z always ascends since s58 Fix D).
-        const double t_z    = surface_t;                                  // for Z
-        const double t_flow = pb.invert_gradient ? surface_t
-                                                  : (1.0 - surface_t);    // s59 flip
-        flow = pb.ratio_at(pass_idx, t_flow);
-
-        // NEOTKO_PATHBLEND_TAG — s58 Fix C: 0.04mm-equivalent minimum flow per pass.
-        // Mirrors MultiPass MinLayer Rule 1 (each sub-height ≥ 0.04mm).  Without
-        // this floor, the last pass at t_flow=0 had flow=0 and got skipped by the
-        // guard below, leaving visible gaps in the second pass.  Renormalises so
-        // the sum across passes never exceeds 1.0 (no over-extrusion).
-        const double min_flow_04mm = std::max(0.05, 0.04 / layer_height);
-        flow = std::max(flow, min_flow_04mm);
-        {
-            double total_flow = 0.0;
-            for (int p = 0; p < pb.num_passes; ++p)
-                total_flow += std::max(static_cast<double>(pb.ratio_at(p, t_flow)),
-                                       min_flow_04mm);
-            if (total_flow > 1.0)
-                flow /= total_flow;
-        }
-        if (flow < 1e-9) return "";  // safety; floor should normally prevent this
-
-        const double z_bottom_anchor = bottom_z + t_z * layer_height;
-        if (pb.num_passes == 1) {
-            z_pass = z_bottom_anchor;
-        } else {
-            const double frac = static_cast<double>(pass_idx)
-                              / static_cast<double>(pb.num_passes - 1);
-            z_pass = z_bottom_anchor + frac * (nominal_z - z_bottom_anchor);
-        }
-        z_pass = std::clamp(z_pass, bottom_z, nominal_z);
+    // Apply easing to surface_t before deriving geometry. Easing shapes how the
+    // ramp's Z and the flow split distribute across the surface; pass 0 and pass 1
+    // share the same t so the cap's complement stays exact.
+    double t = std::clamp(surface_t, 0.0, 1.0);
+    switch (pb.ease_mode) {
+        case 1: t = t * t;                    break;  // EaseIn
+        case 2: t = 1.0 - (1.0 - t) * (1.0 - t); break; // EaseOut
+        case 3: t = t * t * (3.0 - 2.0 * t); break;  // EaseInOut (smoothstep)
+        default: break;                                 // Linear
     }
 
+    // Ramp Z geometry (relative to bottom_z): floor at t=0, mid_end at t=1.
+    // The dialog enforces floor >= 0.01 and (Full only) mid_end <= H - 0.04, but
+    // a stale or hand-edited preset could violate the invariants — clamp here
+    // so the engine never reads invalid geometry.
+    const float floor_mm   = std::max(0.01f, pb.floor_mm);
+    const float mid_end_mm = std::max(floor_mm,
+        (pb.mode == PathBlendPassConfig::Mode::Full)
+            ? std::min(pb.mid_end_mm, static_cast<float>(H - 0.04))
+            : std::min(pb.mid_end_mm, static_cast<float>(H)));
+
+    const double ramp_thickness = double(floor_mm) + t * double(mid_end_mm - floor_mm);
+    // Clamp the ramp's local thickness to [0.01, H] so cap_flow stays non-negative
+    // even when a preset asked for a ramp larger than the current layer.
+    const double ramp_thickness_clamped = std::clamp(ramp_thickness, 0.01, H);
+
+    double z_pass;
+    double flow;
+
+    if (pass_idx == 0) {
+        // RAMPA: nozzle Z varies with t. The bead's top surface IS the ramp.
+        z_pass = bottom_z + ramp_thickness_clamped;
+        flow   = ramp_thickness_clamped / H;
+    } else {
+        // TAPA (pass_idx == 1, Full only): flat at nominal_z. Flow = 1 - ramp.
+        z_pass = nominal_z;
+        flow   = std::max(0.0, 1.0 - (ramp_thickness_clamped / H));
+    }
+
+    // NEOTKO_PATHBLEND_TAG — internal `min_flow` safety floor (engine logic,
+    // NOT a UX control). Mirrors MultiPass MinLayer Rule 1: a bead thinner than
+    // 0.04 mm is at the edge of what a 0.4 mm nozzle can extrude reliably.
+    // Without this floor, the cap at t=0 (ramp at floor=0.01, cap thickness =
+    // 0.19/0.20 ≈ 0.95) and similar edges would still extrude fine, but the
+    // floor protects against degenerate edge cases (e.g. Full preset with
+    // mid_end pushed to H − ε by float drift → cap_thickness near zero).
+    const double min_flow_04mm = std::max(0.05, 0.04 / H);
+    if (pass_idx == 1) {
+        // Only floor the cap — the ramp is allowed to be thinner (the authorised
+        // semi-fill in Half, the 0.01 mm minimum in Full).
+        flow = std::max(flow, min_flow_04mm);
+    }
+    if (flow < 1e-9) return "";  // last-resort safety
+
     // NEOTKO_PATHBLEND_TAG — s58 Bug 2 SAFETY: enforce monotonic Z ascent per pass.
-    // If max_z_per_pass is provided (by GCode caller), never let z_pass drop below
-    // the maximum z already reached for this pass_idx within the current layer.
-    // Effect: nozzle either ascends or stays flat — never descends mid-pass.
-    // Prevents the dangerous "high z + low flow → low z + high flow" pattern that
-    // would otherwise drag the nozzle through fresh extrusion (real-print hazard).
-    // The visual gradient may flatten in regions where path order isn't ideal, but
-    // the print stays safe.  See PATHBLEND.md "Bug 2 safety" for full context.
+    // If max_z_per_pass is provided, never let z_pass drop below the maximum z
+    // already reached for this pass_idx within the current layer.
     if (max_z_per_pass != nullptr) {
         auto it_mz = max_z_per_pass->find(pass_idx);
         if (it_mz != max_z_per_pass->end() && it_mz->second > z_pass + 1e-5) {
@@ -2346,10 +2659,13 @@ std::string PathBlendEngine::apply_path(
     NEOTKO_LOG(MULTIPASS,
         "PathBlend"
         << " layer="     << (int)(nominal_z * 1000) << "um"
-        << " mode="      << (_mp_on ? "multipass" : "standalone")
+        << " mode="      << (pb.mode == PathBlendPassConfig::Mode::Full ? "full" : "half")
         << " role="      << (role == erPenultimateInfill ? "penu" : "top")
         << " pass="      << pass_idx << "/" << pb.num_passes
         << " t_raw="     << surface_t
+        << " ease_t="    << t
+        << " floor_mm="  << floor_mm
+        << " mid_end_mm=" << mid_end_mm
         << " z_pass="    << z_pass
         << " flow="      << flow
         << " pts="       << pts.size());

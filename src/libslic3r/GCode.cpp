@@ -16,6 +16,7 @@
 #include "GCode/WipeTower2.hpp"
 #include "ShortestPath.hpp"
 #include "Print.hpp"
+#include "MultiPassScheduler.hpp" // NEOTKO_MPSCHEDULER_TAG s79 — canonical grouped-by-tool order
 #include "Utils.hpp"
 #include "ClipperUtils.hpp"
 #include "libslic3r.h"
@@ -5080,20 +5081,63 @@ LayerResult GCode::process_layer(const Print& print,
 
     // NEOTKO_MULTIPASS_TAG_START — sublayer-only group: all entries are virtual MP sublayers
     if (layer_ptr == nullptr) {
-        // NEOTKO_NEOTOWER_TAG — Sublayer pass ordering.
+        // NEOTKO_MPSCHEDULER_TAG s79 — canonical grouped-by-tool sublayer ordering.
         //
-        // Use the original layers order (no sort). The NeoTower scheduler plans
-        // events based on this order.  Any reordering (ascending by tool_id or
-        // context-aware "current tool first") changes the dispatch sequence and
-        // TC count per z-level, causing get_tcr() MISS errors.
-        // TODO: Implement Mejora A (context-aware sort: current writer tool first)
-        // once the scheduler accounts for writer-state-dependent sublayer ordering
-        // (PATH C Scheduler enhancement).
+        // This process_layer call handles ONE z_actual plane (collect_layers_to_print
+        // merges by print_z), so all mp_sublayer entries here share the same z. Reorder
+        // them grouped-by-tool, keeping the current writer tool FIRST (zero toolchange),
+        // then merging the remaining tools behind a single toolchange each. Mirror of
+        // NeoTower's per-plane replay (mp_group_canon_order) → plan==emission by
+        // construction. Without this, object-major emission alternated T0→T1→T0→T1
+        // (one wipe per object); now it emits T0,T0→wipe→T1,T1.
+        //
+        // The cross-z grouping emerges automatically: the next plane's call enters with
+        // the writer tool this plane ends on, so a same-tool pass across the z boundary
+        // needs no toolchange.
         std::vector<LayerToPrint> ltps_sorted(layers.begin(), layers.end());
-        // NEOTKO_NEOTOWER_TAG
+        {
+            // Build SublayerKey items for the mp entries (preserving their index in
+            // ltps_sorted so we can rebuild the permutation). chain_key identically
+            // computed to NeoTower: (uintptr_t)mp_object * 1000003 + mp_layer_id.
+            std::vector<size_t>                         mp_pos;   // index into ltps_sorted
+            std::vector<MultiPassScheduler::SublayerKey> items;
+            for (size_t i = 0; i < ltps_sorted.size(); ++i) {
+                const LayerToPrint& ltp = ltps_sorted[i];
+                if (!ltp.mp_sublayer) continue;
+                MultiPassScheduler::SublayerKey k;
+                k.chain_key = (uint64_t)(uintptr_t)ltp.mp_object * 1000003ull
+                              + (uint64_t)ltp.mp_layer_id;
+                k.pass_idx  = ltp.mp_sublayer->pass_idx;
+                k.tool_id   = ltp.mp_sublayer->tool_id;
+                k.z_actual  = ltp.mp_sublayer->print_z;
+                mp_pos.push_back(i);
+                items.push_back(k);
+            }
+            if (items.size() > 1) {
+                const int init_tool = m_writer.extruder()
+                                      ? (int)m_writer.extruder()->id() : -1;
+                std::vector<size_t> order =
+                    MultiPassScheduler::order_sublayers_by_tool(items, init_tool);
+                std::vector<LayerToPrint> reordered;
+                reordered.reserve(ltps_sorted.size());
+                for (size_t oi : order)
+                    reordered.push_back(ltps_sorted[mp_pos[oi]]);
+                // Append any non-mp entries (none expected in a sublayer-only group)
+                // unchanged at the end, preserving completeness.
+                for (size_t i = 0; i < ltps_sorted.size(); ++i)
+                    if (!ltps_sorted[i].mp_sublayer)
+                        reordered.push_back(ltps_sorted[i]);
+                if (reordered.size() == ltps_sorted.size())
+                    ltps_sorted.swap(reordered);
+            }
+        }
+        // NEOTKO_MPSCHEDULER_TAG s79
+        // sub_layer_id/sub_print_z identify this z-plane's LayerResult position in the
+        // pipeline — derive them from the ORIGINAL `layers` order (NOT the reordered
+        // ltps_sorted) so the result ordering is unchanged by the grouped-by-tool sort.
         size_t   sub_layer_id = 0;
         coordf_t sub_print_z  = 0.;
-        for (const LayerToPrint& ltp : ltps_sorted) {
+        for (const LayerToPrint& ltp : layers) {
             if (ltp.mp_sublayer) { sub_layer_id = ltp.mp_layer_id; sub_print_z = ltp.mp_print_z; break; }
         }
         LayerResult result{"", sub_layer_id, false, last_layer};
@@ -5101,6 +5145,7 @@ LayerResult GCode::process_layer(const Print& print,
         for (const LayerToPrint& ltp : ltps_sorted) {
             if (!ltp.mp_sublayer || !ltp.mp_object) continue;
             const MultiPassSubLayer& sub = *ltp.mp_sublayer;
+            // NEOTKO_SANDWICH_TAG — skip an empty sublayer.
             if (sub.fills.entities.empty()) continue;
             // NEOTKO_MULTIPASS_TAG — apply object config FIRST so that set_extruder()
             // and retract() read valid filament vectors (retract_length, filament_start_gcode,
@@ -5108,15 +5153,68 @@ LayerResult GCode::process_layer(const Print& print,
             // Extruder::retraction_length because m_config still held the previous object's
             // config with potentially different vector sizes or invalidated pointers.
             m_config.apply(ltp.mp_object->config(), true);
-            const unsigned int tool_0based = static_cast<unsigned int>(sub.tool_id);
-            if (m_writer.need_toolchange(tool_0based)) {
+
+            // NEOTKO_SANDWICH_TAG_START — each sublayer is single-tool. A ColorMix
+            // lámina is emitted upstream (Fill.cpp FASE 2) as N separate bucket
+            // sublayers, each at its own print_z, so the handler emits exactly one
+            // (tool_id, fills) — identical in shape to a classic MultiPass pass.
+            std::vector<std::pair<unsigned int, const ExtrusionEntityCollection*>> _segments;
+            _segments.emplace_back(static_cast<unsigned int>(sub.tool_id), &sub.fills);
+
+            // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend sublayer setup.
+            // A PathBlend sublayer (ramp/cap) routes its fills through apply_path
+            // (variable-Z gradient) instead of flat extrusion. We set the context
+            // that extrude_path's PB branch reads, point m_pathblend_surface_bbox at
+            // this sublayer's fill bbox (extrude_path's surface_t fallback uses it),
+            // and pre-sort the paths by Y-centroid so Z climbs monotonically
+            // (lane_mode Default; lane modes 1/2/3 are a follow-up — see notes).
+            const bool _is_pb_sub = (sub.pathblend_pass >= 0);
+            PathBlendPassConfig _pb_sub_cfg_local;
+            std::vector<const ExtrusionEntity*> _pb_sorted;
+            if (_is_pb_sub) {
+                _pb_sub_cfg_local = PathBlendPassConfig::from_blob_json(sub.pathblend_blob);
+                m_pathblend_surface_bbox = BoundingBox();
+                m_pathblend_path_t.clear();
+                m_pathblend_polyline_t.clear();
+                m_pathblend_max_z_per_pass.clear();
+                auto _add_path = [&](const ExtrusionEntity* e) {
+                    if (!e) return;
+                    _pb_sorted.push_back(e);
+                    if (const auto* p = dynamic_cast<const ExtrusionPath*>(e))
+                        m_pathblend_surface_bbox.merge(p->polyline.bounding_box());
+                };
+                for (const ExtrusionEntity* e : sub.fills.entities) {
+                    if (!e) continue;
+                    if (const auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(e))
+                        for (const ExtrusionEntity* ee : coll->entities) _add_path(ee);
+                    else
+                        _add_path(e);
+                }
+                auto _cy = [](const ExtrusionEntity* e) -> double {
+                    const auto* p = dynamic_cast<const ExtrusionPath*>(e);
+                    if (!p || p->polyline.points.empty()) return 0.0;
+                    double s = 0.0;
+                    for (const auto& pt : p->polyline.points) s += double(pt.y());
+                    return s / double(p->polyline.points.size());
+                };
+                std::stable_sort(_pb_sorted.begin(), _pb_sorted.end(),
+                    [&](const ExtrusionEntity* a, const ExtrusionEntity* b) { return _cy(a) < _cy(b); });
+                m_pb_sub_cfg          = &_pb_sub_cfg_local;
+                m_pb_sub_pass         = sub.pathblend_pass;
+                m_pb_sub_role         = sub.role;
+                m_pb_sub_nominal_z    = sub.print_z;   // ~nominal (within ~1µm); apply_path derives bottom_z
+                m_pb_sub_layer_height = sub.height;
+            }
+
+            const double sz = sub.print_z + m_config.z_offset.value;
+            // Per-segment toolchange with Local-Z prime (same mechanism as the
+            // legacy single-tool path). Shared by every bucket of the sublayer.
+            auto _mp_toolchange = [&](unsigned int tool_0based) {
+                if (!m_writer.need_toolchange(tool_0based)) return;
                 // NEOTKO_MULTIPASS_PRIME_TAG — prime on wipe tower before sublayer toolchange.
-                // Uses the Local-Z reserve mechanism (same as dithering_local_z_mode).
-                // multipass_prime_volume is a PrintRegionConfig key — NOT available via
-                // m_config (which only holds PrintObjectConfig keys after apply()). Read it
-                // directly from the object's region config, same pattern as ToolOrdering.cpp.
-                // When prime is disabled (multipass_prime_volume == 0) or wipe tower is absent,
-                // fall through to set_extruder directly — identical to the previous behaviour.
+                // multipass_prime_volume is a PrintRegionConfig key — read it directly from
+                // the object's region config. When prime is disabled or the wipe tower is
+                // absent, fall through to set_extruder — identical to the previous behaviour.
                 float mp_pv = 0.f;
                 if (!ltp.mp_object->layers().empty())
                     for (const LayerRegion* lr : ltp.mp_object->layers().front()->regions())
@@ -5127,8 +5225,6 @@ LayerResult GCode::process_layer(const Print& print,
                     << " mp_pv=" << mp_pv
                     << " has_wt=" << (m_wipe_tower ? "yes" : "no"));
                 if (m_wipe_tower && mp_pv > 0.f) {
-                    // local_z_nominal_layer_z = sub.print_z: the wipe tower purges at the
-                    // sublayer's actual Z. The tower is sparse at this intermediate Z → safe.
                     gcode += m_wipe_tower->tool_change(*this, int(tool_0based),
                                                        /*finish_layer=*/false,
                                                        /*local_z_unplanned=*/true,
@@ -5137,61 +5233,88 @@ LayerResult GCode::process_layer(const Print& print,
                 } else {
                     gcode += this->set_extruder(tool_0based, sub.print_z);
                 }
-            }
-            const double sz = sub.print_z + m_config.z_offset.value;
-            m_nominal_z    = sz;
-            m_last_layer_z = float(sz);
-            m_layer        = nullptr;
-            if (std::abs(m_writer.get_position().z() - sz) > EPSILON) {
-                gcode += this->retract(false, false, LiftType::NormalLift);
-                gcode += m_writer.travel_to_z(sz, "mp sublayer z");
-            }
-            // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: emit cloned perimeters before fills
-            if (!sub.perimeters.entities.empty()) {
-                NEOTKO_LOG(MULTIPASS, "MP_PERIM_EMIT: pass=" << sub.pass_idx
-                    << " T" << sub.tool_id << " z=" << sub.print_z
-                    << " n=" << sub.perimeters.entities.size());
+            };
+
+            bool _first_segment = true;
+            for (const auto& _seg : _segments) {
+                _mp_toolchange(_seg.first);
+                m_nominal_z    = sz;
+                m_last_layer_z = float(sz);
+                m_layer        = nullptr;
+                if (std::abs(m_writer.get_position().z() - sz) > EPSILON) {
+                    gcode += this->retract(false, false, LiftType::NormalLift);
+                    gcode += m_writer.travel_to_z(sz, "mp sublayer z");
+                }
+                if (_first_segment) {
+                    // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: emit cloned perimeters before fills
+                    if (!sub.perimeters.entities.empty()) {
+                        NEOTKO_LOG(MULTIPASS, "MP_PERIM_EMIT: pass=" << sub.pass_idx
+                            << " T" << sub.tool_id << " z=" << sub.print_z
+                            << " n=" << sub.perimeters.entities.size());
+                        for (const PrintInstance& inst : ltp.mp_object->instances()) {
+                            this->set_origin(unscale(inst.shift));
+                            for (const ExtrusionEntity* e : sub.perimeters.entities) {
+                                if (!e) continue;
+                                if (const auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
+                                    for (const ExtrusionEntity* ee : coll->entities)
+                                        if (ee) gcode += this->extrude_entity(*ee, "mp sublayer perimeter");
+                                } else {
+                                    gcode += this->extrude_entity(*e, "mp sublayer perimeter");
+                                }
+                            }
+                        }
+                    }
+                    // NEOTKO_MULTIPASS_TAG_END
+                    // NEOTKO_MULTIPASS_SURFACES_TAG — emit ;TYPE: role, gcode_start, M220 before fills
+                    gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role)
+                           + ExtrusionEntity::role_to_string(sub.role) + "\n";
+                    if (!sub.gcode_start.empty())
+                        gcode += sub.gcode_start + "\n";
+                    if (sub.speed_pct != 100)
+                        gcode += "M220 S" + std::to_string(sub.speed_pct) + "\n";
+                    // NEOTKO_MULTIPASS_SURFACES_TAG
+                    _first_segment = false;
+                }
                 for (const PrintInstance& inst : ltp.mp_object->instances()) {
                     this->set_origin(unscale(inst.shift));
-                    for (const ExtrusionEntity* e : sub.perimeters.entities) {
+                    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend sublayer
+                    // extrudes its pre-sorted paths (Y-centroid ascending) so the
+                    // variable-Z ramp climbs monotonically. extrude_path's PB branch
+                    // fires on the context set above and applies the gradient.
+                    if (_is_pb_sub) {
+                        for (const ExtrusionEntity* e : _pb_sorted)
+                            gcode += this->extrude_entity(*e, "pb sublayer");
+                        continue;
+                    }
+                    // extrude_entity in this fork does not handle ExtrusionEntityCollection —
+                    // unpack one level manually so only Path/MultiPath/Loop reach it.
+                    for (const ExtrusionEntity* e : _seg.second->entities) {
                         if (!e) continue;
                         if (const auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
                             for (const ExtrusionEntity* ee : coll->entities)
-                                if (ee) gcode += this->extrude_entity(*ee, "mp sublayer perimeter");
+                                if (ee) gcode += this->extrude_entity(*ee, "mp sublayer");
                         } else {
-                            gcode += this->extrude_entity(*e, "mp sublayer perimeter");
+                            gcode += this->extrude_entity(*e, "mp sublayer");
                         }
                     }
                 }
             }
-            // NEOTKO_MULTIPASS_TAG_END
-            // NEOTKO_MULTIPASS_SURFACES_TAG — emit ;TYPE: role, gcode_start, M220 before fills
-            gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role)
-                   + ExtrusionEntity::role_to_string(sub.role) + "\n";
-            if (!sub.gcode_start.empty())
-                gcode += sub.gcode_start + "\n";
-            if (sub.speed_pct != 100)
-                gcode += "M220 S" + std::to_string(sub.speed_pct) + "\n";
-            // NEOTKO_MULTIPASS_SURFACES_TAG
-            for (const PrintInstance& inst : ltp.mp_object->instances()) {
-                this->set_origin(unscale(inst.shift));
-                // extrude_entity in this fork does not handle ExtrusionEntityCollection —
-                // unpack one level manually so only Path/MultiPath/Loop reach it.
-                for (const ExtrusionEntity* e : sub.fills.entities) {
-                    if (!e) continue;
-                    if (const auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
-                        for (const ExtrusionEntity* ee : coll->entities)
-                            if (ee) gcode += this->extrude_entity(*ee, "mp sublayer");
-                    } else {
-                        gcode += this->extrude_entity(*e, "mp sublayer");
-                    }
-                }
+            // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: clear the PathBlend
+            // sublayer context so subsequent (non-PB) sublayers / real layers are
+            // unaffected. m_pb_sub_cfg pointed at a stack local — must not dangle.
+            if (_is_pb_sub) {
+                m_pb_sub_cfg          = nullptr;
+                m_pb_sub_pass         = -1;
+                m_pb_sub_nominal_z    = 0.0;
+                m_pb_sub_layer_height = 0.0;
+                m_pathblend_surface_bbox = BoundingBox();
             }
             // NEOTKO_MULTIPASS_SURFACES_TAG — restore after fills
             if (!sub.gcode_end.empty())
                 gcode += sub.gcode_end + "\n";
             if (sub.speed_pct != 100)
                 gcode += "M220 S100\n";
+            // NEOTKO_SANDWICH_TAG_END
             // NEOTKO_MULTIPASS_SURFACES_TAG
         }
         // NEOTKO_MULTIPASS_TAG_START — hardening P4: lifecycle API
@@ -5206,10 +5329,13 @@ LayerResult GCode::process_layer(const Print& print,
             }
             m_mp_group.begin(z_nominal_group);
         }
-        // Register all tools of every pass in this z-entry.
+        // Register the tool of every sublayer in this z-entry.
+        // NEOTKO_SANDWICH_TAG — each sublayer is single-tool (ColorMix buckets
+        // are separate sublayers — see Fill.cpp FASE 2).
         for (const LayerToPrint& _ltp : ltps_sorted) {
-            if (_ltp.mp_sublayer)
-                m_mp_group.add_pass(static_cast<unsigned int>(_ltp.mp_sublayer->tool_id));
+            if (!_ltp.mp_sublayer) continue;
+            const MultiPassSubLayer& _s = *_ltp.mp_sublayer;
+            m_mp_group.add_pass(static_cast<unsigned int>(_s.tool_id));
         }
         // NEOTKO_MULTIPASS_TAG_END
         result.gcode = std::move(gcode);
@@ -6134,52 +6260,11 @@ LayerResult GCode::process_layer(const Print& print,
                                         }
                                     }
                                 }
-                                // NEOTKO_PATHBLEND_TAG — s58 fix: pre-populate bucket order
-                                // for PathBlend exactly like MultiPass above.  Without this,
-                                // bucket_order was filled by first-appearance after
-                                // chain_and_reorder may have shuffled the clones, which often
-                                // ended up printing pass 1 (T_top) BEFORE pass 0 (T_bottom).
-                                // That caused two visible bugs:
-                                //   - "primera pasada después de la segunda" (pass 0 prints over
-                                //     pass 1's z=nominal_z deposit → drag / smear).
-                                //   - "segunda pasada incompleta" (pass 1 printed first across
-                                //     full surface with flow=t, then pass 0 printed at variable
-                                //     z hiding/lifting the t-low region).
-                                // Toggling pathblend_fill_angle from 0→1 accidentally fixed it
-                                // by changing the fill engine's path order, which is exactly
-                                // the symptom of a non-deterministic bucket ordering.
-                                else if (region.config().multipass_path_gradient.value) {
-                                    // NEOTKO_PATHBLEND_TAG — s69 miniblob: detect the
-                                    // surface role of these encoded paths so the
-                                    // per-zone PB blob (top vs penu) is read correctly.
-                                    ExtrusionRole _pb_role = erTopSolidInfill;
-                                    for (const ExtrusionEntity* ce : filtered_extrusions->entities) {
-                                        const ExtrusionPath* fp = dynamic_cast<const ExtrusionPath*>(ce);
-                                        if (fp == nullptr)
-                                            if (const auto* sub = dynamic_cast<const ExtrusionEntityCollection*>(ce))
-                                                for (const ExtrusionEntity* se : sub->entities)
-                                                    if ((fp = dynamic_cast<const ExtrusionPath*>(se)) != nullptr) break;
-                                        if (fp != nullptr) { _pb_role = fp->role(); break; }
-                                    }
-                                    const PathBlendPassConfig pb =
-                                        PathBlendPassConfig::from_region_config(region.config(), _pb_role);
-                                    const int n_pb = std::max(1, std::min(4, pb.num_passes));
-                                    for (int pi = 0; pi < n_pb; ++pi) {
-                                        if (pb.tool[pi] < 0) continue;
-                                        const unsigned int tid = static_cast<unsigned int>(pb.tool[pi]);
-                                        if (colormix_buckets.find(tid) == colormix_buckets.end()) {
-                                            colormix_buckets[tid] = std::make_unique<ExtrusionEntityCollection>();
-                                            colormix_buckets[tid]->no_sort = true;
-                                            colormix_bucket_order.push_back(tid);
-                                        }
-                                    }
-                                    NEOTKO_LOG(COLORMIX,
-                                        "PB_BUCKET_ORDER_FIXED: pre-populated by pathblend_tool_*"
-                                        << " (passes=" << n_pb
-                                        << " tool[0]=" << pb.tool[0]
-                                        << " tool[1]=" << pb.tool[1]
-                                        << ")");
-                                }
+                                // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the
+                                // PathBlend bucket-order pre-seed was DELETED. PathBlend
+                                // no longer injects mm3-encoded paths into the real layer
+                                // (it is compiled into MultiPass sublayers), so this hook
+                                // never sees PB paths and needs no PB pre-seed.
 
                                 auto decode_one_path = [&](const ExtrusionPath* cp) {
                                     ExtrusionPath decoded(*cp);
@@ -6907,19 +6992,23 @@ LayerResult GCode::process_layer(const Print& print,
     }
 
     if (nominal_layer_start_extruder >= 0) {
-        auto it = std::find(layer_extruders.begin(), layer_extruders.end(), unsigned(nominal_layer_start_extruder));
+        // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the Bug C std::rotate
+        // suppression was REVERTED. PathBlend tools no longer live in
+        // layer_extruders (they are sublayers, dispatched separately), so the
+        // standard min-toolchange rotation can never reorder a PB ramp/cap pair
+        // — ramp-before-cap ordering is now intrinsic to the sublayer pass_idx
+        // sequence. Restore the unconditional rotation (min toolchanges).
+        auto it = std::find(layer_extruders.begin(), layer_extruders.end(),
+                            unsigned(nominal_layer_start_extruder));
         if (it != layer_extruders.end())
             std::rotate(layer_extruders.begin(), it, layer_extruders.end());
     }
 
-    // NEOTKO_PATHBLEND_TAG — s58 Fix B / s69: record the layer's PHYSICAL print
-    // order (post-rotation layer_extruders).  _extrude() filters this per-region
-    // by the current region's PathBlend tool set, so multiple objects with
-    // different PathBlend tool sets at the same Z stay independent.  Before s69
-    // this list was pre-filtered by a single (first-found) PB region's tools,
-    // which cross-contaminated objects: a penu-PB object using {T1,T2} inherited
-    // another object's {T1,T3} order → its ramp pass (pass 0) was omitted.
-    m_pathblend_layer_extruders = layer_extruders;
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s73: m_pathblend_layer_extruders eliminated.
+    // pass_idx is now derived from config order (pb.tool[]) in _extrude, not
+    // from the physical print order, so recording the post-rotation order is
+    // no longer needed. The diagnostic PB_PRINT_ORDER log below still uses
+    // layer_extruders directly for traceability.
     m_pathblend_max_z_per_pass.clear();  // NEOTKO_PATHBLEND_TAG s58 Bug 2 safety reset
     if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
         // Log the per-region PathBlend print order for every PB region at this z.
@@ -6973,6 +7062,78 @@ LayerResult GCode::process_layer(const Print& print,
         const bool needs_tc = m_writer.need_toolchange(expected_initial);
         const MpGroupState::Action action = m_mp_group.end(expected_initial, needs_tc);
 
+        // NEOTKO_MULTIPASS_TAG — s78 diag (perimeter-color bug): capture the plan vs
+        // writer state at the real micro-layer above a sublayer group. Cross-check
+        // with NeoTower's "1a ROTATE / SKIP_FREE_FIRST" lines: if a wall tool ==
+        // expected_initial and needs_tc==0, that wall's TC is being skipped as
+        // "free-first" — wrong when objects emit per-object and that wall does not
+        // print first. Zero behavior change.
+        if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+            std::ostringstream _d;
+            _d << "MP_GROUP_DIAG z=" << print_z << " height=" << m_last_height
+               << " writer_tool=T" << m_writer.extruder()->id()
+               << " nominal_start=T" << nominal_layer_start_extruder
+               << " expected_initial=T" << expected_initial
+               << " needs_tc=" << (needs_tc ? 1 : 0)
+               << " action=" << (int)action
+               << " layer_extruders=[";
+            for (unsigned int e : layer_extruders) _d << "T" << e << " ";
+            _d << "]";
+            NeoDebug::write(NeoDebug::WIPETOWER, _d.str());
+        }
+
+        // NEOTKO_MPSCHEDULER_TAG s79c DEBUG — post-sandwich recovery analysis (NO behavior
+        // change; pure logging). Confirms the unified fix for bug01 (recover-with-purge to
+        // a printing tool) and bug02 (skip empty-pass tools): for each tool in the real
+        // layer, whether it actually prints (non-empty perimeters/infills/support in
+        // by_extruder), which tool the recovery SHOULD target (first printing tool), and
+        // whether NeoTower already has the exit→first_printing TCR. KEEP this debug (marked
+        // for the FINAL cleanup phase) — useful if the recovery issue ever regresses.
+        if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+            // Suppression-aware: at a perimeter-override sandwich layer the real-layer
+            // PERIMETERS are skipped at emission (GCode.cpp:8159), so a tool whose only
+            // content is a perimeter prints NOTHING. Count perimeters only when the
+            // override is NOT active; always count infills + support.
+            const bool perim_suppressed = layer_tools.mp_perim_override_active;
+            auto tool_counts = [&](unsigned int tid, int& perim, int& infill, int& sup) {
+                perim = infill = sup = 0;
+                auto it = by_extruder.find(tid);
+                if (it == by_extruder.end()) return;
+                for (const ObjectByExtruder& obe : it->second) {
+                    if (obe.support != nullptr && !obe.support->empty()) ++sup;
+                    for (const ObjectByExtruder::Island& isl : obe.islands)
+                        for (const ObjectByExtruder::Island::Region& reg : isl.by_region) {
+                            perim  += int(reg.perimeters.size());
+                            infill += int(reg.infills.size());
+                        }
+                }
+            };
+            const int exit_tool = m_writer.extruder() ? int(m_writer.extruder()->id()) : -1;
+            int first_printing = -1;
+            std::ostringstream _r;
+            _r << "MP_RECOVERY_DIAG z=" << print_z << " exit=T" << exit_tool
+               << " expected_initial=T" << expected_initial
+               << " perim_override=" << (perim_suppressed ? 1 : 0) << " tools=[";
+            for (unsigned int tid : layer_extruders) {
+                int perim, infill, sup;
+                tool_counts(tid, perim, infill, sup);
+                // effective = what actually emits after suppression
+                const int eff = infill + sup + (perim_suppressed ? 0 : perim);
+                _r << "T" << tid << "(p" << perim << "/i" << infill << "/s" << sup
+                   << "→" << (eff > 0 ? "print" : "EMPTY") << ") ";
+                if (eff > 0 && first_printing < 0) first_printing = int(tid);
+            }
+            _r << "] first_printing=T" << first_printing;
+            NeoDebug::write(NeoDebug::WIPETOWER, _r.str());
+            if (m_neo_tower != nullptr && exit_tool >= 0 && first_printing >= 0
+                && exit_tool != first_printing) {
+                auto tcr = m_neo_tower->get_tcr((float)print_z, (size_t)exit_tool, (size_t)first_printing);
+                NeoDebug::write(NeoDebug::WIPETOWER,
+                    std::string("MP_RECOVERY_DIAG neotower get_tcr(T") + std::to_string(exit_tool)
+                    + "→T" + std::to_string(first_printing) + ") = " + (tcr ? "HIT" : "MISS"));
+            }
+        }
+
         if (action == MpGroupState::Action::BareRecover) {
             // bare set_extruder + skip_planned_toolchange_to (Bug 12 path A)
             if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
@@ -6984,6 +7145,41 @@ LayerResult GCode::process_layer(const Print& print,
                      << " print_z=" << print_z;
                 NeoDebug::write(NeoDebug::WIPETOWER, _oss.str());
             }
+            // NEOTKO_MPSCHEDULER_TAG s79d — bug01 fix: if the tool we recover to actually
+            // PRINTS at this real layer, recover via a tower PURGE (clean color) instead of
+            // the bare hardware set_extruder below — otherwise the first extrusion of that
+            // tool prints contaminated (no flush). Gated to the printing case (suppression-
+            // aware) so the bug02 empty-pass case is untouched. SAFE: get_tcr is keyed (no
+            // m_layer_idx desync), same path as the has_wt=false recovery; the set_extruder
+            // below then no-ops (writer already there) and skip_planned_toolchange_to still
+            // consumes the slot → the extruder loop skips it (is_empty=true, no double TC).
+            {
+                const bool perim_suppressed = layer_tools.mp_perim_override_active;
+                int _p = 0, _i = 0, _s = 0;
+                auto _it = by_extruder.find(expected_initial);
+                if (_it != by_extruder.end())
+                    for (const ObjectByExtruder& _obe : _it->second) {
+                        if (_obe.support != nullptr && !_obe.support->empty()) ++_s;
+                        for (const ObjectByExtruder::Island& _isl : _obe.islands)
+                            for (const ObjectByExtruder::Island::Region& _reg : _isl.by_region) {
+                                _p += int(_reg.perimeters.size());
+                                _i += int(_reg.infills.size());
+                            }
+                    }
+                const bool expected_prints = (_i + _s + (perim_suppressed ? 0 : _p)) > 0;
+                const int  exit_tool = m_writer.extruder() ? int(m_writer.extruder()->id()) : -1;
+                if (expected_prints && m_neo_tower != nullptr && m_wipe_tower != nullptr
+                    && exit_tool >= 0 && exit_tool != (int)expected_initial
+                    && m_neo_tower->get_tcr((float)print_z, (size_t)exit_tool, (size_t)expected_initial)) {
+                    gcode += m_wipe_tower->tool_change(*this, (int)expected_initial,
+                                                       /*finish_layer=*/false,
+                                                       /*local_z_unplanned=*/true,
+                                                       /*local_z_nominal_layer_z=*/print_z + m_config.z_offset.value);
+                    NEOTKO_LOG(WIPETOWER, "MP_GROUP_END BareRecover→PURGE expected=T"
+                        << expected_initial << " exit=T" << exit_tool
+                        << " (recovered tool prints; tower purge instead of bare set) z=" << print_z);
+                }
+            }
             gcode += this->set_extruder(expected_initial, print_z);
             // TODO P1-cleanup: redundant after G91-aware get_last_z_from_gcode.
             {
@@ -6991,7 +7187,16 @@ LayerResult GCode::process_layer(const Print& print,
                 _wz.z() = print_z;
                 m_writer.set_position(_wz);
             }
-            m_wipe_tower->skip_planned_toolchange_to((int)expected_initial);
+            // NEOTKO_MULTIPASS_TAG — BareRecover skip guard (s76 fix):
+            // Only consume the plan slot when the layer has exactly 1 extruder
+            // (the body tool alone). If layer_extruders has >1 tools, the extruder
+            // loop will process the remaining TCs using the plan — consuming the slot
+            // here would exhaust it before the loop reaches the second tool → throw.
+            // With a single-tool layer the plan slot is a structural T→T finish_layer
+            // entry or an identity event; consuming it here is correct and matches the
+            // original Bug 12 / P4 intent.
+            if (layer_extruders.size() <= 1)
+                m_wipe_tower->skip_planned_toolchange_to((int)expected_initial);
             if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
                 std::ostringstream _oss;
                 _oss << "MP_GROUP_END action=BareRecover expected=T" << expected_initial
@@ -7084,7 +7289,8 @@ LayerResult GCode::process_layer(const Print& print,
 
         std::string gcode_toolchange;
         if (has_wipe_tower) {
-            if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, extruder_id == layer_extruders.back())) {
+            const bool _wt_empty = m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, extruder_id == layer_extruders.back());
+            if (!_wt_empty) {
                 if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode) {
                     gcode += this->retract(false, false, LiftType::NormalLift);
                     m_writer.add_object_change_labels(gcode);
@@ -7104,9 +7310,39 @@ LayerResult GCode::process_layer(const Print& print,
                     has_insert_timelapse_gcode = true;
                 }
                 gcode_toolchange = m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_extruders.back());
+            } else if (last_layer && m_writer.need_toolchange(extruder_id)) {
+                // NEOTKO_NEOTOWER_TAG — s78 fix (perimeter-color bug): the wipe tower
+                // suppressed this real toolchange (IS_EMPTY_WT). The normal
+                // post-sublayer suppress defers the pending TC to the NEXT real layer's
+                // plan entry — but on the LAST layer there is none, so the perimeter
+                // would inherit the previous tool (e.g. the PathBlend cap sublayer) and
+                // print in the wrong color. Emit a direct hardware toolchange (no tower
+                // purge), identical to the non-wipe-tower branch below.
+                gcode_toolchange = this->set_extruder(extruder_id, print_z);
+                NEOTKO_LOG(WIPETOWER, "FINAL_LAYER_TC_FALLBACK z=" << print_z
+                    << " ext=T" << extruder_id
+                    << " (wipe tower suppressed orphaned final-layer TC; direct set_extruder)");
             }
         } else {
-            gcode_toolchange = this->set_extruder(extruder_id, print_z);
+            // NEOTKO_MPSCHEDULER_TAG s79 — post-sandwich perimeter recovery purge.
+            // On a has_wipe_tower=false real layer that follows a sandwich group, the
+            // writer may sit on the group's exit tool (e.g. T3) while this layer needs
+            // another tool (e.g. T1 perimeter). A bare set_extruder switches hardware
+            // WITHOUT purging → contaminated first perimeter (s71 / FINAL_LAYER bug).
+            // Route through the local_z_unplanned path, which consults NeoTower's keyed
+            // get_tcr (independent of m_layer_idx): if a recovery TCR was planned at this
+            // z it PURGES; otherwise it falls back to a bare set_extruder internally —
+            // identical to the previous behaviour. (pass z + z_offset so the path's
+            // internal `tower_z - z_offset` recovers the raw z NeoTower indexed.)
+            if (m_neo_tower != nullptr && m_wipe_tower != nullptr
+                && m_writer.need_toolchange(extruder_id)) {
+                gcode_toolchange = m_wipe_tower->tool_change(
+                    *this, extruder_id, /*finish_layer=*/false,
+                    /*local_z_unplanned=*/true,
+                    /*local_z_nominal_layer_z=*/print_z + m_config.z_offset.value);
+            } else {
+                gcode_toolchange = this->set_extruder(extruder_id, print_z);
+            }
         }
         if (!gcode_toolchange.empty()) {
             // Disable vase mode for layers that has toolchange
@@ -8031,277 +8267,14 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
                 for (const ExtrusionEntity* fill : extrusions) {
                     auto* eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
                     if (eec) {
-                        // NEOTKO_PATHBLEND_TAG_START — per-surface bbox for surface_t
-                        // Compute Y extent from all PathBlend paths in this collection so that
-                        // each individual surface is normalised independently (not against the
-                        // full layer bbox, which would compress surface_t near 0.5 for any object
-                        // smaller than the print bed, producing micro-jumps at angle=0 and
-                        // vanishing gradient at low angles).
-                        m_pathblend_surface_bbox = BoundingBox();
-                        m_pathblend_path_t.clear();  // NEOTKO_COLORMIX_TAG s58: per-path lane-mode t
-                        m_pathblend_polyline_t.clear();  // NEOTKO_PATHBLEND_TAG s59: polyline-keyed t
-                        // NEOTKO_PATHBLEND_TAG — s59 Bug 2 same-z carry-over fix.
-                        // The per-pass max-z safety tracker MUST reset per EEC, not just
-                        // per layer.  When two objects share the same nominal_z (e.g. two
-                        // circles at z=2.08), the first EEC's pass-0 climbed bottom→nominal
-                        // correctly; the second EEC's pass-0 tried to start again at
-                        // bottom_z but inherited max_reached=nominal_z from EEC #1 →
-                        // every path was clamped flat to nominal → the second surface
-                        // lost its gradient entirely (visible as "only one circle has
-                        // PathBlend").  Between EECs the nozzle travels (with Z-lift),
-                        // so the in-EEC monotonic-Z guarantee does not need to persist
-                        // across surface boundaries — only within a surface.
-                        m_pathblend_max_z_per_pass.clear();
-                        // NEOTKO_PROFILE_TAG — Fase G fix: painter-mode PB
-                        // path acceptance. Replaces the preset-only
-                        // `needs_blend` check with a per-role decision based
-                        // on which painted profile covers this layer's Z.
-                        //
-                        // Two effects in one block:
-                        //  (a) PB_LEAK_BLOCK — if painter mode + no painted PB
-                        //      profile anywhere at this Z, skip PB entirely
-                        //      (CM-only painted area must not get PB flow).
-                        //  (b) per-role override — if painter mode + painted
-                        //      profile has PB on top role, accept top paths
-                        //      regardless of preset's `pathblend_surface`.
-                        //      Same for penu. Fixes the case where preset
-                        //      surface=1 (Top only) but user painted PB on
-                        //      penu — without this override, penu paths get
-                        //      rejected by `needs_blend`, never enter pb_paths,
-                        //      never receive flow gradient, and both passes
-                        //      print at nominal_z (pass 0 invisible under
-                        //      pass 1).
-                        bool _gc_pb_painter_mode = false;
-                        bool _gc_pb_painter_block = false;
-                        bool _gc_pb_paint_top  = false;
-                        bool _gc_pb_paint_penu = false;
-                        if (m_layer && m_layer->object()) {
-                            const PrintObject* _po = m_layer->object();
-                            // NEOTKO_PROFILE_TAG — MMU exclusion: never apply PathBlend
-                            // to an MMU-painted object; MMU owns its surfaces.
-                            const bool _gc_mm_painted = _po->model_object() != nullptr
-                                && _po->model_object()->is_mm_painted();
-                            const bool _pmo = !_gc_mm_painted
-                                && SurfaceColorMix::object_has_any_colormix_paint(
-                                       _po->model_object());
-                            if (_gc_mm_painted) {
-                                _gc_pb_painter_mode  = true;
-                                _gc_pb_painter_block = true;
-                                NEOTKO_LOG(COLORMIX, "PB_LEAK_BLOCK mmu_painted z="
-                                    << m_layer->print_z << " (MMU object — PathBlend suppressed)");
-                            } else if (_pmo) {
-                                _gc_pb_painter_mode = true;
-                                const double _pz = m_layer->print_z;
-                                const double _ph = m_layer->height;
-                                const int _top_slot  = SurfaceColorMix::dominant_painted_slot_in_z_range(_po, _pz - _ph, _pz);
-                                const int _penu_slot = SurfaceColorMix::dominant_painted_slot_in_z_range(_po, _pz, _pz + _ph);
-                                auto profile_has_pb = [&](int slot) -> bool {
-                                    if (slot <= 0) return false;
-                                    const int pid = SurfaceColorMix::profile_id_for_slot(_po, slot);
-                                    const auto* p = SurfaceEffectProfileManager::get().find(pid);
-                                    return (p && p->pathblend.present);
-                                };
-                                _gc_pb_paint_top  = profile_has_pb(_top_slot);
-                                _gc_pb_paint_penu = profile_has_pb(_penu_slot);
-                                if (!_gc_pb_paint_top && !_gc_pb_paint_penu) {
-                                    _gc_pb_painter_block = true;
-                                    NEOTKO_LOG(COLORMIX, "PB_LEAK_BLOCK painter_mode z="
-                                        << _pz << " (no painted PB profile at this layer)");
-                                } else if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
-                                    NEOTKO_LOG(COLORMIX, "PB_PAINT_ACCEPT z=" << _pz
-                                        << " top_pb=" << (_gc_pb_paint_top ? 1 : 0)
-                                        << " penu_pb=" << (_gc_pb_paint_penu ? 1 : 0));
-                                }
-                            }
-                        }
-                        auto _gc_accept_pb_path = [&](const ExtrusionPath& p) -> bool {
-                            if (_gc_pb_painter_mode) {
-                                // Painter mode: bypass preset surface filter;
-                                // accept per painted-profile presence per role.
-                                if (p.role() == erTopSolidInfill)    return _gc_pb_paint_top;
-                                if (p.role() == erPenultimateInfill) return _gc_pb_paint_penu;
-                                return false;
-                            }
-                            return PathBlendEngine::needs_blend(p, m_config);
-                        };
-                        std::vector<const ExtrusionPath*> pb_paths;
-                        for (const ExtrusionEntity* ee2 : eec->entities) {
-                            if (_gc_pb_painter_block) break;
-                            if (const auto* p2 = dynamic_cast<const ExtrusionPath*>(ee2))
-                                if (_gc_accept_pb_path(*p2)) {
-                                    m_pathblend_surface_bbox.merge(p2->polyline.bounding_box());
-                                    pb_paths.push_back(p2);
-                                }
-                        }
-                        // NEOTKO_COLORMIX_TAG — s58 Fix A: PathBlend lane mode (1/2/3).
-                        // Pre-compute surface_t per path with `compute_t_per_line` which
-                        // returns t directly in [0, 1] normalised against the actual lane
-                        // range observed (not a fixed slot count — that was Bug 1: t never
-                        // reached 1.0 → pass N-1 paths near t=0 had flow=0 and got skipped
-                        // by the apply_path guard, producing visible gaps).
-                        // Consumed inside the loop that calls PathBlendEngine::apply_path
-                        // (~line 8697); falls back to the legacy Y-bbox formula when the
-                        // map is empty or a path isn't found.
-                        if (!pb_paths.empty()) {
-                            const int lane_mode = m_config.option<ConfigOptionInt>(
-                                "surface_color_mix_lane_mode")
-                                ? m_config.option<ConfigOptionInt>("surface_color_mix_lane_mode")->value
-                                : kLaneMode_Default;
-                            if (lane_mode != kLaneMode_Default) {
-                                struct PBLine { Polyline pl; float width; };
-                                std::vector<PBLine> raw;
-                                raw.reserve(pb_paths.size());
-                                for (const auto* p : pb_paths)
-                                    raw.push_back({ p->polyline, p->width });
-                                std::string lane_dbg;
-                                std::vector<double> t_per = compute_t_per_line(
-                                    raw, lane_mode,
-                                    NeoDebug::enabled(NeoDebug::COLORMIX) ? &lane_dbg : nullptr);
-                                if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
-                                    NEOTKO_LOG(COLORMIX,
-                                        "PB_LANE_MODE mode=" << lane_mode
-                                        << " (" << lane_dbg << ") paths=" << pb_paths.size());
-                                }
-                                for (size_t i = 0; i < pb_paths.size(); ++i) {
-                                    const double t = std::clamp(t_per[i], 0.0, 1.0);
-                                    m_pathblend_path_t[pb_paths[i]] = t;
-                                    m_pathblend_polyline_t[
-                                        pb_polyline_signature(pb_paths[i]->polyline)] = t;
-                                }
-                            } else {
-                                // NEOTKO_PATHBLEND_TAG — s59 Bug 2 root-cause fix.
-                                // With lane_mode=Default the map was left empty, the
-                                // t-ascending sort below was skipped, and paths came out
-                                // in chained_path_from() travel order — descending in t
-                                // for some objects → pass 0 nozzle descended in Z →
-                                // PATHBLEND_SAFETY clamped z_pass to max_reached, killing
-                                // the gradient and leaving the print "locked" at nominal_z.
-                                // Populate the map using the same Y-bbox centroid formula
-                                // used by the apply_path call-site fallback (see _extrude
-                                // around L8888), so the sort runs unconditionally and the
-                                // surface_t the sort uses matches the one fed into
-                                // apply_path. Pass 0 is then guaranteed to climb from
-                                // bottom_z → nominal_z, "Z menor → Z mayor" always.
-                                if (m_pathblend_surface_bbox.defined) {
-                                    const double y_min = double(m_pathblend_surface_bbox.min.y());
-                                    const double y_max = double(m_pathblend_surface_bbox.max.y());
-                                    if (y_max > y_min + 1.0) {
-                                        for (const auto* p : pb_paths) {
-                                            if (p->polyline.points.empty()) continue;
-                                            double sum_y = 0.0;
-                                            for (const auto& pt : p->polyline.points)
-                                                sum_y += double(pt.y());
-                                            const double cy = sum_y / double(p->polyline.points.size());
-                                            const double t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
-                                            m_pathblend_path_t[p] = t;
-                                            m_pathblend_polyline_t[
-                                                pb_polyline_signature(p->polyline)] = t;
-                                        }
-                                        if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
-                                            NEOTKO_LOG(COLORMIX,
-                                                "PB_T_FROM_BBOX (lane_mode=Default) paths="
-                                                << pb_paths.size()
-                                                << " y_min=" << y_min << " y_max=" << y_max);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // NEOTKO_PATHBLEND_TAG_END
-
-                        // NEOTKO_COLORMIX_TAG — s58 Fix B: monotonic Z within each pass.
-                        // When PathBlend lane mode is active, paths printed in
-                        // chained_path_from() order have non-monotonic surface_t, causing
-                        // the nozzle to bounce up and down in Z within pass 0 (z = bottom +
-                        // t * h varies per path) → drag through previously deposited
-                        // material.  Force t-ascending order (or descending if
-                        // invert_gradient) so Z climbs monotonically within each pass.
-                        // Trade-off: lose chained_path's travel optimisation, gain print
-                        // quality (no drag).  For PathBlend this is non-negotiable.
-                        if (!m_pathblend_path_t.empty()) {
-                            // NEOTKO_PATHBLEND_TAG — s58 Fix A: separate PathBlend paths
-                            // (which have a registered t) from non-PathBlend ones (perimeters,
-                            // fallback-extruder paths mixed into this bucket via COLORMIX_HOOK
-                            // decode).  Without this split, the ~36 non-PB paths sat at the
-                            // default t=0.5 and broke the Z monotony within the pass.
-                            std::vector<ExtrusionEntity*> ent_pb;
-                            std::vector<ExtrusionEntity*> ent_other;
-                            ent_pb.reserve(eec->entities.size());
-                            for (ExtrusionEntity* e : eec->entities) {
-                                bool has_t = false;
-                                if (const auto* p = dynamic_cast<const ExtrusionPath*>(e))
-                                    has_t = (m_pathblend_path_t.count(p) > 0);
-                                (has_t ? ent_pb : ent_other).push_back(e);
-                            }
-                            // NEOTKO_PATHBLEND_TAG — s58 Fix D: ALWAYS sort ascending by t
-                            // (= surface_t).  Z direction is decoupled from invert_gradient
-                            // in apply_path (see SurfaceColorMix.cpp), so the nozzle always
-                            // climbs Z monotonically from bottom_z (t=0) to nominal_z (t=1).
-                            // The invert flag now only flips the colour gradient (which side
-                            // gets which pass's tool predominantly), it never changes Z.
-                            std::stable_sort(ent_pb.begin(), ent_pb.end(),
-                                [&](const ExtrusionEntity* a, const ExtrusionEntity* b) {
-                                    auto t_for = [&](const ExtrusionEntity* e) -> double {
-                                        if (const auto* p = dynamic_cast<const ExtrusionPath*>(e)) {
-                                            // Prefer stable polyline-signature key (survives
-                                            // extrude_entity's internal path copy); pointer
-                                            // map is kept as a secondary fallback.
-                                            auto it2 = m_pathblend_polyline_t.find(
-                                                pb_polyline_signature(p->polyline));
-                                            if (it2 != m_pathblend_polyline_t.end()) return it2->second;
-                                            auto it = m_pathblend_path_t.find(p);
-                                            if (it != m_pathblend_path_t.end()) return it->second;
-                                        }
-                                        return 0.5;
-                                    };
-                                    return t_for(a) < t_for(b);  // ascending → Z ascends
-                                });
-                            if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
-                                // NEOTKO_PATHBLEND_TAG — s59 diagnostic: show map spread
-                                // and the first/last entries in ent_pb after sort so we
-                                // can tell whether the sort actually reordered (i.e. did
-                                // ent_pb[0] end up at the lowest t and ent_pb.back() at
-                                // the highest t?  If not, lookup is missing for some
-                                // paths and the comparator falls back to 0.5 → stable_sort
-                                // preserves original order → first path may have high t
-                                // → safety clamp pins z for the rest of the pass).
-                                double t_map_min = 1.1, t_map_max = -0.1;
-                                for (const auto& kv : m_pathblend_path_t) {
-                                    if (kv.second < t_map_min) t_map_min = kv.second;
-                                    if (kv.second > t_map_max) t_map_max = kv.second;
-                                }
-                                auto t_of = [&](const ExtrusionEntity* e) -> double {
-                                    if (const auto* p = dynamic_cast<const ExtrusionPath*>(e)) {
-                                        auto it2 = m_pathblend_polyline_t.find(
-                                            pb_polyline_signature(p->polyline));
-                                        if (it2 != m_pathblend_polyline_t.end()) return it2->second;
-                                        auto it = m_pathblend_path_t.find(p);
-                                        if (it != m_pathblend_path_t.end()) return it->second;
-                                    }
-                                    return -1.0; // sentinel: lookup MISS
-                                };
-                                double t_first = ent_pb.empty() ? -2.0 : t_of(ent_pb.front());
-                                double t_last  = ent_pb.empty() ? -2.0 : t_of(ent_pb.back());
-                                NEOTKO_LOG(COLORMIX,
-                                    "PB_SORT_BY_T (z-ascending always)"
-                                    << " pb_paths=" << ent_pb.size()
-                                    << " other_paths=" << ent_other.size()
-                                    << " map_size=" << m_pathblend_path_t.size()
-                                    << " map_t=[" << t_map_min << ".." << t_map_max << "]"
-                                    << " sorted_first_t=" << t_first
-                                    << " sorted_last_t="  << t_last);
-                            }
-                            // PB paths first (sorted by t), then non-PB paths preserving order.
-                            for (ExtrusionEntity* ee : ent_pb)
-                                gcode += this->extrude_entity(*ee, extrusion_name);
-                            for (ExtrusionEntity* ee : ent_other)
-                                gcode += this->extrude_entity(*ee, extrusion_name);
-                        } else {
-                            for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos).entities)
-                                gcode += this->extrude_entity(*ee, extrusion_name);
-                        }
-                        m_pathblend_surface_bbox = BoundingBox(); // reset after collection
-                        m_pathblend_path_t.clear();               // NEOTKO_COLORMIX_TAG s58 reset
+                        // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the PathBlend
+                        // surface_t precompute + monotonic sort that lived here was
+                        // DELETED. PathBlend no longer flows through the real-layer
+                        // infill path — it is compiled into MultiPass sublayers, where
+                        // the sort + apply_path now run (process_layer sublayer dispatch).
+                        // Real-layer infill just emits its chained path order.
+                        for (ExtrusionEntity* ee : eec->chained_path_from(m_last_pos).entities)
+                            gcode += this->extrude_entity(*ee, extrusion_name);
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name);
                 }
@@ -8980,28 +8953,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             // NEOTKO_NEOWEAVING_TAG_START — force G1 branch when neoweaving (arc moves can't carry per-line Z offsets)
             const bool any_neoweave = (sloped == nullptr) && NeoweaveEngine::needs_weave(path, m_config);
             // NEOTKO_NEOWEAVING_TAG_END
-            // NEOTKO_MULTIPASS_TAG_START — PathBlend: force G1 branch (Z+flow gradient, incompatible with arc fitting)
-            // NEOTKO_COLORMIX_TAG_START — zone + filament filter for PathBlend
-            bool _pb_zone_ok = true, _pb_fil_ok = true;
-            if (m_layer != nullptr && PathBlendEngine::needs_blend(path, m_config)) {
-                const ExtrusionRole _pb_role = path.role();
-                const int _pb_zone = (_pb_role == erTopSolidInfill)
-                    ? m_config.interlayer_colormix_top_zone.value
-                    : m_config.interlayer_colormix_penu_zone.value;
-                if (_pb_zone == 1) {
-                    _pb_zone_ok = (_pb_role == erTopSolidInfill)
-                        ? (m_layer->upper_layer == nullptr)
-                        : (m_layer->upper_layer != nullptr && m_layer->upper_layer->upper_layer == nullptr);
-                }
-                const int _pb_ff = m_config.interlayer_colormix_filament_filter.value;
-                if (_pb_ff > 0) _pb_fil_ok = (m_config.solid_infill_filament.value == _pb_ff);
-            }
-            // NEOTKO_COLORMIX_TAG_END
+            // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend now runs ONLY
+            // as a sublayer (Fill.cpp FASE 2 compiles it into ramp/cap single-tool
+            // sublayers). The trigger is the sublayer context set by process_layer's
+            // sublayer dispatch — NOT the old real-layer needs_blend(m_config)+m_layer
+            // gate. Zone/filament filtering already happened upstream when the
+            // SurfacePassStack was resolved (synthesize_from_legacy + the Fill gate),
+            // so no redundant per-path filtering here. Forces the G1 branch (the
+            // variable-Z gradient is incompatible with arc fitting).
             const bool any_pathblend = !any_neoweave
                 && (sloped == nullptr)
-                && (m_layer != nullptr)
-                && _pb_zone_ok && _pb_fil_ok
-                && PathBlendEngine::needs_blend(path, m_config);
+                && (m_pb_sub_pass >= 0)
+                && (m_pb_sub_cfg != nullptr);
             // NEOTKO_MULTIPASS_TAG_END
             if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || any_neoweave || any_pathblend) {
                 // NEOTKO_NEOWEAVING_TAG_START
@@ -9021,53 +8984,14 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                 // NEOTKO_NEOWEAVING_TAG_END
                 // NEOTKO_MULTIPASS_TAG_START — PathBlend apply
                 if (any_pathblend) {
-                    // Determine pass_idx.
-                    // NEOTKO_PATHBLEND_TAG — s58 Fix B: prefer REAL print order over
-                    // config tool[] order.  When the writer entered the layer with
-                    // pathblend_tool_2 (e.g. T3 from a previous layer), the rotation
-                    // in process_layer puts T3 first → T3 is physically printed
-                    // before T2.  Using config-based pass_idx (pb.tool[1]==T3 →
-                    // pass_idx=1) made the first-printed extruder go to z=nominal_z,
-                    // dragging the nozzle through fresh material on the way down to
-                    // pass 0.  Using print-order pass_idx guarantees the first
-                    // extruder printed is always pass 0 (z=bottom) → monotonic Z.
-                    int pass_idx = 0;
-                    if (m_writer.extruder() != nullptr) {
-                        const int cur_ext = static_cast<int>(m_writer.extruder()->id());
-                        // NEOTKO_PATHBLEND_TAG — s69 cross-object fix: derive
-                        // pass_idx from the physical layer print order filtered
-                        // by THIS region's PathBlend tool set.  m_config is
-                        // region-correct here (extrude_infill applied it), so
-                        // objects with different PB tool sets no longer
-                        // contaminate each other's pass ordering.
-                        const auto pb = PathBlendPassConfig::from_region_config(m_config, path.role());
-                        std::set<int> pb_tools;
-                        for (int pi = 0; pi < pb.num_passes; ++pi)
-                            if (pb.tool[pi] >= 0)
-                                pb_tools.insert(pb.tool[pi]);
-                        bool by_print_order = false;
-                        if (!m_pathblend_layer_extruders.empty() && !pb_tools.empty()) {
-                            int rank = 0;
-                            for (unsigned int ext : m_pathblend_layer_extruders) {
-                                if (!pb_tools.count(static_cast<int>(ext)))
-                                    continue;
-                                if (static_cast<int>(ext) == cur_ext) {
-                                    pass_idx = rank;
-                                    by_print_order = true;
-                                    break;
-                                }
-                                ++rank;
-                            }
-                        }
-                        if (!by_print_order) {
-                            // Fallback: config tool[] order (legacy, used when
-                            // the current extruder is not in the physical order
-                            // for any reason).
-                            for (int pi = 0; pi < pb.num_passes; ++pi) {
-                                if (pb.tool[pi] == cur_ext) { pass_idx = pi; break; }
-                            }
-                        }
-                    }
+                    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: pass_idx comes
+                    // directly from the sublayer context (0 = ramp, 1 = cap). The
+                    // sublayer IS the pass: Fill.cpp emits one single-tool sublayer
+                    // per PB pass, so there is no ambiguity to resolve from the
+                    // writer's current tool (which broke when std::rotate reordered
+                    // the real-layer extruder list — the whole class of bug this
+                    // migration removes).
+                    const int pass_idx = m_pb_sub_pass;
                     // surface_t: position of this path in the surface [0..1].
                     // NEOTKO_COLORMIX_TAG — s58: lane mode lookup.
                     // When the user selected a non-Default lane mode, extrude_infill()
@@ -9138,9 +9062,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                                 << " map_size=" << m_pathblend_path_t.size());
                         }
                     }
+                    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: use the pb-overload
+                    // with the sublayer context (decoded pb, role, nominal_z, layer
+                    // height). No PrintRegionConfig dependency — the sublayer carries
+                    // everything apply_path needs.
                     gcode += PathBlendEngine::apply_path(
-                        path, m_config, path.role(), m_writer,
-                        m_nominal_z, m_layer->height,
+                        path, *m_pb_sub_cfg, m_pb_sub_role, m_writer,
+                        m_pb_sub_nominal_z, m_pb_sub_layer_height,
                         F, e_per_mm, pass_idx, surface_t,
                         [this](const Point& p) { return this->point_to_gcode(p); },
                         // NEOTKO_PATHBLEND_TAG s58 Bug 2 safety: pass the per-pass max-z

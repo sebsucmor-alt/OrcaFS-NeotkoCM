@@ -46,6 +46,7 @@ namespace { struct Item; }
 struct PrintInstance;
 class ConstPrintObjectPtrsAdaptor;
 struct MultiPassSubLayer; // NEOTKO_MULTIPASS_TAG — defined in Print.hpp
+struct PathBlendPassConfig; // NEOTKO_PATHBLEND_TAG — defined in SurfaceColorMix.hpp (pointer member only)
 
 class OozePrevention {
 public:
@@ -839,29 +840,12 @@ private:
     // same EEC are extremely unlikely (fill segments rarely share both endpoints).
     std::map<uint64_t, double> m_pathblend_polyline_t;
 
-    // NEOTKO_PATHBLEND_TAG — s58 Fix B / s69 multi-object fix: the layer's
-    // extruders in their REAL physical print order (= post-rotation
-    // layer_extruders).  Populated in process_layer right after the rotation
-    // that puts current_tool first.  Consumed inside _extrude() to compute
-    // pass_idx: the order is filtered there by the CURRENT region's PathBlend
-    // tool set (PathBlendPassConfig::from_region_config(m_config) — region-correct
-    // inside extrude_infill) and pass_idx = rank of the current extruder among
-    // those tools.
-    //
-    // Why: when the writer enters a PathBlend layer with the WRONG tool (e.g.
-    // entered as T3 but config says pass 0 = T2), the layer_extruders rotation
-    // puts T3 first, so T3 is the first extruder physically printed.  Treating
-    // the first-printed extruder as pass 0 (z=bottom) instead of pass 1
-    // (z=nominal_z) eliminates the "primera pasada después de la segunda" bug:
-    // the nozzle always climbs Z monotonically across passes.
-    //
-    // s69: this used to be PRE-FILTERED by a single PB region's tools, picked as
-    // the first PB region across ALL objects' layers.  With 3+ objects where two
-    // had PathBlend with DIFFERENT tool sets, the penultimate object inherited
-    // the other object's tool list → its pass 0 had no matching rank → ramp pass
-    // omitted.  Storing the raw order and filtering per-region in _extrude fixes
-    // the cross-object contamination.
-    std::vector<unsigned int> m_pathblend_layer_extruders;
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s73: m_pathblend_layer_extruders REMOVED.
+    // pass_idx is now derived from config order (pb.tool[]) in _extrude — the
+    // physical-print-order derivation it used to feed was the root cause of
+    // the s71 "tool<->pasada inversion" bug (test 03 s72).  Inter-pass physical
+    // ordering (ramp before cap) is now enforced upstream by suppressing the
+    // std::rotate in process_layer when PB is active.
 
     // NEOTKO_PATHBLEND_TAG — s58 Bug 2 safety: max-z reached per (layer, pass).
     // PathBlend's standalone mode can produce dangerous gcode where, within a
@@ -879,6 +863,21 @@ private:
     // Reset at the start of every real layer in process_layer.
     // Key: pass_idx (int).  Value: max z reached so far (mm).
     std::map<int, double> m_pathblend_max_z_per_pass;
+
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend-as-sublayer context.
+    // PathBlend no longer runs in the real-layer extrude path. It is compiled into
+    // ramp(+cap) single-tool sublayers (Fill.cpp FASE 2). When the sublayer dispatch
+    // (process_layer) emits a PathBlend sublayer it sets this context, then calls
+    // extrude_entity normally; extrude_path's PB branch fires on m_pb_sub_pass >= 0
+    // (NOT on m_layer/m_config, which are unavailable/unreliable in sublayer dispatch)
+    // and routes the path through PathBlendEngine::apply_path with these values.
+    // surface_t still comes from the existing m_pathblend_surface_bbox fallback,
+    // which the dispatch sets to the sublayer's fill bbox. Cleared after each sub.
+    const PathBlendPassConfig* m_pb_sub_cfg          = nullptr; // points to a dispatch-local pb
+    int                        m_pb_sub_pass         = -1;      // 0 = ramp, 1 = cap
+    ExtrusionRole              m_pb_sub_role         = erTopSolidInfill;
+    double                     m_pb_sub_nominal_z    = 0.0;
+    double                     m_pb_sub_layer_height = 0.0;
     // NEOTKO_PATHBLEND_TAG_END
     int m_start_gcode_filament = -1;
 

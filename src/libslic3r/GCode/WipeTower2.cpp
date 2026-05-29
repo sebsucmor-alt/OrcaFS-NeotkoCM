@@ -1752,6 +1752,15 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     const bool do_ramming   = (m_semm && m_enable_filament_ramming) || m_filpar[m_current_tool].multitool_ramming;
     const bool cold_ramming = m_is_mk4mmu3;
 
+    // NEOTKO_MPSCHEDULER_TAG s79b — sandwich sublayer TCs: keep the TRAVEL to the tower
+    // (drip-control visit, gated by do_ramming) but skip the ramming EXTRUSION (deposit).
+    // On a multi-tool machine the filament swap is done by the printer macro, so the tower
+    // ramming is redundant — and in the small sandwich box it ate the box, starving the
+    // useful pre-print wipe. With ram_deposit=false the box is left empty for the wipe to
+    // fill before printing. Body real-layer TCs (skip_ramming=false) keep full ramming.
+    const bool ram_deposit  = do_ramming &&
+                              !(m_active_tool_change != nullptr && m_active_tool_change->skip_ramming);
+
     if (do_ramming) {
         writer.travel(ramming_start_pos); // move to starting position
         if (!m_is_mk4mmu3) {
@@ -1766,7 +1775,7 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
         writer.set_position(ramming_start_pos);
 
     // if the ending point of the ram would end up in mid air, align it with the end of the wipe tower:
-    if (do_ramming &&
+    if (ram_deposit &&
         (m_layer_info > m_plan.begin() && m_layer_info < m_plan.end() && (m_layer_info - 1 != m_plan.begin() || !m_adhesion))) {
         // this is y of the center of previous sparse infill border
         float sparse_beginning_y = 0.f;
@@ -1799,7 +1808,7 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     }
 
     // now the ramming itself:
-    while (do_ramming && i < m_filpar[m_current_tool].ramming_speed.size() && !is_over_tower_height) {
+    while (ram_deposit && i < m_filpar[m_current_tool].ramming_speed.size() && !is_over_tower_height) {
         // The time step is different for SEMM ramming and the MM ramming. See comments in set_extruder() for details.
         const float time_step = m_semm ? 0.25f : m_filpar[m_current_tool].multitool_ramming_time;
 
@@ -2319,7 +2328,7 @@ static float get_wipe_depth(float volume, float layer_height, float perimeter_wi
 }
 
 // Appends a toolchange into m_plan and calculates neccessary depth of the corresponding box
-void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume)
+void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume, bool skip_ramming)
 {
     assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON); // refuses to add a layer below the last one
 
@@ -2356,7 +2365,15 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
     // true micro-sublayer height, so extrusion/flow are 100% unchanged.
     // Applied identically in plan_local_z_toolchange / plan_local_z_reserve /
     // save_on_last_wipe below.
-    float height_for_depth  = std::max(layer_height_par, m_filpar[old_tool].nozzle_diameter * 0.5f);
+    // NEOTKO_NEOTOWER_TAG — s78 fix (purge overflow): floor the depth-math height to
+    // the real min layer height (0.04), NOT nozzle×0.5 (~0.2). The s67 floor decoupled
+    // the DEPTH reservation (computed at 0.2) from the actual EXTRUSION (volume_to_length
+    // uses the real m_layer_height ~0.04) → the purge line is ~5× longer than the reserved
+    // Y-depth → it overran the tower footprint ("purgas fuera de la zona de wipetower") and
+    // spiked the volumetric flow. Reserve == extrude now (both at the real height). Safe:
+    // sandwich purge volume is the reserve knob (small), and NeoTower already floors event
+    // heights to ≥0.04 (0.0002 residuals → 0.2), so this never explodes.
+    float height_for_depth  = std::max(layer_height_par, 0.04f);
     // NEOTKO_NEOTOWER_TAG_END
     float length_to_extrude = volume_to_length(0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(),
                                                                        m_filpar[old_tool].ramming_speed.end(), 0.f),
@@ -2373,8 +2390,11 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
     float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, height_for_depth, m_perimeter_width, m_extra_flow,
                                              m_extra_spacing_wipe, width);
 
+    // NEOTKO_MPSCHEDULER_TAG s79b — keep the box (ramming_depth + wiping_depth) so the tower
+    // footprint is unchanged; the skip_ramming flag only moves the DEPOSIT from the after-print
+    // ramming to the before-print wipe (which then fills the whole box). See toolchange_Unload.
     m_plan.back().tool_changes.push_back(
-        WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume));
+        WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume, skip_ramming));
 }
 
 void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume)
@@ -2394,7 +2414,9 @@ void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, un
     // NEOTKO_NEOTOWER_TAG — s67 wipe-tower depth flooring (see plan_toolchange for
     // the full rationale). Floor the depth-math height to nozzle_diameter*0.5 so
     // Local-Z sublayer micro-heights cannot inflate the planned Y footprint.
-    float height_for_depth  = std::max(layer_height_par, m_filpar[old_tool].nozzle_diameter * 0.5f);
+    // NEOTKO_NEOTOWER_TAG — s78 fix: floor to real min layer height (0.04), not nozzle×0.5.
+    // Depth reservation must match the real extrusion height (see plan_toolchange).
+    float height_for_depth  = std::max(layer_height_par, 0.04f);
     float length_to_extrude = volume_to_length(0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(),
                                                                        m_filpar[old_tool].ramming_speed.end(), 0.f),
                                                m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator, height_for_depth);
@@ -2429,7 +2451,9 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
     // NEOTKO_NEOTOWER_TAG — s67 wipe-tower depth flooring (see plan_toolchange for
     // the full rationale). plan_local_z_reserve has no explicit old_tool, so the
     // floor uses the base extruder's nozzle diameter (m_filpar[0]).
-    float height_for_depth      = std::max(layer_height_par, m_filpar[0].nozzle_diameter * 0.5f);
+    // NEOTKO_NEOTOWER_TAG — s78 fix: floor to real min layer height (0.04), not nozzle×0.5
+    // (see plan_toolchange) — depth reservation must match real extrusion height.
+    float height_for_depth      = std::max(layer_height_par, 0.04f);
     const float mini_wipe_depth = m_local_z_wipe_tower_purge_lines * m_perimeter_width * m_extra_spacing_wipe;
     const float wipe_width      = std::max(0.f, m_wipe_tower_width - 3.f * m_perimeter_width);
     const float wiping_depth    = wipe_width > WT_EPSILON ?
@@ -2517,7 +2541,9 @@ void WipeTower2::save_on_last_wipe()
                 // for the full rationale). save_on_last_wipe recomputes depth from the
                 // real layer height; floor it to nozzle_diameter*0.5 of the incoming tool
                 // so the last-wipe saving does not distort a thin-layer footprint.
-                float height_for_depth         = std::max(m_layer_info->height, m_filpar[toolchange.new_tool].nozzle_diameter * 0.5f);
+                // NEOTKO_NEOTOWER_TAG — s78 fix: floor to real min layer height (0.04),
+                // not nozzle×0.5 (see plan_toolchange) — reserve must match real extrusion.
+                float height_for_depth         = std::max(m_layer_info->height, 0.04f);
                 float volume_to_save           = length_to_volume(finish_layer().total_extrusion_length_in_plane(), m_perimeter_width,
                                                                   height_for_depth);
                 float volume_left_to_wipe      = std::max(m_filpar[toolchange.new_tool].filament_minimal_purge_on_wipe_tower,

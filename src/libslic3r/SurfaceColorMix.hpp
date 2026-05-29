@@ -9,8 +9,11 @@
 
 #include "libslic3r.h"
 #include "ExtrusionEntity.hpp"
+#include "ExtrusionEntityCollection.hpp" // NEOTKO_SANDWICH_TAG — eec_to_tool_buckets() returns EEC by value
 #include "PrintConfig.hpp"
 #include "MixedFilament.hpp"
+#include "SurfaceEffectProfile.hpp" // NEOTKO_SANDWICH_TAG — SurfaceEffectPayload by value in SurfacePass
+#include <utility>  // NEOTKO_SANDWICH_TAG — std::pair in eec_to_tool_buckets() return type
 #include <vector>
 #include <map>
 #include <string>
@@ -191,6 +194,15 @@ public:
     // Decode in GCode.cpp: tool = floor(mm3_per_mm / 10.0) - 1
     static void encode_tool_in_path(ExtrusionPath* path, int tool_idx);
 
+    // NEOTKO_SANDWICH_TAG — Fase 2: decode a ColorMix-encoded EEC into per-tool
+    // buckets. `encoded` is the output of assign_and_group_tools() (tool stored
+    // in mm3_per_mm via the +(tool+1)*10 trick). Each path is cloned, its real
+    // mm3_per_mm restored, and routed to its tool's bucket. Unencoded paths
+    // (mm3_per_mm < 10) go to `default_tool`. Buckets are returned in
+    // first-appearance (spatial) order. The caller owns the cloned entities.
+    static std::vector<std::pair<int, ExtrusionEntityCollection>>
+    eec_to_tool_buckets(const ExtrusionEntityCollection& encoded, int default_tool);
+
     // NEOTKO_COLORMIX_TAG — s60 numeric gradient.
     //
     // Easing curves applied to the position fraction t ∈ [0,1] BEFORE the dither
@@ -318,41 +330,165 @@ struct MultiPassConfig {
 };
 
 // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
+// NEOTKO_SANDWICH_TAG — Fase 5 (s72): geometry-driven PathBlend.
+//
+// The blend is governed by explicit Z heights (mm) instead of the old
+// min_ratio/max_ratio fractions. Two variants live in the SandwichDialog
+// row selector: PathBlend Half (no cap, semi-filled layer) and PathBlend
+// Full (ramp + flat cap on top, fully filled).
+//
+// Geometry (relative to bottom_z, in mm):
+//   - floor_mm   : Z of the ramp at t=0 (low end). Min 0.01 mm.
+//   - mid_end_mm : Z of the ramp at t=1 (high end). Must be >= floor_mm.
+//                  Full also requires mid_end_mm <= H - 0.04 (cap >= 0.04).
+//   - Full       : flat cap at nominal_z covering [mid_end, nominal_z].
+//   - Half       : no cap; area above mid_end is empty (authorized semi-fill).
+//
+// Legacy view (num_passes, tool[]) is derived from mode/tool_bottom/tool_top
+// at load-time so existing iterating callers (GCode COLORMIX_HOOK,
+// ToolOrdering, Fill.cpp PB block) keep compiling unchanged.
 struct PathBlendPassConfig {
-    bool    enabled        = false;
-    int     surface        = 0;      // 0=both, 1=top, 2=penultimate
-    int     num_passes     = 2;
-    int     tool[4]        = {0, 1, 2, 3};
-    float   layer_ratio[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // ratio at the active extreme of each pass
-    float   min_ratio      = 0.05f;  // minimum extrusion ratio for the leading pass at t=0
-    float   max_ratio      = 1.00f;  // maximum extrusion ratio cap for the dominant pass at its peak
-    int     ease_mode      = 0;      // 0=Linear, 1=EaseIn (t²), 2=EaseOut (1-(1-t)²), 3=EaseInOut (smoothstep)
-    bool    invert_gradient = true;  // invert t for z calc → ascending z during print (safe)
-    int     fill_angle      = -1;    // -1 = follow top surface angle; 0..359 = override
+    enum class Mode : int { Half = 0, Full = 1 };
 
-    // Compute the extrusion ratio for pass `p` at normalized surface position `t` in [0,1].
-    // 2 passes: r0(t)=1-t, r1(t)=t
-    // 3 passes: r0=max(0,1-2t), r1=1-|2t-1|, r2=max(0,2t-1)
-    // 4 passes: linear-hat per tramo, peaks at t=0, 0.333, 0.667, 1.0
-    // min_ratio: applied to pass 0 (dominant at t=0) so it never goes below min_ratio.
-    double ratio_at(int p, double t) const;
+    bool    enabled         = false;
+    int     surface         = 0;      // 0=both, 1=top, 2=penultimate
+
+    // --- New geometry model (Fase 5) ---
+    Mode    mode            = Mode::Full;
+    float   floor_mm        = 0.01f;  // Z of ramp at t=0 (low end), >= 0.01
+    float   mid_end_mm      = 0.05f;  // Z of ramp at t=1 (high end), >= floor_mm
+    int     tool_bottom     = 0;      // ramp tool (0-based)
+    int     tool_top        = 1;      // cap tool (Full only; -1 if Half)
+    int     ease_mode       = 0;      // 0=Linear, 1=EaseIn (t²), 2=EaseOut, 3=EaseInOut
+    int     fill_angle      = -1;     // -1 = follow top surface angle; 0..359 = override
+
+    // --- Legacy view (derived from the new fields by from_*) ---
+    // num_passes == 1 for Half, 2 for Full. tool[0]=tool_bottom,
+    // tool[1]=tool_top (Full) or -1 (Half), tool[2..3] always -1.
+    int     num_passes      = 2;
+    int     tool[4]         = {0, 1, -1, -1};
+
+    // Recompute num_passes/tool[] from mode/tool_bottom/tool_top.
+    // Call this after writing to the new fields (called automatically by
+    // from_region_config / from_blob_json).
+    void    sync_legacy_view();
 
     // Build from PrintRegionConfig.  NEOTKO_PATHBLEND_TAG — s69 miniblob: when
     // the per-zone blob key (pathblend_top / pathblend_penu, selected by `role`)
-    // is non-empty it is parsed; otherwise the flat pathblend_* keys are read
-    // (back-compat).  enable + surface are always the shared scope keys
+    // is non-empty it is parsed; if it's the new v=2 schema (Fase 5) the
+    // geometry fields are read directly. Otherwise (v=1 miniblob or absent →
+    // flat pathblend_* keys legacy) the values are converted to the new model.
+    // enable + surface are always the shared scope keys
     // (multipass_path_gradient / pathblend_surface).
     static PathBlendPassConfig from_region_config(const PrintRegionConfig& cfg,
                                                   ExtrusionRole role = erTopSolidInfill);
 
-    // NEOTKO_PATHBLEND_TAG — s69 miniblob JSON round-trip for the per-zone blob.
-    // to_blob_json() serializes the per-zone settings (everything except the
-    // shared enable/surface scope).  from_blob_json() parses one; an empty or
-    // invalid blob yields a default-constructed config.
+    // NEOTKO_PATHBLEND_TAG — JSON round-trip for the per-zone blob.
+    // to_blob_json() emits the v=2 schema (Fase 5 geometry).
+    // from_blob_json() reads v=2 directly and converts v=1 (legacy s69 schema)
+    // to the new model. An empty or invalid blob yields a default-constructed
+    // config (Full, floor=0.01, mid_end=0.05).
     std::string                to_blob_json() const;
     static PathBlendPassConfig from_blob_json(const std::string& blob);
 };
 // NEOTKO_PATHBLEND_TAG_END
+
+// NEOTKO_SANDWICH_TAG_START
+// ===========================================================================
+// Sandwich revamp — MultiPass as the universal layer cutter.
+//
+// A Top surface (and an independent Penultimate surface) becomes a *stack* of
+// passes — a "sandwich of effects". Each pass owns a Z fraction (`ratio`, the
+// draggable "50%") and an effect kind. MultiPass virtual sublayers are the only
+// path: a ColorMix-only surface is a stack of 1 ColorMix pass.
+//
+// Storage (Q1): 2 coString JSON keys per region — neotko_surface_passes_top /
+// neotko_surface_passes_penu. Legacy multipass_* / interlayer_colormix_* /
+// pathblend_* keys (incl. the s69 pathblend_top/penu miniblob) stay read-only;
+// synthesize_from_legacy() rebuilds a stack when the blob is empty so old 3mf /
+// presets keep working.
+//
+// Slots model (user decision s69): a stack holds 1..3 passes.
+//   1 slot    → ColorMix or PathBlend only (a lone Solid pass is meaningless).
+//   2-3 slots → any kind per pass (Solid / ColorMix / PathBlend).
+//
+// NOTE: the enum is `SurfacePassKind`, NOT `SurfaceEffectKind` — the latter
+// already exists in SurfaceEffectProfile.hpp with different members.
+enum class SurfacePassKind : int {
+    None      = 0,   // passthrough — natural object surface, no effect, no gap
+    Solid     = 1,   // flat colour (a classic MultiPass pass)
+    ColorMix  = 2,   // dithered numeric gradient
+    PathBlend = 3,   // diagonal Z+flow blend (legacy whole-surface until Fase 5)
+};
+
+struct SurfacePass {
+    SurfacePassKind kind  = SurfacePassKind::Solid;
+    double          ratio = 0.0;          // fraction of layer Z height; Σ over stack ≈ 1.0
+
+    // --- Solid pass parameters (kind == Solid) ---
+    int             solid_tool = 0;       // 0-based physical extruder
+    int             angle      = -1;      // -1 = auto (follow fill angle), 0-359 custom
+    int             fan        = -1;      // 0-255, -1 = no change
+    int             speed_pct  = 100;     // M220 Sxx override (100 = no change)
+    std::string     gcode_start;          // injected before the pass fills
+    std::string     gcode_end;            // injected after the pass fills
+
+    // --- ColorMix / PathBlend parameters ---
+    // Serialized config-key -> value maps (same shape as SurfaceEffectPayload).
+    //  - colormix.kv : interlayer_colormix_* keys. Empty kv + present=true →
+    //                  the engine falls back to the region preset config.
+    //  - pathblend.kv: one entry "blob" holding PathBlendPassConfig::to_blob_json()
+    //                  (the s69 miniblob schema, reused verbatim).
+    SurfaceEffectPayload colormix;
+    SurfaceEffectPayload pathblend;
+};
+
+struct SurfacePassStack {
+    static constexpr int kMaxPasses = 3;  // slots model — hard cap
+
+    bool                     enabled            = false;
+    bool                     perimeter_override = false;
+    std::vector<SurfacePass> passes;            // bottom -> top, 1..kMaxPasses
+
+    bool empty() const { return passes.empty(); }
+
+    // True if every pass is Solid (or the stack is empty). An all-Solid stack
+    // is GCode-equivalent to a classic MultiPass run.
+    bool all_solid() const;
+
+    // JSON round-trip. to_json() of a disabled/empty stack returns "" so the
+    // config key stays at its empty default (→ synthesize_from_legacy kicks in).
+    std::string             to_json() const;
+    static SurfacePassStack from_json(const std::string& text);
+
+    // Rebuild a stack from a region's legacy keys when the blob is empty.
+    //   role == erPenultimateInfill → reads penu legacy keys + pathblend_penu
+    //   any other role             → reads top legacy keys  + pathblend_top
+    static SurfacePassStack synthesize_from_legacy(const PrintRegionConfig& cfg,
+                                                   ExtrusionRole role);
+
+    // Read the right blob key for `role`, parse it; fall back to
+    // synthesize_from_legacy() when the blob is empty. Single entry point for
+    // the engine (Fill.cpp FASE 2) and the wipe-tower mirror (ToolOrdering).
+    static SurfacePassStack resolve(const PrintRegionConfig& cfg,
+                                    ExtrusionRole role);
+
+    // Fase 3 UX helper — same as resolve() but for the SandwichDialog, which
+    // works with a DynamicPrintConfig (not a typed PrintRegionConfig). Copies
+    // the overlapping region keys into a PrintRegionConfig and delegates.
+    // `penu == true` resolves the Penultimate zone, false the Top zone.
+    static SurfacePassStack resolve_for_zone(const DynamicPrintConfig& cfg,
+                                             bool penu);
+
+    // Build a legacy MultiPassConfig view of the stack so the existing FASE 2
+    // sublayer loop can consume it. Non-Solid passes get tool = -1.
+    MultiPassConfig to_multipass_config(ExtrusionRole role) const;
+
+    // Inverse: build an all-Solid stack from a MultiPassConfig. Used by the
+    // FASE 2 painter branch (legacy bridge) so the loop always iterates a stack.
+    static SurfacePassStack from_multipass_config(const MultiPassConfig& mp);
+};
+// NEOTKO_SANDWICH_TAG_END
 
 
 // NEOTKO_NEOWEAVING_TAG_START
@@ -463,6 +599,27 @@ public:
         // only ascends or stays flat.  Prevents the dangerous "start high z +
         // low flow, end low z + high flow" pattern that risks drag/lifts.
         // Caller must reset the map at the start of each real layer.
+        std::map<int, double>*                    max_z_per_pass = nullptr
+    );
+
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: overload taking the resolved
+    // PathBlendPassConfig directly. The cfg-version above derives `pb` from
+    // from_region_config(cfg, role) and forwards here. The MultiPass-sublayer
+    // dispatch (GCode.cpp) decodes the sublayer's stored blob into a pb and calls
+    // this directly — it has no PrintRegionConfig in scope and must not depend on
+    // the m_layer/m_config global state that the legacy extrude_path branch used.
+    static std::string apply_path(
+        const ExtrusionPath&                      path,
+        const PathBlendPassConfig&                pb,
+        ExtrusionRole                             role,
+        GCodeWriter&                              writer,
+        double                                    nominal_z,
+        double                                    layer_height,
+        double                                    F,
+        double                                    e_per_mm,
+        int                                       pass_idx,
+        double                                    surface_t,
+        const std::function<Vec2d(const Point&)>& point_to_gcode,
         std::map<int, double>*                    max_z_per_pass = nullptr
     );
 };

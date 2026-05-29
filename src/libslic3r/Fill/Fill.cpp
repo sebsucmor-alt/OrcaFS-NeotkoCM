@@ -1351,6 +1351,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             {
                 const auto& mp_cfg   = layerm->region().config();
                 MultiPassConfig     mp;
+                SurfacePassStack    mp_stack;  // NEOTKO_SANDWICH_TAG — drives the FASE 2 loop
                 bool                is_mp_fill = false;
                 // NEOTKO_PROFILE_TAG_START — Fase F: painter-mode MP override.
                 // If any model_part volume of this object has painted facets,
@@ -1407,25 +1408,68 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                         << " surface=" << mp.surface
                                         << " (MP payload says off for this role)");
                                 }
+                            }
+                            // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: painter
+                            // PathBlend now drives FASE-2 sublayers too (no more
+                            // legacy path-duplication block). Build a one-pass
+                            // PathBlend stack from the painted profile's payload so
+                            // the band loop compiles it into ramp(+cap) sublayers.
+                            // MP takes priority (mirrors synthesize_from_legacy).
+                            else if (_p && _p->pathblend.present) {
+                                const PathBlendPassConfig _pbp =
+                                    SurfaceColorMix::pathblend_from_profile_payload(_p->pathblend);
+                                if (_pbp.enabled && _pbp.num_passes >= 1 &&
+                                    SurfaceColorMix::should_process_role(_mp_role, _pbp.surface)) {
+                                    SurfacePass _pp;
+                                    _pp.kind  = SurfacePassKind::PathBlend;
+                                    _pp.ratio = 1.0;
+                                    _pp.pathblend.present   = true;
+                                    _pp.pathblend.kv["blob"] = _pbp.to_blob_json();
+                                    mp_stack.passes.clear();
+                                    mp_stack.passes.push_back(std::move(_pp));
+                                    mp_stack.enabled = true;
+                                    is_mp_fill = true;
+                                    _mp_profile = _p;
+                                    NEOTKO_LOG(PROFILE, "PB_OVERRIDE layer=" << f->layer_id
+                                        << " z=" << this->print_z
+                                        << " role=" << (int)_mp_role
+                                        << " profile='" << _p->name << "'"
+                                        << " passes=" << _pbp.num_passes
+                                        << " tools=[" << _pbp.tool[0] << "," << _pbp.tool[1] << "]");
+                                } else {
+                                    NEOTKO_LOG(PROFILE, "PB_SUPPRESS layer=" << f->layer_id
+                                        << " role=" << (int)_mp_role
+                                        << " profile='" << _p->name << "'"
+                                        << " (PB payload off for this role)");
+                                }
                             } else {
                                 NEOTKO_LOG(PROFILE, "MP_SUPPRESS layer=" << f->layer_id
                                     << " role=" << (int)_mp_role
                                     << " slot=" << _slot
-                                    << " (profile has no MP payload)");
+                                    << " (profile has no MP/PB payload)");
                             }
                         }
                         // else: unpainted area of a painted object → painter
-                        // absoluto says no MP here. is_mp_fill stays false.
+                        // absoluto says no effect here. is_mp_fill stays false.
                     } else {
-                        const bool _mp_on = (_mp_role == erTopSolidInfill)
-                            ? mp_cfg.multipass_enabled.value
-                            : mp_cfg.penultimate_multipass_enabled.value;
-                        if (_mp_on) {
-                            mp         = MultiPassConfig::from_region_config(mp_cfg, _mp_role);
-                            is_mp_fill = (_mp_role == erTopSolidInfill)
-                                ? SurfaceColorMix::should_process_role(_mp_role, mp.surface)
-                                : true; // penultimate_multipass_enabled already gated above
+                        // NEOTKO_SANDWICH_TAG_START — preset mode: resolve the
+                        // pass stack (blob, or synthesize_from_legacy if empty).
+                        // Fase 2: a Solid/ColorMix/PathBlend stack drives FASE-2
+                        // sublayers (the loop dispatches per pass kind).
+                        // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend
+                        // passes NO longer fall through to the legacy GCode engine.
+                        // A PathBlend pass is compiled into ramp(+cap) sublayers in
+                        // the band loop below, exactly like Solid/ColorMix passes —
+                        // so its scheduling joins the proven single-tool-per-sublayer
+                        // model and the legacy ToolOrdering/extrude_path PB special
+                        // cases are deleted (no more "append_tcr unexpected" crashes).
+                        const SurfacePassStack _stack =
+                            SurfacePassStack::resolve(mp_cfg, _mp_role);
+                        if (_stack.enabled && !_stack.passes.empty()) {
+                            mp_stack   = _stack;
+                            is_mp_fill = true;
                         }
+                        // NEOTKO_SANDWICH_TAG_END
                     }
                     // NEOTKO_PROFILE_TAG_END
                 }
@@ -1467,6 +1511,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     }
                 }
 
+                // NEOTKO_SANDWICH_TAG — the painter branch (legacy bridge) builds
+                // a MultiPassConfig; convert it to an all-Solid stack so the loop
+                // below always iterates a SurfacePassStack.
+                if (is_mp_fill && mp_stack.passes.empty())
+                    mp_stack = SurfacePassStack::from_multipass_config(mp);
+
                 NEOTKO_LOG(MULTIPASS, "FASE2_CHECK layer=" << f->layer_id
                     << " print_z=" << this->print_z
                     << " role=" << (int)surface_fill.params.extrusion_role
@@ -1475,21 +1525,132 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     << " is_mp_fill=" << is_mp_fill);
 
                 if (is_mp_fill) {
-                    const int   n          = std::max(1, std::min(3, mp.num_passes));
+                    // NEOTKO_SANDWICH_TAG_START — Fase 2: the FASE 2 loop iterates
+                    // the SurfacePassStack and compiles each band into sublayers:
+                    //   Solid / None → one mono-tool sublayer (None = passthrough,
+                    //                  prints with the object's natural surface tool)
+                    //   ColorMix     → assign_and_group_tools encodes tools, then
+                    //                  eec_to_tool_buckets splits the lámina into N
+                    //                  per-tool buckets — each emitted as its own
+                    //                  single-tool sublayer (shaped like a MultiPass
+                    //                  pass: distinct print_z, monotonic pass_idx) so
+                    //                  NeoTower / ToolOrdering / the GCode handler
+                    //                  schedule them with zero changes.
+                    //   PathBlend    → never reaches here (preset gate excludes it).
+                    const int   n          = std::min<int>(3, (int)mp_stack.passes.size());
                     const float base_angle = surface_fill.params.angle;
-                    // NEOTKO_MULTIPASS_TAG_START — Virtual sublayers: each pass → MultiPassSubLayer
                     // Beer-Lambert stadium model: A(W,H) = H*(W - H*(1-π/4)) [matches Flow.cpp]
-                    constexpr double k_mp = 1.0 - 0.25 * M_PI;
-                    auto& sublayer_slot   = this->object()->multipass_sublayers()[this->id()];
+                    constexpr double k_mp  = 1.0 - 0.25 * M_PI;
+                    auto& sublayer_slot    = this->object()->multipass_sublayers()[this->id()];
+                    const ExtrusionRole _sub_role = surface_fill.params.extrusion_role;
+                    // Natural surface tool (0-based): used by None passes (passthrough)
+                    // and as the ColorMix unencoded-path fallback bucket.
+                    const int natural_tool = std::max(0, mp_cfg.solid_infill_filament.value - 1);
+                    // NEOTKO_SANDWICH_TAG — monotonic sublayer index across the
+                    // whole layer. NeoTower chains sublayers by (obj,layer,pass_idx);
+                    // a ColorMix band emits several sublayers, so pass_idx must be
+                    // a running counter, not the band index.
+                    int global_pass = 0;
 
                     for (int i = 0; i < n; ++i) {
-                        if (mp.tool[i] < 0) continue;
+                        const SurfacePass&    pass = mp_stack.passes[i];
+                        const SurfacePassKind kind = pass.kind;
 
-                        const double ratio = mp.width_ratio[i];
+                        // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: compile a
+                        // PathBlend pass into ramp(+cap) single-tool sublayers.
+                        // Geometry is UNCHANGED — the GCode handler routes each
+                        // sublayer's fills through PathBlendEngine::apply_path
+                        // (variable-Z ramp / flat complementary cap) exactly as the
+                        // legacy engine did. Only the SCHEDULING changes: one tool
+                        // per sublayer with its own print_z → wipe-tower sync is
+                        // structural (no has_pathblend_chain / body_equals_cap /
+                        // body_needs_return / std::rotate special cases).
+                        if (kind == SurfacePassKind::PathBlend) {
+                            const std::string _blob = pass.pathblend.kv.count("blob")
+                                ? pass.pathblend.kv.at("blob") : std::string();
+                            const PathBlendPassConfig pb = PathBlendPassConfig::from_blob_json(_blob);
+                            // NEOTKO_PATHBLEND_TAG — Fase 5 s78 fix: do NOT gate on
+                            // pb.enabled here. `enabled` is a shared scope key
+                            // (multipass_path_gradient) intentionally NOT serialized
+                            // into the per-zone blob (see to_blob_json /
+                            // from_region_config). from_blob_json() therefore always
+                            // returns enabled=false, so `!pb.enabled` was ALWAYS true
+                            // → every PathBlend pass skipped → empty top layer → empty
+                            // wipe tower → EXC_BAD_ACCESS in
+                            // update_print_stats_and_format_filament_stats
+                            // (used_filament[id] on an empty vector). Reaching this
+                            // branch with kind==PathBlend already proves PB is enabled
+                            // (synthesize_from_legacy / the painter only emit a
+                            // PathBlend pass when the enable flag is set).
+                            if (pb.num_passes < 1 || pb.tool_bottom < 0) continue;
+
+                            // Fill angle: PathBlend override or the natural surface angle.
+                            f->angle = (pb.fill_angle >= 0)
+                                ? Geometry::deg2rad(static_cast<float>(pb.fill_angle))
+                                : base_angle;
+
+                            // Generate the surface fill once (NO Beer-Lambert ratio
+                            // scaling — apply_path derives flow from ramp_thickness/H,
+                            // overriding the path's mm3_per_mm).
+                            ExtrusionEntityCollection pb_src;
+                            f->fill_surface_extrusion(&surface_fill.surface, params, pb_src.entities);
+                            if (pb_src.entities.empty()) continue;
+
+                            auto _clone_into = [](const ExtrusionEntityCollection& s,
+                                                  ExtrusionEntityCollection& d) {
+                                for (const ExtrusionEntity* e : s.entities)
+                                    if (e) d.entities.push_back(e->clone());
+                            };
+
+                            // Scheduling Z: ramp/cap as two co-planar buckets just
+                            // below nominal (mirror the ColorMix 1 µm bucket step).
+                            // apply_path sets the REAL extrusion Z (ramp variable, cap
+                            // nominal); print_z here is only the LayerTools key + the
+                            // ramp-before-cap ordering.
+                            const double pb_band_top = this->bottom_z() + this->height - 2.0 * EPSILON;
+                            const float  pb_height   = float(this->height);
+                            const int    pb_npasses  = (pb.tool_top >= 0 && pb.num_passes >= 2) ? 2 : 1;
+
+                            for (int pp = 0; pp < pb_npasses; ++pp) {
+                                const int pb_tool = (pp == 0) ? pb.tool_bottom : pb.tool_top;
+                                if (pb_tool < 0) continue;
+                                MultiPassSubLayer sub;
+                                sub.print_z        = (pp == 0) ? (pb_band_top - 1e-3) : pb_band_top;
+                                sub.height         = pb_height;
+                                sub.pass_idx       = global_pass++;
+                                sub.role           = _sub_role;
+                                sub.effect         = SurfacePassKind::PathBlend;
+                                sub.tool_id        = pb_tool;
+                                sub.speed_pct      = 100;
+                                sub.pathblend_pass = pp;     // 0 = ramp, 1 = cap
+                                sub.pathblend_blob = _blob;  // decoded back into pb at dispatch
+                                if (pp == pb_npasses - 1)
+                                    sub.fills = std::move(pb_src);   // last takes ownership
+                                else
+                                    _clone_into(pb_src, sub.fills);
+                                sublayer_slot.push_back(std::move(sub));
+                            }
+                            NEOTKO_LOG(MULTIPASS, "  SANDWICH PathBlend z=" << pb_band_top
+                                << " mode=" << (pb_npasses == 2 ? "full" : "half")
+                                << " tools=[T" << pb.tool_bottom
+                                << (pb_npasses == 2 ? ",T" + std::to_string(pb.tool_top) : "")
+                                << "] pass_idx=" << (global_pass - pb_npasses)
+                                << ".." << (global_pass - 1));
+                            continue;
+                        }
+
+                        const bool is_cm   = (kind == SurfacePassKind::ColorMix);
+                        const bool is_none = (kind == SurfacePassKind::None);
+                        // None prints with the object's natural surface tool.
+                        const int  solid_tool = is_none ? natural_tool : pass.solid_tool;
+                        // Disabled Solid pass (tool<0): skip generation — its ratio
+                        // still counts in the cumulative Z sum (byte-equivalent to
+                        // a classic MultiPass run with a disabled middle pass).
+                        if (!is_cm && solid_tool < 0) continue;
+
+                        const double ratio = pass.ratio;
 
                         // NEOTKO_MULTIPASS_MINLAYER_TAG — skip passes thinner than minimum printable height.
-                        // Opción B (not implemented): renormalize remaining active passes so sum == 1.0,
-                        // preventing over-extrusion when a constrained pass is skipped and others are uncapped.
                         {
                             const float sub_height_mm = float(this->height * ratio);
                             if (sub_height_mm < 0.04f) {
@@ -1500,12 +1661,25 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         }
                         // NEOTKO_MULTIPASS_MINLAYER_TAG
 
-                        f->angle = (mp.angle[i] >= 0)
-                            ? Geometry::deg2rad(static_cast<float>(mp.angle[i]))
-                            : base_angle + float(i % 2) * float(M_PI / 2);
+                        // Fill angle. ColorMix needs a consistent direction (its
+                        // dither runs perpendicular to the lines, MonotonicLine);
+                        // Solid alternates perpendicular per pass for bonding.
+                        if (is_cm) {
+                            const int cm_angle = (_sub_role == erTopSolidInfill)
+                                ? mp_cfg.interlayer_colormix_angle.value
+                                : mp_cfg.interlayer_colormix_penu_angle.value;
+                            f->angle = (cm_angle >= 0)
+                                ? Geometry::deg2rad(static_cast<float>(cm_angle))
+                                : base_angle;
+                        } else {
+                            f->angle = (pass.angle >= 0)
+                                ? Geometry::deg2rad(static_cast<float>(pass.angle))
+                                : base_angle + float(i % 2) * float(M_PI / 2);
+                        }
 
                         ExtrusionEntityCollection temp;
                         f->fill_surface_extrusion(&surface_fill.surface, params, temp.entities);
+                        // Beer-Lambert stadium correction to the sublayer height.
                         for (auto* e : temp.entities) {
                             auto* coll = dynamic_cast<ExtrusionEntityCollection*>(e);
                             if (!coll) continue;
@@ -1525,55 +1699,94 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             }
                         }
 
+                        // Z: the band top — where the nozzle prints a band of
+                        // height ratio*H whose bottom is the cumulative Z below.
                         double cumsum = 0.0;
-                        for (int pi = 0; pi <= i; ++pi) cumsum += mp.width_ratio[pi];
-                        const bool   is_last_pass = (i == n - 1);
+                        for (int pi = 0; pi <= i; ++pi) cumsum += mp_stack.passes[pi].ratio;
+                        const bool   is_last_band = (i == n - 1);
                         // Float rounding in ratios (e.g. 0.396+0.417+0.188=1.001) makes
                         // cumsum slightly >1 → bottom_z + cumsum*h - 2ε = nominal_z exactly.
-                        // Fix: last pass always uses nominal_z-2ε directly, bypassing cumsum.
-                        const double sub_print_z  = is_last_pass
+                        // Fix: last band always uses nominal_z-2ε directly, bypassing cumsum.
+                        const double band_top_z = is_last_band
                             ? (this->bottom_z() + this->height - 2.0 * EPSILON)
                             : (this->bottom_z() + cumsum * this->height);
+                        const float  band_height = float(this->height * ratio);
 
-                        MultiPassSubLayer sub;
-                        sub.print_z   = sub_print_z;
-                        sub.height    = float(this->height * ratio);
-                        sub.tool_id   = mp.tool[i];
-                        sub.pass_idx  = i;
-                        sub.role      = surface_fill.params.extrusion_role;
-                        sub.speed_pct = mp.speed_pct[i];
-                        sub.gcode_start = mp.gcode_start[i];
-                        sub.gcode_end   = mp.gcode_end[i];
-                        const size_t n_paths = temp.entities.size();
-                        sub.fills    = std::move(temp);
-
-                        // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: clone region perimeters into sublayer
-                        // NEOTKO_PROFILE_TAG — Fase F: in painter mode read the flag
-                        // from the painted profile's MP payload, not the preset.
-                        const bool _mp_perim = _mp_painter_mode
-                            ? (_mp_profile && SurfaceColorMix::painted_perim_override_from_profile(_mp_profile->multipass))
-                            : mp_cfg.multipass_perimeter_override.value;
-                        if (_mp_perim) {
-                            for (const LayerRegion* lr : this->regions()) {
-                                for (const ExtrusionEntity* pe : lr->perimeters.entities) {
-                                    ExtrusionEntity* cloned = pe->clone();
-                                    neotko_mp_scale_perim(cloned, ratio, k_mp);
-                                    sub.perimeters.entities.push_back(cloned);
-                                }
+                        if (is_cm) {
+                            // NEOTKO_SANDWICH_TAG — ColorMix lámina: encode the tools,
+                            // decode into per-tool buckets, and emit ONE single-tool
+                            // sublayer per bucket. Each bucket is shaped exactly like
+                            // a MultiPass pass → NeoTower / ToolOrdering / the GCode
+                            // handler schedule them with zero changes (their pass-chain
+                            // + cross-product machinery already plans the toolchanges).
+                            SurfaceColorMix::assign_and_group_tools(
+                                temp, mp_cfg, _sub_role, int(f->layer_id),
+                                /*allow_top=*/true, /*allow_penu=*/true);
+                            auto buckets =
+                                SurfaceColorMix::eec_to_tool_buckets(temp, natural_tool);
+                            const int NB = (int)buckets.size();
+                            // Buckets are co-planar (one lámina). Step print_z by 1 µm
+                            // so each gets a distinct LayerTools entry / z_um key; the
+                            // last bucket sits at the band top.
+                            constexpr double kBucketZStep = 1e-3; // 1 µm
+                            const int _pass0 = global_pass;
+                            for (int k = 0; k < NB; ++k) {
+                                MultiPassSubLayer sub;
+                                sub.print_z   = band_top_z
+                                    - double(NB - 1 - k) * kBucketZStep;
+                                sub.height    = band_height;
+                                sub.pass_idx  = global_pass++;
+                                sub.role      = _sub_role;
+                                sub.effect    = SurfacePassKind::ColorMix;
+                                sub.tool_id   = buckets[k].first;
+                                sub.speed_pct = 100;
+                                sub.fills     = std::move(buckets[k].second);
+                                sublayer_slot.push_back(std::move(sub));
                             }
-                            NEOTKO_LOG(MULTIPASS, "  SUBLAYER perimeters cloned: "
-                                << sub.perimeters.entities.size() << " entities for pass " << i);
+                            NEOTKO_LOG(MULTIPASS, "  SANDWICH ColorMix band" << i
+                                << " z=" << band_top_z << " buckets=" << NB
+                                << " pass_idx=" << _pass0 << ".." << (global_pass - 1));
+                        } else {
+                            // Solid / None — one mono-tool sublayer at the band top.
+                            MultiPassSubLayer sub;
+                            sub.print_z     = band_top_z;
+                            sub.height      = band_height;
+                            sub.pass_idx    = global_pass++;
+                            sub.role        = _sub_role;
+                            sub.effect      = SurfacePassKind::Solid;
+                            sub.tool_id     = solid_tool;
+                            sub.speed_pct   = is_none ? 100 : pass.speed_pct;
+                            sub.gcode_start = is_none ? std::string() : pass.gcode_start;
+                            sub.gcode_end   = is_none ? std::string() : pass.gcode_end;
+                            sub.fills       = std::move(temp);
+
+                            // NEOTKO_MULTIPASS_TAG — Perimeter Override (Solid only).
+                            // NEOTKO_PROFILE_TAG — Fase F: in painter mode read the
+                            // flag from the painted profile's MP payload, not preset.
+                            const bool _mp_perim = _mp_painter_mode
+                                ? (_mp_profile && SurfaceColorMix::painted_perim_override_from_profile(_mp_profile->multipass))
+                                : mp_cfg.multipass_perimeter_override.value;
+                            if (_mp_perim) {
+                                for (const LayerRegion* lr : this->regions()) {
+                                    for (const ExtrusionEntity* pe : lr->perimeters.entities) {
+                                        ExtrusionEntity* cloned = pe->clone();
+                                        neotko_mp_scale_perim(cloned, ratio, k_mp);
+                                        sub.perimeters.entities.push_back(cloned);
+                                    }
+                                }
+                                NEOTKO_LOG(MULTIPASS, "  SUBLAYER perimeters cloned: "
+                                    << sub.perimeters.entities.size() << " entities for band " << i);
+                            }
+
+                            sublayer_slot.push_back(std::move(sub));
+
+                            NEOTKO_LOG(MULTIPASS, "  SUBLAYER band" << i
+                                << " kind=" << (int)kind << " print_z=" << band_top_z
+                                << " T" << solid_tool
+                                << " pass_idx=" << (global_pass - 1));
                         }
-                        // NEOTKO_MULTIPASS_TAG_END
-
-                        sublayer_slot.push_back(std::move(sub));
-
-                        NEOTKO_LOG(MULTIPASS, "  SUBLAYER pass" << i << ": T" << mp.tool[i]
-                            << " print_z=" << sub_print_z
-                            << " height=" << (this->height * ratio)
-                            << " n_paths=" << n_paths);
                     }
-                    // NEOTKO_MULTIPASS_TAG_END
+                    // NEOTKO_SANDWICH_TAG_END
 
                     f->angle = base_angle;
                 } else {
@@ -1674,153 +1887,11 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		}
     }
 
-    // NEOTKO_PATHBLEND_TAG_START — PathBlend FASE2 path duplication
-    // For PathBlend surfaces: clone each surface path N times (one per pass), encoding
-    // the pass tool in mm3_per_mm (same trick as MultiPass / ColorMix).
-    // Flow is NOT scaled — PathBlendEngine::apply_path() applies the gradient at GCode time.
-    // COLORMIX_HOOK (GCode.cpp) detects mm3_per_mm >= 10, decodes tool, routes to buckets.
-    // NEOTKO_PROFILE_TAG_START — Fase G: PathBlend painter-mode resolution.
-    // If any model_part volume of this object has painted facets, the painter
-    // is authoritative (Q1=A absoluto). Preset PathBlend is suppressed; only
-    // profile.pathblend payloads apply, per dominant painted slot at the
-    // current Z range.
-    const ModelObject* _pb_mo = (this->object() != nullptr)
-        ? this->object()->model_object() : nullptr;
-    const bool _pb_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_pb_mo);
-    // NEOTKO_PROFILE_TAG — MMU exclusion: skip PathBlend entirely for MMU-painted objects.
-    const bool _pb_mm_painted = (_pb_mo != nullptr && _pb_mo->is_mm_painted());
-    if (_pb_mm_painted)
-        NEOTKO_LOG(MULTIPASS, "MMU_SKIP PathBlend z=" << this->print_z
-            << " — object is MMU-painted, PathBlend suppressed");
-    // NEOTKO_PROFILE_TAG_END
-    for (LayerRegion *layerm : m_regions) {
-        if (_pb_mm_painted) break;
-        if (layerm->fills.entities.empty()) continue;
-        const auto& reg_cfg = layerm->region().config();
-        // NEOTKO_PROFILE_TAG — Fase G: in preset mode require the enable flag;
-        // in painter mode the per-profile flag drives it per region.
-        if (!_pb_painter_mode && !reg_cfg.multipass_path_gradient.value) continue;
-        // NEOTKO_PATHBLEND_TAG — s69 miniblob: the per-zone PB config is resolved
-        // per sub-collection below — from_region_config() needs the surface role.
-
-        // Collect sub-collections to process (avoid iterator invalidation).
-        std::vector<ExtrusionEntityCollection*> to_process;
-        for (auto* e : layerm->fills.entities)
-            if (auto* sub = dynamic_cast<ExtrusionEntityCollection*>(e))
-                to_process.push_back(sub);
-
-        for (auto* sub : to_process) {
-            if (sub->entities.empty()) continue;
-            ExtrusionPath* first_path = nullptr;
-            for (auto* e : sub->entities)
-                if ((first_path = dynamic_cast<ExtrusionPath*>(e))) break;
-            if (!first_path) continue;
-            if (first_path->mm3_per_mm >= 10.0) continue; // skip already-encoded (MultiPass)
-
-            // NEOTKO_PROFILE_TAG_START — Fase G: pick pb per role (painter)
-            // or fall back to the region preset (preset mode).
-            // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PB config by role
-            // (Top → pathblend_top blob / Penu → pathblend_penu blob, with the
-            // flat pathblend_* keys as back-compat fallback).
-            PathBlendPassConfig pb = _pb_painter_mode
-                ? PathBlendPassConfig{}
-                : PathBlendPassConfig::from_region_config(reg_cfg, first_path->role());
-            const SurfaceEffectProfile* _pb_profile = nullptr;
-            if (_pb_painter_mode) {
-                const ExtrusionRole _role = first_path->role();
-                if (_role != erTopSolidInfill && _role != erPenultimateInfill) continue;
-                const PrintObject* _po = this->object();
-                const int _slot = (_role == erTopSolidInfill)
-                    ? SurfaceColorMix::dominant_painted_slot_in_z_range(
-                          _po, this->print_z - this->height, this->print_z)
-                    : SurfaceColorMix::dominant_painted_slot_in_z_range(
-                          _po, this->print_z, this->print_z + this->height);
-                if (_slot <= 0) continue; // unpainted area of painted object
-                const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
-                const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
-                if (!_p || !_p->pathblend.present) {
-                    NEOTKO_LOG(PROFILE, "PB_SUPPRESS layer=" << this->id()
-                        << " role=" << (int)_role << " slot=" << _slot
-                        << " (profile has no PathBlend payload)");
-                    continue;
-                }
-                pb = SurfaceColorMix::pathblend_from_profile_payload(_p->pathblend);
-                if (!pb.enabled || pb.num_passes < 1) {
-                    NEOTKO_LOG(PROFILE, "PB_SUPPRESS layer=" << this->id()
-                        << " role=" << (int)_role << " profile='" << _p->name
-                        << "' enabled=" << (pb.enabled ? 1 : 0)
-                        << " passes=" << pb.num_passes
-                        << " (PB payload says off)");
-                    continue;
-                }
-                _pb_profile = _p;
-                NEOTKO_LOG(PROFILE, "PB_OVERRIDE layer=" << this->id()
-                    << " role=" << (int)_role
-                    << " profile='" << _p->name << "'"
-                    << " passes=" << pb.num_passes
-                    << " tools=[" << pb.tool[0] << "," << pb.tool[1]
-                    << "," << pb.tool[2] << "," << pb.tool[3] << "]");
-            }
-            // NEOTKO_PROFILE_TAG_END
-
-            if (!SurfaceColorMix::should_process_role(first_path->role(), pb.surface)) continue;
-
-            // NEOTKO_COLORMIX_TAG_START — Zone + filament filter (PathBlend FASE2)
-            // NEOTKO_PROFILE_TAG — Fase G: preset-mode-only gates. In painter
-            // mode the painted slot lookup already encodes the "which area".
-            if (!_pb_painter_mode) {
-                const ExtrusionRole _role = first_path->role();
-                const int _zone = (_role == erTopSolidInfill)
-                    ? reg_cfg.interlayer_colormix_top_zone.value
-                    : reg_cfg.interlayer_colormix_penu_zone.value;
-                if (_zone == 1) {
-                    const bool _in_zone = (_role == erTopSolidInfill)
-                        ? (this->upper_layer == nullptr)
-                        : (this->upper_layer != nullptr && this->upper_layer->upper_layer == nullptr);
-                    if (!_in_zone) continue;
-                }
-                const int _ff = reg_cfg.interlayer_colormix_filament_filter.value;
-                if (_ff > 0 && reg_cfg.solid_infill_filament.value != _ff) continue;
-            }
-            // NEOTKO_COLORMIX_TAG_END
-
-            // Gather originals, then build N encoded copies.
-            std::vector<ExtrusionPath*> originals;
-            for (auto* e : sub->entities)
-                if (auto* p = dynamic_cast<ExtrusionPath*>(e))
-                    originals.push_back(p);
-            if (originals.empty()) continue;
-
-            // Save debug info before deleting originals (first_path becomes dangling after delete).
-            const int    saved_role      = (int)first_path->role();
-            const size_t saved_originals = originals.size();
-
-            std::vector<ExtrusionPath*> new_paths;
-            for (int pi = 0; pi < pb.num_passes; ++pi) {
-                const int tool = pb.tool[pi];
-                if (tool < 0) continue;
-                for (auto* orig : originals) {
-                    ExtrusionPath* clone = new ExtrusionPath(*orig);
-                    SurfaceColorMix::encode_tool_in_path(clone, tool);
-                    new_paths.push_back(clone);
-                }
-            }
-            if (new_paths.empty()) continue;
-
-            for (auto* e : sub->entities) delete e;
-            sub->entities.clear();
-            sub->no_sort = true;
-            for (auto* p : new_paths)
-                sub->entities.push_back(p);
-
-            NEOTKO_LOG(MULTIPASS, "PATHBLEND_FASE2 layer=" << this->id()
-                << " role=" << saved_role
-                << " originals=" << saved_originals
-                << " passes=" << pb.num_passes
-                << " total_paths=" << new_paths.size());
-        }
-    }
-    // NEOTKO_PATHBLEND_TAG_END
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the legacy PathBlend FASE2
+    // "path duplication" block (clone-per-pass + mm3 tool encoding, decoded by
+    // COLORMIX_HOOK at GCode time) was DELETED. PathBlend now compiles into
+    // ramp(+cap) single-tool sublayers in the FASE 2 band loop above, scheduled
+    // exactly like MultiPass/ColorMix. See the SurfacePassKind::PathBlend branch.
 
 
     // NEOTKO_COLORMIX_TAG_START — Apply Surface ColorMix to top/penultimate layers

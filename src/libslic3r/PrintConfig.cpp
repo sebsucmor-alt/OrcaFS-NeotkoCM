@@ -6597,6 +6597,19 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionString(""));
     // NEOTKO_PATHBLEND_TAG_END
 
+    // NEOTKO_SANDWICH_TAG_START — Sandwich pass-stack blob (serialized JSON).
+    // Hidden keys: written/read by the Sandwich dialog, never shown in optgroups.
+    def = this->add("neotko_surface_passes_top", coString);
+    def->label = L("Sandwich pass stack (Top)");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("neotko_surface_passes_penu", coString);
+    def->label = L("Sandwich pass stack (Penultimate)");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+    // NEOTKO_SANDWICH_TAG_END
+
     // NEOTKO_MULTIPASS_TAG_START — Neotko Neoweaving
     def = this->add("interlayer_neoweave_enabled", coBool);
     def->label = L("Enable Neotko Neoweaving");
