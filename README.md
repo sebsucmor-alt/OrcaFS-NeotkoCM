@@ -4,9 +4,25 @@
 
 This fork adds a set of surface quality, color blending and workflow features on top of OrcaSlicer FullSpectrum (Snapmaker base). This guide explains what each feature does and how to use it — no programming knowledge required.
 
-<a href="https://www.buymeacoffee.com/Neotko">
-  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-red.png" alt="Buy Me a Coffee" height="60" width="217">
-</a>
+---
+
+## Philosophy — the Sandwich
+
+Everything in this fork revolves around one idea: a **Sandwich** of layers you build yourself.
+
+A normal slicer treats the top of your part as one thing — one filament, one pattern, one pass. The Sandwich breaks that open. Each top (and penultimate) surface becomes a stack of independent layers, and you decide what each layer is made of:
+
+- A **stripe pattern** of two filaments — line by line (ColorMix).
+- A **stack of full passes** with different tools, angles, speeds and Z heights — like glazes (MultiPass).
+- A **continuous gradient** that smoothly fades between two, three or four filaments across the surface (PathBlend).
+- A **mechanical interlock** that nests successive layers into each other (Neoweaving).
+- And — when you want different recipes on different parts of the same object — a **3D Painter** that lets you brush Sandwich profiles onto specific faces.
+
+All of this is hosted by a single dialog: the **Sandwich dialog** (Quality → ColorMix & Multi-Pass Blend → **Edit…**, internally called the SandwichDialog). One place, two zone cards (Top / Penultimate), pills to pick the effect, advanced dialogs to tune the recipe, a profile system to save your favourite stacks, and a 3D Painter to apply them where you want.
+
+The goal is not to give you "presets that work" — it is to give you a **playground**. Mix, stack, experiment, save profiles, paint them, and see what kind of surface comes out. The features described in this guide are the building blocks; the combinations are yours.
+
+The rest of this document describes each building block in detail.
 
 ---
 
@@ -41,13 +57,15 @@ This fork adds a set of surface quality, color blending and workflow features on
 
 ---
 
-## 1. Surface Color Mixer
+## 1. Surface Color Mixer — the Sandwich dialog
 
-The Surface Color Mixer is the umbrella feature for everything that happens on **top and penultimate surfaces** when you have more than one filament loaded. It lives under **Quality → ColorMix & Multi-Pass Blend** in the process settings, and has a single "Edit…" button that opens the dialog.
+The **Sandwich dialog** (historically *Surface Color Mixer*) is the umbrella for everything that happens on **top and penultimate surfaces** when you have more than one filament loaded. It lives under **Quality → ColorMix & Multi-Pass Blend** in the process settings, and has a single "Edit…" button that opens it.
+
+This is the entry point for the whole Sandwich philosophy: pick a recipe per surface, stack effects across surfaces, save the result as a profile, and reuse it across prints or paint it onto specific parts of a model with the 3D Painter (§7). Throughout this guide, **"Sandwich"** refers to the combined output of these effects on a single top + penultimate stack.
 
 ### Dialog layout
 
-The dialog has two independent **zone cards** — one for the **Top** surface and one for the **Penultimate** surface. Each zone is configured entirely on its own.
+The dialog has two independent **zone cards** — one for the **Top** surface and one for the **Penultimate** surface. Each zone is configured entirely on its own. Together they form one *Sandwich* over your fill.
 
 At the top of each zone card are four **pill buttons**:
 
@@ -214,7 +232,7 @@ PathBlend is **independent of MultiPass** — it does not require MultiPass to b
 
 ### 1d. Zone and filament filters
 
-These controls appear in the **Filament** section at the bottom of the Surface Color Mixer dialog. They apply to whichever effect is active on each surface.
+These controls appear in the **Filament** section at the bottom of the Sandwich dialog. They apply to whichever effect is active on each surface.
 
 #### Zone — All surfaces vs. Topmost only
 
@@ -244,7 +262,7 @@ On multi-material objects, different regions may already be assigned to differen
 
 ### 1e. TD Preview and Blend Suggestion
 
-The **TD Preview** section (collapsable, at the bottom of the Surface Color Mixer dialog) lets you visualize and calculate how your filaments will visually combine when one layer sits on top of another.
+The **TD Preview** section (collapsable, at the bottom of the Sandwich dialog) lets you visualize and calculate how your filaments will visually combine when one layer sits on top of another.
 
 #### Transmission Density (TD)
 
@@ -498,7 +516,9 @@ When importing:
 
 **What it does**
 
-This system lets you **save your Surface Color Mixer configurations as named profiles**, then **paint them directly onto specific surfaces of your 3D model** using a brush-based gizmo. Different parts of the same object can have different effects (e.g. one stair step uses ColorMix with a red/blue stripe pattern, another stair uses MultiPass with three filaments, a third uses PathBlend gradient).
+This system lets you **save your Sandwich configurations as named profiles**, then **paint them directly onto specific surfaces of your 3D model** using a brush-based gizmo. Different parts of the same object can have different Sandwiches (e.g. one stair step uses ColorMix with a red/blue stripe pattern, another stair uses MultiPass with three filaments, a third uses PathBlend gradient).
+
+This is where the Sandwich philosophy reaches its full expression: instead of one global recipe per print, every region of every object can carry its own stack of effects, and the whole thing travels inside the 3MF.
 
 Profiles are saved inside the **3MF project file**, so they travel with the print. Painted areas are saved per-volume facet annotations, again persisted in the 3MF.
 
@@ -514,7 +534,7 @@ Every effect dialog has a **"Save as profile…"** button:
 
 | Dialog | What it captures |
 |--------|-----------------|
-| **Surface Color Mixer** (the main dialog) | Captures **whichever effects are currently active in the pills**. CM+MP, CM only, MP only, PB only, etc. The saved profile is a bundle of every enabled effect on Top/Penultimate. |
+| **Sandwich dialog** (the main dialog) | Captures the **full Sandwich** — whichever effects are currently active in the pills. CM+MP, CM only, MP only, PB only, etc. The saved profile is a bundle of every enabled effect on Top/Penultimate. |
 | **MultiPass Advanced** | Captures **MultiPass settings only** (Top + Penu MP keys). No ColorMix or PathBlend in the saved profile. |
 | **PathBlend Advanced** | Captures **PathBlend settings only**. No ColorMix or MultiPass in the saved profile. |
 
@@ -535,12 +555,12 @@ Every effect dialog has a **"Save as profile…"** button:
 
 ### 7b. Managing profiles (load, update, rename, delete)
 
-In the Surface Color Mixer dialog, next to "Save as profile…" there is a **Manage profiles…** button. Opens a list dialog with:
+In the Sandwich dialog, next to "Save as profile…" there is a **Manage profiles…** button. Opens a list dialog with:
 
 | Button | Behaviour |
 |--------|-----------|
-| **Load into dialog** | Restores the selected profile's values into the SCM dialog. The pills, zone settings, filament filter, and Advanced sub-dialog values all switch to match the profile. From here you can tweak and re-save. |
-| **Update from current** | Overwrites the selected profile's payloads with whatever is currently active in the SCM pills. Effects toggled off in the pills are cleared from the profile. |
+| **Load into dialog** | Restores the selected profile's values into the Sandwich dialog. The pills, zone settings, filament filter, and Advanced sub-dialog values all switch to match the profile. From here you can tweak and re-save. |
+| **Update from current** | Overwrites the selected profile's payloads with whatever is currently active in the Sandwich pills. Effects toggled off in the pills are cleared from the profile. |
 | **Rename** | Edit the profile name. |
 | **Delete** | Remove the profile from the manager. Painted areas referencing this profile become "orphan" — they will print with no effect (see warning below). |
 | **Close** | Dismisses the dialog. |
@@ -570,7 +590,12 @@ The painter lives in the **left-side gizmo toolbar** in the 3D view, next to the
 
 Up to **15 different profiles** can be painted on a single object (slot 0 is reserved as "unpainted"). Slots are auto-assigned the first time you paint with a profile.
 
-**Erase**: Use the eraser tool (or switch to no-profile mode) to clear painted triangles. Cleared triangles return to "unpainted" — they will use the preset mode if the object becomes entirely unpainted, or no effect if any paint remains.
+**Erase**:
+- **Erase mode checkbox** (right panel) — when enabled, left-click clears painted triangles under the cursor using the same Smart Fill / Circle / Sphere / Triangle tool you have active. Toggle it back off to resume painting with the active profile.
+- **Shift + Left-click** — quick one-shot erase without toggling the checkbox (active even when Erase mode is off).
+- **Erase all** — clears every painted triangle on the current volume in one action.
+
+Cleared triangles return to "unpainted" — they will use the preset mode if the object becomes entirely unpainted, or no effect if any paint remains.
 
 **Smart Fill angle**: Lower angle = more selective (only very-coplanar triangles), higher angle = more inclusive (catches curved surfaces). The default 1.5° is ideal for flat staircase steps and similar geometry.
 
@@ -582,7 +607,7 @@ When an object has **any painted facets**, the slicer auto-switches that object 
 
 | Situation | What applies |
 |-----------|--------------|
-| Object has zero painted facets | **Preset mode** — Surface Color Mixer dialog values apply normally |
+| Object has zero painted facets | **Preset mode** — Sandwich dialog values apply normally |
 | Object has painted facets — painted area | **Painted profile** applies. Preset is fully ignored for that area. |
 | Object has painted facets — **unpainted** area | **No effect** applies to that area (preset is suppressed for the whole object). |
 
@@ -622,7 +647,7 @@ When you open a 3MF, all three pieces are restored. The painter list, the painte
 
 PathBlend's penultimate surface support has a known gradient-direction bug on the second-stair penu surface of multi-stair objects. The slice-time clone path inverts the pass order for the second stair, so pass 0 paints on top of pass 1 instead of underneath, breaking the gradient.
 
-For this reason, **the PathBlend pill is hidden on the Penultimate zone card** in the Surface Color Mixer dialog. PathBlend is only selectable on the Top zone. Profiles saved before this restriction was added are loaded with their penu PathBlend intent silently demoted: if penu also has MP or CM enabled, those apply; otherwise penu is set to None.
+For this reason, **the PathBlend pill is hidden on the Penultimate zone card** in the Sandwich dialog. PathBlend is only selectable on the Top zone. Profiles saved before this restriction was added are loaded with their penu PathBlend intent silently demoted: if penu also has MP or CM enabled, those apply; otherwise penu is set to None.
 
 The underlying engine supports penu PB (the struct, payload, and 3mf I/O are all in place). When the gradient-direction bug is resolved, the pill can be re-enabled.
 
@@ -632,13 +657,13 @@ The underlying engine supports penu PB (the struct, payload, and 3mf I/O are all
 
 | Feature | Location in UI |
 |---------|---------------|
-| ColorMix / MultiPass / PathBlend | Quality → ColorMix & Multi-Pass Blend → **Edit…** |
+| Sandwich dialog (ColorMix / MultiPass / PathBlend) | Quality → ColorMix & Multi-Pass Blend → **Edit…** |
 | Line distribution mode (CM + PB) | Quality → **Line distribution mode** (Advanced) |
 | ColorMix pattern mode (Linear 2/3, Custom bands, Pattern string) | SCM dialog → **Advanced…** on ColorMix pill |
 | Easing / gamma / overlap / invert | ColorMix Advanced dialog (Linear modes only) |
-| Effect pill (None/ColorMix/MultiPass/PathBlend) | Surface Color Mixer dialog — pill buttons per zone card |
-| Advanced config (per effect) | Surface Color Mixer dialog → **Advanced…** button |
-| TD Preview + Blend Suggestion | Surface Color Mixer dialog → **TD Preview** (collapsable) |
+| Effect pill (None/ColorMix/MultiPass/PathBlend) | Sandwich dialog — pill buttons per zone card |
+| Advanced config (per effect) | Sandwich dialog → **Advanced…** button |
+| TD Preview + Blend Suggestion | Sandwich dialog → **TD Preview** (collapsable) |
 | Neoweaving | Quality → Neotko Neoweaving |
 | Penultimate layers | Strength → Top/bottom shells → Penultimate top layers |
 | Libre Mode toggle | **Top toolbar** (main window button) |
@@ -646,7 +671,7 @@ The underlying engine supports penu PB (the struct, payload, and 3mf I/O are all
 | Temporal Link (select group) | Right-click object → **Select Grouped** or **Ctrl+Shift+G** |
 | S3DFactory import | File → Import → Import 3D model → select `.factory` |
 | Save as profile | Bottom of SCM / MultiPass / PathBlend dialogs — **Save as profile…** button |
-| Manage profiles (load / update / rename / delete) | Surface Color Mixer dialog → **Manage profiles…** button |
+| Manage profiles (load / update / rename / delete) | Sandwich dialog → **Manage profiles…** button |
 | 3D Painter | Left-side gizmo toolbar → **ColorMix Painter** icon |
 | Painter — pick brush | Gizmo right panel toolbar (Circle / Sphere / Triangle / SmartFill) |
 | Painter — pick profile | Scrollable profile list inside the gizmo's right panel |
@@ -739,6 +764,11 @@ Yes. Profiles are project-scoped — they live inside the 3MF only, separate fro
 **Q: What does the ΔE indicator on the Blend Suggestion mean?**
 
 ΔE is a perceptual color difference measure. A value below ~5 is generally indistinguishable to the eye. Values above 10–15 indicate the suggested ratios will produce a visible difference from the target color — usually because the available filaments cannot accurately reproduce the target, or because the TD values need calibration.
+
+---
+
+*OrcaSlicer FullSpectrum — Neotko Feature Pack*
+*Designed by Neotko · Implementation by Claude (Anthropic)*
 
 All of this work is open and free. Fork it, improve it, credit it.
 
