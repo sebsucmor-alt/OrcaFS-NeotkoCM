@@ -4851,8 +4851,15 @@ void apply_fuzzy_skin_segmentation(PrintObject &print_object, ThrowOnCancel thro
             it_layer_range = layer_range_next(layer_ranges, it_layer_range, layer.slice_z);
             const PrintObjectRegions::LayerRangeRegions &layer_range = *it_layer_range;
 
-            assert(segmentation[layer_idx].size() == 1);
-            const ExPolygons &fuzzy_skin_segmentation      = segmentation[layer_idx][0];
+            // NEOTKO_NEOTOWER_TAG s79j — Bug 06: fuzzy paint invertido.
+            // `fuzzy_skin_segmentation_by_painting` pide num_facets_states=2 y
+            // `merge_segmented_layers` devuelve vector de tamaño num_facets_states:
+            //   [0] = state NONE  (área NO pintada)
+            //   [1] = state ENFORCER/FUZZY_SKIN (área pintada)
+            // El código original leía [0] (assert "==1" era stale), aplicando fuzzy
+            // a la región NO pintada → inversión visible (también presente en Orca main).
+            assert(segmentation[layer_idx].size() == 2);
+            const ExPolygons &fuzzy_skin_segmentation      = segmentation[layer_idx][1];
             const BoundingBox fuzzy_skin_segmentation_bbox = get_extents(fuzzy_skin_segmentation);
             if (fuzzy_skin_segmentation.empty())
                 continue;

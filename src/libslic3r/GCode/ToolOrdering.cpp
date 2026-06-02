@@ -1078,52 +1078,13 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // layer_tools.extruders is 1-based at this stage; reorder_extruders() converts
             // to 0-based later. parse_colormix_pattern_1based() returns 1-based IDs.
 
-            // NEOTKO_PROFILE_TAG — Fase D painter mode:
-            // If any paint on the object, ignore preset SCM and register tools
-            // from the per-layer painted profile (top/penu). Stays in sync
-            // with SurfaceColorMix::assign_and_group_tools.
-            if (painter_mode_obj && has_top_surface_infill) {
-                const double print_z   = layer->print_z;
-                const double height    = layer->height;
-                const double z_top_min  = print_z - height;
-                const double z_top_max  = print_z;
-                const double z_penu_min = print_z;
-                const double z_penu_max = print_z + height;
-                const int top_slot  = SurfaceColorMix::dominant_painted_slot_in_z_range(
-                    &object, z_top_min,  z_top_max);
-                const int penu_slot = SurfaceColorMix::dominant_painted_slot_in_z_range(
-                    &object, z_penu_min, z_penu_max);
-                const SurfaceEffectProfile* top_p  = nullptr;
-                const SurfaceEffectProfile* penu_p = nullptr;
-                if (const int pid = SurfaceColorMix::profile_id_for_slot(&object, top_slot); pid)
-                    top_p = SurfaceEffectProfileManager::get().find(pid);
-                if (const int pid = SurfaceColorMix::profile_id_for_slot(&object, penu_slot); pid)
-                    penu_p = SurfaceEffectProfileManager::get().find(pid);
-
-                std::vector<unsigned int> tools_top, tools_pen;
-                if (top_p  && top_p->colormix.present)
-                    tools_top = SurfaceColorMix::painted_profile_tools_1based(*top_p,  true);
-                if (penu_p && penu_p->colormix.present)
-                    tools_pen = SurfaceColorMix::painted_profile_tools_1based(*penu_p, false);
-
-                std::set<unsigned int> emplace_set;
-                auto emplace_once = [&](unsigned int t) {
-                    if (emplace_set.insert(t).second)
-                        layer_tools.extruders.emplace_back(t);
-                };
-                for (auto t : tools_top) emplace_once(t);
-                for (auto t : tools_pen) emplace_once(t);
-
-                if (NeoDebug::enabled(NeoDebug::TOOLORDER) && !emplace_set.empty()) {
-                    std::ostringstream _s;
-                    _s << "COLORMIX_PAINT\tz=" << layer->print_z
-                       << "\ttop_slot=" << top_slot << " penu_slot=" << penu_slot
-                       << "\t+[";
-                    for (auto t : emplace_set) _s << "T" << (t > 0 ? t - 1 : 0) << " ";
-                    _s << "]";
-                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
-                }
-            } else
+            // NEOTKO_PROFILE_TAG — Fase 6b: painter ColorMix tools are NO LONGER
+            // registered here. A painted profile now drives FASE-2 sublayers, and
+            // every sublayer tool (sub.tool_id) is registered once from
+            // multipass_sublayers() in collect_extruders — the SAME single source
+            // of truth as preset mode. Registering the painted-profile tools again
+            // on the real layer would double-count and diverge the wipe-tower plan
+            // (the canonical "single source of truth or wipe-tower crashes" rule).
             if (!painter_mode_obj && !object_is_mm_painted && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
                 const auto& cfg   = region.config();
                 const int tool_a  = cfg.interlayer_colormix_tool_a.value;
@@ -1588,6 +1549,23 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
         }
     }
     // NEOTKO_LIBRE_TAG_END
+
+    // NEOTKO_NEOTOWER_TAG_START s79i — Bug 04: gap estructural entre objetos apilados.
+    // En escenas con objetos no contiguos en Z (p.ej. 2 cubos apilados con soporte
+    // entre ellos) las capas del gap son solo-soporte: has_object=false → la fórmula
+    // base línea 1519 deja has_wipe_tower=false aunque wipe_tower_partitions>0
+    // (propagado hacia abajo desde un TC superior, línea 1494). Resultado: NeoTower
+    // saltea esas capas en su loop estructural → la torre se interrumpe en el gap
+    // → fallo físico (las capas superiores de la torre quedan voladas).
+    //
+    // WipeTower2 tradicional NO tenía este bug porque iteraba por
+    // wipe_tower_partitions>0 (no por has_wipe_tower). Restauramos esa semántica
+    // aquí: si hay partitions propagadas desde un TC superior, la torre debe existir.
+    for (LayerTools &lt : m_layer_tools) {
+        if (!lt.has_wipe_tower && !lt.is_mp_sublayer && lt.wipe_tower_partitions > 0)
+            lt.has_wipe_tower = true;
+    }
+    // NEOTKO_NEOTOWER_TAG_END
 
     // NEOTKO_WIPETOWER_DEBUG_TAG_START
     // Dump per-layer wipe-tower state after all gates have run.

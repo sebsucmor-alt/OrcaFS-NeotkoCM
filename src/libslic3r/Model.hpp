@@ -1018,6 +1018,7 @@ public:
         this->seam_facets.set_new_unique_id();
         this->mmu_segmentation_facets.set_new_unique_id();
         this->fuzzy_skin_facets.set_new_unique_id();
+        this->color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG — Fase 6c: duplicate gets its own paint id
     }
 
     bool is_fdm_support_painted() const { return !this->supported_facets.empty(); }
@@ -1119,10 +1120,15 @@ private:
         name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        fuzzy_skin_facets(other.fuzzy_skin_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        fuzzy_skin_facets(other.fuzzy_skin_facets),
+        // NEOTKO_PROFILE_TAG — Fase 6c: carry the 3D-Painter ColorMix paint when a
+        // volume is copied (object duplicate). Without this the duplicate lost its
+        // paint, breaking painter-mode tests on duplicated objects.
+        color_mix_paint_facets(other.color_mix_paint_facets),
+        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
-		assert(this->id().valid()); 
-        assert(this->config.id().valid()); 
+		assert(this->id().valid());
+        assert(this->config.id().valid());
         assert(this->supported_facets.id().valid());
         assert(this->seam_facets.id().valid());
         assert(this->mmu_segmentation_facets.id().valid());
@@ -1137,6 +1143,9 @@ private:
         assert(this->seam_facets.id() == other.seam_facets.id());
         assert(this->mmu_segmentation_facets.id() == other.mmu_segmentation_facets.id());
         assert(this->fuzzy_skin_facets.id() == other.fuzzy_skin_facets.id());
+        // NEOTKO_PROFILE_TAG — Fase 6c: slot→profile table is a plain array, copy it too.
+        for (int _s = 0; _s < 16; ++_s)
+            this->colormix_slot_to_profile_id[_s] = other.colormix_slot_to_profile_id[_s];
         this->set_material_id(other.material_id());
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.

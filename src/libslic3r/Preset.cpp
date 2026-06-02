@@ -853,11 +853,13 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_colormix_pct_b", "interlayer_colormix_easing",
     "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines",
     "interlayer_colormix_overlap", "interlayer_colormix_invert",
+    "interlayer_colormix_repetitions", // NEOTKO_COLORMIX_TAG — s80
     // NEOTKO_COLORMIX_TAG — s61: per-role penultimate variants.
     "interlayer_colormix_penu_mode", "interlayer_colormix_penu_pct_a",
     "interlayer_colormix_penu_pct_b", "interlayer_colormix_penu_easing",
     "interlayer_colormix_penu_gamma", "interlayer_colormix_penu_min_surface_lines",
     "interlayer_colormix_penu_overlap", "interlayer_colormix_penu_invert",
+    "interlayer_colormix_penu_repetitions", // NEOTKO_COLORMIX_TAG — s80
     "interlayer_colormix_penu_band_count_a", "interlayer_colormix_penu_band_count_b",
     "interlayer_colormix_penu_band_count_c", "interlayer_colormix_penu_band_count_d",
     "interlayer_colormix_penu_tool_a", "interlayer_colormix_penu_tool_b",

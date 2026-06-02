@@ -8,6 +8,7 @@
 // NEOTKO_COLORMIX_TAG_END
 
 #include "libslic3r.h"
+#include "ExPolygon.hpp"  // NEOTKO_PROFILE_TAG — Fase 6c: painted_footprint_in_z_range returns ExPolygons
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp" // NEOTKO_SANDWICH_TAG — eec_to_tool_buckets() returns EEC by value
 #include "PrintConfig.hpp"
@@ -54,6 +55,14 @@ namespace NeoDebug {
     bool enabled(Channel c);
     // Append msg + newline to the channel's log file (thread-safe).
     void write(Channel c, const std::string& msg);
+    // NEOTKO_DEBUG_TAG s79h — write a session banner to ALL active channels.
+    // Used at the start of each slice to separate test runs in append-mode logs
+    // (otherwise multiple slices in the same Orca process all concatenate without
+    // delimiter, making post-mortem triage hard). `tag` is a short caller-supplied
+    // identifier (e.g. "collect_and_plan", plate index, 3mf basename if available).
+    // Banner format:  =============  [HH:MM:SS] SLICE #N  tag  =============
+    // N is a process-wide monotonic counter.
+    void write_session_banner(const std::string& tag);
 } // namespace NeoDebug
 // NEOTKO_DEBUG_TAG_END
 
@@ -143,6 +152,24 @@ public:
     static int  dominant_painted_slot_in_z_range(const PrintObject* po,
                                                   double z_min, double z_max);
     static int  profile_id_for_slot(const PrintObject* po, int slot);
+
+    // NEOTKO_PROFILE_TAG — Fase 6c: XY footprint mask of the painted triangles
+    // for a given slot within a Z band, projected to the print-frame XY plane
+    // (scaled coords) and unioned. Used by FASE 2 to clip a painted surface so
+    // the sandwich applies ONLY where the user painted (the rest prints natural),
+    // preserving the painted shape instead of flooding the whole top surface.
+    // Same scan/frame as dominant_painted_slot_in_z_range. Empty if no paint.
+    static ExPolygons painted_footprint_in_z_range(const PrintObject* po, int slot,
+                                                    double z_min, double z_max);
+
+    // NEOTKO_PROFILE_TAG — Fase 6c v2: every painted slot whose upward-facing
+    // triangles fall in the Z band, with at least one triangle. Used to handle
+    // twin/multi islands at the same Z painted with DIFFERENT profiles: instead
+    // of picking only the dominant slot (v1), each painted slot in the band gets
+    // its own footprint mask and its own sandwich; the rest prints natural.
+    // Returned in ascending slot order (stable).
+    static std::vector<int> enumerate_painted_slots_in_z_range(const PrintObject* po,
+                                                                double z_min, double z_max);
     static std::vector<unsigned int> painted_profile_tools_1based(
         const SurfaceEffectProfile& p, bool top_role);
 
@@ -623,6 +650,100 @@ public:
         std::map<int, double>*                    max_z_per_pass = nullptr
     );
 };
+
+// ===========================================================================
+// === INGREDIENT: PathBlend ================================================
+// ===========================================================================
+// PathBlend is one of the sandwich ingredients (alongside ColorMix and the
+// MultiPass passes). It owns its own data structures, runtime toggles and
+// helper math. Code below this banner is PathBlend-specific — keep it
+// self-contained so future ingredients can be added in their own banner
+// blocks without polluting this one.
+//
+// Sections inside the PathBlend ingredient:
+//   1. PBBand / compute_pb_bands        — band geometry helper (legacy + cap)
+//   2. PathBlendSchedulerRuntime        — scheduler-side toggle (atomic chain)
+//   3. PathBlendDispatcherRuntime       — dispatcher-side toggles (continuous
+//                                          chain, XY threshold)
+// ===========================================================================
+
+// --- 1. PathBlend band geometry ------------------------------------------
+// NEOTKO_PATHBLEND_TAG_START — s87 B-bands model.
+// A PB pass discretized into K real micro-layers along the t axis. Each band
+// is a self-contained printable slice with its own Z, height and t-range; the
+// caller masks the surface to that t-range, builds a Flow.with_height(h_step)
+// and emits a regular single-tool sublayer (no apply_path flow scaling needed).
+//
+// For Full mode, K_ramp bands cover the ascending wedge, and a matching set of
+// K_cap cap-bands cover the residual hole between each ramp step and Z=nominal.
+// All cap-bands print at Z=nominal_z but each has its own h_cap (= H - ramp_at_t_mid)
+// so the regenerated Flow.with_height(h_cap) gives spacing/width consistent with
+// the volume that band must deposit. This composes cleanly with ColorMix bucket
+// splitting (each band can itself be sub-split into N tool-buckets without
+// touching the band math).
+struct PBBand {
+    bool   is_cap;       // false = ramp band, true = cap band
+    float  t_lo;         // [0,1] — t-range covered by this band (XY mask range)
+    float  t_hi;
+    float  t_mid;        // midpoint used for ramp height eval
+    float  z_top;        // absolute Z at which the nozzle prints this band
+    float  h_step;       // physical layer height for the new Flow (rounded-rect)
+};
+// compute_pb_bands returns the ordered list of bands for one PB pass.
+//   bottom_z      — base Z (top of layer below)
+//   H             — full layer height
+//   min_band_h    — minimum printable height; bands thinner are merged upward
+//   want_cap      — true for Full mode (emit cap bands), false for Half
+// Empty result means "fall back to legacy K==1 path" (the band model degenerates
+// to the current variable-Z apply_path behaviour).
+std::vector<PBBand> compute_pb_bands(
+    const PathBlendPassConfig& pb,
+    double                     bottom_z,
+    double                     H,
+    double                     min_band_h,
+    bool                       want_cap,
+    int                        target_k = 0); // 0 = natural (range / min_band_h). >0 = force K (clamped by min_band_h floor; safety still applies).
+// NEOTKO_PATHBLEND_TAG_END
+
+// --- 2. PathBlend SCHEDULER runtime --------------------------------------
+// NEOTKO_PATHBLEND_TAG — s88. Toggle consumed by MultiPassScheduler and
+// NeoTower. When chain_atomic is true, the cross-object scheduler drains
+// every consecutive same-tool sublayer of one chain before moving on to
+// the next chain. Eliminates cross-object micro-travels between PB
+// scanlines of different objects (the multi-cube preview bug).
+// Lives at libslic3r level so both backend and GUI can read/write through
+// a single singleton without pulling GUI headers into libslic3r.
+struct PathBlendSchedulerRuntime {
+    bool chain_atomic = true;
+    // NEOTKO_PATHBLEND_TAG — s89. When true, NeoTower's Fase B sublayer
+    // scheduler uses MultiPassScheduler::order_sublayers_by_tool (the SAME
+    // algorithm GCode.cpp:5277 uses to dispatch) instead of its home-grown
+    // FusedGroup chain-greedy. Aligns plan with emission for atomic-chain
+    // multi-object PathBlend (test04 4-cube crash). Fusion of contiguous
+    // same-(old,new) runs is preserved as a post-process so tower
+    // compaction across same-pair siblings is not lost. See [[session-s89-plan]].
+    bool use_canon_scheduler = true;
+
+    static PathBlendSchedulerRuntime&       mut();
+    static const PathBlendSchedulerRuntime& get();
+};
+
+// --- 3. PathBlend DISPATCHER runtime -------------------------------------
+// NEOTKO_PATHBLEND_TAG — s88. Toggles consumed by GCode.cpp dispatcher.
+//   chain_continuous: when true, suppress retract+wipe+lift between two
+//     same-tool PB sublayers within chain_max_xy_mm of each other →
+//     continuous extrusion across adjacent scanlines.
+//   chain_max_xy_mm:  XY threshold (mm) below which two PB sublayers are
+//     considered part of the same chain. Beyond it (disconnected
+//     islands) the normal lift cycle returns.
+struct PathBlendDispatcherRuntime {
+    bool   chain_continuous = true;
+    double chain_max_xy_mm  = 1.0;
+
+    static PathBlendDispatcherRuntime&       mut();
+    static const PathBlendDispatcherRuntime& get();
+};
+
 // NEOTKO_MULTIPASS_TAG_END
 
 // ===========================================================================

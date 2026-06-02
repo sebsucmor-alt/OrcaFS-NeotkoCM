@@ -10,6 +10,7 @@
 #include "PrintConfig.hpp"
 #include "Print.hpp"                  // NEOTKO_PROFILE_TAG — PrintObject access
 #include "Model.hpp"                  // NEOTKO_PROFILE_TAG — ModelObject/Volume access
+#include "ClipperUtils.hpp"           // NEOTKO_PROFILE_TAG — Fase 6c: union_ex for footprint mask
 #include "SurfaceEffectProfile.hpp"   // NEOTKO_PROFILE_TAG — painted-profile lookup
 #include "GCodeWriter.hpp"  // NEOTKO_NEOWEAVING_TAG — must be outside namespace Slic3r
 #include <cstdlib>
@@ -19,6 +20,9 @@
 #include <limits>
 #include <set>      // NEOTKO_COLORMIX: unique-tool check in build_tool_list_from_pattern
 #include <mutex>    // NEOTKO_DEBUG: NeoDebug::write thread safety
+#include <atomic>   // NEOTKO_DEBUG s79h: session-banner monotonic counter
+#include <ctime>    // NEOTKO_DEBUG s79h: localtime + strftime for banner timestamp
+#include <sstream>  // NEOTKO_DEBUG s79h: banner formatting
 #include <numeric>  // NEOTKO_COLORMIX s58: std::iota for lane_mode sort indices
 #include <nlohmann/json.hpp> // NEOTKO_PATHBLEND_TAG s69: miniblob JSON round-trip
 
@@ -60,6 +64,40 @@ namespace NeoDebug {
         std::lock_guard<std::mutex> lk(s_mtx);
         std::ofstream f(k_chans[static_cast<int>(c)].log_path, std::ios::app);
         if (f.is_open()) f << msg << "\n";
+    }
+
+    // NEOTKO_DEBUG_TAG s79h — session banner. Writes the same separator line to
+    // every channel that is currently active. Process-wide monotonic counter +
+    // wall-clock HH:MM:SS so the user can correlate a specific slice across all
+    // /tmp/neotko_*.log files. Cheap; only fires once per call.
+    void write_session_banner(const std::string& tag)
+    {
+        static std::atomic<int> s_slice_n{0};
+        const int n = ++s_slice_n;
+
+        // Format HH:MM:SS in local time.
+        const std::time_t now = std::time(nullptr);
+        std::tm tm_local{};
+#ifdef _WIN32
+        localtime_s(&tm_local, &now);
+#else
+        localtime_r(&now, &tm_local);
+#endif
+        char ts[16] = "??:??:??";
+        std::strftime(ts, sizeof(ts), "%H:%M:%S", &tm_local);
+
+        std::ostringstream oss;
+        oss << "\n============= [" << ts << "] SLICE #" << n
+            << "  " << tag << "  =============";
+        const std::string banner = oss.str();
+
+        // Write to every channel that is enabled. We bypass enabled() here only
+        // to ensure the banner appears even if the channel cache hasn't been
+        // queried yet — but still honour env-gating to avoid creating spurious
+        // logs for channels the user didn't enable.
+        for (int i = 0; i < CH_COUNT; ++i)
+            if (enabled(static_cast<Channel>(i)))
+                write(static_cast<Channel>(i), banner);
     }
 } // namespace NeoDebug
 // NEOTKO_DEBUG_TAG_END
@@ -470,6 +508,104 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
     return best_slot;
 }
 
+// NEOTKO_PROFILE_TAG — Fase 6c: XY footprint of a slot's painted triangles in a
+// Z band. Mirrors dominant_painted_slot_in_z_range's scan/frame, but instead of
+// counting it projects each qualifying upward triangle to the XY plane (dropping
+// Z), scales to clipper coords, and unions them. The result is the mask FASE 2
+// uses to clip a painted surface so the sandwich applies ONLY where the user
+// painted — the painted shape is preserved instead of flooding the whole top.
+ExPolygons SurfaceColorMix::painted_footprint_in_z_range(const PrintObject* po, int slot,
+                                                         double z_min, double z_max)
+{
+    ExPolygons out;
+    if (!po || slot <= 0 || slot >= 16) return out;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return out;
+
+    const Transform3d trafo = po->trafo();
+    const double z_tol = 0.02; // same fp slack as the dominant-slot scan
+    Polygons tris;             // one CCW triangle polygon per qualifying facet
+
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        const Transform3d vt = trafo * mv->get_matrix();
+        const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
+            *mv, static_cast<EnforcerBlockerType>(slot));
+        if (its.indices.empty()) continue;
+        for (const auto& tri : its.indices) {
+            const Vec3f& v0f = its.vertices[tri[0]];
+            const Vec3f& v1f = its.vertices[tri[1]];
+            const Vec3f& v2f = its.vertices[tri[2]];
+            const Vec3d v0 = vt * Vec3d(v0f.x(), v0f.y(), v0f.z());
+            const Vec3d v1 = vt * Vec3d(v1f.x(), v1f.y(), v1f.z());
+            const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
+            const Vec3d e1 = v1 - v0, e2 = v2 - v0;
+            const Vec3d n  = e1.cross(e2);
+            if (n.z() <= 0.0) continue; // upward-facing only
+            const double max_z = std::max({v0.z(), v1.z(), v2.z()});
+            if (max_z < z_min - z_tol || max_z > z_max + z_tol) continue;
+            Polygon p;
+            p.points = { Point(scale_(v0.x()), scale_(v0.y())),
+                         Point(scale_(v1.x()), scale_(v1.y())),
+                         Point(scale_(v2.x()), scale_(v2.y())) };
+            if (std::abs(p.area()) < SCALED_EPSILON) continue; // degenerate
+            p.make_counter_clockwise();
+            tris.push_back(std::move(p));
+        }
+    }
+    if (tris.empty()) return out;
+    // Union the overlapping/adjacent triangle projections into clean regions.
+    out = union_ex(tris);
+    return out;
+}
+
+// NEOTKO_PROFILE_TAG — Fase 6c v2: enumerate every painted slot present in the
+// Z band. Mirrors dominant_painted_slot_in_z_range's scan but returns the FULL
+// set instead of just the winner. Used to handle multiple painted profiles at
+// the same Z (twin islands with different profiles each get their own mask).
+std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
+    const PrintObject* po, double z_min, double z_max)
+{
+    std::vector<int> out;
+    if (!po) return out;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return out;
+
+    const Transform3d trafo = po->trafo();
+    const double z_tol = 0.02;
+    bool present[16] = {false};
+
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        const Transform3d vt = trafo * mv->get_matrix();
+        for (int slot = 1; slot < 16; ++slot) {
+            if (present[slot]) continue; // already known
+            const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
+                *mv, static_cast<EnforcerBlockerType>(slot));
+            if (its.indices.empty()) continue;
+            for (const auto& tri : its.indices) {
+                const Vec3f& v0f = its.vertices[tri[0]];
+                const Vec3f& v1f = its.vertices[tri[1]];
+                const Vec3f& v2f = its.vertices[tri[2]];
+                const Vec3d v0 = vt * Vec3d(v0f.x(), v0f.y(), v0f.z());
+                const Vec3d v1 = vt * Vec3d(v1f.x(), v1f.y(), v1f.z());
+                const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
+                const Vec3d e1 = v1 - v0, e2 = v2 - v0;
+                const Vec3d n  = e1.cross(e2);
+                if (n.z() <= 0.0) continue;
+                const double max_z = std::max({v0.z(), v1.z(), v2.z()});
+                if (max_z >= z_min - z_tol && max_z <= z_max + z_tol) {
+                    present[slot] = true;
+                    break;
+                }
+            }
+        }
+    }
+    for (int s = 1; s < 16; ++s)
+        if (present[s]) out.push_back(s);
+    return out;
+}
+
 // Resolve the SurfaceEffectProfile id for a painted slot on the print's model.
 // Slot tables live per-ModelVolume; we pick the first model_part with a
 // non-zero entry at that slot (the gizmo keeps them consistent across volumes
@@ -784,6 +920,7 @@ int SurfaceColorMix::assign_and_group_tools(
             bool   invert;
             int    band_a, band_b, band_c, band_d;
             int    tool_a, tool_b, tool_c, tool_d;
+            int    repetitions;  // NEOTKO_COLORMIX_TAG — s80: repeat the gradient N times
         };
         GV gv;
         if (gv_is_top_role) {
@@ -803,6 +940,7 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_b    = config.interlayer_colormix_tool_b.value;
             gv.tool_c    = config.interlayer_colormix_tool_c.value;
             gv.tool_d    = config.interlayer_colormix_tool_d.value;
+            gv.repetitions = config.interlayer_colormix_repetitions.value;
         } else {
             gv.cm_mode   = config.interlayer_colormix_penu_mode.value;
             gv.pct_a     = config.interlayer_colormix_penu_pct_a.value;
@@ -820,6 +958,7 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_b    = config.interlayer_colormix_penu_tool_b.value;
             gv.tool_c    = config.interlayer_colormix_penu_tool_c.value;
             gv.tool_d    = config.interlayer_colormix_penu_tool_d.value;
+            gv.repetitions = config.interlayer_colormix_penu_repetitions.value;
         }
 
         // NEOTKO_PROFILE_TAG — Fase D: painted-profile override.
@@ -862,6 +1001,7 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_b    = get_int ("tool_b",            gv.tool_b);
             gv.tool_c    = get_int ("tool_c",            gv.tool_c);
             gv.tool_d    = get_int ("tool_d",            gv.tool_d);
+            gv.repetitions = get_int ("repetitions",     gv.repetitions);
             NEOTKO_LOG(PROFILE, "OVERRIDE layer=" << layer_idx
                 << " role=" << (gv_is_top_role ? "Top" : "Penu")
                 << " profile='" << eff_profile->name << "' (id=" << eff_profile->id << ")"
@@ -999,6 +1139,13 @@ int SurfaceColorMix::assign_and_group_tools(
             const int n         = static_cast<int>(raw_lines.size());
             const int easing    = gv.easing;
             const double gamma  = gv.gamma;
+            // NEOTKO_COLORMIX_TAG — s80: gradient repetitions. Build the dither
+            // over a 1/reps slice of the lines (build_n), then tile it `reps`
+            // times to fill all n lines → `reps` identical repeated gradients.
+            // Surface analysis (line count, lane mode) is unchanged: the lane
+            // mapping below still spreads the tiled sequence along the geometry.
+            const int reps      = std::max(1, gv.repetitions);
+            const int build_n   = (reps > 1) ? std::max(2, (n + reps - 1) / reps) : n;
             if (min_lines > 0 && n < min_lines) {
                 // Fall back to single tool (Tool A) for tiny surfaces.
                 tools.assign(static_cast<size_t>(n), gv.tool_a);
@@ -1009,7 +1156,7 @@ int SurfaceColorMix::assign_and_group_tools(
                 const int t_a   = tools[0];
                 const int t_b   = tools[1];
                 const int pct_a = gv.pct_a;
-                tools = build_dithered_tools_2color(n, t_a, t_b, pct_a, easing, gamma);
+                tools = build_dithered_tools_2color(build_n, t_a, t_b, pct_a, easing, gamma);
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     int count_a = 0, count_b = 0;
                     for (int t : tools) (t == t_a ? count_a : count_b)++;
@@ -1027,7 +1174,7 @@ int SurfaceColorMix::assign_and_group_tools(
                 const int pct_a = gv.pct_a;
                 const int pct_b = gv.pct_b;
                 const double overlap = gv.overlap;
-                tools = build_dithered_tools_3color(n, t_a, t_b, t_c, pct_a, pct_b,
+                tools = build_dithered_tools_3color(build_n, t_a, t_b, t_c, pct_a, pct_b,
                                                     easing, gamma, overlap);
                 if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
                     int ca = 0, cb = 0, cc = 0;
@@ -1043,7 +1190,7 @@ int SurfaceColorMix::assign_and_group_tools(
                 }
             } else if (cm_mode == 3) {
                 // Custom bands: ignore easing (hard blocks by definition).
-                tools = build_custom_bands(n,
+                tools = build_custom_bands(build_n,
                     gv.tool_a, gv.band_a,
                     gv.tool_b, gv.band_b,
                     gv.tool_c, gv.band_c,
@@ -1057,6 +1204,20 @@ int SurfaceColorMix::assign_and_group_tools(
                         << ", T" << gv.tool_c << "x" << gv.band_c
                         << ", T" << gv.tool_d << "x" << gv.band_d << "]");
                 }
+            }
+
+            // NEOTKO_COLORMIX_TAG — s80: tile the built period to fill all lines.
+            // build_n == n when reps == 1 (period == full → tiling is a no-op).
+            if (reps > 1 && !tools.empty() && (int)tools.size() < n) {
+                const int period = static_cast<int>(tools.size());
+                std::vector<int> tiled;
+                tiled.reserve(n);
+                for (int i = 0; i < n; ++i) tiled.push_back(tools[i % period]);
+                tools.swap(tiled);
+                NEOTKO_LOG(COLORMIX, "GRADIENT_REPEAT layer=" << layer_idx
+                    << " role=" << (gv_is_top_role ? "Top" : "Penu")
+                    << " reps=" << reps << " period=" << period
+                    << " total=" << tools.size());
             }
 
             // NEOTKO_COLORMIX_TAG — s60: invert applies AFTER dither/band gen.
@@ -2615,6 +2776,22 @@ std::string PathBlendEngine::apply_path(
         // semi-fill in Half, the 0.01 mm minimum in Full).
         flow = std::max(flow, min_flow_04mm);
     }
+    // NEOTKO_PATHBLEND_TAG — s87 GEOM diagnostic: the s86 gap_boost quickfix was
+    // retired (mathematically ill-conditioned: multiplied a flow that was already
+    // tiny where the gap is widest). The real fix is the "B-bands" model: split
+    // the ramp into K real micro-layers each with its own Flow.with_height() and
+    // recomputed spacing, plus a band-by-band cap. This block stays as the
+    // legacy K==1 fallback until the bands path is wired.
+    NEOTKO_LOG(MULTIPASS,
+        "PATHBLEND_GEOM"
+        << " nominal_z=" << nominal_z
+        << " H=" << H
+        << " t=" << t
+        << " ramp_thickness=" << ramp_thickness_clamped
+        << " spacing_nominal_for_H=" << (path.width - H * (1.0 - 0.25 * 3.14159265358979))
+        << " spacing_would_be_at_h_ramp=" << (path.width - ramp_thickness_clamped * (1.0 - 0.25 * 3.14159265358979))
+        << " pass=" << pass_idx
+        << " flow=" << flow);
     if (flow < 1e-9) return "";  // last-resort safety
 
     // NEOTKO_PATHBLEND_TAG — s58 Bug 2 SAFETY: enforce monotonic Z ascent per pass.
@@ -2673,5 +2850,102 @@ std::string PathBlendEngine::apply_path(
     return gcode;
 }
 // NEOTKO_MULTIPASS_TAG_END
+
+// NEOTKO_PATHBLEND_TAG_START — s87 B-bands model implementation.
+// Discretize the ramp into K real micro-layers. Strategy:
+//   1. Clamp floor/mid_end against H and min_band_h (a band thinner than
+//      min_band_h is unprintable — reabsorb upward).
+//   2. K_ramp = floor((mid_end - floor) / min_band_h). If K_ramp < 1 → return
+//      empty (caller uses legacy K==1 path).
+//   3. Distribute the ramp range [floor, mid_end] in K_ramp equal-height steps.
+//      Band k: t in [k/K, (k+1)/K], h_step = (mid_end - floor) / K_ramp,
+//      z_top = bottom_z + floor + (k+1) * h_step.
+//   4. If want_cap: emit a matching set of K_cap == K_ramp cap-bands, each at
+//      Z = bottom_z + H, h_cap = H - ramp_at_t_mid (the residual hole height).
+//      Cap-bands print bottom-to-top of nominal-z but at the SAME Z; their
+//      h_step varies so the regenerated Flow gives a width/spacing matched to
+//      the residual hole each band covers.
+std::vector<PBBand> compute_pb_bands(
+    const PathBlendPassConfig& pb,
+    double                     bottom_z,
+    double                     H,
+    double                     min_band_h,
+    bool                       want_cap,
+    int                        target_k)
+{
+    std::vector<PBBand> out;
+    if (H <= 0.0 || min_band_h <= 0.0) return out;
+
+    // Clamp config values against physical limits. The PathBlend UX already
+    // enforces floor >= 0.01 and (Full) mid_end <= H - 0.04; min_band_h is a
+    // last-resort safety floor on per-band h_step.
+    const float floor_mm   = std::max(static_cast<float>(min_band_h), std::max(0.01f, pb.floor_mm));
+    const float mid_end_mm = (pb.mode == PathBlendPassConfig::Mode::Full)
+        ? std::min(pb.mid_end_mm, static_cast<float>(H - min_band_h))
+        : std::min(pb.mid_end_mm, static_cast<float>(H));
+    if (mid_end_mm <= floor_mm) return out;             // degenerate → legacy path
+    const double range_mm = double(mid_end_mm) - double(floor_mm);
+
+    // How many bands? Natural K from range/min_band_h, or forced via target_k.
+    // When forced, we still cap by what min_band_h permits so an over-ambitious
+    // target_k doesn't produce unprintable sub-min_band_h slices.
+    const int K_natural = std::max(1, static_cast<int>(std::floor(range_mm / min_band_h)));
+    const int K_ramp    = (target_k > 0) ? std::min(target_k, K_natural) : K_natural;
+    if (K_ramp < 1) return out;
+
+    const double h_step  = range_mm / double(K_ramp);
+    const double t_step  = 1.0 / double(K_ramp);
+
+    // Ramp bands — ascending Z, single tool (pb.tool_bottom assumed by caller).
+    for (int k = 0; k < K_ramp; ++k) {
+        PBBand b;
+        b.is_cap = false;
+        b.t_lo   = static_cast<float>(k * t_step);
+        b.t_hi   = static_cast<float>((k + 1) * t_step);
+        b.t_mid  = 0.5f * (b.t_lo + b.t_hi);
+        // ramp(t_mid) ≈ floor + t_mid * (mid_end - floor); the top of band k is
+        // at z = bottom_z + floor + (k+1) * h_step (equivalent to the analytic
+        // ramp value at t = t_hi when range/K equals h_step exactly).
+        b.z_top  = static_cast<float>(bottom_z + double(floor_mm) + double(k + 1) * h_step);
+        b.h_step = static_cast<float>(h_step);
+        out.push_back(b);
+    }
+
+    if (!want_cap) return out;
+
+    // Cap bands — Full mode only. All bands at Z = bottom_z + H but each with
+    // its own h_cap matching the residual hole over its ramp counterpart.
+    for (int k = 0; k < K_ramp; ++k) {
+        const PBBand& r = out[k];
+        const double ramp_at_mid = double(floor_mm) + double(r.t_mid) * range_mm;
+        const double h_cap_mm    = std::max(min_band_h, H - ramp_at_mid);
+        PBBand c;
+        c.is_cap = true;
+        c.t_lo   = r.t_lo;
+        c.t_hi   = r.t_hi;
+        c.t_mid  = r.t_mid;
+        c.z_top  = static_cast<float>(bottom_z + H);
+        c.h_step = static_cast<float>(h_cap_mm);
+        out.push_back(c);
+    }
+    return out;
+}
+// NEOTKO_PATHBLEND_TAG_END
+
+// --- PathBlend runtime singletons (s88) ----------------------------------
+// One instance per process. GUI writes, backend reads. The defaults match
+// the s88 hardcoded behavior — leaving them untouched yields the post-s88
+// canonical model verified by the user.
+PathBlendSchedulerRuntime& PathBlendSchedulerRuntime::mut() {
+    static PathBlendSchedulerRuntime g;
+    return g;
+}
+const PathBlendSchedulerRuntime& PathBlendSchedulerRuntime::get() { return mut(); }
+
+PathBlendDispatcherRuntime& PathBlendDispatcherRuntime::mut() {
+    static PathBlendDispatcherRuntime g;
+    return g;
+}
+const PathBlendDispatcherRuntime& PathBlendDispatcherRuntime::get() { return mut(); }
 
 } // namespace Slic3r

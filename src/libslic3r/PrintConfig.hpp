@@ -115,6 +115,13 @@ enum InfillPattern : int {
     ipCrossHatch, ipTpmsD, ipTpmsFK, ipGyroid,
     ipConcentric, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
     ipSupportBase, ipConcentricInternal,
+    // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch pattern. Reserved for top/bottom
+    // surface_pattern: subdivides the surface ExPolygon into K thin Y-strips and
+    // generates an independent FillRectilinear per strip. Adjacent strips have
+    // unsynchronised phase and any non-axis-aligned angle produces short
+    // diagonal segments — visually a stitched / chopped texture. Useful for
+    // Neoweaving and special-support experiments. NOT a normal solid infill.
+    ipMicroStitch,
     ipCount,
 };
 
@@ -1153,6 +1160,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_min_surface_lines))
     ((ConfigOptionFloat,   interlayer_colormix_overlap))
     ((ConfigOptionBool,    interlayer_colormix_invert))
+    ((ConfigOptionInt,     interlayer_colormix_repetitions))      // NEOTKO_COLORMIX_TAG — s80: repeat the gradient N times across the surface
     // NEOTKO_COLORMIX_TAG — s61: per-role penultimate-surface variants.
     ((ConfigOptionInt,     interlayer_colormix_penu_mode))
     ((ConfigOptionInt,     interlayer_colormix_penu_pct_a))
@@ -1162,6 +1170,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_penu_min_surface_lines))
     ((ConfigOptionFloat,   interlayer_colormix_penu_overlap))
     ((ConfigOptionBool,    interlayer_colormix_penu_invert))
+    ((ConfigOptionInt,     interlayer_colormix_penu_repetitions))  // NEOTKO_COLORMIX_TAG — s80
     ((ConfigOptionInt,     interlayer_colormix_penu_band_count_a))
     ((ConfigOptionInt,     interlayer_colormix_penu_band_count_b))
     ((ConfigOptionInt,     interlayer_colormix_penu_band_count_c))

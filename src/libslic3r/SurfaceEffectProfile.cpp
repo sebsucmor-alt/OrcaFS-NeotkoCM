@@ -125,6 +125,7 @@ const std::vector<std::string>& SurfaceEffectProfileManager::colormix_keys()
         "interlayer_colormix_min_surface_lines",
         "interlayer_colormix_overlap",
         "interlayer_colormix_invert",
+        "interlayer_colormix_repetitions",
         "interlayer_colormix_band_count_a",
         "interlayer_colormix_band_count_b",
         "interlayer_colormix_band_count_c",
@@ -142,6 +143,7 @@ const std::vector<std::string>& SurfaceEffectProfileManager::colormix_keys()
         "interlayer_colormix_penu_min_surface_lines",
         "interlayer_colormix_penu_overlap",
         "interlayer_colormix_penu_invert",
+        "interlayer_colormix_penu_repetitions",
         "interlayer_colormix_penu_band_count_a",
         "interlayer_colormix_penu_band_count_b",
         "interlayer_colormix_penu_band_count_c",
@@ -289,17 +291,19 @@ static SurfaceEffectPayload payload_from_json(const nlohmann::json& j)
 std::string SurfaceEffectProfileManager::to_json() const
 {
     nlohmann::json root;
-    root["v"]       = 1;
+    root["v"]       = 2; // NEOTKO_PROFILE_TAG — Fase 6: +stack_top/penu_json
     root["next_id"] = m_next_id;
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& p : m_profiles) {
         nlohmann::json e;
-        e["id"]           = p.id;
-        e["name"]         = p.name;
-        e["preview_argb"] = p.preview_argb;
-        e["colormix"]     = payload_to_json(p.colormix);
-        e["pathblend"]    = payload_to_json(p.pathblend);
-        e["multipass"]    = payload_to_json(p.multipass);
+        e["id"]              = p.id;
+        e["name"]            = p.name;
+        e["preview_argb"]    = p.preview_argb;
+        e["colormix"]        = payload_to_json(p.colormix);
+        e["pathblend"]       = payload_to_json(p.pathblend);
+        e["multipass"]       = payload_to_json(p.multipass);
+        e["stack_top_json"]  = p.stack_top_json;
+        e["stack_penu_json"] = p.stack_penu_json;
         arr.push_back(std::move(e));
     }
     root["profiles"] = std::move(arr);
@@ -330,6 +334,11 @@ bool SurfaceEffectProfileManager::from_json(const std::string& text)
         if (e.contains("colormix"))  p.colormix  = payload_from_json(e["colormix"]);
         if (e.contains("pathblend")) p.pathblend = payload_from_json(e["pathblend"]);
         if (e.contains("multipass")) p.multipass = payload_from_json(e["multipass"]);
+        // NEOTKO_PROFILE_TAG — Fase 6 (v2): preview stacks. Absent in v1 → "".
+        if (e.contains("stack_top_json")  && e["stack_top_json"].is_string())
+            p.stack_top_json  = e["stack_top_json"].get<std::string>();
+        if (e.contains("stack_penu_json") && e["stack_penu_json"].is_string())
+            p.stack_penu_json = e["stack_penu_json"].get<std::string>();
         if (p.id <= 0) p.id = m_next_id;
         m_next_id = std::max(m_next_id, p.id + 1);
         m_profiles.push_back(std::move(p));

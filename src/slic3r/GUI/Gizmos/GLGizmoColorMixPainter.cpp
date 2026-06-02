@@ -18,6 +18,10 @@
 
 #include <GL/glew.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 #include <boost/nowide/convert.hpp>
 
 namespace Slic3r::GUI {
@@ -68,7 +72,7 @@ PainterGizmoType GLGizmoColorMixPainter::get_painter_type() const
 wxString GLGizmoColorMixPainter::handle_snapshot_action_name(bool shift_down,
                                                              GLGizmoPainterBase::Button /*button_down*/) const
 {
-    return shift_down ? _L("Erase ColorMix paint") : _L("ColorMix paint");
+    return (shift_down || m_erase_mode) ? _L("Erase ColorMix paint") : _L("ColorMix paint");
 }
 
 bool GLGizmoColorMixPainter::on_init()
@@ -82,14 +86,12 @@ bool GLGizmoColorMixPainter::on_init()
     m_desc["clipping_of_view_caption"] = alt + _L("Mouse wheel");
     m_desc["clipping_of_view"]         = _L("Section view");
     m_desc["reset_direction"]          = _L("Reset direction");
-    m_desc["cursor_size_caption"]      = ctrl + _L("Mouse wheel");
-    m_desc["cursor_size"]              = _L("Brush size");
     m_desc["paint_caption"]            = _L("Left mouse button");
     m_desc["paint"]                    = _L("Paint with selected profile");
     m_desc["erase_caption"]            = shift + _L("Left mouse button");
     m_desc["erase"]                    = _L("Erase paint");
+    m_desc["erase_mode"]               = _L("Erase mode");
     m_desc["remove_all"]               = _L("Erase all painting");
-    m_desc["tool_type"]                = _L("Tool type");
     m_desc["smart_fill_angle_caption"] = ctrl + _L("Mouse wheel");
     m_desc["smart_fill_angle"]         = _L("Smart fill angle");
     m_desc["profiles"]                 = _L("Profiles");
@@ -119,6 +121,8 @@ void GLGizmoColorMixPainter::render_painter_gizmo()
 
 EnforcerBlockerType GLGizmoColorMixPainter::get_left_button_state_type() const
 {
+    if (m_erase_mode)
+        return EnforcerBlockerType::NONE;
     if (m_active_slot >= 1 && m_active_slot <= 15)
         return static_cast<EnforcerBlockerType>(m_active_slot);
     return EnforcerBlockerType::NONE;
@@ -161,6 +165,140 @@ static ColorRGBA color_for_profile(const SurfaceEffectProfile& p)
     const uint8_t g = (p.preview_argb >>  8) & 0xFF;
     const uint8_t b = (p.preview_argb >>  0) & 0xFF;
     return ColorRGBA(r / 255.f, g / 255.f, b / 255.f, a == 0 ? 1.f : a / 255.f);
+}
+
+// ----------------------------------------------------------------------------
+// Mini-sandwich preview (NEOTKO_PROFILE_TAG — Fase 6).
+// Renders a profile's resolved SurfacePassStack (Top + Penu) inside the row
+// using ImGui draw-list primitives — same visual language as the SandwichDialog
+// (paint_chip / paint_preview in Tab.cpp): dark 45/45/45 background, real
+// filament colours per tool, ColorMix as vertical tool stripes, Solid as a
+// flat block with T#, PathBlend as ramp/cap halves, None as a hatch.
+// ----------------------------------------------------------------------------
+
+// Real filament colour for a 0-based tool index, as ImU32. Grey fallback.
+static ImU32 tool_col_u32(const std::vector<std::string>& fcolors, int tool0)
+{
+    if (tool0 >= 0 && tool0 < (int)fcolors.size() && !fcolors[tool0].empty()) {
+        std::string s = fcolors[tool0];
+        if (!s.empty() && s[0] == '#') s = s.substr(1);
+        if (s.size() >= 6) {
+            const unsigned long rgb = std::strtoul(s.substr(0, 6).c_str(), nullptr, 16);
+            return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, 255);
+        }
+    }
+    return IM_COL32(128, 128, 128, 255);
+}
+
+// Participating ColorMix tools for a pass (reads the pass's per-zone override
+// kv; the injected payload at save time guarantees these keys are present).
+static std::vector<int> cm_tools_from_pass(const SurfacePass& p, bool penu)
+{
+    const std::string pre = penu ? "interlayer_colormix_penu_" : "interlayer_colormix_";
+    std::vector<int> out;
+    for (const char* s : { "tool_a", "tool_b", "tool_c", "tool_d" }) {
+        const auto it = p.colormix.kv.find(pre + s);
+        if (it != p.colormix.kv.end()) {
+            try { const int v = std::stoi(it->second); if (v >= 0) out.push_back(v); }
+            catch (...) {}
+        }
+    }
+    if (out.empty()) out = { 0, 1 };
+    return out;
+}
+
+// Draw one pass inside rect [a,b].
+static void draw_pass(ImDrawList* dl, ImVec2 a, ImVec2 b,
+                      const SurfacePass& p, bool penu,
+                      const std::vector<std::string>& fcolors)
+{
+    dl->AddRectFilled(a, b, IM_COL32(45, 45, 45, 255));
+    const float w = b.x - a.x;
+    const float h = b.y - a.y;
+    switch (p.kind) {
+    case SurfacePassKind::Solid: {
+        dl->AddRectFilled(a, b, tool_col_u32(fcolors, p.solid_tool));
+        if (w > 14.f) {
+            char t[8]; std::snprintf(t, sizeof(t), "T%d", p.solid_tool + 1);
+            dl->AddText(ImVec2(a.x + 2.f, a.y), IM_COL32(255, 255, 255, 255), t);
+        }
+        break;
+    }
+    case SurfacePassKind::ColorMix: {
+        const std::vector<int> tools = cm_tools_from_pass(p, penu);
+        const int n = (int)tools.size();
+        for (int i = 0; i < n; ++i) {
+            const float x0 = a.x + w * float(i)     / float(n);
+            const float x1 = a.x + w * float(i + 1) / float(n);
+            dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x1, b.y),
+                              tool_col_u32(fcolors, tools[i]));
+        }
+        break;
+    }
+    case SurfacePassKind::PathBlend: {
+        PathBlendPassConfig pbc;
+        const auto it = p.pathblend.kv.find("blob");
+        if (it != p.pathblend.kv.end() && !it->second.empty())
+            pbc = PathBlendPassConfig::from_blob_json(it->second);
+        const float midy = a.y + h * 0.5f;
+        // Bottom half = ramp tool (always present).
+        dl->AddRectFilled(ImVec2(a.x, midy), b, tool_col_u32(fcolors, pbc.tool_bottom));
+        // Top half = cap tool (Full only).
+        if (pbc.mode == PathBlendPassConfig::Mode::Full)
+            dl->AddRectFilled(a, ImVec2(b.x, midy), tool_col_u32(fcolors, pbc.tool_top));
+        break;
+    }
+    default: // None — diagonal hatch
+        for (float x = a.x - h; x < b.x; x += 6.f)
+            dl->AddLine(ImVec2(x, b.y), ImVec2(x + h, a.y), IM_COL32(110, 110, 110, 255));
+        break;
+    }
+    dl->AddRect(a, b, IM_COL32(20, 20, 20, 255));
+}
+
+// Draw a zone's stack (bottom->top) stacked vertically inside rect [a,b],
+// weighted by pass ratio (equal split when ratios are unset).
+static void draw_zone(ImDrawList* dl, ImVec2 a, ImVec2 b,
+                      const SurfacePassStack& st, bool penu,
+                      const std::vector<std::string>& fcolors)
+{
+    const int n = (int)st.passes.size();
+    if (n == 0) {
+        dl->AddRectFilled(a, b, IM_COL32(60, 60, 60, 255));
+        dl->AddRect(a, b, IM_COL32(20, 20, 20, 255));
+        return;
+    }
+    const float h = b.y - a.y;
+    double total = 0.0;
+    for (const auto& p : st.passes) total += std::max(0.0, p.ratio);
+    const bool weighted = total > 1e-6;
+    float y = b.y; // start at the bottom (pass[0] is the bottom-most pass)
+    for (int i = 0; i < n; ++i) {
+        const double frac = weighted ? (std::max(0.0, st.passes[i].ratio) / total)
+                                     : (1.0 / double(n));
+        const float band = (float)(frac * h);
+        const float y1 = y;
+        const float y0 = (i == n - 1) ? a.y : (y - band);
+        draw_pass(dl, ImVec2(a.x, y0), ImVec2(b.x, y1), st.passes[i], penu, fcolors);
+        y = y0;
+    }
+}
+
+// One-line textual description of a zone: "+" -joined per-pass tokens.
+static std::string zone_desc(const SurfacePassStack& st)
+{
+    if (st.passes.empty()) return "—"; // em dash
+    std::string s;
+    for (const auto& p : st.passes) {
+        if (!s.empty()) s += "+";
+        switch (p.kind) {
+        case SurfacePassKind::Solid:     s += "T" + std::to_string(p.solid_tool + 1); break;
+        case SurfacePassKind::ColorMix:  s += "CM"; break;
+        case SurfacePassKind::PathBlend: s += "PB"; break;
+        default:                         s += "·"; break; // middle dot
+        }
+    }
+    return s;
 }
 
 int GLGizmoColorMixPainter::slot_for_selected_profile(bool assign_if_missing)
@@ -271,7 +409,7 @@ void GLGizmoColorMixPainter::show_tooltip_information(float caption_max, float x
             ImGui::SameLine(caption_max);
             m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG, text);
         };
-        for (const auto& t : { "paint", "erase", "cursor_size", "smart_fill_angle", "clipping_of_view" })
+        for (const auto& t : { "paint", "erase", "smart_fill_angle", "clipping_of_view" })
             draw_text_with_caption(m_desc.at(std::string(t) + "_caption") + ": ", m_desc.at(t));
         ImGui::EndTooltip();
     }
@@ -300,10 +438,8 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
         m_imgui->calc_text_size(m_desc.at("clipping_of_view")).x + m_imgui->scaled(1.5f),
         m_imgui->calc_text_size(m_desc.at("reset_direction")).x + m_imgui->scaled(1.5f)
             + ImGui::GetStyle().FramePadding.x * 2);
-    const float cursor_slider_left     = m_imgui->calc_text_size(m_desc.at("cursor_size")).x       + m_imgui->scaled(1.5f);
     const float smart_fill_slider_left = m_imgui->calc_text_size(m_desc.at("smart_fill_angle")).x  + m_imgui->scaled(1.5f);
-    const float sliders_left_width     = std::max(smart_fill_slider_left,
-                                            std::max(cursor_slider_left, clipping_slider_left));
+    const float sliders_left_width     = std::max(smart_fill_slider_left, clipping_slider_left);
     const float sliders_width          = m_imgui->scaled(7.0f);
     const float slider_icon_width      = m_imgui->get_slider_icon_size().x;
     const float drag_left_width        = ImGui::GetStyle().WindowPadding.x + sliders_width - space_size;
@@ -312,7 +448,7 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
     const float max_tooltip_width      = ImGui::GetFontSize() * 20.0f;
 
     float caption_max = 0.f;
-    for (const auto& t : { "paint", "erase", "cursor_size", "smart_fill_angle", "clipping_of_view" })
+    for (const auto& t : { "paint", "erase", "smart_fill_angle", "clipping_of_view" })
         caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc[std::string(t) + "_caption"]).x);
     caption_max += m_imgui->scaled(1.f);
 
@@ -330,7 +466,7 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
 
     m_imgui->text(m_desc["profiles"]);
 
-    const float list_height = m_imgui->scaled(8.f);
+    const float list_height = m_imgui->scaled(16.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
     ImGui::BeginChild("##cmp_profile_list", ImVec2(window_width, list_height), true,
                       ImGuiWindowFlags_HorizontalScrollbar);
@@ -349,40 +485,57 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
             return 0;
         };
 
+        // Real filament colours (project config) for the mini-sandwich preview.
+        std::vector<std::string> fcolors;
+        if (auto* o = wxGetApp().preset_bundle->project_config
+                          .option<ConfigOptionStrings>("filament_colour"))
+            fcolors = o->values;
+
+        const float text_h  = ImGui::GetTextLineHeight();
+        const float row_h   = text_h * 2.0f + 4.f;     // two text lines + pad
+        const float mini_w  = text_h * 3.0f;           // mini-sandwich column
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
         for (const SurfaceEffectProfile& p : mgr.list()) {
             ImGui::PushID(p.id);
-            const ColorRGBA col = color_for_profile(p);
-            // Swatch
-            ImVec2 sw_pos = ImGui::GetCursorScreenPos();
-            const float text_h = ImGui::GetTextLineHeight();
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                sw_pos, ImVec2(sw_pos.x + text_h * 1.6f, sw_pos.y + text_h),
-                ImGuiWrapper::to_ImU32(col));
-            ImGui::GetWindowDrawList()->AddRect(
-                sw_pos, ImVec2(sw_pos.x + text_h * 1.6f, sw_pos.y + text_h),
-                IM_COL32(40, 40, 40, 255));
-            ImGui::Dummy(ImVec2(text_h * 1.6f + 4, text_h));
-            ImGui::SameLine();
-
-            // Selectable row: id + name + flags
-            char flags[16];
-            std::snprintf(flags, sizeof(flags), "[%s%s%s]",
-                          p.colormix.present  ? "C" : "-",
-                          p.pathblend.present ? "P" : "-",
-                          p.multipass.present ? "M" : "-");
-            const int slot = slot_of(p.id);
-            const std::string slot_str = slot ? (" (s" + std::to_string(slot) + ")") : std::string();
-            char label[160];
-            std::snprintf(label, sizeof(label), "#%d  %s %s%s##cmp_row",
-                          p.id, p.name.c_str(), flags, slot_str.c_str());
             const bool sel = (m_selected_profile_id == p.id);
-            if (ImGui::Selectable(label, sel)) {
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+            // Full-row selectable (text drawn on top via the draw-list below).
+            if (ImGui::Selectable("##cmp_row", sel, 0, ImVec2(0.f, row_h))) {
                 if (m_selected_profile_id != p.id) {
                     m_selected_profile_id = p.id;
                     m_active_slot = slot_for_selected_profile(/*assign_if_missing=*/true);
                     refresh_selector_palettes();
                 }
             }
+
+            // ---- mini-sandwich (Top over Penu) ----
+            const SurfacePassStack st_top  = SurfacePassStack::from_json(p.stack_top_json);
+            const SurfacePassStack st_penu = SurfacePassStack::from_json(p.stack_penu_json);
+            const ImVec2 a(origin.x, origin.y + 1.f);
+            const ImVec2 b(origin.x + mini_w, origin.y + row_h - 1.f);
+            if (st_penu.passes.empty()) {
+                draw_zone(dl, a, b, st_top, /*penu=*/false, fcolors);
+            } else {
+                const float midy = origin.y + row_h * 0.5f;
+                draw_zone(dl, a, ImVec2(b.x, midy - 1.f), st_top,  false, fcolors);
+                draw_zone(dl, ImVec2(a.x, midy + 1.f), b,  st_penu, true,  fcolors);
+            }
+
+            // ---- text column ----
+            const ImU32 col_text = ImGui::GetColorU32(ImGuiCol_Text);
+            const ImU32 col_dim  = IM_COL32(165, 165, 165, 255);
+            const float tx = origin.x + mini_w + 6.f;
+            const int   slot = slot_of(p.id);
+            std::string title = "#" + std::to_string(p.id) + "  " + p.name;
+            if (slot) title += "  (s" + std::to_string(slot) + ")";
+            dl->AddText(ImVec2(tx, origin.y + 1.f), col_text, title.c_str());
+            // Second line: per-zone sandwich description.
+            std::string desc = "T:" + zone_desc(st_top);
+            if (!st_penu.passes.empty()) desc += "  P:" + zone_desc(st_penu);
+            dl->AddText(ImVec2(tx, origin.y + text_h + 2.f), col_dim, desc.c_str());
+
             ImGui::PopID();
         }
     }
@@ -395,94 +548,36 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
 
     ImGui::Separator();
 
-    // ---- Tool type (Circle / Sphere / Triangle / Smart-Fill) ----------------
+    // ---- Erase mode toggle --------------------------------------------------
+    // When enabled, left-click smart-fills with NONE state (unpaints) instead
+    // of applying the active slot. Shift+Left and right-click still erase
+    // unconditionally via the base class.
+    m_imgui->bbl_checkbox(m_desc["erase_mode"], m_erase_mode);
+
+    ImGui::Separator();
+
+    // ---- Smart-Fill only ----------------------------------------------------
+    // NEOTKO_PROFILE_TAG — the ColorMix Painter only paints coplanar top
+    // surfaces, so the inherited brush tools (Circle/Sphere/Triangle) were
+    // removed. Smart-Fill is the sole tool; pinned unconditionally.
+    m_current_tool = ImGui::FillButtonIcon;
+    m_cursor_type  = TriangleSelector::CursorType::POINTER;
+    m_tool_type    = ToolType::SMART_FILL;
+
     ImGui::AlignTextToFramePadding();
-    m_imgui->text(m_desc["tool_type"]);
-
-    std::array<wchar_t, 4> tool_ids = {
-        ImGui::CircleButtonIcon, ImGui::SphereButtonIcon,
-        ImGui::TriangleButtonIcon, ImGui::FillButtonIcon };
-    std::array<wchar_t, 4> icons;
-    if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon,
-                  ImGui::TriangleButtonDarkIcon, ImGui::FillButtonDarkIcon };
-    else
-        icons = tool_ids;
-    const std::array<wxString, 4> tool_tips = {
-        _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Smart fill") };
-
-    const float empty_button_width = m_imgui->calc_button_size("").x;
-    for (size_t i = 0; i < tool_ids.size(); ++i) {
-        if (i != 0) ImGui::SameLine((empty_button_width + m_imgui->scaled(1.75f)) * i + m_imgui->scaled(1.5f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.f, 0.f, 0.f));
-        ImGui::PushStyleColor(ImGuiCol_Text,   ImVec4(1.f, 1.f, 1.f, 1.f));
-        const bool active = (m_current_tool == tool_ids[i]);
-        if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.f, 0.59f, 0.53f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.f, 0.59f, 0.53f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_Border,        ImGuiWrapper::COL_ORCA);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 1.0);
+    m_imgui->text(m_desc["smart_fill_angle"]);
+    const std::string fmt = std::string("%.1f") + I18N::translate_utf8("°", "deg");
+    ImGui::SameLine(sliders_left_width);
+    ImGui::PushItemWidth(sliders_width);
+    if (m_imgui->bbl_slider_float_style("##cmp_smart_fill_angle", &m_smart_fill_angle,
+                                        SmartFillAngleMin, SmartFillAngleMax, fmt.c_str(), 1.0f, true))
+        for (auto& sel : m_triangle_selectors) {
+            sel->seed_fill_unselect_all_triangles();
+            sel->request_update_render_data();
         }
-        std::wstring btn_name(1, icons[i]);
-        const bool clicked = ImGui::Button(into_u8(btn_name).c_str());
-        if (active) { ImGui::PopStyleColor(4); ImGui::PopStyleVar(2); }
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar(1);
-
-        if (clicked && !active) {
-            m_current_tool = tool_ids[i];
-            for (auto& sel : m_triangle_selectors) {
-                sel->seed_fill_unselect_all_triangles();
-                sel->request_update_render_data();
-            }
-        }
-        if (ImGui::IsItemHovered()) m_imgui->tooltip(tool_tips[i], max_tooltip_width);
-    }
-
-    ImGui::Dummy(ImVec2(0.f, ImGui::GetFontSize() * 0.1f));
-
-    // ---- Tool-dependent controls -------------------------------------------
-    if (m_current_tool == ImGui::CircleButtonIcon || m_current_tool == ImGui::SphereButtonIcon) {
-        m_cursor_type = (m_current_tool == ImGui::CircleButtonIcon)
-                      ? TriangleSelector::CursorType::CIRCLE
-                      : TriangleSelector::CursorType::SPHERE;
-        m_tool_type = ToolType::BRUSH;
-
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(m_desc.at("cursor_size"));
-        ImGui::SameLine(sliders_left_width);
-        ImGui::PushItemWidth(sliders_width);
-        m_imgui->bbl_slider_float_style("##cmp_cursor_radius", &m_cursor_radius,
-                                        CursorRadiusMin, CursorRadiusMax, "%.2f", 1.0f, true);
-        ImGui::SameLine(drag_left_width + sliders_left_width);
-        ImGui::PushItemWidth(1.5f * slider_icon_width);
-        ImGui::BBLDragFloat("##cmp_cursor_radius_input", &m_cursor_radius, 0.05f, 0.f, 0.f, "%.2f");
-    } else if (m_current_tool == ImGui::TriangleButtonIcon) {
-        m_cursor_type = TriangleSelector::CursorType::POINTER;
-        m_tool_type   = ToolType::BRUSH;
-    } else {
-        // Smart-Fill (default tool for ColorMix Painter — coplanar top surfaces).
-        m_cursor_type = TriangleSelector::CursorType::POINTER;
-        m_tool_type   = ToolType::SMART_FILL;
-
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(m_desc["smart_fill_angle"]);
-        const std::string fmt = std::string("%.1f") + I18N::translate_utf8("°", "deg");
-        ImGui::SameLine(sliders_left_width);
-        ImGui::PushItemWidth(sliders_width);
-        if (m_imgui->bbl_slider_float_style("##cmp_smart_fill_angle", &m_smart_fill_angle,
-                                            SmartFillAngleMin, SmartFillAngleMax, fmt.c_str(), 1.0f, true))
-            for (auto& sel : m_triangle_selectors) {
-                sel->seed_fill_unselect_all_triangles();
-                sel->request_update_render_data();
-            }
-        ImGui::SameLine(drag_left_width + sliders_left_width);
-        ImGui::PushItemWidth(1.5f * slider_icon_width);
-        ImGui::BBLDragFloat("##cmp_smart_fill_angle_input", &m_smart_fill_angle, 0.05f, 0.f, 0.f, "%.2f");
-    }
+    ImGui::SameLine(drag_left_width + sliders_left_width);
+    ImGui::PushItemWidth(1.5f * slider_icon_width);
+    ImGui::BBLDragFloat("##cmp_smart_fill_angle_input", &m_smart_fill_angle, 0.05f, 0.f, 0.f, "%.2f");
 
     ImGui::Separator();
 

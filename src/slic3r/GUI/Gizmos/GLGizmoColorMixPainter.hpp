@@ -67,6 +67,8 @@ private:
     int m_selected_profile_id = 0;
     // Resolved slot 1..15 for the selected profile (0 if unresolved / no profile).
     int m_active_slot         = 0;
+    // When true, left-click erases instead of painting (UI checkbox in panel).
+    bool m_erase_mode         = false;
 
     std::map<std::string, wxString> m_desc;
 };

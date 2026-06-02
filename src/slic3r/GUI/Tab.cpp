@@ -61,7 +61,8 @@
 	#include <commctrl.h>
 #endif // WIN32
 
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG
+#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG + PathBlend
+                                         // ingredient (runtimes for s88 toggles).
 #include "libslic3r/SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
 #include <fstream>    // NEOTKO_COLORMIX_TAG (preset save/load)
 #include <sstream>    // NEOTKO_PROFILE_TAG: std::ostringstream for MP payload serialisation
@@ -223,6 +224,11 @@ public:
     int    get_tool_c()          const { return m_choice_tool_c     ? m_choice_tool_c->GetSelection()    : m_tool_c; }
     int    get_tool_d()          const { return m_choice_tool_d     ? m_choice_tool_d->GetSelection()    : m_tool_d; }
     int    get_grad_angle()      const { return m_sc_angle           ? m_sc_angle->GetValue()              : m_grad_angle; }
+    int    get_grad_repetitions() const { return m_sc_repetitions     ? m_sc_repetitions->GetValue()        : m_grad_repetitions; } // NEOTKO_COLORMIX_TAG — s80
+    // NEOTKO_COLORMIX_TAG — s90: ported from the legacy SurfaceColorMixerDialog.
+    // Global (single key, no penu mirror) — both Top/Penu Advanced dialogs read
+    // and write the SAME value; last-write-wins is the intended behavior.
+    double get_grad_min_length() const { return m_sc_min_length      ? m_sc_min_length->GetValue()        : m_grad_min_length; }
 
 private:
     std::vector<std::string>     m_colours;
@@ -251,6 +257,8 @@ private:
     int    m_tool_c         = 2;
     int    m_tool_d         = 3;
     int    m_grad_angle     = -1; // -1 = Auto (use OrcaSlicer defaults)
+    int    m_grad_repetitions = 1; // NEOTKO_COLORMIX_TAG — s80: gradient repeats
+    double m_grad_min_length  = 1.0; // NEOTKO_COLORMIX_TAG — s90: global "ColorMix min. line length" (mm)
 
     // Gradient widget pointers (created in build_ui when m_cfg != nullptr).
     wxStaticBoxSizer* m_gd_sb            = nullptr;
@@ -286,6 +294,8 @@ private:
     wxCheckBox*       m_chk_invert       = nullptr; // s60: invert gradient direction
     wxButton*         m_btn_invert       = nullptr; // button to invert/reverse custom pattern string
     wxSpinCtrl*       m_sc_angle         = nullptr; // infill angle override spin control
+    wxSpinCtrl*       m_sc_repetitions   = nullptr; // NEOTKO_COLORMIX_TAG — s80: gradient repetitions
+    wxSpinCtrlDouble* m_sc_min_length    = nullptr; // NEOTKO_COLORMIX_TAG — s90: global min line length (mm)
     bool                         m_mixed_filament_selected = false;
     std::vector<wxButton*>       m_physical_buttons;
 
@@ -343,6 +353,10 @@ private:
         m_tool_d         = gi(grad_key("tool_d"), 3);
         if (m_tool_d < 0) m_tool_d = 3;
         m_grad_angle     = gi(grad_key("angle"), -1);
+        m_grad_repetitions = gi(grad_key("repetitions"), 1); // NEOTKO_COLORMIX_TAG — s80
+        // NEOTKO_COLORMIX_TAG — s90: global key (NO grad_key() prefix). Both
+        // Top and Penu Advanced dialogs read/write this single value.
+        m_grad_min_length  = gf("interlayer_colormix_min_length", 1.0);
     }
 
     // Is the current pattern using a virtual MixedFilament digit (5-9)? If
@@ -714,6 +728,31 @@ private:
                 row->Add(m_sc_min_lines, 0, wxALIGN_CENTER_VERTICAL);
                 pv->Add(row, 0, wxEXPAND | wxALL, 2);
             }
+            // NEOTKO_COLORMIX_TAG — s90: ported from the legacy
+            // SurfaceColorMixerDialog. Global "ColorMix min. line length" — skips
+            // lines shorter than this value (they keep the region's default tool).
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                            _L("ColorMix min. line length:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                const double cur_ml = std::max(0.0, std::min(50.0, m_grad_min_length));
+                m_sc_min_length = new wxSpinCtrlDouble(m_panel_linear, wxID_ANY,
+                    wxEmptyString, wxDefaultPosition, wxSize(80, -1),
+                    wxSP_ARROW_KEYS, 0.0, 50.0, cur_ml, 0.5);
+                m_sc_min_length->SetDigits(1);
+                m_sc_min_length->SetToolTip(
+                    _L("ColorMix skips lines shorter than this value — they keep the "
+                       "region's default tool.\n"
+                       "Higher values = fewer tool changes but more uncoloured gaps near edges.\n"
+                       "0 = colour every line regardless of length.\n"
+                       "Tip: if you see empty zones, lower this value.\n"
+                       "(Global setting — applies to all ColorMix passes, both Top and Penu.)"));
+                row->Add(m_sc_min_length, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("mm")),
+                         0, wxALIGN_CENTER_VERTICAL);
+                pv->Add(row, 0, wxEXPAND | wxALL, 2);
+            }
             // ── Visual gradient preview ─────────────────────────────────
             {
                 // Header row: label on the left, "Invert direction ⇆" toggle
@@ -819,6 +858,30 @@ private:
             m_gd_sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
         }
 
+        // ── Gradient repetitions ──────────────────────────────────────────
+        // NEOTKO_COLORMIX_TAG — s80: repeat the whole gradient N times across
+        // the surface (1 = single sweep). The surface is still analysed line by
+        // line; the gradient is built over a 1/N slice and tiled N times.
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(this, wxID_ANY, _L("Gradient repetitions:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_sc_repetitions = new wxSpinCtrl(this, wxID_ANY,
+                wxString::Format("%d", m_grad_repetitions),
+                wxDefaultPosition, wxSize(80, -1),
+                wxSP_ARROW_KEYS, 1, 50, std::max(1, m_grad_repetitions));
+            m_sc_repetitions->SetToolTip(_L(
+                "How many times the gradient repeats across the surface.\n"
+                "1 = a single A→B sweep.\n"
+                "N = the same gradient repeated N times back-to-back\n"
+                "(e.g. a 1→2 gradient with 3 = three 1→2 gradients)."));
+            row->Add(m_sc_repetitions, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            auto* lbl_one = new wxStaticText(this, wxID_ANY, _L("(1 = single)"));
+            lbl_one->SetForegroundColour(wxColour(120, 120, 120));
+            row->Add(lbl_one, 0, wxALIGN_CENTER_VERTICAL);
+            m_gd_sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
+        }
+
         vs->Add(m_gd_sb, 0, wxEXPAND | wxALL, PAD / 2);
 
         // ── Listeners ──────────────────────────────────────────────────
@@ -833,6 +896,8 @@ private:
         if (m_chk_invert)
             m_chk_invert->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { refresh_grad_preview(); });
         m_choice_easing->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        if (m_sc_repetitions)
+            m_sc_repetitions->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_gamma->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { refresh_grad_preview(); });
         m_sc_band_a->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_band_b->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
@@ -900,19 +965,24 @@ private:
 
         std::vector<int> seq;
         const int N = 240; // wider strip = more detail
+        // NEOTKO_COLORMIX_TAG — s80: mirror the engine's repetitions tiling so
+        // the preview shows the repeated gradients. Build over N/reps, tile to N.
+        const int reps    = m_sc_repetitions ? std::max(1, m_sc_repetitions->GetValue())
+                                             : std::max(1, m_grad_repetitions);
+        const int build_N = (reps > 1) ? std::max(2, N / reps) : N;
         if (mode == 1) {
             seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(
-                N, 0, 1, pct_a, easing, gamma);
+                build_N, 0, 1, pct_a, easing, gamma);
         } else if (mode == 2) {
             seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(
-                N, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
+                build_N, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
         } else if (mode == 3) {
             const int ca = m_sc_band_a ? m_sc_band_a->GetValue() : 0;
             const int cb = m_sc_band_b ? m_sc_band_b->GetValue() : 0;
             const int cc = m_sc_band_c ? m_sc_band_c->GetValue() : 0;
             const int cd = m_sc_band_d ? m_sc_band_d->GetValue() : 0;
             seq = Slic3r::SurfaceColorMix::build_custom_bands(
-                N, 0, ca, 1, cb, 2, cc, 3, cd);
+                build_N, 0, ca, 1, cb, 2, cc, 3, cd);
         } else {
             // Pattern-string mode: render the actual pattern (if any) so the
             // user sees its real colour layout. Map each digit 1..4 to slot
@@ -923,6 +993,15 @@ private:
             }
             if (seq.empty()) seq.push_back(-1);
         }
+        // NEOTKO_COLORMIX_TAG — s80: tile the built period to fill the strip
+        // (modes 1-3 only; pattern-string mode is verbatim).
+        if (reps > 1 && mode >= 1 && mode <= 3 && !seq.empty() && (int)seq.size() < N) {
+            const int period = (int)seq.size();
+            std::vector<int> tiled; tiled.reserve(N);
+            for (int i = 0; i < N; ++i) tiled.push_back(seq[i % period]);
+            seq.swap(tiled);
+        }
+
         // s60: invert mirrors the sequence so the strip preview matches what
         // the slicer will produce when the checkbox is enabled.
         const bool invert = m_chk_invert ? m_chk_invert->GetValue() : m_grad_invert;
@@ -3405,6 +3484,9 @@ private:
                 };
                 wi(grad_prefix + "mode",              dlg.get_grad_mode());
                 wi(grad_prefix + "pct_a",             dlg.get_grad_pct_a());
+                // NEOTKO_COLORMIX_TAG — s90: global key (no prefix). Both
+                // Top and Penu Advanced dialogs write the same value here.
+                wf("interlayer_colormix_min_length",  dlg.get_grad_min_length());
                 wi(grad_prefix + "pct_b",             dlg.get_grad_pct_b());
                 wi(grad_prefix + "easing",            dlg.get_grad_easing());
                 wf(grad_prefix + "gamma",             dlg.get_grad_gamma());
@@ -4565,6 +4647,27 @@ private:
                     p.pathblend.kv["multipass_path_gradient"] = "1";
                     p.pathblend.kv["pathblend_surface"] = surface_enum(EFF_PB);
                 }
+                // NEOTKO_PROFILE_TAG — Fase 6 (aditivo): snapshot the resolved
+                // sandwich stacks for the 3D Painter mini-preview. PREVIEW-ONLY —
+                // the slice engine keeps reading the payloads above. Derived from
+                // the live config via the same resolver the SandwichDialog uses.
+                // synthesize_from_legacy leaves ColorMix passes with empty kv
+                // (engine falls back to region config); inject the snapshotted
+                // ColorMix payload so the gizmo preview is self-contained.
+                {
+                    auto st_top  = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
+                    auto st_penu = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
+                    auto inject = [&](Slic3r::SurfacePassStack& st) {
+                        if (!p.colormix.present) return;
+                        for (auto& pass : st.passes)
+                            if (pass.kind == Slic3r::SurfacePassKind::ColorMix && pass.colormix.kv.empty())
+                                pass.colormix = p.colormix;
+                    };
+                    inject(st_top);
+                    inject(st_penu);
+                    p.stack_top_json  = st_top.to_json();
+                    p.stack_penu_json = st_penu.to_json();
+                }
                 const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(p));
                 const auto* added = Slic3r::SurfaceEffectProfileManager::get().find(new_id);
                 wxMessageBox(wxString::Format(_L("Saved profile #%d (CM:%zu, MP:%zu, PB:%zu keys)."),
@@ -4739,6 +4842,22 @@ private:
                     } else {
                         p->pathblend = Slic3r::SurfaceEffectPayload{};
                     }
+                    // NEOTKO_PROFILE_TAG — Fase 6 (aditivo): refresh preview stacks
+                    // (self-contained: inject ColorMix payload, see SCM Save above).
+                    {
+                        auto st_top  = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
+                        auto st_penu = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
+                        auto inject = [&](Slic3r::SurfacePassStack& st) {
+                            if (!p->colormix.present) return;
+                            for (auto& pass : st.passes)
+                                if (pass.kind == Slic3r::SurfacePassKind::ColorMix && pass.colormix.kv.empty())
+                                    pass.colormix = p->colormix;
+                        };
+                        inject(st_top);
+                        inject(st_penu);
+                        p->stack_top_json  = st_top.to_json();
+                        p->stack_penu_json = st_penu.to_json();
+                    }
                     refill();
                 });
 
@@ -4818,11 +4937,46 @@ public:
             m_fcolors = o->values;
         while (m_fcolors.size() < 4) m_fcolors.push_back("#808080");
 
+        // NEOTKO_PATHBLEND_TAG — s88. Seed PathBlend runtimes from app_config
+        // so last-session toggles take effect immediately. Runtimes are split:
+        //   • PathBlendDispatcherRuntime → chain_continuous, chain_max_xy_mm
+        //   • PathBlendSchedulerRuntime  → chain_atomic
+        // Both live in SurfaceColorMix.hpp (PathBlend ingredient section).
+        if (auto* ac = wxGetApp().app_config) {
+            Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
+            Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
+            const std::string vc = ac->get("neotko_pb_chain_continuous");
+            const std::string va = ac->get("neotko_pb_chain_atomic");
+            const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
+            const std::string vk = ac->get("neotko_pb_use_canon_scheduler");
+            if (!vc.empty()) d.chain_continuous   = (vc == "1" || vc == "true");
+            if (!va.empty()) s.chain_atomic       = (va == "1" || va == "true");
+            if (!vk.empty()) s.use_canon_scheduler = (vk == "1" || vk == "true");
+            if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
+        }
+
         // Load the current state of both zones (blob, or synthesized legacy).
         m_stack[0] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
         m_stack[1] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
         for (int z = 0; z < 2; ++z)
             sanitize_stack(z);
+
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD from app_config (same keys
+        // as SurfaceColorMixerDialog: neotko_td_1..4 — single source of truth).
+        {
+            auto* ac = wxGetApp().app_config;
+            for (int i = 0; i < 4; ++i) {
+                const std::string key = "neotko_td_" + std::to_string(i + 1);
+                const std::string val = ac ? ac->get(key) : "";
+                float v = 0.f;
+                try { if (!val.empty()) v = std::stof(val); } catch (...) {}
+                m_td[i] = std::max(0.01f, std::min(10.f, v > 0.f ? v : 1.f));
+            }
+        }
+
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): preload virtual MixedColor
+        // options for Blend Suggestion target picker.
+        load_mix_opts();
 
         build_ui();
     }
@@ -4833,6 +4987,7 @@ private:
     std::vector<std::string>                m_fcolors;
 
     Slic3r::SurfacePassStack m_stack[2];     // 0 = Top, 1 = Penultimate
+    int m_pending_load_id = 0;               // NEOTKO_SANDWICH_TAG — deferred Load (see on_manage_profiles)
 
     // Everything is inline per row — no shared "Advanced" panel. The fill angle
     // is a per-row field bound to that pass's own SurfacePass.angle. fan/speed/
@@ -4856,7 +5011,14 @@ private:
         std::vector<wxTextCtrl*>       angle_txt;   // Solid only
         std::vector<wxPanel*>          preview;
         std::vector<wxButton*>         adv_btn;     // ColorMix / PathBlend
+        // NEOTKO_PATHBLEND_TAG — s88. "Advanced ⚙" button shown next to the
+        // adv_btn ONLY for PathBlend rows. Opens the PB Advanced toggles modal
+        // (chain_continuous, chain_max_xy_mm, chain_atomic).
+        std::vector<wxButton*>         pb_advanced_btn;
         std::vector<wxStaticText*>     minlbl;      // "< 0.04 mm" warning
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): move-up / move-down per row.
+        std::vector<wxButton*>         up_btn;
+        std::vector<wxButton*>         down_btn;
         // NEOTKO_SANDWICH_TAG — Fase 5 s73: KindEntry encodes Kind + PB mode
         // so the kind selector can list "PathBlend Half" and "PathBlend Full"
         // as distinct entries while both map to Kind::PathBlend internally.
@@ -4872,6 +5034,36 @@ private:
     // ratio-bar drag state: which zone / which internal boundary is held.
     int m_drag_zone  = -1;
     int m_drag_bound = -1;
+
+    // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD panel + Lane mode + use_virtual
+    // portados del SurfaceColorMixerDialog viejo. Decisión usuario s84:
+    //   - Panel derecho fijo (BoxSizer horizontal, mockup s71).
+    //   - El viejo diálogo NO se toca todavía (duplicación intencional;
+    //     consolidación en una sesión futura de "retirar UX viejo").
+    //   - Color Science Roadmap (docs/FUTURE/COLOR SCIENCE ROADMAP.md):
+    //     este panel es el punto de entrada natural para N1.1 (RGB→Lab) y
+    //     N1.3 (TD por canal). Por ahora se mantiene escalar + RGB.
+    std::array<float, 4>          m_td       = {};
+    std::array<wxSlider*, 4>      m_sl_td    = {};
+    std::array<wxStaticText*, 4>  m_lbl_td   = {};
+    std::array<wxPanel*, 4>       m_sw_td    = {};
+    wxPanel*       m_stacked_sw_top  = nullptr;
+    wxPanel*       m_stacked_sw_penu = nullptr;
+    wxPanel*       m_stacked_swatch  = nullptr;
+    wxStaticText*  m_lbl_opacity_top = nullptr;
+    wxChoice*      m_choice_lane_mode = nullptr;
+    wxCheckBox*    m_chk_use_virtual  = nullptr;
+
+    // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): Blend Suggestion (Beer-Lambert
+    // joint optimizer) portado del SurfaceColorMixerDialog viejo. Escribe a
+    // m_stack[] (autoritativo) en vez de las legacy multipass_* keys.
+    wxComboBox*    m_bs_combo_target  = nullptr;
+    wxPanel*       m_bs_swatch_target = nullptr;
+    wxRadioButton* m_bs_rb_top        = nullptr;
+    wxRadioButton* m_bs_rb_joint      = nullptr;
+    wxPanel*       m_bs_swatch        = nullptr;
+    wxStaticText*  m_bs_lbl_score     = nullptr;
+    std::vector<Slic3r::ColorMixOption> m_bs_mix_opts;
 
     // ----------------------------------------------------------- small helpers
     // Layer height (mm) — pass heights are shown as ratio × this.
@@ -4954,15 +5146,107 @@ private:
         return out;
     }
 
-    // Read the per-zone ColorMix gradient tools (for chip previews only).
-    std::vector<int> colormix_tools(int z) const
+    // NEOTKO_SANDWICH_TAG — read a ColorMix gradient int key for a given pass:
+    // the pass's per-lámina override (pass.colormix.kv) first, region config as
+    // fallback. `full_key` is the full region-key name (e.g. interlayer_colormix_tool_a).
+    int cm_pass_int(const Slic3r::SurfacePass* p, const std::string& full_key, int dflt) const
+    {
+        if (p && p->colormix.present) {
+            auto it = p->colormix.kv.find(full_key);
+            if (it != p->colormix.kv.end()) {
+                try { return std::stoi(it->second); } catch (...) {}
+            }
+        }
+        if (auto* o = m_config->option<ConfigOptionInt>(full_key)) return o->value;
+        return dflt;
+    }
+    double cm_pass_dbl(const Slic3r::SurfacePass* p, const std::string& full_key, double dflt) const
+    {
+        if (p && p->colormix.present) {
+            auto it = p->colormix.kv.find(full_key);
+            if (it != p->colormix.kv.end()) {
+                try { return std::stod(it->second); } catch (...) {}
+            }
+        }
+        if (auto* o = m_config->option<ConfigOptionFloat>(full_key)) return o->value;
+        return dflt;
+    }
+    std::string cm_pass_str(const Slic3r::SurfacePass* p, const std::string& full_key,
+                            const std::string& dflt) const
+    {
+        if (p && p->colormix.present) {
+            auto it = p->colormix.kv.find(full_key);
+            if (it != p->colormix.kv.end()) return it->second;
+        }
+        if (auto* o = m_config->option<ConfigOptionString>(full_key)) return o->value;
+        return dflt;
+    }
+
+    // NEOTKO_SANDWICH_TAG — s80: build the REAL per-line ColorMix tool sequence
+    // for a pass preview. Mirrors SurfaceColorMix::assign_and_group_tools dither
+    // + repetitions + invert, reading the pass's per-lámina override (region
+    // fallback). Returns physical tool indices; -1 = unknown (mixed digit 5-9).
+    std::vector<int> colormix_preview_seq(int z, const Slic3r::SurfacePass& p, int N) const
+    {
+        const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
+                                         : "interlayer_colormix_";
+        const int    mode    = cm_pass_int(&p, pre + "mode", 0);
+        const int    pct_a   = cm_pass_int(&p, pre + "pct_a", 50);
+        const int    pct_b   = cm_pass_int(&p, pre + "pct_b", 33);
+        const int    easing  = cm_pass_int(&p, pre + "easing", 0);
+        const double gamma   = cm_pass_dbl(&p, pre + "gamma", 1.0);
+        const double overlap = cm_pass_dbl(&p, pre + "overlap", 0.6);
+        const int    reps    = std::max(1, cm_pass_int(&p, pre + "repetitions", 1));
+        const int    ta      = cm_pass_int(&p, pre + "tool_a", 0);
+        const int    tb      = cm_pass_int(&p, pre + "tool_b", 1);
+        const int    tc      = cm_pass_int(&p, pre + "tool_c", 2);
+        const int    td      = cm_pass_int(&p, pre + "tool_d", 3);
+        const int    build_N = (reps > 1) ? std::max(2, N / reps) : N;
+        std::vector<int> seq;
+        if (mode == 1) {
+            seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(
+                build_N, ta, tb, pct_a, easing, gamma);
+        } else if (mode == 2) {
+            seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(
+                build_N, ta, tb, tc, pct_a, pct_b, easing, gamma, overlap);
+        } else if (mode == 3) {
+            seq = Slic3r::SurfaceColorMix::build_custom_bands(
+                build_N, ta, cm_pass_int(&p, pre + "band_count_a", 0),
+                         tb, cm_pass_int(&p, pre + "band_count_b", 0),
+                         tc, cm_pass_int(&p, pre + "band_count_c", 0),
+                         td, cm_pass_int(&p, pre + "band_count_d", 0));
+        } else {
+            const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
+                                           : "interlayer_colormix_pattern_penultimate";
+            const std::string pat = cm_pass_str(&p, pat_key, "");
+            for (char c : pat) {
+                if      (c >= '1' && c <= '4') seq.push_back(c - '1');
+                else if (c >= '5' && c <= '9') seq.push_back(-1);
+            }
+            if (seq.empty()) seq.push_back(-1);
+        }
+        if (reps > 1 && mode >= 1 && mode <= 3 && !seq.empty() && (int)seq.size() < N) {
+            const int period = (int)seq.size();
+            std::vector<int> tiled; tiled.reserve(N);
+            for (int i = 0; i < N; ++i) tiled.push_back(seq[i % period]);
+            seq.swap(tiled);
+        }
+        if (cm_pass_int(&p, pre + "invert", 0) != 0 && seq.size() > 1)
+            std::reverse(seq.begin(), seq.end());
+        return seq;
+    }
+
+    // Read the ColorMix gradient tools for chip previews. When `p` carries a
+    // per-lámina override the tools come from it; otherwise the shared region config.
+    std::vector<int> colormix_tools(int z, const Slic3r::SurfacePass* p = nullptr) const
     {
         const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
                                          : "interlayer_colormix_";
         std::vector<int> out;
-        for (const char* s : { "tool_a", "tool_b", "tool_c", "tool_d" })
-            if (auto* o = m_config->option<ConfigOptionInt>(pre + s))
-                if (o->value >= 0) out.push_back(o->value);
+        for (const char* s : { "tool_a", "tool_b", "tool_c", "tool_d" }) {
+            const int v = cm_pass_int(p, pre + s, -1);
+            if (v >= 0) out.push_back(v);
+        }
         if (out.empty()) out = { 0, 1 };
         return out;
     }
@@ -5004,14 +5288,685 @@ private:
             st.enabled = false;                   // nothing to show
     }
 
+    // NEOTKO_SANDWICH_TAG — Fase 6b: re-sync the WHOLE dialog UI to the current
+    // m_stack[] without destroying any window. Mirrors what the constructor's
+    // build_ui() tail does (header widgets + refresh_rows + sync_zone_enabled),
+    // but post-construction. This is the in-place refresh the s81 note said a
+    // "Load into dialog" would need — refresh_rows only shows/hides the fixed row
+    // panels (never frees them), so it is safe on macOS (no live-NSView free).
+    void reload_ui_from_stack()
+    {
+        for (int z = 0; z < 2; ++z) {
+            sanitize_stack(z);
+            m_ui[z].enable_chk->SetValue(m_stack[z].enabled && !m_stack[z].passes.empty());
+            const int n0 = std::max(1, (int)m_stack[z].passes.size());
+            m_ui[z].slots_rb->SetSelection(std::min(3, n0) - 1);
+            m_ui[z].perim_chk->SetValue(m_stack[z].perimeter_override);
+            refresh_rows(z);
+            sync_zone_enabled(z);
+        }
+        Layout();
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 6b: load a saved profile's stacks into the
+    // dialog so it can be edited / re-saved (the tests need this to iterate on
+    // debug profiles without losing them). Deferred-call safe: invoked AFTER the
+    // Manage modal closes, so no parent UI is mutated while a child modal lives.
+    void load_profile_into_dialog(int id)
+    {
+        const auto* p = Slic3r::SurfaceEffectProfileManager::get().find(id);
+        if (!p) return;
+        m_stack[0] = Slic3r::SurfacePassStack::from_json(p->stack_top_json);
+        m_stack[1] = Slic3r::SurfacePassStack::from_json(p->stack_penu_json);
+        reload_ui_from_stack();
+    }
+
     // ------------------------------------------------------------------- build
+    // ------------------------------------------------------------------ Blend Suggestion data
+    // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): mirror of refresh_mix_opts from
+    // the old SurfaceColorMixerDialog, scoped to virtual-only options.
+    void load_mix_opts()
+    {
+        m_bs_mix_opts.clear();
+        std::string mixed_defs;
+        if (auto* o = wxGetApp().preset_bundle->project_config
+                          .option<ConfigOptionString>("mixed_filament_definitions"))
+            mixed_defs = o->value;
+        if (mixed_defs.empty()) {
+            if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
+                mixed_defs = o->value;
+        }
+        if (!mixed_defs.empty()) {
+            for (auto& opt : Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors))
+                if (!opt.is_physical)
+                    m_bs_mix_opts.push_back(opt);
+        }
+    }
+
+    void refresh_bs_target_swatch()
+    {
+        if (!m_bs_swatch_target) return;
+        const int sel = m_bs_combo_target ? m_bs_combo_target->GetSelection() : -1;
+        wxColour c(128,128,128);
+        if (sel >= 0 && sel < (int)m_bs_mix_opts.size()) {
+            const std::string& dc = m_bs_mix_opts[sel].display_color;
+            if (dc.size() >= 7 && dc[0] == '#') {
+                unsigned long rgb = 0;
+                if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
+                    c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
+            }
+        }
+        m_bs_swatch_target->SetBackgroundColour(c);
+        m_bs_swatch_target->Refresh();
+    }
+
+    // ------------------------------------------------------------------ TD preview helpers
+    // NEOTKO_SANDWICH_TAG — Fase 7 (s84): SandwichDialog-native Beer-Lambert
+    // blend preview. Walks m_stack[z].passes (authoritative) instead of the
+    // legacy keys the old SurfaceColorMixerDialog reads. Solid → 1 tool at
+    // pass.ratio; ColorMix → histogram of pattern digits (kv override or
+    // region-config fallback); PathBlend → 50/50 cap+ramp from blob.
+    // Single-channel TD (same maths as the old dialog) — Color Science N1.3
+    // (TD por canal) entrará cuando se ataque la roadmap futura.
+    wxColour blend_preview_zone(int z, float* out_w = nullptr) const
+    {
+        struct P { int t; float r; };
+        std::vector<P> passes;
+
+        const auto& st = m_stack[z];
+        if (!st.enabled || st.passes.empty()) {
+            if (out_w) *out_w = 0.f;
+            return GetBackgroundColour();
+        }
+        const bool is_penu = (z == 1);
+        for (const Slic3r::SurfacePass& p : st.passes) {
+            const float r_pass = std::max(0.f, (float)p.ratio);
+            if (r_pass < 1e-6f) continue;
+            switch (p.kind) {
+                case Kind::Solid:
+                    passes.push_back({std::clamp(p.solid_tool, 0, 3), r_pass});
+                    break;
+                case Kind::ColorMix: {
+                    std::string pat;
+                    auto it = p.colormix.kv.find("pattern");
+                    if (it != p.colormix.kv.end()) pat = it->second;
+                    if (pat.empty()) {
+                        const char* k = is_penu ? "interlayer_colormix_pattern_penultimate"
+                                                : "interlayer_colormix_pattern_top";
+                        if (auto* o = m_config->option<ConfigOptionString>(k)) pat = o->value;
+                    }
+                    if (pat.empty()) break;
+                    std::map<int,int> cnt; int total = 0;
+                    for (char c : pat) {
+                        int t = (int)c - '1';
+                        if (t >= 0 && t < 4) { cnt[t]++; total++; }
+                    }
+                    if (total == 0) break;
+                    for (auto& [t,n] : cnt)
+                        passes.push_back({t, r_pass * (float)n / (float)total});
+                    break;
+                }
+                case Kind::PathBlend: {
+                    int t_bot = 0, t_top = 0;
+                    auto it = p.pathblend.kv.find("blob");
+                    if (it != p.pathblend.kv.end() && !it->second.empty()) {
+                        const auto pb = Slic3r::PathBlendPassConfig::from_blob_json(it->second);
+                        t_bot = pb.tool_bottom;
+                        t_top = pb.tool_top;
+                    }
+                    passes.push_back({std::clamp(t_bot, 0, 3), r_pass * 0.5f});
+                    passes.push_back({std::clamp(t_top, 0, 3), r_pass * 0.5f});
+                    break;
+                }
+                case Kind::None: break;
+            }
+        }
+
+        if (passes.empty()) {
+            if (out_w) *out_w = 0.f;
+            return wxColour(180, 180, 180);
+        }
+
+        // Beer-Lambert weighted blend (same maths as SurfaceColorMixerDialog).
+        float tr = 0, tg = 0, tb = 0, tw = 0;
+        for (auto& p : passes) {
+            const float td = m_td[std::clamp(p.t, 0, 3)];
+            const wxColour col = tool_colour(p.t);
+            const float opacity = (td < 1e-6f)
+                ? 1.f
+                : 1.f - (float)std::pow(0.1, p.r / td);
+            tr += col.Red()   * opacity;
+            tg += col.Green() * opacity;
+            tb += col.Blue()  * opacity;
+            tw += opacity;
+        }
+        if (tw < 1e-6f) {
+            if (out_w) *out_w = 0.f;
+            return wxColour(180, 180, 180);
+        }
+        if (out_w) *out_w = tw;
+        return wxColour(
+            (unsigned char)std::min(255.f, tr / tw),
+            (unsigned char)std::min(255.f, tg / tw),
+            (unsigned char)std::min(255.f, tb / tw));
+    }
+
+    wxColour stacked_preview_color() const
+    {
+        float op = 0.f;
+        const wxColour c_top  = blend_preview_zone(0, &op);
+        const wxColour c_penu = blend_preview_zone(1);
+        const float a  = std::clamp(op, 0.f, 1.f);
+        const float ia = 1.f - a;
+        return wxColour(
+            (unsigned char)(c_top.Red()   * a + c_penu.Red()   * ia),
+            (unsigned char)(c_top.Green() * a + c_penu.Green() * ia),
+            (unsigned char)(c_top.Blue()  * a + c_penu.Blue()  * ia));
+    }
+
+    void refresh_td_previews()
+    {
+        float transmit_top = 0.f;
+        blend_preview_zone(0, &transmit_top);
+        if (m_stacked_sw_top)  m_stacked_sw_top ->Refresh();
+        if (m_stacked_sw_penu) m_stacked_sw_penu->Refresh();
+        if (m_stacked_swatch)  m_stacked_swatch ->Refresh();
+        if (m_lbl_opacity_top)
+            m_lbl_opacity_top->SetLabel(
+                wxString::Format(_L("transmit=%.2f"),
+                                  std::clamp(transmit_top, 0.f, 1.f)));
+        // Per-pass previews (rows) are RGB-only swatches today; nothing to refresh.
+    }
+
+    // ------------------------------------------------------------------ TD panel builder
+    wxSizer* build_td_panel()
+    {
+        const int PAD = 6;
+        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Filament & TD"));
+        wxWindow* host = sb->GetStaticBox();
+
+        auto* note = new wxStaticText(host, wxID_ANY,
+            _L("Transmission Distance (TD)"));
+        note->SetForegroundColour(wxColour(90, 90, 90));
+        sb->Add(note, 0, wxALL, PAD);
+
+        auto* grid = new wxFlexGridSizer(4, 4, 4, 8);
+        grid->AddGrowableCol(2, 1);
+        for (int i = 0; i < 4; ++i) {
+            auto* sw = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
+            sw->SetBackgroundColour(tool_colour(i));
+            m_sw_td[i] = sw;
+            grid->Add(sw, 0, wxALIGN_CENTER_VERTICAL);
+
+            grid->Add(new wxStaticText(host, wxID_ANY, wxString::Format("T%d", i + 1)),
+                      0, wxALIGN_CENTER_VERTICAL);
+
+            const int iv = (int)(m_td[i] * 100.f + 0.5f);
+            auto* sl = new wxSlider(host, wxID_ANY, iv, 1, 1000,
+                                    wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
+            m_sl_td[i] = sl;
+            grid->Add(sl, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+
+            auto* lbl = new wxStaticText(host, wxID_ANY,
+                wxString::Format("%.2f", m_td[i]),
+                wxDefaultPosition, wxSize(38, -1));
+            m_lbl_td[i] = lbl;
+            grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+
+            sl->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent&) {
+                m_td[i] = m_sl_td[i]->GetValue() / 100.f;
+                m_lbl_td[i]->SetLabel(wxString::Format("%.2f", m_td[i]));
+                refresh_td_previews();
+            });
+        }
+        sb->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        // Stacked preview row (Top × Penu Beer-Lambert).
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(host, wxID_ANY, _L("Top:")),
+                     0, wxALIGN_CENTER_VERTICAL);
+            m_stacked_sw_top = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(28, 18));
+            m_stacked_sw_top->SetBackgroundStyle(wxBG_STYLE_PAINT);
+            m_stacked_sw_top->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+                wxPaintDC dc(m_stacked_sw_top);
+                dc.SetBackground(wxBrush(blend_preview_zone(0)));
+                dc.Clear();
+            });
+            row->Add(m_stacked_sw_top, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+            row->Add(new wxStaticText(host, wxID_ANY, _L("  Penu:")),
+                     0, wxALIGN_CENTER_VERTICAL);
+            m_stacked_sw_penu = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(28, 18));
+            m_stacked_sw_penu->SetBackgroundStyle(wxBG_STYLE_PAINT);
+            m_stacked_sw_penu->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+                wxPaintDC dc(m_stacked_sw_penu);
+                dc.SetBackground(wxBrush(blend_preview_zone(1)));
+                dc.Clear();
+            });
+            row->Add(m_stacked_sw_penu, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+            row->Add(new wxStaticText(host, wxID_ANY, _L("  Result:")),
+                     0, wxALIGN_CENTER_VERTICAL);
+            m_stacked_swatch = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(40, 18));
+            m_stacked_swatch->SetBackgroundStyle(wxBG_STYLE_PAINT);
+            m_stacked_swatch->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+                wxPaintDC dc(m_stacked_swatch);
+                dc.SetBackground(wxBrush(stacked_preview_color()));
+                dc.Clear();
+            });
+            row->Add(m_stacked_swatch, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+            m_lbl_opacity_top = new wxStaticText(host, wxID_ANY, wxEmptyString,
+                                                 wxDefaultPosition, wxSize(90, -1));
+            m_lbl_opacity_top->SetForegroundColour(wxColour(90, 90, 90));
+            row->Add(m_lbl_opacity_top, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 6);
+            sb->Add(row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        }
+
+        // use_virtual (Mixed Filament digits 5-9 in ColorMix pattern editor).
+        {
+            bool cur_uv = true;
+            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+                cur_uv = o->value;
+            m_chk_use_virtual = new wxCheckBox(host, wxID_ANY,
+                _L("Use Mixed Filament colors in pattern"));
+            m_chk_use_virtual->SetValue(cur_uv);
+            m_chk_use_virtual->SetToolTip(
+                _L("When enabled, the pattern editor shows Mixed Filament virtual colors\n"
+                   "(e.g. 'F1+F2') as clickable buttons alongside physical filaments.\n"
+                   "Pattern digits 5-9 reference these virtual colors.\n"
+                   "Requires Mixed Filaments to be defined in the filament panel."));
+            sb->Add(m_chk_use_virtual, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        }
+
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): Blend Suggestion (Target +
+        // Mode + Calculate + ΔE). Portado del SurfaceColorMixerDialog viejo;
+        // Calculate escribe a m_stack[] (autoritativo) en vez de las legacy
+        // multipass_* keys. La checkbox "MultiPass Perimeter Override" no se
+        // porta — ya existe per-zone en SandwichDialog (m_ui[z].perim_chk).
+        {
+            sb->Add(new wxStaticLine(host), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, PAD);
+            auto* bs_lbl = new wxStaticText(host, wxID_ANY,
+                _L("Blend Suggestion — Beer-Lambert optimizer"));
+            wxFont f = bs_lbl->GetFont(); f.MakeBold(); bs_lbl->SetFont(f);
+            sb->Add(bs_lbl, 0, wxLEFT | wxRIGHT | wxTOP, PAD);
+
+            // Target picker row
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(host, wxID_ANY, _L("Target colour:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                wxArrayString labels;
+                for (auto& opt : m_bs_mix_opts)
+                    labels.Add(wxString::FromUTF8(opt.label));
+                if (labels.IsEmpty()) labels.Add(_L("(no MixedColor defined)"));
+                m_bs_combo_target = new wxComboBox(host, wxID_ANY,
+                    labels.IsEmpty() ? wxString() : labels[0],
+                    wxDefaultPosition, wxSize(170, -1), labels, wxCB_READONLY);
+                m_bs_combo_target->SetToolTip(
+                    _L("Select the virtual MixedColor whose display colour is the blend target."));
+                m_bs_combo_target->Enable(!m_bs_mix_opts.empty());
+                row->Add(m_bs_combo_target, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+
+                m_bs_swatch_target = new wxPanel(host, wxID_ANY,
+                    wxDefaultPosition, wxSize(18, 18));
+                m_bs_swatch_target->SetToolTip(
+                    _L("Display colour of the selected MixedColor target."));
+                refresh_bs_target_swatch();
+                m_bs_combo_target->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
+                    refresh_bs_target_swatch();
+                });
+                row->Add(m_bs_swatch_target, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+
+                auto* btn_refresh = new wxButton(host, wxID_ANY, L"↺",
+                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+                btn_refresh->SetToolTip(
+                    _L("Refresh — re-read Mixed Filament definitions from the current project."));
+                btn_refresh->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                    load_mix_opts();
+                    if (!m_bs_combo_target) return;
+                    m_bs_combo_target->Clear();
+                    if (m_bs_mix_opts.empty()) {
+                        m_bs_combo_target->Append(_L("(no MixedColor defined)"));
+                        m_bs_combo_target->SetSelection(0);
+                        m_bs_combo_target->Enable(false);
+                    } else {
+                        for (auto& opt : m_bs_mix_opts)
+                            m_bs_combo_target->Append(wxString::FromUTF8(opt.label));
+                        m_bs_combo_target->SetSelection(0);
+                        m_bs_combo_target->Enable(true);
+                    }
+                    refresh_bs_target_swatch();
+                });
+                row->Add(btn_refresh, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+                sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+            }
+
+            // Mode radios
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                row->Add(new wxStaticText(host, wxID_ANY, _L("Mode:")),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+                m_bs_rb_top = new wxRadioButton(host, wxID_ANY, _L("Top layer only"),
+                    wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
+                m_bs_rb_joint = new wxRadioButton(host, wxID_ANY,
+                    _L("Top + Penultimate"));
+                m_bs_rb_joint->SetValue(true);
+                m_bs_rb_top->SetToolTip(
+                    _L("Apply suggested passes to the Top zone only."));
+                m_bs_rb_joint->SetToolTip(
+                    _L("Apply the same passes to both Top and Penultimate zones.\n"
+                       "Beer-Lambert models this as a stacked double layer — allows\n"
+                       "smaller per-pass ratios while maintaining physical adhesion."));
+                row->Add(m_bs_rb_top,   0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+                row->Add(m_bs_rb_joint, 0, wxALIGN_CENTER_VERTICAL);
+                sb->Add(row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+            }
+
+            // Calculate + result row
+            {
+                auto* row = new wxBoxSizer(wxHORIZONTAL);
+                auto* btn_calc = new wxButton(host, wxID_ANY, _L("Calculate ▶"),
+                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+                btn_calc->Enable(!m_bs_mix_opts.empty());
+
+                m_bs_swatch = new wxPanel(host, wxID_ANY,
+                    wxDefaultPosition, wxSize(22, 22));
+                m_bs_swatch->SetBackgroundColour(wxColour(128, 128, 128));
+                m_bs_swatch->SetToolTip(
+                    _L("Simulated blend colour after Beer-Lambert optimisation."));
+
+                m_bs_lbl_score = new wxStaticText(host, wxID_ANY, _L("  ΔE: ---"));
+                m_bs_lbl_score->SetToolTip(
+                    _L("CIE76 RGB-cube colour distance between simulated result and target.\n"
+                       "<5 excellent, 5-10 good, >10 poor approximation.\n"
+                       "Color Science N1.1 will upgrade this to CIEDE2000 in Lab space."));
+
+                btn_calc->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                    if (m_bs_mix_opts.empty() || !m_bs_combo_target) return;
+                    const int sel = m_bs_combo_target->GetSelection();
+                    if (sel < 0 || sel >= (int)m_bs_mix_opts.size()) return;
+                    const auto& opt = m_bs_mix_opts[sel];
+
+                    // Target display color → RGB [0..255]
+                    const std::string& dc = opt.display_color;
+                    if (dc.size() < 7 || dc[0] != '#') return;
+                    unsigned long rgb_v = 0;
+                    if (!wxString::FromUTF8(dc.substr(1)).ToULong(&rgb_v, 16)) return;
+                    const double t_r = (double)((rgb_v >> 16) & 0xFF);
+                    const double t_g = (double)((rgb_v >>  8) & 0xFF);
+                    const double t_b = (double)( rgb_v        & 0xFF);
+
+                    auto cur_slots = [&](int z) {
+                        const int n = (int)m_stack[z].passes.size();
+                        return n > 0 ? std::clamp(n, 1, 3) : 2;
+                    };
+                    const int top_passes  = cur_slots(0);
+                    const int penu_passes = cur_slots(1);
+
+                    const double LH = layer_height_mm();
+                    const double min_r = std::max(0.05, kMinPassMM / LH);
+
+                    // NEOTKO_SANDWICH_TAG — Fase 7 (s84d) Calculate B: exhaustive
+                    // search over (tool sequence) × (ratio composition), Beer-
+                    // Lambert + ΔE_RGB. Pool = 4 physical filaments; tools may
+                    // repeat. Ratios discretized on a step=0.1 grid summing to 1,
+                    // with floor = min_r (enforced 0.04 mm extrusion). Joint mode
+                    // is greedy: Penu best alone, then Top stacked over it.
+                    // Color Science N1.1 (Lab/CIEDE2000) and N3.1 (NNLS) refinan
+                    // este search — esta es la versión "barata" del N3.2.
+                    constexpr int kPool   = 4;
+                    constexpr int K       = 10;   // 0.1 step
+                    const     int min_int = (int)std::ceil(min_r * K - 1e-6);
+
+                    // Enumerate ratio compositions summing to K, each ≥ min_int.
+                    std::vector<std::vector<double>> ratio_grids[4]; // by n=1..3
+                    auto fill_grid = [&](int n) {
+                        std::vector<std::vector<double>>& out = ratio_grids[n];
+                        out.clear();
+                        if (n == 1) { out.push_back({1.0}); return; }
+                        std::vector<int> acc(n, 0);
+                        std::function<void(int,int)> rec = [&](int i, int rem) {
+                            if (i == n - 1) {
+                                if (rem >= min_int) {
+                                    acc[i] = rem;
+                                    std::vector<double> r(n);
+                                    for (int j = 0; j < n; ++j) r[j] = (double)acc[j] / K;
+                                    out.push_back(std::move(r));
+                                }
+                                return;
+                            }
+                            for (int v = min_int; v <= rem - min_int*(n-1-i); ++v) {
+                                acc[i] = v; rec(i+1, rem - v);
+                            }
+                        };
+                        rec(0, K);
+                    };
+                    fill_grid(1); fill_grid(2); fill_grid(3);
+
+                    // Beer-Lambert color of a (tool, ratio) stack. Returns
+                    // {Rfg, Gfg, Bfg, opacity_total}. Same maths as
+                    // blend_preview_zone (weighted average by per-pass opacity).
+                    auto bl = [&](const std::vector<int>& tools,
+                                  const std::vector<double>& ratios) {
+                        double tr=0, tg=0, tb=0, tw=0;
+                        for (size_t i = 0; i < tools.size(); ++i) {
+                            const int t = std::clamp(tools[i], 0, 3);
+                            const double td = std::max(0.01, (double)m_td[t]);
+                            const wxColour col = tool_colour(t);
+                            const double op = 1.0 - std::pow(0.1, ratios[i] / td);
+                            tr += col.Red()  * op;
+                            tg += col.Green()* op;
+                            tb += col.Blue() * op;
+                            tw += op;
+                        }
+                        std::array<double,4> out;
+                        if (tw < 1e-9) { out = {180.0,180.0,180.0, 0.0}; }
+                        else            { out = {tr/tw, tg/tw, tb/tw, std::clamp(tw, 0.0, 1.0)}; }
+                        return out;
+                    };
+
+                    // Search best (tools, ratios) of length n minimising ΔE² to
+                    // (tr, tg, tb), optionally composited Beer-Lambert over a
+                    // background (br, bg, bb). base_alpha < 1 → fg shows over bg.
+                    auto search = [&](int n, double tr_, double tg_, double tb_,
+                                      double br, double bg, double bb,
+                                      bool composite) {
+                        struct R { std::vector<int> tools; std::vector<double> ratios; double de2; };
+                        R best; best.de2 = 1e18;
+                        std::vector<int> tools(n, 0);
+                        const auto& rgrid = ratio_grids[n];
+                        std::function<void(int)> rec = [&](int depth) {
+                            if (depth == n) {
+                                for (const auto& r : rgrid) {
+                                    const auto c = bl(tools, r);
+                                    double rr, gg, bb_;
+                                    if (composite) {
+                                        const double a = c[3], ia = 1.0 - a;
+                                        rr = c[0]*a + br*ia;
+                                        gg = c[1]*a + bg*ia;
+                                        bb_= c[2]*a + bb*ia;
+                                    } else {
+                                        rr = c[0]; gg = c[1]; bb_ = c[2];
+                                    }
+                                    const double dr = rr - tr_;
+                                    const double dg = gg - tg_;
+                                    const double db = bb_- tb_;
+                                    const double de2 = dr*dr + dg*dg + db*db;
+                                    if (de2 < best.de2) {
+                                        best.de2    = de2;
+                                        best.tools  = tools;
+                                        best.ratios = r;
+                                    }
+                                }
+                                return;
+                            }
+                            for (int t = 0; t < kPool; ++t) {
+                                tools[depth] = t;
+                                rec(depth + 1);
+                            }
+                        };
+                        rec(0);
+                        return best;
+                    };
+
+                    auto write_zone = [&](int z, const std::vector<int>& tools,
+                                          const std::vector<double>& ratios) {
+                        Slic3r::SurfacePassStack& st = m_stack[z];
+                        st.enabled = true;
+                        st.passes.clear();
+                        for (size_t i = 0; i < tools.size(); ++i) {
+                            Slic3r::SurfacePass p;
+                            p.kind       = Kind::Solid;
+                            p.solid_tool = std::clamp(tools[i], 0, 3);
+                            p.ratio      = ratios[i];
+                            p.angle      = -1;
+                            st.passes.push_back(p);
+                        }
+                        sanitize_stack(z);
+                        refresh_rows(z);
+                        sync_zone_enabled(z);
+                    };
+
+                    const bool joint = m_bs_rb_joint && m_bs_rb_joint->GetValue();
+                    if (joint) {
+                        // Penu first: best alone match to target.
+                        auto bp = search(penu_passes, t_r, t_g, t_b,
+                                         0,0,0, /*composite=*/false);
+                        const auto penu_c = bl(bp.tools, bp.ratios);
+                        // Top: stacked over Penu result (composite=true).
+                        auto bt = search(top_passes, t_r, t_g, t_b,
+                                         penu_c[0], penu_c[1], penu_c[2],
+                                         /*composite=*/true);
+                        write_zone(0, bt.tools, bt.ratios);
+                        write_zone(1, bp.tools, bp.ratios);
+                    } else {
+                        // Top-only: best alone match.
+                        auto bt = search(top_passes, t_r, t_g, t_b,
+                                         0,0,0, /*composite=*/false);
+                        write_zone(0, bt.tools, bt.ratios);
+                    }
+
+                    refresh_td_previews();
+
+                    // Predicted result + ΔE for the display swatch (same maths
+                    // used by the search, so this matches what the optimiser saw).
+                    const wxColour rc = joint ? stacked_preview_color()
+                                              : blend_preview_zone(0);
+                    const double dr = rc.Red()   - t_r;
+                    const double dg = rc.Green() - t_g;
+                    const double db = rc.Blue()  - t_b;
+                    const double de = std::sqrt(dr*dr + dg*dg + db*db) * 100.0
+                                      / (255.0 * std::sqrt(3.0));
+                    if (m_bs_swatch) {
+                        m_bs_swatch->SetBackgroundColour(rc);
+                        m_bs_swatch->Refresh();
+                    }
+                    if (m_bs_lbl_score) {
+                        m_bs_lbl_score->SetLabel(wxString::Format(_L("  ΔE: %.1f"), de));
+                        m_bs_lbl_score->SetForegroundColour(
+                            de < 5.0  ? wxColour(30,140,30) :
+                            de < 10.0 ? wxColour(190,130,0) : wxColour(180,40,40));
+                        m_bs_lbl_score->Refresh();
+                    }
+                    Layout();
+                });
+
+                row->Add(btn_calc,       0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+                row->Add(m_bs_swatch,    0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                row->Add(m_bs_lbl_score, 1, wxALIGN_CENTER_VERTICAL);
+                sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+            }
+        }
+
+        return sb;
+    }
+
+    // ------------------------------------------------------------------ Lane mode builder
+    wxSizer* build_lane_panel()
+    {
+        const int PAD = 6;
+        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Line distribution mode"));
+        wxWindow* host = sb->GetStaticBox();
+
+        wxArrayString labels;
+        labels.Add(_L("Default — line index (safe, original)"));
+        labels.Add(_L("GeoSort (A) — sort by perpendicular position"));
+        labels.Add(_L("LaneQuant (B) — quantize to geometric lanes"));
+        labels.Add(_L("DirCluster (C) — cluster by direction, then quantize"));
+
+        int cur_lm = 0;
+        if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
+            cur_lm = std::clamp(o->value, 0, 3);
+
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        row->Add(new wxStaticText(host, wxID_ANY, _L("Mode:")),
+                 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+        m_choice_lane_mode = new wxChoice(host, wxID_ANY,
+            wxDefaultPosition, wxSize(280, -1), labels);
+        m_choice_lane_mode->SetSelection(cur_lm);
+        m_choice_lane_mode->SetToolTip(
+            _L("How pattern slots are assigned to individual extrusion lines.\n\n"
+               "0 Default — slot = line_index mod n_slots (legacy).\n"
+               "1 GeoSort — sort lines by position perpendicular to fill direction.\n"
+               "2 LaneQuant — slot = quantized geometric lane (continuous stripes).\n"
+               "3 DirCluster — cluster by direction first, then LaneQuant per cluster.\n\n"
+               "Applies to ColorMix + PathBlend in Top + Penultimate."));
+        m_choice_lane_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+            if (!m_choice_lane_mode) return;
+            const int v = std::clamp(m_choice_lane_mode->GetSelection(), 0, 3);
+            if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
+                o->value = v;
+            m_on_change("surface_color_mix_lane_mode");
+        });
+        row->Add(m_choice_lane_mode, 1, wxALIGN_CENTER_VERTICAL);
+        sb->Add(row, 0, wxEXPAND | wxALL, PAD);
+
+        auto* note = new wxStaticText(host, wxID_ANY,
+            _L("Experimental. Default = original behaviour (no risk).\n"
+               "Modes A/B/C improve pattern fidelity on irregular shapes."));
+        note->SetForegroundColour(wxColour(100, 100, 100));
+        sb->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        return sb;
+    }
+
     void build_ui()
     {
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84): layout horizontal. Izquierda
+        // editor de pilas + profile manager; derecha panel TD + Lane mode +
+        // use_virtual (mockup s71, portado del SurfaceColorMixerDialog).
         auto* root = new wxBoxSizer(wxVERTICAL);
-        root->Add(build_zone(0, _L("Top layer")),
+        auto* hbox = new wxBoxSizer(wxHORIZONTAL);
+
+        auto* left  = new wxBoxSizer(wxVERTICAL);
+        auto* right = new wxBoxSizer(wxVERTICAL);
+
+        left->Add(build_zone(0, _L("Top layer")),
                   0, wxEXPAND | wxALL, 6);
-        root->Add(build_zone(1, _L("Penultimate layer")),
+        left->Add(build_zone(1, _L("Penultimate layer")),
                   0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+
+        right->Add(build_td_panel(),   0, wxEXPAND | wxALL, 6);
+        right->Add(build_lane_panel(), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+        right->AddStretchSpacer(1);
+
+        hbox->Add(left,  1, wxEXPAND);
+        hbox->Add(right, 0, wxEXPAND | wxLEFT, 4);
+        root->Add(hbox, 1, wxEXPAND);
+
+        // NEOTKO_PROFILE_TAG — Fase 6: profile manager (3D Painter). Saves the
+        // authoritative pass-stack blobs (stack_top/penu_json) into a
+        // SurfaceEffectProfile so the painter can pick this sandwich. The legacy
+        // 3-payloads stay empty (present=false) — the painter ENGINE migration to
+        // consume the stack is Fase 6b; until then the gizmo previews it.
+        root->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
+        auto* prof_row = new wxBoxSizer(wxHORIZONTAL);
+        auto* btn_save_prof = new wxButton(this, wxID_ANY, _L("Save as profile…"));
+        auto* btn_mgr_prof  = new wxButton(this, wxID_ANY, _L("Manage profiles…"));
+        prof_row->Add(btn_save_prof, 0, wxRIGHT, 6);
+        prof_row->Add(btn_mgr_prof,  0);
+        root->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+        btn_save_prof->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_save_profile(); });
+        btn_mgr_prof->Bind(wxEVT_BUTTON,  [this](wxCommandEvent&) { on_manage_profiles(); });
 
         root->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
         auto* btns = CreateButtonSizer(wxOK | wxCANCEL);
@@ -5085,7 +6040,10 @@ private:
         m_ui[z].angle_txt  .assign(kMax, nullptr);
         m_ui[z].preview    .assign(kMax, nullptr);
         m_ui[z].adv_btn    .assign(kMax, nullptr);
+        m_ui[z].pb_advanced_btn.assign(kMax, nullptr);
         m_ui[z].minlbl     .assign(kMax, nullptr);
+        m_ui[z].up_btn     .assign(kMax, nullptr);
+        m_ui[z].down_btn   .assign(kMax, nullptr);
         for (int idx = kMax - 1; idx >= 0; --idx)   // top of stack drawn first
             m_ui[z].rows_sizer->Add(build_row(z, idx), 0,
                                     wxEXPAND | wxTOP | wxBOTTOM, 3);
@@ -5197,6 +6155,21 @@ private:
         u.badge[idx]->SetBackgroundColour(kind_colour(p.kind));
         u.badge[idx]->Refresh();
 
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): up/down visibility + enable.
+        // Hidden when slots < 2 (or PB collapses the stack to 1).
+        {
+            const int n = (int)m_stack[z].passes.size();
+            const bool visible = n >= 2;
+            if (u.up_btn[idx]) {
+                u.up_btn[idx]->Show(visible);
+                u.up_btn[idx]->Enable(visible && idx < n - 1);
+            }
+            if (u.down_btn[idx]) {
+                u.down_btn[idx]->Show(visible);
+                u.down_btn[idx]->Enable(visible && idx > 0);
+            }
+        }
+
         // NEOTKO_SANDWICH_TAG — Fase 5 s73: per-row inline PathBlend repurpose.
         // Solid -> spinner = Z mm (pass height), angle field = fill angle.
         // PathBlend -> spinner = floor_mm, angle field = mid_end_mm (label
@@ -5249,6 +6222,22 @@ private:
         } else {
             adv->Show(false);
         }
+        // NEOTKO_PATHBLEND_TAG — s88. Advanced ⚙ button is PB-only.
+        if (u.pb_advanced_btn[idx]) {
+            u.pb_advanced_btn[idx]->Show(is_pb);
+            if (is_pb) {
+                // Reflect current runtime state on the label so the user sees
+                // at a glance whether any toggle is non-default.
+                const auto& d = Slic3r::PathBlendDispatcherRuntime::get();
+                const auto& s = Slic3r::PathBlendSchedulerRuntime::get();
+                const bool all_default = d.chain_continuous && s.chain_atomic
+                    && s.use_canon_scheduler
+                    && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6;
+                u.pb_advanced_btn[idx]->SetLabel(
+                    all_default ? _L("Advanced \xE2\x9A\x99")
+                                : _L("Advanced \xE2\x9A\x99 *"));
+            }
+        }
 
         // Ratio spinner label changes: "Z mm:" normally, "floor mm:" for PB.
         // The spinner itself is at index 0 of its sizer (we just retitle via the
@@ -5284,6 +6273,27 @@ private:
         row->SetBackgroundColour(wxColour(60, 60, 60));
         auto* rv = new wxBoxSizer(wxVERTICAL);
         auto* rh = new wxBoxSizer(wxHORIZONTAL);
+
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): up/down reorder buttons.
+        // Vector m_stack[z].passes is bottom→top, rows are drawn top-first
+        // (kMax-1 .. 0). Up arrow (visual top direction) = swap with idx+1.
+        // Down arrow = swap with idx-1. Shown only when slots >= 2; disabled
+        // at the extreme positions. State managed in sync_row_widgets.
+        auto* up = new wxButton(row, wxID_ANY, L"▲",
+            wxDefaultPosition, wxSize(22, 22), wxBU_EXACTFIT);
+        up->SetToolTip(_L("Move this pass up (toward the top of the layer)."));
+        up->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
+            move_pass(z, idx, idx + 1);
+        });
+        rh->Add(up, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
+
+        auto* down = new wxButton(row, wxID_ANY, L"▼",
+            wxDefaultPosition, wxSize(22, 22), wxBU_EXACTFIT);
+        down->SetToolTip(_L("Move this pass down (toward the bottom of the layer)."));
+        down->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
+            move_pass(z, idx, idx - 1);
+        });
+        rh->Add(down, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
 
         auto* chip = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(78, 22));
         chip->Bind(wxEVT_PAINT, [this, z, idx](wxPaintEvent&) { paint_chip(z, idx); });
@@ -5363,7 +6373,129 @@ private:
                 cycle_pathblend_ease(z, idx);
             }
         });
-        rv->Add(adv, 0, wxLEFT | wxTOP | wxBOTTOM, 3);
+
+        // NEOTKO_PATHBLEND_TAG — s88. Advanced ⚙ button placed RIGHT NEXT TO
+        // the adv_btn ("Mode: Linear / Ease In / …"). Shown only on PB rows
+        // (sync_row_widgets toggles visibility). Opens the PB Advanced
+        // modal with the runtime toggles (chain_continuous, chain_max_xy_mm,
+        // chain_atomic). The modal reads/writes the singletons in
+        // SurfaceColorMix.hpp (PathBlend ingredient section) and persists
+        // to app_config so choices survive across sessions.
+        auto* pb_adv = new wxButton(row, wxID_ANY,
+            _L("Advanced \xE2\x9A\x99"),
+            wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        pb_adv->SetToolTip(_L(
+            "PathBlend advanced behavior:\n"
+            "  • Continuous chain — suppress retract+lift between adjacent\n"
+            "    scanlines of the same tool.\n"
+            "  • Atomic chain — complete one object's PathBlend before\n"
+            "    starting the next (no cross-object travels during ramp).\n"
+            "  • XY threshold — beyond this distance, treat scanlines as\n"
+            "    disconnected islands and bring the lift back."));
+        pb_adv->Bind(wxEVT_BUTTON, [this, pb_adv](wxCommandEvent&) {
+            // Seed runtimes from app_config on open (defensive — main seed
+            // happens at SandwichDialog ctor).
+            auto* ac = wxGetApp().app_config;
+            Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
+            Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
+            if (ac) {
+                const std::string vc = ac->get("neotko_pb_chain_continuous");
+                const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
+                const std::string va = ac->get("neotko_pb_chain_atomic");
+                const std::string vk = ac->get("neotko_pb_use_canon_scheduler");
+                if (!vc.empty()) d.chain_continuous    = (vc == "1" || vc == "true");
+                if (!va.empty()) s.chain_atomic        = (va == "1" || va == "true");
+                if (!vk.empty()) s.use_canon_scheduler = (vk == "1" || vk == "true");
+                if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
+            }
+            wxDialog dlg(pb_adv, wxID_ANY, _L("PathBlend Advanced"),
+                         wxDefaultPosition, wxDefaultSize,
+                         wxDEFAULT_DIALOG_STYLE);
+            auto* vbox = new wxBoxSizer(wxVERTICAL);
+            auto* chk_cont = new wxCheckBox(&dlg, wxID_ANY,
+                _L("Continuous chain (suppress retract/lift between adjacent scanlines)"));
+            chk_cont->SetValue(d.chain_continuous);
+            chk_cont->SetToolTip(_L(
+                "When ON, consecutive same-tool PathBlend sublayers within the\n"
+                "XY threshold are emitted as one continuous extrusion (no\n"
+                "retract, no wipe, no z-hop). Beyond the threshold the normal\n"
+                "lift cycle returns — useful for disconnected islands."));
+            vbox->Add(chk_cont, 0, wxALL, 8);
+
+            auto* chk_atomic = new wxCheckBox(&dlg, wxID_ANY,
+                _L("Atomic chain (complete each object's PathBlend before next)"));
+            chk_atomic->SetValue(s.chain_atomic);
+            chk_atomic->SetToolTip(_L(
+                "When ON, the multi-object scheduler drains every same-tool\n"
+                "sublayer of one chain before moving on. Eliminates cross-\n"
+                "object micro-travels between scanlines when several objects\n"
+                "with PathBlend print at the same Z.\n\n"
+                "NOTE: must stay in sync between the GCode dispatcher and the\n"
+                "wipe-tower planner — never toggle mid-print."));
+            vbox->Add(chk_atomic, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
+            // NEOTKO_PATHBLEND_TAG — s89. Canon scheduler toggle.
+            auto* chk_canon = new wxCheckBox(&dlg, wxID_ANY,
+                _L("Canon scheduler (NeoTower uses dispatcher's algorithm)"));
+            chk_canon->SetValue(s.use_canon_scheduler);
+            chk_canon->SetToolTip(_L(
+                "When ON, NeoTower's sublayer scheduler uses the SAME algorithm\n"
+                "the GCode dispatcher uses (order_sublayers_by_tool), so the\n"
+                "wipe-tower plan matches actual emission by construction.\n\n"
+                "Required for multi-object atomic PathBlend with distinct tools\n"
+                "(test04 4-cube case). Safe for ColorMix and MultiPass — the\n"
+                "algorithm reduces to natural ascending-z order when items per\n"
+                "plane is 1.\n\n"
+                "Turn OFF only if a regression appears in test01 / test05 /\n"
+                "ColorMix; report logs before doing so."));
+            vbox->Add(chk_canon, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
+            auto* hxy = new wxBoxSizer(wxHORIZONTAL);
+            hxy->Add(new wxStaticText(&dlg, wxID_ANY,
+                    _L("Continuous-chain XY threshold (mm):")),
+                    0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            auto* sc_xy = new wxSpinCtrlDouble(&dlg, wxID_ANY,
+                wxEmptyString, wxDefaultPosition, wxSize(90, -1),
+                wxSP_ARROW_KEYS, 0.0, 50.0, d.chain_max_xy_mm, 0.1);
+            sc_xy->SetDigits(2);
+            sc_xy->SetToolTip(_L(
+                "Two consecutive PB sublayers are part of the same chain\n"
+                "when their XY distance is ≤ this value. Default 1.0 mm\n"
+                "is fine for most rectilinear fills (≥ 2 × spacing)."));
+            hxy->Add(sc_xy, 0, wxALIGN_CENTER_VERTICAL);
+            vbox->Add(hxy, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
+            vbox->Add(dlg.CreateButtonSizer(wxOK | wxCANCEL),
+                      0, wxEXPAND | wxALL, 8);
+            dlg.SetSizerAndFit(vbox);
+            if (dlg.ShowModal() == wxID_OK) {
+                d.chain_continuous    = chk_cont->GetValue();
+                s.chain_atomic        = chk_atomic->GetValue();
+                s.use_canon_scheduler = chk_canon->GetValue();
+                d.chain_max_xy_mm     = sc_xy->GetValue();
+                if (ac) {
+                    ac->set("neotko_pb_chain_continuous",    d.chain_continuous    ? "1" : "0");
+                    ac->set("neotko_pb_chain_atomic",        s.chain_atomic        ? "1" : "0");
+                    ac->set("neotko_pb_use_canon_scheduler", s.use_canon_scheduler ? "1" : "0");
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%.4f", d.chain_max_xy_mm);
+                    ac->set("neotko_pb_chain_max_xy_mm",  buf);
+                    ac->save();
+                }
+                // Refresh the button label to reflect new state.
+                pb_adv->SetLabel(
+                    (d.chain_continuous && s.chain_atomic && s.use_canon_scheduler
+                        && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6)
+                    ? _L("Advanced \xE2\x9A\x99")
+                    : _L("Advanced \xE2\x9A\x99 *"));
+            }
+        });
+
+        // Place adv_btn and pb_adv side by side in a horizontal sub-sizer.
+        auto* adv_row = new wxBoxSizer(wxHORIZONTAL);
+        adv_row->Add(adv,    0, wxALIGN_CENTER_VERTICAL);
+        adv_row->Add(pb_adv, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+        rv->Add(adv_row, 0, wxLEFT | wxTOP | wxBOTTOM, 3);
 
         // min-layer warning — shown when this pass's height < 0.04 mm.
         auto* minl = new wxStaticText(row, wxID_ANY, wxEmptyString);
@@ -5382,8 +6514,26 @@ private:
         u.angle_txt[idx]   = atxt;
         u.preview[idx]     = prev;
         u.adv_btn[idx]     = adv;
+        u.pb_advanced_btn[idx] = pb_adv;
         u.minlbl[idx]      = minl;
+        u.up_btn[idx]      = up;
+        u.down_btn[idx]    = down;
         return row;
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): reorder helper. Passes carry all
+    // their state (kind, colormix.kv, pathblend.kv, ratio, angle) so a swap
+    // is non-destructive — no gradients/PB blobs are lost.
+    void move_pass(int z, int i, int j)
+    {
+        auto& ps = m_stack[z].passes;
+        if (i < 0 || j < 0 || i == j) return;
+        if (i >= (int)ps.size() || j >= (int)ps.size()) return;
+        // PathBlend collapses the zone to 1 pass — nothing to reorder there;
+        // the buttons are hidden in that case, but guard anyway.
+        if (ps.size() < 2) return;
+        std::swap(ps[i], ps[j]);
+        refresh_rows(z);
     }
 
     // ------------------------------------------------------------- interaction
@@ -5733,61 +6883,96 @@ private:
         write_pb_blob(z, idx, pbc);
     }
 
-    // ColorMix gradient editor — reuses ColorMixPatternDialog, writing the
-    // per-zone legacy gradient keys (the engine reads the region config for a
-    // ColorMix pass; see REVAMP_SANDWICH §C Fase 2 limitation).
+    // NEOTKO_SANDWICH_TAG — per-lámina ColorMix gradient editor.
+    // Each ColorMix pass owns its gradient via pass.colormix.kv (colormix_keys
+    // of the role + angle, full region-key names). The shared region keys
+    // (interlayer_colormix_*) are NEVER mutated here — they remain the legacy /
+    // synthesize_from_legacy fallback. The ColorMixPatternDialog reads/writes the
+    // DynamicPrintConfig, so we transiently load the pass override into m_config
+    // to drive the dialog, snapshot the result back into the pass, then restore
+    // the shared config untouched. Engine side: Fill.cpp FASE 2 applies the same
+    // kv over a copy of the region config (single source → wipe-tower stays in sync).
     void open_colormix_for(int z, int idx)
     {
+        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
+        Slic3r::SurfacePass& pass = m_stack[z].passes[idx];
+
+        const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
+                                       : "interlayer_colormix_pattern_penultimate";
+        const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
+                                        : std::string("interlayer_colormix_");
+        // Role gradient keys this editor owns (colormix_keys of the role + angle).
+        std::vector<std::string> role_keys;
+        role_keys.push_back(pat_key);
+        for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
+                               "min_surface_lines", "overlap", "invert", "repetitions",
+                               "band_count_a", "band_count_b", "band_count_c",
+                               "band_count_d", "tool_a", "tool_b", "tool_c",
+                               "tool_d", "angle" })
+            role_keys.push_back(gp + s);
+
+        using SEPM = Slic3r::SurfaceEffectProfileManager;
+        // Save the shared region values so we can restore them afterwards, then
+        // load this pass's override (no-op when the pass has none → the dialog
+        // shows the shared fallback, exactly what the engine would use).
+        Slic3r::SurfaceEffectPayload saved = SEPM::snapshot_keys(*m_config, role_keys);
+        SEPM::restore_keys(*m_config, pass.colormix);
+
         std::string mixed_defs;
         if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
             mixed_defs = o->value;
         const auto options =
             Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
-        const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
-                                       : "interlayer_colormix_pattern_penultimate";
         const std::string cur_pat = m_config->opt_string(pat_key);
         bool use_virtual = false;
         if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
             use_virtual = o->value;
         ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat,
                                   use_virtual, m_config, z);
-        if (dlg.ShowModal() != wxID_OK) return;
+        if (dlg.ShowModal() != wxID_OK) {
+            SEPM::restore_keys(*m_config, saved);   // undo the transient load
+            return;
+        }
 
+        // Apply the dialog outputs into m_config transiently (no m_on_change —
+        // the shared config is reverted below; persistence is via the stack blob).
+        auto si = [&](const std::string& k, int v) {
+            if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
+        };
+        auto sf = [&](const std::string& k, double v) {
+            if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
+        };
         if (auto* o = m_config->option<ConfigOptionString>(pat_key))
             o->value = dlg.get_pattern();
-        m_on_change(pat_key);
-        const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
-                                        : std::string("interlayer_colormix_");
-        auto wi = [&](const std::string& k, int v) {
-            if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
-            m_on_change(k);
-        };
-        auto wf = [&](const std::string& k, double v) {
-            if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
-            m_on_change(k);
-        };
-        wi(gp + "mode",              dlg.get_grad_mode());
-        wi(gp + "pct_a",             dlg.get_grad_pct_a());
-        wi(gp + "pct_b",             dlg.get_grad_pct_b());
-        wi(gp + "easing",            dlg.get_grad_easing());
-        wf(gp + "gamma",             dlg.get_grad_gamma());
-        wi(gp + "min_surface_lines", dlg.get_grad_min_lines());
-        wf(gp + "overlap",           dlg.get_grad_overlap());
-        {
-            const std::string k = gp + "invert";
-            if (auto* o = m_config->option<ConfigOptionBool>(k))
-                o->value = dlg.get_grad_invert();
-            m_on_change(k);
-        }
-        wi(gp + "band_count_a", dlg.get_grad_band_a());
-        wi(gp + "band_count_b", dlg.get_grad_band_b());
-        wi(gp + "band_count_c", dlg.get_grad_band_c());
-        wi(gp + "band_count_d", dlg.get_grad_band_d());
-        wi(gp + "tool_a",       dlg.get_tool_a());
-        wi(gp + "tool_b",       dlg.get_tool_b());
-        wi(gp + "tool_c",       dlg.get_tool_c());
-        wi(gp + "tool_d",       dlg.get_tool_d());
-        wi(gp + "angle",        dlg.get_grad_angle());
+        si(gp + "mode",              dlg.get_grad_mode());
+        si(gp + "pct_a",             dlg.get_grad_pct_a());
+        si(gp + "pct_b",             dlg.get_grad_pct_b());
+        si(gp + "easing",            dlg.get_grad_easing());
+        sf(gp + "gamma",             dlg.get_grad_gamma());
+        si(gp + "min_surface_lines", dlg.get_grad_min_lines());
+        sf(gp + "overlap",           dlg.get_grad_overlap());
+        if (auto* o = m_config->option<ConfigOptionBool>(gp + "invert"))
+            o->value = dlg.get_grad_invert();
+        si(gp + "band_count_a", dlg.get_grad_band_a());
+        si(gp + "band_count_b", dlg.get_grad_band_b());
+        si(gp + "band_count_c", dlg.get_grad_band_c());
+        si(gp + "band_count_d", dlg.get_grad_band_d());
+        si(gp + "tool_a",       dlg.get_tool_a());
+        si(gp + "tool_b",       dlg.get_tool_b());
+        si(gp + "tool_c",       dlg.get_tool_c());
+        si(gp + "tool_d",       dlg.get_tool_d());
+        si(gp + "angle",        dlg.get_grad_angle());
+        si(gp + "repetitions",  dlg.get_grad_repetitions());
+        // NEOTKO_COLORMIX_TAG — s90: global key (no prefix). NOT included in
+        // role_keys/snapshot — it's intentionally outside the per-pass override
+        // because there's a single value shared by all CM passes.
+        sf("interlayer_colormix_min_length", dlg.get_grad_min_length());
+
+        // Snapshot the edited keys into this pass's override, then restore shared.
+        pass.colormix = SEPM::snapshot_keys(*m_config, role_keys);
+        pass.colormix.present = true;
+        SEPM::restore_keys(*m_config, saved);
+
         if (idx >= 0 && idx < (int)m_ui[z].chips.size()) {
             m_ui[z].chips[idx]->Refresh();
             m_ui[z].preview[idx]->Refresh();
@@ -5844,7 +7029,7 @@ private:
 
         std::vector<int> tools;
         if      (p.kind == Kind::Solid)     tools = { p.solid_tool };
-        else if (p.kind == Kind::ColorMix)  tools = colormix_tools(z);
+        else if (p.kind == Kind::ColorMix)  tools = colormix_tools(z, &p);
         if (tools.empty()) return;
 
         const int cw = std::min(20, sz.x / (int)tools.size());
@@ -5893,43 +7078,23 @@ private:
                             (int)(ox + dx * R), (int)(oy + dy * R));
             }
         } else if (p.kind == Kind::ColorMix) {
-            // Banded strip from the zone's real gradient config (tools + band
-            // counts). Falls back to a smooth 2-tool gradient when no bands.
-            const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
-                                             : "interlayer_colormix_";
-            const char* tk[4] = { "tool_a", "tool_b", "tool_c", "tool_d" };
-            const char* bk[4] = { "band_count_a", "band_count_b",
-                                  "band_count_c", "band_count_d" };
-            std::vector<std::pair<int,int>> bands;   // (tool, count)
-            int total = 0;
-            for (int i = 0; i < 4; ++i) {
-                int tool = -1, cnt = 0;
-                if (auto* o = m_config->option<ConfigOptionInt>(pre + tk[i])) tool = o->value;
-                if (auto* o = m_config->option<ConfigOptionInt>(pre + bk[i])) cnt  = o->value;
-                if (tool >= 0 && cnt > 0) { bands.push_back({ tool, cnt }); total += cnt; }
-            }
-            if (bands.empty() || total <= 0) {
-                const std::vector<int> t = colormix_tools(z);
-                const wxColour a = tool_colour(t.front());
-                const wxColour b = tool_colour(t.back());
-                for (int x = 0; x < sz.x; ++x) {
-                    const double f = sz.x > 1 ? (double)x / (sz.x - 1) : 0.0;
-                    dc.SetPen(wxPen(wxColour(
-                        (int)(a.Red()   + f * (b.Red()   - a.Red())),
-                        (int)(a.Green() + f * (b.Green() - a.Green())),
-                        (int)(a.Blue()  + f * (b.Blue()  - a.Blue())))));
-                    dc.DrawLine(x, 0, x, sz.y);
-                }
+            // NEOTKO_SANDWICH_TAG — s80: render the REAL per-line tool sequence
+            // the engine will produce (mode-aware dither + repetitions + invert),
+            // reading this pass's per-lámina override. Each sequence slot is one
+            // vertical stripe — same representation as the ColorMix dialog strip.
+            const std::vector<int> seq = colormix_preview_seq(z, p, std::max(2, sz.x));
+            const int NS = (int)seq.size();
+            if (NS <= 0) {
+                dc.SetBrush(wxBrush(wxColour(90, 90, 90)));
+                dc.DrawRectangle(0, 0, sz.x, sz.y);
             } else {
-                int x = 0;
-                for (size_t i = 0; i < bands.size(); ++i) {
-                    const int bw = (i + 1 == bands.size())
-                        ? (sz.x - x)
-                        : (int)std::round((double)sz.x * bands[i].second / total);
-                    dc.SetBrush(wxBrush(tool_colour(bands[i].first)));
-                    dc.SetPen(*wxTRANSPARENT_PEN);
-                    dc.DrawRectangle(x, 0, bw, sz.y);
-                    x += bw;
+                for (int x = 0; x < sz.x; ++x) {
+                    const int si = (sz.x > 1) ? (int)((long long)x * NS / sz.x) : 0;
+                    const int t  = seq[std::min(NS - 1, std::max(0, si))];
+                    const wxColour c = (t < 0) ? wxColour(150, 150, 150)
+                                               : tool_colour(t);
+                    dc.SetPen(wxPen(c));
+                    dc.DrawLine(x, 0, x, sz.y);
                 }
             }
         } else if (p.kind == Kind::PathBlend) {
@@ -6022,7 +7187,7 @@ private:
     {
         const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
         if (p.kind == Kind::Solid)     return tool_colour(p.solid_tool);
-        if (p.kind == Kind::ColorMix)  return tool_colour(colormix_tools(z).front());
+        if (p.kind == Kind::ColorMix)  return tool_colour(colormix_tools(z, &p).front());
         if (p.kind == Kind::PathBlend) return tool_colour(pathblend_tools(z).front());
         return wxColour(90, 90, 90);                       // None
     }
@@ -6132,6 +7297,213 @@ private:
         m_drag_zone = -1; m_drag_bound = -1;
     }
 
+    // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: snapshot the role-prefixed ColorMix
+    // gradient keys of zone z from the live config (same key set the per-pass
+    // gradient editor `open_colormix_for` owns). Used to bake a self-contained
+    // gradient into a ColorMix pass that has no per-pass override.
+    Slic3r::SurfaceEffectPayload zone_colormix_snapshot(int z) const
+    {
+        const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
+                                       : "interlayer_colormix_pattern_penultimate";
+        const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
+                                        : std::string("interlayer_colormix_");
+        std::vector<std::string> role_keys;
+        role_keys.push_back(pat_key);
+        for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
+                               "min_surface_lines", "overlap", "invert", "repetitions",
+                               "band_count_a", "band_count_b", "band_count_c",
+                               "band_count_d", "tool_a", "tool_b", "tool_c",
+                               "tool_d", "angle" })
+            role_keys.push_back(gp + s);
+        auto pl = Slic3r::SurfaceEffectProfileManager::snapshot_keys(*m_config, role_keys);
+        pl.present = true;
+        return pl;
+    }
+
+    // NEOTKO_SANDWICH_TAG — Fase 6: normalize one zone's stack EXACTLY as commit()
+    // does (flush typed angles → read ratio spins → fold sub-0.04 mm passes →
+    // Σ=1) but on a COPY, returning its to_json(). Used by "Save as profile…" so
+    // the profile captures the same blob commit() would write, without mutating
+    // config or closing the dialog.
+    std::string normalized_zone_json(int z)
+    {
+        // flush typed angles into the live model first (same as commit()).
+        for (int idx = 0; idx < (int)m_stack[z].passes.size(); ++idx)
+            if (m_stack[z].passes[idx].kind == Kind::Solid)
+                store_angle(z, idx);
+
+        const double LH = layer_height_mm();
+        Slic3r::SurfacePassStack st = m_stack[z];   // copy
+        for (size_t i = 0; i < m_ui[z].ratio_spin.size() && i < st.passes.size(); ++i)
+            st.passes[i].ratio = m_ui[z].ratio_spin[i]->GetValue() / LH;
+
+        double lost = 0, keepSum = 0;
+        for (auto& p : st.passes) {
+            if (p.ratio * LH < kMinPassMM - 1e-9) { lost += std::max(0.0, p.ratio); p.ratio = 0.0; }
+            else keepSum += std::max(0.0, p.ratio);
+        }
+        if (lost > 0 && keepSum > 1e-6)
+            for (auto& p : st.passes)
+                if (p.ratio > 0) p.ratio += lost * (p.ratio / keepSum);
+
+        double sum = 0;
+        for (const auto& p : st.passes) sum += std::max(0.0, p.ratio);
+        if (sum > 1e-6)
+            for (auto& p : st.passes) p.ratio = std::max(0.0, p.ratio) / sum;
+        else if (!st.passes.empty())
+            for (auto& p : st.passes) p.ratio = 1.0 / st.passes.size();
+
+        // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: a ColorMix pass with no per-pass
+        // gradient (the user never opened "Edit gradient…") serializes with an
+        // empty kv. In PAINTER mode the engine would then fall back to the
+        // SLICED OBJECT's preset (default T0/T1), not this profile — so the saved
+        // sandwich is not self-contained and the colors come out wrong. Bake the
+        // current zone gradient snapshot into those passes. Passes that DO carry
+        // a per-pass gradient (kv non-empty, set by open_colormix_for) are left
+        // untouched, so an explicit gradient always wins.
+        for (auto& p : st.passes)
+            if (p.kind == Kind::ColorMix && p.colormix.kv.empty())
+                p.colormix = zone_colormix_snapshot(z);
+
+        return st.to_json();   // "" when disabled/empty
+    }
+
+    // NEOTKO_PROFILE_TAG — Fase 6: save the current sandwich as a 3D-Painter
+    // profile. Stores ONLY the authoritative stack blobs; the legacy 3 payloads
+    // stay empty (engine migration to consume the stack = Fase 6b).
+    void on_save_profile()
+    {
+        wxTextEntryDialog dlg(this, _L("Profile name:"), _L("Save Sandwich Profile"));
+        if (dlg.ShowModal() != wxID_OK) return;
+        const std::string name = dlg.GetValue().ToStdString();
+        if (name.empty()) return;
+        Slic3r::SurfaceEffectProfile p;
+        p.name            = name;
+        p.stack_top_json  = normalized_zone_json(0);
+        p.stack_penu_json = normalized_zone_json(1);
+        if (p.stack_top_json.empty() && p.stack_penu_json.empty()) {
+            wxMessageBox(_L("Nothing to save: both zones are empty or disabled."),
+                         _L("Sandwich Profile"), wxOK | wxICON_WARNING, this);
+            return;
+        }
+        const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(p));
+        wxMessageBox(wxString::Format(_L("Saved sandwich profile #%d."), new_id),
+                     _L("Sandwich Profile"), wxOK | wxICON_INFORMATION, this);
+    }
+
+    // Short per-zone description for the manage list (e.g. "CM+T2").
+    wxString stack_desc(const std::string& js) const
+    {
+        Slic3r::SurfacePassStack st = Slic3r::SurfacePassStack::from_json(js);
+        if (st.passes.empty()) return "—";
+        wxString s;
+        for (const auto& p : st.passes) {
+            if (!s.empty()) s += "+";
+            switch (p.kind) {
+                case Kind::Solid:     s += wxString::Format("T%d", p.solid_tool + 1); break;
+                case Kind::ColorMix:  s += "CM"; break;
+                case Kind::PathBlend: s += "PB"; break;
+                default:              s += "·"; break;
+            }
+        }
+        return s;
+    }
+
+    // NEOTKO_PROFILE_TAG — Fase 6 / 6b: manage Sandwich profiles.
+    // Load into dialog / Update / Rename / Delete. "Load into dialog" repopulates
+    // the rows via reload_ui_from_stack() (in-place refresh_rows — never frees a
+    // window), and is deferred until after this modal closes so AppKit can't free
+    // a live NSView (the crash that originally kept Load out).
+    void on_manage_profiles()
+    {
+        auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+        wxDialog mdlg(this, wxID_ANY, _L("Manage Sandwich Profiles"),
+                      wxDefaultPosition, wxSize(440, 320),
+                      wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        auto* ms = new wxBoxSizer(wxVERTICAL);
+        auto* lb = new wxListBox(&mdlg, wxID_ANY);
+        auto refill = [&]() {
+            lb->Clear();
+            for (const auto& p : mgr.list())
+                lb->Append(wxString::Format("#%d  %s   T:%s  P:%s",
+                               p.id, wxString::FromUTF8(p.name),
+                               stack_desc(p.stack_top_json),
+                               stack_desc(p.stack_penu_json)),
+                           reinterpret_cast<void*>((intptr_t)p.id));
+        };
+        refill();
+
+        auto* br = new wxBoxSizer(wxHORIZONTAL);
+        auto* btn_load = new wxButton(&mdlg, wxID_ANY, _L("Load into dialog"));
+        auto* btn_upd = new wxButton(&mdlg, wxID_ANY, _L("Update from current"));
+        auto* btn_ren = new wxButton(&mdlg, wxID_ANY, _L("Rename"));
+        auto* btn_del = new wxButton(&mdlg, wxID_ANY, _L("Delete"));
+        auto* btn_cls = new wxButton(&mdlg, wxID_CLOSE, _L("Close"));
+        br->Add(btn_load, 0, wxRIGHT, 6);
+        br->Add(btn_upd, 0, wxRIGHT, 6);
+        br->Add(btn_ren, 0, wxRIGHT, 6);
+        br->Add(btn_del, 0, wxRIGHT, 6);
+        br->AddStretchSpacer(1);
+        br->Add(btn_cls, 0);
+        ms->Add(lb, 1, wxEXPAND | wxALL, 8);
+        ms->Add(br, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+        mdlg.SetSizer(ms);
+
+        auto selected_id = [&]() -> int {
+            const int sel = lb->GetSelection();
+            if (sel == wxNOT_FOUND) return 0;
+            return (int)(intptr_t)lb->GetClientData(sel);
+        };
+
+        // NEOTKO_SANDWICH_TAG — Fase 6b: Load into dialog. Defer the actual load
+        // until AFTER the modal closes (don't mutate the parent dialog's widgets
+        // while this child modal is alive — that is what crashed AppKit before).
+        btn_load->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
+            const int id = selected_id();
+            if (id == 0) return;
+            m_pending_load_id = id;
+            mdlg.EndModal(wxID_OK);
+        });
+        btn_upd->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
+            const int id = selected_id();
+            if (id == 0) return;
+            auto* p = mgr.find_mut(id);
+            if (!p) return;
+            if (wxMessageBox(wxString::Format(
+                    _L("Overwrite profile '%s' with the current sandwich?"),
+                    wxString::FromUTF8(p->name)),
+                    _L("Update profile"), wxYES_NO | wxICON_QUESTION, &mdlg) != wxYES)
+                return;
+            p->stack_top_json  = normalized_zone_json(0);
+            p->stack_penu_json = normalized_zone_json(1);
+            refill();
+        });
+        btn_ren->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+            const int id = selected_id();
+            if (id == 0) return;
+            const auto* p = mgr.find(id);
+            wxTextEntryDialog td(&mdlg, _L("New name:"), _L("Rename profile"),
+                                 wxString::FromUTF8(p ? p->name : ""));
+            if (td.ShowModal() == wxID_OK) { mgr.rename(id, td.GetValue().ToStdString()); refill(); }
+        });
+        btn_del->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+            const int id = selected_id();
+            if (id == 0) return;
+            mgr.remove(id);
+            refill();
+        });
+        btn_cls->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { mdlg.EndModal(wxID_CLOSE); });
+        mdlg.ShowModal();
+
+        // Deferred Load: the modal is gone now, so refreshing the parent rows
+        // in place is safe.
+        if (m_pending_load_id != 0) {
+            const int id = m_pending_load_id;
+            m_pending_load_id = 0;
+            load_profile_into_dialog(id);
+        }
+    }
+
     // ----------------------------------------------------------------- commit
     void commit()
     {
@@ -6212,6 +7584,21 @@ private:
         const bool perim = (m_stack[0].enabled && m_stack[0].perimeter_override)
                         || (m_stack[1].enabled && m_stack[1].perimeter_override);
         wb("multipass_perimeter_override", perim);
+
+        // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD + use_virtual write-back.
+        // Lane mode is committed live on its wxChoice handler (no extra work).
+        if (auto* ac = wxGetApp().app_config) {
+            char buf[32];
+            for (int i = 0; i < 4; ++i) {
+                std::snprintf(buf, sizeof(buf), "%.3f", m_td[i]);
+                ac->set("neotko_td_" + std::to_string(i + 1), buf);
+            }
+        }
+        if (m_chk_use_virtual) {
+            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+                o->value = m_chk_use_virtual->GetValue();
+            m_on_change("interlayer_colormix_use_virtual");
+        }
     }
 };
 // NEOTKO_SANDWICH_TAG_END
@@ -8523,6 +9910,13 @@ void TabPrint::build()
                 return sz;
             });
 
+        // Row 2 (legacy "Edit Surface Color Mixer…" launcher) — DESHABILITADO en s90.
+        // El SandwichDialog (Row 3 abajo) absorbe toda la funcionalidad; el último
+        // bit que faltaba ("ColorMix min. line length") está ahora en el Advanced
+        // per-pass de ColorMix (ColorMixPatternDialog). La clase SurfaceColorMixerDialog
+        // se conserva intacta como referencia hasta la retirada formal en Fase 7
+        // (ROADMAP_UNIFIED.md s82 punto 3).
+#if 0
         // Row 2: Edit button — separate line below the Enable checkbox.
         create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
             [this](wxWindow* parent) -> wxSizer* {
@@ -8540,8 +9934,13 @@ void TabPrint::build()
                 });
                 auto* sz = new wxBoxSizer(wxHORIZONTAL);
                 sz->Add(btn, 0, wxALL, 3);
-                // NEOTKO_SANDWICH_TAG — Fase 3: launcher for the pass-stack
-                // editor, additive next to the legacy dialog button.
+                return sz;
+            });
+#endif // s90: legacy SurfaceColorMixerDialog launcher disabled
+        // NEOTKO_SANDWICH_TAG — Fase 3: launcher for the pass-stack editor,
+        // on its own row below the legacy dialog button.
+        create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
+            [this](wxWindow* parent) -> wxSizer* {
                 auto* sw_btn = new wxButton(parent, wxID_ANY,
                                             _L("Sandwich editor…"),
                                             wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
@@ -8556,6 +9955,7 @@ void TabPrint::build()
                         });
                     dlg.ShowModal();
                 });
+                auto* sz = new wxBoxSizer(wxHORIZONTAL);
                 sz->Add(sw_btn, 0, wxALL, 3);
                 return sz;
             });

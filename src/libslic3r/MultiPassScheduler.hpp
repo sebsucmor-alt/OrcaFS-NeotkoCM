@@ -32,6 +32,14 @@ struct SublayerKey {
     int      pass_idx  = 0;  // 0-based position in the chain (causal: pass0 before pass1)
     int      tool_id   = 0;  // 0-based physical extruder this sublayer prints with
     double   z_actual  = 0.; // sub.print_z — deterministic tie-break within a tool group
+    // NEOTKO_PATHBLEND_TAG — s88. When true, the scheduler drains every
+    // CONSECUTIVE same-tool entry of this chain in one shot before moving on
+    // to the next chain. Used by per-scanline PathBlend so the rampa of one
+    // object completes before the rampa of the next — avoids the cross-object
+    // micro-travels seen in the multi-cube preview. Toolchange boundaries
+    // still split the chain (rampa T_bottom drained per chain, then tapa
+    // T_top drained across chains).
+    bool     atomic_chain = false;
 };
 
 // Returns a permutation (indices into `items`) in canonical grouped-by-tool emission
@@ -155,7 +163,26 @@ inline std::vector<size_t> order_sublayers_by_tool(const std::vector<SublayerKey
             ++emitted;
             // Advance the owning chain.
             for (Chain &c : chains) {
-                if (c.next < c.idxs.size() && c.idxs[c.next] == ri) { ++c.next; break; }
+                if (c.next < c.idxs.size() && c.idxs[c.next] == ri) {
+                    ++c.next;
+                    // NEOTKO_PATHBLEND_TAG — s88 atomic chain drain. If THIS
+                    // sublayer is atomic, keep consuming consecutive same-tool
+                    // siblings from its chain BEFORE returning control to the
+                    // multi-chain round-robin. Effect: a per-scanline PathBlend
+                    // rampa of one object emits fully before the next object's
+                    // rampa starts — eliminates cross-object micro-travels.
+                    // Tool boundary inside the chain (e.g. rampa→tapa) still
+                    // breaks the drain naturally (tool_id != chosen).
+                    while (items[ri].atomic_chain
+                           && c.next < c.idxs.size()
+                           && items[c.idxs[c.next]].tool_id == chosen) {
+                        const size_t extra = c.idxs[c.next];
+                        order.push_back(extra);
+                        ++emitted;
+                        ++c.next;
+                    }
+                    break;
+                }
             }
         }
         current_tool = chosen;

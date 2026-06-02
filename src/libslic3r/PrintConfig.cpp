@@ -170,7 +170,9 @@ static t_config_enum_values s_keys_map_InfillPattern {
     { "concentric", ipConcentric },
     { "hilbertcurve", ipHilbertCurve },
     { "archimedeanchords", ipArchimedeanChords },
-    { "octagramspiral", ipOctagramSpiral }
+    { "octagramspiral", ipOctagramSpiral },
+    // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch.
+    { "microstitch", ipMicroStitch }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
@@ -1656,6 +1658,8 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("hilbertcurve");
     def->enum_values.push_back("archimedeanchords");
     def->enum_values.push_back("octagramspiral");
+    // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch experimental pattern.
+    def->enum_values.push_back("microstitch");
     def->enum_labels.push_back(L("Monotonic"));
     def->enum_labels.push_back(L("Monotonic line"));
     def->enum_labels.push_back(L("Rectilinear"));
@@ -1664,6 +1668,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Hilbert Curve"));
     def->enum_labels.push_back(L("Archimedean Chords"));
     def->enum_labels.push_back(L("Octagram Spiral"));
+    def->enum_labels.push_back(L("Micro Stitch (Neotko)"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
 
     def = this->add("bottom_surface_pattern", coEnum);
@@ -7003,6 +7008,22 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(3));
 
+    // NEOTKO_COLORMIX_TAG — s80: repeat the gradient N times across the surface.
+    // 1 = single sweep (legacy). N>1 builds the gradient over a 1/N slice of the
+    // lines and tiles it N times → N identical repeated gradients. Surface
+    // analysis (line count, lane mode) is unchanged.
+    def = this->add("interlayer_colormix_repetitions", coInt);
+    def->label = L("Gradient repetitions");
+    def->category = L("Quality");
+    def->tooltip = L("How many times the gradient repeats across the surface.\n"
+                     "1 = a single A→B sweep (default).\n"
+                     "N = the same gradient repeated N times (e.g. a 1→2 gradient\n"
+                     "with repetitions=3 prints three back-to-back 1→2 gradients).");
+    def->min = 1;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(1));
+
     def = this->add("interlayer_colormix_band_count_a", coInt);
     def->label = L("Custom band — count A");
     def->category = L("Quality");
@@ -7102,6 +7123,9 @@ void PrintConfigDef::init_fff_params()
     add_penu_bool ("interlayer_colormix_penu_invert",        false,
                    "Invert gradient direction (Penultimate)",
                    "Penultimate-surface variant of the invert flag.");
+    add_penu_int  ("interlayer_colormix_penu_repetitions", 1, 1, 50,
+                   "Gradient repetitions (Penultimate)",
+                   "Penultimate-surface variant of gradient repetitions.");
     add_penu_int  ("interlayer_colormix_penu_band_count_a", 10, 0, 200,
                    "Custom band — count A (Penultimate)",
                    "Penultimate-surface variant of Custom band A count.");

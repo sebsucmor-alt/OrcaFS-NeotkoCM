@@ -3627,4 +3627,79 @@ void FillLockedZag::fill_surface_extrusion(const Surface *surface, const FillPar
     }
 }
 
+
+// NEOTKO_PATHBLEND_TAG — s87: FillMicroStitch implementation.
+// Reproduces the "diagonal stitched" texture by subdividing the surface
+// ExPolygon into K Y-strips and running an independent FillRectilinear per
+// strip. Phase, bbox, and offset reset per strip → adjacent strips don't
+// align → short diagonal segments when angle is not axis-aligned. This is
+// the intentional artistic effect for Neoweaving / special supports.
+//
+// kStitchBands is hardcoded for the quick+dirty pass; can be promoted to a
+// config option later if you want to tune the stitch density per print.
+void FillMicroStitch::fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out)
+{
+    static constexpr int kStitchBands = 16;
+    if (kStitchBands < 1) return;
+
+    const ExPolygon  &src_exp = surface->expolygon;
+    const BoundingBox src_bb  = src_exp.contour.bounding_box();
+    const coord_t xmin = src_bb.min.x() - SCALED_EPSILON;
+    const coord_t xmax = src_bb.max.x() + SCALED_EPSILON;
+    const coord_t ymin = src_bb.min.y();
+    const coord_t ymax = src_bb.max.y();
+    const double  yspan = double(ymax - ymin);
+    if (yspan <= 0.0) return;
+
+    ExtrusionEntityCollection *eec = new ExtrusionEntityCollection();
+    eec->no_sort = this->no_sort();
+    out.push_back(eec);
+
+    FillParams params2 = params;
+    params2.monotonic = true;
+    params2.anchor_length_max = 0.0f;
+
+    for (int k = 0; k < kStitchBands; ++k) {
+        const double t_lo = double(k) / double(kStitchBands);
+        const double t_hi = double(k + 1) / double(kStitchBands);
+        const coord_t y_lo = ymin + coord_t(yspan * t_lo);
+        const coord_t y_hi = ymin + coord_t(yspan * t_hi);
+        const coord_t yl = coord_t(y_lo - coord_t(SCALED_EPSILON));
+        const coord_t yh = coord_t(y_hi + coord_t(SCALED_EPSILON));
+
+        Polygon clip;
+        clip.points = {
+            Point(xmin, yl),
+            Point(xmax, yl),
+            Point(xmax, yh),
+            Point(xmin, yh),
+        };
+        ExPolygons masked = intersection_ex(ExPolygons{src_exp}, Polygons{clip});
+        if (masked.empty()) continue;
+
+        for (ExPolygon &exp : masked) {
+            Surface strip_surf = *surface;
+            strip_surf.expolygon = std::move(exp);
+            Polylines polylines;
+            try {
+                this->fill_surface_by_lines(&strip_surf, params2, 0.f, 0.f, polylines);
+            } catch (InfillFailedException&) { continue; }
+            if (polylines.empty()) continue;
+
+            const double flow_mm3_per_mm = params.flow.mm3_per_mm();
+            const double flow_width      = params.flow.width();
+            extrusion_entities_append_paths(
+                eec->entities, std::move(polylines),
+                params.extrusion_role,
+                flow_mm3_per_mm, float(flow_width), params.flow.height());
+        }
+    }
+    // If we produced nothing, drop the empty collection so the layer doesn't
+    // get a phantom entity.
+    if (eec->entities.empty()) {
+        out.pop_back();
+        delete eec;
+    }
+}
+
 } // namespace Slic3r

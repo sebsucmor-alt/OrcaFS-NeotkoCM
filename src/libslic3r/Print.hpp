@@ -253,6 +253,12 @@ struct MultiPassSubLayer {
     // (one tool per sublayer, own print_z) joins the proven MultiPass/ColorMix model.
     int                       pathblend_pass = -1;
     std::string               pathblend_blob;
+    // NEOTKO_PATHBLEND_TAG — s87 B-bands: actual nozzle Z at which the band
+    // prints. print_z stays canonical (µm-stepped near nominal) so the wipe
+    // tower / ToolOrdering treat bands as co-planar buckets of one layer;
+    // the dispatcher (GCode.cpp) substitutes real_extrude_z for the Z move
+    // when > 0. Default 0 = legacy behaviour (move to print_z).
+    coordf_t                  real_extrude_z = 0.;
 };
 // NEOTKO_MULTIPASS_TAG_END
 

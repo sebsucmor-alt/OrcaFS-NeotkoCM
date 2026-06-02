@@ -37,6 +37,15 @@ struct SurfaceEffectProfile {
     SurfaceEffectPayload colormix;          // Fase A: lo único que se rellena
     SurfaceEffectPayload pathblend;         // Fase G — placeholder
     SurfaceEffectPayload multipass;         // Fase F — placeholder
+
+    // NEOTKO_PROFILE_TAG — Fase 6 (aditivo): el sandwich completo resuelto como
+    // 2 blobs de SurfacePassStack (= SurfacePassStack::to_json() por zona, las
+    // keys neotko_surface_passes_top/penu). NO los consume el motor de slice
+    // (sigue leyendo los 3 payloads de arriba) — son SOLO para el preview
+    // mini-sandwich del 3D Painter y el round-trip de UX. La migración real del
+    // motor a estos stacks es un debug posterior. Vacío = sin sandwich resuelto.
+    std::string          stack_top_json;
+    std::string          stack_penu_json;
 };
 
 class SurfaceEffectProfileManager
