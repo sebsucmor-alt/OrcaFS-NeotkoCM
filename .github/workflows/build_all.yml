@@ -118,30 +118,34 @@ jobs:
     - name: Compute release metadata
       id: release_meta
       shell: bash
+      env:
+        INPUT_RELEASE_NOTES: ${{ inputs.release-notes }}
+        INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
+        INPUT_RELEASE_TITLE: ${{ inputs.release-title }}
       run: |
         # ── Version (always read from version.inc as the source of truth) ───
         version=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
 
         # ── Tag ─────────────────────────────────────────────────────────────
         # Use the manual input if provided, otherwise fall back to version.inc
-        if [[ -n "${{ inputs.release-tag }}" ]]; then
-          tag="${{ inputs.release-tag }}"
+        if [[ -n "$INPUT_RELEASE_TAG" ]]; then
+          tag="$INPUT_RELEASE_TAG"
         else
           tag="v${version}"
         fi
 
         # ── Title ───────────────────────────────────────────────────────────
         # Use the manual input if provided, otherwise build the default title
-        if [[ -n "${{ inputs.release-title }}" ]]; then
-          title="${{ inputs.release-title }}"
+        if [[ -n "$INPUT_RELEASE_TITLE" ]]; then
+          title="$INPUT_RELEASE_TITLE"
         else
           title="Snapmaker Orca Full Spectrum v${version}"
         fi
 
         # ── Release notes ───────────────────────────────────────────────────
         # Priority: 1) manual input  2) CHANGELOG/RELEASE_NOTES file  3) auto-generated
-        if [[ -n "${{ inputs.release-notes }}" ]]; then
-          notes_content="${{ inputs.release-notes }}"
+        if [[ -n "$INPUT_RELEASE_NOTES" ]]; then
+          notes_content="$INPUT_RELEASE_NOTES"
         else
           notes_content=""
           for notes_file in \
