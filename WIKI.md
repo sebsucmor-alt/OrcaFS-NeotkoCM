@@ -22,6 +22,8 @@ All of this is hosted by a single dialog: the **Sandwich dialog** (Quality → C
 
 The goal is not to give you "presets that work" — it is to give you a **playground**. Mix, stack, experiment, save profiles, paint them, and see what kind of surface comes out. The features described in this guide are the building blocks; the combinations are yours.
 
+Beyond surface effects, the fork also adds a **new wall-generation engine** — **NeoArachne** (§8) — that sits next to the stock Classic and Arachne engines and lets you pick which one prints each kind of wall on your part, with extra controls for bead width, edge closure and a real-time Preview Lab. It's optional and disabled by default.
+
 The rest of this document describes each building block in detail.
 
 ---
@@ -54,6 +56,12 @@ The rest of this document describes each building block in detail.
    - 7e. [Penu role autonomy](#7e-penu-role-autonomy)
    - 7f. [Profile persistence and 3MF round-trip](#7f-profile-persistence-and-3mf-round-trip)
    - 7g. [Known limitation — PathBlend on Penu](#7g-known-limitation--pathblend-on-penu)
+8. [NeoArachne — alternative wall generator](#8-neoarachne--alternative-wall-generator)
+   - 8a. [Turning it on](#8a-turning-it-on)
+   - 8b. [Per-feature engine choice](#8b-per-feature-engine-choice)
+   - 8c. [Edge Closure controls](#8c-edge-closure-controls)
+   - 8d. [NeotkoEdge — stable bead transitions](#8d-neotkoedge--stable-bead-transitions)
+   - 8e. [Preview Lab](#8e-preview-lab)
 
 ---
 
@@ -653,6 +661,124 @@ The underlying engine supports penu PB (the struct, payload, and 3mf I/O are all
 
 ---
 
+## 8. NeoArachne — alternative wall generator
+
+**What it is**
+
+NeoArachne is a **new wall-generation engine** that lives next to OrcaSlicer's two stock engines (Classic constant-width, Arachne variable-width). It is not a replacement — it is a **mix-and-match layer** on top of them that lets you choose, *per feature* (outer wall, inner walls, gap fill), which underlying engine to use, plus a set of extra knobs that target the failure modes Arachne is known for: width breathing along contours, blobs at thin transitions, and bead-count oscillation on borderline-thickness strokes.
+
+The default NeoArachne configuration — internally called **Neotko Hybrid v2** — uses Classic for the outer wall (clean, predictable surface) and stock Arachne for the inner walls (variable-width with integrated gap fill, which is what makes letters and thin features look good). You can override either choice.
+
+NeoArachne also ships a **Preview Lab** (§8e) that renders the planned wall paths layer by layer **before slicing**, so you can see how the engine will lay down each perimeter, where it places seams, and how it travels — without having to slice and inspect the gcode every time.
+
+**When to consider it**
+
+- You print parts with **thin features** (letters, logos, embossed text) where stock Arachne leaves blobs or where Classic skips gap fill.
+- You see **width breathing** on Arachne outers (the outer wall visibly thickens and thins along a curve).
+- You want to **control the maximum bead width** explicitly instead of trusting Arachne's auto-derivation.
+- You want to **preview the wall plan** without slicing.
+
+NeoArachne is **opt-in**. Existing presets and projects are not affected by this feature.
+
+---
+
+### 8a. Turning it on
+
+1. Open **Quality → Wall generator** (Advanced visibility).
+2. The dropdown now has three options: **Classic**, **Arachne**, and **NeoArachne**.
+3. Select **NeoArachne**. A new **NeoArachne** section appears further down the Quality tab with all the controls described below.
+4. Leave the rest of the controls at their defaults for a first slice — they encode the **Neotko Hybrid v2** recipe and produce solid results on most parts.
+
+---
+
+### 8b. Per-feature engine choice
+
+NeoArachne is not a single engine — it routes each kind of wall through whichever underlying engine you pick. The three dropdowns:
+
+| Setting | What it controls | Options | Default |
+|---------|------------------|---------|---------|
+| **NA — outer wall source** | Engine for the outer perimeter (the visible surface) | Classic / Arachne (stock) / Arachne (NeotkoEdge) | **Classic** |
+| **NA — inner walls source** | Engine for every interior perimeter | Classic / Arachne (stock) / Arachne (NeotkoEdge) | **Arachne (stock)** |
+| **NA — gap-fill source** | Dedicated gap-fill pass (only useful when inner=Classic) | Off / Classic / Arachne (stock) / Arachne (NeotkoEdge) | **Off** |
+
+The three engine variants behave like this:
+
+- **Classic** — constant width across the whole pass. Cleanest visible surface, no width breathing, but cannot adapt to thin features without a dedicated gap-fill pass.
+- **Arachne (stock)** — variable-width beading with integrated gap fill. Best for interior walls where adaptation matters.
+- **Arachne (NeotkoEdge)** — Arachne with the NeotkoEdge bead-count stabiliser layered on top (§8d). Reduces the "breathing" artifact on borderline-thickness strokes at the cost of slightly delayed transitions on very thin features.
+
+**Recipe shortcut: Neotko Hybrid v2** (the default): outer = Classic, inner = Arachne (stock), gap fill = Off. That is what you get the first time you switch wall_generator to NeoArachne.
+
+---
+
+### 8c. Edge Closure controls
+
+These five controls shape how Arachne emits beads when it has to deal with thin features and seam-edge geometry. All values are percentages of nozzle diameter unless noted.
+
+| Control | Range / default | What it does |
+|---------|-----------------|--------------|
+| **NA — allowed perimeter overlap** | 0–100%, default **0%** | How much the first Arachne inner bead is allowed to overlap the Classic outer perimeter. The structural overlap from line-width math (~11%) already closes the seam at 0%. Raise to 5–15% only if you see a visible seam on letters or curves. Above ~70% causes heavy blobs. Only applies when outer=Classic + inner=Arachne. |
+| **Min Line Width** | 5–100% of nozzle, default **40%** | Minimum bead width Arachne can emit. Higher values force thin features to be widened up to this minimum (which causes blobs by accumulation). Recommended range 30–50%. |
+| **Max Line Width** | 100–200% of nozzle, default **200%** | Ceiling on bead width. Arachne grows beads naturally up to this cap, then splits into two narrower ones. Default 200% behaves as "auto" — almost never reached in practice. Lower it (e.g. 130–150%) when you want more, narrower beads — useful with fine nominal line widths like 0.24 mm. |
+| **Min Feature Threshold** | 1–100% of nozzle, default **10%** | Geometry thinner than this is discarded entirely. Anything between this floor and the Min Line Width gets widened, so keep this low (0–20%) for clean thin-feature handling. Must stay ≤ Min Line Width. |
+| **Preserve Thin Edges** | on/off, default **on** | Keeps short closure tails that approach the outer perimeter (cleaner seams). Disable only if you see speckled artifacts from very short segments. |
+
+**How to think about Min vs Max Line Width**
+
+- **Min Line Width** is a *floor*. Higher = thin features get widened = more material per pass = blob risk.
+- **Max Line Width** is a *ceiling*. Lower = Arachne splits sooner = more, narrower beads = more transitions.
+
+Most prints don't need to touch either. Reach for them when you see a specific symptom (blobs on thin areas → lower Min; visible "breathing" or fat outers → lower Max).
+
+---
+
+### 8d. NeotkoEdge — stable bead transitions
+
+The "Arachne (NeotkoEdge)" engine variant adds two extra parameters on top of stock Arachne, controlling **how stable the bead count stays along a stroke**.
+
+| Control | Range / default | What it does |
+|---------|-----------------|--------------|
+| **Wall Count Stability** | 0–100% of outer wall width, default **20%** | Spatial hysteresis applied to bead-count transitions. The N → N+1 bead transition is delayed by this much, so borderline-thickness strokes stop oscillating along their length (the classic Arachne "breathing" artifact). Higher = calmer, but very thin features may stay mono-wall longer. 0 disables. Typical 10–25%. |
+| **Wall Blend Distance** | 1–500 mm, default **100 mm** | How smoothly Arachne transitions bead count along the medial axis. Lower (20–50 mm) = sharper, more localised transitions; higher = transitions spread over a longer region. Most use cases work well at 50–100 mm. Reduce when borderline strokes need crisper edges; increase when transitions look visually jarring. |
+
+These controls only have effect when at least one wall (outer or inner) is set to **Arachne (NeotkoEdge)**.
+
+---
+
+### 8e. Preview Lab
+
+The **Preview Lab** is a panel inside the NeoArachne section of the Quality tab that renders the planned wall paths **before you slice**. It is meant for debugging and iteration — see what the engine will lay down without having to slice and open the gcode viewer.
+
+**What it shows**
+
+- The **outer wall** path and every **inner wall** path on the selected layer, in distinct colors.
+- The **execution order** of paths (chain order — which one prints first, second, etc.).
+- **Seam positions** marked as small dots.
+- **Travel moves** drawn as dotted lines, so you can see where the printer would jump dry.
+- A **head animation** (small marker) that traces the planned path in real time so you can watch where blobs or sharp travels are likely.
+
+**Controls inside the panel**
+
+| Control | What it does |
+|---------|-------------|
+| **Layer slider** | Scrub through layers of the currently selected object. |
+| **Speed slider** | Adjust the head animation speed (0.02× to 0.5×). |
+| **Build mode** | Switches between "ghost" (everything visible) and "printed" (only what has been laid down up to the animation head). Useful to spot occlusions and detect missing paths. |
+| **Zoom** | Cmd + scroll on macOS / Alt + scroll on other platforms. |
+| **Use selection** | Limit the preview to whichever object you have selected in the 3D viewport. |
+| **Dump** | Exports the full plan (geometry input, resolved bead toolpaths, NeoArachne config snapshot) as JSON to a file. Use this when reporting a NeoArachne issue — the dump is what makes off-line reproduction possible. |
+
+**When the preview is most useful**
+
+- You want to check that the **outer wall is one clean continuous loop** (no unexpected breaks).
+- You want to see the **chain order** the engine chose (which wall prints first, where the seam is).
+- You suspect a thin feature is being **discarded** or **over-widened**; the preview shows the actual beads.
+- You're tuning **Max Line Width** and want to compare 130% vs 150% vs 200% without re-slicing.
+
+> **Known limitation:** on some geometries there is a small visual divergence between the Preview Lab and the real slice on the second-to-last interior wall in narrow "waist" regions. If you spot this, the **Dump** button is your friend — share the JSON dump (and ideally the 3MF) so it can be diagnosed.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -675,6 +801,12 @@ The underlying engine supports penu PB (the struct, payload, and 3mf I/O are all
 | 3D Painter | Left-side gizmo toolbar → **ColorMix Painter** icon |
 | Painter — pick brush | Gizmo right panel toolbar (Circle / Sphere / Triangle / SmartFill) |
 | Painter — pick profile | Scrollable profile list inside the gizmo's right panel |
+| NeoArachne (enable) | Quality → **Wall generator** → select **NeoArachne** |
+| NeoArachne per-feature engines | Quality → NeoArachne → **NA — outer wall / inner walls / gap-fill source** |
+| Min / Max Line Width | Quality → NeoArachne → **Min Line Width** / **Max Line Width** |
+| Edge Closure (overlap, feature, thin edges) | Quality → NeoArachne → allowed overlap / Min Feature Threshold / Preserve Thin Edges |
+| NeotkoEdge stability (hysteresis + blend distance) | Quality → NeoArachne → **Wall Count Stability** / **Wall Blend Distance** |
+| NeoArachne Preview Lab | Quality → NeoArachne (panel embedded at the bottom of the section) |
 
 ---
 
@@ -764,6 +896,34 @@ Yes. Profiles are project-scoped — they live inside the 3MF only, separate fro
 **Q: What does the ΔE indicator on the Blend Suggestion mean?**
 
 ΔE is a perceptual color difference measure. A value below ~5 is generally indistinguishable to the eye. Values above 10–15 indicate the suggested ratios will produce a visible difference from the target color — usually because the available filaments cannot accurately reproduce the target, or because the TD values need calibration.
+
+**Q: I had a Sandwich set up with only Solid (MultiPass) passes and the wipe tower never appeared. Is that the bug fixed in 1.9?**
+
+Yes. Before 1.9 the wipe-tower gate only looked at a small set of legacy enable flags. A Sandwich with only Solid passes (the classic "T0 → T2 → T0" MultiPass recipe) saved its state in a different place (the Sandwich's own per-zone configuration), so the gate missed it and skipped the tower even when "enable prime tower" was on. Re-slice your project on 1.9 — the tower should now show up wherever a Sandwich is active.
+
+**Q: I want to try NeoArachne but don't want to break my current preset. What's the safest way?**
+
+NeoArachne is fully opt-in. Switch **Quality → Wall generator** to **NeoArachne**, leave all the new controls in the NeoArachne section at their defaults, and slice. The defaults encode the "Neotko Hybrid v2" recipe (Classic outer + stock Arachne inner) which produces solid results on most parts. If you don't like what you see, switch the dropdown back to Arachne or Classic — the NeoArachne controls don't touch any existing setting.
+
+**Q: NeoArachne is leaving blobs in thin features (letters, embossed text).**
+
+Two likely causes:
+1. **Min Line Width too high**. The default 40% is calibrated; values above 50% widen thin features and accumulate material. Lower it (try 30–40%) and re-slice.
+2. **Min Feature Threshold too high**. Geometry between this floor and Min Line Width gets widened. Keep this at 5–15% so thin features either survive as native thin beads or are cleanly discarded, not widened.
+
+If the blobs persist, open the **Preview Lab** on the affected layer to see exactly what the engine is laying down, and use the **Dump** button to share the plan for diagnosis.
+
+**Q: NeoArachne outer walls look "fat" or visibly breathe in width along curves.**
+
+Two things to try:
+1. Lower **Max Line Width** (e.g. from 200% to 130–150%). This forces Arachne to split into more, narrower beads sooner, which limits how wide a single bead can grow on a curve.
+2. Switch **NA — inner walls source** to **Arachne (NeotkoEdge)** and raise **Wall Count Stability** to 15–25%. The hysteresis dampens bead-count oscillation along borderline-thickness strokes, which is the usual cause of "breathing".
+
+The outer wall is Classic by default, so its width should already be constant. If the outer itself looks variable, check that **NA — outer wall source** is actually set to **Classic** (the default).
+
+**Q: The NeoArachne Preview Lab shows my walls perfectly but the printed part looks different on one specific layer.**
+
+There is a known visual divergence on the second-to-last interior wall in narrow "waist" regions of some geometries. The Preview Lab and the real slice can disagree there. If you spot this, use the **Dump** button in the Preview Lab to export a JSON dump and share it (with the 3MF) — that's exactly what makes diagnosing the divergence possible.
 
 ---
 
