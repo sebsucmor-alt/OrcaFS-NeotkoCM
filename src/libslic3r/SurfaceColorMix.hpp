@@ -48,7 +48,8 @@ namespace NeoDebug {
         ZBLEND      = 4,
         WIPETOWER   = 5,
         PROFILE     = 6, // NEOTKO_PROFILE_TAG
-        CH_COUNT    = 7
+        DISPATCH    = 7, // NEOTKO_NEOARACHNE_TAG s95 — extrude_entity dispatch trace
+        CH_COUNT    = 8
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).
@@ -69,6 +70,7 @@ namespace NeoDebug {
 class PrintRegionConfig;
 class ExtrusionEntityCollection;
 class PrintObject;            // NEOTKO_PROFILE_TAG
+class Surface;                // NEOTKO_PAINT_COEXIST_TAG s91 — mmu_governs_surface overload
 class ModelObject;            // NEOTKO_PROFILE_TAG
 struct SurfaceEffectProfile;  // NEOTKO_PROFILE_TAG
 struct SurfaceEffectPayload;  // NEOTKO_PROFILE_TAG — Fase F
@@ -170,6 +172,33 @@ public:
     // Returned in ascending slot order (stable).
     static std::vector<int> enumerate_painted_slots_in_z_range(const PrintObject* po,
                                                                 double z_min, double z_max);
+
+    // NEOTKO_PAINT_COEXIST_TAG s91 — MMU governance helpers.
+    //
+    // `mmu_painted_footprint_in_z_range`: XY footprint of MMU-painted triangles
+    // (any extruder slot != NONE) whose Z range OVERLAPS [z_min, z_max].
+    // Unlike painted_footprint_in_z_range (which filters upward facets), this
+    // includes ALL facet orientations so lateral MMU paint also occludes the
+    // sandwich at the XY column it covers. Empty if no MMU paint in the band.
+    static ExPolygons mmu_painted_footprint_in_z_range(
+        const PrintObject* po, double z_min, double z_max);
+
+    // `mmu_governs_xy`: returns true if `surface_xy` intersects the MMU paint
+    // footprint at this layer's vertical slab. SINGLE source of truth consulted
+    // identically by SLICE (SurfaceColorMix, Fill) and ToolOrdering — any
+    // divergence triggers wipe-tower "append_tcr unexpected" crashes.
+    // Empty surface_xy / no MMU paint → false (fast path).
+    static bool mmu_governs_xy(
+        const PrintObject* po,
+        const ExPolygons& surface_xy,
+        double z_min, double z_max);
+
+    // Convenience overload taking a single Surface (uses surface.expolygon).
+    static bool mmu_governs_surface(
+        const PrintObject* po,
+        const Surface& surface,
+        double z_min, double z_max);
+
     static std::vector<unsigned int> painted_profile_tools_1based(
         const SurfaceEffectProfile& p, bool top_role);
 

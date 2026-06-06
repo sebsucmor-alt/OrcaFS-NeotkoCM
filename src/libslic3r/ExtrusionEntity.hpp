@@ -144,6 +144,16 @@ public:
     // Orca: Used for inner/outer/inner mode - classic perimeter generator
     int inset_idx = -1;
 
+    // NEOTKO_NEOARACHNE_TAG s93 — per-path override for the Auto Lift heuristic.
+    // When true, GCode.cpp::needs_retraction() forces LazyLift instead of
+    // SpiralLift even if Auto Lift would have picked spiral. Set by
+    // NeoArachneInterior on all paths it emits. Solves the s93 spiral-smear
+    // blob bug around clusters of is_odd / variable-thickness Arachne paths
+    // where Auto Lift was misdetecting overhang due to path density and
+    // emitting G3 helical lifts that smeared residual ooze in a circle.
+    // Default false → upstream behaviour unchanged for Classic paths.
+    bool force_no_spiral_lift = false;
+
     static std::string role_to_string(ExtrusionRole role);
     static ExtrusionRole string_to_role(const std::string_view role);
 };
@@ -175,6 +185,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
     ExtrusionPath(ExtrusionPath &&rhs)
         : polyline(std::move(rhs.polyline))
@@ -186,6 +197,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
     ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
         : polyline(polyline)
@@ -197,6 +209,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
     ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
         : polyline(std::move(polyline))
@@ -208,6 +221,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
 
     ExtrusionPath& operator=(const ExtrusionPath& rhs) {
@@ -219,6 +233,7 @@ public:
         this->height = rhs.height;
         this->polyline = rhs.polyline;
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
         return *this;
     }
     ExtrusionPath& operator=(ExtrusionPath&& rhs) {
@@ -230,6 +245,7 @@ public:
         this->height = rhs.height;
         this->polyline = std::move(rhs.polyline);
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
         return *this;
     }
 

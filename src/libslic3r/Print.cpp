@@ -19,6 +19,8 @@
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
 #include "Model.hpp"
+#include "SurfaceEffectProfile.hpp"  // NEOTKO_LIBRE_TAG — s97 Bug A: profile-aware wipe-tower gate
+#include "SurfaceColorMix.hpp"        // NEOTKO_LIBRE_TAG — s97 Bug A: SurfacePassStack::resolve()
 #include "format.hpp"
 #include <float.h>
 
@@ -3152,6 +3154,18 @@ static bool neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions)
         if (rc.penultimate_multipass_enabled.value) return true;
         if (rc.multipass_path_gradient.value)       return true;
         if (rc.interlayer_colormix_enabled.value)   return true;
+        // NEOTKO_LIBRE_TAG — s97 Bug A: Sandwich JSON blob is the canonical source
+        // of "Sandwich active" since s84. SandwichDialog only sets the 4 booleans
+        // above for ColorMix / PathBlend passes (Tab.cpp:7573,7576). An all-Solid
+        // sandwich (e.g. T0→T2→T0) persists ONLY in neotko_surface_passes_top/_penu,
+        // so without this stack check the wipe-tower gate misses every pure-MultiPass
+        // sandwich and the trio reads (print.has_wt=0, tool_ordering.has_wt=1, ...).
+        {
+            const SurfacePassStack st_top = SurfacePassStack::resolve(rc, erTopSolidInfill);
+            if (st_top.enabled && !st_top.passes.empty()) return true;
+            const SurfacePassStack st_penu = SurfacePassStack::resolve(rc, erPenultimateInfill);
+            if (st_penu.enabled && !st_penu.passes.empty()) return true;
+        }
     }
     // NEOTKO_WIPETOWER_DEBUG_TAG_START
     {
@@ -3166,6 +3180,60 @@ static bool neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions)
     // NEOTKO_WIPETOWER_DEBUG_TAG_END
     return false;
 }
+
+// NEOTKO_LIBRE_TAG_START — s97 Bug A: profile-aware wipe-tower gate
+// Returns true if any object has a SurfaceEffectProfile attached (via 3D Painter
+// slots) whose payload signals a multi-tool effect.  This is the painter / Sandwich
+// path that bypasses the per-region booleans: profiles get applied to the config
+// via restore_keys() AT SLICE TIME, so neotko_any_multi_tool_active() (which
+// reads PrintRegionConfig) misses them when called from has_wipe_tower() /
+// _make_wipe_tower() pre-slice.
+//
+// Without this check, single-filament prints that drive MultiPass/ColorMix/
+// PathBlend only through painter-attached profiles never build a wipe tower
+// even though the slice DOES emit tool changes at sub-band level — the symptom
+// reported in the wipetower.log trio
+//   "print.has_wt=0  tool_ordering.has_wt=1  front.has_wt=0".
+//
+// The function is intentionally a sibling helper (not a signature change on
+// neotko_any_multi_tool_active) so the existing region-based path stays a clean
+// drop-in for the Snapmaker main fork.  Callers OR the two predicates.
+static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
+{
+    for (const PrintObject* obj : objects) {
+        if (obj == nullptr) continue;
+        const ModelObject* mo = obj->model_object();
+        if (mo == nullptr) continue;
+        for (const ModelVolume* mv : mo->volumes) {
+            if (mv == nullptr || !mv->is_model_part()) continue;
+            for (int slot = 1; slot < 16; ++slot) {
+                const int pid = mv->colormix_slot_to_profile_id[slot];
+                if (pid <= 0) continue;
+                const SurfaceEffectProfile* p =
+                    SurfaceEffectProfileManager::get().find(pid);
+                if (p == nullptr) continue;
+                // Any populated payload means the painter is driving a
+                // multi-tool effect on this object.  Mirrors the slice-path's
+                // unconditional restore_keys() behavior.
+                if (p->colormix.present || p->multipass.present || p->pathblend.present)
+                    return true;
+                // NEOTKO_LIBRE_TAG — s97 Bug A: Fase 6b painter mode (Fill.cpp:1531)
+                // reads the profile's resolved SurfacePassStack JSON, not the legacy
+                // payloads. A Solid-only sandwich painted via the gizmo only fills
+                // stack_top_json / stack_penu_json, leaving all 3 payloads .present=false.
+                auto _stack_nonempty = [](const std::string& js) {
+                    if (js.empty()) return false;
+                    const SurfacePassStack st = SurfacePassStack::from_json(js);
+                    return st.enabled && !st.passes.empty();
+                };
+                if (_stack_nonempty(p->stack_top_json) || _stack_nonempty(p->stack_penu_json))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+// NEOTKO_LIBRE_TAG_END
 
 // Returns the number of unique virtual tool_ids used across all MultiPass sublayers
 // of all PrintObjects in the print. MultiPass assigns different tool_ids (0-based) to
@@ -3248,7 +3316,9 @@ bool Print::has_wipe_tower() const
     // and even if enable_prime_tower is disabled — sublayer priming has no other purge path.
     // This check must be OUTSIDE the enable_prime_tower guard so single-filament MultiPass
     // prints don't silently skip the tower just because the user never toggled the setting.
-    if (!m_config.spiral_mode.value && neotko_any_multi_tool_active(m_print_regions))
+    if (!m_config.spiral_mode.value &&
+        (neotko_any_multi_tool_active(m_print_regions) ||
+         neotko_any_profile_with_mp_active(m_objects)))  // NEOTKO_LIBRE_TAG s97 Bug A
         return true;
     // NEOTKO_LIBRE_TAG_END
 
@@ -3293,7 +3363,9 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
                 // (multipass_num_passes / penultimate_multipass_num_passes) so the tower
                 // placeholder has a non-zero depth and is visible in the plater preview.
                 size_t effective_cnt = filaments_cnt;
-                if (filaments_cnt == 1 && neotko_any_multi_tool_active(m_print_regions)) {
+                if (filaments_cnt == 1 &&
+                    (neotko_any_multi_tool_active(m_print_regions) ||
+                     neotko_any_profile_with_mp_active(m_objects))) {  // NEOTKO_LIBRE_TAG s97 Bug A
                     const size_t vtool_cnt = neotko_virtual_tool_count(m_objects);
                     const size_t ecfg_cnt  = neotko_estimated_virtual_tool_count(m_print_regions);
                     effective_cnt = std::max({(size_t)2, vtool_cnt, ecfg_cnt});
@@ -3349,7 +3421,8 @@ void Print::_make_wipe_tower()
     // Pre-slice (vtool_cnt==0): use config-estimated count so the gate doesn't abort early.
     const size_t neotko_vtool  = neotko_virtual_tool_count(m_objects);
     const size_t neotko_ecfg   = neotko_estimated_virtual_tool_count(m_print_regions);
-    const bool neotko_forces_tower = neotko_any_multi_tool_active(m_print_regions) &&
+    const bool neotko_forces_tower = (neotko_any_multi_tool_active(m_print_regions) ||
+                                      neotko_any_profile_with_mp_active(m_objects)) &&  // NEOTKO_LIBRE_TAG s97 Bug A
                                      (neotko_vtool >= 2 || neotko_ecfg >= 2);
     // NEOTKO_WIPETOWER_DEBUG_TAG_START
     {

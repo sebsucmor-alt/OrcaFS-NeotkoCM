@@ -313,7 +313,33 @@ enum class PerimeterGeneratorType
     Classic,
     // Perimeter generator with variable extrusion width based on the paper
     // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling" ported from Cura.
-    Arachne
+    Arachne,
+    // NEOTKO_NEOARACHNE_TAG fase0
+    // Hybrid Classic+Arachne wall generator with NeotkoEdge-style pinned beading.
+    // See: memory/neoarachne_canonical_plan.md
+    NeoArachne
+};
+
+// NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source for NeoArachne.
+// Top-level enum (needed for CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS macro;
+// the macro can't handle nested namespaces). The NeoArachne:: namespace
+// aliases this as `WallSource` for internal code clarity.
+//   Classic           — Classic onion-shell offset, constant width.
+//   ArachneStock      — Arachne stock (Cura) variable-width beading.
+//   ArachneNeotkoEdge — Arachne with NeotkoEdgeBeadingStrategy (Fase 3+):
+//                       bead 0 and bead n-1 pinned to optimal_width;
+//                       residual distributed across interior beads only;
+//                       histéresis in getOptimalBeadCount. Mimics the
+//                       S3D outer-quality heritage without touching its
+//                       proprietary code.
+//   Off               — No wall emission at this slot (legal only for gap_fill;
+//                       the validator in ConfigManipulation blocks outer=Off).
+enum class NeoArachneWallSource
+{
+    Classic,
+    ArachneStock,
+    ArachneNeotkoEdge,
+    Off
 };
 
 // BBS
@@ -1343,6 +1369,39 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloatOrPercent,       scarf_joint_speed))
     ((ConfigOptionFloat,                scarf_joint_flow_ratio))
     ((ConfigOptionPercent,              scarf_overhang_threshold))
+    // NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source selection.
+    // Defaults match "Neotko Hybrid v2" (s91): Classic outer + Arachne interior,
+    // gap-fill integrated into the Arachne pass. Visible in UI only when
+    // wall_generator == NeoArachne. The validator in ConfigManipulation
+    // blocks invalid combos (outer=Off, outer=Arachne*+inner=Classic).
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_outer_wall))
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_inner_walls))
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_gap_fill))
+    // NEOTKO_NEOARACHNE_TAG fase3.0 — Edge Closure (S3D heritage).
+    //  allowed_overlap_pct: how much Arachne first bead overlaps the Classic
+    //    outer (% of ext_perimeter_spacing). 50% default = balance between
+    //    closing the seam gap and PA gobbling tiny extrusions.
+    //  min_bead_width_pct: floor for variable-width bead (% of nozzle).
+    //    Lower = Arachne keeps thinner closure tails; below ~25% PA may
+    //    starve the extruder.
+    //  min_feature_size_pct: below this thickness Arachne discards geometry.
+    //    Lower = thinner geometry survives to be printed (Widening strategy).
+    //  keep_short_tails: suppress Arachne's removeSmallLines so closure
+    //    tails approaching the outer aren't discarded.
+    ((ConfigOptionPercent, neoarachne_allowed_overlap_pct))
+    ((ConfigOptionPercent, neoarachne_min_bead_width_pct))
+    ((ConfigOptionPercent, neoarachne_max_bead_width_pct))
+    ((ConfigOptionPercent, neoarachne_min_feature_size_pct))
+    ((ConfigOptionBool,    neoarachne_keep_short_tails))
+    // NEOTKO_NEOARACHNE_TAG fase3 — Spatial hysteresis (% of outer wall
+    // width) added to Arachne's bead-count transition threshold when one
+    // of the wall sources is ArachneNeotkoEdge. Higher = wider deadband =
+    // fewer breathing transitions across borderline strokes.
+    ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
+    // NEOTKO_NEOARACHNE_TAG fase4 — SkeletalTrapezoidation transition smoothing
+    // distance in mm. Lower = sharper bead-count transitions; higher = smoother.
+    // Upstream Arachne hardcoded this to 100 mm.
+    ((ConfigOptionFloat, neoarachne_transition_filter_dist_mm))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(

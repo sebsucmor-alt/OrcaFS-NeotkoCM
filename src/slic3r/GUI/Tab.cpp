@@ -11,6 +11,7 @@
 
 #include "Search.hpp"
 #include "OG_CustomCtrl.hpp"
+#include "NeoArachnePreviewPanel.hpp"  // NEOTKO_NEOARACHNE_TAG preview-lab
 
 #include <wx/app.h>
 #include <wx/button.h>
@@ -9822,6 +9823,7 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
         optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
+        // Arachne keys — shown when wall_generator == Arachne (toggle_line in ConfigManipulation).
         optgroup->append_single_option_line("wall_transition_angle", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_filter_deviation", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_length", "quality_settings_wall_generator#arachne");
@@ -9830,6 +9832,40 @@ void TabPrint::build()
         optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
+        // NEOTKO_NEOARACHNE_TAG fase2+fase3.0 — same optgroup as Arachne for visual
+        // consistency: keys appear inline below the wall_generator dropdown when
+        // NeoArachne is selected, mirroring how Arachne's keys show below it.
+        // toggle_line gating lives in ConfigManipulation (have_neoarachne).
+        optgroup->append_single_option_line("neoarachne_outer_wall",           "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_inner_walls",          "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_gap_fill",             "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_allowed_overlap_pct",  "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_min_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_max_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_min_feature_size_pct", "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_keep_short_tails",     "quality_settings_wall_generator#neoarachne-edge-closure");
+        // NEOTKO_NEOARACHNE_TAG fase3
+        optgroup->append_single_option_line("neoarachne_bead_count_hysteresis_pct", "quality_settings_wall_generator#neoarachne-neotkoedge");
+        // NEOTKO_NEOARACHNE_TAG fase4
+        optgroup->append_single_option_line("neoarachne_transition_filter_dist_mm",  "quality_settings_wall_generator#neoarachne-neotkoedge");
+
+        // NEOTKO_NEOARACHNE_TAG preview-lab PL.2+PL.3+PL.6 — reactive inline canvas.
+        // Renders the W test geometry every time the user touches an Edge Closure
+        // slider so the effect is visible without re-slicing the whole bed.
+        // Pass `this` so the panel reads the LIVE Tab config (includes per-object
+        // and per-plate overrides), not just the bundle's saved preset.
+        {
+            Line preview_line(_L("Edge Closure preview"), wxEmptyString);
+            preview_line.full_width = 1;
+            Tab* tab_self = this;
+            preview_line.widget = [tab_self](wxWindow* parent) -> wxSizer* {
+                auto* sizer = new wxBoxSizer(wxHORIZONTAL);
+                auto* canvas = new NeoArachnePreviewPanel(parent, tab_self);
+                sizer->Add(canvas, 1, wxEXPAND | wxALL, 4);
+                return sizer;
+            };
+            optgroup->append_line(preview_line);
+        }
 
         optgroup = page->new_optgroup(L("Walls and surfaces"), L"param_wall_surface");
         optgroup->append_single_option_line("wall_sequence", "quality_settings_wall_and_surfaces#walls-printing-order");
@@ -9880,35 +9916,12 @@ void TabPrint::build()
         // NEOTKO_SURFACE_MIXER_TAG_START - Surface Color Mixer (replaces separate ColorMix/MultiPass/PathBlend controls)
         optgroup = page->new_optgroup(L("Surface Color Mixer"));
 
-        // Row 1: Enable checkbox — separate line, ABOVE the Edit button.
-        // Checked = at least one effect is active. Unchecking disables all three effects.
-        create_line_with_widget(optgroup.get(), "interlayer_colormix_enabled", "",
-            [this](wxWindow* parent) -> wxSizer* {
-                const bool any_on = m_config->opt_bool("interlayer_colormix_enabled")
-                                 || m_config->opt_bool("multipass_enabled")
-                                 || m_config->opt_bool("penultimate_multipass_enabled")  // NEOTKO_MULTIPASS_SURFACES_TAG
-                                 || m_config->opt_bool("multipass_path_gradient");
-                auto* cb = new wxCheckBox(parent, wxID_ANY, _L("Enable Surface Color Mixer"));
-                cb->SetValue(any_on);
-                cb->SetToolTip(_L("Enable surface color effects (Color Mix, Multi-Pass, Path Blend). "
-                                  "Uncheck to disable all effects for this preset."));
-                cb->Bind(wxEVT_CHECKBOX, [this, cb](wxCommandEvent&) {
-                    if (!cb->GetValue()) {
-                        if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_enabled")) o->value = false;
-                        on_value_change("interlayer_colormix_enabled", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled")) o->value = false;
-                        on_value_change("multipass_enabled", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionBool>("penultimate_multipass_enabled")) o->value = false; // NEOTKO_MULTIPASS_SURFACES_TAG
-                        on_value_change("penultimate_multipass_enabled", boost::any());
-                        if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient")) o->value = false;
-                        on_value_change("multipass_path_gradient", boost::any());
-                    }
-                    // Checking ON does nothing here — user must open Edit to configure effects.
-                });
-                auto* sz = new wxBoxSizer(wxHORIZONTAL);
-                sz->Add(cb, 0, wxALIGN_CENTER_VERTICAL);
-                return sz;
-            });
+        // NEOTKO_SURFACE_MIXER_TAG — s97: el checkbox "Enable Surface Color Mixer"
+        // se retira. Tras s96+s97 la única fuente de verdad del enable es el stack
+        // del SandwichDialog (blobs neotko_surface_passes_top/_penu + sus toggles
+        // per-zone). El checkbox externo se auto-revertía cuando había stack JSON
+        // poblado (apagar = no persiste, on→off→on de un solo refresh), y duplicaba
+        // controles. La entrada al editor vive en la fila "Sandwich editor…" abajo.
 
         // Row 2 (legacy "Edit Surface Color Mixer…" launcher) — DESHABILITADO en s90.
         // El SandwichDialog (Row 3 abajo) absorbe toda la funcionalidad; el último
@@ -10552,7 +10565,11 @@ void TabPrintModel::build()
                 l.undo_to_sys = true;
             }
             lines.erase(std::remove_if(lines.begin(), lines.end(), [](auto & l) {
-                return l.get_options().empty();
+                // NEOTKO_NEOARACHNE_TAG preview-lab — widget-only lines (e.g. the
+                // NeoArachne preview canvas) have no options but ARE meaningful.
+                // Keeping them lets the same preview render under per-object
+                // overrides, where it reflects the merged config.
+                return l.get_options().empty() && l.widget == nullptr;
             }), lines.end());
             // TODO: remove items from g->m_options;
             g->have_sys_config = [this] { m_back_to_sys = true; return true; };

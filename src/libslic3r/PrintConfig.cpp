@@ -423,10 +423,21 @@ static t_config_enum_values s_keys_map_PrinterStructure {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrinterStructure)
 
 static t_config_enum_values s_keys_map_PerimeterGeneratorType{
-    { "classic", int(PerimeterGeneratorType::Classic) },
-    { "arachne", int(PerimeterGeneratorType::Arachne) }
+    { "classic",    int(PerimeterGeneratorType::Classic)    },
+    { "arachne",    int(PerimeterGeneratorType::Arachne)    },
+    // NEOTKO_NEOARACHNE_TAG fase0
+    { "neoarachne", int(PerimeterGeneratorType::NeoArachne) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
+
+// NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source mapping.
+static t_config_enum_values s_keys_map_NeoArachneWallSource{
+    { "classic",            int(NeoArachneWallSource::Classic)           },
+    { "arachne_stock",      int(NeoArachneWallSource::ArachneStock)      },
+    { "arachne_neotkoedge", int(NeoArachneWallSource::ArachneNeotkoEdge) },
+    { "off",                int(NeoArachneWallSource::Off)               }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoArachneWallSource)
 
 static const t_config_enum_values s_keys_map_ZHopType = {
     { "Auto Lift",          zhtAuto },
@@ -6223,10 +6234,193 @@ void PrintConfigDef::init_fff_params()
     def->enum_keys_map = &ConfigOptionEnum<PerimeterGeneratorType>::get_enum_values();
     def->enum_values.push_back("classic");
     def->enum_values.push_back("arachne");
+    // NEOTKO_NEOARACHNE_TAG fase0 — appears in UI as third option; Phase 0 passthrough to Classic.
+    def->enum_values.push_back("neoarachne");
     def->enum_labels.push_back(L("Classic"));
     def->enum_labels.push_back(L("Arachne"));
+    def->enum_labels.push_back(L("NeoArachne"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
+
+    // NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source selectors.
+    // Visible in UI (via toggle_line) only when wall_generator == NeoArachne.
+    auto add_neoarachne_wallsource = [this](const char* key, const std::string& label,
+                                            const std::string& tooltip,
+                                            NeoArachneWallSource def_val,
+                                            bool allow_off) {
+        ConfigOptionDef* d = this->add(key, coEnum);
+        d->label = label;
+        d->category = L("Quality");
+        d->tooltip = tooltip;
+        d->enum_keys_map = &ConfigOptionEnum<NeoArachneWallSource>::get_enum_values();
+        d->enum_values.push_back("classic");
+        d->enum_values.push_back("arachne_stock");
+        d->enum_values.push_back("arachne_neotkoedge");
+        d->enum_labels.push_back(L("Classic"));
+        d->enum_labels.push_back(L("Arachne (stock)"));
+        d->enum_labels.push_back(L("Arachne (NeotkoEdge)"));
+        if (allow_off) {
+            d->enum_values.push_back("off");
+            d->enum_labels.push_back(L("Off"));
+        }
+        d->mode = comAdvanced;
+        d->set_default_value(new ConfigOptionEnum<NeoArachneWallSource>(def_val));
+    };
+    add_neoarachne_wallsource("neoarachne_outer_wall",
+        L("NA — outer wall source"),
+        L("Engine that emits the outer perimeter when wall_generator = NeoArachne. "
+          "Classic = constant width, clean surface (Neotko Hybrid v2 default). "
+          "Arachne variants = variable-width outer (may exhibit width breathing along the contour). "
+          "Off is not allowed for the outer wall."),
+        NeoArachneWallSource::Classic, /*allow_off=*/false);
+    add_neoarachne_wallsource("neoarachne_inner_walls",
+        L("NA — inner walls source"),
+        L("Engine that emits all interior perimeters (everything past the outer). "
+          "Arachne (stock) is the Neotko Hybrid v2 default — variable-width beading "
+          "with integrated gap-fill, which is what makes NeoArachne shine on letters "
+          "and thin features. Classic falls back to constant-width onion shells."),
+        NeoArachneWallSource::ArachneStock, /*allow_off=*/false);
+    add_neoarachne_wallsource("neoarachne_gap_fill",
+        L("NA — gap-fill source"),
+        L("Engine for the dedicated gap-fill pass. In Neotko Hybrid v2 this is Off "
+          "because Arachne already integrates gap-fill into its inner wall pass. "
+          "Set to Arachne (NeotkoEdge) to enable the legacy 3-pass mode (outer + "
+          "inner Classic + dedicated Arachne gap-fill — slower, only useful for "
+          "specific edge cases)."),
+        NeoArachneWallSource::Off, /*allow_off=*/true);
+
+    // NEOTKO_NEOARACHNE_TAG fase3.0 — Edge Closure (S3D heritage).
+    def = this->add("neoarachne_allowed_overlap_pct", coPercent);
+    def->label = L("NA — allowed perimeter overlap");
+    def->category = L("Quality");
+    def->tooltip = L("Equivalent to the \"Allowed perimeter overlap\" parameter found in other slicers. Percentage of "
+        "the outer perimeter spacing by which the Arachne first interior bead is "
+        "allowed to overlap the Classic outer perimeter. Default 0% — the seam "
+        "between Classic outer and Arachne first inner is already closed by the "
+        "spacing math (~11% structural overlap from line-width vs spacing). "
+        "Raising this above 0% pushes Arachne further into the outer ring → "
+        "tends to over-extrude that band. Use small positive values (5–15%) only "
+        "if you see a visible seam on letters/curves. >70% will merge adjacent "
+        "paths and cause heavy blobs. Only applies when outer=Classic + inner=Arachne*.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("neoarachne_min_bead_width_pct", coPercent);
+    def->label = L("Min Line Width");
+    def->category = L("Quality");
+    def->tooltip = L("Minimum variable-width bead emitted by Arachne, as a percentage "
+        "of nozzle diameter. Equivalent to the \"Minimum Printing Width %\" lower "
+        "bound exposed by other slicers. Default 40%% (= 0.16 mm with a 0.4 mm nozzle) "
+        "— low enough to let thin features survive as is_odd / gap_infill beads "
+        "(which route to gap_infill_speed, calibrated for short paths), but high "
+        "enough to avoid sub-bead-width Widening micro-deposits. Higher values "
+        "(70–90%%) force the WideningBeadingStrategy to widen thin features UP to "
+        "this minimum, depositing 50–100%% more material per pass in thin zones → "
+        "blobs by accumulation (validated empirically s93). Below ~25%% extruders "
+        "with long Bowden tubes may skip steps. Recommended range 30–50%%.");
+    def->sidetext = L("% of nozzle");
+    def->min = 5;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(40));
+
+    // NEOTKO_NEOARACHNE_TAG max-bead-width — expose the upper cap on variable
+    // bead width that Arachne otherwise auto-derives from min_bead_width via
+    // wall_add_middle_threshold (WallToolPaths.cpp:511 in stock). Default 200%
+    // matches the natural ceiling (single bead becomes 2 beads when the slab
+    // would force them past 2× nominal). Lower values push Arachne to split
+    // sooner → narrower beads, more transitions. Range capped at 200% because
+    // beyond that the deposit per pass is not physically supportable by the
+    // extruder/nozzle. Only active when wall_generator = NeoArachne; stock
+    // Arachne keeps the original min_bead-derived formula.
+    def = this->add("neoarachne_max_bead_width_pct", coPercent);
+    def->label = L("Max Line Width");
+    def->category = L("Quality");
+    def->tooltip = L("Ceiling on variable-width beads — Arachne will split a bead "
+        "into two narrower ones once it would grow above this percentage of nozzle "
+        "diameter. Acts as an upper limit on top of Arachne's natural derivation: "
+        "if the auto-derived split point is already below this ceiling, this "
+        "setting has no effect (Arachne grows beads naturally). Lower it to force "
+        "more, narrower beads — useful with fine nominal line widths (e.g. 0.24 mm) "
+        "where every extra % of deposit shows. Default 200%% = effectively \"auto\", "
+        "lets Arachne grow beads up to 2× nozzle which is rarely reached in "
+        "practice. Above 200%% the deposit per pass exceeds what the extruder/nozzle "
+        "can physically lay down. Only applies when wall_generator = NeoArachne; "
+        "stock Arachne keeps its native derivation untouched.");
+    def->sidetext = L("% of nozzle");
+    def->min = 100;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
+
+    def = this->add("neoarachne_min_feature_size_pct", coPercent);
+    def->label = L("Min Feature Threshold");
+    def->category = L("Quality");
+    def->tooltip = L("Geometry thinner than this percentage of nozzle diameter is "
+        "discarded by Arachne. Equivalent to the feature-size floor exposed by "
+        "other slicers. Default 10%% (= 0.04 mm with a 0.4 mm nozzle) — accepts "
+        "even very thin features and emits them as is_odd / gap_infill beads. "
+        "Higher values (50–90%%) discard thin features entirely, but anything "
+        "between this floor and the min_bead_width gets WIDENED to min_bead_width "
+        "→ over-deposit in transition zones (validated empirically s93). Must be "
+        "≤ minimum bead width (the validator swaps them if you invert). Recommended "
+        "range 0–20%%.");
+    def->sidetext = L("% of nozzle");
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(10));
+
+    def = this->add("neoarachne_keep_short_tails", coBool);
+    def->label = L("Preserve Thin Edges");
+    def->category = L("Quality");
+    def->tooltip = L("Suppresses Arachne's removeSmallLines post-process, which "
+        "normally discards extrusion segments shorter than half the smallest line "
+        "width along that polyline. Those segments are typically the closure tails "
+        "that approach the outer perimeter — exactly what we want to keep for clean "
+        "seam closing. Disable only if you see speckled artifacts from extremely "
+        "short segments.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    // NEOTKO_NEOARACHNE_TAG fase3
+    def = this->add("neoarachne_bead_count_hysteresis_pct", coPercent);
+    def->label = L("Wall Count Stability");
+    def->category = L("Quality");
+    def->tooltip = L("Spatial hysteresis applied to Arachne's bead-count "
+        "transition thresholds when the inner or outer walls are set to "
+        "\"Arachne (Neotko edge)\". Expressed as a % of the outer wall "
+        "width. The transition from N→N+1 beads is delayed by this amount, "
+        "so borderline-thickness strokes stop oscillating between bead "
+        "counts along their length (the classic Arachne \"breathing\" "
+        "artifact other slicers also exhibit). Higher = more deadband, "
+        "calmer prints, but very-thin features may stay mono-wall longer. "
+        "0 disables the hysteresis. Typical 10–25%%.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(20));
+
+    // NEOTKO_NEOARACHNE_TAG fase4
+    def = this->add("neoarachne_transition_filter_dist_mm", coFloat);
+    def->label = L("Wall Blend Distance");
+    def->category = L("Quality");
+    def->tooltip = L("SkeletalTrapezoidation transition smoothing distance in mm. "
+        "Controls how Arachne smooths bead-count transitions along the medial "
+        "axis. Upstream Arachne hardcodes this to 100 mm. Lower values (20-50 mm) "
+        "produce sharper, more localised bead-count transitions; higher values "
+        "smooth the transition over a longer region. For most NeoArachne use "
+        "cases 50-100 mm works well; reduce when borderline strokes need crisper "
+        "edges, increase when transitions appear visually jarring.");
+    def->sidetext = L("mm");
+    def->min = 1;
+    def->max = 500;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(100.0));
 
     def = this->add("wall_transition_length", coPercent);
     def->label = L("Wall transition length");

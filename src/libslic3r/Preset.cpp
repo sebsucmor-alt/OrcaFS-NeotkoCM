@@ -952,6 +952,16 @@ static std::vector<std::string> s_Preset_print_options {
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "min_length_factor",
+     // NEOTKO_NEOARACHNE_TAG fase2+fase3.0 — registered here so TabPrintObject /
+     // TabPrintPart (per-object override tabs) accept these keys. Without this,
+     // TabPrintModel filters them out as unknown and the controls never appear
+     // in the Objects panel. See TabPrintModel::build() lines 10560-10568.
+     "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill",
+     "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
+     "neoarachne_max_bead_width_pct",
+     "neoarachne_min_feature_size_pct", "neoarachne_keep_short_tails",
+     "neoarachne_bead_count_hysteresis_pct",
+     "neoarachne_transition_filter_dist_mm",
      "small_perimeter_speed", "small_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","default_junction_deviation",
      "top_solid_infill_flow_ratio","bottom_solid_infill_flow_ratio","only_one_wall_first_layer", "print_flow_ratio", "seam_gap",

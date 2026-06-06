@@ -67,6 +67,30 @@ set(lisbslic3r_sources
     Arachne/utils/SquareGrid.hpp
     Arachne/WallToolPaths.cpp
     Arachne/WallToolPaths.hpp
+    # NEOTKO_NEOARACHNE_TAG fase0+fase1 — hybrid Classic/Arachne wall generator (caja propia).
+    NeoArachne/NeoArachneConfig.hpp
+    NeoArachne/NeoArachneRuntime.hpp
+    NeoArachne/NeoArachneDebug.hpp
+    NeoArachne/NeoArachneDebug.cpp
+    NeoArachne/NeoArachneEngine.hpp
+    NeoArachne/NeoArachneEngine.cpp
+    NeoArachne/NeoArachnePlan.hpp
+    NeoArachne/NeoArachnePlan.cpp
+    NeoArachne/NeoArachneInterior.hpp
+    NeoArachne/NeoArachneInterior.cpp
+    # NEOTKO_NEOARACHNE_TAG fase3 — NeotkoEdgeBeadingStrategy.
+    NeoArachne/NeoArachneBeadingStrategy.hpp
+    NeoArachne/NeoArachneBeadingStrategy.cpp
+    # NEOTKO_NEOARACHNE_TAG preview-lab PL.4+PL.5+PL.7 — backend reactive preview.
+    NeoArachne/Preview/PreviewWGeometry.hpp
+    NeoArachne/Preview/PreviewWGeometry.cpp
+    NeoArachne/Preview/PreviewGeometrySource.hpp
+    NeoArachne/Preview/PreviewGeometrySource.cpp
+    NeoArachne/Preview/PreviewConfigSnapshot.hpp
+    NeoArachne/Preview/PreviewConfigSnapshot.cpp
+    NeoArachne/Preview/PreviewResult.hpp
+    NeoArachne/Preview/PreviewSlicer.hpp
+    NeoArachne/Preview/PreviewSlicer.cpp
     ArcFitter.cpp
     ArcFitter.hpp
     Arrange.cpp

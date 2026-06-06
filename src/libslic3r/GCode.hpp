@@ -377,6 +377,12 @@ public:
     // inside the generated string and after the G-code export finishes.
     std::string     placeholder_parser_process(const std::string &name, const std::string &templ, unsigned int current_extruder_id, const DynamicConfig *config_override = nullptr);
     bool            enable_cooling_markers() const { return m_enable_cooling_markers; }
+    // NEOTKO_NEOARACHNE_TAG s94 task#9 — exposed for Wipe::calculateWipeRetractionLengths
+    // so it can rebalance retract_before_wipe to ≥50% for NeoArachne paths.
+    // True when the most recently extruded path had force_no_spiral_lift set,
+    // which is the marker NeoArachne::Plan and NeoArachneInterior put on every
+    // NeoArachne emission (outer + inner + closures).
+    bool            last_path_force_no_spiral_lift() const { return m_last_path_force_no_spiral_lift; }
     std::string     extrusion_role_to_string_for_parser(const ExtrusionRole &);
 
     // For Perl bindings, to be used exclusively by unit tests.
@@ -720,6 +726,11 @@ private:
     bool                                m_enable_extrusion_role_markers;
     // Keeps track of the last extrusion role passed to the processor
     ExtrusionRole                       m_last_processor_extrusion_role;
+    // NEOTKO_NEOARACHNE_TAG s93 — tracks ExtrusionPath::force_no_spiral_lift
+    // of the most recently extruded path. Read in needs_retraction() to
+    // downgrade SpiralLift → LazyLift on travel-after-NeoArachne. Reset
+    // when extruding any path that does NOT set the flag (Classic paths).
+    bool                                m_last_path_force_no_spiral_lift = false;
     // How many times will change_layer() be called?
     // change_layer() will update the progress bar.
     unsigned int                        m_layer_count;

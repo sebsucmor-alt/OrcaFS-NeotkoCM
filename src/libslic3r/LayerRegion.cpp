@@ -4,6 +4,7 @@
 #include "Exception.hpp"
 #include "Geometry.hpp"
 #include "PerimeterGenerator.hpp"
+#include "NeoArachne/NeoArachneEngine.hpp"
 #include "Print.hpp"
 #include "Surface.hpp"
 #include "BoundingBox.hpp"
@@ -168,10 +169,21 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
 
-    if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
-        g.process_arachne();
-    else
+    // NEOTKO_NEOARACHNE_TAG fase0 — third branch dispatched through the
+    // NeoArachne facade. In Phase 0 the facade is a passthrough to
+    // process_classic() (bit-identical regression baseline); Phases 1+
+    // replace it with the hybrid Classic/Arachne plan. Spiral mode keeps
+    // forcing Classic for both Arachne and NeoArachne, as before.
+    const auto wg = this->layer()->object()->config().wall_generator.value;
+    if (spiral_mode) {
         g.process_classic();
+    } else if (wg == PerimeterGeneratorType::Arachne) {
+        g.process_arachne();
+    } else if (wg == PerimeterGeneratorType::NeoArachne) {
+        NeoArachne::run(g);
+    } else {
+        g.process_classic();
+    }
 }
 
 #if 1

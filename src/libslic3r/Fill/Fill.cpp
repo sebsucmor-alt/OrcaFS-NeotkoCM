@@ -1343,7 +1343,11 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             const ExtrusionRole _role6c = surface_fill.params.extrusion_role;
             const bool _is_tp = (_role6c == erTopSolidInfill ||
                                  _role6c == erPenultimateInfill);
-            if (_is_tp && _mo6c && !_mo6c->is_mm_painted()
+            // NEOTKO_PAINT_COEXIST_TAG s91 — removed `!is_mm_painted()` gate.
+            // Allow painter pre-split even on MMU-painted objects: the per-piece
+            // MMU governance check downstream skips pieces whose XY is owned by
+            // MMU, while colormix-painter pieces on non-MMU regions emit normally.
+            if (_is_tp && _mo6c
                 && SurfaceColorMix::object_has_any_colormix_paint(_mo6c)
                 && !surface_fill.expolygons.empty()) {
                 const PrintObject* _po6c = this->object();
@@ -1449,12 +1453,42 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 const ModelObject* _mp_mo = (this->object() != nullptr)
                     ? this->object()->model_object() : nullptr;
                 const bool _mp_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_mp_mo);
-                // NEOTKO_PROFILE_TAG — MMU exclusion: MMU-painted objects are owned
-                // by MMU segmentation; MultiPass (preset or painter) must not touch them.
-                const bool _mp_mm_painted = (_mp_mo != nullptr && _mp_mo->is_mm_painted());
-                if (_mp_mm_painted)
-                    NEOTKO_LOG(MULTIPASS, "MMU_SKIP MultiPass z=" << this->print_z
-                        << " — object is MMU-painted, MultiPass suppressed");
+                // NEOTKO_PAINT_COEXIST_TAG s91 — per-piece MMU governance.
+                // Was: global is_mm_painted() short-circuit on the whole object.
+                // Now: object-flag fast path + per-surface_piece XY check against
+                // the MMU footprint at the role's vertical slab. Each piece in
+                // surface_fill.expolygons (already pre-split per painted slot by
+                // Fase 6c v2 via _fp_tag) is evaluated independently. MMU-owned
+                // pieces are skipped; sandwich-eligible pieces emit normally.
+                const bool _mp_mm_painted_obj =
+                    (_mp_mo != nullptr && _mp_mo->is_mm_painted());
+                bool _mp_mm_painted = false; // recomputed PER piece below
+                if (_mp_mm_painted_obj &&
+                    (surface_fill.params.extrusion_role == erTopSolidInfill ||
+                     surface_fill.params.extrusion_role == erPenultimateInfill)) {
+                    const double _z_lo =
+                        (surface_fill.params.extrusion_role == erTopSolidInfill)
+                            ? this->print_z - this->height : this->print_z;
+                    const double _z_hi =
+                        (surface_fill.params.extrusion_role == erTopSolidInfill)
+                            ? this->print_z : this->print_z + this->height;
+                    ExPolygons _one; _one.push_back(surface_fill.surface.expolygon);
+                    _mp_mm_painted = SurfaceColorMix::mmu_governs_xy(
+                        this->object(), _one, _z_lo, _z_hi);
+                    if (_mp_mm_painted)
+                        NEOTKO_LOG(MULTIPASS, "s91/coexist MMU_GOVERNS site=FILL"
+                            << " z=" << this->print_z
+                            << " role=" << (int)surface_fill.params.extrusion_role
+                            << " fp_slot_tag=" << _fp_slot_tag
+                            << " z_slab=[" << _z_lo << "," << _z_hi << "]"
+                            << " → suppress sandwich for this piece (MMU owns)");
+                    else
+                        NEOTKO_LOG(MULTIPASS, "s91/coexist MMU_FREE site=FILL"
+                            << " z=" << this->print_z
+                            << " role=" << (int)surface_fill.params.extrusion_role
+                            << " fp_slot_tag=" << _fp_slot_tag
+                            << " → sandwich keeps applying (no MMU on this XY)");
+                }
                 // NEOTKO_PROFILE_TAG_END
                 // NEOTKO_MULTIPASS_SURFACES_TAG — bifurcate enabled check by role:
                 // Top surface uses multipass_enabled; Penultimate uses its own key.

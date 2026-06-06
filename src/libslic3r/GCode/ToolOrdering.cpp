@@ -853,14 +853,17 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     const bool painter_mode_obj =
         SurfaceColorMix::object_has_any_colormix_paint(object.model_object());
 
-    // NEOTKO_PROFILE_TAG — MMU exclusion. MMU-painted objects are owned by MMU
-    // segmentation; ColorMix/PathBlend tool registration must be suppressed for
-    // them so the wipe-tower plan matches the SLICE side (which also skips them).
-    const bool object_is_mm_painted =
+    // NEOTKO_PAINT_COEXIST_TAG s91 — object-wide MMU flag retained ONLY as a
+    // fast-path skip when there's no MMU paint at all. The real per-region
+    // decision happens inside the layer loop, mirroring the SLICE-side
+    // per-piece predicate (SurfaceColorMix::mmu_governs_xy). SLICE and TO MUST
+    // call the SAME predicate with comparable arguments — single source of
+    // truth, otherwise the wipe tower diverges (the cardinal project rule).
+    const bool object_has_mmu_paint =
         object.model_object() != nullptr && object.model_object()->is_mm_painted();
-    if (object_is_mm_painted)
-        NEOTKO_LOG(TOOLORDER, "MMU_SKIP ColorMix/PathBlend tool registration"
-            << " — object is MMU-painted (kept in sync with SLICE)");
+    if (object_has_mmu_paint)
+        NEOTKO_LOG(TOOLORDER, "s91/coexist TO ENTRY object_has_mmu=1"
+            << " — per-region governance active (was global skip pre-s91)");
 
     // NEOTKO_MULTIPASS_TAG — do NOT clear m_mp_sublayer_extruders here.
     // In multi-object prints collect_extruders() is called once per object;
@@ -1085,7 +1088,61 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // of truth as preset mode. Registering the painted-profile tools again
             // on the real layer would double-count and diverge the wipe-tower plan
             // (the canonical "single source of truth or wipe-tower crashes" rule).
-            if (!painter_mode_obj && !object_is_mm_painted && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
+            // NEOTKO_PAINT_COEXIST_TAG s91 — per-LayerRegion MMU governance.
+            // s91 v1.1 policy update: NEVER skip CM tool registration based on
+            // MMU governance. TO sees EEC-level bbox (coarse); FILL.cpp sees
+            // per-piece polygons after Fase 6c v2 pre-split (fine). When the
+            // painter pre-split exposes a non-MMU sub-piece, FILL emits CM
+            // sublayer tools for it. If TO had decided SKIP_CM_REG using its
+            // coarser view, those tools would extrude UNREGISTERED → wipe-tower
+            // "append_tcr unexpected" / V3 chain gap warnings (s91 SLICE↔TO
+            // divergence found in 6-cube painted-coexist test, SLICE #6 of
+            // 10:21:43 run). Forcing KEEP_CM_REG eliminates this divergence:
+            // over-registered tools that don't extrude are harmless, missing
+            // ones crash. The pieces_gov diagnostic is preserved for logs.
+            const bool _s91_region_top_mmu_gov_all = false; // forced KEEP
+            int _s91_pieces_total = 0, _s91_pieces_gov = 0;
+            if (object_has_mmu_paint && has_top_surface_infill) {
+                const double _z_lo = layer->print_z - layer->height;
+                const double _z_hi = layer->print_z;
+                bool any_piece = false;
+                bool all_gov   = true;
+                for (const ExtrusionEntity* ee2 : layerm->fills.entities) {
+                    const auto* fill2 = dynamic_cast<const ExtrusionEntityCollection*>(ee2);
+                    if (!fill2 || fill2->entities.empty()) continue;
+                    const ExtrusionRole r2 = fill2->entities.front()->role();
+                    if (r2 != erTopSolidInfill && r2 != erPenultimateInfill) continue;
+                    Points pts2;
+                    fill2->collect_points(pts2);
+                    if (pts2.empty()) continue;
+                    BoundingBox bb2(pts2);
+                    any_piece = true;
+                    ++_s91_pieces_total;
+                    Polygon p2;
+                    p2.points = {
+                        Point(bb2.min.x(), bb2.min.y()),
+                        Point(bb2.max.x(), bb2.min.y()),
+                        Point(bb2.max.x(), bb2.max.y()),
+                        Point(bb2.min.x(), bb2.max.y()),
+                    };
+                    ExPolygon ep2; ep2.contour = std::move(p2);
+                    ExPolygons one2; one2.emplace_back(std::move(ep2));
+                    const bool gov = SurfaceColorMix::mmu_governs_xy(
+                        &object, one2, _z_lo, _z_hi);
+                    if (gov) ++_s91_pieces_gov;
+                    else     all_gov = false;
+                }
+                const bool _s91_would_skip = (any_piece && all_gov);
+                NEOTKO_LOG(TOOLORDER, "s91/coexist MMU_GOVERNS site=TO"
+                    << " layer=" << layerCount
+                    << " z=" << layer->print_z
+                    << " pieces_gov=" << _s91_pieces_gov << "/" << _s91_pieces_total
+                    << " would_skip=" << (_s91_would_skip ? "1" : "0")
+                    << " decision=KEEP_CM_REG (v1.1 forced over-register: TO bbox"
+                    << " coarser than FILL per-piece view; SKIP causes SLICE↔TO"
+                    << " divergence)");
+            }
+            if (!painter_mode_obj && !_s91_region_top_mmu_gov_all && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
                 const auto& cfg   = region.config();
                 const int tool_a  = cfg.interlayer_colormix_tool_a.value;
                 const int tool_b  = cfg.interlayer_colormix_tool_b.value;

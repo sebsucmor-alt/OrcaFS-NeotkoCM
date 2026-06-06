@@ -42,6 +42,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_ZBLEND",      "/tmp/neotko_zblend.log"      },
         { "ORCA_DEBUG_WIPETOWER",   "/tmp/neotko_wipetower.log"   },
         { "ORCA_DEBUG_PROFILE",     "/tmp/neotko_profile.log"     }, // NEOTKO_PROFILE_TAG
+        { "ORCA_DEBUG_DISPATCH",    "/tmp/neotko_dispatch.log"    }, // NEOTKO_NEOARACHNE_TAG s95
     };
 
     bool enabled(Channel c)
@@ -606,6 +607,166 @@ std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
     return out;
 }
 
+// NEOTKO_PAINT_COEXIST_TAG s91 v1.2 — MMU footprint for sandwich-top suppression.
+//
+// v1 ORIGINAL: included ALL facet orientations (lateral + bottom + top) so the
+// predicate caught any MMU paint whose Z range overlapped the band. INTENT:
+// "if any MMU paint is in this z column, MMU owns it."
+//
+// v1.2 FIX (real-world test exposed): lateral/bottom MMU paint produces
+// TRIANGLES whose Z spans the full cube height. Overlapping with a sandwich
+// band [9.88, 10.08] is satisfied even when the paint is on the FRONT FACE.
+// Worse, projecting the lateral triangle to XY paints almost the entire cube
+// footprint (the triangle covers the full face area), so the intersection
+// with the top surface is huge → predicate returns GOV → sandwich on TOP gets
+// suppressed even though MMU lives on the side.
+//
+// Fix: mirror the colormix `painted_footprint_in_z_range` filter — keep ONLY
+// upward-facing facets (n.z() > 0) whose `max_z` falls in the band. This
+// captures MMU paint that actually lives ON the top surface at this layer,
+// and ignores lateral MMU. Trade-off: MMU paint on a sloped surface that
+// happens to graze the top band may be missed (acceptable — sandwich vs MMU
+// arbitration on slopes is a separate problem not in s91 scope).
+ExPolygons SurfaceColorMix::mmu_painted_footprint_in_z_range(
+    const PrintObject* po, double z_min, double z_max)
+{
+    ExPolygons out;
+    if (!po) return out;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return out;
+    bool any_mm = false;
+    for (const ModelVolume* mv : mo->volumes)
+        if (mv && mv->is_model_part() && !mv->mmu_segmentation_facets.empty()) {
+            any_mm = true; break;
+        }
+    if (!any_mm) return out;
+
+    const Transform3d trafo = po->trafo();
+    const double      z_tol = 0.02;
+    Polygons          tris;
+
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        if (mv->mmu_segmentation_facets.empty()) continue;
+        const Transform3d vt = trafo * mv->get_matrix();
+        for (int slot = 1; slot < 16; ++slot) {
+            const indexed_triangle_set its = mv->mmu_segmentation_facets.get_facets(
+                *mv, static_cast<EnforcerBlockerType>(slot));
+            if (its.indices.empty()) continue;
+            for (const auto& tri : its.indices) {
+                const Vec3f& v0f = its.vertices[tri[0]];
+                const Vec3f& v1f = its.vertices[tri[1]];
+                const Vec3f& v2f = its.vertices[tri[2]];
+                const Vec3d  v0  = vt * Vec3d(v0f.x(), v0f.y(), v0f.z());
+                const Vec3d  v1  = vt * Vec3d(v1f.x(), v1f.y(), v1f.z());
+                const Vec3d  v2  = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
+                // s91 v1.2: upward-facing only (drop lateral/bottom MMU).
+                const Vec3d e1 = v1 - v0, e2 = v2 - v0;
+                const Vec3d n  = e1.cross(e2);
+                if (n.z() <= 0.0) continue;
+                // s91 v1.2: max_z in band (top-edge facet lives here), not
+                // just overlap. A vertical facet spanning the cube has
+                // max_z at the cube top — but its n.z() is 0, so it's
+                // already rejected above. A roof facet has its max_z in
+                // the band where it physically prints.
+                const double max_z = std::max({v0.z(), v1.z(), v2.z()});
+                if (max_z < z_min - z_tol || max_z > z_max + z_tol) continue;
+                Polygon p;
+                p.points = { Point(scale_(v0.x()), scale_(v0.y())),
+                             Point(scale_(v1.x()), scale_(v1.y())),
+                             Point(scale_(v2.x()), scale_(v2.y())) };
+                if (std::abs(p.area()) < SCALED_EPSILON) continue;
+                p.make_counter_clockwise();
+                tris.push_back(std::move(p));
+            }
+        }
+    }
+    if (tris.empty()) return out;
+    out = union_ex(tris);
+    return out;
+}
+
+// NEOTKO_PAINT_COEXIST_TAG s91 — single source of truth predicate.
+// Consulted identically from SurfaceColorMix::assign_and_group_tools (per-EEC),
+// Fill.cpp surface_fill loop (per surface_fill piece), and
+// ToolOrdering::collect_extruders (per LayerRegion top/penu surfaces).
+// Any divergence between these 3 callsites = wipe-tower divergence = crash.
+bool SurfaceColorMix::mmu_governs_xy(
+    const PrintObject* po,
+    const ExPolygons& surface_xy,
+    double z_min, double z_max)
+{
+    if (!po || surface_xy.empty()) return false;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return false;
+    bool any_mm = false;
+    for (const ModelVolume* mv : mo->volumes)
+        if (mv && mv->is_model_part() && !mv->mmu_segmentation_facets.empty()) {
+            any_mm = true; break;
+        }
+    if (!any_mm) return false;
+
+    const ExPolygons fp = mmu_painted_footprint_in_z_range(po, z_min, z_max);
+    if (fp.empty()) {
+        NEOTKO_LOG(COLORMIX, "s91/coexist mmu_governs_xy z=[" << z_min << ","
+            << z_max << "] fp=empty → false");
+        return false;
+    }
+    ExPolygons inter = intersection_ex(surface_xy, fp);
+    if (inter.empty()) {
+        NEOTKO_LOG(COLORMIX, "s91/coexist mmu_governs_xy z=[" << z_min << ","
+            << z_max << "] inter=empty → false");
+        return false;
+    }
+    // s91 v1.3 — coverage-fraction threshold (not absolute area).
+    //
+    // WHY: when MMU paint maps to the SAME extruder as the natural one
+    // (e.g. user paints slot=1 on a cube whose default is also T0), Slic3r's
+    // MMU partitioning DOES NOT split the LayerRegion — there's no extruder
+    // change to honor. The full top remains ONE region; FILL sees one piece
+    // covering the entire top. A small MMU "paint" patch (e.g. 7.9 mm² of
+    // 100 mm²) would falsely register as governance under an absolute
+    // threshold and suppress sandwich on the whole top — even though MMU
+    // physically owns nothing (same extruder = no real partition).
+    //
+    // When MMU paint maps to a DIFFERENT extruder, partitioning splits the
+    // region into MMU-owned and natural sub-regions; the natural region's
+    // piece XY is disjoint from MMU XY (~0 intersection → FREE), and the
+    // MMU region's piece is fully covered by MMU XY (~100% → GOV).
+    //
+    // Coverage > 50% strikes the balance: small MMU patches on shared XY
+    // don't fight sandwich; true MMU partitions still get fully suppressed.
+    double inter_a = 0.0;
+    for (const auto& e : inter) inter_a += std::abs(e.area());
+    double piece_a = 0.0;
+    for (const auto& e : surface_xy) piece_a += std::abs(e.area());
+    // Trivial-area guard (still reject sub-mm² slivers as a sanity floor).
+    const double trivial_thr = scaled<double>(0.01) * scaled<double>(0.01);
+    if (inter_a <= trivial_thr) {
+        NEOTKO_LOG(COLORMIX, "s91/coexist mmu_governs_xy z=[" << z_min << ","
+            << z_max << "] inter_area=" << inter_a
+            << " ≤ trivial_thr=" << trivial_thr << " → no");
+        return false;
+    }
+    const double frac = (piece_a > 0.0) ? inter_a / piece_a : 0.0;
+    const double cov_thr = 0.5; // require MMU to own >50% of the piece
+    const bool gov = frac > cov_thr;
+    NEOTKO_LOG(COLORMIX, "s91/coexist mmu_governs_xy z=[" << z_min << ","
+        << z_max << "] inter=" << inter_a << " piece=" << piece_a
+        << " frac=" << frac << " cov_thr=" << cov_thr
+        << " → " << (gov ? "GOV" : "no"));
+    return gov;
+}
+
+bool SurfaceColorMix::mmu_governs_surface(
+    const PrintObject* po, const Surface& surface,
+    double z_min, double z_max)
+{
+    if (surface.expolygon.empty()) return false;
+    ExPolygons one; one.push_back(surface.expolygon);
+    return mmu_governs_xy(po, one, z_min, z_max);
+}
+
 // Resolve the SurfaceEffectProfile id for a painted slot on the print's model.
 // Slot tables live per-ModelVolume; we pick the first model_part with a
 // non-zero entry at that slot (the gizmo keeps them consistent across volumes
@@ -806,15 +967,20 @@ int SurfaceColorMix::assign_and_group_tools(
     const ModelObject* model_object =
         print_object ? print_object->model_object() : nullptr;
 
-    // NEOTKO_PROFILE_TAG — MMU exclusion. A multi-material-painted object is
-    // controlled entirely by MMU segmentation; re-encoding its top/penu fills
-    // here (preset OR painter mode) clobbers the per-region extruder assignment
-    // MMU produced. MMU owns the surface — ColorMix steps aside completely.
-    if (model_object && model_object->is_mm_painted()) {
-        NEOTKO_LOG(COLORMIX, "MMU_SKIP ColorMix layer=" << layer_idx
-            << " — object is MMU-painted, ColorMix suppressed (MMU owns surfaces)");
-        return 0;
-    }
+    // NEOTKO_PAINT_COEXIST_TAG s91 — per-surface MMU governance (camino 3).
+    // Replaces the global is_mm_painted() short-circuit. Each fill EEC checks
+    // MMU footprint at its bbox below; only EECs whose XY is governed by MMU
+    // paint at this layer's slab are skipped. Unpainted surfaces of a
+    // partially-MMU object now get sandwich/ColorMix normally.
+    const bool _s91_obj_has_mmu_paint =
+        (model_object && model_object->is_mm_painted());
+    const double _s91_z_layer_min = (layer_height > 0.0)
+        ? layer_print_z - layer_height : layer_print_z;
+    const double _s91_z_layer_max = layer_print_z;
+    if (_s91_obj_has_mmu_paint)
+        NEOTKO_LOG(COLORMIX, "s91/coexist SCM ENTRY layer=" << layer_idx
+            << " obj_has_mmu=1 z=[" << _s91_z_layer_min << "," << _s91_z_layer_max
+            << "] — per-EEC governance active (was global skip pre-s91)");
 
     const bool painter_mode_obj = object_has_any_colormix_paint(model_object);
     const SurfaceEffectProfile* painted_top_profile  = nullptr;
@@ -865,6 +1031,40 @@ int SurfaceColorMix::assign_and_group_tools(
     for (auto* top_entity : fills.entities) {
         ExtrusionEntityCollection* sub = dynamic_cast<ExtrusionEntityCollection*>(top_entity);
         if (!sub || sub->entities.empty()) continue;
+
+        // NEOTKO_PAINT_COEXIST_TAG s91 — per-EEC MMU governance.
+        // If this object has MMU paint anywhere, test the EEC's bbox against
+        // the MMU footprint at this layer's slab. If MMU governs the XY, this
+        // EEC is owned by MMU segmentation — skip ColorMix for it. Other EECs
+        // in this fills collection (non-MMU regions of the same object) keep
+        // going normally. Bbox is a conservative first-pass; if false positives
+        // show up in concave geometries we can upgrade to real polyline proj.
+        if (_s91_obj_has_mmu_paint) {
+            Points _eec_pts;
+            sub->collect_points(_eec_pts);
+            if (!_eec_pts.empty()) {
+                BoundingBox bb(_eec_pts);
+                ExPolygons _eec_xy;
+                Polygon poly;
+                poly.points = {
+                    Point(bb.min.x(), bb.min.y()),
+                    Point(bb.max.x(), bb.min.y()),
+                    Point(bb.max.x(), bb.max.y()),
+                    Point(bb.min.x(), bb.max.y()),
+                };
+                ExPolygon ep; ep.contour = std::move(poly);
+                _eec_xy.emplace_back(std::move(ep));
+                if (mmu_governs_xy(print_object, _eec_xy,
+                                   _s91_z_layer_min, _s91_z_layer_max)) {
+                    NEOTKO_LOG(COLORMIX, "s91/coexist MMU_GOVERNS site=SCM"
+                        << " layer=" << layer_idx
+                        << " bb=[" << bb.min.x() << "," << bb.min.y() << ".."
+                        << bb.max.x() << "," << bb.max.y() << "]"
+                        << " → skip EEC (MMU owns this XY)");
+                    continue;
+                }
+            }
+        }
 
         // Skip if already colormix-encoded (mm3_per_mm >= 10.0)
         {

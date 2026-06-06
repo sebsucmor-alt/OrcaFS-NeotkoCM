@@ -31,6 +31,39 @@ public:
     float   wall_transition_filter_deviation;
     int     wall_distribution_count;
     bool    is_top_or_bottom_layer;
+    // NEOTKO_NEOARACHNE_TAG fase3.0 — Edge Closure. When true, WallToolPaths::generate()
+    // skips its removeSmallLines post-process which normally discards extrusion
+    // segments shorter than half the smallest line width along that polyline.
+    // Those are typically the closure tails that approach an adjacent perimeter
+    // (Classic outer in our hybrid case). Default false → upstream behaviour
+    // unchanged. NeoArachne::Interior sets this true to preserve S3D-style edge
+    // closure. See memory/neoarachne_canonical_plan.md.
+    bool    keep_short_tails = false;
+    // NEOTKO_NEOARACHNE_TAG fase3 — NeotkoEdgeBeadingStrategy wrap. When
+    // neotko_edge_enabled is true, BeadingStrategyFactory wraps the meta-chain
+    // with NeoArachneBeadingStrategy which (a) pins outer width to
+    // optimal_width_outer for bead_count 1 and 2, and (b) adds a spatial
+    // hysteresis of neotko_edge_hysteresis_pct (% of optimal_width_outer) to
+    // the bead-count transition threshold. Default false → upstream behaviour
+    // preserved for wall_generator=Arachne. NeoArachne::Interior sets these
+    // when cfg.outer_walls or cfg.inner_walls == ArachneNeotkoEdge.
+    bool    neotko_edge_enabled        = false;
+    bool    neotko_edge_pin_outer      = true;
+    bool    neotko_edge_cap_widening   = false; // s93 — cap inner bead widths to prevent over-deposit
+    double  neotko_edge_hysteresis_pct = 0.0;
+    // NEOTKO_NEOARACHNE_TAG fase4 — SkeletalTrapezoidation::transition_filter_dist.
+    // Upstream Arachne hardcodes this to 100 mm (WallToolPaths.cpp historically).
+    // We expose it as a parameter so NeoArachne can tune transition smoothing
+    // independently. Lower values (20–50 mm) produce sharper bead-count
+    // transitions; higher values produce smoother but longer transitions.
+    // Default 100 = upstream behaviour preserved when this field isn't set.
+    float   wall_transition_filter_dist_mm = 100.f;
+    // NEOTKO_NEOARACHNE_TAG max-bead-width — upper cap on single-bead width.
+    // Sentinel 0 = use stock auto-derivation (min_bead-based formula at
+    // WallToolPaths.cpp:511). Any value >100 overrides wall_add_middle_threshold
+    // to (pct/100)-1, capping single bead at pct% of nominal nozzle width.
+    // Only set by NeoArachne::Interior; stock Arachne path leaves it at 0.
+    float   max_bead_width_pct = 0.f;
 };
 
 WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config);

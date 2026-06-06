@@ -536,6 +536,90 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         }
     }
     // NEOTKO_LIBRE_TAG_END
+
+    // NEOTKO_NEOARACHNE_TAG fase2+fase3.0 — validate the NeoArachne wall-source combo
+    // and Edge Closure invariants. Auto-fix obvious mistakes with a Yes/No dialog;
+    // silently swap inverted invariants (min_feat > min_bead).
+    //
+    // s91 crash fix: this runs on a SPARSE DynamicPrintConfig (per-object override).
+    // The neoarachne_* keys are only present if the user has explicitly set them
+    // on this object. Guard EVERY opt_* read with config->has() — bare opt_enum on
+    // a missing key crashes (DynamicConfig::option returns nullptr, then ->getInt()
+    // segfaults). All five neoarachne_* keys must be present for the validator to
+    // do anything meaningful, so a single has() check on one of them gates the whole
+    // block (they always travel together — added in the same commit).
+    if (config->has("wall_generator")
+        && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoArachne
+        && config->has("neoarachne_outer_wall")
+        && config->has("neoarachne_inner_walls")
+        && config->has("neoarachne_min_bead_width_pct")
+        && config->has("neoarachne_min_feature_size_pct")
+        && !is_msg_dlg_already_exist)
+    {
+        const auto outer = config->opt_enum<NeoArachneWallSource>("neoarachne_outer_wall");
+        const auto inner = config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls");
+
+        // (1) outer = Off is meaningless — every part needs at least one outer.
+        if (outer == NeoArachneWallSource::Off) {
+            MessageDialog dialog(m_msg_dlg_parent,
+                _L("NeoArachne — outer wall set to Off is not allowed. Reset to Classic?"),
+                _L("NeoArachne — invalid combo"), wxICON_WARNING | wxYES | wxNO);
+            is_msg_dlg_already_exist = true;
+            const auto ans = dialog.ShowModal();
+            is_msg_dlg_already_exist = false;
+            if (ans == wxID_YES) {
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("neoarachne_outer_wall",
+                    new ConfigOptionEnum<NeoArachneWallSource>(NeoArachneWallSource::Classic));
+                apply(config, &nc);
+            }
+        }
+        // (2) outer = Arachne* + inner = Classic is a contradiction. Arachne's beading
+        //     strategy reasons over the full slab; splitting outer/inner across two
+        //     different engines breaks the math. Suggest aligning inner with outer.
+        else if ((outer == NeoArachneWallSource::ArachneStock || outer == NeoArachneWallSource::ArachneNeotkoEdge)
+                 && inner == NeoArachneWallSource::Classic)
+        {
+            MessageDialog dialog(m_msg_dlg_parent,
+                _L("NeoArachne — outer = Arachne with inner = Classic is unsupported "
+                   "(Arachne's beading needs the whole slab). Switch inner to match outer?"),
+                _L("NeoArachne — invalid combo"), wxICON_WARNING | wxYES | wxNO);
+            is_msg_dlg_already_exist = true;
+            const auto ans = dialog.ShowModal();
+            is_msg_dlg_already_exist = false;
+            if (ans == wxID_YES) {
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("neoarachne_inner_walls",
+                    new ConfigOptionEnum<NeoArachneWallSource>(outer));
+                apply(config, &nc);
+            }
+        }
+
+        // (3) Edge Closure invariant: min_feature_size_pct must be ≤ min_bead_width_pct
+        //     (Widening strategy: input thinner than min_feature is discarded; widened
+        //     to min_bead otherwise. Inversion would emit beads thinner than the floor.)
+        //
+        // s91 crash fix: `opt_float()` non-const uses the TEMPLATE `option<ConfigOptionFloat>`
+        // (Config.hpp:2018-2023) which compares `opt->type() != TYPE::static_type()` —
+        // exact-match, no inheritance. Our keys are `ConfigOptionPercent` (type=coPercent,
+        // derived from ConfigOptionFloat). Template returns nullptr → ->value crashes at
+        // address 0x8. Fix: read through the virtual `getFloat()` of the base ConfigOption,
+        // which ConfigOptionFloat (and thus Percent) overrides correctly. Same trick used
+        // everywhere else in the codebase that mixes Percent and Float.
+        const ConfigOption* min_bead_opt = config->option("neoarachne_min_bead_width_pct");
+        const ConfigOption* min_feat_opt = config->option("neoarachne_min_feature_size_pct");
+        if (min_bead_opt && min_feat_opt) {
+            const double min_bead = min_bead_opt->getFloat();
+            const double min_feat = min_feat_opt->getFloat();
+            if (min_feat > min_bead) {
+                // Silent swap (no dialog spam — the relationship is non-obvious to most users).
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("neoarachne_min_feature_size_pct", new ConfigOptionPercent(min_bead));
+                nc.set_key_value("neoarachne_min_bead_width_pct",   new ConfigOptionPercent(min_feat));
+                apply(config, &nc);
+            }
+        }
+    }
 }
 
 void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::vector<std::string> const &keys, std::map<ObjectBase *, ModelConfig *> const &configs)
@@ -883,11 +967,57 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi);
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
 
-    bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
+    const auto wall_gen = config->opt_enum<PerimeterGeneratorType>("wall_generator");
+    bool have_arachne = wall_gen == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
+
+    // NEOTKO_NEOARACHNE_TAG fase2+fase3.0+fase2.4c — show the NeoArachne controls
+    // when the user picked NeoArachne.
+    //
+    // s91 lesson: only opt_enum/opt_float/opt_bool reads need config->has() guards
+    // (those crash with EXC_BAD_ACCESS on sparse DynamicPrintConfigs that don't
+    // have the key — Config.hpp:2349 dereferences a nullptr from this->option()).
+    // toggle_line() is safe on any key — it just sets the UI visibility flag for
+    // that control identifier, doesn't read the config value. Earlier fix was
+    // over-defensive: it gated toggle_line on has(), which silenced the new keys
+    // for all presets that didn't yet have neoarachne_* in their JSON (i.e. all
+    // existing user presets pre-Fase 2). Result: keys invisible despite picking
+    // NeoArachne. Fix: drop has() from toggle_line, keep it only on opt_enum.
+    const bool have_neoarachne = wall_gen == PerimeterGeneratorType::NeoArachne;
+    for (auto el : { "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill" })
+        toggle_line(el, have_neoarachne);
+    // For Edge Closure subset gating we need to READ neoarachne_inner_walls.
+    // Here the has() guard IS required to prevent the sparse-config crash.
+    const bool inner_readable = have_neoarachne && config->has("neoarachne_inner_walls");
+    const auto inner_src = inner_readable
+        ? config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls")
+        : NeoArachneWallSource::ArachneStock;  // default → assume Arachne, show closure params
+    const bool inner_is_arachne =
+        inner_src == NeoArachneWallSource::ArachneStock ||
+        inner_src == NeoArachneWallSource::ArachneNeotkoEdge;
+    for (auto el : { "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
+                     "neoarachne_max_bead_width_pct",
+                     "neoarachne_min_feature_size_pct", "neoarachne_keep_short_tails" })
+        toggle_line(el, have_neoarachne && inner_is_arachne);
+    // NEOTKO_NEOARACHNE_TAG fase3 — bead-count hysteresis only matters when
+    // a NeotkoEdge wall source is selected (the factory wrap is gated on
+    // neotko_edge_active in Interior::run). Outside that, the control is
+    // inert; hide it to reduce UI noise.
+    const auto outer_src = (have_neoarachne && config->has("neoarachne_outer_wall"))
+        ? config->opt_enum<NeoArachneWallSource>("neoarachne_outer_wall")
+        : NeoArachneWallSource::Classic;
+    const bool neotko_edge_active = have_neoarachne &&
+        (inner_src == NeoArachneWallSource::ArachneNeotkoEdge ||
+         outer_src == NeoArachneWallSource::ArachneNeotkoEdge);
+    toggle_line("neoarachne_bead_count_hysteresis_pct", neotko_edge_active);
+    // NEOTKO_NEOARACHNE_TAG fase4 — transition_filter_dist visible whenever
+    // any Arachne family is engaged (stock or NeotkoEdge). It tunes
+    // SkeletalTrapezoidation which runs for any Arachne combo.
+    const bool any_arachne = have_neoarachne && inner_is_arachne;
+    toggle_line("neoarachne_transition_filter_dist_mm", any_arachne);
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");

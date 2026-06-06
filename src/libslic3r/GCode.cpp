@@ -1,3 +1,4 @@
+#include <typeinfo>  // NEOTKO_NEOARACHNE_TAG s95 — typeid in extrude_entity dispatch trace
 #include "BoundingBox.hpp"
 #include "Config.hpp"
 #include "Polygon.hpp"
@@ -358,6 +359,41 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     // We will always proceed with incrementing the retraction amount before wiping with the difference
     // and return the maximum allowed wipe amount to be retracted during the wipe move
     retractionBeforeWipe += retraction_length_remaining - retractionDuringWipe;
+
+    // NEOTKO_NEOARACHNE_TAG s94 task#9 — minimum pre-wipe retract on NeoArachne paths.
+    //
+    // Background: empirical analysis of NeoArachne over-extrusion (the
+    // SUGARPOP keychain "S" blob bug) showed that NeoArachne paths nearly
+    // always wind up with pre-wipe retract ≈ 0.1 mm and during-wipe retract
+    // ≈ retraction_length, because the formula
+    //   retractionDuringWipe = retraction_speed * wipe_dist / wipe_speed
+    // exactly equals retraction_length under the user's per-object overrides
+    // (outer_wall_speed=40, wipe_distance=2, retraction_speed=30). The
+    // result: the nozzle is still ~93% pressurized when the wipe begins,
+    // and the first ~0.5 mm of wipe travel deposits oozing plastic on top
+    // of the just-printed bead — a physical second-deposit invisible to the
+    // gcode visualizer (which only renders E+ moves). After several layers
+    // the smear accumulates into the visible blobs.
+    //
+    // The user's filament-level workaround (`retract_before_wipe = 60%`)
+    // helped only marginally because it applies globally, not where it's
+    // needed. This hook is the targeted fix: when the LAST extruded path
+    // was a NeoArachne path (marker = force_no_spiral_lift, set on every
+    // NeoArachne outer+inner+closure by Plan.cpp + Interior.cpp), force at
+    // LEAST 50% of the total retract to happen before the wipe. That gives
+    // the nozzle enough depressurization to wipe cleanly without smearing.
+    //
+    // Classic paths keep their normal distribution — no behaviour change.
+    if (gcodegen.last_path_force_no_spiral_lift()) {
+        const double total          = retractionBeforeWipe + retractionDuringWipe;
+        const double min_before     = total * 0.5;
+        if (retractionBeforeWipe < min_before) {
+            const double shift      = min_before - retractionBeforeWipe;
+            retractionBeforeWipe   += shift;
+            retractionDuringWipe   -= shift;
+        }
+    }
+
     return {retractionBeforeWipe, retractionDuringWipe};
 }
 
@@ -2601,9 +2637,21 @@ static std::string update_print_stats_and_format_filament_stats(const bool      
         std::pair<std::string, unsigned int> out_filament_used_g("; filament used [g] = ", 0);
         std::pair<std::string, unsigned int> out_filament_cost("; filament cost = ", 0);
         for (const Extruder& extruder : extruders) {
-            double used_filament   = extruder.used_filament() + (has_wipe_tower ? wipe_tower_data.used_filament[extruder.id()] : 0.f);
-            double extruded_volume = extruder.extruded_volume() + (has_wipe_tower ? wipe_tower_data.used_filament[extruder.id()] * 2.4052f :
-                                                                                    0.f); // assumes 1.75mm filament diameter
+            // NEOTKO_PAINT_COEXIST_TAG s91 — guard against empty wipe_tower_data.used_filament.
+            // Reproduces when an MMU-painted object's painted slot maps to the SAME extruder
+            // as the natural one (e.g. slot=1 → filament 1 → T0, same as base) → NeoTower
+            // emits zero events ("tower is empty") → get_used_filament() returns empty vector.
+            // Meanwhile has_wipe_tower stays true because partitions>0 forces it (Bug 04 s79j
+            // OR-gate). Without this guard, the raw [extruder.id()] access dereferences a null
+            // and crashes the gcode export thread (EXC_BAD_ACCESS at GCode.cpp:2604).
+            const size_t _eid = static_cast<size_t>(extruder.id());
+            const float  _wt_used =
+                (has_wipe_tower && _eid < wipe_tower_data.used_filament.size())
+                    ? wipe_tower_data.used_filament[_eid]
+                    : 0.f;
+            double used_filament   = extruder.used_filament() + _wt_used;
+            double extruded_volume = extruder.extruded_volume() + _wt_used * 2.4052f;
+                                                                                    // assumes 1.75mm filament diameter
             double filament_weight = extruded_volume * extruder.filament_density() * 0.001;
             double filament_cost   = filament_weight * extruder.filament_cost() * 0.001;
             auto   append          = [&extruder](std::pair<std::string, unsigned int>& dst, const char* tmpl, double value) {
@@ -8111,7 +8159,14 @@ std::string GCode::change_layer(coordf_t print_z)
     if (EXTRUDER_CONFIG(retract_when_changing_layer) && m_writer.will_move_z(z)) {
         LiftType lift_type = this->to_lift_type(ZHopType(EXTRUDER_CONFIG(z_hop_types)));
         // BBS: force to use SpiralLift when change layer if lift type is auto
-        gcode += this->retract(false, false, ZHopType(EXTRUDER_CONFIG(z_hop_types)) == ZHopType::zhtAuto ? LiftType::SpiralLift : lift_type);
+        LiftType layer_lift = ZHopType(EXTRUDER_CONFIG(z_hop_types)) == ZHopType::zhtAuto ? LiftType::SpiralLift : lift_type;
+        // NEOTKO_NEOARACHNE_TAG s93 — downgrade SpiralLift → LazyLift when the
+        // last extruded path of the previous layer opted out (a NeoArachne
+        // path cluster ends right at the layer boundary). Avoids G3 helical
+        // smear at layer-change events too.
+        if (m_last_path_force_no_spiral_lift && layer_lift == LiftType::SpiralLift)
+            layer_lift = LiftType::LazyLift;
+        gcode += this->retract(false, false, layer_lift);
     }
 
     m_writer.add_object_change_labels(gcode);
@@ -8485,14 +8540,49 @@ std::string GCode::extrude_entity(const ExtrusionEntity&      entity,
                                   double                      speed,
                                   const ExtrusionEntitiesPtr& region_perimeters)
 {
-    if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity))
+    // NEOTKO_NEOARACHNE_TAG s95 — dispatch trace.
+    // ORCA_DEBUG_DISPATCH=1 (or ORCA_DEBUG_ALL=1) enables /tmp/neotko_dispatch.log.
+    NEOTKO_LOG(DISPATCH, "DISP_ENTRY typeid=" << typeid(entity).name()
+        << " desc=\"" << description << "\""
+        << " region_perim_n=" << region_perimeters.size());
+
+    if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity)) {
+        NEOTKO_LOG(DISPATCH, "DISP_BRANCH=Path role=" << int(path->role())
+            << " npts=" << path->polyline.points.size());
         return this->extrude_path(*path, description, speed);
-    else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
+    }
+    else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity)) {
+        NEOTKO_LOG(DISPATCH, "DISP_BRANCH=MultiPath npaths=" << multipath->paths.size());
         return this->extrude_multi_path(*multipath, description, speed);
-    else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
+    }
+    else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity)) {
+        NEOTKO_LOG(DISPATCH, "DISP_BRANCH=Loop npaths=" << loop->paths.size()
+            << " role=" << int(loop->role()));
         return this->extrude_loop(*loop, description, speed, region_perimeters);
-    else
+    }
+    else if (const ExtrusionEntityCollection* coll = dynamic_cast<const ExtrusionEntityCollection*>(&entity)) {
+        // NEOTKO_NEOARACHNE_TAG s95 fix — accept nested ExtrusionEntityCollection.
+        // Fix #14 (s94) wraps per-island NeoArachne inner walls in EEC(no_sort=true)
+        // so the outer chain can visit islands by proximity. Without this branch the
+        // generic dispatcher threw "Invalid argument supplied to extrude()" the
+        // moment any caller fed it one of those collections.
+        NEOTKO_LOG(DISPATCH, "DISP_BRANCH=EEC no_sort=" << int(coll->no_sort)
+            << " n_children=" << coll->entities.size());
+        std::string gcode;
+        if (coll->no_sort) {
+            for (const ExtrusionEntity* ee : coll->entities)
+                gcode += this->extrude_entity(*ee, description, speed, region_perimeters);
+        } else {
+            for (ExtrusionEntity* ee : coll->chained_path_from(m_last_pos).entities)
+                gcode += this->extrude_entity(*ee, description, speed, region_perimeters);
+        }
+        return gcode;
+    }
+    else {
+        NEOTKO_LOG(DISPATCH, "DISP_BRANCH=THROW typeid=" << typeid(entity).name()
+            << " desc=\"" << description << "\"");
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
+    }
     return "";
 }
 
@@ -9128,6 +9218,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                 ExtrusionEntity::role_to_string(m_last_processor_extrusion_role).c_str());
         gcode += buf;
     }
+
+    // NEOTKO_NEOARACHNE_TAG s93 — propagate per-path lift override into
+    // GCode state. needs_retraction() reads this when deciding lift type.
+    m_last_path_force_no_spiral_lift = path.force_no_spiral_lift;
 
     if (last_was_wipe_tower || m_last_width != path.width) {
         m_last_width = path.width;
@@ -9958,6 +10052,11 @@ bool GCode::needs_retraction(const Polyline& travel, ExtrusionRole role, LiftTyp
         } else {
             lift_type = to_lift_type(ZHopType(EXTRUDER_CONFIG(z_hop_types)));
         }
+        // NEOTKO_NEOARACHNE_TAG s93 — downgrade SpiralLift → LazyLift when the
+        // last extruded path opted out (force_no_spiral_lift). NeoArachne paths
+        // set this true to avoid G3 helical lifts smearing residual ooze.
+        if (m_last_path_force_no_spiral_lift && lift_type == LiftType::SpiralLift)
+            lift_type = LiftType::LazyLift;
         return true;
     }
 
@@ -9997,6 +10096,10 @@ bool GCode::needs_retraction(const Polyline& travel, ExtrusionRole role, LiftTyp
     } else {
         lift_type = to_lift_type(ZHopType(EXTRUDER_CONFIG(z_hop_types)));
     }
+    // NEOTKO_NEOARACHNE_TAG s93 — downgrade SpiralLift → LazyLift when the last
+    // extruded path opted out. Same logic as the perimeter-exit branch above.
+    if (m_last_path_force_no_spiral_lift && lift_type == LiftType::SpiralLift)
+        lift_type = LiftType::LazyLift;
     return true;
 }
 
