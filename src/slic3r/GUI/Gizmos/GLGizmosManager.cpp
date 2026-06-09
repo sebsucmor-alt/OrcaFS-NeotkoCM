@@ -28,6 +28,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoAssembly.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoAlignStack.hpp" // NEOTKO_ALIGNSTACK_TAG
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -225,6 +226,9 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoAssembly(m_parent, m_is_dark ? "toolbar_assembly_dark.svg" : "toolbar_assembly.svg", EType::Assembly));
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
+    // NEOTKO_ALIGNSTACK_TAG_START
+    m_gizmos.emplace_back(new GLGizmoAlignStack(m_parent, m_is_dark ? "toolbar_align_stack_dark.svg" : "toolbar_align_stack.svg", EType::AlignStack));
+    // NEOTKO_ALIGNSTACK_TAG_END
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));

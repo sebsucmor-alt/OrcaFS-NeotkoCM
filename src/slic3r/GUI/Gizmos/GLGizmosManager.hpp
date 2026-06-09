@@ -91,6 +91,7 @@ public:
         Assembly,
         Simplify,
         BrimEars,
+        AlignStack, // NEOTKO_ALIGNSTACK_TAG
         //SlaSupports,
         // BBS
         //FaceRecognition,

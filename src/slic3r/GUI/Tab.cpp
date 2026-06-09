@@ -9972,6 +9972,12 @@ void TabPrint::build()
                 sz->Add(sw_btn, 0, wxALL, 3);
                 return sz;
             });
+        // NEOTKO_COLORMIX_TAG s99 — surface interlayer_colormix_min_length here
+        // as "Min. Segment" so it stops being buried in the SandwichDialog Linear
+        // panel / retired "More" toggle. Gates which lines participate in the
+        // ColorMix per-line split (lines shorter than this fall back to the
+        // region's default extruder).
+        optgroup->append_single_option_line("interlayer_colormix_min_length");
         // NEOTKO_COLORMIX_TAG — s60: numeric gradient controls live INSIDE the
         // Surface Color Mixer dialog (Gradient section). The optgroup is only
         // for the master enable + dialog launcher.

@@ -9969,6 +9969,40 @@ bool GCode::needs_retraction(const Polyline& travel, ExtrusionRole role, LiftTyp
         return false;
     }
 
+    // NEOTKO_COLORMIX_TAG s99 — extended short-hop bypass for solid infill.
+    //
+    // Background: monotonic line-to-line jumps inside a solid infill region
+    // (top/penultimate/bottom/solid) sit just above `retraction_minimum_travel`
+    // (~1 mm default) — ColorMix tool-bucket reorder, pattern offsets, and
+    // alternating-tool spacings push the typical inter-line gap to ~1-2 mm.
+    // That triggers a full wipe+retract+z-hop+unretract burst per line, which:
+    //   - prints SLOW (every line ends with the wipe path)
+    //   - wears the extruder/filament unnecessarily
+    //   - leaves visible artefacts on the surface (the wipe path is traced
+    //     backwards through the just-extruded line)
+    // The hop itself is too short for meaningful ooze to form, so retraction
+    // protection is wasted here.
+    //
+    // Scope: solid infill roles only. Perimeters, walls, bridges, supports,
+    // overhang perimeters, gap-fill — all keep strict retraction. ColorMix
+    // is gated to top/penu surfaces only, so we are not touching any role
+    // where stringing would be functionally significant.
+    //
+    // Threshold: 2.5 mm. Above any realistic monotonic gap (≤ ~1.7 mm for a
+    // 0.4 mm nozzle with a 4-tool ColorMix pattern), well below a genuine
+    // cross-island travel. Hardcoded for the first iteration; promote to a
+    // config key if real-print evidence pushes the bound up or down.
+    //
+    // Position: AFTER `retraction_minimum_travel` so user presets that set
+    // it above 2.5 mm still win. BEFORE the overhang / perimeter-exit machinery
+    // because <2.5 mm hops physically cannot be the "long perimeter-exit"
+    // case those checks were designed for.
+    if ((role == erTopSolidInfill || role == erPenultimateInfill ||
+         role == erBottomSurface  || role == erSolidInfill) &&
+        travel.length() < scale_(2.5)) {
+        return false;
+    }
+
     // BBS: input travel polyline must be in current plate coordinate system
     auto is_through_overhang = [this](const Polyline& travel) {
         BoundingBox travel_bbox = get_extents(travel);

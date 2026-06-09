@@ -1493,10 +1493,36 @@ int SurfaceColorMix::assign_and_group_tools(
 
         if (tool_blocks.empty()) continue;
 
+        // NEOTKO_COLORMIX_TAG s99 — single-tool short-circuit.
+        // If after slot assignment every line ended up in the same tool bucket,
+        // the ColorMix split produced ZERO multi-tool benefit but would still
+        // break the original zig-zag's natural U-turn continuity (separate
+        // ExtrusionPath* entries + no_sort=true → GCode emits travel+retract
+        // between each pair). Free the throwaway paths we created in the loop
+        // above and leave the original `sub` intact.
+        if (unique_tool_order.size() == 1) {
+            for (auto& kv : tool_blocks)
+                for (auto* p : kv.second) delete p;
+            NEOTKO_LOG(COLORMIX, "SHORT_CIRCUIT layer=" << layer_idx
+                << " role=" << ExtrusionEntity::role_to_string(first_path->role())
+                << " n_paths_before=" << n_paths
+                << " single_tool=T" << unique_tool_order[0]
+                << " (preserved original zig-zag, no split mutation)");
+            continue;
+        }
+
         // Nearest-neighbor travel optimization within each tool's block.
         // Minimizes travel moves and allows endpoint flipping per line.
         for (int t : unique_tool_order)
             optimize_tool_block_travel(tool_blocks[t]);
+
+        // NEOTKO_COLORMIX_TAG s99 — stitch-back REVERTED.
+        // The fusion broke the per-line discontinuity that ColorMix patterns
+        // (GeoSort/LaneQuant/DirCluster) rely on to render visually uniform
+        // gradients. Path separation is intentional. The retract/wipe burst
+        // between adjacent monotonic lines is addressed at GCode-emit time
+        // (suppress retract+wipe+hop when inter-path travel is below a small
+        // threshold), not by re-stitching the paths here.
 
         // Replace sub-collection with unique-tool blocks in first-occurrence order.
         // no_sort=true prevents path reordering and breaking block grouping.
