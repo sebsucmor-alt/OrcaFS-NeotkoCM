@@ -1,3 +1,8 @@
+## Proud to announce that @Snapmaker is officially sponsoring this project!!
+
+Development will be conducted in close collaboration with Snapmaker ecosystem and with Radoux/Radu, author of FullSpectrum the now official part of the Snapmaker team. So from v1.9 forward expect big things!
+By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
+
 # OrcaSlicer FullSpectrum — Neotko Feature Pack · User Guide
 
 > Features conceived and designed by **[Neotko](https://github.com/neotko)** — inventor of *Neosanding*, now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura.
