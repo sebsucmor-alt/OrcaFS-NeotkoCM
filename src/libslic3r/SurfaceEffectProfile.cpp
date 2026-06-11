@@ -304,6 +304,7 @@ std::string SurfaceEffectProfileManager::to_json() const
         e["multipass"]       = payload_to_json(p.multipass);
         e["stack_top_json"]  = p.stack_top_json;
         e["stack_penu_json"] = p.stack_penu_json;
+        e["auto"]            = p.auto_generated;  // NEOTKO_COLORSTITCH_TAG — PR.3
         arr.push_back(std::move(e));
     }
     root["profiles"] = std::move(arr);
@@ -339,6 +340,9 @@ bool SurfaceEffectProfileManager::from_json(const std::string& text)
             p.stack_top_json  = e["stack_top_json"].get<std::string>();
         if (e.contains("stack_penu_json") && e["stack_penu_json"].is_string())
             p.stack_penu_json = e["stack_penu_json"].get<std::string>();
+        // NEOTKO_COLORSTITCH_TAG — PR.3: absent (legacy) → false = saved.
+        if (e.contains("auto") && e["auto"].is_boolean())
+            p.auto_generated = e["auto"].get<bool>();
         if (p.id <= 0) p.id = m_next_id;
         m_next_id = std::max(m_next_id, p.id + 1);
         m_profiles.push_back(std::move(p));

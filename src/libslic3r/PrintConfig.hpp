@@ -445,6 +445,14 @@ enum CounterboreHoleBridgingOption {
      wtwRib
  };
 
+// NEOTKO_NEOTOWER_TAG s104 — tower type selector (decisión s103: enum estilo
+// wall_type, default Classic; sandwich/multipass still auto-promotes via
+// neotko_forces_tower regardless of this setting).
+enum NeoTowerType {
+    nttClassic = 0,
+    nttNeoTower
+};
+
 static std::string bed_type_to_gcode_string(const BedType type)
 {
     std::string type_str;
@@ -554,6 +562,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NeoTowerType) // NEOTKO_NEOTOWER_TAG s104
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
@@ -1712,6 +1721,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_bridging))
     ((ConfigOptionPercent,            wipe_tower_extra_flow))
     ((ConfigOptionFloat,              local_z_wipe_tower_purge_lines))
+    // NEOTKO_NEOTOWER_TAG s104 — F1 sandwich purge compaction (flow-boost cap)
+    ((ConfigOptionFloat,              neotower_purge_compaction))
+    // NEOTKO_NEOTOWER_TAG s104 — tower type (Classic|NeoTower) + zigurat taper option
+    ((ConfigOptionEnum<NeoTowerType>, neotko_tower_type))
+    ((ConfigOptionBool,               neotower_zigurat))
     ((ConfigOptionFloats,             flush_volumes_matrix))
     ((ConfigOptionFloats,             flush_volumes_vector))
 

@@ -744,6 +744,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "other_layers_print_sequence_nums" 
             || opt_key == "wipe_tower_bridging"
             || opt_key == "wipe_tower_extra_flow"
+            || opt_key == "neotower_purge_compaction" // NEOTKO_NEOTOWER_TAG s104
+            || opt_key == "neotko_tower_type"         // NEOTKO_NEOTOWER_TAG s104
+            || opt_key == "neotower_zigurat"          // NEOTKO_NEOTOWER_TAG s104
+
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "flush_volumes_matrix"
             || opt_key == "prime_volume"
@@ -1404,7 +1408,8 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     const Vec3d         plate_origin = print.get_plate_origin();
     float               x            = config.wipe_tower_x.get_at(plate_index) + plate_origin(0);
     float               y            = config.wipe_tower_y.get_at(plate_index) + plate_origin(1);
-    float               width        = config.prime_tower_width.value;
+    // NEOTKO_NEOTOWER_TAG s103-bd — real box grows by 2·pw (box-in-drawer).
+    float               width        = config.prime_tower_width.value + NeoTower::box_drawer_extra_width(config);
     float               a            = config.wipe_tower_rotation_angle.value;
     //float               v            = config.wiping_volume.value;
 
@@ -1515,6 +1520,12 @@ boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.
 
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
 //BBS: refine seq-print validation logic
+// NEOTKO_NEOTOWER_TAG s104 — forward declarations (defined further below) for
+// the tower-type blocking validation in Print::validate().
+static bool   neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions);
+static bool   neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects);
+static size_t neotko_estimated_virtual_tool_count(const PrintRegionPtrs& print_regions);
+
 StringObjectException Print::validate(StringObjectException *warning, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     std::vector<unsigned int> extruders = this->extruders();
@@ -1525,6 +1536,24 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    // NEOTKO_NEOTOWER_TAG s104 — blocking validation (user decision: explicit
+    // over magic, matching Orca's rigidity). Surface Sandwich / MultiPass /
+    // ColorMix sub-layer purging only works with the NeoTower planner
+    // (variable layer-height purges have no purge path in stock WipeTower2).
+    // Previously the gate silently auto-promoted; now the user must select it.
+    // Note: uses the pre-slice ESTIMATED virtual tool count; the rare corner
+    // where the estimate is <2 but post-slice vtools are ≥2 is still covered
+    // by a logged auto-promote safety net at the _make_wipe_tower gate.
+    if (!m_config.spiral_mode.value
+        && (neotko_any_multi_tool_active(m_print_regions) || neotko_any_profile_with_mp_active(m_objects))
+        && neotko_estimated_virtual_tool_count(m_print_regions) >= 2
+        && !NeoTower::is_enabled(m_config)) {
+        return {L("Surface Sandwich / MultiPass / ColorMix require the NeoTower tower type: "
+                  "their sub-layer purges use variable layer heights that the Classic wipe tower "
+                  "cannot handle.\nSet Prime tower → Tower type to \"NeoTower\"."),
+                nullptr, "neotko_tower_type"};
+    }
 
     if (nozzles < 2 && extruders.size() > 1 && m_config.print_sequence != PrintSequence::ByObject) {
         auto ret = check_multi_filament_valid(*this);
@@ -1636,6 +1665,21 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 if (! check_object_layers_fixed(print_object.slicing_parameters(), layers))
                     return {_u8L("Variable layer height is not supported with Organic supports.") };
         }
+
+    // NEOTKO_NEOTOWER_TAG s104 — adaptive/variable layer height + multiple
+    // filaments needs a wipe tower that purges at per-layer delta-Z heights.
+    // The Classic planner reserves at one height and emits at another → purges
+    // overrun the tower ("se desmadra", user-verified). Stock Orca simply does
+    // not support this combination at all; we support it through NeoTower only,
+    // so block Classic explicitly (also keeps the Snapmaker merge surface
+    // aligned with upstream rigidity).
+    if (this->has_wipe_tower() && extruders.size() > 1 && has_custom_layering
+        && !NeoTower::is_enabled(m_config)) {
+        return {L("Adaptive/variable layer height combined with multiple filaments requires "
+                  "the NeoTower tower type (per-layer variable-height purging).\n"
+                  "Set Prime tower → Tower type to \"NeoTower\", or disable variable layer height."),
+                nullptr, "neotko_tower_type"};
+    }
 
     if (this->has_wipe_tower() && ! m_objects.empty()) {
         // Make sure all extruders use same diameter filament and have the same nozzle diameter
@@ -3020,7 +3064,8 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
     if (check_wipe_tower_existance && (!has_wipe_tower() || m_wipe_tower_data.tool_changes.empty()))
         return corners;
     {
-        double width = m_config.prime_tower_width + 2*m_wipe_tower_data.brim_width;
+        // NEOTKO_NEOTOWER_TAG s103-bd — real box grows by 2·pw (box-in-drawer).
+        double width = m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config) + 2*m_wipe_tower_data.brim_width;
         double depth = m_wipe_tower_data.depth + 2*m_wipe_tower_data.brim_width;
         Vec2d pt0(-m_wipe_tower_data.brim_width, -m_wipe_tower_data.brim_width);
         
@@ -3033,7 +3078,7 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
 
         // Now the stabilization cone.
         Vec2d center = (pts[0] + pts[2])/2.;
-        const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width, m_wipe_tower_data.height, m_wipe_tower_data.depth, m_config.wipe_tower_cone_angle);
+        const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config) /* s103-bd */, m_wipe_tower_data.height, m_wipe_tower_data.depth, m_config.wipe_tower_cone_angle);
         double r = cone_R + m_wipe_tower_data.brim_width;
         for (double alpha = 0.; alpha<2*M_PI; alpha += M_PI/20.)
             pts.emplace_back(center + r*Vec2d(std::cos(alpha)/cone_x_scale, std::sin(alpha)));
@@ -3334,7 +3379,8 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
 {
     // If the wipe tower wasn't created yet, make sure the depth and brim_width members are set to default.
     if (!is_step_done(psWipeTower) && filaments_cnt != 0) {
-        double width        = m_config.prime_tower_width;
+        // NEOTKO_NEOTOWER_TAG s103-bd — real box grows by 2·pw (box-in-drawer).
+        double width        = m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config);
         double layer_height = 0.2; // hard code layer height
         if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
             // Calculating depth should take into account currently set wiping volumes.
@@ -3453,6 +3499,18 @@ void Print::_make_wipe_tower()
     // Activates if explicitly enabled (neotko_wipe_tower=true) OR when neotko_forces_tower
     // (single-filament MultiPass/PathBlend/ColorMix requires purging WipeTower2 cannot handle).
     // Positioned here so ToolOrdering is already built and neotko_forces_tower is computed.
+    // NEOTKO_NEOTOWER_TAG s104 — the forced promotion is now a SAFETY NET only:
+    // Print::validate() blocks sandwich/MP scenes with Classic tower type before
+    // slicing, so this path normally runs with is_enabled()==true. It can still
+    // trigger when the pre-slice estimate undercounted virtual tools (validate
+    // saw <2, post-slice found ≥2) — promote loudly rather than emit broken
+    // purges.
+    if (neotko_forces_tower && !NeoTower::is_enabled(m_config)) {
+        BOOST_LOG_TRIVIAL(warning) << "[NeoTower] AUTO-PROMOTE safety net: tower type is Classic but "
+                                      "post-slice virtual tools require NeoTower purging (validate's "
+                                      "pre-slice estimate undercounted). Proceeding with NeoTower.";
+        NEOTKO_LOG(WIPETOWER, "NEOTOWER_AUTOPROMOTE_SAFETY_NET (Classic selected, vtools>=2 post-slice)");
+    }
     if (NeoTower::is_enabled(m_config) || neotko_forces_tower) {
         m_neo_tower = std::make_unique<NeoTower>(
             m_config,

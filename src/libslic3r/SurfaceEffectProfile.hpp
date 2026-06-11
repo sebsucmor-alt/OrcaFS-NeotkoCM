@@ -34,6 +34,15 @@ struct SurfaceEffectProfile {
     std::string          name;
     uint32_t             preview_argb = 0;  // swatch hint for the 3D painter
 
+    // NEOTKO_COLORSTITCH_TAG — PR.3 two-tier palette. `auto_generated` marks a
+    // profile materialized on-the-fly when a gizmo swatch is painted (a working
+    // paint colour), as opposed to a deliberately SAVED palette entry. Auto
+    // profiles are hidden from the saved-palette list and garbage-collected when
+    // no slot references them. Persisted so the distinction survives a reload
+    // (a painted .3mf still needs the recipe; it just stays "auto"). Default
+    // false → legacy/loaded profiles are treated as saved (never GC'd).
+    bool                 auto_generated = false;
+
     SurfaceEffectPayload colormix;          // Fase A: lo único que se rellena
     SurfaceEffectPayload pathblend;         // Fase G — placeholder
     SurfaceEffectPayload multipass;         // Fase F — placeholder

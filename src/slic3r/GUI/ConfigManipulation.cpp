@@ -520,7 +520,7 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
 
         if (neotko_multi_tool && prime_tower_off && !is_msg_dlg_already_exist) {
             MessageDialog dialog(m_msg_dlg_parent,
-                _L("MultiPass / ColorMix / PathBlend require Prime Tower for correct purging between tools.\n"
+                _L("MultiPass / ColorStitch / PathBlend require Prime Tower for correct purging between tools.\n"
                    "Do you want to enable Prime Tower now?"),
                 _L("Prime Tower required"),
                 wxICON_WARNING | wxYES | wxNO);
@@ -934,6 +934,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
+
+    // NEOTKO_NEOTOWER_TAG s104 — tower type selector + NeoTower-only options.
+    // zigurat/compaction only make sense when the NeoTower planner is selected.
+    {
+        const bool show_tower_type = have_prime_tower && !is_BBL_Printer;
+        toggle_line("neotko_tower_type", show_tower_type);
+        const bool is_neotower = show_tower_type &&
+            config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttNeoTower;
+        toggle_line("neotower_zigurat", is_neotower);
+        toggle_line("neotower_purge_compaction", is_neotower);
+    }
 
     toggle_line("prime_volume",have_prime_tower && (!purge_in_primetower || !bSEMM));
 

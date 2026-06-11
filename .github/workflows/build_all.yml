@@ -32,8 +32,12 @@ on:
         description: 'Release title. Leave empty to use default title'
         type: string
         default: ''
+      release-notes-file:
+        description: 'Release notes file in the repo (e.g. NEOTKOCM_RELEASE_2.md). Read verbatim as the release body. Takes priority over the text field below.'
+        type: string
+        default: ''
       release-notes:
-        description: 'Release notes / changelog (Markdown). Leave empty to auto-detect from CHANGELOG file'
+        description: 'Release notes / changelog (Markdown). Used only if the file above is empty. Leave empty to auto-detect from CHANGELOG file'
         type: string
         default: ''
 
@@ -118,34 +122,39 @@ jobs:
     - name: Compute release metadata
       id: release_meta
       shell: bash
-      env:
-        INPUT_RELEASE_NOTES: ${{ inputs.release-notes }}
-        INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
-        INPUT_RELEASE_TITLE: ${{ inputs.release-title }}
       run: |
         # ── Version (always read from version.inc as the source of truth) ───
         version=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
 
         # ── Tag ─────────────────────────────────────────────────────────────
         # Use the manual input if provided, otherwise fall back to version.inc
-        if [[ -n "$INPUT_RELEASE_TAG" ]]; then
-          tag="$INPUT_RELEASE_TAG"
+        if [[ -n "${{ inputs.release-tag }}" ]]; then
+          tag="${{ inputs.release-tag }}"
         else
           tag="v${version}"
         fi
 
         # ── Title ───────────────────────────────────────────────────────────
         # Use the manual input if provided, otherwise build the default title
-        if [[ -n "$INPUT_RELEASE_TITLE" ]]; then
-          title="$INPUT_RELEASE_TITLE"
+        if [[ -n "${{ inputs.release-title }}" ]]; then
+          title="${{ inputs.release-title }}"
         else
           title="Snapmaker Orca Full Spectrum v${version}"
         fi
 
         # ── Release notes ───────────────────────────────────────────────────
-        # Priority: 1) manual input  2) CHANGELOG/RELEASE_NOTES file  3) auto-generated
-        if [[ -n "$INPUT_RELEASE_NOTES" ]]; then
-          notes_content="$INPUT_RELEASE_NOTES"
+        # Priority: 1) notes file input  2) manual text input
+        #           3) CHANGELOG/RELEASE_NOTES file  4) auto-generated
+        notes_path="${{ inputs.release-notes-file }}"
+        if [[ -n "$notes_path" ]]; then
+          if [ -f "$notes_path" ]; then
+            notes_content=$(cat "$notes_path")
+          else
+            echo "::error::release-notes-file '$notes_path' not found in the repository (path is relative to the repo root)"
+            exit 1
+          fi
+        elif [[ -n "${{ inputs.release-notes }}" ]]; then
+          notes_content="${{ inputs.release-notes }}"
         else
           notes_content=""
           for notes_file in \

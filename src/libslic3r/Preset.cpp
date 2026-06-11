@@ -842,7 +842,8 @@ static std::vector<std::string> s_Preset_print_options {
     "interlayer_neoweave_amplitude", "interlayer_neoweave_period", "interlayer_neoweave_max_z_speed", "interlayer_neoweave_min_length",
     "neoweave_penultimate_layers", "neoweave_speed_pct",
     "neotko_interlayer_nesting_enabled", // NEOTKO_NEOWEAVING_TAG — Feature 14: Monotonic Interlayer Nesting
-    "neotko_wipe_tower", // NEOTKO_NEOTOWER_TAG — NeoTower post-slice wipe tower planner
+    "neotko_wipe_tower", // NEOTKO_NEOTOWER_TAG — legacy checkbox (fallback, hidden since s104)
+    "neotko_tower_type", "neotower_zigurat", // NEOTKO_NEOTOWER_TAG s104 — tower type + zigurat option
     // NEOTKO_COLORMIX_TAG_START
     "interlayer_colormix_enabled", "interlayer_colormix_surface",
     "interlayer_colormix_tool_a", "interlayer_colormix_tool_b",
@@ -973,7 +974,7 @@ static std::vector<std::string> s_Preset_print_options {
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
-     "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
+     "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow", "neotower_purge_compaction", "single_extruder_multi_material_priming",
      "wipe_tower_rotation_angle", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
      "small_area_infill_flow_compensation", "small_area_infill_flow_compensation_model",

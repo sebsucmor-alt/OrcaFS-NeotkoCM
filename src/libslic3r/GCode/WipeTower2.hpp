@@ -48,9 +48,26 @@ public:
 	// Set the extruder properties.
     void set_extruder(size_t idx, const PrintConfig& config);
 
+    // NEOTKO_NEOTOWER_TAG s103-bd — "box-in-drawer": grow the REAL tower box by
+    // 2·m_perimeter_width so the canonical wall ring gets a reserved channel;
+    // synthetic (sandwich) content keeps the original box → inset 1 bead/side.
+    // Call AFTER the set_extruder() loop (m_perimeter_width is derived there)
+    // and BEFORE any plan_toolchange(). Must stay in sync with
+    // NeoTower::box_drawer_extra_width(). Revert: grep "s103-bd".
+    void neo_grow_box_drawer() { m_wipe_tower_width += 2.f * m_perimeter_width; }
+
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
-    void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, bool skip_ramming = false);
+    // NEOTKO_NEOTOWER_TAG s102 — `synthetic`: caller-declared truth for "this plan
+    // entry is a NeoTower sub-layer entry, not a real print layer". NeoTower passes
+    // NeoTowerEvent::is_sublayer; stock callers (Print.cpp) keep the default false.
+    // Replaces the float-gap inference ((next->z - z) < NOMINAL_LH_MIN) used by the
+    // s100 frame-skip guard, which broke in s101/s102 (Teorías A+C): sub-entry gaps
+    // reach 0.0398 mm while the canonical→next-entry gap can be exactly 0.04 mm —
+    // zero float safety margin.
+    // s102-h: `same_plane` qualifies `synthetic` — lámina pass (true) vs
+    // staircase plane (false). Ignored when synthetic == false.
+    void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, bool skip_ramming = false, bool synthetic = false, bool same_plane = false);
     void plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f);
     void plan_local_z_reserve(float z_par, float layer_height_par, size_t reserve_slot_count, float wipe_volume = 0.f);
 
@@ -274,6 +291,12 @@ private:
 	float			m_extra_spacing_wipe    = 1.f;
 	float			m_extra_spacing_ramming = 1.f;
     float           m_local_z_wipe_tower_purge_lines = 3.f;
+    // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction cap (config
+    // neotower_purge_compaction, 1 = off). See ToolChange::flow_mult.
+    float           m_neo_purge_compaction = 1.f;
+    // NEOTKO_NEOTOWER_TAG s104 — zigurat taper option (config neotower_zigurat,
+    // default true). Gates the s103 wall-on-wall shrink constraint in plan_tower.
+    bool            m_neo_zigurat = true;
 
     bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
 
@@ -288,6 +311,11 @@ private:
 
 	// Calculates depth for all layers and propagates them downwards
 	void plan_tower();
+
+    // NEOTKO_NEOTOWER_TAG s104-F2 — Tetris Y allocator: assigns per-entry
+    // neo_y_shift_planned for synthetic sub-layer entries (see WipeTowerInfo).
+    // Runs after plan_tower() (depths final), purely plan-time.
+    void neo_plan_group_y_offsets();
 
     // Goes through m_plan, calculates border and finish_layer extrusions and subtracts them from last wipe
     void save_on_last_wipe();
@@ -309,12 +337,41 @@ private:
             // swap, so the tower ramming is redundant and was starving the useful pre-print
             // wipe in the small sandwich box). Body real-layer TCs keep ramming (skip=false).
             bool  skip_ramming = false;
+            // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction. Plan-time flow
+            // multiplier for this toolchange's wipe (synthetic sandwich TCs
+            // only; 1.0 = stock). plan_toolchange computes it and reserves
+            // required_depth with it; toolchange_Wipe reads it back, so the
+            // reservation and the emitted gcode can never diverge (s78 rule:
+            // reserve == emission). Also the per-TC carrier the F2 occupancy
+            // allocator will write into.
+            float flow_mult = 1.f;
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f, bool skip_ram=false)
             : old_tool{old}, new_tool{newtool}, required_depth{depth}, ramming_depth{ramming_depth}, first_wipe_line{fwl}, wipe_volume{wv}, wipe_volume_total{wv}, skip_ramming{skip_ram} {}
 		};
 		float z;		// z position of the layer
 		float height;	// layer height
 		float depth;	// depth of the layer based on all layers above
+        // NEOTKO_NEOTOWER_TAG s102 — true when every event that landed on this plan
+        // entry was a NeoTower synthetic sub-layer event (see plan_toolchange). The
+        // canonical real-layer entry of a sub-layer group stays false. finish_layer()
+        // uses this to suppress the tower FRAME (empty grid + brim chamfer) on
+        // synthetic entries; the brim chamfer's dist_to_1st counts only entries with
+        // is_synthetic == false.
+        bool is_synthetic = false;
+        // NEOTKO_NEOTOWER_TAG s102-h — true when the synthetic entry sits at the
+        // canonical real layer's physical plane (lámina pass, offset < 0.02 mm).
+        // Lámina entries skip the WHOLE frame (wall+grid+perimeter+brim — they
+        // duplicate the canonical's). Staircase entries (is_synthetic && !this)
+        // keep wall+grid+perimeter — they are the tower's structural shell
+        // between real layers — and skip only the brim.
+        bool is_same_plane = false;
+        // NEOTKO_NEOTOWER_TAG s104-F2 — Tetris Y allocator. Plan-time writer
+        // y_shift for this (synthetic) entry, assigned by neo_plan_group_y_offsets()
+        // so consecutive sub-layer planes land on FRESH physical Y strips inside
+        // the canonical's reserved depth window instead of stacking on the same
+        // strip (and lámina entries stay off the canonical's own purge band).
+        // -1 = unassigned → generate() keeps the stock centering formula.
+        float neo_y_shift_planned = -1.f;
         float normal_toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }
         float local_z_toolchanges_depth() const { float sum = 0.f; for (const auto &a : local_z_tool_changes) sum += a.required_depth; return sum; }
 		float toolchanges_depth() const { return normal_toolchanges_depth() + local_z_toolchanges_depth(); }
@@ -384,12 +441,19 @@ private:
                                       bool                   extrude_perimeter,
                                       bool                   skip_points);
 
+    // NEOTKO_NEOTOWER_TAG s102-g — extrude_perimeter mirrors the rib variant:
+    // false computes and returns the wall polygon (needed for the post-brim wipe
+    // points) without emitting any gcode. Used by the synthetic sub-entry frame
+    // guard in finish_layer(); the s102-e guard only covered the rib branch, so
+    // cone-wall profiles kept stacking one wall per sub-entry (user-verified:
+    // full-tower rectangle by T0 at z=0.878 — degenerate cone emits a rectangle).
     Polygon generate_support_cone_wall(
-        WipeTowerWriter2& writer, 
-		const WipeTower::box_coordinates& wt_box, 
-		double feedrate, 
-		bool infill_cone, 
-		float spacing);
+        WipeTowerWriter2& writer,
+		const WipeTower::box_coordinates& wt_box,
+		double feedrate,
+		bool infill_cone,
+		float spacing,
+		bool extrude_perimeter = true);
 
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
 };

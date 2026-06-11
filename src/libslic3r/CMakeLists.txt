@@ -319,6 +319,17 @@ set(lisbslic3r_sources
     SurfaceColorMix.hpp
     SurfaceEffectProfile.cpp
     SurfaceEffectProfile.hpp
+    # NEOTKO_COLORSCI_TAG — ColorSci engine (COLORSTITCH_STUDIO_PLAN P0/P1/P5)
+    ColorSci/ColorSci.hpp
+    ColorSci/ColorSci.cpp
+    ColorSci/StackFlatten.hpp
+    ColorSci/StackFlatten.cpp
+    ColorSci/GradientRamp.hpp
+    ColorSci/GradientRamp.cpp
+    ColorSci/WeaveLibrary.hpp
+    ColorSci/WeaveLibrary.cpp
+    ColorSci/ColorPredict.hpp
+    ColorSci/ColorPredict.cpp
     filament_mixer.cpp
     filament_mixer.h
     filament_mixer_model.h

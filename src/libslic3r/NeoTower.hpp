@@ -213,9 +213,19 @@ public:
     // Returns nullopt only on programming error (missing event).
     // GCode.cpp should BOOST_LOG on nullopt.
     // -----------------------------------------------------------------------
+    // NEOTKO_NEOTOWER_TAG s102 — `sublayer_ctx`: lookup channel. The last sublayer
+    // plane and the real layer share the same µm-quantized Z by design (sub
+    // z=0.8798 and real z=0.88 both → 880 µm), so a sub TC and a real TC with the
+    // same (old,new) pair produce IDENTICAL keys. One map cannot disambiguate them
+    // (s102 finding: the canonical frame TCR was served to sublayer prime lookups →
+    // duplicate brim at 0.878/0.880 and orphaned sub purge). Sublayer prime
+    // dispatches pass true; real-layer / recovery dispatches keep the default.
+    // Resolution falls back to the other channel (logged CROSS_CHANNEL) so legacy
+    // behaviour is preserved wherever the channels do not collide.
     std::optional<WipeTower::ToolChangeResult> get_tcr(float  z_actual,
                                                         size_t old_tool,
-                                                        size_t new_tool) const;
+                                                        size_t new_tool,
+                                                        bool   sublayer_ctx = false) const;
 
     // -----------------------------------------------------------------------
     // Structural-layer TCR lookup for GCode.cpp.
@@ -245,6 +255,11 @@ public:
     // Returns true when the config key neotko_wipe_tower is true.
     // Used by Print.cpp / GCode.cpp to choose between NeoTower and WipeTower2.
     static bool is_enabled(const PrintConfig& config);
+
+    // NEOTKO_NEOTOWER_TAG s103-bd — "box-in-drawer": extra width the REAL tower
+    // box grows by (2·perimeter_width; 0 when NeoTower disabled). Every plate
+    // footprint consumer in Print.cpp must add this to prime_tower_width.
+    static float box_drawer_extra_width(const PrintConfig& config);
 
 private:
     // -----------------------------------------------------------------------
@@ -307,7 +322,14 @@ private:
     std::vector<std::vector<WipeTower::ToolChangeResult>> m_result;
 
     // O(1) TCR lookup: make_key(...) → {layer_idx, slot_idx} into m_result.
+    // NEOTKO_NEOTOWER_TAG s102 — dual channel: m_tcr_index holds REAL-layer TCs,
+    // m_tcr_index_sub holds sublayer TCs (ev.is_sublayer). The last sub plane and
+    // the real plane quantize to the same µm, so the same (z_um, old, new) key can
+    // legitimately exist in BOTH channels pointing at different TCRs (Hallazgo VII
+    // collision, s102). get_tcr() picks the channel from its sublayer_ctx argument
+    // and cross-falls-back. V16 detects collisions WITHIN a channel (still bugs).
     std::unordered_map<uint64_t, std::pair<size_t, size_t>> m_tcr_index;
+    std::unordered_map<uint64_t, std::pair<size_t, size_t>> m_tcr_index_sub;
 
     // O(1) structural-layer lookup: z_um → {layer_idx, slot_idx} into m_result.
     // Only populated for structural events (old_tool == new_tool, !is_sublayer).

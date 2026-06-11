@@ -199,6 +199,70 @@ inline std::vector<size_t> order_sublayers_by_tool(const std::vector<SublayerKey
     return order;
 }
 
+// NEOTKO_NEOTOWER_TAG s102 — per-process-layer-call replay.
+//
+// GCode reorders sublayers once per process_layer call, and
+// collect_layers_to_print partitions entries into Z windows
+// [z_first, z_first + eps] (eps = Slic3r EPSILON = 1e-4, GCode.cpp ~2199
+// "Merge numerically very close Z values"). Consequences:
+//   - Classic MP planes (~0.001 apart)        → one window per plane.
+//   - PathBlend scanline chains (1e-7 apart)  → a single window, so the
+//     s88/s89 atomic-chain drain semantics are preserved bit-for-bit.
+//
+// NeoTower previously replayed the WHOLE z_nominal group in one
+// order_sublayers_by_tool call (s89). For multi-plane classic MP groups that
+// diverges from GCode's per-call ordering: the predicted group-exit tool (and
+// therefore the real-layer rotation and the real TC pair) can differ from what
+// the writer actually does — s102 finding: NeoTower planned the real layer as
+// [T1,T0]/TC 1→0 while GCode emitted [T0,T1]/TC 0→1, so the canonical frame
+// TCR was never dispatched (missing brim at z=0.88) and unpredicted
+// transitions inside multi-plane groups produced get_tcr MISSes.
+//
+// This helper reproduces GCode's effective behaviour: greedy windows over
+// ascending z_actual, each window ordered by order_sublayers_by_tool with the
+// running tool chained across windows (the writer carries over between
+// process_layer calls). Returns the concatenated permutation (indices into
+// `items`). With a single window it degenerates to order_sublayers_by_tool —
+// identical output to the pre-s102 global call.
+inline std::vector<size_t> order_sublayers_by_tool_windowed(
+    const std::vector<SublayerKey>& items, int initial_tool, double window_eps)
+{
+    std::vector<size_t> out;
+    const size_t n = items.size();
+    if (n == 0)
+        return out;
+    out.reserve(n);
+
+    // Indices sorted by z_actual; stable so equal-z items keep their original
+    // relative order (mirrors collect_layers_to_print's stable z sort).
+    std::vector<size_t> by_z(n);
+    for (size_t i = 0; i < n; ++i)
+        by_z[i] = i;
+    std::stable_sort(by_z.begin(), by_z.end(), [&](size_t a, size_t b) {
+        return items[a].z_actual < items[b].z_actual;
+    });
+
+    int running = initial_tool;
+    size_t i = 0;
+    while (i < n) {
+        const double zmax = items[by_z[i]].z_actual + window_eps;
+        size_t j = i + 1;
+        while (j < n && items[by_z[j]].z_actual <= zmax)
+            ++j;
+        std::vector<SublayerKey> wnd;
+        wnd.reserve(j - i);
+        for (size_t k = i; k < j; ++k)
+            wnd.push_back(items[by_z[k]]);
+        const std::vector<size_t> ord = order_sublayers_by_tool(wnd, running);
+        for (size_t oi : ord)
+            out.push_back(by_z[i + oi]);
+        if (!ord.empty())
+            running = wnd[ord.back()].tool_id;
+        i = j;
+    }
+    return out;
+}
+
 } // namespace MultiPassScheduler
 } // namespace Slic3r
 

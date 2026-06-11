@@ -478,6 +478,13 @@ static const t_config_enum_values s_keys_map_WipeTowerWallType{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeTowerWallType)
 
+// NEOTKO_NEOTOWER_TAG s104 — tower type enum
+static const t_config_enum_values s_keys_map_NeoTowerType{
+    {"classic", nttClassic},
+    {"neotower", nttNeoTower},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoTowerType)
+
 // NEOTKO_MULTIPASS_TAG_START — enum static maps for Neoweaving + ColorMix + MultiPass
 static t_config_enum_values s_keys_map_NeoweaveMode {
     { "wave",   int(NeoweaveMode::Wave)   },
@@ -1670,7 +1677,10 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("archimedeanchords");
     def->enum_values.push_back("octagramspiral");
     // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch experimental pattern.
-    def->enum_values.push_back("microstitch");
+    // NEOTKO_COLORSTITCH_TAG — beta WIP: oculto del dropdown (enum_keys_map y el
+    // dispatch en FillBase siguen intactos → presets viejos con "microstitch"
+    // no rompen; solo deja de ser seleccionable). Reactivar quitando el //.
+    //def->enum_values.push_back("microstitch");
     def->enum_labels.push_back(L("Monotonic"));
     def->enum_labels.push_back(L("Monotonic line"));
     def->enum_labels.push_back(L("Rectilinear"));
@@ -1679,7 +1689,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Hilbert Curve"));
     def->enum_labels.push_back(L("Archimedean Chords"));
     def->enum_labels.push_back(L("Octagram Spiral"));
-    def->enum_labels.push_back(L("Micro Stitch (Neotko)"));
+    //def->enum_labels.push_back(L("Micro Stitch (Neotko)"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
 
     def = this->add("bottom_surface_pattern", coEnum);
@@ -6134,6 +6144,60 @@ void PrintConfigDef::init_fff_params()
     def->min = 1.0;
     def->set_default_value(new ConfigOptionFloat(3.0));
 
+    // NEOTKO_NEOTOWER_TAG s104 — F1 sandwich purge compaction. Sandwich/MultiPass
+    // sub-layer purges run at microscopic heights (0.04mm): a purge volume laid
+    // that thin needs ~5x the area of a normal-height purge, which inflates the
+    // tower footprint. This multiplier caps a flow boost applied ONLY to those
+    // synthetic toolchange wipes: the head keeps its plane, pushes up to N x the
+    // plastic per mm (never above ~nozzle/2 equivalent height) and the purge
+    // band shrinks accordingly; the surplus hangs into the hollow tower grid
+    // below (sandwich purges already print without bridging for this reason).
+    // 1 = off (bit-identical to previous behavior).
+    def = this->add("neotower_purge_compaction", coFloat);
+    def->label = L("Sandwich purge compaction");
+    def->tooltip = L("Flow-boost cap for sandwich/MultiPass sub-layer purges on the wipe tower. "
+                     "Values above 1 compact those thin purges into a narrower band by extruding "
+                     "more material per millimeter (the excess hangs into the hollow tower interior), "
+                     "reducing the wipe tower footprint. 1 disables compaction. "
+                     "Requires test prints to find what your material tolerates.");
+    def->mode = comAdvanced;
+    def->min = 1.0;
+    def->max = 5.0;
+    def->set_default_value(new ConfigOptionFloat(1.7)); // NEOTKO_COLORSTITCH_TAG — beta default
+
+    // NEOTKO_NEOTOWER_TAG s104 — tower type selector (decisión s103). Sandwich /
+    // single-filament MultiPass still auto-promotes to NeoTower regardless
+    // (neotko_forces_tower in Print.cpp) — this selects the planner for plain
+    // multi-tool scenes and exposes the NeoTower-only options below.
+    def = this->add("neotko_tower_type", coEnum);
+    def->label = L("Tower type");
+    def->category = L("Prime tower");
+    def->tooltip = L("Wipe tower planner.\n"
+                     "1. Classic: the standard WipeTower2 planner.\n"
+                     "2. NeoTower: post-slice planner that sees every toolchange (including "
+                     "sandwich sub-layer primes) before committing to any geometry. Fixed "
+                     "footprint, delta-Z aware, with zigurat taper and purge compaction options.\n\n"
+                     "Sandwich/MultiPass scenes use NeoTower automatically regardless of this setting.");
+    def->enum_keys_map = &ConfigOptionEnum<NeoTowerType>::get_enum_values();
+    def->enum_values.emplace_back("classic");
+    def->enum_values.emplace_back("neotower");
+    def->enum_labels.emplace_back("Classic");
+    def->enum_labels.emplace_back("NeoTower");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<NeoTowerType>(nttClassic));
+
+    // NEOTKO_NEOTOWER_TAG s104 — zigurat taper option (decisión s103: OPCIÓN del
+    // tipo NeoTower; default ON = safe wall-on-wall, OFF = less material/time).
+    def = this->add("neotower_zigurat", coBool);
+    def->label = L("Zigurat taper");
+    def->category = L("Prime tower");
+    def->tooltip = L("Limit how fast the NeoTower footprint may shrink between consecutive "
+                     "real layers (one perimeter width per side), so every wall ring rests "
+                     "on the ring below (wall-on-wall). Disable to save material and time at "
+                     "the cost of rings partially supported by the sparse grid.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("idle_temperature", coInts);
     def->label = L("Idle temperature");
     def->tooltip = L("Nozzle temperature when the tool is currently not used in multi-tool setups. "
@@ -6985,7 +7049,7 @@ void PrintConfigDef::init_fff_params()
 
     // NEOTKO_COLORMIX_TAG_START — Surface ColorMix
     def = this->add("interlayer_colormix_enabled", coBool);
-    def->label = L("Enable Surface ColorMix");
+    def->label = L("Enable Surface ColorStitch"); // NEOTKO_COLORSTITCH_TAG
     def->category = L("Quality");
     def->tooltip = L("Distributes top and/or penultimate surface lines across multiple extruders "
                      "to create a mixed-color effect. Requires a multi-material setup (2-4 extruders).");
@@ -7059,9 +7123,9 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(-1));
 
     def = this->add("interlayer_colormix_min_length", coFloat);
-    def->label = L("Minimum line length (ColorMix)");
+    def->label = L("Minimum line length (ColorStitch)"); // NEOTKO_COLORSTITCH_TAG
     def->category = L("Quality");
-    def->tooltip = L("ColorMix skips lines shorter than this value — they are printed with the "
+    def->tooltip = L("ColorStitch skips lines shorter than this value — they are printed with the "
                      "region's default extruder instead of being split by tool.\n"
                      "Higher values = fewer tool changes but more uncoloured gaps.\n"
                      "Set to 0 to colour every line regardless of length.");
@@ -7390,7 +7454,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("interlayer_colormix_angle", coInt);
     def->label = L("Infill angle override");
     def->category = L("Quality");
-    def->tooltip = L("Override standard infill rotation angle on layers where ColorMix is active.\n"
+    def->tooltip = L("Override standard infill rotation angle on layers where ColorStitch is active.\n"
                      "-1 = Use standard (default/OrcaSlicer settings).\n"
                      "0 to 359 = Override with this angle in degrees.");
     def->min = -1;
@@ -7570,14 +7634,14 @@ void PrintConfigDef::init_fff_params()
     // Applies to both Top and Penultimate sublayer primes (MultiPass + ColorMix + PathBlend).
     // The legacy `penultimate_multipass_prime_volume` is removed; this key is the single source.
     def = this->add("multipass_prime_volume", coFloat);
-    def->label = L("SurfaceColorMix wipe reserve");
-    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each SurfaceColorMix "
-                     "sublayer toolchange (MultiPass / ColorMix / PathBlend, Top + Penultimate). "
+    def->label = L("SurfaceColorStitch wipe reserve"); // NEOTKO_COLORSTITCH_TAG
+    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each SurfaceColorStitch "
+                     "sublayer toolchange (MultiPass / ColorStitch / PathBlend, Top + Penultimate). "
                      "Set to 0 to disable. Requires a wipe tower (NeoTower or prime tower) active. "
                      "Lower values = thinner / shorter wipe tower; higher values = better purge.");
     def->sidetext = L("mm³");
     def->min = 0; def->max = 200; def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.f));
+    def->set_default_value(new ConfigOptionFloat(10.f)); // NEOTKO_COLORSTITCH_TAG — beta default
 
     // NEOTKO_MULTIPASS_TAG_START — Perimeter Override
     def = this->add("multipass_perimeter_override", coBool);

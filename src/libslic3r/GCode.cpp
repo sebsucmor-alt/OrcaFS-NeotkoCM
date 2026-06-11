@@ -1336,15 +1336,30 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                 && gcodegen.writer().extruder() != nullptr) {
             const size_t       current_tool = gcodegen.writer().extruder()->id();
             auto tcr_opt = gcodegen.m_neo_tower->get_tcr(
-                float(toolchange_print_z), current_tool, size_t(extruder_id));
+                float(toolchange_print_z), current_tool, size_t(extruder_id),
+                /*sublayer_ctx=*/true); // NEOTKO_NEOTOWER_TAG s102 — sublayer prime → sub channel
             if (tcr_opt) {
                 BOOST_LOG_TRIVIAL(debug) << "NeoTower: sublayer prime TCR found"
                                          << " z_actual=" << toolchange_print_z
                                          << " old=" << current_tool
                                          << " new=" << extruder_id;
+                // NEOTKO_NEOTOWER_TAG s104-z — emit the TCR at ITS plane, not the
+                // requester's. z_redirect serves events with the NEXT plane's fused
+                // TCR; printing it at the requesting sublayer's z dropped its purge
+                // band 1 plane down, onto a strip that plane had already purged
+                // (double material at the same z) while its own plane kept a hole.
+                // Shift in writer z-space by the plan-space delta (z_offset cancels).
+                // Only upward (redirect); plain HITs have delta ~0 and are untouched.
+                double emit_z = tower_z;
+                if ((double)tcr_opt->print_z > toolchange_print_z + (double)NeoTowerZ::Z_EPS_PLAN) {
+                    emit_z = tower_z + ((double)tcr_opt->print_z - toolchange_print_z);
+                    NEOTKO_LOG(WIPETOWER, "Z_REALIGN(sub-prime): req_z=" << toolchange_print_z
+                        << " tcr.print_z=" << tcr_opt->print_z
+                        << " emit_z=" << emit_z);
+                }
                 return gcodegen.is_BBL_Printer()
-                           ? append_tcr(gcodegen, *tcr_opt, extruder_id, tower_z)
-                           : append_tcr2(gcodegen, *tcr_opt, extruder_id, tower_z);
+                           ? append_tcr(gcodegen, *tcr_opt, extruder_id, emit_z)
+                           : append_tcr2(gcodegen, *tcr_opt, extruder_id, emit_z);
             }
             BOOST_LOG_TRIVIAL(warning)
                 << "NeoTower::get_tcr() returned nullopt for sublayer prime"
@@ -1659,7 +1674,18 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                                 << " tcr.initial=T" << tcr_opt->initial_tool
                                 << " tcr.new=T" << tcr_opt->new_tool
                                 << " tcr.print_z=" << tcr_opt->print_z);
-                            gcode += append_tcr2(gcodegen, *tcr_opt, extruder_id, wipe_tower_z);
+                            // NEOTKO_NEOTOWER_TAG s104-z — same plane-realign as the
+                            // sublayer-prime site: a redirected (fused) TCR must print
+                            // at ITS plane, not the requesting layer's z. See comment
+                            // at the sub-prime dispatch above.
+                            double emit_z = wipe_tower_z;
+                            if (tcr_opt->print_z > layer_z + NeoTowerZ::Z_EPS_PLAN) {
+                                emit_z = wipe_tower_z + ((double)tcr_opt->print_z - (double)layer_z);
+                                NEOTKO_LOG(WIPETOWER, "Z_REALIGN(real): req_z=" << layer_z
+                                    << " tcr.print_z=" << tcr_opt->print_z
+                                    << " emit_z=" << emit_z);
+                            }
+                            gcode += append_tcr2(gcodegen, *tcr_opt, extruder_id, emit_z);
                         } else {
                             // Fallback: index-based (should not happen with NeoTower active).
                             BOOST_LOG_TRIVIAL(warning)
@@ -1680,8 +1706,30 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                                 << " → fallback to stale plan slot");
                             // tc_idx was already incremented; use idx-1 for the fallback TCR.
                             const int fallback_idx = m_tool_change_idx - 1;
-                            if (fallback_idx >= 0 && fallback_idx < (int)m_tool_changes[m_layer_idx].size())
-                                gcode += append_tcr2(gcodegen, m_tool_changes[m_layer_idx][fallback_idx], extruder_id, wipe_tower_z);
+                            if (fallback_idx >= 0 && fallback_idx < (int)m_tool_changes[m_layer_idx].size()) {
+                                // NEOTKO_NEOTOWER_TAG s104 — identity-request guard.
+                                // Adaptive-height multi-tool scenes produce identity
+                                // requests (cur == req, T→T structural visits) that
+                                // get_tcr() does not index (identity events live in the
+                                // finish channel — V5 debt). The blind fallback only
+                                // worked when the slot happened to BE that layer's
+                                // identity TCR; if the slot is a real toolchange for a
+                                // DIFFERENT tool pair, emitting it purges with the wrong
+                                // geometry/tool. Emit the slot only when it matches the
+                                // identity request; otherwise emit nothing (an identity
+                                // visit needs no purge).
+                                const auto& _fb = m_tool_changes[m_layer_idx][fallback_idx];
+                                const bool _identity_req = (cur_tool == (size_t)extruder_id);
+                                if (!_identity_req
+                                    || (_fb.initial_tool == _fb.new_tool && _fb.new_tool == extruder_id)) {
+                                    gcode += append_tcr2(gcodegen, _fb, extruder_id, wipe_tower_z);
+                                } else {
+                                    NEOTKO_LOG(WIPETOWER, "GETTCR_MISS_IDENTITY_SKIP z=" << layer_z
+                                        << " req=T" << extruder_id
+                                        << " slot=T" << _fb.initial_tool << "->T" << _fb.new_tool
+                                        << " → no TCR emitted (identity needs no purge)");
+                                }
+                            }
                         }
                     } else {
                         // NEOTKO_DEBUG_TAG s85b — confirm whether we are in the non-NeoTower

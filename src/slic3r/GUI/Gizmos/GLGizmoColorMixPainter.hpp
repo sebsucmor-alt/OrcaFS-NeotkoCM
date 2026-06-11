@@ -8,7 +8,10 @@
 
 #include "GLGizmoPainterBase.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "libslic3r/ColorSci/ColorPredict.hpp"   // NEOTKO_COLORSTITCH_TAG — PR.2 palette strips
 #include <map>
+#include <string>
+#include <vector>
 
 namespace Slic3r::GUI {
 
@@ -32,9 +35,9 @@ protected:
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
 
-    std::string get_gizmo_entering_text() const override { return _u8L("Entering ColorMix Painter"); }
-    std::string get_gizmo_leaving_text()  const override { return _u8L("Leaving ColorMix Painter"); }
-    std::string get_action_snapshot_name() const override { return _u8L("ColorMix painting editing"); }
+    std::string get_gizmo_entering_text() const override { return _u8L("Entering ColorStitch Painter"); }
+    std::string get_gizmo_leaving_text()  const override { return _u8L("Leaving ColorStitch Painter"); }
+    std::string get_action_snapshot_name() const override { return _u8L("ColorStitch painting editing"); }
 
     // Painter state encoding: slot index 1..15 maps directly to EnforcerBlockerType(N).
     EnforcerBlockerType get_left_button_state_type()  const override;
@@ -60,6 +63,44 @@ private:
 
     // Build per-volume ebt color palette from the slot→profile table + manager.
     std::vector<ColorRGBA> build_ebt_colors_for_volume(const ModelVolume* mv) const;
+
+    // NEOTKO_COLORSTITCH_TAG_START — PR.2 (COLORSTITCH_PAINTER_REVAMP_PLAN.md):
+    // estilo-paletas generadas por el dispatcher ColorSci::build_palette y
+    // cacheadas. Se regeneran SOLO cuando cambia el contexto (filamentos / TD /
+    // layer height / tools del gradient), no cada frame.
+    void gizmo_materials(Slic3r::ColorSci::Material out[4],
+                         std::vector<std::string>& fcolors_out) const;
+    void rebuild_palettes_if_stale();
+    void render_palette_panel(float window_width);
+
+    // PR.3 — modelo de dos capas (auto vs guardadas):
+    //  · set_active_recipe: click en swatch = SOLO fija el color activo (no crea
+    //    profile ni quema slot — navegar la paleta no contamina nada).
+    //  · ensure_active_slot: materializa el slot+profile AUTO (dedup) la primera
+    //    vez que se pinta de verdad con el color activo. Llamado desde
+    //    get_left_button_state_type.
+    //  · garbage_collect_auto_profiles: borra profiles auto sin slot que los use.
+    //  · save_active_as_palette: promueve el color activo a paleta GUARDADA
+    //    (auto_generated=false → aparece en la lista, ya no se hace GC).
+    void set_active_recipe(const Slic3r::ColorSci::ColorRecipe& r,
+                           const std::string& style);
+    int  ensure_active_slot();
+    void garbage_collect_auto_profiles();
+    void save_active_as_palette();
+
+    std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_flat;
+    std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_mixed;
+    std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_gradient;
+    std::string m_pal_key;          // firma del contexto con el que se generaron
+    int  m_grad_tool_a = 0;         // A/B del gradient (selección UI: fase posterior)
+    int  m_grad_tool_b = 1;
+
+    // Color activo de pintura (capa "auto"). Sin slot hasta que se pinta.
+    Slic3r::ColorSci::ColorRecipe m_active_recipe;
+    std::string                   m_active_style;       // para el nombre al materializar/guardar
+    bool                          m_has_active_recipe = false;
+    bool                          m_active_resolved   = false;  // slot ya materializado
+    // NEOTKO_COLORSTITCH_TAG_END
     // Refresh all triangle-selector palettes after profile/slot table changes.
     void refresh_selector_palettes();
 

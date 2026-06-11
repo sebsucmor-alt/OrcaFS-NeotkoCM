@@ -17,6 +17,7 @@
 #include <set>
 #include <unordered_map>
 #include <cstdlib>
+#include <fstream>   // NEOTKO_NEOTOWER_TAG s102-f — TCR gcode dump
 
 // NEOTKO_NEOTOWER_TAG_START — NeoDebug routing
 #include "SurfaceColorMix.hpp"  // NEOTKO_NEOTOWER_TAG — NeoDebug.
@@ -96,14 +97,42 @@ NeoTower::NeoTower(const PrintConfig&                     config,
 // ---------------------------------------------------------------------------
 bool NeoTower::is_enabled(const PrintConfig& config)
 {
-    // Config key added in PrintConfig.hpp/cpp: neotko_wipe_tower (ConfigOptionBool).
-    const auto* opt = config.option<ConfigOptionBool>("neotko_wipe_tower");
-    if (!opt) {
-        NT_LOG("is_enabled(): key 'neotko_wipe_tower' NOT FOUND in config");
+    // NEOTKO_NEOTOWER_TAG s104 — the tower type enum is the source of truth
+    // (decisión s103: selector estilo wall_type, default Classic). The legacy
+    // checkbox key neotko_wipe_tower is kept as a fallback so profiles/3mf
+    // saved before s104 do not silently lose NeoTower (the enum loads at its
+    // Classic default there).
+    // s104 follow-up: the enum is the ONLY truth. The legacy checkbox fallback
+    // made "Classic" unselectable for any profile saved with the old checkbox
+    // ON (invisible key always won) — observed by the user. Old profiles must
+    // re-select Tower type = NeoTower once; the blocking validation in
+    // Print::validate() catches sandwich scenes that forget.
+    const auto* type_opt = config.option<ConfigOptionEnum<NeoTowerType>>("neotko_tower_type");
+    if (!type_opt) {
+        NT_LOG("is_enabled(): key 'neotko_tower_type' NOT FOUND in config");
         return false;
     }
-    NT_LOG("is_enabled() → " << (opt->value ? "TRUE" : "FALSE"));
-    return opt->value;
+    const bool en = (type_opt->value == nttNeoTower);
+    NT_LOG("is_enabled() → " << (en ? "TRUE (tower type = NeoTower)" : "FALSE (tower type = Classic)"));
+    return en;
+}
+
+// NEOTKO_NEOTOWER_TAG s103-bd — "box-in-drawer" extra width.
+// The REAL tower box (drawer) grows by 2·perimeter_width so the canonical wall
+// ring gets a reserved channel; sandwich/synthetic content keeps the original
+// (config) box and ends up inset 1 bead per side. Single source of truth for
+// every plate-footprint consumer (Print.cpp bbox/conflict/cone) — must match
+// WipeTower2::neo_grow_box_drawer() (which uses m_perimeter_width =
+// nozzle_diameter × Width_To_Nozzle_Ratio = 1.25, WipeTower.hpp:281).
+// Revert: grep "s103-bd" and remove every tagged block.
+float NeoTower::box_drawer_extra_width(const PrintConfig& config)
+{
+    if (!is_enabled(config))
+        return 0.f;
+    const float nozzle = config.nozzle_diameter.values.empty()
+                             ? 0.4f
+                             : static_cast<float>(config.nozzle_diameter.values.front());
+    return 2.f * nozzle * 1.25f;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,8 +313,14 @@ void NeoTower::collect_all_events(const Print& print)
         // std::map<double, …> first, but with 1e-7 inter-scanline spacing
         // every scanline became its own plane → atomic_chain inert.
         const std::vector<MultiPassScheduler::SublayerKey>& src = it->second;
+        // NEOTKO_NEOTOWER_TAG s102 — per-window replay (Fase 7.2). The s89 global
+        // call diverged from GCode for multi-plane classic-MP groups: GCode
+        // reorders per process_layer call (one Z window of EPSILON=1e-4, see
+        // collect_layers_to_print), with the writer tool chaining across calls.
+        // PathBlend scanline chains (1e-7 spacing) still land in ONE window, so
+        // the s88/s89 atomic-chain behaviour is unchanged for them.
         std::vector<size_t> ord =
-            MultiPassScheduler::order_sublayers_by_tool(src, entering_tool);
+            MultiPassScheduler::order_sublayers_by_tool_windowed(src, entering_tool, EPSILON);
         std::vector<MultiPassScheduler::SublayerKey> out;
         out.reserve(ord.size());
         for (size_t idx : ord)
@@ -1041,8 +1076,13 @@ void NeoTower::collect_all_events(const Print& print)
                         item_to_se.push_back(k);
                     }
 
+                    // NEOTKO_NEOTOWER_TAG s102 — per-window replay (Fase 7.2), same
+                    // rationale as mp_group_canon_order: must match GCode's
+                    // per-process_layer-call reordering or the planned TC chain
+                    // (and the synthetic coverage derived from it) diverges from
+                    // emission → real-TC pair mismatch + get_tcr MISSes.
                     std::vector<size_t> order =
-                        MultiPassScheduler::order_sublayers_by_tool(items, (int)chain_cur);
+                        MultiPassScheduler::order_sublayers_by_tool_windowed(items, (int)chain_cur, EPSILON);
 
                     // Walk the canon order, emitting events with (old, new)
                     // chained from chain_cur. Consecutive items with the same
@@ -1396,9 +1436,27 @@ void NeoTower::collect_all_events(const Print& print)
                     sublayer_zums.insert(z_um64(ev.z_actual));
 
             // Walk ToolOrdering sequentially, tracking current_tool.
-            size_t struct_tool = tool_ordering.first_extruder();
-            if (struct_tool == (size_t)-1)
-                struct_tool = m_initial_tool;
+            // NEOTKO_NEOTOWER_TAG s103 — mirror GCode's initial_extruder_id rule
+            // (same s66 fix 1a already has; this generator never got it).
+            // first_extruder() said T1 while GCode (non-BBL + wipe tower +
+            // !semm_priming) starts on all_extruders().back() = T0 → the first
+            // structural event came out as T1→T0, which (a) GCode never
+            // dispatches (it requests the identity T0→T0 → get_tcr MISS at
+            // z=first_layer, served only by the stale-slot fallback) and
+            // (b) poisoned effective_initial detection (the bogus 1→0 was the
+            // only min-z event, so chain-start = T1). With the mirrored init
+            // the first event is the identity T0→T0 growth event, served via
+            // get_finish_layer like every other identity layer.
+            size_t struct_tool;
+            if (!print.is_BBL_printer() && tool_ordering.has_wipe_tower()
+                && !cfg.single_extruder_multi_material_priming.value
+                && !tool_ordering.all_extruders().empty()) {
+                struct_tool = tool_ordering.all_extruders().back();
+            } else {
+                struct_tool = tool_ordering.first_extruder();
+                if (struct_tool == (size_t)-1)
+                    struct_tool = m_initial_tool;
+            }
             bool first_real_layer_struct = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
 
             for (const LayerTools& lt : tool_ordering) {
@@ -1848,6 +1906,7 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     result.clear();
     m_result.clear();
     m_tcr_index.clear();
+    m_tcr_index_sub.clear(); // NEOTKO_NEOTOWER_TAG s102 — dual-channel index
     m_finish_layer_index.clear();
     m_merged_tcrs.clear();
     m_merged_index.clear();
@@ -1941,6 +2000,12 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     for (size_t t : all_tools)
         wt2.set_extruder(t, *m_print_config);
 
+    // NEOTKO_NEOTOWER_TAG s103-bd — grow the real box (drawer). After
+    // set_extruder (m_perimeter_width final), before any plan_toolchange so
+    // the real-entry wipe-length math sees the grown width. Synthetic entries
+    // keep the original box via the s103-bd branches in WipeTower2.
+    wt2.neo_grow_box_drawer();
+
     // -----------------------------------------------------------------------
     // Phase 1: Feed plan to WipeTower2 via plan_toolchange().
     //
@@ -1986,16 +2051,52 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     // tc_count_per_wt2_li removed — tc_idx is now derived from raw_result after generate(),
     // not from the feed order.  See "Re-derive tc_idx" block below.
 
+    // NEOTKO_NEOTOWER_TAG s103 — delta-Z height normalization (frame + wipes).
+    // Plan entries used to carry the NOMINAL layer height even when the plane
+    // physically sits only ~0.1 above the previous emitted tower plane (a
+    // staircase shell between two real layers, s102-h). set_layer() derives
+    // m_extrusion_flow and the wipe lengths from entry.height, so the canonical
+    // layer right after a staircase over-extruded its wall/grid/wipes 2× into a
+    // half-size gap, and láminas over-extruded onto the staircase plane too.
+    // Fix at the FEED (not as a post-pass over m_plan): plan_toolchange computes
+    // each ToolChange's required_depth from layer_height_par at call time, so
+    // passing the corrected height here keeps depth reservation == emission
+    // (Plan == Emisión; a post-pass would resurrect the s78 overflow).
+    // Rule: height = (z − z_prev_emitting_plane) ONLY when that delta is SMALLER
+    // than the carried nominal (floored to NOMINAL_LH_MIN). It never grows the
+    // height, so sparse-gap behaviour (delta > nominal) is unchanged.
+    // Lámina entries (no plane of their own) never advance the tracker; their
+    // wipes still get the delta height to their structural support plane.
+    float last_emitting_plane_z = 0.f;
+    auto  eff_layer_height = [&](float z, float nominal_h) -> float {
+        const float delta = z - last_emitting_plane_z;
+        if (delta > NeoTowerZ::Z_EPS_PLAN && delta < nominal_h - NeoTowerZ::Z_EPS_PLAN) {
+            const float eff = std::max(delta, NeoTowerZ::NOMINAL_LH_MIN);
+            NT_LOG("DELTA_H z=" << z << " nominal_h=" << nominal_h
+                << " → eff_h=" << eff
+                << " (support plane z=" << last_emitting_plane_z << ")");
+            return eff;
+        }
+        return nominal_h;
+    };
+    bool grp_planned_any = false; // any plan_toolchange() issued for current z-group
+
     // Helper: feed one event to wt2 in chain order, updating bookkeeping.
     auto feed_event = [&](size_t evi) {
         const NeoTowerEvent& ev = all_events[evi];
         event_to_wt2_li[evi] = wt2_li;
+        grp_planned_any = true; // NEOTKO_NEOTOWER_TAG s103
         wt2.plan_toolchange(
-            ev.z_actual, ev.layer_height,
+            ev.z_actual, eff_layer_height(ev.z_actual, ev.layer_height),
             static_cast<unsigned int>(ev.old_tool),
             static_cast<unsigned int>(ev.new_tool),
             ev.wipe_volume,
-            ev.no_ramming); // NEOTKO_MPSCHEDULER_TAG s79b — sandwich TCs skip ramming deposit
+            ev.no_ramming,      // NEOTKO_MPSCHEDULER_TAG s79b — sandwich TCs skip ramming deposit
+            ev.is_sublayer,     // NEOTKO_NEOTOWER_TAG s102 — explicit synthetic-entry flag
+            // NEOTKO_NEOTOWER_TAG s102-h — lámina (same physical plane as the real
+            // layer, frame fully skipped) vs staircase (distinct plane in the gap,
+            // keeps wall+grid as the tower's structural shell).
+            ev.is_sublayer && (ev.z_nominal - ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF);
         if (ev.old_tool != ev.new_tool) {
             // event_to_wt2_tc_idx will be filled after wt2.generate() — see below.
             chain_tool = static_cast<int>(ev.new_tool);
@@ -2057,6 +2158,8 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
         while (ei_end < all_events.size() &&
                std::abs(all_events[ei_end].z_actual - z_grp) <= NT_WT_EPS)
             ++ei_end;
+
+        grp_planned_any = false; // NEOTKO_NEOTOWER_TAG s103 — reset per z-group
 
         ++wt2_li;
 
@@ -2133,11 +2236,16 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                     } else {
                         // Sublayer-to-sublayer (or non-post-sublayer) gap: inject the
                         // bridge at the event's actual z — original behaviour.
-                        wt2.plan_toolchange(_gev.z_actual, _gev.layer_height,
+                        grp_planned_any = true; // NEOTKO_NEOTOWER_TAG s103
+                        wt2.plan_toolchange(_gev.z_actual,
+                                            eff_layer_height(_gev.z_actual, _gev.layer_height), // s103 delta-Z
                                             static_cast<unsigned int>(chain_tool),
                                             static_cast<unsigned int>(_gev.old_tool),
                                             0.f,
-                                            /*skip_ramming=*/true); // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
+                                            /*skip_ramming=*/true,   // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
+                                            /*synthetic=*/_gev.is_sublayer, // NEOTKO_NEOTOWER_TAG s102 — bridge inherits the driving event's plane kind
+                                            /*same_plane=*/_gev.is_sublayer &&
+                                                (_gev.z_nominal - _gev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF); // s102-h
                         bridge_tcs.push_back({_gev.z_actual, chain_tool,
                                               static_cast<int>(_gev.old_tool), wt2_li,
                                               false});
@@ -2218,11 +2326,20 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                     const float bridge_z = bridge_follows_sublayer
                                            ? last_sublayer_z_nominal
                                            : all_events[ei].z_actual;
-                    wt2.plan_toolchange(bridge_z, all_events[ei].layer_height,
+                    grp_planned_any = true; // NEOTKO_NEOTOWER_TAG s103
+                    wt2.plan_toolchange(bridge_z,
+                                        eff_layer_height(bridge_z, all_events[ei].layer_height), // s103 delta-Z
                                         static_cast<unsigned int>(chain_tool),
                                         static_cast<unsigned int>(section1a_initial),
                                         0.f,
-                                        /*skip_ramming=*/true); // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
+                                        /*skip_ramming=*/true,   // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
+                                        // NEOTKO_NEOTOWER_TAG s102 — bridge-at-nominal lands on the
+                                        // canonical (real) plane; bridge-at-actual inherits the
+                                        // driving event's plane kind.
+                                        /*synthetic=*/(bridge_follows_sublayer ? false : all_events[ei].is_sublayer),
+                                        /*same_plane=*/(bridge_follows_sublayer ? false :
+                                            (all_events[ei].is_sublayer &&
+                                             (all_events[ei].z_nominal - all_events[ei].z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF))); // s102-h
                     bridge_tcs.push_back({bridge_z, chain_tool,
                                           section1a_initial, wt2_li,
                                           bridge_follows_sublayer});
@@ -2299,6 +2416,25 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 last_sublayer_z_nominal = -1.f;
         }
 
+        // NEOTKO_NEOTOWER_TAG s103 — advance the emitting-plane tracker.
+        // A z-group leaves a physical tower plane (shell) unless ALL of its
+        // events are láminas (same plane as the canonical, frame fully skipped
+        // by the s102-h guard — they deposit wipes but no structural plane of
+        // their own). Mirrors plan_toolchange's entry-flag AND/demote semantics.
+        // grp_planned_any guards the phantom-init edge case (group whose only
+        // event was skipped → no wt2 entry exists → nothing was emitted).
+        {
+            bool grp_emits_plane = false;
+            for (size_t k = ei; k < ei_end; ++k) {
+                const NeoTowerEvent& ev = all_events[k];
+                const bool is_lamina = ev.is_sublayer &&
+                    (ev.z_nominal - ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF;
+                if (!is_lamina) { grp_emits_plane = true; break; }
+            }
+            if (grp_planned_any && grp_emits_plane)
+                last_emitting_plane_z = z_grp;
+        }
+
         ei = ei_end;
     }
 
@@ -2321,6 +2457,148 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 << " z=" << raw_result[_li][_si].print_z
                 << " initial=" << raw_result[_li][_si].initial_tool
                 << " new="     << raw_result[_li][_si].new_tool);
+        }
+    }
+
+    // NEOTKO_NEOTOWER_TAG s102-f — full TCR gcode dump for frame forensics.
+    // The wipetower log carries sizes and markers but not the moves themselves;
+    // an unidentified structural contour (user preview: full-tower rectangle by
+    // T0 at z≈0.878) cannot be attributed from markers alone. Dump every TCR's
+    // gcode to a separate file so the emitting block can be identified offline.
+    // Remove (or keep gated) once the frame work closes.
+    if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+        std::ofstream _tcr_dump("/tmp/neotko_wipetower_tcrs.txt", std::ios::trunc);
+        if (_tcr_dump.is_open()) {
+            for (size_t _li = 0; _li < raw_result.size(); ++_li)
+                for (size_t _si = 0; _si < raw_result[_li].size(); ++_si) {
+                    const auto& _t = raw_result[_li][_si];
+                    _tcr_dump << "===== TCR [" << _li << "][" << _si << "]"
+                              << " print_z=" << _t.print_z
+                              << " initial=T" << _t.initial_tool
+                              << " new=T" << _t.new_tool
+                              << " bytes=" << _t.gcode.size()
+                              << " =====\n" << _t.gcode << "\n";
+                }
+            for (size_t _li = 0; _li < local_z_result.size(); ++_li)
+                for (size_t _si = 0; _si < local_z_result[_li].size(); ++_si) {
+                    const auto& _t = local_z_result[_li][_si];
+                    _tcr_dump << "===== LOCAL_Z TCR [" << _li << "][" << _si << "]"
+                              << " print_z=" << _t.print_z
+                              << " initial=T" << _t.initial_tool
+                              << " new=T" << _t.new_tool
+                              << " bytes=" << _t.gcode.size()
+                              << " =====\n" << _t.gcode << "\n";
+                }
+        }
+    }
+
+    // NEOTKO_NEOTOWER_TAG s102 — V14: slice-time frame invariant.
+    // (a) No tower FRAME block (brim chamfer / empty grid) may appear in a TCR
+    //     emitted on a synthetic sub-layer plane.
+    // (b) At most ONE brim block may exist across all TCRs of one nominal layer.
+    // This catches ANY frame duplication (whatever the root cause) at slice time
+    // instead of in the printed part. Pure validation — no behavioural change.
+    {
+        auto _count_marker = [](const std::string& g, const std::string& m) {
+            int n = 0;
+            for (size_t p = g.find(m); p != std::string::npos; p = g.find(m, p + m.size()))
+                ++n;
+            return n;
+        };
+        // Local µm quantizer — same formula as make_key / collect_all_events' z_um64
+        // (that lambda is function-local there and not visible here).
+        auto z_um64 = [](float z) -> uint64_t {
+            return static_cast<uint64_t>(std::llround(static_cast<double>(z) * 1000.0));
+        };
+        // A plane is synthetic iff every event on it is a sublayer event (AND
+        // semantics — must match WipeTowerInfo::is_synthetic in WipeTower2).
+        std::set<uint64_t> _synth_zum, _real_zum, _staircase_zum;
+        std::map<uint64_t, uint64_t> _zum_to_znom;
+        for (const NeoTowerEvent& _ev : all_events) {
+            const uint64_t _zum = z_um64(_ev.z_actual);
+            (_ev.is_sublayer ? _synth_zum : _real_zum).insert(_zum);
+            // NEOTKO_NEOTOWER_TAG s102-h — staircase planes legitimately carry
+            // wall + grid (structural shell); only lámina planes must be frame-free.
+            if (_ev.is_sublayer &&
+                (_ev.z_nominal - _ev.z_actual) >= NeoTowerZ::SAME_PLANE_MAX_OFF)
+                _staircase_zum.insert(_zum);
+            _zum_to_znom[_zum] = z_um64(_ev.z_nominal);
+        }
+        std::map<uint64_t, int> _brims_per_nominal;
+        int _v14_warnings = 0;
+        for (size_t _li = 0; _li < raw_result.size(); ++_li) {
+            for (size_t _si = 0; _si < raw_result[_li].size(); ++_si) {
+                const auto&    _tcr  = raw_result[_li][_si];
+                const uint64_t _zum  = z_um64(static_cast<float>(_tcr.print_z));
+                const bool _is_synth_plane = _synth_zum.count(_zum) && !_real_zum.count(_zum);
+                const bool _is_staircase   = _staircase_zum.count(_zum) > 0;
+                const int  _brims = _count_marker(_tcr.gcode, "WIPE_TOWER_BRIM_START");
+                const int  _grids = _count_marker(_tcr.gcode, "CP EMPTY GRID START");
+                // s102-h: brim is illegal on ANY synthetic plane; grid only on
+                // lámina (same-plane) ones — staircase planes need it.
+                if (_is_synth_plane && (_brims > 0 || (_grids > 0 && !_is_staircase))) {
+                    NT_LOG("[VALIDATE] WARN: V14a FRAME on synthetic plane z=" << _tcr.print_z
+                        << " li=" << _li << " si=" << _si
+                        << " brims=" << _brims << " grids=" << _grids
+                        << " staircase=" << _is_staircase);
+                    ++_v14_warnings;
+                }
+                const auto _zn = _zum_to_znom.find(_zum);
+                _brims_per_nominal[_zn != _zum_to_znom.end() ? _zn->second : _zum] += _brims;
+            }
+        }
+        for (const auto& _kv : _brims_per_nominal)
+            if (_kv.second > 1) {
+                NT_LOG("[VALIDATE] WARN: V14b " << _kv.second
+                    << " brim blocks within nominal layer z=" << (_kv.first / 1000.f));
+                ++_v14_warnings;
+            }
+        if (_v14_warnings == 0)
+            NT_LOG("[VALIDATE] V14 frame invariant OK ("
+                << raw_result.size() << " plan layers scanned)");
+
+        // NEOTKO_NEOTOWER_TAG s103 — V17: delta-Z height invariant.
+        // No TCR may extrude at a height GREATER than the physical gap to the
+        // previous emitting tower plane (real or staircase; láminas leave no
+        // plane). Over-height = over-extrusion crammed into a smaller gap —
+        // exactly the post-staircase wall bug this session fixes. The floor to
+        // NOMINAL_LH_MIN is legal, hence the max() in the bound. Pure validation.
+        {
+            std::vector<uint64_t> _emitting_sorted;
+            for (uint64_t _z : _real_zum) _emitting_sorted.push_back(_z);
+            for (uint64_t _z : _staircase_zum) _emitting_sorted.push_back(_z);
+            std::sort(_emitting_sorted.begin(), _emitting_sorted.end());
+            auto _parse_height = [](const std::string& g) -> float {
+                const size_t p = g.find(";HEIGHT:");
+                return p == std::string::npos ? -1.f
+                                              : std::strtof(g.c_str() + p + 8, nullptr);
+            };
+            int _v17_warnings = 0;
+            for (size_t _li = 0; _li < raw_result.size(); ++_li)
+                for (size_t _si = 0; _si < raw_result[_li].size(); ++_si) {
+                    const auto&    _tcr = raw_result[_li][_si];
+                    const float    _h   = _parse_height(_tcr.gcode);
+                    if (_h <= 0.f)
+                        continue;
+                    const uint64_t _zum = z_um64(static_cast<float>(_tcr.print_z));
+                    // Previous emitting plane strictly below this TCR's plane.
+                    auto _it = std::lower_bound(_emitting_sorted.begin(),
+                                                _emitting_sorted.end(), _zum);
+                    const float _prev_z = (_it == _emitting_sorted.begin())
+                                          ? 0.f
+                                          : (*(_it - 1) / 1000.f);
+                    const float _gap   = static_cast<float>(_tcr.print_z) - _prev_z;
+                    const float _bound = std::max(_gap, NeoTowerZ::NOMINAL_LH_MIN) + 0.002f;
+                    if (_h > _bound) {
+                        NT_LOG("[VALIDATE] WARN: V17 OVER-HEIGHT z=" << _tcr.print_z
+                            << " li=" << _li << " si=" << _si
+                            << " height=" << _h << " gap=" << _gap
+                            << " (support plane z=" << _prev_z << ")");
+                        ++_v17_warnings;
+                    }
+                }
+            if (_v17_warnings == 0)
+                NT_LOG("[VALIDATE] V17 delta-Z height invariant OK");
         }
     }
 
@@ -2403,8 +2681,30 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             // Real toolchange — map (z, old, new) → raw_result[li][tc_idx].
             if (tc_idx >= 0 && tc_idx < static_cast<int>(raw_result[li].size())) {
                 const uint64_t key = make_key(ev.z_actual, ev.old_tool, ev.new_tool);
-                m_tcr_index[key] = {static_cast<size_t>(li),
-                                    static_cast<size_t>(tc_idx)};
+                // NEOTKO_NEOTOWER_TAG s102 — dual-channel index: sublayer TCs go to
+                // m_tcr_index_sub, real-layer TCs to m_tcr_index. The last sub plane
+                // and the real plane quantize to the same µm, so the same key may
+                // exist in BOTH channels (Hallazgo VII collision) — that is now legal
+                // ACROSS channels; get_tcr() disambiguates via sublayer_ctx.
+                auto& _chan = ev.is_sublayer ? m_tcr_index_sub : m_tcr_index;
+                // V16: a collision WITHIN one channel is still a real bug (two
+                // same-channel events sharing (z_um, old, new) → one TCR shadowed).
+                {
+                    auto _prev = _chan.find(key);
+                    if (_prev != _chan.end() &&
+                        (_prev->second.first != static_cast<size_t>(li) ||
+                         _prev->second.second != static_cast<size_t>(tc_idx))) {
+                        NT_LOG("[VALIDATE] WARN: V16 KEY COLLISION (channel="
+                            << (ev.is_sublayer ? "sub" : "real") << ") key=" << key
+                            << " z=" << ev.z_actual
+                            << " old=" << ev.old_tool << " new=" << ev.new_tool
+                            << " overwrites [" << _prev->second.first << "][" << _prev->second.second
+                            << "] with [" << li << "][" << tc_idx << "]"
+                            << " — emission will cross-wire");
+                    }
+                }
+                _chan[key] = {static_cast<size_t>(li),
+                              static_cast<size_t>(tc_idx)};
                 NT_LOG("generate tcr [" << li << "][" << tc_idx << "]"
                     << " z=" << ev.z_actual
                     << " old=" << ev.old_tool << " new=" << ev.new_tool
@@ -2456,6 +2756,18 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 const uint64_t key = make_key(br.z,
                                               static_cast<size_t>(br.from_tool),
                                               static_cast<size_t>(br.to_tool));
+                // NEOTKO_NEOTOWER_TAG s102 — V16 (bridge variant), see Phase 3 block.
+                {
+                    auto _prev = m_tcr_index.find(key);
+                    if (_prev != m_tcr_index.end() &&
+                        (_prev->second.first != static_cast<size_t>(li) ||
+                         _prev->second.second != static_cast<size_t>(si))) {
+                        NT_LOG("[VALIDATE] WARN: V16 m_tcr_index KEY COLLISION (bridge) key=" << key
+                            << " z=" << br.z << " old=" << br.from_tool << " new=" << br.to_tool
+                            << " overwrites [" << _prev->second.first << "][" << _prev->second.second
+                            << "] with [" << li << "][" << si << "]");
+                    }
+                }
                 m_tcr_index[key] = {static_cast<size_t>(li), static_cast<size_t>(si)};
                 NT_LOG("generate bridge-TCR registered z=" << br.z
                     << " old=" << br.from_tool << " new=" << br.to_tool
@@ -2522,43 +2834,68 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
 // get_tcr()
 // ---------------------------------------------------------------------------
 std::optional<WipeTower::ToolChangeResult>
-NeoTower::get_tcr(float z_actual, size_t old_tool, size_t new_tool) const
+NeoTower::get_tcr(float z_actual, size_t old_tool, size_t new_tool, bool sublayer_ctx) const
 {
-    uint64_t key = make_key(z_actual, old_tool, new_tool);
-    auto it = m_tcr_index.find(key);
-    // NEOTKO_MPSCHEDULER_TAG — C4: redirect fused sublayer events
-    if (it == m_tcr_index.end()) {
-        // NEOTKO_NEOTOWER_TAG — bridge merged TCR:
-        // GCode calls get_tcr(z, chain_tool, final_target) in one shot.
-        // When a bridge TC existed for this z, we synthesized a merged TCR
-        // combining bridge+real GCode.  Check that map first.
-        {
-            auto mit = m_merged_index.find(key);
-            if (mit != m_merged_index.end()) {
-                NT_LOG("get_tcr MERGED z=" << z_actual << " old=" << old_tool
-                    << " new=" << new_tool
-                    << " → merged[" << mit->second << "]");
-                return m_merged_tcrs[mit->second];
-            }
-        }
-        auto redir = m_z_redirect.find(key);
-        if (redir != m_z_redirect.end()) {
-            it = m_tcr_index.find(redir->second);
-            if (it != m_tcr_index.end()) {
-                const auto [li, si] = it->second;
-                NT_LOG("get_tcr REDIRECT z=" << z_actual << " old=" << old_tool
-                    << " new=" << new_tool << " → fused [" << li << "][" << si << "]");
-                return m_result[li][si];
-            }
-        }
-        NT_LOG("get_tcr() MISS z=" << z_actual
-            << " old=" << old_tool << " new=" << new_tool << " ← ERROR");
-        return std::nullopt;
+    // NEOTKO_NEOTOWER_TAG s102 — dual-channel resolution. Primary channel comes
+    // from the caller's context (sublayer prime vs real-layer dispatch); the other
+    // channel acts as fallback so non-colliding legacy lookups keep resolving.
+    const uint64_t key = make_key(z_actual, old_tool, new_tool);
+    const auto& primary  = sublayer_ctx ? m_tcr_index_sub : m_tcr_index;
+    const auto& fallback = sublayer_ctx ? m_tcr_index     : m_tcr_index_sub;
+    const char* pname    = sublayer_ctx ? "sub" : "real";
+
+    // 1. Direct hit in the context channel.
+    if (auto it = primary.find(key); it != primary.end()) {
+        const auto [li, si] = it->second;
+        NT_LOG("get_tcr HIT(" << pname << ") z=" << z_actual << " old=" << old_tool
+            << " new=" << new_tool << " → [" << li << "][" << si << "]");
+        return m_result[li][si];
     }
-    const auto [li, si] = it->second;
-    NT_LOG("get_tcr HIT z=" << z_actual << " old=" << old_tool
-        << " new=" << new_tool << " → [" << li << "][" << si << "]");
-    return m_result[li][si];
+
+    // 2. Bridge merged TCR (single map — bridge keys are unambiguous).
+    // NEOTKO_NEOTOWER_TAG — bridge merged TCR:
+    // GCode calls get_tcr(z, chain_tool, final_target) in one shot.
+    // When a bridge TC existed for this z, we synthesized a merged TCR
+    // combining bridge+real GCode.
+    if (auto mit = m_merged_index.find(key); mit != m_merged_index.end()) {
+        NT_LOG("get_tcr MERGED z=" << z_actual << " old=" << old_tool
+            << " new=" << new_tool
+            << " → merged[" << mit->second << "]");
+        return m_merged_tcrs[mit->second];
+    }
+
+    // 3. NEOTKO_MPSCHEDULER_TAG — C4: redirect fused sublayer events. Redirect
+    //    targets are scheduler-fused SUBLAYER events → resolve in the sub channel
+    //    first, then real (pre-s102 behaviour as last resort).
+    if (auto redir = m_z_redirect.find(key); redir != m_z_redirect.end()) {
+        if (auto it = m_tcr_index_sub.find(redir->second); it != m_tcr_index_sub.end()) {
+            const auto [li, si] = it->second;
+            NT_LOG("get_tcr REDIRECT(sub) z=" << z_actual << " old=" << old_tool
+                << " new=" << new_tool << " → fused [" << li << "][" << si << "]");
+            return m_result[li][si];
+        }
+        if (auto it = m_tcr_index.find(redir->second); it != m_tcr_index.end()) {
+            const auto [li, si] = it->second;
+            NT_LOG("get_tcr REDIRECT(real) z=" << z_actual << " old=" << old_tool
+                << " new=" << new_tool << " → fused [" << li << "][" << si << "]");
+            return m_result[li][si];
+        }
+    }
+
+    // 4. Cross-channel fallback (legacy single-map behaviour). Logged so the
+    //    census shows which dispatches still depend on it (chain-gap candidates).
+    if (auto it = fallback.find(key); it != fallback.end()) {
+        const auto [li, si] = it->second;
+        NT_LOG("get_tcr CROSS_CHANNEL(" << pname << "→" << (sublayer_ctx ? "real" : "sub")
+            << ") z=" << z_actual << " old=" << old_tool
+            << " new=" << new_tool << " → [" << li << "][" << si << "]");
+        return m_result[li][si];
+    }
+
+    NT_LOG("get_tcr() MISS z=" << z_actual
+        << " old=" << old_tool << " new=" << new_tool
+        << " ctx=" << pname << " ← ERROR");
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -2661,10 +2998,12 @@ void NeoTower::validate_plan() const
     }
 
     // V4: non-identity events (m_events) have tcr index
+    // NEOTKO_NEOTOWER_TAG s102 — check the event's own channel (dual-channel index).
     for (size_t i = 0; i < m_events.size(); ++i) {
         const auto& ev = m_events[i];
         const uint64_t key = make_key(ev.z_actual, ev.old_tool, ev.new_tool);
-        if (m_tcr_index.find(key) == m_tcr_index.end()) {
+        const auto& _chan = ev.is_sublayer ? m_tcr_index_sub : m_tcr_index;
+        if (_chan.find(key) == _chan.end()) {
             std::ostringstream oss;
             oss << "V4: missing m_tcr_index for event[" << i
                 << "] z=" << ev.z_actual
@@ -2750,11 +3089,14 @@ void NeoTower::validate_plan() const
 
     // V9 (Scheduler): every m_z_redirect target exists in m_tcr_index.
     // Only runs after generate() has populated m_tcr_index.
-    if (!m_tcr_index.empty()) {
+    if (!m_tcr_index.empty() || !m_tcr_index_sub.empty()) {
+        // NEOTKO_NEOTOWER_TAG s102 — dual-channel: a redirect target may live in
+        // either channel (fused targets are sublayer events → usually sub).
         for (const auto& [from_key, to_key] : m_z_redirect) {
-            if (m_tcr_index.find(to_key) == m_tcr_index.end()) {
+            if (m_tcr_index.find(to_key) == m_tcr_index.end() &&
+                m_tcr_index_sub.find(to_key) == m_tcr_index_sub.end()) {
                 std::ostringstream oss;
-                oss << "V9: m_z_redirect target missing in m_tcr_index"
+                oss << "V9: m_z_redirect target missing in both tcr index channels"
                     << " from_key=" << from_key << " to_key=" << to_key;
                 WARN(oss.str());
             }
@@ -2787,29 +3129,32 @@ void NeoTower::validate_plan() const
         // V11: m_merged_index and m_tcr_index do not share keys (bridge merges would
         // shadow regular TCRs and silently emit the wrong sequence).
         for (const auto& [key, _idx] : m_merged_index) {
-            if (m_tcr_index.find(key) != m_tcr_index.end()) {
+            // NEOTKO_NEOTOWER_TAG s102 — check both channels.
+            if (m_tcr_index.find(key) != m_tcr_index.end() ||
+                m_tcr_index_sub.find(key) != m_tcr_index_sub.end()) {
                 std::ostringstream oss;
-                oss << "V11: key shared between m_merged_index and m_tcr_index"
+                oss << "V11: key shared between m_merged_index and a tcr index channel"
                     << " key=" << key;
                 WARN(oss.str());
             }
         }
 
-        // V12: m_tcr_index targets are in-bounds for m_result.
-        for (const auto& [key, ls] : m_tcr_index) {
-            if (ls.first >= m_result.size()
-                || ls.second >= m_result[ls.first].size()) {
-                std::ostringstream oss;
-                oss << "V12: m_tcr_index out-of-bounds key=" << key
-                    << " li=" << ls.first << " si=" << ls.second
-                    << " (result.size=" << m_result.size()
-                    << (ls.first < m_result.size()
-                        ? std::string(", layer.size=") + std::to_string(m_result[ls.first].size())
-                        : std::string())
-                    << ")";
-                WARN(oss.str());
+        // V12: tcr index targets are in-bounds for m_result (both channels, s102).
+        for (const auto* _map : { &m_tcr_index, &m_tcr_index_sub })
+            for (const auto& [key, ls] : *_map) {
+                if (ls.first >= m_result.size()
+                    || ls.second >= m_result[ls.first].size()) {
+                    std::ostringstream oss;
+                    oss << "V12: tcr index out-of-bounds key=" << key
+                        << " li=" << ls.first << " si=" << ls.second
+                        << " (result.size=" << m_result.size()
+                        << (ls.first < m_result.size()
+                            ? std::string(", layer.size=") + std::to_string(m_result[ls.first].size())
+                            : std::string())
+                        << ")";
+                    WARN(oss.str());
+                }
             }
-        }
 
         // V13: m_finish_layer_index targets are in-bounds for m_result.
         for (const auto& [zum, ls] : m_finish_layer_index) {
@@ -2834,7 +3179,8 @@ void NeoTower::validate_plan() const
         NT_LOG("[VALIDATE] plan OK ("
             << m_events.size() << " real_tc, "
             << m_growth_events.size() << " growth, "
-            << m_tcr_index.size() << " tcr, "
+            << m_tcr_index.size() << " tcr_real, "
+            << m_tcr_index_sub.size() << " tcr_sub, "
             << m_finish_layer_index.size() << " finish_layer, "
             << m_z_redirect.size() << " z_redirect, "
             << m_z_redirect_finish.size() << " z_redirect_finish, "

@@ -37,7 +37,21 @@ The goal is not to give you "presets that work" — it is to give you a **playgr
 
 Beyond surface effects, the fork also adds a **new wall-generation engine** — **NeoArachne** (§8) — that sits next to the stock Classic and Arachne engines and lets you pick which one prints each kind of wall on your part, with extra controls for bead width, edge closure and a real-time Preview Lab. It's optional and disabled by default.
 
+It also ships **NeoTower** (§9) — a post-slice wipe-tower planner that sees every toolchange (including Sandwich sub-layer primes) before committing to geometry, giving you a fixed, tidy tower even with adaptive layers, multi-tool scenes and Sandwiches at the same time.
+
 The rest of this document describes each building block in detail.
+
+---
+
+## What's new since 1.9 (this is a WIP beta)
+
+> This build is a **work-in-progress beta**. Some surfaces show a **(WIP Beta)** marker. The features below are usable but still being refined — review your G-code before long prints.
+
+- **ColorStitch — the new name.** The "Surface Color Mixer" family is being rebranded to **ColorStitch** in the UI. The Sandwich dialog now hosts a **ColorStitch Studio** (§1g) and the 3D painter is now the **ColorStitch Painter** (§7c). Internal names, config keys and 3MF data are unchanged, so old projects keep working — only the labels you see are different. You will still see the word *ColorMix* in a few places (e.g. the per-line effect pill); they refer to the same thing.
+- **ColorStitch Studio** (§1g): generate whole palettes — **Gradient ramp**, **Flat colour** and **Mixed approximation (predict)** — directly from your loaded filaments and their TD, then click a swatch to load that recipe into the Sandwich.
+- **ColorStitch Painter revamp** (§7c): the painter now shows those same palettes as **collapsible colour strips**. Pick a swatch and paint — no need to pre-build profiles. A two-tier model keeps working colours separate from the palettes you deliberately **Save**.
+- **NeoTower** (§9): tower-type selector, zigurat taper, Sandwich purge compaction, and a unified **SurfaceColorStitch wipe reserve**. NeoTower is what makes adaptive layer height + multi-tool + Sandwich coexist on one tower.
+- **Beta defaults / changes:** *SurfaceColorStitch wipe reserve* default raised to **10 mm³**, *Sandwich purge compaction* default **1.7**, and the experimental **Micro Stitch (Neotko)** top/bottom fill pattern is **hidden** in this beta (existing presets that use it still load).
 
 ---
 
@@ -50,6 +64,7 @@ The rest of this document describes each building block in detail.
    - 1d. [Zone and filament filters](#1d-zone-and-filament-filters)
    - 1e. [TD Preview and Blend Suggestion](#1e-td-preview-and-blend-suggestion)
    - 1f. [Line Distribution Mode (CM + PB)](#1f-line-distribution-mode-cm--pb)
+   - 1g. [ColorStitch Studio — palette generators](#1g-colorstitch-studio--palette-generators)
 2. [Neoweaving — mechanical interlocking of layers](#2-neoweaving--mechanical-interlocking-of-layers)
 3. [Penultimate Top Layers](#3-penultimate-top-layers)
 4. [Monotonic Interlayer Nesting](#4-monotonic-interlayer-nesting)
@@ -64,7 +79,7 @@ The rest of this document describes each building block in detail.
 7. [Surface Effect Profiles & 3D Painter](#7-surface-effect-profiles--3d-painter)
    - 7a. [Saving profiles from the dialogs](#7a-saving-profiles-from-the-dialogs)
    - 7b. [Managing profiles (load, update, rename, delete)](#7b-managing-profiles-load-update-rename-delete)
-   - 7c. [The ColorMix Painter gizmo](#7c-the-colormix-painter-gizmo)
+   - 7c. [The ColorStitch Painter gizmo](#7c-the-colorstitch-painter-gizmo)
    - 7d. [Painter mode at slice time](#7d-painter-mode-at-slice-time)
    - 7e. [Penu role autonomy](#7e-penu-role-autonomy)
    - 7f. [Profile persistence and 3MF round-trip](#7f-profile-persistence-and-3mf-round-trip)
@@ -75,6 +90,12 @@ The rest of this document describes each building block in detail.
    - 8c. [Edge Closure controls](#8c-edge-closure-controls)
    - 8d. [NeotkoEdge — stable bead transitions](#8d-neotkoedge--stable-bead-transitions)
    - 8e. [Preview Lab](#8e-preview-lab)
+9. [NeoTower — post-slice wipe tower](#9-neotower--post-slice-wipe-tower)
+   - 9a. [Tower type](#9a-tower-type)
+   - 9b. [Zigurat taper](#9b-zigurat-taper)
+   - 9c. [Sandwich purge compaction](#9c-sandwich-purge-compaction)
+   - 9d. [SurfaceColorStitch wipe reserve](#9d-surfacecolorstitch-wipe-reserve)
+   - 9e. [Adaptive layers × multi-tool × Sandwich](#9e-adaptive-layers--multi-tool--sandwich)
 
 ---
 
@@ -366,6 +387,38 @@ There is no single best mode for every print. A rough decision tree:
 
 ---
 
+### 1g. ColorStitch Studio — palette generators
+
+> **New in this beta.** The Studio lives inside the Sandwich dialog (ColorStitch Studio panel). It turns "design a recipe by hand" into "pick a colour from a generated palette."
+
+**What it does**
+
+Instead of configuring passes one by one, the Studio **generates a whole strip of colour swatches** from the filaments you have loaded and their TD values, using the same colour-science engine as the TD Preview. Each swatch is a complete Sandwich recipe (a Top/Penu pass stack) with its predicted colour already computed. Click a swatch and that recipe is **loaded into the live Sandwich** (the zone cards repopulate), ready to slice, tweak, or save as a profile.
+
+**The three modes**
+
+| Mode | What it generates |
+|------|-------------------|
+| **Gradient ramp** | A manual ramp between two tools (A → B). You pick the two filaments, a weave/dither pattern, the number of steps and the split range; the Studio builds the ramp. Clicking a swatch toggles whether it's included when you **Export palette**. |
+| **Flat colour (predict)** | Browses the gamut reachable by **stacking solid passes** of your filaments (1–2 solids, swept by thickness). Robust, predictable colours. |
+| **Mixed approximation (predict)** | Browses an **extended gamut**: a dithered ColorStitch base (penultimate) plus a translucent solid on top. This reaches colours no single filament can make — the optical average of the dither acts like a new primary. |
+
+**Target + Match**
+
+Pick a **MixedColor target** and press **Match ▸**. The Studio runs an inverse search (minimising ΔE2000) and loads the closest achievable recipe, showing the resulting ΔE. Use it when you have a specific colour in mind rather than browsing.
+
+**Export palette**
+
+The **Export palette…** button turns swatches into saved Surface Effect Profiles (§7) so the painter and profile manager can use them. In Gradient mode it exports the swatches you marked; in the predict modes it exports the whole strip. Give the batch a base **Name** first.
+
+**Live TD**
+
+The strips react to your **TD sliders**: change a filament's TD and the palette regenerates (debounced) with the new predicted colours, because the colour is baked into each recipe.
+
+**Print-friendly minimums**: the predict generators respect minimum printable pass thicknesses (a too-thin top on a visible face prints badly), so the swatches they offer are ones that actually print. The manual Gradient mode lets you go thinner at your own risk.
+
+---
+
 ## 2. Neoweaving — mechanical interlocking of layers
 
 **What it does**
@@ -592,33 +645,46 @@ The profile list shows each profile with a tag `[CM:* PB:* MP:*]` where `*` mean
 
 ---
 
-### 7c. The ColorMix Painter gizmo
+### 7c. The ColorStitch Painter gizmo
 
-The painter lives in the **left-side gizmo toolbar** in the 3D view, next to the FuzzySkin, Seam, and MMU segmentation gizmos. The icon is a placeholder (reuses MMU's for now).
+> **Revamped in this beta** (marked **(WIP Beta)** in the panel). The painter used to show a plain text list of profiles. It now shows your filaments as **generated colour palettes** and lets you paint with them directly.
 
-**How to use**
+The painter lives in the **left-side gizmo toolbar** in the 3D view, next to the FuzzySkin, Seam, and MMU segmentation gizmos.
 
-1. Click the **ColorMix Painter** gizmo (or its keyboard shortcut, if assigned).
-2. The right panel shows a **scrollable list of all Surface Effect Profiles** currently loaded.
-3. Click a profile name to select it as the active brush.
-4. Pick a paint tool from the toolbar:
-   - **Circle** — paints triangles inside a circular cursor
-   - **Sphere** — 3D sphere selector
-   - **Triangle** — single-triangle precision
-   - **Smart Fill** (default) — flood-fills coplanar triangles up to a configurable angle threshold (default 1.5°). This is the primary tool for painting flat top surfaces in one click.
-5. Click on the model surface. Painted triangles change colour to indicate the active slot.
-6. Switch profiles and paint again — different profiles paint different slots automatically.
+**The panel, top to bottom**
 
-Up to **15 different profiles** can be painted on a single object (slot 0 is reserved as "unpainted"). Slots are auto-assigned the first time you paint with a profile.
+1. **Palette strips** — three **collapsible** sections, one per style: **Mixed approximation (predict)**, **Gradient ramp**, **Flat colour**. Each expands into a horizontally-scrollable strip of colour swatches, generated from your loaded filaments + their TD (the same engine as the ColorStitch Studio, §1g). Hover a swatch to preview its Top/Penultimate mini-sandwich and recipe. The strips regenerate automatically when you change filament colours or TD.
+2. **Active colour + Save palette** — appears once you pick a swatch (see below).
+3. **Profiles** — the list of **saved** palettes (see the two-tier model below).
+4. **Smart-Fill angle** + **Clipping plane** sliders, **Erase mode**, and **Erase all**.
 
-**Erase**:
-- **Erase mode checkbox** (right panel) — when enabled, left-click clears painted triangles under the cursor using the same Smart Fill / Circle / Sphere / Triangle tool you have active. Toggle it back off to resume painting with the active profile.
-- **Shift + Left-click** — quick one-shot erase without toggling the checkbox (active even when Erase mode is off).
-- **Erase all** — clears every painted triangle on the current volume in one action.
+**Smart-Fill only**: the ColorStitch Painter paints coplanar top surfaces, so it uses **Smart Fill** as its single tool (the old Circle / Sphere / Triangle brushes were removed). Click a flat face and it flood-fills the coplanar region in one click. **Smart-Fill angle**: lower = more selective (only very-coplanar triangles), higher = more inclusive. Default **1.5°** suits flat staircase steps and similar geometry.
 
-Cleared triangles return to "unpainted" — they will use the preset mode if the object becomes entirely unpainted, or no effect if any paint remains.
+**How to paint**
 
-**Smart Fill angle**: Lower angle = more selective (only very-coplanar triangles), higher angle = more inclusive (catches curved surfaces). The default 1.5° is ideal for flat staircase steps and similar geometry.
+1. Open a palette section and **click a swatch** → it becomes the **active colour** (shown next to the Save button). Browsing/clicking swatches does **not** create anything yet.
+2. **Click the model surface** to paint. The first time you paint with a colour, a paint slot is materialised for it behind the scenes.
+3. Pick another swatch and paint a different region with it.
+
+#### Two-tier palette model (why the list no longer fills up)
+
+Earlier the painter created a new saved profile for every colour, which quickly cluttered the list. Now there are two tiers:
+
+- **Working colours (automatic)** — the colours you actually paint. They are created on demand the first time you paint with a swatch, **deduplicated** (re-using a colour reuses its slot), and **garbage-collected** when no painted face uses them anymore (e.g. after *Erase all* or when you close the gizmo). They do **not** appear in the saved list, so it stays clean.
+- **Saved palettes (deliberate)** — press **Save palette** while a colour is active to promote it into the **Profiles** list. Saved palettes are named, shown in the list, survive garbage-collection, and travel in the 3MF. This is the list you browse and reuse.
+
+Up to **15 working colours** can be painted on a single object at once (slot 0 is "unpainted"). Because browsing no longer consumes slots, you can explore the palettes freely.
+
+> Note: auto-naming uses the recipe (e.g. *"Mixed T3/CM"*). A name prompt before saving is on the list of refinements for this WIP feature.
+
+**Erase**
+- **Erase mode checkbox** — when enabled, left-click clears the painted region under the cursor with Smart Fill instead of painting.
+- **Shift + Left-click** — quick one-shot erase without toggling the checkbox.
+- **Erase all** — clears every painted face on the current volume, then garbage-collects the now-unused working colours.
+
+Cleared faces return to "unpainted" — they use preset mode if the object becomes entirely unpainted, or no effect if any paint remains.
+
+> The **Profiles** list (saved palettes) still works exactly as before for selecting a saved recipe as the active brush — clicking a saved row paints with it directly.
 
 ---
 
@@ -792,6 +858,69 @@ The **Preview Lab** is a panel inside the NeoArachne section of the Quality tab 
 
 ---
 
+## 9. NeoTower — post-slice wipe tower
+
+**What it is**
+
+NeoTower is an alternative **wipe-tower planner**. The stock planner (WipeTower2) decides the tower geometry up front; NeoTower runs **after slicing**, when every toolchange is already known — including the extra sub-layer primes that Sandwiches and MultiPass insert *inside* a layer. Because it sees the complete toolchange list before committing to any geometry, it can build a **fixed, predictable footprint** that stays in sync with the real G-code, and it understands variable (adaptive) layer heights.
+
+This is what makes the hard combination — **adaptive layer height + multiple tools + a Sandwich**, all at once — actually print on a single tower, which is something other slicers don't do.
+
+**You usually don't have to choose it.** Any scene that uses a Sandwich or MultiPass (single-filament or multi-tool) **auto-promotes to NeoTower** regardless of the setting below. The Tower-type selector matters mainly for plain multi-tool scenes and to expose NeoTower's extra options.
+
+The options live in **Quality → Prime tower**.
+
+---
+
+### 9a. Tower type
+
+| Setting | Behaviour |
+|---------|-----------|
+| **Classic** (default) | The standard WipeTower2 planner. |
+| **NeoTower** | The post-slice planner described above — fixed footprint, delta-Z aware, with the zigurat-taper and purge-compaction options below. |
+
+Sandwich / MultiPass scenes use NeoTower automatically even when this is set to Classic.
+
+---
+
+### 9b. Zigurat taper
+
+**Default: on.** Limits how fast the NeoTower footprint may shrink between consecutive real layers (one perimeter width per side) so that every wall ring rests on the ring below — *wall-on-wall*, which prints cleanly. Disable to **save material and time**, at the cost of rings that are only partially supported by the sparse grid inside the tower.
+
+---
+
+### 9c. Sandwich purge compaction
+
+Sandwich and MultiPass insert thin sub-layer purges into the tower. **Purge compaction** is a flow-boost cap that lets those thin purges be compacted into a **narrower band** by extruding more material per millimetre (the excess hangs into the hollow tower interior), which **reduces the tower footprint**.
+
+- **1.0** = no compaction.
+- Values above 1 compact more aggressively.
+- **Beta default: 1.7.** Range 1.0–5.0.
+
+Compaction depends on what your material tolerates — confirm with a test print before pushing it high.
+
+---
+
+### 9d. SurfaceColorStitch wipe reserve
+
+The volume (mm³) purged on the wipe tower before each **ColorStitch / MultiPass / PathBlend** sub-layer toolchange (Top + Penultimate). It replaces the old separate top/penultimate prime-volume keys with a **single** reserve.
+
+- **Beta default: 10 mm³** (raised from 5).
+- Lower = thinner / shorter tower; higher = better purge.
+- Set to **0** to disable. Requires a wipe tower (NeoTower or prime tower) to be active.
+
+> This is the global counterpart of the per-pass **Prime volume** described in the MultiPass dialog (§1b).
+
+---
+
+### 9e. Adaptive layers × multi-tool × Sandwich
+
+Because NeoTower plans from the real, post-slice toolchange list and is delta-Z aware, you can enable **adaptive/variable layer height** on a **multi-tool** print that also uses a **Sandwich** — three things that normally fight each other on the tower — and still get a coherent wipe tower. The planner mirrors the exact emission plan (plan = emission = tower) so there are no "unexpected toolchange" divergences.
+
+This is a recent capability and still being hardened; if you hit a tower artifact with this exact combination, it's worth reporting with the project 3MF.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -803,6 +932,7 @@ The **Preview Lab** is a panel inside the NeoArachne section of the Quality tab 
 | Effect pill (None/ColorMix/MultiPass/PathBlend) | Sandwich dialog — pill buttons per zone card |
 | Advanced config (per effect) | Sandwich dialog → **Advanced…** button |
 | TD Preview + Blend Suggestion | Sandwich dialog → **TD Preview** (collapsable) |
+| ColorStitch Studio (palette generators) | Sandwich dialog → **ColorStitch Studio** panel (Gradient / Flat / Mixed predict) |
 | Neoweaving | Quality → Neotko Neoweaving |
 | Penultimate layers | Strength → Top/bottom shells → Penultimate top layers |
 | Libre Mode toggle | **Top toolbar** (main window button) |
@@ -811,15 +941,19 @@ The **Preview Lab** is a panel inside the NeoArachne section of the Quality tab 
 | S3DFactory import | File → Import → Import 3D model → select `.factory` |
 | Save as profile | Bottom of SCM / MultiPass / PathBlend dialogs — **Save as profile…** button |
 | Manage profiles (load / update / rename / delete) | Sandwich dialog → **Manage profiles…** button |
-| 3D Painter | Left-side gizmo toolbar → **ColorMix Painter** icon |
-| Painter — pick brush | Gizmo right panel toolbar (Circle / Sphere / Triangle / SmartFill) |
-| Painter — pick profile | Scrollable profile list inside the gizmo's right panel |
+| 3D Painter | Left-side gizmo toolbar → **ColorStitch Painter** icon |
+| Painter — palette strips | Gizmo right panel → collapsible **Mixed / Gradient / Flat** sections (click swatch = active colour) |
+| Painter — save a palette | Gizmo right panel → **Save palette** (while a colour is active) |
+| Painter — pick saved profile | **Profiles** list inside the gizmo's right panel |
 | NeoArachne (enable) | Quality → **Wall generator** → select **NeoArachne** |
 | NeoArachne per-feature engines | Quality → NeoArachne → **NA — outer wall / inner walls / gap-fill source** |
 | Min / Max Line Width | Quality → NeoArachne → **Min Line Width** / **Max Line Width** |
 | Edge Closure (overlap, feature, thin edges) | Quality → NeoArachne → allowed overlap / Min Feature Threshold / Preserve Thin Edges |
 | NeotkoEdge stability (hysteresis + blend distance) | Quality → NeoArachne → **Wall Count Stability** / **Wall Blend Distance** |
 | NeoArachne Preview Lab | Quality → NeoArachne (panel embedded at the bottom of the section) |
+| NeoTower (tower type) | Quality → Prime tower → **Tower type** (Classic / NeoTower) |
+| Zigurat taper / Sandwich purge compaction | Quality → Prime tower |
+| SurfaceColorStitch wipe reserve | Quality → Prime tower → **SurfaceColorStitch wipe reserve** (mm³) |
 
 ---
 
@@ -938,7 +1072,27 @@ The outer wall is Classic by default, so its width should already be constant. I
 
 There is a known visual divergence on the second-to-last interior wall in narrow "waist" regions of some geometries. The Preview Lab and the real slice can disagree there. If you spot this, use the **Dump** button in the Preview Lab to export a JSON dump and share it (with the 3MF) — that's exactly what makes diagnosing the divergence possible.
 
----
+**Q: "ColorStitch", "Surface Color Mixer", "ColorMix" — are these the same thing?**
+
+Mostly yes. **ColorStitch** is the new UI name for the Surface Color Mixer family (the Studio in the Sandwich dialog and the ColorStitch Painter gizmo). Internal names, config keys and 3MF data were not renamed, so old projects keep working — and you'll still see *ColorMix* as the name of the per-line effect pill. They refer to the same system.
+
+**Q: In the painter, why don't my picked colours show up in the profile list anymore?**
+
+By design (this beta). Clicking a palette swatch sets it as the **active colour** but doesn't save anything — colours you paint with are "working colours" that are created on demand, reused if identical, and cleaned up when no face uses them. The **Profiles** list only shows palettes you deliberately **Save palette**. This keeps the list from filling up with every shade you try. See §7c.
+
+**Q: I can't find "Micro Stitch (Neotko)" in the top/bottom surface pattern dropdown.**
+
+It's **hidden in this beta** — it was an experimental pattern and is parked while other work stabilises. Presets that already use it still load and slice; the option just isn't offered in the dropdown. It can be re-enabled in a later build.
+
+**Q: My wipe tower changed size / uses more purge than before. Why?**
+
+Two beta default changes: **SurfaceColorStitch wipe reserve** is now **10 mm³** (was 5) and **Sandwich purge compaction** is **1.7** (was 1.0). Both live in **Quality → Prime tower** (§9). Lower the reserve for a thinner tower, or set compaction back to 1.0 to disable footprint compaction. Note: existing saved profiles keep whatever value they had — the new defaults only apply to fresh profiles.
+
+**Q: Can I use adaptive (variable) layer height with multiple tools and a Sandwich at the same time?**
+
+Yes — that's what **NeoTower** (§9) enables, and it's a recent capability of this fork. Sandwich/MultiPass scenes promote to NeoTower automatically. It's still being hardened, so if you see a tower artifact with this exact combination, report it with the project 3MF.
+
+--
 
 All of this work is open and free. Fork it, improve it, credit it.
 
