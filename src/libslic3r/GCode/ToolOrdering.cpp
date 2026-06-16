@@ -1628,10 +1628,20 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // Dump per-layer wipe-tower state after all gates have run.
     // Activate with: ORCA_DEBUG_WIPETOWER=1
     {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
+        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr); // s115-dbg — align gate with the other blocks so the per-layer partition dump is captured under ORCA_DEBUG_ALL too
         if (_wt_dbg) {
             static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
-            _wt_log << "\n=== fill_wipe_tower_partitions() [" << (call_context ? call_context : "unknown") << "] — " << m_layer_tools.size() << " layers ===\n";
+            // s116-dbg INSTANCE-ID: log the ToolOrdering instance pointer so the
+            // dump can be cross-referenced with NeoTower's 1a_READ (which logs
+            // &tool_ordering). Multiple ToolOrdering objects are built per slice
+            // (Print.cpp:2684 prime=false, :3482 prime=true=NeoTower's, :416 per-obj);
+            // this tells us whether the has_wt=1 we see here is the SAME instance
+            // NeoTower later reads as has_wt=0 (true posterior mutation) or a
+            // DIFFERENT instance that diverges on the 2.2 band.
+            _wt_log << "\n=== fill_wipe_tower_partitions() [" << (call_context ? call_context : "unknown")
+                    << "] this=" << static_cast<const void*>(this)
+                    << " — " << m_layer_tools.size() << " layers ===\n";
             for (size_t i = 0; i < m_layer_tools.size(); ++i) {
                 const LayerTools& lt = m_layer_tools[i];
                 _wt_log << "  [" << i << "]"
@@ -1757,6 +1767,58 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     }
     // NEOTKO_NEOTOWER_TAG_END
 
+    // NEOTKO_NEOTOWER_TAG s117 — drawer-continuity invariant (FALLO 3, hueco 2.20).
+    // The stock max-gap walk above (~:1726) seeds its baseline from the i+1 layer's
+    // print_z even when that layer is itself has_wt=0 — e.g. a single-tool band-
+    // nominal layer (z=1.88) left unpromoted because the entry below it is a sublayer
+    // block with empty extruders (the pair is skipped via `continue` at :1721). That
+    // leaves a real layer (z=2.2) unbuilt inside a > max_layer_height gap while the
+    // NEXT real layer (z=2.52) gets built → the built layer bridges TWO drawers (the
+    // forbidden 0.64 mega). Enforce the invariant directly and last: no two
+    // consecutive BUILT tower layers (has_wipe_tower OR is_mp_sublayer) may sit more
+    // than max_layer_height apart. Peek-ahead; when the NEXT layer would overshoot the
+    // baseline, the current real layer becomes a sparse single-tool drawer. Promotion
+    // only (never demotes) and bounded by max_layer_height → it can only PREVENT megas,
+    // never create one. A current layer within SAME_PLANE_MAX_OFF (0.02) of the
+    // baseline (a sublayer block sits ~SUBLAYER_GAP below its nominal real plane) just
+    // advances the baseline, so we never stack a redundant zero-height drawer on a
+    // plane the sublayer block already covers. Gated on sublayer presence so classic
+    // WipeTower2 prints (no empty-extruder entries → stock walk is correct) are
+    // untouched.
+    {
+        const bool _dc_has_sublayer = std::any_of(
+            m_layer_tools.begin(), m_layer_tools.end(),
+            [](const LayerTools& lt) { return lt.is_mp_sublayer; });
+        if (_dc_has_sublayer) {
+            // Local copy of NeoTowerZ::SAME_PLANE_MAX_OFF — avoid pulling the NeoTower
+            // Z header into this core TU; the value is the same-plane threshold.
+            constexpr double same_plane_off = 0.02;
+            static const bool _dc_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                     || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+            double last_built_z = -1.0;
+            for (size_t i = 0; i + 1 < m_layer_tools.size(); ++i) {
+                LayerTools& lt = m_layer_tools[i];
+                if (lt.has_wipe_tower || lt.is_mp_sublayer) { last_built_z = lt.print_z; continue; }
+                if (last_built_z < 0.0 || lt.extruders.empty()) continue; // tower not started / non-object
+                if (m_layer_tools[i + 1].print_z - last_built_z > max_layer_height + EPSILON) {
+                    const bool promoted = (lt.print_z - last_built_z > same_plane_off);
+                    if (promoted) lt.has_wipe_tower = true;     // real layer needs its own drawer
+                    if (_dc_dbg) {
+                        static std::ofstream _wt_logd("/tmp/neotko_wipetower.log", std::ios::app);
+                        _wt_logd << "[NEOTOWER] DRAWER_CONTINUITY z=" << lt.print_z
+                                 << (promoted ? " PROMOTE" : " same-plane(advance)")
+                                 << " next=" << m_layer_tools[i + 1].print_z
+                                 << " last_built=" << last_built_z
+                                 << " gap=" << (m_layer_tools[i + 1].print_z - last_built_z)
+                                 << " max_lh=" << max_layer_height << "\n";
+                        _wt_logd.flush();
+                    }
+                    last_built_z = lt.print_z;                  // advance baseline (also same-plane)
+                }
+            }
+        }
+    }
+
     // Calculate the wipe_tower_layer_height values.
     coordf_t wipe_tower_print_z_last = 0.;
     for (LayerTools &lt : m_layer_tools)
@@ -1811,7 +1873,8 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
     // Log the final public has_wipe_tower() value here — m_first_printing_extruder is
     // now valid, so this reflects the real runtime decision used by Print.cpp and GCode.cpp.
     {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
+        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr); // s115-dbg — align gate with the other blocks so the per-layer partition dump is captured under ORCA_DEBUG_ALL too
         if (_wt_dbg) {
             static std::ofstream _wt_log2("/tmp/neotko_wipetower.log", std::ios::app);
             _wt_log2 << "  → has_wipe_tower() (public, post collect_extruder_statistics)"

@@ -874,6 +874,14 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                             params.pattern = region_config.bottom_surface_pattern.value;
                             params.density = float(region_config.bottom_surface_density);
                         }
+                    // NEOTKO_MULTIPASS_TAG — penultimate solid surface has its own
+                    // pattern (default Monotonic Line, required by PathBlend/ColorStitch)
+                    // and its own density ("Penultimate Solid %"). internal_solid_infill_pattern
+                    // then governs only the remaining (non-penu, non-top) internal solid.
+                    } else if (surface.surface_type == stPenultimateInternalSolid) {
+                        // penu keys live in PrintObjectConfig (not region) → object_config.
+                        params.pattern = object_config.penultimate_solid_infill_pattern.value;
+                        params.density = float(object_config.penultimate_solid_infill_density);
                     } else if (surface.is_solid_infill()) {
                         params.pattern = region_config.internal_solid_infill_pattern.value;
                         params.density = 100.f;
@@ -1351,10 +1359,19 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 && SurfaceColorMix::object_has_any_colormix_paint(_mo6c)
                 && !surface_fill.expolygons.empty()) {
                 const PrintObject* _po6c = this->object();
+                // NEOTKO_COLORSTITCH_TAG — s112 fix: el tope REAL de la malla puede
+                // quedar hasta ~1 altura de capa POR ENCIMA del print_z de la última
+                // rebanada (cuando la altura del objeto no es múltiplo limpio de la
+                // capa). La pintura del top vive ahí, así que extendemos el límite
+                // superior +1 capa (top) / +2 capas (penu, que ancla 1 capa más abajo)
+                // para alcanzarla. Sin esto, objetos cuyo tope cae entre capas no
+                // resuelven slot y no slicean (duplicar+escalar lo "arreglaba" por
+                // alineación accidental).
                 const double _zlo = (_role6c == erTopSolidInfill)
                     ? this->print_z - this->height : this->print_z;
                 const double _zhi = (_role6c == erTopSolidInfill)
-                    ? this->print_z : this->print_z + this->height;
+                    ? this->print_z + this->height
+                    : this->print_z + 2.0 * this->height;
                 // Enumerate every painted slot present in the Z band, then keep
                 // only the ones whose profile has a non-empty stack for this role.
                 std::vector<int> _slots = SurfaceColorMix::enumerate_painted_slots_in_z_range(
@@ -1496,6 +1513,14 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     (surface_fill.params.extrusion_role == erTopSolidInfill ||
                      surface_fill.params.extrusion_role == erPenultimateInfill)) {
                     const ExtrusionRole _mp_role = surface_fill.params.extrusion_role;
+                    // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico: ¿llega un objeto
+                    // pintado a la rama FASE-2 painter? Vuelca mo + painter_mode + rol.
+                    NEOTKO_LOG(PROFILE, "FILL_MP z=" << this->print_z
+                        << " role=" << (int)_mp_role
+                        << " painter_mode=" << (_mp_painter_mode ? "1" : "0")
+                        << " mo=" << (const void*)_mp_mo
+                        << " obj='" << (_mp_mo ? _mp_mo->name : "<null>") << "'"
+                        << " fp_slot_tag=" << _fp_slot_tag);
                     // NEOTKO_PROFILE_TAG_START — Fase 6b: painter = pure applicator
                     // of the authoritative SurfacePassStack. The painter no longer
                     // reads the legacy 3 payloads (multipass/pathblend/colormix);
@@ -1518,10 +1543,13 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             ? _fp_slot_tag
                             : (_fp_slot_tag == 0 ? 0
                                 : ((_mp_role == erTopSolidInfill)
+                                    // NEOTKO_COLORSTITCH_TAG — s112 fix: +1 capa arriba
+                                    // (top) para alcanzar el tope de malla entre capas.
                                     ? SurfaceColorMix::dominant_painted_slot_in_z_range(
-                                          _po, this->print_z - this->height, this->print_z)
+                                          _po, this->print_z - this->height, this->print_z + this->height)
+                                    // penu ancla 1 capa más abajo → +2 capas arriba.
                                     : SurfaceColorMix::dominant_painted_slot_in_z_range(
-                                          _po, this->print_z, this->print_z + this->height)));
+                                          _po, this->print_z, this->print_z + 2.0 * this->height)));
                         if (_slot > 0) {
                             const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
                             const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
@@ -1529,7 +1557,13 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 const std::string& _js = (_mp_role == erTopSolidInfill)
                                     ? _p->stack_top_json : _p->stack_penu_json;
                                 SurfacePassStack _st = SurfacePassStack::from_json(_js);
-                                if (_st.enabled && !_st.passes.empty()) {
+                                // NEOTKO_SANDWICH_TAG s119 (EMPTY model): the painted
+                                // CONTENT is the only source of truth. Engage iff the
+                                // zone has a real effect (any non-None pass) — NOT the
+                                // legacy `enabled` gate. A [None] (Empty) zone suppresses
+                                // → vanilla. This removes the gate that made two regions
+                                // painted identically diverge (one enabled, one not).
+                                if (_st.any_effect()) {
                                     mp_stack    = std::move(_st);
                                     is_mp_fill  = true;
                                     NEOTKO_LOG(PROFILE, "STACK_OVERRIDE layer=" << f->layer_id
@@ -1561,7 +1595,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         // cases are deleted (no more "append_tcr unexpected" crashes).
                         const SurfacePassStack _stack =
                             SurfacePassStack::resolve(mp_cfg, _mp_role);
-                        if (_stack.enabled && !_stack.passes.empty()) {
+                        // NEOTKO_SANDWICH_TAG s119 (EMPTY model): drive by content, not
+                        // the legacy `enabled` gate. A [None] (Empty) zone → vanilla.
+                        if (_stack.any_effect()) {
                             mp_stack   = _stack;
                             is_mp_fill = true;
                         }
@@ -1746,6 +1782,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // tapa única que rellena el residual variable. Sin gaps por
                             // mask-induced phase mismatch.
                             if (!_bands.empty()) {
+                                // NEOTKO_MULTIPASS_TAG — Perimeter Override anchor: record
+                                // the sublayer count before this PB band so the cloned
+                                // perimeter can attach to the last PB sublayer pushed here
+                                // (cap for Full, topmost ramp for Half). Additive only —
+                                // does NOT touch the ramp/cap staircase geometry.
+                                const size_t _pb_slot_base = sublayer_slot.size();
                                 const ExPolygon  _src_exp = surface_fill.surface.expolygon;
                                 const BoundingBox _src_bb = _src_exp.contour.bounding_box();
                                 const coord_t _ymin = _src_bb.min.y();
@@ -1807,9 +1849,16 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 
                                     const double _H_d = double(this->height);
                                     const float _floor_pb = std::max(0.01f, pb.floor_mm);
+                                    // mid_end_mm <0 ⇒ auto: resolve to the tallest legal ramp
+                                    // before the min-clamp (else a default PB yields a negative
+                                    // range and the staircase collapses flat).
+                                    const float _mid_pref_pb = (pb.mid_end_mm < 0.f)
+                                        ? ((pb.mode == PathBlendPassConfig::Mode::Full)
+                                               ? static_cast<float>(_H_d - 0.04) : static_cast<float>(_H_d))
+                                        : pb.mid_end_mm;
                                     const float _mid_end_pb = (pb.mode == PathBlendPassConfig::Mode::Full)
-                                        ? std::min(pb.mid_end_mm, static_cast<float>(_H_d - 0.04))
-                                        : std::min(pb.mid_end_mm, static_cast<float>(_H_d));
+                                        ? std::min(_mid_pref_pb, static_cast<float>(_H_d - 0.04))
+                                        : std::min(_mid_pref_pb, static_cast<float>(_H_d));
                                     const double _range_pb = double(_mid_end_pb) - double(_floor_pb);
                                     const double _base_z = this->bottom_z();
 
@@ -1890,9 +1939,14 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 
                                     const double _H_d = double(this->height);
                                     const float _floor_pb   = std::max(0.01f, pb.floor_mm);
+                                    // mid_end_mm <0 ⇒ auto: resolve to tallest legal ramp first.
+                                    const float _mid_pref_pb = (pb.mid_end_mm < 0.f)
+                                        ? ((pb.mode == PathBlendPassConfig::Mode::Full)
+                                               ? static_cast<float>(_H_d - 0.04) : static_cast<float>(_H_d))
+                                        : pb.mid_end_mm;
                                     const float _mid_end_pb = (pb.mode == PathBlendPassConfig::Mode::Full)
-                                        ? std::min(pb.mid_end_mm, static_cast<float>(_H_d - 0.04))
-                                        : std::min(pb.mid_end_mm, static_cast<float>(_H_d));
+                                        ? std::min(_mid_pref_pb, static_cast<float>(_H_d - 0.04))
+                                        : std::min(_mid_pref_pb, static_cast<float>(_H_d));
 
                                     ExtrusionEntityCollection _cap_collected;
                                     auto _scale_and_collect = [&](const ExtrusionPath* p) {
@@ -1932,6 +1986,58 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                             << " pass=" << (global_pass - 1)
                                             << " spacing=" << _nominal_flow.spacing()
                                             << " paths=" << _sub.fills.entities.size());
+                                    }
+                                }
+
+                                // NEOTKO_MULTIPASS_TAG — Perimeter Override for PathBlend.
+                                // perimeter_override suppresses the real-layer perimeter
+                                // (GCode MP_PERIM_SUPPRESS); without a replacement the PB
+                                // surface loses its contour. The perimeter is a structural
+                                // wall → debe construirse a la altura REAL de la zona (Z
+                                // NOMINAL, full height), NO a la altura del path-half.
+                                //   Full: el cap ya imprime a Z nominal → adjuntar ahí.
+                                //   Half: NO hay cap; el último sublayer es el tope de rampa
+                                //   (real_extrude_z = ramp_end, sub-nominal). Adjuntar ahí
+                                //   dejaría el perímetro corto. → sintetizamos un sublayer
+                                //   PORTADOR de SOLO perímetro a Z nominal (tool_bottom),
+                                //   sin fills, para que el contorno cierre la capa.
+                                const bool _pb_perim = _mp_painter_mode
+                                    ? mp_stack.perimeter_override
+                                    : mp_cfg.multipass_perimeter_override.value;
+                                if (_pb_perim && i == n - 1 && sublayer_slot.size() > _pb_slot_base) {
+                                    const double _nominal_z = this->bottom_z() + double(this->height);
+                                    const bool _back_at_nominal =
+                                        sublayer_slot.back().real_extrude_z >= _nominal_z - 1e-4;
+                                    if (_back_at_nominal) {
+                                        // Full (cap a Z nominal) — adjuntar al cap.
+                                        MultiPassSubLayer& _anchor = sublayer_slot.back();
+                                        for (const LayerRegion* lr : this->regions())
+                                            for (const ExtrusionEntity* pe : lr->perimeters.entities)
+                                                _anchor.perimeters.entities.push_back(pe->clone());
+                                        NEOTKO_LOG(MULTIPASS, "  SUBLAYER PB perimeters cloned (cap@nominal): "
+                                            << _anchor.perimeters.entities.size()
+                                            << " → tool T" << _anchor.tool_id << " z=" << _anchor.print_z);
+                                    } else {
+                                        // Half (sin cap) — sublayer portador a Z nominal.
+                                        MultiPassSubLayer _psub;
+                                        _psub.print_z        = _pb_band_top_sched; // tras todas las rampas
+                                        _psub.height         = double(this->height);
+                                        _psub.real_extrude_z = _nominal_z;         // perímetro a altura real
+                                        _psub.pass_idx       = global_pass++;
+                                        _psub.role           = _sub_role;
+                                        _psub.effect         = SurfacePassKind::PathBlend;
+                                        _psub.tool_id        = pb.tool_bottom;     // color de la superficie
+                                        _psub.speed_pct      = 100;
+                                        _psub.pathblend_pass = -1;                 // plain dispatch, sin apply_path
+                                        _psub.pathblend_blob.clear();
+                                        for (const LayerRegion* lr : this->regions())
+                                            for (const ExtrusionEntity* pe : lr->perimeters.entities)
+                                                _psub.perimeters.entities.push_back(pe->clone());
+                                        NEOTKO_LOG(MULTIPASS, "  SUBLAYER PB perimeters carrier (half@nominal): "
+                                            << _psub.perimeters.entities.size()
+                                            << " → tool T" << _psub.tool_id << " real_z=" << _psub.real_extrude_z);
+                                        sublayer_slot.push_back(std::move(_psub));
+                                        ++_band_local_idx;
                                     }
                                 }
 
@@ -1981,6 +2087,24 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 else
                                     _clone_into(pb_src, sub.fills);
                                 sublayer_slot.push_back(std::move(sub));
+                            }
+                            // NEOTKO_MULTIPASS_TAG — Perimeter Override (legacy PB path):
+                            // attach the suppressed perimeter to the last pass pushed
+                            // (cap for Full, ramp for Half). Mirrors the staircase block.
+                            {
+                                const bool _pb_perim = _mp_painter_mode
+                                    ? mp_stack.perimeter_override
+                                    : mp_cfg.multipass_perimeter_override.value;
+                                if (_pb_perim && i == n - 1 && !sublayer_slot.empty()
+                                    && sublayer_slot.back().effect == SurfacePassKind::PathBlend) {
+                                    MultiPassSubLayer& _anchor = sublayer_slot.back();
+                                    for (const LayerRegion* lr : this->regions())
+                                        for (const ExtrusionEntity* pe : lr->perimeters.entities) {
+                                            ExtrusionEntity* cloned = pe->clone();
+                                            neotko_mp_scale_perim(cloned, 1.0, k_mp);
+                                            _anchor.perimeters.entities.push_back(cloned);
+                                        }
+                                }
                             }
                             NEOTKO_LOG(MULTIPASS, "  SANDWICH PathBlend z=" << pb_band_top
                                 << " mode=" << (pb_npasses == 2 ? "full" : "half")
@@ -2126,7 +2250,21 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // + cross-product machinery already plans the toolchanges).
                             SurfaceColorMix::assign_and_group_tools(
                                 temp, *cm_eff, _sub_role, int(f->layer_id),
-                                /*allow_top=*/true, /*allow_penu=*/true);
+                                /*allow_top=*/true, /*allow_penu=*/true,
+                                // NEOTKO_SANDWICH_TAG s119 — ROOT FIX for "painted penu
+                                // colormix doesn't slice unless the SandwichDialog penu
+                                // 'Enabled' is checked". This FASE2 call omitted
+                                // print_object + Z, so assign_and_group_tools could NOT
+                                // detect PAINTER MODE and fell into PRESET mode, where
+                                // should_process_role(Penultimate, surface) gates on the
+                                // preset's interlayer_colormix_surface — which the penu
+                                // 'Enabled' checkbox writes (top-only when disabled) →
+                                // penu skipped → 1 bucket (no mix). Passing these (as the
+                                // LayerRegion call site already does) enables painter
+                                // mode → the painted profile drives the penu, ignoring
+                                // the legacy preset surface gate.
+                                /*mgr=*/nullptr, /*num_physical=*/0,
+                                this->object(), this->print_z, this->height);
                             auto buckets =
                                 SurfaceColorMix::eec_to_tool_buckets(temp, natural_tool);
                             const int NB = (int)buckets.size();
@@ -2147,6 +2285,27 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 sub.speed_pct = 100;
                                 sub.fills     = std::move(buckets[k].second);
                                 sublayer_slot.push_back(std::move(sub));
+                            }
+
+                            // NEOTKO_MULTIPASS_TAG — Perimeter Override for ColorMix.
+                            // s109 fix: emit the perimeter ONCE at FULL layer height on
+                            // the topmost band's last bucket (≈ nominal Z) so the wall
+                            // closes the layer. Scaling it to the band height (old bug)
+                            // left Penultimate/partial bands short → open perimeter.
+                            // Only the colour (the last bucket's tool) is overridden.
+                            {
+                                const bool _cm_perim = _mp_painter_mode
+                                    ? mp_stack.perimeter_override
+                                    : mp_cfg.multipass_perimeter_override.value;
+                                if (_cm_perim && i == n - 1 && !sublayer_slot.empty()) {
+                                    MultiPassSubLayer& _anchor = sublayer_slot.back();
+                                    for (const LayerRegion* lr : this->regions())
+                                        for (const ExtrusionEntity* pe : lr->perimeters.entities)
+                                            _anchor.perimeters.entities.push_back(pe->clone());
+                                    NEOTKO_LOG(MULTIPASS, "  SUBLAYER CM perimeters cloned (full-h): "
+                                        << _anchor.perimeters.entities.size()
+                                        << " entities → tool T" << _anchor.tool_id << " top band " << i);
+                                }
                             }
                             NEOTKO_LOG(MULTIPASS, "  SANDWICH ColorMix band" << i
                                 << " z=" << band_top_z << " buckets=" << NB

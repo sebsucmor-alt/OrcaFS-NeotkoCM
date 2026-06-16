@@ -15,9 +15,193 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <set>
 
 namespace Slic3r { namespace GUI {
+
+// =============================================================================
+// Visual language: per-letter colors for badges/chips, and procedurally drawn
+// isometric mini-cube icon buttons (no SVG assets, no toolbar tint pipeline).
+// =============================================================================
+
+namespace {
+
+const ImU32 kOrderColors[] = {
+    IM_COL32(255, 140,   0, 235), // A orange
+    IM_COL32(240, 200,   0, 235), // B yellow
+    IM_COL32( 70, 180,  80, 235), // C green
+    IM_COL32( 40, 180, 200, 235), // D cyan
+    IM_COL32(180,  90, 230, 235), // E violet
+    IM_COL32(230,  80, 120, 235), // F pink
+};
+constexpr size_t kOrderColorCount = sizeof(kOrderColors) / sizeof(kOrderColors[0]);
+
+inline ImU32 order_color(size_t i) { return kOrderColors[i % kOrderColorCount]; }
+
+// Same palette as ColorRGBA for tinting scene volumes (kept in sync above).
+inline ColorRGBA order_color_rgba(size_t i)
+{
+    const ImU32 c = order_color(i);
+    return ColorRGBA((float)((c >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
+                     (float)((c >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
+                     (float)((c >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
+                     1.0f);
+}
+
+enum class CubeIcon {
+    TouchZPos,  // plane descends onto the top face (stack)
+    TouchXPos,  // plane presses against the right (+X) face
+    TouchXNeg,  // mirrored: plane presses against the left (-X) face
+    TouchYNeg,  // plane presses against the front (-Y) face
+    TouchYPos,  // mirrored: plane presses against the back (+Y) face
+    Bed,        // cube drops onto the ground line
+    CenterX,    // translucent mid slab perpendicular to X
+    CenterY,    // mid slab perpendicular to Y
+    CenterZ,    // mid slab perpendicular to Z
+};
+
+// Isometric mini-cube icon button. The highlighted face + incoming plane with
+// arrows tells the user what the operation does. In flush mode the plane is
+// drawn nearly coincident with the face (faces become coplanar, not stacked).
+bool cube_icon_button(const char* id, CubeIcon icon, float size, bool flush_mode,
+                      const char* axis_label)
+{
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p0 = ImGui::GetItemRectMin();
+
+    const bool mirror = (icon == CubeIcon::TouchXNeg || icon == CubeIcon::TouchYPos);
+    auto P = [&](float u, float v) {
+        if (mirror) u = 1.0f - u;
+        return ImVec2(p0.x + u * size, p0.y + v * size);
+    };
+
+    // Colors
+    const ImU32 col_line  = IM_COL32(43, 52, 62, 255);
+    const ImU32 col_top   = IM_COL32(214, 214, 214, 255);
+    const ImU32 col_left  = IM_COL32(168, 168, 168, 255);
+    const ImU32 col_right = IM_COL32(128, 128, 128, 255);
+    const ImU32 col_hl    = hovered ? IM_COL32(38, 198, 182, 255)
+                                    : IM_COL32(0, 150, 136, 255); // Orca teal
+    const ImU32 col_plane_fill = IM_COL32(255, 255, 255, 60);
+
+    if (hovered)
+        dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                          IM_COL32(255, 255, 255, 26), 4.0f);
+
+    // Base cube geometry in [0,1] button space (slightly low, room for planes).
+    // Iso axes on screen: +X = (0.28, 0.14), +Y = (0.28, -0.14), +Z = up.
+    const float lift = (icon == CubeIcon::Bed) ? -0.10f : 0.0f;
+    auto F = [&](std::initializer_list<std::pair<float, float>> uv, ImU32 fill) {
+        ImVec2 pts[4]; int n = 0;
+        for (auto& q : uv) pts[n++] = P(q.first, q.second + lift);
+        dl->AddConvexPolyFilled(pts, n, fill);
+        dl->AddPolyline(pts, n, col_line, ImDrawFlags_Closed, 1.2f);
+    };
+
+    const std::initializer_list<std::pair<float, float>> top_face =
+        { {0.50f, 0.30f}, {0.78f, 0.44f}, {0.50f, 0.58f}, {0.22f, 0.44f} };
+    const std::initializer_list<std::pair<float, float>> left_face =   // -Y
+        { {0.22f, 0.44f}, {0.50f, 0.58f}, {0.50f, 0.88f}, {0.22f, 0.74f} };
+    const std::initializer_list<std::pair<float, float>> right_face =  // +X
+        { {0.50f, 0.58f}, {0.78f, 0.44f}, {0.78f, 0.74f}, {0.50f, 0.88f} };
+
+    const bool hl_top   = (icon == CubeIcon::TouchZPos);
+    const bool hl_right = (icon == CubeIcon::TouchXPos || icon == CubeIcon::TouchXNeg);
+    const bool hl_left  = (icon == CubeIcon::TouchYNeg || icon == CubeIcon::TouchYPos);
+
+    F(top_face,   hl_top   ? col_hl : col_top);
+    F(left_face,  hl_left  ? col_hl : col_left);
+    F(right_face, hl_right ? col_hl : col_right);
+
+    // Incoming plane (offset copy of the target face) + two approach arrows.
+    const float k = flush_mode ? 0.18f : 0.55f; // flush: almost touching
+    auto plane = [&](std::initializer_list<std::pair<float, float>> face,
+                     float dx, float dy) {
+        ImVec2 pts[4]; int n = 0;
+        for (auto& q : face) pts[n++] = P(q.first + dx * k, q.second + dy * k + lift);
+        dl->AddConvexPolyFilled(pts, n, col_plane_fill);
+        dl->AddPolyline(pts, n, col_line, ImDrawFlags_Closed, 1.2f);
+    };
+    auto arrow = [&](ImVec2 a, ImVec2 b) {
+        dl->AddLine(a, b, col_line, 1.4f);
+        ImVec2 d(b.x - a.x, b.y - a.y);
+        const float len = std::sqrt(d.x * d.x + d.y * d.y);
+        if (len < 1e-3f) return;
+        d.x /= len; d.y /= len;
+        const ImVec2 perp(-d.y, d.x);
+        const float h = 0.08f * size;
+        dl->AddTriangleFilled(b,
+                              ImVec2(b.x - d.x * h + perp.x * h * 0.6f, b.y - d.y * h + perp.y * h * 0.6f),
+                              ImVec2(b.x - d.x * h - perp.x * h * 0.6f, b.y - d.y * h - perp.y * h * 0.6f),
+                              col_line);
+    };
+
+    switch (icon) {
+    case CubeIcon::TouchZPos:
+        plane(top_face, 0.0f, -0.42f);              // plane floating above
+        arrow(P(0.12f, 0.18f), P(0.12f, 0.34f));    // flanking down arrows
+        arrow(P(0.88f, 0.18f), P(0.88f, 0.34f));
+        break;
+    case CubeIcon::TouchXPos:
+    case CubeIcon::TouchXNeg:
+        plane(right_face, 0.28f, 0.14f);            // plane out along +X
+        arrow(P(0.97f, 0.30f), P(0.85f, 0.24f));    // arrows pushing in (-X)
+        arrow(P(0.97f, 0.95f), P(0.85f, 0.89f));
+        break;
+    case CubeIcon::TouchYNeg:
+    case CubeIcon::TouchYPos:
+        plane(left_face, -0.28f, 0.14f);            // plane out along -Y
+        arrow(P(0.03f, 0.30f), P(0.15f, 0.24f));    // arrows pushing in (+Y)
+        arrow(P(0.03f, 0.95f), P(0.15f, 0.89f));
+        break;
+    case CubeIcon::Bed: {
+        dl->AddLine(P(0.08f, 0.92f), P(0.92f, 0.92f), col_hl, 2.2f);
+        arrow(P(0.30f, 0.68f), P(0.30f, 0.88f));
+        arrow(P(0.70f, 0.68f), P(0.70f, 0.88f));
+        break;
+    }
+    case CubeIcon::CenterX: {
+        // Mid slab perpendicular to X = right face pulled back to the center.
+        ImVec2 pts[4]; int n = 0;
+        for (auto& q : right_face) pts[n++] = P(q.first - 0.14f, q.second - 0.07f);
+        dl->AddConvexPolyFilled(pts, n, (col_hl & 0x00FFFFFF) | (200u << 24));
+        dl->AddPolyline(pts, n, col_line, ImDrawFlags_Closed, 1.2f);
+        break;
+    }
+    case CubeIcon::CenterY: {
+        ImVec2 pts[4]; int n = 0;
+        for (auto& q : left_face) pts[n++] = P(q.first + 0.14f, q.second - 0.07f);
+        dl->AddConvexPolyFilled(pts, n, (col_hl & 0x00FFFFFF) | (200u << 24));
+        dl->AddPolyline(pts, n, col_line, ImDrawFlags_Closed, 1.2f);
+        break;
+    }
+    case CubeIcon::CenterZ: {
+        ImVec2 pts[4]; int n = 0;
+        for (auto& q : top_face) pts[n++] = P(q.first, q.second + 0.145f);
+        dl->AddConvexPolyFilled(pts, n, (col_hl & 0x00FFFFFF) | (200u << 24));
+        dl->AddPolyline(pts, n, col_line, ImDrawFlags_Closed, 1.2f);
+        break;
+    }
+    }
+
+    // Tiny axis label so mirrored twins are unambiguous at a glance.
+    if (axis_label != nullptr && axis_label[0] != '\0')
+        dl->AddText(ImGui::GetFont(), size * 0.26f,
+                    ImVec2(p0.x + 2.0f, p0.y + size - size * 0.26f - 1.0f),
+                    col_line, axis_label);
+
+    return pressed;
+}
+
+} // anonymous namespace
+
+// =============================================================================
+// Gizmo
+// =============================================================================
 
 GLGizmoAlignStack::GLGizmoAlignStack(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -36,13 +220,18 @@ std::string GLGizmoAlignStack::on_get_name() const
 
 bool GLGizmoAlignStack::on_is_activable() const
 {
-    // Activable as soon as something is selected; the panel guards heavier ops.
-    return !m_parent.get_selection().is_empty();
+    // Always available: the user can open it on an empty scene/selection and
+    // build the order by clicking objects.
+    return true;
 }
 
 void GLGizmoAlignStack::on_set_state()
 {
-    if (get_state() == Off) {
+    if (get_state() == On) {
+        seed_order_from_selection();
+        apply_highlight();
+    } else if (get_state() == Off) {
+        restore_highlight();
         m_ordered_object_idxs.clear();
         clear_face_pick();
     }
@@ -50,37 +239,102 @@ void GLGizmoAlignStack::on_set_state()
 
 void GLGizmoAlignStack::data_changed(bool /*is_serializing*/)
 {
-    // Selection changed externally — keep our ordered list in sync.
-    sync_order_with_selection();
+    // Fires on selection changes and on volume rebuilds. apply_highlight()
+    // restores via stable ids first (no dangling pointers), then re-tints —
+    // so tints never accumulate and removed objects regain their color.
+    prune_dead_objects();
+    if (get_state() == On)
+        apply_highlight();
 }
 
 // -----------------------------------------------------------------------------
-// Order tracking
+// Order tracking — owned by the gizmo, selection is mirrored so that
+// Selection::translate() keeps acting on every ordered object.
 // -----------------------------------------------------------------------------
 
-void GLGizmoAlignStack::sync_order_with_selection()
+void GLGizmoAlignStack::seed_order_from_selection()
 {
-    const Selection& sel = m_parent.get_selection();
+    m_ordered_object_idxs.clear();
+    for (const auto& kv : m_parent.get_selection().get_content())
+        m_ordered_object_idxs.push_back(kv.first);
+}
 
-    // Collect currently selected object idxs (top-level instances only).
-    std::set<int> cur_set;
-    for (const auto& kv : sel.get_content())
-        cur_set.insert(kv.first);
-
-    // Drop entries no longer selected.
+void GLGizmoAlignStack::prune_dead_objects()
+{
+    const Model* model = m_parent.get_selection().get_model();
+    const int n_objects = model ? (int)model->objects.size() : 0;
     m_ordered_object_idxs.erase(
         std::remove_if(m_ordered_object_idxs.begin(), m_ordered_object_idxs.end(),
-                       [&](int idx) { return cur_set.find(idx) == cur_set.end(); }),
+                       [&](int idx) { return idx < 0 || idx >= n_objects; }),
         m_ordered_object_idxs.end());
+}
 
-    // Append newly selected ones, preserving insertion order from the set
-    // iterator (best effort — true click order is not retrievable from
-    // std::set, but stable enough for typical shift+click flows).
-    for (int idx : cur_set) {
-        if (std::find(m_ordered_object_idxs.begin(), m_ordered_object_idxs.end(), idx)
-            == m_ordered_object_idxs.end())
-            m_ordered_object_idxs.push_back(idx);
+void GLGizmoAlignStack::toggle_object_order(int object_idx)
+{
+    Selection& sel = m_parent.get_selection();
+    auto it = std::find(m_ordered_object_idxs.begin(), m_ordered_object_idxs.end(), object_idx);
+    if (it != m_ordered_object_idxs.end()) {
+        m_ordered_object_idxs.erase(it);
+        sel.remove_object((unsigned int)object_idx);
+    } else {
+        m_ordered_object_idxs.push_back(object_idx);
+        sel.add_object((unsigned int)object_idx, false);
     }
+    // Order changed → a previously picked face on the old anchor is stale.
+    if (m_face_pick_mode || m_has_picked_face)
+        clear_face_pick();
+    refresh_highlight();
+}
+
+// -----------------------------------------------------------------------------
+// Scene highlight — tint each ordered object's volumes with its order color
+// -----------------------------------------------------------------------------
+
+void GLGizmoAlignStack::restore_highlight()
+{
+    if (m_saved_colors.empty())
+        return;
+    // Restore by matching live volumes against saved ids; stale ids (volumes
+    // that no longer exist after a rebuild) simply don't match and are dropped.
+    for (GLVolume* v : m_parent.get_volumes().volumes) {
+        if (v == nullptr)
+            continue;
+        auto it = m_saved_colors.find(std::make_tuple(v->object_idx(), v->volume_idx(), v->instance_idx()));
+        if (it != m_saved_colors.end())
+            v->set_color(it->second);
+    }
+    m_saved_colors.clear();
+}
+
+void GLGizmoAlignStack::apply_highlight()
+{
+    // Always restore first so we never save an already-tinted color as the
+    // "original" (which would make tints accumulate/darken on each refresh).
+    restore_highlight();
+
+    const GLVolumePtrs& volumes = m_parent.get_volumes().volumes;
+    for (size_t order = 0; order < m_ordered_object_idxs.size(); ++order) {
+        const int obj = m_ordered_object_idxs[order];
+        const ColorRGBA letter = order_color_rgba(order);
+        for (GLVolume* v : volumes) {
+            if (v == nullptr || v->object_idx() != obj || v->is_modifier || v->is_wipe_tower)
+                continue;
+            m_saved_colors.emplace(std::make_tuple(v->object_idx(), v->volume_idx(), v->instance_idx()), v->color);
+            // Blend 72% toward the letter color so geometry shading still reads.
+            ColorRGBA tint;
+            for (int k = 0; k < 3; ++k)
+                tint[k] = 0.28f * v->color[k] + 0.72f * letter[k];
+            tint[3] = v->color[3];
+            v->set_color(tint);
+        }
+    }
+}
+
+void GLGizmoAlignStack::refresh_highlight()
+{
+    apply_highlight();
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
 }
 
 // -----------------------------------------------------------------------------
@@ -100,12 +354,12 @@ BoundingBoxf3 GLGizmoAlignStack::world_bbox_of_object(int object_idx) const
 }
 
 // -----------------------------------------------------------------------------
-// Render — badges only, no 3D handles
+// Render — colored letter badges, no 3D handles
 // -----------------------------------------------------------------------------
 
 void GLGizmoAlignStack::on_render()
 {
-    sync_order_with_selection();
+    prune_dead_objects();
     render_badges();
 }
 
@@ -118,78 +372,96 @@ void GLGizmoAlignStack::render_badges()
     const Matrix4d proj_view = (camera.get_projection_matrix() * camera.get_view_matrix()).matrix();
     const std::array<int, 4>& viewport = camera.get_viewport();
 
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+
     for (size_t i = 0; i < m_ordered_object_idxs.size(); ++i) {
         const int obj_idx = m_ordered_object_idxs[i];
         const BoundingBoxf3 bb = world_bbox_of_object(obj_idx);
         if (!bb.defined)
             continue;
 
-        // Anchor the badge slightly above the top of the bbox.
+        // Billboard a big numbered disc just above the object's top.
         Vec3d anchor = bb.center();
         anchor.z()   = bb.max.z() + 2.0;
-
         const Vec2d ss = TransformHelper::world_to_ss(anchor, proj_view, viewport);
+        const ImVec2 center((float)ss.x(), (float)(viewport[3] - ss.y()));
 
-        // ImGui Y is inverted vs OpenGL viewport.
-        ImGui::SetNextWindowPos(ImVec2((float)ss.x(),
-                                       (float)(viewport[3] - ss.y())),
-                                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        const ImU32 col      = order_color(i);
+        const float radius   = 17.0f;
+        const bool  anchor_n = (i == 0); // #1 = the anchor
 
-        const char label_letter = (char)('A' + (int)std::min<size_t>(i, 25));
-        std::string win_id = std::string("##alignstack_badge_") + std::to_string(obj_idx);
+        // Disc + outline (anchor gets a thicker ring to read as "the base").
+        fg->AddCircleFilled(center, radius, col, 32);
+        fg->AddCircle(center, radius, IM_COL32(43, 52, 62, 255),
+                      32, anchor_n ? 3.5f : 1.8f);
 
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.95f, 0.75f, 0.10f, 0.90f));
-        ImGui::PushStyleColor(ImGuiCol_Text,     ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-        ImGui::Begin(win_id.c_str(), nullptr,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs     | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-        ImGui::Text("%c", label_letter);
-        ImGui::End();
-        ImGui::PopStyleColor(2);
+        // Big centered number.
+        const std::string num = std::to_string((int)i + 1);
+        ImFont* font = ImGui::GetFont();
+        const float fsize = 26.0f;
+        const ImVec2 tsz  = font->CalcTextSizeA(fsize, FLT_MAX, 0.0f, num.c_str());
+        fg->AddText(font, fsize,
+                    ImVec2(center.x - tsz.x * 0.5f, center.y - tsz.y * 0.5f),
+                    IM_COL32(20, 20, 20, 255), num.c_str());
     }
 }
 
 // -----------------------------------------------------------------------------
-// Mouse — face-pick mode only
+// Mouse — click-to-order in the scene, plus face-pick mode
 // -----------------------------------------------------------------------------
 
 bool GLGizmoAlignStack::on_mouse(const wxMouseEvent& mouse_event)
 {
-    if (!m_face_pick_mode)
-        return false;
+    if (m_face_pick_mode) {
+        if (mouse_event.LeftDown()) {
+            const int a_idx = ordered_obj(0);
+            if (a_idx < 0)
+                return false;
 
-    if (mouse_event.LeftDown()) {
-        // We pick on object A (first ordered).
-        const int a_idx = ordered_obj(0);
-        if (a_idx < 0)
-            return false;
+            ensure_face_raycaster_for_A();
+            if (!m_face_raycaster)
+                return false;
 
-        ensure_face_raycaster_for_A();
-        if (!m_face_raycaster)
-            return false;
+            const Camera& camera = wxGetApp().plater()->get_camera();
+            const Vec2d mouse_pos(mouse_event.GetX(), mouse_event.GetY());
 
-        const Camera& camera = wxGetApp().plater()->get_camera();
-        const Vec2d mouse_pos(mouse_event.GetX(), mouse_event.GetY());
+            Vec3f  hit_local  { 0.f, 0.f, 0.f };
+            Vec3f  hit_normal { 0.f, 0.f, 1.f };
+            size_t facet_idx  = 0;
 
-        Vec3f  hit_local  { 0.f, 0.f, 0.f };
-        Vec3f  hit_normal { 0.f, 0.f, 1.f };
-        size_t facet_idx  = 0;
-
-        if (m_face_raycaster->unproject_on_mesh(mouse_pos,
-                                                m_face_raycaster_world_trafo,
-                                                camera, hit_local, hit_normal,
-                                                nullptr, &facet_idx)) {
-            const Vec3d hit_world =
-                m_face_raycaster_world_trafo * hit_local.cast<double>();
-            m_picked_face_world_pos    = hit_world;
-            m_picked_face_world_normal = (m_face_raycaster_world_trafo.linear()
-                                           * hit_normal.cast<double>()).normalized();
-            m_picked_face_world_z      = hit_world.z();
-            m_has_picked_face          = true;
-            // Stay in pick mode so user can re-pick; explicit toggle to exit.
-            return true;
+            if (m_face_raycaster->unproject_on_mesh(mouse_pos,
+                                                    m_face_raycaster_world_trafo,
+                                                    camera, hit_local, hit_normal,
+                                                    nullptr, &facet_idx)) {
+                const Vec3d hit_world =
+                    m_face_raycaster_world_trafo * hit_local.cast<double>();
+                m_picked_face_world_pos    = hit_world;
+                m_picked_face_world_normal = (m_face_raycaster_world_trafo.linear()
+                                               * hit_normal.cast<double>()).normalized();
+                m_picked_face_world_z      = hit_world.z();
+                m_has_picked_face          = true;
+                // Stay in pick mode so the user can re-pick.
+                return true;
+            }
         }
+        return false;
+    }
+
+    // Click-to-order: clicking an object in the scene assigns the next letter;
+    // clicking an already-lettered object removes it from the order.
+    if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
+        const int hovered = m_parent.get_first_hover_volume_idx();
+        if (hovered < 0)
+            return false; // empty space → camera keeps working as usual
+        const GLVolumePtrs& volumes = m_parent.get_volumes().volumes;
+        if (hovered >= (int)volumes.size() || volumes[hovered] == nullptr)
+            return false;
+        const int obj_idx = volumes[hovered]->object_idx();
+        const Model* model = m_parent.get_selection().get_model();
+        if (!model || obj_idx < 0 || obj_idx >= (int)model->objects.size())
+            return false;
+        toggle_object_order(obj_idx);
+        return true; // consume: keep global selection stable while ordering
     }
     return false;
 }
@@ -211,7 +483,6 @@ void GLGizmoAlignStack::ensure_face_raycaster_for_A()
     if (mo->instances.empty())
         return;
 
-    // raw_mesh is the merged mesh of all MODEL_PART volumes in object coords.
     TriangleMesh mesh = mo->raw_mesh();
     m_face_raycaster.reset(new MeshRaycaster(std::move(mesh)));
     m_face_raycaster_obj_idx     = a_idx;
@@ -227,105 +498,110 @@ void GLGizmoAlignStack::clear_face_pick()
 }
 
 // -----------------------------------------------------------------------------
-// Transform application
+// Transform application — A is always the anchor; B, C... move toward it.
 // -----------------------------------------------------------------------------
 
-void GLGizmoAlignStack::move_object_min_z_to(int object_idx, double target_z)
+void GLGizmoAlignStack::translate_object(int object_idx, const Vec3d& delta)
 {
-    const BoundingBoxf3 bb = world_bbox_of_object(object_idx);
-    if (!bb.defined)
+    if (delta.norm() < 1e-9)
         return;
-    const double dz = target_z - bb.min.z();
-    if (std::abs(dz) < 1e-9)
-        return;
-
     Selection& sel = m_parent.get_selection();
     const Model* model = sel.get_model();
-    if (!model || object_idx >= (int)model->objects.size())
+    if (!model || object_idx < 0 || object_idx >= (int)model->objects.size())
         return;
     const ModelObject* mo = model->objects[object_idx];
     for (size_t i = 0; i < mo->instances.size(); ++i)
-        sel.translate((unsigned int)object_idx, (unsigned int)i, Vec3d(0.0, 0.0, dz));
+        sel.translate((unsigned int)object_idx, (unsigned int)i, delta);
 }
 
-void GLGizmoAlignStack::apply_align(int axis, int mode)
+void GLGizmoAlignStack::apply_touch(int axis, int dir)
 {
     if (m_ordered_object_idxs.size() < 2)
         return;
 
-    // Compute anchor coordinate on `axis` from the chosen anchor.
-    auto bbox_coord = [&](const BoundingBoxf3& bb)->double {
-        if (mode == 0) return bb.min(axis);
-        if (mode == 2) return bb.max(axis);
-        return bb.center()(axis);
-    };
+    Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: place against");
 
-    double target = 0.0;
-    switch (m_align_anchor) {
-    case 0: target = bbox_coord(world_bbox_of_object(m_ordered_object_idxs.front())); break;
-    case 1: target = bbox_coord(world_bbox_of_object(m_ordered_object_idxs.back()));  break;
-    case 2: {
-        BoundingBoxf3 union_bb;
-        for (int idx : m_ordered_object_idxs)
-            union_bb.merge(world_bbox_of_object(idx));
-        target = bbox_coord(union_bb);
-        break;
-    }
-    case 3: {
-        // Bed anchor: in v1, only meaningful on Z (target = 0). For X/Y fall
-        // back to selection center to avoid coupling to bed-shape internals.
-        if (axis == 2) {
-            target = 0.0;
-        } else {
-            BoundingBoxf3 union_bb;
-            for (int idx : m_ordered_object_idxs)
-                union_bb.merge(world_bbox_of_object(idx));
-            target = bbox_coord(union_bb);
-        }
-        break;
-    }
+    if (axis == 2 && dir > 0 && m_place_a_on_bed) {
+        const BoundingBoxf3 abb = world_bbox_of_object(m_ordered_object_idxs.front());
+        if (abb.defined)
+            translate_object(m_ordered_object_idxs.front(), Vec3d(0.0, 0.0, -abb.min.z()));
     }
 
-    Plater::TakeSnapshot snap(wxGetApp().plater(), "Align objects");
-    Selection& sel = m_parent.get_selection();
-    const Model* model = sel.get_model();
-    if (!model) return;
+    // Z contact gets the epsilon gap (slicing sanity); lateral contact is exact.
+    const double gap = (axis == 2) ? (double)m_epsilon_mm : 0.0;
 
-    for (int obj_idx : m_ordered_object_idxs) {
-        if (obj_idx < 0 || obj_idx >= (int)model->objects.size()) continue;
-        const ModelObject* mo = model->objects[obj_idx];
-        const BoundingBoxf3 bb = world_bbox_of_object(obj_idx);
-        if (!bb.defined) continue;
-
-        double cur = bbox_coord(bb);
-        double d   = target - cur;
-        if (std::abs(d) < 1e-9) continue;
-
-        Vec3d disp = Vec3d::Zero();
-        disp(axis) = d;
-        for (size_t i = 0; i < mo->instances.size(); ++i)
-            sel.translate((unsigned int)obj_idx, (unsigned int)i, disp);
-    }
-    m_parent.do_move(""); // snapshot already taken
-}
-
-void GLGizmoAlignStack::apply_stack_ordered()
-{
-    if (m_ordered_object_idxs.size() < 2)
-        return;
-
-    Plater::TakeSnapshot snap(wxGetApp().plater(), "Stack objects");
-
-    // Optionally place A on the bed first.
-    if (m_place_a_on_bed)
-        move_object_min_z_to(m_ordered_object_idxs.front(), 0.0);
-
-    // Recompute bbox of A after the move.
-    double prev_max_z = world_bbox_of_object(m_ordered_object_idxs.front()).max.z();
+    BoundingBoxf3 ref = world_bbox_of_object(m_ordered_object_idxs.front());
     for (size_t i = 1; i < m_ordered_object_idxs.size(); ++i) {
         const int idx = m_ordered_object_idxs[i];
-        move_object_min_z_to(idx, prev_max_z + (double)m_epsilon_mm);
-        prev_max_z = world_bbox_of_object(idx).max.z();
+        const BoundingBoxf3 bb = world_bbox_of_object(idx);
+        if (!bb.defined || !ref.defined)
+            continue;
+        Vec3d delta = Vec3d::Zero();
+        delta(axis) = (dir > 0) ? (ref.max(axis) + gap - bb.min(axis))
+                                : (ref.min(axis) - gap - bb.max(axis));
+        translate_object(idx, delta);
+        ref = world_bbox_of_object(idx); // chain: C goes against B
+    }
+    m_parent.do_move("");
+}
+
+void GLGizmoAlignStack::apply_flush(int axis, int dir)
+{
+    if (m_ordered_object_idxs.size() < 2)
+        return;
+
+    Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: flush align");
+
+    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs.front());
+    if (!a_bb.defined)
+        return;
+    const double target = (dir > 0) ? a_bb.max(axis) : a_bb.min(axis);
+
+    for (size_t i = 1; i < m_ordered_object_idxs.size(); ++i) {
+        const int idx = m_ordered_object_idxs[i];
+        const BoundingBoxf3 bb = world_bbox_of_object(idx);
+        if (!bb.defined)
+            continue;
+        Vec3d delta = Vec3d::Zero();
+        delta(axis) = target - ((dir > 0) ? bb.max(axis) : bb.min(axis));
+        translate_object(idx, delta);
+    }
+    m_parent.do_move("");
+}
+
+void GLGizmoAlignStack::apply_center(int axis)
+{
+    if (m_ordered_object_idxs.size() < 2)
+        return;
+
+    Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: center");
+
+    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs.front());
+    if (!a_bb.defined)
+        return;
+    const double target = a_bb.center()(axis);
+
+    for (size_t i = 1; i < m_ordered_object_idxs.size(); ++i) {
+        const int idx = m_ordered_object_idxs[i];
+        const BoundingBoxf3 bb = world_bbox_of_object(idx);
+        if (!bb.defined)
+            continue;
+        Vec3d delta = Vec3d::Zero();
+        delta(axis) = target - bb.center()(axis);
+        translate_object(idx, delta);
+    }
+    m_parent.do_move("");
+}
+
+void GLGizmoAlignStack::apply_all_on_bed()
+{
+    if (m_ordered_object_idxs.empty())
+        return;
+    Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: drop to bed");
+    for (int idx : m_ordered_object_idxs) {
+        const BoundingBoxf3 bb = world_bbox_of_object(idx);
+        if (bb.defined)
+            translate_object(idx, Vec3d(0.0, 0.0, -bb.min.z()));
     }
     m_parent.do_move("");
 }
@@ -334,9 +610,12 @@ void GLGizmoAlignStack::apply_place_on_picked_face()
 {
     if (!m_has_picked_face || m_ordered_object_idxs.size() < 2)
         return;
-    Plater::TakeSnapshot snap(wxGetApp().plater(), "Stack on face");
-    move_object_min_z_to(m_ordered_object_idxs[1],
-                         m_picked_face_world_z + (double)m_epsilon_mm);
+    Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: stack on face");
+    const int b_idx = m_ordered_object_idxs[1];
+    const BoundingBoxf3 bb = world_bbox_of_object(b_idx);
+    if (bb.defined)
+        translate_object(b_idx, Vec3d(0.0, 0.0,
+                         m_picked_face_world_z + (double)m_epsilon_mm - bb.min.z()));
     m_parent.do_move("");
 }
 
@@ -346,9 +625,9 @@ void GLGizmoAlignStack::apply_place_on_picked_face()
 
 void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_limit)
 {
-    sync_order_with_selection();
+    prune_dead_objects();
 
-    const float win_w = 320.0f;
+    const float win_w = 336.0f;
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
     GizmoImguiBegin(on_get_name(),
                     ImGuiWindowFlags_AlwaysAutoResize |
@@ -356,78 +635,129 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
 
     ImGui::SetWindowSize(ImVec2(win_w, 0.f), ImGuiCond_Always);
 
-    // --- Selection summary --------------------------------------------------
     const size_t n = m_ordered_object_idxs.size();
-    ImGui::TextDisabled(_u8L("Selected: %zu object(s)").c_str(), n);
+    const Model* model = m_parent.get_selection().get_model();
+
+    // --- Order chips ---------------------------------------------------------
     if (n == 0)
-        ImGui::TextWrapped("%s", _u8L("Shift+click objects in the scene to add them in order A, B, C…").c_str());
+        ImGui::TextWrapped("%s", _u8L("Click objects in the scene to add them in order. #1 becomes the anchor; the rest move toward it.").c_str());
+    else
+        ImGui::TextWrapped("%s", _u8L("Click more objects to extend the order. #1 is the anchor.").c_str());
+
+    for (size_t i = 0; i < n; ++i) {
+        const int obj_idx = m_ordered_object_idxs[i];
+        const int number  = (int)i + 1;
+        const ImVec4 col = ImGui::ColorConvertU32ToFloat4(order_color(i));
+
+        // Wrap chips: keep at most 3 per row.
+        if (i > 0 && i % 3 != 0) ImGui::SameLine(0.0f, 4.0f);
+
+        std::string name = (model && obj_idx < (int)model->objects.size())
+                               ? model->objects[obj_idx]->name : std::string("?");
+        if (name.size() > 10) name = name.substr(0, 9) + "…";
+
+        ImGui::PushStyleColor(ImGuiCol_Button, col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 1));
+        const std::string chip = "#" + std::to_string(number) + " · " + name +
+                                 "##chip" + std::to_string(obj_idx);
+        if (ImGui::SmallButton(chip.c_str()))
+            toggle_object_order(obj_idx); // click chip = remove from order
+        ImGui::PopStyleColor(4);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Click to remove from the order").c_str());
+    }
+    if (n > 0) {
+        ImGui::SameLine(0.0f, 8.0f);
+        if (ImGui::SmallButton(_u8L("Reset").c_str())) {
+            while (!m_ordered_object_idxs.empty())
+                toggle_object_order(m_ordered_object_idxs.back());
+        }
+    }
 
     ImGui::Separator();
 
-    // --- Align XY/Z ---------------------------------------------------------
-    ImGui::Text("%s", _u8L("Align").c_str());
-    static const std::string s_anchor_first  = _u8L("First (A)");
-    static const std::string s_anchor_last   = _u8L("Last");
-    static const std::string s_anchor_center = _u8L("Selection center");
-    static const std::string s_anchor_bed    = _u8L("Bed");
-    const char* anchors[] = {
-        s_anchor_first.c_str(),
-        s_anchor_last.c_str(),
-        s_anchor_center.c_str(),
-        s_anchor_bed.c_str()
+    // --- Mode toggle ----------------------------------------------------------
+    if (ImGui::RadioButton(_u8L("Place against").c_str(), !m_flush_mode))
+        m_flush_mode = false;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Objects come to rest touching the chosen face of #1 (chained: #2 on #1, #3 on #2...)").c_str());
+    ImGui::SameLine(0.0f, 14.0f);
+    if (ImGui::RadioButton(_u8L("Align flush").c_str(), m_flush_mode))
+        m_flush_mode = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Same-side faces become coplanar with #1 (Illustrator-style align)").c_str());
+
+    // --- Face buttons -----------------------------------------------------------
+    const bool can_apply = n >= 2;
+    m_imgui->disabled_begin(!can_apply);
+
+    const float bs = 46.0f;
+    struct FaceBtn { const char* id; CubeIcon icon; const char* label; int axis; int dir; const char* tip_touch; const char* tip_flush; };
+    const FaceBtn face_btns[] = {
+        { "##as_zpos", CubeIcon::TouchZPos, "Z",  2, +1,
+          "Stack on top of #1 (#2 on #1, #3 on #2...), with gap", "Top faces flush with #1" },
+        { "##as_xneg", CubeIcon::TouchXNeg, "X-", 0, -1,
+          "Place against #1's left side", "Left faces flush with #1" },
+        { "##as_xpos", CubeIcon::TouchXPos, "X+", 0, +1,
+          "Place against #1's right side", "Right faces flush with #1" },
+        { "##as_yneg", CubeIcon::TouchYNeg, "Y-", 1, -1,
+          "Place against #1's front side", "Front faces flush with #1" },
+        { "##as_ypos", CubeIcon::TouchYPos, "Y+", 1, +1,
+          "Place against #1's back side", "Back faces flush with #1" },
     };
-    ImGui::SetNextItemWidth(160.f);
-    ImGui::Combo("##alignstack_anchor", &m_align_anchor, anchors, IM_ARRAYSIZE(anchors));
+    for (size_t i = 0; i < sizeof(face_btns) / sizeof(face_btns[0]); ++i) {
+        if (i > 0) ImGui::SameLine(0.0f, 6.0f);
+        const FaceBtn& b = face_btns[i];
+        if (cube_icon_button(b.id, b.icon, bs, m_flush_mode, b.label)) {
+            if (m_flush_mode) apply_flush(b.axis, b.dir);
+            else              apply_touch(b.axis, b.dir);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L(m_flush_mode ? b.tip_flush : b.tip_touch).c_str());
+    }
 
-    const bool can_align = n >= 2;
-    m_imgui->disabled_begin(!can_align);
-
-    const std::string s_min    = _u8L("Min");
-    const std::string s_center = _u8L("Center");
-    const std::string s_max    = _u8L("Max");
-    auto align_row = [&](const char* axis_label, int axis) {
-        ImGui::Text("%s", axis_label);
-        ImGui::SameLine();
-        if (ImGui::Button((s_min    + "##" + axis_label).c_str())) apply_align(axis, 0);
-        ImGui::SameLine();
-        if (ImGui::Button((s_center + "##" + axis_label).c_str())) apply_align(axis, 1);
-        ImGui::SameLine();
-        if (ImGui::Button((s_max    + "##" + axis_label).c_str())) apply_align(axis, 2);
+    // --- Center row + bed --------------------------------------------------------
+    const struct { const char* id; CubeIcon icon; const char* label; int axis; const char* tip; } center_btns[] = {
+        { "##as_cx", CubeIcon::CenterX, "X", 0, "Center on #1 in X" },
+        { "##as_cy", CubeIcon::CenterY, "Y", 1, "Center on #1 in Y" },
+        { "##as_cz", CubeIcon::CenterZ, "Z", 2, "Center on #1 in Z" },
     };
-    align_row("X", 0);
-    align_row("Y", 1);
-    align_row("Z", 2);
-
-    m_imgui->disabled_end();
-
-    ImGui::Separator();
-
-    // --- Stack Z -----------------------------------------------------------
-    ImGui::Text("%s", _u8L("Stack Z").c_str());
-    ImGui::SetNextItemWidth(120.f);
-    ImGui::InputFloat(_u8L("Epsilon (mm)").c_str(), &m_epsilon_mm, 0.001f, 0.01f, "%.4f");
-    if (m_epsilon_mm < 0.f) m_epsilon_mm = 0.f;
-    if (m_epsilon_mm > 0.1f) m_epsilon_mm = 0.1f;
-
-    ImGui::Checkbox(_u8L("Place A on bed first").c_str(), &m_place_a_on_bed);
-
-    m_imgui->disabled_begin(!can_align);
-    if (ImGui::Button(_u8L("Stack ordered (A->B->C...)").c_str()))
-        apply_stack_ordered();
-    if (n == 2) {
-        ImGui::SameLine();
-        if (ImGui::Button(_u8L("B on top of A").c_str()))
-            apply_stack_ordered();
+    for (size_t i = 0; i < 3; ++i) {
+        if (i > 0) ImGui::SameLine(0.0f, 6.0f);
+        if (cube_icon_button(center_btns[i].id, center_btns[i].icon, bs, false, center_btns[i].label))
+            apply_center(center_btns[i].axis);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L(center_btns[i].tip).c_str());
     }
     m_imgui->disabled_end();
 
+    ImGui::SameLine(0.0f, 6.0f);
+    m_imgui->disabled_begin(n == 0);
+    if (cube_icon_button("##as_bed", CubeIcon::Bed, bs, false, nullptr))
+        apply_all_on_bed();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Drop every ordered object to the bed (Z = 0)").c_str());
+    m_imgui->disabled_end();
+
+    // --- Options ------------------------------------------------------------------
+    ImGui::SetNextItemWidth(90.f);
+    ImGui::InputFloat(_u8L("Z gap (mm)").c_str(), &m_epsilon_mm, 0.0f, 0.0f, "%.3f");
+    if (m_epsilon_mm < 0.f)   m_epsilon_mm = 0.f;
+    if (m_epsilon_mm > 0.1f)  m_epsilon_mm = 0.1f;
+    ImGui::SameLine(0.0f, 12.0f);
+    ImGui::Checkbox(_u8L("#1 to bed first").c_str(), &m_place_a_on_bed);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Drop #1 to the bed before stacking on top of it").c_str());
+
     ImGui::Separator();
 
-    // --- Stack on Face -----------------------------------------------------
-    ImGui::Text("%s", _u8L("Stack on Face").c_str());
-    m_imgui->disabled_begin(!can_align);
+    // --- Stack on face ---------------------------------------------------------------
+    ImGui::Text("%s", _u8L("Stack on face").c_str());
+    m_imgui->disabled_begin(!can_apply);
 
-    if (ImGui::Checkbox(_u8L("Pick face on A").c_str(), &m_face_pick_mode)) {
+    if (ImGui::Checkbox(_u8L("Pick a face on #1").c_str(), &m_face_pick_mode)) {
         if (m_face_pick_mode) {
             m_has_picked_face = false;
             ensure_face_raycaster_for_A();
@@ -436,26 +766,15 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
         }
     }
     if (m_has_picked_face) {
-        ImGui::Text(_u8L("Picked Z = %.3f mm").c_str(), m_picked_face_world_z);
+        ImGui::SameLine();
+        ImGui::Text(_u8L("Z = %.3f mm").c_str(), m_picked_face_world_z);
         if (ImGui::Button(_u8L("Place B on picked face").c_str()))
             apply_place_on_picked_face();
     } else if (m_face_pick_mode) {
-        ImGui::TextDisabled("%s", _u8L("Click a face on object A...").c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", _u8L("Click a face on #1...").c_str());
     }
     m_imgui->disabled_end();
-
-    ImGui::Separator();
-
-    // --- Utilities ---------------------------------------------------------
-    if (ImGui::Button(_u8L("Place all on bed").c_str())) {
-        Plater::TakeSnapshot snap(wxGetApp().plater(), "Place on bed");
-        for (int idx : m_ordered_object_idxs)
-            move_object_min_z_to(idx, 0.0);
-        m_parent.do_move("");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(_u8L("Clear order").c_str()))
-        m_ordered_object_idxs.clear();
 
     GizmoImguiEnd();
 }

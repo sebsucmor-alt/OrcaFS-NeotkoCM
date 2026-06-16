@@ -33,6 +33,7 @@
 #include "DailyTips.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoColorMixPainter.hpp" // NEOTKO_COLORSTITCH_TAG s111 — multi-objeto
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
 
@@ -4607,7 +4608,14 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         m_mouse.position = pos.cast<double>();
 
         // updates gizmos overlay
-        if (m_selection.is_empty())
+        // NEOTKO_ALIGNSTACK_TAG: Align & Stack is usable with an empty selection
+        // (the user builds the order by clicking objects), so don't auto-close it
+        // just because nothing is selected yet.
+        // NEOTKO_COLORSTITCH_TAG s111: idem para el ColorStitch Painter, que en
+        // modo "Select" deja elegir objetos clicando con la selección vacía.
+        if (m_selection.is_empty() &&
+            m_gizmos.get_current_type() != GLGizmosManager::AlignStack &&
+            m_gizmos.get_current_type() != GLGizmosManager::ColorMixPainter)
             m_gizmos.reset_all_states();
 
         m_dirty = true;
@@ -7446,9 +7454,17 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         case GLVolumeCollection::ERenderType::Opaque:
         {
             GLGizmosManager& gm = get_gizmos_manager();
-            if (dynamic_cast<GLGizmoPainterBase*>(gm.get_current()) == nullptr)
+            GLGizmoPainterBase* painter_giz = dynamic_cast<GLGizmoPainterBase*>(gm.get_current());
+            // NEOTKO_COLORSTITCH_TAG s111: el ColorStitch Painter es multi-objeto.
+            // Los painters normales DELEGAN todo el dibujo de objetos a
+            // render_painter_gizmo (que solo pinta el objeto activo), por eso el
+            // resto de objetos "desaparecían". Para ColorMixPainter dibujamos los
+            // objetos por la vía normal (todos visibles) y SOLO superponemos el
+            // painter sobre el objeto activo (los demás se ven planos y clicables).
+            const bool colormix_painter = gm.get_current_type() == GLGizmosManager::ColorMixPainter;
+            if (painter_giz == nullptr || colormix_painter)
             {
-                if (m_picking_enabled && m_layers_editing.is_enabled() && (m_layers_editing.last_object_id != -1) && (m_layers_editing.object_max_z() > 0.0f)) {
+                if (painter_giz == nullptr && m_picking_enabled && m_layers_editing.is_enabled() && (m_layers_editing.last_object_id != -1) && (m_layers_editing.object_max_z() > 0.0f)) {
                     int object_id = m_layers_editing.last_object_id;
                 const Camera& camera = wxGetApp().plater()->get_camera();
                 m_volumes.render(type, false, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [object_id](const GLVolume& volume) {
@@ -7467,27 +7483,38 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                     //BBS:add assemble view related logic
                     // do not cull backfaces to show broken geometry, if any
                 const Camera& camera = wxGetApp().plater()->get_camera();
-                    m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [this, canvas_type](const GLVolume& volume) {
+                    // s111: con ColorMixPainter, los objetos MARCADOS los dibuja el
+                    // painter (activo en vivo + resto vía preview), así que aquí se
+                    // SALTAN. Los no-marcados: en modo Select se ven planos; en modo
+                    // pintar (bucket/eraser) se OCULTAN para trabajar solo en el set.
+                    GLGizmoColorMixPainter* cmp = colormix_painter
+                        ? dynamic_cast<GLGizmoColorMixPainter*>(painter_giz) : nullptr;
+                    m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [this, canvas_type, cmp](const GLVolume& volume) {
                         if (canvas_type == ECanvasType::CanvasAssembleView) {
                             return !volume.is_modifier && !volume.is_wipe_tower;
                         }
                         else {
+                            if (cmp) {
+                                const int oid = volume.composite_id.object_id;
+                                if (cmp->object_is_marked(oid)) return false;   // lo pinta el painter
+                                // bucket/eraser con un set marcado: ocultar los no-marcados
+                                // (foco en el set). Sin set marcado, mostrar todos para poder
+                                // elegir. En Select siempre se ven todos.
+                                if (!cmp->select_tool_active() && cmp->has_marked()) return false;
+                            }
                             return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0);
                         }
                         },
                         partly_inside_enable);
                 }
             }
-            else {
+            if (painter_giz != nullptr) {
                 // In case a painting gizmo is open, it should render the painted triangles
                 // before transparent objects are rendered. Otherwise they would not be
                 // visible when inside modifier meshes etc.
-//                GLGizmosManager::EType type = gm.get_current_type();
-                if (dynamic_cast<GLGizmoPainterBase*>(gm.get_current())) {
-                    shader->stop_using();
-                    gm.render_painter_gizmo();
-                    shader->start_using();
-                }
+                shader->stop_using();
+                gm.render_painter_gizmo();
+                shader->start_using();
             }
 
             break;

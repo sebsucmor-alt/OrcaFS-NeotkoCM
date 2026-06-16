@@ -310,11 +310,12 @@ static inline std::string colormix_profiles_b64_decode(const std::string& b64)
 }
 
 // Parse "1,2,0,3,0,..." (up to 16 ints) into slots[]. Missing entries left as 0.
-static inline void parse_colormix_slot_table(const std::string& csv, int (&slots)[16])
+static inline void parse_colormix_slot_table(const std::string& csv, int (&slots)[Slic3r::ModelVolume::COLORMIX_SLOT_COUNT])
 {
     for (int& s : slots) s = 0;
     size_t i = 0, start = 0, idx = 0;
-    while (i <= csv.size() && idx < 16) {
+    // Back-compat: a shorter CSV (old 16-slot files) leaves the rest zero-filled.
+    while (i <= csv.size() && idx < Slic3r::ModelVolume::COLORMIX_SLOT_COUNT) {
         if (i == csv.size() || csv[i] == ',') {
             try { slots[idx++] = std::stoi(csv.substr(start, i - start)); }
             catch (...) { slots[idx++] = 0; }
@@ -325,14 +326,14 @@ static inline void parse_colormix_slot_table(const std::string& csv, int (&slots
 }
 // Serialize iff at least one slot is non-zero; otherwise returns empty string
 // (callers skip the metadata write entirely in that case).
-static inline std::string serialize_colormix_slot_table(const int (&slots)[16])
+static inline std::string serialize_colormix_slot_table(const int (&slots)[Slic3r::ModelVolume::COLORMIX_SLOT_COUNT])
 {
     bool any = false;
     for (int s : slots) if (s != 0) { any = true; break; }
     if (!any) return std::string();
     std::string out;
-    out.reserve(48);
-    for (int i = 0; i < 16; ++i) {
+    out.reserve(96);
+    for (int i = 0; i < Slic3r::ModelVolume::COLORMIX_SLOT_COUNT; ++i) {
         if (i) out += ',';
         out += std::to_string(slots[i]);
     }

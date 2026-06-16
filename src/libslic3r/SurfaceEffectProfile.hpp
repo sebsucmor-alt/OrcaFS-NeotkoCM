@@ -14,6 +14,7 @@
 namespace Slic3r {
 
 class DynamicPrintConfig;
+struct SurfacePassStack;   // NEOTKO_PROFILE_TAG — payload_from_stacks (SurfaceColorMix.hpp)
 
 enum class SurfaceEffectKind : uint8_t {
     ColorMix  = 1,
@@ -78,6 +79,21 @@ public:
     // The caller picks which keys to snapshot (so we keep the manager engine-agnostic).
     static SurfaceEffectPayload snapshot_keys(const DynamicPrintConfig& cfg,
                                               const std::vector<std::string>& keys);
+
+    // NEOTKO_COLORSTITCH_TAG — s112 fix (PAINTER_SLICE_PAYLOAD_GAP.md). Derive the
+    // engine-readable PROFILE payload from a resolved sandwich (top/penu stacks)
+    // by LIFTING each ColorMix/PathBlend pass's already-canonical `kv` up to the
+    // profile level. The painter's auto profiles only stored the visual stacks
+    // (stack_*_json); the slicer's painter-mode gate (SurfaceColorMix.cpp:1094)
+    // requires `colormix.present`. This bridges them — mirror of what Tab.cpp's
+    // "Save profile" does, but sourced from the stacks instead of the live config.
+    // Solid passes are intentionally ignored (they ride the stack_json/MultiPass
+    // path in Fill.cpp, not the colormix payload). Sets `interlayer_colormix_*`
+    // enable + surface (0=Both/1=Top/2=Penu) / `multipass_path_gradient` +
+    // `pathblend_surface` based on which zones carry each effect.
+    static void payload_from_stacks(const SurfacePassStack& top,
+                                    const SurfacePassStack& penu,
+                                    SurfaceEffectProfile& p);
     static void                  restore_keys (DynamicPrintConfig& cfg,
                                               const SurfaceEffectPayload& payload);
 

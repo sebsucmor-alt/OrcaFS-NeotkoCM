@@ -397,6 +397,9 @@ struct MultiPassConfig {
 //   - floor_mm   : Z of the ramp at t=0 (low end). Min 0.01 mm.
 //   - mid_end_mm : Z of the ramp at t=1 (high end). Must be >= floor_mm.
 //                  Full also requires mid_end_mm <= H - 0.04 (cap >= 0.04).
+//                  Sentinel < 0 ⇒ "auto": resolves to the tallest legal ramp
+//                  (H - 0.04 for Full, H for Half). This is the default so a
+//                  fresh PathBlend ramps the full layer instead of staying flat.
 //   - Full       : flat cap at nominal_z covering [mid_end, nominal_z].
 //   - Half       : no cap; area above mid_end is empty (authorized semi-fill).
 //
@@ -412,7 +415,7 @@ struct PathBlendPassConfig {
     // --- New geometry model (Fase 5) ---
     Mode    mode            = Mode::Full;
     float   floor_mm        = 0.01f;  // Z of ramp at t=0 (low end), >= 0.01
-    float   mid_end_mm      = 0.05f;  // Z of ramp at t=1 (high end), >= floor_mm
+    float   mid_end_mm      = -1.0f;  // Z of ramp at t=1; <0 ⇒ auto = H-0.04 (Full) / H (Half)
     int     tool_bottom     = 0;      // ramp tool (0-based)
     int     tool_top        = 1;      // cap tool (Full only; -1 if Half)
     int     ease_mode       = 0;      // 0=Linear, 1=EaseIn (t²), 2=EaseOut, 3=EaseInOut
@@ -428,6 +431,15 @@ struct PathBlendPassConfig {
     // Call this after writing to the new fields (called automatically by
     // from_region_config / from_blob_json).
     void    sync_legacy_view();
+
+    // NEOTKO_COLORSTITCH_TAG s108 — physical sanity clamp on (floor_mm,
+    // mid_end_mm) for a given layer height H (mm). Promoted from the
+    // SandwichDialog (Tab.cpp pb_apply_constraints) so the ColorStitch
+    // Painter pro-mode tray shares the exact same rules:
+    //   Half: mid_end_mm is the layer top; no cap. Forced mid = H.
+    //   Full: cap = top 0.04 mm of flow → mid_end ≤ H − 0.04. Ramp must
+    //         exist (mid > floor strictly).
+    void    apply_constraints(double layer_height_mm);
 
     // Build from PrintRegionConfig.  NEOTKO_PATHBLEND_TAG — s69 miniblob: when
     // the per-zone blob key (pathblend_top / pathblend_penu, selected by `role`)
@@ -511,6 +523,13 @@ struct SurfacePassStack {
     // True if every pass is Solid (or the stack is empty). An all-Solid stack
     // is GCode-equivalent to a classic MultiPass run.
     bool all_solid() const;
+
+    // NEOTKO_SANDWICH_TAG s119 (EMPTY model) — kind None is the first-class
+    // "empty zone authored on purpose" (explicit passthrough: natural surface
+    // tool, no gap), distinct from an unauthored (passes.empty()) stack.
+    // any_effect() is the single authority for "this zone does something",
+    // retiring the legacy `enabled` flag as a parallel encoding of "no effect".
+    bool any_effect() const;   // true iff any pass has kind != None
 
     // JSON round-trip. to_json() of a disabled/empty stack returns "" so the
     // config key stays at its empty default (→ synthesize_from_legacy kicks in).

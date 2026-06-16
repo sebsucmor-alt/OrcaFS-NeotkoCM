@@ -473,13 +473,17 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
     const Transform3d trafo = po->trafo();
     const double z_tol = 0.02; // fp slack around the layer extent
 
-    int counts[16] = {0};
+    int counts[ModelVolume::COLORMIX_SLOT_COUNT] = {0};   // NEOTKO_COLORSTITCH_TAG s112: 16→31
     bool any_painted = false;
+    // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico: extent Z real de las facetas
+    // pintadas (hacia arriba) vs la banda consultada.
+    int    _dbg_up_tris = 0, _dbg_in_band = 0;
+    double _dbg_minz = 1e30, _dbg_maxz = -1e30;
 
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
-        for (int slot = 1; slot < 16; ++slot) {
+        for (int slot = 1; slot < ModelVolume::COLORMIX_SLOT_COUNT; ++slot) {   // NEOTKO_COLORSTITCH_TAG s112
             const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
                 *mv, static_cast<EnforcerBlockerType>(slot));
             if (its.indices.empty()) continue;
@@ -494,17 +498,27 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
                 const Vec3d n  = e1.cross(e2);
                 if (n.z() <= 0.0) continue; // upward-facing only
                 const double max_z = std::max({v0.z(), v1.z(), v2.z()});
+                ++_dbg_up_tris;
+                _dbg_minz = std::min(_dbg_minz, max_z);
+                _dbg_maxz = std::max(_dbg_maxz, max_z);
                 if (max_z >= z_min - z_tol && max_z <= z_max + z_tol) {
                     counts[slot]++;
                     any_painted = true;
+                    ++_dbg_in_band;
                 }
             }
         }
     }
 
+    NEOTKO_LOG(PROFILE, "DOM_SLOT band=[" << z_min << "," << z_max << "]"
+        << " up_tris=" << _dbg_up_tris << " in_band=" << _dbg_in_band
+        << " facet_maxz=[" << (_dbg_up_tris ? _dbg_minz : 0) << ","
+        << (_dbg_up_tris ? _dbg_maxz : 0) << "]"
+        << " → slot=" << (any_painted ? 1 : 0) << "(pre)");
+
     if (!any_painted) return 0;
     int best_slot = 0, best_count = 0;
-    for (int s = 1; s < 16; ++s)
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)   // NEOTKO_COLORSTITCH_TAG s112
         if (counts[s] > best_count) { best_count = counts[s]; best_slot = s; }
     return best_slot;
 }
@@ -519,7 +533,7 @@ ExPolygons SurfaceColorMix::painted_footprint_in_z_range(const PrintObject* po, 
                                                          double z_min, double z_max)
 {
     ExPolygons out;
-    if (!po || slot <= 0 || slot >= 16) return out;
+    if (!po || slot <= 0 || slot >= ModelVolume::COLORMIX_SLOT_COUNT) return out;   // NEOTKO_COLORSTITCH_TAG s112
     const ModelObject* mo = po->model_object();
     if (!mo) return out;
 
@@ -574,12 +588,12 @@ std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
 
     const Transform3d trafo = po->trafo();
     const double z_tol = 0.02;
-    bool present[16] = {false};
+    bool present[ModelVolume::COLORMIX_SLOT_COUNT] = {false};   // NEOTKO_COLORSTITCH_TAG s112: 16→31
 
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
-        for (int slot = 1; slot < 16; ++slot) {
+        for (int slot = 1; slot < ModelVolume::COLORMIX_SLOT_COUNT; ++slot) {   // NEOTKO_COLORSTITCH_TAG s112
             if (present[slot]) continue; // already known
             const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
                 *mv, static_cast<EnforcerBlockerType>(slot));
@@ -602,7 +616,7 @@ std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
             }
         }
     }
-    for (int s = 1; s < 16; ++s)
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)   // NEOTKO_COLORSTITCH_TAG s112
         if (present[s]) out.push_back(s);
     return out;
 }
@@ -773,7 +787,7 @@ bool SurfaceColorMix::mmu_governs_surface(
 // of the same object).
 int SurfaceColorMix::profile_id_for_slot(const PrintObject* po, int slot)
 {
-    if (!po || slot <= 0 || slot >= 16) return 0;
+    if (!po || slot <= 0 || slot >= ModelVolume::COLORMIX_SLOT_COUNT) return 0;   // NEOTKO_COLORSTITCH_TAG s112
     const ModelObject* mo = po->model_object();
     if (!mo) return 0;
     for (const ModelVolume* mv : mo->volumes) {
@@ -791,7 +805,16 @@ bool SurfaceColorMix::object_has_any_colormix_paint(const ModelObject* mo)
     if (!mo) return false;
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
-        for (int s = 1; s < 16; ++s)
+        // NEOTKO_SANDWICH_TAG s119 — painter mode requires ACTUAL painted triangles,
+        // not merely a populated slot→profile table. The eraser removes the painted
+        // facets but does NOT clear colormix_slot_to_profile_id (slots stay mapped),
+        // so an object painted-then-fully-erased kept reporting "painted" here →
+        // painter takeover with no geometry → the preset SandwichDialog settings were
+        // ignored AND nothing was painted → vanilla. Gating on real facets makes a
+        // fully-erased object fall back to PRESET mode, as expected.
+        if (mv->color_mix_paint_facets.empty())
+            continue;
+        for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)   // NEOTKO_COLORSTITCH_TAG s112
             if (mv->colormix_slot_to_profile_id[s] != 0)
                 return true;
     }
@@ -806,12 +829,28 @@ bool SurfaceColorMix::object_painter_wants_penu(const ModelObject* mo)
     std::set<int> profile_ids_seen;
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
-        for (int s = 1; s < 16; ++s) {
+        for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {   // NEOTKO_COLORSTITCH_TAG s112
             const int pid = mv->colormix_slot_to_profile_id[s];
             if (pid <= 0) continue;
             if (!profile_ids_seen.insert(pid).second) continue;
             const SurfaceEffectProfile* p = mgr.find(pid);
             if (!p) continue;
+            // NEOTKO_COLORSTITCH_TAG — s118: fuente de verdad = el STACK de penu del
+            // perfil. Si el painter compuso una zona Penu (stack_penu_json con passes),
+            // el color DECLARA penu y debemos forzar la estructura penu, aunque el
+            // preset no tenga penultimate activo (el painter manda también para CREAR
+            // la capa penu, no sólo para el color). El enum legacy interlayer_colormix_
+            // surface sólo se ponía según los pases ColorMix → se perdían penu Solid/PB
+            // u objetos cuyo enum salía "top". Ver bug "penu pintado no slicea sin
+            // penultimate activo en el main UX".
+            {
+                const SurfacePassStack penu = SurfacePassStack::from_json(p->stack_penu_json);
+                // NEOTKO_SANDWICH_TAG s119 (EMPTY model): the painter declares penu
+                // iff the zone carries a NON-None pass. An authored-but-empty penu
+                // ([None] passthrough) must NOT force the penu layer into existence.
+                if (penu.any_effect())
+                    return true;
+            }
             // MultiPass — penu enabled?
             if (p->multipass.present) {
                 auto it = p->multipass.kv.find("penultimate_multipass_enabled");
@@ -983,6 +1022,28 @@ int SurfaceColorMix::assign_and_group_tools(
             << "] — per-EEC governance active (was global skip pre-s91)");
 
     const bool painter_mode_obj = object_has_any_colormix_paint(model_object);
+    // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico: ¿el objeto entra en painter-mode?
+    // Recontamos los slots pintados aquí mismo (igual que object_has_any) + el
+    // puntero del mo para cruzarlo con el PAINT_SLOT de PrintObjectSlice.
+    {
+        int _nvol = 0, _npaint = 0, _nfacets = 0;
+        if (model_object)
+            for (const ModelVolume* _mv : model_object->volumes) {
+                if (!_mv || !_mv->is_model_part()) continue;
+                ++_nvol;
+                if (!_mv->color_mix_paint_facets.empty()) ++_nfacets;
+                for (int _s = 1; _s < ModelVolume::COLORMIX_SLOT_COUNT; ++_s)
+                    if (_mv->colormix_slot_to_profile_id[_s] != 0) ++_npaint;
+            }
+        // _nfacets>0 con _npaint=0 = facetas pintadas pero tabla slot vacía (bug copia).
+        NEOTKO_LOG(PROFILE, "SCM_GATE layer=" << layer_idx
+            << " painter_mode=" << (painter_mode_obj ? "1" : "0")
+            << " preset_enabled=" << config.interlayer_colormix_enabled.value
+            << " mo=" << (const void*)model_object
+            << " parts=" << _nvol << " painted_slots=" << _npaint
+            << " facet_vols=" << _nfacets
+            << " obj='" << (model_object ? model_object->name : "<null>") << "'");
+    }
     const SurfaceEffectProfile* painted_top_profile  = nullptr;
     const SurfaceEffectProfile* painted_penu_profile = nullptr;
     if (print_object && layer_height > 0.0) {
@@ -995,10 +1056,14 @@ int SurfaceColorMix::assign_and_group_tools(
         //                   → [print_z - height, print_z]
         //   penu role at L: paint inside the slab ONE LAYER ABOVE
         //                   → [print_z, print_z + height]
+        // NEOTKO_COLORSTITCH_TAG — s112 fix: extender el límite superior para
+        // capturar la pintura del tope de malla que queda entre capas (hasta ~1
+        // altura de capa por encima de la última rebanada). Top +1 capa; penu +2
+        // (ancla 1 capa más abajo). Ver Fill.cpp mismo fix.
         const double z_top_min  = layer_print_z - layer_height;
-        const double z_top_max  = layer_print_z;
+        const double z_top_max  = layer_print_z + layer_height;
         const double z_penu_min = layer_print_z;
-        const double z_penu_max = layer_print_z + layer_height;
+        const double z_penu_max = layer_print_z + 2.0 * layer_height;
         const int top_slot  = dominant_painted_slot_in_z_range(print_object, z_top_min,  z_top_max);
         const int penu_slot = dominant_painted_slot_in_z_range(print_object, z_penu_min, z_penu_max);
         if (const int pid = profile_id_for_slot(print_object, top_slot); pid)
@@ -1099,11 +1164,29 @@ int SurfaceColorMix::assign_and_group_tools(
             // has a painted profile for the role. The painter decides where —
             // preset's surface/zone/filter gates do not apply.
             const ExtrusionRole r = first_path->role();
-            if (r != erTopSolidInfill && r != erPenultimateInfill) continue;
-            if (!painted_override) continue;
+            // NEOTKO_SANDWICH_TAG s119 — SCM_MODE canary. Two bugs this session lived
+            // exactly here (painter penu blocked by preset surface gate; erased object
+            // wrongly in painter mode). This logs WHICH branch ran and WHICH gate cut,
+            // so "no colormix on this role" is greppable in one line, not reconstructed
+            // from bucket counts.
+            const bool _cut_role = (r != erTopSolidInfill && r != erPenultimateInfill);
+            const bool _cut_paint = !painted_override;
+            NEOTKO_LOG(PROFILE, "SCM_MODE layer=" << layer_idx << " role=" << (int)r
+                << " mode=painter gate=" << (_cut_role ? "SKIP(non-top/penu)"
+                    : _cut_paint ? "SKIP(no painted profile for role)" : "PASS"));
+            if (_cut_role) continue;
+            if (_cut_paint) continue;
         } else {
             // Preset mode (original gates).
-            if (!should_process_role(first_path->role(), surface)) continue;
+            // NEOTKO_SANDWICH_TAG s119 — SCM_MODE canary (preset branch). surface is
+            // the preset interlayer_colormix_surface; should_process_role gating the
+            // PENU here is what the SandwichDialog "Enabled" used to (wrongly) drive.
+            const bool _cut_surf = !should_process_role(first_path->role(), surface);
+            NEOTKO_LOG(PROFILE, "SCM_MODE layer=" << layer_idx
+                << " role=" << (int)first_path->role()
+                << " mode=preset surface=" << surface
+                << " gate=" << (_cut_surf ? "SKIP(should_process_role)" : "PASS"));
+            if (_cut_surf) continue;
             if (!allow_top  && first_path->role() == erTopSolidInfill)    continue;
             if (!allow_penu && first_path->role() == erPenultimateInfill)  continue;
         }
@@ -1818,10 +1901,20 @@ void SurfaceColorMix::debug_log(
     _s << "]";
     for (const auto& pair : grouped) {
         double total_mm = 0.0;
-        for (const auto* p : pair.second)
+        // NEOTKO_SANDWICH_TAG s119 — per-tool extrusion width trace. Each ColorMix
+        // tool should inherit the SAME source width (the role's flow, e.g. internal
+        // solid infill). A divergence here (e.g. T0=0.3 / T1=0.4) is the "blue thin /
+        // violet thick" bug: the per-tool paths are NOT sharing one width.
+        float w_min = 1e9f, w_max = 0.f;
+        for (const auto* p : pair.second) {
             total_mm += static_cast<double>(p->polyline.length()) / 1e6;
+            const float w = p->width;   // ExtrusionPath::width is in mm
+            w_min = std::min(w_min, w);
+            w_max = std::max(w_max, w);
+        }
         _s << "\n  T" << pair.first << ": " << pair.second.size()
-           << " paths, " << total_mm << " mm";
+           << " paths, " << total_mm << " mm"
+           << " width=[" << w_min << ".." << w_max << "]mm";
     }
     NeoDebug::write(NeoDebug::COLORMIX, _s.str());
 }
@@ -2177,12 +2270,27 @@ bool SurfaceColorMix::any_painted_profile_has_perim_override(
     const int top_slot  = dominant_painted_slot_in_z_range(po, print_z - height, print_z);
     const int penu_slot = dominant_painted_slot_in_z_range(po, print_z, print_z + height);
     auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
-    for (int slot : {top_slot, penu_slot}) {
+    // NEOTKO_COLORSTITCH_TAG — s118 (B, unificación): leer el perimeter_override de
+    // la MISMA fuente que Fill.cpp (línea ~1559): el SurfacePassStack del blob del
+    // perfil (stack_top_json/penu_json). El painter (s118 A) ahora escribe ese flag
+    // en el stack; payload_from_stacks NO lo vuelca a p->multipass.kv, así que el
+    // check legacy de abajo nunca lo veía → el prepass de ToolOrdering divergía de
+    // Fill. Una sola fuente: el stack. p->multipass.kv queda como fallback para
+    // perfiles pintados legacy (Fase G) anteriores a la unificación de stacks.
+    const std::pair<int, bool> zones[2] = { {top_slot, false}, {penu_slot, true} };
+    for (const auto& [slot, is_penu] : zones) {
         if (slot <= 0) continue;
         const int pid = profile_id_for_slot(po, slot);
         if (!pid) continue;
         const SurfaceEffectProfile* p = mgr.find(pid);
-        if (p && p->multipass.present && painted_perim_override_from_profile(p->multipass))
+        if (!p) continue;
+        const std::string& js = is_penu ? p->stack_penu_json : p->stack_top_json;
+        const SurfacePassStack st = SurfacePassStack::from_json(js);
+        // NEOTKO_SANDWICH_TAG s119 (EMPTY model): content-driven, not `enabled`.
+        if (st.any_effect() && st.perimeter_override)
+            return true;
+        // Fallback legacy (perfiles Fase G sin stack json).
+        if (p->multipass.present && painted_perim_override_from_profile(p->multipass))
             return true;
     }
     return false;
@@ -2429,6 +2537,33 @@ void PathBlendPassConfig::sync_legacy_view()
     tool[3] = -1;
 }
 
+// NEOTKO_COLORSTITCH_TAG s108 — physical sanity clamp on (floor_mm, mid_end_mm).
+// Verbatim port of the SandwichDialog's pb_apply_constraints (Tab.cpp), promoted
+// here so the painter pro-mode tray and the dialog share one rule set.
+//   Half: mid_end_mm is the layer top; there is no cap. Forced mid = H.
+//   Full: cap = top 0.04 mm of flow → mid_end ≤ H − 0.04. Ramp must exist
+//         (mid > floor strictly); equal values would mean two flat layers,
+//         which is the MultiPass use-case, not PathBlend.
+void PathBlendPassConfig::apply_constraints(double layer_height_mm)
+{
+    constexpr float kRampGap = 0.001f;  // strict mid > floor (anti-equality)
+    constexpr float kCapMin  = 0.04f;   // Full: cap flow minimum on top
+    const double H = std::max(0.04, layer_height_mm);
+    if (mode == Mode::Full) {
+        const float floor_max = std::max(0.01f, (float)H - kCapMin - kRampGap);
+        floor_mm   = std::clamp(floor_mm, 0.01f, floor_max);
+        const float mid_min = floor_mm + kRampGap;
+        const float mid_max = std::max(mid_min, (float)H - kCapMin);
+        // Sentinel <0 ⇒ auto default: ramp the whole layer (tallest legal ramp).
+        if (mid_end_mm < 0.f) mid_end_mm = mid_max;
+        mid_end_mm = std::clamp(mid_end_mm, mid_min, mid_max);
+    } else {  // Half
+        const float floor_max = std::max(0.01f, (float)H - kRampGap);
+        floor_mm   = std::clamp(floor_mm, 0.01f, floor_max);
+        mid_end_mm = (float)H;  // ramp goes to layer top; no cap
+    }
+}
+
 // NEOTKO_PATHBLEND_TAG — s69 miniblob: JSON round-trip for the per-zone blob.
 // The blob carries only the per-zone settings; enable + surface are the shared
 // scope keys, applied by from_region_config() from the live config.
@@ -2485,7 +2620,7 @@ static PathBlendPassConfig pathblend_convert_legacy_to_v2(int   legacy_num_passe
 
 PathBlendPassConfig PathBlendPassConfig::from_blob_json(const std::string& blob)
 {
-    PathBlendPassConfig c;  // defaults: Full, floor=0.01, mid_end=0.05
+    PathBlendPassConfig c;  // defaults: Full, floor=0.01, mid_end=auto (<0 ⇒ H-0.04)
     c.sync_legacy_view();
     if (blob.empty()) return c;
     try {
@@ -2509,14 +2644,16 @@ PathBlendPassConfig PathBlendPassConfig::from_blob_json(const std::string& blob)
                                    ? j["mode"].get<std::string>() : "full";
             c.mode        = (mode_str == "half") ? Mode::Half : Mode::Full;
             c.floor_mm    = static_cast<float>(gf("floor_mm",   0.01));
-            c.mid_end_mm  = static_cast<float>(gf("mid_end_mm", 0.05));
+            c.mid_end_mm  = static_cast<float>(gf("mid_end_mm", -1.0));  // <0 ⇒ auto
             c.tool_bottom = gi("tool_bottom", 0);
             c.tool_top    = gi("tool_top",    1);
             c.ease_mode   = std::clamp(gi("ease_mode", 0), 0, 3);
             c.fill_angle  = gi("fill_angle", -1);
             // Hard constraint: floor >= 0.01.
             if (c.floor_mm   < 0.01f)         c.floor_mm   = 0.01f;
-            if (c.mid_end_mm < c.floor_mm)    c.mid_end_mm = c.floor_mm;
+            // Keep the auto sentinel (<0) intact; only clamp real values.
+            if (c.mid_end_mm >= 0.f && c.mid_end_mm < c.floor_mm)
+                c.mid_end_mm = c.floor_mm;
         } else {
             // v=1 legacy: num_passes / tool[] / layer_ratio / min/max / invert.
             int   legacy_np   = std::clamp(gi("num_passes", 2), 1, 4);
@@ -2620,12 +2757,48 @@ bool SurfacePassStack::all_solid() const
     return true;
 }
 
+// NEOTKO_SANDWICH_TAG s119 (EMPTY model) — "does this zone do anything?".
+// A kind None pass is an explicit passthrough (no effect); a stack whose passes
+// are all None is GCode-equivalent to a vanilla surface. This is the single
+// authority used to gate effect emission, replacing the legacy `enabled` flag.
+bool SurfacePassStack::any_effect() const
+{
+    for (const SurfacePass& p : passes)
+        if (p.kind != SurfacePassKind::None) return true;
+    return false;
+}
+
 std::string SurfacePassStack::to_json() const
 {
-    // Empty/disabled stack → "" so the config key stays at its empty default
-    // and synthesize_from_legacy() remains authoritative for untouched presets.
-    if (!enabled || passes.empty())
+    // NEOTKO_SANDWICH_TAG s119 (EMPTY model). "No effect on this zone" is encoded
+    // exactly ONE way: an explicit passthrough = a single None pass. Three states:
+    //   * passes.empty()                → "" (UNAUTHORED → synthesize_from_legacy
+    //                                     stays authoritative for untouched presets;
+    //                                     preserves the s70 universal-vanilla rule).
+    //   * authored but no effect        → canonical [None] blob (a legacy
+    //     (!enabled || !any_effect())     enabled=false stack, or an all-None stack).
+    //                                     It SURVIVES the round-trip, so resolve()
+    //                                     never re-synthesizes and the preset never
+    //                                     captures the zone (root of s114→s118).
+    //   * authored with effect          → full serialization.
+    // The old `if (!enabled || passes.empty()) return "";` cut collapsed the middle
+    // state into "" — that ambiguity WAS the penu-capture / disable-sticky bug.
+    if (passes.empty())
         return std::string();
+
+    if (!enabled || !any_effect()) {
+        nlohmann::json root;
+        root["v"]                  = 1;
+        root["enabled"]            = false;
+        root["perimeter_override"] = perimeter_override;
+        nlohmann::json arr = nlohmann::json::array();
+        nlohmann::json e;
+        e["kind"]  = static_cast<int>(SurfacePassKind::None);
+        e["ratio"] = 1.0;
+        arr.push_back(std::move(e));
+        root["passes"] = std::move(arr);
+        return root.dump();
+    }
 
     nlohmann::json root;
     root["v"]                  = 1;
@@ -2687,6 +2860,22 @@ SurfacePassStack SurfacePassStack::from_json(const std::string& text)
         if (e.contains("colormix"))   p.colormix  = sandwich_payload_from_json(e["colormix"]);
         if (e.contains("pathblend"))  p.pathblend = sandwich_payload_from_json(e["pathblend"]);
         st.passes.push_back(std::move(p));
+    }
+
+    // NEOTKO_SANDWICH_TAG s119 (EMPTY model) — migration A (lazy upcast, logged).
+    // A legacy "disabled but populated" stack (enabled=false + real effect passes)
+    // meant "no effect on this zone". Normalize it to the canonical explicit
+    // passthrough so it can never re-trigger synthesize_from_legacy / preset
+    // capture downstream. An already-canonical [None] passthrough
+    // (any_effect()==false) is left untouched → no log spam on every load.
+    if (!st.enabled && st.any_effect()) {
+        NEOTKO_LOG(MULTIPASS, "SANDWICH from_json s119 upcast: enabled=false + "
+            << st.passes.size() << " effect pass(es) → explicit [None] passthrough");
+        st.passes.clear();
+        SurfacePass none_pass;
+        none_pass.kind  = SurfacePassKind::None;
+        none_pass.ratio = 1.0;
+        st.passes.push_back(std::move(none_pass));
     }
     return st;
 }
@@ -2966,10 +3155,17 @@ std::string PathBlendEngine::apply_path(
     // a stale or hand-edited preset could violate the invariants — clamp here
     // so the engine never reads invalid geometry.
     const float floor_mm   = std::max(0.01f, pb.floor_mm);
+    // Sentinel <0 ⇒ auto: resolve to the tallest legal ramp before clamping, so
+    // a default (untouched) PathBlend ramps the full layer instead of collapsing
+    // to floor (a flat, non-planar pass).
+    const float mid_pref   = (pb.mid_end_mm < 0.f)
+        ? ((pb.mode == PathBlendPassConfig::Mode::Full)
+               ? static_cast<float>(H - 0.04) : static_cast<float>(H))
+        : pb.mid_end_mm;
     const float mid_end_mm = std::max(floor_mm,
         (pb.mode == PathBlendPassConfig::Mode::Full)
-            ? std::min(pb.mid_end_mm, static_cast<float>(H - 0.04))
-            : std::min(pb.mid_end_mm, static_cast<float>(H)));
+            ? std::min(mid_pref, static_cast<float>(H - 0.04))
+            : std::min(mid_pref, static_cast<float>(H)));
 
     const double ramp_thickness = double(floor_mm) + t * double(mid_end_mm - floor_mm);
     // Clamp the ramp's local thickness to [0.01, H] so cap_flow stays non-negative

@@ -303,6 +303,14 @@ public:
     [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx) const;
     [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx, const Vec3i32 &neighbors) const;
 
+    // NEOTKO_COLORSTITCH_TAG — s118 (eyedropper): estado (slot/EBT) del triángulo
+    // sin-dividir bajo un hit. Devuelve NONE si no se resuelve el triángulo.
+    [[nodiscard]] EnforcerBlockerType get_state_at(const Vec3f &hit, int facet_idx) const {
+        const int leaf = select_unsplit_triangle(hit, facet_idx);
+        return (leaf >= 0 && leaf < (int)m_triangles.size())
+                   ? m_triangles[leaf].get_state() : EnforcerBlockerType::NONE;
+    }
+
     // Select all triangles fully inside the circle, subdivide where needed.
     void select_patch(int                       facet_start,                   // facet of the original mesh (unsplit) that the hit point belongs to
                       std::unique_ptr<Cursor> &&cursor,                        // Cursor containing information about the point where to start, camera position (mesh coords), matrix to get from mesh to world, and its shape and type.

@@ -2070,6 +2070,53 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
     // analyzer width is boosted so the preview shows the real fat bead.
     const float _neo_mult = (m_active_tool_change != nullptr) ? m_active_tool_change->flow_mult : 1.f;
 
+    // NEOTKO_NEOTOWER_TAG s117 — box-in-drawer WIPE gap (DRAWER INVARIANT).
+    // The wall ring in finish_layer extrudes at the FULL drawer gap (_bd_full_gap)
+    // so it reaches down to the previous REAL plane; the wipe rasters did NOT and
+    // floated over the step at the toolchange XY (FALLO 1, T3@1.8798). Compute the
+    // SAME gap here. INVARIANT: a wipe box lives inside ONE drawer (one real layer)
+    // and never spans two — the gap is measured to the immediately-previous real
+    // plane only (walk back skipping ONLY synthetic box-in-drawer shells) and is
+    // clamped to 5x, exactly as the wall does → cannot reproduce the 0.64 mega.
+    float _bd_wipe_gap  = 0.f;
+    float _bd_wipe_mult = 1.f;
+    if (m_layer_info != m_plan.end() && m_layer_info != m_plan.begin()
+        && (m_layer_info - 1)->is_synthetic && m_layer_height > WT_EPSILON) {
+        auto _prev_real = m_layer_info - 1;
+        while (_prev_real != m_plan.begin() && _prev_real->is_synthetic)
+            --_prev_real;
+        if (!_prev_real->is_synthetic) {
+            _bd_wipe_gap      = m_layer_info->z - _prev_real->z;
+            const float _mult = _bd_wipe_gap / m_layer_height;
+            if (_mult > 1.01f)
+                _bd_wipe_mult = std::min(_mult, 5.f);
+        }
+    }
+    // s117-dbg — WIPE_COVERAGE: per-wipe vertical ledger, mirror of WALL_COVERAGE.
+    // Proves numerically whether each wipe box reaches its drawer base. h_nominal =
+    // what the wipe currently emits; h_emitted = what the box-in-drawer boost would
+    // make it (Paso 2). gate aligned with the other blocks (ORCA_DEBUG_ALL).
+    {
+        static const bool _wt_dbgw = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        if (_wt_dbgw && m_layer_info != m_plan.end()) {
+            static std::ofstream _wt_logw("/tmp/neotko_wipetower.log", std::ios::app);
+            const float _h_nom = std::max(m_layer_height, 0.04f);
+            _wt_logw << "[NEOTOWER] WIPE_COVERAGE"
+                     << " z=" << m_layer_info->z
+                     << " lh=" << m_layer_height
+                     << " tool=T" << m_current_tool
+                     << " drawer_gap=" << _bd_wipe_gap
+                     << " wipe_mult=" << _bd_wipe_mult
+                     << " h_nominal=" << _h_nom
+                     << " h_emitted=" << (_bd_wipe_mult > 1.f ? _bd_wipe_mult * m_layer_height : _h_nom)
+                     << " synth_prev=" << (int)(m_layer_info != m_plan.begin() && (m_layer_info - 1)->is_synthetic)
+                     << (_bd_wipe_gap > 1e-3f && _bd_wipe_mult <= 1.f ? " [WIPE_FLOATS]" : "")
+                     << "\n";
+            _wt_logw.flush();
+        }
+    }
+
     // NEOTKO_NEOTOWER_TAG s104 — adaptive-height floor (s78 redux). plan_toolchange
     // reserves depth with height_for_depth = max(h, 0.04), trusting that entry
     // heights never go below 0.04. Adaptive layer height with MULTIPLE objects
@@ -2084,7 +2131,19 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
     const float _h_wipe     = std::max(m_layer_height, 0.04f);
     const float _flow_wipe  = (_h_wipe > m_layer_height + WT_EPSILON) ? extrusion_flow(_h_wipe) : m_extrusion_flow;
 
-    writer.set_extrusion_flow(_flow_wipe * m_extra_flow * _neo_mult);
+    // NEOTKO_NEOTOWER_TAG s117 — box-in-drawer wipe anchoring (DRAWER INVARIANT).
+    // Boost the wipe FLOW by _bd_wipe_mult so each box fills its drawer from
+    // print_z down to the real plane below — same mechanism the wall already uses
+    // (finish_layer _bd_wall_mult): we scale flow, NOT the raster path, so the
+    // wipe stays inside its reserved cleaning_box and never crosses into the next
+    // drawer. _neo_mult (depth compaction) and _bd_wipe_mult (vertical fill) are
+    // orthogonal. No-op (mult=1) for every previously verified scenario.
+    writer.set_extrusion_flow(_flow_wipe * m_extra_flow * _neo_mult * _bd_wipe_mult);
+    if (_bd_wipe_mult > 1.f)
+        // Tag the DEPOSITED thickness (mult x h) for the preview, exactly as the
+        // wall does — so the wipe box reads as full drawer height, not nominal.
+        writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
+                      + float_to_string_decimal_point(_bd_wipe_mult * m_layer_height) + "\n");
     const float line_width = m_perimeter_width * m_extra_flow;
     writer.change_analyzer_line_width(line_width * _neo_mult);
 
@@ -2388,6 +2447,54 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
                       + float_to_string_decimal_point(_bd_wall_mult * m_layer_height) + "\n");
     }
+
+    // NEOTKO_NEOTOWER_TAG s115-dbg — WALL_COVERAGE: vertical coverage ledger.
+    // One line per finish_layer tying the EMITTED wall height (with box-in-drawer
+    // boost) and brim height to the air gap left below the previous REAL layer.
+    // Surfaces family #1 (wall_h != brim_h mismatch at z=1.56/1.88) and family #2
+    // (air gap at z=2.52) in a single column, with cause (did the boost fire? was
+    // prev entry synthetic?). PERMANENT regression canary — these failures
+    // historically come back; do NOT remove. GAP is the primary signal (measured
+    // from real z's, robust). grep: "s115-dbg".
+    {
+        static const bool _wt_dbgc = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        if (_wt_dbgc) {
+            static std::ofstream _wt_logc("/tmp/neotko_wipetower.log", std::ios::app);
+            static float _cov_last_real_top = -1.f;
+            const float _cov_z          = m_layer_info->z;
+            const float _cov_wall_h     = _bd_wall_mult * m_layer_height;
+            // s115 WALL==BRIM — brim now inherits the box-in-drawer boost (restore
+            // deferred to after the brim block), so its emitted height matches the
+            // wall. [WALL!=BRIM] now only fires if that coupling regresses.
+            const float _cov_brim_h     = _bd_wall_mult * m_layer_height;
+            const float _cov_wall_bot   = _cov_z - _cov_wall_h;
+            const bool  _cov_synth_prev = (m_layer_info != m_plan.begin()
+                                           && (m_layer_info - 1)->is_synthetic);
+            const float _cov_gap = (!_na_synth_any && _cov_last_real_top >= 0.f)
+                                   ? (_cov_wall_bot - _cov_last_real_top) : 0.f;
+            _wt_logc << "[NEOTOWER] WALL_COVERAGE"
+                     << " z=" << _cov_z
+                     << " lh=" << m_layer_height
+                     << " wall_mult=" << _bd_wall_mult
+                     << " full_gap=" << _bd_full_gap
+                     << " wall_h=" << _cov_wall_h
+                     << " brim_h=" << _cov_brim_h
+                     << " wall_bottom=" << _cov_wall_bot
+                     << " prev_real_top=" << _cov_last_real_top
+                     << " GAP=" << _cov_gap
+                     << " synth_prev=" << (int) _cov_synth_prev
+                     << " na_synth_any=" << (int) _na_synth_any
+                     << " first_layer=" << (int) first_layer
+                     << (std::fabs(_cov_wall_h - _cov_brim_h) > 1e-4f ? " [WALL!=BRIM]" : "")
+                     << (_cov_gap > 1e-3f ? " [AIR_GAP]" : "")
+                     << "\n";
+            _wt_logc.flush();
+            if (first_layer)      _cov_last_real_top = -1.f;     // reset per tower
+            if (!_na_synth_any)   _cov_last_real_top = _cov_z;   // advance real top
+        }
+    }
+
     if (m_wall_type == (int) wtwCone) {
         WipeTower::box_coordinates wt_box(Vec2f(_bd_x0, (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f)),
                                           m_wipe_tower_width - 2.f * _bd_x0, m_layer_info->depth + m_perimeter_width);
@@ -2413,13 +2520,15 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
                                          /*extrude_perimeter=*/!_na_skip_frame_synth_sub, false);
     }
 
-    // NEOTKO_NEOTOWER_TAG s103-bd — restore normal flow + height tag after the
-    // full-height canonical wall, before the brim block.
-    if (_bd_wall_mult > 1.f) {
-        writer.set_extrusion_flow(m_extrusion_flow);
-        writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
-                      + float_to_string_decimal_point(m_layer_height) + "\n");
-    }
+    // NEOTKO_NEOTOWER_TAG s115 — WALL==BRIM: the box-in-drawer wall above bridges
+    // the full real-layer gap (flow x _bd_wall_mult, height _bd_wall_mult*lh,
+    // anchored at the last real plane). The brim ring belongs to the SAME bridged
+    // layer, so it MUST share the boost — otherwise it deposits at nominal lh and
+    // floats over the step (the [WALL!=BRIM] failure at z=1.56/1.88/4.76/5.08). The
+    // flow/height restore is therefore DEFERRED to AFTER the brim block (below), so
+    // the brim inherits the canonical wall's boost. This is the same "brim sized to
+    // the real layer" principle already applied to the wall, just extended to the
+    // brim (NOT a new mega-extrusion — same bridge, same gap). Revert: grep "s115 WALL==BRIM".
 
     // brim with chamfer (gradual layer-by-layer reduction)
     int loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
@@ -2536,6 +2645,16 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         if (first_layer) {
             m_wipe_tower_brim_width_real = loops_num * spacing;
         }
+    }
+
+    // NEOTKO_NEOTOWER_TAG s115 WALL==BRIM — restore normal flow + height tag now
+    // that BOTH the canonical wall AND its brim have been emitted at the box-in-
+    // drawer boost. Moved here from before the brim block so the brim shares the
+    // wall's bridge (see the deferral note above).
+    if (_bd_wall_mult > 1.f) {
+        writer.set_extrusion_flow(m_extrusion_flow);
+        writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
+                      + float_to_string_decimal_point(m_layer_height) + "\n");
     }
 
     // Now prepare future wipe.

@@ -836,6 +836,19 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
     // Let the planner know we are traveling between objects.
     gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+
+    // NEOTKO_SANDWICH_TAG s119 — width/role tag desync fix. Splicing the prime-tower
+    // TCR as raw gcode (with its own ;WIDTH:0.5 / ;TYPE:Prime tower text) does NOT
+    // update m_last_processor_extrusion_role. So when the object resumes with the same
+    // path width as before the tower (e.g. the 2nd ColorMix penu bucket T1, same width
+    // as bucket T0), `_extrude` sees role unchanged + width unchanged → it SKIPS
+    // re-emitting ;WIDTH:/;TYPE:/;HEIGHT:, leaving the viewer rendering the resumed
+    // path at the tower's 0.5 width (looked massively over-extruded vs the previous
+    // bucket; flow E was actually identical). Marking the role as erWipeTower here —
+    // as the main per-extruder loop already does at the standard call sites — forces
+    // `last_was_wipe_tower` true so the resuming path re-declares its tags.
+    if (!gcode.empty())
+        gcodegen.m_last_processor_extrusion_role = erWipeTower;
     return gcode;
 }
 
@@ -1141,6 +1154,19 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
 
     // Let the planner know we are traveling between objects.
     gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+
+    // NEOTKO_SANDWICH_TAG s119 — width/role tag desync fix. Splicing the prime-tower
+    // TCR as raw gcode (with its own ;WIDTH:0.5 / ;TYPE:Prime tower text) does NOT
+    // update m_last_processor_extrusion_role. So when the object resumes with the same
+    // path width as before the tower (e.g. the 2nd ColorMix penu bucket T1, same width
+    // as bucket T0), `_extrude` sees role unchanged + width unchanged → it SKIPS
+    // re-emitting ;WIDTH:/;TYPE:/;HEIGHT:, leaving the viewer rendering the resumed
+    // path at the tower's 0.5 width (looked massively over-extruded vs the previous
+    // bucket; flow E was actually identical). Marking the role as erWipeTower here —
+    // as the main per-extruder loop already does at the standard call sites — forces
+    // `last_was_wipe_tower` true so the resuming path re-declares its tags.
+    if (!gcode.empty())
+        gcodegen.m_last_processor_extrusion_role = erWipeTower;
     return gcode;
 }
 
@@ -5440,9 +5466,12 @@ LayerResult GCode::process_layer(const Print& print,
                 << " pb_pass=" << sub.pathblend_pass
                 << " fills=" << sub.fills.entities.size()
                 << " perims=" << sub.perimeters.entities.size()
-                << (sub.fills.entities.empty() ? " → SKIP_EMPTY" : " → EXTRUDE"));
-            // NEOTKO_SANDWICH_TAG — skip an empty sublayer.
-            if (sub.fills.entities.empty()) continue;
+                << ((sub.fills.entities.empty() && sub.perimeters.entities.empty())
+                        ? " → SKIP_EMPTY" : " → EXTRUDE"));
+            // NEOTKO_SANDWICH_TAG — skip a fully empty sublayer. s109: a
+            // perimeter-only carrier (PB Half perimeter override, Fill.cpp) has
+            // empty fills but a non-empty perimeter to emit at Z nominal → NO skip.
+            if (sub.fills.entities.empty() && sub.perimeters.entities.empty()) continue;
             // NEOTKO_MULTIPASS_TAG — apply object config FIRST so that set_extruder()
             // and retract() read valid filament vectors (retract_length, filament_start_gcode,
             // pressure_advance…). Moving this after set_extruder caused EXC_BAD_ACCESS in
@@ -8676,18 +8705,30 @@ std::string GCode::extrude_perimeters(const Print&                              
             const int    _n_perim = int(region.perimeters.size());
             // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: suppress real-layer perimeters
             // when the override is active and this layer has sublayers with cloned perimeters.
-            if (m_config.multipass_perimeter_override.value && m_layer != nullptr) {
+            // NEOTKO_MULTIPASS_TAG s113 — source-of-truth fix. Suppress the real
+            // perimeter iff the sublayers ACTUALLY carry a replacement, instead of
+            // gating on m_config.multipass_perimeter_override (legacy global flag).
+            // In painter mode the override lives in the per-zone resolved stack
+            // (Fill.cpp reads mp_stack.perimeter_override); keying suppression off the
+            // produced sublayer perimeters keeps suppress ≡ re-emit and fixes both
+            // "perimeters not created with override ON" (real suppressed, no clone to
+            // replace it) and the mirror double-perimeter case (clone + real both emit).
+            if (m_layer != nullptr) {
                 const PrintObject* po = m_layer->object();
                 const size_t lid = m_layer->id();
                 const auto& subs = po->multipass_sublayers();
-                if (lid < subs.size() && !subs[lid].empty()) {
-                    NEOTKO_LOG(MULTIPASS, "MP_PERIM_SUPPRESS: layer=" << lid
-                        << " z=" << _z << " tool=T" << _tool
-                        << " obj_id=" << _obj_id << " region=" << _reg_idx
-                        << " n_perim=" << _n_perim
-                        << " (perimeter_override active, "
-                        << subs[lid].size() << " sublayers handle them)");
-                    continue;
+                if (lid < subs.size()) {
+                    const bool _subs_carry_perim = std::any_of(
+                        subs[lid].begin(), subs[lid].end(),
+                        [](const MultiPassSubLayer& s){ return !s.perimeters.entities.empty(); });
+                    if (_subs_carry_perim) {
+                        NEOTKO_LOG(MULTIPASS, "MP_PERIM_SUPPRESS: layer=" << lid
+                            << " z=" << _z << " tool=T" << _tool
+                            << " obj_id=" << _obj_id << " region=" << _reg_idx
+                            << " n_perim=" << _n_perim
+                            << " (sublayers carry replacement perimeters)");
+                        continue;
+                    }
                 }
             }
             // NEOTKO_MULTIPASS_TAG_END

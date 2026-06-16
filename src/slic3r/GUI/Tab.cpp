@@ -3753,11 +3753,17 @@ private:
         }
         if (auto* o = m_config->option<ConfigOptionBool>("penultimate_multipass_enabled")) o->value = penu_mp;
         m_on_change("penultimate_multipass_enabled");
-        // NEOTKO_MULTIPASS_TAG_START — Perimeter Override write-back
-        if (auto* o = m_config->option<ConfigOptionBool>("multipass_perimeter_override"))
-            o->value = m_mp_perim_override && m_mp_perim_override->GetValue();
-        m_on_change("multipass_perimeter_override");
-        // NEOTKO_MULTIPASS_TAG_END
+        // NEOTKO_MULTIPASS_TAG — s120: el checkbox legacy "MultiPass Perimeter
+        // Override" se retiró junto al panel Blend Suggestion. El perim override
+        // ahora es el unificado de s118 (m_ui[z].perim_chk → stack → wb en la
+        // escritura normalizada). GUARD: si el checkbox ya no existe, NO se
+        // escribe aquí — de lo contrario clobbearía a `false` el valor canónico
+        // que deriva del stack.
+        if (m_mp_perim_override) {
+            if (auto* o = m_config->option<ConfigOptionBool>("multipass_perimeter_override"))
+                o->value = m_mp_perim_override->GetValue();
+            m_on_change("multipass_perimeter_override");
+        }
 
         // PathBlend (EFF_PB only — independent surface key, independent enable)
         // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
@@ -4306,7 +4312,7 @@ private:
 
         // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint Top+Penultimate optimizer)
         {
-            // Build virtual-only MixedColor options from mixed_filament_definitions
+            // s120: pool de MixedColors conservado para el Match del Studio.
             {
                 std::string mixed_defs;
                 if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
@@ -4318,7 +4324,11 @@ private:
                             m_bs_mix_opts.push_back(opt);
                 }
             }
+        }
+        // NEOTKO_MULTIPASS_TAG_END
 
+#if 0   // s120: UI del antiguo Blend Suggestion (sustituida por ColorStitch Studio → Match). Pendiente excisión dura.
+        {
             auto* bs_sb = new wxStaticBoxSizer(wxVERTICAL, this,
                 _L("Blend Suggestion \u2014 Beer-Lambert optimizer"));
 
@@ -4582,7 +4592,7 @@ private:
 
             vs->Add(bs_sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
         }
-        // NEOTKO_MULTIPASS_TAG_END
+#endif  // s120: fin UI Blend Suggestion eliminada
 
         // NEOTKO_PROFILE_TAG_START — Fase A: Save/Manage Surface Effect Profiles.
         // Snapshot ONLY the ColorMix payload for now; the profile struct already
@@ -5180,8 +5190,11 @@ private:
     {
         using PBMode = Slic3r::PathBlendPassConfig::Mode;
         std::vector<ZoneUI::KindEntry> out;
+        // NEOTKO_SANDWICH_TAG s119 (EMPTY model): None is NOT a per-row kind. Empty
+        // is a zone-level, exclusive, single-pass state (the Enabled checkbox) — it
+        // can never be one band among several. So a multi-pass stack only offers
+        // Solid here; "no effect" is expressed by disabling the whole zone.
         if (n > 1) {
-            out.push_back({ Kind::None,      -1, _L("None") });
             out.push_back({ Kind::Solid,     -1, _L("Solid") });
         }
         out.push_back({ Kind::ColorMix,  -1,                _L("ColorStitch") }); // NEOTKO_COLORSTITCH_TAG
@@ -5325,9 +5338,16 @@ private:
             pb.kind = Kind::PathBlend; pb.ratio = 1.0;
             st.passes.assign(1, pb);
         }
-        if (st.passes.size() == 1 &&
-            (st.passes[0].kind == Kind::Solid || st.passes[0].kind == Kind::None))
-            st.passes[0].kind = Kind::ColorMix;   // lone Solid/None is meaningless
+        // NEOTKO_SANDWICH_TAG s119 (EMPTY model): a lone None pass is the canonical
+        // Empty zone (explicit passthrough loaded from a [None] blob). Keep it as a
+        // DISABLED zone with its single None pass so commit()'s to_json() writes the
+        // explicit [None] blob (not ""→synthesize, which is what captures the zone).
+        // Do NOT promote it to ColorMix — Empty is the Enabled-checkbox-off state.
+        if (st.passes.size() == 1 && st.passes[0].kind == Kind::None) {
+            st.enabled = false;
+        } else if (st.passes.size() == 1 && st.passes[0].kind == Kind::Solid) {
+            st.passes[0].kind = Kind::ColorMix;   // lone Solid is meaningless
+        }
         if (st.passes.empty())
             st.enabled = false;                   // nothing to show
     }
@@ -5345,7 +5365,9 @@ private:
             m_ui[z].enable_chk->SetValue(m_stack[z].enabled && !m_stack[z].passes.empty());
             const int n0 = std::max(1, (int)m_stack[z].passes.size());
             m_ui[z].slots_rb->SetSelection(std::min(3, n0) - 1);
-            m_ui[z].perim_chk->SetValue(m_stack[z].perimeter_override);
+            // s118: perim_chk único (sólo z==0), refleja el estado combinado.
+            if (m_ui[z].perim_chk)
+                m_ui[z].perim_chk->SetValue(m_stack[0].perimeter_override || m_stack[1].perimeter_override);
             refresh_rows(z);
             sync_zone_enabled(z);
         }
@@ -5581,6 +5603,7 @@ private:
         // Calculate escribe a m_stack[] (autoritativo) en vez de las legacy
         // multipass_* keys. La checkbox "MultiPass Perimeter Override" no se
         // porta — ya existe per-zone en SandwichDialog (m_ui[z].perim_chk).
+#if 0   // s120: panel "Blend Suggestion" del SandwichDialog RETIRADO (legacy mp_suggest, superseded por ColorStitch Studio → Match, ΔE2000). El pool (load_mix_opts) y el Studio siguen vivos. Pendiente excisión dura.
         {
             sb->Add(new wxStaticLine(host), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, PAD);
             auto* bs_lbl = new wxStaticText(host, wxID_ANY,
@@ -5875,6 +5898,7 @@ private:
                 sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
             }
         }
+#endif  // s120: fin panel Blend Suggestion (SandwichDialog) eliminado
 
         return sb;
     }
@@ -6045,7 +6069,6 @@ private:
             CS::GradientSpec s;
             s.tool_a       = std::max(0, m_gd_tool_a->GetSelection());
             s.tool_b       = std::max(0, m_gd_tool_b->GetSelection());
-            s.penu_pattern = std::string(m_gd_pattern->GetValue().ToUTF8());
             s.steps        = m_gd_steps->GetValue();
             s.split_min_mm = m_gd_min->GetValue();
             s.split_max_mm = m_gd_max->GetValue();
@@ -6245,25 +6268,15 @@ private:
             row->Add(new wxStaticText(d, wxID_ANY, _L("B")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
             m_gd_tool_b = new wxChoice(d, wxID_ANY, wxDefaultPosition, wxSize(60, -1), tools);
             m_gd_tool_b->SetSelection(1);
-            m_gd_tool_b->SetToolTip(_L("Contrast tool (lower top pass + penu pattern tool B)"));
+            m_gd_tool_b->SetToolTip(_L("Contrast tool (lower top pass)"));
             row->Add(m_gd_tool_b, 0, wxRIGHT, 10);
-            row->Add(new wxStaticText(d, wxID_ANY, _L("Weave:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            wxArrayString weaves;
-            for (const auto& w : Slic3r::ColorSci::weave_presets())
-                weaves.Add(wxGetTranslation(wxString::FromUTF8(w.name)));
-            m_gd_weave = new wxChoice(d, wxID_ANY, wxDefaultPosition, wxDefaultSize, weaves);
-            m_gd_weave->SetSelection(0);
-            m_gd_weave->SetToolTip(_L("Textile weave presets — fills the pattern field.\n"
-                                      "Twill diagonals need per-layer offset (future C.2)."));
-            row->Add(m_gd_weave, 1, wxALIGN_CENTER_VERTICAL);
+            // s120: Weave/Pattern retirados — el gradiente es TOP-only (sin penu).
+            // El dither de penu lo añade el usuario aparte si lo quiere.
+            row->AddStretchSpacer(1);
             dz->Add(row, 0, wxEXPAND | wxBOTTOM, PAD);
 
-            // fila: pattern + steps + split
+            // fila: steps + split  (s120: Pattern retirado — gradiente top-only)
             auto* row2 = new wxBoxSizer(wxHORIZONTAL);
-            row2->Add(new wxStaticText(d, wxID_ANY, _L("Pattern:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            m_gd_pattern = new wxTextCtrl(d, wxID_ANY, "12", wxDefaultPosition, wxSize(70, -1));
-            m_gd_pattern->SetToolTip(_L("Penu dither pattern — digits 1-4, one digit per line"));
-            row2->Add(m_gd_pattern, 0, wxRIGHT, 10);
             row2->Add(new wxStaticText(d, wxID_ANY, _L("Steps:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
             m_gd_steps = new wxSpinCtrl(d, wxID_ANY, "8", wxDefaultPosition, wxSize(56, -1),
                                         wxSP_ARROW_KEYS, 1, 30, 8);
@@ -6410,20 +6423,9 @@ private:
         // reactividad modo Gradient
         m_gd_tool_a->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { gd_recalc(); });
         m_gd_tool_b->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { gd_recalc(); });
-        m_gd_pattern->Bind(wxEVT_TEXT,  [this](wxCommandEvent&) { gd_recalc(); });
         m_gd_steps->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&)   { gd_recalc(); });
         m_gd_min->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { gd_recalc(); });
         m_gd_max->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { gd_recalc(); });
-        m_gd_weave->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
-            const auto& presets = Slic3r::ColorSci::weave_presets();
-            const int sel = m_gd_weave->GetSelection();
-            if (sel > 0 && sel < (int)presets.size()) {
-                const auto& w = presets[sel];
-                const char* pat = (w.pattern_penu && w.pattern_penu[0]) ? w.pattern_penu : w.pattern_top;
-                m_gd_pattern->ChangeValue(wxString::FromUTF8(pat));
-            }
-            gd_recalc();
-        });
 
         // Timer de debounce TD → regenerar. Owner = este diálogo, id propio.
         m_gd_td_timer.SetOwner(this, kGdTdTimerId);
@@ -6504,10 +6506,20 @@ private:
         m_ui[z].enable_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
             const bool on = m_ui[z].enable_chk->GetValue();
             m_stack[z].enabled = on;
-            if (on && m_stack[z].passes.empty()) {
-                Slic3r::SurfacePass p;
-                p.kind = Kind::ColorMix; p.ratio = 1.0;
-                m_stack[z].passes.push_back(p);
+            if (on) {
+                // NEOTKO_SANDWICH_TAG s119 (EMPTY model): enabling a zone means "I
+                // want an effect here". An empty stack or a lone None (Empty) zone
+                // becomes a real ColorMix pass — the per-row selector no longer
+                // offers None, so a None row would otherwise show no kind.
+                if (m_stack[z].passes.empty()) {
+                    Slic3r::SurfacePass p;
+                    p.kind = Kind::ColorMix; p.ratio = 1.0;
+                    m_stack[z].passes.push_back(p);
+                } else if (m_stack[z].passes.size() == 1 &&
+                           m_stack[z].passes[0].kind == Kind::None) {
+                    m_stack[z].passes[0].kind  = Kind::ColorMix;
+                    m_stack[z].passes[0].ratio = 1.0;
+                }
             }
             refresh_rows(z);
             sync_zone_enabled(z);
@@ -6525,14 +6537,23 @@ private:
         });
         hdr->Add(m_ui[z].slots_rb, 0, wxALIGN_CENTER_VERTICAL);
 
-        m_ui[z].perim_chk = new wxCheckBox(boxw, wxID_ANY, _L("Perimeter override"));
-        m_ui[z].perim_chk->SetValue(m_stack[z].perimeter_override);
-        m_ui[z].perim_chk->SetToolTip(_L("Clone the walls into every Solid pass of "
-                                         "this zone (MultiPass perimeter override)."));
-        m_ui[z].perim_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
-            m_stack[z].perimeter_override = m_ui[z].perim_chk->GetValue();
-        });
-        hdr->Add(m_ui[z].perim_chk, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 16);
+        // NEOTKO_COLORSTITCH_TAG — s118: Perimeter override es UNA sola opción del
+        // color (no per-zona). Se crea sólo en la zona Top y aplica a top+penu; la
+        // zona Penu no lo dibuja (m_ui[1].perim_chk queda null → refs guardadas).
+        // El motor lo lee por-zona (Fill.cpp), así que escribimos ambos stacks.
+        if (z == 0) {
+            m_ui[z].perim_chk = new wxCheckBox(boxw, wxID_ANY, _L("Perimeter override"));
+            m_ui[z].perim_chk->SetValue(m_stack[0].perimeter_override || m_stack[1].perimeter_override);
+            m_ui[z].perim_chk->SetToolTip(_L("Clone the walls into every Solid pass "
+                                             "(MultiPass perimeter override). Applies to "
+                                             "Top and Penultimate."));
+            m_ui[z].perim_chk->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+                const bool on = m_ui[0].perim_chk->GetValue();
+                m_stack[0].perimeter_override = on;
+                m_stack[1].perimeter_override = on;
+            });
+            hdr->Add(m_ui[z].perim_chk, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 16);
+        }
         box->Add(hdr, 0, wxALL, 6);
 
         // rows host — kMaxPasses fixed row panels, shown/hidden by slot count.
@@ -6697,7 +6718,7 @@ private:
             u.angle_lbl[idx]->SetLabel(_L("angle:"));
             u.angle_txt[idx]->ChangeValue(wxString::Format("%d", p.angle));
         } else if (is_pb) {
-            u.angle_lbl[idx]->SetLabel(_L("mid mm:"));
+            u.angle_lbl[idx]->SetLabel(_L("ramp end:"));
             Slic3r::PathBlendPassConfig pbc;
             const auto it_blob = p.pathblend.kv.find("blob");
             if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
@@ -7215,7 +7236,7 @@ private:
         if (m_ui[z].slots_rb)  m_ui[z].slots_rb->Enable(on);
         if (m_ui[z].rows_host) m_ui[z].rows_host->Enable(on);
         if (m_ui[z].norm_btn)  m_ui[z].norm_btn->Enable(on);
-        if (m_ui[z].perim_chk) m_ui[z].perim_chk->Enable(on);
+        // s118: perim_chk es global (no se ata al enable de la zona Top).
         if (m_ui[z].ratio_bar) { m_ui[z].ratio_bar->Enable(on); m_ui[z].ratio_bar->Refresh(); }
     }
 
@@ -7287,22 +7308,12 @@ private:
     //   Full: cap = top 0,04 mm of flow → mid_end ≤ H − 0,04. Ramp must exist
     //         (mid > floor strictly); equal values would mean two flat layers,
     //         which is the MultiPass use-case, not PathBlend.
+    // NEOTKO_COLORSTITCH_TAG s108 — body promoted to the engine
+    // (PathBlendPassConfig::apply_constraints) so the painter pro-mode tray
+    // shares the exact same rules; this wrapper keeps the call sites intact.
     static void pb_apply_constraints(Slic3r::PathBlendPassConfig& pbc, double H)
     {
-        constexpr float kRampGap = 0.001f;  // strict mid > floor (anti-equality)
-        constexpr float kCapMin  = 0.04f;   // Full: cap flow minimum on top
-        H = std::max(0.04, H);
-        if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
-            const float floor_max = std::max(0.01f, (float)H - kCapMin - kRampGap);
-            pbc.floor_mm   = std::clamp(pbc.floor_mm, 0.01f, floor_max);
-            const float mid_min = pbc.floor_mm + kRampGap;
-            const float mid_max = std::max(mid_min, (float)H - kCapMin);
-            pbc.mid_end_mm = std::clamp(pbc.mid_end_mm, mid_min, mid_max);
-        } else {  // Half
-            const float floor_max = std::max(0.01f, (float)H - kRampGap);
-            pbc.floor_mm   = std::clamp(pbc.floor_mm, 0.01f, floor_max);
-            pbc.mid_end_mm = (float)H;  // ramp goes to layer top; no cap
-        }
+        pbc.apply_constraints(H);
     }
 
     void write_pb_blob(int z, int idx, const Slic3r::PathBlendPassConfig& pbc_in)
@@ -10516,6 +10527,7 @@ void TabPrint::build()
         // NEOTKO_LIBRE_TAG_END
         // NEOTKO_COLORMIX_TAG_START — Penultimate Top Layers Control
         optgroup->append_single_option_line("penultimate_top_layers");
+        optgroup->append_single_option_line("penultimate_solid_infill_pattern");
         optgroup->append_single_option_line("penultimate_solid_infill_density");
         // NEOTKO_COLORMIX_TAG_END
         optgroup->append_single_option_line("bottom_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");

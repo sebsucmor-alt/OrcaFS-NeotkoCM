@@ -22,6 +22,7 @@
 //BBS
 #include "ShortestPath.hpp"
 #include "SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — orphan slot warning
+#include "SurfaceColorMix.hpp"      // NEOTKO_COLORSTITCH_TAG s112 — NEOTKO_LOG(PROFILE) diagnóstico
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
 
 //! macro used to mark string used at localization, return same string
@@ -824,10 +825,23 @@ void PrintObject::slice()
         std::set<std::pair<int, int>> orphan_slots; // (slot, missing_pid)
         for (const ModelVolume* mv : this->model_object()->volumes) {
             if (!mv || !mv->is_model_part()) continue;
-            for (int slot = 1; slot < 16; ++slot) {
+            for (int slot = 1; slot < ModelVolume::COLORMIX_SLOT_COUNT; ++slot) {   // NEOTKO_COLORSTITCH_TAG s112
                 const int pid = mv->colormix_slot_to_profile_id[slot];
                 if (pid <= 0) continue;
-                if (!SurfaceEffectProfileManager::get().find(pid))
+                // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico: vuelca el estado real
+                // de cada slot pintado al slicear (¿perfil existe? ¿payload? ¿stack?).
+                // Una sola vez por objeto. Canal PROFILE (ORCA_DEBUG_PROFILE).
+                const SurfaceEffectProfile* _dp = SurfaceEffectProfileManager::get().find(pid);
+                NEOTKO_LOG(PROFILE, "PAINT_SLOT mo=" << (const void*)this->model_object()
+                    << " obj='" << this->model_object()->name
+                    << "' vol='" << mv->name << "' slot=" << slot << " pid=" << pid
+                    << " found=" << (_dp ? "yes" : "NO")
+                    << " cm_present=" << (_dp && _dp->colormix.present ? "yes" : "no")
+                    << " pb_present=" << (_dp && _dp->pathblend.present ? "yes" : "no")
+                    << " cm_kv=" << (_dp ? _dp->colormix.kv.size() : 0)
+                    << " stack_top_empty=" << (_dp ? (_dp->stack_top_json.empty() ? "1" : "0") : "?")
+                    << " stack_penu_empty=" << (_dp ? (_dp->stack_penu_json.empty() ? "1" : "0") : "?"));
+                if (!_dp)
                     orphan_slots.insert({slot, pid});
             }
         }

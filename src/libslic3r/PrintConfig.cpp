@@ -1709,7 +1709,24 @@ void PrintConfigDef::init_fff_params()
     def->enum_values   = def_top_fill_pattern->enum_values;
     def->enum_labels   = def_top_fill_pattern->enum_labels;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonic));
-    
+
+    // NEOTKO_MULTIPASS_TAG — dedicated pattern for the penultimate solid surface.
+    // PathBlend/ColorMix on the penultimate role require a line-based pattern
+    // (Monotonic Line) to lay down the per-scanline ramp; other patterns make the
+    // PB ramp and its perimeter come out partial. Splitting it from
+    // internal_solid_infill_pattern lets that key govern only the remaining
+    // (non-penu, non-top) internal solid infill.
+    def                = this->add("penultimate_solid_infill_pattern", coEnum);
+    def->label         = L("Penultimate solid infill pattern");
+    def->category      = L("Strength");
+    def->tooltip       = L("Line pattern of the penultimate solid infill (the solid layers just "
+                           "below the top surface). Keep Monotonic Line when using PathBlend or "
+                           "ColorStitch on the penultimate role.");
+    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
+    def->enum_values   = def_top_fill_pattern->enum_values;
+    def->enum_labels   = def_top_fill_pattern->enum_labels;
+    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
+
     def = this->add("outer_wall_line_width", coFloatOrPercent);
     def->label = L("Outer wall");
     def->category = L("Quality");

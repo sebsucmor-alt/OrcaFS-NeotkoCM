@@ -91,6 +91,59 @@ SurfaceEffectProfileManager::snapshot_keys(const DynamicPrintConfig& cfg,
     return out;
 }
 
+// NEOTKO_COLORSTITCH_TAG — s112 fix. Lift ColorMix/PathBlend pass payloads from
+// the resolved stacks to the profile level so the slicer's painter-mode gate
+// (which reads p.colormix.present, not the visual stack_*_json) fires.
+void SurfaceEffectProfileManager::payload_from_stacks(const SurfacePassStack& top,
+                                                      const SurfacePassStack& penu,
+                                                      SurfaceEffectProfile& p)
+{
+    bool cm_top = false, cm_penu = false;
+    bool pb_top = false, pb_penu = false;
+
+    auto lift = [](const SurfacePassStack& st, bool penu_zone,
+                   SurfaceEffectProfile& prof, bool& cm_hit, bool& pb_hit) {
+        for (const SurfacePass& pass : st.passes) {
+            if (pass.kind == SurfacePassKind::ColorMix && pass.colormix.present) {
+                // kv keys are already role-prefixed (interlayer_colormix_ for top,
+                // interlayer_colormix_penu_ for penu) — straight merge.
+                for (const auto& [k, v] : pass.colormix.kv)
+                    prof.colormix.kv[k] = v;
+                cm_hit = true;
+            } else if (pass.kind == SurfacePassKind::PathBlend && pass.pathblend.present) {
+                for (const auto& [k, v] : pass.pathblend.kv)
+                    prof.pathblend.kv[k] = v;
+                pb_hit = true;
+            }
+        }
+        (void)penu_zone;
+    };
+
+    lift(top,  false, p, cm_top,  pb_top);
+    lift(penu, true,  p, cm_penu, pb_penu);
+
+    // surface enum: 0=Both / 1=Top only / 2=Penu only (mirror Tab.cpp:4627).
+    auto surface_enum = [](bool t, bool pen) -> std::string {
+        if (t && pen) return "0";
+        if (t)        return "1";
+        return "2";
+    };
+
+    if (cm_top || cm_penu) {
+        p.colormix.present = true;
+        p.colormix.kv["interlayer_colormix_enabled"] = "1";
+        p.colormix.kv["interlayer_colormix_surface"] = surface_enum(cm_top, cm_penu);
+    }
+    if (pb_top || pb_penu) {
+        p.pathblend.present = true;
+        p.pathblend.kv["multipass_path_gradient"] = "1";
+        p.pathblend.kv["pathblend_surface"] = surface_enum(pb_top, pb_penu);
+    }
+    NEOTKO_LOG(PROFILE, "payload_from_stacks cm=[" << cm_top << "," << cm_penu
+        << "] pb=[" << pb_top << "," << pb_penu << "]"
+        << " cm_kv=" << p.colormix.kv.size() << " pb_kv=" << p.pathblend.kv.size());
+}
+
 void SurfaceEffectProfileManager::restore_keys(DynamicPrintConfig& cfg,
                                                const SurfaceEffectPayload& payload)
 {
@@ -343,6 +396,19 @@ bool SurfaceEffectProfileManager::from_json(const std::string& text)
         // NEOTKO_COLORSTITCH_TAG — PR.3: absent (legacy) → false = saved.
         if (e.contains("auto") && e["auto"].is_boolean())
             p.auto_generated = e["auto"].get<bool>();
+        // NEOTKO_COLORSTITCH_TAG — s112: backfill payload for profiles saved
+        // BEFORE the fix (auto profiles only carried the visual stacks). Without
+        // a payload the slicer's painter-mode gate skips them → painted .3mf
+        // loaded as all-T0. Derive it from the stacks here so old files slice.
+        if (!p.colormix.present && !p.pathblend.present &&
+            (!p.stack_top_json.empty() || !p.stack_penu_json.empty())) {
+            const SurfacePassStack st_top  = SurfacePassStack::from_json(p.stack_top_json);
+            const SurfacePassStack st_penu = SurfacePassStack::from_json(p.stack_penu_json);
+            payload_from_stacks(st_top, st_penu, p);
+            NEOTKO_LOG(PROFILE, "from_json backfill id=" << p.id << " name='" << p.name
+                << "' → cm=" << (p.colormix.present ? "yes" : "no")
+                << " pb=" << (p.pathblend.present ? "yes" : "no"));
+        }
         if (p.id <= 0) p.id = m_next_id;
         m_next_id = std::max(m_next_id, p.id + 1);
         m_profiles.push_back(std::move(p));

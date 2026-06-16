@@ -1745,6 +1745,16 @@ void PrintObject::discover_vertical_shells()
 
     BOOST_LOG_TRIVIAL(info) << "Discovering vertical shells..." << log_memory_info();
 
+    // NEOTKO_COLORSTITCH_TAG — s118 dbg (penu pintado no slicea): log INCONDICIONAL,
+    // una vez por objeto, de la decisión de autonomía penu. Así sabemos si
+    // object_painter_wants_penu() ve el penu del perfil y qué penultimate_top_layers
+    // hay, sin depender de que el PENU_AUTONOMY interno llegue a forzar.
+    NEOTKO_LOG(PROFILE, "PENU_DECISION obj='"
+        << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
+        << "' mo=" << (const void*)this->model_object()
+        << " penultimate_top_layers=" << this->config().penultimate_top_layers.value
+        << " wants_penu=" << (SurfaceColorMix::object_painter_wants_penu(this->model_object()) ? 1 : 0));
+
     struct DiscoverVerticalShellsCacheEntry
     {
         // Collected polygons, offsetted

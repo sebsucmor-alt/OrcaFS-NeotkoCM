@@ -1041,6 +1041,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,  calib_flowrate_topinfill_special_order)) // ORCA: special flag for flow rate calibration
 
     // NEOTKO_MULTIPASS_TAG_START — Penultimate top layers
+    ((ConfigOptionEnum<InfillPattern>, penultimate_solid_infill_pattern))
     ((ConfigOptionPercent,  penultimate_solid_infill_density))
     ((ConfigOptionInt,      penultimate_top_layers))
     ((ConfigOptionFloat,    penultimate_infill_speed))

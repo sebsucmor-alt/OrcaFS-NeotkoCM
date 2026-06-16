@@ -2500,6 +2500,17 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     int object_count = m_objects.size();
     std::set<PrintObject*> need_slicing_objects;
     std::set<PrintObject*> re_slicing_objects;
+    // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico shared-object: cuántos slots
+    // colormix pintados ve cada objeto y a quién acaba compartiendo.
+    auto _cm_painted_count = [](const ModelObject* mo) -> int {
+        int n = 0;
+        if (mo) for (const ModelVolume* mv : mo->volumes) {
+            if (!mv || !mv->is_model_part()) continue;
+            for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
+                if (mv->colormix_slot_to_profile_id[s] != 0) ++n;
+        }
+        return n;
+    };
     if (!use_cache) {
         for (int index = 0; index < object_count; index++)
         {
@@ -2513,6 +2524,16 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
             if (!obj->get_shared_object())
                 need_slicing_objects.insert(obj);
+            const ModelObject* _mo = obj->model_object();
+            const PrintObject* _sh = obj->get_shared_object();
+            NEOTKO_LOG(PROFILE, "SHARED_DEDUP obj_mo=" << (const void*)_mo
+                << " name='" << (_mo ? _mo->name : "<null>") << "'"
+                << " painted_slots=" << _cm_painted_count(_mo)
+                << " shared=" << (_sh ? "YES→" : "NO(self)")
+                << (_sh ? (const void*)_sh->model_object() : (const void*)nullptr)
+                << (_sh && _sh->model_object()
+                       ? (" painted=" + std::to_string(_cm_painted_count(_sh->model_object())))
+                       : std::string()));
         }
     }
     else {

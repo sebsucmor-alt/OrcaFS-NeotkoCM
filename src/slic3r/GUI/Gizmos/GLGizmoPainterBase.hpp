@@ -341,6 +341,15 @@ private:
     };
     mutable RaycastResult m_rr = {Vec2d::Zero(), -1, Vec3f::Zero(), 0};
 
+protected:
+    // NEOTKO_COLORSTITCH_TAG — s118: exposición de solo-lectura del último raycast
+    // (mesh_id/hit/facet) para el eyedropper del ColorStitch painter. No expone el
+    // tipo privado RaycastResult; devuelve primitivos.
+    int          rr_mesh_id() const { return m_rr.mesh_id; }
+    const Vec3f& rr_hit()     const { return m_rr.hit; }
+    int          rr_facet()   const { return (int)m_rr.facet; }
+private:
+
     // BBS
     struct CutContours
     {
@@ -363,6 +372,12 @@ private:
     void update_contours(int i, const TriangleMesh& vol_mesh, float cursor_z, float max_z, float min_z) const;
 
 protected:
+    // NEOTKO_COLORSTITCH_TAG s111 — invalida el cache del raycast (m_rr) para que
+    // el siguiente raycast recompute. Necesario cuando el objeto activo cambia sin
+    // que el ratón se mueva (multi-objeto del ColorStitch Painter): el cache está
+    // keyed solo por posición y devolvería un hit calculado contra el objeto viejo.
+    void invalidate_raycast_cache() { m_rr.mouse_position = Vec2d(DBL_MAX, DBL_MAX); }
+
     void on_set_state() override;
     virtual void on_opening() = 0;
     virtual void on_shutdown() = 0;

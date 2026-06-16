@@ -369,11 +369,38 @@ void NeoTower::collect_all_events(const Print& print)
                                     : (int)tool_ordering.all_extruders().back())
             << " first_ext=" << (int)tool_ordering.first_extruder());
 
+        // NEOTKO_NEOTOWER_TAG s116-dbg INSTANCE-ID — log the address of the
+        // ToolOrdering this loop reads, so 1a_READ rows can be matched against the
+        // fill_wipe_tower_partitions() dump (which now logs this=<ptr>). If the
+        // pointers differ, the 2.2 has_wt=0 we read here comes from a DIFFERENT
+        // ToolOrdering instance than the dump that showed has_wt=1 — not a posterior
+        // mutation of one instance.
+        NT_LOG("1a_READ INSTANCE tool_ordering=" << static_cast<const void*>(&tool_ordering));
+
         bool first_real_layer_1a = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
         float last_znom_1a = -1.f;       // NEOTKO_MPSCHEDULER_TAG s79 — current sublayer group
         bool just_exited_sublayer_group = false; // NEOTKO_MPSCHEDULER_TAG s79
 
         for (const LayerTools& lt : tool_ordering) {
+            // NEOTKO_NEOTOWER_TAG s115-dbg — 1a_READ: dump exactly what THIS loop
+            // reads per LayerTools, so we can see why 2.2 is skipped while 2.52 is
+            // built (both single-tool in l1) and how mp_perim_override_active /
+            // wipe_tower_partitions / extruders line up at the band-nominal layers
+            // (1.88 / 5.08). This is the read-site truth (vs the fill_wipe_tower_
+            // partitions dump, which is a different point in the pipeline).
+            {
+                std::ostringstream _r;
+                _r << "1a_READ z=" << lt.print_z
+                   << " has_wt=" << lt.has_wipe_tower
+                   << " is_mp_sub=" << lt.is_mp_sublayer
+                   << " wipe_parts=" << lt.wipe_tower_partitions
+                   << " perim_ov=" << lt.mp_perim_override_active
+                   << " ext=" << lt.extruders.size() << "(";
+                bool _f = true;
+                for (unsigned int _e : lt.extruders) { if (!_f) _r << ","; _r << _e; _f = false; }
+                _r << ")";
+                NT_LOG(_r.str());
+            }
             if (!lt.has_wipe_tower || lt.is_mp_sublayer) {
                 // NEOTKO_NEOTOWER_TAG — Track tool through sublayers.
                 // Sublayer groups change the writer's tool between real layers.
@@ -717,6 +744,7 @@ void NeoTower::collect_all_events(const Print& print)
             // by atomic chains (PathBlend) and skip the reverse synthetic
             // (T_cap→T_ramp), which is the phantom that breaks TCR matching.
             bool               atomic    = false;
+            int                effect    = 0;   // s115-dbg — (int)sub.effect (SurfacePassKind)
         };
 
         if (mp_prime_vol > 0.f) {
@@ -742,6 +770,7 @@ void NeoTower::collect_all_events(const Print& print)
                         // (NeoTower.cpp:243) for consistency.
                         se.atomic    = PathBlendSchedulerRuntime::get().chain_atomic
                                        && (sub.effect == SurfacePassKind::PathBlend);
+                        se.effect    = (int)sub.effect;   // s115-dbg
                         // z_nominal from sublayer_to_nominal map
                         {
                             auto it = sublayer_to_nominal.find(z_um64(se.z_actual));
@@ -811,6 +840,7 @@ void NeoTower::collect_all_events(const Print& print)
                     // raw_result/plan slot matching in generate().
                     bool all_atomic = true;   // optimistic; flipped on first non-atomic event
                     int  n_events   = 0;
+                    std::set<int> effects;    // s115-dbg — SurfacePassKind ints seen at this z
                 };
                 std::map<uint64_t, ZInfo> z_info;
                 for (const SurfaceEvent& se : surf_events) {
@@ -821,6 +851,7 @@ void NeoTower::collect_all_events(const Print& print)
                     info.h_max     = std::max(info.h_max, se.height);
                     info.tools.insert(se.new_tool);
                     if (!se.atomic) info.all_atomic = false;
+                    info.effects.insert(se.effect);   // s115-dbg
                     ++info.n_events;
                 }
 
@@ -902,6 +933,16 @@ void NeoTower::collect_all_events(const Print& print)
                                 if (!_first) _ts << ",";
                                 _ts << "T" << t;
                                 _first = false;
+                            }
+                            _ts << "}";
+                            // s115-dbg — effect/atomic provenance of this band z.
+                            // SurfacePassKind: 0=None 1=Solid 2=ColorMix 3=PathBlend.
+                            _ts << " all_atomic=" << z_info[zum].all_atomic
+                                << " effects={";
+                            bool _ef = true;
+                            for (int e : z_info[zum].effects) {
+                                if (!_ef) _ts << ",";
+                                _ts << e; _ef = false;
                             }
                             _ts << "}";
                             NT_LOG(_ts.str());
@@ -1103,21 +1144,39 @@ void NeoTower::collect_all_events(const Print& print)
                             ++j;
                         // Batch is order[i..j-1], all tool=tool.
                         float z_max   = 0.f;
+                        float z_min   = -1.f;   // s115 FALLO 1 — pass START z
                         float lh_max  = 0.f;
                         float vol_max = 0.f;
+                        bool  batch_atomic = true;
                         for (size_t b = i; b < j; ++b) {
                             const SurfaceEvent& se = surf_events[item_to_se[order[b]]];
                             z_max   = std::max(z_max,   se.z_actual);
+                            if (z_min < 0.f || se.z_actual < z_min) z_min = se.z_actual;
                             lh_max  = std::max(lh_max,  se.height);
                             vol_max = std::max(vol_max, se.wipe_vol);
+                            batch_atomic = batch_atomic && items[order[b]].atomic_chain;
                         }
                         const float lh = (lh_max > 0.01f ? lh_max
                                                          : (m_nozzle_diameter * 0.5f));
                         const bool is_real_tc = (running != tool);
 
+                        // NEOTKO_PATHBLEND_TAG s115 — FALLO 1: anchor the PathBlend
+                        // tool-entry wipe at the pass START (z_min = first deposit of
+                        // this tool in the band), NOT the band top (z_max). The PB ramp
+                        // is OUR geometry with a known start/end; deriving the wipe z
+                        // from z_max made the toolchange TCR float above the step where
+                        // the tool first prints whenever no other tool happened to split
+                        // the same-tool run (log1: T0→T3 emitted at 1.8798 while T3 first
+                        // deposits at 1.816 → wipe floats ~0.06). Atomic (PB) batches
+                        // ONLY — classic MP / sandwich keep z_max (print-verified). Wall
+                        // span (start→end) is FALLO 2, handled next bottom-up step.
+                        // Revert: grep "s115 FALLO 1".
+                        const float z_tc_anchor =
+                            (is_real_tc && batch_atomic) ? z_min : z_max;
+
                         NeoTowerEvent ev;
                         ev.z_nominal    = z_nom;
-                        ev.z_actual     = z_max;
+                        ev.z_actual     = z_tc_anchor;
                         ev.layer_height = lh;
                         ev.old_tool     = (size_t)running;
                         ev.new_tool     = (size_t)tool;
@@ -1128,34 +1187,41 @@ void NeoTower::collect_all_events(const Print& print)
                             m_events.push_back(ev);
                         else
                             m_growth_events.push_back(ev);
-                        NT_LOG("sublayer CANON_SCHED z_max=" << z_max
+                        NT_LOG("sublayer CANON_SCHED z_anchor=" << z_tc_anchor
+                            << " z_min=" << z_min << " z_max=" << z_max
                             << " old=" << running << " new=" << tool
                             << " z_nom=" << z_nom << " vol=" << vol_max
                             << " batch=" << (j - i)
-                            << " is_real=" << is_real_tc);
+                            << " is_real=" << is_real_tc
+                            << " atomic=" << batch_atomic
+                            << (is_real_tc && batch_atomic && z_um64(z_min) != z_um64(z_max)
+                                    ? " [s115-START-ANCHOR]" : ""));
 
-                        // z_redirect aliases for batch members at z_actual < z_max.
+                        // z_redirect aliases for batch members at z_actual != anchor.
+                        // s115 FALLO 1: anchor is z_min for atomic real TCs (see above);
+                        // members above the start redirect DOWN to it. Non-atomic /
+                        // finish keep z_max anchor (z_tc_anchor == z_max there).
                         for (size_t b = i; b < j; ++b) {
                             const SurfaceEvent& se = surf_events[item_to_se[order[b]]];
-                            if (z_um64(se.z_actual) != z_um64(z_max)) {
+                            if (z_um64(se.z_actual) != z_um64(z_tc_anchor)) {
                                 if (is_real_tc) {
                                     uint64_t from_key = make_key(se.z_actual,
                                                                  (size_t)running,
                                                                  (size_t)tool);
-                                    uint64_t to_key   = make_key(z_max,
+                                    uint64_t to_key   = make_key(z_tc_anchor,
                                                                  (size_t)running,
                                                                  (size_t)tool);
                                     m_z_redirect[from_key] = to_key;
                                     NT_LOG("CANON z_redirect: z=" << se.z_actual
                                         << " " << running << "→" << tool
-                                        << " → z_fused=" << z_max);
+                                        << " → z_fused=" << z_tc_anchor);
                                 } else {
                                     m_z_redirect_finish[z_um64(se.z_actual)]
-                                        = z_um64(z_max);
+                                        = z_um64(z_tc_anchor);
                                     NT_LOG("CANON z_redirect_finish: z="
                                         << se.z_actual
                                         << " T" << running << "→T" << tool
-                                        << " → z_fused=" << z_max);
+                                        << " → z_fused=" << z_tc_anchor);
                                 }
                             }
                             if (se.obj != nullptr)
@@ -1927,6 +1993,39 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 return a.z_nominal < b.z_nominal;
             return a.z_actual < b.z_actual;
         });
+    // NEOTKO_NEOTOWER_TAG s114 — standalone painted-layer detection (by composition).
+    // A canonical layer whose z_nominal carries NO real (non-sublayer) event is
+    // realised entirely by MultiPass sublayers → it IS the layer (PathBlend /
+    // ColorMix / mixed / any gradient shape), not a decoration of a real one.
+    // Mark its sublayer events so the s102-h lámina classification below treats
+    // them as structural planes (keep wall+grid + advance the emitting-plane
+    // tracker) instead of frame-free same-plane decorations. Without this, a run
+    // of fully-painted layers left the tower no structural plane → frozen tracker
+    // → multi-layer gap → box-in-drawer Fase C flow-boost wall (whiskers, s112-s113).
+    {
+        auto _zum = [](float z) -> uint64_t {
+            return static_cast<uint64_t>(std::llround(static_cast<double>(z) * 1000.0));
+        };
+        std::set<uint64_t> _znom_with_real;
+        for (const NeoTowerEvent& _ev : all_events)
+            if (!_ev.is_sublayer) _znom_with_real.insert(_zum(_ev.z_nominal));
+        // Mark ONLY the band-top sublayer (z_actual ≈ z_nominal) of a parent-less
+        // layer — that is the one that represents the real canonical plane. The
+        // intermediate staircase sublayers (z_actual well below z_nominal) MUST
+        // stay synthetic+inset (they are the box-in-drawer shells, §17.3 Fase B);
+        // clearing synthetic on them would stack N full-drawer walls in one layer
+        // interval ("demasiadas capas de golpe"). The band-top alone becomes the
+        // canonical full-height wall.
+        size_t _marked = 0;
+        for (NeoTowerEvent& _ev : all_events)
+            if (_ev.is_sublayer && !_znom_with_real.count(_zum(_ev.z_nominal))
+                && (_ev.z_nominal - _ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF) {
+                _ev.standalone_plane = true;
+                ++_marked;
+            }
+        NT_LOG("STANDALONE_PLANE: marked " << _marked << " band-top sublayer events on "
+            << "fully-painted canonical layers (no real-layer parent)");
+    }
     // NEOTKO_NEOTOWER_TAG_END
 
     // NEOTKO_NEOTOWER_TAG_START: effective_initial_tool
@@ -2092,11 +2191,11 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             static_cast<unsigned int>(ev.new_tool),
             ev.wipe_volume,
             ev.no_ramming,      // NEOTKO_MPSCHEDULER_TAG s79b — sandwich TCs skip ramming deposit
-            ev.is_sublayer,     // NEOTKO_NEOTOWER_TAG s102 — explicit synthetic-entry flag
+            ev.is_sublayer && !ev.standalone_plane,     // NEOTKO_NEOTOWER_TAG s102 — explicit synthetic-entry flag (s114: standalone band-top = canonical, not synthetic)
             // NEOTKO_NEOTOWER_TAG s102-h — lámina (same physical plane as the real
             // layer, frame fully skipped) vs staircase (distinct plane in the gap,
             // keeps wall+grid as the tower's structural shell).
-            ev.is_sublayer && (ev.z_nominal - ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF);
+            ev.is_sublayer && !ev.standalone_plane && (ev.z_nominal - ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF); // s114 standalone
         if (ev.old_tool != ev.new_tool) {
             // event_to_wt2_tc_idx will be filled after wt2.generate() — see below.
             chain_tool = static_cast<int>(ev.new_tool);
@@ -2243,8 +2342,8 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                                             static_cast<unsigned int>(_gev.old_tool),
                                             0.f,
                                             /*skip_ramming=*/true,   // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
-                                            /*synthetic=*/_gev.is_sublayer, // NEOTKO_NEOTOWER_TAG s102 — bridge inherits the driving event's plane kind
-                                            /*same_plane=*/_gev.is_sublayer &&
+                                            /*synthetic=*/(_gev.is_sublayer && !_gev.standalone_plane), // NEOTKO_NEOTOWER_TAG s102 — bridge inherits the driving event's plane kind (s114 standalone)
+                                            /*same_plane=*/_gev.is_sublayer && !_gev.standalone_plane && // s114 standalone
                                                 (_gev.z_nominal - _gev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF); // s102-h
                         bridge_tcs.push_back({_gev.z_actual, chain_tool,
                                               static_cast<int>(_gev.old_tool), wt2_li,
@@ -2336,9 +2435,9 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                                         // NEOTKO_NEOTOWER_TAG s102 — bridge-at-nominal lands on the
                                         // canonical (real) plane; bridge-at-actual inherits the
                                         // driving event's plane kind.
-                                        /*synthetic=*/(bridge_follows_sublayer ? false : all_events[ei].is_sublayer),
+                                        /*synthetic=*/(bridge_follows_sublayer ? false : (all_events[ei].is_sublayer && !all_events[ei].standalone_plane)), // s114 standalone
                                         /*same_plane=*/(bridge_follows_sublayer ? false :
-                                            (all_events[ei].is_sublayer &&
+                                            (all_events[ei].is_sublayer && !all_events[ei].standalone_plane && // s114 standalone
                                              (all_events[ei].z_nominal - all_events[ei].z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF))); // s102-h
                     bridge_tcs.push_back({bridge_z, chain_tool,
                                           section1a_initial, wt2_li,
@@ -2427,7 +2526,7 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             bool grp_emits_plane = false;
             for (size_t k = ei; k < ei_end; ++k) {
                 const NeoTowerEvent& ev = all_events[k];
-                const bool is_lamina = ev.is_sublayer &&
+                const bool is_lamina = ev.is_sublayer && !ev.standalone_plane && // s114 standalone
                     (ev.z_nominal - ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF;
                 if (!is_lamina) { grp_emits_plane = true; break; }
             }
@@ -2520,7 +2619,8 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             // NEOTKO_NEOTOWER_TAG s102-h — staircase planes legitimately carry
             // wall + grid (structural shell); only lámina planes must be frame-free.
             if (_ev.is_sublayer &&
-                (_ev.z_nominal - _ev.z_actual) >= NeoTowerZ::SAME_PLANE_MAX_OFF)
+                (_ev.standalone_plane || // s114 standalone painted layer = legit structural shell
+                 (_ev.z_nominal - _ev.z_actual) >= NeoTowerZ::SAME_PLANE_MAX_OFF))
                 _staircase_zum.insert(_zum);
             _zum_to_znom[_zum] = z_um64(_ev.z_nominal);
         }

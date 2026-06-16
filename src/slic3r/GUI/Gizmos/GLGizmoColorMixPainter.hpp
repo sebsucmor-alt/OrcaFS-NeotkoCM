@@ -8,8 +8,10 @@
 
 #include "GLGizmoPainterBase.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/GUI/GLModel.hpp"                 // NEOTKO_COLORSTITCH_TAG s111 — caja-marca ×1.15
 #include "libslic3r/ColorSci/ColorPredict.hpp"   // NEOTKO_COLORSTITCH_TAG — PR.2 palette strips
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -22,14 +24,18 @@ public:
 
     void render_painter_gizmo() override;
 
-    // Max slots per painted volume — slot 0 is "unpainted", 1..15 are profile slots.
-    static constexpr int MAX_SLOTS = 16;
+    // Max slots per painted volume — slot 0 is "unpainted", 1..MAX_SLOTS-1 are
+    // profile slots. Must match ModelVolume::COLORMIX_SLOT_COUNT (static_assert in .cpp).
+    static constexpr int MAX_SLOTS = 31;
 
 protected:
     void        on_render_input_window(float x, float y, float bottom_limit) override;
     std::string on_get_name()       const override;
     bool        on_is_selectable()  const override;
     bool        on_is_activable()   const override;
+    // s111 — sin InstancesHider: el painter ya NO aísla (oculta) los demás
+    // objetos; el modo Select necesita verlos y clicarlos.
+    CommonGizmosDataID on_get_requirements() const override;
 
     void show_tooltip_information(float caption_max, float x, float y);
 
@@ -41,7 +47,17 @@ protected:
 
     // Painter state encoding: slot index 1..15 maps directly to EnforcerBlockerType(N).
     EnforcerBlockerType get_left_button_state_type()  const override;
-    EnforcerBlockerType get_right_button_state_type() const override { return EnforcerBlockerType::NONE; }
+    // NEOTKO_COLORSTITCH_TAG — s118: el botón derecho NO pinta/borra aquí (el
+    // borrado es Shift+Izquierdo / modo Eraser). Devolver NONE hacía que la base
+    // (GLGizmoPainterBase::gizmo_event :669) lo tratara como trazo de borrado, así
+    // que panear la cámara con el derecho borraba el slot del objeto bajo el cursor.
+    // El centinela EnforcerBlockerType(-1) es el "este botón no hace nada" que la
+    // base reconoce (665/669) → el derecho cae al canvas = pan/rotación de cámara.
+    EnforcerBlockerType get_right_button_state_type() const override { return EnforcerBlockerType(-1); }
+
+    // s111 — modo "Select": intercepta clics para marcar/activar objetos en vez
+    // de pintar. Solo en este modo se re-activa el picking de la escena.
+    bool on_mouse(const wxMouseEvent& mouse_event) override;
 
     wchar_t m_current_tool = 0;
 
@@ -53,6 +69,8 @@ private:
 
     void             on_opening()  override {}
     void             on_shutdown() override;
+    // s111 — al abrir: sembrar el set marcado desde la selección previa + activo.
+    void             on_set_state() override;
     PainterGizmoType get_painter_type() const override;
 
     // Resolve the slot index in the currently selected ModelObject for the chosen
@@ -72,6 +90,12 @@ private:
                          std::vector<std::string>& fcolors_out) const;
     void rebuild_palettes_if_stale();
     void render_palette_panel(float window_width);
+    // Opción B del revamp — bandeja "pro mode" inline: compone Top/Penu (passes
+    // Solid) + TD y produce un ColorRecipe como color activo de pintura.
+    void render_pro_mode_panel();
+    // s111 — carril izquierdo del panel: swatch del color Activo + biblioteca
+    // de paletas guardadas como columna vertical con scroll.
+    void render_left_rail(float rail_w, float rail_h);
 
     // PR.3 — modelo de dos capas (auto vs guardadas):
     //  · set_active_recipe: click en swatch = SOLO fija el color activo (no crea
@@ -84,6 +108,10 @@ private:
     //    (auto_generated=false → aparece en la lista, ya no se hace GC).
     void set_active_recipe(const Slic3r::ColorSci::ColorRecipe& r,
                            const std::string& style);
+    // s112 — Pro mode dual: cargar una receta (paleta, perfil o sandwich base del
+    // objeto) en los editores de zona Pro (m_pro_top/penu) para que el panel Pro
+    // SIEMPRE refleje el color activo, no sea solo un creador de custom.
+    void load_recipe_into_pro(const Slic3r::ColorSci::ColorRecipe& r);
     int  ensure_active_slot();
     void garbage_collect_auto_profiles();
     void save_active_as_palette();
@@ -100,6 +128,13 @@ private:
     std::string                   m_active_style;       // para el nombre al materializar/guardar
     bool                          m_has_active_recipe = false;
     bool                          m_active_resolved   = false;  // slot ya materializado
+
+    // Pro mode — estado editable de la bandeja inline (passes Solid + TD). El
+    // resultado se compone con sandwich_colour_stacked y se vuelca a la receta
+    // activa vía set_active_recipe. ColorMix/PathBlend quedan en el editor completo.
+    Slic3r::SurfacePassStack      m_pro_top;
+    Slic3r::SurfacePassStack      m_pro_penu;
+    bool                          m_pro_seeded = false;   // sembrado lazy (1 pass Solid en Top)
     // NEOTKO_COLORSTITCH_TAG_END
     // Refresh all triangle-selector palettes after profile/slot table changes.
     void refresh_selector_palettes();
@@ -110,6 +145,44 @@ private:
     int m_active_slot         = 0;
     // When true, left-click erases instead of painting (UI checkbox in panel).
     bool m_erase_mode         = false;
+
+    // s111 — Select mode: set multi-objeto pintable. NEOTKO_COLORSTITCH_TAG.
+    bool             m_prev_on     = false;          // estado On previo (m_old_state es privado en la base)
+    bool             m_select_mode = false;          // herramienta Select activa
+    std::set<int>    m_marked_objects;               // object_idx marcados (set pintable)
+    void set_tool_mode(bool select, bool erase);     // mutuamente excluyentes
+    void toggle_mark(int object_idx, bool unmark);   // marcar/activar (o desmarcar)
+    void switch_active_object(int object_idx);       // activar objeto + RE-APLICAR el color
+    void render_tool_row();                          // fila [Select][bucket][Eraser][Pick]
+
+    // NEOTKO_COLORSTITCH_TAG — s118 (eyedropper): leer la receta de un objeto y
+    // ENLAZARLA (mismo camino que un swatch guardado: bind id + load Pro). Además
+    // vuelca a PROFILE un dump de TODO lo que tiene el objeto: slots pintados
+    // (pid/nombre/cm/pb/top-penu-empty) + la base sandwich del preset (penu/colormix
+    // enabled) → debug del "penu pintado no se honra sin penu activo en el main UX".
+    bool m_pick_mode = false;                         // herramienta eyedropper
+    // picked_slot = slot real de la faceta bajo el cursor (0 si sin pintar) → se
+    // enlaza ese perfil; si 0/ inválido, cae al primer slot pintado del objeto.
+    void pick_recipe_from_object(int object_idx, int picked_slot);
+
+    // s111 — preview de pintura para los objetos marcados NO-activos: el painter
+    // base solo dibuja el objeto activo, así que para ver TODOS los marcados con su
+    // color construimos selectors de solo-lectura por objeto (cacheados) y los
+    // renderizamos con la malla + trafo de cada uno.
+    std::map<int, std::vector<std::unique_ptr<TriangleSelectorGUI>>> m_preview_sel;
+    bool             m_preview_dirty = true;         // rebuild lazy al cambiar marcas/pintura/activo
+    void rebuild_preview_selectors_if_dirty();
+    void render_marked_paint();                      // dibuja la pintura de los marcados no-activos
+
+public:
+    // Consultas para el render del canvas (GLCanvas3D::_render_objects):
+    bool object_is_marked(int object_idx) const { return m_marked_objects.count(object_idx) > 0; }
+    bool select_tool_active()             const { return m_select_mode; }
+    bool has_marked()                     const { return !m_marked_objects.empty(); }
+private:
+    // s111 — altura real del cuerpo del panel medida el frame anterior (los
+    // children de ImGui 1.8x no auto-redimensionan en Y; converge en 1 frame).
+    float m_panel_col_h       = 0.f;
 
     std::map<std::string, wxString> m_desc;
 };

@@ -84,6 +84,18 @@ struct NeoTowerEvent {
     // True for MultiPass virtual sublayer events.
     bool   is_sublayer  = false;
 
+    // NEOTKO_NEOTOWER_TAG s114 — standalone painted-layer plane. True for a
+    // sublayer event whose z_nominal carries NO real (non-sublayer) event: the
+    // canonical layer is realised ENTIRELY by MultiPass sublayers (PathBlend /
+    // ColorMix / mixed / any gradient shape) → it IS the layer, not a decoration
+    // of a real one. The s102-h lámina test (z_nominal-z_actual < SAME_PLANE_MAX_OFF)
+    // assumes a real parent builds the frame; for a fully-painted layer there is
+    // none, so it must be treated as a structural plane (keep wall+grid, advance
+    // the emitting-plane tracker). Marked once in generate() by composition, so
+    // the signal is effect/shape-agnostic. Set false on real layers and on
+    // sublayers that genuinely decorate a real layer at the same z_nominal.
+    bool   standalone_plane = false;
+
     // NEOTKO_MPSCHEDULER_TAG s79b — sandwich-context TC: the tower visit must still happen
     // (drip control), but the ramming EXTRUSION is skipped so the deposit lands in the
     // before-print wipe instead of the after-print ramming. Set for sublayer band TCs and

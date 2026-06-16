@@ -885,12 +885,14 @@ public:
     FacetsAnnotation    fuzzy_skin_facets;
 
     // NEOTKO_PROFILE_TAG_START — Opción 4 Fase B (3D Painter)
-    // Per-triangle slot 0..15 stored via TriangleSelector (4-bit width, like MMU).
-    // 0 = unpainted (use preset region config), 1..15 = painted slots.
+    // Per-triangle slot stored via TriangleSelector. The triangle state encoding is
+    // a 2-bit prefix + extension 4-bit nibbles (same scheme MMU uses for >16
+    // extruders), so state values well beyond 15 round-trip safely. The slot table
+    // is therefore widened to 30 usable slots (index 0 unused = unpainted).
+    static constexpr int COLORMIX_SLOT_COUNT = 31;   // index 0 unused + slots 1..30
     FacetsAnnotation    color_mix_paint_facets;
     // Slot → SurfaceEffectProfile id mapping. Index 0 unused (slot 0 = unpainted).
-    // 16 entries to align with the 4-bit triangle state range.
-    int                 colormix_slot_to_profile_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    int                 colormix_slot_to_profile_id[COLORMIX_SLOT_COUNT] = {0};
     // NEOTKO_PROFILE_TAG_END
 
     // BBS: quick access for volume extruders, 1 based
@@ -1144,7 +1146,7 @@ private:
         assert(this->mmu_segmentation_facets.id() == other.mmu_segmentation_facets.id());
         assert(this->fuzzy_skin_facets.id() == other.fuzzy_skin_facets.id());
         // NEOTKO_PROFILE_TAG — Fase 6c: slot→profile table is a plain array, copy it too.
-        for (int _s = 0; _s < 16; ++_s)
+        for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
             this->colormix_slot_to_profile_id[_s] = other.colormix_slot_to_profile_id[_s];
         this->set_material_id(other.material_id());
     }

@@ -4,14 +4,23 @@
 
 #include "GLGizmoBase.hpp"
 #include "slic3r/GUI/MeshUtils.hpp"
+#include "libslic3r/Color.hpp"
 
+#include <map>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 namespace Slic3r { namespace GUI {
 
-// Align & Stack gizmo: Illustrator-style align (X/Y/Z) plus ordered Z-stack
-// with epsilon gap. Targets ModelInstances (top-level objects only in v1).
+// Align & Stack gizmo v2: two visual controls.
+//  - "Place / Align": six face buttons drawn as isometric mini-cubes (the
+//    highlighted face + incoming plane tells the story) plus three center
+//    buttons. Touch mode chains objects against the anchor face; Flush mode
+//    aligns same-side faces Illustrator-style.
+//  - "Stack on face": pick a real face on A in the viewport, drop B onto it.
+// Order A/B/C is assigned by clicking objects in the scene while the gizmo
+// is open (selection is mirrored so Selection::translate keeps working).
 class GLGizmoAlignStack : public GLGizmoBase
 {
 public:
@@ -29,62 +38,66 @@ protected:
     void        on_set_state() override;
 
 private:
-    // --- Order tracking (A, B, C, ... by click-add order) -----------------
-    // Object indices (into Model::objects) in the order the user added them
-    // to the selection while the gizmo is open. We do not patch Selection;
-    // we diff against the current selection on each render to stay in sync.
+    // --- Order tracking (A, B, C, ... assigned by in-gizmo clicks) ---------
+    // Object indices (into Model::objects) in user click order. Seeded from
+    // the selection when the gizmo opens; afterwards owned by the gizmo.
     std::vector<int> m_ordered_object_idxs;
 
-    // --- Stack Z params ---------------------------------------------------
-    float m_epsilon_mm        = 0.01f;  // gap between B.min_z and A.max_z
-    bool  m_place_a_on_bed    = true;   // before chained stack
+    // --- Params -------------------------------------------------------------
+    float m_epsilon_mm     = 0.01f;  // Z gap when touching/stacking
+    bool  m_place_a_on_bed = true;   // drop A to bed before a Z+ chain
+    bool  m_flush_mode     = false;  // false = Touch (contact), true = Flush
 
-    // --- Align anchor -----------------------------------------------------
-    // 0 = first (A), 1 = last, 2 = selection bbox center, 3 = bed center
-    int m_align_anchor = 0;
-
-    // --- Face-pick state --------------------------------------------------
+    // --- Face-pick state ----------------------------------------------------
     bool   m_face_pick_mode    = false;
     bool   m_has_picked_face   = false;
     double m_picked_face_world_z = 0.0;
     Vec3d  m_picked_face_world_pos { Vec3d::Zero() };
     Vec3d  m_picked_face_world_normal { Vec3d::UnitZ() };
-    // Raycaster built on demand from object A's raw_mesh (instance-level).
     std::unique_ptr<MeshRaycaster> m_face_raycaster;
     int                             m_face_raycaster_obj_idx = -1;
     Transform3d                     m_face_raycaster_world_trafo { Transform3d::Identity() };
 
-    // --- Helpers ----------------------------------------------------------
-    void sync_order_with_selection();
+    // --- Scene highlight: original GLVolume colors we tinted ---------------
+    // Keyed by a stable (object_idx, volume_idx, instance_idx) id so we can
+    // restore by matching live volumes — safe across selection changes AND
+    // volume rebuilds (no dangling pointers).
+    std::map<std::tuple<int, int, int>, ColorRGBA> m_saved_colors;
+
+    // --- Helpers ------------------------------------------------------------
+    void seed_order_from_selection();
+    void prune_dead_objects();
+    void toggle_object_order(int object_idx);
     void render_badges();
 
-    // Returns the object index of the i-th entry in m_ordered_object_idxs,
-    // or -1 if out of range.
+    // Tint every GLVolume of each ordered object with its order color, after
+    // restoring any previous tint. Requests a redraw.
+    void apply_highlight();
+    void restore_highlight();
+    // Re-apply highlight and ask the canvas to repaint next frame.
+    void refresh_highlight();
+
     int  ordered_obj(size_t i) const {
         return i < m_ordered_object_idxs.size() ? m_ordered_object_idxs[i] : -1;
     }
 
-    // World-space AABB of all instances of a given object index.
     BoundingBoxf3 world_bbox_of_object(int object_idx) const;
 
-    // Apply a Z translation so that the object's min_z reaches target_z.
-    // Iterates all instances of the object. Caller wraps in TakeSnapshot
-    // and calls do_move afterwards.
-    void move_object_min_z_to(int object_idx, double target_z);
+    // Translate every instance of the object by delta (selection-backed).
+    void translate_object(int object_idx, const Vec3d& delta);
 
-    // Align along an axis (0=X, 1=Y, 2=Z), mode: 0=min, 1=center, 2=max.
-    void apply_align(int axis, int mode);
+    // Touch: chain B against A's face on `axis` toward `dir` (+1/-1),
+    // C against B, etc. Z+ uses epsilon gap; lateral contact is exact.
+    void apply_touch(int axis, int dir);
+    // Flush: same-side faces of B, C... coplanar with A's (dir>0: max, else min).
+    void apply_flush(int axis, int dir);
+    // Center every non-anchor object on A along axis.
+    void apply_center(int axis);
+    // Every ordered object to min_z = 0.
+    void apply_all_on_bed();
 
-    // Stack A→B→C: each next.min_z = prev.max_z + epsilon (XY preserved).
-    void apply_stack_ordered();
-
-    // Place B (ordered[1]) so that B.min_z = picked_face_world_z + eps.
     void apply_place_on_picked_face();
-
-    // Reset face-pick state and release raycaster.
     void clear_face_pick();
-
-    // Build raycaster for object A if needed (instance 0's transform).
     void ensure_face_raycaster_for_A();
 };
 

@@ -108,10 +108,12 @@ std::vector<GradientStep> build_ramp(const GradientSpec& spec)
 {
     const GradientSpec s = sanitize(spec);
 
-    SurfacePassStack penu;
-    penu.enabled = true;
-    penu.passes.push_back(make_penu_colorstitch_pass(s));
-
+    // s120: el gradiente es un helper TOP-only — solo reparto A/B en el top.
+    // YA NO se le asigna penu ColorStitch (era el origen del bug: el generador
+    // se construyó partiendo de "Mixed approximation", que mete un dither de
+    // los tools del patrón (0/1 absolutos) ajeno al A/B elegido → contaminaba
+    // preview Y slice). Si el usuario quiere un penu para ajustar el tono, lo
+    // añade él después como un plus.
     std::vector<GradientStep> out;
     out.reserve(s.steps);
     for (int i = 0; i < s.steps; ++i) {
@@ -129,7 +131,7 @@ std::vector<GradientStep> build_ramp(const GradientSpec& spec)
         step.a_mm = a_mm;
         step.b_mm = b_mm;
         step.top  = std::move(top);
-        step.penu = penu;          // copia — idéntico en todos los pasos
+        step.penu.enabled = false;  // s120: gradiente top-only (sin penu)
         out.push_back(std::move(step));
     }
     return out;
