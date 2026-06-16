@@ -49,9 +49,17 @@ The rest of this document describes each building block in detail.
 
 - **ColorStitch — the new name.** The "Surface Color Mixer" family is being rebranded to **ColorStitch** in the UI. The Sandwich dialog now hosts a **ColorStitch Studio** (§1g) and the 3D painter is now the **ColorStitch Painter** (§7c). Internal names, config keys and 3MF data are unchanged, so old projects keep working — only the labels you see are different. You will still see the word *ColorMix* in a few places (e.g. the per-line effect pill); they refer to the same thing.
 - **ColorStitch Studio** (§1g): generate whole palettes — **Gradient ramp**, **Flat colour** and **Mixed approximation (predict)** — directly from your loaded filaments and their TD, then click a swatch to load that recipe into the Sandwich.
-- **ColorStitch Painter revamp** (§7c): the painter now shows those same palettes as **collapsible colour strips**. Pick a swatch and paint — no need to pre-build profiles. A two-tier model keeps working colours separate from the palettes you deliberately **Save**.
+- **ColorStitch Painter revamp** (§7c): the painter shows those same palettes as **collapsible colour strips**. Pick a swatch and paint — no need to pre-build profiles. A two-tier model keeps working colours separate from the palettes you deliberately save.
 - **NeoTower** (§9): tower-type selector, zigurat taper, Sandwich purge compaction, and a unified **SurfaceColorStitch wipe reserve**. NeoTower is what makes adaptive layer height + multi-tool + Sandwich coexist on one tower.
 - **Beta defaults / changes:** *SurfaceColorStitch wipe reserve* default raised to **10 mm³**, *Sandwich purge compaction* default **1.7**, and the experimental **Micro Stitch (Neotko)** top/bottom fill pattern is **hidden** in this beta (existing presets that use it still load).
+
+**Refined in 2.1**
+
+- **ColorStitch Painter — Pro mode & live editing** (§7c): the Pro panel **is** the active colour — compose Top/Penu rows (Solid / ColorStitch / PathBlend) with a per-pass Z box and paint with them directly. A new **Pick** (eyedropper) tool reads a recipe straight off the model, **Pin to palette + Name** replaces the old save buttons, editing a linked profile **rewrites it in place**, and destructive-mouse fixes mean **right-click is camera only**.
+- **Gradient is now a clean top-only helper** (§1g): the Studio/painter gradient sweeps the A/B top split only — the weave/dither **Pattern** controls were removed and no penultimate ColorStitch is attached (a same-tool gradient now correctly predicts that tool's colour). Add a penu tone yourself if you want one.
+- **"Mixed approximation" strip removed from the painter**; **Gradient + Flat** remain. (Mixed approximation is still available in the Sandwich-dialog Studio.)
+- **Blend Suggestion retired** (§1e): the old Beer-Lambert "Calculate" panel is gone; the inverse colour match now lives in **ColorStitch Studio → Match ▸** (ΔE2000).
+- **Wipe-tower colour fix:** fixed a `;WIDTH:` G-code desync where a same-width tool change after the tower made the viewer render the next colour at the tower's line width.
 
 ---
 
@@ -62,7 +70,7 @@ The rest of this document describes each building block in detail.
    - 1b. [MultiPass Blend — multiple passes per layer](#1b-multipass-blend--multiple-passes-per-layer)
    - 1c. [PathBlend — smooth gradient across the surface](#1c-pathblend--smooth-gradient-across-the-surface)
    - 1d. [Zone and filament filters](#1d-zone-and-filament-filters)
-   - 1e. [TD Preview and Blend Suggestion](#1e-td-preview-and-blend-suggestion)
+   - 1e. [TD Preview](#1e-td-preview)
    - 1f. [Line Distribution Mode (CM + PB)](#1f-line-distribution-mode-cm--pb)
    - 1g. [ColorStitch Studio — palette generators](#1g-colorstitch-studio--palette-generators)
 2. [Neoweaving — mechanical interlocking of layers](#2-neoweaving--mechanical-interlocking-of-layers)
@@ -302,9 +310,11 @@ On multi-material objects, different regions may already be assigned to differen
 
 ---
 
-### 1e. TD Preview and Blend Suggestion
+### 1e. TD Preview
 
-The **TD Preview** section (collapsable, at the bottom of the Sandwich dialog) lets you visualize and calculate how your filaments will visually combine when one layer sits on top of another.
+The **TD Preview** section (collapsable, at the bottom of the Sandwich dialog) lets you visualize how your filaments will visually combine when one layer sits on top of another.
+
+> **Changed in 2.1:** the old **Blend Suggestion — Beer-Lambert optimizer** panel (legacy "Calculate") has been **retired**. Its job — find the recipe that best matches a target colour — is now done by **Target + Match ▸** in the **ColorStitch Studio** (§1g), which uses the newer ΔE2000 colour-science engine and writes the result straight into the live Sandwich. Use that instead.
 
 #### Transmission Density (TD)
 
@@ -331,18 +341,7 @@ Below the TD sliders, three swatches show:
 
 An **opacity_top** label shows the computed opacity of the Top layer stack (0 = fully transparent, 1 = fully opaque).
 
-#### Blend Suggestion — Calculate
-
-The **Calculate** button computes a suggested MultiPass configuration to reproduce a target mixed color as closely as possible.
-
-**How it works:**
-1. Select a **MixedColor** target from the dropdown (these are the virtual blended colors you have created in the mixer).
-2. The target color's recipe (which filaments and in what proportions) is read.
-3. Using the Beer-Lambert inverse formula, the slicer computes what **width ratios** each pass needs so that the combined optical result (at the current TD values) matches the target color.
-4. The suggested passes are split between Top and Penultimate zones if both are active, or assigned to Top only.
-5. A **ΔE** swatch shows how close the calculated result is to the target: green = very close, orange = acceptable, red = significant difference.
-
-Click **Apply** to write the suggested ratios and tool assignments into the current MultiPass configuration. You can then fine-tune from there.
+> Looking for the old **Calculate** / inverse colour-match? It moved to the **ColorStitch Studio → Target + Match ▸** (§1g). See the note at the top of this section.
 
 ---
 
@@ -399,7 +398,7 @@ Instead of configuring passes one by one, the Studio **generates a whole strip o
 
 | Mode | What it generates |
 |------|-------------------|
-| **Gradient ramp** | A manual ramp between two tools (A → B). You pick the two filaments, a weave/dither pattern, the number of steps and the split range; the Studio builds the ramp. Clicking a swatch toggles whether it's included when you **Export palette**. |
+| **Gradient ramp** | A manual **top-only** ramp between two tools (A → B). You pick the two filaments, the number of **steps** and the **split range**; the Studio sweeps the A/B thickness split across the steps. Clicking a swatch toggles whether it's included when you **Export palette**. *(Changed in 2.1: the gradient is now a pure top-surface helper — the weave/dither **Pattern** controls were removed and no penultimate ColorStitch is attached. If you want a penu tone underneath, add it yourself afterwards.)* |
 | **Flat colour (predict)** | Browses the gamut reachable by **stacking solid passes** of your filaments (1–2 solids, swept by thickness). Robust, predictable colours. |
 | **Mixed approximation (predict)** | Browses an **extended gamut**: a dithered ColorStitch base (penultimate) plus a translucent solid on top. This reaches colours no single filament can make — the optical average of the dither acts like a new primary. |
 
@@ -647,44 +646,50 @@ The profile list shows each profile with a tag `[CM:* PB:* MP:*]` where `*` mean
 
 ### 7c. The ColorStitch Painter gizmo
 
-> **Revamped in this beta** (marked **(WIP Beta)** in the panel). The painter used to show a plain text list of profiles. It now shows your filaments as **generated colour palettes** and lets you paint with them directly.
+> **Revamped through this beta** (still marked **(WIP Beta)** in the panel). The painter used to show a plain text list of profiles. It now shows your filaments as **generated colour palettes**, lets you **compose and edit a recipe live** (Pro mode), and **pick** a colour straight off the model.
 
 The painter lives in the **left-side gizmo toolbar** in the 3D view, next to the FuzzySkin, Seam, and MMU segmentation gizmos.
 
+**Tools (top row of the panel)**
+
+| Tool | What it does |
+|------|--------------|
+| **Select** (Smart Fill) | Click a flat face → flood-fills the coplanar top region with the **active colour**. |
+| **Eraser** | Click a painted region → clears it (Smart Fill). |
+| **Pick** (eyedropper) | Click a painted face → reads the **actual recipe** under the cursor, loads it as the active colour and links its profile. The quickest way to keep painting with a colour that's already on the model. |
+
+**Mouse rules** — left-click paints / erases / picks with the active tool; **right-click is camera only** (orbit & pan — it never paints or erases); **Shift + left-click** is a one-shot erase regardless of tool. Left-clicking with **no colour selected does nothing** (it won't wipe paint by accident). These replace the old behaviour where moving the camera or clicking an empty slot could destroy paint.
+
 **The panel, top to bottom**
 
-1. **Palette strips** — three **collapsible** sections, one per style: **Mixed approximation (predict)**, **Gradient ramp**, **Flat colour**. Each expands into a horizontally-scrollable strip of colour swatches, generated from your loaded filaments + their TD (the same engine as the ColorStitch Studio, §1g). Hover a swatch to preview its Top/Penultimate mini-sandwich and recipe. The strips regenerate automatically when you change filament colours or TD.
-2. **Active colour + Save palette** — appears once you pick a swatch (see below).
-3. **Profiles** — the list of **saved** palettes (see the two-tier model below).
-4. **Smart-Fill angle** + **Clipping plane** sliders, **Erase mode**, and **Erase all**.
+1. **Palette strips** — **collapsible** sections, one per style: **Gradient ramp** and **Flat colour**. Each expands into a horizontally-scrollable strip of swatches generated from your loaded filaments + their TD (the same engine as the ColorStitch Studio, §1g). Hover a swatch to preview its recipe; the strips regenerate when you change filament colours or TD. *(The old "Mixed approximation" strip was removed from the painter in this beta.)*
+2. **Pro mode** — a collapsible composer, and **the Pro panel IS the active colour**. Whatever you build here — **Top / Penultimate** rows, each one **Solid / ColorStitch / PathBlend (Half|Full)**, with a per-pass **Z height** box — is exactly what you paint with. A single **Perimeter override** checkbox applies to both zones (the recipe stack is the source of truth, no separate per-zone keys).
+3. **Pin to palette + Name** — type a name and **Pin to palette** to promote the active recipe into the **Profiles** list (this replaces the old "Use as paint colour" / "Save palette" buttons). If the active colour is **linked to a saved profile**, editing it in Pro mode **rewrites that profile in place** — every object using it updates live.
+4. **Profiles** — the list of **saved** palettes (two-tier model below). Click a saved row to load it into Pro and paint with it; it stays **live-editable**.
+5. **Smart-Fill angle** + **Clipping plane** sliders, and **Erase all**.
 
-**Smart-Fill only**: the ColorStitch Painter paints coplanar top surfaces, so it uses **Smart Fill** as its single tool (the old Circle / Sphere / Triangle brushes were removed). Click a flat face and it flood-fills the coplanar region in one click. **Smart-Fill angle**: lower = more selective (only very-coplanar triangles), higher = more inclusive. Default **1.5°** suits flat staircase steps and similar geometry.
+**Smart-Fill only**: the painter targets coplanar top surfaces, so Select/Eraser use **Smart Fill** (the old Circle / Sphere / Triangle brushes were removed). **Smart-Fill angle**: lower = more selective (only very-coplanar triangles), higher = more inclusive. Default **1.5°** suits flat staircase steps.
 
 **How to paint**
 
-1. Open a palette section and **click a swatch** → it becomes the **active colour** (shown next to the Save button). Browsing/clicking swatches does **not** create anything yet.
-2. **Click the model surface** to paint. The first time you paint with a colour, a paint slot is materialised for it behind the scenes.
-3. Pick another swatch and paint a different region with it.
+1. **Pick a swatch** (Gradient/Flat) or **compose one in Pro mode** → it becomes the **active colour**. Browsing does not create anything yet.
+2. **Click the model surface** to paint. The first paint with a colour materialises a slot for it.
+3. Use **Pick** to grab a colour already on the model and keep going, or select another swatch.
 
 #### Two-tier palette model (why the list no longer fills up)
 
-Earlier the painter created a new saved profile for every colour, which quickly cluttered the list. Now there are two tiers:
-
-- **Working colours (automatic)** — the colours you actually paint. They are created on demand the first time you paint with a swatch, **deduplicated** (re-using a colour reuses its slot), and **garbage-collected** when no painted face uses them anymore (e.g. after *Erase all* or when you close the gizmo). They do **not** appear in the saved list, so it stays clean.
-- **Saved palettes (deliberate)** — press **Save palette** while a colour is active to promote it into the **Profiles** list. Saved palettes are named, shown in the list, survive garbage-collection, and travel in the 3MF. This is the list you browse and reuse.
+- **Working colours (automatic)** — the colours you actually paint. Created on demand the first time you paint with a recipe, **deduplicated** (re-using a colour reuses its slot), and **garbage-collected** when no painted face uses them anymore (after *Erase all* or closing the gizmo). They do **not** appear in the saved list, so it stays clean. A working colour that occupies a slot is shown with an **amber border**; **right-click → Delete** frees that slot.
+- **Saved palettes (deliberate)** — **Pin to palette** promotes the active colour into the **Profiles** list. Saved palettes are named, persistent, survive garbage-collection, and travel in the 3MF.
 
 Up to **15 working colours** can be painted on a single object at once (slot 0 is "unpainted"). Because browsing no longer consumes slots, you can explore the palettes freely.
 
-> Note: auto-naming uses the recipe (e.g. *"Mixed T3/CM"*). A name prompt before saving is on the list of refinements for this WIP feature.
-
 **Erase**
-- **Erase mode checkbox** — when enabled, left-click clears the painted region under the cursor with Smart Fill instead of painting.
-- **Shift + Left-click** — quick one-shot erase without toggling the checkbox.
+- **Eraser tool** / **Shift + left-click** — clear the painted region under the cursor with Smart Fill.
 - **Erase all** — clears every painted face on the current volume, then garbage-collects the now-unused working colours.
 
 Cleared faces return to "unpainted" — they use preset mode if the object becomes entirely unpainted, or no effect if any paint remains.
 
-> The **Profiles** list (saved palettes) still works exactly as before for selecting a saved recipe as the active brush — clicking a saved row paints with it directly.
+**Penultimate painting**: if the recipe you paint declares activity on the **penultimate** zone, the slicer auto-forces 2 penu layers for that object (Penu role autonomy, §7e) so the penu effect actually has a surface to apply on.
 
 ---
 
@@ -931,7 +936,8 @@ This is a recent capability and still being hardened; if you hit a tower artifac
 | Easing / gamma / overlap / invert | ColorMix Advanced dialog (Linear modes only) |
 | Effect pill (None/ColorMix/MultiPass/PathBlend) | Sandwich dialog — pill buttons per zone card |
 | Advanced config (per effect) | Sandwich dialog → **Advanced…** button |
-| TD Preview + Blend Suggestion | Sandwich dialog → **TD Preview** (collapsable) |
+| TD Preview | Sandwich dialog → **TD Preview** (collapsable) |
+| Colour match (inverse ΔE2000) | Sandwich dialog → **ColorStitch Studio → Target + Match ▸** (replaces old Blend Suggestion) |
 | ColorStitch Studio (palette generators) | Sandwich dialog → **ColorStitch Studio** panel (Gradient / Flat / Mixed predict) |
 | Neoweaving | Quality → Neotko Neoweaving |
 | Penultimate layers | Strength → Top/bottom shells → Penultimate top layers |
@@ -942,8 +948,10 @@ This is a recent capability and still being hardened; if you hit a tower artifac
 | Save as profile | Bottom of SCM / MultiPass / PathBlend dialogs — **Save as profile…** button |
 | Manage profiles (load / update / rename / delete) | Sandwich dialog → **Manage profiles…** button |
 | 3D Painter | Left-side gizmo toolbar → **ColorStitch Painter** icon |
-| Painter — palette strips | Gizmo right panel → collapsible **Mixed / Gradient / Flat** sections (click swatch = active colour) |
-| Painter — save a palette | Gizmo right panel → **Save palette** (while a colour is active) |
+| Painter — palette strips | Gizmo right panel → collapsible **Gradient / Flat** sections (click swatch = active colour) |
+| Painter — compose / edit a recipe | Gizmo right panel → **Pro mode** (Top/Penu rows, live = active colour) |
+| Painter — pick colour off the model | Gizmo top row → **Pick** (eyedropper) tool |
+| Painter — save a palette | Gizmo right panel → **Pin to palette** + Name (while a colour is active) |
 | Painter — pick saved profile | **Profiles** list inside the gizmo's right panel |
 | NeoArachne (enable) | Quality → **Wall generator** → select **NeoArachne** |
 | NeoArachne per-feature engines | Quality → NeoArachne → **NA — outer wall / inner walls / gap-fill source** |
@@ -1040,9 +1048,9 @@ Yes — that is exactly what the 3D Painter is for. Save each effect as its own 
 
 Yes. Profiles are project-scoped — they live inside the 3MF only, separate from your preset library. Loading a project restores its profiles into the manager for that session, but does not modify your default preset. Save the project as a template if you want the profiles available as a starting point for new prints.
 
-**Q: What does the ΔE indicator on the Blend Suggestion mean?**
+**Q: What does the ΔE indicator on the ColorStitch Studio's Match mean?**
 
-ΔE is a perceptual color difference measure. A value below ~5 is generally indistinguishable to the eye. Values above 10–15 indicate the suggested ratios will produce a visible difference from the target color — usually because the available filaments cannot accurately reproduce the target, or because the TD values need calibration.
+ΔE is a perceptual color difference measure (the Studio uses ΔE2000). A value below ~5 is generally indistinguishable to the eye. Values above 10–15 indicate the closest achievable recipe will still look visibly different from the target colour — usually because the available filaments cannot reproduce the target, or because the TD values need calibration. *(The old "Blend Suggestion" panel that showed this in the Sandwich dialog was retired in 2.1; the inverse match now lives in the ColorStitch Studio — §1g.)*
 
 **Q: I had a Sandwich set up with only Solid (MultiPass) passes and the wipe tower never appeared. Is that the bug fixed in 1.9?**
 
@@ -1078,7 +1086,7 @@ Mostly yes. **ColorStitch** is the new UI name for the Surface Color Mixer famil
 
 **Q: In the painter, why don't my picked colours show up in the profile list anymore?**
 
-By design (this beta). Clicking a palette swatch sets it as the **active colour** but doesn't save anything — colours you paint with are "working colours" that are created on demand, reused if identical, and cleaned up when no face uses them. The **Profiles** list only shows palettes you deliberately **Save palette**. This keeps the list from filling up with every shade you try. See §7c.
+By design (this beta). Clicking a palette swatch sets it as the **active colour** but doesn't save anything — colours you paint with are "working colours" that are created on demand, reused if identical, and cleaned up when no face uses them. The **Profiles** list only shows palettes you deliberately **Pin to palette** (with a name). This keeps the list from filling up with every shade you try. To grab a colour already on the model, use the **Pick** (eyedropper) tool. See §7c.
 
 **Q: I can't find "Micro Stitch (Neotko)" in the top/bottom surface pattern dropdown.**
 
@@ -1092,7 +1100,7 @@ Two beta default changes: **SurfaceColorStitch wipe reserve** is now **10 mm³**
 
 Yes — that's what **NeoTower** (§9) enables, and it's a recent capability of this fork. Sandwich/MultiPass scenes promote to NeoTower automatically. It's still being hardened, so if you see a tower artifact with this exact combination, report it with the project 3MF.
 
---
+---
 
 All of this work is open and free. Fork it, improve it, credit it.
 

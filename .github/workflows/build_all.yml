@@ -73,7 +73,7 @@ jobs:
           MATRIX='{"include":['
           SEP=""
           if [[ "$BUILD_WIN" == "true" ]]; then
-            MATRIX+="${SEP}{\"os\":\"windows-latest\"}"
+            MATRIX+="${SEP}{\"os\":\"windows-2022\"}"
             SEP=","
           fi
           if [[ "$BUILD_LIN" == "true" ]]; then
