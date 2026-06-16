@@ -38,7 +38,7 @@ jobs:
         # This broke cache lookup and caused deps (including OpenVDB) to never be found.
         shell: bash
         run: |
-          if [ "${{ inputs.os }}" = "windows-latest" ]; then
+          if [ "${{ inputs.os }}" = "windows-2022" ]; then
             dep_folder="/OrcaSlicer_dep"
           elif [ "${{ inputs.os }}" = "macos-14" ]; then
             dep_folder=""

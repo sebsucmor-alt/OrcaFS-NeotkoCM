@@ -49,16 +49,16 @@ jobs:
           cmakeVersion: "~3.28.0"  # use most recent 3.28.x version
 
       - name: setup dev on Windows
-        if: inputs.os == 'windows-latest'
+        if: inputs.os == 'windows-2022'
         uses: microsoft/setup-msbuild@v2
 
       - name: Get the date on Ubuntu and macOS
-        if: inputs.os != 'windows-latest'
+        if: inputs.os != 'windows-2022'
         run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_ENV
         shell: bash
 
       - name: Get the date on Windows
-        if: inputs.os == 'windows-latest'
+        if: inputs.os == 'windows-2022'
         run: echo "date=$(Get-Date -Format 'yyyyMMdd')" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
         shell: pwsh
 
@@ -66,7 +66,7 @@ jobs:
       # Enable long path support on Windows - required because the repo name is long
       # and OCCT/Sentry submodules create deeply nested paths that exceed Windows' 260 char limit
       - name: Enable long paths on Windows
-        if: inputs.os == 'windows-latest'
+        if: inputs.os == 'windows-2022'
         shell: pwsh
         run: |
           git config --system core.longpaths true
@@ -75,7 +75,7 @@ jobs:
 
       # Build Dependencies
       - name: Build on Windows
-        if: inputs.os == 'windows-latest'
+        if: inputs.os == 'windows-2022'
         working-directory: ${{ github.workspace }}
         shell: pwsh
         run: |
@@ -87,7 +87,7 @@ jobs:
       # FIX: Verify that OpenVDB was actually built and is findable after the Windows build.
       # Previously the build could silently succeed without OpenVDB, causing the main build to fail.
       - name: Verify OpenVDB on Windows
-        if: inputs.os == 'windows-latest'
+        if: inputs.os == 'windows-2022'
         shell: bash
         run: |
           echo "=== Searching for OpenVDB cmake files ==="
@@ -161,7 +161,7 @@ jobs:
       #     path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep*.tar.gz
 
       # - name: Upload Windows artifacts
-      #   if: inputs.os == 'windows-latest'
+      #   if: inputs.os == 'windows-2022'
       #   uses: actions/upload-artifact@v4
       #   with:
       #     name: OrcaSlicer_dep_win64_${{ env.date }}
