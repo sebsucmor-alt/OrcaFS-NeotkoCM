@@ -125,7 +125,13 @@ public:
         // the preset gradient view for this layer's fills.
         const PrintObject*          print_object  = nullptr,
         double                      layer_print_z = 0.0,
-        double                      layer_height  = 0.0
+        double                      layer_height  = 0.0,
+        // NEOTKO_COLORSTITCH_TAG — cuando el llamador (FASE2 band-loop) YA fusionó el
+        // override per-pase (pass.colormix.kv) dentro de `config`, ese config es la
+        // fuente de verdad de ESTA lámina. En painter-mode NO se debe re-aplicar
+        // encima el payload COLAPSADO del profile (payload_from_stacks funde todos los
+        // pases por rol → tool_a del último gana), que pisaba los tools per-pase.
+        bool                        config_has_pass_override = false
     );
 
     // Check if role matches the surface filter setting.

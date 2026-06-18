@@ -64,6 +64,7 @@
 
 #include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG + PathBlend
                                          // ingredient (runtimes for s88 toggles).
+#include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — puente al 3D Painter
 #include "libslic3r/SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
 // NEOTKO_COLORSCI_TAG GD1+GD2+GD3 — Gradient Designer embebido en SandwichDialog
 // (docs/FUTURE/COLORSTITCH_STUDIO_PLAN.md P1-P3). Engine en libslic3r/ColorSci/.
@@ -8125,6 +8126,96 @@ private:
 
 } // anonymous namespace
 // NEOTKO_COLORMIX_TAG_END
+
+// NEOTKO_COLORSTITCH_TAG — puente público (decl. en ColorStitchPatternLauncher.hpp)
+// para abrir el editor avanzado de patrón desde el 3D Painter gizmo, que no puede
+// ver la clase ColorMixPatternDialog (file-private, anon ns). Definido aquí, FUERA
+// del anon ns → linkage externo; la clase sigue siendo reachable porque el anon ns
+// inyecta sus nombres en Slic3r::GUI. Reusa la misma construcción de `options` que
+// los call-sites del SandwichDialog. A diferencia de open_edit_for(), NO reescribe
+// los knobs gradiente a DynamicPrintConfig: solo devuelve el patrón (+ ángulo), para
+// que varios ColorMix por nivel no se contaminen entre sí.
+bool open_colorstitch_pattern_dialog(
+    wxWindow*                                 parent,
+    const std::vector<std::string>&           fcolors,
+    bool                                      penu,
+    Slic3r::DynamicPrintConfig*               base_cfg,
+    const std::map<std::string, std::string>& cur_kv,
+    std::map<std::string, std::string>&       out_kv)
+{
+    using SEPM = Slic3r::SurfaceEffectProfileManager;
+    if (!base_cfg) return false;
+
+    // Trabajar sobre una COPIA — el preset vivo NUNCA se ensucia (mismo motivo por
+    // el que open_colormix_for hace save/restore: el diálogo lee/escribe el cfg).
+    DynamicPrintConfig cfg = *base_cfg;
+
+    const char* pat_key = penu ? "interlayer_colormix_pattern_penultimate"
+                               : "interlayer_colormix_pattern_top";
+    const std::string gp = penu ? std::string("interlayer_colormix_penu_")
+                                : std::string("interlayer_colormix_");
+    // role_keys = idéntico a open_colormix_for (pattern + knobs del gradiente role).
+    std::vector<std::string> role_keys;
+    role_keys.push_back(pat_key);
+    for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
+                           "min_surface_lines", "overlap", "invert", "repetitions",
+                           "band_count_a", "band_count_b", "band_count_c",
+                           "band_count_d", "tool_a", "tool_b", "tool_c",
+                           "tool_d", "angle" })
+        role_keys.push_back(gp + s);
+
+    // Sembrar el diálogo desde el override actual del pase (vacío → fallback región).
+    if (!cur_kv.empty()) {
+        Slic3r::SurfaceEffectPayload seed; seed.present = true; seed.kv = cur_kv;
+        SEPM::restore_keys(cfg, seed);
+    }
+
+    std::string mixed_defs;
+    if (auto* o = cfg.option<ConfigOptionString>("mixed_filament_definitions"))
+        mixed_defs = o->value;
+    const auto options = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, fcolors);
+    const std::string cur_pat = cfg.opt_string(pat_key);
+    bool use_virtual = false;
+    if (auto* o = cfg.option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
+        use_virtual = o->value;
+
+    ColorMixPatternDialog dlg(parent, options, fcolors, cur_pat,
+                              use_virtual, &cfg, penu ? 1 : 0);
+    if (dlg.ShowModal() != wxID_OK)
+        return false;
+
+    // Volcar TODOS los getters al cfg copia (mismo orden que open_colormix_for).
+    auto si = [&](const std::string& k, int v) {
+        if (auto* o = cfg.option<ConfigOptionInt>(k)) o->value = v; };
+    auto sf = [&](const std::string& k, double v) {
+        if (auto* o = cfg.option<ConfigOptionFloat>(k)) o->value = v; };
+    if (auto* o = cfg.option<ConfigOptionString>(pat_key)) o->value = dlg.get_pattern();
+    si(gp + "mode",              dlg.get_grad_mode());
+    si(gp + "pct_a",             dlg.get_grad_pct_a());
+    si(gp + "pct_b",             dlg.get_grad_pct_b());
+    si(gp + "easing",            dlg.get_grad_easing());
+    sf(gp + "gamma",             dlg.get_grad_gamma());
+    si(gp + "min_surface_lines", dlg.get_grad_min_lines());
+    sf(gp + "overlap",           dlg.get_grad_overlap());
+    if (auto* o = cfg.option<ConfigOptionBool>(gp + "invert")) o->value = dlg.get_grad_invert();
+    si(gp + "band_count_a", dlg.get_grad_band_a());
+    si(gp + "band_count_b", dlg.get_grad_band_b());
+    si(gp + "band_count_c", dlg.get_grad_band_c());
+    si(gp + "band_count_d", dlg.get_grad_band_d());
+    si(gp + "tool_a",       dlg.get_tool_a());
+    si(gp + "tool_b",       dlg.get_tool_b());
+    si(gp + "tool_c",       dlg.get_tool_c());
+    si(gp + "tool_d",       dlg.get_tool_d());
+    si(gp + "angle",        dlg.get_grad_angle());
+    si(gp + "repetitions",  dlg.get_grad_repetitions());
+    // min_length es GLOBAL (no role-prefijado) → fuera del per-pase, igual que
+    // open_colormix_for lo deja fuera de role_keys.
+
+    // Snapshot del payload completo del pase (string + todos los knobs).
+    Slic3r::SurfaceEffectPayload snap = SEPM::snapshot_keys(cfg, role_keys);
+    out_kv = std::move(snap.kv);
+    return true;
+}
 
 #define DISABLE_UNDO_SYS
 

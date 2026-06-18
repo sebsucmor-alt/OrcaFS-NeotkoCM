@@ -893,6 +893,14 @@ public:
     FacetsAnnotation    color_mix_paint_facets;
     // Slot → SurfaceEffectProfile id mapping. Index 0 unused (slot 0 = unpainted).
     int                 colormix_slot_to_profile_id[COLORMIX_SLOT_COUNT] = {0};
+    // NEOTKO_COLORSTITCH_TAG — huella del CONTENIDO de los perfiles referenciados.
+    // El contenido del perfil (stack/tools) vive en SurfaceEffectProfileManager
+    // (singleton), FUERA del modelo, así que editar un tool no cambiaba ni las
+    // facetas ni el mapeo de slots → Print::apply consideraba el volumen idéntico y
+    // NO re-sliceaba ("hay que mover algo más para que detecte el cambio"). El
+    // painter recalcula esta huella al editar un perfil; Print::apply la compara →
+    // editar un color dispara re-slice. 0 = sin perfiles pintados / aún sin calcular.
+    uint64_t            colormix_profiles_fingerprint = 0;
     // NEOTKO_PROFILE_TAG_END
 
     // BBS: quick access for volume extruders, 1 based
@@ -1148,6 +1156,8 @@ private:
         // NEOTKO_PROFILE_TAG — Fase 6c: slot→profile table is a plain array, copy it too.
         for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
             this->colormix_slot_to_profile_id[_s] = other.colormix_slot_to_profile_id[_s];
+        // NEOTKO_COLORSTITCH_TAG — copiar la huella de contenido (re-slice on profile edit).
+        this->colormix_profiles_fingerprint = other.colormix_profiles_fingerprint;
         this->set_material_id(other.material_id());
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.

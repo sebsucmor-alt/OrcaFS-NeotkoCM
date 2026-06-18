@@ -2264,7 +2264,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 // mode → the painted profile drives the penu, ignoring
                                 // the legacy preset surface gate.
                                 /*mgr=*/nullptr, /*num_physical=*/0,
-                                this->object(), this->print_z, this->height);
+                                this->object(), this->print_z, this->height,
+                                // NEOTKO_COLORSTITCH_TAG — cm_eff ya lleva el override
+                                // per-pase (cuando se construyó cm_cfg_override); avisa a
+                                // assign_and_group_tools para que NO lo pise con el payload
+                                // colapsado del profile (tools del último pase del rol).
+                                /*config_has_pass_override=*/(cm_eff == &cm_cfg_override));
                             auto buckets =
                                 SurfaceColorMix::eec_to_tool_buckets(temp, natural_tool);
                             const int NB = (int)buckets.size();

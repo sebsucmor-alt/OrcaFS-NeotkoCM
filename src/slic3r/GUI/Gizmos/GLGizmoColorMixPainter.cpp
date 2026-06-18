@@ -18,6 +18,7 @@
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — botón ADV → editor de patrón
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include <GL/glew.h>
@@ -25,6 +26,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -1242,28 +1245,46 @@ static void draw_zone_editor(const char* id, const char* label,
             pro_pass_preview(dl, q, ImVec2(q.x + left_w, q.y + bar_h), p, penu, fcolors);
         }
 
-        // ---- line 3 (ColorStitch only): inline A/B + mix% mini-editor ----
+        // ---- line 3 (ColorStitch only): botón ADV → editor avanzado de patrón ----
+        // NEOTKO_COLORSTITCH_TAG — el editor inline A/B + mix% (derivado del sistema
+        // de predicción textil) se retiró: solo generaba un patrón Bresenham de 2
+        // tools y no aportaba a la *creación* de color. Ahora un único botón abre el
+        // ColorMixPatternDialog (4 tools, S-curve, overlap, ángulo…), que TOMA el
+        // patrón actual y DEVUELVE el editado → se escribe en el pase. La preview del
+        // patrón ya se dibuja en la línea 2 (pro_pass_preview), que sigue siendo el
+        // feedback visual. Knobs de diseño NO round-trip per-pase (solo el patrón).
         if (p.kind == K::ColorMix) {
-            int ca, cb, cp;
-            pro_cm_read(p, penu, ca, cb, cp);
-            bool ch = false;
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("A"); ImGui::SameLine();
-            ch |= pro_tool_chip("##cma", fcolors, nfil, ca, _u8L("Tool A").c_str());
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("B"); ImGui::SameLine();
-            ch |= pro_tool_chip("##cmb", fcolors, nfil, cb, _u8L("Tool B").c_str());
-            ImGui::SameLine();
-            ImGui::PushItemWidth(110.f);
-            ch |= ImGui::SliderInt("##mix", &cp, 0, 100, "B %d%%");
-            ImGui::PopItemWidth();
+            // Backfill defensivo: un pase sin payload no debe degradar a Solid.
+            if (pro_cm_pattern(p, penu).empty()) {
+                int a, b, cp; pro_cm_read(p, penu, a, b, cp);
+                pro_cm_write(p, penu, a, b, cp);
+            }
+            if (ImGui::Button(_u8L("ADV…").c_str())) {
+                auto* cfg = const_cast<DynamicPrintConfig*>(
+                    &wxGetApp().preset_bundle->prints.get_edited_preset().config);
+                std::map<std::string, std::string> out_kv;
+                // El diálogo devuelve el PAYLOAD COMPLETO del pase (string + knobs
+                // del gradiente). Sembrarlo con el kv actual permite re-editar. Así
+                // cada pase lleva su PROPIO diseño → el motor (Fill.cpp FASE2) los
+                // sliccea distintos; antes solo se capturaba el string y todos los
+                // pases caían al gradiente compartido de la región (bug "salen todos
+                // iguales", tanto en preview como en slice).
+                if (open_colorstitch_pattern_dialog(
+                        wxGetApp().plater(), fcolors, penu, cfg, p.colormix.kv, out_kv)) {
+                    p.colormix.present = true;
+                    p.colormix.kv      = std::move(out_kv);
+                    // Sync chip/preview/wheel desde el payload nuevo.
+                    int a, b, cp; pro_cm_read(p, penu, a, b, cp);
+                    p.solid_tool = a;
+                    const auto it = p.colormix.kv.find(
+                        penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle");
+                    if (it != p.colormix.kv.end()) {
+                        try { p.angle = std::stoi(it->second); } catch (...) {}
+                    }
+                }
+            }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Line mix ratio — snaps to 1/8 steps").c_str());
-            // s118: backfill aunque no cambie, si el pase venía sin payload (evita que
-            // un ColorMix cargado sin tocar se persista vacío → Solid).
-            if (ch || pro_cm_pattern(p, penu).empty())
-                pro_cm_write(p, penu, ca, cb, cp);
+                ImGui::SetTooltip("%s", _u8L("Open the ColorStitch pattern editor").c_str());
         }
         ImGui::EndGroup();
 
@@ -1275,9 +1296,17 @@ static void draw_zone_editor(const char* id, const char* label,
         const bool thin = (p.kind != K::PathBlend) && (pass_mm < 0.04 - 1e-9);
 
         dl->ChannelsSetCurrent(0);          // bg rect behind the block
+        // NEOTKO_COLORSTITCH_TAG — la caja de la fila debe contrastar con el TEXTO,
+        // que es claro en modo oscuro y oscuro en modo claro. Una caja gris-oscura
+        // fija dejaba texto oscuro sobre fondo oscuro en light mode (ilegible). Caja
+        // adaptativa: oscura en dark mode (como estaba), clara en light mode.
+        const bool _dark = ImGuiWrapper::is_dark_mode();
+        const ImU32 _box_col = thin
+            ? (_dark ? IM_COL32(48, 40, 32, 255) : IM_COL32(245, 232, 205, 255))
+            : (_dark ? IM_COL32(60, 60, 60, 255) : IM_COL32(214, 214, 214, 255));
         dl->AddRectFilled(ImVec2(gmin.x - 3.f, gmin.y - 2.f),
                           ImVec2(gmin.x + left_w + 3.f, gmax.y + 2.f),
-                          thin ? IM_COL32(48, 40, 32, 255) : IM_COL32(60, 60, 60, 255), 3.f);
+                          _box_col, 3.f);
         dl->ChannelsMerge();
 
         // ---- Z box (right edge): pass height mm / PB floor mm ----
@@ -1748,6 +1777,14 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
                 SurfaceEffectProfileManager::payload_from_stacks(recipe.top, recipe.penu, *p);
                 refresh_selector_palettes();   // overlay + swatches al día en vivo
                 m_preview_dirty = true;
+                // NEOTKO_COLORSTITCH_TAG — editar el contenido del perfil no toca las
+                // facetas ni el mapeo de slots. Agendamos el background process; la
+                // invalidación REAL la decide Print::apply, que recalcula la huella de
+                // contenido del perfil desde el manager (model_colormix_paint_data_changed,
+                // Model.cpp) → re-slice sin depender de este camino concreto.
+                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+                NEOTKO_LOG(PROFILE, "PRO live-rewrite RESLICE posted SCHEDULE_BG"
+                    << " profile_id=" << p->id);
                 NEOTKO_LOG(PROFILE, "PRO live-rewrite profile_id=" << p->id
                     << " name='" << p->name << "' top_empty=" << tj.empty()
                     << " penu_empty=" << pj.empty());
@@ -2014,7 +2051,12 @@ void GLGizmoColorMixPainter::render_tool_row()
 {
     auto tool_toggle = [](const char* label, bool active, const char* tip) -> bool {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.f, 0.f, 0.f));
-        ImGui::PushStyleColor(ImGuiCol_Text,   ImVec4(1.f, 1.f, 1.f, 1.f));
+        // NEOTKO_COLORSTITCH_TAG — botón de fondo transparente: el texto debe seguir
+        // al modo (blanco sobre oscuro / oscuro sobre claro), no forzarse a blanco
+        // (era ilegible en light mode). Mismos valores que push_toolbar_style.
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            ImGuiWrapper::is_dark_mode() ? ImVec4(1.f, 1.f, 1.f, 1.f)
+                                         : ImVec4(50 / 255.f, 58 / 255.f, 61 / 255.f, 1.f));
         if (active) {
             ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.f, 0.59f, 0.53f, 0.25f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.30f));
@@ -2648,6 +2690,8 @@ void GLGizmoColorMixPainter::update_model_object()
         }
         const ModelObjectPtrs& mos = wxGetApp().model().objects;
         wxGetApp().obj_list()->update_info_items(std::find(mos.begin(), mos.end(), mo) - mos.begin());
+        // El re-slice por paint ya lo dispara el cambio de facetas/slot (timestamp); la
+        // huella de contenido la recalcula Print::apply. Solo agendamos el proceso.
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
     }
 }

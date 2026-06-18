@@ -9,6 +9,7 @@
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "SurfaceEffectProfile.hpp" // NEOTKO_COLORSTITCH_TAG — huella de contenido de perfiles (re-slice on edit)
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
@@ -3670,6 +3671,31 @@ bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObjec
 
 // NEOTKO_PROFILE_TAG — change detector for the ColorMix Painter so paint or
 // slot-table edits force a re-slice instead of hitting the apply() cache.
+// NEOTKO_COLORSTITCH_TAG — huella del CONTENIDO de los perfiles que referencian los
+// slots pintados de un volumen. El contenido (stacks/tools) vive en el manager global
+// (SurfaceEffectProfileManager), FUERA del modelo, así que editar un tool/color NO
+// cambiaba ni las facetas ni el mapeo de slots → la puerta de invalidación de apply
+// (model_colormix_paint_data_changed) no detectaba el cambio y no re-sliceaba (ni el
+// botón de refresh). Calculamos esta huella EN apply desde el manager → es
+// independiente de QUIÉN editó el perfil (painter, ADV, Sandwich Editor).
+static uint64_t colormix_profiles_fingerprint_of(const ModelVolume& mv)
+{
+    auto& mgr = SurfaceEffectProfileManager::get();
+    std::string acc;
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
+        const int pid = mv.colormix_slot_to_profile_id[s];
+        if (pid == 0) continue;
+        acc += std::to_string(s) + ":";
+        if (const SurfaceEffectProfile* p = mgr.find(pid)) {
+            acc += p->stack_top_json;  acc += "|";  acc += p->stack_penu_json;
+        } else {
+            acc += "#deleted#";
+        }
+        acc += ";";
+    }
+    return (uint64_t)std::hash<std::string>{}(acc);
+}
+
 bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new)
 {
     return model_property_changed(mo, mo_new,
@@ -3680,6 +3706,13 @@ bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject&
             for (int s = 0; s < 16; ++s)
                 if (mv_old.colormix_slot_to_profile_id[s] != mv_new.colormix_slot_to_profile_id[s])
                     return false;
+            // Recalcular la huella de contenido AHORA y bajarla al volumen NUEVO (cache
+            // derivada) para que el snapshot del Print la conserve. mv_old lleva la del
+            // apply anterior; si difieren, el contenido del perfil cambió → re-slice.
+            const uint64_t fp_new = colormix_profiles_fingerprint_of(mv_new);
+            const_cast<ModelVolume&>(mv_new).colormix_profiles_fingerprint = fp_new;
+            if (mv_old.colormix_profiles_fingerprint != fp_new)
+                return false;
             return true;
         });
 }

@@ -981,7 +981,8 @@ int SurfaceColorMix::assign_and_group_tools(
     size_t num_physical,
     const PrintObject* print_object,
     double layer_print_z,
-    double layer_height
+    double layer_height,
+    bool config_has_pass_override
 ) {
     NEOTKO_LOG(COLORMIX, "ENTRY layer=" << layer_idx
         << " enabled=" << config.interlayer_colormix_enabled.value
@@ -1248,7 +1249,12 @@ int SurfaceColorMix::assign_and_group_tools(
         // The profile's ColorMix payload was snapshot-taken with the full key
         // set (top + _penu_). We pick the matching subset for this role and
         // overlay its values on top of the preset-loaded gv.
-        if (painted_override) {
+        // NEOTKO_COLORSTITCH_TAG — solo aplicar el payload COLAPSADO del profile cuando
+        // el `config` NO trae ya el override per-pase. En la ruta FASE2 (band-loop) el
+        // config ES cm_eff = región + pass.colormix.kv (per-pase, fuente de verdad);
+        // re-aplicar aquí el colapsado pisaba los tools de la lámina con los del último
+        // pase del rol (payload_from_stacks). gv ya quedó cargado desde config arriba.
+        if (painted_override && !config_has_pass_override) {
             const auto& kv = eff_profile->colormix.kv;
             const std::string prefix = gv_is_top_role
                 ? std::string("interlayer_colormix_")
@@ -1322,7 +1328,13 @@ int SurfaceColorMix::assign_and_group_tools(
         // preset's tool_a/b/c/d which can be different from the profile's
         // (e.g., preset has [0,1,2,3] but profile has [0,1,-1,-1] → 4 vs 2
         // tools → wipe-tower MISMATCH crash).
-        if (painted_override) {
+        // NEOTKO_COLORSTITCH_TAG — la lista de tools también debe salir del config
+        // per-pase cuando lo hay (FASE2). painted_profile_tools_1based lee el payload
+        // COLAPSADO del profile (tool_a del último pase del rol gana), que era el
+        // segundo punto donde el pase de abajo heredaba los tools del de encima
+        // (easing salía bien pero tools no). Con override per-pase, caer a la rama
+        // cm_mode → gv.tool_a/b, que ya viene del config per-pase.
+        if (painted_override && !config_has_pass_override) {
             const auto tools_1b = painted_profile_tools_1based(*eff_profile, gv_is_top_role);
             for (auto t : tools_1b)
                 if (t > 0) tools.push_back(int(t) - 1); // back to 0-based for gv path

@@ -344,6 +344,10 @@ public:
 
     //BBS
     static void on_change_color_mode(bool is_dark);
+    // NEOTKO_COLORSTITCH_TAG — expone el MISMO flag que push_toolbar_style usa para
+    // decidir el color del texto, para que los draws custom (cajas del Pro tray)
+    // contrasten con el texto. GUI_App::dark_mode() sigue el SO en mac y diverge.
+    static bool is_dark_mode();
     static void push_toolbar_style(const float scale);
     static void pop_toolbar_style();
     static void push_menu_style(const float scale);

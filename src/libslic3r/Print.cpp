@@ -2488,6 +2488,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 if (model_volume1.colormix_slot_to_profile_id[s]
                     != model_volume2.colormix_slot_to_profile_id[s])
                     return false;
+            // NEOTKO_COLORSTITCH_TAG — el CONTENIDO del perfil (stacks/tools) vive en
+            // SurfaceEffectProfileManager, fuera del modelo. El painter baja una huella
+            // de ese contenido al volumen (colormix_profiles_fingerprint); compararla
+            // aquí hace que editar un color/tool de un perfil ya pintado dispare re-slice
+            // sin tener que "mover algo más". Aditivo: a lo sumo re-slicea de más.
+            if (model_volume1.colormix_profiles_fingerprint
+                != model_volume2.colormix_profiles_fingerprint)
+                return false;
             if (model_volume1.config.get() != model_volume2.config.get())
                 return false;
         }
