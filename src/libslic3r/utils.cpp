@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <locale>
+#include <mutex>
 #include <ctime>
 #include <cstdarg>
 #include <stdio.h>
@@ -339,20 +340,11 @@ void set_log_path_and_level(const std::string& file, unsigned int level)
 	}
 #endif
 
-    // Prefer LOCALAPPDATA on Windows so runtime logs are written under:
-    // C:\\Users\\[user]\\AppData\\Local\\Snapmaker_Orca\\log\\*.log
-    // Keep g_data_dir fallback for non-Windows or missing environment.
-    boost::filesystem::path log_folder = boost::filesystem::path(g_data_dir) / "log";
-#ifdef _WIN32
-    // boost::filesystem is configured to interpret narrow paths as UTF-8.
-    // On Windows, std::getenv() may return ANSI-encoded bytes, which breaks
-    // non-ASCII profile paths (for example usernames containing umlauts).
-    if (const char *local_appdata = boost::nowide::getenv("LOCALAPPDATA"); local_appdata != nullptr && *local_appdata != '\0')
-        log_folder = boost::filesystem::path(local_appdata) / "Snapmaker_Orca" / "log";
-#endif
-    if (!boost::filesystem::exists(log_folder)) {
-        boost::filesystem::create_directories(log_folder);
-    }
+	//BBS log file at C:\\Users\\[yourname]\\AppData\\Roaming\\Snapmaker_Orca\\log\\[log_filename].log
+	auto log_folder = boost::filesystem::path(g_data_dir) / "log";
+	if (!boost::filesystem::exists(log_folder)) {
+		boost::filesystem::create_directories(log_folder);
+	}
 	auto full_path = (log_folder / file).make_preferred();
 
 	g_log_sink = boost::log::add_file_log(
@@ -1529,8 +1521,12 @@ bool bbl_calc_md5(std::string &filename, std::string &md5_out)
 // SoftFever: copy directory recursively
 void copy_directory_recursively(const boost::filesystem::path &source, const boost::filesystem::path &target, std::function<bool(const std::string)> filter)
 {
-    BOOST_LOG_TRIVIAL(info) << Slic3r::format("copy_directory_recursively %1% -> %2%", source, target);
+    BOOST_LOG_TRIVIAL(debug) << Slic3r::format("copy_directory_recursively %1% -> %2%", source, target);
     std::string error_message;
+
+    if (!boost::filesystem::exists(source) || !boost::filesystem::is_directory(source)) {
+        BOOST_LOG_TRIVIAL(error) << Slic3r::format("copy_directory_recursively source is invalid: %1%", source);        
+    }
 
     if (boost::filesystem::exists(target))
         boost::filesystem::remove_all(target);

@@ -23,6 +23,7 @@
 #include "slic3r/GUI/Tab.hpp"
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "ParamsPanel.hpp"
+#include "MixedFilamentBadge.hpp"
 #include "MsgDialog.hpp"
 #include "wx/utils.h"
 
@@ -145,7 +146,7 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::PART_CAT
                     }},
     { L("Strength"), {{"wall_loops", "",1},{"top_shell_layers", L("Top Solid Layers"),1},{"top_shell_thickness", L("Top Minimum Shell Thickness"),1},{"top_surface_density", L("Top Surface Density"),1},
                     {"bottom_shell_layers", L("Bottom Solid Layers"),1}, {"bottom_shell_thickness", L("Bottom Minimum Shell Thickness"),1},{"bottom_surface_density", L("Bottom Surface Density"),1},
-                    {"sparse_infill_density", "",1},{"sparse_infill_pattern", "",1},{"enable_infill_filament_override", "",1},{"infill_filament_use_base_first_layers", "",1},{"infill_filament_use_base_last_layers", "",1},{"sparse_infill_filament", "",1},{"lateral_lattice_angle_1", "",1},{"lateral_lattice_angle_2", "",1},{"infill_overhang_angle", "",1},{"infill_anchor", "",1},{"infill_anchor_max", "",1},{"top_surface_pattern", "",1},{"bottom_surface_pattern", "",1}, {"internal_solid_infill_pattern", "",1},
+                    {"sparse_infill_density", "",1},{"sparse_infill_pattern", "",1},{"sparse_infill_filament", "",1},{"lateral_lattice_angle_1", "",1},{"lateral_lattice_angle_2", "",1},{"infill_overhang_angle", "",1},{"infill_anchor", "",1},{"infill_anchor_max", "",1},{"top_surface_pattern", "",1},{"bottom_surface_pattern", "",1}, {"internal_solid_infill_pattern", "",1},
                     {"align_infill_direction_to_model", "", 1},
                     {"extra_solid_infills", "", 1},
         {"infill_combination", "",1}, {"infill_combination_max_layer_height", "",1}, {"infill_wall_overlap", "",1},{"top_bottom_infill_wall_overlap", "",1}, {"solid_infill_direction", "",1}, {"infill_direction", "",1}, {"bridge_angle", "",1}, {"internal_bridge_angle", "",1}, {"minimum_sparse_infill_area", "",1}
@@ -939,7 +940,7 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
         initial_extruder = config.has("extruder") ? config.extruder() : 0;
     }
 
-    for (size_t display_idx = 0; display_idx <= ordered_filament_ids.size(); ++display_idx)
+    for (size_t display_idx = 1; display_idx <= ordered_filament_ids.size(); ++display_idx)
     {
         const int actual_filament_id = display_idx == 0 ? 0 : int(ordered_filament_ids[display_idx - 1]);
         const bool is_active_extruder = actual_filament_id == initial_extruder;
@@ -1517,6 +1518,9 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
             nullptr, []() { return plater()->sidebar().combos_filament().size() > 1; }, m_parent);
     }
 
+    if (wxGetApp().preset_bundle == nullptr)
+        return;
+
     const int item_id = menu->FindItem(_L("Merge with"));
     if (item_id != wxNOT_FOUND)
         menu->Destroy(item_id);
@@ -1528,6 +1532,7 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     filaments_cnt = std::min(filaments_cnt, static_cast<int>(icons.size()));
     filaments_cnt = std::min(filaments_cnt, static_cast<int>(filament_presets.size()));
 
+    // Add physical filaments as merge targets
     for (int i = 0; i < filaments_cnt; i++) {
         if (i == active_filament_menu_id)
             continue;
@@ -1539,8 +1544,79 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
             sub_menu, wxID_ANY, item_name, "", [i](wxCommandEvent&) { plater()->sidebar().change_filament(-2, i); }, *icons[i], menu,
             []() { return true; }, m_parent);
     }
+
+    // Add mixed filaments as merge targets
+    auto& mixed_mgr = wxGetApp().preset_bundle->mixed_filaments;
+    const auto& mfs = mixed_mgr.mixed_filaments();
+    const size_t num_physical = filament_presets.size();
+    
+    // Get icon dimensions
+    const double em = Slic3r::GUI::wxGetApp().em_unit();
+    const int icon_width = lround(2 * em);
+    const int icon_height = lround(2 * em);
+    
+    // Determine the source physical filament ID (if active_filament_menu_id is a physical filament)
+    unsigned int source_physical_1based = 0;
+    if (active_filament_menu_id >= 0 && active_filament_menu_id < (int)num_physical) {
+        source_physical_1based = (unsigned int)(active_filament_menu_id + 1);
+    }
+    
+    // Get indices of mixed filaments that depend on the source physical filament
+    std::vector<size_t> dependent_mixed_indices;
+    if (source_physical_1based > 0) {
+        dependent_mixed_indices = mixed_mgr.mixed_filaments_using_physical(source_physical_1based);
+    }
+    
+    size_t visible_idx = 0;
+    size_t running_idx = 0;  // counts all non-deleted entries for virtual ID calculation
+    for (size_t j = 0; j < mfs.size(); ++j) {
+        if (mfs[j].deleted || !mfs[j].enabled) continue;
+
+        // Calculate virtual ID for this mixed filament based on all non-deleted entries
+        size_t mixed_virtual_id = num_physical + running_idx;
+        running_idx++;
+
+        // Skip active mixed filament (consistent with physical filaments)
+        if (mixed_virtual_id == (size_t)active_filament_menu_id) {
+            continue;
+        }
+
+        // Skip mixed filaments that depend on the source physical filament
+        // This prevents merging a physical filament into a mixed filament that uses it as a component
+        if (std::find(dependent_mixed_indices.begin(), dependent_mixed_indices.end(), j) != dependent_mixed_indices.end()) {
+            continue;
+        }
+        
+        const int virtual_id = static_cast<int>(mixed_virtual_id) + 1;
+        wxString item_name = wxString::Format(_L("Mixed Filament %d"), virtual_id);
+        
+        // Create a colored bitmap for the mixed filament — gradient filaments get a gradient icon
+        MixedFilamentDisplayContext menu_ctx;
+        {
+            auto* co2 = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+            menu_ctx.physical_colors = co2 ? co2->values : std::vector<std::string>{};
+            menu_ctx.num_physical = num_physical;
+        }
+        wxBitmap* mixed_bmp = create_mixed_filament_menu_bitmap(
+            mfs[j], menu_ctx, icon_width, icon_height,
+            wxString::Format("%d", virtual_id));
+
+        size_t captured_target = mixed_virtual_id;
+        append_menu_item(
+            sub_menu, wxID_ANY, item_name, "", [captured_target](wxCommandEvent&) {
+                plater()->sidebar().change_filament(-2, captured_target);
+            }, *mixed_bmp, menu,
+            []() { return true; }, m_parent);
+        
+        visible_idx++;
+    }
+
+    // Show merge menu if there are any targets available
+    size_t total_targets = filaments_cnt + visible_idx;
     append_submenu(
-        menu, sub_menu, wxID_ANY, _L("Merge with"), "", "", [filaments_cnt]() { return filaments_cnt > 1; }, m_parent);
+        menu, sub_menu, wxID_ANY, _L("Merge with"), "", "", [total_targets, active_filament_menu_id]() { 
+            return total_targets > 1 || (total_targets == 1 && active_filament_menu_id < 0); 
+        }, m_parent);
 }
 
 //BBS: add part plate related logic
@@ -1687,42 +1763,6 @@ wxMenu* MenuFactory::object_menu()
     append_menu_item_edit_text(&m_object_menu);
     append_menu_item_edit_svg(&m_object_menu);
     append_menu_item_change_filament(&m_object_menu);
-    // NEOTKO_LIBRE_TAG_START — Temporal Link + Copy/Paste Process Settings (single-object menu)
-    // Guard: items are appended to the persistent m_object_menu — skip if already present.
-    {
-        auto* ac = wxGetApp().app_config;
-        if (ac && ac->get_bool("neotko_libre_mode") &&
-            m_object_menu.FindItem(_devL("Select Grouped (Ctrl+Shift+G)")) == wxNOT_FOUND) {
-            m_object_menu.AppendSeparator();
-            append_menu_item(&m_object_menu, wxID_ANY,
-                _devL("Select Grouped (Ctrl+Shift+G)"),
-                _devL("Select all objects in the same link group"),
-                [](wxCommandEvent&) { plater()->select_link_group(); }, "", &m_object_menu,
-                []() { return true; }, m_parent);
-            append_menu_item(&m_object_menu, wxID_ANY,
-                _devL("Break All Links in Group"),
-                _devL("Break the entire link group of this object"),
-                [](wxCommandEvent&) { plater()->break_link_all_in_group(); }, "", &m_object_menu,
-                []() { return true; }, m_parent);
-            append_menu_item(&m_object_menu, wxID_ANY,
-                _devL("Break Link (this object only)"),
-                _devL("Remove this object from its link group"),
-                [](wxCommandEvent&) { plater()->break_link_selected_objects(); }, "", &m_object_menu,
-                []() { return true; }, m_parent);
-            m_object_menu.AppendSeparator();
-            append_menu_item(&m_object_menu, wxID_ANY,
-                _devL("Copy Process Settings"),
-                _devL("Copy all per-object overrides (speed, quality, width…) from this object"),
-                [](wxCommandEvent&) { plater()->copy_process_settings(); }, "", &m_object_menu,
-                []() { return true; }, m_parent);
-            append_menu_item(&m_object_menu, wxID_ANY,
-                _devL("Paste Process Settings"),
-                _devL("Apply the copied process settings to this object"),
-                [](wxCommandEvent&) { plater()->paste_process_settings(); }, "", &m_object_menu,
-                []() { return plater()->has_process_settings_clipboard(); }, m_parent);
-        }
-    }
-    // NEOTKO_LIBRE_TAG_END
     return &m_object_menu;
 }
 
@@ -1795,41 +1835,6 @@ wxMenu* MenuFactory::multi_selection_menu()
             append_menu_item_merge_to_multipart_object(menu);
             index++;
         }
-        // NEOTKO_LIBRE_TAG_START — Temporal Link menu items (multi-object selection)
-        {
-            auto* ac = wxGetApp().app_config;
-            if (ac && ac->get_bool("neotko_libre_mode")) {
-                menu->AppendSeparator();
-                append_menu_item(menu, wxID_ANY,
-                    _devL("Link Objects (Ctrl+G)"),
-                    _devL("Link selected objects — they will move/rotate/scale together"),
-                    [](wxCommandEvent&) { plater()->link_selected_objects(); }, "", menu,
-                    []() { return true; }, m_parent);
-                append_menu_item(menu, wxID_ANY,
-                    _devL("Select Grouped (Ctrl+Shift+G)"),
-                    _devL("Select all objects in the same link group"),
-                    [](wxCommandEvent&) { plater()->select_link_group(); }, "", menu,
-                    []() { return true; }, m_parent);
-                append_menu_item(menu, wxID_ANY,
-                    _devL("Break All Links in Group"),
-                    _devL("Break the entire link group of the selected objects"),
-                    [](wxCommandEvent&) { plater()->break_link_all_in_group(); }, "", menu,
-                    []() { return true; }, m_parent);
-                append_menu_item(menu, wxID_ANY,
-                    _devL("Break Link (selected only)"),
-                    _devL("Remove only the selected objects from their link group"),
-                    [](wxCommandEvent&) { plater()->break_link_selected_objects(); }, "", menu,
-                    []() { return true; }, m_parent);
-                menu->AppendSeparator();
-                append_menu_item(menu, wxID_ANY,
-                    _devL("Paste Process Settings"),
-                    _devL("Apply the copied process settings to all selected objects"),
-                    [](wxCommandEvent&) { plater()->paste_process_settings(); }, "", menu,
-                    []() { return plater()->has_process_settings_clipboard(); }, m_parent);
-                menu->AppendSeparator();
-            }
-        }
-        // NEOTKO_LIBRE_TAG_END
         append_menu_item_center(menu);
         append_menu_item_drop(menu);
         append_menu_item_fix_through_netfabb(menu);
@@ -2081,7 +2086,7 @@ void MenuFactory::append_menu_item_change_filament(wxMenu* menu)
             initial_extruder = config.has("extruder") ? config.extruder() : 0;
     }
 
-    for (size_t display_idx = 0; display_idx <= ordered_filament_ids.size(); ++display_idx)
+    for (size_t display_idx = 1; display_idx <= ordered_filament_ids.size(); ++display_idx)
     {
         const int actual_filament_id = display_idx == 0 ? 0 : int(ordered_filament_ids[display_idx - 1]);
         bool is_active_extruder = false;

@@ -6,8 +6,8 @@
 #include "../libslic3r.h"
 #include "../MixedFilament.hpp"
 
-#include <set>
 #include <utility>
+#include <set>      // NEOTKO_MULTIPASS_TAG — LayerTools::mp_tools_set
 
 #include <boost/container/small_vector.hpp>
 
@@ -119,11 +119,6 @@ public:
     // Zero based extruder IDs, ordered to minimize tool switches.
     std::vector<unsigned int> 	extruders;
     bool                        preserve_extruder_order = false;
-    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: has_pathblend_chain /
-    // pathblend_cap_tool / pathblend_body_equals_cap / pathblend_body_needs_return
-    // / pathblend_body_tool were DELETED. PathBlend no longer registers tools into
-    // the real-layer extruder list; it is compiled into MultiPass sublayers, so the
-    // wipe-tower scheduling needs zero PathBlend-specific dedup/return bookkeeping.
     // If per layer extruder switches are inserted by the G-code preview slider, this value contains the new (1 based) extruder, with which the whole object layer is being printed with.
     // If not overriden, it is set to 0.
     unsigned int 				extruder_override = 0;
@@ -140,9 +135,12 @@ public:
     // Due to the support layers possibly interleaving the object layers,
     // wipe tower will be disabled for some support only layers.
     bool 						has_wipe_tower = false;
-    bool                        is_mp_sublayer  = false; // NEOTKO_MULTIPASS_TAG — virtual sublayer
+    // NEOTKO_MULTIPASS_TAG_START — MultiPass/Sandwich virtual-sublayer markers,
+    // consumed by NeoTower (collect_all_events) + the wipe-tower scheduler. Set by
+    // the Sandwich/MultiPass ToolOrdering integration (lands with the engine);
+    // until then both stay false → NeoTower treats every layer as a real layer.
+    bool                        is_mp_sublayer  = false; // virtual sublayer
     bool                        mp_perim_override_active = false;
-    // NEOTKO_MULTIPASS_TAG_END
     // NEOTKO_MULTIPASS_PRIME_TAG — number of Local-Z wipe tower slots to reserve for
     // this sublayer's prime. 0 = prime disabled. Finalized from mp_tools_set after all
     // collect_extruders() calls complete. Consumed in Print.cpp wipe tower planning loop.
@@ -152,10 +150,7 @@ public:
     // and the set is cleared. This ensures we reserve one slot per unique tool, not one
     // per object — avoiding O(N_objects) prime tower bloat when all objects share a config.
     std::set<unsigned int>      mp_tools_set;
-    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: neotko_ordering_constraints
-    // DELETED. It was populated only by the (now-removed) PathBlend real-layer
-    // registration block; PathBlend pass order is now intrinsic to the sublayer
-    // pass_idx sequence, so no post-dedup constraint fix-up is needed.
+    // NEOTKO_MULTIPASS_TAG_END
     // Number of wipe tower partitions to support the required number of tool switches
     // and to support the wipe tower partitions above this one.
     size_t                      wipe_tower_partitions = 0;
@@ -175,6 +170,7 @@ public:
     float                       mixed_layer_height_a    = 0.f;
     float                       mixed_layer_height_b    = 0.f;
     float                       mixed_base_layer_height = 0.2f;
+    const PrintObject          *current_object = nullptr;
 
 private:
     // Resolve a 1-based filament ID through the mixed-filament manager for this layer.
@@ -225,18 +221,7 @@ public:
     std::vector<LayerTools>::const_iterator end()   const { return m_layer_tools.end(); }
     bool 				empty()       const { return m_layer_tools.empty(); }
     std::vector<LayerTools>& layer_tools() { return m_layer_tools; }
-    bool 				has_wipe_tower() const {
-        if (m_layer_tools.empty() || m_first_printing_extruder == (unsigned int)-1) return false;
-        // NEOTKO_NEOTOWER_TAG — s68: the tower is needed if ANY layer has a toolchange,
-        // not just the front layer. The old check (front().has_wipe_tower, plus MP
-        // sublayers only) wrongly skipped the tower for a plain MMU object whose colour
-        // change starts above layer 0 — front has 1 extruder, no MP sublayers → the object
-        // printed in a single colour. This any-layer scan also covers the previous cases:
-        // front-layer toolchanges and single-filament MultiPass sublayer prime purges.
-        for (const LayerTools& lt : m_layer_tools)
-            if (lt.has_wipe_tower) return true;
-        return false;
-    }
+    bool 				has_wipe_tower() const { return ! m_layer_tools.empty() && m_first_printing_extruder != (unsigned int)-1 && m_layer_tools.front().has_wipe_tower; }
 
 private:
     void				initialize_layers(std::vector<coordf_t> &zs);
@@ -265,7 +250,8 @@ private:
     unsigned int resolve_mixed(unsigned int filament_id_1based,
                                int          layer_index,
                                float        layer_print_z = 0.f,
-                               float        layer_height  = 0.f) const;
+                               float        layer_height  = 0.f,
+                               const PrintObject* current_object = nullptr) const;
 
     std::vector<LayerTools>    m_layer_tools;
     // First printing extruder, including the multi-material priming sequence.

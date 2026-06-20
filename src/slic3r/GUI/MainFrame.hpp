@@ -125,8 +125,6 @@ class MainFrame : public DPIFrame
     bool can_export_all_gcode() const;
     bool can_print_3mf() const;
     bool can_send_gcode() const;
-    //bool can_export_gcode_sd() const;
-    //bool can_eject() const;
     bool can_slice() const;
     bool can_change_view() const;
     bool can_select() const;
@@ -348,7 +346,11 @@ public:
     void        load_printer_url();
     bool        is_printer_view() const;
     void        refresh_plugin_tips();
-    void RunScript(wxString js);
+    void        RunScript(wxString js);
+
+    void        downloadOpenProject(const std::string& fileUrl, 
+                                    const std::string& fileName, 
+                                    std::string completeFilePath = "");
 
     //SoftFever
     void show_device(bool bBBLPrinter);
@@ -397,10 +399,6 @@ public:
     SideButton* m_slice_option_btn{ nullptr };
     SideButton* m_print_btn{ nullptr };
     SideButton* m_print_option_btn{ nullptr };
-    // NEOTKO_LIBRE_TAG_START
-    SideButton* m_neotko_libre_btn   { nullptr };
-    SideButton* m_neotko_refresh_btn { nullptr };
-    // NEOTKO_LIBRE_TAG_END
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };
     bool get_enable_slice_status();
@@ -424,6 +422,7 @@ wxDECLARE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);
 wxDECLARE_EVENT(EVT_SHOW_IP_DIALOG, wxCommandEvent);
 wxDECLARE_EVENT(EVT_UPDATE_MACHINE_LIST, wxCommandEvent);
 wxDECLARE_EVENT(EVT_UPDATE_PRESET_CB, SimpleEvent);
+wxDECLARE_EVENT(EVT_NETWORK_TEST_LOG_UPDATE, wxCommandEvent);
 
 
 

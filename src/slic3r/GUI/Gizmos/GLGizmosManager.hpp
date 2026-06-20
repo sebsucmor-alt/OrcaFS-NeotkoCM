@@ -84,14 +84,13 @@ public:
         Seam,
         FuzzySkin,
         MmSegmentation,
-        ColorMixPainter, // NEOTKO_PROFILE_TAG
+        ColorMixPainter, // NEOTKO_PROFILE_TAG — s130 port
         Emboss,
         Svg,
         Measure,
         Assembly,
         Simplify,
         BrimEars,
-        AlignStack, // NEOTKO_ALIGNSTACK_TAG
         //SlaSupports,
         // BBS
         //FaceRecognition,

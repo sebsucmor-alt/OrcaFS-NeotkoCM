@@ -48,9 +48,7 @@ echo "building deps.."
 
 echo on
 cmake ../ -G "Visual Studio 17 2022" -A x64 -DDESTDIR="%DEPS%" -DCMAKE_BUILD_TYPE=%build_type% -DDEP_DEBUG=%debug% -DORCA_INCLUDE_DEBUG_INFO=%debuginfo%
-if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . --config %build_type% --target deps -- -m
-if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 @echo off
 
 if "%1"=="deps" exit /b 0
@@ -62,10 +60,8 @@ mkdir %build_dir%
 cd %build_dir%
 
 echo on
-cmake .. -G "Visual Studio 17 2022" -A x64 -DBBL_RELEASE_TO_PUBLIC=1 -DORCA_TOOLS=ON %SIG_FLAG% -DCMAKE_PREFIX_PATH="%DEPS%/usr/local" -DOPENVDB_LIBRARYDIR="%DEPS%/usr/local" -DCMAKE_INSTALL_PREFIX="./Snapmaker_Orca" -DCMAKE_BUILD_TYPE=%build_type% -DWIN10SDK_PATH="%WindowsSdkDir%Include\%WindowsSDKVersion%\"
-if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+cmake .. -G "Visual Studio 17 2022" -A x64 -DBBL_RELEASE_TO_PUBLIC=1 -DORCA_TOOLS=ON %SIG_FLAG% -DCMAKE_PREFIX_PATH="%DEPS%/usr/local" -DCMAKE_INSTALL_PREFIX="./Snapmaker_Orca" -DCMAKE_BUILD_TYPE=%build_type% -DWIN10SDK_PATH="%WindowsSdkDir%Include\%WindowsSDKVersion%\"
 cmake --build . --config %build_type% --target ALL_BUILD -- -m
-if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 @echo off
 cd ..
 call scripts/run_gettext.bat

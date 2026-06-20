@@ -13,7 +13,6 @@
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
-#include "Format/S3DFactory.hpp" // NEOTKO_S3DFACTORY_TAG
 // BBS
 #include "FaceDetector.hpp"
 
@@ -323,10 +322,6 @@ Model Model::read_from_file(const std::string&                                  
         delete_temp_file(temp_stl);
     }
 #endif
-    // NEOTKO_S3DFACTORY_TAG_START
-    else if (boost::algorithm::iends_with(input_file, ".factory"))
-        result = load_s3d_factory(input_file, model);
-    // NEOTKO_S3DFACTORY_TAG_END
     else
         throw Slic3r::RuntimeError(_L("Unknown file format. Input file must have .stl, .obj, .amf(.xml) extension."));
 
@@ -464,7 +459,7 @@ ModelObject* Model::add_object(const char *name, const char *path, const Triangl
     new_volume->source.volume_idx = (int)new_object->volumes.size() - 1;
     // BBS: set extruder id to 1
     if (!new_object->config.has("extruder") || new_object->config.extruder() == 0)
-        new_object->config.set_key_value("extruder", new ConfigOptionInt(0));
+        new_object->config.set_key_value("extruder", new ConfigOptionInt(1));
     new_object->invalidate_bounding_box();
     return new_object;
 }
@@ -482,18 +477,18 @@ ModelObject* Model::add_object(const char *name, const char *path, TriangleMesh 
     new_volume->source.volume_idx = (int)new_object->volumes.size() - 1;
     // BBS: set default extruder id to 1
     if (!new_object->config.has("extruder") || new_object->config.extruder() == 0)
-        new_object->config.set_key_value("extruder", new ConfigOptionInt(0));
+        new_object->config.set_key_value("extruder", new ConfigOptionInt(1));
     new_object->invalidate_bounding_box();
     return new_object;
 }
 
 ModelObject* Model::add_object(const ModelObject &other)
 {
-	ModelObject* new_object = ModelObject::new_clone(other);
+    ModelObject* new_object = ModelObject::new_clone(other);
     new_object->set_model(this);
     // BBS: set default extruder id to 1
     if (!new_object->config.has("extruder") || new_object->config.extruder() == 0)
-        new_object->config.set_key_value("extruder", new ConfigOptionInt(0));
+        new_object->config.set_key_value("extruder", new ConfigOptionInt(1));
     this->objects.push_back(new_object);
     // BBS: backup
     if (need_backup) {
@@ -2521,7 +2516,14 @@ void ModelVolume::update_extruder_count_when_delete_filament(size_t extruder_cou
     std::vector<int> used_extruders = get_extruders();
     for (int extruder_id : used_extruders) {
         if (extruder_id >= filament_id) {
-            mmu_segmentation_facets.set_enforcer_block_type_limit(*this, (EnforcerBlockerType) (extruder_count),
+            // Calculate max_ebt to accommodate both physical and mixed filament IDs
+            // If replace_filament_id is a mixed filament virtual ID, it may be larger than extruder_count
+            size_t max_ebt_value = extruder_count;
+            if (replace_filament_id > 0 && (size_t)replace_filament_id > extruder_count) {
+                max_ebt_value = replace_filament_id;
+            }
+            
+            mmu_segmentation_facets.set_enforcer_block_type_limit(*this, (EnforcerBlockerType) (max_ebt_value),
                                                                   (EnforcerBlockerType) (filament_id),
                                                                   (EnforcerBlockerType) (replace_filament_id));
             break;
@@ -3669,6 +3671,13 @@ bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObjec
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.mmu_segmentation_facets.timestamp_matches(mv_new.mmu_segmentation_facets); });
 }
 
+bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new)
+{
+    return model_property_changed(mo, mo_new,
+        [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
+        [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.fuzzy_skin_facets.timestamp_matches(mv_new.fuzzy_skin_facets); });
+}
+
 // NEOTKO_PROFILE_TAG — change detector for the ColorMix Painter so paint or
 // slot-table edits force a re-slice instead of hitting the apply() cache.
 // NEOTKO_COLORSTITCH_TAG — huella del CONTENIDO de los perfiles que referencian los
@@ -3715,13 +3724,6 @@ bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject&
                 return false;
             return true;
         });
-}
-
-bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new)
-{
-    return model_property_changed(mo, mo_new,
-        [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
-        [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.fuzzy_skin_facets.timestamp_matches(mv_new.fuzzy_skin_facets); });
 }
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new)

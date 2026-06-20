@@ -90,9 +90,6 @@ public:
     void    OnMotion(wxMouseEvent& event);
     void    OnLeftDown(wxMouseEvent& event);
     void    OnLeaveWin(wxMouseEvent& event);
-    // NEOTKO_LIBRE_TAG_START — Less Used Toggle: right-click to mark/unmark options
-    void    OnRightDown(wxMouseEvent& event);
-    // NEOTKO_LIBRE_TAG_END
 
     void    init_ctrl_lines();
     bool    update_visibility(ConfigOptionMode mode);

@@ -118,9 +118,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GizmoObjectManipulation.hpp
     GUI/Gizmos/GLGizmoAssembly.cpp
     GUI/Gizmos/GLGizmoAssembly.hpp
-    # NEOTKO_ALIGNSTACK_TAG
-    GUI/Gizmos/GLGizmoAlignStack.cpp
-    GUI/Gizmos/GLGizmoAlignStack.hpp
     GUI/Gizmos/GLGizmoBase.cpp
     GUI/Gizmos/GLGizmoBase.hpp
     GUI/Gizmos/GLGizmoBrimEars.cpp
@@ -316,6 +313,18 @@ set(SLIC3R_GUI_SOURCES
     GUI/NotificationManager.hpp
     GUI/OAuthDialog.cpp
     GUI/OAuthDialog.hpp
+    GUI/MixedFilamentDialog.cpp
+    GUI/MixedFilamentDialog.hpp
+    GUI/MixedGradientSelector.hpp
+    GUI/MixedGradientSelector.cpp
+    GUI/MixedColorMatchPanel.cpp
+    GUI/MixedColorMatchPanel.hpp
+    GUI/MixedColorMatchHelpers.hpp
+    GUI/MixedColorMatchHelpers.cpp
+    GUI/MixedFilamentColorMapPanel.hpp
+    GUI/MixedFilamentColorMapPanel.cpp
+    GUI/MixedFilamentBadge.cpp
+    GUI/MixedFilamentBadge.hpp
     GUI/ObjColorDialog.cpp
     GUI/ObjColorDialog.hpp
     GUI/ObjectDataViewModel.cpp
@@ -408,9 +417,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/TabButton.hpp
     GUI/Tab.cpp
     GUI/Tab.hpp
-    # NEOTKO_NEOARACHNE_TAG preview-lab PL.2+PL.3+PL.6 — reactive inline canvas.
-    GUI/NeoArachnePreviewPanel.hpp
-    GUI/NeoArachnePreviewPanel.cpp
     GUI/TaskManager.cpp
     GUI/TaskManager.hpp
     GUI/TextLines.cpp
@@ -512,8 +518,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/SMPhysicalPrinterDialog.cpp
     GUI/SSWCP.cpp
     GUI/SSWCP.hpp
-    GUI/WCPDownloadManager.cpp
-    GUI/WCPDownloadManager.hpp
+    GUI/DownloadManager.cpp
+    GUI/DownloadManager.hpp
+    GUI/GenericDownloadDialog.cpp
+    GUI/GenericDownloadDialog.hpp
     GUI/WebPresetDialog.hpp
     GUI/WebPresetDialog.cpp
     GUI/WebSMUserLoginDialog.cpp
@@ -604,6 +612,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.cpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
+    Utils/TimeSyncManager.cpp
+    Utils/TimeSyncManager.hpp
     Utils/TimeoutMap.hpp
 )
 

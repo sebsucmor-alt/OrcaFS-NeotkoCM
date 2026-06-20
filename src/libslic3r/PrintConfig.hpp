@@ -29,46 +29,36 @@
 
 namespace Slic3r {
 
-// NEOTKO_MULTIPASS_TAG_START — Neoweaving + ColorMix + MultiPass enums
+// NEOTKO_COLORMIX_TAG — ColorMix surface target (which role(s) the effect applies to).
+//   0 = Both, 1 = Top only, 2 = Penultimate only.
+static constexpr int kColormixSurface_Both        = 0;
+static constexpr int kColormixSurface_Top         = 1;
+static constexpr int kColormixSurface_Penultimate = 2;
+
+// NEOTKO_COLORMIX_TAG — s58 lane distribution mode (Sandwich engine, Fase 2).
+// Controls how SurfaceColorMix (and PathBlend) maps pattern slots to extrusion lines.
+// Consumed via the `surface_color_mix_lane_mode` per-region config key.
+//   0 = Default     — slot = path_idx % n_slots  (legacy behaviour)
+//   1 = GeoSort     — sort lines by perpendicular projection, slot = ord % n_slots
+//   2 = LaneQuant   — slot = quantized lane(midpoint) % n_slots
+//   3 = DirCluster  — cluster lines by dominant direction, apply LaneQuant per cluster
+static constexpr int kLaneMode_Default    = 0;
+static constexpr int kLaneMode_GeoSort    = 1;
+static constexpr int kLaneMode_LaneQuant  = 2;
+static constexpr int kLaneMode_DirCluster = 3;
+// NEOTKO_COLORMIX_TAG_END
+
+// NEOTKO_NEOWEAVING_TAG_START — Neoweaving enums (interlayer Z-zigzag / angle lock)
 enum class NeoweaveMode {
     Wave,    // continuous triangular-wave oscillation along the path
     Linear   // per-line linear ramp: each line tilts from -amp to +amp (alternating)
-};
-
-enum class InfillNeoweaveOverride {
-    Inherit,  // use global interlayer_neoweave_enabled
-    Enable,   // force-enable for this object
-    Disable   // force-disable for this object
 };
 
 enum class NeoweaveFilter {
     All,      // affects all solid infill (top, penultimate, bottom internal)
     TopOnly   // only affects top layers (stTop + stPenultimateInternalSolid)
 };
-
-// NEOTKO_COLORMIX_TAG_START
-// ColormixSurface stored as int to avoid static initialization issues:
-//   0 = Both (top + penultimate)
-//   1 = Top surface only
-//   2 = Penultimate layers only
-static constexpr int kColormixSurface_Both        = 0;
-static constexpr int kColormixSurface_Top         = 1;
-static constexpr int kColormixSurface_Penultimate = 2;
-
-// NEOTKO_COLORMIX_TAG — s58 lane distribution mode.
-// Controls how SurfaceColorMix (and PathBlend) maps pattern slots to extrusion lines:
-//   0 = Default     — slot = path_idx % n_slots  (legacy behaviour, unchanged)
-//   1 = GeoSort     — sort lines by perpendicular projection, slot = ord % n_slots
-//   2 = LaneQuant   — slot = quantized lane(midpoint) % n_slots  (fragments of the
-//                     same visual stripe share a tool — most "geometric" mode)
-//   3 = DirCluster  — cluster lines by dominant direction, apply LaneQuant per cluster
-//                     (handles sub-regions where the fill engine rotated direction)
-static constexpr int kLaneMode_Default    = 0;
-static constexpr int kLaneMode_GeoSort    = 1;
-static constexpr int kLaneMode_LaneQuant  = 2;
-static constexpr int kLaneMode_DirCluster = 3;
-// NEOTKO_COLORMIX_TAG_END
-// NEOTKO_MULTIPASS_TAG_END
+// NEOTKO_NEOWEAVING_TAG_END
 
 enum GCodeFlavor : unsigned char {
     gcfMarlinLegacy, gcfKlipper, gcfRepRapFirmware, gcfMarlinFirmware, gcfRepRapSprinter, gcfRepetier, gcfTeacup, gcfMakerWare, gcfSailfish, gcfMach3, gcfMachinekit,
@@ -115,13 +105,6 @@ enum InfillPattern : int {
     ipCrossHatch, ipTpmsD, ipTpmsFK, ipGyroid,
     ipConcentric, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
     ipSupportBase, ipConcentricInternal,
-    // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch pattern. Reserved for top/bottom
-    // surface_pattern: subdivides the surface ExPolygon into K thin Y-strips and
-    // generates an independent FillRectilinear per strip. Adjacent strips have
-    // unsynchronised phase and any non-axis-aligned angle produces short
-    // diagonal segments — visually a stitched / chopped texture. Useful for
-    // Neoweaving and special-support experiments. NOT a normal solid infill.
-    ipMicroStitch,
     ipCount,
 };
 
@@ -313,33 +296,7 @@ enum class PerimeterGeneratorType
     Classic,
     // Perimeter generator with variable extrusion width based on the paper
     // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling" ported from Cura.
-    Arachne,
-    // NEOTKO_NEOARACHNE_TAG fase0
-    // Hybrid Classic+Arachne wall generator with NeotkoEdge-style pinned beading.
-    // See: memory/neoarachne_canonical_plan.md
-    NeoArachne
-};
-
-// NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source for NeoArachne.
-// Top-level enum (needed for CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS macro;
-// the macro can't handle nested namespaces). The NeoArachne:: namespace
-// aliases this as `WallSource` for internal code clarity.
-//   Classic           — Classic onion-shell offset, constant width.
-//   ArachneStock      — Arachne stock (Cura) variable-width beading.
-//   ArachneNeotkoEdge — Arachne with NeotkoEdgeBeadingStrategy (Fase 3+):
-//                       bead 0 and bead n-1 pinned to optimal_width;
-//                       residual distributed across interior beads only;
-//                       histéresis in getOptimalBeadCount. Mimics the
-//                       S3D outer-quality heritage without touching its
-//                       proprietary code.
-//   Off               — No wall emission at this slot (legal only for gap_fill;
-//                       the validator in ConfigManipulation blocks outer=Off).
-enum class NeoArachneWallSource
-{
-    Classic,
-    ArachneStock,
-    ArachneNeotkoEdge,
-    Off
+    Arachne
 };
 
 // BBS
@@ -360,6 +317,7 @@ enum BedType {
     btPEI,
     btPTE,
     btPCT,
+    btGESP,
     btSuperTack,
     btCount
 };
@@ -445,13 +403,14 @@ enum CounterboreHoleBridgingOption {
      wtwRib
  };
 
-// NEOTKO_NEOTOWER_TAG s104 — tower type selector (decisión s103: enum estilo
+// NEOTKO_NEOTOWER_TAG_START — tower type selector (decisión s103: enum estilo
 // wall_type, default Classic; sandwich/multipass still auto-promotes via
 // neotko_forces_tower regardless of this setting).
 enum NeoTowerType {
     nttClassic = 0,
     nttNeoTower
 };
+// NEOTKO_NEOTOWER_TAG_END
 
 static std::string bed_type_to_gcode_string(const BedType type)
 {
@@ -504,6 +463,9 @@ static std::string get_bed_temp_key(const BedType type)
     if (type == btPTE)
         return "textured_plate_temp";
 
+    if (type == btGESP)
+        return "graphic_effect_plate_temp";
+
     return "";
 }
 
@@ -526,6 +488,9 @@ static std::string get_bed_temp_1st_layer_key(const BedType type)
 
     if (type == btPTE)
         return "textured_plate_temp_initial_layer";
+
+    if (type == btGESP)
+        return "graphic_effect_plate_temp_initial_layer";
 
     return "";
 }
@@ -1040,33 +1005,21 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Orca: internal use only
     ((ConfigOptionBool,  calib_flowrate_topinfill_special_order)) // ORCA: special flag for flow rate calibration
 
-    // NEOTKO_MULTIPASS_TAG_START — Penultimate top layers
+    // NEOTKO_MULTIPASS_TAG_START — Penultimate top layers (Sandwich engine, Fase 2)
     ((ConfigOptionEnum<InfillPattern>, penultimate_solid_infill_pattern))
     ((ConfigOptionPercent,  penultimate_solid_infill_density))
     ((ConfigOptionInt,      penultimate_top_layers))
     ((ConfigOptionFloat,    penultimate_infill_speed))
     // NEOTKO_MULTIPASS_TAG_END
-
-    // NEOTKO_LIBRE_TAG_START — Feature 3: Bridge Infill Control
-    // Set automatically from Libre Mode at slice time; not exposed in UI.
-    ((ConfigOptionBool,     neotko_disable_bridge_infill))
-    // NEOTKO_LIBRE_TAG_END
-
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
-// NEOTKO_COLORMIX_TAG — s61: PrintRegionConfig has crossed the ~256-entry
-// limit that MSVC accepts inside a single PRINT_CONFIG_CLASS_DEFINE macro
-// (error C1009 "macros nested too deeply" on GitHub Actions Windows runner).
-// We split the class in two: PrintRegionConfigBase holds upstream / Orca
-// entries up through top_surface_speed; PrintRegionConfig itself becomes a
-// PRINT_CONFIG_CLASS_DERIVED_DEFINE that inherits Base and adds all the
-// NEOTKO + BBS keys (Neoweave, MultiPass, ColorMix, PathBlend, …). No `.cpp`
-// callers need changes — `config.<any_key>` still works thanks to inheritance.
-// IMPORTANT: future per-region keys must go in the derived block, not Base.
 PRINT_CONFIG_CLASS_DEFINE(
-    PrintRegionConfigBase,
+    PrintRegionConfig,
 
+    // NEOTKO_MULTIPASS_PRIME_TAG — prime volume (mm³) purged before each MultiPass/
+    // Sandwich sublayer toolchange (read per-region by NeoTower). 0 = disabled.
+    ((ConfigOptionFloat,                multipass_prime_volume))
     ((ConfigOptionInt,                  bottom_shell_layers))
     ((ConfigOptionFloat,                bottom_shell_thickness))
     ((ConfigOptionFloat,                bridge_angle))
@@ -1106,9 +1059,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
     ((ConfigOptionFloat,                gap_infill_speed))
-    ((ConfigOptionBool,                 enable_infill_filament_override))
-    ((ConfigOptionInt,                  infill_filament_use_base_first_layers))
-    ((ConfigOptionInt,                  infill_filament_use_base_last_layers))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
     ((ConfigOptionPercent,              infill_wall_overlap))
@@ -1151,178 +1101,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
     ((ConfigOptionFloat, top_surface_speed))
-)
-
-// NEOTKO_COLORMIX_TAG — s61: derived part of PrintRegionConfig (see split note
-// above). All NEOTKO + BBS per-region keys live here so the BOOST_PP_SEQ
-// expansion stays under MSVC's macro-nesting limit.
-PRINT_CONFIG_CLASS_DERIVED_DEFINE(
-    PrintRegionConfig,
-    (PrintRegionConfigBase),
-
-    // NEOTKO_MULTIPASS_TAG_START — Neoweaving
-    ((ConfigOptionBool,                   interlayer_neoweave_enabled))
-    ((ConfigOptionEnum<NeoweaveMode>,     interlayer_neoweave_mode))
-    ((ConfigOptionEnum<NeoweaveFilter>,   neoweave_filter))
-    ((ConfigOptionFloat,                  interlayer_neoweave_amplitude))
-    ((ConfigOptionFloat,                  interlayer_neoweave_period))
-    ((ConfigOptionFloat,                  interlayer_neoweave_max_z_speed))
-    ((ConfigOptionFloat,                  interlayer_neoweave_min_length))
-    ((ConfigOptionInt,                    neoweave_penultimate_layers))
-    ((ConfigOptionInt,                    neoweave_speed_pct))
-    // NEOTKO_NEOWEAVING_TAG_START — Feature 14: Monotonic Interlayer Nesting toggle
-    ((ConfigOptionBool,                   neotko_interlayer_nesting_enabled))
-    // NEOTKO_NEOWEAVING_TAG_END
-    // Infill Neoweaving (per-object tristate override)
-    ((ConfigOptionEnum<InfillNeoweaveOverride>, infill_neoweave_enabled))
-    ((ConfigOptionFloat,                  infill_neoweave_amplitude))
-    ((ConfigOptionFloat,                  infill_neoweave_period))
-    ((ConfigOptionFloat,                  infill_neoweave_max_z_speed))
-    // NEOTKO_COLORMIX_TAG_START — Surface ColorMix
-    ((ConfigOptionBool,    interlayer_colormix_enabled))
-    ((ConfigOptionInt,     interlayer_colormix_surface))
-    ((ConfigOptionInt,     interlayer_colormix_tool_a))
-    ((ConfigOptionInt,     interlayer_colormix_tool_b))
-    ((ConfigOptionInt,     interlayer_colormix_tool_c))
-    ((ConfigOptionInt,     interlayer_colormix_tool_d))
-    ((ConfigOptionFloat,   interlayer_colormix_min_length))
-    ((ConfigOptionString,  interlayer_colormix_pattern_top))
-    ((ConfigOptionString,  interlayer_colormix_pattern_penultimate))
-    ((ConfigOptionInt,     interlayer_colormix_mode))
-    ((ConfigOptionInt,     interlayer_colormix_pct_a))
-    ((ConfigOptionInt,     interlayer_colormix_pct_b))
-    ((ConfigOptionInt,     interlayer_colormix_easing))
-    ((ConfigOptionFloat,   interlayer_colormix_gamma))
-    ((ConfigOptionInt,     interlayer_colormix_min_surface_lines))
-    ((ConfigOptionFloat,   interlayer_colormix_overlap))
-    ((ConfigOptionBool,    interlayer_colormix_invert))
-    ((ConfigOptionInt,     interlayer_colormix_repetitions))      // NEOTKO_COLORMIX_TAG — s80: repeat the gradient N times across the surface
-    // NEOTKO_COLORMIX_TAG — s61: per-role penultimate-surface variants.
-    ((ConfigOptionInt,     interlayer_colormix_penu_mode))
-    ((ConfigOptionInt,     interlayer_colormix_penu_pct_a))
-    ((ConfigOptionInt,     interlayer_colormix_penu_pct_b))
-    ((ConfigOptionInt,     interlayer_colormix_penu_easing))
-    ((ConfigOptionFloat,   interlayer_colormix_penu_gamma))
-    ((ConfigOptionInt,     interlayer_colormix_penu_min_surface_lines))
-    ((ConfigOptionFloat,   interlayer_colormix_penu_overlap))
-    ((ConfigOptionBool,    interlayer_colormix_penu_invert))
-    ((ConfigOptionInt,     interlayer_colormix_penu_repetitions))  // NEOTKO_COLORMIX_TAG — s80
-    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_a))
-    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_b))
-    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_c))
-    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_d))
-    ((ConfigOptionInt,     interlayer_colormix_penu_tool_a))
-    ((ConfigOptionInt,     interlayer_colormix_penu_tool_b))
-    ((ConfigOptionInt,     interlayer_colormix_penu_tool_c))
-    ((ConfigOptionInt,     interlayer_colormix_penu_tool_d))
-    ((ConfigOptionInt,     interlayer_colormix_band_count_a))
-    ((ConfigOptionInt,     interlayer_colormix_band_count_b))
-    ((ConfigOptionInt,     interlayer_colormix_band_count_c))
-    ((ConfigOptionInt,     interlayer_colormix_band_count_d))
-    ((ConfigOptionInt,     interlayer_colormix_top_zone))
-    ((ConfigOptionInt,     interlayer_colormix_penu_zone))
-    ((ConfigOptionInt,     interlayer_colormix_filament_filter))
-    ((ConfigOptionBool,    interlayer_colormix_use_virtual))
-    ((ConfigOptionInt,     interlayer_colormix_angle))
-    ((ConfigOptionInt,     interlayer_colormix_penu_angle))
-    // NEOTKO_COLORMIX_TAG — s58: line distribution mode (kLaneMode_* in this file).
-    // Affects ColorMix (Top + Penultimate) AND PathBlend.
-    ((ConfigOptionInt,     surface_color_mix_lane_mode))
-    // NEOTKO_COLORMIX_TAG_END
-    // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
-    ((ConfigOptionBool,    multipass_enabled))
-    ((ConfigOptionInt,     multipass_surface))
-    ((ConfigOptionInt,     multipass_num_passes))
-    ((ConfigOptionInt,     multipass_tool_1))
-    ((ConfigOptionInt,     multipass_tool_2))
-    ((ConfigOptionInt,     multipass_tool_3))
-    ((ConfigOptionFloat,   multipass_width_ratio_1))
-    ((ConfigOptionFloat,   multipass_width_ratio_2))
-    ((ConfigOptionFloat,   multipass_width_ratio_3))
-    ((ConfigOptionBool,    multipass_vary_pattern))
-    ((ConfigOptionInt,     multipass_angle_1))
-    ((ConfigOptionInt,     multipass_angle_2))
-    ((ConfigOptionInt,     multipass_angle_3))
-    ((ConfigOptionInt,     multipass_pa_mode))
-    ((ConfigOptionFloat,   multipass_pa_value))
-    ((ConfigOptionInt,     multipass_fan_1))
-    ((ConfigOptionInt,     multipass_fan_2))
-    ((ConfigOptionInt,     multipass_fan_3))
-    ((ConfigOptionInt,     multipass_speed_pct_1))
-    ((ConfigOptionInt,     multipass_speed_pct_2))
-    ((ConfigOptionInt,     multipass_speed_pct_3))
-    ((ConfigOptionString,  multipass_gcode_start_1))
-    ((ConfigOptionString,  multipass_gcode_start_2))
-    ((ConfigOptionString,  multipass_gcode_start_3))
-    ((ConfigOptionString,  multipass_gcode_end_1))
-    ((ConfigOptionString,  multipass_gcode_end_2))
-    ((ConfigOptionString,  multipass_gcode_end_3))
-    // NEOTKO_MULTIPASS_PRIME_TAG — prime volume for sublayer toolchanges via Local-Z reserve
-    ((ConfigOptionFloat,   multipass_prime_volume))
-    // NEOTKO_MULTIPASS_TAG_START — Perimeter Override: re-print perimeters at each sublayer Z
-    ((ConfigOptionBool,    multipass_perimeter_override))
-    // NEOTKO_MULTIPASS_TAG_END
-    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
-    ((ConfigOptionBool,    penultimate_multipass_enabled))
-    ((ConfigOptionInt,     penultimate_multipass_num_passes))
-    ((ConfigOptionInt,     penultimate_multipass_tool_1))
-    ((ConfigOptionInt,     penultimate_multipass_tool_2))
-    ((ConfigOptionInt,     penultimate_multipass_tool_3))
-    ((ConfigOptionFloat,   penultimate_multipass_width_ratio_1))
-    ((ConfigOptionFloat,   penultimate_multipass_width_ratio_2))
-    ((ConfigOptionFloat,   penultimate_multipass_width_ratio_3))
-    ((ConfigOptionInt,     penultimate_multipass_angle_1))
-    ((ConfigOptionInt,     penultimate_multipass_angle_2))
-    ((ConfigOptionInt,     penultimate_multipass_angle_3))
-    ((ConfigOptionString,  penultimate_multipass_gcode_start_1))
-    ((ConfigOptionString,  penultimate_multipass_gcode_start_2))
-    ((ConfigOptionString,  penultimate_multipass_gcode_start_3))
-    ((ConfigOptionString,  penultimate_multipass_gcode_end_1))
-    ((ConfigOptionString,  penultimate_multipass_gcode_end_2))
-    ((ConfigOptionString,  penultimate_multipass_gcode_end_3))
-    // NEOTKO_MULTIPASS_PRIME_TAG — s58: removed. Unified into `multipass_prime_volume` (global).
-    // ((ConfigOptionFloat,   penultimate_multipass_prime_volume))
-    ((ConfigOptionBool,    penultimate_multipass_vary_pattern))
-    ((ConfigOptionInt,     penultimate_multipass_fan_1))
-    ((ConfigOptionInt,     penultimate_multipass_fan_2))
-    ((ConfigOptionInt,     penultimate_multipass_fan_3))
-    ((ConfigOptionInt,     penultimate_multipass_speed_pct_1))
-    ((ConfigOptionInt,     penultimate_multipass_speed_pct_2))
-    ((ConfigOptionInt,     penultimate_multipass_speed_pct_3))
-    // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
-    ((ConfigOptionBool,    multipass_path_gradient))
-    ((ConfigOptionInt,     path_gradient_segments))
-    ((ConfigOptionInt,     path_gradient_min_flow_pct))
-    // NEOTKO_MULTIPASS_TAG_END
-    // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
-    ((ConfigOptionInt,     pathblend_num_passes))
-    ((ConfigOptionInt,     pathblend_tool_1))
-    ((ConfigOptionInt,     pathblend_tool_2))
-    ((ConfigOptionInt,     pathblend_tool_3))
-    ((ConfigOptionInt,     pathblend_tool_4))
-    ((ConfigOptionFloat,   pathblend_layer_ratio_1))
-    ((ConfigOptionFloat,   pathblend_layer_ratio_2))
-    ((ConfigOptionFloat,   pathblend_layer_ratio_3))
-    ((ConfigOptionFloat,   pathblend_layer_ratio_4))
-    ((ConfigOptionFloat,   pathblend_min_ratio))
-    ((ConfigOptionFloat,   pathblend_max_ratio))
-    ((ConfigOptionInt,     pathblend_ease_mode))
-    ((ConfigOptionInt,     pathblend_surface))
-    ((ConfigOptionBool,    pathblend_invert_gradient))
-    ((ConfigOptionInt,     pathblend_fill_angle))
-    // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings as a JSON
-    // blob.  Empty default → from_region_config() falls back to the flat
-    // pathblend_* keys (back-compat).  Lets Top and Penultimate PathBlend hold
-    // independent settings without 14 mirror keys.
-    ((ConfigOptionString,  pathblend_top))
-    ((ConfigOptionString,  pathblend_penu))
-    // NEOTKO_PATHBLEND_TAG_END
-    // NEOTKO_SANDWICH_TAG_START — Sandwich pass-stack blob (1 coString JSON per zone).
-    // Empty default → SurfacePassStack::synthesize_from_legacy() rebuilds the
-    // stack from the legacy multipass_*/interlayer_colormix_*/pathblend_* keys.
-    ((ConfigOptionString,  neotko_surface_passes_top))
-    ((ConfigOptionString,  neotko_surface_passes_penu))
-    // NEOTKO_SANDWICH_TAG_END
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))
     ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))
@@ -1379,39 +1157,148 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloatOrPercent,       scarf_joint_speed))
     ((ConfigOptionFloat,                scarf_joint_flow_ratio))
     ((ConfigOptionPercent,              scarf_overhang_threshold))
-    // NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source selection.
-    // Defaults match "Neotko Hybrid v2" (s91): Classic outer + Arachne interior,
-    // gap-fill integrated into the Arachne pass. Visible in UI only when
-    // wall_generator == NeoArachne. The validator in ConfigManipulation
-    // blocks invalid combos (outer=Off, outer=Arachne*+inner=Classic).
-    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_outer_wall))
-    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_inner_walls))
-    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_gap_fill))
-    // NEOTKO_NEOARACHNE_TAG fase3.0 — Edge Closure (S3D heritage).
-    //  allowed_overlap_pct: how much Arachne first bead overlaps the Classic
-    //    outer (% of ext_perimeter_spacing). 50% default = balance between
-    //    closing the seam gap and PA gobbling tiny extrusions.
-    //  min_bead_width_pct: floor for variable-width bead (% of nozzle).
-    //    Lower = Arachne keeps thinner closure tails; below ~25% PA may
-    //    starve the extruder.
-    //  min_feature_size_pct: below this thickness Arachne discards geometry.
-    //    Lower = thinner geometry survives to be printed (Widening strategy).
-    //  keep_short_tails: suppress Arachne's removeSmallLines so closure
-    //    tails approaching the outer aren't discarded.
-    ((ConfigOptionPercent, neoarachne_allowed_overlap_pct))
-    ((ConfigOptionPercent, neoarachne_min_bead_width_pct))
-    ((ConfigOptionPercent, neoarachne_max_bead_width_pct))
-    ((ConfigOptionPercent, neoarachne_min_feature_size_pct))
-    ((ConfigOptionBool,    neoarachne_keep_short_tails))
-    // NEOTKO_NEOARACHNE_TAG fase3 — Spatial hysteresis (% of outer wall
-    // width) added to Arachne's bead-count transition threshold when one
-    // of the wall sources is ArachneNeotkoEdge. Higher = wider deadband =
-    // fewer breathing transitions across borderline strokes.
-    ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
-    // NEOTKO_NEOARACHNE_TAG fase4 — SkeletalTrapezoidation transition smoothing
-    // distance in mm. Lower = sharper bead-count transitions; higher = smoother.
-    // Upstream Arachne hardcoded this to 100 mm.
-    ((ConfigOptionFloat, neoarachne_transition_filter_dist_mm))
+
+    // ===================================================================
+    // NEOTKO SANDWICH ENGINE (Fase 2 port) — ColorMix + MultiPass + PathBlend
+    // + Penultimate + Interlayer nesting. Neoweaving/MicroStitch keys NOT ported
+    // (Tier B). multipass_prime_volume already lives above (increment #3).
+    // ===================================================================
+    // NEOTKO_NEOWEAVING_TAG — Monotonic Interlayer Nesting toggle (kept per D1;
+    // re-verify no neoweaving-code dependency when SurfaceColorMix.cpp lands).
+    ((ConfigOptionBool,                   neotko_interlayer_nesting_enabled))
+    // NEOTKO_NEOWEAVING_TAG — angle-lock keys consumed by Fill (_infill_direction).
+    // The full wave engine (NeoweaveEngine) + numeric keys live with GCode/SurfaceColorMix.
+    ((ConfigOptionBool,                   interlayer_neoweave_enabled))
+    ((ConfigOptionEnum<NeoweaveMode>,     interlayer_neoweave_mode))
+    ((ConfigOptionEnum<NeoweaveFilter>,   neoweave_filter))
+    // NEOTKO_COLORMIX_TAG_START — Surface ColorMix
+    ((ConfigOptionBool,    interlayer_colormix_enabled))
+    ((ConfigOptionInt,     interlayer_colormix_surface))
+    ((ConfigOptionInt,     interlayer_colormix_tool_a))
+    ((ConfigOptionInt,     interlayer_colormix_tool_b))
+    ((ConfigOptionInt,     interlayer_colormix_tool_c))
+    ((ConfigOptionInt,     interlayer_colormix_tool_d))
+    ((ConfigOptionFloat,   interlayer_colormix_min_length))
+    ((ConfigOptionString,  interlayer_colormix_pattern_top))
+    ((ConfigOptionString,  interlayer_colormix_pattern_penultimate))
+    ((ConfigOptionInt,     interlayer_colormix_mode))
+    ((ConfigOptionInt,     interlayer_colormix_pct_a))
+    ((ConfigOptionInt,     interlayer_colormix_pct_b))
+    ((ConfigOptionInt,     interlayer_colormix_easing))
+    ((ConfigOptionFloat,   interlayer_colormix_gamma))
+    ((ConfigOptionInt,     interlayer_colormix_min_surface_lines))
+    ((ConfigOptionFloat,   interlayer_colormix_overlap))
+    ((ConfigOptionBool,    interlayer_colormix_invert))
+    ((ConfigOptionInt,     interlayer_colormix_repetitions))
+    ((ConfigOptionInt,     interlayer_colormix_penu_mode))
+    ((ConfigOptionInt,     interlayer_colormix_penu_pct_a))
+    ((ConfigOptionInt,     interlayer_colormix_penu_pct_b))
+    ((ConfigOptionInt,     interlayer_colormix_penu_easing))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_gamma))
+    ((ConfigOptionInt,     interlayer_colormix_penu_min_surface_lines))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_overlap))
+    ((ConfigOptionBool,    interlayer_colormix_penu_invert))
+    ((ConfigOptionInt,     interlayer_colormix_penu_repetitions))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_a))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_b))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_c))
+    ((ConfigOptionInt,     interlayer_colormix_penu_band_count_d))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_a))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_b))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_c))
+    ((ConfigOptionInt,     interlayer_colormix_penu_tool_d))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_a))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_b))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_c))
+    ((ConfigOptionInt,     interlayer_colormix_band_count_d))
+    ((ConfigOptionInt,     interlayer_colormix_top_zone))
+    ((ConfigOptionInt,     interlayer_colormix_penu_zone))
+    ((ConfigOptionInt,     interlayer_colormix_filament_filter))
+    ((ConfigOptionBool,    interlayer_colormix_use_virtual))
+    ((ConfigOptionInt,     interlayer_colormix_angle))
+    ((ConfigOptionInt,     interlayer_colormix_penu_angle))
+    ((ConfigOptionInt,     surface_color_mix_lane_mode))
+    // NEOTKO_COLORMIX_TAG_END
+    // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend (multipass_prime_volume already above)
+    ((ConfigOptionBool,    multipass_enabled))
+    ((ConfigOptionInt,     multipass_surface))
+    ((ConfigOptionInt,     multipass_num_passes))
+    ((ConfigOptionInt,     multipass_tool_1))
+    ((ConfigOptionInt,     multipass_tool_2))
+    ((ConfigOptionInt,     multipass_tool_3))
+    ((ConfigOptionFloat,   multipass_width_ratio_1))
+    ((ConfigOptionFloat,   multipass_width_ratio_2))
+    ((ConfigOptionFloat,   multipass_width_ratio_3))
+    ((ConfigOptionBool,    multipass_vary_pattern))
+    ((ConfigOptionInt,     multipass_angle_1))
+    ((ConfigOptionInt,     multipass_angle_2))
+    ((ConfigOptionInt,     multipass_angle_3))
+    ((ConfigOptionInt,     multipass_pa_mode))
+    ((ConfigOptionFloat,   multipass_pa_value))
+    ((ConfigOptionInt,     multipass_fan_1))
+    ((ConfigOptionInt,     multipass_fan_2))
+    ((ConfigOptionInt,     multipass_fan_3))
+    ((ConfigOptionInt,     multipass_speed_pct_1))
+    ((ConfigOptionInt,     multipass_speed_pct_2))
+    ((ConfigOptionInt,     multipass_speed_pct_3))
+    ((ConfigOptionString,  multipass_gcode_start_1))
+    ((ConfigOptionString,  multipass_gcode_start_2))
+    ((ConfigOptionString,  multipass_gcode_start_3))
+    ((ConfigOptionString,  multipass_gcode_end_1))
+    ((ConfigOptionString,  multipass_gcode_end_2))
+    ((ConfigOptionString,  multipass_gcode_end_3))
+    ((ConfigOptionBool,    multipass_perimeter_override))
+    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
+    ((ConfigOptionBool,    penultimate_multipass_enabled))
+    ((ConfigOptionInt,     penultimate_multipass_num_passes))
+    ((ConfigOptionInt,     penultimate_multipass_tool_1))
+    ((ConfigOptionInt,     penultimate_multipass_tool_2))
+    ((ConfigOptionInt,     penultimate_multipass_tool_3))
+    ((ConfigOptionFloat,   penultimate_multipass_width_ratio_1))
+    ((ConfigOptionFloat,   penultimate_multipass_width_ratio_2))
+    ((ConfigOptionFloat,   penultimate_multipass_width_ratio_3))
+    ((ConfigOptionInt,     penultimate_multipass_angle_1))
+    ((ConfigOptionInt,     penultimate_multipass_angle_2))
+    ((ConfigOptionInt,     penultimate_multipass_angle_3))
+    ((ConfigOptionString,  penultimate_multipass_gcode_start_1))
+    ((ConfigOptionString,  penultimate_multipass_gcode_start_2))
+    ((ConfigOptionString,  penultimate_multipass_gcode_start_3))
+    ((ConfigOptionString,  penultimate_multipass_gcode_end_1))
+    ((ConfigOptionString,  penultimate_multipass_gcode_end_2))
+    ((ConfigOptionString,  penultimate_multipass_gcode_end_3))
+    ((ConfigOptionBool,    penultimate_multipass_vary_pattern))
+    ((ConfigOptionInt,     penultimate_multipass_fan_1))
+    ((ConfigOptionInt,     penultimate_multipass_fan_2))
+    ((ConfigOptionInt,     penultimate_multipass_fan_3))
+    ((ConfigOptionInt,     penultimate_multipass_speed_pct_1))
+    ((ConfigOptionInt,     penultimate_multipass_speed_pct_2))
+    ((ConfigOptionInt,     penultimate_multipass_speed_pct_3))
+    // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
+    ((ConfigOptionBool,    multipass_path_gradient))
+    ((ConfigOptionInt,     path_gradient_segments))
+    ((ConfigOptionInt,     path_gradient_min_flow_pct))
+    // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend: independent gradient blend system
+    ((ConfigOptionInt,     pathblend_num_passes))
+    ((ConfigOptionInt,     pathblend_tool_1))
+    ((ConfigOptionInt,     pathblend_tool_2))
+    ((ConfigOptionInt,     pathblend_tool_3))
+    ((ConfigOptionInt,     pathblend_tool_4))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_1))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_2))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_3))
+    ((ConfigOptionFloat,   pathblend_layer_ratio_4))
+    ((ConfigOptionFloat,   pathblend_min_ratio))
+    ((ConfigOptionFloat,   pathblend_max_ratio))
+    ((ConfigOptionInt,     pathblend_ease_mode))
+    ((ConfigOptionInt,     pathblend_surface))
+    ((ConfigOptionBool,    pathblend_invert_gradient))
+    ((ConfigOptionInt,     pathblend_fill_angle))
+    ((ConfigOptionString,  pathblend_top))
+    ((ConfigOptionString,  pathblend_penu))
+    // NEOTKO_SANDWICH_TAG — Sandwich pass-stack blob (1 coString JSON per zone).
+    ((ConfigOptionString,  neotko_surface_passes_top))
+    ((ConfigOptionString,  neotko_surface_passes_penu))
+    // NEOTKO_SANDWICH_ENGINE_TAG_END
 )
 
 PRINT_CONFIG_CLASS_DEFINE(
@@ -1612,12 +1499,14 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               eng_plate_temp))
     ((ConfigOptionInts,               hot_plate_temp)) // hot is short for high temperature
     ((ConfigOptionInts,               textured_plate_temp))
+    ((ConfigOptionInts,               graphic_effect_plate_temp))
     ((ConfigOptionInts,               supertack_plate_temp_initial_layer))
     ((ConfigOptionInts,               cool_plate_temp_initial_layer))
     ((ConfigOptionInts,               textured_cool_plate_temp_initial_layer))
     ((ConfigOptionInts,               eng_plate_temp_initial_layer))
     ((ConfigOptionInts,               hot_plate_temp_initial_layer)) // hot is short for high temperature
     ((ConfigOptionInts,               textured_plate_temp_initial_layer))
+    ((ConfigOptionInts,               graphic_effect_plate_temp_initial_layer))
     ((ConfigOptionBools,              enable_overhang_bridge_fan))
     ((ConfigOptionInts,               overhang_fan_speed))
     ((ConfigOptionEnumsGeneric,       overhang_fan_threshold))
@@ -1677,6 +1566,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))
+    ((ConfigOptionBool,               dithering_local_z_infill))
     ((ConfigOptionBool,               dithering_local_z_direct_multicolor))
     ((ConfigOptionBool,               dithering_step_painted_zones_only))
     ((ConfigOptionString,             printer_model))
@@ -1707,9 +1597,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               nozzle_temperature_range_high))
     ((ConfigOptionFloats,             wipe_distance))
     ((ConfigOptionBool,               enable_prime_tower))
-    // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner
-    ((ConfigOptionBool,               neotko_wipe_tower))
-    // NEOTKO_NEOTOWER_TAG_END
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
     ((ConfigOptionFloats,             wipe_tower_x))
     ((ConfigOptionFloats,             wipe_tower_y))
@@ -1722,11 +1609,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_bridging))
     ((ConfigOptionPercent,            wipe_tower_extra_flow))
     ((ConfigOptionFloat,              local_z_wipe_tower_purge_lines))
-    // NEOTKO_NEOTOWER_TAG s104 — F1 sandwich purge compaction (flow-boost cap)
-    ((ConfigOptionFloat,              neotower_purge_compaction))
-    // NEOTKO_NEOTOWER_TAG s104 — tower type (Classic|NeoTower) + zigurat taper option
-    ((ConfigOptionEnum<NeoTowerType>, neotko_tower_type))
-    ((ConfigOptionBool,               neotower_zigurat))
     ((ConfigOptionFloats,             flush_volumes_matrix))
     ((ConfigOptionFloats,             flush_volumes_vector))
 
@@ -1738,10 +1620,17 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
+    ((ConfigOptionBool,               wipe_tower_wall_gap))
     ((ConfigOptionInt,                wipe_tower_filament))
     ((ConfigOptionFloats,             wiping_volumes_extruders))
     ((ConfigOptionInts,       idle_temperature))
-
+    ((ConfigOptionFloats, filament_tower_ironing_area))
+    // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner + options
+    ((ConfigOptionBool,               neotko_wipe_tower))
+    ((ConfigOptionFloat,              neotower_purge_compaction))
+    ((ConfigOptionEnum<NeoTowerType>, neotko_tower_type))
+    ((ConfigOptionBool,               neotower_zigurat))
+    // NEOTKO_NEOTOWER_TAG_END
 
     // BBS: wipe tower is only used for priming
     ((ConfigOptionFloat,              prime_volume))

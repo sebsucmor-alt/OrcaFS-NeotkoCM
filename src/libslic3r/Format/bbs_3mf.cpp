@@ -1,9 +1,9 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
 #include "../Model.hpp"
-#include "../MixedFilament.hpp"
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
 #include "../SurfaceColorMix.hpp"      // NEOTKO_PROFILE_TAG — NEOTKO_LOG + NeoDebug::PROFILE
+#include "../MixedFilament.hpp"
 #include "../Preset.hpp"
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
@@ -277,12 +277,14 @@ static constexpr const char* OFFSET_ATTR = "offset";
 static constexpr const char* PRINTABLE_ATTR = "printable";
 static constexpr const char* INSTANCESCOUNT_ATTR = "instances_count";
 static constexpr const char* CUSTOM_SUPPORTS_ATTR = "paint_supports";
-static constexpr const char* CUSTOM_FUZZY_SKIN_ATTR  = "paint_fuzzy_skin";
+static constexpr const char* CUSTOM_FUZZY_SKIN_ATTR      = "paint_fuzzy_skin";
+static constexpr const char* CUSTOM_FUZZY_SKIN_ATTR_OLD  = "paint_fuzzy";
 static constexpr const char* CUSTOM_SEAM_ATTR = "paint_seam";
 static constexpr const char* MMU_SEGMENTATION_ATTR = "paint_color";
+
 // NEOTKO_PROFILE_TAG — Surface Effect Profile painter:
 //   * per-triangle 4-bit slot encoded as XML attribute (same hex format as MMU)
-//   * per-volume slot→profile id table (16 ints, comma-separated metadata tag)
+//   * per-volume slot→profile id table (comma-separated metadata tag)
 static constexpr const char* COLORMIX_PAINT_ATTR     = "paint_colormix";
 static constexpr const char* COLORMIX_SLOT_TABLE_KEY = "colormix_slot_to_profile_id";
 
@@ -309,7 +311,7 @@ static inline std::string colormix_profiles_b64_decode(const std::string& b64)
     return out;
 }
 
-// Parse "1,2,0,3,0,..." (up to 16 ints) into slots[]. Missing entries left as 0.
+// Parse "1,2,0,3,0,..." into slots[]. Missing entries left as 0.
 static inline void parse_colormix_slot_table(const std::string& csv, int (&slots)[Slic3r::ModelVolume::COLORMIX_SLOT_COUNT])
 {
     for (int& s : slots) s = 0;
@@ -500,6 +502,18 @@ std::string bbs_get_attribute_value_string(const char** attributes, unsigned int
     return (text != nullptr) ? text : "";
 }
 
+// Try each key in order, returning the first non-empty value.
+// Supports any number of fallback keys for backward compatibility.
+static std::string bbs_get_attribute_value_string(const char** attributes, unsigned int attributes_size,
+                                                   std::initializer_list<const char*> keys)
+{
+    for (const char* key : keys) {
+        std::string data = bbs_get_attribute_value_string(attributes, attributes_size, key);
+        if (!data.empty()) return data;
+    }
+    return "";
+}
+
 float bbs_get_attribute_value_float(const char** attributes, unsigned int attributes_size, const char* attribute_key)
 {
     float value = 0.0f;
@@ -638,34 +652,37 @@ namespace Slic3r {
 
 static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
 {
-    if (const auto *opt = config.option<ConfigOptionStrings>("filament_colour"); opt != nullptr && !opt->values.empty())
-        return opt->values.size();
-    if (const auto *opt = config.option<ConfigOptionStrings>("filament_settings_id"); opt != nullptr && !opt->values.empty())
-        return opt->values.size();
-    if (const auto *opt = config.option<ConfigOptionStrings>("filament_ids"); opt != nullptr && !opt->values.empty())
-        return opt->values.size();
-    if (const auto *opt = config.option<ConfigOptionStrings>("default_filament_colour"); opt != nullptr && !opt->values.empty())
-        return opt->values.size();
-    if (const auto *opt = config.option<ConfigOptionFloats>("nozzle_diameter"); opt != nullptr && !opt->values.empty())
+    for (const char* key : {"filament_colour", "filament_settings_id",
+                             "filament_ids", "default_filament_colour"}) {
+        if (const auto* opt = config.option<ConfigOptionStrings>(key); opt && !opt->values.empty())
+            return opt->values.size();
+    }
+    if (const auto* opt = config.option<ConfigOptionFloats>("nozzle_diameter"); opt && !opt->values.empty())
         return opt->values.size();
     return 0;
 }
 
 static int max_supported_filament_id_from_project_config(const DynamicPrintConfig &config)
 {
-    const size_t physical_count = physical_filament_count_from_project_config(config);
+    size_t physical_count = 0;
+    std::vector<std::string> physical_colors;
+    auto try_color_key = [&](const char* key) -> bool {
+        const auto* opt = config.option<ConfigOptionStrings>(key);
+        if (opt != nullptr && !opt->values.empty()) {
+            physical_count  = opt->values.size();
+            physical_colors = opt->values;
+            return true;
+        }
+        return false;
+    };
+    if (!try_color_key("filament_colour") && !try_color_key("default_filament_colour")) {
+        physical_count = physical_filament_count_from_project_config(config);
+        if (physical_count > 0)
+            physical_colors.assign(physical_count, "#FFFFFF");
+    }
+
     if (physical_count == 0)
         return std::numeric_limits<int>::max();
-
-    std::vector<std::string> physical_colors;
-    if (const auto *opt = config.option<ConfigOptionStrings>("filament_colour"); opt != nullptr)
-        physical_colors = opt->values;
-    else if (const auto *opt = config.option<ConfigOptionStrings>("default_filament_colour"); opt != nullptr)
-        physical_colors = opt->values;
-    if (physical_colors.size() < physical_count)
-        physical_colors.resize(physical_count, "#FFFFFF");
-    else if (physical_colors.size() > physical_count)
-        physical_colors.resize(physical_count);
 
     size_t max_filament_id = physical_count;
     if (physical_count >= 2) {
@@ -3713,7 +3730,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             m_curr_object->geometry.custom_supports.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SUPPORTS_ATTR));
             m_curr_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
             m_curr_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
-            m_curr_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));
+            m_curr_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, {CUSTOM_FUZZY_SKIN_ATTR, CUSTOM_FUZZY_SKIN_ATTR_OLD}));
             m_curr_object->geometry.colormix_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, COLORMIX_PAINT_ATTR)); // NEOTKO_PROFILE_TAG
             // BBS
             m_curr_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
@@ -5373,7 +5390,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             current_object->geometry.custom_supports.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SUPPORTS_ATTR));
             current_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
             current_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
-            current_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));
+            current_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, {CUSTOM_FUZZY_SKIN_ATTR, CUSTOM_FUZZY_SKIN_ATTR_OLD}));
             current_object->geometry.colormix_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, COLORMIX_PAINT_ATTR)); // NEOTKO_PROFILE_TAG
             // BBS
             current_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
@@ -7646,11 +7663,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
 
                 // stores object's config data
-                // NEOTKO_SANDWICH_TAG — xml_escape the value: coString keys can
-                // hold JSON (neotko_surface_passes_*, pathblend_*); a raw " in an
-                // XML attribute breaks the parser → "Loading of model file failed".
                 for (const std::string& key : obj->config.keys()) {
-                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape(obj->config.opt_serialize(key)) << "\"/>\n";
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape(obj->config.opt_serialize(key)) << "\"/>\n"; // NEOTKO_PROFILE_TAG — xml_escape: JSON blobs (neotko_surface_passes_*, pathblend_*) carry '\"' that breaks the XML attribute without escaping
                 }
 
                 for (const ModelVolume* volume : obj_metadata.second.object->volumes) {
@@ -7716,7 +7730,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                             // stores volume's config data
                             for (const std::string& key : volume->config.keys()) {
-                                stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
+                                stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->config.opt_serialize(key)) << "\"/>\n"; // NEOTKO_PROFILE_TAG — xml_escape: per-part JSON blobs (sandwich/painter) need escaping too (bug_xml_escape_per_part_metadata)
                             }
 
                             // NEOTKO_PROFILE_TAG — colormix painter slot table

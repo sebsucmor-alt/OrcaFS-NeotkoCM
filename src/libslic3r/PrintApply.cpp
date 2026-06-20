@@ -1,3 +1,4 @@
+#include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
 
@@ -238,6 +239,10 @@ static t_config_option_keys print_config_diffs(
     const std::string               filament_prefix       = "filament_";
     t_config_option_keys            print_diff;
     for (const t_config_option_key &opt_key : current_config.keys()) {
+        // Skip wipe_tower_filament: it is auto-selected by ToolOrdering during slicing,
+        // and should not cause a print config diff that triggers re-slicing on plate switch.
+        if (opt_key == "wipe_tower_filament")
+            continue;
         const ConfigOption *opt_old = current_config.option(opt_key);
         assert(opt_old != nullptr);
         const ConfigOption *opt_new = new_full_config.option(opt_key);
@@ -300,6 +305,10 @@ static t_config_option_keys full_print_config_diffs(const DynamicPrintConfig &cu
 {
     t_config_option_keys full_config_diff;
     for (const t_config_option_key &opt_key : new_full_config.keys()) {
+        // Skip wipe_tower_filament: it is auto-selected by ToolOrdering during slicing,
+        // and should not cause a full config diff that triggers re-slicing on plate switch.
+        if (opt_key == "wipe_tower_filament")
+            continue;
         const ConfigOption *opt_old = current_full_config.option(opt_key);
         const ConfigOption *opt_new = new_full_config.option(opt_key);
         if (opt_old == nullptr || !config_options_equal(opt_new, opt_old)) {
@@ -1016,11 +1025,6 @@ static PrintObjectRegions* generate_print_object_regions(
         region_set.emplace(it, region);
         return region;
     };
-    auto create_unique_region = [&all_regions](PrintRegionConfig &&config) -> PrintRegion* {
-        size_t hash = config.hash();
-        all_regions.emplace_back(std::make_unique<PrintRegion>(std::move(config), hash, int(all_regions.size())));
-        return all_regions.back().get();
-    };
     // Chain the regions in the order they are stored in the volumes list.
     for (int volume_id = 0; volume_id < int(model_volumes.size()); ++ volume_id) {
         const ModelVolume &volume = *model_volumes[volume_id];
@@ -1076,7 +1080,9 @@ static PrintObjectRegions* generate_print_object_regions(
                     cfg.wall_filament.value    = painted_extruder_id;
                     cfg.solid_infill_filament.value = painted_extruder_id;
                     cfg.sparse_infill_filament.value       = painted_extruder_id;
-                    PrintRegion *painted_region = create_unique_region(std::move(cfg));
+                    // Keep PrintRegion config-interned. If a painted target resolves to the same
+                    // config as its parent, alias it instead of creating a duplicate PrintRegion.
+                    PrintRegion *painted_region = get_create_region(std::move(cfg));
                     if (painted_region->config().wall_filament.value != painted_extruder_id ||
                         painted_region->config().solid_infill_filament.value != painted_extruder_id ||
                         painted_region->config().sparse_infill_filament.value != painted_extruder_id) {
@@ -1159,27 +1165,64 @@ static void append_mixed_component_extruders(const MixedFilamentManager &mixed_m
     append_unique_painted_extruder(painting_extruders, mixed_row->component_a, num_physical_extruders);
     append_unique_painted_extruder(painting_extruders, mixed_row->component_b, num_physical_extruders);
 
-    for (char token : mixed_row->gradient_component_ids) {
-        if (token < '1' || token > '9')
-            continue;
-        append_unique_painted_extruder(painting_extruders, unsigned(token - '0'), num_physical_extruders);
+    for (unsigned int id : MixedFilamentManager::decode_gradient_component_ids(mixed_row->gradient_component_ids, num_physical_extruders))
+        append_unique_painted_extruder(painting_extruders, id, num_physical_extruders);
+
+    {
+        const std::string flattened = MixedFilamentManager::normalize_manual_pattern(mixed_row->manual_pattern);
+        if (!flattened.empty()) {
+            const std::vector<std::string> group_strs = MixedFilamentManager::split_pattern_groups(flattened);
+            for (const std::string &group : group_strs) {
+                const std::vector<std::string> tokens =
+                    MixedFilamentManager::split_pattern_group_to_tokens(group, num_physical_extruders);
+                for (const std::string &token : tokens) {
+                    const unsigned int extruder_id =
+                        MixedFilamentManager::physical_filament_from_token(token, *mixed_row, num_physical_extruders);
+                    append_unique_painted_extruder(painting_extruders, extruder_id, num_physical_extruders);
+                }
+            }
+        }
+    }
+}
+
+static bool painted_region_targets_match(const PrintObjectRegions           &print_object_regions,
+                                         const std::vector<unsigned int>    &painting_extruders)
+{
+    std::vector<unsigned int> expected_extruders = painting_extruders;
+    std::sort(expected_extruders.begin(), expected_extruders.end());
+    expected_extruders.erase(std::unique(expected_extruders.begin(), expected_extruders.end()), expected_extruders.end());
+
+    for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges) {
+        std::vector<std::pair<int, unsigned int>> expected_targets;
+        expected_targets.reserve(layer_range.volume_regions.size() * expected_extruders.size());
+
+        for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++parent_region_id) {
+            const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
+            if (parent_region.region != nullptr &&
+                (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
+                mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+                for (unsigned int extruder_id : expected_extruders)
+                    expected_targets.emplace_back(parent_region_id, extruder_id);
+            }
+        }
+
+        std::vector<std::pair<int, unsigned int>> actual_targets;
+        actual_targets.reserve(layer_range.painted_regions.size());
+        for (const PrintObjectRegions::PaintedRegion &painted_region : layer_range.painted_regions)
+            actual_targets.emplace_back(painted_region.parent, painted_region.extruder_id);
+
+        std::sort(expected_targets.begin(), expected_targets.end());
+        std::sort(actual_targets.begin(), actual_targets.end());
+        if (actual_targets != expected_targets)
+            return false;
     }
 
-    for (char token : mixed_row->manual_pattern) {
-        unsigned int extruder_id = 0;
-        if (token == '1')
-            extruder_id = mixed_row->component_a;
-        else if (token == '2')
-            extruder_id = mixed_row->component_b;
-        else if (token >= '3' && token <= '9')
-            extruder_id = unsigned(token - '0');
-
-        append_unique_painted_extruder(painting_extruders, extruder_id, num_physical_extruders);
-    }
+    return true;
 }
 
 static bool same_layer_pointillism_enabled(const MixedFilamentManager &mixed_mgr)
 {
+    // Deprecated: same-layer pointillism is disabled and will be removed.
 #if 0
     for (const MixedFilament &mf : mixed_mgr.mixed_filaments())
         if (mf.enabled && mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
@@ -1205,6 +1248,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     new_full_config.option("dithering_z_step_size", true);
     new_full_config.option("dithering_local_z_mode", true);
     new_full_config.option("dithering_local_z_whole_objects", true);
+    new_full_config.option("dithering_local_z_infill", true);
     new_full_config.option("dithering_local_z_direct_multicolor", true);
     new_full_config.option("dithering_step_painted_zones_only", true);
     new_full_config.option("mixed_filament_gradient_mode", true);
@@ -1220,6 +1264,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_config.option("dithering_z_step_size", true);
     m_config.option("dithering_local_z_mode", true);
     m_config.option("dithering_local_z_whole_objects", true);
+    m_config.option("dithering_local_z_infill", true);
     m_config.option("dithering_local_z_direct_multicolor", true);
     m_config.option("dithering_step_painted_zones_only", true);
     m_config.option("mixed_filament_gradient_mode", true);
@@ -1235,6 +1280,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_default_object_config.option("dithering_z_step_size", true);
     m_default_object_config.option("dithering_local_z_mode", true);
     m_default_object_config.option("dithering_local_z_whole_objects", true);
+    m_default_object_config.option("dithering_local_z_infill", true);
     m_default_object_config.option("dithering_local_z_direct_multicolor", true);
     m_default_object_config.option("dithering_step_painted_zones_only", true);
     m_default_object_config.option("mixed_filament_gradient_mode", true);
@@ -1895,6 +1941,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 invalidate();
                 print_object_regions->clear();
                 model_object_status.print_object_regions_status = ModelObjectStatus::PrintObjectRegionsStatus::Invalid;
+                print_regions_reshuffled = true;
+            } else if (print_object_regions && !painted_region_targets_match(*print_object_regions, painting_extruders)) {
+                invalidate();
+                model_object_status.print_object_regions_status = ModelObjectStatus::PrintObjectRegionsStatus::PartiallyValid;
                 print_regions_reshuffled = true;
             } else if (print_object_regions &&
                 verify_update_print_object_regions(

@@ -13,7 +13,10 @@
 #include "ExtrusionEntityCollection.hpp" // NEOTKO_SANDWICH_TAG — eec_to_tool_buckets() returns EEC by value
 #include "PrintConfig.hpp"
 #include "MixedFilament.hpp"
-#include "SurfaceEffectProfile.hpp" // NEOTKO_SANDWICH_TAG — SurfaceEffectPayload by value in SurfacePass
+#include "SurfaceEffectProfile.hpp"  // NEOTKO_SANDWICH_TAG — SurfaceEffectPayload by value in SurfacePass
+#include "SurfacePassKind.hpp"   // NEOTKO_SANDWICH_TAG — extracted enum (was inline)
+#include "NeoDebug.hpp"           // NEOTKO_DEBUG_TAG — extracted NeoDebug namespace
+#include "PathBlendRuntime.hpp"   // NEOTKO_PATHBLEND_TAG — extracted scheduler/dispatcher runtimes
 #include <utility>  // NEOTKO_SANDWICH_TAG — std::pair in eec_to_tool_buckets() return type
 #include <vector>
 #include <map>
@@ -39,32 +42,6 @@ namespace Slic3r {
 //                              Fase D painted-slot resolution + gv override)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
 // Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile}.log
-namespace NeoDebug {
-    enum Channel : int {
-        COLORMIX    = 0,
-        MULTIPASS   = 1,
-        PENULTIMATE = 2,
-        TOOLORDER   = 3,
-        ZBLEND      = 4,
-        WIPETOWER   = 5,
-        PROFILE     = 6, // NEOTKO_PROFILE_TAG
-        DISPATCH    = 7, // NEOTKO_NEOARACHNE_TAG s95 — extrude_entity dispatch trace
-        CH_COUNT    = 8
-    };
-    // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
-    // Cheap after first call (static flag per channel).
-    bool enabled(Channel c);
-    // Append msg + newline to the channel's log file (thread-safe).
-    void write(Channel c, const std::string& msg);
-    // NEOTKO_DEBUG_TAG s79h — write a session banner to ALL active channels.
-    // Used at the start of each slice to separate test runs in append-mode logs
-    // (otherwise multiple slices in the same Orca process all concatenate without
-    // delimiter, making post-mortem triage hard). `tag` is a short caller-supplied
-    // identifier (e.g. "collect_and_plan", plate index, 3mf basename if available).
-    // Banner format:  =============  [HH:MM:SS] SLICE #N  tag  =============
-    // N is a process-wide monotonic counter.
-    void write_session_banner(const std::string& tag);
-} // namespace NeoDebug
 // NEOTKO_DEBUG_TAG_END
 
 class PrintRegionConfig;
@@ -488,12 +465,6 @@ struct PathBlendPassConfig {
 //
 // NOTE: the enum is `SurfacePassKind`, NOT `SurfaceEffectKind` — the latter
 // already exists in SurfaceEffectProfile.hpp with different members.
-enum class SurfacePassKind : int {
-    None      = 0,   // passthrough — natural object surface, no effect, no gap
-    Solid     = 1,   // flat colour (a classic MultiPass pass)
-    ColorMix  = 2,   // dithered numeric gradient
-    PathBlend = 3,   // diagonal Z+flow blend (legacy whole-surface until Fase 5)
-};
 
 struct SurfacePass {
     SurfacePassKind kind  = SurfacePassKind::Solid;
@@ -594,49 +565,6 @@ struct SurfacePassStack {
 class GCodeWriter;
 struct ExtrusionPath;
 
-class NeoweaveEngine {
-public:
-    // Returns true if neoweaving should apply to this path.
-    // When true, the caller MUST skip arc-fitting and use G1 extrusion.
-    static bool needs_weave(const ExtrusionPath& path, const PrintRegionConfig& cfg);
-
-    // Apply neowave to a complete ExtrusionPath (all lines in its polyline).
-    // Appends to gcode_out. Both Wave and Linear modes handled.
-    // Does NOT include the final Z-restore after the path; call restore_z() after.
-    //
-    // Parameters:
-    //   path              — path to extrude (polyline + role + width)
-    //   cfg               — region config (mode, amplitude, period, etc.)
-    //   writer            — GCodeWriter for emit helpers (extrude_to_xy/xyz, get_position)
-    //   layer_index       — m_layer_index (parity used for Linear mode)
-    //   nominal_z         — m_nominal_z (layer base Z)
-    //   F                 — current print speed (mm/min)
-    //   e_per_mm          — extrusion per mm for this path
-    //   is_force_no_extr  — pass-through path flag
-    //   point_to_gcode    — converts Slic3r Point → Vec2d GCode coords (lambda from GCode.cpp)
-    static std::string apply_path(
-        const ExtrusionPath&                       path,
-        const PrintRegionConfig&                   cfg,
-        GCodeWriter&                               writer,
-        int                                        layer_index,
-        double                                     nominal_z,
-        double                                     F,
-        double                                     e_per_mm,
-        bool                                       is_force_no_extr,
-        const std::function<Vec2d(const Point&)>&  point_to_gcode
-    );
-
-    // Restore the nozzle to nominal_z after a weaving path.
-    // Linear mode: emits a G1 Z move at path speed F (NOT travel speed).
-    // Wave mode:   emits travel_to_z (speed already capped via weave_F).
-    static std::string restore_z(
-        const PrintRegionConfig& cfg,
-        GCodeWriter&             writer,
-        double                   nominal_z,
-        double                   F,
-        bool                     surface_weave_active  // true=top/penultimate, false=infill
-    );
-};
 // NEOTKO_NEOWEAVING_TAG_END
 
 // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
@@ -767,20 +695,6 @@ std::vector<PBBand> compute_pb_bands(
 // scanlines of different objects (the multi-cube preview bug).
 // Lives at libslic3r level so both backend and GUI can read/write through
 // a single singleton without pulling GUI headers into libslic3r.
-struct PathBlendSchedulerRuntime {
-    bool chain_atomic = true;
-    // NEOTKO_PATHBLEND_TAG — s89. When true, NeoTower's Fase B sublayer
-    // scheduler uses MultiPassScheduler::order_sublayers_by_tool (the SAME
-    // algorithm GCode.cpp:5277 uses to dispatch) instead of its home-grown
-    // FusedGroup chain-greedy. Aligns plan with emission for atomic-chain
-    // multi-object PathBlend (test04 4-cube crash). Fusion of contiguous
-    // same-(old,new) runs is preserved as a post-process so tower
-    // compaction across same-pair siblings is not lost. See [[session-s89-plan]].
-    bool use_canon_scheduler = true;
-
-    static PathBlendSchedulerRuntime&       mut();
-    static const PathBlendSchedulerRuntime& get();
-};
 
 // --- 3. PathBlend DISPATCHER runtime -------------------------------------
 // NEOTKO_PATHBLEND_TAG — s88. Toggles consumed by GCode.cpp dispatcher.
@@ -790,13 +704,6 @@ struct PathBlendSchedulerRuntime {
 //   chain_max_xy_mm:  XY threshold (mm) below which two PB sublayers are
 //     considered part of the same chain. Beyond it (disconnected
 //     islands) the normal lift cycle returns.
-struct PathBlendDispatcherRuntime {
-    bool   chain_continuous = true;
-    double chain_max_xy_mm  = 1.0;
-
-    static PathBlendDispatcherRuntime&       mut();
-    static const PathBlendDispatcherRuntime& get();
-};
 
 // NEOTKO_MULTIPASS_TAG_END
 

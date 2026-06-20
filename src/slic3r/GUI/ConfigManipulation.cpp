@@ -505,10 +505,9 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
-    // NEOTKO_LIBRE_TAG_START
-    // Warn user if Neotko multi-tool features are active but Prime Tower is disabled.
-    // We do NOT force enable_prime_tower — user must opt in explicitly.
-    // Uses config->has() before opt_bool() to be null-safe (config may be local_config).
+    // NEOTKO_LIBRE_TAG — s130 port: warn if Neotko multi-tool features are active but
+    // Prime Tower is disabled. We do NOT force enable_prime_tower — user opts in.
+    // has() before opt_bool() is null-safe (config may be local_config).
     {
         const bool neotko_multi_tool =
             (config->has("multipass_enabled")             && config->opt_bool("multipass_enabled")) ||
@@ -532,91 +531,6 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
                 DynamicPrintConfig new_conf = *config;
                 new_conf.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
                 apply(config, &new_conf);
-            }
-        }
-    }
-    // NEOTKO_LIBRE_TAG_END
-
-    // NEOTKO_NEOARACHNE_TAG fase2+fase3.0 — validate the NeoArachne wall-source combo
-    // and Edge Closure invariants. Auto-fix obvious mistakes with a Yes/No dialog;
-    // silently swap inverted invariants (min_feat > min_bead).
-    //
-    // s91 crash fix: this runs on a SPARSE DynamicPrintConfig (per-object override).
-    // The neoarachne_* keys are only present if the user has explicitly set them
-    // on this object. Guard EVERY opt_* read with config->has() — bare opt_enum on
-    // a missing key crashes (DynamicConfig::option returns nullptr, then ->getInt()
-    // segfaults). All five neoarachne_* keys must be present for the validator to
-    // do anything meaningful, so a single has() check on one of them gates the whole
-    // block (they always travel together — added in the same commit).
-    if (config->has("wall_generator")
-        && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoArachne
-        && config->has("neoarachne_outer_wall")
-        && config->has("neoarachne_inner_walls")
-        && config->has("neoarachne_min_bead_width_pct")
-        && config->has("neoarachne_min_feature_size_pct")
-        && !is_msg_dlg_already_exist)
-    {
-        const auto outer = config->opt_enum<NeoArachneWallSource>("neoarachne_outer_wall");
-        const auto inner = config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls");
-
-        // (1) outer = Off is meaningless — every part needs at least one outer.
-        if (outer == NeoArachneWallSource::Off) {
-            MessageDialog dialog(m_msg_dlg_parent,
-                _L("NeoArachne — outer wall set to Off is not allowed. Reset to Classic?"),
-                _L("NeoArachne — invalid combo"), wxICON_WARNING | wxYES | wxNO);
-            is_msg_dlg_already_exist = true;
-            const auto ans = dialog.ShowModal();
-            is_msg_dlg_already_exist = false;
-            if (ans == wxID_YES) {
-                DynamicPrintConfig nc = *config;
-                nc.set_key_value("neoarachne_outer_wall",
-                    new ConfigOptionEnum<NeoArachneWallSource>(NeoArachneWallSource::Classic));
-                apply(config, &nc);
-            }
-        }
-        // (2) outer = Arachne* + inner = Classic is a contradiction. Arachne's beading
-        //     strategy reasons over the full slab; splitting outer/inner across two
-        //     different engines breaks the math. Suggest aligning inner with outer.
-        else if ((outer == NeoArachneWallSource::ArachneStock || outer == NeoArachneWallSource::ArachneNeotkoEdge)
-                 && inner == NeoArachneWallSource::Classic)
-        {
-            MessageDialog dialog(m_msg_dlg_parent,
-                _L("NeoArachne — outer = Arachne with inner = Classic is unsupported "
-                   "(Arachne's beading needs the whole slab). Switch inner to match outer?"),
-                _L("NeoArachne — invalid combo"), wxICON_WARNING | wxYES | wxNO);
-            is_msg_dlg_already_exist = true;
-            const auto ans = dialog.ShowModal();
-            is_msg_dlg_already_exist = false;
-            if (ans == wxID_YES) {
-                DynamicPrintConfig nc = *config;
-                nc.set_key_value("neoarachne_inner_walls",
-                    new ConfigOptionEnum<NeoArachneWallSource>(outer));
-                apply(config, &nc);
-            }
-        }
-
-        // (3) Edge Closure invariant: min_feature_size_pct must be ≤ min_bead_width_pct
-        //     (Widening strategy: input thinner than min_feature is discarded; widened
-        //     to min_bead otherwise. Inversion would emit beads thinner than the floor.)
-        //
-        // s91 crash fix: `opt_float()` non-const uses the TEMPLATE `option<ConfigOptionFloat>`
-        // (Config.hpp:2018-2023) which compares `opt->type() != TYPE::static_type()` —
-        // exact-match, no inheritance. Our keys are `ConfigOptionPercent` (type=coPercent,
-        // derived from ConfigOptionFloat). Template returns nullptr → ->value crashes at
-        // address 0x8. Fix: read through the virtual `getFloat()` of the base ConfigOption,
-        // which ConfigOptionFloat (and thus Percent) overrides correctly. Same trick used
-        // everywhere else in the codebase that mixes Percent and Float.
-        const ConfigOption* min_bead_opt = config->option("neoarachne_min_bead_width_pct");
-        const ConfigOption* min_feat_opt = config->option("neoarachne_min_feature_size_pct");
-        if (min_bead_opt && min_feat_opt) {
-            const double min_bead = min_bead_opt->getFloat();
-            const double min_feat = min_feat_opt->getFloat();
-            if (min_feat > min_bead) {
-                // Silent swap (no dialog spam — the relationship is non-obvious to most users).
-                DynamicPrintConfig nc = *config;
-                nc.set_key_value("neoarachne_min_feature_size_pct", new ConfigOptionPercent(min_bead));
-                nc.set_key_value("neoarachne_min_bead_width_pct",   new ConfigOptionPercent(min_feat));
-                apply(config, &nc);
             }
         }
     }
@@ -673,12 +587,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_field(el, have_perimeters);
 
     bool have_infill = config->option<ConfigOptionPercent>("sparse_infill_density")->value > 0;
-    const bool show_infill_filament_override_toggle = !is_global_config && have_infill && !bSEMM;
     // sparse_infill_filament uses the same logic as in Print::extruders()
     for (auto el : { "sparse_infill_pattern", "infill_combination",
         "minimum_sparse_infill_area", "infill_anchor_max","infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
         toggle_line(el, have_infill);
-    toggle_line("enable_infill_filament_override", show_infill_filament_override_toggle);
 
     bool have_combined_infill = config->opt_bool("infill_combination") && have_infill;
     toggle_line("infill_combination_max_layer_height", have_combined_infill);
@@ -796,17 +708,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : { "support_style", "support_base_pattern",
         "support_base_pattern_spacing", "support_expansion", "support_angle",
         "support_interface_pattern", "support_interface_top_layers", "support_interface_bottom_layers",
-        "bridge_no_support", "max_bridge_length", "support_bottom_z_distance",
+        "bridge_no_support", "max_bridge_length", "support_top_z_distance", "support_bottom_z_distance",
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
         "support_object_xy_distance", "support_object_first_layer_gap"/*, "independent_support_layer_height"*/})
         toggle_field(el, have_support_material);
-    // NEOTKO_LIBRE_TAG_START — Support options: enable with LM even without support_interface_filament
-    {
-        auto* ac = wxGetApp().app_config;
-        const bool lm = ac && ac->get_bool("neotko_libre_mode");
-        toggle_field("support_top_z_distance", have_support_material || lm);
-    }
-    // NEOTKO_LIBRE_TAG_END
     toggle_field("support_threshold_angle", have_support_material && is_auto(support_type));
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
     //toggle_field("support_closing_radius", have_support_material && support_style == smsSnug);
@@ -842,13 +747,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing" })
         toggle_line(el, has_support_ironing);
     // Orca: Force solid support interface when using support ironing
-    // NEOTKO_LIBRE_TAG_START — Support options: enable with LM even without support_interface_filament
-    {
-        auto* ac = wxGetApp().app_config;
-        const bool lm = ac && ac->get_bool("neotko_libre_mode");
-        toggle_field("support_interface_spacing", (have_support_material && have_support_interface && !has_support_ironing) || lm);
-    }
-    // NEOTKO_LIBRE_TAG_END
+    toggle_field("support_interface_spacing", have_support_material && have_support_interface && !has_support_ironing);
 
     bool have_skirt_height = have_skirt &&
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
@@ -887,31 +786,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     int preheat_steps = config->opt_int("preheat_steps");
     toggle_line("preheat_steps", have_ooze_prevention && (preheat_steps > 0));
 
-    // NEOTKO_LIBRE_TAG_START
-    // When Neotko multi-tool features are active, Prime Tower controls must be visible
-    // even with a single physical filament (engine will generate the tower via has_wipe_tower()).
-    const bool neotko_multi_tool_ui =
-        (config->has("multipass_enabled")             && config->opt_bool("multipass_enabled")) ||
-        (config->has("penultimate_multipass_enabled") && config->opt_bool("penultimate_multipass_enabled")) ||
-        (config->has("multipass_path_gradient")       && config->opt_bool("multipass_path_gradient")) ||
-        (config->has("interlayer_colormix_enabled")   && config->opt_bool("interlayer_colormix_enabled"));
-    bool have_prime_tower = config->opt_bool("enable_prime_tower") || neotko_multi_tool_ui;
-    // NEOTKO_LIBRE_TAG_END
+    bool have_prime_tower = config->opt_bool("enable_prime_tower");
     for (auto el : { "prime_tower_width", "prime_tower_brim_width"})
         toggle_line(el, have_prime_tower);
 
     for (auto el : {"wall_filament", "sparse_infill_filament", "solid_infill_filament", "wipe_tower_filament"})
         toggle_line(el, !bSEMM);
 
-    const bool show_sparse_infill_filament =
-        show_infill_filament_override_toggle && config->opt_bool("enable_infill_filament_override");
-    toggle_line("infill_filament_use_base_first_layers", show_sparse_infill_filament);
-    toggle_line("infill_filament_use_base_last_layers", show_sparse_infill_filament);
-    toggle_line("sparse_infill_filament", show_sparse_infill_filament);
-
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
 
-    for (auto el : {"wipe_tower_rotation_angle", "wipe_tower_cone_angle",
+    for (auto el : {"wipe_tower_cone_angle",
                     "wipe_tower_extra_spacing", "wipe_tower_max_purge_speed",
                     "wipe_tower_wall_type",
                     "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall",
@@ -923,8 +807,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         config->has("dithering_local_z_mode") && config->option("dithering_local_z_mode") != nullptr &&
         config->opt_bool("dithering_local_z_mode");
     toggle_line("dithering_local_z_whole_objects", local_z_dithering_enabled);
+    toggle_line("dithering_local_z_infill", local_z_dithering_enabled);
     toggle_line("dithering_local_z_direct_multicolor", local_z_dithering_enabled);
-    toggle_line("local_z_wipe_tower_purge_lines", have_prime_tower && !is_BBL_Printer && local_z_dithering_enabled);
 
     WipeTowerWallType wipe_tower_wall_type = config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type");
     toggle_line("wipe_tower_cone_angle", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwCone);
@@ -932,10 +816,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("wipe_tower_rib_width", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     toggle_line("wipe_tower_fillet_wall", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     
+    toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
 
-    // NEOTKO_NEOTOWER_TAG s104 — tower type selector + NeoTower-only options.
+    // NEOTKO_NEOTOWER_TAG s104 — s130 port: tower type selector + NeoTower-only options.
     // zigurat/compaction only make sense when the NeoTower planner is selected.
     {
         const bool show_tower_type = have_prime_tower && !is_BBL_Printer;
@@ -950,15 +835,6 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     for (auto el : {"flush_into_infill", "flush_into_support", "flush_into_objects"})
         toggle_field(el, have_prime_tower);
-
-    // BBS: MusangKing - Hide "Independent support layer height" option
-    // NEOTKO_LIBRE_TAG_START — Support options: enable with LM even without support_interface_filament
-    {
-        auto* ac = wxGetApp().app_config;
-        const bool lm = ac && ac->get_bool("neotko_libre_mode");
-        toggle_line("independent_support_layer_height", (have_support_material && !have_prime_tower) || lm);
-    }
-    // NEOTKO_LIBRE_TAG_END
 
     bool have_avoid_crossing_perimeters = config->opt_bool("reduce_crossing_wall");
     toggle_line("max_travel_detour_distance", have_avoid_crossing_perimeters);
@@ -978,57 +854,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi);
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
 
-    const auto wall_gen = config->opt_enum<PerimeterGeneratorType>("wall_generator");
-    bool have_arachne = wall_gen == PerimeterGeneratorType::Arachne;
+    bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
-
-    // NEOTKO_NEOARACHNE_TAG fase2+fase3.0+fase2.4c — show the NeoArachne controls
-    // when the user picked NeoArachne.
-    //
-    // s91 lesson: only opt_enum/opt_float/opt_bool reads need config->has() guards
-    // (those crash with EXC_BAD_ACCESS on sparse DynamicPrintConfigs that don't
-    // have the key — Config.hpp:2349 dereferences a nullptr from this->option()).
-    // toggle_line() is safe on any key — it just sets the UI visibility flag for
-    // that control identifier, doesn't read the config value. Earlier fix was
-    // over-defensive: it gated toggle_line on has(), which silenced the new keys
-    // for all presets that didn't yet have neoarachne_* in their JSON (i.e. all
-    // existing user presets pre-Fase 2). Result: keys invisible despite picking
-    // NeoArachne. Fix: drop has() from toggle_line, keep it only on opt_enum.
-    const bool have_neoarachne = wall_gen == PerimeterGeneratorType::NeoArachne;
-    for (auto el : { "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill" })
-        toggle_line(el, have_neoarachne);
-    // For Edge Closure subset gating we need to READ neoarachne_inner_walls.
-    // Here the has() guard IS required to prevent the sparse-config crash.
-    const bool inner_readable = have_neoarachne && config->has("neoarachne_inner_walls");
-    const auto inner_src = inner_readable
-        ? config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls")
-        : NeoArachneWallSource::ArachneStock;  // default → assume Arachne, show closure params
-    const bool inner_is_arachne =
-        inner_src == NeoArachneWallSource::ArachneStock ||
-        inner_src == NeoArachneWallSource::ArachneNeotkoEdge;
-    for (auto el : { "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
-                     "neoarachne_max_bead_width_pct",
-                     "neoarachne_min_feature_size_pct", "neoarachne_keep_short_tails" })
-        toggle_line(el, have_neoarachne && inner_is_arachne);
-    // NEOTKO_NEOARACHNE_TAG fase3 — bead-count hysteresis only matters when
-    // a NeotkoEdge wall source is selected (the factory wrap is gated on
-    // neotko_edge_active in Interior::run). Outside that, the control is
-    // inert; hide it to reduce UI noise.
-    const auto outer_src = (have_neoarachne && config->has("neoarachne_outer_wall"))
-        ? config->opt_enum<NeoArachneWallSource>("neoarachne_outer_wall")
-        : NeoArachneWallSource::Classic;
-    const bool neotko_edge_active = have_neoarachne &&
-        (inner_src == NeoArachneWallSource::ArachneNeotkoEdge ||
-         outer_src == NeoArachneWallSource::ArachneNeotkoEdge);
-    toggle_line("neoarachne_bead_count_hysteresis_pct", neotko_edge_active);
-    // NEOTKO_NEOARACHNE_TAG fase4 — transition_filter_dist visible whenever
-    // any Arachne family is engaged (stock or NeotkoEdge). It tunes
-    // SkeletalTrapezoidation which runs for any Arachne combo.
-    const bool any_arachne = have_neoarachne && inner_is_arachne;
-    toggle_line("neoarachne_transition_filter_dist_mm", any_arachne);
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");

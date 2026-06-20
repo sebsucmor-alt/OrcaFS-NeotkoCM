@@ -400,11 +400,6 @@ public:
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
 
-    // NEOTKO_LIBRE_TAG_START — Temporal Link
-    // 0 = not linked; >0 = shared movement group id. Pure viewport feature, slicing unaffected.
-    int link_group_id { 0 };
-    // NEOTKO_LIBRE_TAG_END
-
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
     // BBS: production extension
@@ -884,22 +879,19 @@ public:
     // List of mesh facets painted for fuzzy skin.
     FacetsAnnotation    fuzzy_skin_facets;
 
-    // NEOTKO_PROFILE_TAG_START — Opción 4 Fase B (3D Painter)
-    // Per-triangle slot stored via TriangleSelector. The triangle state encoding is
-    // a 2-bit prefix + extension 4-bit nibbles (same scheme MMU uses for >16
-    // extruders), so state values well beyond 15 round-trip safely. The slot table
-    // is therefore widened to 30 usable slots (index 0 unused = unpainted).
+    // NEOTKO_PROFILE_TAG_START — ColorStitch Painter per-triangle paint data.
+    // Per-triangle slot stored via TriangleSelector (2-bit prefix + 4-bit extension
+    // nibbles, same scheme MMU uses for >16 extruders), so state values well beyond
+    // 15 round-trip. 30 usable slots (index 0 unused = unpainted).
     static constexpr int COLORMIX_SLOT_COUNT = 31;   // index 0 unused + slots 1..30
     FacetsAnnotation    color_mix_paint_facets;
     // Slot → SurfaceEffectProfile id mapping. Index 0 unused (slot 0 = unpainted).
     int                 colormix_slot_to_profile_id[COLORMIX_SLOT_COUNT] = {0};
-    // NEOTKO_COLORSTITCH_TAG — huella del CONTENIDO de los perfiles referenciados.
-    // El contenido del perfil (stack/tools) vive en SurfaceEffectProfileManager
-    // (singleton), FUERA del modelo, así que editar un tool no cambiaba ni las
-    // facetas ni el mapeo de slots → Print::apply consideraba el volumen idéntico y
-    // NO re-sliceaba ("hay que mover algo más para que detecte el cambio"). El
-    // painter recalcula esta huella al editar un perfil; Print::apply la compara →
-    // editar un color dispara re-slice. 0 = sin perfiles pintados / aún sin calcular.
+    // NEOTKO_COLORSTITCH_TAG — content fingerprint of the referenced profiles. Profile
+    // content lives in SurfaceEffectProfileManager (outside the model), so editing a tool
+    // doesn't change facets/slot-map → Print::apply would consider the volume identical
+    // and skip re-slice. The painter recomputes this; Print::apply compares it → editing
+    // a colour triggers re-slice. 0 = no painted profiles / not yet computed.
     uint64_t            colormix_profiles_fingerprint = 0;
     // NEOTKO_PROFILE_TAG_END
 
@@ -1028,7 +1020,7 @@ public:
         this->seam_facets.set_new_unique_id();
         this->mmu_segmentation_facets.set_new_unique_id();
         this->fuzzy_skin_facets.set_new_unique_id();
-        this->color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG — Fase 6c: duplicate gets its own paint id
+        this->color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG — duplicate gets its own paint id
     }
 
     bool is_fdm_support_painted() const { return !this->supported_facets.empty(); }
@@ -1130,15 +1122,10 @@ private:
         name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        fuzzy_skin_facets(other.fuzzy_skin_facets),
-        // NEOTKO_PROFILE_TAG — Fase 6c: carry the 3D-Painter ColorMix paint when a
-        // volume is copied (object duplicate). Without this the duplicate lost its
-        // paint, breaking painter-mode tests on duplicated objects.
-        color_mix_paint_facets(other.color_mix_paint_facets),
-        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        fuzzy_skin_facets(other.fuzzy_skin_facets), color_mix_paint_facets(other.color_mix_paint_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
-		assert(this->id().valid());
-        assert(this->config.id().valid());
+		assert(this->id().valid()); 
+        assert(this->config.id().valid()); 
         assert(this->supported_facets.id().valid());
         assert(this->seam_facets.id().valid());
         assert(this->mmu_segmentation_facets.id().valid());
@@ -1153,10 +1140,9 @@ private:
         assert(this->seam_facets.id() == other.seam_facets.id());
         assert(this->mmu_segmentation_facets.id() == other.mmu_segmentation_facets.id());
         assert(this->fuzzy_skin_facets.id() == other.fuzzy_skin_facets.id());
-        // NEOTKO_PROFILE_TAG — Fase 6c: slot→profile table is a plain array, copy it too.
+        // NEOTKO_PROFILE_TAG — slot→profile table + content fingerprint are plain values, copy them.
         for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
             this->colormix_slot_to_profile_id[_s] = other.colormix_slot_to_profile_id[_s];
-        // NEOTKO_COLORSTITCH_TAG — copiar la huella de contenido (re-slice on profile edit).
         this->colormix_profiles_fingerprint = other.colormix_profiles_fingerprint;
         this->set_material_id(other.material_id());
     }
@@ -1782,12 +1768,14 @@ bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo
 // Test whether the now ModelObject has newer MMU segmentation data than the old one.
 // The function assumes that volumes list is synchronized.
 extern bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObject& mo_new);
-// NEOTKO_PROFILE_TAG — ColorMix Painter re-slice trigger.
-extern bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // Test whether the now ModelObject has newer fuzzy skin data than the old one.
 // The function assumes that volumes list is synchronized.
 extern bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new);
+
+// NEOTKO_PROFILE_TAG — Test whether the new ModelObject has newer ColorMix painter
+// data (facets, slot table, or referenced profile content) than the old one.
+extern bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 

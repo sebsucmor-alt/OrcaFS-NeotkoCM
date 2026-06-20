@@ -8121,10 +8121,10 @@ msgstr ""
 msgid "Approximate color matching."
 msgstr ""
 
-msgid "Append all"
+msgid "Append"
 msgstr ""
 
-msgid "Add all clustered colors after the existing filaments."
+msgid "Add consumable extruder after existing extruders."
 msgstr ""
 
 msgid "Keep color"
@@ -16250,8 +16250,11 @@ msgstr ""
 msgid "Snapmaker Orca integrates some features from the 3D printing open-source community, with specific attributions provided in the code comments."
 msgstr "
 
-msgid "Snapmaker Orca is licensed under the GNU Affero Generall Public License, version 3."
+msgid "Snapmaker Orca is licensed under the GNU Affero General Public License, version 3."
 msgstr ""
 
 msgid "OrcaSlicer is forked from Bambu Studio by Bambu Lab."
+msgstr ""
+
+msgid "Incompatible filament types cannot be mixed. Please correct the selection."
 msgstr ""

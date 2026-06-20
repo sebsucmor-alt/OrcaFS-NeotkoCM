@@ -8,6 +8,7 @@
 #include "Layer.hpp"
 #include "MutablePolygon.hpp"
 #include "PrintConfig.hpp"
+#include "SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG (port s129) — NeoDebug + NEOTKO_LOG + object_painter_wants_penu
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
 #include "Support/TreeSupport.hpp"
@@ -18,7 +19,6 @@
 #include "Utils.hpp"
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
-#include "SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG — NeoDebug + NEOTKO_LOG
 #include "Format/STL.hpp"
 #include "format.hpp"
 
@@ -1112,9 +1112,6 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "bottom_shell_thickness"
             || opt_key == "top_shell_thickness"
             || opt_key == "minimum_sparse_infill_area"
-            || opt_key == "enable_infill_filament_override"
-            || opt_key == "infill_filament_use_base_first_layers"
-            || opt_key == "infill_filament_use_base_last_layers"
             || opt_key == "sparse_infill_filament"
             || opt_key == "solid_infill_filament"
             || opt_key == "sparse_infill_line_width"
@@ -1248,7 +1245,8 @@ bool PrintObject::invalidate_state_by_config_options(
         } else if (
                opt_key == "flush_into_infill"
             || opt_key == "flush_into_objects"
-            || opt_key == "flush_into_support") {
+            || opt_key == "flush_into_support"
+            || opt_key == "dithering_local_z_infill") {
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else {
@@ -1745,16 +1743,6 @@ void PrintObject::discover_vertical_shells()
 
     BOOST_LOG_TRIVIAL(info) << "Discovering vertical shells..." << log_memory_info();
 
-    // NEOTKO_COLORSTITCH_TAG — s118 dbg (penu pintado no slicea): log INCONDICIONAL,
-    // una vez por objeto, de la decisión de autonomía penu. Así sabemos si
-    // object_painter_wants_penu() ve el penu del perfil y qué penultimate_top_layers
-    // hay, sin depender de que el PENU_AUTONOMY interno llegue a forzar.
-    NEOTKO_LOG(PROFILE, "PENU_DECISION obj='"
-        << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
-        << "' mo=" << (const void*)this->model_object()
-        << " penultimate_top_layers=" << this->config().penultimate_top_layers.value
-        << " wants_penu=" << (SurfaceColorMix::object_painter_wants_penu(this->model_object()) ? 1 : 0));
-
     struct DiscoverVerticalShellsCacheEntry
     {
         // Collected polygons, offsetted
@@ -1993,8 +1981,9 @@ void PrintObject::discover_vertical_shells()
                                 (i <= itop || m_layers[i]->bottom_z() - print_z < region_config.top_shell_thickness - EPSILON))
                                 combine_holes(cache_top_botom_regions[i].holes);
 	                }
-                // NEOTKO_MULTIPASS_TAG_START: capture top-only shell geometry before bottom surfaces are added.
-                // Used below to distinguish top-derived new_internal_solid (→ penultimate) from bottom-derived.
+                // NEOTKO_MULTIPASS_TAG_START (port s129): capture top-only shell geometry before
+                // bottom surfaces are added. Used below to distinguish top-derived
+                // new_internal_solid (→ penultimate) from bottom-derived.
                 Polygons shell_top = shell;
                 // NEOTKO_MULTIPASS_TAG_END
 	                if (int n_bottom_layers = region_config.bottom_shell_layers.value; n_bottom_layers > 0) {
@@ -2080,8 +2069,8 @@ void PrintObject::discover_vertical_shells()
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
                     // Trim the shells region by the internal & internal void surfaces.
-                    // NEOTKO_MULTIPASS_TAG_START: include stPenultimateInternalSolid so existing penultimate
-                    // surfaces are not excluded from the shell trimming geometry.
+                    // NEOTKO_MULTIPASS_TAG (port s129): include stPenultimateInternalSolid so existing
+                    // penultimate surfaces are not excluded from the shell trimming geometry.
                     const Polygons polygonsInternal = to_polygons(layerm->fill_surfaces.filter_by_types({ stInternal, stInternalVoid, stInternalSolid, stPenultimateInternalSolid }));
                     shell = intersection(shell, polygonsInternal, ApplySafetyOffset::Yes);
                     polygons_append(shell, diff(polygonsInternal, holes));
@@ -2090,10 +2079,9 @@ void PrintObject::discover_vertical_shells()
 
                     // Append the internal solids, so they will be merged with the new ones.
                     polygons_append(shell, to_polygons(layerm->fill_surfaces.filter_by_type(stInternalSolid)));
-                    // NEOTKO_MULTIPASS_TAG_START: also append penultimate surfaces so they are part of
-                    // shell geometry and not lost in subsequent iterations.
+                    // NEOTKO_MULTIPASS_TAG (port s129): also append penultimate surfaces so they are part
+                    // of shell geometry and not lost in subsequent iterations.
                     polygons_append(shell, to_polygons(layerm->fill_surfaces.filter_by_type(stPenultimateInternalSolid)));
-                    // NEOTKO_MULTIPASS_TAG_END
 
                     // These regions will be filled by a rectilinear full infill. Currently this type of infill
                     // only fills regions, which fit at least a single line. To avoid gaps in the sparse infill,
@@ -2179,19 +2167,16 @@ void PrintObject::discover_vertical_shells()
                     }
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
-                    // NEOTKO_MULTIPASS_TAG_START: split new_internal_solid into penultimate (top-derived)
-                    // and regular stInternalSolid, based on proximity to the nearest stTop layer above.
+                    // NEOTKO_MULTIPASS_TAG_START (port s129): split new_internal_solid into penultimate
+                    // (top-derived) and regular stInternalSolid, based on proximity to the nearest stTop
+                    // layer above. This is what makes the penultimate role (stPenultimateInternalSolid →
+                    // erPenultimateInfill) appear so ColorStitch/PathBlend can target it.
                     ExPolygons new_penultimate_solid;
                     ExPolygons new_internal_solid_bottom;
                     {
-                        // NEOTKO_PROFILE_TAG — Fase F polish: penu role autonomy.
-                        // When preset's penultimate_top_layers=0 but a painted
-                        // profile on this object declares penu activity (MP
-                        // penu enabled / CM surface 0|2 / PB surface 0|2),
-                        // force-classify 2 penu layers so the painter mode
-                        // override has surfaces to apply on. Without this, an
-                        // object whose preset has no penu config but is painted
-                        // with a penu-enabled profile would get top role only.
+                        // NEOTKO_PROFILE_TAG — penu role autonomy: when the preset's
+                        // penultimate_top_layers=0 but a painted profile on this object declares penu
+                        // activity, force-classify 2 penu layers so the painter override has surfaces.
                         int penultimate_layers = this->config().penultimate_top_layers.value;
                         if (penultimate_layers == 0 &&
                             SurfaceColorMix::object_painter_wants_penu(this->model_object())) {
@@ -2202,15 +2187,15 @@ void PrintObject::discover_vertical_shells()
                         }
                         if (penultimate_layers > 0) {
                             int layers_below_top = -1;
-                            for (int i = idx_layer + 1; i < (int)m_layers.size(); ++i) {
+                            for (int i = int(idx_layer) + 1; i < (int)m_layers.size(); ++i) {
                                 LayerRegion* upper = m_layers[i]->get_region(region_id);
                                 if (!upper->slices.filter_by_type(stTop).empty()) {
-                                    layers_below_top = i - idx_layer;
+                                    layers_below_top = i - int(idx_layer);
                                     break;
                                 }
                             }
                             if (layers_below_top > 0 && layers_below_top <= penultimate_layers) {
-                                new_penultimate_solid    = intersection_ex(new_internal_solid, shell_top);
+                                new_penultimate_solid     = intersection_ex(new_internal_solid, shell_top);
                                 new_internal_solid_bottom = diff_ex(new_internal_solid, shell_top);
                             } else {
                                 new_internal_solid_bottom = new_internal_solid;
@@ -2227,9 +2212,9 @@ void PrintObject::discover_vertical_shells()
 
                     // Assign resulting internal surfaces to layer.
                     layerm->fill_surfaces.keep_types({ stTop, stBottom, stBottomBridge });
-                    layerm->fill_surfaces.append(new_internal,              stInternal);
-                    layerm->fill_surfaces.append(new_internal_void,         stInternalVoid);
-                    // NEOTKO_MULTIPASS_TAG_START
+                    layerm->fill_surfaces.append(new_internal,       stInternal);
+                    layerm->fill_surfaces.append(new_internal_void,  stInternalVoid);
+                    // NEOTKO_MULTIPASS_TAG_START (port s129)
                     layerm->fill_surfaces.append(new_penultimate_solid,     stPenultimateInternalSolid);
                     layerm->fill_surfaces.append(new_internal_solid_bottom, stInternalSolid);
                     // NEOTKO_MULTIPASS_TAG_END
@@ -3296,7 +3281,6 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
 }
 
 const std::string                                                    key_extruder { "extruder" };
-const std::string                                                    key_enable_infill_filament_override { "enable_infill_filament_override" };
 static constexpr const std::initializer_list<const std::string_view> keys_extruders { "sparse_infill_filament"sv, "solid_infill_filament"sv, "wall_filament"sv };
 
 static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPrintConfig &in)
@@ -3310,23 +3294,10 @@ static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPr
             out.solid_infill_filament.value  = extruder;
             out.wall_filament.value          = extruder;
         }
-    const auto *opt_enable_infill_filament_override = in.opt<ConfigOptionBool>(key_enable_infill_filament_override);
-    const auto *opt_sparse_infill_filament = in.opt<ConfigOptionInt>("sparse_infill_filament");
-    const bool  allow_local_infill_filament_override = opt_enable_infill_filament_override != nullptr ?
-        opt_enable_infill_filament_override->value :
-        (opt_sparse_infill_filament != nullptr &&
-         opt_sparse_infill_filament->value > 0 &&
-         opt_sparse_infill_filament->value != out.wall_filament.value);
-    if (opt_enable_infill_filament_override != nullptr)
-        out.enable_infill_filament_override.value = opt_enable_infill_filament_override->value;
-    else if (opt_sparse_infill_filament != nullptr)
-        out.enable_infill_filament_override.value = allow_local_infill_filament_override;
     // 2) Copy the rest of the values.
     for (auto it = in.cbegin(); it != in.cend(); ++ it)
-        if (it->first != key_extruder && it->first != key_enable_infill_filament_override)
+        if (it->first != key_extruder)
             if (ConfigOption* my_opt = out.option(it->first, false); my_opt != nullptr) {
-                if (it->first == "sparse_infill_filament" && !allow_local_infill_filament_override)
-                    continue;
                 if (one_of(it->first, keys_extruders)) {
                     // Ignore "default" extruders.
                     int extruder = static_cast<const ConfigOptionInt*>(it->second.get())->value;
@@ -3408,8 +3379,6 @@ SlicingParameters PrintObject::slicing_parameters(const DynamicPrintConfig &full
 	print_config.apply(full_config, true);
 	object_config.apply(full_config, true);
 	default_region_config.apply(full_config, true);
-    default_region_config.enable_infill_filament_override.value = false;
-    default_region_config.sparse_infill_filament.value          = default_region_config.wall_filament.value;
     // BBS
 	size_t              filament_extruders = print_config.filament_diameter.size();
 	object_config = object_config_from_model_object(object_config, model_object, filament_extruders);
@@ -3424,9 +3393,6 @@ SlicingParameters PrintObject::slicing_parameters(const DynamicPrintConfig &full
 				object_extruders);
 			for (const std::pair<const t_layer_height_range, ModelConfig> &range_and_config : model_object.layer_config_ranges)
 				if (range_and_config.second.has("wall_filament") ||
-                    range_and_config.second.has("enable_infill_filament_override") ||
-                    range_and_config.second.has("infill_filament_use_base_first_layers") ||
-                    range_and_config.second.has("infill_filament_use_base_last_layers") ||
 					range_and_config.second.has("sparse_infill_filament") ||
 					range_and_config.second.has("solid_infill_filament"))
 					PrintRegion::collect_object_printing_extruders(
@@ -4246,8 +4212,8 @@ void PrintObject::discover_horizontal_shells()
                     // upper perimeter as an obstacle and shell will not be propagated to more upper layers
                     //FIXME How does it work for stInternalBRIDGE? This is set for sparse infill. Likely this does not work.
                     Polygons new_internal_solid;
-                    // NEOTKO_MULTIPASS_TAG_START: track whether empty new_internal_solid is caused
-                    // by penultimate-only surfaces (vs. genuine geometry gap / hollow object).
+                    // NEOTKO_MULTIPASS_TAG_START (port s129): track whether empty new_internal_solid is
+                    // caused by penultimate-only surfaces (vs. genuine geometry gap / hollow object).
                     bool     has_penultimate_intersection = false;
                     // NEOTKO_MULTIPASS_TAG_END
                     {
@@ -4256,8 +4222,8 @@ void PrintObject::discover_horizontal_shells()
                             if (surface.surface_type == stInternal || surface.surface_type == stInternalSolid)
                                 polygons_append(internal, to_polygons(surface.expolygon));
                         new_internal_solid = intersection(solid, internal, ApplySafetyOffset::Yes);
-                        // NEOTKO_MULTIPASS_TAG_START: if empty due to penultimate surfaces covering
-                        // the area, mark it so we can continue propagating past this layer.
+                        // NEOTKO_MULTIPASS_TAG_START (port s129): if empty due to penultimate surfaces
+                        // covering the area, mark it so we can continue propagating past this layer.
                         if (new_internal_solid.empty()) {
                             Polygons penultimate_polys;
                             for (const Surface &surface : neighbor_layerm->fill_surfaces.surfaces)
@@ -4270,16 +4236,16 @@ void PrintObject::discover_horizontal_shells()
                         // NEOTKO_MULTIPASS_TAG_END
                     }
                     if (new_internal_solid.empty()) {
-                        // NEOTKO_MULTIPASS_TAG_START: a penultimate-only layer must not stop horizontal
-                        // shell propagation — discover_vertical_shells already assigned its type.
-                        // Continue to deeper layers regardless of hollow/sparse density setting.
+                        // NEOTKO_MULTIPASS_TAG_START (port s129): a penultimate-only layer must not stop
+                        // horizontal shell propagation — discover_vertical_shells already assigned its
+                        // type. Continue to deeper layers regardless of hollow/sparse density setting.
                         if (has_penultimate_intersection)
                             continue;
                         // NEOTKO_MULTIPASS_TAG_END
                         // No internal solid needed on this layer. In order to decide whether to continue
                         // searching on the next neighbor (thus enforcing the configured number of solid
                         // layers, use different strategies according to configured infill density:
-
+                        
                         // Orca: Also use the same strategy if the user has selected to further reduce
                         // the amount of solid infill on walls.
                         if (region_config.sparse_infill_density.value == 0 || region_config.ensure_vertical_shell_thickness.value == evstCriticalOnly || region_config.ensure_vertical_shell_thickness.value == evstNone) {
@@ -4364,7 +4330,7 @@ void PrintObject::discover_horizontal_shells()
                     ExPolygons internal_solid = union_ex(new_internal_solid);
                     // assign new internal-solid surfaces to layer
                     neighbor_layerm->fill_surfaces.set(internal_solid, stInternalSolid);
-                    // NEOTKO_MULTIPASS_TAG_START: re-add penultimate surfaces from backup —
+                    // NEOTKO_MULTIPASS_TAG_START (port s129): re-add penultimate surfaces from backup —
                     // fill_surfaces.set() wipes everything, so restore them explicitly.
                     neighbor_layerm->fill_surfaces.append(
                         to_expolygons(backup.filter_by_type(stPenultimateInternalSolid)),
@@ -4377,7 +4343,7 @@ void PrintObject::discover_horizontal_shells()
                     neighbor_layerm->fill_surfaces.append(internal, stInternal);
                     polygons_append(polygons_internal, to_polygons(std::move(internal)));
                     // assign top and bottom surfaces to layer
-                    // NEOTKO_MULTIPASS_TAG_START: also keep stPenultimateInternalSolid from backup
+                    // NEOTKO_MULTIPASS_TAG (port s129): also keep stPenultimateInternalSolid from backup
                     // so it survives discover_horizontal_shells reconstruction.
                     backup.keep_types({ stTop, stBottom, stBottomBridge, stPenultimateInternalSolid });
                     std::vector<SurfacesPtr> top_bottom_groups;
@@ -4426,8 +4392,7 @@ void PrintObject::combine_infill()
         // Limit the number of combined layers to the maximum height allowed by this regions' nozzle.
         //FIXME limit the layer height to max_layer_height
         double nozzle_diameter = this->print()->config().nozzle_diameter.get_at(region.config().wall_filament.value - 1);
-        if (region.config().enable_infill_filament_override.value)
-            nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().sparse_infill_filament.value - 1));
+        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().sparse_infill_filament.value - 1));
         nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().solid_infill_filament.value - 1));
         
         //Orca: Limit combination of infill to up to infill_combination_max_layer_height

@@ -182,11 +182,6 @@ wxDECLARE_EVENT(EVT_GLCANVAS_EDIT_COLOR_CHANGE, wxKeyEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_JUMP_TO, wxKeyEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_UNDO, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_REDO, SimpleEvent);
-// NEOTKO_LIBRE_TAG_START — Temporal Link shortcuts
-wxDECLARE_EVENT(EVT_GLCANVAS_LINK_OBJECTS,        SimpleEvent); // Ctrl+G       → link selection
-wxDECLARE_EVENT(EVT_GLCANVAS_BREAK_LINK_OBJECTS,  SimpleEvent); // (menu only)  → break all links
-wxDECLARE_EVENT(EVT_GLCANVAS_SELECT_LINK_GROUP,   SimpleEvent); // Ctrl+Shift+G → select whole group
-// NEOTKO_LIBRE_TAG_END
 wxDECLARE_EVENT(EVT_GLCANVAS_SWITCH_TO_OBJECT, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_SWITCH_TO_GLOBAL, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_COLLAPSE_SIDEBAR, SimpleEvent);
@@ -759,7 +754,11 @@ public:
 
     unsigned int get_volumes_count() const;
     const GLVolumeCollection& get_volumes() const { return m_volumes; }
-    void reset_volumes();
+    enum class ResetVolumesMode {
+        Normal,
+        CanvasDestruction
+    };
+    void reset_volumes(ResetVolumesMode mode = ResetVolumesMode::Normal);
     ModelInstanceEPrintVolumeState check_volumes_outside_state() const;
     bool is_all_plates_selected() { return m_sel_plate_toolbar.m_all_plates_stats_item && m_sel_plate_toolbar.m_all_plates_stats_item->selected; }
     const float get_scale() const;

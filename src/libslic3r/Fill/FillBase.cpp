@@ -70,8 +70,6 @@ Fill* Fill::new_from_type(const InfillPattern type)
     // Orca: Replace BBS implementation with Prusa implementation
     case ipMonotonicLine:       return new FillMonotonicLines();
     case ipZigZag:              return new FillZigZag();
-    // NEOTKO_PATHBLEND_TAG — s87: experimental Micro Stitch.
-    case ipMicroStitch:         return new FillMicroStitch();
     case ipCrossZag:            return new FillCrossZag();
     case ipLockedZag:           return new FillLockedZag();
     default: throw Slic3r::InvalidArgument("unknown type");

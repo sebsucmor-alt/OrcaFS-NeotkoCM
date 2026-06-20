@@ -441,7 +441,6 @@ void ObjectList::create_objects_ctrl()
         return m_objects_model->GetDefaultExtruderIdx(GetSelection());
     });
     bmp_choice_renderer->set_has_default_extruder([this]() {
-        return true;
         return m_objects_model->GetVolumeType(GetSelection()) == ModelVolumeType::PARAMETER_MODIFIER ||
                m_objects_model->GetItemType(GetSelection()) == itLayer;
     });
@@ -2449,7 +2448,7 @@ void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name
     new_volume->name = into_u8(name);
     // set a default extruder value, since user can't add it manually
     // BBS
-    new_object->config.set_key_value("extruder", new ConfigOptionInt(0));
+    new_object->config.set_key_value("extruder", new ConfigOptionInt(1));
     new_object->invalidate_bounding_box();
     new_object->translate(-bb.center());
 
@@ -3132,10 +3131,7 @@ void ObjectList::boolean()
     ModelVolume* new_volume = new_object->add_volume(mesh);
 
     // BBS: ensure on bed but no need to ensure locate in the center around origin
-    // NEOTKO_LIBRE_TAG_START — In LM, boolean result keeps its Z (source objects may be floating)
-    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
-        new_object->ensure_on_bed();
-    // NEOTKO_LIBRE_TAG_END
+    new_object->ensure_on_bed();
     new_object->center_around_origin();
     new_object->translate_instances(-new_object->origin_translation);
     new_object->origin_translation = Vec3d::Zero();
@@ -4067,10 +4063,7 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
                     m_objects_model->UpdateWarningIcon(parent, get_warning_icon_name(obj->get_object_stl_stats()));
                 }
 #endif
-                // NEOTKO_LIBRE_TAG_START — In LM, keep floating objects at their Z after volume deletion
-                if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
-                    wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
-                // NEOTKO_LIBRE_TAG_END
+                wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
             }
             else
                 m_objects_model->Delete(m_objects_model->GetItemByInstanceId(item->obj_idx, item->sub_obj_idx));

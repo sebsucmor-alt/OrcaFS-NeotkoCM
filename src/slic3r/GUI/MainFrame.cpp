@@ -75,7 +75,7 @@
 #endif // _WIN32
 #include <slic3r/GUI/CreatePresetsDialog.hpp>
 #include "sentry_wrapper/SentryWrapper.hpp"
-
+#include "GenericDownloadDialog.hpp"
 
 #define UPDATE_BUSER    true
 #define UPDATE_BUAUTO   false
@@ -88,6 +88,7 @@ wxDEFINE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);
 wxDEFINE_EVENT(EVT_SHOW_IP_DIALOG, wxCommandEvent);
 wxDEFINE_EVENT(EVT_UPDATE_MACHINE_LIST, wxCommandEvent);
 wxDEFINE_EVENT(EVT_UPDATE_PRESET_CB, SimpleEvent);
+wxDEFINE_EVENT(EVT_NETWORK_TEST_LOG_UPDATE, wxCommandEvent);
 
 
 
@@ -253,7 +254,6 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 		e.Skip();
 	});
 #endif
-
 #ifdef __APPLE__
     // Initialize the docker task bar icon.
     switch (wxGetApp().get_app_mode()) {
@@ -269,6 +269,12 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     // Load the icon either from the exe, or from the ico file.
     SetIcon(main_frame_icon(wxGetApp().get_app_mode()));
+
+#ifdef __WXGTK__
+    // GTK/X11: set minimum size before any layout so gtk_widget_set_size_request and
+    // gtk_window_resize never see 0 or negative dimensions (avoids assertion failures).
+    SetMinSize(wxGetApp().get_min_size());
+#endif
 
     // initialize tabpanel and menubar
     init_tabpanel();
@@ -358,6 +364,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     });
 
     Bind(EVT_SYNC_CLOUD_PRESET, &MainFrame::on_select_default_preset, this);
+    Bind(EVT_NETWORK_TEST_LOG_UPDATE, [](wxCommandEvent& evt) {
+        BOOST_LOG_TRIVIAL(warning) << "[NetworkTest] " << into_u8(evt.GetString());
+    });
 
 //    Bind(wxEVT_MENU,
 //        [this](wxCommandEvent&)
@@ -561,31 +570,19 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 #endif
         if (evt.CmdDown() && evt.GetKeyCode() == 'R') { if (m_slice_enable) { wxGetApp().plater()->update(true, true); wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE)); this->m_tabpanel->SetSelection(tpPreview); } return; }
         if (evt.CmdDown() && evt.ShiftDown() && evt.GetKeyCode() == 'G') {
-            // NEOTKO_LIBRE_TAG_START — Cmd+Shift+G is Temporal Link "select group" in LM; skip print/send
-            if (!wxGetApp().app_config->get_bool("neotko_libre_mode")) {
-            // NEOTKO_LIBRE_TAG_END
-                m_plater->apply_background_progress();
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                if (m_print_enable) {
-                    if (wxGetApp().preset_bundle->use_bbl_network())
-                        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_PLATE));
-                    else
-                        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
-                }
-            // NEOTKO_LIBRE_TAG_START
+            m_plater->apply_background_progress();
+            m_print_enable = get_enable_print_status();
+            m_print_btn->Enable(m_print_enable);
+            if (m_print_enable) {
+                if (wxGetApp().preset_bundle->use_bbl_network())
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_PLATE));
+                else
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
             }
-            // NEOTKO_LIBRE_TAG_END
             evt.Skip();
             return;
         }
-        else if (evt.CmdDown() && evt.GetKeyCode() == 'G') {
-            // NEOTKO_LIBRE_TAG_START — Cmd+G is Temporal Link "link objects" in LM; skip export gcode
-            if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
-            // NEOTKO_LIBRE_TAG_END
-                if (can_export_gcode()) { wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); }
-            evt.Skip(); return;
-        }
+        else if (evt.CmdDown() && evt.GetKeyCode() == 'G') { if (can_export_gcode()) { wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); } evt.Skip(); return; }
         if (evt.CmdDown() && evt.GetKeyCode() == 'J') { m_printhost_queue_dlg->Show(); return; }
         if (evt.CmdDown() && evt.GetKeyCode() == 'N') { m_plater->new_project(); return;}
         if (evt.CmdDown() && evt.GetKeyCode() == 'O') { m_plater->load_project(); return;}
@@ -959,10 +956,6 @@ void MainFrame::shutdown(bool isRecreate)
 	wxGetApp().other_instance_message_handler()->shutdown(this);
     // Save the slic3r.ini.Usually the ini file is saved from "on idle" callback,
     // but in rare cases it may not have been called yet.
-    // NEOTKO_LIBRE_TAG_START — persist window layout (incl. libre panel state) before save
-    if (m_plater)
-        m_plater->save_window_layout();
-    // NEOTKO_LIBRE_TAG_END
     if(wxGetApp().app_config->dirty())
         wxGetApp().app_config->save();
 //         if (m_plater)
@@ -1165,9 +1158,9 @@ void MainFrame::init_tabpanel() {
     Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent &evt) {
         wxString url = evt.GetString();
         wxString key = evt.GetAPIkey();
-        //select_tab(MainFrame::tpMonitor);
         m_printer_view->load_url(url, key);
     });
+
     m_printer_view->Hide();
 
     if (wxGetApp().is_enable_multi_machine()) {
@@ -1264,7 +1257,6 @@ void MainFrame::show_device(bool bBBLPrinter) {
             Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent& evt) {
                 wxString url = evt.GetString();
                 wxString key = evt.GetAPIkey();
-                // select_tab(MainFrame::tpMonitor);
                 m_printer_view->load_url(url, key);
             });
         }
@@ -1378,18 +1370,6 @@ void MainFrame::create_preset_tabs()
     m_param_dialog->panel()->rebuild_panels();
     //m_tabpanel->AddPage(m_param_panel, "Parameters", "notebook_presets_active");
     //m_tabpanel->InsertPage(tpSettings, m_param_panel, _L("Parameters"), std::string("cog"));
-
-    // NEOTKO_LIBRE_TAG_START — float Process panel on startup if Libre Mode is on
-    // CallAfter: defer until after GUI_App::OnInit completes and the event loop starts.
-    // Direct call here fires before select_tab(tp3DEditor) → update_sidebar() → AuiMgr::Update(),
-    // which resets the pane state. CallAfter runs after all that is settled.
-    if (m_plater && wxGetApp().app_config->get_bool("neotko_libre_mode")) {
-        CallAfter([this]() {
-            if (m_plater)
-                m_plater->float_params_panel(true);
-        });
-    }
-    // NEOTKO_LIBRE_TAG_END
 }
 
 void MainFrame::add_created_tab(Tab* panel,  const std::string& bmp_name /*= ""*/)
@@ -1549,19 +1529,18 @@ bool MainFrame::can_send_gcode() const
     if (m_plater && !m_plater->model().objects.empty())
     {
         auto        devices     = wxGetApp().app_config->get_devices();
-        std::string preset_name = "Snapmaker U1 0.4 nozzle";
         const auto& edit_preset = wxGetApp().preset_bundle->printers.get_edited_preset();
 
-        std::string local_name = "";
-        if (edit_preset.is_system) {
-            local_name = edit_preset.name;
-        } else {
-            const auto& base_preset = wxGetApp().preset_bundle->printers.get_preset_base(edit_preset);
-            local_name              = base_preset->name;
+        auto printer_config    = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        auto printer_model_opt = printer_config.option<ConfigOptionString>("printer_model");
+        bool is_snapmaker_u1   = false;
+        if (printer_model_opt) {
+            std::string printer_model = printer_model_opt->value;
+            is_snapmaker_u1           = boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1");
         }
-        local_name.erase(std::remove(local_name.begin(), local_name.end(), '('), local_name.end());
-        local_name.erase(std::remove(local_name.begin(), local_name.end(), ')'), local_name.end());
-        if (local_name == preset_name) {
+
+        if (is_snapmaker_u1)
+        {
             return true;
         }
 
@@ -1576,27 +1555,6 @@ bool MainFrame::can_send_gcode() const
     }
     return true;
 }
-
-/*bool MainFrame::can_export_gcode_sd() const
-{
-    if (m_plater == nullptr)
-        return false;
-
-    if (m_plater->model().objects.empty())
-        return false;
-
-    if (m_plater->is_export_gcode_scheduled())
-        return false;
-
-    // TODO:: add other filters
-
-    return wxGetApp().removable_drive_manager()->status().has_removable_drives;
-}
-
-bool MainFrame::can_eject() const
-{
-	return wxGetApp().removable_drive_manager()->status().has_eject;
-}*/
 
 bool MainFrame::can_slice() const
 {
@@ -1666,59 +1624,12 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_btn = new SideButton(this, _L("Print plate"), "");
     m_print_option_btn = new SideButton(this, "", "sidebutton_dropdown", 0, 14);
 
-    // NEOTKO_LIBRE_TAG_START
-    {
-        const bool nlm_on = wxGetApp().app_config->get_bool("neotko_libre_mode");
-        m_neotko_libre_btn = new SideButton(this, nlm_on ? "Neotko LM: On" : "Neotko LM: Off", "");
-        m_neotko_libre_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            const bool next = !wxGetApp().app_config->get_bool("neotko_libre_mode");
-            wxGetApp().app_config->set_bool("neotko_libre_mode", next);
-            wxGetApp().app_config->save();
-            // NEOTKO_LIBRE_TAG_START — update slicing pipeline cache immediately after toggle
-            // Must happen before any schedule_background_process() triggered below,
-            // so the cache is consistent when update_background_process() runs.
-            if (m_plater)
-                m_plater->set_neotko_libre_cached(next);
-            // NEOTKO_LIBRE_TAG_END
-            m_neotko_libre_btn->SetLabel(next ? "Neotko LM: On" : "Neotko LM: Off");
-            m_neotko_libre_btn->Refresh();
-            // Show/hide refresh button with LM state
-            if (m_neotko_refresh_btn)
-                m_neotko_refresh_btn->Show(next);
-            // NEOTKO_LIBRE_TAG_START — float/dock Process panel
-            if (m_plater)
-                m_plater->float_params_panel(next);
-            // NEOTKO_LIBRE_TAG_END
-            if (m_plater) {
-                m_plater->Layout();
-                m_plater->object_list_changed();
-            }
-        });
-
-        // "↺ Refresh Part" — copies ObjectConfig overrides from selected Part to parent Object.
-        // Visible only when Libre Mode is on. Safe no-op when no Part is selected.
-        m_neotko_refresh_btn = new SideButton(this, "\u21ba Refresh Part", "");
-        m_neotko_refresh_btn->SetToolTip(_L("Copies ObjectConfig overrides (e.g. XY Expansion) from the "
-                                            "selected Part to its parent Object, then reschedules slicing."));
-        m_neotko_refresh_btn->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
-            auto* part_tab = dynamic_cast<TabPrintPart*>(wxGetApp().get_model_tab(true));
-            if (part_tab)
-                part_tab->refresh_part_object_config();
-        });
-        m_neotko_refresh_btn->Show(nlm_on);
-    }
-    // NEOTKO_LIBRE_TAG_END
-
     update_side_button_style();
     // m_publish_btn->Hide();
     m_slice_option_btn->Enable();
     m_print_option_btn->Enable();
     // sizer->Add(m_publish_btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(1));
     // sizer->Add(FromDIP(15), 0, 0, 0, 0);
-    // NEOTKO_LIBRE_TAG_START
-    sizer->Add(m_neotko_libre_btn,    0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
-    sizer->Add(m_neotko_refresh_btn,  0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(15));
-    // NEOTKO_LIBRE_TAG_END
     sizer->Add(m_slice_option_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     sizer->Add(m_slice_btn       , 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(15));
     sizer->Add(m_print_option_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(2));
@@ -1996,6 +1907,10 @@ bool MainFrame::get_enable_slice_status()
         {
             enable = false;
         }
+        if (enable && m_plater->has_incompatible_mixed_filament_in_use())
+        {
+            enable = false;
+        }
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": m_slice_select %1%, enable= %2% ")%m_slice_select %enable;
@@ -2115,21 +2030,6 @@ void MainFrame::update_side_button_style()
     // m_publish_btn->SetBorderColor(m_btn_bg_enable);
     // m_publish_btn->SetBackgroundColour(wxColour(59,68,70));
     // m_publish_btn->SetTextColor(StateColor::darkModeColorFor("#FFFFFE"));
-
-    // NEOTKO_LIBRE_TAG_START
-    if (m_neotko_libre_btn) {
-        m_neotko_libre_btn->SetTextLayout(SideButton::EHorizontalOrientation::HO_Left, FromDIP(15));
-        m_neotko_libre_btn->SetCornerRadius(FromDIP(12));
-        m_neotko_libre_btn->SetExtraSize(wxSize(FromDIP(38), FromDIP(10)));
-        m_neotko_libre_btn->SetMinSize(wxSize(-1, FromDIP(24)));
-    }
-    if (m_neotko_refresh_btn) {
-        m_neotko_refresh_btn->SetTextLayout(SideButton::EHorizontalOrientation::HO_Left, FromDIP(10));
-        m_neotko_refresh_btn->SetCornerRadius(FromDIP(12));
-        m_neotko_refresh_btn->SetExtraSize(wxSize(FromDIP(20), FromDIP(10)));
-        m_neotko_refresh_btn->SetMinSize(wxSize(-1, FromDIP(24)));
-    }
-    // NEOTKO_LIBRE_TAG_END
 
     m_slice_btn->SetTextLayout(SideButton::EHorizontalOrientation::HO_Left, FromDIP(15));
     m_slice_btn->SetCornerRadius(FromDIP(12));
@@ -2344,7 +2244,8 @@ static wxMenu* generate_help_menu()
     //        //TODO
     //    });
     // Check New Version
-    append_menu_item(helpMenu, wxID_ANY, _L("Check for Update"), _L("Check for Update"),
+    append_menu_item(
+        helpMenu, wxID_ANY, _L("Check for Update"), _L("Check for Update"),
         [](wxCommandEvent&) {
             wxGetApp().check_new_version_sf(true, UPDATE_BUSER);
         }, "", nullptr, []() {
@@ -2903,23 +2804,10 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) { m_plater->toggle_show_wireframe(); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,
             [this]() { return m_plater->is_wireframe_enabled(); }, [this]() { return m_plater->is_show_wireframe(); }, this);*/
 
-        //viewMenu->AppendSeparator();
-        ////BBS orthogonal view
-        //append_menu_check_item(viewMenu, wxID_ANY, _L("Show Edges(TODO)"), _L("Show Edges."),
-        //    [this](wxCommandEvent& evt) {
-        //        wxGetApp().app_config->set("show_build_edges", evt.GetInt() == 1 ? "true" : "false");
-        //    }, nullptr, [this]() {return can_select(); }, [this]() {
-        //        std::string show_build_edges = wxGetApp().app_config->get("show_build_edges");
-        //        return show_build_edges.compare("true") == 0;
-        //    }, this);
     }
 
     wxWindowID config_id_base = wxWindow::NewControlId(int(ConfigMenuCnt));
-    //TODO remove
-    //auto config_wizard_name = _(ConfigWizard::name(true) + "(Debug)");
-    //const auto config_wizard_tooltip = from_u8((boost::format(_utf8(L("Run %s"))) % config_wizard_name).str());
-    //auto config_item = new wxMenuItem(m_topbar->GetTopMenu(), ConfigMenuWizard + config_id_base, config_wizard_name, config_wizard_tooltip);
-#ifdef __APPLE__
+   #ifdef __APPLE__
     wxWindowID bambu_studio_id_base = wxWindow::NewControlId(int(2));
     wxMenu* parent_menu = m_menubar->OSXGetAppleMenu();
     //auto preference_item = new wxMenuItem(parent_menu, OrcaSlicerMenuPreferences + bambu_studio_id_base, _L("Preferences") + "\t" + ctrl + ",", "");
@@ -2928,98 +2816,11 @@ void MainFrame::init_menubar_as_editor()
     auto preference_item = new wxMenuItem(parent_menu, ConfigMenuPreferences + config_id_base, _L("Preferences") + "\t" + ctrl + "P", "");
 
 #endif
-    //auto printer_item = new wxMenuItem(parent_menu, ConfigMenuPrinter + config_id_base, _L("Printer"), "");
-    //auto language_item = new wxMenuItem(parent_menu, ConfigMenuLanguage + config_id_base, _L("Switch Language"), "");
-//    parent_menu->Bind(wxEVT_MENU, [this, config_id_base](wxEvent& event) {
-//        switch (event.GetId() - config_id_base) {
-//        //case ConfigMenuLanguage:
-//        //{
-//        //    /* Before change application language, let's check unsaved changes on 3D-Scene
-//        //     * and draw user's attention to the application restarting after a language change
-//        //     */
-//        //    {
-//        //        // the dialog needs to be destroyed before the call to switch_language()
-//        //        // or sometimes the application crashes into wxDialogBase() destructor
-//        //        // so we put it into an inner scope
-//        //        wxString title = _L("Language selection");
-//        //        wxMessageDialog dialog(nullptr,
-//        //            _L("Switching the language requires application restart.\n") + "\n\n" +
-//        //            _L("Do you want to continue?"),
-//        //            title,
-//        //            wxICON_QUESTION | wxOK | wxCANCEL);
-//        //        if (dialog.ShowModal() == wxID_CANCEL)
-//        //            return;
-//        //    }
-//
-//        //    wxGetApp().switch_language();
-//        //    break;
-//        //}
-//        //case ConfigMenuWizard:
-//        //{
-//        //    wxGetApp().run_wizard(ConfigWizard::RR_USER);
-//        //    break;
-//        //}
-//        case ConfigMenuPrinter:
-//        {
-//            wxGetApp().params_dialog()->Popup();
-//            wxGetApp().get_tab(Preset::TYPE_PRINTER)->restore_last_select_item();
-//            break;
-//        }
-//        case ConfigMenuPreferences:
-//        {
-//            CallAfter([this] {
-//                PreferencesDialog dlg(this);
-//                dlg.ShowModal();
-//#if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-//                if (dlg.seq_top_layer_only_changed() || dlg.seq_seq_top_gcode_indices_changed())
-//#else
-//                if (dlg.seq_top_layer_only_changed())
-//#endif // ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-//                    plater()->refresh_print();
-//#if ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
-//#ifdef _WIN32
-//                /*
-//                if (wxGetApp().app_config()->get("associate_3mf") == "true")
-//                    wxGetApp().associate_3mf_files();
-//                if (wxGetApp().app_config()->get("associate_stl") == "true")
-//                    wxGetApp().associate_stl_files();
-//                /*if (wxGetApp().app_config()->get("associate_step") == "true")
-//                    wxGetApp().associate_step_files();*/
-//#endif // _WIN32
-//#endif
-//            });
-//            break;
-//        }
-//        default:
-//            break;
-//        }
-//    });
+   
 
 #ifdef __APPLE__
     wxString about_title = wxString::Format(_L("&About %s"), SLIC3R_APP_FULL_NAME);
-    //auto about_item = new wxMenuItem(parent_menu, Snapmaker_OrcaMenuAbout + bambu_studio_id_base, about_title, "");
-        //parent_menu->Bind(wxEVT_MENU, [this, bambu_studio_id_base](wxEvent& event) {
-        //    switch (event.GetId() - bambu_studio_id_base) {
-        //        case Snapmaker_OrcaMenuAbout:
-        //            Slic3r::GUI::about();
-        //            break;
-        //        case Snapmaker_OrcaMenuPreferences:
-        //            CallAfter([this] {
-        //                PreferencesDialog dlg(this);
-        //                dlg.ShowModal();
-        //#if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-        //                if (dlg.seq_top_layer_only_changed() || dlg.seq_seq_top_gcode_indices_changed())
-        //#else
-        //                if (dlg.seq_top_layer_only_changed())
-        //#endif // ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-        //                    plater()->refresh_print();
-        //            });
-        //            break;
-        //        default:
-        //            break;
-        //    }
-        //});
-    //parent_menu->Insert(0, about_item);
+
     append_menu_item(
         parent_menu, wxID_ANY, _L(about_title), "",
         [this](wxCommandEvent &) { Slic3r::GUI::about();},
@@ -3059,10 +2860,7 @@ void MainFrame::init_menubar_as_editor()
             plater()->get_current_canvas3D()->force_set_focus();
         },
         "", nullptr, []() { return true; }, this);
-    //m_topbar->AddDropDownMenuItem(preference_item);
-    //m_topbar->AddDropDownMenuItem(printer_item);
-    //m_topbar->AddDropDownMenuItem(language_item);
-    //m_topbar->AddDropDownMenuItem(config_item);
+
     m_topbar->AddDropDownSubMenu(helpMenu, _L("Help"));
 
     // SoftFever calibrations
@@ -4104,6 +3902,61 @@ void MainFrame::RunScript(wxString js)
         m_webview->RunScript(js);
 }
 
+void MainFrame::downloadOpenProject(const std::string& fileUrl, const std::string& fileName, std::string completeFilePath)
+{
+    // std::string fileUrl = "https://public.resource.snapmaker.com/model/public/3mf/test_for_download.3mf";
+    // std::string           filename     = "test_for_download.3mf";
+    wxString fileNameEx = wxString::FromUTF8(fileName.c_str()).Lower();
+    std::string releaFileName = "";
+
+    bool strRes = fileNameEx.EndsWith(".3mf");
+
+    if (strRes)
+        releaFileName = fileName;
+    else
+        releaFileName = fileName + ".3mf";
+
+    GenericDownloadDialog dlg(_L("downloading the model"), fileUrl, releaFileName, completeFilePath);
+    auto res = dlg.ShowModal();
+
+    if (res != wxID_OK)
+        return;
+
+    // DownloadManager may save under a uniquified name (e.g. a(1).3mf); use the path returned by the dialog.
+    std::string path_to_open = dlg.get_file_path();
+    if (path_to_open.empty()) {
+        if (completeFilePath.empty()) {
+            auto downloadPath = wxGetApp().app_config->get("download_path");
+            completeFilePath  = downloadPath + "/" + releaFileName;
+        }
+        path_to_open = completeFilePath;
+    }
+    if (!boost::filesystem::exists(path_to_open))
+    {
+        BOOST_LOG_TRIVIAL(warning) << boost::format("the file '%1%' not exists") % path_to_open;
+        return;
+    }
+
+    // Auto-open project if it's a .3mf file
+    boost::filesystem::path path(path_to_open);
+    std::string             extension = boost::algorithm::to_lower_copy(path.extension().string());
+    if (extension == ".3mf") {
+        BOOST_LOG_TRIVIAL(info) << boost::format("GenericDownloadDialog: Auto-opening project file '%1%'") % path_to_open;
+        wxString wx_file_path = wxString::FromUTF8(path_to_open.c_str());
+        if (wxGetApp().can_load_project() && wxGetApp().mainframe && wxGetApp().mainframe->plater()) {
+            wxGetApp().mainframe->plater()->load_project(wx_file_path);
+        }
+    }
+    else
+    {
+        // Not a valid 3mf file, show error message
+        wxString msg = wxString::Format(_L("The downloaded file '%s' is not a valid 3MF project file."), releaFileName);
+        MessageDialog(this, msg, _L("Invalid File"), wxOK | wxICON_WARNING).ShowModal();
+    }
+
+    
+}
+
 void MainFrame::technology_changed()
 {
     // update menu titles
@@ -4162,6 +4015,9 @@ void MainFrame::export_logs()
         return;
 
     wxString zip_path = dlg.GetPath();
+
+    // Write version info and flush to log file before zipping
+    GUI_App::log_version_info();
 
     // 4. Create ZIP file and add all logs
     try {

@@ -303,8 +303,8 @@ public:
     [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx) const;
     [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx, const Vec3i32 &neighbors) const;
 
-    // NEOTKO_COLORSTITCH_TAG — s118 (eyedropper): estado (slot/EBT) del triángulo
-    // sin-dividir bajo un hit. Devuelve NONE si no se resuelve el triángulo.
+    // NEOTKO_COLORSTITCH_TAG — s118 (eyedropper) / s130 port: estado (slot/EBT) del
+    // triángulo sin-dividir bajo un hit. Devuelve NONE si no se resuelve el triángulo.
     [[nodiscard]] EnforcerBlockerType get_state_at(const Vec3f &hit, int facet_idx) const {
         const int leaf = select_unsplit_triangle(hit, facet_idx);
         return (leaf >= 0 && leaf < (int)m_triangles.size())

@@ -4,7 +4,6 @@
 #include "Exception.hpp"
 #include "Geometry.hpp"
 #include "PerimeterGenerator.hpp"
-#include "NeoArachne/NeoArachneEngine.hpp"
 #include "Print.hpp"
 #include "Surface.hpp"
 #include "BoundingBox.hpp"
@@ -23,16 +22,63 @@ namespace Slic3r {
 
 namespace {
 
-bool use_base_infill_filament(const PrintRegionConfig &config, int layer_index, int layer_count)
+unsigned int effective_layer_filament_id(const Layer &layer, unsigned int filament_id)
 {
-    if (!config.enable_infill_filament_override.value)
-        return true;
-    if (layer_count <= 0)
-        return false;
+    if (filament_id == 0)
+        return filament_id;
 
-    const int first_layers = std::max(0, config.infill_filament_use_base_first_layers.value);
-    const int last_layers  = std::max(0, config.infill_filament_use_base_last_layers.value);
-    return layer_index < first_layers || layer_index >= layer_count - last_layers;
+    const PrintObject *object = layer.object();
+    const Print       *print  = object ? object->print() : nullptr;
+    if (print == nullptr)
+        return filament_id;
+
+    const size_t num_physical = print->config().filament_diameter.size();
+    if (num_physical == 0)
+        return filament_id;
+
+    // Ordinary mixed rows still print with one physical filament per layer even
+    // when region collapse is disabled, so geometry / flow decisions must use
+    // that effective physical filament to avoid per-layer thin-feature drift.
+    return print->mixed_filament_manager().effective_painted_region_filament_id(filament_id,
+                                                                                num_physical,
+                                                                                int(layer.id()),
+                                                                                float(layer.print_z),
+                                                                                float(layer.height));
+}
+
+unsigned int effective_infill_filament_id(const Layer &layer, const PrintRegionConfig &config, unsigned int filament_id)
+{
+    const unsigned int effective = effective_layer_filament_id(layer, filament_id);
+    if (effective != filament_id || filament_id == 0)
+        return effective;
+
+    const PrintObject *object = layer.object();
+    const Print       *print  = object ? object->print() : nullptr;
+    if (print == nullptr)
+        return filament_id;
+
+    const size_t num_physical = print->config().filament_diameter.size();
+    if (num_physical == 0)
+        return filament_id;
+
+    const MixedFilamentManager &mixed_mgr = print->mixed_filament_manager();
+    const MixedFilament *mixed_row = mixed_mgr.mixed_filament_from_id(filament_id, num_physical);
+    if (mixed_row == nullptr)
+        return filament_id;
+
+    const std::string normalized_pattern = MixedFilamentManager::normalize_manual_pattern(mixed_row->manual_pattern);
+    if (normalized_pattern.find(',') == std::string::npos)
+        return filament_id;
+
+    const int innermost_perimeter_index = std::max(0, config.wall_loops.value - 1);
+    return mixed_mgr.resolve_perimeter(filament_id,
+                                       num_physical,
+                                       int(layer.id()),
+                                       innermost_perimeter_index,
+                                       float(layer.print_z),
+                                       float(layer.height),
+                                       false,
+                                       object);
 }
 
 } // namespace
@@ -40,11 +86,17 @@ bool use_base_infill_filament(const PrintRegionConfig &config, int layer_index, 
 unsigned int LayerRegion::extruder(FlowRole role) const
 {
     const PrintRegionConfig &config = this->region().config();
+    unsigned int             filament_id = 0;
     if (role == frInfill)
-        return use_base_infill_filament(config, m_layer->id(), int(m_layer->object()->layers().size())) ? config.wall_filament.value : config.sparse_infill_filament.value;
-    if (role == frSolidInfill && std::abs(config.sparse_infill_density.value - 100.) < EPSILON)
-        return use_base_infill_filament(config, m_layer->id(), int(m_layer->object()->layers().size())) ? config.wall_filament.value : config.sparse_infill_filament.value;
-    return this->region().extruder(role);
+        filament_id = config.sparse_infill_filament.value;
+    else if (role == frSolidInfill && std::abs(config.sparse_infill_density.value - 100.) < EPSILON)
+        filament_id = config.sparse_infill_filament.value;
+    else
+        filament_id = this->region().extruder(role);
+
+    return (role == frInfill || role == frSolidInfill) ?
+        effective_infill_filament_id(*m_layer, config, filament_id) :
+        effective_layer_filament_id(*m_layer, filament_id);
 }
 
 Flow LayerRegion::flow(FlowRole role) const
@@ -54,9 +106,14 @@ Flow LayerRegion::flow(FlowRole role) const
 
 Flow LayerRegion::flow(FlowRole role, double layer_height) const
 {
+    return this->flow(role, layer_height, m_layer->id() == 0);
+}
+
+Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_layer_width) const
+{
     const PrintConfig          &print_config = m_layer->object()->print()->config();
     ConfigOptionFloatOrPercent config_width;
-    if (m_layer->id() == 0 && print_config.initial_layer_line_width.value > 0) {
+    if (use_initial_layer_width && print_config.initial_layer_line_width.value > 0) {
         config_width = print_config.initial_layer_line_width;
     } else if (role == frExternalPerimeter) {
         config_width = m_region->config().outer_wall_line_width;
@@ -69,7 +126,9 @@ Flow LayerRegion::flow(FlowRole role, double layer_height) const
     } else if (role == frTopSolidInfill) {
         config_width = m_region->config().top_surface_line_width;
     } else {
-        throw Slic3r::InvalidArgument("Unknown role");
+        BOOST_LOG_TRIVIAL(error) << "Unknown role in LayerRegion::flow: " << int(role);
+        assert(false);
+        return Flow();
     }
 
     if (config_width.value == 0)
@@ -128,6 +187,10 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     const PrintConfig       &print_config  = this->layer()->object()->print()->config();
     const PrintRegionConfig &region_config = this->region().config();
     const PrintObjectConfig& object_config = this->layer()->object()->config();
+    PrintRegionConfig        perimeter_config = region_config;
+    perimeter_config.wall_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.wall_filament.value))));
+    perimeter_config.sparse_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.sparse_infill_filament.value))));
+    perimeter_config.solid_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.solid_infill_filament.value))));
     // This needs to be in sync with PrintObject::_slice() slicing_mode_normal_below_layer!
     bool spiral_mode = print_config.spiral_mode &&
         //FIXME account for raft layers.
@@ -141,7 +204,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         this->layer()->height,
         this->layer()->slice_z,
         this->flow(frPerimeter),
-        &region_config,
+        &perimeter_config,
         &this->layer()->object()->config(),
         &print_config,
         spiral_mode,
@@ -169,21 +232,10 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
 
-    // NEOTKO_NEOARACHNE_TAG fase0 — third branch dispatched through the
-    // NeoArachne facade. In Phase 0 the facade is a passthrough to
-    // process_classic() (bit-identical regression baseline); Phases 1+
-    // replace it with the hybrid Classic/Arachne plan. Spiral mode keeps
-    // forcing Classic for both Arachne and NeoArachne, as before.
-    const auto wg = this->layer()->object()->config().wall_generator.value;
-    if (spiral_mode) {
-        g.process_classic();
-    } else if (wg == PerimeterGeneratorType::Arachne) {
+    if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();
-    } else if (wg == PerimeterGeneratorType::NeoArachne) {
-        NeoArachne::run(g);
-    } else {
+    else
         g.process_classic();
-    }
 }
 
 #if 1

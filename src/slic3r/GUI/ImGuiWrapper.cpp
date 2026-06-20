@@ -2411,7 +2411,7 @@ void ImGuiWrapper::on_change_color_mode(bool is_dark)
     m_is_dark_mode = is_dark;
 }
 
-// NEOTKO_COLORSTITCH_TAG — mismo flag que push_toolbar_style (texto claro/oscuro).
+// NEOTKO_COLORSTITCH_TAG — s130 port: mismo flag que push_toolbar_style (texto claro/oscuro).
 bool ImGuiWrapper::is_dark_mode()
 {
     return m_is_dark_mode;
@@ -2466,19 +2466,13 @@ void ImGuiWrapper::push_toolbar_style(const float scale)
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
-        // NEOTKO_COLORSTITCH_TAG — fondo de popups/tooltips en LIGHT mode. Sin esto los
-        // tooltips heredaban el PopupBg oscuro del estilo base y, con el texto oscuro de
-        // este light style, salían "negro con texto muy oscuro". Solo rama light → modo
-        // oscuro intacto. El pop correspondiente es condicional (ver pop_toolbar_style).
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(250 / 255.0f, 250 / 255.0f, 250 / 255.0f, 1.00f)); // 17 (solo light)
     }
 }
 
 void ImGuiWrapper::pop_toolbar_style()
 {
-    // size in push toolbar style — la rama light empuja un color extra (PopupBg).
-    // is_dark_mode() es estable dentro de un mismo push/pop (no cambia mid-frame).
-    ImGui::PopStyleColor(m_is_dark_mode ? 16 : 17);
+    // size in push toolbar style
+    ImGui::PopStyleColor(16);
     ImGui::PopStyleVar(6);
 }
 

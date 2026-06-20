@@ -1,7 +1,9 @@
 #ifndef slic3r_Plater_hpp_
 #define slic3r_Plater_hpp_
 
+#include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 #include <boost/filesystem/path.hpp>
 
@@ -10,6 +12,7 @@
 #include <wx/notebook.h>
 
 #include "Selection.hpp"
+#include "MixedColorMatchHelpers.hpp"
 
 #include "libslic3r/enum_bitmask.hpp"
 #include "libslic3r/Preset.hpp"
@@ -150,12 +153,15 @@ public:
     // BBS. Add on_filaments_change() method.
     void on_filaments_change(size_t num_filaments);
     void change_filament(size_t from_id, size_t to_id);
+    void merge_mixed_filament(size_t from_id, size_t to_id);
     void add_filament();
     void delete_filament(size_t filament_id  = size_t(-1), int replace_filament_id = -1); // 0 base, -1 means default
     void add_custom_filament(wxColour new_col);
     void edit_filament();
 
     void on_filaments_delete(size_t filament_id);
+    void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
+    void update_color_mix_panel();
     void update_mixed_filament_panel(bool sync_manager = true);
     std::vector<unsigned int> get_ui_ordered_filament_ids() const;
     // BBS
@@ -207,11 +213,7 @@ public:
     Search::OptionsSearcher&        get_searcher();
     std::string&                    get_search_line();
     void                            update_printer_thumbnail();
-
-    // NEOTKO_LIBRE_TAG_START
-    wxPanel*                        get_scrolled_panel() const;
-    wxBoxSizer*                     get_scrolled_sizer() const { return m_scrolled_sizer; }
-    // NEOTKO_LIBRE_TAG_END
+    const std::vector<std::string>& get_bed_type_combo_enum_values() const { return m_bed_type_combo_enum_values; }
 
 private:
     struct priv;
@@ -219,6 +221,7 @@ private:
 
     wxBoxSizer* m_scrolled_sizer = nullptr;
     ComboBox* m_bed_type_list = nullptr;
+    std::vector<std::string> m_bed_type_combo_enum_values;
     ScalableButton* connection_btn = nullptr;
     ScalableButton* machine_connecting_btn = nullptr;
     ScalableButton* ams_btn = nullptr;
@@ -387,15 +390,6 @@ public:
 
     void reset_window_layout();
 
-    // NEOTKO_LIBRE_TAG_START
-    void float_params_panel(bool do_float);
-    void save_window_layout();
-    // Sets the cached Libre Mode state used by the slicing pipeline.
-    // Call this from MainFrame toggle button AFTER app_config->set_bool(),
-    // and BEFORE any schedule_background_process() is triggered.
-    void set_neotko_libre_cached(bool v);
-    // NEOTKO_LIBRE_TAG_END
-
     // Called after the Preferences dialog is closed and the program settings are saved.
     // Update the UI based on the current preferences.
     void update_ui_from_settings();
@@ -505,7 +499,7 @@ public:
     bool leave_gizmos_stack();
 
     void on_filaments_change(size_t extruders_count);
-    void on_filaments_delete(size_t extruders_count, size_t filament_id, int replace_filament_id = -1);
+    void on_filaments_delete(size_t extruders_count, size_t filament_id, int replace_filament_id = -1, const std::vector<unsigned char>& is_mixed_snapshot = {});
     bool confirm_auto_generated_gradients(size_t num_physical);
     void set_auto_generated_gradient_decision(size_t num_physical, bool create_auto_gradients);
     // BBS
@@ -531,6 +525,8 @@ public:
     wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false) const;
     void set_project_filename(const wxString& filename);
     void update_print_error_info(int code, std::string msg, std::string extra);
+    void notify_vhl_dithering_conflict(bool local_z_enabled);
+    bool has_incompatible_mixed_filament_in_use() const;
 
     bool is_export_gcode_scheduled() const;
 
@@ -580,16 +576,6 @@ public:
     void split_object();
     void split_volume();
     void optimize_rotation();
-    // NEOTKO_LIBRE_TAG_START — Temporal Link
-    void link_selected_objects();
-    void break_link_selected_objects();
-    void break_link_all_in_group();
-    void select_link_group();
-    // Copy/Paste Process Settings
-    void copy_process_settings();
-    void paste_process_settings();
-    bool has_process_settings_clipboard() const;
-    // NEOTKO_LIBRE_TAG_END
     // find all empty cells on the plate and won't overlap with exclusion areas
     static std::vector<Vec2f> get_empty_cells(const Vec2f step);
 
@@ -692,6 +678,7 @@ public:
 #endif
 
     void reset_gcode_toolpaths();
+    void post_slice_state_change_update();
     void reset_last_loaded_gcode() { m_last_loaded_gcode = ""; }
 
     const Mouse3DController& get_mouse3d_controller() const;
@@ -886,6 +873,7 @@ private:
 };
 
 std::vector<int> get_min_flush_volumes(const DynamicPrintConfig& full_config);
+
 } // namespace GUI
 } // namespace Slic3r
 

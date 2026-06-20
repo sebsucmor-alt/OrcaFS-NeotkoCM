@@ -16,11 +16,12 @@
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
 #include "NeoTower.hpp"  // NEOTKO_NEOTOWER_TAG
+#include "SurfaceEffectProfile.hpp"  // NEOTKO_LIBRE_TAG — profile-aware wipe-tower gate
+#include "SurfaceColorMix.hpp"        // NEOTKO_LIBRE_TAG — SurfacePassStack::resolve()
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
+#include "FilamentHotBedNozzleRules.hpp"
 #include "Model.hpp"
-#include "SurfaceEffectProfile.hpp"  // NEOTKO_LIBRE_TAG — s97 Bug A: profile-aware wipe-tower gate
-#include "SurfaceColorMix.hpp"        // NEOTKO_LIBRE_TAG — s97 Bug A: SurfacePassStack::resolve()
 #include "format.hpp"
 #include <float.h>
 
@@ -98,8 +99,8 @@ static bool local_z_segments_exist(Polylines segments)
     return false;
 }
 
-static bool extrusion_collection_has_local_z_perimeter_segment(const ExtrusionEntityCollection &source,
-                                                               const ExPolygons               &include_masks)
+static bool extrusion_collection_has_local_z_segment(const ExtrusionEntityCollection &source,
+                                                     const ExPolygons               &include_masks)
 {
     if (source.entities.empty() || include_masks.empty())
         return false;
@@ -125,7 +126,7 @@ static bool extrusion_collection_has_local_z_perimeter_segment(const ExtrusionEn
     return false;
 }
 
-static bool layer_has_local_z_perimeters(const Layer &layer, const ExPolygons &pass_masks)
+static bool layer_has_local_z_extrusions(const Layer &layer, const ExPolygons &pass_masks, bool include_infill)
 {
     if (pass_masks.empty())
         return false;
@@ -135,7 +136,16 @@ static bool layer_has_local_z_perimeters(const Layer &layer, const ExPolygons &p
             const auto *extrusions = dynamic_cast<const ExtrusionEntityCollection*>(entity);
             if (extrusions == nullptr)
                 continue;
-            if (extrusion_collection_has_local_z_perimeter_segment(*extrusions, pass_masks))
+            if (extrusion_collection_has_local_z_segment(*extrusions, pass_masks))
+                return true;
+        }
+        if (!include_infill)
+            continue;
+        for (const ExtrusionEntity *entity : layer_region->fills.entities) {
+            const auto *extrusions = dynamic_cast<const ExtrusionEntityCollection*>(entity);
+            if (extrusions == nullptr)
+                continue;
+            if (extrusion_collection_has_local_z_segment(*extrusions, pass_masks))
                 return true;
         }
     }
@@ -170,6 +180,7 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
 {
     std::vector<LocalZWipeTowerPassRef> pass_refs;
     const bool  local_z_whole_objects_enabled = print.full_print_config().opt_bool("dithering_local_z_whole_objects");
+    const bool  local_z_infill_enabled        = print.full_print_config().opt_bool("dithering_local_z_infill");
     const float local_z_perimeter_mask_expand = float(scale_(LOCAL_Z_PERIMETER_MASK_EXPAND_MM));
 
     for (size_t layer_to_print_idx = 0; layer_to_print_idx < layers.size(); ++layer_to_print_idx) {
@@ -251,7 +262,7 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
                 const ExPolygons &pass_masks = compensated_masks_by_extruder[extruder_id];
                 if (pass_masks.empty())
                     continue;
-                if (layer_has_local_z_perimeters(*layer_to_print.object_layer, pass_masks))
+                if (layer_has_local_z_extrusions(*layer_to_print.object_layer, pass_masks, local_z_infill_enabled))
                     pass_ref.extruders.push_back(unsigned(extruder_id));
             }
 
@@ -576,6 +587,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "eng_plate_temp_initial_layer",
         "hot_plate_temp_initial_layer",
         "textured_plate_temp_initial_layer",
+        "graphic_effect_plate_temp_initial_layer",
         "gcode_add_line_number",
         "layer_change_gcode",
         "time_lapse_gcode",
@@ -735,7 +747,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "textured_cool_plate_temp"
             || opt_key == "eng_plate_temp"
             || opt_key == "hot_plate_temp"
-            || opt_key == "textured_plate_temp"
+            || opt_key == "textured_plate_temp" 
+            || opt_key == "graphic_effect_plate_temp"
             || opt_key == "enable_prime_tower"
             || opt_key == "prime_tower_width"
             || opt_key == "prime_tower_brim_width"
@@ -744,10 +757,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "other_layers_print_sequence_nums" 
             || opt_key == "wipe_tower_bridging"
             || opt_key == "wipe_tower_extra_flow"
-            || opt_key == "neotower_purge_compaction" // NEOTKO_NEOTOWER_TAG s104
-            || opt_key == "neotko_tower_type"         // NEOTKO_NEOTOWER_TAG s104
-            || opt_key == "neotower_zigurat"          // NEOTKO_NEOTOWER_TAG s104
-
+            || opt_key == "neotower_purge_compaction" // NEOTKO_NEOTOWER_TAG s104 — s130 port
+            || opt_key == "neotko_tower_type"         // NEOTKO_NEOTOWER_TAG s104 — s130 port
+            || opt_key == "neotower_zigurat"          // NEOTKO_NEOTOWER_TAG s104 — s130 port
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "flush_volumes_matrix"
             || opt_key == "prime_volume"
@@ -761,7 +773,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "initial_layer_speed"
             || opt_key == "initial_layer_travel_speed"
             || opt_key == "slow_down_layers"
-            || opt_key == "idle_temperature"
+            || opt_key == "idle_temperature" 
+            || opt_key == "filament_tower_ironing_area"
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"
@@ -769,8 +782,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_extra_rib_length"
             || opt_key == "wipe_tower_rib_width"
             || opt_key == "wipe_tower_fillet_wall"
+            || opt_key == "wipe_tower_wall_gap"
             || opt_key == "wipe_tower_filament"
             || opt_key == "wiping_volumes_extruders"
+            || opt_key == "dithering_local_z_infill"
             || opt_key == "enable_filament_ramming"
             || opt_key == "purge_in_prime_tower"
             || opt_key == "z_offset"
@@ -951,7 +966,26 @@ std::vector<unsigned int> Print::extruders(bool conside_custom_gcode) const
     }
 
     sort_remove_duplicates(extruders);
+
     return extruders;
+}
+
+void Print::filament_rule_mismatch_flags(NozzleFilamentRuleMismatch& out_nozzle_mismatch,
+                                         bool& out_gesp,
+                                         bool& out_pei_not_pla,
+                                         bool& out_pei_tpu,
+                                         const PresetBundle* preset_bundle) const
+{
+    FilamentHotBedNozzleRules::singleton().ensure_loaded();
+    const std::vector<unsigned int> used = extruders(true);
+    FilamentHotBedNozzleRules&      rules = FilamentHotBedNozzleRules::singleton();
+    out_nozzle_mismatch = NozzleFilamentRuleMismatch{};
+    rules.evaluate_nozzle_filament_mismatch_detail(m_config, used, preset_bundle, out_nozzle_mismatch);
+
+    out_gesp   = rules.evaluate_graphic_effect_bed_filament_mismatch(m_config, used);
+
+    out_pei_tpu     = rules.evaluate_pei_bed_filament_mismatch_tpu(m_config, used);
+    out_pei_not_pla = rules.evaluate_pei_bed_filament_mismatch_not_pla(m_config, used);
 }
 
 unsigned int Print::num_object_instances() const
@@ -1408,8 +1442,7 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     const Vec3d         plate_origin = print.get_plate_origin();
     float               x            = config.wipe_tower_x.get_at(plate_index) + plate_origin(0);
     float               y            = config.wipe_tower_y.get_at(plate_index) + plate_origin(1);
-    // NEOTKO_NEOTOWER_TAG s103-bd — real box grows by 2·pw (box-in-drawer).
-    float               width        = config.prime_tower_width.value + NeoTower::box_drawer_extra_width(config);
+    float               width        = config.prime_tower_width.value;
     float               a            = config.wipe_tower_rotation_angle.value;
     //float               v            = config.wiping_volume.value;
 
@@ -1518,14 +1551,14 @@ StringObjectException Print::check_multi_filament_valid(const Print& print)
 // Matches "G92 E0" with various forms of writing the zero and with an optional comment.
 boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$" };
 
-// Precondition: Print::validate() requires the Print::apply() to be called its invocation.
-//BBS: refine seq-print validation logic
-// NEOTKO_NEOTOWER_TAG s104 — forward declarations (defined further below) for
-// the tower-type blocking validation in Print::validate().
+// NEOTKO_LIBRE_TAG — forward declarations for the profile-aware wipe-tower gate
+// (defined further below, used by has_wipe_tower() / wipe_tower_data() / _make_wipe_tower()).
 static bool   neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions);
 static bool   neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects);
+static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects);
 static size_t neotko_estimated_virtual_tool_count(const PrintRegionPtrs& print_regions);
-
+// Precondition: Print::validate() requires the Print::apply() to be called its invocation.
+//BBS: refine seq-print validation logic
 StringObjectException Print::validate(StringObjectException *warning, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     std::vector<unsigned int> extruders = this->extruders();
@@ -1537,14 +1570,9 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
-    // NEOTKO_NEOTOWER_TAG s104 — blocking validation (user decision: explicit
-    // over magic, matching Orca's rigidity). Surface Sandwich / MultiPass /
-    // ColorMix sub-layer purging only works with the NeoTower planner
-    // (variable layer-height purges have no purge path in stock WipeTower2).
-    // Previously the gate silently auto-promoted; now the user must select it.
-    // Note: uses the pre-slice ESTIMATED virtual tool count; the rare corner
-    // where the estimate is <2 but post-slice vtools are ≥2 is still covered
-    // by a logged auto-promote safety net at the _make_wipe_tower gate.
+    // NEOTKO_NEOTOWER_TAG s104 — s130 port: block sandwich/MP scenes with Classic
+    // tower type before slicing (their sub-layer purges use variable layer heights
+    // the Classic wipe tower cannot handle). Safety net = AUTO-PROMOTE in _make_wipe_tower.
     if (!m_config.spiral_mode.value
         && (neotko_any_multi_tool_active(m_print_regions) || neotko_any_profile_with_mp_active(m_objects))
         && neotko_estimated_virtual_tool_count(m_print_regions) >= 2
@@ -1666,21 +1694,6 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     return {_u8L("Variable layer height is not supported with Organic supports.") };
         }
 
-    // NEOTKO_NEOTOWER_TAG s104 — adaptive/variable layer height + multiple
-    // filaments needs a wipe tower that purges at per-layer delta-Z heights.
-    // The Classic planner reserves at one height and emits at another → purges
-    // overrun the tower ("se desmadra", user-verified). Stock Orca simply does
-    // not support this combination at all; we support it through NeoTower only,
-    // so block Classic explicitly (also keeps the Snapmaker merge surface
-    // aligned with upstream rigidity).
-    if (this->has_wipe_tower() && extruders.size() > 1 && has_custom_layering
-        && !NeoTower::is_enabled(m_config)) {
-        return {L("Adaptive/variable layer height combined with multiple filaments requires "
-                  "the NeoTower tower type (per-layer variable-height purging).\n"
-                  "Set Prime tower → Tower type to \"NeoTower\", or disable variable layer height."),
-                nullptr, "neotko_tower_type"};
-    }
-
     if (this->has_wipe_tower() && ! m_objects.empty()) {
         // Make sure all extruders use same diameter filament and have the same nozzle diameter
         // EPSILON comparison is used for nozzles and 10 % tolerance is used for filaments
@@ -1732,66 +1745,13 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
         if (m_objects.size() > 1) {
             const SlicingParameters &slicing_params0 = m_objects.front()->slicing_parameters();
-            size_t tallest_object_idx  = 0;
-            size_t shortest_object_idx = 0; // NEOTKO_LIBRE: reference for variable-height comparison
-
-            // NEOTKO_LIBRE_TAG_START
-            // Proxy: neotko_disable_bridge_infill is always injected true/false by Plater
-            // mirroring the Libre Mode toggle — safe to use here without GUI dependency.
-            //
-            // BUG FIX (move/copy race): Previously read only m_objects[0], which could be a
-            // freshly added/copied object whose config hasn't been populated by Print::apply()
-            // yet in this cycle — causing _neotko_libre=false and a spurious prime tower error.
-            // Fix: scan ALL objects; if any one has the flag set, Libre Mode is active.
-            // Rationale: Plater always injects neotko_disable_bridge_infill into _libre_cfg
-            // before apply(), but apply() distributes config to existing objects first — a brand
-            // new PrintObject (from copy/move) may not have received it yet when validate() runs.
-            // A second apply() cycle fixes it (why "moving again" resolved the bug), but now we
-            // don't rely on that — any object with the flag is sufficient proof LM is on.
-            const bool _neotko_libre = [&]() -> bool {
-                for (const PrintObject* obj : m_objects) {
-                    const auto* f = obj->config().option<ConfigOptionBool>("neotko_disable_bridge_infill");
-                    if (f && f->value) return true;
-                }
-                return false;
-            }();
-            // DEBUG — NEOTKO_LIBRE_TAG — remove when bug confirmed fixed
-            // Dumps per-object flag state to /tmp/libre_validate.log when ORCA_DEBUG_LIBRE=1
-            // Each line: [validate_libre] obj=<name> flag=<0/1/missing> → result _neotko_libre=<0/1>
-            // If any line shows flag=0 or flag=missing AND _neotko_libre=0 while LM is ON → race confirmed.
-            do {
-                const char* _dbg_env = std::getenv("ORCA_DEBUG_LIBRE");
-                if (!_dbg_env || _dbg_env[0] != '1') break;
-                FILE* _dbg_f = fopen("/tmp/libre_validate.log", "a");
-                if (!_dbg_f) break;
-                fprintf(_dbg_f, "[validate_libre] --- validate() called, m_objects=%zu  _neotko_libre=%d ---\n",
-                    m_objects.size(), (int)_neotko_libre);
-                for (size_t _di = 0; _di < m_objects.size(); ++_di) {
-                    const PrintObject* _dobj = m_objects[_di];
-                    const auto* _df = _dobj->config().option<ConfigOptionBool>("neotko_disable_bridge_infill");
-                    const char* _dname = _dobj->model_object() ? _dobj->model_object()->name.c_str() : "?";
-                    if (!_df)
-                        fprintf(_dbg_f, "[validate_libre]   obj[%zu]=%s  flag=MISSING\n", _di, _dname);
-                    else
-                        fprintf(_dbg_f, "[validate_libre]   obj[%zu]=%s  flag=%d\n", _di, _dname, (int)_df->value);
-                }
-                fclose(_dbg_f);
-            } while(0);
-            // NEOTKO_LIBRE_TAG_END
-
+            size_t                  tallest_object_idx = 0;
             for (size_t i = 1; i < m_objects.size(); ++ i) {
                 const PrintObject       *object         = m_objects[i];
                 const SlicingParameters &slicing_params = object->slicing_parameters();
-                // NEOTKO_LIBRE_TAG_START
-                // In Libre Mode objects may intentionally have different layer heights (floating
-                // objects, per-object variable layering) — skip the uniformity check so the wipe
-                // tower is not blocked. Standard mode keeps the strict check.
-                if (!_neotko_libre) {
-                    if (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
-                        std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON)
-                        return {L("The prime tower requires that all objects have the same layer heights."), object, "initial_layer_print_height"};
-                }
-                // NEOTKO_LIBRE_TAG_END
+                if (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
+                    std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON)
+                    return {L("The prime tower requires that all objects have the same layer heights."), object, "initial_layer_print_height"};
                 if (slicing_params.raft_layers() != slicing_params0.raft_layers())
                     return {L("The prime tower requires that all objects are printed over the same number of raft layers."), object, "raft_layers"};
                 // BBS: support gap can be multiple of object layer height, remove _L()
@@ -1800,25 +1760,13 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
                     return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
-                // NEOTKO_LIBRE_TAG_START
-                if (!_neotko_libre) {
-                    if (!equal_layering(slicing_params, slicing_params0))
-                        return { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
-                }
-                // NEOTKO_LIBRE_TAG_END
+                if (!equal_layering(slicing_params, slicing_params0))
+                    return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
                 if (has_custom_layering) {
                     auto &lh         = layer_height_profile(i);
                     auto &lh_tallest = layer_height_profile(tallest_object_idx);
                     if (*(lh.end() - 2) > *(lh_tallest.end() - 2))
                         tallest_object_idx = i;
-                    // NEOTKO_LIBRE_TAG_START
-                    // Track shortest object for Libre Mode variable-height profile comparison.
-                    if (_neotko_libre) {
-                        auto &lh_shortest = layer_height_profile(shortest_object_idx);
-                        if (*(lh.end() - 2) < *(lh_shortest.end() - 2))
-                            shortest_object_idx = i;
-                    }
-                    // NEOTKO_LIBRE_TAG_END
                 }
             }
 
@@ -1826,36 +1774,29 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             if (has_custom_layering) {
                 std::vector<std::vector<coordf_t>> layer_z_series;
                 layer_z_series.assign(m_objects.size(), std::vector<coordf_t>());
-
+               
                 for (size_t idx_object = 0; idx_object < m_objects.size(); ++idx_object) {
                     layer_z_series[idx_object] = generate_object_layers(m_objects[idx_object]->slicing_parameters(), layer_height_profiles[idx_object], m_objects[idx_object]->config().precise_z_height.value);
                 }
 
-                // NEOTKO_LIBRE_TAG_START
-                // In Libre Mode objects may have different variable layer height profiles.
-                // Skip the uniformity check — wipe tower uses shortest_object_idx as reference.
-                // In standard mode keep the original strict check against tallest_object_idx.
-                if (!_neotko_libre) {
-                    for (size_t idx_object = 0; idx_object < m_objects.size(); ++idx_object) {
-                        if (idx_object == tallest_object_idx) continue;
-                        // Check that the layer height profiles are equal. This will happen when one object is
-                        // a copy of another, or when a layer height modifier is used the same way on both objects.
-                        // The latter case might create a floating point inaccuracy mismatch, so compare
-                        // element-wise using an epsilon check.
-                        size_t         i   = 0;
-                        const coordf_t eps = 0.5 * EPSILON; // layers closer than EPSILON will be merged later. Let's make
-                        // this check a bit more sensitive to make sure we never consider two different layers as one.
-                        while (i < layer_height_profiles[idx_object].size() && i < layer_height_profiles[tallest_object_idx].size()) {
-                            // BBS: remove the break condition, because a variable layer height object and a new object will not be checked when slicing
-                            //if (i % 2 == 0 && layer_height_profiles[tallest_object_idx][i] > layer_height_profiles[idx_object][layer_height_profiles[idx_object].size() - 2])
-                            //    break;
-                            if (std::abs(layer_height_profiles[idx_object][i] - layer_height_profiles[tallest_object_idx][i]) > eps)
-                                return {L("The prime tower is only supported if all objects have the same variable layer height.")};
-                            ++i;
-                        }
+                for (size_t idx_object = 0; idx_object < m_objects.size(); ++idx_object) {
+                    if (idx_object == tallest_object_idx) continue;
+                    // Check that the layer height profiles are equal. This will happen when one object is
+                    // a copy of another, or when a layer height modifier is used the same way on both objects.
+                    // The latter case might create a floating point inaccuracy mismatch, so compare
+                    // element-wise using an epsilon check.
+                    size_t         i   = 0;
+                    const coordf_t eps = 0.5 * EPSILON; // layers closer than EPSILON will be merged later. Let's make
+                    // this check a bit more sensitive to make sure we never consider two different layers as one.
+                    while (i < layer_height_profiles[idx_object].size() && i < layer_height_profiles[tallest_object_idx].size()) {
+                        // BBS: remove the break condition, because a variable layer height object and a new object will not be checked when slicing
+                        //if (i % 2 == 0 && layer_height_profiles[tallest_object_idx][i] > layer_height_profiles[idx_object][layer_height_profiles[idx_object].size() - 2])
+                        //    break;
+                        if (std::abs(layer_height_profiles[idx_object][i] - layer_height_profiles[tallest_object_idx][i]) > eps)
+                            return {L("The prime tower is only supported if all objects have the same variable layer height.")};
+                        ++i;
                     }
                 }
-                // NEOTKO_LIBRE_TAG_END
             }
         }
     }
@@ -2508,17 +2449,6 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     int object_count = m_objects.size();
     std::set<PrintObject*> need_slicing_objects;
     std::set<PrintObject*> re_slicing_objects;
-    // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico shared-object: cuántos slots
-    // colormix pintados ve cada objeto y a quién acaba compartiendo.
-    auto _cm_painted_count = [](const ModelObject* mo) -> int {
-        int n = 0;
-        if (mo) for (const ModelVolume* mv : mo->volumes) {
-            if (!mv || !mv->is_model_part()) continue;
-            for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
-                if (mv->colormix_slot_to_profile_id[s] != 0) ++n;
-        }
-        return n;
-    };
     if (!use_cache) {
         for (int index = 0; index < object_count; index++)
         {
@@ -2532,16 +2462,6 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
             if (!obj->get_shared_object())
                 need_slicing_objects.insert(obj);
-            const ModelObject* _mo = obj->model_object();
-            const PrintObject* _sh = obj->get_shared_object();
-            NEOTKO_LOG(PROFILE, "SHARED_DEDUP obj_mo=" << (const void*)_mo
-                << " name='" << (_mo ? _mo->name : "<null>") << "'"
-                << " painted_slots=" << _cm_painted_count(_mo)
-                << " shared=" << (_sh ? "YES→" : "NO(self)")
-                << (_sh ? (const void*)_sh->model_object() : (const void*)nullptr)
-                << (_sh && _sh->model_object()
-                       ? (" painted=" + std::to_string(_cm_painted_count(_sh->model_object())))
-                       : std::string()));
         }
     }
     else {
@@ -3093,8 +3013,7 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
     if (check_wipe_tower_existance && (!has_wipe_tower() || m_wipe_tower_data.tool_changes.empty()))
         return corners;
     {
-        // NEOTKO_NEOTOWER_TAG s103-bd — real box grows by 2·pw (box-in-drawer).
-        double width = m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config) + 2*m_wipe_tower_data.brim_width;
+        double width = m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config) + 2*m_wipe_tower_data.brim_width; // NEOTKO_NEOTOWER_TAG
         double depth = m_wipe_tower_data.depth + 2*m_wipe_tower_data.brim_width;
         Vec2d pt0(-m_wipe_tower_data.brim_width, -m_wipe_tower_data.brim_width);
         
@@ -3107,7 +3026,7 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
 
         // Now the stabilization cone.
         Vec2d center = (pts[0] + pts[2])/2.;
-        const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config) /* s103-bd */, m_wipe_tower_data.height, m_wipe_tower_data.depth, m_config.wipe_tower_cone_angle);
+        const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config) /* NEOTKO_NEOTOWER_TAG s103-bd */, m_wipe_tower_data.height, m_wipe_tower_data.depth, m_config.wipe_tower_cone_angle);
         double r = cone_R + m_wipe_tower_data.brim_width;
         for (double alpha = 0.; alpha<2*M_PI; alpha += M_PI/20.)
             pts.emplace_back(center + r*Vec2d(std::cos(alpha)/cone_x_scale, std::sin(alpha)));
@@ -3215,10 +3134,9 @@ void Print::finalize_first_layer_convex_hull()
     m_first_layer_convex_hull = Geometry::convex_hull(m_first_layer_convex_hull.points);
 }
 
-// NEOTKO_LIBRE_TAG_START
-// Returns true if any print region has Neotko multi-tool features active.
-// Iterates m_print_regions (flat list, always populated before has_wipe_tower() is called).
-// Called from has_wipe_tower() — must be safe to call before slicing completes.
+// Wipe tower support.
+// NEOTKO_LIBRE_TAG_START — profile-aware wipe-tower gate helpers.
+// Returns true if any region's config drives a Neotko multi-tool effect.
 static bool neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions)
 {
     for (const PrintRegion* region : print_regions) {
@@ -3228,12 +3146,8 @@ static bool neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions)
         if (rc.penultimate_multipass_enabled.value) return true;
         if (rc.multipass_path_gradient.value)       return true;
         if (rc.interlayer_colormix_enabled.value)   return true;
-        // NEOTKO_LIBRE_TAG — s97 Bug A: Sandwich JSON blob is the canonical source
-        // of "Sandwich active" since s84. SandwichDialog only sets the 4 booleans
-        // above for ColorMix / PathBlend passes (Tab.cpp:7573,7576). An all-Solid
-        // sandwich (e.g. T0→T2→T0) persists ONLY in neotko_surface_passes_top/_penu,
-        // so without this stack check the wipe-tower gate misses every pure-MultiPass
-        // sandwich and the trio reads (print.has_wt=0, tool_ordering.has_wt=1, ...).
+        // Sandwich JSON blob is the canonical source of "Sandwich active" since s84.
+        // An all-Solid sandwich persists ONLY in neotko_surface_passes_top/_penu.
         {
             const SurfacePassStack st_top = SurfacePassStack::resolve(rc, erTopSolidInfill);
             if (st_top.enabled && !st_top.passes.empty()) return true;
@@ -3241,37 +3155,12 @@ static bool neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions)
             if (st_penu.enabled && !st_penu.passes.empty()) return true;
         }
     }
-    // NEOTKO_WIPETOWER_DEBUG_TAG_START
-    {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
-        if (_wt_dbg) {
-            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
-            _wt_log << "[neotko_any_multi_tool_active] → false"
-                    << "  (regions=" << print_regions.size() << ")\n";
-            _wt_log.flush();
-        }
-    }
-    // NEOTKO_WIPETOWER_DEBUG_TAG_END
     return false;
 }
 
-// NEOTKO_LIBRE_TAG_START — s97 Bug A: profile-aware wipe-tower gate
-// Returns true if any object has a SurfaceEffectProfile attached (via 3D Painter
-// slots) whose payload signals a multi-tool effect.  This is the painter / Sandwich
-// path that bypasses the per-region booleans: profiles get applied to the config
-// via restore_keys() AT SLICE TIME, so neotko_any_multi_tool_active() (which
-// reads PrintRegionConfig) misses them when called from has_wipe_tower() /
-// _make_wipe_tower() pre-slice.
-//
-// Without this check, single-filament prints that drive MultiPass/ColorMix/
-// PathBlend only through painter-attached profiles never build a wipe tower
-// even though the slice DOES emit tool changes at sub-band level — the symptom
-// reported in the wipetower.log trio
-//   "print.has_wt=0  tool_ordering.has_wt=1  front.has_wt=0".
-//
-// The function is intentionally a sibling helper (not a signature change on
-// neotko_any_multi_tool_active) so the existing region-based path stays a clean
-// drop-in for the Snapmaker main fork.  Callers OR the two predicates.
+// Returns true if any object has a painted SurfaceEffectProfile with a multi-tool payload.
+// The painter path applies profiles to config AT SLICE TIME via restore_keys(), so the
+// region-based check above misses them pre-slice; this sibling helper covers that.
 static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
 {
     for (const PrintObject* obj : objects) {
@@ -3286,15 +3175,8 @@ static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
                 const SurfaceEffectProfile* p =
                     SurfaceEffectProfileManager::get().find(pid);
                 if (p == nullptr) continue;
-                // Any populated payload means the painter is driving a
-                // multi-tool effect on this object.  Mirrors the slice-path's
-                // unconditional restore_keys() behavior.
                 if (p->colormix.present || p->multipass.present || p->pathblend.present)
                     return true;
-                // NEOTKO_LIBRE_TAG — s97 Bug A: Fase 6b painter mode (Fill.cpp:1531)
-                // reads the profile's resolved SurfacePassStack JSON, not the legacy
-                // payloads. A Solid-only sandwich painted via the gizmo only fills
-                // stack_top_json / stack_penu_json, leaving all 3 payloads .present=false.
                 auto _stack_nonempty = [](const std::string& js) {
                     if (js.empty()) return false;
                     const SurfacePassStack st = SurfacePassStack::from_json(js);
@@ -3307,14 +3189,8 @@ static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
     }
     return false;
 }
-// NEOTKO_LIBRE_TAG_END
 
-// Returns the number of unique virtual tool_ids used across all MultiPass sublayers
-// of all PrintObjects in the print. MultiPass assigns different tool_ids (0-based) to
-// each pass even with 1 physical filament.
-// If no sublayers exist yet (pre-slice), returns 0 — callers must handle that case.
-// Used to give wipe_tower_data() and _make_wipe_tower() the correct "filament count"
-// so they don't produce depth=0 or abort due to apparent single-extruder setup.
+// Number of unique virtual tool_ids across all MultiPass sublayers (post-slice; 0 pre-slice).
 static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects)
 {
     std::set<int> tool_ids;
@@ -3325,80 +3201,40 @@ static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects)
     return tool_ids.size();
 }
 
-// Returns the number of virtual tools Neotko features will use, estimated purely from
-// region config — safe to call pre-slice when m_multipass_sublayers is still empty.
-// multipass_num_passes / penultimate_multipass_num_passes are the configured pass counts.
-// interlayer_colormix always implies ≥2 tools (tool_a + tool_b at minimum).
-// Used as fallback in wipe_tower_data() and _make_wipe_tower() when vtool_cnt == 0.
+// Estimate of virtual tools from region config — safe pre-slice (sublayers still empty).
 static size_t neotko_estimated_virtual_tool_count(const PrintRegionPtrs& print_regions)
 {
     size_t max_tools = 0;
     for (const PrintRegion* region : print_regions) {
         if (region == nullptr) continue;
         const PrintRegionConfig& rc = region->config();
-        if (rc.multipass_enabled.value) {
-            const size_t cnt = std::max<size_t>(2, (size_t)rc.multipass_num_passes.value);
-            max_tools = std::max(max_tools, cnt);
-        }
-        // NEOTKO_LIBRE_TAG_START — PathBlend uses pathblend_num_passes, not multipass_num_passes
-        if (rc.multipass_path_gradient.value) {
-            const size_t cnt = std::max<size_t>(2, (size_t)rc.pathblend_num_passes.value);
-            max_tools = std::max(max_tools, cnt);
-        }
-        // NEOTKO_LIBRE_TAG_END
-        if (rc.penultimate_multipass_enabled.value) {
-            const size_t cnt = std::max<size_t>(2, (size_t)rc.penultimate_multipass_num_passes.value);
-            max_tools = std::max(max_tools, cnt);
-        }
+        if (rc.multipass_enabled.value)
+            max_tools = std::max(max_tools, std::max<size_t>(2, (size_t)rc.multipass_num_passes.value));
+        if (rc.multipass_path_gradient.value)
+            max_tools = std::max(max_tools, std::max<size_t>(2, (size_t)rc.pathblend_num_passes.value));
+        if (rc.penultimate_multipass_enabled.value)
+            max_tools = std::max(max_tools, std::max<size_t>(2, (size_t)rc.penultimate_multipass_num_passes.value));
         if (rc.interlayer_colormix_enabled.value)
             max_tools = std::max<size_t>(max_tools, 2);
     }
-    // NEOTKO_WIPETOWER_DEBUG_TAG_START
-    {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
-        if (_wt_dbg) {
-            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
-            _wt_log << "[neotko_estimated_virtual_tool_count]"
-                    << "  regions=" << print_regions.size()
-                    << "  → max_tools=" << max_tools << "\n";
-            for (const PrintRegion* r : print_regions) {
-                if (!r) continue;
-                const PrintRegionConfig& rc = r->config();
-                _wt_log << "    region:"
-                        << " mp_en="        << rc.multipass_enabled.value
-                        << " mp_passes="    << rc.multipass_num_passes.value
-                        << " pb_gradient="  << rc.multipass_path_gradient.value
-                        << " pb_passes="    << rc.pathblend_num_passes.value
-                        << " penu_en="      << rc.penultimate_multipass_enabled.value
-                        << " penu_passes="  << rc.penultimate_multipass_num_passes.value
-                        << " colormix_en="  << rc.interlayer_colormix_enabled.value
-                        << "\n";
-            }
-            _wt_log.flush();
-        }
-    }
-    // NEOTKO_WIPETOWER_DEBUG_TAG_END
     return max_tools;
 }
 // NEOTKO_LIBRE_TAG_END
 
-// Wipe tower support.
 bool Print::has_wipe_tower() const
 {
-    // NEOTKO_LIBRE_TAG_START
-    // MultiPass/ColorMix/PathBlend need the prime tower even with 1 physical filament
-    // and even if enable_prime_tower is disabled — sublayer priming has no other purge path.
-    // This check must be OUTSIDE the enable_prime_tower guard so single-filament MultiPass
-    // prints don't silently skip the tower just because the user never toggled the setting.
+    // NEOTKO_LIBRE_TAG_START — MultiPass/ColorMix/PathBlend need the prime tower even with
+    // 1 physical filament and even if enable_prime_tower is off — sublayer priming has no
+    // other purge path. Must be OUTSIDE the enable_prime_tower guard.
     if (!m_config.spiral_mode.value &&
         (neotko_any_multi_tool_active(m_print_regions) ||
-         neotko_any_profile_with_mp_active(m_objects)))  // NEOTKO_LIBRE_TAG s97 Bug A
+         neotko_any_profile_with_mp_active(m_objects)))
         return true;
     // NEOTKO_LIBRE_TAG_END
-
     if (m_config.enable_prime_tower.value == true) {
         if (enable_timelapse_print())
             return true;
+
         return !m_config.spiral_mode.value && m_config.filament_diameter.values.size() > 1;
     }
     return false;
@@ -3408,8 +3244,7 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
 {
     // If the wipe tower wasn't created yet, make sure the depth and brim_width members are set to default.
     if (!is_step_done(psWipeTower) && filaments_cnt != 0) {
-        // NEOTKO_NEOTOWER_TAG s103-bd — real box grows by 2·pw (box-in-drawer).
-        double width        = m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config);
+        double width        = m_config.prime_tower_width + NeoTower::box_drawer_extra_width(m_config); // NEOTKO_NEOTOWER_TAG
         double layer_height = 0.2; // hard code layer height
         if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
             // Calculating depth should take into account currently set wiping volumes.
@@ -3430,23 +3265,7 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
             if (filaments_cnt == 1 && enable_timelapse_print()) {
                 const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume / (layer_height * width);
             } else {
-                // NEOTKO_LIBRE_TAG_START
-                // With 1 physical filament + Neotko multi-tool features, filaments_cnt==1 makes
-                // depth = wipe_volume * (1-1) = 0, so the tower box doesn't render in the preview.
-                // Post-slice: use real virtual tool count from m_multipass_sublayers.
-                // Pre-slice (sublayers still empty, vtool_cnt==0): use config-estimated count
-                // (multipass_num_passes / penultimate_multipass_num_passes) so the tower
-                // placeholder has a non-zero depth and is visible in the plater preview.
-                size_t effective_cnt = filaments_cnt;
-                if (filaments_cnt == 1 &&
-                    (neotko_any_multi_tool_active(m_print_regions) ||
-                     neotko_any_profile_with_mp_active(m_objects))) {  // NEOTKO_LIBRE_TAG s97 Bug A
-                    const size_t vtool_cnt = neotko_virtual_tool_count(m_objects);
-                    const size_t ecfg_cnt  = neotko_estimated_virtual_tool_count(m_print_regions);
-                    effective_cnt = std::max({(size_t)2, vtool_cnt, ecfg_cnt});
-                }
-                // NEOTKO_LIBRE_TAG_END
-                const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume * (effective_cnt - 1) / (layer_height * width);
+                const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume * (filaments_cnt - 1) / (layer_height * width);
             }
         }
         const_cast<Print *>(this)->m_wipe_tower_data.brim_width = m_config.prime_tower_brim_width;
@@ -3489,56 +3308,30 @@ void Print::_make_wipe_tower()
     // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2 ? true : false);
 
-    // NEOTKO_LIBRE_TAG_START
-    // ToolOrdering::has_wipe_tower() returns false when only 1 physical extruder is seen,
-    // even if Neotko virtual tools (MultiPass passes) are active and require purging.
-    // Post-slice: use real vtool_cnt from m_multipass_sublayers.
-    // Pre-slice (vtool_cnt==0): use config-estimated count so the gate doesn't abort early.
+    // NEOTKO_LIBRE_TAG_START — ToolOrdering::has_wipe_tower() returns false when only 1
+    // physical extruder is seen, even if Neotko virtual tools (MultiPass/ColorMix passes)
+    // are active and require purging. Force the tower when virtual tools ≥ 2 (post-slice
+    // real count, or pre-slice config estimate).
     const size_t neotko_vtool  = neotko_virtual_tool_count(m_objects);
     const size_t neotko_ecfg   = neotko_estimated_virtual_tool_count(m_print_regions);
     const bool neotko_forces_tower = (neotko_any_multi_tool_active(m_print_regions) ||
-                                      neotko_any_profile_with_mp_active(m_objects)) &&  // NEOTKO_LIBRE_TAG s97 Bug A
+                                      neotko_any_profile_with_mp_active(m_objects)) &&
                                      (neotko_vtool >= 2 || neotko_ecfg >= 2);
-    // NEOTKO_WIPETOWER_DEBUG_TAG_START
-    {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr);
-        if (_wt_dbg) {
-            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
-            _wt_log << "\n=== _make_wipe_tower() gate ===\n"
-                    << "  tool_ordering.has_wipe_tower() = "
-                    << m_wipe_tower_data.tool_ordering.has_wipe_tower() << "\n"
-                    << "  neotko_vtool (post-slice)      = " << neotko_vtool << "\n"
-                    << "  neotko_ecfg  (pre-slice est.)  = " << neotko_ecfg  << "\n"
-                    << "  neotko_any_multi_tool_active   = "
-                    << neotko_any_multi_tool_active(m_print_regions) << "\n"
-                    << "  neotko_forces_tower            = " << neotko_forces_tower << "\n"
-                    << "  → gate result: "
-                    << (!m_wipe_tower_data.tool_ordering.has_wipe_tower() && !neotko_forces_tower
-                        ? "ABORT (no tower generated)" : "PASS (tower will be built)") << "\n";
-            _wt_log.flush();
-        }
-    }
-    // NEOTKO_WIPETOWER_DEBUG_TAG_END
     // NEOTKO_LIBRE_TAG_END
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower() && !neotko_forces_tower)
         // Don't generate any wipe tower.
         return;
 
-    // NEOTKO_NEOTOWER_TAG_START
-    // Activates if explicitly enabled (neotko_wipe_tower=true) OR when neotko_forces_tower
-    // (single-filament MultiPass/PathBlend/ColorMix requires purging WipeTower2 cannot handle).
-    // Positioned here so ToolOrdering is already built and neotko_forces_tower is computed.
-    // NEOTKO_NEOTOWER_TAG s104 — the forced promotion is now a SAFETY NET only:
-    // Print::validate() blocks sandwich/MP scenes with Classic tower type before
-    // slicing, so this path normally runs with is_enabled()==true. It can still
-    // trigger when the pre-slice estimate undercounted virtual tools (validate
-    // saw <2, post-slice found ≥2) — promote loudly rather than emit broken
-    // purges.
+    // NEOTKO_NEOTOWER_TAG_START — increment #4 wiring. NeoTower activates when explicitly
+    // enabled (neotko_tower_type != Classic) OR when neotko_forces_tower (single-filament
+    // MultiPass/ColorMix/PathBlend requires purging WipeTower2 cannot plan). The latter is
+    // an AUTO-PROMOTE safety net: Classic was selected but post-slice virtual tools need
+    // NeoTower purging. NeoTower drives its own internal WipeTower2 and produces the whole
+    // tool_changes plan; GCode dispatches via get_tcr()/get_finish_layer().
     if (neotko_forces_tower && !NeoTower::is_enabled(m_config)) {
         BOOST_LOG_TRIVIAL(warning) << "[NeoTower] AUTO-PROMOTE safety net: tower type is Classic but "
-                                      "post-slice virtual tools require NeoTower purging (validate's "
-                                      "pre-slice estimate undercounted). Proceeding with NeoTower.";
-        NEOTKO_LOG(WIPETOWER, "NEOTOWER_AUTOPROMOTE_SAFETY_NET (Classic selected, vtools>=2 post-slice)");
+                                      "virtual tools require NeoTower purging. Proceeding with NeoTower.";
+        NEOTKO_LOG(WIPETOWER, "NEOTOWER_AUTOPROMOTE_SAFETY_NET (Classic selected, vtools>=2)");
     }
     if (NeoTower::is_enabled(m_config) || neotko_forces_tower) {
         m_neo_tower = std::make_unique<NeoTower>(
@@ -3549,19 +3342,13 @@ void Print::_make_wipe_tower()
             WipeTower2::extract_wipe_volumes(m_config),
             m_wipe_tower_data.tool_ordering.first_extruder());
 
-        // NEOTKO_NEOTOWER_TAG_START: pre-TC structural layers
-        // When only one physical filament is used (single-filament MultiPass /
-        // PathBlend / ColorMix), the ToolOrdering never sets has_wipe_tower=true
-        // for layers before the first real toolchange (no filament switch →
-        // ToolOrdering skips those layers).  Without has_wt=true, GCode won't
-        // call the tower at those layers, NeoTower generates no structural events
-        // there, and the tower has no physical base → first-TC layer floats in air.
-        //
-        // Fix: find the first has_wt=true non-sublayer LayerTools (the first
-        // real-TC layer), then force has_wipe_tower=true on all non-sublayer
-        // layers that precede it and have at least one extruder.  collect_all_events()
-        // will then generate T→T structural (finish_layer) events for those
-        // layers, and GCode will call get_finish_layer() at them.
+        // Pre-TC structural layers: when only one physical filament is used
+        // (single-filament MultiPass / PathBlend / ColorMix), ToolOrdering never sets
+        // has_wipe_tower=true for layers before the first real toolchange. Without it,
+        // GCode won't call the tower there and the tower base floats. Force
+        // has_wipe_tower=true on all non-sublayer layers preceding the first real-TC
+        // layer so collect_all_events() generates T→T structural (finish_layer) events.
+        // (Harmless for plain multitool prints: first_tc_z is the first layer.)
         {
             ToolOrdering& too = m_wipe_tower_data.tool_ordering;
             double first_tc_z = std::numeric_limits<double>::max();
@@ -3580,15 +3367,14 @@ void Print::_make_wipe_tower()
                 }
             }
         }
-        // NEOTKO_NEOTOWER_TAG_END
 
         m_neo_tower->collect_and_plan(*this);
         m_neo_tower->generate(m_wipe_tower_data.tool_changes);
 
-        m_wipe_tower_data.depth            = m_neo_tower->get_depth();
-        m_wipe_tower_data.brim_width       = m_neo_tower->get_brim_width();
-        m_wipe_tower_data.height           = m_neo_tower->get_height();
-        m_wipe_tower_data.used_filament    = m_neo_tower->get_used_filament();
+        m_wipe_tower_data.depth                 = m_neo_tower->get_depth();
+        m_wipe_tower_data.brim_width            = m_neo_tower->get_brim_width();
+        m_wipe_tower_data.height                = m_neo_tower->get_height();
+        m_wipe_tower_data.used_filament         = m_neo_tower->get_used_filament();
         m_wipe_tower_data.number_of_toolchanges = m_neo_tower->get_number_of_toolchanges();
         // z_and_depth_pairs: NeoTower v1 leaves empty — cone-wall GL preview not implemented.
         return;
@@ -3605,7 +3391,7 @@ void Print::_make_wipe_tower()
         // Find the first wipe tower layer, which does not have a counterpart in an object or a support layer.
         for (size_t i = 0; i < idx_end; ++ i) {
             const LayerTools &lt = m_wipe_tower_data.tool_ordering.layer_tools()[i];
-            if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support && !lt.is_mp_sublayer) { // NEOTKO_MULTIPASS_TAG — skip sublayers: fake support insertion breaks multi-object merge
+            if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support) {
                 idx_begin = i;
                 break;
             }
@@ -3619,7 +3405,7 @@ void Print::_make_wipe_tower()
             // Find the stopper of the sequence of wipe tower layers, which do not have a counterpart in an object or a support layer.
             for (size_t i = idx_begin; i < idx_end; ++ i) {
                 LayerTools &lt = const_cast<LayerTools&>(m_wipe_tower_data.tool_ordering.layer_tools()[i]);
-                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support && !lt.is_mp_sublayer)) // NEOTKO_MULTIPASS_TAG
+                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support))
                     break;
                 lt.has_support = true;
                 // Insert the new support layer.
@@ -3765,7 +3551,7 @@ void Print::_make_wipe_tower()
 
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
 
-                if (m_config.dithering_local_z_mode && layers_with_same_print_z != nullptr) {
+                if (layers_with_same_print_z != nullptr) {
                     const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
                         collect_local_z_wipe_tower_toolchanges(*this, *layers_with_same_print_z, int(current_extruder_id));
                     if (!local_z_toolchanges.empty()) {
@@ -3822,47 +3608,9 @@ void Print::_make_wipe_tower()
                     }
                 }
 
-                // NEOTKO_MULTIPASS_PRIME_TAG — reserve Local-Z slot for this sublayer's own prime.
-                //
-                // Each sublayer group has has_wipe_tower=true, so GCode.cpp calls next_layer()
-                // once per sublayer group. Therefore m_layer_idx at execution time equals the
-                // wipe-tower layer index of THIS sublayer — plan the slot here, not on the
-                // preceding real layer (the old forward-scan approach was off-by-N_sublayers).
-                //
-                // plan_local_z_reserve modifies m_plan.back(), which is the wipe-tower entry
-                // just created by plan_toolchange above for this sublayer Z — safe to call.
-                if (!NeoTower::is_enabled(m_config) && layer_tools.is_mp_sublayer &&
-                    layer_tools.mp_prime_slots > 0) {
-                    float mp_prime_vol = 0.f;
-                    for (const PrintObject* obj : m_objects) {
-                        if (obj->layers().empty()) continue;
-                        for (const LayerRegion* lr : obj->layers().front()->regions())
-                            mp_prime_vol = std::max(mp_prime_vol,
-                                (float)lr->region().config().multipass_prime_volume.value);
-                    }
-                    if (mp_prime_vol > 0.f) {
-                        wipe_tower.plan_local_z_reserve(
-                            (float)layer_tools.print_z,
-                            (float)layer_tools.wipe_tower_layer_height,
-                            layer_tools.mp_prime_slots,
-                            mp_prime_vol);
-                    }
-                }
-                // NEOTKO_MULTIPASS_PRIME_TAG_END
-
                 layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
-                // NEOTKO_MULTIPASS_PRIME_TAG — break only when no has_wipe_tower layer follows.
-                // The original condition checked the *immediate* next layer's wipe_partitions,
-                // which fired prematurely when has_wt=0 real layers separated real layers from
-                // MP sublayer groups (sublayers have has_wt=1 and need to be visited here too).
-                {
-                    const auto& all_lt_break = m_wipe_tower_data.tool_ordering.layer_tools();
-                    const LayerTools* lt_cur = &layer_tools;
-                    const auto next_wt = std::find_if(lt_cur + 1,
-                                                      all_lt_break.data() + all_lt_break.size(),
-                                                      [](const LayerTools& lt){ return lt.has_wipe_tower; });
-                    if (next_wt == all_lt_break.data() + all_lt_break.size()) break;
-                }
+                if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
+                    break;
             }
         }
 
@@ -3906,6 +3654,7 @@ void Print::_make_wipe_tower()
                                                   m_wipe_tower_data.z_and_depth_pairs, m_wipe_tower_data.brim_width,
                                                   config().wipe_tower_rotation_angle, config().wipe_tower_cone_angle,
                                                   {scale_(origin.x()), scale_(origin.y())});
+        m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
     }
 }
 
@@ -5340,7 +5089,10 @@ BoundingBoxf3 PrintInstance::get_bounding_box() {
 
 Polygon PrintInstance::get_convex_hull_2d() {
     Polygon poly = print_object->model_object()->convex_hull_2d(model_instance->get_matrix());
-    poly.douglas_peucker(0.1);
+    // Change the distance threshold of the Douglas-Peucker algorithm to 0.5 millimeter and reduce the number of points
+    poly.douglas_peucker(scale_(0.5));
+    // Round coordinates to 0.1mm grid to limit decimal places
+    poly.round_to_grid(scale_(0.1));
     return poly;
 }
 
@@ -5367,6 +5119,42 @@ PrintRegion *PrintObjectRegions::FuzzySkinPaintedRegion::parent_print_object_reg
 int PrintObjectRegions::FuzzySkinPaintedRegion::parent_print_object_region_id(const LayerRangeRegions &layer_range) const
 {
     return this->parent_print_object_region(layer_range)->print_object_region_id();
+}
+
+ExtrusionLayers FakeWipeTower::getTrueExtrusionLayersFromWipeTower() const 
+{ 
+    ExtrusionLayers wtels;
+    wtels.type = ExtrusionLayersType::WIPE_TOWER;
+    std::vector<float> layer_heights;
+    layer_heights.reserve(outer_wall.size());
+    auto pre = outer_wall.begin();
+    for (auto it = outer_wall.begin(); it != outer_wall.end(); ++it) {
+        if (it == outer_wall.begin())
+            layer_heights.push_back(it->first);
+        else {
+            layer_heights.push_back(it->first - pre->first);
+            ++pre;
+        }
+    }
+    Point trans = {scale_(pos.x()), scale_(pos.y())};
+    for (auto it = outer_wall.begin(); it != outer_wall.end(); ++it) {
+        int index = std::distance(outer_wall.begin(), it);
+        ExtrusionLayer el;
+        ExtrusionPaths paths;
+        paths.reserve(it->second.size());
+        for (auto& polyline : it->second) {
+            ExtrusionPath path(ExtrusionRole::erWipeTower, 0.0, 0.0, layer_heights[index]);
+            path.polyline = polyline;
+            for (auto& p : path.polyline.points)
+                p += trans;
+            paths.push_back(path);
+        }
+        el.paths = std::move(paths);
+        el.bottom_z = it->first - layer_heights[index];
+        el.layer = nullptr;
+        wtels.push_back(el);
+    }
+    return wtels;
 }
 
 } // namespace Slic3r

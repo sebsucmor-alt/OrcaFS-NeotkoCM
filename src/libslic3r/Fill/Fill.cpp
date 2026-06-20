@@ -845,11 +845,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 	        else {
 		        const PrintRegionConfig &region_config = layerm.region().config();
 		        FlowRole extrusion_role = surface.is_top() ? frTopSolidInfill : (surface.is_solid() ? frSolidInfill : frInfill);
-		        // NEOTKO_LIBRE_TAG_START — Feature 3: skip bridge infill in Libre Mode
-		        bool     is_bridge 	    = layer.id() > 0 && surface.is_bridge() &&
-		                                  !object_config.neotko_disable_bridge_infill.value;
-		        // NEOTKO_LIBRE_TAG_END
-		        params.extruder 	 = layerm.region().extruder(extrusion_role);
+		        bool     is_bridge 	    = layer.id() > 0 && surface.is_bridge();
+                const unsigned int effective_extruder = layerm.extruder(extrusion_role);
+		        params.extruder 	 = effective_extruder;
 		        params.pattern 		 = region_config.sparse_infill_pattern.value;
 		        params.density       = float(region_config.sparse_infill_density);
                 params.lateral_lattice_angle_1 = region_config.lateral_lattice_angle_1;
@@ -874,10 +872,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                             params.pattern = region_config.bottom_surface_pattern.value;
                             params.density = float(region_config.bottom_surface_density);
                         }
-                    // NEOTKO_MULTIPASS_TAG — penultimate solid surface has its own
-                    // pattern (default Monotonic Line, required by PathBlend/ColorStitch)
-                    // and its own density ("Penultimate Solid %"). internal_solid_infill_pattern
-                    // then governs only the remaining (non-penu, non-top) internal solid.
+                    // NEOTKO_MULTIPASS_TAG (port s129) — penultimate solid surface has its own pattern
+                    // (default Monotonic Line, required by PathBlend/ColorStitch) and its own density.
+                    // internal_solid_infill_pattern then governs only the remaining internal solid.
                     } else if (surface.surface_type == stPenultimateInternalSolid) {
                         // penu keys live in PrintObjectConfig (not region) → object_config.
                         params.pattern = object_config.penultimate_solid_infill_pattern.value;
@@ -906,10 +903,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.extrusion_role = erTopSolidInfill;
                     } else if (surface.is_bottom()) {
                         params.extrusion_role = erBottomSurface;
-                    // NEOTKO_MULTIPASS_TAG_START: penultimate layers get dedicated role
+                    // NEOTKO_MULTIPASS_TAG (port s129): penultimate layers get dedicated role.
                     } else if (surface.surface_type == stPenultimateInternalSolid) {
                         params.extrusion_role = erPenultimateInfill;
-                    // NEOTKO_MULTIPASS_TAG_END
                     } else {
                         params.extrusion_role = erSolidInfill;
                     }
@@ -946,12 +942,6 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.sparse_infill_speed = region_config.sparse_infill_speed;
                     else if (params.extrusion_role == erTopSolidInfill) {
                         params.top_surface_speed = region_config.top_surface_speed;
-                    // NEOTKO_MULTIPASS_TAG_START: penultimate uses dedicated speed, fallback to top speed
-                    } else if (params.extrusion_role == erPenultimateInfill) {
-                        params.solid_infill_speed = object_config.penultimate_infill_speed.value > 0
-                            ? object_config.penultimate_infill_speed
-                            : region_config.top_surface_speed;
-                    // NEOTKO_MULTIPASS_TAG_END
                     } else if (params.extrusion_role == erSolidInfill)
                         params.solid_infill_speed = region_config.internal_solid_infill_speed;
                 }
@@ -962,11 +952,11 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 		            params.anchor_length = 1000.f;
 					params.anchor_length_max = 1000.f;
 		        } else {
-					// Internal infill. Calculating infill line spacing independent of the current layer height and 1st layer status,
-					// so that internall infill will be aligned over all layers of the current region.
-		            params.spacing = layerm.region().flow(*layer.object(), frInfill, layer.object()->config().layer_height, false).spacing();
+					// Internal infill pattern spacing must stay independent of the current layer height and first-layer line width,
+					// so sparse infill stays aligned over all layers of the current region.
+		            params.spacing = layerm.flow(frInfill, layer.object()->config().layer_height, false).spacing();
 		            // Anchor a sparse infill to inner perimeters with the following anchor length:
-			        params.anchor_length = float(region_config.infill_anchor);
+		        	params.anchor_length = float(region_config.infill_anchor);
 					if (region_config.infill_anchor.percent)
 						params.anchor_length = float(params.anchor_length * 0.01 * params.spacing);
 					params.anchor_length_max = float(region_config.infill_anchor_max);
@@ -978,7 +968,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 				//get locked region param
 				if (params.pattern == ipLockedZag){
 					const PrintObject *object = layerm.layer()->object();
-					auto nozzle_diameter = float(object->print()->config().nozzle_diameter.get_at(layerm.region().extruder(extrusion_role) - 1));
+					auto nozzle_diameter = float(object->print()->config().nozzle_diameter.get_at(effective_extruder - 1));
 					Flow skin_flow = params.bridge ? params.flow : Flow::new_from_config_width(extrusion_role, region_config.skin_infill_line_width, nozzle_diameter, float((surface.thickness == -1) ? layer.height : surface.thickness));
 					//add skin flow
 					append_flow_param(lock_param.skin_flow_params, skin_flow, surface.expolygon);

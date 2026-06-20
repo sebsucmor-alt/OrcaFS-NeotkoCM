@@ -19,6 +19,12 @@
   <meta charset="UTF-8"> 
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="Snapmaker Orca">
+  
+  <!-- ★★★ 新增：禁止浏览器缓存 index.html ★★★ -->
+  <!-- <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"> -->
+  <!-- <meta http-equiv="Pragma" content="no-cache"> -->
+  <!-- <meta http-equiv="Expires" content="0"> --> 
+
    <!-- 添加权限策略 -->
   <meta http-equiv="Permissions-Policy" content="local-files-write=*">
   <meta http-equiv="Access-Control-Allow-Origin" content="*">
@@ -46,6 +52,8 @@
   <link rel="apple-touch-startup-image" href="splash.png">
 </head>
 <body>
+  <!-- ★★★ 修改：加上版本号参数，每次发版更新这个数字 ★★★ -->
+  <!-- <script src="flutter_bootstrap.js?v=2.3.18" async></script> -->
   <script src="flutter_bootstrap.js" async></script>
 
   <script>
@@ -60,7 +68,7 @@
         seqid: 1222222,
         cmd: "sw_OpenOrcaWebview",
         params: {
-          url: "http://localhost:7357/?locale=zh-cn-CN&dark_model=1&path=/",
+          url: "http://127.0.0.1:7357/?locale=zh-cn-CN&dark_model=1&path=/",
         },
       });
        // 调用 window.postMessage 传递消息给 flutter

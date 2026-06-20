@@ -22,13 +22,12 @@
 //#include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSeam.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMmuSegmentation.hpp"
-#include "slic3r/GUI/Gizmos/GLGizmoColorMixPainter.hpp" // NEOTKO_PROFILE_TAG
+#include "slic3r/GUI/Gizmos/GLGizmoColorMixPainter.hpp" // NEOTKO_PROFILE_TAG — s130 port
 #include "slic3r/GUI/Gizmos/GLGizmoSimplify.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoAssembly.hpp"
-#include "slic3r/GUI/Gizmos/GLGizmoAlignStack.hpp" // NEOTKO_ALIGNSTACK_TAG
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -164,8 +163,8 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case(EType::MmSegmentation):
             gizmo->set_icon_filename(m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg");
             break;
-        case(EType::ColorMixPainter): // NEOTKO_PROFILE_TAG — placeholder icon
-            gizmo->set_icon_filename(m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg");
+        case(EType::ColorMixPainter): // NEOTKO_PROFILE_TAG — s130 port (real ColorStitch icon, not fork placeholder)
+            gizmo->set_icon_filename(m_is_dark ? "mmu_surfacecolormix_dark.svg" : "mmu_surfacecolormix.svg");
             break;
         case(EType::FuzzySkin):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg");
@@ -218,7 +217,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSeam(m_parent, m_is_dark ? "toolbar_seam_dark.svg" : "toolbar_seam.svg", EType::Seam));
     m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
     m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmSegmentation));
-    // NEOTKO_PROFILE_TAG — Opción 4 Fase B: 3D Painter for SurfaceEffectProfile (placeholder MMU icon).
+    // NEOTKO_PROFILE_TAG — s130 port: 3D Painter for SurfaceEffectProfile / ColorStitch.
     m_gizmos.emplace_back(new GLGizmoColorMixPainter(m_parent, m_is_dark ? "mmu_surfacecolormix_dark.svg" : "mmu_surfacecolormix.svg", EType::ColorMixPainter));
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent, m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg", EType::Emboss));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
@@ -226,9 +225,6 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoAssembly(m_parent, m_is_dark ? "toolbar_assembly_dark.svg" : "toolbar_assembly.svg", EType::Assembly));
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
-    // NEOTKO_ALIGNSTACK_TAG_START
-    m_gizmos.emplace_back(new GLGizmoAlignStack(m_parent, m_is_dark ? "toolbar_align_stack_dark.svg" : "toolbar_align_stack.svg", EType::AlignStack));
-    // NEOTKO_ALIGNSTACK_TAG_END
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -505,7 +501,7 @@ bool GLGizmosManager::is_paint_gizmo()
 {
     return m_current == EType::FdmSupports ||
            m_current == EType::MmSegmentation ||
-           m_current == EType::ColorMixPainter || // NEOTKO_PROFILE_TAG
+           m_current == EType::ColorMixPainter || // NEOTKO_PROFILE_TAG — s130 port
            m_current == EType::FuzzySkin ||
            m_current == EType::Seam;
 }
@@ -1439,7 +1435,7 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Text";
     case GLGizmosManager::EType::MmSegmentation:
         return "Color Painting";
-    case GLGizmosManager::EType::ColorMixPainter: // NEOTKO_PROFILE_TAG
+    case GLGizmosManager::EType::ColorMixPainter: // NEOTKO_PROFILE_TAG — s130 port
         return "ColorMix Painter";
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";

@@ -19,6 +19,19 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#ifdef __linux__
+static std::string get_linux_config_dir()
+{
+    const char* xdg_config = getenv("XDG_CONFIG_HOME");
+    if (xdg_config && xdg_config[0] != '\0')
+        return std::string(xdg_config) + "/Snapmaker_Orca";
+    const char* home = getenv("HOME");
+    if (home && home[0] != '\0')
+        return std::string(home) + "/.config/Snapmaker_Orca";
+    return std::string();
+}
+#endif
+
 namespace common
 {
     std::string get_pc_name()
@@ -71,6 +84,45 @@ namespace common
 #endif // _WIN32
     return machineId;
     }
+    std::string get_profile_version()
+    { 
+        std::string versionFilePath = "";
+#ifdef _WIN32
+
+       
+
+        PWSTR   pszPath    = nullptr;
+        char*   path       = new char[MAX_PATH]();
+        size_t  pathLength = 0;
+        HRESULT hr         = SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &pszPath);
+        if (SUCCEEDED(hr)) {
+            wcstombs_s(&pathLength, path, MAX_PATH, pszPath, MAX_PATH);
+            CoTaskMemFree(pszPath);
+        }
+
+        std::string filePath = path;
+        versionFilePath      = filePath + "\\" + std::string("Snapmaker_Orca\\system\\Snapmaker.json");
+        delete[] path;
+#elif __APPLE__
+        const char* home_env = getenv("HOME");
+        versionFilePath      = home_env;
+        versionFilePath      = versionFilePath + "/Library/Application Support/Snapmaker_Orca/system/Snapmaker.json";
+#else
+        std::string config_dir = get_linux_config_dir();
+        if (!config_dir.empty())
+            versionFilePath = config_dir + "/system/Snapmaker.json";
+#endif
+        std::ifstream json_file(versionFilePath);
+        if (!json_file.is_open()) {
+            std::ifstream json_file(versionFilePath);
+            return "";
+        }
+        nlohmann::json json_data;
+        json_file >> json_data;
+        std::string str_version      = json_data.value("version", "");
+
+        return str_version;
+    }
 
     std::string get_flutter_version()
     {
@@ -85,8 +137,8 @@ namespace common
             if (SUCCEEDED(hr)) {
                 wcstombs_s(&pathLength, path, MAX_PATH, pszPath, MAX_PATH);
                 CoTaskMemFree(pszPath);
-            }                      
-            
+            }
+
             std::string filePath = path;
             versionFilePath      = filePath + "\\" + std::string("Snapmaker_Orca\\web\\flutter_web\\version.json");
 
@@ -96,7 +148,9 @@ namespace common
             versionFilePath      = home_env;
             versionFilePath      = versionFilePath + "/Library/Application Support/Snapmaker_Orca/web/flutter_web/version.json";
 #else
-
+            std::string config_dir = get_linux_config_dir();
+            if (!config_dir.empty())
+                versionFilePath = config_dir + "/web/flutter_web/version.json";
 #endif
 
             std::ifstream json_file(versionFilePath);
@@ -142,7 +196,9 @@ namespace common
         versionFilePath      = home_env;
         cfgfile              = versionFilePath + "/Library/Application Support/Snapmaker_Orca/Snapmaker_Orca.conf";
 #else
-
+        std::string config_dir = get_linux_config_dir();
+        if (!config_dir.empty())
+            cfgfile = config_dir + "/Snapmaker_Orca.conf";
 #endif
         std::ifstream json_file(cfgfile);
         if (!json_file.is_open()) {
@@ -184,7 +240,9 @@ namespace common
         versionFilePath      = home_env;
         cfgfile              = versionFilePath + "/Library/Application Support/Snapmaker_Orca/Snapmaker_Orca.conf";
 #else
-
+        std::string config_dir = get_linux_config_dir();
+        if (!config_dir.empty())
+            cfgfile = config_dir + "/Snapmaker_Orca.conf";
 #endif
         std::ifstream json_file(cfgfile);
         if (!json_file.is_open()) {

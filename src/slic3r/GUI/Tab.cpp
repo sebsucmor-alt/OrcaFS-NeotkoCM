@@ -11,7 +11,6 @@
 
 #include "Search.hpp"
 #include "OG_CustomCtrl.hpp"
-#include "NeoArachnePreviewPanel.hpp"  // NEOTKO_NEOARACHNE_TAG preview-lab
 
 #include <wx/app.h>
 #include <wx/button.h>
@@ -24,10 +23,8 @@
 #include <wx/imaglist.h>
 #include <wx/settings.h>
 #include <wx/filedlg.h>
-#include <wx/textdlg.h> // NEOTKO_PROFILE_TAG: wxTextEntryDialog
-#include <wx/listbox.h> // NEOTKO_PROFILE_TAG: wxListBox
-#include <wx/radiobox.h> // NEOTKO_SANDWICH_TAG: wxRadioBox slot selector
-#include <wx/menu.h>     // NEOTKO_SANDWICH_TAG: wxMenu tool picker
+#include <iomanip>
+#include <sstream>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -53,6 +50,15 @@
 #include "MarkdownTip.hpp"
 #include "Search.hpp"
 #include "BedShapeDialog.hpp"
+#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG — s130 UI port
+#include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — s130
+#include "libslic3r/SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — s130
+#include "libslic3r/ColorSci/GradientRamp.hpp" // NEOTKO_COLORSCI_TAG — s130
+#include "libslic3r/ColorSci/StackFlatten.hpp" // NEOTKO_COLORSCI_TAG — s130
+#include "libslic3r/ColorSci/WeaveLibrary.hpp" // NEOTKO_COLORSCI_TAG — s132 (SandwichDialog)
+#include "libslic3r/ColorSci/ColorPredict.hpp" // NEOTKO_COLORSCI_TAG — s132 (SandwichDialog Predict/Match)
+#include <wx/radiobox.h> // NEOTKO_SANDWICH_TAG — s132: wxRadioBox slot selector
+#include <wx/menu.h>     // NEOTKO_SANDWICH_TAG — s132: wxMenu tool picker
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "NotificationManager.hpp"
 
@@ -61,25 +67,6 @@
 #ifdef WIN32
 	#include <commctrl.h>
 #endif // WIN32
-
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG + PathBlend
-                                         // ingredient (runtimes for s88 toggles).
-#include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — puente al 3D Painter
-#include "libslic3r/SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
-// NEOTKO_COLORSCI_TAG GD1+GD2+GD3 — Gradient Designer embebido en SandwichDialog
-// (docs/FUTURE/COLORSTITCH_STUDIO_PLAN.md P1-P3). Engine en libslic3r/ColorSci/.
-#include "libslic3r/ColorSci/GradientRamp.hpp"
-#include "libslic3r/ColorSci/StackFlatten.hpp"
-#include "libslic3r/ColorSci/WeaveLibrary.hpp"
-#include "libslic3r/ColorSci/ColorPredict.hpp"
-#include <fstream>    // NEOTKO_COLORMIX_TAG (preset save/load)
-#include <sstream>    // NEOTKO_PROFILE_TAG: std::ostringstream for MP payload serialisation
-#include <functional> // NEOTKO_COLORMIX_TAG (std::function in MultiPassPreviewPanel)
-#include <map>        // NEOTKO_SURFACE_MIXER_TAG (blend_preview)
-#include <cstdio>     // NEOTKO_SURFACE_MIXER_TAG (std::snprintf for TD values)
-#include <numeric>    // NEOTKO_MULTIPASS_TAG (std::iota in Beer-Lambert suggest)
-#include <cmath>      // NEOTKO_MULTIPASS_TAG (std::cbrt, std::pow in mp_rgb_to_lab)
-#include <algorithm>  // NEOTKO_MULTIPASS_TAG (std::next_permutation, std::stable_sort)
 
 namespace Slic3r {
 namespace GUI {
@@ -1065,3859 +1052,6 @@ private:
     }
 };
 
-// NEOTKO_MULTIPASS_TAG_START - MultiPass Blend Config Dialog
-// Grid dialog: num_passes, surface (checkboxes), per-pass tool+ratio+fan+speed+gcode, vary_pattern.
-// Uses wxSpinCtrl (int) + wxTextCtrl (float/string) — wxSpinCtrlDouble crashes on macOS.
-// No wxMemoryDC, no Line{""} — safe on Snapmaker fork.
-// NEOTKO_MULTIPASS_TAG — ColorSwatch class moved above ColorMixPatternDialog
-// (see top of namespace) so the gradient sub-section can use it.
-
-// ── DragTextCtrl ─────────────────────────────────────────────────────────────
-// wxTextCtrl with click+drag and scroll-wheel value editing.
-// Drag horizontally to change value (3px dead-zone before mouse capture).
-// Scroll wheel applies ±step*5 per tick. Cursor shows SIZEWE as affordance.
-class DragTextCtrl : public wxTextCtrl
-{
-public:
-    DragTextCtrl(wxWindow* parent, double init, double vmin, double vmax,
-                 double step, const wxString& fmt = "%.3f", int w = 60)
-        : wxTextCtrl(parent, wxID_ANY, wxString::Format(fmt, init),
-                     wxDefaultPosition, wxSize(w, -1))
-        , m_min(vmin), m_max(vmax), m_step(step), m_fmt(fmt)
-    {
-        SetCursor(wxCursor(wxCURSOR_SIZEWE));
-        Bind(wxEVT_LEFT_DOWN,  &DragTextCtrl::on_down,  this);
-        Bind(wxEVT_LEFT_UP,    &DragTextCtrl::on_up,    this);
-        Bind(wxEVT_MOTION,     &DragTextCtrl::on_move,  this);
-        Bind(wxEVT_MOUSEWHEEL, &DragTextCtrl::on_wheel, this);
-    }
-
-    double get_value() const {
-        double v = m_min;
-        GetValue().ToDouble(&v);
-        return std::max(m_min, std::min(m_max, v));
-    }
-    void set_value(double v, bool notify = true) {
-        v = std::max(m_min, std::min(m_max, v));
-        ChangeValue(wxString::Format(m_fmt, v));
-        if (notify) {
-            wxCommandEvent evt(wxEVT_TEXT, GetId());
-            evt.SetEventObject(this);
-            GetEventHandler()->ProcessEvent(evt);
-        }
-    }
-
-private:
-    double   m_min, m_max, m_step;
-    wxString m_fmt;
-    bool     m_potential = false;
-    bool     m_dragging  = false;
-    int      m_start_x   = 0;
-    double   m_start_v   = 0.0;
-
-    void on_down(wxMouseEvent& e) {
-        m_potential = true; m_dragging = false;
-        m_start_x = e.GetX(); m_start_v = get_value();
-        e.Skip();
-    }
-    void on_up(wxMouseEvent& e) {
-        if (m_dragging && HasCapture()) ReleaseMouse();
-        m_potential = m_dragging = false;
-        e.Skip();
-    }
-    void on_move(wxMouseEvent& e) {
-        if (!m_potential || !e.LeftIsDown()) { e.Skip(); return; }
-        const int dx = e.GetX() - m_start_x;
-        if (!m_dragging && std::abs(dx) > 3) { m_dragging = true; CaptureMouse(); }
-        if (m_dragging) set_value(m_start_v + dx * m_step);
-        e.Skip();
-    }
-    void on_wheel(wxMouseEvent& e) {
-        set_value(get_value() + (e.GetWheelRotation() > 0 ? 1.0 : -1.0) * m_step * 5.0);
-    }
-};
-
-// ── MultiPassPreviewPanel ─────────────────────────────────────────────────────
-// Interactive visual preview of the MultiPass pass layout.
-//   • N colored bands proportional to layer ratios (fraction of layer height per pass).
-//     Bands are shown side-by-side for readability; physically passes are Z-stacked.
-//   • Hatch lines at the configured angle inside each band (auto=45°).
-//   • Drag a border between bands → adjusts the two adjacent ratios.
-//   • Scroll wheel inside a band → cycles the fill angle by 5° steps.
-//   • Σ ratio indicator (green/orange/red) in top-right corner.
-//   • Callbacks: on_ratio_change(idx, new_ratio) / on_angle_change(idx, new_angle).
-class MultiPassPreviewPanel : public wxPanel
-{
-public:
-    struct PassData {
-        int      tool  = 0;
-        double   ratio = 0.5;
-        int      angle = -1;           // -1 = auto (shown as 45°)
-        wxColour color { 160, 160, 160 };
-    };
-
-    std::function<void(int, double)> on_ratio_change;
-    std::function<void(int, int)>    on_angle_change;
-
-    explicit MultiPassPreviewPanel(wxWindow* parent)
-        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, 90))
-    {
-        SetMinSize(wxSize(260, 90));
-        SetBackgroundStyle(wxBG_STYLE_PAINT);
-        Bind(wxEVT_PAINT,        &MultiPassPreviewPanel::on_paint, this);
-        Bind(wxEVT_LEFT_DOWN,    &MultiPassPreviewPanel::on_down,  this);
-        Bind(wxEVT_LEFT_UP,      &MultiPassPreviewPanel::on_up,    this);
-        Bind(wxEVT_MOTION,       &MultiPassPreviewPanel::on_move,  this);
-        Bind(wxEVT_MOUSEWHEEL,   &MultiPassPreviewPanel::on_wheel, this);
-        Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent&) {
-            if (m_hover != -1) { m_hover = -1; Refresh(); }
-            SetCursor(wxCursor(wxCURSOR_ARROW));
-        });
-    }
-
-    void set_data(int passes, const PassData pd[3]) {
-        m_passes = std::max(1, std::min(3, passes));
-        for (int i = 0; i < 3; ++i) m_pd[i] = pd[i];
-        Refresh();
-    }
-    void update_ratio(int i, double v) { if (i>=0&&i<3){m_pd[i].ratio=v;Refresh();} }
-    void update_angle(int i, int   v) { if (i>=0&&i<3){m_pd[i].angle=v;Refresh();} }
-    void set_passes (int n)           { m_passes=std::max(1,std::min(3,n));Refresh(); }
-
-private:
-    int      m_passes   = 2;
-    PassData m_pd[3];
-    int      m_hover    = -1;
-    int      m_drag_bdr = -1;
-    int      m_drag_sx  = 0;
-    double   m_drag_r0  = 0.0, m_drag_r1 = 0.0;
-
-    int band_x(int i, int W) const {
-        double tot = 0.0;
-        for (int j = 0; j < m_passes; ++j) tot += m_pd[j].ratio;
-        if (tot <= 0.0) tot = 1.0;
-        double cum = 0.0;
-        for (int j = 0; j < i; ++j) cum += m_pd[j].ratio;
-        return (int)(cum / tot * W);
-    }
-    int hit_border(int mx, int W) const {
-        for (int i = 1; i < m_passes; ++i)
-            if (std::abs(mx - band_x(i, W)) <= 7) return i - 1;
-        return -1;
-    }
-    int hit_band(int mx, int W) const {
-        for (int i = 0; i < m_passes; ++i) {
-            int x0 = band_x(i, W), x1 = (i == m_passes-1) ? W : band_x(i+1, W);
-            if (mx >= x0 && mx < x1) return i;
-        }
-        return -1;
-    }
-
-    static void draw_hatch(wxDC& dc, int x0, int y0, int bw, int bh, int angle_deg) {
-        if (bw <= 0 || bh <= 0) return;
-        dc.SetClippingRegion(x0, y0, bw, bh);
-        const double rad = angle_deg * 3.14159265358979323846 / 180.0;
-        const double ca  = std::cos(rad), sa = std::sin(rad);
-        const int sp = 10, cx = x0+bw/2, cy = y0+bh/2, reach = bw+bh+sp;
-        for (int k = -(reach/sp+1); k <= (reach/sp+1); ++k) {
-            int px = cx + (int)(-sa*k*sp), py = cy + (int)(ca*k*sp);
-            dc.DrawLine(px-(int)(ca*reach), py-(int)(sa*reach),
-                        px+(int)(ca*reach), py+(int)(sa*reach));
-        }
-        dc.DestroyClippingRegion();
-    }
-
-    void on_paint(wxPaintEvent&) {
-        wxPaintDC dc(this);
-        const int W = GetSize().x, H = GetSize().y;
-        dc.SetBackground(wxBrush(wxColour(45, 45, 45)));
-        dc.Clear();
-        if (!m_passes) return;
-
-        for (int i = 0; i < m_passes; ++i) {
-            const PassData& p = m_pd[i];
-            int x0 = band_x(i, W), x1 = (i == m_passes-1) ? W : band_x(i+1, W), bw = x1-x0;
-            if (bw <= 0) continue;
-            dc.SetBrush(wxBrush(p.color)); dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawRectangle(x0, 0, bw, H);
-            dc.SetPen(wxPen(p.color.ChangeLightness(50), 1));
-            draw_hatch(dc, x0, 0, bw, H, p.angle >= 0 ? p.angle : 45);
-            const int lum = p.color.Red()*299 + p.color.Green()*587 + p.color.Blue()*114;
-            dc.SetTextForeground(lum < 128000 ? *wxWHITE : *wxBLACK);
-            dc.SetBackgroundMode(wxTRANSPARENT);
-            wxString lbl = wxString::Format("T%d  %.2f  %s", p.tool, p.ratio,
-                p.angle >= 0 ? wxString::Format("%d\u00b0", p.angle) : wxString("auto"));
-            wxSize ts = dc.GetTextExtent(lbl);
-            dc.DrawText(lbl, x0 + std::max(2, (bw - ts.x)/2), std::max(0, (H-14-ts.y)/2));
-        }
-        // Inter-band draggable borders
-        for (int i = 1; i < m_passes; ++i) {
-            int bx = band_x(i, W); bool hi = (m_hover == i-1 || m_drag_bdr == i-1);
-            dc.SetPen(wxPen(hi ? wxColour(255,255,255) : wxColour(30,30,30), hi ? 3 : 2));
-            dc.DrawLine(bx, 0, bx, H-14);
-        }
-        // Sigma indicator
-        double sum = 0.0; for (int i = 0; i < m_passes; ++i) sum += m_pd[i].ratio;
-        double diff = std::abs(sum - 1.0);
-        dc.SetTextForeground(diff<0.05 ? wxColour(0,200,80) : diff<0.15 ? wxColour(220,140,0) : wxColour(220,50,50));
-        wxString ss = wxString::Format("\u03a3 %.2f", sum);
-        wxSize ts2 = dc.GetTextExtent(ss);
-        dc.DrawText(ss, W - ts2.x - 4, 4);
-        // Hint bar
-        dc.SetTextForeground(wxColour(150, 150, 150));
-        wxFont sf = dc.GetFont();
-        sf.SetPointSize(std::max(7, sf.GetPointSize() - 2));
-        dc.SetFont(sf);
-        dc.DrawText(_L("drag border \u2194 ratio   \u2022   scroll inside band \u2194 angle"), 4, H - 13);
-    }
-
-    void on_down(wxMouseEvent& e) {
-        int mx = e.GetX(), W = GetSize().x;
-        m_drag_bdr = hit_border(mx, W);
-        if (m_drag_bdr >= 0 && m_drag_bdr < m_passes-1) {
-            m_drag_sx = mx;
-            m_drag_r0 = m_pd[m_drag_bdr].ratio;
-            m_drag_r1 = m_pd[m_drag_bdr+1].ratio;
-            CaptureMouse();
-        }
-        e.Skip();
-    }
-    void on_up(wxMouseEvent& e) {
-        if (m_drag_bdr >= 0 && HasCapture()) ReleaseMouse();
-        m_drag_bdr = -1; e.Skip();
-    }
-    void on_move(wxMouseEvent& e) {
-        int mx = e.GetX(), W = GetSize().x;
-        if (m_drag_bdr >= 0 && e.LeftIsDown()) {
-            double tot = 0.0;
-            for (int i = 0; i < m_passes; ++i) tot += m_pd[i].ratio;
-            if (tot <= 0.0) tot = 1.0;
-            double d = (double)(mx - m_drag_sx) / W * tot;
-            double r0 = std::max(0.05, m_drag_r0 + d);
-            double r1 = std::max(0.05, m_drag_r1 - d);
-            m_pd[m_drag_bdr  ].ratio = r0;
-            m_pd[m_drag_bdr+1].ratio = r1;
-            if (on_ratio_change) { on_ratio_change(m_drag_bdr, r0); on_ratio_change(m_drag_bdr+1, r1); }
-            Refresh();
-        } else {
-            int hb = hit_border(mx, W);
-            if (hb != m_hover) {
-                m_hover = hb;
-                SetCursor(wxCursor(hb >= 0 ? wxCURSOR_SIZEWE : wxCURSOR_ARROW));
-                Refresh();
-            }
-        }
-        e.Skip();
-    }
-    void on_wheel(wxMouseEvent& e) {
-        int mx = e.GetX(), W = GetSize().x;
-        int band = hit_band(mx, W);
-        if (band >= 0 && band < m_passes) {
-            int cur = m_pd[band].angle;
-            int d   = e.GetWheelRotation() > 0 ? 5 : -5;
-            cur = cur < 0 ? 0 : (cur + d + 360) % 360;
-            m_pd[band].angle = cur;
-            if (on_angle_change) on_angle_change(band, cur);
-            Refresh();
-        }
-        e.Skip();
-    }
-};
-
-// NEOTKO_MULTIPASS_TAG_START — Beer-Lambert TD helpers
-// Used by MultiPassConfigDialog (single-layer suggest) and
-// SurfaceColorMixerDialog (joint Top+Penultimate suggest).
-// All helpers are pure functions, no wxWidgets dependency.
-
-struct MpLabColor { double L, a, b; };
-
-static MpLabColor mp_rgb_to_lab(double r, double g, double b)
-{
-    auto lin = [](double c) {
-        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
-    };
-    const double rl = lin(r), gl = lin(g), bl = lin(b);
-    const double X = rl*0.4124564 + gl*0.3575761 + bl*0.1804375;
-    const double Y = rl*0.2126729 + gl*0.7151522 + bl*0.0721750;
-    const double Z = rl*0.0193339 + gl*0.1191920 + bl*0.9503041;
-    const double xn = X / 0.95047, yn = Y, zn = Z / 1.08883;
-    auto f = [](double t) { return t > 0.008856 ? std::cbrt(t) : 7.787*t + 16.0/116.0; };
-    return { 116.0*f(yn) - 16.0, 500.0*(f(xn) - f(yn)), 200.0*(f(yn) - f(zn)) };
-}
-
-static double mp_delta_e(const MpLabColor& a, const MpLabColor& b)
-{
-    return std::sqrt((a.L-b.L)*(a.L-b.L) + (a.a-b.a)*(a.a-b.a) + (a.b-b.b)*(a.b-b.b));
-}
-
-// Beer-Lambert stack. layers = bottom-to-top [{r,g,b} in sRGB [0..1], td, ratio].
-// bg_r/g/b: background sRGB (black = 0,0,0 for single layer).
-// Internally converts sRGB→linear before Beer-Lambert (physically correct),
-// returns sRGB output so callers / mp_rgb_to_lab remain unchanged.
-struct MpBLLayer { double r, g, b, td, ratio; };
-
-static std::tuple<double,double,double> mp_beer_blend(
-    const std::vector<MpBLLayer>& layers,
-    double bg_r = 0.0, double bg_g = 0.0, double bg_b = 0.0)
-{
-    auto to_lin = [](double c) {
-        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
-    };
-    auto to_srgb = [](double c) -> double {
-        c = std::max(0.0, std::min(1.0, c));
-        return c <= 0.0031308 ? 12.92 * c : 1.055 * std::pow(c, 1.0 / 2.4) - 0.055;
-    };
-    double r = to_lin(bg_r), g = to_lin(bg_g), bv = to_lin(bg_b);
-    for (const auto& lyr : layers) {
-        const double lr = to_lin(lyr.r), lg = to_lin(lyr.g), lb = to_lin(lyr.b);
-        if (lyr.td < 1e-6) { r = lr; g = lg; bv = lb; continue; }
-        const double t  = std::pow(0.1, lyr.ratio / lyr.td);
-        const double op = 1.0 - t;
-        r  = lr * op + r  * t;
-        g  = lg * op + g  * t;
-        bv = lb * op + bv * t;
-    }
-    return { to_srgb(r), to_srgb(g), to_srgb(bv) };
-}
-
-struct MpSuggestResult {
-    std::vector<int>    order;    // permutation of [0..n-1], bottom→top
-    std::vector<double> ratios;   // layer ratio per pass in that order
-    double              score  = std::numeric_limits<double>::max();
-    double              res_r  = 0.5, res_g = 0.5, res_b = 0.5; // simulated result color
-};
-
-// Exhaustive permutation + ratio grid search for a single layer (or joint two-layer mode).
-// pass_colors: per-pass {r,g,b}; tds: per-pass TD [0..1].
-// joint_two_layers: if true, simulates same passes on TWO stacked layers (Top+Penultimate mode):
-//   bg_after_penu = beer_blend(passes, black)
-//   result        = beer_blend(passes, bg=bg_after_penu)
-// bg_r/g/b: only used when joint_two_layers==false (external background).
-static MpSuggestResult mp_suggest(
-    const std::vector<std::array<double,3>>& pass_colors,
-    const std::vector<double>&               tds,
-    double target_r, double target_g, double target_b,
-    double min_ratio         = 0.05,
-    bool   joint_two_layers  = false,
-    double bg_r = 0.0, double bg_g = 0.0, double bg_b = 0.0)
-{
-    const int n = static_cast<int>(pass_colors.size());
-    if (n == 0) return {};
-
-    const MpLabColor tlab = mp_rgb_to_lab(target_r, target_g, target_b);
-    static constexpr int STEPS = 16;
-
-    std::vector<int> perm(n);
-    std::iota(perm.begin(), perm.end(), 0);
-
-    MpSuggestResult best;
-    best.order.resize(n);  std::iota(best.order.begin(), best.order.end(), 0);
-    best.ratios.assign(n, 1.0 / n);
-
-    auto blend_result = [&](const std::vector<MpBLLayer>& stack)
-        -> std::tuple<double,double,double>
-    {
-        if (joint_two_layers) {
-            auto [pr,pg,pb] = mp_beer_blend(stack);
-            return mp_beer_blend(stack, pr, pg, pb);
-        }
-        return mp_beer_blend(stack, bg_r, bg_g, bg_b);
-    };
-
-    do {
-        // Build ordered layer descriptors for this permutation
-        std::vector<MpBLLayer> tmpl(n);
-        for (int i = 0; i < n; ++i)
-            tmpl[i] = { pass_colors[perm[i]][0], pass_colors[perm[i]][1],
-                        pass_colors[perm[i]][2], tds[perm[i]], 0.0 /*ratio filled below*/ };
-
-        if (n == 1) {
-            tmpl[0].ratio = 1.0;
-            auto [r,g,bv] = blend_result(tmpl);
-            const double sc = mp_delta_e(mp_rgb_to_lab(r,g,bv), tlab);
-            if (sc < best.score) {
-                best.score=sc; best.order=perm; best.ratios={1.0};
-                best.res_r=r; best.res_g=g; best.res_b=bv;
-            }
-        } else if (n == 2) {
-            const double mr = std::max(min_ratio, 0.01);
-            for (int s = 0; s <= STEPS; ++s) {
-                const double r0 = mr + (1.0 - 2.0*mr) * s / STEPS;
-                const double r1 = 1.0 - r0;
-                if (r1 < mr - 1e-9) continue;
-                tmpl[0].ratio = r0; tmpl[1].ratio = r1;
-                auto [r,g,bv] = blend_result(tmpl);
-                const double sc = mp_delta_e(mp_rgb_to_lab(r,g,bv), tlab);
-                if (sc < best.score) {
-                    best.score=sc; best.order=perm; best.ratios={r0,r1};
-                    best.res_r=r; best.res_g=g; best.res_b=bv;
-                }
-            }
-        } else { // n == 3
-            const double mr = std::max(min_ratio, 0.01);
-            for (int s0 = 0; s0 <= STEPS; ++s0) {
-                const double r0     = mr + (1.0 - 3.0*mr) * s0 / STEPS;
-                const double r1_max = 1.0 - r0 - mr;
-                if (r1_max < mr - 1e-9) continue;
-                for (int s1 = 0; s1 <= STEPS; ++s1) {
-                    const double r1 = mr + (r1_max - mr) * s1 / STEPS;
-                    const double r2 = 1.0 - r0 - r1;
-                    if (r2 < mr - 1e-9) continue;
-                    tmpl[0].ratio=r0; tmpl[1].ratio=r1; tmpl[2].ratio=r2;
-                    auto [r,g,bv] = blend_result(tmpl);
-                    const double sc = mp_delta_e(mp_rgb_to_lab(r,g,bv), tlab);
-                    if (sc < best.score) {
-                        best.score=sc; best.order=perm; best.ratios={r0,r1,r2};
-                        best.res_r=r; best.res_g=g; best.res_b=bv;
-                    }
-                }
-            }
-        }
-    } while (std::next_permutation(perm.begin(), perm.end()));
-
-    return best;
-}
-// NEOTKO_MULTIPASS_TAG_END
-
-// NEOTKO_MULTIPASS_SURFACES_TAG — zone selector for per-zone dialogs
-enum class SurfaceZone { TOP, PENULTIMATE };
-
-class MultiPassConfigDialog : public wxDialog
-{
-public:
-    MultiPassConfigDialog(wxWindow* parent,
-                          SurfaceZone zone,
-                          int    cur_passes,
-                          int    cur_surface,
-                          int    cur_tool1,    int    cur_tool2,    int    cur_tool3,
-                          double cur_ratio1,   double cur_ratio2,   double cur_ratio3,
-                          bool   cur_vary,
-                          int    cur_angle1,   int    cur_angle2,   int    cur_angle3,
-                          int    cur_fan1,     int    cur_fan2,     int    cur_fan3,
-                          int    cur_spd1,     int    cur_spd2,     int    cur_spd3,
-                          const std::string& cur_gs1, const std::string& cur_gs2, const std::string& cur_gs3,
-                          const std::string& cur_ge1, const std::string& cur_ge2, const std::string& cur_ge3,
-                          const std::vector<std::string>& filament_colours = {},
-                          const std::vector<Slic3r::ColorMixOption>& mix_options = {},
-                          int    cur_pa_mode  = 0,
-                          double cur_pa_value = 0.1,
-                          double cur_prime_volume = 0.0,
-                          double cur_layer_height = 0.0,  // NEOTKO_MULTIPASS_MINLAYER_TAG
-                          // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent config
-                          bool   penu_enabled = false,
-                          int    penu_passes  = 2,
-                          int    penu_t1 = 0,  int penu_t2 = 1,  int penu_t3 = -1,
-                          double penu_r1 = 0.5, double penu_r2 = 0.5, double penu_r3 = 0.34,
-                          int    penu_a1 = -1,  int penu_a2 = -1,  int penu_a3 = -1,
-                          int    penu_f1 = -1,  int penu_f2 = -1,  int penu_f3 = -1,
-                          int    penu_s1 = 100, int penu_s2 = 100, int penu_s3 = 100,
-                          bool   penu_vary = false,
-                          std::string penu_gs1 = {}, std::string penu_gs2 = {}, std::string penu_gs3 = {},
-                          std::string penu_ge1 = {}, std::string penu_ge2 = {}, std::string penu_ge3 = {},
-                          double penu_prime_vol = 0.0)
-        : wxDialog(parent, wxID_ANY,
-                   zone == SurfaceZone::TOP
-                       ? _L("MultiPass \u2014 Top Surface")
-                       : _L("MultiPass \u2014 Penultimate Surface"),
-                   wxDefaultPosition, wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
-        , m_surface(cur_surface)
-        , m_zone(zone)
-        , m_colours(filament_colours)
-        , m_mix_options(mix_options)
-    {
-        const int angles[3] = {cur_angle1, cur_angle2, cur_angle3};
-        const int fans[3]   = {cur_fan1, cur_fan2, cur_fan3};
-        const int spds[3]   = {cur_spd1, cur_spd2, cur_spd3};
-        const std::string gs[3] = {cur_gs1, cur_gs2, cur_gs3};
-        const std::string ge[3] = {cur_ge1, cur_ge2, cur_ge3};
-        const int penu_tools[3]   = {penu_t1, penu_t2, penu_t3};
-        const double penu_ratios[3] = {penu_r1, penu_r2, penu_r3};
-        const int penu_angles[3]  = {penu_a1, penu_a2, penu_a3};
-        const int penu_fans[3]    = {penu_f1, penu_f2, penu_f3};
-        const int penu_speeds[3]  = {penu_s1, penu_s2, penu_s3};
-        const std::string penu_gs[3] = {penu_gs1, penu_gs2, penu_gs3};
-        const std::string penu_ge[3] = {penu_ge1, penu_ge2, penu_ge3};
-        build_ui(cur_passes, cur_surface,
-                 cur_tool1, cur_tool2, cur_tool3,
-                 cur_ratio1, cur_ratio2, cur_ratio3,
-                 cur_vary, angles, fans, spds, gs, ge,
-                 cur_pa_mode, cur_pa_value, cur_prime_volume, cur_layer_height,
-                 penu_enabled, penu_passes, penu_tools, penu_ratios, penu_angles,
-                 penu_fans, penu_speeds, penu_vary, penu_gs, penu_ge, penu_prime_vol);
-    }
-
-    int    get_passes()  const { return m_sc_passes ? m_sc_passes->GetValue() : 2; }
-    int    get_surface() const { return m_surface; }
-    // Spinners display F-notation (F1=1, F2=2, …); config stores 0-based (T0=0, T1=1, …).
-    // Pass 3: display 0 = disabled → stored -1.
-    int    get_tool1()   const { return m_sc_tool[0] ? m_sc_tool[0]->GetValue() - 1 : 0; }
-    int    get_tool2()   const { return m_sc_tool[1] ? m_sc_tool[1]->GetValue() - 1 : 1; }
-    int    get_tool3()   const { if (!m_sc_tool[2]) return -1; const int v = m_sc_tool[2]->GetValue(); return v > 0 ? v - 1 : -1; }
-    bool   get_vary()    const { return m_cb_vary ? m_cb_vary->GetValue() : false; }
-
-    double get_ratio(int idx, double fallback) const {
-        return m_tc_ratio[idx] ? m_tc_ratio[idx]->get_value() : fallback;
-    }
-    double get_ratio1()  const { return get_ratio(0, 0.50); }
-    double get_ratio2()  const { return get_ratio(1, 0.50); }
-    double get_ratio3()  const { return get_ratio(2, 0.34); }
-
-    int get_angle(int idx) const {
-        return m_sc_angle[idx] ? m_sc_angle[idx]->GetValue() : -1;
-    }
-    int get_angle1() const { return get_angle(0); }
-    int get_angle2() const { return get_angle(1); }
-    int get_angle3() const { return get_angle(2); }
-
-    int get_fan(int idx) const {
-        return m_sc_fan[idx] ? std::max(-1, std::min(255, m_sc_fan[idx]->GetValue())) : -1;
-    }
-    int get_fan1() const { return get_fan(0); }
-    int get_fan2() const { return get_fan(1); }
-    int get_fan3() const { return get_fan(2); }
-
-    int get_speed(int idx) const {
-        return m_sc_speed[idx] ? std::max(1, std::min(200, m_sc_speed[idx]->GetValue())) : 100;
-    }
-    int get_speed1() const { return get_speed(0); }
-    int get_speed2() const { return get_speed(1); }
-    int get_speed3() const { return get_speed(2); }
-
-    std::string get_gcode_start(int idx) const {
-        return m_tc_gstart[idx] ? m_tc_gstart[idx]->GetValue().ToStdString() : "";
-    }
-    std::string get_gcode_start1() const { return get_gcode_start(0); }
-    std::string get_gcode_start2() const { return get_gcode_start(1); }
-    std::string get_gcode_start3() const { return get_gcode_start(2); }
-
-    std::string get_gcode_end(int idx) const {
-        return m_tc_gend[idx] ? m_tc_gend[idx]->GetValue().ToStdString() : "";
-    }
-    std::string get_gcode_end1() const { return get_gcode_end(0); }
-    std::string get_gcode_end2() const { return get_gcode_end(1); }
-    std::string get_gcode_end3() const { return get_gcode_end(2); }
-
-    int get_pa_mode() const {
-        if (m_rb_pa[0] && m_rb_pa[0]->GetValue()) return 1;
-        if (m_rb_pa[1] && m_rb_pa[1]->GetValue()) return 2;
-        return 0;
-    }
-    double get_pa_value() const {
-        double v = 0.1;
-        if (m_tc_pa_val) m_tc_pa_val->GetValue().ToDouble(&v);
-        return std::max(0.0, v);
-    }
-
-    // NEOTKO_MULTIPASS_PRIME_TAG
-    double get_prime_volume() const {
-        return m_sc_prime ? std::max(0.0, m_sc_prime->GetValue()) : 0.0;
-    }
-
-    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface getters
-    bool   get_penu_enabled() const {
-        if (m_zone == SurfaceZone::PENULTIMATE) return true;
-        return m_cb_penu_enabled ? m_cb_penu_enabled->GetValue() : false;
-    }
-    int    get_penu_passes()  const { return m_sc_penu_passes  ? m_sc_penu_passes->GetValue()  : 2; }
-    int    get_penu_tool(int i) const {
-        if (!m_sc_penu_tool[i]) return (i < 2) ? i : -1;
-        const int v = m_sc_penu_tool[i]->GetValue();
-        return (i == 2 && v == 0) ? -1 : v - 1;
-    }
-    int    get_penu_tool1()  const { return get_penu_tool(0); }
-    int    get_penu_tool2()  const { return get_penu_tool(1); }
-    int    get_penu_tool3()  const { return get_penu_tool(2); }
-    double get_penu_ratio(int i) const { return m_tc_penu_ratio[i] ? m_tc_penu_ratio[i]->get_value() : 0.5; }
-    double get_penu_ratio1() const { return get_penu_ratio(0); }
-    double get_penu_ratio2() const { return get_penu_ratio(1); }
-    double get_penu_ratio3() const { return get_penu_ratio(2); }
-    int    get_penu_angle(int i) const { return m_sc_penu_angle[i] ? m_sc_penu_angle[i]->GetValue() : -1; }
-    int    get_penu_angle1() const { return get_penu_angle(0); }
-    int    get_penu_angle2() const { return get_penu_angle(1); }
-    int    get_penu_angle3() const { return get_penu_angle(2); }
-    double get_penu_prime()  const { return m_sc_penu_prime ? std::max(0.0, m_sc_penu_prime->GetValue()) : 0.0; }
-    int    get_penu_fan(int i)  const { return m_sc_penu_fan[i]   ? m_sc_penu_fan[i]->GetValue()   : -1; }
-    int    get_penu_fan1()  const { return get_penu_fan(0); }
-    int    get_penu_fan2()  const { return get_penu_fan(1); }
-    int    get_penu_fan3()  const { return get_penu_fan(2); }
-    int    get_penu_speed(int i) const { return m_sc_penu_speed[i] ? m_sc_penu_speed[i]->GetValue() : 100; }
-    int    get_penu_speed1() const { return get_penu_speed(0); }
-    int    get_penu_speed2() const { return get_penu_speed(1); }
-    int    get_penu_speed3() const { return get_penu_speed(2); }
-    bool   get_penu_vary()  const { return m_cb_penu_vary ? m_cb_penu_vary->GetValue() : false; }
-    std::string get_penu_gcode_start(int i) const {
-        return m_tc_penu_gstart[i] ? m_tc_penu_gstart[i]->GetValue().ToStdString() : "";
-    }
-    std::string get_penu_gcode_start1() const { return get_penu_gcode_start(0); }
-    std::string get_penu_gcode_start2() const { return get_penu_gcode_start(1); }
-    std::string get_penu_gcode_start3() const { return get_penu_gcode_start(2); }
-    std::string get_penu_gcode_end(int i) const {
-        return m_tc_penu_gend[i] ? m_tc_penu_gend[i]->GetValue().ToStdString() : "";
-    }
-    std::string get_penu_gcode_end1() const { return get_penu_gcode_end(0); }
-    std::string get_penu_gcode_end2() const { return get_penu_gcode_end(1); }
-    std::string get_penu_gcode_end3() const { return get_penu_gcode_end(2); }
-
-private:
-    int                      m_surface      = 0;
-    SurfaceZone              m_zone         = SurfaceZone::TOP;
-    std::vector<std::string> m_colours;
-    wxSpinCtrl*   m_sc_passes    = nullptr;
-    wxSpinCtrl*   m_sc_tool[3]   = {nullptr, nullptr, nullptr};
-    ColorSwatch*  m_swatch[3]    = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*   m_sc_angle[3]  = {nullptr, nullptr, nullptr};
-    DragTextCtrl* m_tc_ratio[3]  = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*   m_sc_fan[3]    = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*   m_sc_speed[3]  = {nullptr, nullptr, nullptr};
-    wxTextCtrl*   m_tc_gstart[3] = {nullptr, nullptr, nullptr};
-    wxTextCtrl*   m_tc_gend[3]   = {nullptr, nullptr, nullptr};
-    wxCheckBox*           m_cb_vary    = nullptr;
-    // NEOTKO_MULTIPASS_TAG_START — TD spinners (one per pass, synced with neotko_td_N in app_config)
-    wxSpinCtrlDouble* m_sc_td[3]       = {nullptr, nullptr, nullptr};
-    // NEOTKO_MULTIPASS_TAG_END
-    wxStaticText*         m_lbl_sum    = nullptr;
-    wxRadioButton*        m_rb_pa[3]   = {nullptr, nullptr, nullptr};
-    wxTextCtrl*           m_tc_pa_val  = nullptr;
-    wxSpinCtrlDouble*     m_sc_prime   = nullptr; // NEOTKO_MULTIPASS_PRIME_TAG
-    double                m_layer_height = 0.0;   // NEOTKO_MULTIPASS_MINLAYER_TAG
-    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent section
-    wxCheckBox*           m_cb_penu_enabled  = nullptr;
-    wxSpinCtrl*           m_sc_penu_passes   = nullptr;
-    wxSpinCtrl*           m_sc_penu_tool[3]   = {nullptr, nullptr, nullptr};
-    ColorSwatch*          m_swatch_penu[3]    = {nullptr, nullptr, nullptr};
-    DragTextCtrl*         m_tc_penu_ratio[3]  = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*           m_sc_penu_angle[3]  = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*           m_sc_penu_fan[3]    = {nullptr, nullptr, nullptr};
-    wxSpinCtrl*           m_sc_penu_speed[3]  = {nullptr, nullptr, nullptr};
-    wxCheckBox*           m_cb_penu_vary      = nullptr;
-    wxTextCtrl*           m_tc_penu_gstart[3] = {nullptr, nullptr, nullptr};
-    wxTextCtrl*           m_tc_penu_gend[3]   = {nullptr, nullptr, nullptr};
-    wxSpinCtrlDouble*     m_sc_penu_prime     = nullptr;
-    std::vector<wxWindow*> m_penu_pass3_widgets;
-    MultiPassPreviewPanel* m_preview   = nullptr;
-    wxComboBox*           m_preset_combo  = nullptr;
-    wxComboBox*           m_combo_mixed   = nullptr; // NEOTKO: MixedColor normalize picker
-    wxPanel*              m_swatch_mixed  = nullptr; // colour of selected MixedColor
-    std::vector<Slic3r::ColorMixOption>          m_mix_options;
-    std::vector<std::pair<wxString, wxString>>   m_presets;
-    std::vector<wxWindow*> m_pass3_widgets;
-
-    void update_pass3_state(bool enable)
-    {
-        for (auto* w : m_pass3_widgets)
-            if (w) w->Enable(enable);
-    }
-
-    void update_sum_display()
-    {
-        if (!m_lbl_sum || !m_sc_passes) return;
-        const int passes = m_sc_passes->GetValue();
-        double sum = 0.0;
-        for (int i = 0; i < passes; ++i) {
-            double v = 0.0;
-            if (m_tc_ratio[i]) m_tc_ratio[i]->GetValue().ToDouble(&v);
-            sum += v;
-        }
-        const double diff = std::abs(sum - 1.0);
-        wxString label = wxString::Format("\u03a3 = %.3f", sum);
-        if      (diff < 0.05) label += _L("  \u2713 good");
-        else if (diff < 0.15) label += _L("  \u26a0 aim for 1.0");
-        else                  label += _L("  \u2717 far from 1.0");
-        m_lbl_sum->SetLabel(label);
-        if      (diff < 0.05) m_lbl_sum->SetForegroundColour(wxColour( 30, 160,  30));
-        else if (diff < 0.15) m_lbl_sum->SetForegroundColour(wxColour(200, 140,   0));
-        else                  m_lbl_sum->SetForegroundColour(wxColour(200,  30,  30));
-        m_lbl_sum->Refresh();
-        Layout();
-    }
-
-    void update_preview() {
-        if (!m_preview) return;
-        const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
-        MultiPassPreviewPanel::PassData pd[3];
-        for (int i = 0; i < 3; ++i) {
-            const int fv = m_sc_tool[i] ? m_sc_tool[i]->GetValue() : i + 1; // F-notation
-            pd[i].tool  = fv;
-            pd[i].ratio = m_tc_ratio[i] ? m_tc_ratio[i]->get_value() : 0.5;
-            pd[i].angle = m_sc_angle[i] ? m_sc_angle[i]->GetValue()  : -1;
-            const int t = fv > 0 ? fv - 1 : -1; // 0-based for color lookup
-            if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
-                pd[i].color = wxColour(m_colours[t]);
-            else
-                pd[i].color = wxColour(160, 160, 160);
-        }
-        m_preview->set_data(passes, pd);
-    }
-
-    static wxString preset_file_path() {
-        return wxGetHomeDir() + wxFILE_SEP_PATH + ".orca_mp_presets.txt";
-    }
-
-    wxString collect_state() const {
-        wxString d;
-        auto ai = [&](const char* k, int    v){ d += (d.empty()?"":",")+wxString(k)+"="+wxString::Format("%d",v); };
-        auto af = [&](const char* k, double v){ d += (d.empty()?"":",")+wxString(k)+"="+wxString::Format("%.4f",v); };
-        ai("passes",  m_sc_passes ? m_sc_passes->GetValue() : 2);
-        ai("surface", m_surface);
-        for (int i = 0; i < 3; ++i) {
-            // Store 0-based tool index (not raw spinner F-value) for format stability.
-            // Pass 3: spinner 0 = disabled → store -1. Passes 1&2: spinner F→ store F-1.
-            ai(wxString::Format("t%d", i).c_str(), m_sc_tool[i] ? (m_sc_tool[i]->GetValue() > 0 ? m_sc_tool[i]->GetValue() - 1 : -1) : (i < 2 ? 0 : -1));
-            af(wxString::Format("r%d",   i).c_str(), m_tc_ratio[i] ? m_tc_ratio[i]->get_value() : 0.5);
-            ai(wxString::Format("a%d",   i).c_str(), m_sc_angle[i] ? m_sc_angle[i]->GetValue()  : -1);
-            ai(wxString::Format("fan%d", i).c_str(), m_sc_fan[i]   ? m_sc_fan[i]->GetValue()    : -1);
-            ai(wxString::Format("spd%d", i).c_str(), m_sc_speed[i] ? m_sc_speed[i]->GetValue()  : 100);
-        }
-        ai("vary",    m_cb_vary ? (m_cb_vary->GetValue() ? 1 : 0) : 0);
-        ai("pa_mode", get_pa_mode());
-        af("pa_val",  get_pa_value());
-        return d;
-    }
-
-    void apply_state(const wxString& data) {
-        std::vector<wxString> pairs;
-        wxString tok;
-        for (size_t i = 0; i <= data.size(); ++i) {
-            if (i == data.size() || data[i] == ',') { pairs.push_back(tok); tok.clear(); }
-            else tok += data[i];
-        }
-        for (const wxString& pair : pairs) {
-            int eq = pair.Find('=');
-            if (eq < 0) continue;
-            wxString key = pair.Left(eq), val = pair.Mid(eq+1);
-            long lv = 0; double dv = 0.0;
-            val.ToLong(&lv); val.ToDouble(&dv);
-            if      (key=="passes" && m_sc_passes) m_sc_passes->SetValue(lv);
-            else if (key=="vary"   && m_cb_vary)   m_cb_vary->SetValue(lv!=0);
-            else if (key=="pa_mode") {
-                if (m_rb_pa[0]&&m_rb_pa[1]&&m_rb_pa[2]) {
-                    m_rb_pa[0]->SetValue(lv==1); m_rb_pa[1]->SetValue(lv==2); m_rb_pa[2]->SetValue(lv==0);
-                }
-            }
-            else if (key=="pa_val" && m_tc_pa_val)
-                m_tc_pa_val->ChangeValue(wxString::Format("%.3f", dv));
-            else for (int i = 0; i < 3; ++i) {
-                if (key==wxString::Format("t%d",i) && m_sc_tool[i]) {
-                    // Stored as 0-based index (-1=disabled). Convert to F-notation for spinner.
-                    // Clamp to spinner's [min,max] so invalid stored values don't OOB.
-                    const int fv = (lv >= 0) ? static_cast<int>(lv) + 1 : 0;
-                    m_sc_tool[i]->SetValue(std::clamp(fv, m_sc_tool[i]->GetMin(), m_sc_tool[i]->GetMax()));
-                }
-                else if (key==wxString::Format("r%d",i)   && m_tc_ratio[i]) m_tc_ratio[i]->set_value(dv,true);
-                else if (key==wxString::Format("a%d",i)   && m_sc_angle[i]) m_sc_angle[i]->SetValue(lv);
-                else if (key==wxString::Format("fan%d",i) && m_sc_fan[i])   m_sc_fan[i]->SetValue(lv);
-                else if (key==wxString::Format("spd%d",i) && m_sc_speed[i]) m_sc_speed[i]->SetValue(lv);
-            }
-        }
-        update_pass3_state(m_sc_passes ? m_sc_passes->GetValue() >= 3 : false);
-        update_sum_display();
-        update_preview();
-    }
-
-    void load_presets() {
-        m_presets.clear();
-        std::ifstream f(preset_file_path().ToStdString());
-        std::string line;
-        while (std::getline(f, line)) {
-            if (line.empty() || line[0]=='#') continue;
-            size_t tab = line.find('\t');
-            if (tab == std::string::npos) continue;
-            wxString name = wxString::FromUTF8(line.substr(0, tab));
-            wxString data = wxString::FromUTF8(line.substr(tab+1));
-            m_presets.emplace_back(name, data);
-        }
-        if (m_preset_combo) {
-            const wxString cur = m_preset_combo->GetValue();
-            m_preset_combo->Clear();
-            for (auto& [n, _] : m_presets) m_preset_combo->Append(n);
-            m_preset_combo->SetValue(cur);
-        }
-    }
-
-    void save_presets_file() {
-        std::ofstream f(preset_file_path().ToStdString());
-        f << "# OrcaSlicer MultiPass Presets\n";
-        for (auto& [name, data] : m_presets)
-            f << name.ToUTF8().data() << "\t" << data.ToUTF8().data() << "\n";
-    }
-
-    void build_ui(int cur_passes, int cur_surface,
-                  int t1, int t2, int t3,
-                  double r1, double r2, double r3,
-                  bool cur_vary,
-                  const int angles[3],
-                  const int fans[3], const int spds[3],
-                  const std::string gs[3], const std::string ge[3],
-                  int cur_pa_mode = 0, double cur_pa_value = 0.1,
-                  double cur_prime_volume = 0.0,
-                  double cur_layer_height = 0.0,  // NEOTKO_MULTIPASS_MINLAYER_TAG
-                  // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface
-                  bool penu_enabled = false, int penu_passes = 2,
-                  const int penu_tools[3] = nullptr,
-                  const double penu_ratios[3] = nullptr,
-                  const int penu_angles[3] = nullptr,
-                  const int penu_fans[3] = nullptr,
-                  const int penu_speeds[3] = nullptr,
-                  bool penu_vary = false,
-                  const std::string penu_gs[3] = nullptr,
-                  const std::string penu_ge[3] = nullptr,
-                  double penu_prime_vol = 0.0)
-    {
-        m_layer_height = cur_layer_height; // NEOTKO_MULTIPASS_MINLAYER_TAG
-        const int PAD = 6;
-        auto* vs = new wxBoxSizer(wxVERTICAL);
-
-        if (m_zone == SurfaceZone::TOP) {
-        // ---- Row 1: Passes ----
-        auto* row1 = new wxBoxSizer(wxHORIZONTAL);
-        row1->Add(new wxStaticText(this, wxID_ANY, _L("Passes:")),
-                  0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-        const int safe_passes = (cur_passes >= 1 && cur_passes <= 3) ? cur_passes : 2;
-        m_sc_passes = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                     wxDefaultPosition, wxSize(60,-1),
-                                     wxSP_ARROW_KEYS, 1, 3, safe_passes);
-        row1->Add(m_sc_passes, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 16);
-        vs->Add(row1, 0, wxALL, PAD);
-
-        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
-
-        // ---- LWTS override notice ----
-        {
-            auto* lbl_ov = new wxStaticText(this, wxID_ANY,
-                _L("\u26a0 MultiPass prints each pass at full line width, stacked on the same XY path.\n"
-                   "  Ratio = fraction of layer height. \u03a3 ratios \u2248 1.0 \u2192 solid layer."));
-            lbl_ov->SetForegroundColour(wxColour(180, 80, 0));
-            vs->Add(lbl_ov, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-        }
-
-        // NEOTKO_PROFILE_TAG — Fase G cleanup: MP dialog's internal preset bar
-        // (combo + Save/Delete writing ~/.orca_mp_presets.txt) is disabled.
-        // The SurfaceEffectProfile system (Save as profile… below) is the
-        // single source of truth for MP recipes. The old preset bar shipped
-        // for early MP testing and would now confuse users with two parallel
-        // "save MP" flows. Code kept under #if 0 for reference; the
-        // collect_state/apply_state/load_presets/save_presets_file helpers
-        // and m_preset_combo / m_presets members are now unused.
-#if 0
-        // ---- Preset bar (DISABLED — superseded by SurfaceEffectProfile) ----
-        {
-            auto* row_p = new wxBoxSizer(wxHORIZONTAL);
-            row_p->Add(new wxStaticText(this, wxID_ANY, _L("Preset:")),
-                       0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-            m_preset_combo = new wxComboBox(this, wxID_ANY, wxEmptyString,
-                                            wxDefaultPosition, wxSize(200,-1),
-                                            0, nullptr, wxCB_DROPDOWN);
-            m_preset_combo->SetToolTip(_L("Type a name and click Save, or select an existing preset to load it."));
-            load_presets();
-            row_p->Add(m_preset_combo, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-
-            auto* btn_save = new wxButton(this, wxID_ANY, _L("Save"),
-                                          wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            btn_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                wxString name = m_preset_combo->GetValue().Trim();
-                if (name.empty()) return;
-                wxString data = collect_state();
-                bool found = false;
-                for (auto& [n, d] : m_presets) if (n == name) { d = data; found = true; break; }
-                if (!found) m_presets.emplace_back(name, data);
-                save_presets_file();
-                load_presets();
-                m_preset_combo->SetValue(name);
-            });
-            row_p->Add(btn_save, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-
-            auto* btn_del = new wxButton(this, wxID_ANY, _L("Delete"),
-                                         wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            btn_del->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                wxString name = m_preset_combo->GetValue().Trim();
-                m_presets.erase(std::remove_if(m_presets.begin(), m_presets.end(),
-                    [&name](const std::pair<wxString,wxString>& p){ return p.first==name; }),
-                    m_presets.end());
-                save_presets_file();
-                load_presets();
-                m_preset_combo->SetValue(wxEmptyString);
-            });
-            row_p->Add(btn_del, 0, wxALIGN_CENTER_VERTICAL);
-
-            vs->Add(row_p, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-
-            m_preset_combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& e) {
-                wxString sel = e.GetString();
-                for (auto& [n, d] : m_presets) if (n == sel) { apply_state(d); break; }
-            });
-        }
-#endif
-
-        // ---- Interactive preview panel ----
-        m_preview = new MultiPassPreviewPanel(this);
-        vs->Add(m_preview, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-
-        // ---- Main grid ----
-        auto* grid = new wxFlexGridSizer(6 /*cols*/, PAD, PAD*2);
-
-        grid->Add(new wxStaticText(this, wxID_ANY, _L("Pass")),    0, wxALIGN_CENTER_VERTICAL);
-        {
-            auto* hdr = new wxStaticText(this, wxID_ANY, _L("Filament [F1\u2013FN]"));
-            hdr->SetToolTip(_L("Filament number (1-based: F1 = T0, F2 = T1, \u2026). Matches MixedColor F-notation.\nPass 3: 0 = disabled."));
-            grid->Add(hdr, 0, wxALIGN_CENTER_VERTICAL);
-        }
-        {
-            auto* hdr = new wxStaticText(this, wxID_ANY, _L("Angle°\n(-1=auto)"));
-            hdr->SetToolTip(_L("-1 = follow top surface fill angle.\n"
-                               "0-359 = custom fill angle for this pass.\n"
-                               "Different angles per pass = NeoSanding cross-hatch."));
-            grid->Add(hdr, 0, wxALIGN_CENTER_VERTICAL);
-        }
-        grid->Add(new wxStaticText(this, wxID_ANY, _L("% of layer\n(height ratio)")), 0, wxALIGN_CENTER_VERTICAL);
-        // NEOTKO_MULTIPASS_TAG — s58: Fan PWM / Speed % headers hidden (controls below also hidden).
-        // Backend config keys preserved for preset compatibility.
-        // grid->Add(new wxStaticText(this, wxID_ANY, _L("Fan PWM\n(-1=off)")),  0, wxALIGN_CENTER_VERTICAL);
-        // grid->Add(new wxStaticText(this, wxID_ANY, _L("Speed %\n(100=off)")), 0, wxALIGN_CENTER_VERTICAL);
-
-        const int    tools_def[3]  = {t1, t2, t3};
-        const double ratios_def[3] = {r1, r2, r3};
-        // F-notation: F1=T0, F2=T1 … FN=T(N-1).  Pass 3 uses 0 = "disabled".
-        // tool_min: passes 1&2 require at least F1; pass 3 can be 0 (off).
-        const int    tool_min[3]   = {1, 1, 0};
-        const int    max_tool      = std::max(4, (int)m_colours.size());
-
-        // tool_color always takes a 0-based physical index.
-        auto tool_color = [this](int t) -> wxColour {
-            if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
-                return wxColour(m_colours[t]);
-            return wxColour(160, 160, 160);
-        };
-
-        for (int i = 0; i < 3; ++i) {
-            auto* lbl = new wxStaticText(this, wxID_ANY,
-                                          wxString::Format(_L("Pass %d:"), i+1));
-            if (i == 2) m_pass3_widgets.push_back(lbl);
-            grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
-
-            // Convert stored 0-based tool index to F-notation (1-based display).
-            // Pass 3: stored -1 (disabled) → display 0; stored N → display N+1.
-            const int stored_t  = tools_def[i];
-            const int display_t = (stored_t >= 0) ? (stored_t + 1) : 0;
-            const int safe_tool = std::clamp(display_t, tool_min[i], max_tool);
-            m_sc_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                           wxDefaultPosition, wxSize(50,-1),
-                                           wxSP_ARROW_KEYS, tool_min[i], max_tool, safe_tool);
-            // Swatch uses 0-based index → subtract 1 from F-notation; 0 → gray.
-            m_swatch[i] = new ColorSwatch(this, tool_color(safe_tool > 0 ? safe_tool - 1 : -1));
-            // NEOTKO_MULTIPASS_TAG_START — TD spinner: reads neotko_td_{tool+1} from app_config
-            {
-                double init_td = 0.5;
-                if (stored_t >= 0) {
-                    auto* ac = wxGetApp().app_config;
-                    const std::string td_val = ac ? ac->get("neotko_td_" + std::to_string(stored_t + 1)) : "";
-                    try { if (!td_val.empty()) init_td = std::stod(td_val); } catch (...) {}
-                    init_td = std::clamp(init_td, 0.01, 10.0);
-                }
-                m_sc_td[i] = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
-                                                   wxDefaultPosition, wxSize(62,-1),
-                                                   wxSP_ARROW_KEYS, 0.01, 10.0, init_td, 0.05);
-                m_sc_td[i]->SetDigits(2);
-                m_sc_td[i]->SetToolTip(_L("TD (Tinting Density) for this pass's filament.\n"
-                                           "0.1=highly opaque, 0.5-3=semi-opaque, 3-7=translucent, 7-10+=highly translucent.\n"
-                                           "Lower TD = fewer passes needed to cover underlying color.\n"
-                                           "Synced with the Beer-Lambert TD sliders in Surface Color Mixer.\n"
-                                           "Used by 'Suggest (TD + %)' to compute optimal pass order and ratios."));
-                m_sc_td[i]->Bind(wxEVT_TEXT, [this, i](wxCommandEvent&) {
-                    if (!m_sc_tool[i] || !m_sc_td[i]) return;
-                    const int fv = m_sc_tool[i]->GetValue();
-                    if (fv <= 0) return;
-                    auto* ac = wxGetApp().app_config;
-                    if (ac) {
-                        char buf[32];
-                        std::snprintf(buf, sizeof(buf), "%.3f", m_sc_td[i]->GetValue());
-                        ac->set("neotko_td_" + std::to_string(fv), buf);
-                    }
-                });
-            }
-            // NEOTKO_MULTIPASS_TAG_END
-            auto* tool_cell = new wxBoxSizer(wxHORIZONTAL);
-            tool_cell->Add(m_sc_tool[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 3);
-            tool_cell->Add(m_swatch[i],  0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-            tool_cell->Add(new wxStaticText(this, wxID_ANY, _L("TD:")), 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
-            tool_cell->Add(m_sc_td[i],   0, wxALIGN_CENTER_VERTICAL);
-            if (i == 2) {
-                m_pass3_widgets.push_back(m_sc_tool[i]);
-                m_pass3_widgets.push_back(m_swatch[i]);
-                m_pass3_widgets.push_back(m_sc_td[i]);
-            }
-            grid->Add(tool_cell, 0, wxALIGN_CENTER_VERTICAL);
-            m_sc_tool[i]->Bind(wxEVT_SPINCTRL, [this, i, tool_color](wxSpinEvent& e) {
-                const int fv = e.GetValue(); // F-notation (1-based); 0 = disabled (pass 3 only)
-                if (m_swatch[i]) m_swatch[i]->set_color(tool_color(fv > 0 ? fv - 1 : -1));
-                // NEOTKO_MULTIPASS_TAG_START — reload TD for newly selected tool
-                if (m_sc_td[i] && fv > 0) {
-                    auto* ac = wxGetApp().app_config;
-                    const std::string td_val = ac ? ac->get("neotko_td_" + std::to_string(fv)) : "";
-                    double v = 0.5;
-                    try { if (!td_val.empty()) v = std::stod(td_val); } catch (...) {}
-                    m_sc_td[i]->SetValue(std::clamp(v, 0.01, 10.0));
-                }
-                // NEOTKO_MULTIPASS_TAG_END
-            });
-
-            const int safe_angle = (angles[i] >= -1 && angles[i] <= 359) ? angles[i] : -1;
-            m_sc_angle[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                            wxDefaultPosition, wxSize(60,-1),
-                                            wxSP_ARROW_KEYS, -1, 359, safe_angle);
-            m_sc_angle[i]->SetToolTip(_L("-1 = auto (follow fill angle).\n"
-                                          "0-359 = custom fill angle for NeoSanding."));
-            if (i == 2) m_pass3_widgets.push_back(m_sc_angle[i]);
-            grid->Add(m_sc_angle[i], 0, wxALIGN_CENTER_VERTICAL);
-
-            const double safe_ratio = (ratios_def[i] > 0.0 && ratios_def[i] < 10.0)
-                                      ? ratios_def[i] : (i == 2 ? 0.34 : 0.50);
-            // NEOTKO_MULTIPASS_MINLAYER_TAG — minimum ratio so each pass height ≥ 0.04mm.
-            const double min_r = (m_layer_height > 1e-6)
-                ? std::max(0.05, 0.04 / m_layer_height)
-                : 0.05;
-            m_tc_ratio[i] = new DragTextCtrl(this, std::max(safe_ratio, min_r), min_r, 5.0, 0.01);
-            if (i == 2) m_pass3_widgets.push_back(m_tc_ratio[i]);
-            grid->Add(m_tc_ratio[i], 0, wxALIGN_CENTER_VERTICAL);
-
-            // NEOTKO_MULTIPASS_TAG — s58: Fan / Speed widgets hidden (not added to grid).
-            // The wxSpinCtrl members stay nullptr; read/write code at lines ~973/1013/1507/1572
-            // already handles nullptr via the `m_sc_fan[i] ? ... : -1` guards.
-            m_sc_fan[i]   = nullptr;
-            m_sc_speed[i] = nullptr;
-            (void)fans; (void)spds;  // silence unused-param warnings
-        }
-        vs->Add(grid, 0, wxALL, PAD);
-
-        update_pass3_state(safe_passes >= 3);
-        m_sc_passes->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent& e) {
-            update_pass3_state(e.GetValue() >= 3);
-            update_sum_display();
-            if (m_preview) m_preview->set_passes(e.GetValue());
-            update_preview();
-        });
-        for (int i = 0; i < 3; ++i) {
-            if (m_tc_ratio[i])
-                m_tc_ratio[i]->Bind(wxEVT_TEXT, [this](wxCommandEvent&) {
-                    update_sum_display();
-                    update_preview();
-                });
-            if (m_sc_tool[i])
-                m_sc_tool[i]->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { update_preview(); });
-            if (m_sc_angle[i])
-                m_sc_angle[i]->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { update_preview(); });
-        }
-        if (m_preview) {
-            m_preview->on_ratio_change = [this](int idx, double v) {
-                if (idx >= 0 && idx < 3 && m_tc_ratio[idx]) {
-                    m_tc_ratio[idx]->set_value(v, false);
-                    update_sum_display();
-                }
-            };
-            m_preview->on_angle_change = [this](int idx, int v) {
-                if (idx >= 0 && idx < 3 && m_sc_angle[idx])
-                    m_sc_angle[idx]->SetValue(v);
-            };
-        }
-        update_preview();
-
-        // ---- Flow sum display + auto-fill button ----
-        {
-            auto* row_sum = new wxBoxSizer(wxHORIZONTAL);
-            row_sum->Add(new wxStaticText(this, wxID_ANY, _L("Normalize to layer height:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-            m_lbl_sum = new wxStaticText(this, wxID_ANY, "\u03a3 = ?");
-            row_sum->Add(m_lbl_sum, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
-            auto* btn_eq = new wxButton(this, wxID_ANY, _L("Equal (1/N)"),
-                                        wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            btn_eq->SetToolTip(_L("Set all active pass ratios to 1/N (equal split, \u03a3 = 1.0 exactly)."));
-            btn_eq->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
-                const double r = 1.0 / std::max(1, passes);
-                for (int i = 0; i < passes; ++i)
-                    if (m_tc_ratio[i])
-                        m_tc_ratio[i]->SetValue(wxString::Format("%.3f", r));
-                update_sum_display();
-            });
-            row_sum->Add(btn_eq, 0, wxALIGN_CENTER_VERTICAL);
-            vs->Add(row_sum, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
-        }
-        // NEOTKO_MULTIPASS_TAG_START — "Normalize to MixedColor %" row
-        if (!m_mix_options.empty()) {
-            auto* row_mc = new wxBoxSizer(wxHORIZONTAL);
-            row_mc->Add(new wxStaticText(this, wxID_ANY, _L("From MixedColor:")),
-                        0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-            wxArrayString combo_labels;
-            for (auto& opt : m_mix_options)
-                combo_labels.Add(wxString::FromUTF8(opt.label));
-            m_combo_mixed = new wxComboBox(this, wxID_ANY, combo_labels.empty() ? wxString() : combo_labels[0],
-                                           wxDefaultPosition, wxSize(160, -1),
-                                           combo_labels, wxCB_READONLY);
-            m_combo_mixed->SetToolTip(_L("Select a virtual MixedColor filament to read its blend recipe."));
-            row_mc->Add(m_combo_mixed, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-
-            // Colour swatch for the selected MixedColor
-            m_swatch_mixed = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
-            m_swatch_mixed->SetToolTip(_L("Display colour of the selected MixedColor."));
-            auto update_swatch_mixed = [this]() {
-                if (!m_swatch_mixed) return;
-                const int sel = m_combo_mixed ? m_combo_mixed->GetSelection() : -1;
-                wxColour c(128,128,128);
-                if (sel >= 0 && sel < (int)m_mix_options.size()) {
-                    const std::string& dc = m_mix_options[sel].display_color;
-                    if (dc.size() >= 7 && dc[0] == '#') {
-                        unsigned long rgb = 0;
-                        if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
-                            c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
-                    }
-                }
-                m_swatch_mixed->SetBackgroundColour(c);
-                m_swatch_mixed->Refresh();
-            };
-            update_swatch_mixed();
-            m_combo_mixed->Bind(wxEVT_COMBOBOX, [update_swatch_mixed](wxCommandEvent&) {
-                update_swatch_mixed();
-            });
-            row_mc->Add(m_swatch_mixed, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-
-            auto* btn_mc = new wxButton(this, wxID_ANY, _L("Normalize %"),
-                                        wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            btn_mc->SetToolTip(_L("Apply the selected MixedColor recipe proportions as layer_ratio for each pass.\n"
-                                  "Pass order (and tools) are kept as you set them; only the ratios are updated."));
-            btn_mc->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                if (!m_combo_mixed) return;
-                const int sel = m_combo_mixed->GetSelection();
-                if (sel < 0 || sel >= (int)m_mix_options.size()) return;
-                const auto& opt = m_mix_options[sel];
-                if (opt.tool_weights.empty()) return;
-
-                const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
-
-                // For each active pass, look up its tool in the recipe weights.
-                // If the tool is not in the recipe, weight = 0 (pass gets 0 flow).
-                std::vector<double> raw(passes, 0.0);
-                for (int i = 0; i < passes; ++i) {
-                    if (!m_sc_tool[i]) continue;
-                    const int tool_0based = m_sc_tool[i]->GetValue() - 1; // spinner is 1-based
-                    auto it = opt.tool_weights.find(tool_0based);
-                    if (it != opt.tool_weights.end())
-                        raw[i] = static_cast<double>(it->second);
-                }
-
-                // Normalize so Σ = 1.0
-                double total = 0.0;
-                for (double v : raw) total += v;
-                if (total < 1e-9) {
-                    wxMessageBox(_L("None of the current pass tools appear in the selected recipe.\n"
-                                    "Assign tools that match the recipe first."),
-                                 _L("Normalize — no match"), wxOK | wxICON_INFORMATION, this);
-                    return;
-                }
-                for (double& v : raw) v /= total;
-
-                // Push values into the ratio text controls
-                for (int i = 0; i < passes; ++i)
-                    if (m_tc_ratio[i])
-                        m_tc_ratio[i]->SetValue(wxString::Format("%.3f", raw[i]));
-                update_sum_display();
-            });
-            row_mc->Add(btn_mc, 0, wxALIGN_CENTER_VERTICAL);
-            vs->Add(row_mc, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
-        }
-        // NEOTKO_MULTIPASS_TAG_END
-        // NEOTKO_MULTIPASS_TAG_START — "Suggest (TD + %)" Beer-Lambert optimizer
-        {
-            auto* row_td = new wxBoxSizer(wxHORIZONTAL);
-            auto* btn_suggest = new wxButton(this, wxID_ANY, _L("Suggest (TD + %)"),
-                                             wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            btn_suggest->SetToolTip(_L(
-                "Uses Beer-Lambert optics to find the optimal pass ORDER and layer RATIOS.\n"
-                "If a MixedColor is selected above: simulates the blend and minimises ΔE vs. that target colour.\n"
-                "Otherwise: sorts passes by TD ascending (most opaque first = pass 1 base coat).\n"
-                "TD values are read from the spinners next to each filament selector.\n"
-                "Also reorders angles, fan, speed and GCode entries to match the new order."));
-
-            // Result swatch + ΔE label (updated after each calculation)
-            auto* swatch_result = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(22,22));
-            swatch_result->SetBackgroundColour(wxColour(128,128,128));
-            swatch_result->SetToolTip(_L("Simulated result colour after Beer-Lambert blend."));
-            auto* lbl_de = new wxStaticText(this, wxID_ANY, _L("  ΔE: ---"));
-
-            btn_suggest->Bind(wxEVT_BUTTON, [this, swatch_result, lbl_de](wxCommandEvent&) {
-                const int passes = m_sc_passes ? m_sc_passes->GetValue() : 2;
-                if (passes < 2) return;
-
-                // NEOTKO_MULTIPASS_TAG_START — auto-populate tools from MixedColor recipe
-                if (m_combo_mixed) {
-                    const int sel = m_combo_mixed->GetSelection();
-                    if (sel >= 0 && sel < (int)m_mix_options.size()) {
-                        const auto& tw = m_mix_options[sel].tool_weights;
-                        if (!tw.empty()) {
-                            // Sort tools by weight descending: dominant first
-                            std::vector<std::pair<int,float>> sorted_tw(tw.begin(), tw.end());
-                            std::stable_sort(sorted_tw.begin(), sorted_tw.end(),
-                                [](const auto& a, const auto& b){ return a.second > b.second; });
-                            // Pattern: 2-pass→[dom,sec], 3-pass→[dom,sec,dom]
-                            const int t_dom = sorted_tw[0].first;
-                            const int t_sec = sorted_tw.size() > 1 ? sorted_tw[1].first : t_dom;
-                            std::vector<int> pattern;
-                            if (passes == 2)      pattern = {t_dom, t_sec};
-                            else if (passes == 3) pattern = {t_dom, t_sec, t_dom};
-                            else {
-                                pattern.resize(passes);
-                                for (int i = 0; i < passes; ++i)
-                                    pattern[i] = (i % 2 == 0) ? t_dom : t_sec;
-                            }
-                            auto* ac = wxGetApp().app_config;
-                            for (int i = 0; i < passes; ++i) {
-                                const int fv = pattern[i] + 1; // 1-based F-notation
-                                if (m_sc_tool[i]) {
-                                    m_sc_tool[i]->SetValue(fv);
-                                    if (m_swatch[i])
-                                        m_swatch[i]->set_color(
-                                            (pattern[i] >= 0 && pattern[i] < (int)m_colours.size()
-                                             && !m_colours[pattern[i]].empty())
-                                            ? wxColour(m_colours[pattern[i]])
-                                            : wxColour(128,128,128));
-                                }
-                                if (m_sc_td[i] && fv > 0) {
-                                    const std::string td_key = "neotko_td_" + std::to_string(fv);
-                                    const std::string td_val = ac ? ac->get(td_key) : "";
-                                    double v = 0.5;
-                                    try { if (!td_val.empty()) v = std::stod(td_val); } catch (...) {}
-                                    m_sc_td[i]->SetValue(std::clamp(v, 0.01, 10.0));
-                                }
-                            }
-                        }
-                    }
-                }
-                // NEOTKO_MULTIPASS_TAG_END
-
-                struct PassState {
-                    int tool_0; double ratio, td; int angle, fan, speed;
-                    std::string gs, ge;
-                };
-                std::vector<PassState> states(passes);
-                for (int i = 0; i < passes; ++i) {
-                    states[i].tool_0 = m_sc_tool[i]  ? m_sc_tool[i]->GetValue() - 1 : i;
-                    states[i].ratio  = m_tc_ratio[i]  ? m_tc_ratio[i]->get_value()  : 0.5;
-                    states[i].td     = m_sc_td[i]     ? m_sc_td[i]->GetValue()      : 0.5;
-                    states[i].angle  = m_sc_angle[i]  ? m_sc_angle[i]->GetValue()   : -1;
-                    states[i].fan    = m_sc_fan[i]    ? m_sc_fan[i]->GetValue()     : -1;
-                    states[i].speed  = m_sc_speed[i]  ? m_sc_speed[i]->GetValue()   : 100;
-                    states[i].gs     = m_tc_gstart[i] ? m_tc_gstart[i]->GetValue().ToStdString() : "";
-                    states[i].ge     = m_tc_gend[i]   ? m_tc_gend[i]->GetValue().ToStdString()   : "";
-                }
-
-                // Build per-pass color + TD arrays
-                std::vector<std::array<double,3>> colors(passes);
-                std::vector<double> tds(passes);
-                for (int i = 0; i < passes; ++i) {
-                    const int t = states[i].tool_0;
-                    wxColour wc = (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
-                                  ? wxColour(m_colours[t]) : wxColour(128,128,128);
-                    colors[i] = {wc.Red()/255.0, wc.Green()/255.0, wc.Blue()/255.0};
-                    tds[i]    = std::max(0.01, states[i].td);
-                }
-
-                MpSuggestResult res;
-                bool used_bl = false;
-
-                // Try Beer-Lambert with MixedColor target
-                if (m_combo_mixed) {
-                    const int sel = m_combo_mixed->GetSelection();
-                    if (sel >= 0 && sel < (int)m_mix_options.size()) {
-                        const std::string& dc = m_mix_options[sel].display_color;
-                        if (dc.size() >= 7 && dc[0] == '#') {
-                            unsigned long rgb = 0;
-                            if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16)) {
-                                res = mp_suggest(colors, tds,
-                                                 ((rgb>>16)&0xFF)/255.0,
-                                                 ((rgb>> 8)&0xFF)/255.0,
-                                                 ( rgb     &0xFF)/255.0,
-                                                 0.05, false);
-                                used_bl = true;
-                            }
-                        }
-                    }
-                }
-
-                if (!used_bl) {
-                    // Simple TD-ascending sort (most opaque → pass 1)
-                    res.order.resize(passes); std::iota(res.order.begin(), res.order.end(), 0);
-                    std::stable_sort(res.order.begin(), res.order.end(),
-                        [&states](int a, int b){ return states[a].td < states[b].td; });
-                    res.ratios.assign(passes, 1.0 / passes);
-                    // Compute simulated result with these ratios
-                    std::vector<MpBLLayer> stack;
-                    for (int idx : res.order)
-                        stack.push_back({colors[idx][0], colors[idx][1], colors[idx][2],
-                                         tds[idx], res.ratios[0]});
-                    auto [r,g,bv] = mp_beer_blend(stack);
-                    res.res_r=r; res.res_g=g; res.res_b=bv;
-                    res.score = 999.0;
-                }
-
-                // Apply reordering to all spinners
-                std::vector<PassState> reordered;
-                reordered.reserve(passes);
-                for (int idx : res.order) reordered.push_back(states[idx]);
-
-                for (int i = 0; i < passes; ++i) {
-                    const auto& s = reordered[i];
-                    if (m_sc_tool[i])  m_sc_tool[i]->SetValue(s.tool_0 + 1);
-                    if (m_tc_ratio[i]) m_tc_ratio[i]->set_value(res.ratios[i], true);
-                    if (m_sc_angle[i]) m_sc_angle[i]->SetValue(s.angle);
-                    if (m_sc_fan[i])   m_sc_fan[i]->SetValue(s.fan);
-                    if (m_sc_speed[i]) m_sc_speed[i]->SetValue(s.speed);
-                    if (m_sc_td[i])    m_sc_td[i]->SetValue(s.td);
-                    if (m_tc_gstart[i]) m_tc_gstart[i]->SetValue(wxString::FromUTF8(s.gs));
-                    if (m_tc_gend[i])   m_tc_gend[i]->SetValue(wxString::FromUTF8(s.ge));
-                    const int t = s.tool_0;
-                    if (m_swatch[i]) {
-                        m_swatch[i]->set_color((t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
-                                               ? wxColour(m_colours[t]) : wxColour(128,128,128));
-                    }
-                }
-                update_sum_display();
-                update_preview();
-
-                // Update inline result display
-                const wxColour rc(static_cast<unsigned char>(std::clamp(res.res_r*255,0.0,255.0)),
-                                  static_cast<unsigned char>(std::clamp(res.res_g*255,0.0,255.0)),
-                                  static_cast<unsigned char>(std::clamp(res.res_b*255,0.0,255.0)));
-                swatch_result->SetBackgroundColour(rc);
-                swatch_result->Refresh();
-                const wxString de_str = used_bl
-                    ? wxString::Format(_L("  ΔE: %.1f"), res.score)
-                    : _L("  (sorted by TD)");
-                lbl_de->SetLabel(de_str);
-                if (used_bl)
-                    lbl_de->SetForegroundColour(res.score < 5.0  ? wxColour(30,140,30) :
-                                                res.score < 10.0 ? wxColour(190,130,0) :
-                                                                   wxColour(180,40,40));
-                else
-                    lbl_de->SetForegroundColour(wxColour(80,80,80));
-                lbl_de->Refresh();
-                Layout();
-            });
-
-            row_td->Add(btn_suggest, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-            row_td->Add(swatch_result, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-            row_td->Add(lbl_de, 1, wxALIGN_CENTER_VERTICAL);
-            vs->Add(row_td, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
-        }
-        // NEOTKO_MULTIPASS_TAG_END
-        {
-            auto* hint = new wxStaticText(this, wxID_ANY,
-                _L("\u03a3 \u2248 1.0 = full layer height covered. Each pass occupies its ratio of the layer height."));
-            hint->SetForegroundColour(wxColour(100, 100, 100));
-            vs->Add(hint, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-        }
-        update_sum_display();
-
-        // NEOTKO_MULTIPASS_TAG — s58: Custom GCode per-pass section hidden.
-        // Members m_tc_gstart / m_tc_gend stay nullptr; read/write at lines
-        // ~990/1019/1509/1575 already guards with `m_tc_gstart[i] ? ... : ""`.
-        for (int i = 0; i < 3; ++i) {
-            m_tc_gstart[i] = nullptr;
-            m_tc_gend[i]   = nullptr;
-        }
-        (void)gs; (void)ge;  // silence unused-param warnings
-
-        // ---- Pressure Advance (PA) section ----
-        vs->Add(new wxStaticText(this, wxID_ANY, _L("Pressure Advance (PA) during MultiPass:")),
-                0, wxLEFT|wxTOP|wxRIGHT, PAD);
-        {
-            auto* pa_row = new wxBoxSizer(wxHORIZONTAL);
-
-            m_rb_pa[0] = new wxRadioButton(this, wxID_ANY, _L("PA ="),
-                                            wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
-            const double safe_pa = (cur_pa_value >= 0.0 && cur_pa_value <= 2.0)
-                                   ? cur_pa_value : 0.1;
-            m_tc_pa_val = new wxTextCtrl(this, wxID_ANY,
-                                          wxString::Format("%.3f", safe_pa),
-                                          wxDefaultPosition, wxSize(60,-1));
-            m_tc_pa_val->SetToolTip(_L("Pressure Advance value applied before each MultiPass region.\n"
-                                       "Filament's configured PA is restored after."));
-            pa_row->Add(m_rb_pa[0], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-            pa_row->Add(m_tc_pa_val, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 16);
-
-            m_rb_pa[1] = new wxRadioButton(this, wxID_ANY, _L("PA = 0"));
-            m_rb_pa[1]->SetToolTip(_L("Disable Pressure Advance during MultiPass passes.\n"
-                                       "Useful for very narrow lines (low flow ratio) where PA over-compensates."));
-            pa_row->Add(m_rb_pa[1], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 16);
-
-            m_rb_pa[2] = new wxRadioButton(this, wxID_ANY, _L("No changes (default)"));
-            pa_row->Add(m_rb_pa[2], 0, wxALIGN_CENTER_VERTICAL);
-
-            const int safe_mode = (cur_pa_mode >= 0 && cur_pa_mode <= 2) ? cur_pa_mode : 0;
-            if      (safe_mode == 1) m_rb_pa[0]->SetValue(true);
-            else if (safe_mode == 2) m_rb_pa[1]->SetValue(true);
-            else                     m_rb_pa[2]->SetValue(true);
-
-            vs->Add(pa_row, 0, wxLEFT|wxRIGHT|wxTOP, PAD);
-
-            auto update_pa_ctrl = [this]() {
-                if (m_tc_pa_val)
-                    m_tc_pa_val->Enable(m_rb_pa[0] && m_rb_pa[0]->GetValue());
-            };
-            update_pa_ctrl();
-            m_rb_pa[0]->Bind(wxEVT_RADIOBUTTON, [update_pa_ctrl](wxCommandEvent&) { update_pa_ctrl(); });
-            m_rb_pa[1]->Bind(wxEVT_RADIOBUTTON, [update_pa_ctrl](wxCommandEvent&) { update_pa_ctrl(); });
-            m_rb_pa[2]->Bind(wxEVT_RADIOBUTTON, [update_pa_ctrl](wxCommandEvent&) { update_pa_ctrl(); });
-        }
-        {
-            auto* lbl_pa = new wxStaticText(this, wxID_ANY,
-                _L("PA = value / PA = 0: Orca injects SET_PRESSURE_ADVANCE before each MultiPass region\n"
-                   "and restores the filament's configured PA value after. 'No changes' leaves PA untouched."));
-            lbl_pa->SetForegroundColour(wxColour(100, 100, 100));
-            vs->Add(lbl_pa, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-        }
-
-        vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
-
-        // NEOTKO_MULTIPASS_PRIME_TAG — s58: Wipe tower prime spinner moved OUT of this dialog
-        // to the global Print Settings optgroup (Tab.cpp, right below `neotko_wipe_tower`).
-        // The config key `multipass_prime_volume` is now global (applies to both Top and
-        // Penultimate; `penultimate_multipass_prime_volume` is removed).
-        // m_sc_prime stays nullptr; get_prime_volume() guards it.
-        (void)cur_prime_volume;
-        // NEOTKO_MULTIPASS_PRIME_TAG_END
-
-        // NEOTKO_MULTIPASS_MINLAYER_TAG — Layer height info + minimum ratio warning
-        if (m_layer_height > 1e-6) {
-            vs->Add(new wxStaticLine(this), 0, wxEXPAND|wxLEFT|wxRIGHT, PAD);
-            const double min_r = std::max(0.05, 0.04 / m_layer_height);
-            wxString info_text;
-            if (m_layer_height < 0.04) {
-                info_text = wxString::Format(
-                    _L("\u26a0 Layer height %.3f mm is below 0.04 mm — passes thinner than\n"
-                       "0.04 mm may not extrude reliably. Increase layer height."),
-                    m_layer_height);
-            } else {
-                info_text = wxString::Format(
-                    _L("Layer height: %.3f mm  \u2502  Min pass ratio: %.2f (= 0.04 mm min height)"),
-                    m_layer_height, min_r);
-            }
-            auto* lbl_lh = new wxStaticText(this, wxID_ANY, info_text);
-            lbl_lh->SetForegroundColour(
-                (m_layer_height < 0.04) ? wxColour(200, 30, 30) : wxColour(100, 100, 100));
-            vs->Add(lbl_lh, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-        }
-        // NEOTKO_MULTIPASS_MINLAYER_TAG_END
-        }  // end SurfaceZone::TOP
-
-        // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent section
-        if (m_zone == SurfaceZone::PENULTIMATE) {
-            auto* penu_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Penultimate MultiPass"));
-
-            // Passes + sum label
-            auto* pr1 = new wxBoxSizer(wxHORIZONTAL);
-            pr1->Add(new wxStaticText(this, wxID_ANY, _L("Passes:")),
-                     0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-            const int safe_pp = (penu_passes >= 1 && penu_passes <= 3) ? penu_passes : 2;
-            m_sc_penu_passes = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                              wxDefaultPosition, wxSize(60, -1),
-                                              wxSP_ARROW_KEYS, 1, 3, safe_pp);
-            pr1->Add(m_sc_penu_passes, 0, wxALIGN_CENTER_VERTICAL);
-            penu_box->Add(pr1, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-
-            // Per-pass rows: Tool | Ratio | Angle | Fan | Speed | GCode start | GCode end
-            const int def_tools[3]   = {0, 1, -1};
-            const double def_ratios[3] = {0.5, 0.5, 0.34};
-            const int def_angles[3]  = {-1, -1, -1};
-            const int def_fans[3]    = {-1, -1, -1};
-            const int def_speeds[3]  = {100, 100, 100};
-            auto penu_tool_color = [this](int t) -> wxColour {
-                if (t >= 0 && t < (int)m_colours.size() && !m_colours[t].empty())
-                    return wxColour(m_colours[t]);
-                return wxColour(160, 160, 160);
-            };
-            for (int i = 0; i < 3; ++i) {
-                const int    pt  = penu_tools  ? penu_tools[i]  : def_tools[i];
-                const double pr  = penu_ratios ? penu_ratios[i] : def_ratios[i];
-                const int    pa  = penu_angles ? penu_angles[i] : def_angles[i];
-                const int    pf  = penu_fans   ? penu_fans[i]   : def_fans[i];
-                const int    ps  = penu_speeds  ? penu_speeds[i] : def_speeds[i];
-                const std::string pgs = (penu_gs && !penu_gs[i].empty()) ? penu_gs[i] : "";
-                const std::string pge = (penu_ge && !penu_ge[i].empty()) ? penu_ge[i] : "";
-
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(this, wxID_ANY,
-                          wxString::Format(_L("Pass %d:"), i + 1)),
-                          0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-
-                // Tool spinner + swatch
-                const int fv    = (pt >= 0) ? pt + 1 : 0;
-                const int max_t = std::max(4, (int)m_colours.size());
-                m_sc_penu_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                    wxDefaultPosition, wxSize(55, -1), wxSP_ARROW_KEYS,
-                    (i < 2) ? 1 : 0, max_t, std::clamp(fv, (i < 2) ? 1 : 0, max_t));
-                m_swatch_penu[i] = new ColorSwatch(this, penu_tool_color(fv > 0 ? fv - 1 : -1));
-                m_sc_penu_tool[i]->Bind(wxEVT_SPINCTRL, [this, i, penu_tool_color](wxSpinEvent& e) {
-                    const int v = e.GetValue();
-                    if (m_swatch_penu[i]) m_swatch_penu[i]->set_color(penu_tool_color(v > 0 ? v - 1 : -1));
-                });
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Tool:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_sc_penu_tool[i],  0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 3);
-                row->Add(m_swatch_penu[i],   0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
-
-                // Ratio drag-text
-                const double min_r = (m_layer_height > 1e-6) ? std::max(0.05, 0.04 / m_layer_height) : 0.05;
-                m_tc_penu_ratio[i] = new DragTextCtrl(this, std::max(pr, min_r), min_r, 5.0, 0.01);
-                m_tc_penu_ratio[i]->SetMinSize(wxSize(60, -1));
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Ratio:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_tc_penu_ratio[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
-
-                // Angle spinner
-                const int safe_pa = (pa >= -1 && pa <= 359) ? pa : -1;
-                m_sc_penu_angle[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                    wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, -1, 359, safe_pa);
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Angle:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_sc_penu_angle[i], 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 10);
-
-                // NEOTKO_MULTIPASS_TAG — s58: Fan / Speed / GCode per-pass widgets hidden.
-                // Members stay nullptr; read/write code guards with `m_sc_penu_fan[i] ? ...`.
-                m_sc_penu_fan[i]    = nullptr;
-                m_sc_penu_speed[i]  = nullptr;
-                m_tc_penu_gstart[i] = nullptr;
-                m_tc_penu_gend[i]   = nullptr;
-                (void)pf; (void)ps; (void)pgs; (void)pge;  // silence unused-var warnings
-
-                penu_box->Add(row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-
-                if (i == 2) {
-                    m_penu_pass3_widgets.push_back(m_sc_penu_tool[i]);
-                    m_penu_pass3_widgets.push_back(m_swatch_penu[i]);
-                    m_penu_pass3_widgets.push_back(m_tc_penu_ratio[i]);
-                    m_penu_pass3_widgets.push_back(m_sc_penu_angle[i]);
-                    // Fan/Speed/GCode hidden — not pushed.
-                }
-            }
-
-            // Vary pattern checkbox
-            {
-                auto* vrow = new wxBoxSizer(wxHORIZONTAL);
-                m_cb_penu_vary = new wxCheckBox(this, wxID_ANY, _L("Alternate pass direction"));
-                m_cb_penu_vary->SetValue(penu_vary);
-                m_cb_penu_vary->SetToolTip(_L("Each successive pass reverses the polyline traversal order (180 deg flip)."));
-                vrow->Add(m_cb_penu_vary, 0, wxALIGN_CENTER_VERTICAL);
-                penu_box->Add(vrow, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-            }
-
-            // NEOTKO_MULTIPASS_PRIME_TAG — s58: Penu prime spinner moved OUT (global setting now).
-            // m_sc_penu_prime stays nullptr; get_penu_prime() guards it.
-            (void)penu_prime_vol;
-
-            // Enable/disable pass-3 widgets based on penu_passes
-            const bool p3_on = (safe_pp >= 3);
-            for (auto* w : m_penu_pass3_widgets) if (w) w->Enable(p3_on);
-
-            m_sc_penu_passes->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&) {
-                const bool on = (m_sc_penu_passes->GetValue() >= 3);
-                for (auto* w : m_penu_pass3_widgets) if (w) w->Enable(on);
-                Layout();
-            });
-
-            vs->Add(penu_box, 0, wxEXPAND|wxALL, PAD);
-        }
-        // NEOTKO_MULTIPASS_SURFACES_TAG_END
-
-        // NEOTKO_PROFILE_TAG_START — Fase F1: Save current dialog state as a
-        // MultiPass-only Surface Effect Profile (colormix payload stays absent).
-        // The profile becomes available to the 3D Painter, where painting it
-        // overrides the preset's MultiPass for the painted area.
-        {
-            wxBoxSizer* prof_row = new wxBoxSizer(wxHORIZONTAL);
-            wxButton* btn_save = new wxButton(this, wxID_ANY, _L("Save as profile…"));
-            prof_row->Add(btn_save, 0);
-            vs->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-            btn_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                wxTextEntryDialog ned(this, _L("Profile name:"),
-                                      _L("Save MultiPass profile"));
-                if (ned.ShowModal() != wxID_OK) return;
-                const std::string name = ned.GetValue().ToStdString();
-                if (name.empty()) return;
-
-                // NEOTKO_PROFILE_TAG — Fase F1 fix: write straight into the
-                // SurfaceEffectPayload kv map. The earlier
-                // `new_from_defaults_keys(multipass_keys())` path sometimes
-                // produced an empty config (per-region keys not surfaced from
-                // FullPrintConfig defaults on every build), in which case the
-                // typed writers silently no-op'd and `snapshot_keys` returned
-                // present=false → painter mode read "no MP payload" and fell
-                // back to CM. Serialising manually here matches how
-                // ConfigOption*::serialize emits values (bool→"1"/"0",
-                // int→%d, float→%g, string→raw) so the inverse parse in
-                // `multipass_from_profile_payload` round-trips exactly.
-                Slic3r::SurfaceEffectPayload mp_payload;
-                mp_payload.present = true;
-                auto wi = [&](const char* k, int v) {
-                    mp_payload.kv[k] = std::to_string(v);
-                };
-                auto wb = [&](const char* k, bool v) {
-                    mp_payload.kv[k] = v ? "1" : "0";
-                };
-                auto wf = [&](const char* k, double v) {
-                    std::ostringstream os;
-                    os.imbue(std::locale::classic());
-                    os << v;
-                    mp_payload.kv[k] = os.str();
-                };
-                auto ws = [&](const char* k, const std::string& v) {
-                    mp_payload.kv[k] = v;
-                };
-                // Top role — saved profile enables MP on top by default.
-                wb("multipass_enabled",          true);
-                wi("multipass_surface",          get_surface());
-                wi("multipass_num_passes",       get_passes());
-                wi("multipass_tool_1",           get_tool1());
-                wi("multipass_tool_2",           get_tool2());
-                wi("multipass_tool_3",           get_tool3());
-                wf("multipass_width_ratio_1",    get_ratio1());
-                wf("multipass_width_ratio_2",    get_ratio2());
-                wf("multipass_width_ratio_3",    get_ratio3());
-                wb("multipass_vary_pattern",     get_vary());
-                wi("multipass_angle_1",          get_angle1());
-                wi("multipass_angle_2",          get_angle2());
-                wi("multipass_angle_3",          get_angle3());
-                wi("multipass_pa_mode",          get_pa_mode());
-                wf("multipass_pa_value",         get_pa_value());
-                wi("multipass_fan_1",            get_fan1());
-                wi("multipass_fan_2",            get_fan2());
-                wi("multipass_fan_3",            get_fan3());
-                wi("multipass_speed_pct_1",      get_speed1());
-                wi("multipass_speed_pct_2",      get_speed2());
-                wi("multipass_speed_pct_3",      get_speed3());
-                ws("multipass_gcode_start_1",    get_gcode_start1());
-                ws("multipass_gcode_start_2",    get_gcode_start2());
-                ws("multipass_gcode_start_3",    get_gcode_start3());
-                ws("multipass_gcode_end_1",      get_gcode_end1());
-                ws("multipass_gcode_end_2",      get_gcode_end2());
-                ws("multipass_gcode_end_3",      get_gcode_end3());
-                // multipass_perimeter_override + multipass_path_gradient live in
-                // SCM dialog widgets, not here — keep defaults from new_from_defaults_keys.
-                // Penultimate role
-                wb("penultimate_multipass_enabled",     get_penu_enabled());
-                wi("penultimate_multipass_num_passes",  get_penu_passes());
-                wi("penultimate_multipass_tool_1",      get_penu_tool1());
-                wi("penultimate_multipass_tool_2",      get_penu_tool2());
-                wi("penultimate_multipass_tool_3",      get_penu_tool3());
-                wf("penultimate_multipass_width_ratio_1", get_penu_ratio1());
-                wf("penultimate_multipass_width_ratio_2", get_penu_ratio2());
-                wf("penultimate_multipass_width_ratio_3", get_penu_ratio3());
-                wb("penultimate_multipass_vary_pattern", get_penu_vary());
-                wi("penultimate_multipass_angle_1",     get_penu_angle1());
-                wi("penultimate_multipass_angle_2",     get_penu_angle2());
-                wi("penultimate_multipass_angle_3",     get_penu_angle3());
-                wi("penultimate_multipass_fan_1",       get_penu_fan1());
-                wi("penultimate_multipass_fan_2",       get_penu_fan2());
-                wi("penultimate_multipass_fan_3",       get_penu_fan3());
-                wi("penultimate_multipass_speed_pct_1", get_penu_speed1());
-                wi("penultimate_multipass_speed_pct_2", get_penu_speed2());
-                wi("penultimate_multipass_speed_pct_3", get_penu_speed3());
-                ws("penultimate_multipass_gcode_start_1", get_penu_gcode_start1());
-                ws("penultimate_multipass_gcode_start_2", get_penu_gcode_start2());
-                ws("penultimate_multipass_gcode_start_3", get_penu_gcode_start3());
-                ws("penultimate_multipass_gcode_end_1",   get_penu_gcode_end1());
-                ws("penultimate_multipass_gcode_end_2",   get_penu_gcode_end2());
-                ws("penultimate_multipass_gcode_end_3",   get_penu_gcode_end3());
-
-                Slic3r::SurfaceEffectProfile prof;
-                prof.name = name;
-                prof.multipass = std::move(mp_payload);
-                // colormix / pathblend payloads stay present=false.
-                const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(prof));
-                wxMessageBox(wxString::Format(_L("Saved MultiPass profile #%d (%zu keys)."),
-                                              new_id,
-                                              (size_t)Slic3r::SurfaceEffectProfileManager::get()
-                                                  .find(new_id)->multipass.kv.size()),
-                             _L("Surface Effect Profile"),
-                             wxOK | wxICON_INFORMATION, this);
-            });
-        }
-        // NEOTKO_PROFILE_TAG_END
-
-        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
-                0, wxALL|wxALIGN_RIGHT, PAD);
-        SetSizerAndFit(vs);
-    }
-};
-// NEOTKO_MULTIPASS_TAG_END
-// NEOTKO_SANDWICH_TAG — Fase 5 s73: PathBlendDialog class is dead code.
-// PathBlend is now edited inline in the SandwichDialog row (kind selector
-// Half/Full + floor_mm spinner + mid_end_mm field + ease cycler + chip
-// tool pickers). Wrapped in #if 0 to remove it from the build without
-// the bulk-delete risk; remove physically in a follow-up cleanup.
-#if 0
-class PathBlendDialog : public wxDialog
-{
-public:
-    PathBlendDialog(wxWindow* parent,
-                    const Slic3r::PathBlendPassConfig& cur,
-                    double layer_height_mm,
-                    const std::vector<std::string>& fcolors = {})
-        : wxDialog(parent, wxID_ANY, _L("PathBlend Settings"),
-                   wxDefaultPosition, wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
-        , m_layer_height_mm(std::max(0.04, layer_height_mm))
-    {
-        m_ease_mode = std::clamp(cur.ease_mode, 0, 3);
-        const int PAD = 8;
-        auto* vs = new wxBoxSizer(wxVERTICAL);
-
-        // --- Mode (Half / Full) ---
-        {
-            auto* row_mode = new wxBoxSizer(wxHORIZONTAL);
-            wxString choices[2] = { _L("Half (ramp only, semi-fill)"),
-                                    _L("Full (ramp + cap)") };
-            m_rb_mode = new wxRadioBox(this, wxID_ANY, _L("Mode"),
-                                       wxDefaultPosition, wxDefaultSize,
-                                       2, choices, 1, wxRA_SPECIFY_ROWS);
-            m_rb_mode->SetSelection(
-                (cur.mode == Slic3r::PathBlendPassConfig::Mode::Full) ? 1 : 0);
-            row_mode->Add(m_rb_mode, 0);
-            vs->Add(row_mode, 0, wxALL, PAD);
-        }
-
-        // --- Tools (bottom + top, Fase 5 s72) ---
-        // Stored config values are 0-based; displayed here as 1-based Fn.
-        const int init_tools[2] = { cur.tool_bottom,
-                                    (cur.tool_top < 0 ? 0 : cur.tool_top) };
-
-        // Helper: tool index -> filament color
-        auto pb_hex_col = [&fcolors](int t) -> wxColour {
-            if (t >= 0 && t < (int)fcolors.size() && !fcolors[t].empty()) {
-                unsigned long rgb = 0;
-                wxString s = wxString::FromUTF8(fcolors[t]);
-                if (s.StartsWith("#")) s = s.Mid(1);
-                s.ToULong(&rgb, 16);
-                return wxColour((rgb>>16)&0xFF,(rgb>>8)&0xFF,rgb&0xFF);
-            }
-            return wxColour(128, 128, 128);
-        };
-
-        // 3 columns: label | spinctrl (F1-based) | color swatch (updates on change)
-        // F-notation: F1 = T0, F2 = T1, ... (1-based Fn).
-        auto* grid = new wxFlexGridSizer(2, 3, 4, 8);
-        const int pb_max_tool = std::max(4, (int)fcolors.size()); // F1..FN
-        const wxString tool_lbl[2] = { _L("Ramp tool (bottom):"),
-                                       _L("Cap tool (top):") };
-
-        for (int i = 0; i < 2; ++i) {
-            grid->Add(new wxStaticText(this, wxID_ANY, tool_lbl[i]),
-                      0, wxALIGN_CENTER_VERTICAL);
-
-            // Convert stored 0-based index to F-notation (1-based) for display.
-            const int init_t = std::clamp(init_tools[i] + 1, 1, pb_max_tool);
-            m_sc_tool[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                           wxDefaultPosition, wxSize(60,-1),
-                                           wxSP_ARROW_KEYS, 1, pb_max_tool, init_t);
-            m_sc_tool[i]->SetToolTip(_L("Filament number (F1 = T0, F2 = T1, ...). Matches MixedColor F-notation."));
-            grid->Add(m_sc_tool[i], 0, wxALIGN_CENTER_VERTICAL);
-
-            // Swatch: pb_hex_col takes 0-based; init_t is 1-based → subtract 1.
-            m_swatch_pb[i] = new ColorSwatch(this, pb_hex_col(init_t - 1));
-            grid->Add(m_swatch_pb[i], 0, wxALIGN_CENTER_VERTICAL);
-
-            // Update swatch when the filament number changes
-            m_sc_tool[i]->Bind(wxEVT_SPINCTRL,
-                [this, i, fcolors_cap = fcolors](wxSpinEvent& e) {
-                    if (!m_swatch_pb[i]) return;
-                    const int t = e.GetValue() - 1; // F-notation → 0-based for color lookup
-                    if (t >= 0 && t < (int)fcolors_cap.size() && !fcolors_cap[t].empty()) {
-                        unsigned long rgb = 0;
-                        wxString s = wxString::FromUTF8(fcolors_cap[t]);
-                        if (s.StartsWith("#")) s = s.Mid(1);
-                        s.ToULong(&rgb, 16);
-                        m_swatch_pb[i]->set_color(wxColour((rgb>>16)&0xFF,(rgb>>8)&0xFF,rgb&0xFF));
-                    } else {
-                        m_swatch_pb[i]->set_color(wxColour(128, 128, 128));
-                    }
-                });
-        }
-        vs->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        // --- Heights (mm) - explicit geometry replaces min_ratio/max_ratio ---
-        // floor: Z of the ramp at t=0 (low end), >= 0.01.
-        // mid_end: Z of the ramp at t=1 (high end), >= floor. In Full mode it
-        // also satisfies mid_end <= H - 0.04 (cap thickness >= 0.04 mm).
-        const double H = m_layer_height_mm;
-        const double mid_max_full = std::max(0.01, H - 0.04);
-        const double mid_max_half = H;
-        const double init_floor   = std::clamp((double)cur.floor_mm,   0.01, H);
-        const double init_mid     = std::clamp((double)cur.mid_end_mm,
-                                              init_floor,
-                                              (cur.mode == Slic3r::PathBlendPassConfig::Mode::Full)
-                                                  ? mid_max_full : mid_max_half);
-
-        auto* h_grid = new wxFlexGridSizer(2, 2, 4, 8);
-        h_grid->Add(new wxStaticText(this, wxID_ANY,
-            wxString::Format(_L("Floor mm (ramp at t=0, layer H=%.2f):"), H)),
-            0, wxALIGN_CENTER_VERTICAL);
-        m_sc_floor = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
-                                          wxDefaultPosition, wxSize(80, -1),
-                                          wxSP_ARROW_KEYS, 0.01, H, init_floor, 0.005);
-        m_sc_floor->SetDigits(3);
-        h_grid->Add(m_sc_floor, 0, wxALIGN_CENTER_VERTICAL);
-        h_grid->Add(new wxStaticText(this, wxID_ANY, _L("Mid-end mm (ramp at t=1):")),
-                    0, wxALIGN_CENTER_VERTICAL);
-        m_sc_mid_end = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
-                                            wxDefaultPosition, wxSize(80, -1),
-                                            wxSP_ARROW_KEYS, init_floor, H, init_mid, 0.005);
-        m_sc_mid_end->SetDigits(3);
-        h_grid->Add(m_sc_mid_end, 0, wxALIGN_CENTER_VERTICAL);
-        vs->Add(h_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        // Cross-control: floor and mid_end never cross; mid_end ceiling tightens
-        // to H-0.04 when Full (cap >= 0.04). Tool-top is meaningful only in Full.
-        auto reclamp_heights = [this, H]() {
-            const bool full = (m_rb_mode && m_rb_mode->GetSelection() == 1);
-            const double mid_max = full ? std::max(0.01, H - 0.04) : H;
-            const double floor_v = m_sc_floor->GetValue();
-            if (m_sc_mid_end->GetValue() < floor_v) m_sc_mid_end->SetValue(floor_v);
-            if (m_sc_mid_end->GetValue() > mid_max) m_sc_mid_end->SetValue(mid_max);
-            m_sc_mid_end->SetRange(floor_v, mid_max);
-            if (m_sc_tool[1])   m_sc_tool[1]->Enable(full);
-            if (m_swatch_pb[1]) m_swatch_pb[1]->Enable(full);
-        };
-        m_sc_floor->Bind(wxEVT_SPINCTRLDOUBLE,
-            [reclamp_heights](wxSpinDoubleEvent&) { reclamp_heights(); });
-        m_sc_mid_end->Bind(wxEVT_SPINCTRLDOUBLE,
-            [reclamp_heights](wxSpinDoubleEvent&) { reclamp_heights(); });
-        m_rb_mode->Bind(wxEVT_RADIOBOX,
-            [reclamp_heights](wxCommandEvent&) { reclamp_heights(); });
-        reclamp_heights();
-
-        // --- Gradient easing buttons ---
-        {
-            vs->Add(new wxStaticText(this, wxID_ANY, _L("Gradient curve:")),
-                    0, wxLEFT | wxRIGHT | wxTOP, PAD);
-            auto* row_ease = new wxBoxSizer(wxHORIZONTAL);
-            const wxString ease_labels[4] = {
-                _L("Linear"), _L("Ease In"), _L("Ease Out"), _L("Ease In/Out")
-            };
-            const wxString ease_tips[4] = {
-                _L("Linear: uniform transition."),
-                _L("Ease In: slow start, fast end (t\u00b2)."),
-                _L("Ease Out: fast start, slow end (1-(1-t)\u00b2)."),
-                _L("Ease In/Out: S-curve (smoothstep).")
-            };
-            for (int i = 0; i < 4; ++i) {
-                m_btn_ease[i] = new wxButton(this, wxID_ANY, ease_labels[i],
-                                              wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                m_btn_ease[i]->SetToolTip(ease_tips[i]);
-                row_ease->Add(m_btn_ease[i], 0, wxRIGHT, 3);
-            }
-            vs->Add(row_ease, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-            // Highlight active button
-            auto refresh_ease = [this]() {
-                const wxColour active_bg(60, 120, 220);
-                const wxColour active_fg(*wxWHITE);
-                const wxColour normal_bg(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
-                const wxColour normal_fg(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNTEXT));
-                for (int i = 0; i < 4; ++i) {
-                    if (!m_btn_ease[i]) continue;
-                    const bool on = (i == m_ease_mode);
-                    m_btn_ease[i]->SetBackgroundColour(on ? active_bg : normal_bg);
-                    m_btn_ease[i]->SetForegroundColour(on ? active_fg : normal_fg);
-                    m_btn_ease[i]->Refresh();
-                }
-            };
-            for (int i = 0; i < 4; ++i) {
-                m_btn_ease[i]->Bind(wxEVT_BUTTON, [this, i, refresh_ease](wxCommandEvent&) {
-                    m_ease_mode = i;
-                    refresh_ease();
-                });
-            }
-            refresh_ease();
-        }
-
-        // --- Fill angle override ---
-        // (invert_gradient dropped in Fase 5: heights are explicit, so the
-        // ramp direction is fixed by the floor/mid_end signs — no toggle.)
-        {
-            auto* row_ang = new wxBoxSizer(wxHORIZONTAL);
-            row_ang->Add(new wxStaticText(this, wxID_ANY, _L("Fill angle (-1 = follow top surface):")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            const int safe_ang = (cur.fill_angle >= -1 && cur.fill_angle <= 359) ? cur.fill_angle : -1;
-            m_sc_angle_pb = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-                                            wxDefaultPosition, wxSize(70,-1),
-                                            wxSP_ARROW_KEYS, -1, 359, safe_ang);
-            m_sc_angle_pb->SetToolTip(_L(
-                "-1 = follow the top surface fill angle setting.\n"
-                "0-359 = custom fill angle for PathBlend lines only."));
-            row_ang->Add(m_sc_angle_pb, 0, wxALIGN_CENTER_VERTICAL);
-            vs->Add(row_ang, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-
-        // note
-        auto* note = new wxStaticText(this, wxID_ANY,
-            _L("Gradient is automatic. Surface filter (top/penu) is set in the Surface Mixer combos."));
-        note->SetForegroundColour(wxColour(90, 90, 90));
-        note->Wrap(320);
-        vs->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        // NEOTKO_PROFILE_TAG_START — Fase G1: Save current dialog state as a
-        // PathBlend-only Surface Effect Profile (colormix / multipass payloads
-        // stay absent). The profile becomes available to the 3D Painter, where
-        // painting it overrides the preset's PathBlend on the painted area.
-        {
-            wxBoxSizer* prof_row = new wxBoxSizer(wxHORIZONTAL);
-            wxButton* btn_save = new wxButton(this, wxID_ANY, _L("Save as profile…"));
-            prof_row->Add(btn_save, 0);
-            vs->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-            btn_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                wxTextEntryDialog ned(this, _L("Profile name:"),
-                                      _L("Save PathBlend profile"));
-                if (ned.ShowModal() != wxID_OK) return;
-                const std::string name = ned.GetValue().ToStdString();
-                if (name.empty()) return;
-
-                Slic3r::SurfaceEffectPayload pb_payload;
-                pb_payload.present = true;
-                auto wi = [&](const char* k, int v) {
-                    pb_payload.kv[k] = std::to_string(v);
-                };
-                auto wb = [&](const char* k, bool v) {
-                    pb_payload.kv[k] = v ? "1" : "0";
-                };
-                auto wf = [&](const char* k, double v) {
-                    std::ostringstream os;
-                    os.imbue(std::locale::classic());
-                    os << v;
-                    pb_payload.kv[k] = os.str();
-                };
-                // Saved profile activates PathBlend by default (mirrors MP
-                // dialog save semantics: dialog open → user intends to use it).
-                wb("multipass_path_gradient",  true);
-                wi("pathblend_num_passes",     get_num_passes());
-                wi("pathblend_tool_1",         get_tool(0));
-                wi("pathblend_tool_2",         get_tool(1));
-                wi("pathblend_tool_3",         get_tool(2));
-                wi("pathblend_tool_4",         get_tool(3));
-                wf("pathblend_min_ratio",      get_min_ratio());
-                wf("pathblend_max_ratio",      get_max_ratio());
-                wi("pathblend_ease_mode",      get_ease_mode());
-                wb("pathblend_invert_gradient", get_invert());
-                wi("pathblend_fill_angle",     get_fill_angle());
-                // pathblend_surface / pathblend_layer_ratio_* not exposed in
-                // this dialog — kept out of the payload so the painter-mode
-                // builder falls back to struct defaults.
-
-                Slic3r::SurfaceEffectProfile prof;
-                prof.name = name;
-                prof.pathblend = std::move(pb_payload);
-                const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(prof));
-                wxMessageBox(wxString::Format(_L("Saved PathBlend profile #%d (%zu keys)."),
-                                              new_id,
-                                              (size_t)Slic3r::SurfaceEffectProfileManager::get()
-                                                  .find(new_id)->pathblend.kv.size()),
-                             _L("Surface Effect Profile"),
-                             wxOK | wxICON_INFORMATION, this);
-            });
-        }
-        // NEOTKO_PROFILE_TAG_END
-
-        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
-        SetSizerAndFit(vs);
-    }
-
-    // ---- Fase 5 (s72) accessors over the new geometry model ----
-    Slic3r::PathBlendPassConfig get_config() const
-    {
-        Slic3r::PathBlendPassConfig out;
-        out.mode        = (m_rb_mode && m_rb_mode->GetSelection() == 1)
-                          ? Slic3r::PathBlendPassConfig::Mode::Full
-                          : Slic3r::PathBlendPassConfig::Mode::Half;
-        out.floor_mm    = static_cast<float>(m_sc_floor   ? m_sc_floor->GetValue()   : 0.01);
-        out.mid_end_mm  = static_cast<float>(m_sc_mid_end ? m_sc_mid_end->GetValue() : 0.05);
-        // Spinners display F-notation (F1=1, F2=2, ...); stored 0-based.
-        out.tool_bottom = m_sc_tool[0] ? (m_sc_tool[0]->GetValue() - 1) : 0;
-        out.tool_top    = (out.mode == Slic3r::PathBlendPassConfig::Mode::Full && m_sc_tool[1])
-                          ? (m_sc_tool[1]->GetValue() - 1) : -1;
-        out.ease_mode   = m_ease_mode;
-        out.fill_angle  = m_sc_angle_pb ? m_sc_angle_pb->GetValue() : -1;
-        out.sync_legacy_view();
-        return out;
-    }
-
-    // Legacy getters kept for the "Save as profile..." button below, which
-    // still writes the painter's legacy kv payload (back-compat with Fase G
-    // profiles saved before Fase 5; painter reads via from_payload helper that
-    // converts on read).
-    int   get_num_passes()  const { return (m_rb_mode && m_rb_mode->GetSelection() == 1) ? 2 : 1; }
-    int   get_tool(int i)   const {
-        if (i == 0 && m_sc_tool[0]) return m_sc_tool[0]->GetValue() - 1;
-        if (i == 1 && m_sc_tool[1] && get_num_passes() >= 2)
-            return m_sc_tool[1]->GetValue() - 1;
-        return -1;
-    }
-    float get_min_ratio()   const {
-        const double H = std::max(0.04, m_layer_height_mm);
-        return static_cast<float>(std::clamp((m_sc_floor ? m_sc_floor->GetValue() : 0.01) / H,
-                                             0.01, 0.49));
-    }
-    float get_max_ratio()   const {
-        const double H = std::max(0.04, m_layer_height_mm);
-        return static_cast<float>(std::clamp((m_sc_mid_end ? m_sc_mid_end->GetValue() : 0.05) / H,
-                                             0.51, 1.0));
-    }
-    int   get_ease_mode()   const { return m_ease_mode; }
-    bool  get_invert()      const { return true; }   // dropped in Fase 5; safe default
-    int   get_fill_angle()  const { return m_sc_angle_pb ? m_sc_angle_pb->GetValue() : -1; }
-
-private:
-    double            m_layer_height_mm = 0.20;
-    wxRadioBox*       m_rb_mode         = nullptr;
-    wxSpinCtrl*       m_sc_tool[2]      = {nullptr, nullptr};
-    ColorSwatch*      m_swatch_pb[2]    = {nullptr, nullptr};
-    wxSpinCtrlDouble* m_sc_floor        = nullptr;
-    wxSpinCtrlDouble* m_sc_mid_end      = nullptr;
-    wxButton*         m_btn_ease[4]     = {nullptr, nullptr, nullptr, nullptr};
-    int               m_ease_mode       = 0;
-    wxSpinCtrl*       m_sc_angle_pb     = nullptr;
-};
-#endif // NEOTKO_SANDWICH_TAG Fase 5 s73 — PathBlendDialog dead code wrap
-// NEOTKO_PATHBLEND_TAG_END
-
-// NEOTKO_SURFACE_MIXER_TAG_START
-// Unified Surface Color Mixer dialog.
-// Two independent surface boxes (Top Layer / Penultimate Layer) each with an
-// effect selector (None / Color Mix / Multi-Pass / Path Blend) and an "Edit…"
-// button that opens the respective sub-dialog.  A TD (Transmittance Depth)
-// section with per-filament sliders drives a Beer-Lambert blend preview swatch.
-// TD values are persisted in app_config under neotko_td_1 … neotko_td_4.
-// Effect assignments are written back to the existing config keys on OK.
-class SurfaceColorMixerDialog : public wxDialog
-{
-public:
-    static constexpr int EFF_NONE = 0;
-    static constexpr int EFF_CM   = 1;
-    static constexpr int EFF_MP   = 2;
-    static constexpr int EFF_PB   = 3;
-
-    SurfaceColorMixerDialog(wxWindow* parent,
-                            DynamicPrintConfig* config,
-                            std::function<void(const std::string&)> on_change_cb)
-        : wxDialog(parent, wxID_ANY, _L("Surface Color Mixer"),
-                   wxDefaultPosition, wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
-        , m_config(config)
-        , m_on_change(std::move(on_change_cb))
-    {
-        // Filament colors from project config
-        if (auto* o = wxGetApp().preset_bundle->project_config
-                          .option<ConfigOptionStrings>("filament_colour"))
-            m_fcolors = o->values;
-        while (m_fcolors.size() < 4) m_fcolors.push_back("#808080");
-
-        // TD values from app_config
-        auto* ac = wxGetApp().app_config;
-        for (int i = 0; i < 4; ++i) {
-            const std::string key = "neotko_td_" + std::to_string(i + 1);
-            const std::string val = ac ? ac->get(key) : "";
-            float v = 0.f;
-            try { if (!val.empty()) v = std::stof(val); } catch (...) {}
-            m_td[i] = std::max(0.01f, std::min(10.f, v));
-        }
-
-        infer_effects();
-        build_ui();
-    }
-
-private:
-    DynamicPrintConfig*                      m_config    = nullptr;
-    std::function<void(const std::string&)>  m_on_change;
-    std::vector<std::string>                 m_fcolors;
-    std::array<float, 4>                     m_td        = {};
-    int                                      m_top_eff   = EFF_NONE;
-    int                                      m_penu_eff  = EFF_NONE;
-
-    // Zone card widgets — pills replace wxChoice combos
-    wxButton*      m_pill_top[4]    = {nullptr, nullptr, nullptr, nullptr};
-    wxButton*      m_pill_penu[4]   = {nullptr, nullptr, nullptr, nullptr};
-    wxButton*      m_btn_adv_top    = nullptr;
-    wxButton*      m_btn_adv_penu   = nullptr;
-    wxStaticText*  m_lbl_top_sum    = nullptr;
-    wxStaticText*  m_lbl_penu_sum   = nullptr;
-    wxPanel*       m_prev_top       = nullptr;  // 120×68 mini-preview
-    wxPanel*       m_prev_penu      = nullptr;
-    // Filament section
-    std::array<wxSlider*,     4>  m_sl_td  = {};
-    std::array<wxStaticText*, 4>  m_lbl_td = {};
-    // NEOTKO_COLORMIX_TAG_START — zone + filament filter + min_length controls
-    wxChoice*         m_choice_top_zone      = nullptr;
-    wxChoice*         m_choice_penu_zone     = nullptr;
-    wxSpinCtrl*       m_sc_filament_filter   = nullptr;
-    wxSpinCtrlDouble* m_sc_min_length        = nullptr;
-    wxCheckBox*       m_chk_use_virtual      = nullptr;
-    // NEOTKO_COLORMIX_TAG — s58: lane distribution mode (global, affects ColorMix + PathBlend).
-    wxChoice*         m_choice_lane_mode     = nullptr;
-    // NEOTKO_COLORMIX_TAG — s60: gradient UI moved to ColorMixPatternDialog.
-    // NEOTKO_MULTIPASS_SURFACES_TAG — stacked preview swatches (Top × Penu Beer-Lambert)
-    wxPanel*       m_stacked_sw_top  = nullptr;
-    wxPanel*       m_stacked_sw_penu = nullptr;
-    wxPanel*       m_stacked_swatch  = nullptr;
-    wxStaticText*  m_lbl_opacity_top = nullptr;
-    // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint optimizer)
-    wxComboBox*    m_bs_combo_target  = nullptr; // virtual MixedColor target picker
-    wxPanel*       m_bs_swatch_target = nullptr; // colour of selected target MixedColor
-    wxRadioButton* m_bs_rb_top       = nullptr; // "Top layer only" mode
-    wxRadioButton* m_bs_rb_joint     = nullptr; // "Top + Penultimate" mode
-    wxPanel*       m_bs_swatch       = nullptr; // simulated result colour
-    wxStaticText*  m_bs_lbl_score    = nullptr; // "ΔE: X.X" inline result
-    std::vector<Slic3r::ColorMixOption> m_bs_mix_opts; // virtual-only options cache
-    wxCheckBox*    m_mp_perim_override = nullptr; // NEOTKO_MULTIPASS_TAG: perimeter override checkbox
-    // NEOTKO_MULTIPASS_TAG_END
-
-    // ------------------------------------------------------------------ helpers
-
-    // Re-read m_fcolors + mixed_filament_definitions and repopulate the Target combo.
-    // Called by the ↺ refresh button next to the dropdown.
-    void refresh_mix_opts()
-    {
-        // Re-read filament colours from project_config (always up-to-date)
-        if (auto* o = wxGetApp().preset_bundle->project_config
-                          .option<ConfigOptionStrings>("filament_colour"))
-            m_fcolors = o->values;
-        while (m_fcolors.size() < 4) m_fcolors.push_back("#808080");
-
-        // Prefer project_config for mixed_filament_definitions: it reflects live UI
-        // changes (add/delete MixedColors) without requiring a re-slice.
-        // m_config holds the snapshot from the last slice and is always stale here.
-        m_bs_mix_opts.clear();
-        std::string mixed_defs;
-        if (auto* o = wxGetApp().preset_bundle->project_config
-                          .option<ConfigOptionString>("mixed_filament_definitions"))
-            mixed_defs = o->value;
-        if (mixed_defs.empty()) {
-            if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-                mixed_defs = o->value;
-        }
-
-        if (!mixed_defs.empty()) {
-            for (auto& opt : Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors))
-                if (!opt.is_physical)
-                    m_bs_mix_opts.push_back(opt);
-        }
-
-        if (!m_bs_combo_target) return;
-        m_bs_combo_target->Clear();
-        if (m_bs_mix_opts.empty()) {
-            m_bs_combo_target->Append(_L("(no MixedColor defined)"));
-            m_bs_combo_target->SetSelection(0);
-            m_bs_combo_target->Enable(false);
-        } else {
-            for (auto& opt : m_bs_mix_opts)
-                m_bs_combo_target->Append(wxString::FromUTF8(opt.label));
-            m_bs_combo_target->SetSelection(0);
-            m_bs_combo_target->Enable(true);
-        }
-
-        // Sync target swatch to new selection
-        if (m_bs_swatch_target) {
-            wxColour c(128,128,128);
-            if (!m_bs_mix_opts.empty()) {
-                const std::string& dc = m_bs_mix_opts[0].display_color;
-                if (dc.size() >= 7 && dc[0] == '#') {
-                    unsigned long rgb = 0;
-                    if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
-                        c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
-                }
-            }
-            m_bs_swatch_target->SetBackgroundColour(c);
-            m_bs_swatch_target->Refresh();
-        }
-
-        // Refresh TD sliders in case filament list changed
-        update_ui();
-    }
-
-    static wxColour hex_to_col(const std::string& hex)
-    {
-        unsigned long rgb = 0;
-        wxString s = wxString::FromUTF8(hex);
-        if (s.StartsWith("#")) s = s.Mid(1);
-        if (!s.ToULong(&rgb, 16)) return wxColour(128, 128, 128);
-        return wxColour((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
-    }
-
-    void infer_effects()
-    {
-        const bool cm_on     = m_config->opt_bool("interlayer_colormix_enabled");
-        const int  cm_srf    = m_config->opt_int ("interlayer_colormix_surface");
-        const bool mp_on     = m_config->opt_bool("multipass_enabled");         // top only
-        const int  mp_srf    = m_config->opt_int ("multipass_surface");
-        // NEOTKO_MULTIPASS_SURFACES_TAG: Penultimate MultiPass now has its own enabled key.
-        const bool penu_mp_on = m_config->opt_bool("penultimate_multipass_enabled");
-        // PathBlend is now independent of MultiPass — uses its own surface key.
-        const bool pb_on  = m_config->opt_bool("multipass_path_gradient");
-        const int  pb_srf = m_config->opt_int ("pathblend_surface");
-
-        // surface encoding: 0=both, 1=top only, 2=penu only
-        auto for_top  = [](int s) { return s == 0 || s == 1; };
-        auto for_penu = [](int s) { return s == 0 || s == 2; };
-
-        m_top_eff  = EFF_NONE;
-        m_penu_eff = EFF_NONE;
-
-        if      (pb_on  && for_top(pb_srf))  m_top_eff  = EFF_PB;
-        else if (mp_on  && for_top(mp_srf))  m_top_eff  = EFF_MP;
-        else if (cm_on  && for_top(cm_srf))  m_top_eff  = EFF_CM;
-
-        // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled (engine refactor of
-        // PathBlendEngine::apply_path made it role-aware).
-        if      (pb_on && for_penu(pb_srf))     m_penu_eff = EFF_PB;
-        else if (penu_mp_on)                    m_penu_eff = EFF_MP;
-        else if (cm_on     && for_penu(cm_srf)) m_penu_eff = EFF_CM;
-    }
-
-    wxString summary_for(int eff, int surface_id) const
-    {
-        if (eff == EFF_NONE) return _L("No effect");
-        if (eff == EFF_CM) {
-            const std::string& pat = (surface_id == 0)
-                ? m_config->opt_string("interlayer_colormix_pattern_top")
-                : m_config->opt_string("interlayer_colormix_pattern_penultimate");
-            return wxString::Format(_L("Pattern: %s"),
-                wxString::FromUTF8(pat.empty() ? "(none)" : pat));
-        }
-        if (eff == EFF_MP) {
-            int n = 2;
-            // NEOTKO_MULTIPASS_SURFACES_TAG: penultimate reads its own num_passes key
-            const char* np_key = (surface_id == 0)
-                ? "multipass_num_passes" : "penultimate_multipass_num_passes";
-            if (auto* o = m_config->option<ConfigOptionInt>(np_key)) n = o->value;
-            return wxString::Format(_L("%d passes"), n);
-        }
-        if (eff == EFF_PB) {
-            int n = 2;
-            if (auto* o = m_config->option<ConfigOptionInt>("pathblend_num_passes")) n = o->value;
-            return wxString::Format(_L("PathBlend: %d passes"), n);
-        }
-        return "";
-    }
-
-    wxColour blend_preview(int surface_id, float* out_weight = nullptr) const
-    {
-        const int eff = (surface_id == 0) ? m_top_eff : m_penu_eff;
-        if (eff == EFF_NONE) return GetBackgroundColour();
-
-        struct Pass { int tool_0; float ratio; };
-        std::vector<Pass> passes;
-
-        if (eff == EFF_CM) {
-            const std::string& pat = (surface_id == 0)
-                ? m_config->opt_string("interlayer_colormix_pattern_top")
-                : m_config->opt_string("interlayer_colormix_pattern_penultimate");
-            if (pat.empty()) return wxColour(180, 180, 180);
-            std::map<int, int> cnt;
-            int total = 0;
-            for (char c : pat) {
-                int t = static_cast<int>(c - '1');
-                if (t >= 0 && t < 4) { cnt[t]++; total++; }
-            }
-            if (total == 0) return wxColour(180, 180, 180);
-            for (auto& [t, n] : cnt)
-                passes.push_back({t, static_cast<float>(n) / total});
-        } else if (eff == EFF_MP) {
-            // NEOTKO_MULTIPASS_SURFACES_TAG: use correct prefix per surface
-            const bool is_penu = (surface_id != 0);
-            const char* np_key = is_penu ? "penultimate_multipass_num_passes" : "multipass_num_passes";
-            int n = 2;
-            if (auto* o = m_config->option<ConfigOptionInt>(np_key)) n = o->value;
-            const char* rk_top[3]  = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
-            const char* tk_top[3]  = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
-            const char* rk_penu[3] = {"penultimate_multipass_width_ratio_1","penultimate_multipass_width_ratio_2","penultimate_multipass_width_ratio_3"};
-            const char* tk_penu[3] = {"penultimate_multipass_tool_1","penultimate_multipass_tool_2","penultimate_multipass_tool_3"};
-            const char** rk = is_penu ? rk_penu : rk_top;
-            const char** tk = is_penu ? tk_penu : tk_top;
-            const float def_r[3] = {0.5f, 0.5f, 0.34f};
-            for (int i = 0; i < std::min(n, 3); ++i) {
-                int   t = 0;        if (auto* o = m_config->option<ConfigOptionInt>  (tk[i])) t = o->value;
-                float r = def_r[i]; if (auto* o = m_config->option<ConfigOptionFloat>(rk[i])) r = o->value;
-                passes.push_back({t, r});
-            }
-        } else if (eff == EFF_PB) {
-            // PathBlend: equal-weight preview (actual ratios are dynamic at runtime).
-            int n = 2;
-            if (auto* o = m_config->option<ConfigOptionInt>("pathblend_num_passes")) n = o->value;
-            n = std::clamp(n, 1, 4);
-            const char* tk[4] = {"pathblend_tool_1","pathblend_tool_2","pathblend_tool_3","pathblend_tool_4"};
-            const float equal_r = 1.0f / static_cast<float>(n);
-            for (int i = 0; i < n; ++i) {
-                int t = i; if (auto* o = m_config->option<ConfigOptionInt>(tk[i])) t = o->value;
-                passes.push_back({t, equal_r});
-            }
-        }
-
-        // Beer-Lambert weighted blend: weight_i = opacity_i = 1 - 0.1^(ratio_i/TD_i)
-        // Opaque filament (low TD) → high opacity → dominates the blend (physically correct).
-        float tr = 0, tg = 0, tb = 0, tw = 0;
-        for (auto& p : passes) {
-            int t = std::max(0, std::min(3, p.tool_0));
-            float td = m_td[t];
-            wxColour col = t < (int)m_fcolors.size() ? hex_to_col(m_fcolors[t]) : wxColour(128, 128, 128);
-            const float opacity = (td < 1e-6f)
-                ? 1.0f
-                : 1.0f - static_cast<float>(std::pow(0.1, p.ratio / td));
-            float w = opacity;
-            tr += col.Red()   * w;
-            tg += col.Green() * w;
-            tb += col.Blue()  * w;
-            tw += w;
-        }
-        if (tw < 1e-6f) {
-            if (out_weight) *out_weight = 0.f;
-            return wxColour(180, 180, 180);
-        }
-        if (out_weight) *out_weight = tw;
-        return wxColour(
-            static_cast<unsigned char>(std::min(255.f, tr / tw)),
-            static_cast<unsigned char>(std::min(255.f, tg / tw)),
-            static_cast<unsigned char>(std::min(255.f, tb / tw)));
-    }
-
-    // NEOTKO_MULTIPASS_SURFACES_TAG — Beer-Lambert stacked preview (Top over Penultimate)
-    // opacity_top = Σ opacity_i where opacity_i = 1 - 0.1^(ratio_i/TD_i)
-    // opacity_top=1 → top fully opaque (only top visible)
-    // opacity_top=0 → top fully translucent (only penu visible)
-    wxColour stacked_preview() const
-    {
-        float opacity_top = 0.f;
-        const wxColour c_top  = blend_preview(0, &opacity_top);
-        const wxColour c_penu = blend_preview(1);
-        const float op  = std::clamp(opacity_top, 0.f, 1.f);
-        const float tr  = 1.f - op;
-        return wxColour(
-            static_cast<unsigned char>(c_top.Red()   * op + c_penu.Red()   * tr),
-            static_cast<unsigned char>(c_top.Green() * op + c_penu.Green() * tr),
-            static_cast<unsigned char>(c_top.Blue()  * op + c_penu.Blue()  * tr));
-    }
-
-    // ------------------------------------------------------------------ UI update
-
-    void style_pills(wxButton* pills[4], int eff)
-    {
-        const wxColour active_bg(60, 120, 220);
-        const wxColour active_fg(*wxWHITE);
-        const wxColour normal_bg(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
-        const wxColour normal_fg(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNTEXT));
-        for (int i = 0; i < 4; ++i) {
-            if (!pills[i]) continue;
-            const bool on = (i == eff);
-            pills[i]->SetBackgroundColour(on ? active_bg : normal_bg);
-            pills[i]->SetForegroundColour(on ? active_fg : normal_fg);
-            pills[i]->Refresh();
-        }
-    }
-
-    void update_ui()
-    {
-        style_pills(m_pill_top,  m_top_eff);
-        style_pills(m_pill_penu, m_penu_eff);
-
-        if (m_btn_adv_top)  m_btn_adv_top ->Enable(m_top_eff  != EFF_NONE);
-        if (m_btn_adv_penu) m_btn_adv_penu->Enable(m_penu_eff != EFF_NONE);
-
-        if (m_lbl_top_sum)  { m_lbl_top_sum ->SetLabel(summary_for(m_top_eff,  0)); m_lbl_top_sum ->Wrap(220); }
-        if (m_lbl_penu_sum) { m_lbl_penu_sum->SetLabel(summary_for(m_penu_eff, 1)); m_lbl_penu_sum->Wrap(220); }
-
-        if (m_prev_top)  m_prev_top ->Refresh();
-        if (m_prev_penu) m_prev_penu->Refresh();
-        // NEOTKO_MULTIPASS_SURFACES_TAG — refresh stacked preview
-        {
-            float opacity_top = 0.f;
-            blend_preview(0, &opacity_top);
-            if (m_stacked_sw_top)  m_stacked_sw_top ->Refresh();
-            if (m_stacked_sw_penu) m_stacked_sw_penu->Refresh();
-            if (m_stacked_swatch)  m_stacked_swatch ->Refresh();
-            if (m_lbl_opacity_top)
-                m_lbl_opacity_top->SetLabel(
-                    wxString::Format(_L("opacity=%.2f"), std::clamp(opacity_top, 0.f, 1.f)));
-        }
-
-        Layout();
-    }
-
-    // ------------------------------------------------------------------ sub-dialog launchers
-
-    void open_edit_for(int surface_id)
-    {
-        const int eff = (surface_id == 0) ? m_top_eff : m_penu_eff;
-
-        if (eff == EFF_CM) {
-            std::string mixed_defs;
-            if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-                mixed_defs = o->value;
-            const auto options = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
-            // Each surface has its own independent pattern.
-            // surface_id 0 = Top, 1 = Penultimate.
-            const char* pat_key = (surface_id == 0)
-                ? "interlayer_colormix_pattern_top"
-                : "interlayer_colormix_pattern_penultimate";
-            const std::string cur_pat = m_config->opt_string(pat_key);
-            bool use_virtual = false;
-            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
-                use_virtual = o->value;
-            ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat, use_virtual,
-                                       m_config, surface_id);
-            if (dlg.ShowModal() == wxID_OK) {
-                if (auto* o = m_config->option<ConfigOptionString>(pat_key))
-                    o->value = dlg.get_pattern();
-                m_on_change(pat_key);
-
-                // NEOTKO_COLORMIX_TAG — s61: per-role gradient write-back.
-                // surface_id 0 (Top) → original "interlayer_colormix_*" keys.
-                // surface_id 1 (Penu) → "interlayer_colormix_penu_*" mirrors.
-                // The dialog already read+edited the right set via grad_key();
-                // here we write back using the same prefix so Top and Pen never
-                // bleed into each other.
-                const std::string grad_prefix = (surface_id == 1)
-                    ? std::string("interlayer_colormix_penu_")
-                    : std::string("interlayer_colormix_");
-                auto wi = [&](const std::string& k, int v) {
-                    if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
-                    m_on_change(k);
-                };
-                auto wf = [&](const std::string& k, double v) {
-                    if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
-                    m_on_change(k);
-                };
-                wi(grad_prefix + "mode",              dlg.get_grad_mode());
-                wi(grad_prefix + "pct_a",             dlg.get_grad_pct_a());
-                // NEOTKO_COLORMIX_TAG — s90: global key (no prefix). Both
-                // Top and Penu Advanced dialogs write the same value here.
-                wf("interlayer_colormix_min_length",  dlg.get_grad_min_length());
-                wi(grad_prefix + "pct_b",             dlg.get_grad_pct_b());
-                wi(grad_prefix + "easing",            dlg.get_grad_easing());
-                wf(grad_prefix + "gamma",             dlg.get_grad_gamma());
-                wi(grad_prefix + "min_surface_lines", dlg.get_grad_min_lines());
-                wf(grad_prefix + "overlap",           dlg.get_grad_overlap());
-                {
-                    const std::string k_inv = grad_prefix + "invert";
-                    if (auto* o = m_config->option<ConfigOptionBool>(k_inv))
-                        o->value = dlg.get_grad_invert();
-                    m_on_change(k_inv);
-                }
-                wi(grad_prefix + "band_count_a",      dlg.get_grad_band_a());
-                wi(grad_prefix + "band_count_b",      dlg.get_grad_band_b());
-                wi(grad_prefix + "band_count_c",      dlg.get_grad_band_c());
-                wi(grad_prefix + "band_count_d",      dlg.get_grad_band_d());
-                wi(grad_prefix + "tool_a",            dlg.get_tool_a());
-                wi(grad_prefix + "tool_b",            dlg.get_tool_b());
-                wi(grad_prefix + "tool_c",            dlg.get_tool_c());
-                wi(grad_prefix + "tool_d",            dlg.get_tool_d());
-                wi(grad_prefix + "angle",             dlg.get_grad_angle());
-                // interlayer_colormix_surface is set by the outer dialog combos, not here.
-            }
-        } else if (eff == EFF_MP) {
-            int    cur_passes=2, cur_surface=0;
-            int    cur_tool1=0, cur_tool2=1, cur_tool3=-1;
-            double cur_r1=0.5, cur_r2=0.5, cur_r3=0.34;
-            bool   cur_vary=false;
-            int    cur_a1=-1, cur_a2=-1, cur_a3=-1;
-            int    cur_f1=-1, cur_f2=-1, cur_f3=-1;
-            int    cur_s1=100, cur_s2=100, cur_s3=100;
-            std::string gs1,gs2,gs3,ge1,ge2,ge3;
-            int    pa_mode=0; double pa_val=0.1;
-
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_num_passes"))    cur_passes  =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_surface"))       cur_surface =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_tool_1"))        cur_tool1   =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_tool_2"))        cur_tool2   =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_tool_3"))        cur_tool3   =o->value;
-            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_width_ratio_1")) cur_r1=(double)o->value;
-            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_width_ratio_2")) cur_r2=(double)o->value;
-            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_width_ratio_3")) cur_r3=(double)o->value;
-            if (auto* o=m_config->option<ConfigOptionBool> ("multipass_vary_pattern"))  cur_vary    =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_angle_1"))       cur_a1      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_angle_2"))       cur_a2      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_angle_3"))       cur_a3      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_fan_1"))         cur_f1      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_fan_2"))         cur_f2      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_fan_3"))         cur_f3      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_speed_pct_1"))   cur_s1      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_speed_pct_2"))   cur_s2      =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_speed_pct_3"))   cur_s3      =o->value;
-            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_start_1")) gs1        =o->value;
-            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_start_2")) gs2        =o->value;
-            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_start_3")) gs3        =o->value;
-            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_1"))   ge1        =o->value;
-            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_2"))   ge2        =o->value;
-            if (auto* o=m_config->option<ConfigOptionString>("multipass_gcode_end_3"))   ge3        =o->value;
-            if (auto* o=m_config->option<ConfigOptionInt>  ("multipass_pa_mode"))        pa_mode    =o->value;
-            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_pa_value"))       pa_val=(double)o->value;
-            double cur_prime_vol = 0.0; // NEOTKO_MULTIPASS_PRIME_TAG
-            if (auto* o=m_config->option<ConfigOptionFloat>("multipass_prime_volume"))   cur_prime_vol=(double)o->value;
-            double cur_layer_height = 0.0; // NEOTKO_MULTIPASS_MINLAYER_TAG
-            if (auto* o=m_config->option<ConfigOptionFloat>("layer_height"))             cur_layer_height=(double)o->value;
-
-            // NEOTKO_MULTIPASS_TAG_START — build virtual-only ColorMixOption list for "Normalize to MixedColor %"
-            std::vector<Slic3r::ColorMixOption> mp_mix_opts;
-            {
-                std::string mp_mixed_defs;
-                if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-                    mp_mixed_defs = o->value;
-                if (!mp_mixed_defs.empty()) {
-                    auto all = Slic3r::SurfaceColorMix::get_mix_options(mp_mixed_defs, m_fcolors);
-                    for (auto& opt : all)
-                        if (!opt.is_physical)
-                            mp_mix_opts.push_back(opt);
-                }
-            }
-            // NEOTKO_MULTIPASS_TAG_END
-
-            // NEOTKO_MULTIPASS_SURFACES_TAG — read penultimate independent config
-            // NEOTKO_MULTIPASS_SURFACES_TAG — read penultimate independent config
-            bool   penu_enabled_cur = false;
-            int    penu_passes_cur  = 2;
-            int    penu_t1_cur=0, penu_t2_cur=1, penu_t3_cur=-1;
-            double penu_r1_cur=0.5, penu_r2_cur=0.5, penu_r3_cur=0.34;
-            int    penu_a1_cur=-1, penu_a2_cur=-1, penu_a3_cur=-1;
-            int    penu_f1_cur=-1, penu_f2_cur=-1, penu_f3_cur=-1;
-            int    penu_s1_cur=100, penu_s2_cur=100, penu_s3_cur=100;
-            bool   penu_vary_cur=false;
-            std::string penu_gs1_cur,penu_gs2_cur,penu_gs3_cur;
-            std::string penu_ge1_cur,penu_ge2_cur,penu_ge3_cur;
-            double penu_prime_cur=0.0;
-            if (auto*o=m_config->option<ConfigOptionBool>  ("penultimate_multipass_enabled"))         penu_enabled_cur=o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_num_passes"))      penu_passes_cur =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_1"))          penu_t1_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_2"))          penu_t2_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_tool_3"))          penu_t3_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_1"))   penu_r1_cur=(double)o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_2"))   penu_r2_cur=(double)o->value;
-            if (auto*o=m_config->option<ConfigOptionFloat> ("penultimate_multipass_width_ratio_3"))   penu_r3_cur=(double)o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_1"))         penu_a1_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_2"))         penu_a2_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_angle_3"))         penu_a3_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_fan_1"))           penu_f1_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_fan_2"))           penu_f2_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_fan_3"))           penu_f3_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_speed_pct_1"))     penu_s1_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_speed_pct_2"))     penu_s2_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionInt>   ("penultimate_multipass_speed_pct_3"))     penu_s3_cur     =o->value;
-            if (auto*o=m_config->option<ConfigOptionBool>  ("penultimate_multipass_vary_pattern"))    penu_vary_cur   =o->value;
-            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_start_1"))   penu_gs1_cur    =o->value;
-            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_start_2"))   penu_gs2_cur    =o->value;
-            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_start_3"))   penu_gs3_cur    =o->value;
-            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_1"))     penu_ge1_cur    =o->value;
-            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_2"))     penu_ge2_cur    =o->value;
-            if (auto*o=m_config->option<ConfigOptionString>("penultimate_multipass_gcode_end_3"))     penu_ge3_cur    =o->value;
-            // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume removed.
-            // The unified `multipass_prime_volume` is now read into both cur_prime_vol and
-            // penu_prime_cur so the (vestigial) dialog parameter still has a sensible value
-            // until the dialog's prime field is fully cleaned up.
-            penu_prime_cur = cur_prime_vol;
-
-            const SurfaceZone zone = (surface_id == 0) ? SurfaceZone::TOP : SurfaceZone::PENULTIMATE;
-            MultiPassConfigDialog dlg(this,
-                zone,
-                cur_passes, cur_surface,
-                cur_tool1, cur_tool2, cur_tool3,
-                cur_r1, cur_r2, cur_r3, cur_vary,
-                cur_a1, cur_a2, cur_a3,
-                cur_f1, cur_f2, cur_f3,
-                cur_s1, cur_s2, cur_s3,
-                gs1, gs2, gs3, ge1, ge2, ge3,
-                m_fcolors, mp_mix_opts, pa_mode, pa_val,
-                cur_prime_vol, cur_layer_height,
-                penu_enabled_cur, penu_passes_cur,
-                penu_t1_cur, penu_t2_cur, penu_t3_cur,
-                penu_r1_cur, penu_r2_cur, penu_r3_cur,
-                penu_a1_cur, penu_a2_cur, penu_a3_cur,
-                penu_f1_cur, penu_f2_cur, penu_f3_cur,
-                penu_s1_cur, penu_s2_cur, penu_s3_cur,
-                penu_vary_cur,
-                penu_gs1_cur, penu_gs2_cur, penu_gs3_cur,
-                penu_ge1_cur, penu_ge2_cur, penu_ge3_cur,
-                penu_prime_cur);
-            if (dlg.ShowModal() == wxID_OK) {
-                auto wi = [&](const char* k, int v)  { if(auto*o=m_config->option<ConfigOptionInt>  (k))o->value=v;   m_on_change(k); };
-                auto wb = [&](const char* k, bool v) { if(auto*o=m_config->option<ConfigOptionBool> (k))o->value=v;   m_on_change(k); };
-                auto wf = [&](const char* k, float v){ if(auto*o=m_config->option<ConfigOptionFloat>(k))o->value=v;   m_on_change(k); };
-                auto ws = [&](const char* k, const std::string& v){ if(auto*o=m_config->option<ConfigOptionString>(k))o->value=v; m_on_change(k); };
-                if (surface_id == 0) {
-                    // TOP zone: write top surface keys only
-                    wi("multipass_num_passes",  dlg.get_passes());
-                    wi("multipass_surface",     dlg.get_surface());
-                    wi("multipass_tool_1",      dlg.get_tool1());
-                    wi("multipass_tool_2",      dlg.get_tool2());
-                    wi("multipass_tool_3",      dlg.get_tool3());
-                    wf("multipass_width_ratio_1", (float)dlg.get_ratio1());
-                    wf("multipass_width_ratio_2", (float)dlg.get_ratio2());
-                    wf("multipass_width_ratio_3", (float)dlg.get_ratio3());
-                    wb("multipass_vary_pattern",dlg.get_vary());
-                    wi("multipass_angle_1",     dlg.get_angle1());
-                    wi("multipass_angle_2",     dlg.get_angle2());
-                    wi("multipass_angle_3",     dlg.get_angle3());
-                    wi("multipass_fan_1",       dlg.get_fan1());
-                    wi("multipass_fan_2",       dlg.get_fan2());
-                    wi("multipass_fan_3",       dlg.get_fan3());
-                    wi("multipass_speed_pct_1", dlg.get_speed1());
-                    wi("multipass_speed_pct_2", dlg.get_speed2());
-                    wi("multipass_speed_pct_3", dlg.get_speed3());
-                    ws("multipass_gcode_start_1", dlg.get_gcode_start1());
-                    ws("multipass_gcode_start_2", dlg.get_gcode_start2());
-                    ws("multipass_gcode_start_3", dlg.get_gcode_start3());
-                    ws("multipass_gcode_end_1",   dlg.get_gcode_end1());
-                    ws("multipass_gcode_end_2",   dlg.get_gcode_end2());
-                    ws("multipass_gcode_end_3",   dlg.get_gcode_end3());
-                    wi("multipass_pa_mode",     dlg.get_pa_mode());
-                    wf("multipass_pa_value",    (float)dlg.get_pa_value());
-                    // NEOTKO_MULTIPASS_PRIME_TAG — s58: prime is managed by the global
-                    // optgroup setting (multipass_prime_volume) below `neotko_wipe_tower`,
-                    // not from this dialog. Dialog's get_prime_volume() returns 0 (nullptr
-                    // guard), writing it here would clobber the user's global setting.
-                } else {
-                    // NEOTKO_MULTIPASS_SURFACES_TAG — PENULTIMATE zone: write penu keys only
-                    wb("penultimate_multipass_enabled",       dlg.get_penu_enabled());
-                    wi("penultimate_multipass_num_passes",    dlg.get_penu_passes());
-                    wi("penultimate_multipass_tool_1",        dlg.get_penu_tool1());
-                    wi("penultimate_multipass_tool_2",        dlg.get_penu_tool2());
-                    wi("penultimate_multipass_tool_3",        dlg.get_penu_tool3());
-                    wf("penultimate_multipass_width_ratio_1", (float)dlg.get_penu_ratio1());
-                    wf("penultimate_multipass_width_ratio_2", (float)dlg.get_penu_ratio2());
-                    wf("penultimate_multipass_width_ratio_3", (float)dlg.get_penu_ratio3());
-                    wi("penultimate_multipass_angle_1",       dlg.get_penu_angle1());
-                    wi("penultimate_multipass_angle_2",       dlg.get_penu_angle2());
-                    wi("penultimate_multipass_angle_3",       dlg.get_penu_angle3());
-                    wi("penultimate_multipass_fan_1",         dlg.get_penu_fan1());
-                    wi("penultimate_multipass_fan_2",         dlg.get_penu_fan2());
-                    wi("penultimate_multipass_fan_3",         dlg.get_penu_fan3());
-                    wi("penultimate_multipass_speed_pct_1",   dlg.get_penu_speed1());
-                    wi("penultimate_multipass_speed_pct_2",   dlg.get_penu_speed2());
-                    wi("penultimate_multipass_speed_pct_3",   dlg.get_penu_speed3());
-                    wb("penultimate_multipass_vary_pattern",  dlg.get_penu_vary());
-                    ws("penultimate_multipass_gcode_start_1", dlg.get_penu_gcode_start1());
-                    ws("penultimate_multipass_gcode_start_2", dlg.get_penu_gcode_start2());
-                    ws("penultimate_multipass_gcode_start_3", dlg.get_penu_gcode_start3());
-                    ws("penultimate_multipass_gcode_end_1",   dlg.get_penu_gcode_end1());
-                    ws("penultimate_multipass_gcode_end_2",   dlg.get_penu_gcode_end2());
-                    ws("penultimate_multipass_gcode_end_3",   dlg.get_penu_gcode_end3());
-                    // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume
-                    // removed; the global `multipass_prime_volume` covers Top + Penu.
-                }
-            }
-        } else if (eff == EFF_PB) {
-            // NEOTKO_SANDWICH_TAG — Fase 5 (s72): the PathBlend popup
-            // (PathBlendDialog) is gone. PathBlend is now edited through the
-            // Sandwich editor with draggable floor/mid_end heights in mm and
-            // Half / Full mode selection on the row. The pill stays here for
-            // back-compat of the old SurfaceColorMixerDialog: clicking it just
-            // redirects the user to the new editor.
-            wxMessageBox(_L("PathBlend is now edited from the Sandwich editor.\n\n"
-                            "Open the Sandwich editor and choose 'PathBlend Half' "
-                            "or 'PathBlend Full' as the pass kind."),
-                         _L("PathBlend moved"),
-                         wxOK | wxICON_INFORMATION, this);
-        }
-        update_ui();
-    }
-
-    // ------------------------------------------------------------------ apply
-
-    void apply_effect_config()
-    {
-        // m_top_eff and m_penu_eff are set by pill click handlers — read directly.
-
-        // ColorMix
-        const bool cm_en = (m_top_eff == EFF_CM || m_penu_eff == EFF_CM);
-        int cm_srf = 0;
-        if (m_top_eff == EFF_CM && m_penu_eff != EFF_CM) cm_srf = 1;
-        else if (m_top_eff != EFF_CM && m_penu_eff == EFF_CM) cm_srf = 2;
-
-        if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_enabled")) o->value = cm_en;
-        m_on_change("interlayer_colormix_enabled");
-        if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_surface")) o->value = cm_srf;
-        m_on_change("interlayer_colormix_surface");
-
-        // MultiPass — NEOTKO_MULTIPASS_SURFACES_TAG: Top and Penultimate are now independent.
-        // multipass_enabled controls Top Surface only.
-        // penultimate_multipass_enabled controls Penultimate independently.
-        const bool top_mp  = (m_top_eff  == EFF_MP);
-        const bool penu_mp = (m_penu_eff == EFF_MP);
-
-        if (auto* o = m_config->option<ConfigOptionBool>("multipass_enabled"))          o->value = top_mp;
-        m_on_change("multipass_enabled");
-        // multipass_surface is always 1 (top only) since penu has its own key
-        if (top_mp) {
-            if (auto* o = m_config->option<ConfigOptionInt>("multipass_surface"))       o->value = 1;
-            m_on_change("multipass_surface");
-        }
-        if (auto* o = m_config->option<ConfigOptionBool>("penultimate_multipass_enabled")) o->value = penu_mp;
-        m_on_change("penultimate_multipass_enabled");
-        // NEOTKO_MULTIPASS_TAG — s120: el checkbox legacy "MultiPass Perimeter
-        // Override" se retiró junto al panel Blend Suggestion. El perim override
-        // ahora es el unificado de s118 (m_ui[z].perim_chk → stack → wb en la
-        // escritura normalizada). GUARD: si el checkbox ya no existe, NO se
-        // escribe aquí — de lo contrario clobbearía a `false` el valor canónico
-        // que deriva del stack.
-        if (m_mp_perim_override) {
-            if (auto* o = m_config->option<ConfigOptionBool>("multipass_perimeter_override"))
-                o->value = m_mp_perim_override->GetValue();
-            m_on_change("multipass_perimeter_override");
-        }
-
-        // PathBlend (EFF_PB only — independent surface key, independent enable)
-        // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
-        const bool top_pb  = (m_top_eff  == EFF_PB);
-        const bool penu_pb = (m_penu_eff == EFF_PB);
-        const bool pb_en   = top_pb || penu_pb;
-        int pb_srf = 0;
-        if (top_pb && !penu_pb) pb_srf = 1;
-        else if (!top_pb && penu_pb) pb_srf = 2;
-
-        if (auto* o = m_config->option<ConfigOptionBool>("multipass_path_gradient")) o->value = pb_en;
-        m_on_change("multipass_path_gradient");
-        if (auto* o = m_config->option<ConfigOptionInt> ("pathblend_surface"))       o->value = pb_srf;
-        m_on_change("pathblend_surface");
-
-        // NEOTKO_COLORMIX_TAG_START — write zone, filament filter, min_length
-        {
-            auto wi_z = [&](const char* k, int v) {
-                if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
-                m_on_change(k);
-            };
-            auto wf_z = [&](const char* k, double v) {
-                if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
-                m_on_change(k);
-            };
-            wi_z("interlayer_colormix_top_zone",
-                 m_choice_top_zone  ? m_choice_top_zone->GetSelection()  : 0);
-            wi_z("interlayer_colormix_penu_zone",
-                 m_choice_penu_zone ? m_choice_penu_zone->GetSelection() : 0);
-            wi_z("interlayer_colormix_filament_filter",
-                 m_sc_filament_filter ? m_sc_filament_filter->GetValue() : 0);
-            wf_z("interlayer_colormix_min_length",
-                 m_sc_min_length ? m_sc_min_length->GetValue() : 1.0);
-            // NEOTKO_COLORMIX_TAG_START — use_virtual write-back
-            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
-                o->value = m_chk_use_virtual && m_chk_use_virtual->GetValue();
-            m_on_change("interlayer_colormix_use_virtual");
-            // NEOTKO_COLORMIX_TAG_END
-
-            // NEOTKO_COLORMIX_TAG — s60: numeric gradient write-back was here.
-            // Now handled inside ColorMixPatternDialog (sub-dialog opened by
-            // the Advanced button per role) where the controls live.
-        }
-        // NEOTKO_COLORMIX_TAG_END
-
-        // TD values → app_config
-        auto* ac = wxGetApp().app_config;
-        if (ac) {
-            for (int i = 0; i < 4; ++i) {
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "%.3f", m_td[i]);
-                ac->set("neotko_td_" + std::to_string(i + 1), buf);
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------ mini-preview draw helpers
-
-    void draw_none_preview(wxPaintDC& dc, wxSize sz)
-    {
-        dc.SetBackground(wxBrush(wxColour(48, 48, 48)));
-        dc.Clear();
-        dc.SetPen(wxPen(wxColour(72, 72, 72), 1));
-        for (int x = -sz.y; x < sz.x + sz.y; x += 8)
-            dc.DrawLine(x, 0, x + sz.y, sz.y);
-    }
-
-    void draw_colormix_preview(wxPaintDC& dc, int surface_id, wxSize sz)
-    {
-        dc.SetBackground(wxBrush(wxColour(52, 52, 52)));
-        dc.Clear();
-        const std::string pat = (surface_id == 0)
-            ? m_config->opt_string("interlayer_colormix_pattern_top")
-            : m_config->opt_string("interlayer_colormix_pattern_penultimate");
-        if (pat.empty()) return;
-        const int n = static_cast<int>(pat.size());
-        const int bw = std::max(4, sz.x / n);
-        int x = 0;
-        for (char c : pat) {
-            const int t = static_cast<int>(c - '1');
-            wxColour col(120, 120, 120);
-            if (t >= 0 && t < (int)m_fcolors.size() && !m_fcolors[t].empty())
-                col = hex_to_col(m_fcolors[t]);
-            dc.SetBrush(wxBrush(col));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawRectangle(x, 0, bw, sz.y);
-            x += bw;
-            if (x >= sz.x) break;
-        }
-    }
-
-    void draw_multipass_preview(wxPaintDC& dc, int surface_id, wxSize sz)
-    {
-        dc.SetBackground(wxBrush(wxColour(48, 48, 48)));
-        dc.Clear();
-        const bool is_penu = (surface_id != 0);
-        const char* np_key = is_penu ? "penultimate_multipass_num_passes" : "multipass_num_passes";
-        int n = 2;
-        if (auto* o = m_config->option<ConfigOptionInt>(np_key)) n = o->value;
-        n = std::clamp(n, 1, 3);
-
-        const char* tk_top[3]  = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
-        const char* rk_top[3]  = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
-        const char* tk_penu[3] = {"penultimate_multipass_tool_1","penultimate_multipass_tool_2","penultimate_multipass_tool_3"};
-        const char* rk_penu[3] = {"penultimate_multipass_width_ratio_1","penultimate_multipass_width_ratio_2","penultimate_multipass_width_ratio_3"};
-        const char** tk = is_penu ? tk_penu : tk_top;
-        const char** rk = is_penu ? rk_penu : rk_top;
-        const float def_r[3] = {0.5f, 0.5f, 0.34f};
-
-        float ratios[3] = {};
-        float sum = 0.f;
-        for (int i = 0; i < n; ++i) {
-            ratios[i] = def_r[i];
-            if (auto* o = m_config->option<ConfigOptionFloat>(rk[i])) ratios[i] = o->value;
-            sum += ratios[i];
-        }
-        if (sum < 1e-6f) sum = 1.f;
-
-        // NEOTKO_MULTIPASS_TAG — s58 UX fix:
-        // Draw passes in reverse so pass 0 (printed FIRST, physically at the
-        // bottom of the layer) appears at the BOTTOM of the preview, and the
-        // last pass (printed last, physically on top) appears at the TOP.
-        // Previously the preview was inverted vs reality.
-        int y = 0;
-        for (int i = n - 1; i >= 0; --i) {
-            int t = 0;
-            if (auto* o = m_config->option<ConfigOptionInt>(tk[i])) t = o->value;
-            wxColour col(120, 120, 120);
-            if (t >= 0 && t < (int)m_fcolors.size() && !m_fcolors[t].empty())
-                col = hex_to_col(m_fcolors[t]);
-            // Last drawn (i==0, bottom-most band) fills the remaining height.
-            const int band_h = (i > 0)
-                ? static_cast<int>(ratios[i] / sum * sz.y + 0.5f)
-                : sz.y - y;
-            dc.SetBrush(wxBrush(col));
-            dc.SetPen(wxPen(wxColour(28, 28, 28), 1));
-            dc.DrawRectangle(0, y, sz.x, std::max(1, band_h));
-            y += band_h;
-        }
-    }
-
-    void draw_pathblend_preview(wxPaintDC& dc, wxSize sz)
-    {
-        dc.SetBackground(wxBrush(wxColour(48, 48, 48)));
-        dc.Clear();
-        int t0 = 0, t1 = 1;
-        if (auto* o = m_config->option<ConfigOptionInt>("pathblend_tool_1")) t0 = o->value;
-        if (auto* o = m_config->option<ConfigOptionInt>("pathblend_tool_2")) t1 = o->value;
-        wxColour col0(80, 80, 160), col1(160, 80, 80);
-        if (t0 >= 0 && t0 < (int)m_fcolors.size() && !m_fcolors[t0].empty())
-            col0 = hex_to_col(m_fcolors[t0]);
-        if (t1 >= 0 && t1 < (int)m_fcolors.size() && !m_fcolors[t1].empty())
-            col1 = hex_to_col(m_fcolors[t1]);
-
-        const int N = 8;
-        const int col_w = (sz.x + N - 1) / N;
-        for (int i = 0; i < N; ++i) {
-            const double t = static_cast<double>(i) / (N - 1);
-            const int x   = i * col_w;
-            const int h1  = static_cast<int>(t * sz.y + 0.5);
-            const int h0  = sz.y - h1;
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            if (h1 > 0) {
-                dc.SetBrush(wxBrush(col1));
-                dc.DrawRectangle(x, 0, col_w, h1);
-            }
-            if (h0 > 0) {
-                dc.SetBrush(wxBrush(col0));
-                dc.DrawRectangle(x, h1, col_w, h0);
-            }
-        }
-    }
-
-    void draw_effect_preview(wxPaintDC& dc, int surface_id, int eff, wxSize sz)
-    {
-        switch (eff) {
-            case EFF_CM: draw_colormix_preview(dc, surface_id, sz); break;
-            case EFF_MP: draw_multipass_preview(dc, surface_id, sz); break;
-            case EFF_PB: draw_pathblend_preview(dc, sz); break;
-            default:     draw_none_preview(dc, sz); break;
-        }
-    }
-
-    // ------------------------------------------------------------------ zone card factory
-
-    wxStaticBoxSizer* create_zone_card(int surface_id)
-    {
-        const int PAD = 6;
-        const wxString title = (surface_id == 0) ? _L("Top layer") : _L("Penultimate layer");
-        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, title);
-
-        // --- Pills row ---
-        const wxString pill_labels[4] = {_L("None"), _L("ColorStitch"), _L("MultiPass"), _L("PathBlend")};
-        wxButton** pills = (surface_id == 0) ? m_pill_top : m_pill_penu;
-        const int cur_eff = (surface_id == 0) ? m_top_eff : m_penu_eff;
-
-        auto* pill_row = new wxBoxSizer(wxHORIZONTAL);
-        for (int i = 0; i < 4; ++i) {
-            pills[i] = new wxButton(this, wxID_ANY, pill_labels[i],
-                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-            pills[i]->Bind(wxEVT_BUTTON, [this, surface_id, i](wxCommandEvent&) {
-                if (surface_id == 0) m_top_eff  = i;
-                else                  m_penu_eff = i;
-                update_ui();
-            });
-            // NEOTKO_PROFILE_TAG — s68: Penu PB pill re-enabled. The engine
-            // (PathBlendEngine::apply_path) is now role-aware so penu PB+MP
-            // stacks on the penultimate sub-layers, not the top stack.
-            pill_row->Add(pills[i], 0, wxRIGHT, 3);
-        }
-        sb->Add(pill_row, 0, wxALL, PAD);
-        style_pills(pills, cur_eff);
-
-        // --- Content row: mini-preview + right column ---
-        auto* content_row = new wxBoxSizer(wxHORIZONTAL);
-
-        // Mini-preview panel 120×68
-        auto* mini = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(120, 68));
-        mini->SetBackgroundStyle(wxBG_STYLE_PAINT);
-        mini->Bind(wxEVT_PAINT, [this, mini, surface_id](wxPaintEvent&) {
-            wxPaintDC dc(mini);
-            const int eff = (surface_id == 0) ? m_top_eff : m_penu_eff;
-            draw_effect_preview(dc, surface_id, eff, mini->GetSize());
-        });
-        if (surface_id == 0) m_prev_top  = mini;
-        else                  m_prev_penu = mini;
-        content_row->Add(mini, 0, wxRIGHT, PAD);
-
-        // Right column: summary + zone selector + Advanced button
-        auto* right_col = new wxBoxSizer(wxVERTICAL);
-
-        auto* lbl_sum = new wxStaticText(this, wxID_ANY, summary_for(cur_eff, surface_id),
-                                          wxDefaultPosition, wxSize(200, -1));
-        lbl_sum->SetForegroundColour(wxColour(90, 90, 90));
-        lbl_sum->Wrap(200);
-        if (surface_id == 0) m_lbl_top_sum  = lbl_sum;
-        else                  m_lbl_penu_sum = lbl_sum;
-        right_col->Add(lbl_sum, 1, wxEXPAND | wxBOTTOM, 4);
-
-        // NEOTKO_COLORMIX_TAG_START — zone selector per surface
-        {
-            const char* zone_key = (surface_id == 0)
-                ? "interlayer_colormix_top_zone"
-                : "interlayer_colormix_penu_zone";
-            int cur_zone = 0;
-            if (auto* o = m_config->option<ConfigOptionInt>(zone_key)) cur_zone = o->value;
-            cur_zone = std::clamp(cur_zone, 0, 1);
-
-            auto* zone_row = new wxBoxSizer(wxHORIZONTAL);
-            zone_row->Add(new wxStaticText(this, wxID_ANY, _L("Zone:")),
-                          0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            auto* zone_ch = new wxChoice(this, wxID_ANY);
-            zone_ch->Append(_L("All surfaces"));
-            zone_ch->Append(_L("Topmost only"));
-            zone_ch->SetSelection(cur_zone);
-            zone_ch->SetToolTip(surface_id == 0
-                ? _L("All top surfaces — or only the single topmost top surface of the object.")
-                : _L("All penultimate surfaces — or only the topmost penultimate surface of the object."));
-            zone_row->Add(zone_ch, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
-            right_col->Add(zone_row, 0, wxEXPAND | wxBOTTOM, 4);
-
-            if (surface_id == 0) m_choice_top_zone  = zone_ch;
-            else                 m_choice_penu_zone = zone_ch;
-        }
-        // NEOTKO_COLORMIX_TAG_END
-
-        auto* btn_adv = new wxButton(this, wxID_ANY, _L("Advanced\u2026"),
-                                      wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        btn_adv->Enable(cur_eff != EFF_NONE);
-        btn_adv->Bind(wxEVT_BUTTON, [this, surface_id](wxCommandEvent&) {
-            open_edit_for(surface_id);
-        });
-        if (surface_id == 0) m_btn_adv_top  = btn_adv;
-        else                  m_btn_adv_penu = btn_adv;
-        right_col->Add(btn_adv, 0, wxALIGN_RIGHT);
-
-        content_row->Add(right_col, 1, wxEXPAND);
-        sb->Add(content_row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        return sb;
-    }
-
-    // ------------------------------------------------------------------ filament section factory
-
-    wxStaticBoxSizer* create_filament_section()
-    {
-        const int PAD = 6;
-        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Filament"));
-
-        // TD note
-        auto* td_note = new wxStaticText(this, wxID_ANY,
-            _L("TD (Tinting Density): low=opaque (0.1-0.5), mid=semi-opaque (0.5-3), high=translucent (3-10+). Used for blend preview only."));
-        td_note->SetForegroundColour(wxColour(90, 90, 90));
-        sb->Add(td_note, 0, wxALL, PAD);
-
-        // TD sliders grid
-        auto* td_grid = new wxFlexGridSizer(4, 4, 4, 8);
-        td_grid->AddGrowableCol(2, 1);
-        for (int i = 0; i < 4; ++i) {
-            auto* sw = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
-            sw->SetBackgroundColour(i < (int)m_fcolors.size()
-                ? hex_to_col(m_fcolors[i]) : wxColour(128, 128, 128));
-            td_grid->Add(sw, 0, wxALIGN_CENTER_VERTICAL);
-
-            td_grid->Add(new wxStaticText(this, wxID_ANY, wxString::Format("T%d", i + 1)),
-                         0, wxALIGN_CENTER_VERTICAL);
-
-            const int iv = static_cast<int>(m_td[i] * 100.f + 0.5f);
-            auto* sl = new wxSlider(this, wxID_ANY, iv, 1, 1000,
-                                     wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
-            m_sl_td[i] = sl;
-            td_grid->Add(sl, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
-
-            auto* lbl = new wxStaticText(this, wxID_ANY,
-                wxString::Format("%.2f", m_td[i]),
-                wxDefaultPosition, wxSize(38, -1));
-            m_lbl_td[i] = lbl;
-            td_grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
-
-            sl->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent&) {
-                m_td[i] = m_sl_td[i]->GetValue() / 100.f;
-                m_lbl_td[i]->SetLabel(wxString::Format("%.2f", m_td[i]));
-                if (m_prev_top)  m_prev_top ->Refresh();
-                if (m_prev_penu) m_prev_penu->Refresh();
-                // NEOTKO_MULTIPASS_SURFACES_TAG — refresh stacked preview
-                if (m_stacked_swatch) {
-                    float transmit_top = 0.f;
-                    blend_preview(0, &transmit_top);
-                    m_stacked_swatch->Refresh();
-                    if (m_stacked_sw_top)  m_stacked_sw_top ->Refresh();
-                    if (m_stacked_sw_penu) m_stacked_sw_penu->Refresh();
-                    if (m_lbl_opacity_top)
-                        m_lbl_opacity_top->SetLabel(
-                            wxString::Format(_L("transmit=%.2f"), std::clamp(transmit_top, 0.f, 1.f)));
-                }
-            });
-        }
-        sb->Add(td_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        // NEOTKO_MULTIPASS_SURFACES_TAG — stacked preview row (Top × Penu Beer-Lambert)
-        {
-            auto* row_st = new wxBoxSizer(wxHORIZONTAL);
-            auto* lbl_t = new wxStaticText(this, wxID_ANY, _L("Top:"));
-            m_stacked_sw_top = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(28, 18));
-            m_stacked_sw_top->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_stacked_sw_top->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_stacked_sw_top);
-                dc.SetBackground(wxBrush(blend_preview(0)));
-                dc.Clear();
-            });
-            auto* lbl_p = new wxStaticText(this, wxID_ANY, _L("  Penu:"));
-            m_stacked_sw_penu = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(28, 18));
-            m_stacked_sw_penu->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_stacked_sw_penu->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_stacked_sw_penu);
-                dc.SetBackground(wxBrush(blend_preview(1)));
-                dc.Clear();
-            });
-            auto* lbl_r = new wxStaticText(this, wxID_ANY, _L("  Result:"));
-            m_stacked_swatch = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(40, 18));
-            m_stacked_swatch->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_stacked_swatch->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_stacked_swatch);
-                dc.SetBackground(wxBrush(stacked_preview()));
-                dc.Clear();
-            });
-            m_lbl_opacity_top = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(90, -1));
-            m_lbl_opacity_top->SetForegroundColour(wxColour(90, 90, 90));
-            row_st->Add(lbl_t,          0, wxALIGN_CENTER_VERTICAL);
-            row_st->Add(m_stacked_sw_top,  0, wxALIGN_CENTER_VERTICAL|wxLEFT, 4);
-            row_st->Add(lbl_p,          0, wxALIGN_CENTER_VERTICAL);
-            row_st->Add(m_stacked_sw_penu, 0, wxALIGN_CENTER_VERTICAL|wxLEFT, 4);
-            row_st->Add(lbl_r,   0, wxALIGN_CENTER_VERTICAL);
-            row_st->Add(m_stacked_swatch,    0, wxALIGN_CENTER_VERTICAL|wxLEFT, 4);
-            row_st->Add(m_lbl_opacity_top,   0, wxALIGN_CENTER_VERTICAL|wxLEFT, 6);
-            sb->Add(row_st, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-        }
-        // NEOTKO_MULTIPASS_SURFACES_TAG_END
-
-        // "More" toggle — shows filament filter / min_length / use_virtual
-        auto* more_btn = new wxButton(this, wxID_ANY, _L("\u25b6 More"),
-                                       wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        sb->Add(more_btn, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        auto* more_panel = new wxPanel(this, wxID_ANY);
-        auto* more_vs    = new wxBoxSizer(wxVERTICAL);
-
-        // NEOTKO_COLORMIX_TAG_START — filament filter + min_length + use_virtual
-        {
-            int cur_ff = 0;
-            if (auto* o = m_config->option<ConfigOptionInt>("interlayer_colormix_filament_filter"))
-                cur_ff = o->value;
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(more_panel, wxID_ANY, _L("Filament filter:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            m_sc_filament_filter = new wxSpinCtrl(more_panel, wxID_ANY, wxEmptyString,
-                wxDefaultPosition, wxSize(65, -1),
-                wxSP_ARROW_KEYS, 0, 16, std::clamp(cur_ff, 0, 16));
-            m_sc_filament_filter->SetToolTip(
-                _L("0 = apply to all filaments (no filter).\n"
-                   "N = apply effect only to regions whose base solid-infill extruder is filament N.\n"
-                   "Useful in Assembled multi-material objects to target a specific colour region."));
-            row->Add(m_sc_filament_filter, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            row->Add(new wxStaticText(more_panel, wxID_ANY, _L("(0 = all)")),
-                     0, wxALIGN_CENTER_VERTICAL);
-            more_vs->Add(row, 0, wxEXPAND | wxBOTTOM, 4);
-        }
-        {
-            double cur_ml = 1.0;
-            if (auto* o = m_config->option<ConfigOptionFloat>("interlayer_colormix_min_length"))
-                cur_ml = o->value;
-            cur_ml = std::max(0.0, std::min(50.0, cur_ml));
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(more_panel, wxID_ANY, _L("ColorStitch min. line length:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            m_sc_min_length = new wxSpinCtrlDouble(more_panel, wxID_ANY, wxEmptyString,
-                wxDefaultPosition, wxSize(75, -1),
-                wxSP_ARROW_KEYS, 0.0, 50.0, cur_ml, 0.5);
-            m_sc_min_length->SetDigits(1);
-            m_sc_min_length->SetToolTip(
-                _L("ColorStitch skips lines shorter than this value — they keep the region's default tool.\n"
-                   "Higher values = fewer tool changes but more uncoloured gaps near edges.\n"
-                   "0 = colour every line regardless of length.\n"
-                   "Tip: if you see empty zones, lower this value."));
-            row->Add(m_sc_min_length, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            row->Add(new wxStaticText(more_panel, wxID_ANY, _L("mm")),
-                     0, wxALIGN_CENTER_VERTICAL);
-            more_vs->Add(row, 0, wxEXPAND | wxBOTTOM, 4);
-        }
-        {
-            bool cur_uv = true;
-            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
-                cur_uv = o->value;
-            m_chk_use_virtual = new wxCheckBox(more_panel, wxID_ANY,
-                _L("Use Mixed Filament colors in pattern"));
-            m_chk_use_virtual->SetValue(cur_uv);
-            m_chk_use_virtual->SetToolTip(
-                _L("When enabled, the pattern editor shows Mixed Filament virtual colors\n"
-                   "(e.g. 'F1+F2') as clickable buttons alongside physical filaments.\n"
-                   "Pattern digits 5-9 reference these virtual colors.\n"
-                   "Requires Mixed Filaments to be defined in the filament panel."));
-            more_vs->Add(m_chk_use_virtual, 0, wxBOTTOM, 4);
-        }
-        // NEOTKO_COLORMIX_TAG_END
-
-        more_panel->SetSizer(more_vs);
-        more_panel->Hide();
-        sb->Add(more_panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        more_btn->Bind(wxEVT_BUTTON, [this, more_btn, more_panel](wxCommandEvent&) {
-            const bool show = !more_panel->IsShown();
-            more_panel->Show(show);
-            more_btn->SetLabel(show ? _L("\u25bc More") : _L("\u25b6 More"));
-            Layout();
-            Fit();
-        });
-
-        return sb;
-    }
-
-    // ------------------------------------------------------------------ UI build
-
-    void build_ui()
-    {
-        const int PAD = 8;
-        auto* vs = new wxBoxSizer(wxVERTICAL);
-
-        // 1. Top zone card
-        vs->Add(create_zone_card(0), 0, wxEXPAND | wxALL, PAD / 2);
-
-        // 2. Penultimate zone card
-        vs->Add(create_zone_card(1), 0, wxEXPAND | wxALL, PAD / 2);
-
-        // 3. Filament section (TD sliders + More collapsible)
-        vs->Add(create_filament_section(), 0, wxEXPAND | wxALL, PAD / 2);
-
-        // NEOTKO_COLORMIX_TAG_START — s58 Line distribution mode (global setting).
-        // Controls how SurfaceColorMix and PathBlend map pattern slots to extrusion
-        // lines.  Default (0) is the legacy behaviour (slot = path_idx % n_slots).
-        // Modes 1/2/3 are experimental geometric distribution strategies; see the
-        // tooltips for details.  Affects all four combinations of
-        // (ColorMix/PathBlend) × (Top/Penultimate).
-        {
-            auto* lm_sb = new wxStaticBoxSizer(wxVERTICAL, this,
-                _L("Line distribution mode"));
-            auto* lm_row = new wxBoxSizer(wxHORIZONTAL);
-
-            wxArrayString lm_labels;
-            lm_labels.Add(_L("Default — line index (safe, original)"));
-            lm_labels.Add(_L("GeoSort (A) — sort by perpendicular position"));
-            lm_labels.Add(_L("LaneQuant (B) — quantize to geometric lanes"));
-            lm_labels.Add(_L("DirCluster (C) — cluster by direction, then quantize"));
-
-            int cur_lm = 0;
-            if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
-                cur_lm = std::clamp(o->value, 0, 3);
-
-            m_choice_lane_mode = new wxChoice(this, wxID_ANY,
-                wxDefaultPosition, wxSize(320, -1), lm_labels);
-            m_choice_lane_mode->SetSelection(cur_lm);
-            m_choice_lane_mode->SetToolTip(
-                _L("How pattern slots are assigned to individual extrusion lines.\n\n"
-                   "0 Default — slot = line_index mod n_slots.\n"
-                   "  Legacy behaviour. Pattern can break visually on irregular shapes\n"
-                   "  (corners, concavities, narrow regions) because line order isn't\n"
-                   "  always proportional to geometric position.\n\n"
-                   "1 GeoSort — sort lines by position perpendicular to fill direction.\n"
-                   "  Rayas más ordenadas; fragmentos del mismo carril aún pueden recibir\n"
-                   "  colores distintos.\n\n"
-                   "2 LaneQuant — slot = quantized geometric lane.\n"
-                   "  Fragmentos del mismo carril reciben el mismo color → rayas continuas.\n"
-                   "  Más robusto para formas irregulares.\n\n"
-                   "3 DirCluster — agrupa primero por dirección de fill, luego LaneQuant\n"
-                   "  por cluster. Maneja casos donde el motor de fill rotó la dirección\n"
-                   "  en sub-regiones del contorno.\n\n"
-                   "Aplica a ColorMix + PathBlend en Top + Penultimate."));
-
-            m_choice_lane_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
-                if (!m_choice_lane_mode) return;
-                const int v = std::clamp(m_choice_lane_mode->GetSelection(), 0, 3);
-                if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
-                    o->value = v;
-                m_on_change("surface_color_mix_lane_mode");
-                // Update mini-previews — they don't change shape but it triggers a
-                // redraw so the user gets immediate visual feedback.
-                if (m_prev_top)  m_prev_top->Refresh();
-                if (m_prev_penu) m_prev_penu->Refresh();
-            });
-
-            lm_row->Add(new wxStaticText(this, wxID_ANY, _L("Mode:")),
-                        0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            lm_row->Add(m_choice_lane_mode, 1, wxALIGN_CENTER_VERTICAL);
-            lm_sb->Add(lm_row, 0, wxEXPAND | wxALL, PAD / 2);
-
-            auto* lm_note = new wxStaticText(this, wxID_ANY,
-                _L("Experimental. Default = original behaviour (no risk).\n"
-                   "Modes A/B/C improve pattern fidelity on irregular shapes."));
-            lm_note->SetForegroundColour(wxColour(100, 100, 100));
-            lm_sb->Add(lm_note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
-
-            vs->Add(lm_sb, 0, wxEXPAND | wxALL, PAD / 2);
-        }
-        // NEOTKO_COLORMIX_TAG_END
-
-        // NEOTKO_COLORMIX_TAG — s60: Gradient section MOVED to ColorMixPatternDialog (sub-dialog opened by Advanced button per role).
-
-        // NEOTKO_MULTIPASS_TAG_START — Blend Suggestion (Beer-Lambert joint Top+Penultimate optimizer)
-        {
-            // s120: pool de MixedColors conservado para el Match del Studio.
-            {
-                std::string mixed_defs;
-                if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-                    mixed_defs = o->value;
-                if (!mixed_defs.empty()) {
-                    auto all = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
-                    for (auto& opt : all)
-                        if (!opt.is_physical)
-                            m_bs_mix_opts.push_back(opt);
-                }
-            }
-        }
-        // NEOTKO_MULTIPASS_TAG_END
-
-#if 0   // s120: UI del antiguo Blend Suggestion (sustituida por ColorStitch Studio → Match). Pendiente excisión dura.
-        {
-            auto* bs_sb = new wxStaticBoxSizer(wxVERTICAL, this,
-                _L("Blend Suggestion \u2014 Beer-Lambert optimizer"));
-
-            auto* note = new wxStaticText(this, wxID_ANY,
-                _L("Calculates optimal pass ORDER and layer RATIOS to approximate a MixedColor target.\n"
-                   "Top only: single layer blend.  Top + Penultimate: same passes on both layers\n"
-                   "(doubles physical material \u2014 allows smaller per-pass ratios)."));
-            note->SetForegroundColour(wxColour(80,80,80));
-            bs_sb->Add(note, 0, wxALL, PAD/2);
-
-            // ---- Target picker row ----
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Target colour:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-                wxArrayString labels;
-                for (auto& opt : m_bs_mix_opts)
-                    labels.Add(wxString::FromUTF8(opt.label));
-                if (labels.IsEmpty()) labels.Add(_L("(no MixedColor defined)"));
-                m_bs_combo_target = new wxComboBox(this, wxID_ANY,
-                    labels.IsEmpty() ? wxString() : labels[0],
-                    wxDefaultPosition, wxSize(180,-1), labels, wxCB_READONLY);
-                m_bs_combo_target->SetToolTip(_L("Select the virtual MixedColor whose display colour is the blend target."));
-                m_bs_combo_target->Enable(!m_bs_mix_opts.empty());
-                row->Add(m_bs_combo_target, 1, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-
-                // Colour swatch for the selected target MixedColor
-                m_bs_swatch_target = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(18,18));
-                m_bs_swatch_target->SetToolTip(_L("Display colour of the selected MixedColor target."));
-                auto update_bs_target_swatch = [this]() {
-                    if (!m_bs_swatch_target) return;
-                    const int sel = m_bs_combo_target ? m_bs_combo_target->GetSelection() : -1;
-                    wxColour c(128,128,128);
-                    if (sel >= 0 && sel < (int)m_bs_mix_opts.size()) {
-                        const std::string& dc = m_bs_mix_opts[sel].display_color;
-                        if (dc.size() >= 7 && dc[0] == '#') {
-                            unsigned long rgb = 0;
-                            if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
-                                c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
-                        }
-                    }
-                    m_bs_swatch_target->SetBackgroundColour(c);
-                    m_bs_swatch_target->Refresh();
-                };
-                update_bs_target_swatch();
-                m_bs_combo_target->Bind(wxEVT_COMBOBOX, [update_bs_target_swatch](wxCommandEvent&) {
-                    update_bs_target_swatch();
-                });
-                row->Add(m_bs_swatch_target, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-
-                auto* btn_refresh = new wxButton(this, wxID_ANY, L"\u21BA",
-                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                btn_refresh->SetToolTip(_L("Refresh — re-read Mixed Filament definitions from the current project."));
-                btn_refresh->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { refresh_mix_opts(); });
-                row->Add(btn_refresh, 0, wxALIGN_CENTER_VERTICAL|wxLEFT, 4);
-                bs_sb->Add(row, 0, wxEXPAND|wxALL, PAD/2);
-            }
-
-            // ---- Mode radio buttons ----
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(this, wxID_ANY, _L("Mode:")),
-                         0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 8);
-                m_bs_rb_top = new wxRadioButton(this, wxID_ANY, _L("Top layer only"),
-                                                wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
-                m_bs_rb_joint = new wxRadioButton(this, wxID_ANY,
-                    _L("Top + Penultimate  (same passes on both \u2192 double material)"));
-                m_bs_rb_joint->SetValue(true); // default: joint mode
-                m_bs_rb_top->SetToolTip(_L("MultiPass applies to top surface only (multipass_surface=1)."));
-                m_bs_rb_joint->SetToolTip(_L(
-                    "MultiPass applies to both top AND penultimate (multipass_surface=0).\n"
-                    "The same passes run twice \u2014 Beer-Lambert models this as a stacked double layer.\n"
-                    "Enables smaller per-pass ratios while maintaining physical adhesion."));
-                row->Add(m_bs_rb_top,   0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 12);
-                row->Add(m_bs_rb_joint, 0, wxALIGN_CENTER_VERTICAL);
-                bs_sb->Add(row, 0, wxALL, PAD/2);
-            }
-
-            // NEOTKO_MULTIPASS_TAG_START — Perimeter Override checkbox
-            {
-                const bool cur_perim_ov = m_config->opt_bool("multipass_perimeter_override");
-                m_mp_perim_override = new wxCheckBox(this, wxID_ANY,
-                    _L("MultiPass Perimeter Override"));
-                m_mp_perim_override->SetValue(cur_perim_ov);
-                m_mp_perim_override->SetToolTip(_L(
-                    "When enabled, perimeters are suppressed at the real layer Z and "
-                    "re-printed once per MultiPass sublayer using that sublayer's tool.\n"
-                    "Gives perimeter walls the same per-pass color blending as the top surface fill."));
-                bs_sb->Add(m_mp_perim_override, 0, wxALL, PAD/2);
-            }
-            // NEOTKO_MULTIPASS_TAG_END
-
-            // ---- Calculate button + result display ----
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                auto* btn_calc = new wxButton(this, wxID_ANY, _L("Calculate \u25b6"),
-                                              wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                btn_calc->Enable(!m_bs_mix_opts.empty());
-
-                m_bs_swatch = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(22,22));
-                m_bs_swatch->SetBackgroundColour(wxColour(128,128,128));
-                m_bs_swatch->SetToolTip(_L("Simulated blend colour after Beer-Lambert optimisation."));
-
-                m_bs_lbl_score = new wxStaticText(this, wxID_ANY, _L("  ΔE: ---"));
-                m_bs_lbl_score->SetToolTip(_L("CIE76 colour distance between simulated result and target.\n"
-                                              "<5 excellent, 5\u201310 good, >10 poor approximation."));
-
-                // NEOTKO_MULTIPASS_SURFACES_TAG — recipe-split Calculate
-                // Algorithm: sort recipe tools by weight desc, partition between penu (dominant)
-                // and top (fine-tuning). Ratios = recipe_weight / TD so visual contribution
-                // matches recipe proportions. Min ratio enforces 0.04mm extrusion floor.
-                btn_calc->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    if (m_bs_mix_opts.empty() || !m_bs_combo_target) return;
-                    const int sel = m_bs_combo_target->GetSelection();
-                    if (sel < 0 || sel >= (int)m_bs_mix_opts.size()) return;
-                    const auto& opt = m_bs_mix_opts[sel];
-                    if (opt.tool_weights.empty()) return;
-
-                    // Target display color
-                    const std::string& dc = opt.display_color;
-                    if (dc.size() < 7 || dc[0] != '#') return;
-                    unsigned long rgb_v = 0;
-                    if (!wxString::FromUTF8(dc.substr(1)).ToULong(&rgb_v, 16)) return;
-                    const double t_r = ((rgb_v>>16)&0xFF)/255.0;
-                    const double t_g = ((rgb_v>> 8)&0xFF)/255.0;
-                    const double t_b = ( rgb_v     &0xFF)/255.0;
-
-                    // Normalize recipe weights → sorted by weight desc
-                    double total_w = 0.0;
-                    for (auto& [t, w] : opt.tool_weights) total_w += w;
-                    if (total_w < 1e-9) return;
-                    std::vector<std::pair<int,double>> recipe; // {tool_0based, norm_weight}
-                    for (auto& [t, w] : opt.tool_weights)
-                        recipe.push_back({t, (double)w / total_w});
-                    std::sort(recipe.begin(), recipe.end(),
-                              [](const auto& a, const auto& b){ return a.second > b.second; });
-                    const int n_rec = static_cast<int>(recipe.size());
-
-                    // Pass counts + min ratio from layer height
-                    int top_passes = 2, penu_passes = 2;
-                    if (auto* o = m_config->option<ConfigOptionInt>("multipass_num_passes"))
-                        top_passes = std::clamp(o->value, 1, 3);
-                    if (auto* o = m_config->option<ConfigOptionInt>("penultimate_multipass_num_passes"))
-                        penu_passes = std::clamp(o->value, 1, 3);
-                    double lh = 0.2;
-                    if (auto* o = m_config->option<ConfigOptionFloat>("layer_height"))
-                        lh = std::max(0.04, (double)o->value);
-                    const double min_r = std::max(0.05, 0.04 / lh);
-
-                    // TD for a tool (0-based)
-                    auto* ac = wxGetApp().app_config;
-                    auto get_td = [&](int t) -> double {
-                        if (t >= 0 && t < 4) return std::max(0.01, (double)m_td[t]);
-                        double v = 0.5;
-                        if (t >= 0 && ac) {
-                            const std::string s = ac->get("neotko_td_" + std::to_string(t+1));
-                            try { if (!s.empty()) v = std::stod(s); } catch(...) {}
-                        }
-                        return std::max(0.01, v);
-                    };
-
-                    // Build N pass slots from recipe starting at offset (wraps around)
-                    // Returns {tool, norm_weight} with weights renormalized within the set
-                    auto make_passes = [&](int offset, int n) {
-                        std::vector<std::pair<int,double>> v;
-                        for (int i = 0; i < n; ++i)
-                            v.push_back(recipe[(offset + i) % n_rec]);
-                        double s = 0.0; for (auto& [t,w] : v) s += w;
-                        if (s > 1e-9) for (auto& [t,w] : v) w /= s;
-                        else          for (auto& [t,w] : v) w  = 1.0 / n;
-                        return v;
-                    };
-
-                    // Ratios from (tool, norm_weight): ratio_i = w_i * TD_i
-                    // Beer-Lambert inverse: given target visual weight w (from recipe),
-                    // solve ratio such that opacity = w → ratio = -TD * log10(1 - w).
-                    // Opaque (low TD) gets small ratio; translucent (high TD) gets large ratio.
-                    auto make_ratios = [&](const std::vector<std::pair<int,double>>& passes) {
-                        std::vector<double> r;
-                        for (auto& [t,w] : passes) {
-                            const double td = get_td(t);
-                            double ratio;
-                            if (w <= 0.0) {
-                                ratio = min_r;
-                            } else if (w >= 1.0) {
-                                ratio = td * 5.0; // physical ceiling
-                            } else {
-                                ratio = -td * std::log10(1.0 - std::clamp(w, 0.0, 0.9999));
-                            }
-                            r.push_back(std::max(min_r, ratio));
-                        }
-                        double s = 0.0; for (double x : r) s += x;
-                        if (s < 1e-9) s = 1.0;
-                        for (double& x : r) x = std::max(min_r, x / s);
-                        s = 0.0; for (double x : r) s += x;
-                        for (double& x : r) x /= s; // re-normalize after floor clamp
-                        return r;
-                    };
-
-                    auto wi = [&](const char* k, int v)   { if (auto* o=m_config->option<ConfigOptionInt>  (k)) o->value=v; m_on_change(k); };
-                    auto wb = [&](const char* k, bool v)  { if (auto* o=m_config->option<ConfigOptionBool> (k)) o->value=v; m_on_change(k); };
-                    auto wf = [&](const char* k, float v) { if (auto* o=m_config->option<ConfigOptionFloat>(k)) o->value=v; m_on_change(k); };
-
-                    const bool joint = m_bs_rb_joint && m_bs_rb_joint->GetValue();
-
-                    const char* top_tk[3]  = {"multipass_tool_1","multipass_tool_2","multipass_tool_3"};
-                    const char* top_rk[3]  = {"multipass_width_ratio_1","multipass_width_ratio_2","multipass_width_ratio_3"};
-                    const char* penu_tk[3] = {"penultimate_multipass_tool_1","penultimate_multipass_tool_2","penultimate_multipass_tool_3"};
-                    const char* penu_rk[3] = {"penultimate_multipass_width_ratio_1","penultimate_multipass_width_ratio_2","penultimate_multipass_width_ratio_3"};
-
-                    if (joint) {
-                        // Penu: dominant tools (offset 0); Top: next tools (offset penu_passes)
-                        const auto pv = make_passes(0,           penu_passes);
-                        const auto tv = make_passes(penu_passes, top_passes);
-                        const auto pr = make_ratios(pv);
-                        const auto tr_v = make_ratios(tv);
-                        for (int i = 0; i < top_passes;  ++i) { wi(top_tk[i],  tv[i].first); wf(top_rk[i],  (float)tr_v[i]); }
-                        for (int i = 0; i < penu_passes; ++i) { wi(penu_tk[i], pv[i].first); wf(penu_rk[i], (float)pr[i]);   }
-                        wi("multipass_num_passes",             top_passes);
-                        wi("penultimate_multipass_num_passes", penu_passes);
-                        wb("multipass_enabled",                true);
-                        wi("multipass_surface",                1);
-                        wb("penultimate_multipass_enabled",    true);
-                        m_top_eff  = EFF_MP;
-                        m_penu_eff = EFF_MP;
-                    } else {
-                        // Top-only: best tools from recipe for top_passes slots
-                        const auto tv   = make_passes(0, top_passes);
-                        const auto tr_v = make_ratios(tv);
-                        for (int i = 0; i < top_passes; ++i) { wi(top_tk[i], tv[i].first); wf(top_rk[i], (float)tr_v[i]); }
-                        wi("multipass_num_passes", top_passes);
-                        wb("multipass_enabled",    true);
-                        wi("multipass_surface",    1);
-                        m_top_eff = EFF_MP;
-                    }
-
-                    // Predicted result color + ΔE vs target
-                    const wxColour rc = joint ? stacked_preview() : blend_preview(0);
-                    const double dr = rc.Red()  /255.0 - t_r;
-                    const double dg = rc.Green()/255.0 - t_g;
-                    const double db = rc.Blue() /255.0 - t_b;
-                    const double de = std::sqrt(dr*dr + dg*dg + db*db) * 100.0 / std::sqrt(3.0);
-
-                    if (m_bs_swatch) { m_bs_swatch->SetBackgroundColour(rc); m_bs_swatch->Refresh(); }
-                    if (m_bs_lbl_score) {
-                        m_bs_lbl_score->SetLabel(wxString::Format(_L("  \u0394E: %.1f"), de));
-                        m_bs_lbl_score->SetForegroundColour(
-                            de < 5.0  ? wxColour(30,140,30) :
-                            de < 10.0 ? wxColour(190,130,0) : wxColour(180,40,40));
-                        m_bs_lbl_score->Refresh();
-                    }
-                    update_ui();
-                    Layout();
-                });
-
-                row->Add(btn_calc,       0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 6);
-                row->Add(m_bs_swatch,    0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 4);
-                row->Add(m_bs_lbl_score, 1, wxALIGN_CENTER_VERTICAL);
-                bs_sb->Add(row, 0, wxALL, PAD/2);
-            }
-
-            vs->Add(bs_sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-#endif  // s120: fin UI Blend Suggestion eliminada
-
-        // NEOTKO_PROFILE_TAG_START — Fase A: Save/Manage Surface Effect Profiles.
-        // Snapshot ONLY the ColorMix payload for now; the profile struct already
-        // reserves PathBlend (Fase G) and MultiPass (Fase F) payloads.
-        {
-            wxBoxSizer* prof_row = new wxBoxSizer(wxHORIZONTAL);
-            wxButton* btn_save_prof = new wxButton(this, wxID_ANY, _L("Save as profile…"));
-            wxButton* btn_mgr_prof  = new wxButton(this, wxID_ANY, _L("Manage profiles…"));
-            prof_row->Add(btn_save_prof, 0, wxRIGHT, PAD);
-            prof_row->Add(btn_mgr_prof,  0);
-            vs->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-            btn_save_prof->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                wxTextEntryDialog dlg(this, _L("Profile name:"),
-                                      _L("Save Surface Effect Profile"));
-                if (dlg.ShowModal() != wxID_OK) return;
-                const std::string name = dlg.GetValue().ToStdString();
-                if (name.empty()) return;
-
-                // NEOTKO_PROFILE_TAG — Fase F1: snapshot only effects that are
-                // currently enabled. Otherwise a profile saved with MP pill OFF
-                // would carry an MP payload with `multipass_enabled=0`, which
-                // painter mode reads as "explicitly disabled" and suppresses MP
-                // even when the user wanted ONLY ColorMix in that profile.
-                // NEOTKO_PROFILE_TAG — Fase G fix: read pill state (live UI).
-                // m_config only updates on OK, so Save before OK would otherwise
-                // snapshot the LAST applied state, not what the user sees.
-                // We also override the per-effect enable flags in the captured
-                // kv so they reflect pill state, without mutating m_config
-                // (which would persist across Cancel).
-                const bool _cm_on = (m_top_eff == EFF_CM) || (m_penu_eff == EFF_CM);
-                const bool _mp_on = (m_top_eff == EFF_MP) || (m_penu_eff == EFF_MP);
-                // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
-                const bool _pb_on = (m_top_eff == EFF_PB) || (m_penu_eff == EFF_PB);
-                Slic3r::SurfaceEffectProfile p;
-                p.name = name;
-                // NEOTKO_PROFILE_TAG — Fase G fix: also force the per-effect
-                // surface enum (0=Both / 1=Top only / 2=Penu only) in the
-                // captured kv. Otherwise a profile saved with top=PB+penu=None
-                // would inherit whatever pathblend_surface was last in m_config
-                // (often 0=Both), and Loading would phantom-fill the penu pill.
-                auto surface_enum = [&](int eff) -> std::string {
-                    const bool top = (m_top_eff  == eff);
-                    const bool pen = (m_penu_eff == eff);
-                    if (top && pen) return "0"; // Both
-                    if (top)        return "1"; // Top only
-                    return "2";                 // Penu only
-                };
-                if (_cm_on) {
-                    p.colormix = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
-                        *m_config, Slic3r::SurfaceEffectProfileManager::colormix_keys());
-                    p.colormix.kv["interlayer_colormix_enabled"] = "1";
-                    p.colormix.kv["interlayer_colormix_surface"] = surface_enum(EFF_CM);
-                }
-                if (_mp_on) {
-                    p.multipass = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
-                        *m_config, Slic3r::SurfaceEffectProfileManager::multipass_keys());
-                    // Mark per-role enabled based on which pill is on.
-                    p.multipass.kv["multipass_enabled"] =
-                        (m_top_eff == EFF_MP) ? "1" : "0";
-                    p.multipass.kv["penultimate_multipass_enabled"] =
-                        (m_penu_eff == EFF_MP) ? "1" : "0";
-                    // multipass_surface still kept for legacy reads — sync to pills.
-                    p.multipass.kv["multipass_surface"] = surface_enum(EFF_MP);
-                }
-                if (_pb_on) {
-                    p.pathblend = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
-                        *m_config, Slic3r::SurfaceEffectProfileManager::pathblend_keys());
-                    p.pathblend.kv["multipass_path_gradient"] = "1";
-                    p.pathblend.kv["pathblend_surface"] = surface_enum(EFF_PB);
-                }
-                // NEOTKO_PROFILE_TAG — Fase 6 (aditivo): snapshot the resolved
-                // sandwich stacks for the 3D Painter mini-preview. PREVIEW-ONLY —
-                // the slice engine keeps reading the payloads above. Derived from
-                // the live config via the same resolver the SandwichDialog uses.
-                // synthesize_from_legacy leaves ColorMix passes with empty kv
-                // (engine falls back to region config); inject the snapshotted
-                // ColorMix payload so the gizmo preview is self-contained.
-                {
-                    auto st_top  = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
-                    auto st_penu = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
-                    auto inject = [&](Slic3r::SurfacePassStack& st) {
-                        if (!p.colormix.present) return;
-                        for (auto& pass : st.passes)
-                            if (pass.kind == Slic3r::SurfacePassKind::ColorMix && pass.colormix.kv.empty())
-                                pass.colormix = p.colormix;
-                    };
-                    inject(st_top);
-                    inject(st_penu);
-                    p.stack_top_json  = st_top.to_json();
-                    p.stack_penu_json = st_penu.to_json();
-                }
-                const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(p));
-                const auto* added = Slic3r::SurfaceEffectProfileManager::get().find(new_id);
-                wxMessageBox(wxString::Format(_L("Saved profile #%d (CM:%zu, MP:%zu, PB:%zu keys)."),
-                                              new_id,
-                                              (size_t)added->colormix.kv.size(),
-                                              (size_t)added->multipass.kv.size(),
-                                              (size_t)added->pathblend.kv.size()),
-                             _L("Surface Effect Profile"), wxOK | wxICON_INFORMATION, this);
-            });
-
-            btn_mgr_prof->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
-                wxDialog mdlg(this, wxID_ANY, _L("Manage Surface Effect Profiles"),
-                              wxDefaultPosition, wxSize(420, 320),
-                              wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
-                wxBoxSizer* ms = new wxBoxSizer(wxVERTICAL);
-                wxListBox*  lb = new wxListBox(&mdlg, wxID_ANY);
-
-                auto refill = [&]() {
-                    lb->Clear();
-                    for (const auto& p : mgr.list()) {
-                        wxString label = wxString::Format("#%d  %s  [CM:%s PB:%s MP:%s]",
-                            p.id,
-                            wxString::FromUTF8(p.name),
-                            p.colormix.present  ? "*" : "-",
-                            p.pathblend.present ? "*" : "-",
-                            p.multipass.present ? "*" : "-");
-                        lb->Append(label, reinterpret_cast<void*>((intptr_t)p.id));
-                    }
-                };
-                refill();
-
-                // NEOTKO_PROFILE_TAG — two button rows: edit ops + actions.
-                wxBoxSizer* br_edit = new wxBoxSizer(wxHORIZONTAL);
-                wxButton* btn_load = new wxButton(&mdlg, wxID_ANY, _L("Load into dialog"));
-                wxButton* btn_upd  = new wxButton(&mdlg, wxID_ANY, _L("Update from current"));
-                br_edit->Add(btn_load, 0, wxRIGHT, 6);
-                br_edit->Add(btn_upd,  0);
-
-                wxBoxSizer* br = new wxBoxSizer(wxHORIZONTAL);
-                wxButton* btn_ren = new wxButton(&mdlg, wxID_ANY, _L("Rename"));
-                wxButton* btn_del = new wxButton(&mdlg, wxID_ANY, _L("Delete"));
-                wxButton* btn_cls = new wxButton(&mdlg, wxID_CLOSE, _L("Close"));
-                br->Add(btn_ren, 0, wxRIGHT, 6);
-                br->Add(btn_del, 0, wxRIGHT, 6);
-                br->AddStretchSpacer(1);
-                br->Add(btn_cls, 0);
-
-                ms->Add(lb,      1, wxEXPAND | wxALL, 8);
-                ms->Add(br_edit, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-                ms->Add(br,      0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-                mdlg.SetSizer(ms);
-
-                auto selected_id = [&]() -> int {
-                    const int sel = lb->GetSelection();
-                    if (sel == wxNOT_FOUND) return 0;
-                    return (int)(intptr_t)lb->GetClientData(sel);
-                };
-
-                // NEOTKO_PROFILE_TAG — Load: restore the profile's ColorMix payload
-                // into the active SCM config so the user can edit it in the dialog.
-                // After this the user can tweak values and use "Update from current"
-                // (below) to commit the changes back to this same profile, or
-                // "Save as profile…" to fork it into a new one.
-                btn_load->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
-                    const int id = selected_id();
-                    if (id == 0) return;
-                    const auto* p = mgr.find(id);
-                    if (!p) return;
-                    if (!p->colormix.present && !p->multipass.present && !p->pathblend.present) return;
-                    if (p->colormix.present)
-                        Slic3r::SurfaceEffectProfileManager::restore_keys(*m_config, p->colormix);
-                    // NEOTKO_PROFILE_TAG — Fase F1: restore MultiPass keys too so the
-                    // MP sub-dialog (re-opened later) sees the loaded values.
-                    if (p->multipass.present)
-                        Slic3r::SurfaceEffectProfileManager::restore_keys(*m_config, p->multipass);
-                    // NEOTKO_PROFILE_TAG — Fase G1: restore PathBlend keys.
-                    if (p->pathblend.present)
-                        Slic3r::SurfaceEffectProfileManager::restore_keys(*m_config, p->pathblend);
-                    // Notify config-listeners for every restored key so other panes
-                    // refresh too (filament filter, surface combo, etc.).
-                    if (p->colormix.present)
-                        for (const auto& kv : p->colormix.kv)
-                            m_on_change(kv.first);
-                    if (p->multipass.present)
-                        for (const auto& kv : p->multipass.kv)
-                            m_on_change(kv.first);
-                    if (p->pathblend.present)
-                        for (const auto& kv : p->pathblend.kv)
-                            m_on_change(kv.first);
-                    // Push restored values back into the visible widgets — they
-                    // were built from m_config at dialog creation and don't poll
-                    // for external changes. The advanced sub-dialog
-                    // (ColorMixPatternDialog) re-reads m_config when opened, so
-                    // numeric gradient values appear correctly there.
-                    if (m_choice_top_zone)
-                        m_choice_top_zone->SetSelection(
-                            m_config->opt_int("interlayer_colormix_top_zone"));
-                    if (m_choice_penu_zone)
-                        m_choice_penu_zone->SetSelection(
-                            m_config->opt_int("interlayer_colormix_penu_zone"));
-                    if (m_sc_filament_filter)
-                        m_sc_filament_filter->SetValue(
-                            m_config->opt_int("interlayer_colormix_filament_filter"));
-                    if (m_sc_min_length)
-                        m_sc_min_length->SetValue(
-                            m_config->opt_float("interlayer_colormix_min_length"));
-                    if (m_chk_use_virtual)
-                        m_chk_use_virtual->SetValue(
-                            m_config->opt_bool("interlayer_colormix_use_virtual"));
-                    infer_effects();
-                    update_ui();
-                    Layout();
-                });
-
-                // NEOTKO_PROFILE_TAG — Update from current: re-snapshot the dialog's
-                // live config and overwrite the selected profile's ColorMix payload.
-                // Keeps the profile id/name; only the payload is replaced.
-                btn_upd->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
-                    const int id = selected_id();
-                    if (id == 0) return;
-                    auto* p = mgr.find_mut(id);
-                    if (!p) return;
-                    if (wxMessageBox(
-                            wxString::Format(_L("Overwrite profile '%s' with the "
-                                                "current dialog settings?"),
-                                             wxString::FromUTF8(p->name)),
-                            _L("Update profile"),
-                            wxYES_NO | wxICON_QUESTION, &mdlg) != wxYES)
-                        return;
-                    // NEOTKO_PROFILE_TAG — Fase F1: snapshot only effects that
-                    // are currently enabled; effects toggled OFF clear their
-                    // payload from the profile. Matches Save semantics: profile
-                    // = bundle of currently-active settings.
-                    // NEOTKO_PROFILE_TAG — Fase G fix: same pill-state read as
-                    // SCM Save. Pre-OK Update must reflect what the user sees.
-                    const bool _u_cm_on = (m_top_eff == EFF_CM) || (m_penu_eff == EFF_CM);
-                    const bool _u_mp_on = (m_top_eff == EFF_MP) || (m_penu_eff == EFF_MP);
-                    // NEOTKO_PROFILE_TAG — s68: PB on Penu re-enabled.
-                    const bool _u_pb_on = (m_top_eff == EFF_PB) || (m_penu_eff == EFF_PB);
-                    auto u_surface_enum = [&](int eff) -> std::string {
-                        const bool top = (m_top_eff  == eff);
-                        const bool pen = (m_penu_eff == eff);
-                        if (top && pen) return "0";
-                        if (top)        return "1";
-                        return "2";
-                    };
-                    if (_u_cm_on) {
-                        p->colormix = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
-                            *m_config, Slic3r::SurfaceEffectProfileManager::colormix_keys());
-                        p->colormix.kv["interlayer_colormix_enabled"] = "1";
-                        p->colormix.kv["interlayer_colormix_surface"] = u_surface_enum(EFF_CM);
-                    } else {
-                        p->colormix = Slic3r::SurfaceEffectPayload{};
-                    }
-                    if (_u_mp_on) {
-                        p->multipass = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
-                            *m_config, Slic3r::SurfaceEffectProfileManager::multipass_keys());
-                        p->multipass.kv["multipass_enabled"] =
-                            (m_top_eff == EFF_MP) ? "1" : "0";
-                        p->multipass.kv["penultimate_multipass_enabled"] =
-                            (m_penu_eff == EFF_MP) ? "1" : "0";
-                        p->multipass.kv["multipass_surface"] = u_surface_enum(EFF_MP);
-                    } else {
-                        p->multipass = Slic3r::SurfaceEffectPayload{};
-                    }
-                    if (_u_pb_on) {
-                        p->pathblend = Slic3r::SurfaceEffectProfileManager::snapshot_keys(
-                            *m_config, Slic3r::SurfaceEffectProfileManager::pathblend_keys());
-                        p->pathblend.kv["multipass_path_gradient"] = "1";
-                        p->pathblend.kv["pathblend_surface"] = u_surface_enum(EFF_PB);
-                    } else {
-                        p->pathblend = Slic3r::SurfaceEffectPayload{};
-                    }
-                    // NEOTKO_PROFILE_TAG — Fase 6 (aditivo): refresh preview stacks
-                    // (self-contained: inject ColorMix payload, see SCM Save above).
-                    {
-                        auto st_top  = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
-                        auto st_penu = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
-                        auto inject = [&](Slic3r::SurfacePassStack& st) {
-                            if (!p->colormix.present) return;
-                            for (auto& pass : st.passes)
-                                if (pass.kind == Slic3r::SurfacePassKind::ColorMix && pass.colormix.kv.empty())
-                                    pass.colormix = p->colormix;
-                        };
-                        inject(st_top);
-                        inject(st_penu);
-                        p->stack_top_json  = st_top.to_json();
-                        p->stack_penu_json = st_penu.to_json();
-                    }
-                    refill();
-                });
-
-                btn_ren->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-                    const int id = selected_id();
-                    if (id == 0) return;
-                    const auto* p = mgr.find(id);
-                    wxTextEntryDialog td(&mdlg, _L("New name:"), _L("Rename profile"),
-                                         wxString::FromUTF8(p ? p->name : ""));
-                    if (td.ShowModal() == wxID_OK)
-                        mgr.rename(id, td.GetValue().ToStdString());
-                    refill();
-                });
-                btn_del->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-                    const int id = selected_id();
-                    if (id == 0) return;
-                    if (wxMessageBox(_L("Delete this profile?"), _L("Confirm"),
-                                     wxYES_NO | wxICON_QUESTION, &mdlg) == wxYES) {
-                        mgr.remove(id);
-                        refill();
-                    }
-                });
-                btn_cls->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { mdlg.EndModal(wxID_CLOSE); });
-
-                mdlg.ShowModal();
-            });
-        }
-        // NEOTKO_PROFILE_TAG_END
-
-        // ---- OK / Cancel ----
-        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, PAD);
-        SetSizerAndFit(vs);
-
-        // Wire OK to apply config
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-            if (e.GetId() == wxID_OK)
-                apply_effect_config();
-            e.Skip();
-        });
-    }
-};
-// NEOTKO_SURFACE_MIXER_TAG_END
 
 // NEOTKO_SANDWICH_TAG_START — Fase 3: SandwichDialog
 // ===========================================================================
@@ -6787,8 +2921,12 @@ private:
                 : wxString());
             u.minlbl[idx]->Show(thin);
         }
+        // NEOTKO_SANDWICH_TAG — s132: row box adaptativo al tema (en light mode el
+        // gris (60,60,60) salía casi negro). Dark = igual que el fork; light = gris claro.
+        const bool dark = wxGetApp().dark_mode();
         u.row_panel[idx]->SetBackgroundColour(
-            thin ? wxColour(48, 40, 32) : wxColour(60, 60, 60));
+            thin ? (dark ? wxColour(48, 40, 32) : wxColour(248, 236, 224))
+                 : (dark ? wxColour(60, 60, 60) : wxColour(228, 228, 228)));
 
         u.chips[idx]->Refresh();
         u.preview[idx]->Refresh();
@@ -6801,7 +2939,9 @@ private:
     {
         ZoneUI& u = m_ui[z];
         auto* row = new wxPanel(u.rows_host);
-        row->SetBackgroundColour(wxColour(60, 60, 60));
+        // NEOTKO_SANDWICH_TAG — s132: fondo inicial adaptativo (refresh_rows lo re-aplica).
+        row->SetBackgroundColour(wxGetApp().dark_mode() ? wxColour(60, 60, 60)
+                                                        : wxColour(228, 228, 228));
         auto* rv = new wxBoxSizer(wxVERTICAL);
         auto* rh = new wxBoxSizer(wxHORIZONTAL);
 
@@ -8125,16 +4265,9 @@ private:
 // NEOTKO_SANDWICH_TAG_END
 
 } // anonymous namespace
-// NEOTKO_COLORMIX_TAG_END
+// NEOTKO_COLORMIX_TAG_END — s130 UI port (ColorMixPatternDialog)
 
-// NEOTKO_COLORSTITCH_TAG — puente público (decl. en ColorStitchPatternLauncher.hpp)
-// para abrir el editor avanzado de patrón desde el 3D Painter gizmo, que no puede
-// ver la clase ColorMixPatternDialog (file-private, anon ns). Definido aquí, FUERA
-// del anon ns → linkage externo; la clase sigue siendo reachable porque el anon ns
-// inyecta sus nombres en Slic3r::GUI. Reusa la misma construcción de `options` que
-// los call-sites del SandwichDialog. A diferencia de open_edit_for(), NO reescribe
-// los knobs gradiente a DynamicPrintConfig: solo devuelve el patrón (+ ángulo), para
-// que varios ColorMix por nivel no se contaminen entre sí.
+// NEOTKO_COLORSTITCH_TAG — puente publico (decl. en ColorStitchPatternLauncher.hpp)
 bool open_colorstitch_pattern_dialog(
     wxWindow*                                 parent,
     const std::vector<std::string>&           fcolors,
@@ -8217,9 +4350,73 @@ bool open_colorstitch_pattern_dialog(
     return true;
 }
 
+
 #define DISABLE_UNDO_SYS
 
 static const std::vector<std::string> plate_keys = { "curr_bed_type", "skirt_start_angle", "first_layer_print_sequence", "first_layer_sequence_choice", "other_layers_print_sequence", "other_layers_sequence_choice", "print_sequence", "spiral_mode"};
+
+static std::string bed_type_to_rule_key(BedType bed_type)
+{
+    switch (bed_type) {
+    case btPEI:  return "btPEI";
+    case btGESP: return "btGESP";
+    default:     return "";
+    }
+}
+
+static std::string nozzle_diameter_to_rule_key(double nozzle_diameter)
+{
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2) << nozzle_diameter;
+    std::string out = ss.str();
+    while (!out.empty() && out.back() == '0')
+        out.pop_back();
+    if (!out.empty() && out.back() == '.')
+        out.pop_back();
+    return out + "mm";
+}
+
+static void validate_filament_hot_bed_nozzle_relation(wxWindow* parent)
+{
+    (void)parent;
+    auto& app = wxGetApp();
+    if (!app.has_filament_hot_bed_nozzle_rules() || app.preset_bundle == nullptr)
+        return;
+
+    const Preset& filament_preset = app.preset_bundle->filaments.get_edited_preset();
+    std::string filament_type;
+    if (auto filament_type_opt = filament_preset.config.option<ConfigOptionStrings>("filament_type");
+        filament_type_opt != nullptr && !filament_type_opt->values.empty())
+    {
+        filament_type = filament_type_opt->values.front();
+    }
+    if (filament_type.empty())
+        return;
+
+    auto&       printer_preset = app.preset_bundle->printers.get_edited_preset();
+    const auto& printer_config = printer_preset.config;
+    BedType     bed_type = printer_preset.get_default_bed_type(app.preset_bundle);
+    if (app.preset_bundle->project_config.has("curr_bed_type"))
+        bed_type = app.preset_bundle->project_config.opt_enum<BedType>("curr_bed_type");
+    const std::string bed_key = bed_type_to_rule_key(bed_type);
+
+    if (!bed_key.empty()) {        
+        const bool is_supported = app.is_bed_filament_supported(bed_key, filament_type);
+        const bool is_warning   = app.is_bed_filament_warning(bed_key, filament_type);
+        (void)is_supported;
+        (void)is_warning;
+    }
+
+    const auto* nozzle_opt = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzle_opt != nullptr && !nozzle_opt->values.empty()) {
+        const std::string nozzle_key = nozzle_diameter_to_rule_key(nozzle_opt->values.front());
+        NozzleType        nozzle_mat = NozzleType::ntUndefine;
+        if (const auto* nto = printer_config.option<ConfigOptionEnum<NozzleType>>("nozzle_type"))
+            nozzle_mat = nto->value;
+        const bool is_noz_warn = app.is_nozzle_filament_warning(nozzle_key, filament_preset.name, nozzle_mat);
+        (void)is_noz_warn;
+    }
+}
 
 void Tab::Highlighter::set_timer_owner(wxEvtHandler* owner, int timerid/* = wxID_ANY*/)
 {
@@ -9358,31 +5555,6 @@ void Tab::update_visibility()
     Thaw();
 }
 
-// NEOTKO_LIBRE_TAG_START — Less Used Toggle
-// Reads "less_used_opt_<key>" from app_config and sets toggle_visible = false on
-// matching Lines across all pages. Call at end of build() to initialize flags
-// before pages are activated. The flags are applied by OG_CustomCtrl::update_visibility()
-// when each page is first activated (init_ctrl_lines + update_visibility call chain).
-// The OG_CustomCtrl right-click handler manages its own per-optgroup refresh at runtime.
-void Tab::apply_less_used_visibility()
-{
-    auto* ac = wxGetApp().app_config;
-    if (!ac) return;
-
-    for (auto& page : m_pages) {
-        for (auto& group : page->m_optgroups) {
-            auto& lines = const_cast<std::vector<Line>&>(group->get_lines());
-            for (auto& l : lines) {
-                if (l.get_options().empty()) continue;
-                const std::string& key = l.get_options()[0].opt_id;
-                if (ac->get("less_used_opt_" + key) == "1")
-                    l.toggle_visible = false;
-            }
-        }
-    }
-}
-// NEOTKO_LIBRE_TAG_END
-
 void Tab::msw_rescale()
 {
     m_em_unit = em_unit(m_parent);
@@ -9645,6 +5817,41 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
     if(opt_key == "purge_in_prime_tower")
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
 
+    if (m_type == Preset::TYPE_PRINT && opt_key == "dithering_local_z_mode") {
+        const bool local_z_enabled = boost::any_cast<bool>(value);
+        DynamicPrintConfig new_conf = *m_config;
+        bool dependent_config_changed = false;
+        DynamicPrintConfig &project_cfg = wxGetApp().preset_bundle->project_config;
+
+        auto set_print_bool = [this, &new_conf, &dependent_config_changed](const char *key, bool enabled) {
+            if (!m_config->has(key) || m_config->option(key) == nullptr || m_config->opt_bool(key) == enabled)
+                return;
+            new_conf.set_key_value(key, new ConfigOptionBool(enabled));
+            dependent_config_changed = true;
+        };
+        auto set_project_bool = [&project_cfg](const char *key, bool enabled) {
+            project_cfg.set_key_value(key, new ConfigOptionBool(enabled));
+        };
+
+        if (local_z_enabled) {
+            set_print_bool("dithering_local_z_infill", true);
+        } else {
+            set_print_bool("dithering_local_z_whole_objects", false);
+            set_print_bool("dithering_local_z_infill", false);
+            set_project_bool("dithering_local_z_direct_multicolor", false);
+        }
+
+        if (dependent_config_changed)
+            m_config_manipulation.apply(m_config, &new_conf);
+
+        if (new_conf.has("dithering_local_z_whole_objects"))
+            set_project_bool("dithering_local_z_whole_objects", new_conf.opt_bool("dithering_local_z_whole_objects"));
+        if (new_conf.has("dithering_local_z_infill"))
+            set_project_bool("dithering_local_z_infill", new_conf.opt_bool("dithering_local_z_infill"));
+
+        if (auto* plater = wxGetApp().plater())
+            plater->notify_vhl_dithering_conflict(local_z_enabled);
+    }
 
     if (opt_key == "enable_prime_tower") {
         auto timelapse_type = m_config->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
@@ -9672,50 +5879,6 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
         update_wiping_button_visibility();
     }
-
-    if (opt_key == "dithering_local_z_mode") {
-        const bool local_z_enabled = boost::any_cast<bool>(value);
-        if (local_z_enabled &&
-            (!m_config->has("mixed_filament_region_collapse") ||
-             m_config->option("mixed_filament_region_collapse") == nullptr ||
-             m_config->opt_bool("mixed_filament_region_collapse"))) {
-            change_opt_value(*m_config, "mixed_filament_region_collapse", boost::any(false));
-            if (m_type == Preset::TYPE_PRINT) {
-                DynamicPrintConfig &project_cfg = wxGetApp().preset_bundle->project_config;
-                project_cfg.set_key_value("mixed_filament_region_collapse", new ConfigOptionBool(false));
-            }
-            if (Field *field = this->get_field("mixed_filament_region_collapse"))
-                field->set_value(boost::any(false), false);
-            update_dirty();
-        }
-        if (!local_z_enabled &&
-            m_config->has("dithering_local_z_whole_objects") &&
-            m_config->option("dithering_local_z_whole_objects") != nullptr &&
-            m_config->opt_bool("dithering_local_z_whole_objects")) {
-            change_opt_value(*m_config, "dithering_local_z_whole_objects", boost::any(false));
-            if (m_type == Preset::TYPE_PRINT) {
-                DynamicPrintConfig &project_cfg = wxGetApp().preset_bundle->project_config;
-                project_cfg.set_key_value("dithering_local_z_whole_objects", new ConfigOptionBool(false));
-            }
-            if (Field *field = this->get_field("dithering_local_z_whole_objects"))
-                field->set_value(boost::any(false), false);
-            update_dirty();
-        }
-        if (!local_z_enabled &&
-            m_config->has("dithering_local_z_direct_multicolor") &&
-            m_config->option("dithering_local_z_direct_multicolor") != nullptr &&
-            m_config->opt_bool("dithering_local_z_direct_multicolor")) {
-            change_opt_value(*m_config, "dithering_local_z_direct_multicolor", boost::any(false));
-            if (m_type == Preset::TYPE_PRINT) {
-                DynamicPrintConfig &project_cfg = wxGetApp().preset_bundle->project_config;
-                project_cfg.set_key_value("dithering_local_z_direct_multicolor", new ConfigOptionBool(false));
-            }
-            if (Field *field = this->get_field("dithering_local_z_direct_multicolor"))
-                field->set_value(boost::any(false), false);
-            update_dirty();
-        }
-    }
-
 
     if (opt_key == "single_extruder_multi_material"  ){
         const auto bSEMM = m_config->opt_bool("single_extruder_multi_material");
@@ -10004,7 +6167,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
     }
 
     const bool refresh_mixed_filament_panel =
-        m_type == Preset::TYPE_PRINT && opt_key == "mixed_filament_component_bias_enabled";
+        (m_type == Preset::TYPE_PRINT && opt_key == "mixed_filament_component_bias_enabled") ||
+        (m_type == Preset::TYPE_FILAMENT && opt_key == "filament_type");
 
     // Keep Mixed Filaments global settings in sync with project_config. In
     // full_fff_config(), project_config is applied last and would otherwise
@@ -10024,6 +6188,7 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
          opt_key == "dithering_z_step_size" ||
          opt_key == "dithering_local_z_mode" ||
          opt_key == "dithering_local_z_whole_objects" ||
+         opt_key == "dithering_local_z_infill" ||
          opt_key == "dithering_local_z_direct_multicolor" ||
          opt_key == "dithering_step_painted_zones_only" ||
          opt_key == "mixed_filament_definitions")) {
@@ -10037,8 +6202,10 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         m_active_page->update_visibility(m_mode, true);
     m_page_view->GetParent()->Layout();
 
-    if (refresh_mixed_filament_panel && wxGetApp().plater() != nullptr)
+    if (refresh_mixed_filament_panel && wxGetApp().plater() != nullptr) {
         wxGetApp().sidebar().update_mixed_filament_panel(false);
+        wxGetApp().sidebar().update_color_mix_panel();
+    }
 }
 
 void Tab::show_timelapse_warning_dialog() {
@@ -10433,7 +6600,6 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
         optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
-        // Arachne keys — shown when wall_generator == Arachne (toggle_line in ConfigManipulation).
         optgroup->append_single_option_line("wall_transition_angle", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_filter_deviation", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_length", "quality_settings_wall_generator#arachne");
@@ -10442,40 +6608,6 @@ void TabPrint::build()
         optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
-        // NEOTKO_NEOARACHNE_TAG fase2+fase3.0 — same optgroup as Arachne for visual
-        // consistency: keys appear inline below the wall_generator dropdown when
-        // NeoArachne is selected, mirroring how Arachne's keys show below it.
-        // toggle_line gating lives in ConfigManipulation (have_neoarachne).
-        optgroup->append_single_option_line("neoarachne_outer_wall",           "quality_settings_wall_generator#neoarachne");
-        optgroup->append_single_option_line("neoarachne_inner_walls",          "quality_settings_wall_generator#neoarachne");
-        optgroup->append_single_option_line("neoarachne_gap_fill",             "quality_settings_wall_generator#neoarachne");
-        optgroup->append_single_option_line("neoarachne_allowed_overlap_pct",  "quality_settings_wall_generator#neoarachne-edge-closure");
-        optgroup->append_single_option_line("neoarachne_min_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
-        optgroup->append_single_option_line("neoarachne_max_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
-        optgroup->append_single_option_line("neoarachne_min_feature_size_pct", "quality_settings_wall_generator#neoarachne-edge-closure");
-        optgroup->append_single_option_line("neoarachne_keep_short_tails",     "quality_settings_wall_generator#neoarachne-edge-closure");
-        // NEOTKO_NEOARACHNE_TAG fase3
-        optgroup->append_single_option_line("neoarachne_bead_count_hysteresis_pct", "quality_settings_wall_generator#neoarachne-neotkoedge");
-        // NEOTKO_NEOARACHNE_TAG fase4
-        optgroup->append_single_option_line("neoarachne_transition_filter_dist_mm",  "quality_settings_wall_generator#neoarachne-neotkoedge");
-
-        // NEOTKO_NEOARACHNE_TAG preview-lab PL.2+PL.3+PL.6 — reactive inline canvas.
-        // Renders the W test geometry every time the user touches an Edge Closure
-        // slider so the effect is visible without re-slicing the whole bed.
-        // Pass `this` so the panel reads the LIVE Tab config (includes per-object
-        // and per-plate overrides), not just the bundle's saved preset.
-        {
-            Line preview_line(_L("Edge Closure preview"), wxEmptyString);
-            preview_line.full_width = 1;
-            Tab* tab_self = this;
-            preview_line.widget = [tab_self](wxWindow* parent) -> wxSizer* {
-                auto* sizer = new wxBoxSizer(wxHORIZONTAL);
-                auto* canvas = new NeoArachnePreviewPanel(parent, tab_self);
-                sizer->Add(canvas, 1, wxEXPAND | wxALL, 4);
-                return sizer;
-            };
-            optgroup->append_line(preview_line);
-        }
 
         optgroup = page->new_optgroup(L("Walls and surfaces"), L"param_wall_surface");
         optgroup->append_single_option_line("wall_sequence", "quality_settings_wall_and_surfaces#walls-printing-order");
@@ -10508,60 +6640,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("dont_filter_internal_bridges", "quality_settings_bridging#filter-out-small-internal-bridges");
         optgroup->append_single_option_line("counterbore_hole_bridging", "quality_settings_bridging#bridge-counterbore-hole");
 
-        // NEOTKO_NEOWEAVING_TAG_START
-        optgroup = page->new_optgroup(L("Neotko Neoweaving"));
-        optgroup->append_single_option_line("interlayer_neoweave_enabled");
-        optgroup->append_single_option_line("interlayer_neoweave_mode");
-        optgroup->append_single_option_line("neoweave_filter");
-        optgroup->append_single_option_line("interlayer_neoweave_amplitude");
-        optgroup->append_single_option_line("interlayer_neoweave_period");
-        optgroup->append_single_option_line("interlayer_neoweave_max_z_speed");
-        optgroup->append_single_option_line("interlayer_neoweave_min_length");
-        optgroup->append_single_option_line("neoweave_penultimate_layers");
-        optgroup->append_single_option_line("neoweave_speed_pct");
-        // NEOTKO_NEOWEAVING_TAG_START — Feature 14: Monotonic Interlayer Nesting
-        optgroup->append_single_option_line("neotko_interlayer_nesting_enabled");
-        // NEOTKO_NEOWEAVING_TAG_END
-
-        // NEOTKO_SURFACE_MIXER_TAG_START - Surface Color Mixer (replaces separate ColorMix/MultiPass/PathBlend controls)
-        optgroup = page->new_optgroup(L("Surface ColorStitch")); // NEOTKO_COLORSTITCH_TAG — rebrand UI (keys intactas)
-
-        // NEOTKO_SURFACE_MIXER_TAG — s97: el checkbox "Enable Surface Color Mixer"
-        // se retira. Tras s96+s97 la única fuente de verdad del enable es el stack
-        // del SandwichDialog (blobs neotko_surface_passes_top/_penu + sus toggles
-        // per-zone). El checkbox externo se auto-revertía cuando había stack JSON
-        // poblado (apagar = no persiste, on→off→on de un solo refresh), y duplicaba
-        // controles. La entrada al editor vive en la fila "Sandwich editor…" abajo.
-
-        // Row 2 (legacy "Edit Surface Color Mixer…" launcher) — DESHABILITADO en s90.
-        // El SandwichDialog (Row 3 abajo) absorbe toda la funcionalidad; el último
-        // bit que faltaba ("ColorMix min. line length") está ahora en el Advanced
-        // per-pass de ColorMix (ColorMixPatternDialog). La clase SurfaceColorMixerDialog
-        // se conserva intacta como referencia hasta la retirada formal en Fase 7
-        // (ROADMAP_UNIFIED.md s82 punto 3).
-#if 0
-        // Row 2: Edit button — separate line below the Enable checkbox.
-        create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
-            [this](wxWindow* parent) -> wxSizer* {
-                auto* btn = new wxButton(parent, wxID_ANY,
-                                         _L("Edit Surface Color Mixer\u2026"),
-                                         wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    SurfaceColorMixerDialog dlg(
-                        wxGetApp().mainframe,
-                        m_config,
-                        [this](const std::string& key) {
-                            on_value_change(key, boost::any());
-                        });
-                    dlg.ShowModal();
-                });
-                auto* sz = new wxBoxSizer(wxHORIZONTAL);
-                sz->Add(btn, 0, wxALL, 3);
-                return sz;
-            });
-#endif // s90: legacy SurfaceColorMixerDialog launcher disabled
-        // NEOTKO_SANDWICH_TAG — Fase 3: launcher for the pass-stack editor,
-        // on its own row below the legacy dialog button.
+        // NEOTKO_SANDWICH_TAG — s132 port: "Surface ColorStitch" optgroup hosting the
+        // pass-stack (sandwich) editor launcher + ColorStitch min. line length.
+        // El enable real vive en el stack del SandwichDialog (blobs neotko_surface_passes_*),
+        // por eso aquí no hay checkbox externo (retirado s97). El launcher legacy
+        // SurfaceColorMixerDialog (#if 0 en el fork) NO se porta — dead-code retirado.
+        optgroup = page->new_optgroup(L("Surface ColorStitch"));
         create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
             [this](wxWindow* parent) -> wxSizer* {
                 auto* sw_btn = new wxButton(parent, wxID_ANY,
@@ -10582,16 +6666,7 @@ void TabPrint::build()
                 sz->Add(sw_btn, 0, wxALL, 3);
                 return sz;
             });
-        // NEOTKO_COLORMIX_TAG s99 — surface interlayer_colormix_min_length here
-        // as "Min. Segment" so it stops being buried in the SandwichDialog Linear
-        // panel / retired "More" toggle. Gates which lines participate in the
-        // ColorMix per-line split (lines shorter than this fall back to the
-        // region's default extruder).
         optgroup->append_single_option_line("interlayer_colormix_min_length");
-        // NEOTKO_COLORMIX_TAG — s60: numeric gradient controls live INSIDE the
-        // Surface Color Mixer dialog (Gradient section). The optgroup is only
-        // for the master enable + dialog launcher.
-        // NEOTKO_SURFACE_MIXER_TAG_END
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");
@@ -10613,10 +6688,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("top_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
         optgroup->append_single_option_line("top_shell_layers");
         optgroup->append_single_option_line("top_shell_thickness");
-        // NEOTKO_LIBRE_TAG_START — Feature 4: Top/Bottom Surface Density UI
-        optgroup->append_single_option_line("top_surface_density");
-        // NEOTKO_LIBRE_TAG_END
-        // NEOTKO_COLORMIX_TAG_START — Penultimate Top Layers Control
+        // NEOTKO_COLORMIX_TAG_START — Penultimate surface controls (port s129). Keys exist in
+        // PrintConfig (s124) but had no UI in the 2.3.4 port → penultimate never generated.
+        // penultimate_infill_speed stays hidden (fork: speed not correct yet, uses top_surface_speed).
         optgroup->append_single_option_line("penultimate_top_layers");
         optgroup->append_single_option_line("penultimate_solid_infill_pattern");
         optgroup->append_single_option_line("penultimate_solid_infill_density");
@@ -10624,21 +6698,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("bottom_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
         optgroup->append_single_option_line("bottom_shell_layers");
         optgroup->append_single_option_line("bottom_shell_thickness");
-        // NEOTKO_LIBRE_TAG_START — Feature 4: Bottom Surface Density UI
-        optgroup->append_single_option_line("bottom_surface_density");
-        // NEOTKO_LIBRE_TAG_END
         optgroup->append_single_option_line("top_bottom_infill_wall_overlap");
 
         optgroup = page->new_optgroup(L("Infill"), L"param_infill");
         optgroup->append_single_option_line("sparse_infill_density", "strength_settings_infill#sparse-infill-density");
         optgroup->append_single_option_line("fill_multiline", "strength_settings_infill#fill-multiline");
         optgroup->append_single_option_line("sparse_infill_pattern", "strength_settings_infill#sparse-infill-pattern");
-        if (m_type >= Preset::TYPE_COUNT) {
-            optgroup->append_single_option_line("enable_infill_filament_override");
-            optgroup->append_single_option_line("infill_filament_use_base_first_layers");
-            optgroup->append_single_option_line("infill_filament_use_base_last_layers");
-            optgroup->append_single_option_line("sparse_infill_filament", "multimaterial_settings_filament_for_features#infill");
-        }
         optgroup->append_single_option_line("infill_direction", "strength_settings_infill#direction");
         optgroup->append_single_option_line("sparse_infill_rotate_template", "strength_settings_infill_rotation_template_metalanguage");
         optgroup->append_single_option_line("skin_infill_density", "strength_settings_patterns#locked-zag");
@@ -10686,10 +6751,6 @@ void TabPrint::build()
         optgroup->append_single_option_line("sparse_infill_speed", "speed_settings_other_layers_speed#sparse-infill");
         optgroup->append_single_option_line("internal_solid_infill_speed", "speed_settings_other_layers_speed#internal-solid-infill");
         optgroup->append_single_option_line("top_surface_speed", "speed_settings_other_layers_speed#top-surface");
-        // NEOTKO_COLORMIX_TAG_START — penultimate_infill_speed: key exists but UI hidden
-        // Speed not working correctly — penultimate uses top_surface_speed for now. FASE 2.
-        // optgroup->append_single_option_line("penultimate_infill_speed");
-        // NEOTKO_COLORMIX_TAG_END
         optgroup->append_single_option_line("gap_infill_speed", "speed_settings_other_layers_speed#gap-infill");
         optgroup->append_single_option_line("ironing_speed", "speed_settings_other_layers_speed#ironing-speed");
         optgroup->append_single_option_line("support_speed", "speed_settings_other_layers_speed#support");
@@ -10817,11 +6878,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("prime_tower_brim_width", "multimaterial_settings_prime_tower#brim-width");
         optgroup->append_single_option_line("prime_tower_brim_chamfer", "multimaterial_settings_prime_tower#brim-chamfer");
         optgroup->append_single_option_line("prime_tower_brim_chamfer_max_width", "multimaterial_settings_prime_tower#brim-chamfer-max-width");
-        optgroup->append_single_option_line("wipe_tower_rotation_angle", "multimaterial_settings_prime_tower#wipe-tower-rotation-angle");
+
         optgroup->append_single_option_line("wipe_tower_bridging", "multimaterial_settings_prime_tower#maximal-bridging-distance");
         optgroup->append_single_option_line("wipe_tower_extra_spacing", "multimaterial_settings_prime_tower#wipe-tower-purge-lines-spacing");
         optgroup->append_single_option_line("wipe_tower_extra_flow", "multimaterial_settings_prime_tower#extra-flow-for-purge");
-        optgroup->append_single_option_line("local_z_wipe_tower_purge_lines", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_max_purge_speed", "multimaterial_settings_prime_tower#maximum-wipe-tower-print-speed");
         optgroup->append_single_option_line("wipe_tower_wall_type", "multimaterial_settings_prime_tower#wall-type");
         optgroup->append_single_option_line("wipe_tower_cone_angle", "multimaterial_settings_prime_tower#stabilization-cone-apex-angle");
@@ -10829,25 +6889,21 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_rib_width", "multimaterial_settings_prime_tower#rib-width");
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
+        optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("single_extruder_multi_material_priming", "multimaterial_settings_prime_tower");
-        // NEOTKO_NEOTOWER_TAG_START
-        // NEOTKO_NEOTOWER_TAG s104 — tower type selector replaces the legacy
-        // neotko_wipe_tower checkbox (decisión s103: enum estilo wall_type).
-        // The bool key stays registered as a hidden fallback for old profiles.
+        // NEOTKO_NEOTOWER_TAG (port s129) — tower type selector (Classic / NeoTower) + NeoTower knobs.
+        // Keys exist in PrintConfig but had no UI in the 2.3.4 port. neotko_wipe_tower bool stays
+        // hidden as a fallback for old profiles. Sandwich/MultiPass scenes use NeoTower automatically.
         optgroup->append_single_option_line("neotko_tower_type");
         optgroup->append_single_option_line("neotower_zigurat");
         optgroup->append_single_option_line("neotower_purge_compaction");
-        // NEOTKO_MULTIPASS_PRIME_TAG — s58: SurfaceColorMix wipe reserve (unified).
-        // Was previously buried inside MultiPassConfigDialog as two separate fields
-        // (multipass_prime_volume + penultimate_multipass_prime_volume).  Now a single
-        // global setting under NeoTower.
         optgroup->append_single_option_line("multipass_prime_volume");
-        // NEOTKO_NEOTOWER_TAG_END
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");
         optgroup->append_single_option_line("wall_filament", "multimaterial_settings_filament_for_features#walls");
+        optgroup->append_single_option_line("sparse_infill_filament", "multimaterial_settings_filament_for_features#infill");
         optgroup->append_single_option_line("solid_infill_filament", "multimaterial_settings_filament_for_features#solid-infill");
-        optgroup->append_single_option_line("wipe_tower_filament", "multimaterial_settings_filament_for_features#wipe-tower");
+        //optgroup->append_single_option_line("wipe_tower_filament", "multimaterial_settings_filament_for_features#wipe-tower");
 
         optgroup = page->new_optgroup(L("Ooze prevention"), L"param_ooze_prevention");
         optgroup->append_single_option_line("ooze_prevention", "multimaterial_settings_ooze_prevention");
@@ -10871,7 +6927,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("interlocking_depth", "multimaterial_settings_advanced#interlocking-depth");
         optgroup->append_single_option_line("interlocking_boundary_avoidance", "multimaterial_settings_advanced#interlocking-boundary-avoidance");
 
-page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only visible on placeholders
+        optgroup = page->new_optgroup(L("Color Mixing (Experimental)"), L"param_mixed_color");
+        optgroup->append_single_option_line("dithering_local_z_mode");
+        optgroup->append_single_option_line("dithering_local_z_whole_objects");
+        optgroup->append_single_option_line("dithering_local_z_infill");
+
+    page = add_options_page(L("Others"), "custom-gcode_other"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Skirt"), L"param_skirt");
 optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops");
         optgroup->append_single_option_line("skirt_type", "others_settings_skirt#type");
@@ -10901,25 +6962,6 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("spiral_finishing_flow_ratio", "others_settings_special_mode#spiral-finishing-flow-ratio");
 
         optgroup->append_single_option_line("timelapse_type", "others_settings_special_mode#timelapse");
-
-        // Use default (no icon) here to avoid runtime bitmap load failures.
-        optgroup = page->new_optgroup(L("Mixed Filaments"));
-        // Height-weighted cadence is no longer exposed in the Others tab.
-        // optgroup->append_single_option_line("mixed_filament_gradient_mode");
-        optgroup->append_single_option_line("mixed_filament_height_lower_bound");
-        optgroup->append_single_option_line("mixed_filament_height_upper_bound");
-        optgroup->append_single_option_line("mixed_filament_advanced_dithering");
-        // Pointillisme controls are retired; keep config keys for compatibility only.
-        // optgroup->append_single_option_line("mixed_filament_pointillism_pixel_size");
-        // optgroup->append_single_option_line("mixed_filament_pointillism_line_gap");
-        optgroup->append_single_option_line("mixed_filament_component_bias_enabled");
-        optgroup->append_single_option_line("mixed_filament_surface_indentation");
-        optgroup->append_single_option_line("mixed_filament_region_collapse");
-        optgroup->append_single_option_line("dithering_z_step_size");
-        optgroup->append_single_option_line("dithering_local_z_mode");
-        optgroup->append_single_option_line("dithering_local_z_whole_objects");
-        optgroup->append_single_option_line("dithering_local_z_direct_multicolor");
-        optgroup->append_single_option_line("dithering_step_painted_zones_only");
 
         optgroup = page->new_optgroup(L("Fuzzy Skin"), L"fuzzy_skin");
         optgroup->append_single_option_line("fuzzy_skin", "others_settings_fuzzy_skin");
@@ -10971,10 +7013,6 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
     //     optgroup->append_single_option_line(option);
 
     //     build_preset_description_line(optgroup.get());
-
-    // NEOTKO_LIBRE_TAG_START — Less Used Toggle: apply saved flags at build time
-    apply_less_used_visibility();
-    // NEOTKO_LIBRE_TAG_END
 }
 
 // Reload current config (aka presets->edited_preset->config) into the UI fields.
@@ -11034,24 +7072,61 @@ void TabPrint::toggle_options()
         cb->SetValue(n);
     }
 
-    // NEOTKO_LIBRE_TAG_START — Support options always accessible in Libre Mode
-    // ConfigManipulation gates these on have_support_interface / have_prime_tower.
-    // In LM we want them always visible and editable regardless of those conditions,
-    // so we override here AFTER toggle_print_fff_options() has already run.
-    {
-        auto* ac = wxGetApp().app_config;
-        if (ac && ac->get_bool("neotko_libre_mode")) {
-            toggle_line("support_top_z_distance",          true);
-            toggle_option("support_top_z_distance",        true);
-            toggle_line("support_interface_spacing",       true);
-            toggle_option("support_interface_spacing",     true);
-            toggle_line("independent_support_layer_height", true);
-            toggle_option("independent_support_layer_height", true);
+    // Keep plate bed-type list in sync with currently selected printer.
+    if (m_type == Preset::TYPE_PLATE && m_active_page->title() == L("Plate Settings")) {
+        Field* bed_type_field = m_active_page->get_field("curr_bed_type");
+        if (auto bed_type_choice = dynamic_cast<Choice*>(bed_type_field)) {
+            auto bed_type_cb = dynamic_cast<ComboBox*>(bed_type_choice->window);
+            auto bed_type_def = print_config_def.get("curr_bed_type");
+            if (bed_type_cb && bed_type_def) {
+                const Preset& printer_preset = m_preset_bundle->printers.get_selected_preset();
+                auto printer_cfg = m_preset_bundle->printers.get_edited_preset().config;
+                bool is_snapmaker_u1 = boost::icontains(printer_preset.name, "Snapmaker U1");
+                if (auto printer_model_opt = printer_cfg.option<ConfigOptionString>("printer_model")) {
+                    const std::string printer_model = printer_model_opt->value;
+                    is_snapmaker_u1 = is_snapmaker_u1 || (boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1"));
+                }
+                bool support_multi_bed_types = false;
+                if (auto support_multi_bed_types_opt = printer_cfg.option<ConfigOptionBool>("support_multi_bed_types")) {
+                    support_multi_bed_types = support_multi_bed_types_opt->value;
+                }
+
+                auto& opt = const_cast<ConfigOptionDef&>(bed_type_field->m_opt);
+                opt.enum_values.clear();
+                opt.enum_labels.clear();
+
+                const std::vector<std::string>* target_values = &bed_type_def->enum_values;
+                const std::vector<std::string>* target_labels = &bed_type_def->enum_labels;
+                if (is_snapmaker_u1) {
+                    if (support_multi_bed_types) {
+                        target_values = &bed_type_def->enum_values_ex;
+                        target_labels = &bed_type_def->enum_labels_ex;
+                    } else {
+                        target_values = &bed_type_def->enum_values_u1;
+                        target_labels = &bed_type_def->enum_labels_u1;
+                    }
+                }
+
+                bed_type_cb->Clear();
+                for (size_t i = 0; i < target_values->size() && i < target_labels->size(); ++i) {
+                    opt.enum_values.push_back((*target_values)[i]);
+                    opt.enum_labels.push_back((*target_labels)[i]);
+                    bed_type_cb->Append(_((*target_labels)[i]));
+                }
+
+                int curr_bed_type = m_config->opt_enum<BedType>("curr_bed_type");
+                std::string curr_key;
+                for (const auto& kv : *bed_type_def->enum_keys_map) {
+                    if (kv.second == curr_bed_type) {
+                        curr_key = kv.first;
+                        break;
+                    }
+                }
+                auto it = std::find(opt.enum_values.begin(), opt.enum_values.end(), curr_key);
+                bed_type_cb->SetSelection(it == opt.enum_values.end() ? 0 : int(it - opt.enum_values.begin()));
+            }
         }
     }
-    // NEOTKO_LIBRE_TAG_END
-
-    // NEOTKO_SURFACE_MIXER_TAG: Effect assignment is managed inside SurfaceColorMixerDialog.
 }
 
 void TabPrint::update()
@@ -11130,11 +7205,6 @@ static std::vector<std::string> substruct(std::vector<std::string> const& l, std
 static DynamicPrintConfig resolved_model_config_for_tab(const DynamicPrintConfig& config)
 {
     DynamicPrintConfig resolved(config);
-    const auto*        infill_override_opt = config.option<ConfigOptionBool>("enable_infill_filament_override");
-    const bool         infill_override_enabled = infill_override_opt != nullptr && infill_override_opt->value;
-
-    if (!infill_override_enabled && resolved.has("sparse_infill_filament"))
-        resolved.erase("sparse_infill_filament");
 
     if (const auto* extruder_opt = config.option<ConfigOptionInt>("extruder"); extruder_opt != nullptr && extruder_opt->value > 0) {
         const int extruder = extruder_opt->value;
@@ -11150,6 +7220,18 @@ static DynamicPrintConfig resolved_model_config_for_tab(const DynamicPrintConfig
         resolved.set_key_value("solid_infill_filament", new ConfigOptionInt(resolved.opt_int("sparse_infill_filament")));
 
     return resolved;
+}
+
+static void sync_plate_bed_type_to_global(DynamicPrintConfig& config)
+{
+    if (wxGetApp().preset_bundle == nullptr)
+        return;
+
+    DynamicConfig& global_cfg = wxGetApp().preset_bundle->project_config;
+    if (global_cfg.has("curr_bed_type")) {
+        BedType global_bed_type = global_cfg.opt_enum<BedType>("curr_bed_type");
+        config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(global_bed_type));
+    }
 }
 
 TabPrintModel::TabPrintModel(ParamsPanel* parent, std::vector<std::string> const & keys)
@@ -11187,11 +7269,7 @@ void TabPrintModel::build()
                 l.undo_to_sys = true;
             }
             lines.erase(std::remove_if(lines.begin(), lines.end(), [](auto & l) {
-                // NEOTKO_NEOARACHNE_TAG preview-lab — widget-only lines (e.g. the
-                // NeoArachne preview canvas) have no options but ARE meaningful.
-                // Keeping them lets the same preview render under per-object
-                // overrides, where it reflects the merged config.
-                return l.get_options().empty() && l.widget == nullptr;
+                return l.get_options().empty();
             }), lines.end());
             // TODO: remove items from g->m_options;
             g->have_sys_config = [this] { m_back_to_sys = true; return true; };
@@ -11203,10 +7281,6 @@ void TabPrintModel::build()
     m_pages.erase(std::remove_if(m_pages.begin(), m_pages.end(), [](auto & p) {
         return p->m_optgroups.empty();
     }), m_pages.end());
-
-    // NEOTKO_LIBRE_TAG_START — Less Used Toggle: apply after key filtering
-    apply_less_used_visibility();
-    // NEOTKO_LIBRE_TAG_END
 }
 
 void TabPrintModel::set_model_config(std::map<ObjectBase *, ModelConfig *> const & object_configs)
@@ -11224,6 +7298,9 @@ void TabPrintModel::update_model_config()
     m_config->apply(*m_parent_tab->m_config);
     if (m_type != Preset::TYPE_PLATE) {
         m_config->apply_only(*wxGetApp().plate_tab->get_config(), plate_keys);
+    } else {
+        sync_plate_bed_type_to_global(m_prints.get_selected_preset().config);
+        sync_plate_bed_type_to_global(*m_config);
     }
     m_null_keys.clear();
     if (!m_object_configs.empty()) {
@@ -11417,11 +7494,9 @@ void TabPrintPlate::build()
     load_initial_data();
 
     m_config->option("curr_bed_type", true);
-    if (m_preset_bundle->project_config.has("curr_bed_type")) {
-        BedType global_bed_type = m_preset_bundle->project_config.opt_enum<BedType>("curr_bed_type");
-        global_bed_type = BedType(global_bed_type - 1);
-        m_config->set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(global_bed_type));
-    }
+    m_prints.get_selected_preset().config.option("curr_bed_type", true);
+    sync_plate_bed_type_to_global(m_prints.get_selected_preset().config);
+    sync_plate_bed_type_to_global(*m_config);
     m_config->option("first_layer_sequence_choice", true);
     m_config->option("first_layer_print_sequence", true);
     m_config->option("other_layers_print_sequence", true);
@@ -11429,7 +7504,32 @@ void TabPrintPlate::build()
 
     auto page = add_options_page(L("Plate Settings"), "empty");
     auto optgroup = page->new_optgroup("");
-    optgroup->append_single_option_line("curr_bed_type");
+    {
+        Option bed_type_option = optgroup->get_option("curr_bed_type");
+        bool is_snapmaker_u1 = false;
+        bool support_multi_bed_types = false;
+        const Preset& printer_preset = m_preset_bundle->printers.get_edited_preset();
+        auto printer_cfg = printer_preset.config;
+        is_snapmaker_u1 = boost::icontains(printer_preset.name, "Snapmaker U1");
+        if (auto printer_model_opt = printer_cfg.option<ConfigOptionString>("printer_model")) {
+            const std::string printer_model = printer_model_opt->value;
+            is_snapmaker_u1 = is_snapmaker_u1 || (boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1"));
+        }
+        if (auto support_multi_bed_types_opt = printer_cfg.option<ConfigOptionBool>("support_multi_bed_types")) {
+            support_multi_bed_types = support_multi_bed_types_opt->value;
+        }
+
+        if (is_snapmaker_u1) {
+            if (support_multi_bed_types) {
+                bed_type_option.opt.enum_values = bed_type_option.opt.enum_values_ex;
+                bed_type_option.opt.enum_labels = bed_type_option.opt.enum_labels_ex;
+            } else {
+                bed_type_option.opt.enum_values = bed_type_option.opt.enum_values_u1;
+                bed_type_option.opt.enum_labels = bed_type_option.opt.enum_labels_u1;
+            }
+        }
+        optgroup->append_single_option_line(bed_type_option);
+    }
     optgroup->append_single_option_line("skirt_start_angle");
     optgroup->append_single_option_line("print_sequence");
     optgroup->append_single_option_line("spiral_mode");
@@ -11571,6 +7671,8 @@ void TabPrintPlate::on_value_change(const std::string& opt_key, const boost::any
     }
 
     wxGetApp().params_panel()->notify_object_config_changed();
+    if (k == "curr_bed_type")
+        validate_filament_hot_bed_nozzle_relation(parent());
     update();
 }
 
@@ -11630,18 +7732,7 @@ void TabPrintObject::notify_changed(ObjectBase * object)
 //BBS: GUI refactor
 
 TabPrintPart::TabPrintPart(ParamsPanel* parent) :
-    // NEOTKO_LIBRE_TAG_START — Assembled Parts Full Options
-    // In Libre Mode: expose the same keys as TabPrintObject (ObjectConfig + RegionConfig).
-    // NOTE: The tab is built once at startup. If Libre Mode is toggled at runtime,
-    // a restart is required for this change to take effect.
-    // wipe_tower_* are in PrintConfig (global) — not in PrintObjectConfig, never shown here.
-    TabPrintModel(parent, ([](){
-        auto* ac = wxGetApp().app_config;
-        if (ac && ac->get_bool("neotko_libre_mode"))
-            return concat(PrintObjectConfig().keys(), PrintRegionConfig().keys());
-        return PrintRegionConfig().keys();
-    })())
-    // NEOTKO_LIBRE_TAG_END
+    TabPrintModel(parent, PrintRegionConfig().keys())
 {
     m_parent_tab = wxGetApp().get_model_tab();
 }
@@ -11651,46 +7742,6 @@ void TabPrintPart::notify_changed(ObjectBase * object)
     auto vol = dynamic_cast<ModelVolume*>(object);
     wxGetApp().obj_list()->object_config_options_changed({vol->get_object(), vol});
 }
-
-// NEOTKO_LIBRE_TAG_START — Assembled Parts Full Options
-// Copies ObjectConfig overrides from the Part's ModelVolume config → parent ModelObject config,
-// then schedules a reslice. Only ObjectConfig keys that are explicitly set in the volume config
-// are copied — RegionConfig keys are handled natively per-volume by the slicer already.
-void TabPrintPart::refresh_part_object_config()
-{
-    const auto obj_key_vec = PrintObjectConfig().keys();
-    const auto is_obj_key = [&obj_key_vec](const std::string& k) {
-        return std::find(obj_key_vec.begin(), obj_key_vec.end(), k) != obj_key_vec.end();
-    };
-
-    bool any_copied = false;
-    for (auto& [obj_base, model_config] : m_object_configs) {
-        auto* vol = dynamic_cast<ModelVolume*>(obj_base);
-        if (!vol) continue;
-        ModelObject* obj = vol->get_object();
-        const DynamicPrintConfig& vol_cfg = model_config->get();
-
-        for (const std::string& key : vol_cfg.keys()) {
-            if (!is_obj_key(key)) continue;
-            const ConfigOption* opt = vol_cfg.option(key);
-            if (!opt) continue;
-            obj->config.set_key_value(key, opt->clone());
-            any_copied = true;
-
-            if (std::getenv("ORCA_DEBUG_LIBRE")) {
-                FILE* f = fopen("/tmp/libre_debug.log", "a");
-                if (f) {
-                    fprintf(f, "[REFRESH_SETTINGS] vol→obj key=%s\n", key.c_str());
-                    fclose(f);
-                }
-            }
-        }
-    }
-
-    if (any_copied)
-        wxGetApp().plater()->schedule_background_process();
-}
-// NEOTKO_LIBRE_TAG_END
 
 static std::string layer_height = "layer_height";
 TabPrintLayer::TabPrintLayer(ParamsPanel* parent) :
@@ -11974,6 +8025,7 @@ void TabFilament::build()
         //BBS
         optgroup->append_single_option_line("temperature_vitrification");
         optgroup->append_single_option_line("idle_temperature");
+        optgroup->append_single_option_line("filament_tower_ironing_area");
         Line line = { L("Recommended nozzle temperature"), L("Recommended nozzle temperature range of this filament. 0 means no set") };
         line.append_option(optgroup->get_option("nozzle_temperature_range_low"));
         line.append_option(optgroup->get_option("nozzle_temperature_range_high"));
@@ -12057,6 +8109,12 @@ void TabFilament::build()
                  L("Bed temperature when the Textured PEI Plate is installed. A value of 0 means the filament does not support printing on the Textured PEI Plate.") };
         line.append_option(optgroup->get_option("textured_plate_temp_initial_layer"));
         line.append_option(optgroup->get_option("textured_plate_temp"));
+        optgroup->append_line(line);
+
+        line = {L("Graphic Effect Plate"), 
+                L("Bed temperature when the Graphic Effect Plate is installed. A value of 0 means the filament does not support printing on the Graphic Effect Plate.")};
+        line.append_option(optgroup->get_option("graphic_effect_plate_temp_initial_layer"));
+        line.append_option(optgroup->get_option("graphic_effect_plate_temp"));
         optgroup->append_line(line);
 
         optgroup->m_on_change = [this](t_config_option_key opt_key, boost::any value)
@@ -12308,11 +8366,39 @@ void TabFilament::toggle_options()
     {
         bool pa = m_config->opt_bool("enable_pressure_advance", 0);
         toggle_option("pressure_advance", pa);
-        
+
         // BBS: 控制床温选项的显示
         auto support_multi_bed_types = is_BBL_printer || cfg.opt_bool("support_multi_bed_types");
-        if (support_multi_bed_types) {
-            // 支持多床型：显示所有床温选项
+        bool is_snapmaker_u1 = false;
+        const Preset& printer_preset = m_preset_bundle->printers.get_edited_preset();
+        is_snapmaker_u1 = boost::icontains(printer_preset.name, "Snapmaker U1");
+        if (auto printer_model_opt = cfg.option<ConfigOptionString>("printer_model")) {
+            std::string printer_model = printer_model_opt->value;
+            is_snapmaker_u1 = is_snapmaker_u1 || (boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1"));
+        }
+        if (Line* hot_plate_line = get_line("hot_plate_temp_initial_layer")) {
+            hot_plate_line->label = is_snapmaker_u1
+                ? _L("Smooth PEI Plate")
+                : _L("Smooth PEI Plate / High Temp Plate");
+        }
+        if (is_snapmaker_u1 && !support_multi_bed_types) {
+            // U1 default show 3 plates
+            toggle_line("supertack_plate_temp_initial_layer", false);
+            toggle_line("supertack_plate_temp", false);
+            toggle_line("cool_plate_temp_initial_layer", false);
+            toggle_line("cool_plate_temp", false);
+            toggle_line("textured_cool_plate_temp_initial_layer", false);
+            toggle_line("textured_cool_plate_temp", false);
+            toggle_line("eng_plate_temp_initial_layer", false);
+            toggle_line("eng_plate_temp", false);
+            toggle_line("hot_plate_temp_initial_layer", true);
+            toggle_line("hot_plate_temp", true);
+            toggle_line("textured_plate_temp_initial_layer", true);
+            toggle_line("textured_plate_temp", true);
+            toggle_line("graphic_effect_plate_temp_initial_layer", true);
+            toggle_line("graphic_effect_plate_temp", true);
+        } else if (support_multi_bed_types) {
+            // u1 has 7 plates
             toggle_line("supertack_plate_temp_initial_layer", true);
             toggle_line("cool_plate_temp", true);
             toggle_line("cool_plate_temp_initial_layer", true);
@@ -12325,11 +8411,10 @@ void TabFilament::toggle_options()
             toggle_line("hot_plate_temp", true);
             toggle_line("textured_plate_temp_initial_layer", true);
             toggle_line("textured_plate_temp", true);
+            toggle_line("graphic_effect_plate_temp_initial_layer", is_snapmaker_u1);
+            toggle_line("graphic_effect_plate_temp", is_snapmaker_u1);
         } else {
-            // 不支持多床型：只显示当前选择的床型
-            
             BedType curr_bed_type = m_preset_bundle->printers.get_edited_preset().get_default_bed_type(m_preset_bundle);
-           
             toggle_line("supertack_plate_temp_initial_layer", curr_bed_type == btSuperTack);
             toggle_line("supertack_plate_temp", curr_bed_type == btSuperTack);
             toggle_line("cool_plate_temp_initial_layer", curr_bed_type == btPC);
@@ -12342,6 +8427,8 @@ void TabFilament::toggle_options()
             toggle_line("hot_plate_temp", curr_bed_type == btPEI);
             toggle_line("textured_plate_temp_initial_layer", curr_bed_type == btPTE);
             toggle_line("textured_plate_temp", curr_bed_type == btPTE);
+            toggle_line("graphic_effect_plate_temp_initial_layer", curr_bed_type == btGESP);
+            toggle_line("graphic_effect_plate_temp", curr_bed_type == btGESP);
         }
 
 
@@ -13083,6 +9170,8 @@ if (is_marlin_flavor)
 
                     update_dirty();
                     update();
+                    if (opt_key.find("nozzle_diameter") != std::string::npos)
+                        validate_filament_hot_bed_nozzle_relation(parent());
                 };
 
                 optgroup = page->new_optgroup(L("Layer height limits"), L"param_layer_height");
@@ -13457,6 +9546,11 @@ void Tab::load_current_preset()
 
     // Reload preset pages with the new configuration values.
     reload_config();
+
+    // Refresh field decorations (orange/modified markers) after reload.
+    // Without this, stale decorations from a previous dirty state persist
+    // even after discard_current_changes() resets the config.
+    update_changed_ui();
 
     update_ui_items_related_on_parent_preset(m_presets->get_selected_preset_parent());
 
@@ -13947,6 +10041,8 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 
     if (technology_changed)
         wxGetApp().mainframe->technology_changed();
+    if (!canceled && m_presets->type() == Preset::TYPE_FILAMENT)
+        validate_filament_hot_bed_nozzle_relation(parent());
     BOOST_LOG_TRIVIAL(info) << boost::format("select preset, exit");
 
     return !canceled;

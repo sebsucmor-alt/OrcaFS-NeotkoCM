@@ -900,11 +900,6 @@ ModelVolumeType type_from_string(const std::string &s)
                 for (const Metadata& metadata : obj_metadata->second.metadata) {
                     if (metadata.key == "name")
                         model_object->name = metadata.value;
-                    // NEOTKO_LIBRE_TAG — Temporal Link: restore link group id
-                    else if (metadata.key == "link_group_id") {
-                        try { model_object->link_group_id = std::stoi(metadata.value); }
-                        catch (...) {}
-                    }
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -2048,8 +2043,7 @@ ModelVolumeType type_from_string(const std::string &s)
             "source_offset_y",
             "source_offset_z",
             "extruder",
-            "modifier",
-            "link_group_id"   // NEOTKO_LIBRE_TAG — Temporal Link persistence
+            "modifier"
         };
 
         auto itor = std::find(valid_keys.begin(), valid_keys.end(), key);
@@ -3110,16 +3104,9 @@ ModelVolumeType type_from_string(const std::string &s)
                     stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"name\" " << VALUE_ATTR << "=\"" << xml_escape(obj->name) << "\"/>\n";
 
                 // stores object's config data
-                // NEOTKO_SANDWICH_TAG — xml_escape the value (see bbs_3mf.cpp):
-                // coString keys can hold JSON; a raw " breaks the XML attribute.
                 for (const std::string& key : obj->config.keys()) {
-                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape(obj->config.opt_serialize(key)) << "\"/>\n";
+                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.opt_serialize(key) << "\"/>\n";
                 }
-                // NEOTKO_LIBRE_TAG — Temporal Link persistence
-                if (obj->link_group_id > 0)
-                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" "
-                           << KEY_ATTR << "=\"link_group_id\" "
-                           << VALUE_ATTR << "=\"" << obj->link_group_id << "\"/>\n";
 
                 for (const ModelVolume* volume : obj_metadata.second.object->volumes) {
                     if (volume != nullptr) {

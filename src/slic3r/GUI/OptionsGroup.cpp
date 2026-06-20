@@ -233,8 +233,6 @@ Line* OptionsGroup::get_line(const std::string& opt_key)
     {
         if(l.is_separator())
             continue;
-        if (l.get_options().empty())   // widget-only lines have no opt_id — skip
-            continue;
         if (l.get_first_option_key() == opt_key)
             return &l;
     }

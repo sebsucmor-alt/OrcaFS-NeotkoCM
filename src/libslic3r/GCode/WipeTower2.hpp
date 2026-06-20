@@ -8,7 +8,7 @@
 #include <sstream>
 #include <utility>
 #include <algorithm>
-#include <unordered_map>
+#include <map> // NEOTKO_NEOTOWER_TAG — m_tool_overrides
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -44,29 +44,17 @@ public:
 			  const std::vector<std::vector<float>>& wiping_matrix,
 			  size_t initial_tool);
 
-
 	// Set the extruder properties.
     void set_extruder(size_t idx, const PrintConfig& config);
 
-    // NEOTKO_NEOTOWER_TAG s103-bd — "box-in-drawer": grow the REAL tower box by
-    // 2·m_perimeter_width so the canonical wall ring gets a reserved channel;
-    // synthetic (sandwich) content keeps the original box → inset 1 bead/side.
-    // Call AFTER the set_extruder() loop (m_perimeter_width is derived there)
-    // and BEFORE any plan_toolchange(). Must stay in sync with
-    // NeoTower::box_drawer_extra_width(). Revert: grep "s103-bd".
-    void neo_grow_box_drawer() { m_wipe_tower_width += 2.f * m_perimeter_width; }
-
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
-    // NEOTKO_NEOTOWER_TAG s102 — `synthetic`: caller-declared truth for "this plan
-    // entry is a NeoTower sub-layer entry, not a real print layer". NeoTower passes
-    // NeoTowerEvent::is_sublayer; stock callers (Print.cpp) keep the default false.
-    // Replaces the float-gap inference ((next->z - z) < NOMINAL_LH_MIN) used by the
-    // s100 frame-skip guard, which broke in s101/s102 (Teorías A+C): sub-entry gaps
-    // reach 0.0398 mm while the canonical→next-entry gap can be exactly 0.04 mm —
-    // zero float safety margin.
-    // s102-h: `same_plane` qualifies `synthetic` — lámina pass (true) vs
-    // staircase plane (false). Ignored when synthetic == false.
+    // NEOTKO_NEOTOWER_TAG — extra args used by NeoTower's planner: skip_ramming
+    // (sandwich sublayer TC visits the tower but skips the ramming deposit),
+    // synthetic (this entry is a NeoTower synthetic sublayer event), same_plane
+    // (synthetic entry sits on the canonical real layer's physical plane = lámina).
+    // The NeoTower-specific depth/width/compaction consumption of these flags is
+    // ported with the planner wiring; for now they are captured on the plan entry.
     void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, bool skip_ramming = false, bool synthetic = false, bool same_plane = false);
     void plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f);
     void plan_local_z_reserve(float z_par, float layer_height_par, size_t reserve_slot_count, float wipe_volume = 0.f);
@@ -143,15 +131,21 @@ public:
     WipeTower::ToolChangeResult local_z_tool_change(size_t new_tool, const WipeTower::box_coordinates& cleaning_box, float wipe_volume);
     void set_current_tool(size_t tool) { m_current_tool = tool; }
 
-    // NEOTKO_NEOTOWER_TAG: cross-group tool state correction.
-    // Called by NeoTower::collect_and_plan() before generate() to override m_current_tool
-    // at the start of a specific plan layer.  Used when a sublayer identity event (T→T)
-    // creates a gap between chain_tool and ev.old_tool — WipeTower2's internal tool
-    // counter would otherwise remain at the wrong tool through that layer and corrupt
-    // all subsequent TCRs in the same z-group.
-    void set_tool_override(size_t plan_li, unsigned int tool) {
-        m_tool_overrides[plan_li] = tool;
-    }
+    // NEOTKO_NEOTOWER_TAG s103-bd — "box-in-drawer": grow the REAL tower box by
+    // one perimeter width per side, so NeoTower's synthetic sublayer wipes (which
+    // inset 1 bead/side) recover exactly the pre-growth usable width.
+    void neo_grow_box_drawer() { m_wipe_tower_width += 2.f * m_perimeter_width; }
+    // NEOTKO_NEOTOWER_TAG — per-plan-layer m_current_tool override, set by NeoTower
+    // when the entering tool of a plan layer differs from the chain state.
+    void set_tool_override(size_t plan_li, unsigned int tool) { m_tool_overrides[plan_li] = tool; }
+
+    // NEOTKO_NEOTOWER_TAG s127 — disable the 2.3.4 gap_wall (wipe_tower_wall_gap) for
+    // NeoTower-driven towers. gap_wall routes the toolchange to an OUTER wall ring
+    // (margin = 5·pw + brim, OUTSIDE the reserved box) instead of the classic in-box
+    // wipe → "wall/brim/muro" on return + footprint outside NeoTower's reservation. The
+    // fork (2.3.2) has no gap_wall and does the classic wipe; NeoTower mirrors that.
+    // Called once after construction; Classic 2.3.4 towers keep the config default (true).
+    void set_use_gap_wall(bool v) { m_use_gap_wall = v; }
 
 	// Fill the unfilled space with a sparse infill.
 	// Call this method only if layer_finished() is false.
@@ -191,10 +185,14 @@ public:
         float               filament_area;
 		bool			    multitool_ramming;
 		float               multitool_ramming_time = 0.f;
+		float               multitool_ramming_volume = 0.f;
 		float               filament_minimal_purge_on_wipe_tower = 0.f;
         float               retract_length;
         float               retract_speed;
+        float               flat_iron_area;
     };
+
+    const std::map<float, Polylines>& get_outer_wall() const { return m_outer_wall; }
 
 private:
     struct WipeTowerInfo;
@@ -243,11 +241,14 @@ private:
 
 	int m_wall_type;
     bool   m_used_fillet                  = true;
+    bool   m_use_gap_wall                 = true;
     float  m_rib_width                    = 10;
     float  m_extra_rib_length             = 0;
+    std::vector<std::vector<Vec2f>> m_wall_skip_points;
     float  m_rib_length                   = 0;
 
     bool   m_enable_arc_fitting           = false;
+    std::map<float, Polylines> m_outer_wall; // for wipe tower out wall and brim
 
 	// G-code generator parameters.
     float           m_cooling_tube_retraction   = 0.f;
@@ -282,6 +283,8 @@ private:
 	// A fill-in direction (positive Y, negative Y) alternates with each layer.
 	wipe_shape   	m_current_shape = SHAPE_NORMAL;
     size_t 	m_current_tool  = 0;
+    // NEOTKO_NEOTOWER_TAG — per-plan-layer entering-tool overrides set by NeoTower.
+    std::map<size_t, unsigned int> m_tool_overrides;
     const std::vector<std::vector<float>> wipe_volumes;
 
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
@@ -291,11 +294,12 @@ private:
 	float			m_extra_spacing_wipe    = 1.f;
 	float			m_extra_spacing_ramming = 1.f;
     float           m_local_z_wipe_tower_purge_lines = 3.f;
-    // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction cap (config
+    // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction factor (from config
     // neotower_purge_compaction, 1 = off). See ToolChange::flow_mult.
     float           m_neo_purge_compaction = 1.f;
     // NEOTKO_NEOTOWER_TAG s104 — zigurat taper option (config neotower_zigurat,
-    // default true). Gates the s103 wall-on-wall shrink constraint in plan_tower.
+    // default ON = wall-on-wall). Gated additionally by synthetic presence so the
+    // stock tower stays bit-identical until NeoTower is wired (#4).
     bool            m_neo_zigurat = true;
 
     bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
@@ -311,10 +315,9 @@ private:
 
 	// Calculates depth for all layers and propagates them downwards
 	void plan_tower();
-
-    // NEOTKO_NEOTOWER_TAG s104-F2 — Tetris Y allocator: assigns per-entry
-    // neo_y_shift_planned for synthetic sub-layer entries (see WipeTowerInfo).
-    // Runs after plan_tower() (depths final), purely plan-time.
+    // NEOTKO_NEOTOWER_TAG s104-F2 — Tetris Y allocator: assigns neo_y_shift_planned
+    // to synthetic sub-layer entries so they pack inside their canonical window
+    // instead of all centering on top of each other. No-op without synthetic entries.
     void neo_plan_group_y_offsets();
 
     // Goes through m_plan, calculates border and finish_layer extrusions and subtracts them from last wipe
@@ -330,20 +333,12 @@ private:
             float first_wipe_line;
             float wipe_volume;
 			float wipe_volume_total;
-            // NEOTKO_MPSCHEDULER_TAG s79b — when true, toolchange_Unload still TRAVELS to the
-            // tower (keeps the drip-control visit) but SKIPS the ramming extrusion, so the
-            // before-print wipe fills the whole box instead of the after-print ramming eating
-            // it. Set for sandwich sublayer TCs (multi-tool: the machine macro does the real
-            // swap, so the tower ramming is redundant and was starving the useful pre-print
-            // wipe in the small sandwich box). Body real-layer TCs keep ramming (skip=false).
+            // NEOTKO_MPSCHEDULER_TAG s79b — when true, toolchange_Unload still TRAVELS
+            // to the tower (drip-control visit) but SKIPS the ramming extrusion.
             bool  skip_ramming = false;
-            // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction. Plan-time flow
-            // multiplier for this toolchange's wipe (synthetic sandwich TCs
-            // only; 1.0 = stock). plan_toolchange computes it and reserves
-            // required_depth with it; toolchange_Wipe reads it back, so the
-            // reservation and the emitted gcode can never diverge (s78 rule:
-            // reserve == emission). Also the per-TC carrier the F2 occupancy
-            // allocator will write into.
+            // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction multiplier (1 = off).
+            // plan_toolchange computes it; toolchange_Wipe emits with the exact value
+            // the reservation used (reserve == emission).
             float flow_mult = 1.f;
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f, bool skip_ram=false)
             : old_tool{old}, new_tool{newtool}, required_depth{depth}, ramming_depth{ramming_depth}, first_wipe_line{fwl}, wipe_volume{wv}, wipe_volume_total{wv}, skip_ramming{skip_ram} {}
@@ -351,27 +346,12 @@ private:
 		float z;		// z position of the layer
 		float height;	// layer height
 		float depth;	// depth of the layer based on all layers above
-        // NEOTKO_NEOTOWER_TAG s102 — true when every event that landed on this plan
-        // entry was a NeoTower synthetic sub-layer event (see plan_toolchange). The
-        // canonical real-layer entry of a sub-layer group stays false. finish_layer()
-        // uses this to suppress the tower FRAME (empty grid + brim chamfer) on
-        // synthetic entries; the brim chamfer's dist_to_1st counts only entries with
-        // is_synthetic == false.
+        // NEOTKO_NEOTOWER_TAG s102 — true when every event on this plan entry was a
+        // NeoTower synthetic sublayer event (canonical real-layer entry stays false).
         bool is_synthetic = false;
-        // NEOTKO_NEOTOWER_TAG s102-h — true when the synthetic entry sits at the
-        // canonical real layer's physical plane (lámina pass, offset < 0.02 mm).
-        // Lámina entries skip the WHOLE frame (wall+grid+perimeter+brim — they
-        // duplicate the canonical's). Staircase entries (is_synthetic && !this)
-        // keep wall+grid+perimeter — they are the tower's structural shell
-        // between real layers — and skip only the brim.
+        // NEOTKO_NEOTOWER_TAG s102-h — true when the synthetic entry sits on the
+        // canonical real layer's physical plane (lámina); false = staircase plane.
         bool is_same_plane = false;
-        // NEOTKO_NEOTOWER_TAG s104-F2 — Tetris Y allocator. Plan-time writer
-        // y_shift for this (synthetic) entry, assigned by neo_plan_group_y_offsets()
-        // so consecutive sub-layer planes land on FRESH physical Y strips inside
-        // the canonical's reserved depth window instead of stacking on the same
-        // strip (and lámina entries stay off the canonical's own purge band).
-        // -1 = unassigned → generate() keeps the stock centering formula.
-        float neo_y_shift_planned = -1.f;
         float normal_toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }
         float local_z_toolchanges_depth() const { float sum = 0.f; for (const auto &a : local_z_tool_changes) sum += a.required_depth; return sum; }
 		float toolchanges_depth() const { return normal_toolchanges_depth() + local_z_toolchanges_depth(); }
@@ -379,6 +359,9 @@ private:
         size_t local_z_reserve_slot_count { 0 };
         float local_z_reserve_depth() const { return local_z_reserve_slot_depth * float(local_z_reserve_slot_count); }
         float planned_depth() const { return toolchanges_depth() + local_z_reserve_depth(); }
+        // NEOTKO_NEOTOWER_TAG s104-F2 — y_shift for this (synthetic) entry, assigned
+        // by neo_plan_group_y_offsets(). -1 = unset → generate() uses stock centering.
+        float neo_y_shift_planned = -1.f;
 
 		std::vector<ToolChange> tool_changes;
         std::vector<ToolChange> local_z_tool_changes;
@@ -390,10 +373,6 @@ private:
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
     const WipeTowerInfo::ToolChange     *m_active_tool_change = nullptr;
-
-    // NEOTKO_NEOTOWER_TAG: per-plan-layer m_current_tool overrides set by NeoTower
-    // before generate() to correct cross-group tool state gaps.
-    std::unordered_map<size_t, unsigned int> m_tool_overrides;
 
 	// This sums height of all extruded layers, not counting the layers which
 	// will be later removed when the "no_sparse_layers" is used.
@@ -413,25 +392,22 @@ private:
 
 	void toolchange_Unload(
 		WipeTowerWriter2 &writer,
-		const WipeTower::box_coordinates  &cleaning_box, 
+		const WipeTower::box_coordinates  &cleaning_box,
 		const std::string&	 	current_material,
 		const int 				old_temperature,
 		const int 				new_temperature);
 
-	void toolchange_Change(
-		WipeTowerWriter2 &writer,
-        const size_t		new_tool,
-		const std::string& 		new_material);
-	
+    void toolchange_Change(WipeTowerWriter2 &writer, const size_t new_tool, 
+        const std::string& new_material);
+
 	void toolchange_Load(
 		WipeTowerWriter2 &writer,
 		const WipeTower::box_coordinates  &cleaning_box);
-	
+
 	void toolchange_Wipe(
 		WipeTowerWriter2 &writer,
 		const WipeTower::box_coordinates  &cleaning_box,
 		float wipe_volume);
-
 
     Polygon generate_support_rib_wall(WipeTowerWriter2&                 writer,
                                       const WipeTower::box_coordinates& wt_box,
@@ -439,23 +415,27 @@ private:
                                       bool                   first_layer,
                                       bool                   rib_wall,
                                       bool                   extrude_perimeter,
-                                      bool                   skip_points);
+                                      const std::vector<Vec2f>&         skip_points);
 
-    // NEOTKO_NEOTOWER_TAG s102-g — extrude_perimeter mirrors the rib variant:
-    // false computes and returns the wall polygon (needed for the post-brim wipe
-    // points) without emitting any gcode. Used by the synthetic sub-entry frame
-    // guard in finish_layer(); the s102-e guard only covered the rib branch, so
-    // cone-wall profiles kept stacking one wall per sub-entry (user-verified:
-    // full-tower rectangle by T0 at z=0.878 — degenerate cone emits a rectangle).
+    void get_all_wall_skip_points();
+    // Retrieve pre-computed gap points for a specific layer. Returns empty if layer_id out of bounds.
+    std::vector<Vec2f> get_wall_skip_points(size_t layer_id);
+    // Predict nozzle X after toolchange_Unload ramming, matching its xl/xr and do_ramming logic.
+    // old_tool: extruder index of the filament being unloaded
+    float predict_ramming_end_x(int old_tool, float layer_height) const;
+
     Polygon generate_support_cone_wall(
         WipeTowerWriter2& writer,
 		const WipeTower::box_coordinates& wt_box,
 		double feedrate,
 		bool infill_cone,
 		float spacing,
-		bool extrude_perimeter = true);
+		const std::vector<Vec2f>& skip_points = {},
+		bool extrude_perimeter = true); // NEOTKO_NEOTOWER_TAG s102-g
 
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
+
+    WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume);
 };
 
 

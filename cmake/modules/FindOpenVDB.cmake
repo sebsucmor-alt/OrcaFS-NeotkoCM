@@ -176,14 +176,6 @@ endif()
 
 # Append OPENVDB_ROOT or $ENV{OPENVDB_ROOT} if set (prioritize the direct cmake var)
 set(_OPENVDB_ROOT_SEARCH_DIR "")
-if(OPENVDB_ROOT)
-  list(APPEND _OPENVDB_ROOT_SEARCH_DIR ${OPENVDB_ROOT})
-elseif(DEFINED ENV{OPENVDB_ROOT})
-  list(APPEND _OPENVDB_ROOT_SEARCH_DIR $ENV{OPENVDB_ROOT})
-endif()
-if(OPENVDB_LIBRARYDIR)
-  list(APPEND _OPENVDB_ROOT_SEARCH_DIR ${OPENVDB_LIBRARYDIR})
-endif()
 
 # Additionally try and use pkconfig to find OpenVDB
 
@@ -246,7 +238,7 @@ endif()
 set(OpenVDB_LIB_COMPONENTS "")
 set(OpenVDB_DEBUG_SUFFIX "d" CACHE STRING "Suffix for the debug libraries")
 
-# Force _is_multi to FALSE: CI builds Release only, no debug lib available
+# get_property(_is_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 set(_is_multi FALSE)
 
 foreach(COMPONENT ${OpenVDB_FIND_COMPONENTS})
@@ -373,16 +365,7 @@ if (IlmBase_FOUND AND NOT TARGET IlmBase::Half)
     IMPORTED_LOCATION "${IlmHalf_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${IlmBase_INCLUDE_DIRS}")
 elseif(NOT IlmBase_FOUND)
-  # IlmBase was merged into Imath in OpenEXR 3.x — try Imath as fallback
-  find_package(Imath QUIET)
-  if(Imath_FOUND AND TARGET Imath::Imath)
-    message(STATUS "IlmBase not found, using Imath (OpenEXR 3.x) as fallback for IlmBase::Half")
-    if(NOT TARGET IlmBase::Half)
-      add_library(IlmBase::Half ALIAS Imath::Imath)
-    endif()
-  else()
-    just_fail("IlmBase::Half can not be found (tried IlmBase and Imath)!")
-  endif()
+  just_fail("IlmBase::Half can not be found!")
 endif()
 find_package(TBB ${_quiet} ${_required} COMPONENTS tbb)
 find_package(ZLIB ${_quiet} ${_required})

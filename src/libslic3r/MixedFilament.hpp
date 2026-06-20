@@ -6,9 +6,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <unordered_map>
 #include <utility>
 
 namespace Slic3r {
+
+class PrintObject;
+
+std::vector<int> fill_continuous_layer_range(const std::vector<int> &sorted_layers);
 
 // Represents a virtual "mixed" filament created from physical filaments
 // (layer cadence and/or same-layer interleaved stripe distribution). Display
@@ -40,9 +45,11 @@ struct MixedFilament
     // Blend percentage of component B in [0..100].
     int mix_b_percent = 50;
 
-    // Optional manual pattern for this mixed filament. Tokens:
-    // '1' => component_a, '2' => component_b, '3'..'9' => direct physical
-    // filament IDs (1-based). Example: "11112222" => AAAABBBB repeating.
+    // Optional manual pattern for this mixed filament.
+    // Legacy format (no '/'): each '1'-'9' char is a token.
+    //   '1'=>component_a, '2'=>component_b, '3'-'9'=>direct physical IDs.
+    // Modern format (with '/'): '/' separates tokens, multi-digit IDs supported.
+    //   e.g. "1/10/2/11/12". Comma separates per-perimeter groups.
     std::string manual_pattern;
 
     // Optional explicit gradient multi-color component list, encoded as
@@ -64,6 +71,14 @@ struct MixedFilament
     // Optional Local-Z cap for this mixed row. 0 disables the cap.
     int local_z_max_sublayers = 0;
 
+    static constexpr float k_default_gradient_dominant = 0.8f;  // Dominant component ratio
+    static constexpr float k_default_gradient_minority = 0.2f;  // Minority component ratio
+    static constexpr float k_min_gradient_difference   = 0.05f; // Minimum difference for valid gradient
+    
+    bool  gradient_enabled = false;
+    float gradient_start = k_default_gradient_dominant;
+    float gradient_end   = k_default_gradient_minority;
+
     // Additional XY surface offsets, in mm, applied when this mixed row
     // resolves to component A or B for an entire layer. Positive values
     // contract inward; negative values expand outward.
@@ -84,12 +99,16 @@ struct MixedFilament
     // tombstoned instead of letting regeneration resurrect it.
     bool origin_auto = false;
 
+    // UI mode that created this row (-1=unknown/legacy, 0=RATIO, 1=CYCLE, 2=MATCH, 3=GRADIENT).
+    int ui_mode = -1;
+
     // Computed display colour as "#RRGGBB".
     std::string display_color;
 
     bool operator==(const MixedFilament &rhs) const
     {
         constexpr float k_surface_offset_epsilon = 1e-6f;
+        constexpr float k_gradient_epsilon       = 1e-4f;
         return component_a == rhs.component_a &&
                component_b == rhs.component_b &&
                stable_id   == rhs.stable_id   &&
@@ -102,12 +121,16 @@ struct MixedFilament
                pointillism_all_filaments == rhs.pointillism_all_filaments &&
                distribution_mode == rhs.distribution_mode &&
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
+               gradient_enabled == rhs.gradient_enabled &&
+               std::abs(gradient_start - rhs.gradient_start) <= k_gradient_epsilon &&
+               std::abs(gradient_end   - rhs.gradient_end)   <= k_gradient_epsilon &&
                std::abs(component_a_surface_offset - rhs.component_a_surface_offset) <= k_surface_offset_epsilon &&
                std::abs(component_b_surface_offset - rhs.component_b_surface_offset) <= k_surface_offset_epsilon &&
                enabled      == rhs.enabled &&
                deleted      == rhs.deleted &&
                custom       == rhs.custom &&
-               origin_auto  == rhs.origin_auto;
+               origin_auto  == rhs.origin_auto &&
+               ui_mode      == rhs.ui_mode;
     }
     bool operator!=(const MixedFilament &rhs) const { return !(*this == rhs); }
 };
@@ -180,6 +203,10 @@ public:
     // Remove all custom rows, keep auto-generated ones.
     void clear_custom_entries();
 
+    // Clean up deleted mixed filaments from memory.
+    // This should be called after serializing to remove deleted entries that are no longer needed.
+    void cleanup_deleted_entries();
+
     // Recompute cadence ratios from gradient settings.
     // gradient_mode: 0 = Layer cycle weighted, 1 = Height weighted.
     void apply_gradient_settings(int   gradient_mode,
@@ -192,10 +219,50 @@ public:
     std::string serialize_custom_entries();
     void load_custom_entries(const std::string &serialized, const std::vector<std::string> &filament_colours);
 
-    // Normalize a manual mixed-pattern string into compact token form.
-    // Accepts separators and A/B aliases. Returns empty string if invalid.
+    // ---- Pattern string functions -------------------------------------------
+    // Normalize a manual mixed-pattern string into canonical form.
+    // Format: digits 1-9 for IDs 1-9, [N] for IDs >= 10, comma for group separator.
+    // Returns empty string if invalid.
     static std::string normalize_manual_pattern(const std::string &pattern);
     static int         mix_percent_from_manual_pattern(const std::string &pattern);
+
+    // Tokenize a single pattern group (no commas) into token strings.
+    // Handles single-digit and bracket ([N]) tokens.
+    static std::vector<std::string> split_pattern_group_to_tokens(const std::string &group, size_t num_physical);
+
+    // Map a string token to a physical extruder ID.
+    // "1" => component_a, "2" => component_b, "3"+ => direct physical ID.
+    static unsigned int physical_filament_from_token(const std::string &token, const MixedFilament &mf, size_t num_physical);
+
+    // Split a normalized pattern string by comma into group strings.
+    static std::vector<std::string> split_pattern_groups(const std::string &pattern);
+
+    // ---- Gradient component ID encoding / decoding ------------------------
+
+    // Maximum number of physical filaments supported by the encoding.
+    static constexpr size_t kMaxPhysicalFilaments = 64;
+
+    // Encode filament IDs (1-based) to a compact string.
+    // Legacy format (all IDs ≤ 9):  concatenated single chars, e.g. "132".
+    // Extended format (any ID > 9): '/' separated decimals, e.g. "1/12/3".
+    // Single-ID extended uses leading '/' to disambiguate, e.g. "/12".
+    static std::string encode_gradient_component_ids(const std::vector<unsigned int> &ids);
+
+    // Decode a gradient_component_ids string to a vector of filament IDs (1-based).
+    // Handles both legacy and extended formats.  When num_physical > 0 each ID is
+    // validated to be ≤ num_physical.
+    static std::vector<unsigned int> decode_gradient_component_ids(const std::string &components,
+                                                                   size_t             num_physical = 0);
+
+    // Expand virtual mixed-filament IDs in a sorted/deduplicated vector into
+    // their physical component IDs (component_a, component_b, and gradient
+    // component IDs).  IDs ≤ num_physical are left unchanged.  The caller is
+    // responsible for re-sorting and re-deduplicating after the call.
+    void expand_virtual_extruder_ids(std::vector<int> &ids, size_t num_physical) const;
+
+    // Normalize a gradient_component_ids string to canonical form.
+    // Canonical form uses legacy encoding when all IDs ≤ 9, extended otherwise.
+    static std::string normalize_gradient_component_ids(const std::string &components);
 
     // ---- Queries --------------------------------------------------------
 
@@ -213,14 +280,16 @@ public:
                          int          layer_index,
                          float        layer_print_z = 0.f,
                          float        layer_height  = 0.f,
-                         bool         force_height_weighted = false) const;
+                         bool         force_height_weighted = false,
+                         const PrintObject* current_object = nullptr) const;
     unsigned int resolve_perimeter(unsigned int filament_id,
                                    size_t       num_physical,
                                    int          layer_index,
                                    int          perimeter_index,
                                    float        layer_print_z = 0.f,
                                    float        layer_height  = 0.f,
-                                   bool         force_height_weighted = false) const;
+                                   bool         force_height_weighted = false,
+                                   const PrintObject* current_object = nullptr) const;
     // Resolve the filament ID that should own painted regions on this layer.
     // Modes that require virtual identity later in G-code generation keep the
     // original mixed ID; ordinary mixed rows collapse to the current physical
@@ -257,6 +326,11 @@ public:
 
     const MixedFilament *mixed_filament_from_id(unsigned int filament_id, size_t num_physical) const;
 
+    // Get all mixed filament indices that depend on a specific physical filament (1-based ID).
+    // Returns a vector of indices into m_mixed for mixed filaments that use the physical filament
+    // as a component (either component_a, component_b, or in gradient_component_ids).
+    std::vector<size_t> mixed_filaments_using_physical(unsigned int physical_filament_1based) const;
+
     // Compute a display colour by blending two colours with FilamentMixer.
     static std::string blend_color(const std::string &color_a,
                                    const std::string &color_b,
@@ -272,6 +346,13 @@ public:
                                       float component_a_surface_offset,
                                       float component_b_surface_offset,
                                       float reference_width_mm = 0.4f);
+
+    // Exposed for unit testing — pure logic helpers.
+    static int         safe_mod(int x, int m);
+    static void        normalize_ratio_pair(int &a, int &b);
+    static float       canonical_signed_bias_value(float component_a_surface_offset, float component_b_surface_offset);
+    static std::string format_surface_offset_token(float value);
+    static double      mixed_filament_reference_nozzle_mm(unsigned int component_a, unsigned int component_b, const std::vector<double> &nozzle_diameters);
 
     // ---- Accessors ------------------------------------------------------
 
@@ -306,6 +387,36 @@ private:
     uint64_t                   m_next_stable_id      = 1;
     MixedFilamentDisplayContext m_display_context;
 };
+
+// Returns true when the mixed filament represents a simple two-color gradient
+// that can be rendered as a vertical color ramp (no manual pattern, exactly 2 components).
+inline bool is_simple_gradient(const MixedFilament& mf)
+{
+    // Lightweight ID count without heap allocation.
+    // Canonical form: legacy "12" = two IDs, extended "1/12/3" = three IDs.
+    auto count_ids = [](const std::string& s) -> size_t {
+        if (s.empty()) return 0;
+        if (s.find('/') != std::string::npos) {
+            size_t n = 0;
+            bool in_token = false;
+            for (char c : s) {
+                if (c == '/') {
+                    if (in_token) ++n;
+                    in_token = false;
+                } else {
+                    in_token = true;
+                }
+            }
+            if (in_token) ++n;
+            return n;
+        }
+        return s.size();
+    };
+    return mf.gradient_enabled
+        && mf.component_a != mf.component_b
+        && MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern).empty()
+        && count_ids(mf.gradient_component_ids) < 3;
+}
 
 } // namespace Slic3r
 

@@ -197,21 +197,6 @@ public:
     bool has_consistent_pattern() const override { return true; }
 };
 
-// NEOTKO_PATHBLEND_TAG — s87: FillMicroStitch.
-// Subdivides the surface ExPolygon into K horizontal Y-strips and runs an
-// independent FillRectilinear per strip. Adjacent strips have unsynced phase
-// and any non-axis-aligned angle produces short diagonal segments — the
-// "stitched" texture. Useful for Neoweaving and experimental supports.
-// K is a static constant for now; expose as a config knob later if needed.
-class FillMicroStitch : public FillRectilinear
-{
-public:
-    Fill* clone() const override { return new FillMicroStitch(*this); }
-    ~FillMicroStitch() override = default;
-    void fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out) override;
-    bool no_sort() const override { return true; }
-};
-
 class FillCrossZag : public FillRectilinear
 {
 public:

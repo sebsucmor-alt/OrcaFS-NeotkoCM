@@ -31,6 +31,7 @@ using tcp = asio::ip::tcp;
 #define DELETE_CAMERA_TIMELAPSE "sw_DeleteCameraTimelapse"
 #define GET_DEVICEDATA_STORAGESPACE "sw_GetDeviceDataStorageSpace"
 #define DOWNLOAD_FILE "sw_DownloadFile"
+#define DOWNLOAD_FILE_AND_OPEN "sw_DownLoadFileAndOpen"
 #define CANCEL_DOWNLOAD "sw_CancelDownload"
 #define FILE_VIEW "sw_FileView"
 
@@ -186,6 +187,9 @@ private:
 
     // Sentry
     void sw_UploadEvent();
+
+    // Get software basic info
+    void sw_GetSoftwareInfo();
 
     // open network dialog
     void sw_OpenNetworkDialog();
@@ -459,6 +463,12 @@ private:
     // 请求设备下载文件并打印
     void sw_StartCloudPrint();
 
+    // Request device to start local file print
+    void sw_StartLocalPrint();
+
+    // Request device heartbeat
+    void sw_MachineHeartbeat();
+
     // 设备耗材同步
     void sw_UpdateMachineFilamentInfo();
 
@@ -541,6 +551,11 @@ private:
     void sw_SubUserUpdatePrivacy();
 
     void sw_DownloadFile();
+
+    void sw_DownloadFileAndOpen();
+
+    void sw_DownloadFileEx();
+
     void sw_CancelDownload();
 
     void sw_FileView();

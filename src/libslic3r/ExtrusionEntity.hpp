@@ -144,16 +144,6 @@ public:
     // Orca: Used for inner/outer/inner mode - classic perimeter generator
     int inset_idx = -1;
 
-    // NEOTKO_NEOARACHNE_TAG s93 — per-path override for the Auto Lift heuristic.
-    // When true, GCode.cpp::needs_retraction() forces LazyLift instead of
-    // SpiralLift even if Auto Lift would have picked spiral. Set by
-    // NeoArachneInterior on all paths it emits. Solves the s93 spiral-smear
-    // blob bug around clusters of is_odd / variable-thickness Arachne paths
-    // where Auto Lift was misdetecting overhang due to path density and
-    // emitting G3 helical lifts that smeared residual ooze in a circle.
-    // Default false → upstream behaviour unchanged for Classic paths.
-    bool force_no_spiral_lift = false;
-
     static std::string role_to_string(ExtrusionRole role);
     static ExtrusionRole string_to_role(const std::string_view role);
 };
@@ -185,7 +175,6 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
-        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
     ExtrusionPath(ExtrusionPath &&rhs)
         : polyline(std::move(rhs.polyline))
@@ -197,7 +186,6 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
-        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
     ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
         : polyline(polyline)
@@ -209,7 +197,6 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
-        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
     ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
         : polyline(std::move(polyline))
@@ -221,7 +208,6 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
-        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
     }
 
     ExtrusionPath& operator=(const ExtrusionPath& rhs) {
@@ -233,7 +219,6 @@ public:
         this->height = rhs.height;
         this->polyline = rhs.polyline;
         this->inset_idx = rhs.inset_idx;
-        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
         return *this;
     }
     ExtrusionPath& operator=(ExtrusionPath&& rhs) {
@@ -245,7 +230,6 @@ public:
         this->height = rhs.height;
         this->polyline = std::move(rhs.polyline);
         this->inset_idx = rhs.inset_idx;
-        this->force_no_spiral_lift = rhs.force_no_spiral_lift;
         return *this;
     }
 
@@ -358,21 +342,32 @@ public:
     ExtrusionPaths paths;
 
     ExtrusionMultiPath() {}
-    ExtrusionMultiPath(const ExtrusionMultiPath &rhs) : paths(rhs.paths), m_can_reverse(rhs.m_can_reverse) {}
-    ExtrusionMultiPath(ExtrusionMultiPath &&rhs) : paths(std::move(rhs.paths)), m_can_reverse(rhs.m_can_reverse) {}
-    ExtrusionMultiPath(const ExtrusionPaths &paths) : paths(paths) {}
-    ExtrusionMultiPath(const ExtrusionPath &path) {this->paths.push_back(path); m_can_reverse = path.can_reverse(); }
+    ExtrusionMultiPath(const ExtrusionMultiPath &rhs) : ExtrusionEntity(rhs), paths(rhs.paths), m_can_reverse(rhs.m_can_reverse) {}
+    ExtrusionMultiPath(ExtrusionMultiPath &&rhs) : ExtrusionEntity(rhs), paths(std::move(rhs.paths)), m_can_reverse(rhs.m_can_reverse) {}
+    ExtrusionMultiPath(const ExtrusionPaths &paths) : paths(paths)
+    {
+        if (!paths.empty())
+            this->inset_idx = paths.front().inset_idx;
+    }
+    ExtrusionMultiPath(const ExtrusionPath &path)
+    {
+        this->paths.push_back(path);
+        this->inset_idx = path.inset_idx;
+        m_can_reverse = path.can_reverse();
+    }
 
     ExtrusionMultiPath &operator=(const ExtrusionMultiPath &rhs)
     {
-        this->paths   = rhs.paths;
-        m_can_reverse = rhs.m_can_reverse;
+        this->paths     = rhs.paths;
+        this->inset_idx = rhs.inset_idx;
+        m_can_reverse   = rhs.m_can_reverse;
         return *this;
     }
     ExtrusionMultiPath &operator=(ExtrusionMultiPath &&rhs)
     {
-        this->paths   = std::move(rhs.paths);
-        m_can_reverse = rhs.m_can_reverse;
+        this->paths     = std::move(rhs.paths);
+        this->inset_idx = rhs.inset_idx;
+        m_can_reverse   = rhs.m_can_reverse;
         return *this;
     }
 
@@ -423,12 +418,27 @@ public:
     ExtrusionPaths paths;
 
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
-    ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role) {}
-    ExtrusionLoop(ExtrusionPaths &&paths, ExtrusionLoopRole role = elrDefault) : paths(std::move(paths)), m_loop_role(role) {}
+    ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role)
+    {
+        if (!paths.empty())
+            this->inset_idx = paths.front().inset_idx;
+    }
+    ExtrusionLoop(ExtrusionPaths &&paths, ExtrusionLoopRole role = elrDefault) : paths(std::move(paths)), m_loop_role(role)
+    {
+        if (!this->paths.empty())
+            this->inset_idx = this->paths.front().inset_idx;
+    }
     ExtrusionLoop(const ExtrusionPath &path, ExtrusionLoopRole role = elrDefault) : m_loop_role(role)
-        { this->paths.push_back(path); }
+    {
+        this->paths.push_back(path);
+        this->inset_idx = path.inset_idx;
+    }
     ExtrusionLoop(const ExtrusionPath &&path, ExtrusionLoopRole role = elrDefault) : m_loop_role(role)
-        { this->paths.emplace_back(std::move(path)); }
+    {
+        this->paths.emplace_back(std::move(path));
+        if (!this->paths.empty())
+            this->inset_idx = this->paths.front().inset_idx;
+    }
     bool is_loop() const override{ return true; }
     bool can_reverse() const override { return false; }
 	ExtrusionEntity* clone() const override{ return new ExtrusionLoop (*this); }

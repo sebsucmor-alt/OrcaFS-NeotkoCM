@@ -81,10 +81,22 @@ Semver get_min_version_from_json(std::string file_path)
 Semver get_version_from_json(std::string file_path)
 {
     try {
+        if (!boost::filesystem::exists(file_path)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": file not found: " << file_path;
+            return Semver();
+        }
         boost::nowide::ifstream ifs(file_path);
+        if (!ifs.good()) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": cannot open: " << file_path;
+            return Semver();
+        }
         json j;
         ifs >> j;
-        std::string version_str = j.at(BBL_JSON_KEY_VERSION);
+        if (j.is_null() || !j.is_object() || !j.contains(BBL_JSON_KEY_VERSION)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": missing version key in " << file_path;
+            return Semver();
+        }
+        std::string version_str = j.at(BBL_JSON_KEY_VERSION).get<std::string>();
 
         auto config_version = Semver::parse(version_str);
         if (! config_version) {
@@ -93,10 +105,13 @@ Semver get_version_from_json(std::string file_path)
             return *config_version;
         }
     }
-    catch(nlohmann::detail::parse_error &err) {
+    catch (const nlohmann::detail::parse_error &err) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": parse "<<file_path<<" got a nlohmann::detail::parse_error, reason = " << err.what();
+        return Semver();       
+    }
+    catch (const std::exception &err) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": " << file_path << " — " << err.what();
         return Semver();
-        //throw ConfigurationError(format("Failed loading configuration file \"%1%\": %2%", file_path, err.what()));
     }
 }
 
@@ -360,25 +375,47 @@ void Preset::normalize(DynamicPrintConfig &config)
         }
     }
 
+    const auto &defaults = FullPrintConfig::defaults();
+
     if (config.option("filament_diameter") != nullptr) {
         // This config contains single or multiple filament presets.
         // Ensure that the filament preset vector options contain the correct number of values.
-        const auto &defaults = FullPrintConfig::defaults();
         for (const std::string &key : Preset::filament_options()) {
             if (key == "compatible_prints" || key == "compatible_printers")
                 continue;
             auto *opt = config.option(key, false);
-            /*assert(opt != nullptr);
-            assert(opt->is_vector());*/
-            if (opt != nullptr && opt->is_vector())
+            if (opt == nullptr) {
+                const ConfigOption* default_opt = defaults.option(key);
+                if (default_opt != nullptr) {
+                    config.set_key_value(key, default_opt->clone());
+                    opt = config.option(key, false);
+                }
+            }
+            if (opt != nullptr && opt->is_vector() && static_cast<ConfigOptionVectorBase*>(opt)->size() < n)
                 static_cast<ConfigOptionVectorBase*>(opt)->resize(n, defaults.option(key));
         }
-        // The following keys are mandatory for the UI, but they are not part of FullPrintConfig, therefore they are handled separately.
-        for (const std::string key : { "filament_settings_id" }) {
+        for (const std::string key : {"filament_settings_id"}) {
             auto *opt = config.option(key, false);
-            assert(opt == nullptr || opt->type() == coStrings);
-            if (opt != nullptr && opt->type() == coStrings)
+            if (opt != nullptr && opt->type() == coStrings && static_cast<ConfigOptionStrings*>(opt)->values.size() < n)
                 static_cast<ConfigOptionStrings*>(opt)->values.resize(n, std::string());
+        }
+    } else if (config.option("layer_height") != nullptr) {
+        // Print config: ensure all expected options exist in the loaded profile.
+        for (const std::string &key : Preset::print_options()) {
+            if (!config.has(key)) {
+                const ConfigOption* default_opt = defaults.option(key);
+                if (default_opt != nullptr)
+                    config.set_key_value(key, default_opt->clone());
+            }
+        }
+    } else if (config.option("nozzle_diameter") != nullptr) {
+        // Printer config: ensure all expected options exist in the loaded profile.
+        for (const std::string &key : Preset::printer_options()) {
+            if (!config.has(key)) {
+                const ConfigOption* default_opt = defaults.option(key);
+                if (default_opt != nullptr)
+                    config.set_key_value(key, default_opt->clone());
+            }
         }
     }
 
@@ -834,83 +871,6 @@ bool Preset::has_cali_lines(PresetBundle* preset_bundle)
 static std::vector<std::string> s_Preset_print_options {
     "layer_height", "initial_layer_print_height", "wall_loops", "alternate_extra_wall", "slice_closing_radius", "spiral_mode", "spiral_mode_smooth", "spiral_mode_max_xy_smoothing", "spiral_starting_flow_ratio", "spiral_finishing_flow_ratio", "slicing_mode",
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
-    // NEOTKO_MULTIPASS_TAG_START — Penultimate
-    "penultimate_top_layers", "penultimate_solid_infill_density", "penultimate_solid_infill_pattern",
-    // NEOTKO_MULTIPASS_TAG_END
-    // NEOTKO_MULTIPASS_TAG_START — Neoweaving
-    "interlayer_neoweave_enabled", "interlayer_neoweave_mode", "neoweave_filter",
-    "interlayer_neoweave_amplitude", "interlayer_neoweave_period", "interlayer_neoweave_max_z_speed", "interlayer_neoweave_min_length",
-    "neoweave_penultimate_layers", "neoweave_speed_pct",
-    "neotko_interlayer_nesting_enabled", // NEOTKO_NEOWEAVING_TAG — Feature 14: Monotonic Interlayer Nesting
-    "neotko_wipe_tower", // NEOTKO_NEOTOWER_TAG — legacy checkbox (fallback, hidden since s104)
-    "neotko_tower_type", "neotower_zigurat", // NEOTKO_NEOTOWER_TAG s104 — tower type + zigurat option
-    // NEOTKO_COLORMIX_TAG_START
-    "interlayer_colormix_enabled", "interlayer_colormix_surface",
-    "interlayer_colormix_tool_a", "interlayer_colormix_tool_b",
-    "interlayer_colormix_tool_c", "interlayer_colormix_tool_d",
-    "interlayer_colormix_min_length",
-    "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate",
-    "interlayer_colormix_mode", "interlayer_colormix_pct_a",
-    "interlayer_colormix_pct_b", "interlayer_colormix_easing",
-    "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines",
-    "interlayer_colormix_overlap", "interlayer_colormix_invert",
-    "interlayer_colormix_repetitions", // NEOTKO_COLORMIX_TAG — s80
-    // NEOTKO_COLORMIX_TAG — s61: per-role penultimate variants.
-    "interlayer_colormix_penu_mode", "interlayer_colormix_penu_pct_a",
-    "interlayer_colormix_penu_pct_b", "interlayer_colormix_penu_easing",
-    "interlayer_colormix_penu_gamma", "interlayer_colormix_penu_min_surface_lines",
-    "interlayer_colormix_penu_overlap", "interlayer_colormix_penu_invert",
-    "interlayer_colormix_penu_repetitions", // NEOTKO_COLORMIX_TAG — s80
-    "interlayer_colormix_penu_band_count_a", "interlayer_colormix_penu_band_count_b",
-    "interlayer_colormix_penu_band_count_c", "interlayer_colormix_penu_band_count_d",
-    "interlayer_colormix_penu_tool_a", "interlayer_colormix_penu_tool_b",
-    "interlayer_colormix_penu_tool_c", "interlayer_colormix_penu_tool_d",
-    "interlayer_colormix_band_count_a", "interlayer_colormix_band_count_b",
-    "interlayer_colormix_band_count_c", "interlayer_colormix_band_count_d",
-    "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone",
-    "interlayer_colormix_filament_filter",
-    "interlayer_colormix_use_virtual",
-    "interlayer_colormix_angle", "interlayer_colormix_penu_angle",
-    "surface_color_mix_lane_mode",  // NEOTKO_COLORMIX_TAG — s58
-    // NEOTKO_COLORMIX_TAG_END
-    // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
-    "multipass_enabled", "multipass_surface", "multipass_num_passes",
-    "multipass_tool_1", "multipass_tool_2", "multipass_tool_3",
-    "multipass_width_ratio_1", "multipass_width_ratio_2", "multipass_width_ratio_3",
-    "multipass_vary_pattern",
-    "multipass_angle_1", "multipass_angle_2", "multipass_angle_3",
-    "multipass_pa_mode", "multipass_pa_value",
-    "multipass_fan_1", "multipass_fan_2", "multipass_fan_3",
-    "multipass_speed_pct_1", "multipass_speed_pct_2", "multipass_speed_pct_3",
-    "multipass_gcode_start_1", "multipass_gcode_start_2", "multipass_gcode_start_3",
-    "multipass_gcode_end_1", "multipass_gcode_end_2", "multipass_gcode_end_3",
-    "multipass_prime_volume",  // NEOTKO_MULTIPASS_PRIME_TAG
-    "multipass_perimeter_override",  // NEOTKO_MULTIPASS_TAG
-    // NEOTKO_MULTIPASS_SURFACES_TAG — Penultimate Surface independent MultiPass config
-    "penultimate_multipass_enabled", "penultimate_multipass_num_passes",
-    "penultimate_multipass_tool_1", "penultimate_multipass_tool_2", "penultimate_multipass_tool_3",
-    "penultimate_multipass_width_ratio_1", "penultimate_multipass_width_ratio_2", "penultimate_multipass_width_ratio_3",
-    "penultimate_multipass_angle_1", "penultimate_multipass_angle_2", "penultimate_multipass_angle_3",
-    "penultimate_multipass_gcode_start_1", "penultimate_multipass_gcode_start_2", "penultimate_multipass_gcode_start_3",
-    "penultimate_multipass_gcode_end_1", "penultimate_multipass_gcode_end_2", "penultimate_multipass_gcode_end_3",
-    // NEOTKO_MULTIPASS_PRIME_TAG — s58: penultimate_multipass_prime_volume removed (unified to multipass_prime_volume).
-    "penultimate_multipass_vary_pattern",
-    "penultimate_multipass_fan_1", "penultimate_multipass_fan_2", "penultimate_multipass_fan_3",
-    "penultimate_multipass_speed_pct_1", "penultimate_multipass_speed_pct_2", "penultimate_multipass_speed_pct_3",
-    // NEOTKO_MULTIPASS_TAG_START — PathBlend
-    "multipass_path_gradient", "path_gradient_segments", "path_gradient_min_flow_pct",
-    // NEOTKO_MULTIPASS_TAG_END
-    // NEOTKO_PATHBLEND_TAG_START — MultiPathBlend
-    "pathblend_num_passes",
-    "pathblend_tool_1", "pathblend_tool_2", "pathblend_tool_3", "pathblend_tool_4",
-    "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3", "pathblend_layer_ratio_4",
-    "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface",
-    "pathblend_invert_gradient", "pathblend_fill_angle",
-    // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings blobs
-    "pathblend_top", "pathblend_penu",
-    // NEOTKO_PATHBLEND_TAG_END
-    // NEOTKO_SANDWICH_TAG — pass-stack blob keys
-    "neotko_surface_passes_top", "neotko_surface_passes_penu",
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "detect_overhang_wall", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
     "seam_position", "staggered_inner_seams", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "sparse_infill_pattern", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "top_surface_pattern", "bottom_surface_pattern",
     "infill_direction", "solid_infill_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",
@@ -922,8 +882,6 @@ static std::vector<std::string> s_Preset_print_options {
     "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence",
     "max_volumetric_extrusion_rate_slope", "max_volumetric_extrusion_rate_slope_segment_length","extrusion_rate_smoothing_external_perimeter_only",
     "inner_wall_speed", "outer_wall_speed", "sparse_infill_speed", "internal_solid_infill_speed",
-    "penultimate_infill_speed", // NEOTKO_MULTIPASS_TAG
-    "infill_neoweave_enabled", "infill_neoweave_amplitude", "infill_neoweave_period", "infill_neoweave_max_z_speed", // NEOTKO_MULTIPASS_TAG
     "top_surface_speed", "support_speed", "support_object_xy_distance", "support_object_first_layer_gap", "support_interface_speed",
     "bridge_speed", "internal_bridge_speed", "gap_infill_speed", "travel_speed", "travel_speed_z", "initial_layer_speed",
     "outer_wall_acceleration", "initial_layer_acceleration", "top_surface_acceleration", "default_acceleration", "skirt_type", "skirt_loops", "skirt_speed","min_skirt_length", "skirt_distance", "skirt_start_angle", "skirt_height","single_loop_draft_shield", "draft_shield",
@@ -935,7 +893,7 @@ static std::vector<std::string> s_Preset_print_options {
     "support_interface_pattern", "support_interface_spacing", "support_interface_loop_pattern",
     "support_top_z_distance", "support_on_build_plate_only","support_critical_regions_only", "bridge_no_support", "thick_bridges", "thick_internal_bridges","dont_filter_internal_bridges","enable_extra_bridge_layer", "max_bridge_length", "print_sequence", "print_order", "support_remove_small_overhang",
     "filename_format", "wall_filament", "support_bottom_z_distance",
-    "enable_infill_filament_override", "infill_filament_use_base_first_layers", "infill_filament_use_base_last_layers", "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament","support_interface_not_for_body",
+    "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament","support_interface_not_for_body",
     "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "inner_wall_line_width",
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width",
@@ -953,16 +911,6 @@ static std::vector<std::string> s_Preset_print_options {
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "min_length_factor",
-     // NEOTKO_NEOARACHNE_TAG fase2+fase3.0 — registered here so TabPrintObject /
-     // TabPrintPart (per-object override tabs) accept these keys. Without this,
-     // TabPrintModel filters them out as unknown and the controls never appear
-     // in the Objects panel. See TabPrintModel::build() lines 10560-10568.
-     "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill",
-     "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
-     "neoarachne_max_bead_width_pct",
-     "neoarachne_min_feature_size_pct", "neoarachne_keep_short_tails",
-     "neoarachne_bead_count_hysteresis_pct",
-     "neoarachne_transition_filter_dist_mm",
      "small_perimeter_speed", "small_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","default_junction_deviation",
      "top_solid_infill_flow_ratio","bottom_solid_infill_flow_ratio","only_one_wall_first_layer", "print_flow_ratio", "seam_gap",
@@ -974,12 +922,43 @@ static std::vector<std::string> s_Preset_print_options {
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
-     "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow", "neotower_purge_compaction", "single_extruder_multi_material_priming",
-     "wipe_tower_rotation_angle", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
+     "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
+     // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice planner + options
+     "neotko_wipe_tower", "neotower_purge_compaction", "neotko_tower_type", "neotower_zigurat",
+     // NEOTKO_NEOTOWER_TAG_END
+     "multipass_prime_volume", // NEOTKO_MULTIPASS_PRIME_TAG — per-region sublayer prime volume
+     // NEOTKO_SANDWICH_ENGINE_TAG_START — Sandwich engine per-region/object keys (Fase 2)
+     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
+     "interlayer_colormix_surface", "interlayer_colormix_tool_a", "interlayer_colormix_tool_b", "interlayer_colormix_tool_c", "interlayer_colormix_tool_d", "interlayer_colormix_min_length",
+     "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate", "interlayer_colormix_mode", "interlayer_colormix_pct_a", "interlayer_colormix_pct_b", "interlayer_colormix_easing",
+     "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines", "interlayer_colormix_overlap", "interlayer_colormix_invert", "interlayer_colormix_repetitions", "interlayer_colormix_penu_mode",
+     "interlayer_colormix_penu_pct_a", "interlayer_colormix_penu_pct_b", "interlayer_colormix_penu_easing", "interlayer_colormix_penu_gamma", "interlayer_colormix_penu_min_surface_lines", "interlayer_colormix_penu_overlap",
+     "interlayer_colormix_penu_invert", "interlayer_colormix_penu_repetitions", "interlayer_colormix_penu_band_count_a", "interlayer_colormix_penu_band_count_b", "interlayer_colormix_penu_band_count_c", "interlayer_colormix_penu_band_count_d",
+     "interlayer_colormix_penu_tool_a", "interlayer_colormix_penu_tool_b", "interlayer_colormix_penu_tool_c", "interlayer_colormix_penu_tool_d", "interlayer_colormix_band_count_a", "interlayer_colormix_band_count_b",
+     "interlayer_colormix_band_count_c", "interlayer_colormix_band_count_d", "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone", "interlayer_colormix_filament_filter", "interlayer_colormix_use_virtual",
+     "interlayer_colormix_angle", "interlayer_colormix_penu_angle", "surface_color_mix_lane_mode", "multipass_enabled", "multipass_surface", "multipass_num_passes",
+     "multipass_tool_1", "multipass_tool_2", "multipass_tool_3", "multipass_width_ratio_1", "multipass_width_ratio_2", "multipass_width_ratio_3",
+     "multipass_vary_pattern", "multipass_angle_1", "multipass_angle_2", "multipass_angle_3", "multipass_pa_mode", "multipass_pa_value",
+     "multipass_fan_1", "multipass_fan_2", "multipass_fan_3", "multipass_speed_pct_1", "multipass_speed_pct_2", "multipass_speed_pct_3",
+     "multipass_gcode_start_1", "multipass_gcode_start_2", "multipass_gcode_start_3", "multipass_gcode_end_1", "multipass_gcode_end_2", "multipass_gcode_end_3",
+     "multipass_perimeter_override", "penultimate_multipass_enabled", "penultimate_multipass_num_passes", "penultimate_multipass_tool_1", "penultimate_multipass_tool_2", "penultimate_multipass_tool_3",
+     "penultimate_multipass_width_ratio_1", "penultimate_multipass_width_ratio_2", "penultimate_multipass_width_ratio_3", "penultimate_multipass_angle_1", "penultimate_multipass_angle_2", "penultimate_multipass_angle_3",
+     "penultimate_multipass_gcode_start_1", "penultimate_multipass_gcode_start_2", "penultimate_multipass_gcode_start_3", "penultimate_multipass_gcode_end_1", "penultimate_multipass_gcode_end_2", "penultimate_multipass_gcode_end_3",
+     "penultimate_multipass_vary_pattern", "penultimate_multipass_fan_1", "penultimate_multipass_fan_2", "penultimate_multipass_fan_3", "penultimate_multipass_speed_pct_1", "penultimate_multipass_speed_pct_2",
+     "penultimate_multipass_speed_pct_3", "multipass_path_gradient", "path_gradient_segments", "path_gradient_min_flow_pct", "pathblend_num_passes", "pathblend_tool_1",
+     "pathblend_tool_2", "pathblend_tool_3", "pathblend_tool_4", "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3",
+     "pathblend_layer_ratio_4", "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface", "pathblend_invert_gradient",
+     "pathblend_fill_angle", "pathblend_top", "pathblend_penu", "neotko_surface_passes_top", "neotko_surface_passes_penu",
+     // NEOTKO_SANDWICH_ENGINE_TAG_END
+     "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
      "small_area_infill_flow_compensation", "small_area_infill_flow_compensation_model",
      "seam_slope_type", "seam_slope_conditional", "scarf_angle_threshold", "scarf_joint_speed", "scarf_joint_flow_ratio", "seam_slope_start_height", "seam_slope_entire_loop", "seam_slope_min_length", "seam_slope_steps", "seam_slope_inner_walls", "scarf_overhang_threshold",
-     "interlocking_beam", "interlocking_orientation", "interlocking_beam_layer_count", "interlocking_depth", "interlocking_boundary_avoidance", "interlocking_beam_width","calib_flowrate_topinfill_special_order",
+     "interlocking_beam", "interlocking_orientation", "interlocking_beam_layer_count", "interlocking_depth", "interlocking_boundary_avoidance", "interlocking_beam_width",
+     "dithering_local_z_mode",
+     "dithering_local_z_whole_objects",
+     "dithering_local_z_infill",
+     "calib_flowrate_topinfill_special_order",
 };
 
 static std::vector<std::string> s_Preset_filament_options {
@@ -988,7 +967,10 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_flow_ratio", "filament_density", "filament_cost", "filament_minimal_purge_on_wipe_tower",
     "nozzle_temperature", "nozzle_temperature_initial_layer",
     // BBS
-    "cool_plate_temp", "textured_cool_plate_temp", "eng_plate_temp", "hot_plate_temp", "textured_plate_temp", "cool_plate_temp_initial_layer", "textured_cool_plate_temp_initial_layer", "eng_plate_temp_initial_layer", "hot_plate_temp_initial_layer", "textured_plate_temp_initial_layer", "supertack_plate_temp_initial_layer", "supertack_plate_temp",
+    "cool_plate_temp", "textured_cool_plate_temp", "eng_plate_temp", "hot_plate_temp", "textured_plate_temp",
+    "cool_plate_temp_initial_layer", "textured_cool_plate_temp_initial_layer", "eng_plate_temp_initial_layer",
+    "hot_plate_temp_initial_layer", "textured_plate_temp_initial_layer", "supertack_plate_temp_initial_layer", "supertack_plate_temp",
+    "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
     "temperature_vitrification", "reduce_fan_stop_start_freq","dont_slow_down_outer_wall", "slow_down_for_layer_cooling", "fan_min_speed",
@@ -1011,7 +993,8 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_unloading_speed", "filament_unloading_speed_start", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
     "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "activate_chamber_temp_control",
-    "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature"
+    "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature",
+    "filament_tower_ironing_area"
     };
 
 static std::vector<std::string> s_Preset_machine_limits_options {
@@ -1254,12 +1237,6 @@ void PresetCollection::load_presets(
         if (Slic3r::is_json_file(file_name)) {
             // Remove the .ini suffix.
             std::string name = file_name.erase(file_name.size() - 5);
-            if (this->find_preset(name, false)) {
-                // This happens when there's is a preset (most likely legacy one) with the same name as a system preset
-                // that's already been loaded from a bundle.
-                BOOST_LOG_TRIVIAL(warning) << "Preset already present, not loading: " << name;
-                continue;
-            }
             try {
                 Preset preset(m_type, name, false);
                 preset.file = dir_entry.path().string();
@@ -1287,6 +1264,28 @@ void PresetCollection::load_presets(
                             fs::remove(file_path);
                         BOOST_LOG_TRIVIAL(error) << boost::format("parse config %1% failed")%preset.file;
                         ++m_errors;
+                        continue;
+                    }
+
+                    auto type_it = key_values.find(BBL_JSON_KEY_TYPE);
+                    if (type_it != key_values.end()) {
+                        Preset::Type file_type = Preset::get_type_from_string(type_it->second);
+                        if (file_type != m_type) {
+                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(
+                                ": skip preset %1% because file type %2% does not match collection type %3%")
+                                % preset.file % type_it->second % Preset::get_type_string(m_type);
+                            continue;
+                        }
+                    }
+
+                    auto name_it = key_values.find(BBL_JSON_KEY_NAME);
+                    if (name_it != key_values.end() && !name_it->second.empty())
+                        preset.name = name_it->second;
+
+                    if (this->find_preset(preset.name, false)) {
+                        // This happens when there is a preset with the same logical name already loaded,
+                        // typically from a system bundle or from another JSON file with a different filename.
+                        BOOST_LOG_TRIVIAL(warning) << "Preset already present, not loading: " << preset.name;
                         continue;
                     }
 
@@ -1334,7 +1333,7 @@ void PresetCollection::load_presets(
                         // Find a default preset for the config. The PrintPresetCollection provides different default preset based on the "printer_technology" field.
                         preset.config = default_preset.config;
                     }
-                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " load preset: " << name << " and filament_id: " << preset.filament_id << " and base_id: " << preset.base_id;
+                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " load preset: " << preset.name << " and filament_id: " << preset.filament_id << " and base_id: " << preset.base_id;
                     preset.config.apply(std::move(config));
                     Preset::normalize(preset.config);
                     // Report configuration fields, which are misplaced into a wrong group.
@@ -2796,6 +2795,19 @@ std::vector<std::string> PresetCollection::diameters_of_selected_printer()
     std::set<std::string> diameters;
     auto printer_model = m_edited_preset.config.opt_string("printer_model");
     for (auto &preset : m_presets) {
+        if (preset.is_visible && preset.config.opt_string("printer_model") == printer_model)
+            diameters.insert(preset.config.opt_string("printer_variant"));
+    }
+    return std::vector<std::string>{diameters.begin(), diameters.end()};
+}
+
+std::vector<std::string> PresetCollection::diameters_for_same_printer_model()
+{
+    std::set<std::string> diameters;
+    const std::string     printer_model = m_edited_preset.config.opt_string("printer_model");
+    for (auto &preset : m_presets) {
+        if (!preset.is_system)
+            continue;
         if (preset.config.opt_string("printer_model") == printer_model)
             diameters.insert(preset.config.opt_string("printer_variant"));
     }
@@ -2967,7 +2979,7 @@ inline t_config_option_keys deep_diff(const ConfigBase &config_this, const Confi
 
 static constexpr const std::initializer_list<const char*> optional_keys { "compatible_prints", "compatible_printers" };
 //BBS: skip these keys for dirty check
-static std::set<std::string> skipped_in_dirty = {"printer_settings_id", "print_settings_id", "filament_settings_id"};
+static std::set<std::string> skipped_in_dirty = {"printer_settings_id", "print_settings_id", "filament_settings_id", "mixed_filament_definitions"};
 
 bool PresetCollection::is_dirty(const Preset *edited, const Preset *reference)
 {
@@ -3073,13 +3085,28 @@ bool PresetCollection::select_preset_by_name(const std::string &name_w_suffix, b
         // Preset found by its name and it is visible.
         idx = it - m_presets.begin();
     else {
-        // Find the first visible preset.
-        for (size_t i = m_default_suppressed ? m_num_default_presets : 0; i < m_presets.size(); ++ i)
-            if (m_presets[i].is_visible) {
-                idx = i;
-                break;
+        bool found = false;
+        //Only U1 cancel current preset and select the other avalibale preset to show and not switch the other machine 
+        if (m_type == Preset::Type::TYPE_PRINTER && it != m_presets.end() && it->name == name && !it->is_visible) {
+            std::string printer_model = it->config.opt_string("printer_model");
+            if (!printer_model.empty()) {
+                for (size_t i = m_default_suppressed ? m_num_default_presets : 0; i < m_presets.size(); ++i) {
+                    if (m_presets[i].is_visible && m_presets[i].config.opt_string("printer_model") == printer_model) {
+                        idx = i;
+                        found = true;
+                        break;
+                    }
+                }
             }
-        // If the first visible preset was not found, return the 0th element, which is the default preset.
+        }
+        if (!found) {
+            // Find the first visible preset.
+            for (size_t i = m_default_suppressed ? m_num_default_presets : 0; i < m_presets.size(); ++ i)
+                if (m_presets[i].is_visible) {
+                    idx = i;
+                    break;
+                }
+        }
     }
 
     // 2) Select the new preset.

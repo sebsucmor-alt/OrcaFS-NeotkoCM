@@ -38,15 +38,23 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
                                               float                       layer_height,
                                               float                       layer_height_a,
                                               float                       layer_height_b,
-                                              float                       base_layer_height)
+                                              float                       base_layer_height,
+                                              const PrintObject*          current_object = nullptr)
 {
     if (!(mixed_mgr && mixed_mgr->is_mixed(filament_id_1based, num_physical)))
         return filament_id_1based;
 
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
-    const bool is_custom_mixed = mixed_row != nullptr && mixed_row->custom;
 
-    if (!is_custom_mixed && (layer_height_a > 0.f || layer_height_b > 0.f)) {
+    // Z-direction gradient short-circuits the legacy A/B layer cycle below: the
+    // gradient path needs the per-(object, layer) run lookup performed inside
+    // MixedFilamentManager::resolve.
+    const bool gradient_active = 
+        (mixed_row != nullptr && current_object != nullptr) &&
+        (mixed_row->gradient_enabled && mixed_row->component_a != mixed_row->component_b) &&
+        (layer_index > 0);
+
+    if (mixed_row != nullptr && !mixed_row->custom && !gradient_active && (layer_height_a > 0.f || layer_height_b > 0.f)) {
         const float safe_base = std::max<float>(0.01f, base_layer_height);
         const int ratio_a = std::max(1, int(std::lround((layer_height_a > 0.f ? layer_height_a : safe_base) / safe_base)));
         const int ratio_b = std::max(1, int(std::lround((layer_height_b > 0.f ? layer_height_b : safe_base) / safe_base)));
@@ -60,7 +68,7 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
         }
     }
 
-    return mixed_mgr->resolve(filament_id_1based, num_physical, layer_index, layer_print_z, layer_height);
+    return mixed_mgr->resolve(filament_id_1based, num_physical, layer_index, layer_print_z, layer_height, false, current_object);
 }
 
 bool has_grouped_manual_pattern(const MixedFilamentManager *mixed_mgr,
@@ -108,29 +116,16 @@ bool internal_solid_infill_uses_sparse_filament(const PrintRegion &region, Extru
     return role == erSolidInfill && std::abs(region.config().sparse_infill_density.value - 100.) < EPSILON;
 }
 
-bool use_base_infill_filament(const LayerTools &layer_tools, const PrintRegion &region)
+unsigned int sparse_infill_filament_id_1based(const PrintRegion &region)
 {
-    const PrintRegionConfig &config = region.config();
-    if (!config.enable_infill_filament_override.value)
-        return true;
-    if (layer_tools.object_layer_count <= 0)
-        return false;
-
-    const int first_layers = std::max(0, config.infill_filament_use_base_first_layers.value);
-    const int last_layers  = std::max(0, config.infill_filament_use_base_last_layers.value);
-    return layer_tools.layer_index < first_layers || layer_tools.layer_index >= layer_tools.object_layer_count - last_layers;
-}
-
-unsigned int sparse_infill_filament_id_1based(const LayerTools &layer_tools, const PrintRegion &region)
-{
-    return use_base_infill_filament(layer_tools, region) ? region.config().wall_filament.value : region.config().sparse_infill_filament.value;
+    return region.config().sparse_infill_filament.value;
 }
 
 unsigned int infill_filament_id_1based(const LayerTools &layer_tools, const PrintRegion &region, ExtrusionRole role)
 {
     if (internal_solid_infill_uses_sparse_filament(region, role))
-        return sparse_infill_filament_id_1based(layer_tools, region);
-    return is_solid_infill(role) ? region.config().solid_infill_filament.value : sparse_infill_filament_id_1based(layer_tools, region);
+        return sparse_infill_filament_id_1based(region);
+    return is_solid_infill(role) ? region.config().solid_infill_filament.value : sparse_infill_filament_id_1based(region);
 }
 
 unsigned int grouped_manual_pattern_mixed_filament_id_for_layer(const LayerTools& layer_tools,
@@ -142,6 +137,26 @@ unsigned int grouped_manual_pattern_mixed_filament_id_for_layer(const LayerTools
     if (has_grouped_manual_pattern(layer_tools.mixed_mgr, layer_tools.num_physical, configured_filament_id_1based))
         return configured_filament_id_1based;
     return 0;
+}
+
+unsigned int grouped_manual_pattern_infill_filament_1based(const LayerTools&  layer_tools,
+                                                           const PrintRegion& region,
+                                                           unsigned int       configured_filament_id_1based)
+{
+    const unsigned int grouped_id =
+        grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_filament_id_1based);
+    if (grouped_id == 0)
+        return 0;
+
+    const int innermost_perimeter_index = std::max(0, region.config().wall_loops.value - 1);
+    return layer_tools.mixed_mgr->resolve_perimeter(grouped_id,
+                                                    layer_tools.num_physical,
+                                                    layer_tools.layer_index,
+                                                    innermost_perimeter_index,
+                                                    float(layer_tools.print_z),
+                                                    float(layer_tools.layer_height),
+                                                    false,
+                                                    layer_tools.current_object);
 }
 
 void remove_duplicates_preserve_order(std::vector<unsigned int> &values)
@@ -280,12 +295,6 @@ bool LayerTools::is_extruder_order(unsigned int a, unsigned int b) const
 // Resolve a 1-based filament ID through the mixed-filament manager for this layer.
 unsigned int LayerTools::resolve_mixed_1based(unsigned int filament_id) const
 {
-    // NEOTKO_MULTIPASS_TAG_START — when MultiPass perimeter override is active, bypass
-    // height-based MixedFilament cycling. WipeTower cannot reconcile per-layer Z cycling
-    // with sublayer toolchanges; use component_a for a stable, consistent tool assignment.
-    if (mp_perim_override_active)
-        return resolve_mixed_component_a(mixed_mgr, num_physical, filament_id);
-    // NEOTKO_MULTIPASS_TAG_END
     return resolve_mixed_with_layer_heights(mixed_mgr,
                                             num_physical,
                                             filament_id,
@@ -294,7 +303,8 @@ unsigned int LayerTools::resolve_mixed_1based(unsigned int filament_id) const
                                             float(this->layer_height),
                                             mixed_layer_height_a,
                                             mixed_layer_height_b,
-                                            mixed_base_layer_height);
+                                            mixed_base_layer_height,
+                                            this->current_object);
 }
 
 // Return a zero based extruder from the region, or extruder_override if overriden.
@@ -308,15 +318,17 @@ unsigned int LayerTools::wall_filament(const PrintRegion &region) const
 unsigned int LayerTools::sparse_infill_filament(const PrintRegion &region) const
 {
 	assert(region.config().wall_filament.value > 0);
-	unsigned int id = (this->extruder_override == 0) ? sparse_infill_filament_id_1based(*this, region) : this->extruder_override;
-	return resolve_mixed_1based(id) - 1;
+	unsigned int id = (this->extruder_override == 0) ? sparse_infill_filament_id_1based(region) : this->extruder_override;
+    const unsigned int grouped = grouped_manual_pattern_infill_filament_1based(*this, region, id);
+	return ((grouped != 0) ? grouped : resolve_mixed_1based(id)) - 1;
 }
 
 unsigned int LayerTools::solid_infill_filament(const PrintRegion &region) const
 {
 	assert(region.config().solid_infill_filament.value > 0);
 	unsigned int id = (this->extruder_override == 0) ? region.config().solid_infill_filament.value : this->extruder_override;
-	return resolve_mixed_1based(id) - 1;
+    const unsigned int grouped = grouped_manual_pattern_infill_filament_1based(*this, region, id);
+	return ((grouped != 0) ? grouped : resolve_mixed_1based(id)) - 1;
 }
 
 // Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
@@ -325,19 +337,13 @@ unsigned int LayerTools::extruder(const ExtrusionEntityCollection &extrusions, c
 	assert(region.config().wall_filament.value > 0);
 	assert(region.config().sparse_infill_filament.value > 0);
 	assert(region.config().solid_infill_filament.value > 0);
-	// 1 based extruder ID.
-    unsigned int extruder = 1;
-    if (this->extruder_override == 0) {
-        if (extrusions.has_infill()) {
-            const ExtrusionRole role = extrusions.entities.empty() ? erNone : extrusions.entities.front()->role();
-            extruder = infill_filament_id_1based(*this, region, role);
-        } else
-            extruder = region.config().wall_filament.value;
-    } else
-        extruder = this->extruder_override;
-
-    extruder = resolve_mixed_1based(extruder);
-    return (extruder == 0) ? 0 : extruder - 1;
+    if (extrusions.has_infill()) {
+        const ExtrusionRole role = extrusions.entities.empty() ? erNone : extrusions.entities.front()->role();
+        if (internal_solid_infill_uses_sparse_filament(region, role))
+            return sparse_infill_filament(region);
+        return is_solid_infill(role) ? solid_infill_filament(region) : sparse_infill_filament(region);
+    }
+    return wall_filament(region);
 }
 
 static double calc_max_layer_height(const PrintConfig &config, double max_object_layer_height)
@@ -578,7 +584,26 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         this->reorder_extruders(first_extruder);
     }
 
-    this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height, "multi-print");
+    this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height, "multi-obj");
+
+    if (prime_multi_material) {
+        std::map<unsigned int, int> extrudeCount;
+        for (const LayerTools& lt : m_layer_tools) {
+            for (unsigned int currentExtruder : lt.extruders) {
+                extrudeCount[currentExtruder]++;
+            }
+        }
+
+        unsigned int maxExtrude = -1;
+        int maxCount = 0;
+        for (auto& itPair : extrudeCount) {
+            if (itPair.second > maxCount && !m_print_config_ptr->filament_soluble.get_at(itPair.first)) {
+                maxCount = itPair.second;
+                maxExtrude = itPair.first;
+            }
+        }
+        const_cast<PrintConfig*>(m_print_config_ptr)->wipe_tower_filament.setInt(maxExtrude + 1);
+    }
 
     if (this->insert_wipe_tower_extruder()) {
         // Now convert the 0-based list to 1-based again, because that is what reorder_extruder expects.
@@ -587,7 +612,7 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
                 ++extruder;
         }
         this->reorder_extruders(first_extruder);
-        this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height, "multi-print-post-insert");
+        this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
     }
 
     this->collect_extruder_statistics(prime_multi_material);
@@ -845,40 +870,21 @@ static std::vector<unsigned int> parse_colormix_pattern_1based(
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches, float global_mp_prime_vol)
 {
-    // NEOTKO_PROFILE_TAG — Fase D: ColorMix Painter takeover.
-    // If the object has ANY paint, ignore preset SCM settings for this object;
-    // only painted profiles drive the registered tools. MUST stay in sync with
-    // the SLICE-side decision in SurfaceColorMix::assign_and_group_tools — any
-    // mismatch crashes the wipe tower ("unexpected toolchange").
-    const bool painter_mode_obj =
-        SurfaceColorMix::object_has_any_colormix_paint(object.model_object());
-
-    // NEOTKO_PAINT_COEXIST_TAG s91 — object-wide MMU flag retained ONLY as a
-    // fast-path skip when there's no MMU paint at all. The real per-region
-    // decision happens inside the layer loop, mirroring the SLICE-side
-    // per-piece predicate (SurfaceColorMix::mmu_governs_xy). SLICE and TO MUST
-    // call the SAME predicate with comparable arguments — single source of
-    // truth, otherwise the wipe tower diverges (the cardinal project rule).
-    const bool object_has_mmu_paint =
-        object.model_object() != nullptr && object.model_object()->is_mm_painted();
-    if (object_has_mmu_paint)
-        NEOTKO_LOG(TOOLORDER, "s91/coexist TO ENTRY object_has_mmu=1"
-            << " — per-region governance active (was global skip pre-s91)");
-
     // NEOTKO_MULTIPASS_TAG — do NOT clear m_mp_sublayer_extruders here.
     // In multi-object prints collect_extruders() is called once per object;
     // clearing here would erase entries from previous objects, leaving sublayer
-    // tools uninitialized in GCodeWriter → null m_config crash.
-    // m_mp_sublayer_extruders starts empty at ToolOrdering construction and
-    // accumulates across all objects; sort_remove_duplicates in
-    // collect_extruder_statistics() handles any duplicates.
-
+    // tools uninitialized in GCodeWriter → null m_config crash. The vector starts
+    // empty at construction and accumulates across all objects; sort_remove_duplicates
+    // in collect_extruder_statistics() handles any duplicates.
     for (LayerTools &layer_tools : m_layer_tools) {
         layer_tools.mixed_mgr                = m_mixed_mgr;
         layer_tools.num_physical             = m_num_physical;
         layer_tools.mixed_layer_height_a     = m_mixed_layer_height_a;
         layer_tools.mixed_layer_height_b     = m_mixed_layer_height_b;
         layer_tools.mixed_base_layer_height  = m_mixed_base_layer_height;
+        // Set per-object context for the duration of this collect_extruders call.
+        // Reset after the loops below so unrelated callers see nullptr.
+        layer_tools.current_object           = &object;
     }
 
     // Collect the support extruders.
@@ -891,11 +897,13 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         unsigned int extruder_support   = resolve_mixed(object.config().support_filament.value,
                                                         layer_tools.layer_index,
                                                         float(support_layer->print_z),
-                                                        float(support_layer->height));
+                                                        float(support_layer->height),
+                                                        &object);
         unsigned int extruder_interface = resolve_mixed(object.config().support_interface_filament.value,
                                                         layer_tools.layer_index,
                                                         float(support_layer->print_z),
-                                                        float(support_layer->height));
+                                                        float(support_layer->height),
+                                                        &object);
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
@@ -915,9 +923,6 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     int layerCount = 0;
     std::vector<int> firstLayerExtruders;
     firstLayerExtruders.clear();
-    // NEOTKO_MULTIPASS_TAG_START — source for sublayer presence check (shared-object aware)
-    const PrintObject& mp_src_loop = object.get_shared_object() ? *object.get_shared_object() : object;
-    // NEOTKO_MULTIPASS_TAG_END
 
     // Collect the object extruders.
     for (auto layer : object.layers()) {
@@ -926,37 +931,6 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         layer_tools.layer_index       = layerCount;
         layer_tools.object_layer_count = int(object.layers().size());
         layer_tools.layer_height      = layer->height;
-
-        // NEOTKO_MULTIPASS_TAG_START — detect layers with populated MP sublayers + perimeter_override
-        // to block MixedFilament cycling. Uses sublayer presence (not config flags) so only
-        // top/penultimate layers where MultiPass actually fires are blocked. Config flags like
-        // multipass_enabled are per-region and would match ALL layers of the MP object, incorrectly
-        // blocking MixedFilament on non-surface layers. OR-accumulated; only set, never cleared.
-        if (!layer_tools.mp_perim_override_active) {
-            const bool layer_has_mp_subs =
-                (layerCount < (int)mp_src_loop.multipass_sublayers().size() &&
-                 !mp_src_loop.multipass_sublayers()[layerCount].empty());
-            if (layer_has_mp_subs) {
-                // NEOTKO_PROFILE_TAG — Fase F: painter mode reads perim_override
-                // from the painted profile's MP payload, not the preset region.
-                if (painter_mode_obj) {
-                    if (SurfaceColorMix::any_painted_profile_has_perim_override(
-                            &object, layer->print_z, layer->height))
-                        layer_tools.mp_perim_override_active = true;
-                } else {
-                    for (const LayerRegion* lr : layer->regions())
-                        if (lr->region().config().multipass_perimeter_override.value)
-                            { layer_tools.mp_perim_override_active = true; break; }
-                }
-            }
-            if (layer_tools.mp_perim_override_active)
-                NeoDebug::write(NeoDebug::TOOLORDER,
-                    std::string("MP_PERIM_OVERRIDE_ACTIVE: layer_idx=") + std::to_string(layerCount)
-                    + " print_z=" + std::to_string(layer->print_z)
-                    + (painter_mode_obj ? " [painter]" : "")
-                    + " → MixedFilament cycling blocked (sublayers present + perimeter_override)");
-        }
-        // NEOTKO_MULTIPASS_TAG_END
 
         // Override extruder with the next 
     	for (; it_per_layer_extruder_override != per_layer_extruder_switches.end() && it_per_layer_extruder_override->first < layer->print_z + EPSILON; ++ it_per_layer_extruder_override)
@@ -968,7 +942,6 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         // What extruders are required to print this object layer?
         for (const LayerRegion *layerm : layer->regions()) {
             const PrintRegion &region = layerm->region();
-            unsigned int region_wall_ext = 0;
 
             if (! layerm->perimeters.entities.empty()) {
                 bool something_nonoverriddable = true;
@@ -982,17 +955,13 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
                 if (something_nonoverriddable){
                     const unsigned int configured_wall = (extruder_override == 0) ? region.config().wall_filament.value : extruder_override;
-                    // NEOTKO_MULTIPASS_TAG_START — block MixedFilament cycling when perimeter override active
-                    unsigned int wall_ext = layer_tools.mp_perim_override_active
+                    // NEOTKO_MULTIPASS_TAG — s130 port: block MixedFilament cycling when perimeter
+                    // override is active (the consumer was missing — prepass set the flag but it was
+                    // never read → sublayers cycled to a real tool instead of collapsing to comp.A,
+                    // corrupting has_wt / wipe_tower_layer_height → append_tcr crash).
+                    unsigned int       wall_ext        = layer_tools.mp_perim_override_active
                         ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, configured_wall)
-                        : resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height));
-                    // NEOTKO_MULTIPASS_TAG_END
-                    region_wall_ext = wall_ext;
-                    // NEOTKO_MULTIPASS_TAG — s68 diag: trace MMU painted-region filament → tool.
-                    NEOTKO_LOG(TOOLORDER, "MMU_RESOLVE wall layer=" << layerCount
-                        << " configured=" << configured_wall
-                        << " num_physical=" << m_num_physical
-                        << " resolved=" << wall_ext);
+                        : resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height), &object);
                     const unsigned int grouped_id = layer_tools.mp_perim_override_active
                         ? 0u  // skip grouped pattern cycling when override is active
                         : grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_wall);
@@ -1003,8 +972,9 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                                                                      layerCount,
                                                                      float(layer->print_z),
                                                                      float(layer->height));
-                        if (ordered.size() >= 2) {
-                            layer_tools.preserve_extruder_order = true;
+                        if (!ordered.empty()) {
+                            if (ordered.size() >= 2)
+                                layer_tools.preserve_extruder_order = true;
                             for (unsigned int extruder_id : ordered) {
                                 layer_tools.extruders.emplace_back(extruder_id);
                                 if (layerCount == 0 &&
@@ -1026,11 +996,8 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 layer_tools.has_object = true;
             }
 
-            bool has_sparse_infill      = false;
-            bool has_solid_infill       = false;
-            // NEOTKO_COLORMIX_TAG_START: track top/penultimate surfaces for ColorMix/MultiPass registration
-            bool has_top_surface_infill = false;
-            // NEOTKO_COLORMIX_TAG_END
+            bool has_sparse_infill = false;
+            bool has_solid_infill  = false;
             bool something_nonoverriddable = false;
             for (const ExtrusionEntity *ee : layerm->fills.entities) {
                 // fill represents infill extrusions of a single island.
@@ -1038,13 +1005,9 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 ExtrusionRole role = fill->entities.empty() ? erNone : fill->entities.front()->role();
                 if (internal_solid_infill_uses_sparse_filament(region, role))
                     has_sparse_infill = true;
-                else if (is_solid_infill(role)) {
+                else if (is_solid_infill(role))
                     has_solid_infill = true;
-                    // NEOTKO_COLORMIX_TAG_START
-                    if (role == erTopSolidInfill || role == erPenultimateInfill)
-                        has_top_surface_infill = true;
-                    // NEOTKO_COLORMIX_TAG_END
-                } else if (role != erNone)
+                else if (role != erNone)
                     has_sparse_infill = true;
 
                 if (m_print_config_ptr) {
@@ -1055,231 +1018,23 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
             if (something_nonoverriddable || !m_print_config_ptr) {
             	if (extruder_override == 0) {
-                    // NEOTKO_MULTIPASS_TAG_START — block MixedFilament cycling for fills when override active
-	                if (has_solid_infill)
-	                    layer_tools.extruders.emplace_back(
-                            layer_tools.mp_perim_override_active
-                                ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, region.config().solid_infill_filament)
-                                : resolve_mixed(region.config().solid_infill_filament, layerCount, float(layer->print_z), float(layer->height)));
-	                if (has_sparse_infill)
-	                    layer_tools.extruders.emplace_back(layer_tools.sparse_infill_filament(region) + 1);
-                    // NEOTKO_MULTIPASS_TAG_END
-            	} else if (has_solid_infill || has_sparse_infill)
-                    // NEOTKO_MULTIPASS_TAG_START
-            		layer_tools.extruders.emplace_back(
-                        layer_tools.mp_perim_override_active
-                            ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, extruder_override)
-                            : resolve_mixed(extruder_override, layerCount, float(layer->print_z), float(layer->height)));
-                    // NEOTKO_MULTIPASS_TAG_END
+	                if (has_solid_infill) {
+		                    layer_tools.extruders.emplace_back(layer_tools.solid_infill_filament(region) + 1);
+	                }
+	                if (has_sparse_infill) {
+		                    layer_tools.extruders.emplace_back(layer_tools.sparse_infill_filament(region) + 1);
+	                }
+            	} else if (has_solid_infill || has_sparse_infill) {
+            		layer_tools.extruders.emplace_back(resolve_mixed(extruder_override,
+                                                                      layerCount,
+                                                                      float(layer->print_z),
+                                                                      float(layer->height),
+                                                                      &object));
+            	}
             }
             if (has_solid_infill || has_sparse_infill)
                 layer_tools.has_object = true;
-
-            // NEOTKO_COLORMIX_TAG_START
-            // Register ColorMix tools into LayerTools so fill_wipe_tower_partitions()
-            // accounts for them and generates prime tower purges between colormix tools.
-            // layer_tools.extruders is 1-based at this stage; reorder_extruders() converts
-            // to 0-based later. parse_colormix_pattern_1based() returns 1-based IDs.
-
-            // NEOTKO_PROFILE_TAG — Fase 6b: painter ColorMix tools are NO LONGER
-            // registered here. A painted profile now drives FASE-2 sublayers, and
-            // every sublayer tool (sub.tool_id) is registered once from
-            // multipass_sublayers() in collect_extruders — the SAME single source
-            // of truth as preset mode. Registering the painted-profile tools again
-            // on the real layer would double-count and diverge the wipe-tower plan
-            // (the canonical "single source of truth or wipe-tower crashes" rule).
-            // NEOTKO_PAINT_COEXIST_TAG s91 — per-LayerRegion MMU governance.
-            // s91 v1.1 policy update: NEVER skip CM tool registration based on
-            // MMU governance. TO sees EEC-level bbox (coarse); FILL.cpp sees
-            // per-piece polygons after Fase 6c v2 pre-split (fine). When the
-            // painter pre-split exposes a non-MMU sub-piece, FILL emits CM
-            // sublayer tools for it. If TO had decided SKIP_CM_REG using its
-            // coarser view, those tools would extrude UNREGISTERED → wipe-tower
-            // "append_tcr unexpected" / V3 chain gap warnings (s91 SLICE↔TO
-            // divergence found in 6-cube painted-coexist test, SLICE #6 of
-            // 10:21:43 run). Forcing KEEP_CM_REG eliminates this divergence:
-            // over-registered tools that don't extrude are harmless, missing
-            // ones crash. The pieces_gov diagnostic is preserved for logs.
-            const bool _s91_region_top_mmu_gov_all = false; // forced KEEP
-            int _s91_pieces_total = 0, _s91_pieces_gov = 0;
-            if (object_has_mmu_paint && has_top_surface_infill) {
-                const double _z_lo = layer->print_z - layer->height;
-                const double _z_hi = layer->print_z;
-                bool any_piece = false;
-                bool all_gov   = true;
-                for (const ExtrusionEntity* ee2 : layerm->fills.entities) {
-                    const auto* fill2 = dynamic_cast<const ExtrusionEntityCollection*>(ee2);
-                    if (!fill2 || fill2->entities.empty()) continue;
-                    const ExtrusionRole r2 = fill2->entities.front()->role();
-                    if (r2 != erTopSolidInfill && r2 != erPenultimateInfill) continue;
-                    Points pts2;
-                    fill2->collect_points(pts2);
-                    if (pts2.empty()) continue;
-                    BoundingBox bb2(pts2);
-                    any_piece = true;
-                    ++_s91_pieces_total;
-                    Polygon p2;
-                    p2.points = {
-                        Point(bb2.min.x(), bb2.min.y()),
-                        Point(bb2.max.x(), bb2.min.y()),
-                        Point(bb2.max.x(), bb2.max.y()),
-                        Point(bb2.min.x(), bb2.max.y()),
-                    };
-                    ExPolygon ep2; ep2.contour = std::move(p2);
-                    ExPolygons one2; one2.emplace_back(std::move(ep2));
-                    const bool gov = SurfaceColorMix::mmu_governs_xy(
-                        &object, one2, _z_lo, _z_hi);
-                    if (gov) ++_s91_pieces_gov;
-                    else     all_gov = false;
-                }
-                const bool _s91_would_skip = (any_piece && all_gov);
-                NEOTKO_LOG(TOOLORDER, "s91/coexist MMU_GOVERNS site=TO"
-                    << " layer=" << layerCount
-                    << " z=" << layer->print_z
-                    << " pieces_gov=" << _s91_pieces_gov << "/" << _s91_pieces_total
-                    << " would_skip=" << (_s91_would_skip ? "1" : "0")
-                    << " decision=KEEP_CM_REG (v1.1 forced over-register: TO bbox"
-                    << " coarser than FILL per-piece view; SKIP causes SLICE↔TO"
-                    << " divergence)");
-            }
-            if (!painter_mode_obj && !_s91_region_top_mmu_gov_all && has_top_surface_infill && region.config().interlayer_colormix_enabled.value) {
-                const auto& cfg   = region.config();
-                const int tool_a  = cfg.interlayer_colormix_tool_a.value;
-                const int tool_b  = cfg.interlayer_colormix_tool_b.value;
-                const int tool_c  = cfg.interlayer_colormix_tool_c.value;
-                const int tool_d  = cfg.interlayer_colormix_tool_d.value;
-                // NEOTKO_COLORMIX_TAG — s59 surface-gate fix.
-                // interlayer_colormix_surface: 0=Both, 1=Top only, 2=Penultimate only.
-                // Previously both patterns were parsed unconditionally, so the
-                // unused pattern's DEFAULT ("12" → T0/T1) leaked T0+T1 into
-                // layer_tools.extruders. With Top-only configs that defaulted the
-                // penultimate pattern (or vice versa), this caused the wipe tower
-                // to fire extra purges at colormix heights (the "wipe de 12"
-                // residue user reported). Gate each pattern on the surface mode.
-                const int surf_mode = cfg.interlayer_colormix_surface.value;
-                const bool want_top = (surf_mode == 0 || surf_mode == 1);
-                const bool want_pen = (surf_mode == 0 || surf_mode == 2);
-                std::vector<unsigned int> tools_top, tools_pen;
-                // NEOTKO_COLORMIX_TAG — s60 numeric gradient modes.
-                // When in any numeric mode (1-3), the string pattern is ignored;
-                // only the tools actually used (tool_a/b/c/d filtered by mode-
-                // specific rules) participate. Register those directly so the
-                // wipe tower sees the correct (small) extruder set instead of
-                // parsing whatever default pattern string is sitting there.
-                // NEOTKO_COLORMIX_TAG — s61: per-role gradient config. Each role
-                // (top / penultimate) reads its own mode + tools + band counts.
-                // Top uses the original keys; Penultimate uses the `_penu_`
-                // mirrors added in s61. Defaults match so an unconfigured
-                // preset behaves identically on both roles.
-                auto tools_for_role = [&](bool top_role) -> std::vector<unsigned int> {
-                    const int role_mode = top_role
-                        ? cfg.interlayer_colormix_mode.value
-                        : cfg.interlayer_colormix_penu_mode.value;
-                    const int role_ta = top_role
-                        ? cfg.interlayer_colormix_tool_a.value
-                        : cfg.interlayer_colormix_penu_tool_a.value;
-                    const int role_tb = top_role
-                        ? cfg.interlayer_colormix_tool_b.value
-                        : cfg.interlayer_colormix_penu_tool_b.value;
-                    const int role_tc = top_role
-                        ? cfg.interlayer_colormix_tool_c.value
-                        : cfg.interlayer_colormix_penu_tool_c.value;
-                    const int role_td = top_role
-                        ? cfg.interlayer_colormix_tool_d.value
-                        : cfg.interlayer_colormix_penu_tool_d.value;
-                    const int role_ca = top_role
-                        ? cfg.interlayer_colormix_band_count_a.value
-                        : cfg.interlayer_colormix_penu_band_count_a.value;
-                    const int role_cb = top_role
-                        ? cfg.interlayer_colormix_band_count_b.value
-                        : cfg.interlayer_colormix_penu_band_count_b.value;
-                    const int role_cc = top_role
-                        ? cfg.interlayer_colormix_band_count_c.value
-                        : cfg.interlayer_colormix_penu_band_count_c.value;
-                    const int role_cd = top_role
-                        ? cfg.interlayer_colormix_band_count_d.value
-                        : cfg.interlayer_colormix_penu_band_count_d.value;
-                    std::vector<unsigned int> v;
-                    auto add = [&](int t) {
-                        if (t < 0) return;
-                        const unsigned int u = static_cast<unsigned int>(t + 1);
-                        if (std::find(v.begin(), v.end(), u) == v.end()) v.push_back(u);
-                    };
-                    if (role_mode == 1) {                 // Linear 2-color
-                        add(role_ta); add(role_tb);
-                    } else if (role_mode == 2) {          // Linear 3-color
-                        add(role_ta); add(role_tb); add(role_tc);
-                    } else if (role_mode == 3) {          // Custom bands
-                        if (role_ca > 0) add(role_ta);
-                        if (role_cb > 0) add(role_tb);
-                        if (role_cc > 0) add(role_tc);
-                        if (role_cd > 0) add(role_td);
-                    }
-                    return v;
-                };
-                const int cm_mode_top = cfg.interlayer_colormix_mode.value;
-                const int cm_mode_pen = cfg.interlayer_colormix_penu_mode.value;
-                if (want_top) {
-                    if (cm_mode_top >= 1 && cm_mode_top <= 3)
-                        tools_top = tools_for_role(true);
-                    else
-                        tools_top = parse_colormix_pattern_1based(
-                            cfg.interlayer_colormix_pattern_top.value,
-                            tool_a, tool_b, tool_c, tool_d, &layer_tools);
-                }
-                if (want_pen) {
-                    if (cm_mode_pen >= 1 && cm_mode_pen <= 3)
-                        tools_pen = tools_for_role(false);
-                    else
-                        tools_pen = parse_colormix_pattern_1based(
-                            cfg.interlayer_colormix_pattern_penultimate.value,
-                            tool_a, tool_b, tool_c, tool_d, &layer_tools);
-                }
-                // Insert union (deduplicated) into layer_tools.extruders
-                std::set<unsigned int> emplace_set;
-                auto emplace_once = [&](unsigned int t) {
-                    if (emplace_set.insert(t).second)
-                        layer_tools.extruders.emplace_back(t);
-                };
-                for (auto t : tools_top) emplace_once(t);
-                for (auto t : tools_pen) emplace_once(t);
-                if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
-                    std::ostringstream _s;
-                    _s << "COLORMIX\tz=" << layer->print_z << "\t+[";
-                    for (auto t : emplace_set) _s << "T" << (t > 0 ? t - 1 : 0) << " ";
-                    _s << "]";
-                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
-                }
-            }
-            // NEOTKO_COLORMIX_TAG_END
-
-            // NEOTKO_MULTIPASS_TAG — MultiPass tools now registered via sublayers below.
-
-            // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the PathBlend tool
-            // registration block was DELETED. PathBlend tools are now registered
-            // via the MultiPass sublayer path below (one tool per sublayer, own
-            // print_z) exactly like ColorMix/MultiPass — so NeoTower plans the
-            // toolchanges with zero PathBlend special cases. This removes the
-            // has_pathblend_chain / pathblend_body_equals_cap / pathblend_body_needs_return
-            // cram that produced "append_tcr unexpected toolchange" crashes (s73-s76).
-
         }
-        // NEOTKO_MULTIPASS_TAG_START — trace: detect MixedFilament extruders leaking into sublayer LayerTools
-        if (layer_tools.is_mp_sublayer && !layer_tools.extruders.empty()) {
-            std::ostringstream _oss;
-            _oss << "PHANTOM_TRACE[ToolOrdering] collect_extruders added to is_mp_sublayer LayerTools:"
-                 << " z=" << layer->print_z
-                 << " obj=" << &object
-                 << " mp_perim_override_active=" << layer_tools.mp_perim_override_active
-                 << " extruders=[";
-            for (size_t _i = 0; _i < layer_tools.extruders.size(); ++_i) {
-                if (_i) _oss << ",";
-                _oss << "T" << (layer_tools.extruders[_i] > 0 ? layer_tools.extruders[_i] - 1 : 0);
-            }
-            _oss << "]";
-            NEOTKO_LOG(MULTIPASS, _oss.str());
-        }
-        // NEOTKO_MULTIPASS_TAG_END
         layerCount++;
     }
 
@@ -1343,30 +1098,19 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
     sort_remove_duplicates(firstLayerExtruders);
     const_cast<PrintObject&>(object).object_first_layer_wall_extruders = firstLayerExtruders;
-    
+
     for (auto& layer : m_layer_tools) {
-        // NEOTKO_MULTIPASS_TAG_START
-        // MultiPass/PathBlend use preserve_extruder_order so their configured pass sequence
-        // is maintained. Deduplication always runs: the COLORMIX_HOOK routes all paths with
-        // the same tool_id into one by_extruder bucket, so there is only one GCode toolchange
-        // per unique tool per layer — duplicates in the extruder list would cause the
-        // WipeTower to plan more purges than GCode actually emits.
-        //
-        // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: the PathBlend dedup
-        // exception (has_pathblend_chain / body_equals_cap / body_needs_return)
-        // and the pass-ordering-constraints fix-up were DELETED. PathBlend tools
-        // no longer land in the real-layer extruder list (they are sublayers), so
-        // the standard dedup path applies with no PB special-casing.
-        // NEOTKO_MULTIPASS_TAG_END
-        if (layer.preserve_extruder_order) {
+        if (layer.preserve_extruder_order)
             remove_duplicates_preserve_order(layer.extruders);
-        } else {
+        else
             sort_remove_duplicates(layer.extruders);
-        }
 
         // make sure that there are some tools for each object layer (e.g. tall wiping object will result in empty extruders vector)
         if (layer.extruders.empty() && layer.has_object)
             layer.extruders.emplace_back(0); // 0="dontcare" extruder - it will be taken care of in reorder_extruders
+
+        // Reset per-object context now that this object's collection is done.
+        layer.current_object = nullptr;
     }
 }
 
@@ -1562,9 +1306,6 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     //
     // After zeroing, sublayers with mp_prime_slots > 0 receive wipe_tower_partitions =
     // mp_prime_slots so that _make_wipe_tower() includes them in the WipeTower plan.
-    // This is the correct place to inject these values: after backward propagation (so they
-    // don't inflate real layers below via std::max) and before has_wipe_tower calculation
-    // (so the sublayer entries qualify for plan inclusion via wipe_tower_partitions > 0).
     for (LayerTools& lt : m_layer_tools) {
         if (!lt.is_mp_sublayer) continue;
         lt.wipe_tower_partitions = (lt.mp_prime_slots > 0) ? lt.mp_prime_slots : 0;
@@ -1576,31 +1317,19 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
         lt.has_wipe_tower = (lt.has_object && (config.timelapse_type == TimelapseType::tlSmooth || lt.wipe_tower_partitions > 0))
             || lt.print_z < object_bottom_z + EPSILON;
 
-    // NEOTKO_LIBRE_TAG_START
-    // With a single physical filament, wipe_tower_partitions is always 0 on real layers even
-    // when Neotko features (ColorMix, PathBlend) have registered multiple virtual tools in
-    // lt.extruders during collect_extruders(). At this point extruders is already deduped
-    // (sort_remove_duplicates ran), so size() > 1 means genuinely distinct tools.
-    //
-    // For MultiPass sublayers with mp_prime_slots > 0: wipe_tower_partitions was set above,
-    // so the base has_wipe_tower calculation already covers them. The OR-gate here handles
-    // the remaining cases:
-    //
-    //   (a) ColorMix / PathBlend real layers: extruders.size() > 1 registered in
-    //       collect_extruders() → has_wipe_tower=true directly.
-    //
-    //   (b) front() / first-layer coverage: the base formula uses
-    //       (print_z < object_bottom_z + EPSILON), which gives has_wt=true to the first
-    //       real layer unconditionally — so has_wipe_tower() public returns true as long as
-    //       m_first_printing_extruder is valid (set by collect_extruder_statistics()).
-    //       No additional propagation to all real layers is needed here.
+    // NEOTKO_LIBRE_TAG_START — s130 port: restored from fork (dropped in s122-s129).
+    // The dropped block was the ONLY functional divergence in the has_wt region and
+    // is the root of the STARPAINT append_tcr crash: MP sublayers with mp_prime_slots>0
+    // were left has_wipe_tower=false (the base formula misses them — has_object=false on
+    // sublayers is by design), so NeoTower computed a wrong real-layer height (0.101 vs
+    // 0.2) → real-layer TC absent from m_tcr_index → get_tcr MISS → append_tcr abort.
+    // Classic-safe: the real-layer branch is redundant with the base formula (multi-
+    // extruder layers already have wipe_tower_partitions>0), and the sublayer branch
+    // only fires when MP sublayers exist (sandwich/painter scenes).
     for (LayerTools &lt : m_layer_tools) {
         if (!lt.has_wipe_tower) {
             if (lt.has_object && lt.extruders.size() > 1)
                 lt.has_wipe_tower = true;
-            // mp_prime_slots > 0 sublayers: already handled via wipe_tower_partitions above,
-            // but guard here in case the base formula missed them (e.g. has_object=false on
-            // sublayers is by design — wipe_tower_partitions > 0 is the activation path).
             else if (lt.is_mp_sublayer && lt.mp_prime_slots > 0)
                 lt.has_wipe_tower = true;
         }
@@ -1608,62 +1337,51 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // NEOTKO_LIBRE_TAG_END
 
     // NEOTKO_NEOTOWER_TAG_START s79i — Bug 04: gap estructural entre objetos apilados.
-    // En escenas con objetos no contiguos en Z (p.ej. 2 cubos apilados con soporte
-    // entre ellos) las capas del gap son solo-soporte: has_object=false → la fórmula
-    // base línea 1519 deja has_wipe_tower=false aunque wipe_tower_partitions>0
-    // (propagado hacia abajo desde un TC superior, línea 1494). Resultado: NeoTower
-    // saltea esas capas en su loop estructural → la torre se interrumpe en el gap
-    // → fallo físico (las capas superiores de la torre quedan voladas).
-    //
-    // WipeTower2 tradicional NO tenía este bug porque iteraba por
-    // wipe_tower_partitions>0 (no por has_wipe_tower). Restauramos esa semántica
-    // aquí: si hay partitions propagadas desde un TC superior, la torre debe existir.
-    for (LayerTools &lt : m_layer_tools) {
-        if (!lt.has_wipe_tower && !lt.is_mp_sublayer && lt.wipe_tower_partitions > 0)
-            lt.has_wipe_tower = true;
+    // En escenas con objetos no contiguos en Z (sandwich, cubos apilados con soporte entre
+    // ellos) las capas del gap son solo-soporte: has_object=false → la fórmula base deja
+    // has_wipe_tower=false aunque wipe_tower_partitions>0 (propagado desde un TC superior).
+    // NeoTower saltea esas capas en su loop estructural → la torre se interrumpe en el gap.
+    // WipeTower2 clásico NO tenía este bug porque iteraba por wipe_tower_partitions>0.
+    // Restauramos esa semántica. Gateado por presencia de sublayers (= contexto NeoTower/
+    // sandwich) → Classic 2.3.4 byte-idéntico.
+    {
+        const bool _s79i_has_sublayer = std::any_of(
+            m_layer_tools.begin(), m_layer_tools.end(),
+            [](const LayerTools& lt) { return lt.is_mp_sublayer; });
+        if (_s79i_has_sublayer) {
+            for (LayerTools &lt : m_layer_tools)
+                if (!lt.has_wipe_tower && !lt.is_mp_sublayer && lt.wipe_tower_partitions > 0)
+                    lt.has_wipe_tower = true;
+        }
     }
     // NEOTKO_NEOTOWER_TAG_END
 
-    // NEOTKO_WIPETOWER_DEBUG_TAG_START
-    // Dump per-layer wipe-tower state after all gates have run.
-    // Activate with: ORCA_DEBUG_WIPETOWER=1
+    // NEOTKO_WIPETOWER_DEBUG_TAG_START — per-layer wipe-tower state dump after the s79i gate.
+    // Activate with ORCA_DEBUG_WIPETOWER=1 (or ORCA_DEBUG_ALL). Cross-reference with NeoTower's
+    // 1a_READ to spot has_wt mutations/instance divergence on the structural bands.
     {
         static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr); // s115-dbg — align gate with the other blocks so the per-layer partition dump is captured under ORCA_DEBUG_ALL too
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
         if (_wt_dbg) {
             static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
-            // s116-dbg INSTANCE-ID: log the ToolOrdering instance pointer so the
-            // dump can be cross-referenced with NeoTower's 1a_READ (which logs
-            // &tool_ordering). Multiple ToolOrdering objects are built per slice
-            // (Print.cpp:2684 prime=false, :3482 prime=true=NeoTower's, :416 per-obj);
-            // this tells us whether the has_wt=1 we see here is the SAME instance
-            // NeoTower later reads as has_wt=0 (true posterior mutation) or a
-            // DIFFERENT instance that diverges on the 2.2 band.
             _wt_log << "\n=== fill_wipe_tower_partitions() [" << (call_context ? call_context : "unknown")
                     << "] this=" << static_cast<const void*>(this)
                     << " — " << m_layer_tools.size() << " layers ===\n";
             for (size_t i = 0; i < m_layer_tools.size(); ++i) {
                 const LayerTools& lt = m_layer_tools[i];
                 _wt_log << "  [" << i << "]"
-                        << " z="           << lt.print_z
-                        << " has_obj="     << lt.has_object
-                        << " is_mp_sub="   << lt.is_mp_sublayer
-                        << " extruders="   << lt.extruders.size() << "(";
+                        << " z="         << lt.print_z
+                        << " has_obj="   << lt.has_object
+                        << " is_mp_sub=" << lt.is_mp_sublayer
+                        << " extruders=" << lt.extruders.size() << "(";
                 for (size_t e = 0; e < lt.extruders.size(); ++e)
                     _wt_log << (e ? "," : "") << lt.extruders[e];
                 _wt_log << ")"
-                        << " wipe_parts="  << lt.wipe_tower_partitions
-                        << " mp_slots="    << lt.mp_prime_slots
-                        << " has_wt="      << lt.has_wipe_tower
+                        << " wipe_parts=" << lt.wipe_tower_partitions
+                        << " mp_slots="   << lt.mp_prime_slots
+                        << " has_wt="     << lt.has_wipe_tower
                         << "\n";
             }
-            const bool front_hwt = !m_layer_tools.empty() && m_layer_tools.front().has_wipe_tower;
-            // NOTE: has_wipe_tower() (public) reads m_first_printing_extruder which is set
-            // by collect_extruder_statistics(), called AFTER fill_wipe_tower_partitions().
-            // Printing it here always shows 0. The real value is logged at the end of
-            // collect_extruder_statistics() — search for NEOTKO_WIPETOWER_DEBUG_TAG below.
-            _wt_log << "  → front().has_wipe_tower   = " << front_hwt << "\n"
-                    << "  → has_wipe_tower() (public) = [see collect_extruder_statistics log below]\n";
             _wt_log.flush();
         }
     }
@@ -1716,8 +1434,9 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
         LayerTools& lt = m_layer_tools[i];
         LayerTools& lt_next = m_layer_tools[i+1];
         // NEOTKO_MULTIPASS_TAG — sublayers have empty extruders by design; skip the
-        // extruder-continuity check for this pair but do NOT abort — real layers after
-        // the first sublayer would never get has_wipe_tower=true with a break here.
+        // extruder-continuity check for this pair but do NOT abort (continue, not break) —
+        // real layers after the first sublayer would never get has_wipe_tower=true with a
+        // break here. Inert for Classic (no empty-extruder layers exist without sublayers).
         if (lt.extruders.empty() || lt_next.extruders.empty())
             continue;
         if (!lt_next.has_wipe_tower && (lt_next.extruders.front() != lt.extruders.back() || lt_next.extruders.size() > 1))
@@ -1733,21 +1452,12 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     }
 
     // NEOTKO_NEOTOWER_TAG_START — structural gap fill before MP sublayer blocks.
-    //
     // A real layer immediately preceding a MultiPass sublayer block may have
-    // has_wipe_tower=false when it is a single-tool layer (wipe_tower_partitions=0,
-    // extruders.size()=1). NeoTower's section-1c gates on has_wipe_tower, so it
-    // skips such layers, creating a structural gap before the first sublayer prime.
-    // Example: z=9.65→9.9166 instead of z=9.65→9.85→9.9166 with layer_height=0.2.
-    //
-    // Fix: mark the nearest preceding real layer before any sublayer block as
-    // has_wipe_tower=true so NeoTower emits a structural TCR for it and
-    // GCode.cpp's next_layer() consumes it in sync (preserving 1-to-1 mapping).
-    //
-    // Gate: presence of is_mp_sublayer entries (not config key — 'neotko_wipe_tower'
-    // is not reliably visible in this config context, as confirmed by log line 1).
-    // WipeTower2 never generates sublayer entries → safe to run unconditionally
-    // when sublayers exist.
+    // has_wipe_tower=false when it is single-tool (wipe_tower_partitions=0, 1 extruder).
+    // NeoTower gates on has_wipe_tower, so it skips such layers → structural gap before the
+    // first sublayer prime. Fix: mark the nearest preceding real layer has_wipe_tower=true so
+    // NeoTower emits a structural TCR for it (GCode sync_to_z consumes it in sync). Gated on
+    // sublayer presence (WipeTower2 never generates sublayer entries → Classic untouched).
     {
         const bool has_any_sublayer = std::any_of(
             m_layer_tools.begin(), m_layer_tools.end(),
@@ -1755,7 +1465,6 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
         if (has_any_sublayer) {
             for (size_t i = 1; i < m_layer_tools.size(); ++i) {
                 if (!m_layer_tools[i].is_mp_sublayer) continue;
-                // Find nearest preceding real (non-sublayer) layer.
                 for (int j = (int)i - 1; j >= 0; --j) {
                     if (m_layer_tools[j].is_mp_sublayer) continue;
                     if (!m_layer_tools[j].has_wipe_tower)
@@ -1768,31 +1477,21 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // NEOTKO_NEOTOWER_TAG_END
 
     // NEOTKO_NEOTOWER_TAG s117 — drawer-continuity invariant (FALLO 3, hueco 2.20).
-    // The stock max-gap walk above (~:1726) seeds its baseline from the i+1 layer's
-    // print_z even when that layer is itself has_wt=0 — e.g. a single-tool band-
-    // nominal layer (z=1.88) left unpromoted because the entry below it is a sublayer
-    // block with empty extruders (the pair is skipped via `continue` at :1721). That
-    // leaves a real layer (z=2.2) unbuilt inside a > max_layer_height gap while the
-    // NEXT real layer (z=2.52) gets built → the built layer bridges TWO drawers (the
-    // forbidden 0.64 mega). Enforce the invariant directly and last: no two
-    // consecutive BUILT tower layers (has_wipe_tower OR is_mp_sublayer) may sit more
-    // than max_layer_height apart. Peek-ahead; when the NEXT layer would overshoot the
-    // baseline, the current real layer becomes a sparse single-tool drawer. Promotion
-    // only (never demotes) and bounded by max_layer_height → it can only PREVENT megas,
-    // never create one. A current layer within SAME_PLANE_MAX_OFF (0.02) of the
-    // baseline (a sublayer block sits ~SUBLAYER_GAP below its nominal real plane) just
-    // advances the baseline, so we never stack a redundant zero-height drawer on a
-    // plane the sublayer block already covers. Gated on sublayer presence so classic
-    // WipeTower2 prints (no empty-extruder entries → stock walk is correct) are
-    // untouched.
+    // The stock max-gap walk above seeds its baseline from the i+1 layer even when that layer
+    // is has_wt=0 (a single-tool band-nominal layer left unpromoted because the entry below is
+    // a sublayer block with empty extruders). That leaves a real layer unbuilt inside a
+    // >max_layer_height gap while the NEXT real layer gets built → the built layer bridges TWO
+    // drawers (the forbidden mega). Enforce directly and last: no two consecutive BUILT tower
+    // layers (has_wipe_tower OR is_mp_sublayer) may sit > max_layer_height apart. Promotion
+    // only (never demotes), bounded by max_layer_height → can only PREVENT megas. A layer within
+    // SAME_PLANE_MAX_OFF of the baseline just advances it (the sublayer block already covers that
+    // plane). Gated on sublayer presence → classic WipeTower2 prints untouched.
     {
         const bool _dc_has_sublayer = std::any_of(
             m_layer_tools.begin(), m_layer_tools.end(),
             [](const LayerTools& lt) { return lt.is_mp_sublayer; });
         if (_dc_has_sublayer) {
-            // Local copy of NeoTowerZ::SAME_PLANE_MAX_OFF — avoid pulling the NeoTower
-            // Z header into this core TU; the value is the same-plane threshold.
-            constexpr double same_plane_off = 0.02;
+            constexpr double same_plane_off = 0.02; // == NeoTowerZ::SAME_PLANE_MAX_OFF
             static const bool _dc_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
                                      || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
             double last_built_z = -1.0;
@@ -1868,22 +1567,6 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
         m_all_printing_extruders.emplace_back(m_first_printing_extruder);
         m_first_printing_extruder = m_all_printing_extruders.front();
     }
-
-    // NEOTKO_WIPETOWER_DEBUG_TAG_START
-    // Log the final public has_wipe_tower() value here — m_first_printing_extruder is
-    // now valid, so this reflects the real runtime decision used by Print.cpp and GCode.cpp.
-    {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr); // s115-dbg — align gate with the other blocks so the per-layer partition dump is captured under ORCA_DEBUG_ALL too
-        if (_wt_dbg) {
-            static std::ofstream _wt_log2("/tmp/neotko_wipetower.log", std::ios::app);
-            _wt_log2 << "  → has_wipe_tower() (public, post collect_extruder_statistics)"
-                     << " = " << has_wipe_tower()
-                     << "  [m_first_printing_extruder=" << m_first_printing_extruder << "]\n";
-            _wt_log2.flush();
-        }
-    }
-    // NEOTKO_WIPETOWER_DEBUG_TAG_END
 }
 
 void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
@@ -1991,7 +1674,6 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         }
         current_extruder_id = lt.extruders.back();
     }
-
 }
 
 // Layers are marked for infinite skirt aka draft shield. Not all the layers have to be printed.
@@ -2454,7 +2136,8 @@ int WipingExtrusions::get_support_interface_extruder_overrides(const PrintObject
 unsigned int ToolOrdering::resolve_mixed(unsigned int filament_id_1based,
                                          int          layer_index,
                                          float        layer_print_z,
-                                         float        layer_height) const
+                                         float        layer_height,
+                                         const PrintObject* current_object) const
 {
     return resolve_mixed_with_layer_heights(m_mixed_mgr,
                                             m_num_physical,
@@ -2464,7 +2147,8 @@ unsigned int ToolOrdering::resolve_mixed(unsigned int filament_id_1based,
                                             layer_height,
                                             m_mixed_layer_height_a,
                                             m_mixed_layer_height_b,
-                                            m_mixed_base_layer_height);
+                                            m_mixed_base_layer_height,
+                                            current_object);
 }
 
 } // namespace Slic3r

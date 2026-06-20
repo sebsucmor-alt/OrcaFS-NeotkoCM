@@ -67,30 +67,6 @@ set(lisbslic3r_sources
     Arachne/utils/SquareGrid.hpp
     Arachne/WallToolPaths.cpp
     Arachne/WallToolPaths.hpp
-    # NEOTKO_NEOARACHNE_TAG fase0+fase1 — hybrid Classic/Arachne wall generator (caja propia).
-    NeoArachne/NeoArachneConfig.hpp
-    NeoArachne/NeoArachneRuntime.hpp
-    NeoArachne/NeoArachneDebug.hpp
-    NeoArachne/NeoArachneDebug.cpp
-    NeoArachne/NeoArachneEngine.hpp
-    NeoArachne/NeoArachneEngine.cpp
-    NeoArachne/NeoArachnePlan.hpp
-    NeoArachne/NeoArachnePlan.cpp
-    NeoArachne/NeoArachneInterior.hpp
-    NeoArachne/NeoArachneInterior.cpp
-    # NEOTKO_NEOARACHNE_TAG fase3 — NeotkoEdgeBeadingStrategy.
-    NeoArachne/NeoArachneBeadingStrategy.hpp
-    NeoArachne/NeoArachneBeadingStrategy.cpp
-    # NEOTKO_NEOARACHNE_TAG preview-lab PL.4+PL.5+PL.7 — backend reactive preview.
-    NeoArachne/Preview/PreviewWGeometry.hpp
-    NeoArachne/Preview/PreviewWGeometry.cpp
-    NeoArachne/Preview/PreviewGeometrySource.hpp
-    NeoArachne/Preview/PreviewGeometrySource.cpp
-    NeoArachne/Preview/PreviewConfigSnapshot.hpp
-    NeoArachne/Preview/PreviewConfigSnapshot.cpp
-    NeoArachne/Preview/PreviewResult.hpp
-    NeoArachne/Preview/PreviewSlicer.hpp
-    NeoArachne/Preview/PreviewSlicer.cpp
     ArcFitter.cpp
     ArcFitter.hpp
     Arrange.cpp
@@ -156,6 +132,8 @@ set(lisbslic3r_sources
     Feature/Interlocking/VoxelUtils.cpp
     Feature/Interlocking/VoxelUtils.hpp
     FileParserError.hpp
+    FilamentHotBedNozzleRules.cpp
+    FilamentHotBedNozzleRules.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp
@@ -219,8 +197,6 @@ set(lisbslic3r_sources
     Format/svg.hpp
     Format/ZipperArchiveImport.cpp
     Format/ZipperArchiveImport.hpp
-    Format/S3DFactory.cpp    # NEOTKO_S3DFACTORY_TAG
-    Format/S3DFactory.hpp    # NEOTKO_S3DFACTORY_TAG
     GCode/AdaptivePAInterpolator.cpp
     GCode/AdaptivePAInterpolator.hpp
     GCode/AdaptivePAProcessor.cpp
@@ -268,10 +244,6 @@ set(lisbslic3r_sources
     GCode/WipeTower2.hpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
-    # NEOTKO_NEOTOWER_TAG_START
-    NeoTower.hpp
-    NeoTower.cpp
-    # NEOTKO_NEOTOWER_TAG_END
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/Bicubic.hpp
@@ -315,21 +287,6 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
-    SurfaceColorMix.cpp
-    SurfaceColorMix.hpp
-    SurfaceEffectProfile.cpp
-    SurfaceEffectProfile.hpp
-    # NEOTKO_COLORSCI_TAG — ColorSci engine (COLORSTITCH_STUDIO_PLAN P0/P1/P5)
-    ColorSci/ColorSci.hpp
-    ColorSci/ColorSci.cpp
-    ColorSci/StackFlatten.hpp
-    ColorSci/StackFlatten.cpp
-    ColorSci/GradientRamp.hpp
-    ColorSci/GradientRamp.cpp
-    ColorSci/WeaveLibrary.hpp
-    ColorSci/WeaveLibrary.cpp
-    ColorSci/ColorPredict.hpp
-    ColorSci/ColorPredict.cpp
     filament_mixer.cpp
     filament_mixer.h
     filament_mixer_model.h
@@ -347,6 +304,45 @@ set(lisbslic3r_sources
     MutablePolygon.cpp
     MutablePolygon.hpp
     MutablePriorityQueue.hpp
+    # NEOTKO_DEBUG_TAG_START — centralised debug channels (extracted from SurfaceColorMix)
+    NeoDebug.cpp
+    NeoDebug.hpp
+    # NEOTKO_DEBUG_TAG_END
+    # NEOTKO_MPSCHEDULER_TAG_START — canonical grouped-by-tool order (header-only)
+    MultiPassScheduler.hpp
+    # NEOTKO_MPSCHEDULER_TAG_END
+    # NEOTKO_SANDWICH_TAG_START — sub-layer pass-kind enum (header-only)
+    SurfacePassKind.hpp
+    # NEOTKO_SANDWICH_TAG_END
+    # NEOTKO_PATHBLEND_TAG_START — PathBlend runtime toggles
+    PathBlendRuntime.cpp
+    PathBlendRuntime.hpp
+    # NEOTKO_PATHBLEND_TAG_END
+    # NEOTKO_NEOTOWER_TAG_START — post-slice wipe tower planner
+    NeoTower.cpp
+    NeoTower.hpp
+    NeoTowerZ.hpp
+    # NEOTKO_NEOTOWER_TAG_END
+    # NEOTKO_SANDWICH_TAG_START — Sandwich engine (Fase 2, increment 3): ColorSci
+    # color-science library + SurfaceColorMix engine + SurfaceEffectProfile manager.
+    # Compiled as dead-code (no caller yet — hooks land in increment 4). Neoweaving /
+    # MicroStitch dropped (Tier B). NeoDebug / PathBlendRuntime impls live in their
+    # own extracted .cpp (removed from SurfaceColorMix.cpp to avoid ODR clash).
+    ColorSci/ColorSci.cpp
+    ColorSci/ColorSci.hpp
+    ColorSci/ColorPredict.cpp
+    ColorSci/ColorPredict.hpp
+    ColorSci/GradientRamp.cpp
+    ColorSci/GradientRamp.hpp
+    ColorSci/StackFlatten.cpp
+    ColorSci/StackFlatten.hpp
+    ColorSci/WeaveLibrary.cpp
+    ColorSci/WeaveLibrary.hpp
+    SurfaceColorMix.cpp
+    SurfaceColorMix.hpp
+    SurfaceEffectProfile.cpp
+    SurfaceEffectProfile.hpp
+    # NEOTKO_SANDWICH_TAG_END
     NormalUtils.cpp
     NormalUtils.hpp
     NSVGUtils.cpp

@@ -1,5 +1,6 @@
 #include "MixedFilament.hpp"
 #include "filament_mixer.h"
+#include "libslic3r.h"
 
 #include <algorithm>
 #include <atomic>
@@ -7,6 +8,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
@@ -18,7 +20,11 @@ namespace Slic3r {
 
 namespace {
 
-std::atomic_bool s_mixed_filament_auto_generate_enabled { true };
+// Runtime state for mixed filament auto-generation feature.
+// This is synchronized with the "auto_generate_gradients" config setting.
+// Initial value is false, but will be overridden by AppConfig during application startup.
+// See: GUI_App::init_app_config() which loads the actual config value.
+std::atomic_bool s_mixed_filament_auto_generate_enabled { false };
 
 } // namespace
 
@@ -218,7 +224,7 @@ static float clamp_surface_offset(float v)
     return std::clamp(v, -2.f, 2.f);
 }
 
-static float canonical_signed_bias_value(float component_a_surface_offset, float component_b_surface_offset)
+float MixedFilamentManager::canonical_signed_bias_value(float component_a_surface_offset, float component_b_surface_offset)
 {
     const float offset_a = clamp_surface_offset(component_a_surface_offset);
     const float offset_b = clamp_surface_offset(component_b_surface_offset);
@@ -230,7 +236,7 @@ static float canonical_signed_bias_value(float component_a_surface_offset, float
     return 0.f;
 }
 
-static std::string format_surface_offset_token(float value)
+std::string MixedFilamentManager::format_surface_offset_token(float value)
 {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(4) << clamp_surface_offset(value);
@@ -263,7 +269,7 @@ static void compute_gradient_heights(const MixedFilament &mf, float lower_bound,
     h_b = lo + pct_b * (hi - lo);
 }
 
-static void normalize_ratio_pair(int &a, int &b)
+void MixedFilamentManager::normalize_ratio_pair(int &a, int &b)
 {
     a = std::max(0, a);
     b = std::max(0, b);
@@ -315,10 +321,10 @@ static void compute_gradient_ratios(MixedFilament &mf, int gradient_mode, float 
         }
     }
 
-    normalize_ratio_pair(mf.ratio_a, mf.ratio_b);
+    MixedFilamentManager::normalize_ratio_pair(mf.ratio_a, mf.ratio_b);
 }
 
-static int safe_mod(int x, int m)
+int MixedFilamentManager::safe_mod(int x, int m)
 {
     if (m <= 0)
         return 0;
@@ -348,12 +354,12 @@ static bool use_component_b_advanced_dither(int layer_index, int ratio_a, int ra
         return true;
 
     // Base ordered pattern: as evenly distributed as possible for ratio_b/cycle.
-    const int pos = safe_mod(layer_index, cycle);
+    const int pos = MixedFilamentManager::safe_mod(layer_index, cycle);
     const int cycle_idx = (layer_index - pos) / cycle;
 
     // Rotate each cycle to avoid visible long-period vertical striping.
-    const int phase = safe_mod(cycle_idx * dithering_phase_step(cycle), cycle);
-    const int p = safe_mod(pos + phase, cycle);
+    const int phase = MixedFilamentManager::safe_mod(cycle_idx * dithering_phase_step(cycle), cycle);
+    const int p = MixedFilamentManager::safe_mod(pos + phase, cycle);
 
     const int b_before = (p * ratio_b) / cycle;
     const int b_after  = ((p + 1) * ratio_b) / cycle;
@@ -376,7 +382,11 @@ static bool parse_row_definition(const std::string &row,
                                  int               &local_z_max_sublayers,
                                  float             &component_a_surface_offset,
                                  float             &component_b_surface_offset,
-                                 bool              &deleted)
+                                 bool              &deleted,
+                                 bool              &gradient_enabled,
+                                 float             &gradient_start,
+                                 float             &gradient_end,
+                                 int               &cm_mode)
 {
     auto trim_copy = [](const std::string &s) {
         size_t lo = 0;
@@ -479,6 +489,10 @@ static bool parse_row_definition(const std::string &row,
     component_a_surface_offset = 0.f;
     component_b_surface_offset = 0.f;
     deleted = false;
+    gradient_enabled = false;
+    gradient_start = MixedFilament::k_default_gradient_dominant;
+    gradient_end   = MixedFilament::k_default_gradient_minority;
+    cm_mode        = -1;
 
     size_t token_idx = 5;
     if (tokens.size() >= 6) {
@@ -490,7 +504,9 @@ static bool parse_row_definition(const std::string &row,
         if (legacy == "0" || legacy == "1") {
             pointillism_all_filaments = (legacy == "1");
             token_idx = 6;
-        } else if (legacy.empty() || legacy[0] == 'g' || legacy[0] == 'G' || legacy[0] == 'm' || legacy[0] == 'M') {
+        } else if (legacy.empty() || legacy[0] == 'g' || legacy[0] == 'G' ||
+                   legacy[0] == 'm' || legacy[0] == 'M' ||
+                   legacy[0] == 'r' || legacy[0] == 'R') {
             token_idx = 5;
         } else {
             manual_pattern = legacy;
@@ -557,6 +573,30 @@ static bool parse_row_definition(const std::string &row,
                 stable_id = parsed_stable_id;
             continue;
         }
+        if ((tok[0] == 'c' || tok[0] == 'C') && tok.size() >= 3 && (tok[1] == 'm' || tok[1] == 'M')) {
+            int v = cm_mode;
+            if (parse_int_token(tok.substr(2), v))
+                cm_mode = std::clamp(v, -1, 3);
+            continue;
+        }
+        if (tok[0] == 'r' || tok[0] == 'R') {
+            const std::string body = tok.substr(1);
+            size_t s1 = body.find('/');
+            size_t s2 = (s1 == std::string::npos) ? std::string::npos : body.find('/', s1 + 1);
+            if (s1 != std::string::npos && s2 != std::string::npos) {
+                int   parsed_flag  = gradient_enabled ? 1 : 0;
+                float parsed_start = gradient_start;
+                float parsed_end   = gradient_end;
+                if (parse_int_token(body.substr(0, s1), parsed_flag) &&
+                    parse_float_token(body.substr(s1 + 1, s2 - s1 - 1), parsed_start) &&
+                    parse_float_token(body.substr(s2 + 1), parsed_end)) {
+                    gradient_enabled = parsed_flag != 0;
+                    if (parsed_start > 0.f && parsed_start < 1.f) gradient_start = parsed_start;
+                    if (parsed_end   > 0.f && parsed_end   < 1.f) gradient_end   = parsed_end;
+                }
+            }
+            continue;
+        }
         pattern_tokens.push_back(tok);
     }
 
@@ -570,38 +610,23 @@ static bool parse_row_definition(const std::string &row,
         manual_pattern = joined_pattern.str();
     }
 
-    // Compatibility for early same-layer prototype rows is intentionally
-    // disabled while pointillisme is retired from the mixed-filament path.
-#if 0
-    if (distribution_mode == int(MixedFilament::LayerCycle) && pointillism_all_filaments)
-        distribution_mode = int(MixedFilament::SameLayerPointillisme);
-#endif
     pointillism_all_filaments = false;
     distribution_mode = normalize_distribution_mode_without_pointillism(distribution_mode, gradient_component_ids);
+    
+    // Validate gradient parameters if gradient is enabled
+    if (gradient_enabled) {
+        // Ensure start and end are in valid range (0.01 to 0.99)
+        gradient_start = std::clamp(gradient_start, 0.01f, 0.99f);
+        gradient_end   = std::clamp(gradient_end,   0.01f, 0.99f);
+        
+        // Ensure start and end are not too close (need meaningful gradient)
+        if (std::abs(gradient_start - gradient_end) < MixedFilament::k_min_gradient_difference) {
+            // Gradient range too small, disable gradient mode
+            gradient_enabled = false;
+        }
+    }
+    
     return true;
-}
-
-static bool is_pattern_separator(char c)
-{
-    return std::isspace(static_cast<unsigned char>(c)) || c == '/' || c == '-' || c == '_' || c == '|' || c == ':' || c == ';' || c == ',';
-}
-
-static bool decode_pattern_step(char c, char &out)
-{
-    if (c >= '1' && c <= '9') {
-        out = c;
-        return true;
-    }
-    switch (std::tolower(static_cast<unsigned char>(c))) {
-    case 'a':
-        out = '1';
-        return true;
-    case 'b':
-        out = '2';
-        return true;
-    default:
-        return false;
-    }
 }
 
 static std::vector<std::string> split_manual_pattern_groups(const std::string &pattern)
@@ -636,18 +661,74 @@ static std::string flatten_manual_pattern_groups(const std::string &pattern)
     return flattened;
 }
 
-static unsigned int physical_filament_from_pattern_step(char token, const MixedFilament &mf, size_t num_physical)
+// Basic tokenization of a single group (no comma) into token strings.
+// - No '/' in group: legacy mode, each '1'-'9' char is one token.
+// - Has '/' in group: split by '/', each segment is one token.
+static std::vector<std::string> tokenize_pattern_group(const std::string &group)
 {
-    if (token == '1')
-        return mf.component_a;
-    if (token == '2')
-        return mf.component_b;
-    if (token >= '3' && token <= '9') {
-        const unsigned int direct = unsigned(token - '0');
-        if (direct >= 1 && direct <= num_physical)
-            return direct;
+    std::vector<std::string> tokens;
+    if (group.empty())
+        return tokens;
+
+    for (size_t i = 0; i < group.size(); ++i) {
+        char c = group[i];
+        if (c >= '1' && c <= '9') {
+            tokens.emplace_back(1, c);
+        } else if (c == '[') {
+            size_t j = i + 1;
+            while (j < group.size() && group[j] >= '0' && group[j] <= '9')
+                ++j;
+            if (j > i + 1 && j < group.size() && group[j] == ']') {
+                tokens.emplace_back(group.substr(i + 1, j - i - 1));
+                i = j;
+            }
+        }
     }
+    return tokens;
+}
+
+std::vector<std::string> MixedFilamentManager::split_pattern_group_to_tokens(const std::string &group, size_t /*num_physical*/)
+{
+    return tokenize_pattern_group(group);
+}
+
+unsigned int MixedFilamentManager::physical_filament_from_token(const std::string &token, const MixedFilament &mf, size_t num_physical)
+{
+    // Cycle-mode invariant: component_a≡1, component_b≡2 always
+    // (enforced by UI and MixedFilamentDialog::MODE_CYCLE).
+    // Under this invariant the symbolic tokens "1"/"2" are identity
+    // mappings — no ambiguity with direct physical IDs 1 and 2.
+    if (token == "1")
+        return (mf.component_a >= 1 && mf.component_a <= num_physical) ? mf.component_a : 0;
+    if (token == "2")
+        return (mf.component_b >= 1 && mf.component_b <= num_physical) ? mf.component_b : 0;
+
+    char *end = nullptr;
+    errno = 0;
+    unsigned long id = std::strtoul(token.c_str(), &end, 10);
+    if (errno != ERANGE && *end == '\0' && id >= 1 && id <= num_physical)
+        return unsigned(id);
+
     return 0;
+}
+
+std::vector<std::string> MixedFilamentManager::split_pattern_groups(const std::string &pattern)
+{
+    std::vector<std::string> groups;
+    std::string current;
+    for (char c : pattern) {
+        if (c == ',') {
+            if (!current.empty()) {
+                groups.emplace_back(std::move(current));
+                current.clear();
+            }
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty())
+        groups.emplace_back(std::move(current));
+    return groups;
 }
 
 static int mix_percent_from_normalized_pattern(const std::string &pattern)
@@ -656,54 +737,119 @@ static int mix_percent_from_normalized_pattern(const std::string &pattern)
     if (groups.empty())
         return 50;
 
-    // For grouped patterns, blend preview is the average of each perimeter
-    // group's own cadence. This keeps simple outer/inner patterns like
-    // "12,21" at 50/50 and "11111112,11121111" at 12.5%.
     double blend_b = 0.0;
     for (const std::string &group : groups) {
         if (group.empty())
             continue;
-        const int count_b = int(std::count(group.begin(), group.end(), '2'));
-        blend_b += double(count_b) / double(group.size());
+        const std::vector<std::string> tokens = tokenize_pattern_group(group);
+        if (tokens.empty())
+            continue;
+        const int count_b = int(std::count(tokens.begin(), tokens.end(), "2"));
+        blend_b += double(count_b) / double(tokens.size());
     }
     return clamp_int(int(std::lround(100.0 * blend_b / double(groups.size()))), 0, 100);
 }
 
-static std::string normalize_gradient_component_ids(const std::string &components)
+std::string MixedFilamentManager::normalize_gradient_component_ids(const std::string &components)
 {
-    std::string normalized;
-    normalized.reserve(components.size());
-    bool seen[10] = { false };
-    for (const char c : components) {
-        if (c < '1' || c > '9')
-            continue;
-        const int idx = c - '0';
-        if (seen[idx])
-            continue;
-        seen[idx] = true;
-        normalized.push_back(c);
-    }
-    return normalized;
+    // Decode (no validation cap during normalization), then re-encode to canonical form.
+    auto ids = decode_gradient_component_ids(components, kMaxPhysicalFilaments);
+    return encode_gradient_component_ids(ids);
 }
 
-static std::vector<unsigned int> decode_gradient_component_ids(const std::string &components, size_t num_physical)
+std::string MixedFilamentManager::encode_gradient_component_ids(const std::vector<unsigned int> &ids)
+{
+    bool extended = false;
+    for (unsigned int id : ids)
+        if (id > 9) { extended = true; break; }
+
+    // Single extended ID: use leading '/' to disambiguate from legacy format
+    if (extended && ids.size() == 1)
+        return "/" + std::to_string(ids[0]);
+
+    std::string out;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0 && extended) out.push_back('/');
+        if (extended)
+            out.append(std::to_string(ids[i]));
+        else
+            out.push_back(char('0' + ids[i]));
+    }
+    return out;
+}
+
+std::vector<unsigned int> MixedFilamentManager::decode_gradient_component_ids(const std::string &components,
+                                                                               size_t             num_physical)
 {
     std::vector<unsigned int> ids;
-    if (components.empty() || num_physical == 0)
+    if (components.empty())
         return ids;
 
-    bool seen[10] = { false };
+    const bool validate = (num_physical > 0);
+    std::unordered_set<unsigned int> seen;
     ids.reserve(components.size());
-    for (const char c : components) {
-        if (c < '1' || c > '9')
-            continue;
-        const unsigned int id = unsigned(c - '0');
-        if (id == 0 || id > num_physical || seen[id])
-            continue;
-        seen[id] = true;
-        ids.emplace_back(id);
+
+    // Extended format: /-separated decimal IDs
+    if (components.find('/') != std::string::npos) {
+        std::string token;
+        for (const char c : components) {
+            if (c == '/') {
+                if (!token.empty()) {
+                    const unsigned int id = unsigned(std::strtoul(token.c_str(), nullptr, 10));
+                    if (id >= 1 && (!validate || id <= num_physical) && seen.insert(id).second)
+                        ids.emplace_back(id);
+                    token.clear();
+                }
+            } else {
+                token.push_back(c);
+            }
+        }
+        if (!token.empty()) {
+            const unsigned int id = unsigned(std::strtoul(token.c_str(), nullptr, 10));
+            if (id >= 1 && (!validate || id <= num_physical) && seen.insert(id).second)
+                ids.emplace_back(id);
+        }
+    } else {
+        // Legacy format: concatenated single-digit chars
+        bool seen_legacy[10] = { false };
+        for (const char c : components) {
+            if (c < '1' || c > '9')
+                continue;
+            const unsigned int id = unsigned(c - '0');
+            if (id == 0 || (validate && id > num_physical) || seen_legacy[id])
+                continue;
+            seen_legacy[id] = true;
+            ids.emplace_back(id);
+        }
     }
     return ids;
+}
+
+void MixedFilamentManager::expand_virtual_extruder_ids(std::vector<int> &ids, size_t num_physical) const
+{
+    if (num_physical == 0)
+        return;
+    std::vector<int> expanded;
+    expanded.reserve(ids.size() * 2);
+    for (int id : ids) {
+        if (id > static_cast<int>(num_physical)) {
+            const MixedFilament *mf = mixed_filament_from_id(
+                static_cast<unsigned int>(id), num_physical);
+            if (mf != nullptr && mf->enabled) {
+                expanded.push_back(static_cast<int>(mf->component_a));
+                expanded.push_back(static_cast<int>(mf->component_b));
+                auto gradient_ids = decode_gradient_component_ids(
+                    mf->gradient_component_ids, num_physical);
+                for (unsigned int gid : gradient_ids)
+                    expanded.push_back(static_cast<int>(gid));
+            } else {
+                expanded.push_back(id);
+            }
+        } else {
+            expanded.push_back(id);
+        }
+    }
+    ids = std::move(expanded);
 }
 
 static int normalize_distribution_mode_without_pointillism(int distribution_mode, const std::string &gradient_component_ids)
@@ -712,7 +858,7 @@ static int normalize_distribution_mode_without_pointillism(int distribution_mode
     if (clamped_mode != int(MixedFilament::SameLayerPointillisme))
         return clamped_mode;
 
-    const size_t gradient_count = decode_gradient_component_ids(gradient_component_ids, 9).size();
+    const size_t gradient_count = MixedFilamentManager::decode_gradient_component_ids(gradient_component_ids, 0).size();
     return gradient_count >= 3 ? int(MixedFilament::LayerCycle) : int(MixedFilament::Simple);
 }
 
@@ -884,17 +1030,20 @@ static std::vector<unsigned int> build_weighted_gradient_sequence(const std::vec
     return sequence;
 }
 
-static unsigned int decode_manual_pattern_preview_token(char token, unsigned int component_a, unsigned int component_b, size_t num_physical)
+static unsigned int decode_manual_pattern_preview_token(const std::string &token, unsigned int component_a, unsigned int component_b, size_t num_physical)
 {
-    unsigned int extruder_id = 0;
-    if (token == '1')
-        extruder_id = component_a;
-    else if (token == '2')
-        extruder_id = component_b;
-    else if (token >= '3' && token <= '9')
-        extruder_id = unsigned(token - '0');
+    if (token == "1")
+        return (component_a >= 1 && component_a <= num_physical) ? component_a : 0;
+    if (token == "2")
+        return (component_b >= 1 && component_b <= num_physical) ? component_b : 0;
 
-    return (extruder_id >= 1 && extruder_id <= num_physical) ? extruder_id : 0;
+    char *end = nullptr;
+    errno = 0;
+    unsigned long id = std::strtoul(token.c_str(), &end, 10);
+    if (errno != ERANGE && *end == '\0' && id >= 1 && id <= num_physical)
+        return unsigned(id);
+
+    return 0;
 }
 
 static std::vector<unsigned int> build_grouped_manual_pattern_preview_sequence(const std::string &pattern,
@@ -916,8 +1065,9 @@ static std::vector<unsigned int> build_grouped_manual_pattern_preview_sequence(c
         return sequence;
 
     if (groups.size() == 1) {
-        sequence.reserve(normalized.size());
-        for (const char token : normalized) {
+        const std::vector<std::string> tokens = MixedFilamentManager::split_pattern_group_to_tokens(groups[0], num_physical);
+        sequence.reserve(tokens.size());
+        for (const std::string &token : tokens) {
             const unsigned int extruder_id =
                 decode_manual_pattern_preview_token(token, component_a, component_b, num_physical);
             if (extruder_id != 0)
@@ -926,12 +1076,18 @@ static std::vector<unsigned int> build_grouped_manual_pattern_preview_sequence(c
         return sequence;
     }
 
+    // Build per-group token vectors for indexed access
+    std::vector<std::vector<std::string>> group_tokens;
+    group_tokens.reserve(groups.size());
+    for (const std::string &group : groups)
+        group_tokens.push_back(MixedFilamentManager::split_pattern_group_to_tokens(group, num_physical));
+
     constexpr size_t k_max_preview_cycle = 48;
     size_t cycle = 1;
-    for (const std::string &group : groups) {
-        if (group.empty())
+    for (const auto &tokens : group_tokens) {
+        if (tokens.empty())
             continue;
-        cycle = std::lcm(cycle, group.size());
+        cycle = std::lcm(cycle, tokens.size());
         if (cycle >= k_max_preview_cycle) {
             cycle = k_max_preview_cycle;
             break;
@@ -942,10 +1098,10 @@ static std::vector<unsigned int> build_grouped_manual_pattern_preview_sequence(c
     sequence.reserve(preview_wall_loops * cycle);
     for (size_t layer_idx = 0; layer_idx < cycle; ++layer_idx) {
         for (size_t wall_idx = 0; wall_idx < preview_wall_loops; ++wall_idx) {
-            const std::string &group = groups[std::min(wall_idx, groups.size() - 1)];
-            if (group.empty())
+            const auto &tokens = group_tokens[std::min(wall_idx, group_tokens.size() - 1)];
+            if (tokens.empty())
                 continue;
-            const char token = group[layer_idx % group.size()];
+            const std::string &token = tokens[layer_idx % tokens.size()];
             const unsigned int extruder_id =
                 decode_manual_pattern_preview_token(token, component_a, component_b, num_physical);
             if (extruder_id != 0)
@@ -1295,7 +1451,7 @@ static std::vector<double> build_local_z_preview_pass_heights(double nominal_lay
     return build_alternating(gradient_h_a, gradient_h_b);
 }
 
-static double mixed_filament_reference_nozzle_mm(unsigned int               component_a,
+double MixedFilamentManager::mixed_filament_reference_nozzle_mm(unsigned int               component_a,
                                                  unsigned int               component_b,
                                                  const std::vector<double> &nozzle_diameters)
 {
@@ -1325,7 +1481,7 @@ int mixed_filament_effective_local_z_preview_mix_b_percent(const MixedFilament  
     if (!normalized_pattern.empty() || mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
         return std::clamp(mf.mix_b_percent, 0, 100);
 
-    const std::vector<unsigned int> gradient_ids = decode_gradient_component_ids(mf.gradient_component_ids, 9);
+    const std::vector<unsigned int> gradient_ids = MixedFilamentManager::decode_gradient_component_ids(mf.gradient_component_ids, 0);
     if (gradient_ids.size() >= 3)
         return std::clamp(mf.mix_b_percent, 0, 100);
 
@@ -1397,7 +1553,7 @@ bool mixed_filament_supports_bias_apparent_color(const MixedFilament            
         return false;
     if (!MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern).empty())
         return false;
-    if (decode_gradient_component_ids(mf.gradient_component_ids, 9).size() >= 3)
+    if (MixedFilamentManager::decode_gradient_component_ids(mf.gradient_component_ids, 0).size() >= 3)
         return false;
     return mf.component_a >= 1 && mf.component_b >= 1 && mf.component_a != mf.component_b;
 }
@@ -1411,7 +1567,7 @@ std::pair<int, int> mixed_filament_apparent_pair_percentages(const MixedFilament
     if (!mixed_filament_supports_bias_apparent_color(mf, preview_settings, bias_mode_enabled))
         return { 100 - base_b, base_b };
 
-    const double reference_nozzle_mm = mixed_filament_reference_nozzle_mm(mf.component_a, mf.component_b, nozzle_diameters);
+    const double reference_nozzle_mm = MixedFilamentManager::mixed_filament_reference_nozzle_mm(mf.component_a, mf.component_b, nozzle_diameters);
     const int apparent_b = MixedFilamentManager::apparent_mix_b_percent(base_b,
                                                                         mf.component_a_surface_offset,
                                                                         mf.component_b_surface_offset,
@@ -1447,7 +1603,7 @@ std::string compute_mixed_filament_display_color(const MixedFilament &entry, con
     }
 
     if (entry.distribution_mode != int(MixedFilament::Simple)) {
-        const std::vector<unsigned int> gradient_ids = decode_gradient_component_ids(entry.gradient_component_ids, context.num_physical);
+        const std::vector<unsigned int> gradient_ids = MixedFilamentManager::decode_gradient_component_ids(entry.gradient_component_ids, context.num_physical);
         if (gradient_ids.size() >= 3) {
             const std::vector<int> gradient_weights =
                 decode_gradient_component_weights(entry.gradient_component_weights, gradient_ids.size());
@@ -1580,16 +1736,123 @@ void MixedFilamentManager::remove_physical_filament(unsigned int deleted_filamen
     if (deleted_filament_id == 0 || m_mixed.empty())
         return;
 
+    // Check and adjust filaments following resolve() order:
+    //   1. manual_pattern (cycle mode tokens)
+    //   2. gradient_component_ids
+    //   3. component_a / component_b (pair)
+
     std::vector<MixedFilament> filtered;
     filtered.reserve(m_mixed.size());
     for (MixedFilament mf : m_mixed) {
-        if (mf.component_a == deleted_filament_id || mf.component_b == deleted_filament_id)
+
+        // ---- 1. manual_pattern ----
+        bool uses_deleted_in_pattern = false;
+        const std::string norm = normalize_manual_pattern(mf.manual_pattern);
+        if (!norm.empty()) {
+            const auto groups = split_pattern_groups(norm);
+            for (const std::string &group : groups) {
+                const auto tokens = tokenize_pattern_group(group);
+                for (const std::string &token : tokens) {
+                    if (physical_filament_from_token(token, mf, kMaxPhysicalFilaments) == deleted_filament_id) {
+                        uses_deleted_in_pattern = true;
+                        break;
+                    }
+                }
+                if (uses_deleted_in_pattern) break;
+            }
+        }
+        if (uses_deleted_in_pattern)
             continue;
 
-        if (mf.component_a > deleted_filament_id)
-            --mf.component_a;
-        if (mf.component_b > deleted_filament_id)
-            --mf.component_b;
+        // ---- 2. gradient components ----
+        // Only check when there is no manual_pattern; a pattern already resolves
+        // every token, so the gradient check would be a false positive at worst.
+        if (norm.empty()) {
+            bool uses_deleted_in_gradient = false;
+            for (unsigned int comp_id : decode_gradient_component_ids(mf.gradient_component_ids, 0)) {
+                if (comp_id == deleted_filament_id) {
+                    uses_deleted_in_gradient = true;
+                    break;
+                }
+            }
+            if (uses_deleted_in_gradient)
+                continue;
+        }
+
+        // ---- 3. pair components ----
+        // Only check when there is no manual_pattern; a pattern already resolves
+        // every token through physical_filament_from_token (symbolic "1"/"2" or
+        // literal numeric), so the pair check would be redundant at best and a
+        // false positive at worst (component_a/b may hold unrelated default values).
+        if (norm.empty() && (mf.component_a == deleted_filament_id || mf.component_b == deleted_filament_id))
+            continue;
+
+        // ---- Adjust IDs for the surviving mixed filament ----
+
+        // Adjust manual_pattern
+        if (!norm.empty()) {
+            const auto groups = split_pattern_groups(norm);
+            std::string adjusted;
+            for (size_t gi = 0; gi < groups.size(); ++gi) {
+                if (gi > 0) adjusted += ',';
+                const auto tokens = tokenize_pattern_group(groups[gi]);
+                for (const std::string &token : tokens) {
+                    // All tokens are treated as literal physical-filament IDs
+                    // during adjustment. In cycle mode (component_a≡1, component_b≡2)
+                    // the "1"/"2" identity mapping means decrementing them produces
+                    // the correct result; for non-cycle patterns without "1"/"2",
+                    // component_a/b are irrelevant (pair adjustment is guarded by
+                    // norm.empty()).
+                    char *end = nullptr;
+                    errno = 0;
+                    unsigned long id = std::strtoul(token.c_str(), &end, 10);
+                    if (errno != ERANGE && *end == '\0' && id > deleted_filament_id) {
+                        --id;
+                        if (id >= 10) {
+                            adjusted += '[';
+                            adjusted += std::to_string(id);
+                            adjusted += ']';
+                        } else {
+                            adjusted += std::to_string(id);
+                        }
+                    } else {
+                        if (token.size() > 1) {
+                            adjusted += '[';
+                            adjusted += token;
+                            adjusted += ']';
+                        } else {
+                            adjusted += token;
+                        }
+                    }
+                }
+            }
+            mf.manual_pattern = adjusted;
+        }
+
+        // Adjust pair components (only when no pattern — same rationale as Step 3)
+        if (norm.empty()) {
+            if (mf.component_a > deleted_filament_id)
+                --mf.component_a;
+            if (mf.component_b > deleted_filament_id)
+                --mf.component_b;
+        }
+
+        // Adjust gradient component IDs
+        {
+            auto decoded = decode_gradient_component_ids(mf.gradient_component_ids, 0);
+            if (!norm.empty()) {
+                // When manual_pattern is the active resolution source the
+                // gradient deletion check was skipped — remove stale IDs
+                // that reference the now-deleted physical filament.
+                decoded.erase(
+                    std::remove(decoded.begin(), decoded.end(), deleted_filament_id),
+                    decoded.end());
+            }
+            for (unsigned int &id : decoded)
+                if (id > deleted_filament_id)
+                    --id;
+            mf.gradient_component_ids = encode_gradient_component_ids(decoded);
+        }
 
         filtered.emplace_back(std::move(mf));
     }
@@ -1603,6 +1866,8 @@ void MixedFilamentManager::add_custom_filament(unsigned int component_a,
 {
     const size_t n = filament_colours.size();
     if (n < 2)
+        return;
+    if (total_filaments(n) >= MAXIMUM_FILAMENT_NUMBER)
         return;
 
     component_a = std::max<unsigned int>(1, std::min<unsigned int>(component_a, unsigned(n)));
@@ -1639,32 +1904,68 @@ void MixedFilamentManager::clear_custom_entries()
     m_mixed.erase(std::remove_if(m_mixed.begin(), m_mixed.end(), [](const MixedFilament &mf) { return mf.custom; }), m_mixed.end());
 }
 
+void MixedFilamentManager::cleanup_deleted_entries()
+{
+    // Remove all deleted entries from memory
+    m_mixed.erase(std::remove_if(m_mixed.begin(), m_mixed.end(), [](const MixedFilament &mf) { return mf.deleted; }), m_mixed.end());
+}
+
 std::string MixedFilamentManager::normalize_manual_pattern(const std::string &pattern)
 {
+    if (pattern.empty())
+        return {};
+
     std::string normalized;
     normalized.reserve(pattern.size());
-    bool current_group_has_steps = false;
-    for (char c : pattern) {
-        char step = '\0';
-        if (decode_pattern_step(c, step)) {
-            normalized.push_back(step);
-            current_group_has_steps = true;
-            continue;
-        }
-        if (c == ',') {
-            if (!current_group_has_steps)
-                return std::string();
+    bool group_has_content = false;
+
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        char c = pattern[i];
+        if (c >= '1' && c <= '9') {
+            normalized.push_back(c);
+            group_has_content = true;
+        } else if (c == ',') {
+            if (!group_has_content)
+                return {};
             normalized.push_back(',');
-            current_group_has_steps = false;
-            continue;
+            group_has_content = false;
+        } else if (c == '[') {
+            size_t j = i + 1;
+            while (j < pattern.size() && pattern[j] >= '0' && pattern[j] <= '9')
+                ++j;
+            if (j == i + 1 || j >= pattern.size() || pattern[j] != ']')
+                return {};
+
+            std::string num_str = pattern.substr(i + 1, j - i - 1);
+            if (num_str.size() > 2)
+                return {};
+            if (num_str.size() > 1 && num_str[0] == '0')
+                return {};
+            if (num_str == "0")
+                return {};
+
+            // Compressing [1]→1 and [2]→2 is safe under the cycle-mode
+            // invariant (component_a≡1, component_b≡2) — the symbolic
+            // tokens are identity mappings, so no information is lost.
+            if (num_str.size() == 1) {
+                normalized.push_back(num_str[0]);
+            } else {
+                normalized.push_back('[');
+                normalized.append(num_str);
+                normalized.push_back(']');
+            }
+            group_has_content = true;
+            i = j;
+        } else if (c == ']' || c == '0') {
+            return {};
+        } else {
+            return {};
         }
-        if (is_pattern_separator(c))
-            continue;
-        // Unknown token => invalid pattern.
-        return std::string();
     }
-    if (!normalized.empty() && normalized.back() == ',')
-        return std::string();
+
+    if (!group_has_content)
+        return {};
+
     return normalized;
 }
 
@@ -1694,6 +1995,18 @@ void MixedFilamentManager::apply_gradient_settings(int   gradient_mode,
     }
 }
 
+std::vector<int> fill_continuous_layer_range(const std::vector<int> &sorted_layers)
+{
+    if (sorted_layers.empty()) return {};
+    const int first = sorted_layers.front();
+    const int last  = sorted_layers.back();
+    std::vector<int> result;
+    result.reserve(last - first + 1);
+    for (int layer = first; layer <= last; ++layer)
+        result.push_back(layer);
+    return result;
+}
+
 std::string MixedFilamentManager::serialize_custom_entries()
 {
     std::ostringstream ss;
@@ -1705,7 +2018,7 @@ std::string MixedFilamentManager::serialize_custom_entries()
         disable_pointillism_mode(mf);
         mf.stable_id = normalize_stable_id(mf.stable_id);
         const std::string normalized_ids = normalize_gradient_component_ids(mf.gradient_component_ids);
-        const std::string normalized_weights = normalize_gradient_component_weights(mf.gradient_component_weights, normalized_ids.size());
+        const std::string normalized_weights = normalize_gradient_component_weights(mf.gradient_component_weights, decode_gradient_component_ids(normalized_ids, 0).size());
         ss << mf.component_a << ','
            << mf.component_b << ','
            << (mf.enabled ? 1 : 0) << ','
@@ -1721,6 +2034,14 @@ std::string MixedFilamentManager::serialize_custom_entries()
            << 'd' << (mf.deleted ? 1 : 0) << ','
            << 'o' << (mf.origin_auto ? 1 : 0) << ','
            << 'u' << mf.stable_id;
+        if (mf.ui_mode >= 0)
+            ss << ",cm" << mf.ui_mode;
+        if (mf.gradient_enabled) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.4f/%.4f",
+                          double(mf.gradient_start), double(mf.gradient_end));
+            ss << ",r1/" << buf;
+        }
         const std::string normalized_pattern = normalize_manual_pattern(mf.manual_pattern);
         if (!normalized_pattern.empty())
             ss << ',' << normalized_pattern;
@@ -1792,9 +2113,14 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         float component_a_surface_offset = 0.f;
         float component_b_surface_offset = 0.f;
         bool deleted = false;
+        bool gradient_enabled = false;
+        float gradient_start = 0.8f;
+        float gradient_end   = 0.2f;
+        int   cm_mode = -1;
         if (!parse_row_definition(row, a, b, stable_id, enabled, custom, origin_auto, mix, pointillism_all_filaments,
                                   gradient_component_ids, gradient_component_weights, manual_pattern, distribution_mode,
-                                  local_z_max_sublayers, component_a_surface_offset, component_b_surface_offset, deleted)) {
+                                  local_z_max_sublayers, component_a_surface_offset, component_b_surface_offset, deleted,
+                                  gradient_enabled, gradient_start, gradient_end, cm_mode)) {
             ++skipped_rows;
             BOOST_LOG_TRIVIAL(warning) << "MixedFilamentManager::load_custom_entries invalid row format: " << row;
             continue;
@@ -1834,11 +2160,12 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
             mf.component_a = std::min(a, b);
             mf.component_b = std::max(a, b);
             mf.stable_id = dedupe_stable_id(stable_id != 0 ? stable_id : mf.stable_id);
+            mf.ui_mode   = cm_mode;
             mf.enabled = enabled;
             mf.pointillism_all_filaments = pointillism_all_filaments;
             mf.gradient_component_ids = normalize_gradient_component_ids(gradient_component_ids);
             mf.gradient_component_weights =
-                normalize_gradient_component_weights(gradient_component_weights, mf.gradient_component_ids.size());
+                normalize_gradient_component_weights(gradient_component_weights, decode_gradient_component_ids(mf.gradient_component_ids, 0).size());
             mf.manual_pattern = normalize_manual_pattern(manual_pattern);
             mf.distribution_mode = clamp_int(distribution_mode, int(MixedFilament::LayerCycle), int(MixedFilament::Simple));
             mf.local_z_max_sublayers = std::max(0, local_z_max_sublayers);
@@ -1850,6 +2177,9 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
                 mf.enabled = false;
             mf.custom = false;
             mf.origin_auto = true;
+            mf.gradient_enabled = gradient_enabled;
+            mf.gradient_start   = gradient_start;
+            mf.gradient_end     = gradient_end;
             disable_pointillism_mode(mf);
 
             rebuilt.push_back(std::move(mf));
@@ -1862,13 +2192,14 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         mf.component_a = a;
         mf.component_b = b;
         mf.stable_id = dedupe_stable_id(stable_id);
+        mf.ui_mode   = cm_mode;
         mf.mix_b_percent = mix;
         mf.ratio_a = 1;
         mf.ratio_b = 1;
         mf.pointillism_all_filaments = pointillism_all_filaments;
         mf.gradient_component_ids = normalize_gradient_component_ids(gradient_component_ids);
         mf.gradient_component_weights =
-            normalize_gradient_component_weights(gradient_component_weights, mf.gradient_component_ids.size());
+            normalize_gradient_component_weights(gradient_component_weights, decode_gradient_component_ids(mf.gradient_component_ids, 0).size());
         mf.manual_pattern = normalize_manual_pattern(manual_pattern);
         mf.distribution_mode = clamp_int(distribution_mode, int(MixedFilament::LayerCycle), int(MixedFilament::Simple));
         mf.local_z_max_sublayers = std::max(0, local_z_max_sublayers);
@@ -1882,6 +2213,9 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
             mf.enabled = false;
         mf.custom = custom;
         mf.origin_auto = origin_auto;
+        mf.gradient_enabled = gradient_enabled;
+        mf.gradient_start   = gradient_start;
+        mf.gradient_end     = gradient_end;
         disable_pointillism_mode(mf);
         rebuilt.push_back(std::move(mf));
         ++loaded_rows;
@@ -1924,7 +2258,8 @@ unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
                                            int          layer_index,
                                            float        layer_print_z,
                                            float        layer_height,
-                                           bool         force_height_weighted) const
+                                           bool         force_height_weighted,
+                                           const PrintObject* current_object) const
 {
     const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
     if (mixed_idx < 0)
@@ -1932,16 +2267,19 @@ unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
 
-    // Manual pattern takes precedence when provided. Pattern uses repeating
-    // steps: '1' => component_a, '2' => component_b, '3'..'9' => direct
-    // physical filament IDs.
+    // Manual pattern takes precedence when provided.
+    // Tokens: '1'=>component_a, '2'=>component_b, '3'..'9'=>direct IDs,
+    // with '/' delimited multi-digit tokens (e.g. /12/).
     if (!mf.manual_pattern.empty()) {
         const std::string flattened_pattern = flatten_manual_pattern_groups(mf.manual_pattern);
         if (!flattened_pattern.empty()) {
-            const int pos = safe_mod(layer_index, int(flattened_pattern.size()));
-            const unsigned int resolved = physical_filament_from_pattern_step(flattened_pattern[size_t(pos)], mf, num_physical);
-            if (resolved >= 1 && resolved <= num_physical)
-                return resolved;
+            const std::vector<std::string> tokens = split_pattern_group_to_tokens(flattened_pattern, num_physical);
+            if (!tokens.empty()) {
+                const int pos = MixedFilamentManager::safe_mod(layer_index, int(tokens.size()));
+                const unsigned int resolved = physical_filament_from_token(tokens[size_t(pos)], mf, num_physical);
+                if (resolved >= 1 && resolved <= num_physical)
+                    return resolved;
+            }
         }
         return mf.component_a;
     }
@@ -1954,7 +2292,7 @@ unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
         const std::vector<unsigned int> gradient_sequence = build_weighted_gradient_sequence(
             gradient_ids, gradient_weights.empty() ? std::vector<int>(gradient_ids.size(), 1) : gradient_weights);
         if (!gradient_sequence.empty()) {
-            const size_t pos = size_t(safe_mod(layer_index, int(gradient_sequence.size())));
+            const size_t pos = size_t(MixedFilamentManager::safe_mod(layer_index, int(gradient_sequence.size())));
             return gradient_sequence[pos];
         }
     }
@@ -1993,7 +2331,8 @@ unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
                                                      int          perimeter_index,
                                                      float        layer_print_z,
                                                      float        layer_height,
-                                                     bool         force_height_weighted) const
+                                                     bool         force_height_weighted,
+                                                     const PrintObject* current_object) const
 {
     const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
     if (mixed_idx < 0)
@@ -2006,15 +2345,18 @@ unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
             const size_t group_idx = size_t(std::max(0, perimeter_index));
             const std::string &group = pattern_groups[std::min(group_idx, pattern_groups.size() - 1)];
             if (!group.empty()) {
-                const int pos = safe_mod(layer_index, int(group.size()));
-                const unsigned int resolved = physical_filament_from_pattern_step(group[size_t(pos)], mf, num_physical);
-                if (resolved >= 1 && resolved <= num_physical)
-                    return resolved;
+                const std::vector<std::string> tokens = split_pattern_group_to_tokens(group, num_physical);
+                if (!tokens.empty()) {
+                    const int pos = MixedFilamentManager::safe_mod(layer_index, int(tokens.size()));
+                    const unsigned int resolved = physical_filament_from_token(tokens[size_t(pos)], mf, num_physical);
+                    if (resolved >= 1 && resolved <= num_physical)
+                        return resolved;
+                }
             }
         }
     }
 
-    return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted);
+    return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
 }
 
 unsigned int MixedFilamentManager::effective_painted_region_filament_id(unsigned int filament_id,
@@ -2149,6 +2491,58 @@ const MixedFilament *MixedFilamentManager::mixed_filament_from_id(unsigned int f
 {
     const int idx = mixed_index_from_filament_id(filament_id, num_physical);
     return idx >= 0 ? &m_mixed[size_t(idx)] : nullptr;
+}
+
+// Get all mixed filament indices that depend on a specific physical filament
+std::vector<size_t> MixedFilamentManager::mixed_filaments_using_physical(unsigned int physical_filament_1based) const
+{
+    std::vector<size_t> result;
+    
+    for (size_t j = 0; j < m_mixed.size(); ++j) {
+        const MixedFilament& mf = m_mixed[j];
+        if (mf.deleted || !mf.enabled) continue;
+        
+        bool depends_on_physical = false;
+
+        // Check manual_pattern (cycle mode tokens — resolve order #1)
+        const std::string norm = normalize_manual_pattern(mf.manual_pattern);
+        if (!norm.empty()) {
+            const auto groups = split_pattern_groups(norm);
+            for (const std::string &group : groups) {
+                const auto tokens = tokenize_pattern_group(group);
+                for (const std::string &token : tokens) {
+                    if (physical_filament_from_token(token, mf, kMaxPhysicalFilaments) == physical_filament_1based) {
+                        depends_on_physical = true;
+                        break;
+                    }
+                }
+                if (depends_on_physical) break;
+            }
+        }
+
+        // Check gradient components (resolve order #2)
+        if (!depends_on_physical && norm.empty()) {
+            for (unsigned int comp_id : decode_gradient_component_ids(mf.gradient_component_ids, 0)) {
+                if (comp_id == physical_filament_1based) {
+                    depends_on_physical = true;
+                    break;
+                }
+            }
+        }
+
+        // Check pair components (resolve order #3)
+        if (!depends_on_physical && norm.empty()) {
+            if (mf.component_a == physical_filament_1based || mf.component_b == physical_filament_1based) {
+                depends_on_physical = true;
+            }
+        }
+        
+        if (depends_on_physical) {
+            result.push_back(j);
+        }
+    }
+    
+    return result;
 }
 
 // Blend N colours using weighted pairwise FilamentMixer blending.

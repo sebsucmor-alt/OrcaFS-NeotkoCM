@@ -3,7 +3,6 @@
 #include <numeric>
 #include <vector>
 #include <string>
-#include <sstream>
 #include <regex>
 #include <future>
 #include <GL/glew.h>
@@ -78,38 +77,11 @@ class Bed3D;
 
 namespace {
 
-struct ResolvedInfillFilament
-{
-    int  wall_filament          = 1;
-    int  sparse_infill_filament = 1;
-    bool override_enabled       = false;
-};
-
 template <typename ConfigLike>
-ResolvedInfillFilament resolve_infill_filament(const ConfigLike &config, int inherited_wall_filament, bool inherited_override_enabled, int inherited_sparse_infill_filament)
+int resolve_sparse_infill_filament(const ConfigLike &config, int inherited_sparse_infill_filament)
 {
-    ResolvedInfillFilament resolved;
-    resolved.wall_filament          = inherited_wall_filament;
-    resolved.sparse_infill_filament = inherited_sparse_infill_filament;
-    resolved.override_enabled       = inherited_override_enabled;
-
-    if (const ConfigOption *wall_opt = config.option("wall_filament"); wall_opt != nullptr)
-        resolved.wall_filament = wall_opt->getInt();
-
-    const ConfigOption *sparse_opt   = config.option("sparse_infill_filament");
-    const ConfigOption *override_opt = config.option("enable_infill_filament_override");
-    if (override_opt != nullptr)
-        resolved.override_enabled = override_opt->getBool();
-    else if (sparse_opt != nullptr)
-        resolved.override_enabled = sparse_opt->getInt() != resolved.wall_filament;
-
-    if (sparse_opt != nullptr)
-        resolved.sparse_infill_filament = sparse_opt->getInt();
-
-    if (!resolved.override_enabled)
-        resolved.sparse_infill_filament = resolved.wall_filament;
-
-    return resolved;
+    const ConfigOption *sparse_opt = config.option("sparse_infill_filament");
+    return sparse_opt != nullptr && sparse_opt->getInt() > 0 ? sparse_opt->getInt() : inherited_sparse_infill_filament;
 }
 
 } // namespace
@@ -1373,6 +1345,16 @@ int PartPlate::picking_id_component(int idx) const
     return this->m_plate_index * GRABBER_COUNT + idx;
 }
 
+
+static void expand_plate_extruders(std::vector<int>& ids)
+{
+	const size_t num_physical = static_cast<size_t>(std::max(wxGetApp().filaments_cnt(), 0));
+	if (num_physical > 0) {
+		wxGetApp().preset_bundle->mixed_filaments.expand_virtual_extruder_ids(ids, num_physical);
+		std::sort(ids.begin(), ids.end());
+		ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+	}
+}
 std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 {
 	std::vector<int> plate_extruders;
@@ -1389,8 +1371,7 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 	int glb_support_intf_extr = glb_config.opt_int("support_interface_filament");
 	int glb_support_extr = glb_config.opt_int("support_filament");
 	int glb_wall_extr = glb_config.opt_int("wall_filament");
-	const ResolvedInfillFilament global_infill { glb_wall_extr, glb_wall_extr, false };
-	int glb_sparse_infill_extr = glb_wall_extr;
+	int glb_sparse_infill_extr = glb_config.opt_int("sparse_infill_filament");
 	int glb_solid_infill_extr = glb_config.opt_int("solid_infill_filament");
 	bool glb_support = glb_config.opt_bool("enable_support");
     glb_support |= glb_config.opt_int("raft_layers") > 0;
@@ -1452,9 +1433,9 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 		if (obj_wall_extr != 1)
 			plate_extruders.push_back(obj_wall_extr);
 
-		const ResolvedInfillFilament object_infill = resolve_infill_filament(mo->config, glb_wall_extr, global_infill.override_enabled, glb_sparse_infill_extr);
-		if (object_infill.override_enabled && object_infill.sparse_infill_filament != 1)
-			plate_extruders.push_back(object_infill.sparse_infill_filament);
+		const int object_sparse_infill_extr = resolve_sparse_infill_filament(mo->config, glb_sparse_infill_extr);
+		if (object_sparse_infill_extr != 1)
+			plate_extruders.push_back(object_sparse_infill_extr);
 
 		int obj_solid_infill_extr = 1;
 		const ConfigOption* solid_infill_opt = mo->config.option("solid_infill_filament");
@@ -1464,33 +1445,6 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 			plate_extruders.push_back(obj_solid_infill_extr);
 		else if (glb_solid_infill_extr != 1)
 			plate_extruders.push_back(glb_solid_infill_extr);
-
-		// NEOTKO_COLORMIX_TAG_START
-		// If ColorMix is active for this object, inject the tools from the pattern strings
-		// so plate_extruders.size() > 1 → wipe tower appears and is generated during slicing.
-		// Per-object config takes priority; falls back to global print config.
-		// The sort+unique at end of this function deduplicates everything.
-		{
-			const ConfigOption* cm_opt = mo->config.option("interlayer_colormix_enabled");
-			bool obj_colormix = (cm_opt != nullptr)
-				? cm_opt->getBool()
-				: glb_config.opt_bool("interlayer_colormix_enabled");
-			if (obj_colormix) {
-				auto add_pattern_tools = [&](const ConfigOption* opt) {
-					if (!opt) return;
-					const auto* sopt = dynamic_cast<const ConfigOptionString*>(opt);
-					if (!sopt) return;
-					for (char c : sopt->value)
-						if (c >= '1' && c <= '4')
-							plate_extruders.push_back(static_cast<int>(c - '0'));
-				};
-				const ConfigOption* top_opt = mo->config.option("interlayer_colormix_pattern_top");
-				add_pattern_tools(top_opt ? top_opt : glb_config.option("interlayer_colormix_pattern_top"));
-				const ConfigOption* pen_opt = mo->config.option("interlayer_colormix_pattern_penultimate");
-				add_pattern_tools(pen_opt ? pen_opt : glb_config.option("interlayer_colormix_pattern_penultimate"));
-			}
-		}
-		// NEOTKO_COLORMIX_TAG_END
 
 	}
 
@@ -1512,6 +1466,10 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 	std::sort(plate_extruders.begin(), plate_extruders.end());
 	auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
 	plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+
+		expand_plate_extruders(plate_extruders);
+
+
 	return plate_extruders;
 }
 
@@ -1525,10 +1483,9 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
 
     // if 3mf file
     int glb_support_intf_extr = full_config.opt_int("support_interface_filament");
-    int glb_support_extr = full_config.opt_int("support_filament");
+	int glb_support_extr = full_config.opt_int("support_filament");
 	int glb_wall_extr = full_config.opt_int("wall_filament");
-	const ResolvedInfillFilament global_infill { glb_wall_extr, glb_wall_extr, false };
-	int glb_sparse_infill_extr = glb_wall_extr;
+	int glb_sparse_infill_extr = full_config.opt_int("sparse_infill_filament");
 	int glb_solid_infill_extr = full_config.opt_int("solid_infill_filament");
 
     bool glb_support = full_config.opt_bool("enable_support");
@@ -1548,7 +1505,7 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
                                          << " obj_id=" << obj_id;
                 continue;
             }
-            if (instance_id < 0 || instance_id >= (int)object->instances.size()) {
+            if (instance_id < 0 || instance_id >= object->instances.size()) {
                 BOOST_LOG_TRIVIAL(error) << "PartPlate::get_extruders_under_cli encountered invalid instance index"
                                          << " plate=" << m_plate_index
                                          << " obj_id=" << obj_id
@@ -1620,9 +1577,9 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
 			if (obj_wall_extr != 1)
 				plate_extruders.push_back(obj_wall_extr);
 
-			const ResolvedInfillFilament object_infill = resolve_infill_filament(object->config, glb_wall_extr, global_infill.override_enabled, glb_sparse_infill_extr);
-			if (object_infill.override_enabled && object_infill.sparse_infill_filament != 1)
-				plate_extruders.push_back(object_infill.sparse_infill_filament);
+			const int object_sparse_infill_extr = resolve_sparse_infill_filament(object->config, glb_sparse_infill_extr);
+			if (object_sparse_infill_extr != 1)
+				plate_extruders.push_back(object_sparse_infill_extr);
 
 			int obj_solid_infill_extr = 1;
 			const ConfigOption* solid_infill_opt = object->config.option("solid_infill_filament");
@@ -1632,29 +1589,6 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
 				plate_extruders.push_back(obj_solid_infill_extr);
 			else if (glb_solid_infill_extr != 1)
 				plate_extruders.push_back(glb_solid_infill_extr);
-
-			// NEOTKO_COLORMIX_TAG_START — CLI version (same logic, uses full_config)
-			{
-				const ConfigOption* cm_opt = object->config.option("interlayer_colormix_enabled");
-				bool obj_colormix = (cm_opt != nullptr)
-					? cm_opt->getBool()
-					: full_config.opt_bool("interlayer_colormix_enabled");
-				if (obj_colormix) {
-					auto add_pattern_tools = [&](const ConfigOption* opt) {
-						if (!opt) return;
-						const auto* sopt = dynamic_cast<const ConfigOptionString*>(opt);
-						if (!sopt) return;
-						for (char c : sopt->value)
-							if (c >= '1' && c <= '4')
-								plate_extruders.push_back(static_cast<int>(c - '0'));
-					};
-					const ConfigOption* top_opt = object->config.option("interlayer_colormix_pattern_top");
-					add_pattern_tools(top_opt ? top_opt : full_config.option("interlayer_colormix_pattern_top"));
-					const ConfigOption* pen_opt = object->config.option("interlayer_colormix_pattern_penultimate");
-					add_pattern_tools(pen_opt ? pen_opt : full_config.option("interlayer_colormix_pattern_penultimate"));
-				}
-			}
-			// NEOTKO_COLORMIX_TAG_END
         }
     }
 
@@ -1666,6 +1600,7 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
     std::sort(plate_extruders.begin(), plate_extruders.end());
     auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
     plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+    expand_plate_extruders(plate_extruders);
     std::ostringstream extruders_list;
     for (size_t i = 0; i < plate_extruders.size(); ++i) {
         if (i != 0)
@@ -1721,6 +1656,8 @@ std::vector<int> PartPlate::get_extruders_without_support(bool conside_custom_gc
 	std::sort(plate_extruders.begin(), plate_extruders.end());
 	auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
 	plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+
+	expand_plate_extruders(plate_extruders);
 	return plate_extruders;
 }
 
@@ -2082,7 +2019,7 @@ bool PartPlate::is_valid_gcode_file()
 	return true;
 }
 
-ModelObjectPtrs PartPlate::get_objects_on_this_plate() {
+ModelObjectPtrs PartPlate::get_objects_on_this_plate() const {
     ModelObjectPtrs objects_ptr;
     int obj_id;
     for (auto it = obj_to_instance_set.begin(); it != obj_to_instance_set.end(); it++) {

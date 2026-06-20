@@ -33,7 +33,6 @@
 #include "DailyTips.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
-#include "slic3r/GUI/Gizmos/GLGizmoColorMixPainter.hpp" // NEOTKO_COLORSTITCH_TAG s111 — multi-objeto
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
 
@@ -1039,11 +1038,6 @@ wxDEFINE_EVENT(EVT_GLCANVAS_EDIT_COLOR_CHANGE, wxKeyEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_JUMP_TO, wxKeyEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_UNDO, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_REDO, SimpleEvent);
-// NEOTKO_LIBRE_TAG_START — Temporal Link
-wxDEFINE_EVENT(EVT_GLCANVAS_LINK_OBJECTS,       SimpleEvent);
-wxDEFINE_EVENT(EVT_GLCANVAS_BREAK_LINK_OBJECTS, SimpleEvent);
-wxDEFINE_EVENT(EVT_GLCANVAS_SELECT_LINK_GROUP,  SimpleEvent);
-// NEOTKO_LIBRE_TAG_END
 wxDEFINE_EVENT(EVT_GLCANVAS_SWITCH_TO_OBJECT, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_SWITCH_TO_GLOBAL, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_COLLAPSE_SIDEBAR, SimpleEvent);
@@ -1209,7 +1203,7 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed)
 
 GLCanvas3D::~GLCanvas3D()
 {
-    reset_volumes();
+    reset_volumes(ResetVolumesMode::CanvasDestruction);
 
     m_sel_plate_toolbar.del_all_item();
     m_sel_plate_toolbar.del_stats_item();
@@ -1346,7 +1340,7 @@ unsigned int GLCanvas3D::get_volumes_count() const
     return (unsigned int)m_volumes.volumes.size();
 }
 
-void GLCanvas3D::reset_volumes()
+void GLCanvas3D::reset_volumes(ResetVolumesMode mode)
 {
     if (!m_initialized)
         return;
@@ -1356,9 +1350,12 @@ void GLCanvas3D::reset_volumes()
 
     _set_current();
 
-    m_selection.clear();
+    m_selection.clear(mode == ResetVolumesMode::Normal);
     m_volumes.clear();
     m_dirty = true;
+
+    if (mode == ResetVolumesMode::CanvasDestruction)
+        return;
 
     auto pLater = wxGetApp().plater();
     if (pLater) {
@@ -1547,7 +1544,7 @@ void GLCanvas3D::set_config(const DynamicPrintConfig* config)
     // Orca: Filament shrinkage compensation
     const Print *print = fff_print();
     if (print != nullptr)
-        m_layers_editing.set_shrinkage_compensation(fff_print()->shrinkage_compensation());
+        m_layers_editing.set_shrinkage_compensation(print->shrinkage_compensation());
 }
 
 void GLCanvas3D::set_process(BackgroundSlicingProcess *process)
@@ -3291,24 +3288,6 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
 #endif /* __APPLE__ */
             post_event(SimpleEvent(EVT_GLTOOLBAR_CLONE));
             break;
-        // NEOTKO_LIBRE_TAG_START — Temporal Link: Ctrl+G = link, Ctrl+Shift+G = break
-#ifdef __APPLE__
-        case 'g':
-        case 'G':
-#else
-        case WXK_CONTROL_G:
-#endif
-        {
-            auto* ac = wxGetApp().app_config;
-            if (ac && ac->get_bool("neotko_libre_mode")) {
-                if ((evt.GetModifiers() & shiftMask) != 0)
-                    post_event(SimpleEvent(EVT_GLCANVAS_SELECT_LINK_GROUP));
-                else
-                    post_event(SimpleEvent(EVT_GLCANVAS_LINK_OBJECTS));
-            }
-            break;
-        }
-        // NEOTKO_LIBRE_TAG_END
         default:            evt.Skip();
         }
     } else {
@@ -4608,14 +4587,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         m_mouse.position = pos.cast<double>();
 
         // updates gizmos overlay
-        // NEOTKO_ALIGNSTACK_TAG: Align & Stack is usable with an empty selection
-        // (the user builds the order by clicking objects), so don't auto-close it
-        // just because nothing is selected yet.
-        // NEOTKO_COLORSTITCH_TAG s111: idem para el ColorStitch Painter, que en
-        // modo "Select" deja elegir objetos clicando con la selección vacía.
-        if (m_selection.is_empty() &&
-            m_gizmos.get_current_type() != GLGizmosManager::AlignStack &&
-            m_gizmos.get_current_type() != GLGizmosManager::ColorMixPainter)
+        if (m_selection.is_empty())
             m_gizmos.reset_all_states();
 
         m_dirty = true;
@@ -4815,15 +4787,11 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, 0);
 
     // Fixes flying instances
-    // NEOTKO_LIBRE_TAG_START — In Libre Mode (FFF), allow floating objects above bed
-    const bool _nlm_move = !wxGetApp().app_config->get_bool("neotko_libre_mode") ||
-                            current_printer_technology() == ptSLA;
-    // NEOTKO_LIBRE_TAG_END
     for (const std::pair<int, int>& i : done) {
         ModelObject* m = m_model->objects[i.first];
         const double shift_z = m->get_instance_min_z(i.second);
         //BBS: don't call translate if the z is zero
-        if (_nlm_move && (current_printer_technology() == ptSLA || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+        if ((current_printer_technology() == ptSLA || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
             const Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -4929,16 +4897,13 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, -1);
     if (m_canvas_type != CanvasAssembleView) {
         // Fixes sinking/flying instances
-        // NEOTKO_LIBRE_TAG_START — In Libre Mode (FFF), allow floating on rotate
-        const bool _nlm_rot = !wxGetApp().app_config->get_bool("neotko_libre_mode");
-        // NEOTKO_LIBRE_TAG_END
         for (const std::pair<int, int> &i : done) {
             ModelObject *m = m_model->objects[i.first];
 
             // BBS: don't call translate if the z is zero
             const double shift_z = m->get_instance_min_z(i.second);
             // leave sinking instances as sinking
-            if (_nlm_rot && (min_zs.find({i.first, i.second})->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+            if ((min_zs.find({i.first, i.second})->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
                 const Vec3d shift(0.0, 0.0, -shift_z);
                 m_selection.translate(i.first, i.second, shift);
                 m->translate_instance(i.second, shift);
@@ -5017,16 +4982,13 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, -1);
 
     // Fixes sinking/flying instances
-    // NEOTKO_LIBRE_TAG_START — In Libre Mode (FFF), allow floating on scale
-    const bool _nlm_scale = !wxGetApp().app_config->get_bool("neotko_libre_mode");
-    // NEOTKO_LIBRE_TAG_END
     for (const std::pair<int, int>& i : done) {
         ModelObject* m = m_model->objects[i.first];
 
         //BBS: don't call translate if the z is zero
         double shift_z = m->get_instance_min_z(i.second);
         // leave sinking instances as sinking
-        if (_nlm_scale && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+        if ((min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
             Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -5123,16 +5085,13 @@ void GLCanvas3D::do_mirror(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, -1);
 
     // Fixes sinking/flying instances
-    // NEOTKO_LIBRE_TAG_START — In Libre Mode (FFF), allow floating on translate/mirror
-    const bool _nlm_trans = !wxGetApp().app_config->get_bool("neotko_libre_mode");
-    // NEOTKO_LIBRE_TAG_END
     for (const std::pair<int, int>& i : done) {
         ModelObject* m = m_model->objects[i.first];
 
         //BBS: don't call translate if the z is zero
         double shift_z = m->get_instance_min_z(i.second);
         // leave sinking instances as sinking
-        if (_nlm_trans && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD)&&(shift_z != 0.0f)) {
+        if ((min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD)&&(shift_z != 0.0f)) {
             Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -7454,17 +7413,9 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         case GLVolumeCollection::ERenderType::Opaque:
         {
             GLGizmosManager& gm = get_gizmos_manager();
-            GLGizmoPainterBase* painter_giz = dynamic_cast<GLGizmoPainterBase*>(gm.get_current());
-            // NEOTKO_COLORSTITCH_TAG s111: el ColorStitch Painter es multi-objeto.
-            // Los painters normales DELEGAN todo el dibujo de objetos a
-            // render_painter_gizmo (que solo pinta el objeto activo), por eso el
-            // resto de objetos "desaparecían". Para ColorMixPainter dibujamos los
-            // objetos por la vía normal (todos visibles) y SOLO superponemos el
-            // painter sobre el objeto activo (los demás se ven planos y clicables).
-            const bool colormix_painter = gm.get_current_type() == GLGizmosManager::ColorMixPainter;
-            if (painter_giz == nullptr || colormix_painter)
+            if (dynamic_cast<GLGizmoPainterBase*>(gm.get_current()) == nullptr)
             {
-                if (painter_giz == nullptr && m_picking_enabled && m_layers_editing.is_enabled() && (m_layers_editing.last_object_id != -1) && (m_layers_editing.object_max_z() > 0.0f)) {
+                if (m_picking_enabled && m_layers_editing.is_enabled() && (m_layers_editing.last_object_id != -1) && (m_layers_editing.object_max_z() > 0.0f)) {
                     int object_id = m_layers_editing.last_object_id;
                 const Camera& camera = wxGetApp().plater()->get_camera();
                 m_volumes.render(type, false, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [object_id](const GLVolume& volume) {
@@ -7483,38 +7434,27 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                     //BBS:add assemble view related logic
                     // do not cull backfaces to show broken geometry, if any
                 const Camera& camera = wxGetApp().plater()->get_camera();
-                    // s111: con ColorMixPainter, los objetos MARCADOS los dibuja el
-                    // painter (activo en vivo + resto vía preview), así que aquí se
-                    // SALTAN. Los no-marcados: en modo Select se ven planos; en modo
-                    // pintar (bucket/eraser) se OCULTAN para trabajar solo en el set.
-                    GLGizmoColorMixPainter* cmp = colormix_painter
-                        ? dynamic_cast<GLGizmoColorMixPainter*>(painter_giz) : nullptr;
-                    m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [this, canvas_type, cmp](const GLVolume& volume) {
+                    m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [this, canvas_type](const GLVolume& volume) {
                         if (canvas_type == ECanvasType::CanvasAssembleView) {
                             return !volume.is_modifier && !volume.is_wipe_tower;
                         }
                         else {
-                            if (cmp) {
-                                const int oid = volume.composite_id.object_id;
-                                if (cmp->object_is_marked(oid)) return false;   // lo pinta el painter
-                                // bucket/eraser con un set marcado: ocultar los no-marcados
-                                // (foco en el set). Sin set marcado, mostrar todos para poder
-                                // elegir. En Select siempre se ven todos.
-                                if (!cmp->select_tool_active() && cmp->has_marked()) return false;
-                            }
                             return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0);
                         }
                         },
                         partly_inside_enable);
                 }
             }
-            if (painter_giz != nullptr) {
+            else {
                 // In case a painting gizmo is open, it should render the painted triangles
                 // before transparent objects are rendered. Otherwise they would not be
                 // visible when inside modifier meshes etc.
-                shader->stop_using();
-                gm.render_painter_gizmo();
-                shader->start_using();
+//                GLGizmosManager::EType type = gm.get_current_type();
+                if (dynamic_cast<GLGizmoPainterBase*>(gm.get_current())) {
+                    shader->stop_using();
+                    gm.render_painter_gizmo();
+                    shader->start_using();
+                }
             }
 
             break;

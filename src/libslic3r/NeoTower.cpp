@@ -5,6 +5,8 @@
 #include "NeoTowerZ.hpp"  // NEOTKO_NEOTOWER_TAG — hardening P2
 
 #include "libslic3r/Print.hpp"             // Print, PrintObject, MultiPassSubLayer
+#include "libslic3r/SurfacePassKind.hpp"   // NEOTKO_SANDWICH_TAG — SurfacePassKind enum (== PathBlend)
+#include "libslic3r/PathBlendRuntime.hpp"  // NEOTKO_PATHBLEND_TAG — PathBlendSchedulerRuntime
 #include "libslic3r/PrintConfig.hpp"       // PrintConfig, PrintRegionConfig
 #include "libslic3r/GCode/ToolOrdering.hpp" // LayerTools, ToolOrdering
 #include "libslic3r/MultiPassScheduler.hpp" // NEOTKO_MPSCHEDULER_TAG s79 — canonical grouped-by-tool order
@@ -20,8 +22,8 @@
 #include <fstream>   // NEOTKO_NEOTOWER_TAG s102-f — TCR gcode dump
 
 // NEOTKO_NEOTOWER_TAG_START — NeoDebug routing
-#include "SurfaceColorMix.hpp"  // NEOTKO_NEOTOWER_TAG — NeoDebug.
-                                // Also hosts PathBlendSchedulerRuntime (s88).
+#include "NeoDebug.hpp"  // NEOTKO_DEBUG_TAG — NeoDebug channels (extracted from
+                         // SurfaceColorMix during the Snapmaker 2.3.4 port).
 
 #define NT_LOG(msg) do { if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {  \
     std::ostringstream _nt_oss; _nt_oss << "[NEOTOWER] " << msg;         \
@@ -2105,6 +2107,14 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     // keep the original box via the s103-bd branches in WipeTower2.
     wt2.neo_grow_box_drawer();
 
+    // NEOTKO_NEOTOWER_TAG s127 — NeoTower towers use the classic in-box wipe, NOT the
+    // 2.3.4 gap_wall. gap_wall (default ON via wipe_tower_wall_gap) draws an outer wall
+    // ring on every toolchange (margin 5·pw + brim, outside the reserved box) → the
+    // "wall/brim/muro on return instead of a classic wipe" + extrusions outside the
+    // NeoTower footprint. The fork (2.3.2) had no gap_wall. Gated here → only NeoTower's
+    // internal wt2 is affected; stock/Classic 2.3.4 towers keep the config default.
+    wt2.set_use_gap_wall(false);
+
     // -----------------------------------------------------------------------
     // Phase 1: Feed plan to WipeTower2 via plan_toolchange().
     //
@@ -2330,6 +2340,16 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                         NT_LOG("GROUP_SINGLE: post-sublayer real event — trust ev.old=T"
                             << _gev.old_tool << " (stale chain_tool=T" << chain_tool
                             << "), bridge SUPPRESSED");
+                        // NEOTKO_NEOTOWER_TAG s130 — STARPAINT append_tcr layer-45 fix (A):
+                        // mirror the identity branch — force wt2's initial_tool for this plan
+                        // layer to ev.old_tool. Without it, wt2 keeps m_current_tool from before
+                        // the sublayer excursion (T3 here, not the sublayer exit T1) and generates
+                        // a T3→T3 identity entry, while NeoTower indexes the event as T1→T3 →
+                        // m_result↔m_tcr_index mismatch → single-tool classifier suppresses the
+                        // real TC → get_tcr MISS at the next layer. set_tool_override fixes the
+                        // stored initial_tool without injecting a TC (GCode is already at ev.old).
+                        wt2.set_tool_override(static_cast<size_t>(wt2_li),
+                                              static_cast<unsigned int>(_gev.old_tool));
                         chain_tool = static_cast<int>(_gev.old_tool);
                         last_sublayer_z_nominal = -1.f;  // consumed
                     } else {
@@ -2773,6 +2793,16 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
         const NeoTowerEvent& ev      = all_events[ei];
         const int            li      = event_to_wt2_li[ei];
         const int            tc_idx  = event_to_wt2_tc_idx[ei];
+
+        // NEOTKO_NEOTOWER_TAG s130-dbg — probe: dump the event→wt2 mapping for real TCs to
+        // find why some events miss m_tcr_index despite their TCR being generated (STARPAINT
+        // append_tcr layer-45). Behavior-neutral logging; gated on the debug channel.
+        if (ev.old_tool != ev.new_tool)
+            NT_LOG("PHASE3_MAP ei=" << ei << " z=" << ev.z_actual
+                << " old=" << ev.old_tool << " new=" << ev.new_tool
+                << " is_sub=" << ev.is_sublayer
+                << " li=" << li << " tc_idx=" << tc_idx
+                << " raw_li_size=" << ((li >= 0 && li < static_cast<int>(raw_result.size())) ? static_cast<int>(raw_result[li].size()) : -1));
 
         if (li < 0 || li >= static_cast<int>(raw_result.size()) || raw_result[li].empty())
             continue;

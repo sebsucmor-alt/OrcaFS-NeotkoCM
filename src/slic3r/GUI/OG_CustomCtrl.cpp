@@ -67,9 +67,6 @@ OG_CustomCtrl::OG_CustomCtrl(   wxWindow*            parent,
     this->Bind(wxEVT_MOTION,    &OG_CustomCtrl::OnMotion, this);
     this->Bind(wxEVT_LEFT_DOWN, &OG_CustomCtrl::OnLeftDown, this);
     this->Bind(wxEVT_LEAVE_WINDOW, &OG_CustomCtrl::OnLeaveWin, this);
-    // NEOTKO_LIBRE_TAG_START — Less Used Toggle
-    this->Bind(wxEVT_RIGHT_DOWN, &OG_CustomCtrl::OnRightDown, this);
-    // NEOTKO_LIBRE_TAG_END
 }
 
 void OG_CustomCtrl::init_ctrl_lines()
@@ -487,99 +484,6 @@ void OG_CustomCtrl::OnLeaveWin(wxMouseEvent& event)
     Update();
     event.Skip();
 }
-
-// NEOTKO_LIBRE_TAG_START — Less Used Toggle
-// Right-click on a visible option label → mark/unmark as "Less Used" (saved in app_config).
-// Right-click on empty space → "Show all hidden options in this section" if any are hidden.
-// Only active in Libre Mode. Debug: ORCA_DEBUG_LIBRE=1 → /tmp/libre_debug.log
-void OG_CustomCtrl::OnRightDown(wxMouseEvent& event)
-{
-    auto* ac = wxGetApp().app_config;
-    if (!ac || !ac->get_bool("neotko_libre_mode")) {
-        event.Skip();
-        return;
-    }
-
-    const wxPoint pos = event.GetLogicalPosition(wxClientDC(this));
-
-    // Find option key under cursor (visible lines only)
-    std::string opt_key;
-    for (const CtrlLine& cl : ctrl_lines) {
-        if (!cl.is_visible || cl.is_separator()) continue;
-        if (is_point_in_rect(pos, cl.rect_label)) {
-            const auto& opts = cl.og_line.get_options();
-            if (!opts.empty())
-                opt_key = opts[0].opt_id;
-            break;
-        }
-    }
-
-    wxMenu menu;
-
-    if (!opt_key.empty()) {
-        // Option found: mark / unmark as Less Used
-        const bool is_less_used = (ac->get("less_used_opt_" + opt_key) == "1");
-        const wxString label = is_less_used ? _L("Remove from Less Used") : _L("Mark as Less Used");
-        wxMenuItem* item = menu.Append(wxID_ANY, label);
-        menu.Bind(wxEVT_MENU, [this, ac, opt_key, is_less_used](wxCommandEvent&) {
-            const bool new_state = !is_less_used; // true = now less_used (hidden)
-            ac->set("less_used_opt_" + opt_key, new_state ? "1" : "0");
-
-            // Flip toggle_visible on the Line in the OptionsGroup
-            auto& lines = const_cast<std::vector<Line>&>(opt_group->get_lines());
-            for (auto& l : lines) {
-                if (!l.get_options().empty() && l.get_options()[0].opt_id == opt_key) {
-                    l.toggle_visible = !new_state;
-                    break;
-                }
-            }
-
-            // Refresh this optgroup's visibility + layout
-            // opt_group is always a ConfigOptionsGroup in practice
-            static_cast<ConfigOptionsGroup*>(opt_group)->update_visibility(wxGetApp().get_mode());
-            if (GetParent()) GetParent()->Layout();
-
-            if (std::getenv("ORCA_DEBUG_LIBRE")) {
-                FILE* f = fopen("/tmp/libre_debug.log", "a");
-                if (f) {
-                    fprintf(f, "[LESS_USED] opt=%s marked=%d\n", opt_key.c_str(), new_state ? 1 : 0);
-                    fclose(f);
-                }
-            }
-        }, item->GetId());
-    } else {
-        // Empty space: offer to reveal hidden options in this section
-        bool has_hidden = false;
-        for (const CtrlLine& cl : ctrl_lines) {
-            if (!cl.is_separator() && !cl.is_visible) { has_hidden = true; break; }
-        }
-        if (!has_hidden) { event.Skip(); return; }
-
-        wxMenuItem* item = menu.Append(wxID_ANY, _L("Show all hidden options in this section"));
-        menu.Bind(wxEVT_MENU, [this, ac](wxCommandEvent&) {
-            auto& lines = const_cast<std::vector<Line>&>(opt_group->get_lines());
-            for (auto& l : lines) {
-                if (l.get_options().empty()) continue;
-                const std::string& key = l.get_options()[0].opt_id;
-                if (ac->get("less_used_opt_" + key) == "1") {
-                    ac->set("less_used_opt_" + key, "0");
-                    l.toggle_visible = true;
-                    if (std::getenv("ORCA_DEBUG_LIBRE")) {
-                        FILE* f = fopen("/tmp/libre_debug.log", "a");
-                        if (f) { fprintf(f, "[LESS_USED] reveal opt=%s\n", key.c_str()); fclose(f); }
-                    }
-                }
-            }
-            static_cast<ConfigOptionsGroup*>(opt_group)->update_visibility(wxGetApp().get_mode());
-            if (GetParent()) GetParent()->Layout();
-        }, item->GetId());
-    }
-
-    if (menu.GetMenuItemCount() > 0)
-        PopupMenu(&menu);
-    event.Skip();
-}
-// NEOTKO_LIBRE_TAG_END
 
 bool OG_CustomCtrl::update_visibility(ConfigOptionMode mode)
 {

@@ -142,6 +142,20 @@ static t_config_enum_values s_keys_map_FuzzySkinMode {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinMode)
 
+// NEOTKO_NEOWEAVING_TAG_START — Neoweaving enum maps
+static t_config_enum_values s_keys_map_NeoweaveMode {
+    { "wave",   int(NeoweaveMode::Wave)   },
+    { "linear", int(NeoweaveMode::Linear) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoweaveMode)
+
+static t_config_enum_values s_keys_map_NeoweaveFilter {
+    { "all",      int(NeoweaveFilter::All)     },
+    { "top_only", int(NeoweaveFilter::TopOnly) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoweaveFilter)
+// NEOTKO_NEOWEAVING_TAG_END
+
 static t_config_enum_values s_keys_map_InfillPattern {
     { "monotonic", ipMonotonic },
     { "monotonicline", ipMonotonicLine },
@@ -170,9 +184,7 @@ static t_config_enum_values s_keys_map_InfillPattern {
     { "concentric", ipConcentric },
     { "hilbertcurve", ipHilbertCurve },
     { "archimedeanchords", ipArchimedeanChords },
-    { "octagramspiral", ipOctagramSpiral },
-    // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch.
-    { "microstitch", ipMicroStitch }
+    { "octagramspiral", ipOctagramSpiral }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
@@ -394,9 +406,24 @@ static const t_config_enum_values s_keys_map_BedType = {
     { "Engineering Plate",  btEP  },
     { "High Temp Plate",    btPEI  },
     { "Textured PEI Plate", btPTE },
-    { "Textured Cool Plate", btPCT }
+    { "Textured Cool Plate", btPCT },
+    // Canonical name for btGESP (UI: "Graphic Effect Plate"). Keep legacy string so old projects/3MF still deserialize.
+    { "Graphic Effect Plate", btGESP },
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BedType)
+
+namespace {
+// Two keys map to btGESP; enum_names_from_keys_map assigns the lexicographically last key to names[btGESP].
+// Force the canonical string used by serialize() / 3MF export.
+struct BedTypeGespCanonicalSerializeName
+{
+    BedTypeGespCanonicalSerializeName()
+    {
+        if (s_keys_names_BedType.size() > size_t(btGESP))
+            s_keys_names_BedType[size_t(btGESP)] = "Graphic Effect Plate";
+    }
+} s_bed_type_gesp_canonical_serialize_name;
+} // namespace
 
 // BBS
 static const t_config_enum_values s_keys_map_LayerSeq = {
@@ -423,21 +450,10 @@ static t_config_enum_values s_keys_map_PrinterStructure {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrinterStructure)
 
 static t_config_enum_values s_keys_map_PerimeterGeneratorType{
-    { "classic",    int(PerimeterGeneratorType::Classic)    },
-    { "arachne",    int(PerimeterGeneratorType::Arachne)    },
-    // NEOTKO_NEOARACHNE_TAG fase0
-    { "neoarachne", int(PerimeterGeneratorType::NeoArachne) }
+    { "classic", int(PerimeterGeneratorType::Classic) },
+    { "arachne", int(PerimeterGeneratorType::Arachne) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
-
-// NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source mapping.
-static t_config_enum_values s_keys_map_NeoArachneWallSource{
-    { "classic",            int(NeoArachneWallSource::Classic)           },
-    { "arachne_stock",      int(NeoArachneWallSource::ArachneStock)      },
-    { "arachne_neotkoedge", int(NeoArachneWallSource::ArachneNeotkoEdge) },
-    { "off",                int(NeoArachneWallSource::Off)               }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoArachneWallSource)
 
 static const t_config_enum_values s_keys_map_ZHopType = {
     { "Auto Lift",          zhtAuto },
@@ -478,33 +494,13 @@ static const t_config_enum_values s_keys_map_WipeTowerWallType{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeTowerWallType)
 
-// NEOTKO_NEOTOWER_TAG s104 — tower type enum
+// NEOTKO_NEOTOWER_TAG_START s104 — tower type enum
 static const t_config_enum_values s_keys_map_NeoTowerType{
     {"classic", nttClassic},
     {"neotower", nttNeoTower},
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoTowerType)
-
-// NEOTKO_MULTIPASS_TAG_START — enum static maps for Neoweaving + ColorMix + MultiPass
-static t_config_enum_values s_keys_map_NeoweaveMode {
-    { "wave",   int(NeoweaveMode::Wave)   },
-    { "linear", int(NeoweaveMode::Linear) },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoweaveMode)
-
-static t_config_enum_values s_keys_map_InfillNeoweaveOverride {
-    { "inherit", int(InfillNeoweaveOverride::Inherit) },
-    { "enable",  int(InfillNeoweaveOverride::Enable)  },
-    { "disable", int(InfillNeoweaveOverride::Disable) },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillNeoweaveOverride)
-
-static t_config_enum_values s_keys_map_NeoweaveFilter {
-    { "all",      int(NeoweaveFilter::All)     },
-    { "top_only", int(NeoweaveFilter::TopOnly) },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoweaveFilter)
-// NEOTKO_MULTIPASS_TAG_END
+// NEOTKO_NEOTOWER_TAG_END
 
 static void assign_printer_technology_to_unknown(t_optiondef_map &options, PrinterTechnology printer_technology)
 {
@@ -802,6 +798,16 @@ void PrintConfigDef::init_fff_params()
     def->max = 300;
     def->set_default_value(new ConfigOptionInts{45});
 
+    def             = this->add("graphic_effect_plate_temp", coInts);
+    def->label      = L("Other layers");
+    def->tooltip    = L("Bed temperature for layers except the initial one. "
+                           "A value of 0 means the filament does not support printing on the Graphic Effect Plate.");
+    def->sidetext   = u8"\u2103" /* °C */; // degrees Celsius, don't need translation
+    def->full_label = L("Bed temperature");
+    def->min        = 0;
+    def->max        = 300;
+    def->set_default_value(new ConfigOptionInts{0});
+
     def = this->add("supertack_plate_temp_initial_layer", coInts);
     def->label = L("Initial layer");
     def->full_label = L("Initial layer bed temperature");
@@ -861,6 +867,16 @@ void PrintConfigDef::init_fff_params()
     def->max = 300;
     def->set_default_value(new ConfigOptionInts{45});
 
+    def             = this->add("graphic_effect_plate_temp_initial_layer", coInts);
+    def->label      = L("Initial layer");
+    def->full_label = L("Initial layer bed temperature");
+    def->tooltip    = L("Bed temperature of the initial layer. "
+                           "A value of 0 means the filament does not support printing on the Graphic Effect Plate.");
+    def->sidetext   = u8"\u2103" /* °C */; // degrees Celsius, don't need translation
+    def->min        = 0;
+    def->max        = 300;
+    def->set_default_value(new ConfigOptionInts{0});
+
     def = this->add("curr_bed_type", coEnum);
     def->label = L("Bed type");
     def->tooltip = L("Bed types supported by the printer.");
@@ -879,6 +895,28 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.emplace_back(L("Textured PEI Plate"));
     def->enum_labels.emplace_back(L("Textured Cool Plate"));
     def->enum_labels.emplace_back(L("Cool Plate (SuperTack)"));
+    // U1 only 3
+    def->enum_values_u1.emplace_back("Textured PEI Plate");
+    def->enum_values_u1.emplace_back("High Temp Plate");
+    def->enum_values_u1.emplace_back("Graphic Effect Plate");
+    def->enum_labels_u1.emplace_back(L("Textured PEI Plate"));
+    def->enum_labels_u1.emplace_back(L("Smooth PEI Plate"));
+    def->enum_labels_u1.emplace_back(L("Graphic Effect Plate"));
+    // U1 use 7 when open support_multi_bed_types
+    def->enum_values_ex.emplace_back("Cool Plate");
+    def->enum_values_ex.emplace_back("Engineering Plate");
+    def->enum_values_ex.emplace_back("High Temp Plate");
+    def->enum_values_ex.emplace_back("Textured PEI Plate");
+    def->enum_values_ex.emplace_back("Textured Cool Plate");
+    def->enum_values_ex.emplace_back("Supertack Plate");
+    def->enum_values_ex.emplace_back("Graphic Effect Plate");
+    def->enum_labels_ex.emplace_back(L("Smooth Cool Plate"));
+    def->enum_labels_ex.emplace_back(L("Engineering Plate"));
+    def->enum_labels_ex.emplace_back(L("Smooth PEI Plate"));
+    def->enum_labels_ex.emplace_back(L("Textured PEI Plate"));
+    def->enum_labels_ex.emplace_back(L("Textured Cool Plate"));
+    def->enum_labels_ex.emplace_back(L("Cool Plate (SuperTack)"));
+    def->enum_labels_ex.emplace_back(L("Graphic Effect Plate"));
     def->set_default_value(new ConfigOptionEnum<BedType>(btPC));
 
     // Orca: allow profile maker to set default bed type in machine profile
@@ -1676,11 +1714,6 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("hilbertcurve");
     def->enum_values.push_back("archimedeanchords");
     def->enum_values.push_back("octagramspiral");
-    // NEOTKO_PATHBLEND_TAG — s87: Micro Stitch experimental pattern.
-    // NEOTKO_COLORSTITCH_TAG — beta WIP: oculto del dropdown (enum_keys_map y el
-    // dispatch en FillBase siguen intactos → presets viejos con "microstitch"
-    // no rompen; solo deja de ser seleccionable). Reactivar quitando el //.
-    //def->enum_values.push_back("microstitch");
     def->enum_labels.push_back(L("Monotonic"));
     def->enum_labels.push_back(L("Monotonic line"));
     def->enum_labels.push_back(L("Rectilinear"));
@@ -1689,7 +1722,6 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Hilbert Curve"));
     def->enum_labels.push_back(L("Archimedean Chords"));
     def->enum_labels.push_back(L("Octagram Spiral"));
-    //def->enum_labels.push_back(L("Micro Stitch (Neotko)"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
 
     def = this->add("bottom_surface_pattern", coEnum);
@@ -1710,12 +1742,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels   = def_top_fill_pattern->enum_labels;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonic));
 
-    // NEOTKO_MULTIPASS_TAG — dedicated pattern for the penultimate solid surface.
-    // PathBlend/ColorMix on the penultimate role require a line-based pattern
-    // (Monotonic Line) to lay down the per-scanline ramp; other patterns make the
-    // PB ramp and its perimeter come out partial. Splitting it from
-    // internal_solid_infill_pattern lets that key govern only the remaining
-    // (non-penu, non-top) internal solid infill.
+    // NEOTKO_MULTIPASS_TAG_START — Penultimate solid infill pattern (Sandwich, Fase 2)
     def                = this->add("penultimate_solid_infill_pattern", coEnum);
     def->label         = L("Penultimate solid infill pattern");
     def->category      = L("Strength");
@@ -1726,7 +1753,8 @@ void PrintConfigDef::init_fff_params()
     def->enum_values   = def_top_fill_pattern->enum_values;
     def->enum_labels   = def_top_fill_pattern->enum_labels;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
-
+    // NEOTKO_MULTIPASS_TAG_END
+    
     def = this->add("outer_wall_line_width", coFloatOrPercent);
     def->label = L("Outer wall");
     def->category = L("Quality");
@@ -3385,31 +3413,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(100., true));
 
-    def = this->add("enable_infill_filament_override", coBool);
-    def->label = L("Override infill filament");
-    def->category = L("Extruders");
-    def->tooltip = L("Allow this print, object, or part to use a dedicated filament for sparse infill instead of inheriting its regular filament.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("infill_filament_use_base_first_layers", coInt);
-    def->label = L("Base infill on first layers");
-    def->category = L("Extruders");
-    def->tooltip = L("Keep using the regular object filament for this many bottom infill layers before switching to the infill override filament.");
-    def->sidetext = L("layers");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("infill_filament_use_base_last_layers", coInt);
-    def->label = L("Base infill on last layers");
-    def->category = L("Extruders");
-    def->tooltip = L("Keep using the regular object filament for this many top infill layers after switching back from the infill override filament.");
-    def->sidetext = L("layers");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
     def = this->add("sparse_infill_filament", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label = L("Infill");
@@ -4323,8 +4326,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Collapse same-color mixed regions");
     def->category = L("Others");
     def->tooltip = L("Merge ordinary mixed-filament painted regions into a single area when they resolve to the same physical filament on a layer.\n\n"
-                     "This improves continuity for adjacent same-color areas. Local Z dithering turns this off automatically when enabled, but you may turn it back on manually.\n\n"
-                     "Experimental with Local Z dithering.");
+                     "This improves continuity for adjacent same-color areas.\n\n"
+                     "Subdivide Mix Layer disables this behavior, and gradient mixed regions also bypass it because they use the Local-Z pipeline.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
@@ -4348,19 +4351,26 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.0));
 
     def = this->add("dithering_local_z_mode", coBool);
-    def->label = L("Local Z dithering mode");
-    def->category = L("Others");
-    def->tooltip = L("Use Variable Layers for Color Blending\n\n"
-                     "Blend colors by varying layer heights instead of using a fixed ratio of equal-height layers. This only affects blended color zones; non-blended areas keep their nominal layer height and cadence when possible.\n\n"
-                     "This setting increases color blending smoothness by splitting each blended layer according to the blend ratio. For example, a 66/33 blend at 0.12 mm layer height will print as one 0.08 mm layer and one 0.04 mm layer. At 0.20 mm layer height, a 75/25 blend will print as one 0.15 mm layer and one 0.05 mm layer.");
+    def->label = L("Subdivide Mix Layer");
+    def->category = L("Material");
+    def->tooltip  = L("Enable \"Subdivide Mix Layer\" for mixing areas. Layer height will be subdivided for better color mixing results.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("dithering_local_z_whole_objects", coBool);
-    def->label = L("Apply Local-Z to whole mixed objects");
+    def->label = L("Full domain");
     def->category = L("Others");
-    def->tooltip = L("Experimental. Extend Local-Z dithering beyond painted mixed zones so mixed wall regions can use Local-Z across the whole object.\n\n"
-                     "This also lets Local-Z continue through default mixed walls around painted areas instead of limiting the effect strictly to painted masks.");
+    def->tooltip = L("Experimental. Apply Local-Z thinning across whole mixed-color regions instead of limiting the effect strictly to painted mixed masks.\n\n"
+                     "Only available when Subdivide Mix Layer is enabled.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("dithering_local_z_infill", coBool);
+    def->label = L("Apply subdivision to infill");
+    def->category = L("Material");
+    def->tooltip = L("Experimental. When Subdivide Mix Layer is enabled, also apply the same subdivision to infill inside mixed-color areas.\n\n"
+                     "This is enabled automatically with Subdivide Mix Layer. Turn it off to keep infill on the normal layer height.\n\n"
+                     "It can improve internal color mixing, but may add toolchanges and affect infill behavior.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -5519,7 +5529,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Support layer uses layer height independent with object layer. This is to support customizing z-gap and save print time. "
                      "This option will be invalid when the prime tower is enabled.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("support_threshold_angle", coInt);
     def->label = L("Threshold angle");
@@ -6031,13 +6041,8 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(30.0));
     
     def = this->add("wipe_tower_max_purge_speed", coFloat);
-    def->label = L("Maximum wipe tower print speed");
-    def->tooltip = L("The maximum print speed when purging in the wipe tower and printing the wipe tower sparse layers. "
-                     "When purging, if the sparse infill speed or calculated speed from the filament max volumetric speed is lower, the lowest will be used instead.\n\n"
-                     "When printing the sparse layers, if the internal perimeter speed or calculated speed from the filament max volumetric speed is lower, the lowest will be used instead.\n\n"
-                     "Increasing this speed may affect the tower's stability as well as increase the force with which the nozzle collides with any blobs that may have formed on the wipe tower.\n\n"
-                     "Before increasing this parameter beyond the default of 90 mm/s, make sure your printer can reliably bridge at the increased speeds and that ooze when tool changing is well controlled.\n\n"
-                     "For the wipe tower external perimeters the internal perimeter speed is used regardless of this setting.");
+    def->label = L("Maximum wipe tower print speed of out wall");
+    def->tooltip = L("Maximum wipe tower print speed of out wall.");
     def->sidetext = "mm/s";	// milimeters per second, don't need translation
     def->mode = comAdvanced;
     def->min = 10;
@@ -6082,7 +6087,6 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
-
     def = this->add("wipe_tower_filament", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label = L("Wipe tower");
@@ -6093,565 +6097,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
-    def = this->add("wiping_volumes_extruders", coFloats);
-    def->label = L("Purging volumes - load/unload volumes");
-    def->tooltip = L("This vector saves required volumes to change from/to each tool used on the "
-                     "wipe tower. These values are used to simplify creation of the full purging "
-                     "volumes below.");
-    def->set_default_value(new ConfigOptionFloats { 70., 70., 70., 70., 70., 70., 70., 70., 70., 70.  });
-
-    def = this->add("flush_into_infill", coBool);
-    def->category = L("Flush options");
-    def->label = L("Flush into objects' infill");
-    def->tooltip = L("Purging after filament change will be done inside objects' infills. "
-        "This may lower the amount of waste and decrease the print time. "
-        "If the walls are printed with transparent filament, the mixed color infill will be seen outside. "
-        "It will not take effect, unless the prime tower is enabled.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("flush_into_support", coBool);
-    def->category = L("Flush options");
-    def->label = L("Flush into objects' support");
-    def->tooltip = L("Purging after filament change will be done inside objects' support. "
-        "This may lower the amount of waste and decrease the print time. "
-        "It will not take effect, unless the prime tower is enabled.");
+    def          = this->add("wipe_tower_wall_gap", coBool);
+    def->label   = L("Wall gap");
+    def->tooltip = L("Create small gaps in the wipe tower outer wall at tool change entry points. "
+                     "The first extrusion path after a filament change will enter through the gap, "
+                     "leaving the filament blob on the gap edge instead of on the outer wall surface.");
+    def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
-    def = this->add("flush_into_objects", coBool);
-    def->category = L("Flush options");
-    def->label = L("Flush into this object");
-    def->tooltip = L("This object will be used to purge the nozzle after a filament change to save filament and decrease the print time. "
-        "Colors of the objects will be mixed as a result. "
-        "It will not take effect unless the prime tower is enabled.");
-    def->set_default_value(new ConfigOptionBool(false));
 
-    def = this->add("wipe_tower_bridging", coFloat);
-    def->label = L("Maximal bridging distance");
-    def->tooltip = L("Maximal distance between supports on sparse infill sections.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10.));
+    // ===== NEOTKO SANDWICH ENGINE config defs (Fase 2) — Neoweaving/MicroStitch/Libre
+    // dropped (Tier B); multipass_prime_volume already defined (#3). =====
 
-    def = this->add("wipe_tower_extra_spacing", coPercent);
-    def->label = L("Wipe tower purge lines spacing");
-    def->tooltip = L("Spacing of purge lines on the wipe tower.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 100.;
-    def->max = 300.;
-    def->set_default_value(new ConfigOptionPercent(100.));
-
-    def = this->add("wipe_tower_extra_flow", coPercent);
-    def->label = L("Extra flow for purging");
-    def->tooltip = L("Extra flow used for the purging lines on the wipe tower. This makes the purging lines thicker or narrower "
-                     "than they normally would be. The spacing is adjusted automatically.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 100.;
-    def->max = 300.;
-    def->set_default_value(new ConfigOptionPercent(100.));
-
-    def = this->add("local_z_wipe_tower_purge_lines", coFloat);
-    def->label = L("Local-Z mini wipe lines");
-    def->tooltip = L("Number of purge lines reserved for each runtime Local-Z wipe tower toolchange. "
-                     "Higher values improve cleanup but increase tower depth. "
-                     "Only used when Local-Z dithering and the prime tower are enabled.");
-    def->sidetext = L("lines");
-    def->mode = comAdvanced;
-    def->min = 1.0;
-    def->set_default_value(new ConfigOptionFloat(3.0));
-
-    // NEOTKO_NEOTOWER_TAG s104 — F1 sandwich purge compaction. Sandwich/MultiPass
-    // sub-layer purges run at microscopic heights (0.04mm): a purge volume laid
-    // that thin needs ~5x the area of a normal-height purge, which inflates the
-    // tower footprint. This multiplier caps a flow boost applied ONLY to those
-    // synthetic toolchange wipes: the head keeps its plane, pushes up to N x the
-    // plastic per mm (never above ~nozzle/2 equivalent height) and the purge
-    // band shrinks accordingly; the surplus hangs into the hollow tower grid
-    // below (sandwich purges already print without bridging for this reason).
-    // 1 = off (bit-identical to previous behavior).
-    def = this->add("neotower_purge_compaction", coFloat);
-    def->label = L("Sandwich purge compaction");
-    def->tooltip = L("Flow-boost cap for sandwich/MultiPass sub-layer purges on the wipe tower. "
-                     "Values above 1 compact those thin purges into a narrower band by extruding "
-                     "more material per millimeter (the excess hangs into the hollow tower interior), "
-                     "reducing the wipe tower footprint. 1 disables compaction. "
-                     "Requires test prints to find what your material tolerates.");
-    def->mode = comAdvanced;
-    def->min = 1.0;
-    def->max = 5.0;
-    def->set_default_value(new ConfigOptionFloat(1.7)); // NEOTKO_COLORSTITCH_TAG — beta default
-
-    // NEOTKO_NEOTOWER_TAG s104 — tower type selector (decisión s103). Sandwich /
-    // single-filament MultiPass still auto-promotes to NeoTower regardless
-    // (neotko_forces_tower in Print.cpp) — this selects the planner for plain
-    // multi-tool scenes and exposes the NeoTower-only options below.
-    def = this->add("neotko_tower_type", coEnum);
-    def->label = L("Tower type");
-    def->category = L("Prime tower");
-    def->tooltip = L("Wipe tower planner.\n"
-                     "1. Classic: the standard WipeTower2 planner.\n"
-                     "2. NeoTower: post-slice planner that sees every toolchange (including "
-                     "sandwich sub-layer primes) before committing to any geometry. Fixed "
-                     "footprint, delta-Z aware, with zigurat taper and purge compaction options.\n\n"
-                     "Sandwich/MultiPass scenes use NeoTower automatically regardless of this setting.");
-    def->enum_keys_map = &ConfigOptionEnum<NeoTowerType>::get_enum_values();
-    def->enum_values.emplace_back("classic");
-    def->enum_values.emplace_back("neotower");
-    def->enum_labels.emplace_back("Classic");
-    def->enum_labels.emplace_back("NeoTower");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<NeoTowerType>(nttClassic));
-
-    // NEOTKO_NEOTOWER_TAG s104 — zigurat taper option (decisión s103: OPCIÓN del
-    // tipo NeoTower; default ON = safe wall-on-wall, OFF = less material/time).
-    def = this->add("neotower_zigurat", coBool);
-    def->label = L("Zigurat taper");
-    def->category = L("Prime tower");
-    def->tooltip = L("Limit how fast the NeoTower footprint may shrink between consecutive "
-                     "real layers (one perimeter width per side), so every wall ring rests "
-                     "on the ring below (wall-on-wall). Disable to save material and time at "
-                     "the cost of rings partially supported by the sparse grid.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("idle_temperature", coInts);
-    def->label = L("Idle temperature");
-    def->tooltip = L("Nozzle temperature when the tool is currently not used in multi-tool setups. "
-                     "This is only used when 'Ooze prevention' is active in Print Settings. Set to 0 to disable.");
-    def->sidetext = u8"\u2103" /* °C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def = this->add("xy_hole_compensation", coFloat);
-    def->label = L("X-Y hole compensation");
-    def->category = L("Quality");
-    def->tooltip = L("Holes in objects will expand or contract in the XY plane by the configured value. "
-                     "Positive values make holes bigger, negative values make holes smaller. "
-                     "This function is used to adjust sizes slightly when the objects have assembling issues.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("xy_contour_compensation", coFloat);
-    def->label = L("X-Y contour compensation");
-    def->category = L("Quality");
-    def->tooltip = L("Contours of objects will expand or contract in the XY plane by the configured value. "
-                     "Positive values make contours bigger, negative values make contours smaller. "
-                     "This function is used to adjust sizes slightly when the objects have assembling issues.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("hole_to_polyhole", coBool);
-    def->label = L("Convert holes to polyholes");
-    def->category = L("Quality");
-    def->tooltip = L("Search for almost-circular holes that span more than one layer and convert the geometry to polyholes."
-                     " Use the nozzle size and the (biggest) diameter to compute the polyhole."
-                     "\nSee http://hydraraptor.blogspot.com/2011/02/polyholes.html");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("hole_to_polyhole_threshold", coFloatOrPercent);
-    def->label = L("Polyhole detection margin");
-    def->category = L("Quality");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Maximum defection of a point to the estimated radius of the circle."
-                     "\nAs cylinders are often exported as triangles of varying size, points may not be on the circle circumference."
-                     " This setting allows you some leeway to broaden the detection."
-                     "\nIn mm or in % of the radius.");
-    def->sidetext = L("mm or %");
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0.01, false));
-
-    def = this->add("hole_to_polyhole_twisted", coBool);
-    def->label = L("Polyhole twist");
-    def->category = L("Quality");
-    def->tooltip = L("Rotate the polyhole every layer.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("thumbnails", coString);
-    def->label = L("G-code thumbnails");
-    def->tooltip = L("Picture sizes to be stored into a .gcode and .sl1 / .sl1s files, in the following format: \"XxY, XxY, ...\"");
-    def->mode = comAdvanced;
-    def->gui_type = ConfigOptionDef::GUIType::one_string;
-    def->set_default_value(new ConfigOptionString("48x48/PNG,300x300/PNG"));
-
-    def = this->add("thumbnails_format", coEnum);
-    def->label = L("Format of G-code thumbnails");
-    def->tooltip = L("Format of G-code thumbnails: PNG for best quality, JPG for smallest size, QOI for low memory firmware.");
-    def->mode = comAdvanced;
-    def->enum_keys_map = &ConfigOptionEnum<GCodeThumbnailsFormat>::get_enum_values();
-    def->enum_values.push_back("PNG");
-    def->enum_values.push_back("JPG");
-    def->enum_values.push_back("QOI");
-    def->enum_values.push_back("BTT_TFT");
-    def->enum_values.push_back("COLPIC");
-    def->enum_labels.push_back("PNG");
-    def->enum_labels.push_back("JPG");
-    def->enum_labels.push_back("QOI");
-    def->enum_labels.push_back("BTT TT");
-    def->enum_labels.push_back("ColPic");
-    def->set_default_value(new ConfigOptionEnum<GCodeThumbnailsFormat>(GCodeThumbnailsFormat::PNG));
-
-    def = this->add("use_relative_e_distances", coBool);
-    def->label = L("Use relative E distances");
-    def->tooltip = L("Relative extrusion is recommended when using \"label_objects\" option. "
-                   "Some extruders work better with this option unchecked (absolute extrusion mode). "
-                   "Wipe tower is only compatible with relative mode. It is recommended on "
-                   "most printers. Default is checked.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("wall_generator", coEnum);
-    def->label = L("Wall generator");
-    def->category = L("Quality");
-    def->tooltip = L("Classic wall generator produces walls with constant extrusion width and for "
-        "very thin areas is used gap-fill. "
-        "Arachne engine produces walls with variable extrusion width.");
-    def->enum_keys_map = &ConfigOptionEnum<PerimeterGeneratorType>::get_enum_values();
-    def->enum_values.push_back("classic");
-    def->enum_values.push_back("arachne");
-    // NEOTKO_NEOARACHNE_TAG fase0 — appears in UI as third option; Phase 0 passthrough to Classic.
-    def->enum_values.push_back("neoarachne");
-    def->enum_labels.push_back(L("Classic"));
-    def->enum_labels.push_back(L("Arachne"));
-    def->enum_labels.push_back(L("NeoArachne"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
-
-    // NEOTKO_NEOARACHNE_TAG fase2 — per-feature wall source selectors.
-    // Visible in UI (via toggle_line) only when wall_generator == NeoArachne.
-    auto add_neoarachne_wallsource = [this](const char* key, const std::string& label,
-                                            const std::string& tooltip,
-                                            NeoArachneWallSource def_val,
-                                            bool allow_off) {
-        ConfigOptionDef* d = this->add(key, coEnum);
-        d->label = label;
-        d->category = L("Quality");
-        d->tooltip = tooltip;
-        d->enum_keys_map = &ConfigOptionEnum<NeoArachneWallSource>::get_enum_values();
-        d->enum_values.push_back("classic");
-        d->enum_values.push_back("arachne_stock");
-        d->enum_values.push_back("arachne_neotkoedge");
-        d->enum_labels.push_back(L("Classic"));
-        d->enum_labels.push_back(L("Arachne (stock)"));
-        d->enum_labels.push_back(L("Arachne (NeotkoEdge)"));
-        if (allow_off) {
-            d->enum_values.push_back("off");
-            d->enum_labels.push_back(L("Off"));
-        }
-        d->mode = comAdvanced;
-        d->set_default_value(new ConfigOptionEnum<NeoArachneWallSource>(def_val));
-    };
-    add_neoarachne_wallsource("neoarachne_outer_wall",
-        L("NA — outer wall source"),
-        L("Engine that emits the outer perimeter when wall_generator = NeoArachne. "
-          "Classic = constant width, clean surface (Neotko Hybrid v2 default). "
-          "Arachne variants = variable-width outer (may exhibit width breathing along the contour). "
-          "Off is not allowed for the outer wall."),
-        NeoArachneWallSource::Classic, /*allow_off=*/false);
-    add_neoarachne_wallsource("neoarachne_inner_walls",
-        L("NA — inner walls source"),
-        L("Engine that emits all interior perimeters (everything past the outer). "
-          "Arachne (stock) is the Neotko Hybrid v2 default — variable-width beading "
-          "with integrated gap-fill, which is what makes NeoArachne shine on letters "
-          "and thin features. Classic falls back to constant-width onion shells."),
-        NeoArachneWallSource::ArachneStock, /*allow_off=*/false);
-    add_neoarachne_wallsource("neoarachne_gap_fill",
-        L("NA — gap-fill source"),
-        L("Engine for the dedicated gap-fill pass. In Neotko Hybrid v2 this is Off "
-          "because Arachne already integrates gap-fill into its inner wall pass. "
-          "Set to Arachne (NeotkoEdge) to enable the legacy 3-pass mode (outer + "
-          "inner Classic + dedicated Arachne gap-fill — slower, only useful for "
-          "specific edge cases)."),
-        NeoArachneWallSource::Off, /*allow_off=*/true);
-
-    // NEOTKO_NEOARACHNE_TAG fase3.0 — Edge Closure (S3D heritage).
-    def = this->add("neoarachne_allowed_overlap_pct", coPercent);
-    def->label = L("NA — allowed perimeter overlap");
-    def->category = L("Quality");
-    def->tooltip = L("Equivalent to the \"Allowed perimeter overlap\" parameter found in other slicers. Percentage of "
-        "the outer perimeter spacing by which the Arachne first interior bead is "
-        "allowed to overlap the Classic outer perimeter. Default 0% — the seam "
-        "between Classic outer and Arachne first inner is already closed by the "
-        "spacing math (~11% structural overlap from line-width vs spacing). "
-        "Raising this above 0% pushes Arachne further into the outer ring → "
-        "tends to over-extrude that band. Use small positive values (5–15%) only "
-        "if you see a visible seam on letters/curves. >70% will merge adjacent "
-        "paths and cause heavy blobs. Only applies when outer=Classic + inner=Arachne*.");
-    def->sidetext = L("%");
-    def->min = 0;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(0));
-
-    def = this->add("neoarachne_min_bead_width_pct", coPercent);
-    def->label = L("Min Line Width");
-    def->category = L("Quality");
-    def->tooltip = L("Minimum variable-width bead emitted by Arachne, as a percentage "
-        "of nozzle diameter. Equivalent to the \"Minimum Printing Width %\" lower "
-        "bound exposed by other slicers. Default 40%% (= 0.16 mm with a 0.4 mm nozzle) "
-        "— low enough to let thin features survive as is_odd / gap_infill beads "
-        "(which route to gap_infill_speed, calibrated for short paths), but high "
-        "enough to avoid sub-bead-width Widening micro-deposits. Higher values "
-        "(70–90%%) force the WideningBeadingStrategy to widen thin features UP to "
-        "this minimum, depositing 50–100%% more material per pass in thin zones → "
-        "blobs by accumulation (validated empirically s93). Below ~25%% extruders "
-        "with long Bowden tubes may skip steps. Recommended range 30–50%%.");
-    def->sidetext = L("% of nozzle");
-    def->min = 5;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(40));
-
-    // NEOTKO_NEOARACHNE_TAG max-bead-width — expose the upper cap on variable
-    // bead width that Arachne otherwise auto-derives from min_bead_width via
-    // wall_add_middle_threshold (WallToolPaths.cpp:511 in stock). Default 200%
-    // matches the natural ceiling (single bead becomes 2 beads when the slab
-    // would force them past 2× nominal). Lower values push Arachne to split
-    // sooner → narrower beads, more transitions. Range capped at 200% because
-    // beyond that the deposit per pass is not physically supportable by the
-    // extruder/nozzle. Only active when wall_generator = NeoArachne; stock
-    // Arachne keeps the original min_bead-derived formula.
-    def = this->add("neoarachne_max_bead_width_pct", coPercent);
-    def->label = L("Max Line Width");
-    def->category = L("Quality");
-    def->tooltip = L("Ceiling on variable-width beads — Arachne will split a bead "
-        "into two narrower ones once it would grow above this percentage of nozzle "
-        "diameter. Acts as an upper limit on top of Arachne's natural derivation: "
-        "if the auto-derived split point is already below this ceiling, this "
-        "setting has no effect (Arachne grows beads naturally). Lower it to force "
-        "more, narrower beads — useful with fine nominal line widths (e.g. 0.24 mm) "
-        "where every extra % of deposit shows. Default 200%% = effectively \"auto\", "
-        "lets Arachne grow beads up to 2× nozzle which is rarely reached in "
-        "practice. Above 200%% the deposit per pass exceeds what the extruder/nozzle "
-        "can physically lay down. Only applies when wall_generator = NeoArachne; "
-        "stock Arachne keeps its native derivation untouched.");
-    def->sidetext = L("% of nozzle");
-    def->min = 100;
-    def->max = 200;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(200));
-
-    def = this->add("neoarachne_min_feature_size_pct", coPercent);
-    def->label = L("Min Feature Threshold");
-    def->category = L("Quality");
-    def->tooltip = L("Geometry thinner than this percentage of nozzle diameter is "
-        "discarded by Arachne. Equivalent to the feature-size floor exposed by "
-        "other slicers. Default 10%% (= 0.04 mm with a 0.4 mm nozzle) — accepts "
-        "even very thin features and emits them as is_odd / gap_infill beads. "
-        "Higher values (50–90%%) discard thin features entirely, but anything "
-        "between this floor and the min_bead_width gets WIDENED to min_bead_width "
-        "→ over-deposit in transition zones (validated empirically s93). Must be "
-        "≤ minimum bead width (the validator swaps them if you invert). Recommended "
-        "range 0–20%%.");
-    def->sidetext = L("% of nozzle");
-    def->min = 1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(10));
-
-    def = this->add("neoarachne_keep_short_tails", coBool);
-    def->label = L("Preserve Thin Edges");
-    def->category = L("Quality");
-    def->tooltip = L("Suppresses Arachne's removeSmallLines post-process, which "
-        "normally discards extrusion segments shorter than half the smallest line "
-        "width along that polyline. Those segments are typically the closure tails "
-        "that approach the outer perimeter — exactly what we want to keep for clean "
-        "seam closing. Disable only if you see speckled artifacts from extremely "
-        "short segments.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    // NEOTKO_NEOARACHNE_TAG fase3
-    def = this->add("neoarachne_bead_count_hysteresis_pct", coPercent);
-    def->label = L("Wall Count Stability");
-    def->category = L("Quality");
-    def->tooltip = L("Spatial hysteresis applied to Arachne's bead-count "
-        "transition thresholds when the inner or outer walls are set to "
-        "\"Arachne (Neotko edge)\". Expressed as a % of the outer wall "
-        "width. The transition from N→N+1 beads is delayed by this amount, "
-        "so borderline-thickness strokes stop oscillating between bead "
-        "counts along their length (the classic Arachne \"breathing\" "
-        "artifact other slicers also exhibit). Higher = more deadband, "
-        "calmer prints, but very-thin features may stay mono-wall longer. "
-        "0 disables the hysteresis. Typical 10–25%%.");
-    def->sidetext = L("%");
-    def->min = 0;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(20));
-
-    // NEOTKO_NEOARACHNE_TAG fase4
-    def = this->add("neoarachne_transition_filter_dist_mm", coFloat);
-    def->label = L("Wall Blend Distance");
-    def->category = L("Quality");
-    def->tooltip = L("SkeletalTrapezoidation transition smoothing distance in mm. "
-        "Controls how Arachne smooths bead-count transitions along the medial "
-        "axis. Upstream Arachne hardcodes this to 100 mm. Lower values (20-50 mm) "
-        "produce sharper, more localised bead-count transitions; higher values "
-        "smooth the transition over a longer region. For most NeoArachne use "
-        "cases 50-100 mm works well; reduce when borderline strokes need crisper "
-        "edges, increase when transitions appear visually jarring.");
-    def->sidetext = L("mm");
-    def->min = 1;
-    def->max = 500;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(100.0));
-
-    def = this->add("wall_transition_length", coPercent);
-    def->label = L("Wall transition length");
-    def->category = L("Quality");
-    def->tooltip = L("When transitioning between different numbers of walls as the part becomes "
-        "thinner, a certain amount of space is allotted to split or join the wall segments. "
-        "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(100));
-
-    def = this->add("wall_transition_filter_deviation", coPercent);
-    def->label = L("Wall transitioning filter margin");
-    def->category = L("Quality");
-    def->tooltip = L("Prevent transitioning back and forth between one extra wall and one less. This "
-        "margin extends the range of extrusion widths which follow to [Minimum wall width "
-        "- margin, 2 * Minimum wall width + margin]. Increasing this margin "
-        "reduces the number of transitions, which reduces the number of extrusion "
-        "starts/stops and travel time. However, large extrusion width variation can lead to "
-        "under- or overextrusion problems. "
-        "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def = this->add("wall_transition_angle", coFloat);
-    def->label = L("Wall transitioning threshold angle");
-    def->category = L("Quality");
-    def->tooltip = L("When to create transitions between even and odd numbers of walls. A wedge shape with"
-        " an angle greater than this setting will not have transitions and no walls will be "
-        "printed in the center to fill the remaining space. Reducing this setting reduces "
-        "the number and length of these center walls, but may leave gaps or overextrude.");
-    def->sidetext = "°";	// degrees, don't need translation
-    def->mode = comAdvanced;
-    def->min = 1.;
-    def->max = 59.;
-    def->set_default_value(new ConfigOptionFloat(10.));
-
-    def = this->add("wall_distribution_count", coInt);
-    def->label = L("Wall distribution count");
-    def->category = L("Quality");
-    def->tooltip = L("The number of walls, counted from the center, over which the variation needs to be "
-        "spread. Lower values mean that the outer walls don't change in width.");
-    def->mode = comAdvanced;
-    def->min = 1;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("min_feature_size", coPercent);
-    def->label = L("Minimum feature size");
-    def->category = L("Quality");
-    def->tooltip = L("Minimum thickness of thin features. Model features that are thinner than this value will not be printed, "
-                     "while features thicker than than this value will be widened to the minimum wall width. "
-                     "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def = this->add("min_length_factor", coFloat);
-    def->label = L("Minimum wall length");
-    def->category = L("Quality");
-    def->tooltip = L("Adjust this value to prevent short, unclosed walls from being printed, which could increase print time. "
-    "Higher values remove more and longer walls.\n\n"
-    "NOTE: Bottom and top surfaces will not be affected by this value to prevent visual gaps on the outside of the model. "
-    "Adjust 'One wall threshold' in the Advanced settings below to adjust the sensitivity of what is considered a top-surface. "
-    "'One wall threshold' is only visible if this setting is set above the default value of 0.5, or if single-wall top surfaces is enabled.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->min = 0.0;
-    def->max = 25.0;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    def = this->add("initial_layer_min_bead_width", coPercent);
-    def->label = L("First layer minimum wall width");
-    def->category = L("Quality");
-    def->tooltip = L("The minimum wall width that should be used for the first layer is recommended to be set "
-                     "to the same size as the nozzle. This adjustment is expected to enhance adhesion.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(85));
-
-    def = this->add("min_bead_width", coPercent);
-    def->label = L("Minimum wall width");
-    def->category = L("Quality");
-    def->tooltip = L("Width of the wall that will replace thin features (according to the Minimum feature size) "
-        "of the model. If the Minimum wall width is thinner than the thickness of the feature,"
-        " the wall will become as thick as the feature itself. "
-        "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(85));
-
-    // Declare retract values for filament profile, overriding the printer's extruder profile.
-    for (const char *opt_key : {
-        // floats
-        "retraction_length", "z_hop", "z_hop_types", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed", "retract_restart_extra", "retraction_minimum_travel",
-        // BBS: floats
-        "wipe_distance",
-        // bools
-        "retract_when_changing_layer", "wipe",
-        // percents
-        "retract_before_wipe",
-        "long_retractions_when_cut",
-        "retraction_distances_when_cut",
-        "retract_length_toolchange",
-        "retract_restart_extra_toolchange"
-        }) {
-        auto it_opt = options.find(opt_key);
-        assert(it_opt != options.end());
-        def = this->add_nullable(std::string("filament_") + opt_key, it_opt->second.type);
-        def->label 		= it_opt->second.label;
-        def->full_label = it_opt->second.full_label;
-        def->tooltip 	= it_opt->second.tooltip;
-        def->sidetext   = it_opt->second.sidetext;
-        def->enum_keys_map = it_opt->second.enum_keys_map;
-        def->enum_labels   = it_opt->second.enum_labels;
-        def->enum_values   = it_opt->second.enum_values;
-        def->min        = it_opt->second.min;
-        def->max        = it_opt->second.max;
-        //BBS: shown specific filament retract config because we hide the machine retract into comDevelop mode
-        if ((strcmp(opt_key, "retraction_length") == 0) ||
-            (strcmp(opt_key, "z_hop") == 0)||
-            (strcmp(opt_key, "long_retractions_when_cut") == 0)||
-            (strcmp(opt_key, "retraction_distances_when_cut") == 0))
-            def->mode       = comSimple;
-        else
-            def->mode       = comAdvanced;
-        switch (def->type) {
-        case coFloats   : def->set_default_value(new ConfigOptionFloatsNullable  (static_cast<const ConfigOptionFloats*  >(it_opt->second.default_value.get())->values)); break;
-        case coPercents : def->set_default_value(new ConfigOptionPercentsNullable(static_cast<const ConfigOptionPercents*>(it_opt->second.default_value.get())->values)); break;
-        case coBools    : def->set_default_value(new ConfigOptionBoolsNullable   (static_cast<const ConfigOptionBools*   >(it_opt->second.default_value.get())->values)); break;
-        case coEnums    : def->set_default_value(new ConfigOptionEnumsGenericNullable(static_cast<const ConfigOptionEnumsGeneric*   >(it_opt->second.default_value.get())->values)); break;
-        default: assert(false);
-        }
-    }
-
-    def = this->add("detect_narrow_internal_solid_infill", coBool);
-    def->label = L("Detect narrow internal solid infill");
-    def->category = L("Strength");
-    def->tooltip = L("This option will auto-detect narrow internal solid infill areas. "
-                     "If enabled, the concentric pattern will be used for the area to speed up printing. "
-                     "Otherwise, the rectilinear pattern will be used by default.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    // NEOTKO_MULTIPASS_TAG_START — Penultimate Top Layers
     def = this->add("penultimate_solid_infill_density", coPercent);
     def->label = L("Penultimate solid infill density");
     def->category = L("Strength");
@@ -6682,18 +6139,6 @@ void PrintConfigDef::init_fff_params()
     // NEOTKO_MULTIPASS_TAG_END
 
     // NEOTKO_LIBRE_TAG_START — Feature 3: Bridge Infill Control
-    def = this->add("neotko_disable_bridge_infill", coBool);
-    def->label = L("Disable bridge infill (Libre Mode)");
-    def->category = L("Quality");
-    def->tooltip = L("When enabled via Neotko Libre Mode, completely skips bridge infill generation. "
-                     "Bridge surfaces are treated as regular solid surfaces instead. "
-                     "This eliminates the -1 top surface layer count artifact caused by bridge infill. "
-                     "Set automatically by the Libre Mode toggle — not intended for manual use.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBool(false));
-    // NEOTKO_LIBRE_TAG_END
-
-    // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path
     def = this->add("multipass_path_gradient", coBool);
     def->label = L("Path Gradient Blend");
     def->category = L("Quality");
@@ -6891,6 +6336,17 @@ void PrintConfigDef::init_fff_params()
     // NEOTKO_SANDWICH_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — Neotko Neoweaving
+    def = this->add("neotko_interlayer_nesting_enabled", coBool);
+    def->label = L("Monotonic Interlayer Nesting");
+    def->category = L("Quality");
+    def->tooltip = L("On odd layers, shifts the Monotonic infill reference point by half a line spacing "
+                     "perpendicular to the fill direction. Lines of layer N fall into the gaps of layer N-1, "
+                     "creating XY mechanical interlock. Combine with Neoweaving Linear for XY+Z nesting.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_NEOWEAVING_TAG — angle-lock keys consumed by Fill (_infill_direction).
+    // The full wave engine + numeric keys (amplitude/period/...) land with GCode/SurfaceColorMix.
     def = this->add("interlayer_neoweave_enabled", coBool);
     def->label = L("Enable Neotko Neoweaving");
     def->category = L("Quality");
@@ -6927,144 +6383,9 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Top only (recommended)"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<NeoweaveFilter>(NeoweaveFilter::TopOnly));
-
-    def = this->add("interlayer_neoweave_min_length", coFloat);
-    def->label = L("Minimum line length for linear neoweave");
-    def->category = L("Quality");
-    def->tooltip = L("Linear neoweave mode only. Lines shorter than this are printed at nominal Z without ramp.");
-    def->sidetext = "mm";
-    def->min = 0;
-    def->max = 50.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(3.0));
-
-    def = this->add("interlayer_neoweave_amplitude", coFloat);
-    def->label = L("Neoweave Z amplitude");
-    def->category = L("Quality");
-    def->tooltip = L("Peak Z deviation during oscillation. Typical: 0.05-0.2 mm.");
-    def->sidetext = "mm";
-    def->min = 0.01;
-    def->max = 2.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.1));
-
-    def = this->add("interlayer_neoweave_period", coFloat);
-    def->label = L("Neoweave oscillation period");
-    def->category = L("Quality");
-    def->tooltip = L("Distance for one complete Z oscillation cycle. 0 = auto (line width).");
-    def->sidetext = "mm";
-    def->min = 0;
-    def->max = 20.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("interlayer_neoweave_max_z_speed", coFloat);
-    def->label = L("Neoweave max Z speed");
-    def->category = L("Quality");
-    def->tooltip = L("Maximum Z axis speed during neoweaving. XY speed is capped to stay within this limit.");
-    def->sidetext = "mm/s";
-    def->min = 1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(20.));
-
-    // NEOTKO_NEOWEAVING_TAG_START — penultimate layer count + speed override
-    def = this->add("neoweave_penultimate_layers", coInt);
-    def->label = L("Neoweave penultimate layers");
-    def->category = L("Quality");
-    def->tooltip = L("Number of penultimate layers that receive neoweaving. "
-                     "0 = disabled (only top surface is neoweaved). "
-                     "1+ = that many penultimate layers also get Z-motion treatment.");
-    def->min = 0;
-    def->max = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("neoweave_speed_pct", coInt);
-    def->label = L("Neoweave speed %");
-    def->category = L("Quality");
-    def->tooltip = L("Speed multiplier for neoweaved lines (Linear mode). "
-                     "100 = no change. Lower values improve Z precision on narrow lines. "
-                     "Applied to the G1 Z move; firmware inherits this speed for the following extrusion.");
-    def->sidetext = "%";
-    def->min = 1;
-    def->max = 200;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(100));
-
-    // NEOTKO_NEOWEAVING_TAG_START — Feature 14: Monotonic Interlayer Nesting
-    def = this->add("neotko_interlayer_nesting_enabled", coBool);
-    def->label = L("Monotonic Interlayer Nesting");
-    def->category = L("Quality");
-    def->tooltip = L("On odd layers, shifts the Monotonic infill reference point by half a line spacing "
-                     "perpendicular to the fill direction. Lines of layer N fall into the gaps of layer N-1, "
-                     "creating XY mechanical interlock. Combine with Neoweaving Linear for XY+Z nesting.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_NEOWEAVING_TAG_END
 
     // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner
-    def = this->add("neotko_wipe_tower", coBool);
-    def->label = L("NeoTower (post-slice wipe tower)");
-    def->category = L("Prime tower");
-    def->tooltip = L("Replace the standard WipeTower2 planner with NeoTower, a post-slice wipe tower "
-                     "that sees every toolchange (including MultiPass sublayer primes) before committing "
-                     "to any geometry. Produces a globally-optimised, fixed-footprint square tower.\n\n"
-                     "Requires enable_prime_tower to be active.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-    // NEOTKO_NEOTOWER_TAG_END
-
-    // Infill Neoweaving
-    def = this->add("infill_neoweave_enabled", coEnum);
-    def->label = L("Infill Neoweaving");
-    def->category = L("Strength");
-    def->tooltip = L("Per-object override for infill neoweaving.\n\n"
-                     "Inherit: use global preset setting.\n"
-                     "Enable: force-enable for this object.\n"
-                     "Disable: force-disable for this object.");
-    def->enum_keys_map = &ConfigOptionEnum<InfillNeoweaveOverride>::get_enum_values();
-    def->enum_values.push_back("inherit");
-    def->enum_values.push_back("enable");
-    def->enum_values.push_back("disable");
-    def->enum_labels.push_back(L("Inherit from preset"));
-    def->enum_labels.push_back(L("Enable"));
-    def->enum_labels.push_back(L("Disable"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<InfillNeoweaveOverride>(InfillNeoweaveOverride::Inherit));
-
-    def = this->add("infill_neoweave_amplitude", coFloat);
-    def->label = L("Infill neoweave Z amplitude");
-    def->category = L("Strength");
-    def->tooltip = L("Peak Z deviation during infill oscillation. Typical: 0.05-0.3 mm.");
-    def->sidetext = "mm";
-    def->min = 0.01;
-    def->max = 2.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.1));
-
-    def = this->add("infill_neoweave_period", coFloat);
-    def->label = L("Infill neoweave oscillation period");
-    def->category = L("Strength");
-    def->tooltip = L("Distance for one complete Z oscillation cycle in infill. 0 = auto (line width).");
-    def->sidetext = "mm";
-    def->min = 0;
-    def->max = 20.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("infill_neoweave_max_z_speed", coFloat);
-    def->label = L("Infill neoweave max Z speed");
-    def->category = L("Strength");
-    def->tooltip = L("Maximum Z speed during infill neoweaving. XY sparse infill speed is capped accordingly.");
-    def->sidetext = "mm/s";
-    def->min = 1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(20.));
-    // NEOTKO_MULTIPASS_TAG_END — Neoweaving
-
-    // NEOTKO_COLORMIX_TAG_START — Surface ColorMix
     def = this->add("interlayer_colormix_enabled", coBool);
     def->label = L("Enable Surface ColorStitch"); // NEOTKO_COLORSTITCH_TAG
     def->category = L("Quality");
@@ -7650,17 +6971,6 @@ void PrintConfigDef::init_fff_params()
     // NEOTKO_MULTIPASS_PRIME_TAG — s58: relabeled as a global SurfaceColorMix wipe reserve.
     // Applies to both Top and Penultimate sublayer primes (MultiPass + ColorMix + PathBlend).
     // The legacy `penultimate_multipass_prime_volume` is removed; this key is the single source.
-    def = this->add("multipass_prime_volume", coFloat);
-    def->label = L("SurfaceColorStitch wipe reserve"); // NEOTKO_COLORSTITCH_TAG
-    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each SurfaceColorStitch "
-                     "sublayer toolchange (MultiPass / ColorStitch / PathBlend, Top + Penultimate). "
-                     "Set to 0 to disable. Requires a wipe tower (NeoTower or prime tower) active. "
-                     "Lower values = thinner / shorter wipe tower; higher values = better purge.");
-    def->sidetext = L("mm³");
-    def->min = 0; def->max = 200; def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10.f)); // NEOTKO_COLORSTITCH_TAG — beta default
-
-    // NEOTKO_MULTIPASS_TAG_START — Perimeter Override
     def = this->add("multipass_perimeter_override", coBool);
     def->label = L("Perimeter Override");
     def->tooltip = L("When enabled, perimeters are suppressed at the real layer Z and re-printed "
@@ -7816,6 +7126,413 @@ void PrintConfigDef::init_fff_params()
     // NEOTKO_MULTIPASS_SURFACES_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_END
+
+    // NEOTKO_SANDWICH_ENGINE_DEFS_END
+
+    def = this->add("wiping_volumes_extruders", coFloats);
+    def->label = L("Purging volumes - load/unload volumes");
+    def->tooltip = L("This vector saves required volumes to change from/to each tool used on the "
+                     "wipe tower. These values are used to simplify creation of the full purging "
+                     "volumes below.");
+    def->set_default_value(new ConfigOptionFloats { 70., 70., 70., 70., 70., 70., 70., 70., 70., 70.  });
+
+    def = this->add("flush_into_infill", coBool);
+    def->category = L("Flush options");
+    def->label = L("Flush into objects' infill");
+    def->tooltip = L("Purging after filament change will be done inside objects' infills. "
+        "This may lower the amount of waste and decrease the print time. "
+        "If the walls are printed with transparent filament, the mixed color infill will be seen outside. "
+        "It will not take effect, unless the prime tower is enabled.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("flush_into_support", coBool);
+    def->category = L("Flush options");
+    def->label = L("Flush into objects' support");
+    def->tooltip = L("Purging after filament change will be done inside objects' support. "
+        "This may lower the amount of waste and decrease the print time. "
+        "It will not take effect, unless the prime tower is enabled.");
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("flush_into_objects", coBool);
+    def->category = L("Flush options");
+    def->label = L("Flush into this object");
+    def->tooltip = L("This object will be used to purge the nozzle after a filament change to save filament and decrease the print time. "
+        "Colors of the objects will be mixed as a result. "
+        "It will not take effect unless the prime tower is enabled.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("wipe_tower_bridging", coFloat);
+    def->label = L("Maximal bridging distance");
+    def->tooltip = L("Maximal distance between supports on sparse infill sections.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10.));
+
+    def = this->add("wipe_tower_extra_spacing", coPercent);
+    def->label = L("Wipe tower purge lines spacing");
+    def->tooltip = L("Spacing of purge lines on the wipe tower.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 100.;
+    def->max = 300.;
+    def->set_default_value(new ConfigOptionPercent(100.));
+
+    def = this->add("wipe_tower_extra_flow", coPercent);
+    def->label = L("Extra flow for purging");
+    def->tooltip = L("Extra flow used for the purging lines on the wipe tower. This makes the purging lines thicker or narrower "
+                     "than they normally would be. The spacing is adjusted automatically.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 100.;
+    def->max = 300.;
+    def->set_default_value(new ConfigOptionPercent(100.));
+
+    def = this->add("local_z_wipe_tower_purge_lines", coFloat);
+    def->label = L("Local-Z mini wipe lines");
+    def->tooltip = L("Number of purge lines reserved for each runtime Local-Z wipe tower toolchange. "
+                     "Higher values improve cleanup but increase tower depth. "
+                     "Only used when Local-Z dithering and the prime tower are enabled.");
+    def->sidetext = L("lines");
+    def->mode = comAdvanced;
+    def->min = 1.0;
+    def->set_default_value(new ConfigOptionFloat(3.0));
+
+    // NEOTKO_MULTIPASS_PRIME_TAG — per-region prime volume for sublayer toolchanges
+    // (MultiPass / ColorMix / PathBlend, Top + Penultimate). Read by NeoTower.
+    def = this->add("multipass_prime_volume", coFloat);
+    def->label = L("Sandwich wipe reserve");
+    def->tooltip = L("Volume (mm³) to purge on the wipe tower before each Sandwich "
+                     "sublayer toolchange (MultiPass / ColorMix / PathBlend, Top + Penultimate). "
+                     "Set to 0 to disable. Requires a wipe tower (NeoTower or prime tower) active. "
+                     "Lower values = thinner / shorter wipe tower; higher values = better purge.");
+    def->sidetext = L("mm³");
+    def->min = 0; def->max = 200; def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10.f));
+
+    // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner + options
+    def = this->add("neotko_wipe_tower", coBool);
+    def->label = L("NeoTower (post-slice wipe tower)");
+    def->category = L("Prime tower");
+    def->tooltip = L("Replace the standard WipeTower2 planner with NeoTower, a post-slice wipe tower "
+                     "that sees every toolchange (including MultiPass sublayer primes) before committing "
+                     "to any geometry. Produces a globally-optimised, fixed-footprint square tower.\n\n"
+                     "Requires enable_prime_tower to be active.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // F1 sandwich purge compaction. Sandwich/MultiPass sub-layer purges run at
+    // microscopic heights (0.04mm): a purge volume laid that thin needs ~5x the
+    // area of a normal-height purge, which inflates the tower footprint. This
+    // multiplier caps a flow boost applied ONLY to those synthetic toolchange
+    // wipes: the head keeps its plane, pushes up to N x the plastic per mm (never
+    // above ~nozzle/2 equivalent height) and the purge band shrinks accordingly;
+    // the surplus hangs into the hollow tower grid below. 1 = off (bit-identical).
+    def = this->add("neotower_purge_compaction", coFloat);
+    def->label = L("Sandwich purge compaction");
+    def->tooltip = L("Flow-boost cap for sandwich/MultiPass sub-layer purges on the wipe tower. "
+                     "Values above 1 compact those thin purges into a narrower band by extruding "
+                     "more material per millimeter (the excess hangs into the hollow tower interior), "
+                     "reducing the wipe tower footprint. 1 disables compaction. "
+                     "Requires test prints to find what your material tolerates.");
+    def->mode = comAdvanced;
+    def->min = 1.0;
+    def->max = 5.0;
+    def->set_default_value(new ConfigOptionFloat(1.7));
+
+    // tower type selector (decisión s103). Sandwich / single-filament MultiPass
+    // still auto-promotes to NeoTower regardless (neotko_forces_tower in
+    // Print.cpp) — this selects the planner for plain multi-tool scenes and
+    // exposes the NeoTower-only options below.
+    def = this->add("neotko_tower_type", coEnum);
+    def->label = L("Tower type");
+    def->category = L("Prime tower");
+    def->tooltip = L("Wipe tower planner.\n"
+                     "1. Classic: the standard WipeTower2 planner.\n"
+                     "2. NeoTower: post-slice planner that sees every toolchange (including "
+                     "sandwich sub-layer primes) before committing to any geometry. Fixed "
+                     "footprint, delta-Z aware, with zigurat taper and purge compaction options.\n\n"
+                     "Sandwich/MultiPass scenes use NeoTower automatically regardless of this setting.");
+    def->enum_keys_map = &ConfigOptionEnum<NeoTowerType>::get_enum_values();
+    def->enum_values.emplace_back("classic");
+    def->enum_values.emplace_back("neotower");
+    def->enum_labels.emplace_back("Classic");
+    def->enum_labels.emplace_back("NeoTower");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<NeoTowerType>(nttClassic));
+
+    // zigurat taper option (decisión s103: OPCIÓN del tipo NeoTower; default ON =
+    // safe wall-on-wall, OFF = less material/time).
+    def = this->add("neotower_zigurat", coBool);
+    def->label = L("Zigurat taper");
+    def->category = L("Prime tower");
+    def->tooltip = L("Limit how fast the NeoTower footprint may shrink between consecutive "
+                     "real layers (one perimeter width per side), so every wall ring rests "
+                     "on the ring below (wall-on-wall). Disable to save material and time at "
+                     "the cost of rings partially supported by the sparse grid.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+    // NEOTKO_NEOTOWER_TAG_END
+
+    def = this->add("idle_temperature", coInts);
+    def->label = L("Idle temperature");
+    def->tooltip = L("Nozzle temperature when the tool is currently not used in multi-tool setups. "
+                     "This is only used when 'Ooze prevention' is active in Print Settings. Set to 0 to disable.");
+    def->sidetext = u8"\u2103" /* °C */;	// degrees Celsius, don't need translation
+    def->min = 0;
+    def->max = max_temp;
+    def->set_default_value(new ConfigOptionInts{0});
+
+    def = this->add("filament_tower_ironing_area", coFloats);
+    def->label = L("Tower ironing area");
+    def->tooltip = L("Ironing area for prime tower interface layer (where different materials meet).");
+    def->sidetext = L("mm²");
+    def->min = 0;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{4.});
+
+    def = this->add("xy_hole_compensation", coFloat);
+    def->label = L("X-Y hole compensation");
+    def->category = L("Quality");
+    def->tooltip = L("Holes in objects will expand or contract in the XY plane by the configured value. "
+                     "Positive values make holes bigger, negative values make holes smaller. "
+                     "This function is used to adjust sizes slightly when the objects have assembling issues.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("xy_contour_compensation", coFloat);
+    def->label = L("X-Y contour compensation");
+    def->category = L("Quality");
+    def->tooltip = L("Contours of objects will expand or contract in the XY plane by the configured value. "
+                     "Positive values make contours bigger, negative values make contours smaller. "
+                     "This function is used to adjust sizes slightly when the objects have assembling issues.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("hole_to_polyhole", coBool);
+    def->label = L("Convert holes to polyholes");
+    def->category = L("Quality");
+    def->tooltip = L("Search for almost-circular holes that span more than one layer and convert the geometry to polyholes."
+                     " Use the nozzle size and the (biggest) diameter to compute the polyhole."
+                     "\nSee http://hydraraptor.blogspot.com/2011/02/polyholes.html");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("hole_to_polyhole_threshold", coFloatOrPercent);
+    def->label = L("Polyhole detection margin");
+    def->category = L("Quality");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Maximum defection of a point to the estimated radius of the circle."
+                     "\nAs cylinders are often exported as triangles of varying size, points may not be on the circle circumference."
+                     " This setting allows you some leeway to broaden the detection."
+                     "\nIn mm or in % of the radius.");
+    def->sidetext = L("mm or %");
+    def->max_literal = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0.01, false));
+
+    def = this->add("hole_to_polyhole_twisted", coBool);
+    def->label = L("Polyhole twist");
+    def->category = L("Quality");
+    def->tooltip = L("Rotate the polyhole every layer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("thumbnails", coString);
+    def->label = L("G-code thumbnails");
+    def->tooltip = L("Picture sizes to be stored into a .gcode and .sl1 / .sl1s files, in the following format: \"XxY, XxY, ...\"");
+    def->mode = comAdvanced;
+    def->gui_type = ConfigOptionDef::GUIType::one_string;
+    def->set_default_value(new ConfigOptionString("48x48/PNG,300x300/PNG"));
+
+    def = this->add("thumbnails_format", coEnum);
+    def->label = L("Format of G-code thumbnails");
+    def->tooltip = L("Format of G-code thumbnails: PNG for best quality, JPG for smallest size, QOI for low memory firmware.");
+    def->mode = comAdvanced;
+    def->enum_keys_map = &ConfigOptionEnum<GCodeThumbnailsFormat>::get_enum_values();
+    def->enum_values.push_back("PNG");
+    def->enum_values.push_back("JPG");
+    def->enum_values.push_back("QOI");
+    def->enum_values.push_back("BTT_TFT");
+    def->enum_values.push_back("COLPIC");
+    def->enum_labels.push_back("PNG");
+    def->enum_labels.push_back("JPG");
+    def->enum_labels.push_back("QOI");
+    def->enum_labels.push_back("BTT TT");
+    def->enum_labels.push_back("ColPic");
+    def->set_default_value(new ConfigOptionEnum<GCodeThumbnailsFormat>(GCodeThumbnailsFormat::PNG));
+
+    def = this->add("use_relative_e_distances", coBool);
+    def->label = L("Use relative E distances");
+    def->tooltip = L("Relative extrusion is recommended when using \"label_objects\" option. "
+                   "Some extruders work better with this option unchecked (absolute extrusion mode). "
+                   "Wipe tower is only compatible with relative mode. It is recommended on "
+                   "most printers. Default is checked.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("wall_generator", coEnum);
+    def->label = L("Wall generator");
+    def->category = L("Quality");
+    def->tooltip = L("Classic wall generator produces walls with constant extrusion width and for "
+        "very thin areas is used gap-fill. "
+        "Arachne engine produces walls with variable extrusion width.");
+    def->enum_keys_map = &ConfigOptionEnum<PerimeterGeneratorType>::get_enum_values();
+    def->enum_values.push_back("classic");
+    def->enum_values.push_back("arachne");
+    def->enum_labels.push_back(L("Classic"));
+    def->enum_labels.push_back(L("Arachne"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
+
+    def = this->add("wall_transition_length", coPercent);
+    def->label = L("Wall transition length");
+    def->category = L("Quality");
+    def->tooltip = L("When transitioning between different numbers of walls as the part becomes "
+        "thinner, a certain amount of space is allotted to split or join the wall segments. "
+        "It's expressed as a percentage over nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("wall_transition_filter_deviation", coPercent);
+    def->label = L("Wall transitioning filter margin");
+    def->category = L("Quality");
+    def->tooltip = L("Prevent transitioning back and forth between one extra wall and one less. This "
+        "margin extends the range of extrusion widths which follow to [Minimum wall width "
+        "- margin, 2 * Minimum wall width + margin]. Increasing this margin "
+        "reduces the number of transitions, which reduces the number of extrusion "
+        "starts/stops and travel time. However, large extrusion width variation can lead to "
+        "under- or overextrusion problems. "
+        "It's expressed as a percentage over nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionPercent(25));
+
+    def = this->add("wall_transition_angle", coFloat);
+    def->label = L("Wall transitioning threshold angle");
+    def->category = L("Quality");
+    def->tooltip = L("When to create transitions between even and odd numbers of walls. A wedge shape with"
+        " an angle greater than this setting will not have transitions and no walls will be "
+        "printed in the center to fill the remaining space. Reducing this setting reduces "
+        "the number and length of these center walls, but may leave gaps or overextrude.");
+    def->sidetext = "°";	// degrees, don't need translation
+    def->mode = comAdvanced;
+    def->min = 1.;
+    def->max = 59.;
+    def->set_default_value(new ConfigOptionFloat(10.));
+
+    def = this->add("wall_distribution_count", coInt);
+    def->label = L("Wall distribution count");
+    def->category = L("Quality");
+    def->tooltip = L("The number of walls, counted from the center, over which the variation needs to be "
+        "spread. Lower values mean that the outer walls don't change in width.");
+    def->mode = comAdvanced;
+    def->min = 1;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("min_feature_size", coPercent);
+    def->label = L("Minimum feature size");
+    def->category = L("Quality");
+    def->tooltip = L("Minimum thickness of thin features. Model features that are thinner than this value will not be printed, "
+                     "while features thicker than than this value will be widened to the minimum wall width. "
+                     "It's expressed as a percentage over nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionPercent(25));
+
+    def = this->add("min_length_factor", coFloat);
+    def->label = L("Minimum wall length");
+    def->category = L("Quality");
+    def->tooltip = L("Adjust this value to prevent short, unclosed walls from being printed, which could increase print time. "
+    "Higher values remove more and longer walls.\n\n"
+    "NOTE: Bottom and top surfaces will not be affected by this value to prevent visual gaps on the outside of the model. "
+    "Adjust 'One wall threshold' in the Advanced settings below to adjust the sensitivity of what is considered a top-surface. "
+    "'One wall threshold' is only visible if this setting is set above the default value of 0.5, or if single-wall top surfaces is enabled.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->mode = comAdvanced;
+    def->min = 0.0;
+    def->max = 25.0;
+    def->set_default_value(new ConfigOptionFloat(0.5));
+
+    def = this->add("initial_layer_min_bead_width", coPercent);
+    def->label = L("First layer minimum wall width");
+    def->category = L("Quality");
+    def->tooltip = L("The minimum wall width that should be used for the first layer is recommended to be set "
+                     "to the same size as the nozzle. This adjustment is expected to enhance adhesion.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionPercent(85));
+
+    def = this->add("min_bead_width", coPercent);
+    def->label = L("Minimum wall width");
+    def->category = L("Quality");
+    def->tooltip = L("Width of the wall that will replace thin features (according to the Minimum feature size) "
+        "of the model. If the Minimum wall width is thinner than the thickness of the feature,"
+        " the wall will become as thick as the feature itself. "
+        "It's expressed as a percentage over nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionPercent(85));
+
+    // Declare retract values for filament profile, overriding the printer's extruder profile.
+    for (const char *opt_key : {
+        // floats
+        "retraction_length", "z_hop", "z_hop_types", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed", "retract_restart_extra", "retraction_minimum_travel",
+        // BBS: floats
+        "wipe_distance",
+        // bools
+        "retract_when_changing_layer", "wipe",
+        // percents
+        "retract_before_wipe",
+        "long_retractions_when_cut",
+        "retraction_distances_when_cut",
+        "retract_length_toolchange",
+        "retract_restart_extra_toolchange"
+        }) {
+        auto it_opt = options.find(opt_key);
+        assert(it_opt != options.end());
+        def = this->add_nullable(std::string("filament_") + opt_key, it_opt->second.type);
+        def->label 		= it_opt->second.label;
+        def->full_label = it_opt->second.full_label;
+        def->tooltip 	= it_opt->second.tooltip;
+        def->sidetext   = it_opt->second.sidetext;
+        def->enum_keys_map = it_opt->second.enum_keys_map;
+        def->enum_labels   = it_opt->second.enum_labels;
+        def->enum_values   = it_opt->second.enum_values;
+        def->min        = it_opt->second.min;
+        def->max        = it_opt->second.max;
+        //BBS: shown specific filament retract config because we hide the machine retract into comDevelop mode
+        if ((strcmp(opt_key, "retraction_length") == 0) ||
+            (strcmp(opt_key, "z_hop") == 0)||
+            (strcmp(opt_key, "long_retractions_when_cut") == 0)||
+            (strcmp(opt_key, "retraction_distances_when_cut") == 0))
+            def->mode       = comSimple;
+        else
+            def->mode       = comAdvanced;
+        switch (def->type) {
+        case coFloats   : def->set_default_value(new ConfigOptionFloatsNullable  (static_cast<const ConfigOptionFloats*  >(it_opt->second.default_value.get())->values)); break;
+        case coPercents : def->set_default_value(new ConfigOptionPercentsNullable(static_cast<const ConfigOptionPercents*>(it_opt->second.default_value.get())->values)); break;
+        case coBools    : def->set_default_value(new ConfigOptionBoolsNullable   (static_cast<const ConfigOptionBools*   >(it_opt->second.default_value.get())->values)); break;
+        case coEnums    : def->set_default_value(new ConfigOptionEnumsGenericNullable(static_cast<const ConfigOptionEnumsGeneric*   >(it_opt->second.default_value.get())->values)); break;
+        default: assert(false);
+        }
+    }
+
+    def = this->add("detect_narrow_internal_solid_infill", coBool);
+    def->label = L("Detect narrow internal solid infill");
+    def->category = L("Strength");
+    def->tooltip = L("This option will auto-detect narrow internal solid infill areas. "
+                     "If enabled, the concentric pattern will be used for the area to speed up printing. "
+                     "Otherwise, the rectilinear pattern will be used by default.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
 }
 
 void PrintConfigDef::init_extruder_option_keys()
@@ -8602,7 +8319,7 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         }
     } else if (opt_key == "overhang_fan_threshold" && value == "5%") {
         value = "10%";
-    } else if( opt_key == "wall_infill_order" ) {
+    }else if( opt_key == "wall_infill_order" ) {
         if (value == "inner wall/outer wall/infill" || value == "infill/inner wall/outer wall") {
             opt_key = "wall_sequence";
             value = "inner wall/outer wall";
@@ -8807,13 +8524,6 @@ void DynamicPrintConfig::normalize_fdm(int used_filaments)
         }
     }
 
-    if (!this->has("enable_infill_filament_override") && this->has("sparse_infill_filament")) {
-        const int wall_filament = this->has("wall_filament") ? this->option("wall_filament")->getInt() : 1;
-        const int sparse_infill_filament = this->option("sparse_infill_filament")->getInt();
-        if (sparse_infill_filament > 0 && sparse_infill_filament != wall_filament)
-            this->opt<ConfigOptionBool>("enable_infill_filament_override", true)->value = true;
-    }
-
     if (this->has("wipe_tower_filament")) {
         // If invalid, replace with 0.
         int extruder      = this->opt<ConfigOptionInt>("wipe_tower_filament")->value;
@@ -8893,13 +8603,6 @@ void DynamicPrintConfig::normalize_fdm_1()
             // if (!this->has("support_interface_filament"))
             //     this->option("support_interface_filament", true)->setInt(extruder);
         }
-    }
-
-    if (!this->has("enable_infill_filament_override") && this->has("sparse_infill_filament")) {
-        const int wall_filament = this->has("wall_filament") ? this->option("wall_filament")->getInt() : 1;
-        const int sparse_infill_filament = this->option("sparse_infill_filament")->getInt();
-        if (sparse_infill_filament > 0 && sparse_infill_filament != wall_filament)
-            this->opt<ConfigOptionBool>("enable_infill_filament_override", true)->value = true;
     }
 
     if (!this->has("solid_infill_filament") && this->has("sparse_infill_filament"))
@@ -9369,12 +9072,8 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
         return 1; \
     }
-// NEOTKO_COLORMIX_TAG — s61: PrintRegionConfigBase added here because the
-// MSVC-driven split introduced a Base class that has its own static cache.
-// Without this entry the linker reports "undefined virtual thunk to
-// PrintRegionConfigBase::keys() const" on macOS (and similar on Linux).
 PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfigBase, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintConfig, FullPrintConfig,
+    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintConfig, FullPrintConfig,
     SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
 static int print_config_static_initialized = print_config_static_initializer();
 

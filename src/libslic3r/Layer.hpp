@@ -74,6 +74,7 @@ public:
     unsigned int extruder(FlowRole role) const;
     Flow    flow(FlowRole role) const;
     Flow    flow(FlowRole role, double layer_height) const;
+    Flow    flow(FlowRole role, double layer_height, bool use_initial_layer_width) const;
     Flow    bridging_flow(FlowRole role, bool thick_bridge = false) const;
 
     void    slices_to_fill_surfaces_clipped();
@@ -186,10 +187,8 @@ public:
     static bool             is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b);
     void                    make_perimeters();
     // Phony version of make_fills() without parameters for Perl integration only.
-    // NEOTKO_COLORMIX_TAG_START
     bool                    make_fills() { return this->make_fills(nullptr, nullptr); }
     bool                    make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator = nullptr);
-    // NEOTKO_COLORMIX_TAG_END
     Polylines               generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree *adaptive_fill_octree,
                                                                            FillAdaptive::Octree *support_fill_octree,
                                                                            FillLightning::Generator* lightning_generator) const;

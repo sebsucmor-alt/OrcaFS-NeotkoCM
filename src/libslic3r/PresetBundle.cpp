@@ -83,13 +83,14 @@ static std::vector<std::string> s_project_options {
     "dithering_z_step_size",
     "dithering_local_z_mode",
     "dithering_local_z_whole_objects",
+    "dithering_local_z_infill",
     "dithering_local_z_direct_multicolor",
     "dithering_step_painted_zones_only",
 };
 
 // SM_FEATURE: add Snapmaker machine as default
 const char* PresetBundle::SM_BUNDLE = "Snapmaker";
-const char* PresetBundle::SM_DEFAULT_PRINTER_MODEL = "Snapmaker U1(0.4 nozzle)";
+const char* PresetBundle::SM_DEFAULT_PRINTER_MODEL = "Snapmaker U1";
 const char* PresetBundle::SM_DEFAULT_PRINTER_VARIANT = "0.4";
 const char* PresetBundle::SM_DEFAULT_FILAMENT        = "Snapmaker PLA SnapSpeed";
 const char *PresetBundle::ORCA_FILAMENT_LIBRARY = "OrcaFilamentLibrary";
@@ -1524,11 +1525,36 @@ static inline std::string remove_ini_suffix(const std::string &name)
     return out;
 }
 
+void PresetBundle::install_missing_variants_for_enabled_models(AppConfig &config)
+{
+    for (const auto &vendor_entry : this->vendors) {
+        const VendorProfile &vendor_profile = vendor_entry.second;
+        if (!vendor_profile.valid())
+            continue;
+        for (const auto &model : vendor_profile.models) {
+            if (model.variants.size() <= 1)
+                continue;
+            bool any_enabled = false;
+            for (const auto &v : model.variants) {
+                if (config.get_variant(vendor_profile.id, model.id, v.name)) {
+                    any_enabled = true;
+                    break;
+                }
+            }
+            if (!any_enabled)
+                continue;
+            for (const auto &v : model.variants)
+                config.set_variant(vendor_profile.id, model.id, v.name, true);
+        }
+    }
+}
+
 // Set the "enabled" flag for printer vendors, printer models and printer variants
 // based on the user configuration.
 // If the "vendor" section is missing, enable all models and variants of the particular vendor.
-void PresetBundle::load_installed_printers(const AppConfig &config)
+void PresetBundle::load_installed_printers(AppConfig &config)
 {
+    this->install_missing_variants_for_enabled_models(config);
 	this->update_system_maps();
     for (auto &preset : printers)
         preset.set_visible_from_appconfig(config);
@@ -3171,9 +3197,9 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                 // Some system bundles only provide setting_id for filaments. Treat it as a stable fallback
                 // instead of aborting the entire vendor import and losing all dependent presets.
                 filament_id = setting_id;
-                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__
-                                           << ": missing filament_id for " << preset_name
-                                           << ", falling back to setting_id " << setting_id;
+                // BOOST_LOG_TRIVIAL(warning) << __FUNCTION__
+                //                            << ": missing filament_id for " << preset_name
+                //                            << ", falling back to setting_id " << setting_id;
             }
             //check whether it inherits other preset or not
             auto it1 = key_values.find(BBL_JSON_KEY_INHERITS);
@@ -3489,11 +3515,11 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
 		this->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = new_matrix;
     }
 
-    // Keep mixed (virtual) combinations in sync with physical filament deletion.
-    // Mixed entries containing the deleted physical filament are removed, while
-    // remaining component IDs are shifted.
-    if (deleting_filament)
+    std::string post_delete_mixed_defs;
+    if (deleting_filament) {
         this->mixed_filaments.remove_physical_filament(unsigned(to_delete_filament_id + 1));
+        post_delete_mixed_defs = this->mixed_filaments.serialize_custom_entries();
+    }
 
     // Keep project colours aligned to physical filaments, then regenerate mixed
     // (virtual) entries from the physical set only.
@@ -3566,7 +3592,9 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             upper_bound = std::max(lower_bound, upper_bound);
 
             this->mixed_filaments.clear_custom_entries();
-            this->mixed_filaments.load_custom_entries(get_mixed_string("mixed_filament_definitions"), color_opt->values);
+            this->mixed_filaments.load_custom_entries(
+                deleting_filament ? post_delete_mixed_defs : get_mixed_string("mixed_filament_definitions"),
+                color_opt->values);
             this->mixed_filaments.apply_gradient_settings(gradient_mode, lower_bound, upper_bound, advanced_dithering);
 
             const std::string serialized = this->mixed_filaments.serialize_custom_entries();
@@ -3584,16 +3612,50 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
 
 void PresetBundle::update_mixed_filament_id_remap(const std::vector<MixedFilament> &old_mixed,
                                                   size_t old_num_filaments,
-                                                  size_t new_num_filaments)
+                                                  size_t new_num_filaments,
+                                                  size_t deleted_mixed_idx)
 {
-    build_filament_id_remap(old_mixed, old_num_filaments, new_num_filaments, false, 0u);
+    build_filament_id_remap(old_mixed, old_num_filaments, new_num_filaments, false, 0u, deleted_mixed_idx);
+}
+
+// Checks manual_pattern and gradient dependency.
+// When norm is non-empty, the pair check is skipped (pattern tokens already
+// cover dependency detection via physical_filament_from_token).
+// When norm is empty, the caller checks pair first, then calls this as supplement.
+static bool mixed_filament_depends_on_physical(const MixedFilament& mf, unsigned int physical_1based)
+{
+    // ---- 1. manual_pattern ----
+    const std::string norm = MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern);
+    if (!norm.empty()) {
+        const auto groups = MixedFilamentManager::split_pattern_groups(norm);
+        for (const std::string& group : groups) {
+            const auto tokens = MixedFilamentManager::split_pattern_group_to_tokens(group, 0);
+            for (const std::string& token : tokens) {
+                if (MixedFilamentManager::physical_filament_from_token(token, mf, MixedFilamentManager::kMaxPhysicalFilaments) == physical_1based)
+                    return true;
+            }
+        }
+    }
+
+    // ---- 2. gradient components ----
+    // Only check when there is no manual_pattern; a pattern already resolves
+    // every token, so gradient IDs would be a false positive at worst.
+    if (norm.empty()) {
+        for (unsigned int comp_id : MixedFilamentManager::decode_gradient_component_ids(mf.gradient_component_ids, 0)) {
+            if (comp_id == physical_1based)
+                return true;
+        }
+    }
+
+    return false;
 }
 
 void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old_mixed,
                                            size_t old_num_filaments,
                                            size_t new_num_filaments,
                                            bool deleting_filament,
-                                           unsigned int deleted_1based)
+                                           unsigned int deleted_1based,
+                                           size_t deleted_mixed_idx)
 {
     size_t old_enabled_mixed = 0;
     for (const auto &mf : old_mixed)
@@ -3607,10 +3669,10 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
         unsigned int mapped = 0;
         if (deleting_filament && old_id == deleted_1based) {
             mapped = 0;
+        } else if (deleting_filament && old_id > deleted_1based) {
+            mapped = old_id - 1;
         } else if (old_id <= unsigned(new_num_filaments)) {
             mapped = old_id;
-            if (deleting_filament && old_id > deleted_1based)
-                --mapped;
         }
         m_last_filament_id_remap[old_id] = mapped;
     }
@@ -3634,14 +3696,32 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
     size_t stable_id_hits = 0;
     size_t fallback_pair_hits = 0;
     size_t missing_hits = 0;
+    size_t deleted_mixed_skips = 0;
     unsigned int old_virtual_id = unsigned(old_num_filaments + 1);
-    for (const auto &mf : old_mixed) {
+    for (size_t midx = 0; midx < old_mixed.size(); ++midx) {
+        const auto &mf = old_mixed[midx];
         if (!mf.enabled)
             continue;
 
+        // When a mixed filament is explicitly deleted, leave its old virtual ID
+        // mapped to 0 (NONE) so paint on the deleted filament is removed, rather
+        // than being reassigned to a surviving mixed via pair-based fallback.
+        if (midx == deleted_mixed_idx) {
+            ++old_virtual_id;
+            ++deleted_mixed_skips;
+            continue;
+        }
+
+        const std::string norm = MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern);
         unsigned int a = mf.component_a;
         unsigned int b = mf.component_b;
-        if (a == deleted_1based || b == deleted_1based) {
+        if (norm.empty() && (a == deleted_1based || b == deleted_1based)) {
+            m_last_filament_id_remap[old_virtual_id] = 0;
+            ++missing_hits;
+        } else if (deleting_filament && mixed_filament_depends_on_physical(mf, deleted_1based)) {
+            // The mixed filament was removed by remove_physical_filament because
+            // its manual_pattern or gradient references the deleted physical,
+            // even though component_a/component_b do not.
             m_last_filament_id_remap[old_virtual_id] = 0;
             ++missing_hits;
         } else {
@@ -3655,7 +3735,7 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
                 }
             }
             if (!mapped_by_stable_id) {
-                if (deleting_filament) {
+                if (deleting_filament && norm.empty()) {
                     if (a > deleted_1based)
                         --a;
                     if (b > deleted_1based)
@@ -3700,6 +3780,7 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
                             << " new_physical=" << new_num_filaments
                             << " deleting=" << (deleting_filament ? 1 : 0)
                             << " deleted_id=" << deleted_1based
+                            << " deleted_mixed_skips=" << deleted_mixed_skips
                             << " old_mixed_enabled=" << old_enabled_mixed
                             << " new_mixed_enabled=" << this->mixed_filaments.enabled_count()
                             << " stable_id_hits=" << stable_id_hits

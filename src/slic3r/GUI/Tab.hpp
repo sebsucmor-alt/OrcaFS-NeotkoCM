@@ -376,9 +376,6 @@ public:
 	virtual void	reload_config();
     void            update_mode();
     void            update_visibility();
-    // NEOTKO_LIBRE_TAG_START — Less Used Toggle: set toggle_visible flags from app_config
-    void            apply_less_used_visibility();
-    // NEOTKO_LIBRE_TAG_END
     virtual void    msw_rescale();
     virtual void	sys_color_changed();
 	Field*			get_field(const t_config_option_key& opt_key, int opt_index = -1) const;
@@ -537,9 +534,6 @@ public:
 	//BBS: GUI refactor
 	TabPrintPart(ParamsPanel* parent);
 	~TabPrintPart() {}
-    // NEOTKO_LIBRE_TAG_START — Assembled Parts Full Options
-    void            refresh_part_object_config();
-    // NEOTKO_LIBRE_TAG_END
 protected:
 	virtual void    notify_changed(ObjectBase * object) override;
 };

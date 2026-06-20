@@ -161,6 +161,10 @@ bool makedir(const std::string path);
 std::string debug_out_path(const char *name, ...);
 // smaller level means less log. level=5 means saving all logs.
 void set_log_path_and_level(const std::string& file, unsigned int level);
+
+/*
+ * TODO : This interface may have truncation issues.
+ */
 void flush_logs();
 
 // A special type for strings encoded in the local Windows 8-bit code page.
@@ -217,7 +221,10 @@ extern bool is_shapes_dir(const std::string& dir);
 extern bool is_json_file(const std::string& path);
 
 // Orca: custom protocal support utils
-inline bool is_orca_open(const std::string& url) { return boost::starts_with(url, "Snapmaker_Orca://open"); }
+inline bool is_orca_open(const std::string& url)
+{
+    return boost::starts_with(url, "Snapmaker_Orca://open") || boost::starts_with(url, "snapmaker-orca://open");
+}
 inline bool is_prusaslicer_open(const std::string& url) { return boost::starts_with(url, "prusaslicer://open"); }
 inline bool is_bambustudio_open(const std::string& url) { return boost::starts_with(url, "bambustudio://open") || boost::starts_with(url, "bambustudioopen://"); }
 inline bool is_cura_open(const std::string& url) { return boost::starts_with(url, "cura://open"); }

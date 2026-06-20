@@ -507,32 +507,8 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
 
     const coord_t wall_transition_length = scaled<coord_t>(this->m_params.wall_transition_length);
 	
-	// NEOTKO_NEOARACHNE_TAG max-bead-width — S3D-style ceiling semantics.
-    //
-    // Arachne computes a per-parity "minimum_line_width" via two thresholds
-    // (DistributedBeadingStrategy.cpp:96):
-    //   - wall_split_middle_threshold → odd naive counts (1↔2, 3↔4, 5↔6, ...)
-    //   - wall_add_middle_threshold   → even naive counts (2↔3, 4↔5, 6↔7, ...)
-    // The threshold equals the % a single bead may exceed nominal width before
-    // splitting → max single bead = optimal_width * (1 + threshold).
-    //
-    // Initial impl OVERRODE the auto-derived thresholds. That works as a manual
-    // split control but breaks the "natural growth" mode users expect when MAX
-    // is set high. The correct S3D semantic is a CEILING: cap the auto-derived
-    // threshold from above, never push it artificially upward.
-    //   - MAX=200 → ceiling 1.0 → typical auto-derivation is well below this
-    //               → auto wins → bead grows naturally (Arachne stock behaviour).
-    //   - MAX=150 → ceiling 0.5 → caps auto if it would exceed 0.5.
-    //   - MAX=100 → ceiling 0.0 → forces aggressive splitting (cap dominates).
-    // Sentinel 0 (used by stock Arachne path that never sets this) = no ceiling,
-    // pure auto-derivation preserved.
-    const double na_max_ceiling = (m_params.max_bead_width_pct > 0.f)
-        ? std::clamp(double(m_params.max_bead_width_pct) / 100.0 - 1.0, 0.0, 1.0)
-        : std::numeric_limits<double>::infinity();
-    const double stock_split_threshold = std::clamp(2. * unscaled<double>(this->min_bead_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99); // For an uneven nr. of lines: When to split the middle wall into two.
-    const double stock_add_threshold   = std::clamp(unscaled<double>(this->min_bead_width) / perimeter_extrusion_width, 0.01, 0.99); // For an even nr. of lines: When to add a new middle in between the innermost two walls.
-    const double wall_split_middle_threshold = std::min(stock_split_threshold, na_max_ceiling);
-    const double wall_add_middle_threshold   = std::min(stock_add_threshold,   na_max_ceiling);
+	const double wall_split_middle_threshold = std::clamp(2. * unscaled<double>(this->min_bead_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99); // For an uneven nr. of lines: When to split the middle wall into two.
+    const double wall_add_middle_threshold   = std::clamp(unscaled<double>(this->min_bead_width) / perimeter_extrusion_width, 0.01, 0.99); // For an even nr. of lines: When to add a new middle in between the innermost two walls.
     
     const int wall_distribution_count = this->m_params.wall_distribution_count;
     const size_t max_bead_count = (inset_count < std::numeric_limits<coord_t>::max() / 2) ? 2 * inset_count : std::numeric_limits<coord_t>::max();
@@ -549,18 +525,9 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
             wall_add_middle_threshold,
             max_bead_count,
             wall_0_inset,
-            wall_distribution_count,
-            // minimum_variable_line_width — keep factory default
-            0.5,
-            // NEOTKO_NEOARACHNE_TAG fase3 / s93
-            m_params.neotko_edge_enabled,
-            m_params.neotko_edge_pin_outer,
-            m_params.neotko_edge_cap_widening,
-            m_params.neotko_edge_hysteresis_pct
+            wall_distribution_count
         );
-    // NEOTKO_NEOARACHNE_TAG fase4 — was hardcoded 100mm. Now read from params
-    // so NeoArachne can tune via neoarachne_transition_filter_dist_mm.
-    const coord_t transition_filter_dist   = scaled<coord_t>(m_params.wall_transition_filter_dist_mm);
+    const coord_t transition_filter_dist   = scaled<coord_t>(100.f);
     const coord_t allowed_filter_deviation = wall_transition_filter_deviation;
     SkeletalTrapezoidation wall_maker
     (
@@ -576,14 +543,7 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
 
     stitchToolPaths(toolpaths, this->bead_width_x);
 
-    // NEOTKO_NEOARACHNE_TAG fase3.0 — Edge Closure. removeSmallLines() discards
-    // any extrusion segment shorter than half the smallest line width along its
-    // polyline. In NeoArachne's hybrid C+A those are usually the closure tails
-    // approaching the Classic outer perimeter — the segments we explicitly WANT
-    // to keep for S3D-style seam closure. Gate via m_params.keep_short_tails.
-    // Default false → upstream behaviour preserved for wall_generator=Arachne.
-    if (!m_params.keep_short_tails)
-        removeSmallLines(toolpaths);
+    removeSmallLines(toolpaths);
 
     separateOutInnerContour();
 

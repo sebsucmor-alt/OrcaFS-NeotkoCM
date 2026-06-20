@@ -638,7 +638,7 @@ void Selection::set_deserialized(EMode mode, const std::vector<std::pair<size_t,
     set_bounding_boxes_dirty();
 }
 
-void Selection::clear()
+void Selection::clear(bool notify_sidebar)
 {
     if (!m_valid)
         return;
@@ -682,7 +682,8 @@ void Selection::clear()
 #endif
 
     // #et_FIXME fake KillFocus from sidebar
-    wxGetApp().plater()->canvas3D()->handle_sidebar_focus_event("", false);
+    if (notify_sidebar)
+        wxGetApp().plater()->canvas3D()->handle_sidebar_focus_event("", false);
 }
 
 // Update the selection based on the new instance IDs.
@@ -1593,10 +1594,7 @@ void Selection::scale_and_translate(const Vec3d &scale, const Vec3d &world_trans
         synchronize_unselected_volumes();
 #endif // !DISABLE_INSTANCES_SYNCH
 
-    // NEOTKO_LIBRE_TAG_START — In Libre Mode (FFF) allow floating objects: skip bed snap during scale/mirror drag
-    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
-        ensure_on_bed();
-    // NEOTKO_LIBRE_TAG_END
+    ensure_on_bed();
     set_bounding_boxes_dirty();
     if (wxGetApp().plater()->canvas3D()->get_canvas_type() != GLCanvas3D::ECanvasType::CanvasAssembleView) {
         wxGetApp().plater()->canvas3D()->requires_check_outside_state();

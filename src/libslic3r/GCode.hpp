@@ -13,12 +13,10 @@
 #include "GCode/FanMover.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
-// NEOTKO_NEOTOWER_TAG_START
-#include "NeoTower.hpp"
-#include "NeoTowerZ.hpp"  // NEOTKO_NEOTOWER_TAG — hardening P2
-// NEOTKO_NEOTOWER_TAG_END
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
+#include "NeoTower.hpp"        // NEOTKO_NEOTOWER_TAG
+#include "NeoTowerZ.hpp"       // NEOTKO_NEOTOWER_TAG — Z epsilons for identity dispatch
 #include "GCode/SeamPlacer.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "EdgeGrid.hpp"
@@ -117,19 +115,13 @@ public:
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_reserve_slot_idx.size())
             m_local_z_reserve_slot_idx[size_t(m_layer_idx)] = 0;
     }
-
     // NEOTKO_NEOTOWER_TAG_START — sync_to_z: z-aware plan layer lookup (replaces
     // next_layer() + suppress_finish_layer_if_future_layer() for NeoTower).
-    //
-    // Root cause of bugs 00_, 01_, 02_: next_layer() increments m_layer_idx
-    // blindly, but layers_to_print has more has_wipe_tower entries than wt2 plan
-    // entries (sublayer layers get has_wipe_tower=true via fill_wipe_tower_partitions
-    // propagation).  This desync causes suppress to cascade, exhausting tc_idx on
-    // real TC layers.
-    //
-    // Fix: search m_tool_changes by z with Z_EPS_PLAN (1e-4f < SUBLAYER_GAP 2e-4f)
-    // to find the correct plan entry.  When no plan entry matches, suppress
-    // finish_layer for this layer (structural-only — no TC or finish_layer content).
+    // Root cause of structural desync: next_layer() increments m_layer_idx blindly,
+    // but layers_to_print has more has_wipe_tower entries than wt2 plan entries
+    // (sublayer/structural layers get has_wipe_tower=true via fill_wipe_tower_partitions
+    // propagation). Fix: search m_tool_changes by z with Z_EPS_PLAN to find the correct
+    // plan entry; when none matches, suppress finish_layer (structural-only layer).
     void sync_to_z(float nominal_print_z) {
         m_suppress_finish_layer = false;
         const int start = std::max(0, m_layer_idx);
@@ -151,33 +143,14 @@ public:
         // No plan entry at this z → suppress finish_layer (empty structural layer).
         m_suppress_finish_layer = true;
     }
-    // NEOTKO_NEOTOWER_TAG_END
-
-    // NEOTKO_NEOTOWER_TAG_START s79j — Bug 04 residual: emit orphan plan slots
-    // between the previously visited z and `next_visited_z`. Layers in the
-    // support air-gap exist in NeoTower's m_tool_changes plan but are absent
-    // from `layers_to_print` (no object/support geometry at that z), so the
-    // normal sync_to_z + process_layer pipeline never dispatches their TCRs
-    // and the wipe tower develops a structural hole at those z. This helper
-    // walks forward from m_layer_idx, emitting append_tcr2 for each plan slot
-    // whose front().print_z < next_visited_z, advancing m_layer_idx as it
-    // goes so subsequent sync_to_z continues from the right index.
+    // s79j — Bug 04 residual: emit orphan plan slots between the previously visited z
+    // and `next_visited_z` (support air-gap layers exist in NeoTower's plan but are
+    // absent from layers_to_print, so the normal pipeline never dispatches their TCRs).
     // Defined out-of-line in GCode.cpp to access append_tcr2.
     std::string emit_orphan_finish_layers_until_z(GCode& gcodegen, float next_visited_z);
     // NEOTKO_NEOTOWER_TAG_END
 
-    // If local_z_unplanned is true, emit a wipe/toolchange without consuming the preplanned
-    // per-layer wipe-tower sequence (used by Local-Z phase-b extra toolchanges).
-    std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer, bool local_z_unplanned = false,
-                            double local_z_nominal_layer_z = -1.);
-    bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
-    std::string finalize(GCode &gcodegen);
-    std::vector<float> used_filament_length() const;
-
-    bool is_first_print() const { return m_is_first_print;}
-    void set_is_first_print(bool is) { m_is_first_print = is; }
-
-    // NEOTKO_MULTIPASS_TAG_START
+    // NEOTKO_MULTIPASS_TAG_START — hardening P4 (port s129).
     // Called when the MP group recovery block (P4) uses set_extruder() to
     // restore the printer to the expected initial tool of the current layer, bypassing
     // the normal WT toolchange path. If the WT plan's next pending TCR targets exactly
@@ -197,65 +170,22 @@ public:
     }
     // NEOTKO_MULTIPASS_TAG_END
 
-    // NEOTKO_NEOTOWER_TAG_START — Bug: nominal post-sublayer layer has no WT plan entry.
-    // When a sublayer group is dispatched as separate layers_to_print entries, each calls
-    // next_layer(), leaving m_layer_idx pointing to the NEXT real TC layer by the time
-    // the nominal GCode layer (e.g. z=2.28) starts. The finish_layer=true call in its
-    // extruder_loop would incorrectly dispatch that future TC. Fix: detect the mismatch
-    // in the phantom recovery block, undo the premature m_layer_idx advance, and suppress
-    // the finish_layer dispatch for that one extruder_loop pass.
-    // Note: no NEOTKO_LOG here — method is inline in .hpp which lacks NeoDebug includes.
-    // Tracing happens in is_empty_wipe_tower_gcode() in GCode.cpp where NEOTKO_LOG compiles.
-    bool m_suppress_finish_layer = false;
+    std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer,
+                            bool local_z_unplanned = false,
+                            double local_z_nominal_layer_z = -1.,
+                            // NEOTKO_NEOTOWER_TAG s131 — sublayer disambiguation for the
+                            // local_z_unplanned get_tcr() lookup. Sub-prime callers want the
+                            // sublayer channel (true); real-layer recovery (BareRecover→PURGE)
+                            // must use the real channel (false) so it picks the real-layer TCR
+                            // that carries the structural drawer wall, not the µm-colliding
+                            // sublayer purge.
+                            bool local_z_sublayer_ctx = true);
+    bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
+    std::string finalize(GCode &gcodegen);
+    std::vector<float> used_filament_length() const;
 
-    // TODO P5-cleanup: with identity events in a separate channel and tc_idx
-    // counting only real TCs, this suppress mechanism may be redundant. Verify
-    // with regression suite (especially Bug 9, Bug 11 scenarios) before removing.
-    void suppress_finish_layer_if_future_layer(float nominal_print_z) {
-        if (m_layer_idx < 0 || m_layer_idx >= (int)m_tool_changes.size()) return;
-        if (m_tool_changes[m_layer_idx].empty()) return;
-        const float wt_z = (float)m_tool_changes[m_layer_idx].front().print_z;
-        // NEOTKO_NEOTOWER_TAG — hardening P2: central epsilon
-        if (wt_z > nominal_print_z + NeoTowerZ::Z_EPS_FUTURE_TC) {
-            --m_layer_idx;
-            // NEOTKO_NEOTOWER_TAG — Bug 01_ fix: after rewinding, check whether the
-            // rewound plan layer IS the current print_z (a real TC layer for this z).
-            //
-            // Original code always exhausted tc_idx and set m_suppress_finish_layer=true.
-            // This was correct for post-sublayer nominal layers (e.g. z=2.28) where the
-            // rewound layer is ALSO a future layer (e.g. plan[K-1]=z=2.48 > z=2.28).
-            //
-            // But at z=2.48 (a real TC layer), m_layer_idx pointed to plan[K]=z=2.68
-            // (future), so suppress fired and rewound to plan[K-1]=z=2.48.  The old code
-            // then exhausted plan[K-1] and set suppress=true → IS_EMPTY_WT returned true
-            // → the real TC (T2→T0) was silently skipped → tool stayed wrong for all
-            // upper objects.
-            //
-            // Fix: if the rewound layer's z matches the current print_z, this IS the real
-            // TC layer — do NOT exhaust tc_idx (next_layer() already reset it to 0) and
-            // do NOT set m_suppress_finish_layer.  The TC will be dispatched normally.
-            // Only exhaust+suppress when the rewound layer is ALSO a future layer.
-            if (m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size()) {
-                const bool rewound_is_future =
-                    !m_tool_changes[m_layer_idx].empty() &&
-                    (float)m_tool_changes[m_layer_idx].front().print_z
-                        > nominal_print_z + NeoTowerZ::Z_EPS_FUTURE_TC;
-                if (rewound_is_future) {
-                    // Rewound layer is still a future layer → original behaviour:
-                    // exhaust tc_idx so any bypass of m_suppress_finish_layer hits the
-                    // "empty first layer" guard instead of silently mis-dispatching.
-                    m_tool_change_idx = (int)m_tool_changes[m_layer_idx].size();
-                    m_suppress_finish_layer = true;
-                }
-                // else: rewound layer z ≈ nominal_print_z → real TC layer.
-                // tc_idx was reset to 0 by next_layer() — keep it.
-                // m_suppress_finish_layer stays false — IS_EMPTY_WT dispatches normally.
-            } else {
-                m_suppress_finish_layer = true;
-            }
-        }
-    }
-    // NEOTKO_NEOTOWER_TAG_END
+    bool is_first_print() const { return m_is_first_print;}
+    void set_is_first_print(bool is) { m_is_first_print = is; }
 
     bool enable_timelapse_print() const { return m_enable_timelapse_print; }
 
@@ -267,6 +197,10 @@ private:
     // Postprocesses gcode: rotates and moves G1 extrusions and returns result
     std::string post_process_wipe_tower_moves(const WipeTower::ToolChangeResult& tcr, const Vec2f& translation, float angle) const;
     // Left / right edges of the wipe tower, for the planning of wipe moves.
+
+    Vec2d extruder_offset_at(size_t extruder_id) const;
+
+private:
     const float                                                  m_left;
     const float                                                  m_right;
     const Vec2f                                                  m_wipe_tower_pos;
@@ -285,13 +219,10 @@ private:
     std::vector<size_t>                                          m_local_z_tool_change_idx;
     std::vector<size_t>                                          m_local_z_reserve_slot_idx;
     double                                                       m_last_wipe_tower_print_z = 0.f;
-    // NEOTKO_NEOTOWER_TAG_START s79j — Bug 04 residual: floor z for orphan emit.
-    // emit_orphan_finish_layers_until_z scans m_tool_changes whose print_z is in
-    // (m_orphan_floor_z, next_visited_z - EPS). After draining, updates the floor
-    // to next_visited_z so the next call doesn't re-emit entries already drained.
-    // Initialised to -infinity so the first call considers all entries < first z.
+    // NEOTKO_NEOTOWER_TAG — structural-layer sync (sync_to_z / orphan-emit). Inert
+    // unless m_neo_tower is active (set at dispatch sites, increment 2).
+    bool                                                         m_suppress_finish_layer = false;
     float                                                        m_orphan_floor_z = std::numeric_limits<float>::lowest();
-    // NEOTKO_NEOTOWER_TAG_END
 
     // BBS
     Vec3d                                                        m_plate_origin;
@@ -377,12 +308,6 @@ public:
     // inside the generated string and after the G-code export finishes.
     std::string     placeholder_parser_process(const std::string &name, const std::string &templ, unsigned int current_extruder_id, const DynamicConfig *config_override = nullptr);
     bool            enable_cooling_markers() const { return m_enable_cooling_markers; }
-    // NEOTKO_NEOARACHNE_TAG s94 task#9 — exposed for Wipe::calculateWipeRetractionLengths
-    // so it can rebalance retract_before_wipe to ≥50% for NeoArachne paths.
-    // True when the most recently extruded path had force_no_spiral_lift set,
-    // which is the marker NeoArachne::Plan and NeoArachneInterior put on every
-    // NeoArachne emission (outer + inner + closures).
-    bool            last_path_force_no_spiral_lift() const { return m_last_path_force_no_spiral_lift; }
     std::string     extrusion_role_to_string_for_parser(const ExtrusionRole &);
 
     // For Perl bindings, to be used exclusively by unit tests.
@@ -409,9 +334,9 @@ public:
     {
         LayerToPrint() : object_layer(nullptr), support_layer(nullptr), original_object(nullptr),
                          mp_sublayer(nullptr), mp_object(nullptr), mp_layer_id(0), mp_print_z(0.) {}
-        const Layer*             object_layer;
-        const SupportLayer*      support_layer;
-        const PrintObject*       original_object; //BBS: used for shared object logic
+        const Layer* 		object_layer;
+        const SupportLayer* support_layer;
+        const PrintObject*  original_object; //BBS: used for shared object logic
         // NEOTKO_MULTIPASS_TAG_START — virtual sublayer fields (MultiPassSubLayer forward-declared)
         const MultiPassSubLayer* mp_sublayer;  // non-null → this entry is a virtual MP sublayer
         const PrintObject*       mp_object;    // owning PrintObject for mp_sublayer
@@ -632,27 +557,6 @@ private:
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
 
-    // NEOTKO_MPSCHEDULER_TAG s79e — suppression-aware print classifier (single source of
-    // truth for MP_RECOVERY_DIAG debug, BareRecover→PURGE bug01 fix, and BUG02_FIX
-    // skip-all-empty bug02 fix). Members of GCode so they can name ObjectByExtruder
-    // (which is private). Stateless; no `this` access — kept static.
-    //
-    // `obj_perim_suppressed` is indexed by `obj_idx` in `print.objects()` order (the
-    // same indexing as the inner vector of by_extruder). True iff that object has
-    // multipass sublayers at its layer-id matching this print_z, which is the real
-    // per-object check GCode performs at extrude_perimeters time (~L8239). This is
-    // critical for MIXED SCENES (sandwich object + non-sandwich object on the same
-    // real layer): the per-layer flag `mp_perim_override_active` is set if ANY object
-    // has sublayers, so using it for all objects mis-classifies non-sandwich objects'
-    // perimeters as suppressed and drops their output (regression seen at z=1 of
-    // session s79e test set).
-    static int mp_tool_emits(unsigned int                                                   tid,
-                             const std::map<unsigned int, std::vector<ObjectByExtruder>>&   by_extruder,
-                             const std::vector<bool>&                                       obj_perim_suppressed);
-    static int mp_first_printing(const std::vector<unsigned int>&                           layer_extruders,
-                                 const std::map<unsigned int, std::vector<ObjectByExtruder>>& by_extruder,
-                                 const std::vector<bool>&                                   obj_perim_suppressed);
-
     // BBS
     LiftType to_lift_type(ZHopType z_hop_types);
 
@@ -726,11 +630,6 @@ private:
     bool                                m_enable_extrusion_role_markers;
     // Keeps track of the last extrusion role passed to the processor
     ExtrusionRole                       m_last_processor_extrusion_role;
-    // NEOTKO_NEOARACHNE_TAG s93 — tracks ExtrusionPath::force_no_spiral_lift
-    // of the most recently extruded path. Read in needs_retraction() to
-    // downgrade SpiralLift → LazyLift on travel-after-NeoArachne. Reset
-    // when extruding any path that does NOT set the flag (Classic paths).
-    bool                                m_last_path_force_no_spiral_lift = false;
     // How many times will change_layer() be called?
     // change_layer() will update the progress bar.
     unsigned int                        m_layer_count;
@@ -779,9 +678,10 @@ private:
     std::unique_ptr<AdaptivePAProcessor>      m_pa_processor;
 
     std::unique_ptr<WipeTowerIntegration> m_wipe_tower;
-    // NEOTKO_NEOTOWER_TAG_START — non-owning; NeoTower instance owned by Print::m_neo_tower
+    // NEOTKO_NEOTOWER_TAG — non-owning; NeoTower instance owned by Print::m_neo_tower.
+    // Bound at the m_wipe_tower.reset() site; nullptr when neotko_tower_type==Classic
+    // (all NeoTower dispatch branches gated on it → stock tower byte-identical).
     NeoTower*                             m_neo_tower = nullptr;
-    // NEOTKO_NEOTOWER_TAG_END
 
     std::unique_ptr<SmallAreaInfillFlowCompensator> m_small_area_infill_flow_compensator;
     
@@ -869,74 +769,27 @@ private:
     // NEOTKO_COLORMIX_TAG — s58 per-path pre-computed surface_t for PathBlend.
     // Populated by extrude_infill() before iterating an EEC when
     // surface_color_mix_lane_mode != Default.  Each PathBlend-eligible path gets
-    // a t in [0..1] computed according to the chosen lane mode (1=GeoSort,
-    // 2=LaneQuant, 3=DirCluster) projected perpendicular to the fill direction.
-    // When the map is empty OR the path is missing, extrude_path falls back to
-    // the legacy Y-bbox formula.
+    // a t in [0..1] computed according to the chosen lane mode.
     std::map<const ExtrusionPath*, double> m_pathblend_path_t;
 
-    // NEOTKO_PATHBLEND_TAG — s59 path-pointer mismatch fix.
-    // extrude_entity() → extrude_path() → _extrude(path) receives a LOCAL COPY of
-    // the ExtrusionPath (always at the same stack address per iteration), not the
-    // original pointer stored in eec->entities.  Looking up m_pathblend_path_t
-    // with &path therefore always misses → _extrude falls back to the bbox-Y
-    // formula.  For Default lane mode the map is also populated with bbox-Y t,
-    // so the result happens to match.  For lane modes 1/2/3 the map holds
-    // geometric t (perpendicular projection) but _extrude returns bbox-Y t —
-    // print order (set by the sort) and Z (set by _extrude's t) diverge → the
-    // first path written has bbox-Y t ≈ 0.85, max-z safety pins z for the rest
-    // of the pass → no Z gradient.
-    //
-    // Fix: key the map by a stable signature derived from the polyline values
-    // (first point + last point + size).  Polyline values survive copies; only
-    // the container address changes.  Collisions among distinct PB paths in the
-    // same EEC are extremely unlikely (fill segments rarely share both endpoints).
+    // NEOTKO_PATHBLEND_TAG — s59 path-pointer mismatch fix. Key the map by a stable
+    // signature derived from the polyline values (first point + last point + size),
+    // because extrude_path receives a LOCAL COPY of the path (address changes, values survive).
     std::map<uint64_t, double> m_pathblend_polyline_t;
 
-    // NEOTKO_PATHBLEND_TAG — Fase 5 s73: m_pathblend_layer_extruders REMOVED.
-    // pass_idx is now derived from config order (pb.tool[]) in _extrude — the
-    // physical-print-order derivation it used to feed was the root cause of
-    // the s71 "tool<->pasada inversion" bug (test 03 s72).  Inter-pass physical
-    // ordering (ramp before cap) is now enforced upstream by suppressing the
-    // std::rotate in process_layer when PB is active.
-
     // NEOTKO_PATHBLEND_TAG — s58 Bug 2 safety: max-z reached per (layer, pass).
-    // PathBlend's standalone mode can produce dangerous gcode where, within a
-    // single pass, the nozzle starts at HIGH z with LOW flow and ENDS at LOW z
-    // with HIGH flow.  As Z descends, the high-flow extrusions are emitted BELOW
-    // the previously-extruded thin top, risking lifts/blobs/print failures.
-    //
-    // SAFETY: track the maximum z reached so far per (layer_index, pass_idx).
-    // In PathBlendEngine::apply_path, if the new z_pass would be lower than the
-    // recorded max for this pass within this layer, clamp z to that max.  The
-    // nozzle then never descends within a pass — only ascends or stays flat.
-    // The user explicitly requested this safety after observing the dangerous
-    // pattern in real prints (log02b, circulo-02.gcode).
-    //
-    // Reset at the start of every real layer in process_layer.
-    // Key: pass_idx (int).  Value: max z reached so far (mm).
+    // Clamp z so the nozzle never descends within a pass. Reset every real layer.
     std::map<int, double> m_pathblend_max_z_per_pass;
 
-    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend-as-sublayer context.
-    // PathBlend no longer runs in the real-layer extrude path. It is compiled into
-    // ramp(+cap) single-tool sublayers (Fill.cpp FASE 2). When the sublayer dispatch
-    // (process_layer) emits a PathBlend sublayer it sets this context, then calls
-    // extrude_entity normally; extrude_path's PB branch fires on m_pb_sub_pass >= 0
-    // (NOT on m_layer/m_config, which are unavailable/unreliable in sublayer dispatch)
-    // and routes the path through PathBlendEngine::apply_path with these values.
-    // surface_t still comes from the existing m_pathblend_surface_bbox fallback,
-    // which the dispatch sets to the sublayer's fill bbox. Cleared after each sub.
+    // NEOTKO_PATHBLEND_TAG — Fase 5 s77: PathBlend-as-sublayer dispatch context.
+    // Set by the sublayer dispatch (process_layer) before calling extrude_entity;
+    // extrude_path's PB branch fires on m_pb_sub_pass >= 0. Cleared after each sub.
     const PathBlendPassConfig* m_pb_sub_cfg          = nullptr; // points to a dispatch-local pb
     int                        m_pb_sub_pass         = -1;      // 0 = ramp, 1 = cap
     ExtrusionRole              m_pb_sub_role         = erTopSolidInfill;
     double                     m_pb_sub_nominal_z    = 0.0;
     double                     m_pb_sub_layer_height = 0.0;
-    // NEOTKO_PATHBLEND_TAG — s88 continuous chain: track previous PB sublayer
-    // tool + last XY emitted. When the next sublayer starts and the prev was
-    // PB same tool AND XY distance ≤ pathblend_chain_max_xy_mm, suppress the
-    // retract+wipe+lift and emit only travel_to_z → continuous extrusion
-    // within the same scanline group. Reset whenever a non-PB sublayer or a
-    // toolchange interrupts the chain. -1 = no chain active.
+    // NEOTKO_PATHBLEND_TAG — s88 continuous chain: track prev PB sublayer tool + last XY.
     int                        m_pb_chain_prev_tool  = -1;
     Vec2d                      m_pb_chain_prev_xy    = Vec2d::Zero();
     // NEOTKO_PATHBLEND_TAG_END
@@ -973,6 +826,20 @@ private:
         size_t                                                  object_idx,
         size_t                                                  num_objects,
         size_t                                                  num_islands);
+
+    // NEOTKO_MPSCHEDULER_TAG s79e (port s129) — suppression-aware print classifier.
+    // Single source of truth for MP_RECOVERY_DIAG / BareRecover→PURGE / BUG02_FIX.
+    // Static members so they can name ObjectByExtruder (private nested type).
+    // obj_perim_suppressed is a per-LAYER aggregate done per-OBJECT: the per-layer
+    // flag mp_perim_override_active is true if ANY object has sublayers, so applying
+    // it to all objects would mis-classify non-sandwich objects' perimeters as
+    // suppressed and drop their output in mixed scenes.
+    static int mp_tool_emits(unsigned int                                                   tid,
+                             const std::map<unsigned int, std::vector<ObjectByExtruder>>&   by_extruder,
+                             const std::vector<bool>&                                       obj_perim_suppressed);
+    static int mp_first_printing(const std::vector<unsigned int>&                           layer_extruders,
+                                 const std::map<unsigned int, std::vector<ObjectByExtruder>>& by_extruder,
+                                 const std::vector<bool>&                                   obj_perim_suppressed);
 
     friend class Wipe;
     friend class WipeTowerIntegration;

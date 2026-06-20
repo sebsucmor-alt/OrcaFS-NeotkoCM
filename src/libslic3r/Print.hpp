@@ -14,9 +14,7 @@
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
-// NEOTKO_NEOTOWER_TAG_START
-#include "NeoTower.hpp"
-// NEOTKO_NEOTOWER_TAG_END
+#include "NeoTower.hpp"  // NEOTKO_NEOTOWER_TAG
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
@@ -27,6 +25,7 @@
 
 #include <functional>
 #include <set>
+#include <vector>
 
 #include "calib.hpp"
 
@@ -41,6 +40,10 @@ class SupportLayer;
 // BBS
 class TreeSupportData;
 class TreeSupport;
+class PresetCollection;
+class PresetBundle;
+struct NozzleFilamentRuleMismatch;
+struct ExtrusionLayers;
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
 // BBS: move from PrintObjectSlice.cpp
@@ -85,7 +88,6 @@ struct SubLayerPlan
     std::vector<ExPolygons> fixed_painted_masks_by_extruder;
     ExPolygons              base_masks;
 };
-
 
 enum SupportNecessaryType {
     NoNeedSupp=0,
@@ -219,49 +221,6 @@ class ConstSupportLayerPtrsAdaptor : public ConstVectorOfPtrsAdaptor<SupportLaye
     ConstSupportLayerPtrsAdaptor(const SupportLayerPtrs *data) : ConstVectorOfPtrsAdaptor<SupportLayer>(data) {}
 };
 
-// NEOTKO_SANDWICH_TAG — opaque declaration of the Sandwich pass-kind enum
-// (full definition in SurfaceColorMix.hpp). Fixed underlying type → complete
-// type here, so MultiPassSubLayer::effect can be declared without the heavy
-// SurfaceColorMix.hpp include. 1 == SurfacePassKind::Solid.
-enum class SurfacePassKind : int;
-
-// NEOTKO_MULTIPASS_TAG_START — Virtual sublayer for MultiPass Z-stacking
-struct MultiPassSubLayer {
-    coordf_t                  print_z    = 0.;                 // absolute Z of this sub-layer
-    float                     height     = 0.f;                // extrusion height H_sub = H * ratio
-    int                       tool_id    = 0;                  // 0-based physical extruder
-    int                       pass_idx   = 0;                  // 0-based position in MultiPassConfig
-    // NEOTKO_SANDWICH_TAG — effect kind of this pass (informational / debug).
-    // A ColorMix lámina is emitted as N separate single-tool bucket sublayers
-    // (Fill.cpp FASE 2), so the GCode handler / ToolOrdering / NeoTower treat
-    // every sublayer uniformly — exactly like a MultiPass pass — regardless of
-    // `effect`. 1 == SurfacePassKind::Solid.
-    SurfacePassKind           effect     = static_cast<SurfacePassKind>(1); // Solid
-    ExtrusionRole             role       = erTopSolidInfill;   // role for ;TYPE: visualizer comment
-    int                       speed_pct  = 100;                // M220 Sxx override (100 = no change)
-    std::string               gcode_start;                     // injected before fills
-    std::string               gcode_end;                       // injected after fills
-    ExtrusionEntityCollection fills;          // infill paths — tool stored directly, no mm3 encoding
-    ExtrusionEntityCollection perimeters;     // cloned+scaled perimeter paths (multipass_perimeter_override only)
-    // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: PathBlend ramp/cap as a sublayer.
-    // pathblend_pass: -1 = not a PathBlend sublayer (Solid/ColorMix — emitted flat by
-    // the GCode handler); 0 = ramp (variable-Z), 1 = cap (Full only). When >= 0 the
-    // handler routes `fills` through PathBlendEngine::apply_path() using `pathblend_blob`
-    // (PathBlendPassConfig::to_blob_json(), decoded at dispatch — avoids pulling the
-    // heavy SurfaceColorMix.hpp into Print.hpp) + `role` + this pass index. This keeps
-    // the variable-Z geometry identical to the legacy engine while the SCHEDULING
-    // (one tool per sublayer, own print_z) joins the proven MultiPass/ColorMix model.
-    int                       pathblend_pass = -1;
-    std::string               pathblend_blob;
-    // NEOTKO_PATHBLEND_TAG — s87 B-bands: actual nozzle Z at which the band
-    // prints. print_z stays canonical (µm-stepped near nominal) so the wipe
-    // tower / ToolOrdering treat bands as co-planar buckets of one layer;
-    // the dispatcher (GCode.cpp) substitutes real_extrude_z for the Z move
-    // when > 0. Default 0 = legacy behaviour (move to print_z).
-    coordf_t                  real_extrude_z = 0.;
-};
-// NEOTKO_MULTIPASS_TAG_END
-
 // Single instance of a PrintObject.
 // As multiple PrintObjects may be generated for a single ModelObject (their instances differ in rotation around Z),
 // ModelObject's instancess will be distributed among these multiple PrintObjects.
@@ -386,6 +345,49 @@ private:
     size_t                                      m_ref_cnt{ 0 };
 };
 
+// NEOTKO_SANDWICH_TAG — opaque declaration of the Sandwich pass-kind enum
+// (full definition in SurfacePassKind.hpp). Fixed underlying type → complete
+// type here, so MultiPassSubLayer::effect can be declared without the heavy
+// SurfaceColorMix.hpp include. 1 == SurfacePassKind::Solid.
+enum class SurfacePassKind : int;
+
+// NEOTKO_MULTIPASS_TAG_START — Virtual sublayer for MultiPass / Sandwich Z-stacking.
+// Built by the Sandwich engine (Fill.cpp FASE 2) and consumed by the GCode
+// dispatcher + NeoTower. One real layer expands into N single-tool sublayers,
+// each at its own print_z. Ported as a data hook for NeoTower (the producer side
+// lands with the Sandwich engine; until then the vector stays empty and NeoTower
+// falls back to the plain real-layer path).
+struct MultiPassSubLayer {
+    coordf_t                  print_z    = 0.;                 // absolute Z of this sub-layer
+    float                     height     = 0.f;                // extrusion height H_sub = H * ratio
+    int                       tool_id    = 0;                  // 0-based physical extruder
+    int                       pass_idx   = 0;                  // 0-based position in MultiPassConfig
+    // NEOTKO_SANDWICH_TAG — effect kind of this pass (informational / debug).
+    // A ColorMix lámina is emitted as N separate single-tool bucket sublayers
+    // (Fill.cpp FASE 2), so the GCode handler / ToolOrdering / NeoTower treat
+    // every sublayer uniformly — exactly like a MultiPass pass — regardless of
+    // `effect`. 1 == SurfacePassKind::Solid.
+    SurfacePassKind           effect     = static_cast<SurfacePassKind>(1); // Solid
+    ExtrusionRole             role       = erTopSolidInfill;   // role for ;TYPE: visualizer comment
+    int                       speed_pct  = 100;                // M220 Sxx override (100 = no change)
+    std::string               gcode_start;                     // injected before fills
+    std::string               gcode_end;                       // injected after fills
+    ExtrusionEntityCollection fills;          // infill paths — tool stored directly, no mm3 encoding
+    ExtrusionEntityCollection perimeters;     // cloned+scaled perimeter paths (multipass_perimeter_override only)
+    // NEOTKO_PATHBLEND_TAG — PathBlend ramp/cap as a sublayer.
+    // pathblend_pass: -1 = not a PathBlend sublayer (Solid/ColorMix — emitted flat by
+    // the GCode handler); 0 = ramp (variable-Z), 1 = cap (Full only). When >= 0 the
+    // handler routes `fills` through PathBlendEngine::apply_path() using `pathblend_blob`.
+    int                       pathblend_pass = -1;
+    std::string               pathblend_blob;
+    // NEOTKO_PATHBLEND_TAG — s87 B-bands: actual nozzle Z at which the band prints.
+    // print_z stays canonical (µm-stepped near nominal) so the wipe tower /
+    // ToolOrdering treat bands as co-planar buckets of one layer; the dispatcher
+    // substitutes real_extrude_z for the Z move when > 0. Default 0 = legacy.
+    coordf_t                  real_extrude_z = 0.;
+};
+// NEOTKO_MULTIPASS_TAG_END
+
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
 private: // Prevents erroneous use by other classes.
@@ -398,10 +400,6 @@ public:
     void                         configBrimWidth(double m)      {m_config.brim_width.value = m; }
     ConstLayerPtrsAdaptor        layers() const         { return ConstLayerPtrsAdaptor(&m_layers); }
     ConstSupportLayerPtrsAdaptor support_layers() const { return ConstSupportLayerPtrsAdaptor(&m_support_layers); }
-    // NEOTKO_MULTIPASS_TAG_START
-    const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
-    std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
-    // NEOTKO_MULTIPASS_TAG_END
     const Transform3d&           trafo() const          { return m_trafo; }
     // Trafo with the center_offset() applied after the transformation, to center the object in XY before slicing.
     Transform3d                  trafo_centered() const
@@ -412,6 +410,10 @@ public:
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
     LayerPtrs&                   layers()               { return m_layers; }
     SupportLayerPtrs&            support_layers()       { return m_support_layers; }
+    // NEOTKO_MULTIPASS_TAG — per-layer MultiPass/Sandwich sublayers (canonical
+    // source consumed by NeoTower + the GCode dispatcher). Indexed by layer_idx.
+    const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
+    std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
 
     template<typename PolysType>
     static void remove_bridges_from_contacts(
@@ -639,9 +641,10 @@ private:
     SlicingParameters                       m_slicing_params;
     LayerPtrs                               m_layers;
     SupportLayerPtrs                        m_support_layers;
-    // NEOTKO_MULTIPASS_TAG_START
-    std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers; // indexed by layer_idx
-    // NEOTKO_MULTIPASS_TAG_END
+    // NEOTKO_MULTIPASS_TAG — MultiPass/Sandwich sublayers, indexed by layer_idx.
+    // Populated by the Sandwich engine; empty until that lands (NeoTower then
+    // sees no sublayer events and uses the plain real-layer path).
+    std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // BBS
@@ -690,6 +693,7 @@ struct FakeWipeTower
     float rotation_angle;
     float cone_angle;
     Vec2d plate_origin;
+    std::map<float, Polylines> outer_wall;
 
     void set_fake_extrusion_data(Vec2f p, float w, float h, float lh, float d, float bd, Vec2d o)
     {
@@ -817,6 +821,8 @@ struct FakeWipeTower
 
         return paths;
     }
+
+    ExtrusionLayers getTrueExtrusionLayersFromWipeTower() const;
 };
 
 struct WipeTowerData
@@ -993,6 +999,13 @@ public:
     std::vector<unsigned int> object_extruders() const;
     std::vector<unsigned int> support_material_extruders() const;
     std::vector<unsigned int> extruders(bool conside_custom_gcode = false) const;
+    // On-demand evaluation vs filament_hot_bed_nozzles.json (calls extruders(true) once internally).
+    void                filament_rule_mismatch_flags(NozzleFilamentRuleMismatch& out_nozzle_mismatch,
+                                                     bool& out_gesp,
+                                                     bool& out_pei_not_pla,
+                                                     bool& out_pei_tpu,
+                                                     const PresetBundle* preset_bundle = nullptr) const;
+    
     double              max_allowed_layer_height() const;
     bool                has_support_material() const;
     // Make sure the background processing has no access to this model_object during this call!
@@ -1051,6 +1064,7 @@ public:
     size_t                      num_print_regions() const throw() { return m_print_regions.size(); }
     const PrintRegion&          get_print_region(size_t idx) const  { return *m_print_regions[idx]; }
     const ToolOrdering&         get_tool_ordering() const { return m_wipe_tower_data.tool_ordering; }
+    const FakeWipeTower& get_fake_wipe_tower() const { return m_fake_wipe_tower; }
 
     //BBS: plate's origin related functions
     void set_plate_origin(Vec3d origin) { m_origin = origin; }
