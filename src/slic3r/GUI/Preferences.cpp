@@ -1249,6 +1249,17 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
     auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting Snapmaker Orca)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
     auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
+    // NeotkoLIBRE_START — s133: master availability gate for LibreMode (Tier B wall).
+    // OFF by default → Snapmaker only sees Tier A (NeoTower/Sandwich/Painter). ON → the
+    // LibreMode side-button appears and the advanced workflows become reachable. Separate
+    // from the runtime active state (neotko_libre_mode, toggled by the side-button).
+    auto title_neotko = create_item_title(_devL("Neotko"), page, _devL("Neotko"));
+    auto item_neotko_libre_enabled = create_item_checkbox(
+        _devL("Enable Neotko LibreMode (requires restart)"), page,
+        _devL("Master switch for LibreMode: assembly printing, relaxed bed/boundary "
+              "restrictions and extended UX. When off, none of it is shown. Restart required."),
+        50, "neotko_libre_enabled");
+    // NeotkoLIBRE_END
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
     auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset");
@@ -1348,6 +1359,10 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
+    // NeotkoLIBRE_START — s133: master availability gate
+    sizer_page->Add(title_neotko, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_neotko_libre_enabled, 0, wxTOP, FromDIP(3));
+    // NeotkoLIBRE_END
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));

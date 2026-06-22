@@ -135,6 +135,11 @@ public:
     Sidebar &operator=(const Sidebar &) = delete;
     ~Sidebar();
 
+    // NeotkoLIBRE — s133: expose the scrolled host of the Process panel so Plater can
+    // detach/redock it (detachable Process panel). Mirrors the fork's Sidebar getters.
+    wxBoxSizer* get_scrolled_sizer() { return m_scrolled_sizer; }
+    wxPanel*    get_scrolled_panel();
+
     void create_printer_preset();
     void init_filament_combo(PlaterPresetComboBox **combo, const int filament_idx);
     void remove_unused_filament_combos(const size_t current_extruder_count);
@@ -389,6 +394,8 @@ public:
     Sidebar::DockingState get_sidebar_docking_state() const;
 
     void reset_window_layout();
+    void float_params_panel(bool do_float); // NeotkoLIBRE — s133: detachable Process panel
+    void set_neotko_libre_cached(bool v);   // NeotkoLIBRE — s133: slice-time LibreMode flag cache
 
     // Called after the Preferences dialog is closed and the program settings are saved.
     // Update the UI based on the current preferences.
@@ -576,6 +583,10 @@ public:
     void split_object();
     void split_volume();
     void optimize_rotation();
+    // NeotkoLIBRE — Copy/Paste Process Settings (category-filtered: "Speed"/"Quality"/"Strength"/""=All)
+    void copy_process_settings(const std::string& category);
+    void paste_process_settings();
+    bool has_process_settings_clipboard() const;
     // find all empty cells on the plate and won't overlap with exclusion areas
     static std::vector<Vec2f> get_empty_cells(const Vec2f step);
 

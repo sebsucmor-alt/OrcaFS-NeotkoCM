@@ -122,6 +122,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoBase.hpp
     GUI/Gizmos/GLGizmoBrimEars.cpp
     GUI/Gizmos/GLGizmoBrimEars.hpp
+    GUI/Gizmos/GLGizmoAlignStack.cpp
+    GUI/Gizmos/GLGizmoAlignStack.hpp
     GUI/Gizmos/GLGizmoCut.cpp
     GUI/Gizmos/GLGizmoCut.hpp
     GUI/Gizmos/GLGizmoEmboss.cpp
@@ -417,6 +419,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/TabButton.hpp
     GUI/Tab.cpp
     GUI/Tab.hpp
+    # NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab reactive canvas (gated to NeoArachne).
+    GUI/NeoArachnePreviewPanel.hpp
+    GUI/NeoArachnePreviewPanel.cpp
     GUI/TaskManager.cpp
     GUI/TaskManager.hpp
     GUI/TextLines.cpp

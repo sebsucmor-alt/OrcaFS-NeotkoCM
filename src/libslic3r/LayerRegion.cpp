@@ -6,6 +6,7 @@
 #include "PerimeterGenerator.hpp"
 #include "Print.hpp"
 #include "Surface.hpp"
+#include "NeoArachne/NeoArachneEngine.hpp" // NEOTKO_NEOARACHNE_TAG Inc2e (port s134)
 #include "BoundingBox.hpp"
 #include "SVG.hpp"
 #include "Algorithm/RegionExpansion.hpp"
@@ -234,6 +235,16 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
 
     if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();
+    // NEOTKO_NEOARACHNE_TAG Inc2e (port s134) — NeoArachne hybrid wall generator. The real engine
+    // runs only when LibreMode is active (Tier-B gate, slice-time flag neotko_libre_mode injected at
+    // background_process.apply). If a preset carries wall_generator=neoarachne but LibreMode is off,
+    // fall back to stock Arachne (NeoArachne is Arachne-based; closest intent). Spiral mode → Classic.
+    else if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::NeoArachne && !spiral_mode) {
+        if (this->layer()->object()->config().neotko_libre_mode.value)
+            Slic3r::NeoArachne::run(g);
+        else
+            g.process_arachne();
+    }
     else
         g.process_classic();
 }

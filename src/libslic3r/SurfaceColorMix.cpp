@@ -642,6 +642,26 @@ bool SurfaceColorMix::mmu_governs_xy(
     double z_min, double z_max)
 {
     if (!po || surface_xy.empty()) return false;
+
+    // NEOTKO_PAINT_COEXIST_TAG s136 — PRECEDENCE DECISION (user, 2026-06-22):
+    // the Sandwich/ColorStitch painter ALWAYS governs the surfaces it paints; MMU
+    // never suppresses sandwich on a sandwich surface. Rationale: reconciling MMU
+    // top-layer ownership with sandwich per-pass profiles is near-impossible, and
+    // the sandwich painter delimits flat top surfaces better than MMU. MMU still
+    // applies everywhere sandwich does NOT (walls, non-top regions, layers with no
+    // sandwich profile). Returning false here keeps all 3 callsites (assign_and_
+    // group_tools, Fill surface_fill, ToolOrdering) consistent → no wipe-tower
+    // divergence. The original s91 coverage-fraction arbitration is preserved
+    // below (now unreachable) so a gated MMU-governs mode can be reintroduced.
+    {
+        static const bool _sandwich_always_governs = true; // flip to false to restore s91 arbitration
+        if (_sandwich_always_governs) {
+            NEOTKO_LOG(COLORMIX, "s91/coexist mmu_governs_xy z=[" << z_min << ","
+                << z_max << "] → SANDWICH_GOVERNS (s136 precedence: sandwich wins over MMU)");
+            return false;
+        }
+    }
+
     const ModelObject* mo = po->model_object();
     if (!mo) return false;
     bool any_mm = false;

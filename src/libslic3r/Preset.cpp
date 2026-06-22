@@ -910,6 +910,13 @@ static std::vector<std::string> s_Preset_print_options {
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
+     // NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — per-region keys must be whitelisted or they are
+     // invisible in the Objects (per-object) settings tab. See canonical plan bug 2.4d.
+     "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill",
+     "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
+     "neoarachne_max_bead_width_pct", "neoarachne_min_feature_size_pct",
+     "neoarachne_keep_short_tails", "neoarachne_bead_count_hysteresis_pct",
+     "neoarachne_transition_filter_dist_mm",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "min_length_factor",
      "small_perimeter_speed", "small_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","default_junction_deviation",
@@ -928,7 +935,7 @@ static std::vector<std::string> s_Preset_print_options {
      // NEOTKO_NEOTOWER_TAG_END
      "multipass_prime_volume", // NEOTKO_MULTIPASS_PRIME_TAG — per-region sublayer prime volume
      // NEOTKO_SANDWICH_ENGINE_TAG_START — Sandwich engine per-region/object keys (Fase 2)
-     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
+     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_libre_mode", "neotko_assemble_boolean", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
      "interlayer_colormix_surface", "interlayer_colormix_tool_a", "interlayer_colormix_tool_b", "interlayer_colormix_tool_c", "interlayer_colormix_tool_d", "interlayer_colormix_min_length",
      "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate", "interlayer_colormix_mode", "interlayer_colormix_pct_a", "interlayer_colormix_pct_b", "interlayer_colormix_easing",
      "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines", "interlayer_colormix_overlap", "interlayer_colormix_invert", "interlayer_colormix_repetitions", "interlayer_colormix_penu_mode",

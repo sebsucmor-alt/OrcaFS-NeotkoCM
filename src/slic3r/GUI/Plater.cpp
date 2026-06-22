@@ -29,6 +29,7 @@
 #include <future>
 #include <functional>
 #include <sstream>
+#include <fstream> // NEOTKO_LIBRE_TAG — world-space import /tmp debug log
 #include <boost/algorithm/string.hpp>
 #include <boost/iterator/counting_iterator.hpp>
 #include <boost/optional.hpp>
@@ -202,6 +203,24 @@ static const std::pair<unsigned int, unsigned int> THUMBNAIL_SIZE_3MF = { 512, 5
 
 namespace Slic3r {
 namespace GUI {
+
+// NEOTKO_LIBRE_TAG — world-space import trace. Writes to /tmp/libre_debug.log only
+// when ORCA_DEBUG_LIBRE=1 (truncated each launch). The file's mere existence confirms
+// this build carries the world-space gates; its contents show libre state + path taken.
+static std::ofstream* neotko_ws_log()
+{
+    static bool           checked = false;
+    static std::ofstream* log     = nullptr;
+    if (!checked) {
+        checked = true;
+        if (::getenv("ORCA_DEBUG_LIBRE") != nullptr) {
+            log = new std::ofstream("/tmp/libre_debug.log", std::ios::out | std::ios::trunc);
+            if (log->is_open())
+                *log << "=== NEOTKO world-space import debug ===\n" << std::flush;
+        }
+    }
+    return (log && log->is_open()) ? log : nullptr;
+}
 
 wxDEFINE_EVENT(EVT_SCHEDULE_BACKGROUND_PROCESS,     SimpleEvent);
 wxDEFINE_EVENT(EVT_SLICING_UPDATE,                  SlicingStatusEvent);
@@ -2505,6 +2524,9 @@ Sidebar::Sidebar(Plater *parent)
 }
 
 Sidebar::~Sidebar() {}
+
+// NeotkoLIBRE — s133: scrolled panel that hosts the Process panel (impl needs Sidebar::priv).
+wxPanel* Sidebar::get_scrolled_panel() { return p->scrolled; }
 
 void Sidebar::create_printer_preset()
 {
@@ -8424,6 +8446,14 @@ struct Plater::priv
     // GUI elements
     AuiMgr m_aui_mgr;
     wxString m_default_window_layout;
+    // NeotkoLIBRE_START — s133: detachable Process panel (LibreMode).
+    bool     m_params_panel_floated = false;
+    wxString m_libre_window_layout;
+    // s133: cached LibreMode active state, mirrored into the print config at apply time so the
+    // slicer can relax bed/boundary checks. Set ONLY via set_neotko_libre_cached() (toggle/startup).
+    bool     m_neotko_libre_cached = false;
+    void set_neotko_libre_cached(bool v) { m_neotko_libre_cached = v; }
+    // NeotkoLIBRE_END
     wxPanel* current_panel{ nullptr };
     std::vector<wxPanel*> panels;
     Sidebar *sidebar;
@@ -8585,6 +8615,7 @@ struct Plater::priv
     void collapse_sidebar(bool collapse);
     void update_sidebar(bool force_update = false);
     void reset_window_layout();
+    void float_params_panel(bool do_float); // NeotkoLIBRE — s133: detachable Process panel
     Sidebar::DockingState get_sidebar_docking_state();
 
     bool is_view3D_layers_editing_enabled() const { return (current_panel == view3D) && view3D->get_canvas3d()->is_layers_editing_enabled(); }
@@ -8672,6 +8703,14 @@ struct Plater::priv
     /*void take_snapshot(const wxString& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action)
         { this->take_snapshot(std::string(snapshot_name.ToUTF8().data()), snapshot_type); }*/
     int  get_active_snapshot_index();
+
+    // NeotkoLIBRE — Copy/Paste Process Settings (per-object config overrides), category-filtered.
+    // category = "Speed"/"Quality"/"Strength" copies only the keys in that block; "" (empty) = All.
+    DynamicPrintConfig m_process_settings_clipboard;
+    bool m_process_clipboard_is_all = false; // All = replace (assign) on paste; categories = merge (apply)
+    void copy_process_settings(const std::string& category);
+    void paste_process_settings();
+    bool has_process_settings_clipboard() const { return !m_process_settings_clipboard.empty(); }
 
     void undo();
     void redo();
@@ -9007,6 +9046,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     , partplate_list(this->q, &model)
 {
     m_is_dark = wxGetApp().app_config->get("dark_color_mode") == "1";
+    // NeotkoLIBRE — s133: seed the LibreMode slice-time cache from the persisted active state,
+    // so the first slice is correct even if the user never toggles this session.
+    m_neotko_libre_cached = wxGetApp().app_config->get_bool("neotko_libre_mode");
 
     m_aui_mgr.SetManagedWindow(q);
     m_aui_mgr.SetDockSizeConstraint(1, 1);
@@ -9113,6 +9155,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             m_aui_mgr.LoadPerspective(layout, false);
             sidebar_layout.is_collapsed = !sidebar.IsShown();
         }
+        // NeotkoLIBRE — s133: remember the floating-Process-panel layout across sessions.
+        m_libre_window_layout = wxString::FromUTF8(cfg->get("libre_window_layout"));
 
         // Keep tracking the current sidebar size, by storing it using `best_size`, which will be stored
         // in the config and re-applied when the app is opened again.
@@ -9708,6 +9752,67 @@ void Plater::priv::reset_window_layout()
     update_sidebar(true);
 }
 
+// NeotkoLIBRE_START — s133: detach/redock the Process (params) panel as a floatable AuiMgr
+// pane. Adapted from the fork's float_params_panel to Snapmaker 2.3.4's sidebar: the params
+// panel lives inside `scrolled` (sizer = m_scrolled_sizer), not the fork's Sidebar::get_scrolled_*
+// helpers (which don't exist here). Decoupled from the slicing pipeline (no bridge-infill cache).
+void Plater::priv::float_params_panel(bool do_float)
+{
+    auto* pp = wxGetApp().params_panel();
+    if (!pp || !sidebar) return;
+    if (do_float == m_params_panel_floated) return;
+
+    // The Process panel lives inside the sidebar's scrolled host (Snapmaker 2.3.4 keeps it
+    // there; the fork exposed the same via Sidebar::get_scrolled_*).
+    wxBoxSizer* scrolled_sizer = sidebar->get_scrolled_sizer();
+
+    if (do_float) {
+        // Detach the params panel from the sidebar's scrolled sizer (no destroy) and hand it
+        // to the AuiMgr as a right-docked, floatable "Process" pane.
+        scrolled_sizer->Detach(pp);
+        pp->Reparent(q);
+
+        const int em = wxGetApp().em_unit();
+        m_aui_mgr.AddPane(pp, wxAuiPaneInfo()
+            .Name("params_panel")
+            .Caption(_L("Process"))
+            .Right()
+            .Floatable(true)
+            .CloseButton(false)
+            .TopDockable(false)
+            .BottomDockable(false)
+            .BestSize(wxSize(45 * em, -1)));
+
+        if (!m_libre_window_layout.empty())
+            m_aui_mgr.LoadPerspective(m_libre_window_layout, false);
+
+        m_aui_mgr.Update();
+        scrolled_sizer->Layout();
+        m_params_panel_floated = true;
+    } else {
+        // Persist the floating layout, dock it back, then return ownership to the sidebar sizer.
+        m_libre_window_layout = m_aui_mgr.SavePerspective();
+        wxGetApp().app_config->set("libre_window_layout", m_libre_window_layout.utf8_string());
+
+        {
+            auto& pane = m_aui_mgr.GetPane("params_panel");
+            if (pane.IsOk() && pane.IsFloating()) {
+                pane.Dock().Right();
+                m_aui_mgr.Update();
+            }
+        }
+
+        m_aui_mgr.DetachPane(pp);
+        pp->Reparent(sidebar->get_scrolled_panel());
+        pp->Show();
+        scrolled_sizer->Add(pp, 3, wxEXPAND); // same proportion as the original sidebar add
+        m_aui_mgr.Update();
+        scrolled_sizer->Layout();
+        m_params_panel_floated = false;
+    }
+}
+// NeotkoLIBRE_END
+
 Sidebar::DockingState Plater::priv::get_sidebar_docking_state() {
     if (!sidebar_layout.is_enabled) {
         return Sidebar::None;
@@ -9926,6 +10031,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         const bool type_3mf = std::regex_match(path.string(), pattern_3mf);
         // const bool type_zip_amf = !type_3mf && std::regex_match(path.string(), pattern_zip_amf);
         const bool type_any_amf = !type_3mf && std::regex_match(path.string(), pattern_any_amf);
+        // NEOTKO_S3DFACTORY_TAG — Simplify3D .factory: always assembled (see below).
+        const bool type_factory = boost::algorithm::iends_with(path.string(), ".factory");
         // const bool type_prusa   = std::regex_match(path.string(), pattern_prusa);
 
         Slic3r::Model model;
@@ -10646,7 +10753,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 // convert_model_if(model, answer_convert_from_imperial_units == wxID_YES);
             }
 
-             if (!is_project_file && model.looks_like_multipart_object()) {
+             // NEOTKO_S3DFACTORY_TAG — Simplify3D .factory always loads as a single
+             // assembled object: its parts share one world-space layout (base + texts +
+             // icons of a keychain), so keeping them as separate objects scatters them.
+             // Force the assemble path (no dialog) whenever there are ≥2 parts.
+             if (type_factory && model.objects.size() >= 2) {
+                model.convert_multipart_object(filaments_cnt);
+             }
+             else if (!is_project_file && model.looks_like_multipart_object()) {
                MessageDialog msg_dlg(q, _L(
                     "This file contains several objects positioned at multiple heights.\n"
                     "Instead of considering them as multiple objects, should \n"
@@ -10676,8 +10790,31 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
 
         int model_idx = 0;
+        // NEOTKO_LIBRE_TAG / NEOTKO_S3DFACTORY_TAG — world-space import.
+        // center_around_origin() centers ALL axes (incl. Z) → sinks the object to
+        // half its height. Skip it when:
+        //  - the object already carries instances (factory/S3D files are world-space), or
+        //  - LibreMode is active (preserve the file's original XYZ so importing many
+        //    parts without assemble keeps each part's origin Z).
+        const bool _ws_libre = wxGetApp().app_config != nullptr
+            && wxGetApp().app_config->get_bool("neotko_libre_mode");
+        // NEOTKO_LIBRE_TAG — world-space import diagnostics (ORCA_DEBUG_LIBRE=1).
+        if (auto* _lg = neotko_ws_log())
+            *_lg << "file_loop libre=" << _ws_libre
+                 << " type_3mf=" << type_3mf << " type_amf=" << type_any_amf
+                 << " one_by_one=" << one_by_one << "\n" << std::flush;
         for (ModelObject *model_object : model.objects) {
-            if (!type_3mf && !type_any_amf) model_object->center_around_origin(false);
+            const bool _ws_will_center = !type_3mf && !type_any_amf
+                && model_object->instances.empty() && !_ws_libre;
+            if (auto* _lg = neotko_ws_log()) {
+                const BoundingBoxf3 _bb = model_object->raw_mesh_bounding_box();
+                *_lg << "  obj='" << model_object->name
+                     << "' inst=" << model_object->instances.size()
+                     << " rawMinZ=" << _bb.min.z() << " rawCenterZ=" << _bb.center().z()
+                     << " willCenter=" << _ws_will_center << "\n" << std::flush;
+            }
+            if (_ws_will_center)
+                model_object->center_around_origin(false);
 
             // BBS
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("import 3mf IMPORT_LOAD_MODEL_OBJECTS \n");
@@ -10689,7 +10826,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 return empty_result;
             }
 
-            if (!model_object->instances.empty())
+            // NEOTKO_LIBRE_TAG — in LibreMode never snap to bed: keep the file's world Z.
+            if (!model_object->instances.empty() && !_ws_libre)
                 model_object->ensure_on_bed(is_project_file);
         }
 
@@ -10892,10 +11030,38 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
         std::string object_name = object->name.empty() ? fs::path(object->input_file).filename().string() : object->name;
         obj_idxs.push_back(obj_count++);
 
+        // NEOTKO_LIBRE_TAG — "fresh" = a plain import with no pre-existing instances
+        // (STL/OBJ). Fresh imports always snap to the bed (XY world is preserved by
+        // skipping center_around_origin), so a single STL lands on its origin nicely.
+        // Objects that arrive WITH instances (factory/3mf/split-to-objects) keep their
+        // world Z in LibreMode — that's what stops multi-part imports losing their Z.
+        const bool _lmo_was_fresh = model_object->instances.empty();
+
+        // NEOTKO_LIBRE_TAG — world-space import trace (entry).
+        if (auto* _lg = neotko_ws_log()) {
+            const BoundingBoxf3 _bb = object->raw_mesh_bounding_box();
+            *_lg << "lmo entry obj='" << object->name << "' inst=" << model_object->instances.size()
+                 << " split=" << split_object << " allow_neg_z=" << allow_negative_z
+                 << " rawCenterZ=" << _bb.center().z() << "\n" << std::flush;
+        }
+
         if (model_object->instances.empty()) {
 #ifdef AUTOPLACEMENT_ON_LOAD
-            object->center_around_origin();
-            new_instances.emplace_back(object->add_instance());
+            // NEOTKO_LIBRE_TAG — world-space import: in LibreMode the geometry is already
+            // in world coords (file_loop skipped centering too); just add an instance at the
+            // origin so the object appears at its original XYZ instead of sunk to half height.
+            const bool _lmo_libre = wxGetApp().app_config != nullptr
+                && wxGetApp().app_config->get_bool("neotko_libre_mode");
+            if (auto* _lg = neotko_ws_log())
+                *_lg << "load_model_objects obj='" << object->name << "' libre=" << _lmo_libre
+                     << " → " << (_lmo_libre ? "world-space (no center)" : "center+instance")
+                     << "\n" << std::flush;
+            if (_lmo_libre) {
+                new_instances.emplace_back(object->add_instance());
+            } else {
+                object->center_around_origin();
+                new_instances.emplace_back(object->add_instance());
+            }
 #else /* AUTOPLACEMENT_ON_LOAD */
             // if object has no defined position(s) we need to rearrange everything after loading
             // need_arrange = true;
@@ -10938,7 +11104,23 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
             }
         }
 
-        object->ensure_on_bed(allow_negative_z);
+        // NeotkoLIBRE_START — s133: in LibreMode keep the object's Z (don't snap to bed). This is
+        // what makes "Split to objects" preserve the floating Z of the source object (split objects
+        // arrive here with their instance transforms). Fresh world-space import is handled separately.
+        const bool _eob_libre = wxGetApp().app_config->get_bool("neotko_libre_mode");
+        // Fresh imports always snap to bed (XY world kept); only pre-existing-instance
+        // objects respect LibreMode Z (factory/3mf/split keep their world height).
+        const bool _eob_ensure = _lmo_was_fresh || !_eob_libre;
+        if (auto* _lg = neotko_ws_log()) {
+            const BoundingBoxf3 _bb = object->bounding_box_exact();
+            *_lg << "lmo ensure_on_bed obj='" << object->name << "' libre=" << _eob_libre
+                 << " fresh=" << _lmo_was_fresh << " willEnsure=" << _eob_ensure
+                 << " minZ=" << _bb.min.z() << " centerZ=" << _bb.center().z()
+                 << "\n" << std::flush;
+        }
+        if (_eob_ensure)
+            object->ensure_on_bed(allow_negative_z);
+        // NeotkoLIBRE_END
         if (!split_object) {
             //BBS initial assemble transformation
             for (ModelObject* model_object : model.objects) {
@@ -11764,7 +11946,13 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         this->partplate_list.update_slice_context_to_current_plate(background_process);
         this->preview->update_gcode_result(partplate_list.get_current_slice_result());
     }
-    Print::ApplyStatus invalidated = background_process.apply(this->model, wxGetApp().preset_bundle->full_config());
+    // NeotkoLIBRE_START — s133: mirror the cached LibreMode active state into the print config so
+    // the slicer can relax bed/boundary checks (e.g. empty-first-layer for floating objects).
+    // Decoupled from bridge-infill: this only sets neotko_libre_mode, no other behaviour.
+    DynamicPrintConfig _libre_full_cfg = wxGetApp().preset_bundle->full_config();
+    _libre_full_cfg.set_key_value("neotko_libre_mode", new ConfigOptionBool(m_neotko_libre_cached));
+    Print::ApplyStatus invalidated = background_process.apply(this->model, _libre_full_cfg);
+    // NeotkoLIBRE_END
     notify_filament_compatibility_after_apply();
 
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
@@ -18045,6 +18233,8 @@ void Plater::collapse_sidebar(bool collapse) { p->collapse_sidebar(collapse); }
 Sidebar::DockingState Plater::get_sidebar_docking_state() const { return p->get_sidebar_docking_state(); }
 
 void Plater::reset_window_layout() { p->reset_window_layout(); }
+void Plater::float_params_panel(bool do_float) { p->float_params_panel(do_float); } // NeotkoLIBRE — s133
+void Plater::set_neotko_libre_cached(bool v) { p->set_neotko_libre_cached(v); } // NeotkoLIBRE — s133
 
 //BBS
 void Plater::select_curr_plate_all() { p->select_curr_plate_all(); }
@@ -20623,6 +20813,90 @@ void Plater::changed_mesh(int obj_idx)
     p->object_list_changed();
     p->schedule_background_process();
 }
+
+// NeotkoLIBRE — Copy Process Settings. Copies the per-object config overrides of the selected
+// object into a clipboard, filtered to one category ("Speed"/"Quality"/"Strength") or All ("").
+// Support / Multimaterial / Others keys are only carried by All.
+void Plater::priv::copy_process_settings(const std::string& category)
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode")) return;
+
+    // Resolve source object: GL selection first, obj_list as fallback (right-click clears GL sel).
+    int src_idx = -1;
+    {
+        const auto& instances = get_curr_selection().get_selected_object_instances();
+        for (const auto& [obj_idx, inst_idx] : instances)
+            if (obj_idx >= 0 && (size_t) obj_idx < model.objects.size()) { src_idx = obj_idx; break; }
+    }
+    if (src_idx < 0)
+        src_idx = wxGetApp().obj_list()->get_selected_obj_idx();
+    if (src_idx < 0 || (size_t) src_idx >= model.objects.size()) return;
+
+    const DynamicPrintConfig src = model.objects[src_idx]->config.get();
+    m_process_clipboard_is_all = category.empty();
+
+    if (category.empty()) {
+        // All: keep every override as-is.
+        m_process_settings_clipboard = src;
+    } else {
+        DynamicPrintConfig filtered;
+        for (const std::string& key : src.keys()) {
+            const ConfigOptionDef* def = print_config_def.get(key);
+            if (def && def->category == category)
+                filtered.set_key_value(key, src.option(key)->clone());
+        }
+        m_process_settings_clipboard = std::move(filtered);
+    }
+}
+
+// NeotkoLIBRE — Paste Process Settings. Applies the clipboard overrides to all selected objects.
+void Plater::priv::paste_process_settings()
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode")) return;
+    if (m_process_settings_clipboard.empty()) return;
+
+    std::vector<size_t> changed_idxs;
+    {
+        const auto& instances = get_curr_selection().get_selected_object_instances();
+        for (const auto& [obj_idx, inst_idx] : instances) {
+            if (obj_idx < 0 || (size_t) obj_idx >= model.objects.size()) continue;
+            size_t uidx = (size_t) obj_idx;
+            if (std::find(changed_idxs.begin(), changed_idxs.end(), uidx) == changed_idxs.end())
+                changed_idxs.push_back(uidx);
+        }
+        if (changed_idxs.empty()) {
+            std::vector<int> obj_idxs, vol_idxs;
+            wxGetApp().obj_list()->get_selection_indexes(obj_idxs, vol_idxs);
+            for (int idx : obj_idxs) {
+                if (idx < 0 || (size_t) idx >= model.objects.size()) continue;
+                size_t uidx = (size_t) idx;
+                if (std::find(changed_idxs.begin(), changed_idxs.end(), uidx) == changed_idxs.end())
+                    changed_idxs.push_back(uidx);
+            }
+        }
+    }
+    if (changed_idxs.empty()) return;
+
+    take_snapshot("Paste Process Settings");
+    // "All" replaces the whole per-object config (assign); a category paste merges (apply) so it
+    // only overwrites that block's keys, leaving the destination's other overrides intact.
+    for (size_t uidx : changed_idxs) {
+        if (m_process_clipboard_is_all)
+            model.objects[uidx]->config.assign_config(m_process_settings_clipboard);
+        else
+            model.objects[uidx]->config.apply(m_process_settings_clipboard);
+    }
+
+    q->changed_objects(changed_idxs);
+    wxGetApp().params_panel()->notify_object_config_changed();
+}
+
+// NeotkoLIBRE — Copy/Paste Process Settings public forwarders.
+void Plater::copy_process_settings(const std::string& category) { p->copy_process_settings(category); }
+void Plater::paste_process_settings()                           { p->paste_process_settings(); }
+bool Plater::has_process_settings_clipboard() const             { return p->has_process_settings_clipboard(); }
 
 void Plater::changed_object(ModelObject &object){
     assert(object.get_model() == &p->model); // is object from same model?

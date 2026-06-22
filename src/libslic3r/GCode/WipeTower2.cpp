@@ -2207,6 +2207,19 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
                m_perimeter_width; // Don't use the extra spacing for the first layer, but do use the spacing resulting from increased flow.
     // All the calculations in all other places take the spacing into account for all the layers.
 
+    // NEOTKO_NEOTOWER_TAG s136-dbg — purge-truncation ledger (debug-first, NO behavior change).
+    // Proves whether a wipe box ran out of DEPTH before depositing the ordered volume:
+    // the box-full break (~line 2288) fires BEFORE the volume-satisfied break (~2293), so a
+    // box that is too shallow for the ordered volume truncates the purge (the carolina-ibiza
+    // #18 ColorStitch case: real-event slot_height = nominal 0.2 → shallow box → 4 passes).
+    // Gated by ORCA_DEBUG_WIPETOWER / ORCA_DEBUG_ALL; emits to /tmp/neotko_wipetower.log.
+    static const bool _wt_dbgtr = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                               || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+    const float _tr_box_depth = cleaning_box.lu.y() - cleaning_box.ld.y();
+    const float _tr_x_ordered = x_to_wipe; // length still in mm before the loop consumes it
+    int         _tr_exit      = 0;         // 1 = box-full (truncated), 2 = volume satisfied
+    int         _tr_lines     = 0;
+
     // If spare layers are excluded->if 1 or less toolchange has been done, it must be sill the first layer, too.So slow down.
     const float target_speed = is_first_layer() || (m_num_tool_changes <= 1 && m_no_sparse_layers) ?
                                    m_first_layer_speed * 60.f :
@@ -2285,17 +2298,42 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
                 writer.extrude(xl + m_perimeter_width / 2.f, writer.y(), wipe_speed);
         }
 
-        if (writer.y() + float(EPSILON) > cleaning_box.lu.y() - 0.5f * line_width)
+        if (writer.y() + float(EPSILON) > cleaning_box.lu.y() - 0.5f * line_width) {
+            _tr_exit = 1; _tr_lines = i; // NEOTKO_NEOTOWER_TAG s136-dbg — box-full (may truncate)
             break; // in case next line would not fit
+        }
 
         traversed_x -= writer.x();
         x_to_wipe -= std::abs(traversed_x);
         if (x_to_wipe < WT_EPSILON) {
+            _tr_exit = 2; _tr_lines = i; // NEOTKO_NEOTOWER_TAG s136-dbg — ordered volume satisfied
             break;
         }
         // stepping to the next line:
         writer.extrude(writer.x(), writer.y() + dy);
         m_left_to_right = !m_left_to_right;
+    }
+
+    // NEOTKO_NEOTOWER_TAG s136-dbg — emit the purge-truncation ledger for this toolchange.
+    if (_wt_dbgtr && m_layer_info != m_plan.end()) {
+        static std::ofstream _wt_logtr("/tmp/neotko_wipetower.log", std::ios::app);
+        const bool _under = (_tr_exit == 1 && x_to_wipe > WT_EPSILON);
+        _wt_logtr << "[NEOTOWER] PURGE_TRUNC"
+                  << " z="          << m_layer_info->z
+                  << " lh="         << m_layer_height
+                  << " h_wipe="     << _h_wipe
+                  << " tool=T"      << m_current_tool
+                  << " vol_ordered="<< wipe_volume
+                  << " len_ordered="<< _tr_x_ordered
+                  << " len_residual="<< x_to_wipe          // >0 with BOX_FULL == material NOT purged
+                  << " box_depth="  << _tr_box_depth
+                  << " neo_mult="   << _neo_mult
+                  << " wipe_mult="  << _bd_wipe_mult
+                  << " lines="      << (_tr_exit == 0 ? -1 : _tr_lines + 1)
+                  << " exit="       << (_tr_exit == 1 ? "BOX_FULL" : _tr_exit == 2 ? "VOL_OK" : "loop_end")
+                  << (_under ? " [UNDER_PURGE]" : "")
+                  << "\n";
+        _wt_logtr.flush();
     }
 
     // We may be going back to the model - wipe the nozzle. If this is followed
@@ -2801,12 +2839,14 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
     return wipe_volumes;
 }
 
-static float get_wipe_depth(float volume, float layer_height, float perimeter_width, float extra_flow, float extra_spacing, float width)
+static float get_wipe_depth(float volume, float layer_height, float perimeter_width, float extra_flow, float extra_spacing, float width, int line_cushion = 1)
 {
     float length_to_extrude = (volume_to_length(volume, perimeter_width, layer_height)) / extra_flow;
     length_to_extrude       = std::max(length_to_extrude, 0.f);
 
-    return (int(length_to_extrude / width) + 1) * perimeter_width * extra_spacing;
+    // NEOTKO_NEOTOWER_TAG s136 — line_cushion default 1 keeps the stock reservation
+    // byte-identical; NeoTower passes 2 to absorb the raster's box-full half-line margin.
+    return (int(length_to_extrude / width) + line_cushion) * perimeter_width * extra_spacing;
 }
 
 // Appends a toolchange into m_plan and calculates neccessary depth of the corresponding box
@@ -2893,8 +2933,22 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
     float first_wipe_line   = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
 
     float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow * _neo_mult, height_for_depth);
-    float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, height_for_depth, m_perimeter_width, m_extra_flow * _neo_mult,
-                                             m_extra_spacing_wipe, width);
+    // NEOTKO_NEOTOWER_TAG s136 — wipe-box coherence (Plan == Emisión == raster).
+    // The stock reserve models (wipe_volume − first_wipe) with a single line cushion, but
+    // toolchange_Wipe sweeps the FULL wipe_volume and its box-full break (writer.y() >
+    // lu.y − 0.5·line_width) eats ~half a line. At low line-counts — sandwich/ColorStitch
+    // sublayers carry low volume (5 mm³) at the high delta-Z height eff_layer_height gives
+    // the FIRST sublayer of a drawer group — that cushion is consumed and the box truncates
+    // the purge before the ordered volume (carolina #18: 4 lines instead of ~6 → ~35% of the
+    // colour flush lost → cold-start + feed noise when it returns to the part). For NeoTower-
+    // driven towers (gap_wall OFF, set in NeoTower::generate) reserve for the FULL volume and
+    // add one extra cushion line so reserve ≥ raster. Inert on the stock Classic tower
+    // (gap_wall default ON → original first_wipe subtraction + cushion 1, byte-identical).
+    const bool  _neo_driven    = !m_use_gap_wall;
+    const float _vol_for_depth = _neo_driven ? wipe_volume : (wipe_volume - first_wipe_volume);
+    const int   _line_cushion  = _neo_driven ? 2 : 1;
+    float wiping_depth      = get_wipe_depth(_vol_for_depth, height_for_depth, m_perimeter_width, m_extra_flow * _neo_mult,
+                                             m_extra_spacing_wipe, width, _line_cushion);
 
     m_plan.back().tool_changes.push_back(
         WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume, skip_ramming));

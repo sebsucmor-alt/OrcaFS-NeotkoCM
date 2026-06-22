@@ -640,10 +640,10 @@ static const FileWildcards file_wildcards_by_type[FT_SIZE] = {
     /* FT_MODEL */
     {"Supported files"sv,
      {".3mf"sv, ".stl"sv, ".oltp"sv, ".stp"sv, ".step"sv, ".svg"sv, ".amf"sv, ".obj"sv, ".usd"sv, ".usda"sv, ".usdc"sv, ".usdz"sv, ".abc"sv,
-      ".ply"sv}},
+      ".ply"sv, ".factory"sv}}, // NEOTKO_S3DFACTORY_TAG
 #else
     /* FT_MODEL */
-    {"Supported files"sv, {".3mf"sv, ".stl"sv, ".oltp"sv, ".stp"sv, ".step"sv, ".svg"sv, ".amf"sv, ".obj"sv}},
+    {"Supported files"sv, {".3mf"sv, ".stl"sv, ".oltp"sv, ".stp"sv, ".step"sv, ".svg"sv, ".amf"sv, ".obj"sv, ".factory"sv}}, // NEOTKO_S3DFACTORY_TAG
 #endif
     /* FT_ZIP */ {"ZIP files"sv, {".zip"sv}},
     /* FT_PROJECT */ {"Project files"sv, {".3mf"sv}},

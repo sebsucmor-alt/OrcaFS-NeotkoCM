@@ -434,6 +434,18 @@ void NeoTower::collect_all_events(const Print& print)
                             << " z_nom=" << znom
                             << " current_tool: T" << prev << " → T" << current_tool
                             << " (canonical grouped-by-tool end)");
+                        // NEOTKO s136-dbg — full canonical order so we can confirm whether
+                        // mp_group_final_tool's last tool (= 1a rotation entry tool) matches the
+                        // real local-z sublayer emission exit (GCode rotates the real layer via
+                        // nominal_layer_start_extruder = local_z_phase_b exit). Behavior-neutral.
+                        if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+                            auto _ord = mp_group_canon_order(znom, (int)prev);
+                            std::ostringstream _co;
+                            _co << "1a CANON_ORDER z_nom=" << znom << " enter=T" << prev << " order=[";
+                            for (const auto& _k : _ord) _co << "T" << _k.tool_id << "@z" << _k.z_actual << ",";
+                            _co << "] final=T" << current_tool;
+                            NeoDebug::write(NeoDebug::WIPETOWER, _co.str());
+                        }
                     } else {
                         NT_LOG("1a SUBLAYER_TRACK z=" << lt.print_z
                             << " z_um=" << sub_zum << " (same group, current_tool=T"

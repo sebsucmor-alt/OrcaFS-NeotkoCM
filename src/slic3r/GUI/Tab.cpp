@@ -1,6 +1,7 @@
 // #include "libslic3r/GCodeSender.hpp"
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
+#include "NeoArachnePreviewPanel.hpp" // NEOTKO_NEOARACHNE_TAG Inc3 (port s134)
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -6608,6 +6609,37 @@ void TabPrint::build()
         optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
+        // NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — same optgroup as Arachne for visual consistency:
+        // these appear inline below the wall_generator dropdown. Visibility is gated in
+        // ConfigManipulation::toggle_print_fff_options (shown only when wall_generator == NeoArachne
+        // AND LibreMode active). The Preview Lab "tele" canvas is intentionally NOT ported here yet
+        // (deferred Inc 3 — it must appear only when NeoArachne is selected).
+        optgroup->append_single_option_line("neoarachne_outer_wall",           "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_inner_walls",          "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_gap_fill",             "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_allowed_overlap_pct",  "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_min_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_max_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_min_feature_size_pct", "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_keep_short_tails",     "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_bead_count_hysteresis_pct", "quality_settings_wall_generator#neoarachne-neotkoedge");
+        optgroup->append_single_option_line("neoarachne_transition_filter_dist_mm",  "quality_settings_wall_generator#neoarachne-neotkoedge");
+
+        // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab reactive canvas. Unlike the fork, the
+        // panel self-gates: it only shows when wall_generator == NeoArachne (see NeoArachnePreviewPanel
+        // on_poll_timer / ctor), so no "off TV" sits in the optgroup for Classic/Arachne presets.
+        {
+            Line preview_line(_L("Edge Closure preview"), wxEmptyString);
+            preview_line.full_width = 1;
+            Tab* tab_self = this;
+            preview_line.widget = [tab_self](wxWindow* parent) -> wxSizer* {
+                auto* sizer  = new wxBoxSizer(wxHORIZONTAL);
+                auto* canvas = new NeoArachnePreviewPanel(parent, tab_self);
+                sizer->Add(canvas, 1, wxEXPAND | wxALL, 4);
+                return sizer;
+            };
+            optgroup->append_line(preview_line);
+        }
 
         optgroup = page->new_optgroup(L("Walls and surfaces"), L"param_wall_surface");
         optgroup->append_single_option_line("wall_sequence", "quality_settings_wall_and_surfaces#walls-printing-order");
@@ -7127,6 +7159,48 @@ void TabPrint::toggle_options()
             }
         }
     }
+
+    // NeotkoLIBRE — s134: in LibreMode the engine kills ALL internal bridges (bridge_over_infill
+    // is skipped), so the internal-bridge-only knobs have no effect. Grey them out to make that
+    // obvious. We only force them OFF when LibreMode is active; we never re-enable (the normal
+    // toggle logic above keeps the say otherwise). External-bridge knobs (bridge_density/bridge_flow)
+    // and enable_extra_bridge_layer stay enabled: external bridges and their extra layer survive.
+    if (wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+        toggle_option("internal_bridge_density", false);
+        toggle_option("internal_bridge_flow", false);
+        toggle_option("internal_bridge_speed", false);
+        toggle_option("thick_internal_bridges", false);
+        toggle_option("dont_filter_internal_bridges", false);
+    }
+
+    // NeotkoLIBRE — s134: hide "NeoArachne" from the wall_generator combo unless LibreMode is
+    // active (Tier-B gate). Rebuilds the combo's visible enum list from the global def (which always
+    // keeps all 3 values), mirroring the support_style rebuild above. The serialized value still
+    // round-trips — only the visible choices change; the slice-time dispatch falls back to Arachne
+    // if a preset carries neoarachne while LibreMode is off.
+    {
+        Field* wg_field = m_active_page->get_field("wall_generator");
+        if (auto wg_choice = dynamic_cast<Choice*>(wg_field)) {
+            const bool libre_active = wxGetApp().app_config->get_bool("neotko_libre_mode");
+            auto  def = print_config_def.get("wall_generator");
+            auto& opt = const_cast<ConfigOptionDef&>(wg_field->m_opt);
+            auto  cb  = dynamic_cast<ComboBox*>(wg_choice->window);
+            if (cb && def) {
+                auto cur = cb->GetValue();
+                opt.enum_values.clear();
+                opt.enum_labels.clear();
+                cb->Clear();
+                for (size_t i = 0; i < def->enum_values.size() && i < def->enum_labels.size(); ++i) {
+                    if (def->enum_values[i] == "neoarachne" && !libre_active)
+                        continue; // drop NeoArachne from the visible list when LibreMode is off
+                    opt.enum_values.push_back(def->enum_values[i]);
+                    opt.enum_labels.push_back(def->enum_labels[i]);
+                    cb->Append(_(def->enum_labels[i]));
+                }
+                cb->SetValue(cur);
+            }
+        }
+    }
 }
 
 void TabPrint::update()
@@ -7268,8 +7342,12 @@ void TabPrintModel::build()
                 }), opts.end());
                 l.undo_to_sys = true;
             }
+            // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — keep widget-only lines (e.g. the NeoArachne
+            // Preview canvas) in the per-object tab. The default predicate drops every option-less
+            // line, which removed the preview from Objects mode; widget lines must survive so the
+            // preview is editable per object (where it reads that object's wall settings).
             lines.erase(std::remove_if(lines.begin(), lines.end(), [](auto & l) {
-                return l.get_options().empty();
+                return l.get_options().empty() && l.widget == nullptr;
             }), lines.end());
             // TODO: remove items from g->m_options;
             g->have_sys_config = [this] { m_back_to_sys = true; return true; };
@@ -7731,8 +7809,17 @@ void TabPrintObject::notify_changed(ObjectBase * object)
 
 //BBS: GUI refactor
 
+// NeotkoLIBRE — Assembled Parts Full Options: in LibreMode the Part settings tab exposes the same
+// keys as the Object tab (ObjectConfig + RegionConfig) instead of RegionConfig only, so a part
+// inside an assembled object can carry object-level overrides (e.g. XY hole/contour comp).
+// NOTE: the tab is built once at startup → toggling LibreMode needs a restart to take effect.
 TabPrintPart::TabPrintPart(ParamsPanel* parent) :
-    TabPrintModel(parent, PrintRegionConfig().keys())
+    TabPrintModel(parent, ([](){
+        auto* ac = wxGetApp().app_config;
+        if (ac && ac->get_bool("neotko_libre_mode"))
+            return concat(PrintObjectConfig().keys(), PrintRegionConfig().keys());
+        return PrintRegionConfig().keys();
+    })())
 {
     m_parent_tab = wxGetApp().get_model_tab();
 }
@@ -7741,6 +7828,37 @@ void TabPrintPart::notify_changed(ObjectBase * object)
 {
     auto vol = dynamic_cast<ModelVolume*>(object);
     wxGetApp().obj_list()->object_config_options_changed({vol->get_object(), vol});
+}
+
+// NeotkoLIBRE — Assembled Parts Full Options. Copies the ObjectConfig overrides explicitly set on
+// each Part's ModelVolume config up to its parent ModelObject config, then reschedules slicing.
+// RegionConfig keys are handled natively per-volume by the slicer, so only ObjectConfig keys are
+// copied. (XY hole/contour comp also has per-volume engine support and self-corrects via the delta
+// applied in slice_volumes, so this copy-up does not break per-part XY behaviour.) Triggered by the
+// "Refresh Part" SideButton (LibreMode only).
+void TabPrintPart::refresh_part_object_config()
+{
+    const auto obj_key_vec = PrintObjectConfig().keys();
+    const auto is_obj_key = [&obj_key_vec](const std::string& k) {
+        return std::find(obj_key_vec.begin(), obj_key_vec.end(), k) != obj_key_vec.end();
+    };
+
+    bool any_copied = false;
+    for (auto& [obj_base, model_config] : m_object_configs) {
+        auto* vol = dynamic_cast<ModelVolume*>(obj_base);
+        if (!vol) continue;
+        ModelObject* obj = vol->get_object();
+        const DynamicPrintConfig& vol_cfg = model_config->get();
+        for (const std::string& key : vol_cfg.keys()) {
+            if (!is_obj_key(key)) continue;
+            const ConfigOption* opt = vol_cfg.option(key);
+            if (!opt) continue;
+            obj->config.set_key_value(key, opt->clone());
+            any_copied = true;
+        }
+    }
+    if (any_copied)
+        wxGetApp().plater()->schedule_background_process();
 }
 
 static std::string layer_height = "layer_height";

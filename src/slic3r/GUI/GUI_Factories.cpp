@@ -173,6 +173,9 @@ std::vector<std::string> SettingsFactory::get_options(const bool is_part)
         std::vector<std::string> obj_options = obj_config.keys();
         options.insert(options.end(), obj_options.begin(), obj_options.end());
     }
+    // NeotkoLIBRE note: per-part XY comp is surfaced via get_visible_options (Object Table),
+    // not here — get_options feeds the layer/hierarchy "Add settings" menu where a per-volume
+    // override would be a no-op.
     return options;
 }
 
@@ -215,6 +218,16 @@ std::vector<SimpleSettingData> SettingsFactory::get_visible_options(const std::s
         it = OBJECT_CATEGORY_SETTINGS.find(category);
         if (it != OBJECT_CATEGORY_SETTINGS.end())
             options.insert(options.end(), OBJECT_CATEGORY_SETTINGS[category].begin(), OBJECT_CATEGORY_SETTINGS[category].end());
+    } else {
+        // NeotkoLIBRE — expose XY hole/contour compensation on parts (volumes) too, under
+        // Quality, when LibreMode is active. The Object Table reads this list, so this is what
+        // surfaces the keys for an assembled part. Engine applies them per-volume in
+        // PrintObject::slice_volumes.
+        if (category == "Quality" &&
+            wxGetApp().app_config && wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+            options.push_back({"xy_hole_compensation", "", 5});
+            options.push_back({"xy_contour_compensation", "", 6});
+        }
     }
 
     auto sort_func = [](SimpleSettingData& setting1, SimpleSettingData& setting2) {
@@ -854,6 +867,81 @@ wxMenuItem* MenuFactory::append_menu_item_printable(wxMenu* menu)
     return menu_item_printable;
 }
 
+// NeotkoLIBRE — "Assembled Mode (Boolean)" toggle. Checked = boolean union ON (stock default);
+// unchecked = parts sliced without boolean union. Per-object, only meaningful for multi-part
+// (assembled) objects and only available while LibreMode is active.
+wxMenuItem* MenuFactory::append_menu_item_assemble_boolean(wxMenu* menu)
+{
+    wxMenuItem* item = append_menu_check_item(menu, wxID_ANY, _L("Assembled Mode (Boolean)"),
+        _L("When unchecked, the parts of this assembled object are sliced without boolean union "
+           "(overlapping parts keep their own perimeters)."),
+        [](wxCommandEvent&) { obj_list()->toggle_assemble_boolean(); }, menu);
+
+    m_parent->Bind(wxEVT_UPDATE_UI, [](wxUpdateUIEvent& evt) {
+        // Only in LibreMode, and only for a single multi-part object selection.
+        if (!wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+            evt.Enable(false);
+            evt.Check(false);
+            return;
+        }
+        ObjectList* list = obj_list();
+        wxDataViewItemArray sels;
+        list->GetSelections(sels);
+        if (sels.IsEmpty()) { evt.Enable(false); evt.Check(false); return; }
+
+        ItemType type = list->GetModel()->GetItemType(sels[0]);
+        if (!(type & (itObject | itInstance))) { evt.Enable(false); evt.Check(false); return; }
+
+        int obj_idx = list->GetModel()->GetObjectIdByItem(sels[0]);
+        ModelObject* obj = obj_idx < 0 ? nullptr : list->object(obj_idx);
+        const bool multipart = obj && obj->volumes.size() > 1;
+        evt.Enable(multipart);
+
+        // Checked = boolean union ON. Default (no key) = true.
+        bool boolean_on = true;
+        if (obj) {
+            const ConfigOption* opt = obj->config.option("neotko_assemble_boolean");
+            if (opt) boolean_on = opt->getBool();
+        }
+        evt.Check(boolean_on);
+    }, item->GetId());
+
+    return item;
+}
+
+// NeotkoLIBRE — Copy/Paste Process Settings. "Copy Process Settings" submenu with one entry per
+// block (Speed / Quality / Strength) plus All, and a "Paste Process Settings" item. Appended once
+// (guarded) into the persistent object menu, only while LibreMode is active.
+void MenuFactory::append_menu_items_process_clipboard(wxMenu* menu)
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode"))
+        return;
+    if (menu->FindItem(_L("Copy Process Settings")) != wxNOT_FOUND)
+        return; // already added to this persistent menu
+
+    menu->AppendSeparator();
+
+    wxMenu* copy_menu = new wxMenu();
+    auto add_copy = [this, copy_menu, menu](const wxString& label, const std::string& category) {
+        append_menu_item(copy_menu, wxID_ANY, label, "",
+            [category](wxCommandEvent&) { plater()->copy_process_settings(category); }, "", menu,
+            []() { return true; }, m_parent);
+    };
+    add_copy(_L("Speed"),    "Speed");
+    add_copy(_L("Quality"),  "Quality");
+    add_copy(_L("Strength"), "Strength");
+    add_copy(_L("All"),      "");
+    append_submenu(menu, copy_menu, wxID_ANY, _L("Copy Process Settings"),
+                   _L("Copy this object's per-object overrides (by block, or All) to the clipboard"),
+                   "", []() { return true; }, m_parent);
+
+    append_menu_item(menu, wxID_ANY, _L("Paste Process Settings"),
+        _L("Apply the copied process settings to the selected object(s)"),
+        [](wxCommandEvent&) { plater()->paste_process_settings(); }, "", menu,
+        []() { return plater()->has_process_settings_clipboard(); }, m_parent);
+}
+
 void MenuFactory::append_menu_item_rename(wxMenu* menu)
 {
     append_menu_item(menu, wxID_ANY, _L("Rename"), "",
@@ -1378,6 +1466,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_per_object_process(&m_object_menu);
     // Enter per object parameters
     append_menu_item_per_object_settings(&m_object_menu);
+    // NeotkoLIBRE — Assembled Boolean mode (per-object, LibreMode only)
+    append_menu_item_assemble_boolean(&m_object_menu);
     m_object_menu.AppendSeparator();
     append_menu_item_reload_from_disk(&m_object_menu);
     append_menu_item_replace_with_stl(&m_object_menu);
@@ -1763,6 +1853,8 @@ wxMenu* MenuFactory::object_menu()
     append_menu_item_edit_text(&m_object_menu);
     append_menu_item_edit_svg(&m_object_menu);
     append_menu_item_change_filament(&m_object_menu);
+    // NeotkoLIBRE — Copy/Paste Process Settings (by block / All)
+    append_menu_items_process_clipboard(&m_object_menu);
     return &m_object_menu;
 }
 
@@ -1874,6 +1966,8 @@ wxMenu* MenuFactory::multi_selection_menu()
         menu->AppendSeparator();
         append_menu_item_change_filament(menu);
     }
+    // NeotkoLIBRE — Copy/Paste Process Settings across the selected objects
+    append_menu_items_process_clipboard(menu);
     return menu;
 }
 

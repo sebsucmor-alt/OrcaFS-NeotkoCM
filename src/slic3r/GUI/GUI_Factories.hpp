@@ -137,6 +137,10 @@ private:
     wxMenuItem* append_menu_item_change_type(wxMenu* menu);
     wxMenuItem* append_menu_item_instance_to_object(wxMenu* menu);
     wxMenuItem* append_menu_item_printable(wxMenu* menu);
+    // NeotkoLIBRE — "Assembled Mode (Boolean)" check item (per-object, LibreMode only).
+    wxMenuItem* append_menu_item_assemble_boolean(wxMenu* menu);
+    // NeotkoLIBRE — Copy (by block: Speed/Quality/Strength/All) + Paste Process Settings.
+    void append_menu_items_process_clipboard(wxMenu* menu);
     void        append_menu_item_rename(wxMenu* menu);
     wxMenuItem* append_menu_item_fix_through_netfabb(wxMenu* menu);
     //wxMenuItem* append_menu_item_simplify(wxMenu* menu);

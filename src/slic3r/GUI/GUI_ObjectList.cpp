@@ -2994,7 +2994,12 @@ void ObjectList::merge(bool to_multipart_object)
         }
 
         //BBS: ensure on bed, and no need to center around origin
-        new_object->ensure_on_bed();
+        // NeotkoLIBRE_START — s133: in LibreMode keep the assembled (merged) group at its Z instead
+        // of snapping to bed. center_around_origin + translate_instances below preserve world XYZ;
+        // only ensure_on_bed forces Z=0, so gating it alone keeps the floating position.
+        if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+            new_object->ensure_on_bed();
+        // NeotkoLIBRE_END
         new_object->center_around_origin();
         new_object->translate_instances(-new_object->origin_translation);
         new_object->origin_translation = Vec3d::Zero();
@@ -6102,6 +6107,49 @@ void ObjectList::toggle_printable_state()
     // update scene
     wxGetApp().plater()->update();
     wxGetApp().plater()->reload_paint_after_background_process_apply();
+}
+
+// NeotkoLIBRE — toggle per-object Assembled Boolean mode. Flips neotko_assemble_boolean on the
+// selected object(s) config (true = stock boolean union of parts; false = no union, overlaps
+// allowed). Writes to the ModelObject config and reslices. No-op outside LibreMode.
+void ObjectList::toggle_assemble_boolean()
+{
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        return;
+
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    if (sels.IsEmpty())
+        return;
+
+    // New value derived from the first selected object: invert its current state.
+    int frst_obj = m_objects_model->GetObjectIdByItem(sels[0]);
+    if (frst_obj < 0)
+        return;
+    const ConfigOption* cur = object(frst_obj)->config.option("neotko_assemble_boolean");
+    const bool new_boolean = cur ? !cur->getBool() : false; // default is true → first toggle = false
+
+    take_snapshot("Toggle assembled boolean mode");
+
+    std::vector<size_t> obj_idxs;
+    for (wxDataViewItem item : sels) {
+        ItemType type = m_objects_model->GetItemType(item);
+        if (!(type & (itObject | itInstance)))
+            continue;
+        int obj_idx = m_objects_model->GetObjectIdByItem(item);
+        if (obj_idx < 0)
+            continue;
+        object(obj_idx)->config.set_key_value("neotko_assemble_boolean", new ConfigOptionBool(new_boolean));
+        obj_idxs.emplace_back(static_cast<size_t>(obj_idx));
+    }
+    if (obj_idxs.empty())
+        return;
+
+    sort(obj_idxs.begin(), obj_idxs.end());
+    obj_idxs.erase(unique(obj_idxs.begin(), obj_idxs.end()), obj_idxs.end());
+
+    wxGetApp().plater()->changed_objects(obj_idxs);
+    wxGetApp().plater()->update();
 }
 
 ModelObject* ObjectList::object(const int obj_idx) const

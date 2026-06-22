@@ -1370,6 +1370,19 @@ void MainFrame::create_preset_tabs()
     m_param_dialog->panel()->rebuild_panels();
     //m_tabpanel->AddPage(m_param_panel, "Parameters", "notebook_presets_active");
     //m_tabpanel->InsertPage(tpSettings, m_param_panel, _L("Parameters"), std::string("cog"));
+
+    // NeotkoLIBRE_START — s133: float the Process panel on startup when LibreMode is active.
+    // Gated on BOTH the master switch and the runtime state. CallAfter defers until the event
+    // loop starts: a direct call fires before select_tab(tp3DEditor) → AuiMgr::Update() resets panes.
+    if (m_plater
+        && wxGetApp().app_config->get_bool("neotko_libre_enabled")
+        && wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+        CallAfter([this]() {
+            if (m_plater)
+                m_plater->float_params_panel(true);
+        });
+    }
+    // NeotkoLIBRE_END
 }
 
 void MainFrame::add_created_tab(Tab* panel,  const std::string& bmp_name /*= ""*/)
@@ -1624,12 +1637,63 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_btn = new SideButton(this, _L("Print plate"), "");
     m_print_option_btn = new SideButton(this, "", "sidebutton_dropdown", 0, 14);
 
+    // NeotkoLIBRE_START — s133: master-gated LibreMode toggle (the Tier B wall).
+    // Created ONLY when the master switch (Preferences → Neotko → "Enable Neotko LibreMode")
+    // is on. When off, the button is never built/added → Snapmaker sees no LibreMode at all,
+    // which fixes the fork bug where the toggle stayed visible regardless of the setting.
+    if (wxGetApp().app_config->get_bool("neotko_libre_enabled")) {
+        const bool nlm_on = wxGetApp().app_config->get_bool("neotko_libre_mode");
+        m_neotko_libre_btn = new SideButton(this, nlm_on ? "Neotko LM: On" : "Neotko LM: Off", "");
+        m_neotko_libre_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            const bool next = !wxGetApp().app_config->get_bool("neotko_libre_mode");
+            wxGetApp().app_config->set_bool("neotko_libre_mode", next);
+            wxGetApp().app_config->save();
+            // NeotkoLIBRE — s133: update the slice-time cache BEFORE any reslice, then detach/redock
+            // the Process panel. (No bridge-infill behaviour — only the floating/boundary relax.)
+            if (m_plater) {
+                m_plater->set_neotko_libre_cached(next);
+                m_plater->float_params_panel(next);
+            }
+            m_neotko_libre_btn->SetLabel(next ? "Neotko LM: On" : "Neotko LM: Off");
+            m_neotko_libre_btn->Refresh();
+            // NeotkoLIBRE — Assembled Parts Full Options: show/hide the "Refresh Part" button with LM.
+            if (m_neotko_refresh_btn)
+                m_neotko_refresh_btn->Show(next);
+        });
+
+        // NeotkoLIBRE — "↺ Refresh Part": pushes the selected Part's ObjectConfig overrides to its
+        // parent Object, then reschedules slicing. Visible only in LibreMode; no-op if no Part tab.
+        m_neotko_refresh_btn = new SideButton(this, "↺ Refresh Part", "");
+        m_neotko_refresh_btn->SetToolTip(_L("Copies ObjectConfig overrides (e.g. XY compensation) from the "
+                                            "selected Part to its parent Object, then reschedules slicing."));
+        m_neotko_refresh_btn->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
+            auto* part_tab = dynamic_cast<TabPrintPart*>(wxGetApp().get_model_tab(true));
+            if (part_tab)
+                part_tab->refresh_part_object_config();
+        });
+        m_neotko_refresh_btn->Show(nlm_on);
+    } else {
+        // Master off → force the runtime active state off so any (future) behavior gates that
+        // read "neotko_libre_mode" stay inert even if the key was left true from a prior session.
+        if (wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+            wxGetApp().app_config->set_bool("neotko_libre_mode", false);
+            wxGetApp().app_config->save();
+        }
+    }
+    // NeotkoLIBRE_END
+
     update_side_button_style();
     // m_publish_btn->Hide();
     m_slice_option_btn->Enable();
     m_print_option_btn->Enable();
     // sizer->Add(m_publish_btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(1));
     // sizer->Add(FromDIP(15), 0, 0, 0, 0);
+    // NeotkoLIBRE_START — s133: add the toggle to the top bar only when it exists (master on).
+    if (m_neotko_libre_btn)
+        sizer->Add(m_neotko_libre_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
+    if (m_neotko_refresh_btn)
+        sizer->Add(m_neotko_refresh_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
+    // NeotkoLIBRE_END
     sizer->Add(m_slice_option_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     sizer->Add(m_slice_btn       , 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(15));
     sizer->Add(m_print_option_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(2));
@@ -2052,6 +2116,15 @@ void MainFrame::update_side_button_style()
     m_print_option_btn->SetExtraSize(wxSize(FromDIP(10), FromDIP(10)));
     m_print_option_btn->SetIconOffset(FromDIP(2));
     m_print_option_btn->SetMinSize(wxSize(FromDIP(24), FromDIP(24)));
+
+    // NeotkoLIBRE_START — s133: style the LibreMode toggle like the other side buttons.
+    if (m_neotko_libre_btn) {
+        m_neotko_libre_btn->SetTextLayout(SideButton::EHorizontalOrientation::HO_Left, FromDIP(15));
+        m_neotko_libre_btn->SetCornerRadius(FromDIP(12));
+        m_neotko_libre_btn->SetExtraSize(wxSize(FromDIP(38), FromDIP(10)));
+        m_neotko_libre_btn->SetMinSize(wxSize(-1, FromDIP(24)));
+    }
+    // NeotkoLIBRE_END
 }
 
 void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_slice, bool can_print)

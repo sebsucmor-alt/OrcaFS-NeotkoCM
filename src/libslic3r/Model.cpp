@@ -13,6 +13,7 @@
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
+#include "Format/S3DFactory.hpp" // NEOTKO_S3DFACTORY_TAG
 // BBS
 #include "FaceDetector.hpp"
 
@@ -322,6 +323,10 @@ Model Model::read_from_file(const std::string&                                  
         delete_temp_file(temp_stl);
     }
 #endif
+    // NEOTKO_S3DFACTORY_TAG_START — Simplify3D .factory importer (v4.x/v5.x, world-space)
+    else if (boost::algorithm::iends_with(input_file, ".factory"))
+        result = load_s3d_factory(input_file, model);
+    // NEOTKO_S3DFACTORY_TAG_END
     else
         throw Slic3r::RuntimeError(_L("Unknown file format. Input file must have .stl, .obj, .amf(.xml) extension."));
 

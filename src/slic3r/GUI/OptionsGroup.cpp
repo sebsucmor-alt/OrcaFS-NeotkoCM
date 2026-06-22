@@ -233,6 +233,11 @@ Line* OptionsGroup::get_line(const std::string& opt_key)
     {
         if(l.is_separator())
             continue;
+        // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — skip widget-only lines (e.g. the NeoArachne
+        // Preview canvas). They carry no Option, so get_first_option_key() would dereference an
+        // empty vector → EXC_BAD_ACCESS during Tab::decorate's get_line("compatible_printers").
+        if (l.get_options().empty())
+            continue;
         if (l.get_first_option_key() == opt_key)
             return &l;
     }

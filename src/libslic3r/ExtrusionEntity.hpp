@@ -144,6 +144,13 @@ public:
     // Orca: Used for inner/outer/inner mode - classic perimeter generator
     int inset_idx = -1;
 
+    // NEOTKO_NEOARACHNE_TAG Inc2a (port s134) — per-path override for the Auto Lift heuristic.
+    // When true, GCode forces LazyLift instead of SpiralLift even if Auto Lift would pick spiral.
+    // Set by NeoArachneInterior/Plan on all paths a NeoArachne region emits, to stop the spiral-
+    // smear blob bug around dense is_odd/variable-thickness Arachne paths. Default false → stock
+    // behaviour for Classic/Arachne paths. Lives in the base so all entity types carry it.
+    bool force_no_spiral_lift = false;
+
     static std::string role_to_string(ExtrusionRole role);
     static ExtrusionRole string_to_role(const std::string_view role);
 };
@@ -175,6 +182,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
     }
     ExtrusionPath(ExtrusionPath &&rhs)
         : polyline(std::move(rhs.polyline))
@@ -186,6 +194,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
     }
     ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
         : polyline(polyline)
@@ -197,6 +206,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
     }
     ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
         : polyline(std::move(polyline))
@@ -208,6 +218,7 @@ public:
         , m_no_extrusion(rhs.m_no_extrusion)
     {
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
     }
 
     ExtrusionPath& operator=(const ExtrusionPath& rhs) {
@@ -219,6 +230,7 @@ public:
         this->height = rhs.height;
         this->polyline = rhs.polyline;
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
         return *this;
     }
     ExtrusionPath& operator=(ExtrusionPath&& rhs) {
@@ -230,6 +242,7 @@ public:
         this->height = rhs.height;
         this->polyline = std::move(rhs.polyline);
         this->inset_idx = rhs.inset_idx;
+        this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
         return *this;
     }
 

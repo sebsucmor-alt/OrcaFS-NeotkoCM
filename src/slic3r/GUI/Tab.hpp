@@ -534,6 +534,8 @@ public:
 	//BBS: GUI refactor
 	TabPrintPart(ParamsPanel* parent);
 	~TabPrintPart() {}
+	// NeotkoLIBRE — Assembled Parts Full Options: push part's ObjectConfig overrides to parent object.
+	void            refresh_part_object_config();
 protected:
 	virtual void    notify_changed(ObjectBase * object) override;
 };

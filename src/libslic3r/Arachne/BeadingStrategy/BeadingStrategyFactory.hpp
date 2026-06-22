@@ -31,7 +31,14 @@ public:
         coord_t max_bead_count = 0,
         coord_t outer_wall_offset = 0,
         int inward_distributed_center_wall_count = 2,
-        double minimum_variable_line_width = 0.5
+        double minimum_variable_line_width = 0.5,
+        // NEOTKO_NEOARACHNE_TAG Inc2c (port s134) — when neotko_edge_enabled, wrap the meta-chain
+        // (after Redistribute/Widening/OuterInset, BEFORE Limited) with NeoArachneBeadingStrategy.
+        // Defaults preserve stock behaviour.
+        bool   neotko_edge_enabled = false,
+        bool   neotko_edge_pin_outer = true,
+        bool   neotko_edge_cap_widening = false,
+        double neotko_edge_hysteresis_pct = 0.0
     );
 };
 

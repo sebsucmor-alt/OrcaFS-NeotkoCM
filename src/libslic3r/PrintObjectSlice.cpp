@@ -5223,9 +5223,51 @@ void PrintObject::slice_volumes()
     //applyNegtiveVolumes(this->model_object()->volumes, objSliceByVolume, firstLayerObjSliceByGroups, scaled_resolution);
     firstLayerObjSliceByVolume = objSliceByVolume;
 
+    // NeotkoLIBRE — Per-volume XY compensation. If a ModelVolume (part) carries an explicit
+    // xy_contour/hole_compensation override in its per-volume config, apply the DELTA vs the
+    // object-level value to that volume's pre-merge slices. The global object-level compensation
+    // still runs later (make_slices). Net: part with override → its value; part without → object
+    // value. No engine gate needed: only the LibreMode UI exposes these keys on parts, so without
+    // it the per-volume config is empty and this block is a no-op. Pairs with Assembled Boolean
+    // OFF, where the per-part compensation stays separate instead of being merged.
+    if (!objSliceByVolume.empty()) {
+        const float obj_xy_contour = float(m_config.xy_contour_compensation.value);
+        const float obj_xy_hole    = float(m_config.xy_hole_compensation.value);
+        for (VolumeSlices& vs : objSliceByVolume) {
+            const ModelVolume* mv = nullptr;
+            for (const ModelVolume* v : this->model_object()->volumes)
+                if (v->id() == vs.volume_id) { mv = v; break; }
+            if (!mv || !mv->is_model_part()) continue;
+
+            const auto* opt_c = mv->config.get().option<ConfigOptionFloat>("xy_contour_compensation");
+            const auto* opt_h = mv->config.get().option<ConfigOptionFloat>("xy_hole_compensation");
+            if (!opt_c && !opt_h) continue;
+
+            const float vol_c = opt_c ? float(opt_c->value) : obj_xy_contour;
+            const float vol_h = opt_h ? float(opt_h->value) : obj_xy_hole;
+            const float dc    = scaled<float>(vol_c - obj_xy_contour);  // contour delta
+            const float dh    = scaled<float>(vol_h - obj_xy_hole);     // hole delta
+            if (std::abs(dc) < 1.f && std::abs(dh) < 1.f) continue;     // sub-nanometer: skip
+
+            for (ExPolygons& lslices : vs.slices) {
+                if (lslices.empty()) continue;
+                if (dc > 0.f || dh > 0.f)
+                    lslices = this->_shrink_contour_holes(std::max(0.f, dc), std::max(0.f, dh), lslices);
+                if (dc < 0.f || dh < 0.f)
+                    lslices = this->_shrink_contour_holes(std::min(0.f, dc), std::min(0.f, dh), lslices);
+            }
+        }
+    }
+
+    // NeotkoLIBRE — per-object Assembled Boolean mode. Default (neotko_assemble_boolean=true)
+    // keeps the stock global clip; false disables boolean union of this object's parts (overlaps
+    // allowed, each part keeps its own perimeters). No-op for single-part objects.
+    const bool clip_multipart = this->config().neotko_assemble_boolean.value
+                                    ? PrintObject::clip_multipart_objects : false;
+
     std::vector<std::vector<ExPolygons>> region_slices =
         slices_to_regions(print->config(), *this, this->model_object()->volumes, *m_shared_regions, slice_zs,
-                          std::move(objSliceByVolume), PrintObject::clip_multipart_objects, throw_on_cancel_callback);
+                          std::move(objSliceByVolume), clip_multipart, throw_on_cancel_callback);
 
     for (size_t region_id = 0; region_id < region_slices.size(); ++ region_id) {
         std::vector<ExPolygons> &by_layer = region_slices[region_id];

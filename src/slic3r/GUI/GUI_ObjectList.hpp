@@ -441,6 +441,8 @@ public:
     //update printable state for item from objects model
     void update_printable_state(int obj_idx, int instance_idx);
     void toggle_printable_state();
+    // NeotkoLIBRE — toggle per-object Assembled Boolean mode (neotko_assemble_boolean).
+    void toggle_assemble_boolean();
 
     //BBS: remove const qualifier
     void set_extruder_for_selected_items(const int extruder);

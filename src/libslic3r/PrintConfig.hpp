@@ -296,7 +296,29 @@ enum class PerimeterGeneratorType
     Classic,
     // Perimeter generator with variable extrusion width based on the paper
     // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling" ported from Cura.
-    Arachne
+    Arachne,
+    // NEOTKO_NEOARACHNE_TAG Inc0 (port s134) — Neotko Hybrid wall generator: Classic owns the outer
+    // perimeter, Arachne owns the integrated interior (inner walls + gap-fill). Inc 0 ports only the
+    // enum value; dispatch is a passthrough to Classic until the engine lands in Inc 2.
+    NeoArachne
+};
+
+// NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — per-feature wall source for NeoArachne.
+// Top-level enum (the CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS macro can't handle nested
+// namespaces). The NeoArachne:: namespace aliases this as `WallSource` internally.
+//   Classic           — Classic onion-shell offset, constant width.
+//   ArachneStock      — Arachne stock (Cura) variable-width beading.
+//   ArachneNeotkoEdge — Arachne with NeotkoEdgeBeadingStrategy: bead 0 and bead n-1
+//                       pinned to optimal_width, residual on interior beads only,
+//                       hysteresis in getOptimalBeadCount.
+//   Off               — No wall emission at this slot (legal only for gap_fill; the
+//                       validator in ConfigManipulation blocks outer=Off).
+enum class NeoArachneWallSource
+{
+    Classic,
+    ArachneStock,
+    ArachneNeotkoEdge,
+    Off
 };
 
 // BBS
@@ -1011,11 +1033,26 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,      penultimate_top_layers))
     ((ConfigOptionFloat,    penultimate_infill_speed))
     // NEOTKO_MULTIPASS_TAG_END
+    // NeotkoLIBRE — s133: slice-time mirror of the LibreMode active state (app_config
+    // "neotko_libre_mode"). Injected at background_process.apply so the engine knows LibreMode
+    // is on (e.g. downgrade the empty-first-layer error for intentionally floating objects).
+    // Hidden/dev; carries no bridge-infill behaviour.
+    ((ConfigOptionBool,     neotko_libre_mode))
+    // NeotkoLIBRE — Assembled Boolean mode (per-object). true = stock boolean union of the
+    // object's model parts; false = the parts are sliced WITHOUT boolean union, so overlapping
+    // parts keep their own perimeters. Drives clip_multipart_objects per-object in slice_volumes.
+    // Set from the object context menu (LibreMode only). Default true = stock behaviour.
+    ((ConfigOptionBool,     neotko_assemble_boolean))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
+// NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — split into Base + DERIVED. The single block hit
+// 250 entries; the BOOST_PP sequence limit (256) blocks adding the 10 NeoArachne keys here.
+// All original keys stay in Base untouched; the NeoArachne keys live in the derived
+// PrintRegionConfig below. Code referencing PrintRegionConfig is unchanged (it gets Base + the
+// NeoArachne keys by inheritance).
 PRINT_CONFIG_CLASS_DEFINE(
-    PrintRegionConfig,
+    PrintRegionConfigBase,
 
     // NEOTKO_MULTIPASS_PRIME_TAG — prime volume (mm³) purged before each MultiPass/
     // Sandwich sublayer toolchange (read per-region by NeoTower). 0 = disabled.
@@ -1299,6 +1336,27 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,  neotko_surface_passes_top))
     ((ConfigOptionString,  neotko_surface_passes_penu))
     // NEOTKO_SANDWICH_ENGINE_TAG_END
+)
+
+// NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — DERIVED PrintRegionConfig: adds the NeoArachne
+// per-region keys on top of PrintRegionConfigBase. Kept here (not in Base) because Base already
+// holds 250 entries and the BOOST_PP sequence limit is 256. Defaults match "Neotko Hybrid v2"
+// (Classic outer + Arachne interior, gap integrated). Visible in UI only when wall_generator ==
+// NeoArachne AND LibreMode is active; the validator in ConfigManipulation blocks invalid combos.
+PRINT_CONFIG_CLASS_DERIVED_DEFINE(
+    PrintRegionConfig,
+    (PrintRegionConfigBase),
+
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_outer_wall))
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_inner_walls))
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_gap_fill))
+    ((ConfigOptionPercent, neoarachne_allowed_overlap_pct))
+    ((ConfigOptionPercent, neoarachne_min_bead_width_pct))
+    ((ConfigOptionPercent, neoarachne_max_bead_width_pct))
+    ((ConfigOptionPercent, neoarachne_min_feature_size_pct))
+    ((ConfigOptionBool,    neoarachne_keep_short_tails))
+    ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
+    ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(

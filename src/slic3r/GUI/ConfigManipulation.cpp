@@ -534,6 +534,73 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             }
         }
     }
+
+    // NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — validate the NeoArachne wall-source combo and Edge
+    // Closure invariants. Runs on a possibly-SPARSE per-object config → guard EVERY opt_* read with
+    // config->has() (bare opt_enum on a missing key crashes). The neoarachne_* keys travel together,
+    // so a has() on a few gates the whole block.
+    if (config->has("wall_generator")
+        && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoArachne
+        && config->has("neoarachne_outer_wall")
+        && config->has("neoarachne_inner_walls")
+        && config->has("neoarachne_min_bead_width_pct")
+        && config->has("neoarachne_min_feature_size_pct")
+        && !is_msg_dlg_already_exist)
+    {
+        const auto outer = config->opt_enum<NeoArachneWallSource>("neoarachne_outer_wall");
+        const auto inner = config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls");
+
+        // (1) outer = Off is meaningless — every part needs at least one outer.
+        if (outer == NeoArachneWallSource::Off) {
+            MessageDialog dialog(m_msg_dlg_parent,
+                _L("NeoArachne — outer wall set to Off is not allowed. Reset to Classic?"),
+                _L("NeoArachne — invalid combo"), wxICON_WARNING | wxYES | wxNO);
+            is_msg_dlg_already_exist = true;
+            const auto ans = dialog.ShowModal();
+            is_msg_dlg_already_exist = false;
+            if (ans == wxID_YES) {
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("neoarachne_outer_wall",
+                    new ConfigOptionEnum<NeoArachneWallSource>(NeoArachneWallSource::Classic));
+                apply(config, &nc);
+            }
+        }
+        // (2) outer = Arachne* + inner = Classic breaks Arachne's whole-slab beading.
+        else if ((outer == NeoArachneWallSource::ArachneStock || outer == NeoArachneWallSource::ArachneNeotkoEdge)
+                 && inner == NeoArachneWallSource::Classic)
+        {
+            MessageDialog dialog(m_msg_dlg_parent,
+                _L("NeoArachne — outer = Arachne with inner = Classic is unsupported "
+                   "(Arachne's beading needs the whole slab). Switch inner to match outer?"),
+                _L("NeoArachne — invalid combo"), wxICON_WARNING | wxYES | wxNO);
+            is_msg_dlg_already_exist = true;
+            const auto ans = dialog.ShowModal();
+            is_msg_dlg_already_exist = false;
+            if (ans == wxID_YES) {
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("neoarachne_inner_walls",
+                    new ConfigOptionEnum<NeoArachneWallSource>(outer));
+                apply(config, &nc);
+            }
+        }
+
+        // (3) Edge Closure invariant: min_feature_size_pct must be ≤ min_bead_width_pct.
+        // Read through the virtual getFloat() of the base ConfigOption — the non-const opt_float
+        // template is exact-type-match and returns nullptr for ConfigOptionPercent (crash).
+        const ConfigOption* min_bead_opt = config->option("neoarachne_min_bead_width_pct");
+        const ConfigOption* min_feat_opt = config->option("neoarachne_min_feature_size_pct");
+        if (min_bead_opt && min_feat_opt) {
+            const double min_bead = min_bead_opt->getFloat();
+            const double min_feat = min_feat_opt->getFloat();
+            if (min_feat > min_bead) {
+                // Silent swap (the relationship is non-obvious — no dialog spam).
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("neoarachne_min_feature_size_pct", new ConfigOptionPercent(min_bead));
+                nc.set_key_value("neoarachne_min_bead_width_pct",   new ConfigOptionPercent(min_feat));
+                apply(config, &nc);
+            }
+        }
+    }
 }
 
 void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::vector<std::string> const &keys, std::map<ObjectBase *, ModelConfig *> const &configs)
@@ -859,6 +926,37 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
+
+    // NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — show the NeoArachne controls only when the user
+    // picked NeoArachne AND LibreMode is active (Tier-B gate). toggle_line is safe on any key
+    // (it only sets UI visibility, no value read); opt_enum reads keep their config->has() guard
+    // for sparse per-object configs. The LibreMode app_config flag mirrors the Tier-B gating used
+    // for the internal-bridge toggles.
+    const bool libre_active = wxGetApp().app_config->get_bool("neotko_libre_mode");
+    const bool have_neoarachne =
+        config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoArachne
+        && libre_active;
+    for (auto el : { "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill" })
+        toggle_line(el, have_neoarachne);
+    const bool inner_readable = have_neoarachne && config->has("neoarachne_inner_walls");
+    const auto inner_src = inner_readable
+        ? config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls")
+        : NeoArachneWallSource::ArachneStock; // default → assume Arachne, show closure params
+    const bool inner_is_arachne =
+        inner_src == NeoArachneWallSource::ArachneStock ||
+        inner_src == NeoArachneWallSource::ArachneNeotkoEdge;
+    for (auto el : { "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
+                     "neoarachne_max_bead_width_pct",
+                     "neoarachne_min_feature_size_pct", "neoarachne_keep_short_tails" })
+        toggle_line(el, have_neoarachne && inner_is_arachne);
+    const auto outer_src = (have_neoarachne && config->has("neoarachne_outer_wall"))
+        ? config->opt_enum<NeoArachneWallSource>("neoarachne_outer_wall")
+        : NeoArachneWallSource::Classic;
+    const bool neotko_edge_active = have_neoarachne &&
+        (inner_src == NeoArachneWallSource::ArachneNeotkoEdge ||
+         outer_src == NeoArachneWallSource::ArachneNeotkoEdge);
+    toggle_line("neoarachne_bead_count_hysteresis_pct", neotko_edge_active);
+    toggle_line("neoarachne_transition_filter_dist_mm", have_neoarachne && inner_is_arachne);
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");

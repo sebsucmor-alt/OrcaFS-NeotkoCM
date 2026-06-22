@@ -31,6 +31,23 @@ public:
     float   wall_transition_filter_deviation;
     int     wall_distribution_count;
     bool    is_top_or_bottom_layer;
+    // NEOTKO_NEOARACHNE_TAG Inc2b (port s134) — Edge Closure: skip removeSmallLines so closure
+    // tails approaching an adjacent perimeter (Classic outer in the hybrid) survive. Default false
+    // → stock behaviour. Set true by NeoArachne::Interior.
+    bool    keep_short_tails = false;
+    // NEOTKO_NEOARACHNE_TAG Inc2b — NeotkoEdgeBeadingStrategy wrap. When neotko_edge_enabled,
+    // BeadingStrategyFactory wraps the meta-chain with NeoArachneBeadingStrategy: pin outer width
+    // for bead_count 1/2, cap inner widening, add spatial hysteresis. Defaults preserve stock.
+    bool    neotko_edge_enabled        = false;
+    bool    neotko_edge_pin_outer      = true;
+    bool    neotko_edge_cap_widening   = false;
+    double  neotko_edge_hysteresis_pct = 0.0;
+    // NEOTKO_NEOARACHNE_TAG Inc2b — SkeletalTrapezoidation transition_filter_dist (mm). Stock
+    // Arachne hardcodes 100 mm; exposing it lets NeoArachne tune transition smoothing. Default 100.
+    float   wall_transition_filter_dist_mm = 100.f;
+    // NEOTKO_NEOARACHNE_TAG Inc2b — upper cap on single-bead width (% of nozzle). Sentinel 0 = stock
+    // auto-derivation; any value >100 caps wall_*_middle_threshold. Only set by NeoArachne::Interior.
+    float   max_bead_width_pct = 0.f;
 };
 
 WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config);

@@ -44,6 +44,29 @@ set(lisbslic3r_sources
     Arachne/BeadingStrategy/RedistributeBeadingStrategy.hpp
     Arachne/BeadingStrategy/WideningBeadingStrategy.cpp
     Arachne/BeadingStrategy/WideningBeadingStrategy.hpp
+    # NEOTKO_NEOARACHNE_TAG Inc2c/Inc2d (port s134) — NeoArachne hybrid wall engine.
+    NeoArachne/NeoArachneBeadingStrategy.cpp
+    NeoArachne/NeoArachneBeadingStrategy.hpp
+    NeoArachne/NeoArachneConfig.hpp
+    NeoArachne/NeoArachneRuntime.hpp
+    NeoArachne/NeoArachneDebug.cpp
+    NeoArachne/NeoArachneDebug.hpp
+    NeoArachne/NeoArachneEngine.cpp
+    NeoArachne/NeoArachneEngine.hpp
+    NeoArachne/NeoArachnePlan.cpp
+    NeoArachne/NeoArachnePlan.hpp
+    NeoArachne/NeoArachneInterior.cpp
+    NeoArachne/NeoArachneInterior.hpp
+    # NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab backend (mini-slicer for the reactive canvas).
+    NeoArachne/Preview/PreviewWGeometry.hpp
+    NeoArachne/Preview/PreviewWGeometry.cpp
+    NeoArachne/Preview/PreviewGeometrySource.hpp
+    NeoArachne/Preview/PreviewGeometrySource.cpp
+    NeoArachne/Preview/PreviewConfigSnapshot.hpp
+    NeoArachne/Preview/PreviewConfigSnapshot.cpp
+    NeoArachne/Preview/PreviewResult.hpp
+    NeoArachne/Preview/PreviewSlicer.hpp
+    NeoArachne/Preview/PreviewSlicer.cpp
     Arachne/SkeletalTrapezoidation.cpp
     Arachne/SkeletalTrapezoidationEdge.hpp
     Arachne/SkeletalTrapezoidationGraph.cpp
@@ -180,6 +203,8 @@ set(lisbslic3r_sources
     Format/3mf.hpp
     Format/AMF.cpp
     Format/AMF.hpp
+    Format/S3DFactory.cpp    # NEOTKO_S3DFACTORY_TAG
+    Format/S3DFactory.hpp    # NEOTKO_S3DFACTORY_TAG
     Format/bbs_3mf.cpp
     Format/bbs_3mf.hpp
     format.hpp

@@ -513,7 +513,14 @@ void PrintObject::prepare_infill()
 
     // the following step needs to be done before combination because it may need
     // to remove only half of the combined infill
-    this->bridge_over_infill();
+    // NeotkoLIBRE_START — s134: in LibreMode, kill ALL internal bridges. Skipping
+    // bridge_over_infill() leaves would-be internal-bridge zones as stInternalSolid/
+    // stInternal, so the normal fill renders them uniformly (solid/sparse/penultimate).
+    // This overrides enable_extra_bridge_layer / internal_bridge_density from the file.
+    // External bridges are unaffected (detected at slicing, not here).
+    if (!this->config().neotko_libre_mode.value)
+        this->bridge_over_infill();
+    // NeotkoLIBRE_END
     m_print->throw_if_canceled();
 
     // combine fill surfaces to honor the "infill every N layers" option

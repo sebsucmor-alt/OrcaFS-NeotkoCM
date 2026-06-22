@@ -1233,6 +1233,27 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 	}
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
+    // NeotkoLIBRE_DBG s133 — pre-fill summary (env ORCA_DEBUG_INFILL / ORCA_DEBUG_ALL): list every
+    // grouped SurfaceFill (type/role/pattern/density/area) so we can tell whether a missing-infill
+    // zone was dropped BEFORE the fill loop (absent here) vs filled empty (PRELIST present, entities=0).
+    if (getenv("ORCA_DEBUG_INFILL") || getenv("ORCA_DEBUG_ALL")) {
+        if (FILE* _lf = fopen("/tmp/neotko_infill.log", "a")) {
+            // NeotkoLIBRE_DBG s134 — echo the slice-time LibreMode flag as the engine sees it
+            // (PrintObjectConfig). If libre=0 here, the s134 bridge gate cannot fire: LibreMode was
+            // not active at slice time (or the cfg injection didn't reach this object).
+            fprintf(_lf, "LIBREFLAG z=%.3f neotko_libre_mode=%d\n",
+                this->print_z, this->object()->config().neotko_libre_mode.value ? 1 : 0);
+            for (const SurfaceFill& _sf : surface_fills) {
+                double _a = 0.0; for (const auto& _e : _sf.expolygons) _a += _e.area();
+                fprintf(_lf, "PRELIST z=%.3f region=%d type=%d role=%d pattern=%d density=%.0f bridge=%d pieces=%zu area_mm2=%.3f\n",
+                    this->print_z, (int)_sf.region_id, (int)_sf.surface.surface_type, (int)_sf.params.extrusion_role,
+                    (int)_sf.params.pattern, (double)_sf.params.density, _sf.params.bridge ? 1 : 0,
+                    _sf.expolygons.size(), _a * SCALING_FACTOR * SCALING_FACTOR);
+            }
+            fclose(_lf);
+        }
+    }
+
     for (SurfaceFill &surface_fill : surface_fills) {
         // Create the filler object.
         std::unique_ptr<Fill> f = std::unique_ptr<Fill>(Fill::new_from_type(surface_fill.params.pattern));
@@ -2465,9 +2486,27 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     }
                     // NEOTKO_COLORMIX_TAG_END
                     // BBS: make fill
+                    // NeotkoLIBRE_DBG s133 — infill coverage probe (env ORCA_DEBUG_INFILL / ORCA_DEBUG_ALL).
+                    // Logs, per filled piece, the input region area vs the extrusion entities produced, to
+                    // catch "region has area but the fill is empty" (the empty-zone bug). No behaviour change.
+                    const bool _dbg_inf = getenv("ORCA_DEBUG_INFILL") || getenv("ORCA_DEBUG_ALL");
+                    const size_t _dbg_before = m_regions[surface_fill.region_id]->fills.entities.size();
                     f->fill_surface_extrusion(&surface_fill.surface,
                         params,
                         m_regions[surface_fill.region_id]->fills.entities);
+                    if (_dbg_inf) {
+                        const size_t _added = m_regions[surface_fill.region_id]->fills.entities.size() - _dbg_before;
+                        const double _a_mm2 = surface_fill.surface.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+                        if (FILE* _lf = fopen("/tmp/neotko_infill.log", "a")) {
+                            fprintf(_lf, "z=%.3f region=%d type=%d role=%d pattern=%d density=%.0f bridge=%d angle=%.1f area_mm2=%.3f entities=%zu%s\n",
+                                this->print_z, (int)surface_fill.region_id, (int)surface_fill.surface.surface_type,
+                                (int)surface_fill.params.extrusion_role, (int)surface_fill.params.pattern,
+                                (double)surface_fill.params.density, surface_fill.params.bridge ? 1 : 0,
+                                surface_fill.params.angle * 57.29578, _a_mm2, _added,
+                                (_a_mm2 > 0.05 && _added == 0) ? "  <<< EMPTY-ZONE" : "");
+                            fclose(_lf);
+                        }
+                    }
                 }
             }
             // NEOTKO_MULTIPASS_TAG_END

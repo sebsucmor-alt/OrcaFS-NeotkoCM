@@ -4587,7 +4587,11 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         m_mouse.position = pos.cast<double>();
 
         // updates gizmos overlay
-        if (m_selection.is_empty())
+        // NEOTKO_ALIGNSTACK_TAG: Align & Stack is usable with an empty selection
+        // (the user builds the order by clicking objects), so don't auto-close it
+        // just because nothing is selected yet.
+        if (m_selection.is_empty() &&
+            m_gizmos.get_current_type() != GLGizmosManager::AlignStack)
             m_gizmos.reset_all_states();
 
         m_dirty = true;
@@ -4787,11 +4791,15 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, 0);
 
     // Fixes flying instances
+    // NeotkoLIBRE_START — s133: in LibreMode (FFF) allow floating objects above the bed (no drop on move).
+    const bool _nlm_move = !wxGetApp().app_config->get_bool("neotko_libre_mode") ||
+                            current_printer_technology() == ptSLA;
+    // NeotkoLIBRE_END
     for (const std::pair<int, int>& i : done) {
         ModelObject* m = m_model->objects[i.first];
         const double shift_z = m->get_instance_min_z(i.second);
         //BBS: don't call translate if the z is zero
-        if ((current_printer_technology() == ptSLA || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+        if (_nlm_move && (current_printer_technology() == ptSLA || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
             const Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -4897,13 +4905,16 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, -1);
     if (m_canvas_type != CanvasAssembleView) {
         // Fixes sinking/flying instances
+        // NeotkoLIBRE_START — s133: in LibreMode allow floating on rotate (no drop to bed).
+        const bool _nlm_rot = !wxGetApp().app_config->get_bool("neotko_libre_mode");
+        // NeotkoLIBRE_END
         for (const std::pair<int, int> &i : done) {
             ModelObject *m = m_model->objects[i.first];
 
             // BBS: don't call translate if the z is zero
             const double shift_z = m->get_instance_min_z(i.second);
             // leave sinking instances as sinking
-            if ((min_zs.find({i.first, i.second})->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+            if (_nlm_rot && (min_zs.find({i.first, i.second})->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
                 const Vec3d shift(0.0, 0.0, -shift_z);
                 m_selection.translate(i.first, i.second, shift);
                 m->translate_instance(i.second, shift);
@@ -4988,7 +4999,8 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
         //BBS: don't call translate if the z is zero
         double shift_z = m->get_instance_min_z(i.second);
         // leave sinking instances as sinking
-        if ((min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+        // NeotkoLIBRE — s133: in LibreMode allow floating on scale (skip the drop-to-bed shift).
+        if (!wxGetApp().app_config->get_bool("neotko_libre_mode") && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
             Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -5091,7 +5103,8 @@ void GLCanvas3D::do_mirror(const std::string& snapshot_type)
         //BBS: don't call translate if the z is zero
         double shift_z = m->get_instance_min_z(i.second);
         // leave sinking instances as sinking
-        if ((min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD)&&(shift_z != 0.0f)) {
+        // NeotkoLIBRE — s133: in LibreMode allow floating on mirror/translate (skip drop-to-bed).
+        if (!wxGetApp().app_config->get_bool("neotko_libre_mode") && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD)&&(shift_z != 0.0f)) {
             Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);

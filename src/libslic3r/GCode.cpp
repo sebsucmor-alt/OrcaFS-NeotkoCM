@@ -356,6 +356,23 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     // We will always proceed with incrementing the retraction amount before wiping with the difference
     // and return the maximum allowed wipe amount to be retracted during the wipe move
     retractionBeforeWipe += retraction_length_remaining - retractionDuringWipe;
+
+    // NEOTKO_NEOARACHNE_TAG Inc2a (port s134) — minimum pre-wipe retract on NeoArachne paths.
+    // NeoArachne paths nearly always end with pre-wipe retract ≈ 0.1 mm and during-wipe ≈ full
+    // retraction, leaving the nozzle ~93% pressurized when the wipe starts → the first ~0.5 mm of
+    // wipe smears ooze on the just-printed bead (invisible to the gcode viewer; accumulates into
+    // blobs over layers). When the last extruded path was a NeoArachne path (force_no_spiral_lift
+    // marker), force ≥50% of the total retract before the wipe. Classic/Arachne paths unchanged.
+    if (gcodegen.last_path_force_no_spiral_lift()) {
+        const double total      = retractionBeforeWipe + retractionDuringWipe;
+        const double min_before = total * 0.5;
+        if (retractionBeforeWipe < min_before) {
+            const double shift    = min_before - retractionBeforeWipe;
+            retractionBeforeWipe += shift;
+            retractionDuringWipe -= shift;
+        }
+    }
+
     return {retractionBeforeWipe, retractionDuringWipe};
 }
 
@@ -433,10 +450,26 @@ static inline Point wipe_tower_point_to_object_point(GCode& gcodegen, const Vec2
 
 std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_extruder_id, double z) const
 {
-    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
+    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool) {
+        // NEOTKO s136-dbg — plan↔emisión desync forensic dump (behavior-neutral). Mirror of the
+        // append_tcr2 probe for the BBL path.
+        if (NeoDebug::enabled(NeoDebug::WIPETOWER)
+            && m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size()) {
+            std::ostringstream _d;
+            _d << "APPEND_TCR_DESYNC layer_idx=" << m_layer_idx
+               << " tc_idx=" << m_tool_change_idx
+               << " req=T" << new_extruder_id
+               << " got=T" << tcr.initial_tool << "->T" << tcr.new_tool
+               << " plan=[";
+            for (const auto& _t : m_tool_changes[m_layer_idx])
+                _d << "T" << _t.initial_tool << "->T" << _t.new_tool << "@z" << _t.print_z << ",";
+            _d << "]";
+            NeoDebug::write(NeoDebug::WIPETOWER, _d.str());
+        }
         throw Slic3r::InvalidArgument(Slic3r::format(
             "Error: WipeTowerIntegration::append_tcr unexpected toolchange: layer_idx=%1% tool_change_idx=%2% requested=%3% expected=%4% initial=%5%",
             m_layer_idx, m_tool_change_idx, new_extruder_id, tcr.new_tool, tcr.initial_tool));
+    }
 
     std::string gcode;
 
@@ -706,10 +739,27 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
 std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_extruder_id, double z) const
 {
-    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
+    if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool) {
+        // NEOTKO s136-dbg — plan↔emisión desync forensic dump (behavior-neutral). Logs the full
+        // planned TC sequence for this layer before throwing, so the painter(T2)+ColorStitch
+        // sublayer entry-tool divergence is captured in /tmp/neotko_wipetower.log.
+        if (NeoDebug::enabled(NeoDebug::WIPETOWER)
+            && m_layer_idx >= 0 && m_layer_idx < (int)m_tool_changes.size()) {
+            std::ostringstream _d;
+            _d << "APPEND_TCR2_DESYNC layer_idx=" << m_layer_idx
+               << " tc_idx=" << m_tool_change_idx
+               << " req=T" << new_extruder_id
+               << " got=T" << tcr.initial_tool << "->T" << tcr.new_tool
+               << " plan=[";
+            for (const auto& _t : m_tool_changes[m_layer_idx])
+                _d << "T" << _t.initial_tool << "->T" << _t.new_tool << "@z" << _t.print_z << ",";
+            _d << "]";
+            NeoDebug::write(NeoDebug::WIPETOWER, _d.str());
+        }
         throw Slic3r::InvalidArgument(Slic3r::format(
             "Error: WipeTowerIntegration::append_tcr unexpected toolchange: layer_idx=%1% tool_change_idx=%2% requested=%3% expected=%4% initial=%5%",
             m_layer_idx, m_tool_change_idx, new_extruder_id, tcr.new_tool, tcr.initial_tool));
+    }
 
     std::string gcode;
 
@@ -1434,6 +1484,22 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                         auto      tcr_opt  = gcodegen.m_neo_tower->get_tcr(layer_z, cur_tool, (size_t)extruder_id);
                         const int slot_idx = m_tool_change_idx;
                         ++m_tool_change_idx; // always advance — keeps bounds in sync
+                        // NEOTKO s136-dbg — emission-order trace (behavior-neutral). Captures the
+                        // real (cur→req) toolchange order GCode requests for each real layer +
+                        // whether NeoTower's plan has a matching TCR (get_tcr HIT) or the dispatch
+                        // falls back to the planned slot (MISS → crash candidate). Compare against
+                        // SINGLE_TOOL_PROBE (plan entries) to localize plan↔emission divergence.
+                        NEOTKO_LOG(WIPETOWER, "WT_EMIT_TRACE layer=" << m_layer_idx
+                            << " z=" << layer_z << " slot_idx=" << slot_idx
+                            << " cur=T" << cur_tool << " req=T" << extruder_id
+                            << " get_tcr=" << (tcr_opt ? "HIT" : "MISS")
+                            << (tcr_opt ? (" tcr=T" + std::to_string(tcr_opt->initial_tool)
+                                           + "->T" + std::to_string(tcr_opt->new_tool))
+                                        : std::string())
+                            << " plan_slot=" << ((slot_idx >= 0 && slot_idx < (int)m_tool_changes[m_layer_idx].size())
+                                ? ("T" + std::to_string(m_tool_changes[m_layer_idx][slot_idx].initial_tool)
+                                   + "->T" + std::to_string(m_tool_changes[m_layer_idx][slot_idx].new_tool))
+                                : std::string("none")));
                         if (tcr_opt) {
                             // s104-z plane-realign: a fused/redirected TCR prints at ITS plane,
                             // not the requesting layer's z (no-op for plain multitool where
@@ -1449,9 +1515,40 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                             // for an identity visit (would purge with the wrong tool pair).
                             const auto& fb           = m_tool_changes[m_layer_idx][slot_idx];
                             const bool  identity_req = (cur_tool == (size_t)extruder_id);
-                            if (!identity_req
-                                || (fb.initial_tool == fb.new_tool && (int)fb.new_tool == extruder_id))
+                            if (identity_req) {
+                                if (fb.initial_tool == fb.new_tool && (int)fb.new_tool == extruder_id)
+                                    gcode += append_tcr2(gcodegen, fb, extruder_id, wipe_tower_z);
+                            } else if ((int)fb.new_tool == extruder_id) {
                                 gcode += append_tcr2(gcodegen, fb, extruder_id, wipe_tower_z);
+                            } else {
+                                // NEOTKO s136 — plan↔emisión rotation divergence guard. Local-Z
+                                // sublayer groups emit via LocalZOrderOptimizer::order_bucket_extruders
+                                // (ending on the tool shared with the next group), but NeoTower planned
+                                // the real layer via the *sandwich* mirror order_sublayers_by_tool_
+                                // windowed → it rotated to a different entry tool, so the positional
+                                // slot is the wrong tool (e.g. req=T1 but slot is T1->T0) and append_tcr2
+                                // throws "unexpected toolchange". The stock (non-NeoTower) path already
+                                // realigns by tool (realign_nominal_toolchange_idx); the NeoTower path
+                                // did not. Mirror that graceful realign: emit a planned TCR whose
+                                // new_tool == request so the tower purges to the correct tool instead of
+                                // crashing. NOTE: this is the crash guard / parity fix; the root fix
+                                // (NeoTower predicting the local-z group exit the same way emission does)
+                                // is tracked separately.
+                                auto it = std::find_if(
+                                    m_tool_changes[m_layer_idx].begin(), m_tool_changes[m_layer_idx].end(),
+                                    [&](const WipeTower::ToolChangeResult& c) { return (int)c.new_tool == extruder_id; });
+                                if (it != m_tool_changes[m_layer_idx].end()) {
+                                    NEOTKO_LOG(WIPETOWER, "WT_REALIGN_MISS layer=" << m_layer_idx
+                                        << " req=T" << extruder_id
+                                        << " slot=T" << fb.initial_tool << "->T" << fb.new_tool
+                                        << " realigned=T" << it->initial_tool << "->T" << it->new_tool);
+                                    gcode += append_tcr2(gcodegen, *it, extruder_id, wipe_tower_z);
+                                } else {
+                                    NEOTKO_LOG(WIPETOWER, "WT_REALIGN_MISS layer=" << m_layer_idx
+                                        << " req=T" << extruder_id
+                                        << " NO matching planned TCR — skipping tower purge (no crash)");
+                                }
+                            }
                         }
                     } else {
                         realign_nominal_toolchange_idx(extruder_id);
@@ -1797,10 +1894,21 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
         if (layers_to_print.size() == 1u) {
-            if (!has_extrusions)
+            if (!has_extrusions) {
+                // NeotkoLIBRE_START — s133: in LibreMode the empty first layer is expected (the object
+                // is intentionally floating). Downgrade the hard error to a non-critical warning so the
+                // slice can proceed, instead of blocking it. Flag injected at apply (no bridge behaviour).
+                if (object.config().neotko_libre_mode.value) {
+                    const_cast<Print*>(object.print())->active_step_add_warning(
+                        PrintStateBase::WarningLevel::NON_CRITICAL,
+                        _(L("One object has empty initial layer (floating object). "
+                            "LibreMode: slicing continues, expect potential artifacts.")));
+                } else
+                // NeotkoLIBRE_END
                 throw Slic3r::SlicingError(
                     _(L("One object has empty initial layer and can't be printed. Please Cut the bottom or enable supports.")),
                     object.id().id);
+            }
         }
 
         // In case there are extrusions on this layer, check there is a layer to lay it on.
@@ -6993,6 +7101,21 @@ LayerResult GCode::process_layer(const Print& print,
             std::rotate(layer_extruders.begin(), it, layer_extruders.end());
     }
 
+    // NEOTKO s136-dbg — emission-side rotation probe (behavior-neutral). The tool GCode rotates
+    // the real layer to (= nominal_layer_start_extruder = writer/local-z exit) is the ground-truth
+    // entry tool the wipe tower must match. Compare against NeoTower's "1a ROTATE" to localize the
+    // plan↔emission divergence (painter T2 + ColorStitch sublayer exit tool).
+    if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+        std::ostringstream _er;
+        _er << "EMIT_ROTATE print_z=" << print_z
+            << " nominal_start=T" << nominal_layer_start_extruder
+            << " writer=T" << (m_writer.extruder() ? (int)m_writer.extruder()->id() : -1)
+            << " rotated=[";
+        for (unsigned int _e : layer_extruders) _er << "T" << _e << ",";
+        _er << "]";
+        NeoDebug::write(NeoDebug::WIPETOWER, _er.str());
+    }
+
     // NEOTKO_MULTIPASS_TAG_START — hardening P4 (port s129): restore wipe tower expected
     // initial after a sublayer (ColorStitch/sandwich) group. The wipe tower was planned
     // assuming layer_extruders.front() is already the current tool (= last tool of the
@@ -8071,6 +8194,21 @@ std::string GCode::extrude_entity(const ExtrusionEntity&      entity,
         return this->extrude_multi_path(*multipath, description, speed);
     else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
         return this->extrude_loop(*loop, description, speed, region_perimeters);
+    else if (const ExtrusionEntityCollection* coll = dynamic_cast<const ExtrusionEntityCollection*>(&entity)) {
+        // NEOTKO_NEOARACHNE_TAG Inc2e (port s134) — accept nested ExtrusionEntityCollection.
+        // NeoArachneInterior wraps per-island inner walls in EEC(no_sort=true) so the outer chain
+        // visits islands by proximity (s94 #14). Without this branch the dispatcher threw
+        // "Invalid argument supplied to extrude()" the moment a caller fed it one of those buckets.
+        std::string gcode;
+        if (coll->no_sort) {
+            for (const ExtrusionEntity* ee : coll->entities)
+                gcode += this->extrude_entity(*ee, description, speed, region_perimeters);
+        } else {
+            for (ExtrusionEntity* ee : coll->chained_path_from(m_last_pos).entities)
+                gcode += this->extrude_entity(*ee, description, speed, region_perimeters);
+        }
+        return gcode;
+    }
     else
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
     return "";
@@ -8647,6 +8785,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     bool last_was_wipe_tower = (m_last_processor_extrusion_role == erWipeTower);
     char buf[64];
     assert(is_decimal_separator_point());
+
+    // NEOTKO_NEOARACHNE_TAG Inc2a (port s134) — track this path's spiral-lift opt-out for the next
+    // travel's lift decision and the wipe rebalance. Unconditional so Classic paths reset it.
+    m_last_path_force_no_spiral_lift = path.force_no_spiral_lift;
 
     if (path.role() != m_last_processor_extrusion_role) {
         m_last_processor_extrusion_role = path.role();
@@ -9416,6 +9558,9 @@ bool GCode::needs_retraction(const Polyline& travel, ExtrusionRole role, LiftTyp
         } else {
             lift_type = to_lift_type(ZHopType(EXTRUDER_CONFIG(z_hop_types)));
         }
+        // NEOTKO_NEOARACHNE_TAG Inc2a — NeoArachne paths opt out of SpiralLift (anti spiral-smear).
+        if (m_last_path_force_no_spiral_lift && lift_type == LiftType::SpiralLift)
+            lift_type = LiftType::LazyLift;
         return true;
     }
 
@@ -9449,6 +9594,9 @@ bool GCode::needs_retraction(const Polyline& travel, ExtrusionRole role, LiftTyp
     } else {
         lift_type = to_lift_type(ZHopType(EXTRUDER_CONFIG(z_hop_types)));
     }
+    // NEOTKO_NEOARACHNE_TAG Inc2a — NeoArachne paths opt out of SpiralLift (anti spiral-smear).
+    if (m_last_path_force_no_spiral_lift && lift_type == LiftType::SpiralLift)
+        lift_type = LiftType::LazyLift;
     return true;
 }
 
