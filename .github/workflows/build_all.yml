@@ -1,51 +1,245 @@
 name: Build all
 
 on:
-  schedule:
-    - cron: '0 18 * * *' # everyday 2:00(beijing time UTC+8)
-
-  workflow_dispatch:
+  workflow_dispatch: # manual dispatch only
     inputs:
       build-deps-only:
         description: 'Only build dependencies (bypasses caching)'
         type: boolean
         default: false
-      force-build:
-        description: 'Force full rebuild (bypass dependency cache)'
+      build-windows:
+        description: 'Build Windows'
+        type: boolean
+        default: true
+      build-linux:
+        description: 'Build Linux (Ubuntu 24.04)'
+        type: boolean
+        default: true
+      build-macos:
+        description: 'Build macOS (arm64)'
+        type: boolean
+        default: true
+      publish-release:
+        description: 'Publish GitHub Release after build'
         type: boolean
         default: false
+      # ── Release metadata (only used when publish-release is true) ──────────
+      release-tag:
+        description: 'Release tag (e.g. v2.3.0). Leave empty to auto-detect from version.inc'
+        type: string
+        default: ''
+      release-title:
+        description: 'Release title. Leave empty to use default title'
+        type: string
+        default: ''
+      release-notes-file:
+        description: 'Release notes file in the repo (e.g. NEOTKOCM_RELEASE_2.md). Read verbatim as the release body. Takes priority over the text field below.'
+        type: string
+        default: ''
+      release-notes:
+        description: 'Release notes / changelog (Markdown). Used only if the file above is empty. Leave empty to auto-detect from CHANGELOG file'
+        type: string
+        default: ''
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-  
+
 
 jobs:
+  # Compute which platforms to build. Outputs a JSON array consumed by the matrix below.
+  # On push/pull_request all three are always built (same behaviour as before).
+  # On workflow_dispatch the user's checkboxes control which ones run.
+  setup:
+    name: Determine build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          # Default: build everything (push / pull_request / schedule)
+          BUILD_WIN=true
+          BUILD_LIN=true
+          BUILD_MAC=true
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BUILD_WIN="${{ inputs.build-windows }}"
+            BUILD_LIN="${{ inputs.build-linux }}"
+            BUILD_MAC="${{ inputs.build-macos }}"
+          fi
+
+          MATRIX='{"include":['
+          SEP=""
+          if [[ "$BUILD_WIN" == "true" ]]; then
+            MATRIX+="${SEP}{\"os\":\"windows-2022\"}"
+            SEP=","
+          fi
+          if [[ "$BUILD_LIN" == "true" ]]; then
+            MATRIX+="${SEP}{\"os\":\"ubuntu-24.04\"}"
+            SEP=","
+          fi
+          if [[ "$BUILD_MAC" == "true" ]]; then
+            MATRIX+="${SEP}{\"os\":\"macos-14\",\"arch\":\"arm64\"}"
+            SEP=","
+          fi
+          MATRIX+=']}'
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+        shell: bash
+
   build_all:
     name: Build All
+    needs: [setup]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
-          - os: windows-2022
-          - os: macos-14
-            arch: arm64
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
-      arch: ${{ matrix.arch }}
+      arch: ${{ matrix.arch || '' }}
       build-deps-only: ${{ inputs.build-deps-only || false }}
+      force-build: ${{ github.event_name == 'schedule' }}
     secrets: inherit
+
+  publish_release:
+    name: Publish Release
+    needs: [build_all]
+    if: ${{ !cancelled() && needs.build_all.result == 'success' && github.event_name != 'pull_request' && github.repository != 'Snapmaker/OrcaSlicer' && inputs.build-deps-only != true && inputs.publish-release == true }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/download-artifact@v4
+      with:
+        path: release-assets
+
+    - name: Compute release metadata
+      id: release_meta
+      shell: bash
+      run: |
+        # ── Version (always read from version.inc as the source of truth) ───
+        version=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
+
+        # ── Tag ─────────────────────────────────────────────────────────────
+        # Use the manual input if provided, otherwise fall back to version.inc
+        if [[ -n "${{ inputs.release-tag }}" ]]; then
+          tag="${{ inputs.release-tag }}"
+        else
+          tag="v${version}"
+        fi
+
+        # ── Title ───────────────────────────────────────────────────────────
+        # Use the manual input if provided, otherwise build the default title
+        if [[ -n "${{ inputs.release-title }}" ]]; then
+          title="${{ inputs.release-title }}"
+        else
+          title="Snapmaker Orca Full Spectrum v${version}"
+        fi
+
+        # ── Release notes ───────────────────────────────────────────────────
+        # Priority: 1) notes file input  2) manual text input
+        #           3) CHANGELOG/RELEASE_NOTES file  4) auto-generated
+        notes_path="${{ inputs.release-notes-file }}"
+        if [[ -n "$notes_path" ]]; then
+          if [ -f "$notes_path" ]; then
+            notes_content=$(cat "$notes_path")
+          else
+            echo "::error::release-notes-file '$notes_path' not found in the repository (path is relative to the repo root)"
+            exit 1
+          fi
+        elif [[ -n "${{ inputs.release-notes }}" ]]; then
+          notes_content="${{ inputs.release-notes }}"
+        else
+          notes_content=""
+          for notes_file in \
+            "CHANGELOG_v${version}.md" \
+            "RELEASE_NOTES_v${version}.md"; do
+            if [ -f "$notes_file" ]; then
+              notes_content=$(cat "$notes_file")
+              break
+            fi
+          done
+
+          if [ -z "$notes_content" ]; then
+            printf -v notes_content '%s\n\n%s\n%s\n%s\n\n%s' \
+              "Automated build for ${GITHUB_REPOSITORY}." \
+              "- Ref: ${GITHUB_REF_NAME}" \
+              "- Commit: ${GITHUB_SHA}" \
+              "- Version: V${version}" \
+              "macOS artifacts published from this fork are unsigned and not notarized."
+          fi
+        fi
+
+        {
+          echo "tag=$tag"
+          echo "title=$title"
+          echo "version=V$version"
+          echo "notes<<NOTES_EOF"
+          echo "$notes_content"
+          echo "NOTES_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Collect release files
+      id: collect_files
+      shell: bash
+      run: |
+        mkdir -p release-upload
+        find release-assets -type f \
+          \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.zip' -o -name '*.flatpak' -o -name 'Snapmaker_Orca_profile_validator' \) \
+          -print -exec cp -f {} release-upload/ \;
+        count=$(find release-upload -maxdepth 1 -type f | wc -l | tr -d ' ')
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+        if [ "$count" -eq 0 ]; then
+          echo "::error::No release files were collected from workflow artifacts"
+          exit 1
+        fi
+        find release-upload -maxdepth 1 -type f -printf 'asset=%f\n'
+
+    - name: Create or update release
+      if: steps.collect_files.outputs.count != '0'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        tag="${{ steps.release_meta.outputs.tag }}"
+        title="${{ steps.release_meta.outputs.title }}"
+        notes_file="$RUNNER_TEMP/release-notes.md"
+        printf '%s\n' "${{ steps.release_meta.outputs.notes }}" > "$notes_file"
+
+        if gh release view "$tag" >/dev/null 2>&1; then
+          gh release edit "$tag" \
+            --title "$title" \
+            --notes-file "$notes_file" \
+            --prerelease
+        else
+          gh release create "$tag" \
+            --title "$title" \
+            --notes-file "$notes_file" \
+            --target "$GITHUB_SHA" \
+            --prerelease
+        fi
+
+        while IFS= read -r asset_name; do
+          gh release delete-asset "$tag" "$asset_name" --yes
+        done < <(gh release view "$tag" --json assets --jq '.assets[].name')
+
+        mapfile -t upload_files < <(find release-upload -maxdepth 1 -type f | sort)
+        gh release upload "$tag" "${upload_files[@]}" --clobber
+
   flatpak:
     name: "Flatpak"
+    if: ${{ github.repository == 'Snapmaker/OrcaSlicer' }}
     concurrency:
-      group: flatpak-${{ matrix.variant.arch }}-${{ github.ref }}
+      group: flatpak-${{ matrix.variant.arch }}-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
       options: --privileged
       volumes:
         - /usr/local/lib/android:/usr/local/lib/android
@@ -123,7 +317,7 @@ jobs:
         if-no-files-found: error
 
     - name: Deploy Flatpak to nightly release
-      if: ${{github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final'}}
+      if: ${{github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.4'}}
       uses: WebFreak001/deploy-nightly@v3.2.0
       with:
         upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
