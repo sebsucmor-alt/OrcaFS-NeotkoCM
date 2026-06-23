@@ -26,7 +26,13 @@ public:
 
     // Max slots per painted volume — slot 0 is "unpainted", 1..MAX_SLOTS-1 are
     // profile slots. Must match ModelVolume::COLORMIX_SLOT_COUNT (static_assert in .cpp).
-    static constexpr int MAX_SLOTS = 31;
+    // NEOTKO_COLORSTITCH_TAG — s137: 255 (EnforcerBlockerType::ExtruderMax sentinel),
+    // so up to 254 distinct profiles can be painted on one volume. Encoding already
+    // supports it (2-bit prefix + base-15 nibbles); this was a deliberate UI cap.
+    static constexpr int MAX_SLOTS = 255;
+    // NEOTKO_COLORSTITCH_TAG — s137: palette groups. Project-level library (mgr) is
+    // bucketed into 1..MAX_GROUPS via a name suffix (see cs_*_group helpers in .cpp).
+    static constexpr int MAX_GROUPS = 10;
 
 protected:
     void        on_render_input_window(float x, float y, float bottom_limit) override;
@@ -145,6 +151,10 @@ private:
     int m_active_slot         = 0;
     // When true, left-click erases instead of painting (UI checkbox in panel).
     bool m_erase_mode         = false;
+    // NEOTKO_COLORSTITCH_TAG — s137: active palette group (1..MAX_GROUPS). Pin to
+    // palette / Save tags the new profile with this group; the Profiles list filters
+    // by it. Project-level navigation only — does NOT partition the per-volume slots.
+    int  m_active_group       = 1;
 
     // s111 — Select mode: set multi-objeto pintable. NEOTKO_COLORSTITCH_TAG.
     bool             m_prev_on     = false;          // estado On previo (m_old_state es privado en la base)

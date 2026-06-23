@@ -882,8 +882,10 @@ public:
     // NEOTKO_PROFILE_TAG_START — ColorStitch Painter per-triangle paint data.
     // Per-triangle slot stored via TriangleSelector (2-bit prefix + 4-bit extension
     // nibbles, same scheme MMU uses for >16 extruders), so state values well beyond
-    // 15 round-trip. 30 usable slots (index 0 unused = unpainted).
-    static constexpr int COLORMIX_SLOT_COUNT = 31;   // index 0 unused + slots 1..30
+    // 15 round-trip. NEOTKO_COLORSTITCH_TAG — s137: 255 (= EnforcerBlockerType::
+    // ExtruderMax sentinel) → 254 usable slots (index 0 unused = unpainted). The 3mf
+    // slot table is CSV-iterated, so old projects (≤30 entries) load forward-compatibly.
+    static constexpr int COLORMIX_SLOT_COUNT = 255;  // index 0 unused + slots 1..254
     FacetsAnnotation    color_mix_paint_facets;
     // Slot → SurfaceEffectProfile id mapping. Index 0 unused (slot 0 = unpainted).
     int                 colormix_slot_to_profile_id[COLORMIX_SLOT_COUNT] = {0};

@@ -35,6 +35,38 @@
 
 namespace Slic3r::GUI {
 
+// NEOTKO_COLORSTITCH_TAG — s137: palette groups (SIMPLE / disposable, will be
+// reworked with MixedFilament TD). A profile's group is encoded as an invisible
+// suffix in its `name`: '\x1f' + 'g' + digit. This touches NO schema and NO 3mf
+// (name already serializes), and old projects (no suffix) fall into Group 1.
+// Strip for display, re-append on save/rename. Group 1 = no suffix (clean + back-compat).
+namespace {
+constexpr char CS_GROUP_SEP = '\x1f';   // unit separator — group marker
+constexpr int  CS_MAX_GROUPS = GLGizmoColorMixPainter::MAX_GROUPS;
+
+int cs_parse_group(const std::string& name)
+{
+    const auto pos = name.rfind(CS_GROUP_SEP);
+    if (pos == std::string::npos || pos + 2 >= name.size() || name[pos + 1] != 'g')
+        return 1;
+    const int g = std::atoi(name.c_str() + pos + 2);
+    return (g >= 1 && g <= CS_MAX_GROUPS) ? g : 1;
+}
+
+std::string cs_strip_group(const std::string& name)
+{
+    const auto pos = name.rfind(CS_GROUP_SEP);
+    return pos == std::string::npos ? name : name.substr(0, pos);
+}
+
+std::string cs_with_group(const std::string& name, int g)
+{
+    const std::string base = cs_strip_group(name);
+    if (g <= 1) return base;                 // Group 1 = no suffix
+    return base + CS_GROUP_SEP + 'g' + std::to_string(g);
+}
+} // namespace
+
 // ----------------------------------------------------------------------------
 // Boilerplate (mirror of FuzzySkin)
 // ----------------------------------------------------------------------------
@@ -1796,10 +1828,12 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
     if (SurfaceEffectProfile* p = (m_selected_profile_id != 0)
                                       ? mgr.find_mut(m_selected_profile_id) : nullptr) {
         char namebuf[128];
-        std::snprintf(namebuf, sizeof(namebuf), "%s", p->name.c_str());
+        // NEOTKO_COLORSTITCH_TAG — s137: edit the bare name (no group suffix); on
+        // change re-append the profile's OWN group so renaming never moves it.
+        std::snprintf(namebuf, sizeof(namebuf), "%s", cs_strip_group(p->name).c_str());
         ImGui::PushItemWidth(160.f);
         if (ImGui::InputText("##cs_name", namebuf, sizeof(namebuf)))
-            p->name = namebuf;
+            p->name = cs_with_group(namebuf, cs_parse_group(p->name));
         ImGui::PopItemWidth();
         ImGui::SameLine();
     }
@@ -1990,6 +2024,11 @@ void GLGizmoColorMixPainter::save_active_as_palette()
     for (const SurfaceEffectProfile& p : mgr.list())
         if (p.stack_top_json == top_json && p.stack_penu_json == penu_json) {
             if (SurfaceEffectProfile* mp = mgr.find_mut(p.id)) {
+                // NEOTKO_COLORSTITCH_TAG — s137: promoting a working colour (auto) to
+                // the library files it into the active group. An already-saved profile
+                // keeps its group (re-pinning must not silently move it).
+                if (mp->auto_generated)
+                    mp->name = cs_with_group(mp->name, m_active_group);
                 mp->auto_generated = false;
                 // NEOTKO_COLORSTITCH_TAG — s112: backfill payload if missing.
                 if (!mp->colormix.present && !mp->pathblend.present)
@@ -2001,7 +2040,8 @@ void GLGizmoColorMixPainter::save_active_as_palette()
         }
 
     SurfaceEffectProfile p;
-    p.name            = recipe_name(m_active_recipe, m_active_style);
+    // NEOTKO_COLORSTITCH_TAG — s137: file the new palette into the active group.
+    p.name            = cs_with_group(recipe_name(m_active_recipe, m_active_style), m_active_group);
     p.stack_top_json  = top_json;
     p.stack_penu_json = penu_json;
     p.preview_argb    = recipe_argb(m_active_recipe);
@@ -2178,7 +2218,7 @@ void GLGizmoColorMixPainter::pick_recipe_from_object(int object_idx, int picked_
     m_active_resolved     = false;
     m_active_slot         = slot_for_selected_profile(/*assign_if_missing=*/true);
     m_active_recipe       = r;
-    m_active_style        = p->name;
+    m_active_style        = cs_strip_group(p->name);   // s137: sin sufijo de grupo
     m_has_active_recipe   = true;
     load_recipe_into_pro(r);
     refresh_selector_palettes();
@@ -2273,6 +2313,70 @@ void GLGizmoColorMixPainter::render_left_rail(float rail_w, float rail_h)
     ImGui::Spacing();
     m_imgui->text(m_desc["profiles"]);
 
+    // NEOTKO_COLORSTITCH_TAG — s137: selector de grupo de paleta. Lista GLOBAL
+    // (project-level, independiente del objeto); el grupo es solo navegación y NO
+    // particiona los slots por volumen. Grupo activo manda dónde cae el Pin/Save.
+    {
+        int max_group = m_active_group;   // mostrar al menos hasta el activo (grupo "nuevo" vacío)
+        for (const SurfaceEffectProfile& gp : mgr.list())
+            max_group = std::max(max_group, cs_parse_group(gp.name));
+        auto group_count = [&](int g) {
+            int c = 0;
+            for (const SurfaceEffectProfile& gp : mgr.list())
+                if (!gp.auto_generated && cs_parse_group(gp.name) == g) ++c;
+            return c;
+        };
+
+        ImGui::PushItemWidth(96.f);
+        char gid[40];
+        std::snprintf(gid, sizeof(gid), "%s %d", _u8L("Group").c_str(), m_active_group);
+        if (ImGui::BeginCombo("##cs_group", gid)) {
+            for (int g = 1; g <= max_group; ++g) {
+                char lbl[56];
+                std::snprintf(lbl, sizeof(lbl), "%s %d  (%d)", _u8L("Group").c_str(), g, group_count(g));
+                if (ImGui::Selectable(lbl, g == m_active_group)) m_active_group = g;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+
+        // (Sin BeginDisabled: esta versión de ImGui no lo trae → dim manual + guarda.)
+        const bool can_add = max_group < GLGizmoColorMixPainter::MAX_GROUPS;
+        ImGui::SameLine();
+        if (!can_add) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        if (m_imgui->button("+##cs_group_add") && can_add)
+            m_active_group = std::min(max_group + 1, GLGizmoColorMixPainter::MAX_GROUPS);
+        if (!can_add) ImGui::PopStyleVar();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _u8L("New group").c_str());
+
+        const bool can_del = m_active_group > 1;
+        ImGui::SameLine();
+        if (!can_del) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        if (m_imgui->button("-##cs_group_del") && can_del) {
+            // Borrar grupo = mover sus colores al Grupo 1 (sin perder trabajo).
+            Plater::TakeSnapshot snap(wxGetApp().plater(), _u8L("Delete ColorStitch group"),
+                                      UndoRedo::SnapshotType::GizmoAction);
+            std::vector<int> ids;
+            for (const SurfaceEffectProfile& gp : mgr.list())
+                if (cs_parse_group(gp.name) == m_active_group) ids.push_back(gp.id);
+            for (int id : ids)
+                if (const SurfaceEffectProfile* gp = mgr.find(id))
+                    mgr.rename(id, cs_strip_group(gp->name));   // → Grupo 1
+            m_active_group = 1;
+            refresh_selector_palettes();
+        }
+        if (!can_del) ImGui::PopStyleVar();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Delete group (its colours move to Group 1)").c_str());
+
+        // Guía SUAVE (no bloquea): aviso si el grupo activo pasa de 30.
+        const int active_cnt = group_count(m_active_group);
+        if (active_cnt > 30) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.9f, 0.63f, 0.16f, 1.f), "%d/30", active_cnt);
+        }
+    }
+
     const ModelObject* mo = m_c->selection_info()->model_object();
     const ModelVolume* first_mv = nullptr;
     if (mo) for (const ModelVolume* mv : mo->volumes) if (mv->is_model_part()) { first_mv = mv; break; }
@@ -2312,6 +2416,10 @@ void GLGizmoColorMixPainter::render_left_rail(float rail_w, float rail_h)
             // acumulado (los slots se llenaban sin forma de vaciarlos salvo el main UX).
             const bool occupies_slot = (slot_of(p.id) != 0);
             if (p.auto_generated && !occupies_slot) continue;
+            // NEOTKO_COLORSTITCH_TAG — s137: filtrar por grupo activo. Excepción: un
+            // color que ocupa slot en el objeto actual se muestra SIEMPRE (para poder
+            // borrarlo aunque sea de otro grupo) — mismo criterio que los auto.
+            if (cs_parse_group(p.name) != m_active_group && !occupies_slot) continue;
             ImGui::PushID(p.id);
 
             const ImVec2 sp = ImGui::GetCursorScreenPos();
@@ -2330,7 +2438,7 @@ void GLGizmoColorMixPainter::render_left_rail(float rail_w, float rail_h)
                     m_active_slot = slot_for_selected_profile(/*assign_if_missing=*/true);
                     // Estado activo completo (pinta por id; el Pro lo edita en vivo).
                     m_active_recipe     = r;
-                    m_active_style      = p.name;
+                    m_active_style      = cs_strip_group(p.name);   // s137: sin sufijo de grupo
                     m_has_active_recipe = true;
                     load_recipe_into_pro(r);
                     refresh_selector_palettes();
@@ -2384,7 +2492,7 @@ void GLGizmoColorMixPainter::render_left_rail(float rail_w, float rail_h)
                     draw_zone(tdl, tp, ImVec2(tp.x + zw, midy - 1.f), st_top,  false, fcolors);
                     draw_zone(tdl, ImVec2(tp.x, midy + 1.f), ImVec2(tp.x + zw, tp.y + zh), st_penu, true, fcolors);
                 }
-                ImGui::TextUnformatted(p.name.c_str());
+                ImGui::TextUnformatted(cs_strip_group(p.name).c_str());   // s137
                 if (p.auto_generated)   // s118: aclara que es color de trabajo
                     ImGui::TextColored(ImVec4(0.9f, 0.63f, 0.16f, 1.f), "%s",
                                        _u8L("working colour (not saved) — right-click to delete").c_str());

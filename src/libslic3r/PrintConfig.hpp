@@ -1054,9 +1054,6 @@ PRINT_CONFIG_CLASS_DEFINE(
 PRINT_CONFIG_CLASS_DEFINE(
     PrintRegionConfigBase,
 
-    // NEOTKO_MULTIPASS_PRIME_TAG — prime volume (mm³) purged before each MultiPass/
-    // Sandwich sublayer toolchange (read per-region by NeoTower). 0 = disabled.
-    ((ConfigOptionFloat,                multipass_prime_volume))
     ((ConfigOptionInt,                  bottom_shell_layers))
     ((ConfigOptionFloat,                bottom_shell_thickness))
     ((ConfigOptionFloat,                bridge_angle))
@@ -1195,6 +1192,34 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                scarf_joint_flow_ratio))
     ((ConfigOptionPercent,              scarf_overhang_threshold))
 
+)
+
+// NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — DERIVED PrintRegionConfig: adds the NeoArachne
+// per-region keys on top of PrintRegionConfigBase. Kept here (not in Base) because Base already
+// holds 250 entries and the BOOST_PP sequence limit is 256. Defaults match "Neotko Hybrid v2"
+// (Classic outer + Arachne interior, gap integrated). Visible in UI only when wall_generator ==
+// NeoArachne AND LibreMode is active; the validator in ConfigManipulation blocks invalid combos.
+PRINT_CONFIG_CLASS_DERIVED_DEFINE(
+    PrintRegionConfig,
+    (PrintRegionConfigBase),
+
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_outer_wall))
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_inner_walls))
+    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_gap_fill))
+    ((ConfigOptionPercent, neoarachne_allowed_overlap_pct))
+    ((ConfigOptionPercent, neoarachne_min_bead_width_pct))
+    ((ConfigOptionPercent, neoarachne_max_bead_width_pct))
+    ((ConfigOptionPercent, neoarachne_min_feature_size_pct))
+    ((ConfigOptionBool,    neoarachne_keep_short_tails))
+    ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
+    ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
+
+    // NEOTKO_*_TAG — moved out of PrintRegionConfigBase into this derived class
+    // to stay under the MSVC C1009 macro-nesting limit (Base was 250 entries → 125).
+    // Same pattern as the FullSpectrum fork. Inheritance keeps every config.<key> working.
+    // NEOTKO_MULTIPASS_PRIME_TAG — prime volume (mm³) purged before each MultiPass/
+    // Sandwich sublayer toolchange (read per-region by NeoTower). 0 = disabled.
+    ((ConfigOptionFloat,                multipass_prime_volume))
     // ===================================================================
     // NEOTKO SANDWICH ENGINE (Fase 2 port) — ColorMix + MultiPass + PathBlend
     // + Penultimate + Interlayer nesting. Neoweaving/MicroStitch keys NOT ported
@@ -1336,27 +1361,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,  neotko_surface_passes_top))
     ((ConfigOptionString,  neotko_surface_passes_penu))
     // NEOTKO_SANDWICH_ENGINE_TAG_END
-)
-
-// NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — DERIVED PrintRegionConfig: adds the NeoArachne
-// per-region keys on top of PrintRegionConfigBase. Kept here (not in Base) because Base already
-// holds 250 entries and the BOOST_PP sequence limit is 256. Defaults match "Neotko Hybrid v2"
-// (Classic outer + Arachne interior, gap integrated). Visible in UI only when wall_generator ==
-// NeoArachne AND LibreMode is active; the validator in ConfigManipulation blocks invalid combos.
-PRINT_CONFIG_CLASS_DERIVED_DEFINE(
-    PrintRegionConfig,
-    (PrintRegionConfigBase),
-
-    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_outer_wall))
-    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_inner_walls))
-    ((ConfigOptionEnum<NeoArachneWallSource>, neoarachne_gap_fill))
-    ((ConfigOptionPercent, neoarachne_allowed_overlap_pct))
-    ((ConfigOptionPercent, neoarachne_min_bead_width_pct))
-    ((ConfigOptionPercent, neoarachne_max_bead_width_pct))
-    ((ConfigOptionPercent, neoarachne_min_feature_size_pct))
-    ((ConfigOptionBool,    neoarachne_keep_short_tails))
-    ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
-    ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(
