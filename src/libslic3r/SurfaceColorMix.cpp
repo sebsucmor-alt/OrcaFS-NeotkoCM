@@ -415,6 +415,23 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
         if (!mv || !mv->is_model_part()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
         for (int slot = 1; slot < ModelVolume::COLORMIX_SLOT_COUNT; ++slot) {   // NEOTKO_COLORSTITCH_TAG s112
+            // NEOTKO_COLORSTITCH_TAG s137b — IGNORAR slots pintados que NO mapean a
+            // ningún profile (slot→profile_id==0). Son "pintura fantasma": facetas
+            // que quedaron con un índice de slot huérfano (p.ej. una zona pintada y
+            // luego desemparejada / sin profile), visibles como una caja gris sin
+            // color. Si tienen MÁS triángulos que el slot bueno, robaban el dominante
+            // → profile_id_for_slot()=0 → top_profile=<none> → SCM_MODE SKIP → el
+            // ColorMix de esa capa NO se generaba. Fill.cpp (FOOTPRINT_CLIP) ya los
+            // ignora; aquí alineamos el escaneo para que ambos coincidan.
+            // Cubrimos DOS casos de huérfano: (a) tabla a 0 (sin profile), y
+            // (b) pid colgado = apunta a un profile ya borrado (p.ej. tras
+            // garbage_collect_auto_profiles) → find()==null. Ambos = "fantasma".
+            {
+                const int _pid = mv->colormix_slot_to_profile_id[slot];
+                if (_pid == 0 ||
+                    Slic3r::SurfaceEffectProfileManager::get().find(_pid) == nullptr)
+                    continue;
+            }
             const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
                 *mv, static_cast<EnforcerBlockerType>(slot));
             if (its.indices.empty()) continue;
@@ -441,16 +458,29 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
         }
     }
 
+    int best_slot = 0, best_count = 0;
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)   // NEOTKO_COLORSTITCH_TAG s112
+        if (counts[s] > best_count) { best_count = counts[s]; best_slot = s; }
+
+    // NEOTKO_COLORSTITCH_TAG — s139 dbg: desglose POR-SLOT de los conteos en banda.
+    // El "slot=1(pre)" agregado no permitía distinguir empate (1-vs-1, contaminación
+    // entre cajas que comparten esquina) de mayoría real (3-vs-1, repintado). Esto
+    // imprime counts[s] de cada slot pintado + qué slot gana, para ver en qué banda
+    // un ColorStitch real (slot 2) pierde contra otro slot por conteo de facetas.
+    std::string _per_slot;
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
+        if (counts[s] > 0)
+            _per_slot += (_per_slot.empty() ? "" : ",") + std::to_string(s)
+                       + ":" + std::to_string(counts[s]);
+
     NEOTKO_LOG(PROFILE, "DOM_SLOT band=[" << z_min << "," << z_max << "]"
         << " up_tris=" << _dbg_up_tris << " in_band=" << _dbg_in_band
         << " facet_maxz=[" << (_dbg_up_tris ? _dbg_minz : 0) << ","
         << (_dbg_up_tris ? _dbg_maxz : 0) << "]"
-        << " → slot=" << (any_painted ? 1 : 0) << "(pre)");
+        << " counts=[" << _per_slot << "]"
+        << " → slot=" << best_slot << (any_painted ? "" : "(none)"));
 
     if (!any_painted) return 0;
-    int best_slot = 0, best_count = 0;
-    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)   // NEOTKO_COLORSTITCH_TAG s112
-        if (counts[s] > best_count) { best_count = counts[s]; best_slot = s; }
     return best_slot;
 }
 
@@ -1018,6 +1048,27 @@ int SurfaceColorMix::assign_and_group_tools(
         const double z_penu_max = layer_print_z + 2.0 * layer_height;
         const int top_slot  = dominant_painted_slot_in_z_range(print_object, z_top_min,  z_top_max);
         const int penu_slot = dominant_painted_slot_in_z_range(print_object, z_penu_min, z_penu_max);
+
+        // NEOTKO_COLORSTITCH_TAG — s139 dbg: el SCM colapsa a UN solo slot dominante
+        // por rol/capa, pero una capa puede tener VARIOS slots pintados (cajas que
+        // comparten capa/esquina). Si el dominante es un slot SIN colormix (p.ej. un
+        // gradiente solid), un ColorStitch real presente en la MISMA capa se pierde
+        // (SCM SKIP global). Esto enumera todos los slots del top band con su
+        // colormix.present para ver si hay un slot-stitch eclipsado por el dominante.
+        if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+            std::string _present;
+            for (int _s : SurfaceColorMix::enumerate_painted_slots_in_z_range(
+                              print_object, z_top_min, z_top_max)) {
+                const int _pid = profile_id_for_slot(print_object, _s);
+                const auto* _p = SurfaceEffectProfileManager::get().find(_pid);
+                _present += (_present.empty() ? "" : " ") + std::to_string(_s) + "{"
+                          + (_p ? _p->name : "<null>") + ",cm="
+                          + (_p && _p->colormix.present ? "1" : "0") + "}";
+            }
+            NEOTKO_LOG(PROFILE, "TOP_SLOTS layer=" << layer_idx << " z=" << layer_print_z
+                << " dominant=" << top_slot << " present=[" << _present << "]");
+        }
+
         if (const int pid = profile_id_for_slot(print_object, top_slot); pid)
             painted_top_profile = SurfaceEffectProfileManager::get().find(pid);
         if (const int pid = profile_id_for_slot(print_object, penu_slot); pid)
@@ -1108,8 +1159,17 @@ int SurfaceColorMix::assign_and_group_tools(
         const bool gv_is_top_role = (first_path->role() == erTopSolidInfill);
         const SurfaceEffectProfile* eff_profile =
             gv_is_top_role ? painted_top_profile : painted_penu_profile;
+        // NEOTKO_COLORSTITCH_TAG — s139 fix B (per-pieza): cuando Fill.cpp resolvió un
+        // override de pase para ESTA pieza (config_has_pass_override), el perfil de la
+        // pieza ya viaja en `config` (interlayer_colormix_enabled=true en cm_cfg_override,
+        // Fill.cpp:2196) — NO en el slot dominante. El gate confiaba sólo en el dominante
+        // (painted_top_profile), que colapsa la capa a UN slot: cuando dos cajas comparten
+        // capa y el dominante cae en un slot sin colormix (p.ej. un gradiente solid), el
+        // ColorStitch real de la OTRA caja se perdía (SKIP global). Confiar en el config
+        // per-pieza cierra esa clase de bugs ("cajas que comparten capa/esquina").
         const bool painted_override =
-            eff_profile && eff_profile->colormix.present;
+            (config_has_pass_override && config.interlayer_colormix_enabled.value)
+            || (eff_profile && eff_profile->colormix.present);
 
         if (painter_mode_obj) {
             // Painter mode: only process top/penu roles AND only if this layer

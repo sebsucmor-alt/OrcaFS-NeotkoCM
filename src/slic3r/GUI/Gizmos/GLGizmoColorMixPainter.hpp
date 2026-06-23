@@ -102,6 +102,7 @@ private:
     // s111 — carril izquierdo del panel: swatch del color Activo + biblioteca
     // de paletas guardadas como columna vertical con scroll.
     void render_left_rail(float rail_w, float rail_h);
+    void render_group_selector();                    // s137b: fila full-width del selector de grupo
 
     // PR.3 — modelo de dos capas (auto vs guardadas):
     //  · set_active_recipe: click en swatch = SOLO fija el color activo (no crea
@@ -121,6 +122,12 @@ private:
     int  ensure_active_slot();
     void garbage_collect_auto_profiles();
     void save_active_as_palette();
+    // s140 — SAVE ALL: promueve TODOS los colores de trabajo no guardados
+    // (auto_generated) al grupo activo de golpe. Deja "Remove all" libre para
+    // borrar lo efímero sin perder trabajo. Devuelve cuántos promovió.
+    int  save_all_palettes();
+    // ¿Hay algún color de trabajo sin guardar? (gobierna la visibilidad del botón.)
+    bool has_unsaved_palettes() const;
 
     std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_flat;
     std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_mixed;

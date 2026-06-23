@@ -1389,8 +1389,14 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
 
 void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
 {
-    // while (m_filpar.size() < idx+1)   // makes sure the required element is in the vector
-    m_filpar.push_back(FilamentParameters());
+    // NEOTKO_NEOTOWER_TAG s137b — RESTAURADO el guard original. NeoTower::generate
+    // registra solo los tools USADOS (std::set), que puede tener huecos (p.ej. un
+    // stripe con T1 count=0 → tools {T0,T2}). Con un push_back único, set_extruder(2)
+    // dejaba m_filpar.size()=2 e indexaba [2] → OOB → heap corruption (EXC_BAD_ACCESS
+    // 0x434f4e44 "COND" en ramming_speed.push_back). El while crece hasta idx+1
+    // rellenando los huecos con FilamentParameters por defecto (seguro).
+    while (m_filpar.size() < idx + 1)   // makes sure the required element is in the vector
+        m_filpar.push_back(FilamentParameters());
 
     m_filpar[idx].material = config.filament_type.get_at(idx);
     m_filpar[idx].is_soluble = config.wipe_tower_filament == 0 ? config.filament_soluble.get_at(idx) :

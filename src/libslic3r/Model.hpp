@@ -1214,6 +1214,12 @@ private:
         mesh_changed |= t != mmu_segmentation_facets.timestamp();
         cereal::load_by_value(ar, fuzzy_skin_facets);
         mesh_changed |= t != fuzzy_skin_facets.timestamp();
+        // NEOTKO_COLORSTITCH_TAG — s139: incluir la pintura ColorStitch (facetas +
+        // tabla slot→perfil) en el undo/redo. Antes no se serializaban → el snapshot
+        // se tomaba pero al deshacer no se restauraba lo pintado. Pila en-memoria
+        // (no formato de fichero); save/load deben mantener el MISMO orden.
+        cereal::load_by_value(ar, color_mix_paint_facets);
+        ar(colormix_slot_to_profile_id);
         cereal::load_by_value(ar, config);
         cereal::load(ar, text_configuration);
         cereal::load(ar, emboss_shape);
@@ -1235,6 +1241,9 @@ private:
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);
         cereal::save_by_value(ar, fuzzy_skin_facets);
+        // NEOTKO_COLORSTITCH_TAG — s139: ver load() — pintura ColorStitch en undo/redo.
+        cereal::save_by_value(ar, color_mix_paint_facets);
+        ar(colormix_slot_to_profile_id);
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);
         cereal::save(ar, emboss_shape);
