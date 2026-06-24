@@ -176,13 +176,17 @@ jobs:
           fi
         fi
 
+        # Write the release body to a file (persisted via $RUNNER_TEMP across steps
+        # in this job) instead of round-tripping it through $GITHUB_OUTPUT. The notes
+        # are Markdown full of backticks / $() / quotes; re-interpolating them into a
+        # shell string in the publish step (printf "...${{ ...notes }}...") made the
+        # shell EXECUTE them and broke the release. A file + --notes-file is safe.
+        printf '%s\n' "$notes_content" > "$RUNNER_TEMP/release-notes.md"
+
         {
           echo "tag=$tag"
           echo "title=$title"
           echo "version=V$version"
-          echo "notes<<NOTES_EOF"
-          echo "$notes_content"
-          echo "NOTES_EOF"
         } >> "$GITHUB_OUTPUT"
 
     - name: Collect release files
@@ -209,8 +213,8 @@ jobs:
       run: |
         tag="${{ steps.release_meta.outputs.tag }}"
         title="${{ steps.release_meta.outputs.title }}"
+        # Body written by the "Compute release metadata" step (same $RUNNER_TEMP job).
         notes_file="$RUNNER_TEMP/release-notes.md"
-        printf '%s\n' "${{ steps.release_meta.outputs.notes }}" > "$notes_file"
 
         if gh release view "$tag" >/dev/null 2>&1; then
           gh release edit "$tag" \
@@ -269,7 +273,9 @@ jobs:
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
           ver="PR-${{ github.event.number }}"
         else
-          ver=V$ver_pure
+          # NEOTKO artifact label (235B = Snapmaker Orca 2.3.5 Beta base, NTK23 =
+          # Neotko FullSpectrum v2.3). ver_pure stays the parseable X.Y.Z.
+          ver=235B-NTK23
         fi
         echo "ver=$ver" >> $GITHUB_ENV
         echo "ver_pure=$ver_pure" >> $GITHUB_ENV

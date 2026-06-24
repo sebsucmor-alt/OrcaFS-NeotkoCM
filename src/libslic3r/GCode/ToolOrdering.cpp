@@ -586,6 +586,17 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
 
     this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height, "multi-obj");
 
+    // NEOTKO #501 s143 — revert "wipe tower filament" auto-force (upstream 4143994).
+    // This block auto-selected wipe_tower_filament = (most-used extruder)+1. Side effect:
+    // with wipe_tower_filament != 0, WipeTower2.cpp:1402 / WipeTower.cpp:678 compute
+    //   is_soluble = (idx != wipe_tower_filament-1)
+    // → EVERY filament except the chosen wipe one is flagged "soluble", which makes
+    // layer_has_soluble_toolchange() true on every toolchange layer → finish_layer()
+    // fills the tower slice of the PRIOR layer SOLID (the PVA-only extra purge), e.g.
+    // 10.282 mm vs the 6.423 mm sparse baseline on PLA. Removing the force leaves the
+    // value at its default 0; every consumer (ToolOrdering:435, Print.cpp:965,
+    // WipeTower2:1402) is guarded by `!= 0`, so they cleanly no-op = stock behavior.
+#if 0
     if (prime_multi_material) {
         std::map<unsigned int, int> extrudeCount;
         for (const LayerTools& lt : m_layer_tools) {
@@ -604,6 +615,7 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         }
         const_cast<PrintConfig*>(m_print_config_ptr)->wipe_tower_filament.setInt(maxExtrude + 1);
     }
+#endif
 
     if (this->insert_wipe_tower_extruder()) {
         // Now convert the 0-based list to 1-based again, because that is what reorder_extruder expects.

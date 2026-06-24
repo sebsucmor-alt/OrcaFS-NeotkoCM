@@ -567,6 +567,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "fan_speedup_overhangs",
         "fan_speedup_time",
         "filament_colour",
+        "filament_multi_colors",
+        "filament_colour_mode",
         "default_filament_colour",
         "filament_diameter",
         "filament_density",
@@ -1581,15 +1583,6 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                   "their sub-layer purges use variable layer heights that the Classic wipe tower "
                   "cannot handle.\nSet Prime tower → Tower type to \"NeoTower\"."),
                 nullptr, "neotko_tower_type"};
-    }
-
-    if (nozzles < 2 && extruders.size() > 1 && m_config.print_sequence != PrintSequence::ByObject) {
-        auto ret = check_multi_filament_valid(*this);
-        if (!ret.string.empty())
-        {
-            ret.type = STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
-            return ret;
-        }
     }
 
     if (m_config.print_sequence == PrintSequence::ByObject) {

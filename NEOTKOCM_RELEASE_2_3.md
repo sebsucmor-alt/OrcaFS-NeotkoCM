@@ -9,7 +9,7 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 > ⚠️ **This is a beta.** Several pieces below are usable but still being refined — review your generated G-code before long or production prints. Surfaces that are still in progress show a **(WIP)** marker in the UI.
 
-**Base build:** Snapmaker Orca **2.3.4 beta** — upstream `nightly-builds`, commit **`8597556`** (2026-06-17).
+**Base build:** Snapmaker Orca **2.3.4 nightly** (commit **`8597556`**, 2026-06-17) with the complete **2.3.5 beta** patch set integrated on top (upstream `main` **`4d77d7f`**, 2026-06-23). See *Upstream Snapmaker Orca 2.3.5 (beta) — integrated* below for the full list.
 
 **2.3 is a re-platforming release.** The headline is not a new effect — it is that the **entire Neotko feature pack now runs on the official Snapmaker Orca 2.3.4 base**, instead of the older FullSpectrum 0.99 fork. The whole stack — Surface ColorStitch (the Sandwich), the ColorStitch Painter, NeoTower, NeoArachne — was ported onto 2.3.4 so the features can be adopted **à la carte** on a current, official base. On top of the port, **Libre Mode** graduates to a full professional-workflow tier, and **Align & Stack** joins as a first-class gizmo. Everything is **opt-in**: with the new options at their defaults, the build behaves like stock Snapmaker Orca 2.3.4.
 
@@ -46,6 +46,24 @@ The NeoArachne wall engine (per-feature Classic / Arachne (stock) / Arachne (Neo
 
 **S3DFactory — Simplify3D `.factory` import**
 `.factory` projects open directly (File → Import → Import 3D model). They load as a single **Assembled** object preserving the world-space layout; split in Libre Mode to recover the parts in place.
+
+---
+
+## Upstream Snapmaker Orca 2.3.5 (beta) — integrated
+
+The full 2.3.5 beta patch set from upstream `main` (`4d77d7f`, 2026-06-23) is folded into this release on top of the 2.3.4 nightly base, so every official 2.3.5 improvement ships alongside the Neotko pack. Patches are referenced by their upstream PR number:
+
+- **Filament Sync v2** — #527, #528, #535, #538 (sync dialog, layout, picker offset)
+- **Filament Color Library & adaptation** — #520, #529
+- **Top cover detection** (enclosure with ABS/PETG extraction) — #504, #521
+- **Redesigned splash screen** — #505
+- **Web bundle / resources** — #533, #513
+- **MQTT** — #508
+- **Misc fixes** — #518 (2.3.5-30 bugfix), #525 (logging), #530 (macOS build), #536 (filament profiles), #539 (compile fix), #540 (Linux build)
+- **#537 (About) — partial:** only the `MIN_FIRM_VER` bump to 1.5.0 was taken; the app version is intentionally **not** bumped to upstream's number.
+
+**Wipe-tower filament-waste fix — upstream #501 (adopted).**
+On multi-tool prints the slicer auto-selected a dedicated wipe filament, a side effect of which was that **every other filament got treated as *soluble*** — adding a PVA-style extra **solid** purge on the tower slice of the layer *before* each tool change. On PLA/PETG that solid floor is pure waste (≈10.3 mm vs the normal 6.4 mm sparse slice in our tests — roughly +60% on each pre-toolchange slice). Adopting upstream #501 removes the auto-force: non-soluble filaments no longer trigger the extra purge, the genuine tool-change purge is untouched, and tool-change ordering now matches upstream. **Sandwich prints benefit most** (many tool changes). *Note: this was an upstream mainstream bug — the soluble flag was meant only for true soluble supports (PVA), which need the extra purge because they degrade in the hot end over time; it should never have fired on PLA.*
 
 ---
 
