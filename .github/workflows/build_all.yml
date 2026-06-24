@@ -178,9 +178,9 @@ jobs:
 
         # Write the release body to a file (persisted via $RUNNER_TEMP across steps
         # in this job) instead of round-tripping it through $GITHUB_OUTPUT. The notes
-        # are Markdown full of backticks / $() / quotes; re-interpolating them into a
-        # shell string in the publish step (printf "...${{ ...notes }}...") made the
-        # shell EXECUTE them and broke the release. A file + --notes-file is safe.
+        # are Markdown full of backticks / $() / quotes; re-interpolating them back
+        # into a shell string in the publish step made the shell EXECUTE them and
+        # broke the release. A file + gh --notes-file is injection-proof.
         printf '%s\n' "$notes_content" > "$RUNNER_TEMP/release-notes.md"
 
         {
