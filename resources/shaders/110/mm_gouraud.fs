@@ -23,6 +23,17 @@ const vec3 LightRed = vec3(0.78, 0.0, 0.0);
 const vec3 LightBlue = vec3(0.73, 1.0, 1.0);
 uniform vec4 uniform_color;
 
+// NEOTKO_COLORSTITCH_TAG — weave preview: procedural stripes reproducing the
+// ColorStitch per-line tool sequence, projected in world space. Driven per-slot
+// from GLGizmoColorMixPainter. Inert (identical to stock) when u_weave_on=false.
+uniform bool  u_weave_on;
+uniform bool  u_weave_tile;       // true = repeat pattern at real line width (wrap); false = span once
+uniform int   u_weave_n;          // stripes in the sequence LUT (<= 64)
+uniform float u_weave_angle;      // radians — band orientation (along the fill lines)
+uniform float u_weave_pitch;      // mm — stripe pitch (real line width when tiling)
+uniform float u_weave_p0;         // mm — projection of the surface edge (object-local axis)
+uniform vec3  u_weave_cols[64];   // per-stripe colour, already sequenced (tool colours)
+
 uniform bool volume_mirrored;
 
 uniform mat4 view_model_matrix;
@@ -62,11 +73,43 @@ vec3 getWireframeColor(vec3 fill) {
 }
 uniform bool show_wireframe;
 
+// NEOTKO_COLORSTITCH_TAG — pick the stripe colour for this fragment. Projects the
+// world-space position onto the axis perpendicular to the fill lines, quantises
+// to the stripe pitch, and looks up the tiled tool sequence. Constant-index loop
+// avoids dynamic uniform-array indexing (portable across drivers).
+vec3 weave_color(vec3 base)
+{
+    if (!u_weave_on || u_weave_n <= 0)
+        return base;
+    float s = sin(u_weave_angle);
+    float c = cos(u_weave_angle);
+    // Object-local projection (model_pos) onto the axis across the fill lines, then
+    // index the per-line sequence spanning the surface [p0 .. p0 + n*pitch]. Clamp
+    // (no wrap) so gradients run once and patterns tile via the sequence itself.
+    float proj = -model_pos.x * s + model_pos.y * c;
+    float line = floor((proj - u_weave_p0) / max(u_weave_pitch, 0.0001));
+    int   idx;
+    if (u_weave_tile) {
+        // PATTERN: wrap into [0, n) at real line width. GLSL 1.10 has no integer % ,
+        // so use float modulo (floor handles negatives: -1 mod 2 -> 1).
+        float fn = float(u_weave_n);
+        idx = int(line - fn * floor(line / fn));
+    } else {
+        // GRADIENT: clamp (run once across the surface). No integer clamp() in 1.10.
+        idx = int(line);
+        if (idx < 0)             idx = 0;
+        if (idx > u_weave_n - 1) idx = u_weave_n - 1;
+    }
+    for (int i = 0; i < 64; ++i)
+        if (i == idx) return u_weave_cols[i];
+    return base;
+}
+
 void main()
 {
     if (any(lessThan(clipping_planes_dots, ZERO)))
         discard;
-    vec3  color = uniform_color.rgb;
+    vec3  color = weave_color(uniform_color.rgb);
     float alpha = uniform_color.a;
 
     vec3 triangle_normal = normalize(cross(dFdx(model_pos.xyz), dFdy(model_pos.xyz)));

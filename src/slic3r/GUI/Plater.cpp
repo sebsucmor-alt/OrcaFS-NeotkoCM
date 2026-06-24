@@ -12837,7 +12837,8 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     new_volume->fuzzy_skin_facets.assign(old_volume->fuzzy_skin_facets);
     std::swap(old_model_object->volumes[volume_idx], old_model_object->volumes.back());
     old_model_object->delete_volume(old_model_object->volumes.size() - 1);
-    if (!sinking)
+    // NeotkoLIBRE — keep floating Z when replacing a volume of an existing object.
+    if (!sinking && !wxGetApp().app_config->get_bool("neotko_libre_mode"))
         old_model_object->ensure_on_bed();
     old_model_object->sort_volumes(true);
 
@@ -13240,7 +13241,8 @@ void Plater::priv::reload_from_disk()
                     new_volume->convert_from_meters();
                 std::swap(old_model_object->volumes[vol_idx], old_model_object->volumes.back());
                 old_model_object->delete_volume(old_model_object->volumes.size() - 1);
-                if (!sinking) old_model_object->ensure_on_bed();
+                // NeotkoLIBRE — keep floating Z on reload-from-disk of an existing object.
+                if (!sinking && !wxGetApp().app_config->get_bool("neotko_libre_mode")) old_model_object->ensure_on_bed();
                 old_model_object->sort_volumes(wxGetApp().app_config->get("order_volumes") == "1");
 
                 sla::reproject_points_and_holes(old_model_object);
@@ -13312,7 +13314,8 @@ void Plater::priv::reload_from_disk()
                     new_volume->convert_from_meters();
                 std::swap(old_model_object->volumes[sel_v.volume_idx], old_model_object->volumes.back());
                 old_model_object->delete_volume(old_model_object->volumes.size() - 1);
-                if (!sinking)
+                // NeotkoLIBRE — keep floating Z on reload-from-disk of an existing object.
+                if (!sinking && !wxGetApp().app_config->get_bool("neotko_libre_mode"))
                     old_model_object->ensure_on_bed();
                 old_model_object->sort_volumes(true);
 
@@ -21754,8 +21757,13 @@ void Plater::changed_object(ModelObject &object){
     assert(object.get_model() == &p->model); // is object from same model?
     object.invalidate_bounding_box();
 
-    // recenter and re - align to Z = 0
-    object.ensure_on_bed(p->printer_technology != ptSLA);
+    // NeotkoLIBRE_START — in LibreMode an object edit (settings paste, emboss, drag/drop,
+    // per-object config change, ...) must NOT snap the object back to Z=0. Floating objects keep
+    // their Z; the user drops to bed explicitly via the sinking column. Non-libre = stock behavior.
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        // recenter and re - align to Z = 0
+        object.ensure_on_bed(p->printer_technology != ptSLA);
+    // NeotkoLIBRE_END
 
     if (p->printer_technology == ptSLA) {
         // Update the SLAPrint from the current Model, so that the reload_scene()
@@ -21788,9 +21796,12 @@ void Plater::changed_objects(const std::vector<size_t>& object_idxs)
     if (object_idxs.empty())
         return;
 
+    // NeotkoLIBRE — in LibreMode never auto-snap to Z=0 on object change (copy/paste, paste
+    // process settings, calibration regen, ...): floating objects must keep their Z.
+    const bool _libre = wxGetApp().app_config->get_bool("neotko_libre_mode");
     for (size_t obj_idx : object_idxs) {
         if (obj_idx < p->model.objects.size()) {
-            if (p->model.objects[obj_idx]->min_z() >= SINKING_Z_THRESHOLD)
+            if (!_libre && p->model.objects[obj_idx]->min_z() >= SINKING_Z_THRESHOLD)
                 // re - align to Z = 0
                 p->model.objects[obj_idx]->ensure_on_bed();
         }

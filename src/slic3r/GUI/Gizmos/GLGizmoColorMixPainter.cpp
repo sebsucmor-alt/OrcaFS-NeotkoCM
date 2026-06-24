@@ -24,6 +24,7 @@
 #include <GL/glew.h>
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -616,6 +617,60 @@ static std::vector<int> cm_tools_from_pass(const SurfacePass& p, bool penu)
     return out;
 }
 
+// NEOTKO_COLORSTITCH_TAG — single source of truth for the ColorStitch per-line tool
+// sequence used by ALL previews (3D weave + pro-tray strip), built with the SAME
+// engine builders the slicer uses (SurfaceColorMix.cpp:1326+): modes 1-3 →
+// build_dithered_tools_2color/_3color / build_custom_bands over n_lines; mode 0 →
+// pattern string (digit → 0-based physical tool). penu=false → top-role keys.
+// Returns physical tool indices (length n_lines for modes 1-3; pattern length for
+// mode 0 → caller tiles). Empty kv ⇒ empty result.
+static std::vector<int> colorstitch_tool_sequence(
+    const std::map<std::string, std::string>& kv, bool penu, int n_lines)
+{
+    if (kv.empty()) return {};
+    n_lines = std::max(1, n_lines);
+    const std::string pre = penu ? "interlayer_colormix_penu_" : "interlayer_colormix_";
+    auto gi = [&](const char* k, int d) {
+        const auto it = kv.find(pre + k);
+        if (it != kv.end()) { try { return std::stoi(it->second); } catch (...) {} }
+        return d; };
+    auto gd = [&](const char* k, double d) {
+        const auto it = kv.find(pre + k);
+        if (it != kv.end()) { try { return std::stod(it->second); } catch (...) {} }
+        return d; };
+    auto gb = [&](const char* k, bool d) {
+        const auto it = kv.find(pre + k);
+        return it != kv.end() ? (it->second == "1" || it->second == "true") : d; };
+
+    const int    mode = gi("mode", 0);
+    const int    ta = gi("tool_a", 0), tb = gi("tool_b", 1), tc = gi("tool_c", 2), td = gi("tool_d", 3);
+    const int    pa = gi("pct_a", 50), pb = gi("pct_b", 33);
+    const int    ea = gi("easing", 0);
+    const double ga = gd("gamma", 1.0), ov = gd("overlap", 0.6);
+    const int    ba = gi("band_count_a", 0), bb = gi("band_count_b", 0);
+    const int    bc = gi("band_count_c", 0), bd = gi("band_count_d", 0);
+    const bool   inv = gb("invert", false);
+
+    std::vector<int> seq;
+    switch (mode) {
+    case 1: seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(n_lines, ta, tb, pa, ea, ga); break;
+    case 2: seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(n_lines, ta, tb, tc, pa, pb, ea, ga, ov); break;
+    case 3: seq = Slic3r::SurfaceColorMix::build_custom_bands(n_lines, ta, ba, tb, bb, tc, bc, td, bd); break;
+    default: {   // mode 0 — pattern string, digit → 0-based physical tool ('1' → 0)
+        std::string pat;
+        auto pit = kv.find(penu ? std::string("interlayer_colormix_pattern_penultimate")
+                                : std::string("interlayer_colormix_pattern_top"));
+        if (pit == kv.end() || pit->second.empty()) pit = kv.find("pattern");
+        if (pit != kv.end()) pat = pit->second;
+        for (char ch : pat) if (ch >= '1' && ch <= '9') seq.push_back(ch - '1');
+        if (seq.empty()) seq.push_back(ta);
+        break;
+    }
+    }
+    if (inv && seq.size() > 1) std::reverse(seq.begin(), seq.end());
+    return seq;
+}
+
 // Draw one pass inside rect [a,b].
 static void draw_pass(ImDrawList* dl, ImVec2 a, ImVec2 b,
                       const SurfacePass& p, bool penu,
@@ -1014,15 +1069,40 @@ static void pro_pass_preview(ImDrawList* dl, ImVec2 a, ImVec2 b,
         break;
     }
     case SurfacePassKind::ColorMix: {
-        std::string pat = pro_cm_pattern(p, penu);
-        if (pat.empty()) pat = "12";
-        const float bw = 6.f;
-        int i = 0;
-        for (float x = a.x; x < b.x; x += bw, ++i) {
-            const int t = std::clamp((int)pat[i % (int)pat.size()] - (int)'1', 0, 3);
-            dl->AddRectFilled(ImVec2(x, a.y), ImVec2(std::min(x + bw, b.x), b.y),
-                              tool_col_u32(fcolors, t));
+        // Unified with the 3D weave: the SAME per-line tool sequence the slicer
+        // produces (dither / gradient / bands / pattern), not the raw digits.
+        // NEOTKO_COLORSTITCH_TAG — bands drawn at the REAL fill angle so the preview
+        // rotates with the wheel (mirrors the Solid hatch + the 3D weave).
+        const float bw     = 4.f;
+        const int   nbands = (int)(std::hypot(b.x - a.x, b.y - a.y) / bw) + 2;
+        std::vector<int> seq = colorstitch_tool_sequence(p.colormix.kv, penu, std::max(2, nbands));
+        if (seq.empty()) seq.push_back(0);
+        // angle from the pass kv (auto=-1 → display at 45°). Bands run ALONG the fill
+        // lines, so band boundaries step across the perpendicular axis.
+        int adeg = -1;
+        { const auto it = p.colormix.kv.find(penu ? "interlayer_colormix_penu_angle"
+                                                  : "interlayer_colormix_angle");
+          if (it != p.colormix.kv.end()) { try { adeg = std::stoi(it->second); } catch (...) {} } }
+        const float deg = (adeg < 0) ? 45.f : (float)adeg;     // = cm_angle (matches slice + weave)
+        const float ang = deg * 3.14159265f / 180.f;
+        const float dx = std::cos(ang), dy = -std::sin(ang);   // stripe dir (screen Y down)
+        const float nx = -dy, ny = dx;                         // across the lines
+        const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+        const float ext = 0.5f * (float)std::hypot(b.x - a.x, b.y - a.y) + 4.f;
+        const int   ns  = (int)seq.size();
+        dl->PushClipRect(a, b, true);
+        const int half = nbands / 2 + 1;
+        for (int i = -half; i <= half; ++i) {
+            const int t = seq[((i % ns) + ns) % ns];
+            const ImU32 col = tool_col_u32(fcolors, t < 0 ? 0 : t);
+            const float o0 = bw * (float)i, o1 = bw * (float)(i + 1);
+            const ImVec2 p0(c.x + nx * o0 - dx * ext, c.y + ny * o0 - dy * ext);
+            const ImVec2 p1(c.x + nx * o0 + dx * ext, c.y + ny * o0 + dy * ext);
+            const ImVec2 p2(c.x + nx * o1 + dx * ext, c.y + ny * o1 + dy * ext);
+            const ImVec2 p3(c.x + nx * o1 - dx * ext, c.y + ny * o1 - dy * ext);
+            dl->AddQuadFilled(p0, p1, p2, p3, col);
         }
+        dl->PopClipRect();
         break;
     }
     case SurfacePassKind::PathBlend: {
@@ -1254,6 +1334,28 @@ static void draw_zone_editor(const char* id, const char* label,
                 pbe.ease_mode = (em + 1) % 4;
                 pro_pb_write(p, pbe, layer_h);
             }
+        } else if (p.kind == K::ColorMix) {
+            // NEOTKO_COLORSTITCH_TAG — inline fill-angle for ColorStitch (mirrors Solid).
+            // Writes the pass kv so it persists into the profile stack → the slice honours
+            // it (Fill.cpp painted_colormix_angle_for_slot). -1 = auto (follow fill angle).
+            const char* akey = penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle";
+            int cm_ang = -1;
+            { const auto it = p.colormix.kv.find(akey);
+              if (it != p.colormix.kv.end()) { try { cm_ang = std::stoi(it->second); } catch (...) {} } }
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(_u8L("angle:").c_str());
+            ImGui::SameLine();
+            ImGui::PushItemWidth(42.f);
+            if (ImGui::DragInt("##cm_ang", &cm_ang, 1.f, -1, 359)) {
+                if (cm_ang < -1) cm_ang = -1; else if (cm_ang > 359) cm_ang = 359;
+                p.colormix.present = true;
+                p.colormix.kv[akey] = std::to_string(cm_ang);
+                p.angle = cm_ang;
+            }
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("-1 = auto (follow fill angle). Wheel over the bar rotates.").c_str());
         }
 
         // ---- line 2: preview bar (hover wheel: Solid angle / PB Full mid) ----
@@ -1270,6 +1372,20 @@ static void draw_zone_editor(const char* id, const char* label,
                         int a2 = p.angle;
                         if (a2 < 0) a2 = (step > 0) ? 0 : -1;
                         else { a2 += step; if (a2 < 0) a2 = -1; else a2 %= 360; }
+                        p.angle = a2;
+                    } else if (p.kind == K::ColorMix) {
+                        // NEOTKO_COLORSTITCH_TAG — wheel rotates the ColorStitch fill angle;
+                        // write the pass kv so it persists to the slice (same as the DragInt).
+                        const char* akey = penu ? "interlayer_colormix_penu_angle"
+                                                : "interlayer_colormix_angle";
+                        int a2 = -1;
+                        { const auto it = p.colormix.kv.find(akey);
+                          if (it != p.colormix.kv.end()) { try { a2 = std::stoi(it->second); } catch (...) {} } }
+                        const int step = (wheel > 0.f) ? 5 : -5;
+                        if (a2 < 0) a2 = (step > 0) ? 0 : -1;
+                        else { a2 += step; if (a2 < 0) a2 = -1; else a2 %= 360; }
+                        p.colormix.present = true;
+                        p.colormix.kv[akey] = std::to_string(a2);
                         p.angle = a2;
                     } else if (p.kind == K::PathBlend && !is_pb_half) {
                         PathBlendPassConfig pbe = pro_pb_read(p);
@@ -1321,6 +1437,24 @@ static void draw_zone_editor(const char* id, const char* label,
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", _u8L("Open the ColorStitch pattern editor").c_str());
+            // NEOTKO_COLORSTITCH_TAG — auto-angle (-1) notice next to ADV. With -1 the slicer
+            // alternates the fill angle per layer (uniform finish), so the print won't keep the
+            // previewed orientation. Compact amber tag + tooltip; set a fixed angle to lock it.
+            {
+                int _adv_ang = -1;
+                const auto it = p.colormix.kv.find(penu ? "interlayer_colormix_penu_angle"
+                                                        : "interlayer_colormix_angle");
+                if (it != p.colormix.kv.end()) { try { _adv_ang = std::stoi(it->second); } catch (...) {} }
+                if (_adv_ang < 0) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1.f), "%s", _u8L("auto angle").c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", _u8L("Angle -1 = auto: the slicer rotates the fill "
+                                                     "angle every layer (uniform finish), so the print "
+                                                     "won't match this orientation. Set a fixed angle "
+                                                     "(wheel over the bar) to lock it.").c_str());
+                }
+            }
         }
         ImGui::EndGroup();
 
@@ -1527,6 +1661,250 @@ GLGizmoColorMixPainter::build_ebt_colors_for_volume(const ModelVolume* mv) const
     return ebt;
 }
 
+// NEOTKO_COLORSTITCH_TAG — weave preview helpers.
+// Fwd-decl: resolved top-surface line width (defined below, after the palette helpers).
+static double GLGizmoColorMixPainter_top_line_width();
+// Real filament colour for a 0-based tool, as ColorRGBA (mirror of tool_col_u32).
+static ColorRGBA tool_col_rgba(const std::vector<std::string>& fcolors, int tool0)
+{
+    const ImU32 c = tool_col_u32(fcolors, tool0);
+    return ColorRGBA(float((c >>  0) & 0xFF) / 255.f,   // IM_COL32 packs R at bit 0
+                     float((c >>  8) & 0xFF) / 255.f,
+                     float((c >> 16) & 0xFF) / 255.f, 1.f);
+}
+
+// Extract the ColorStitch Top pass's config keys (interlayer_colormix_*). Prefers the
+// resolved Top stack (same source as the mini-sandwich preview); falls back to the raw
+// colormix payload (predict swatches with no resolved stack). Empty ⇒ not ColorStitch.
+static std::map<std::string, std::string>
+colorstitch_top_kv(const Slic3r::SurfaceEffectProfile& prof)
+{
+    if (!prof.stack_top_json.empty()) {
+        const Slic3r::SurfacePassStack st = Slic3r::SurfacePassStack::from_json(prof.stack_top_json);
+        for (const Slic3r::SurfacePass& p : st.passes)
+            if (p.kind == Slic3r::SurfacePassKind::ColorMix && !p.colormix.kv.empty())
+                return p.colormix.kv;
+    }
+    if (prof.colormix.present && !prof.colormix.kv.empty())
+        return prof.colormix.kv;
+    return {};
+}
+
+// NEOTKO_COLORSTITCH_TAG — band orientation for a ColorStitch slot = printed fill lines =
+// cm_angle + 90°. `is_auto` set when the kv leaves the angle on auto (-1).
+static float colorstitch_weave_theta(const std::map<std::string, std::string>& kv, bool& is_auto)
+{
+    int angle = -1;
+    const auto it = kv.find("interlayer_colormix_angle");
+    if (it != kv.end()) { try { angle = std::stoi(it->second); } catch (...) {} }
+    float base_rad;
+    if (angle >= 0) { base_rad = float(angle) * float(M_PI) / 180.f; is_auto = false; }
+    else            { base_rad = float(M_PI) / 4.f;                  is_auto = true;  }
+    // NEOTKO_COLORSTITCH_TAG — band direction = cm_angle (verified against the slice). The
+    // per-layer alternation that used to scramble this is now locked out for a fixed angle via
+    // f->is_using_template_angle in Fill.cpp, so weave == slice == pro-tray bar at cm_angle.
+    return base_rad;
+}
+
+// NEOTKO_COLORSTITCH_TAG — one WeaveParams from a projected extent [pmin,pmax] along `theta`.
+// N (line count) comes from the REAL line width; pitch = span/N so each stripe is one line
+// wide (≈ line_w) until the LUT cap (64), beyond which it coarsens to still cover the span.
+static TriangleSelectorPatch::WeaveParams
+colorstitch_make_weave(const std::map<std::string, std::string>& kv,
+                       const std::vector<std::string>& fcolors,
+                       float theta, float pmin, float pmax, float line_w)
+{
+    TriangleSelectorPatch::WeaveParams w;
+    const float span = pmax - pmin;
+    if (span < 1e-3f) return w;   // w.on stays false
+    const float lw = std::max(line_w, 0.05f);
+
+    int mode = 0;
+    { const auto it = kv.find("interlayer_colormix_mode");
+      if (it != kv.end()) { try { mode = std::stoi(it->second); } catch (...) {} } }
+
+    auto fill_cols = [&](const std::vector<int>& seq, int count) {
+        w.cols.resize(count);
+        for (int i = 0; i < count; ++i) {
+            const int tool0 = seq[(size_t) i % seq.size()];
+            w.cols[i] = (tool0 >= 0) ? tool_col_rgba(fcolors, tool0)
+                                     : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+        }
+    };
+
+    if (mode == 0) {
+        // PATTERN (periodic, e.g. "12"): tile ONE period at the real line width so each
+        // stripe == one printed line, independent of island size (no 64-line stretch).
+        const std::vector<int> base = colorstitch_tool_sequence(kv, /*penu*/false, 1);
+        if (base.empty()) return w;
+        const int n = std::min<int>((int) base.size(), 64);
+        w.on = true; w.tile = true; w.angle_rad = theta; w.p0 = pmin; w.pitch = lw;
+        fill_cols(base, n);
+    } else {
+        // GRADIENT / dither (modes 1-3): span the island once with N real-width lines,
+        // capped at the 64-entry LUT (then it coarsens, but the ramp still reads right).
+        const int N = std::clamp((int) std::lround(span / lw), 4, 64);
+        const std::vector<int> base = colorstitch_tool_sequence(kv, /*penu*/false, N);
+        if (base.empty()) return w;
+        w.on = true; w.tile = false; w.angle_rad = theta; w.p0 = pmin; w.pitch = span / float(N);
+        fill_cols(base, N);
+    }
+    return w;
+}
+
+std::vector<TriangleSelectorPatch::WeaveParams>
+GLGizmoColorMixPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
+                                                   const TriangleSelectorPatch* sel) const
+{
+    std::vector<TriangleSelectorPatch::WeaveParams> out(MAX_SLOTS);
+    m_weave_any_auto_angle = false;
+    if (!mv || !m_weave_preview) return out;   // toggle off → all flat
+
+    Slic3r::ColorSci::Material mats[4];
+    std::vector<std::string>   fcolors;
+    gizmo_materials(mats, fcolors);
+
+    const Slic3r::BoundingBoxf3 bb = mv->mesh().bounding_box();   // object-local (fallback)
+    // Real top-surface line width (resolved from config, no slice). Drives the line COUNT
+    // so stripe/gradient scale matches what the slicer lays on the top.
+    const float line_w = (float) GLGizmoColorMixPainter_top_line_width();
+
+    const auto& mgr = SurfaceEffectProfileManager::get();
+    for (int s = 1; s < MAX_SLOTS; ++s) {
+        const int pid = mv->colormix_slot_to_profile_id[s];
+        if (pid == 0) continue;
+        const SurfaceEffectProfile* p = mgr.find(pid);
+        if (!p) continue;
+        const std::map<std::string, std::string> kv = colorstitch_top_kv(*p);
+        if (kv.empty()) continue;   // not ColorStitch → flat
+
+        bool is_auto = false;
+        const float theta = colorstitch_weave_theta(kv, is_auto);
+        if (is_auto) m_weave_any_auto_angle = true;
+        const float sN = std::sin(theta), cN = std::cos(theta);
+
+        // -- surface span along the cross-axis: union of the slot's painted facets (this is
+        // the PER-SLOT fallback used by fragment patches; the per-ISLAND split happens in
+        // build_ebt_weave_islands_for_volume). Falls back to the object AABB when no facets.
+        float pmin = 1e9f, pmax = -1e9f;
+        bool  have_painted = false;
+        if (sel) {
+            const indexed_triangle_set its = sel->get_facets(static_cast<EnforcerBlockerType>(s));
+            for (const stl_vertex& v : its.vertices) {
+                const float pr = -v.x() * sN + v.y() * cN;
+                pmin = std::min(pmin, pr); pmax = std::max(pmax, pr);
+                have_painted = true;
+            }
+        }
+        if (!have_painted) {
+            for (double X : { bb.min.x(), bb.max.x() })
+                for (double Y : { bb.min.y(), bb.max.y() }) {
+                    const float pr = -float(X) * sN + float(Y) * cN;
+                    pmin = std::min(pmin, pr); pmax = std::max(pmax, pr);
+                }
+        }
+        TriangleSelectorPatch::WeaveParams w = colorstitch_make_weave(kv, fcolors, theta, pmin, pmax, line_w);
+        if (w.on) out[s] = std::move(w);
+    }
+    return out;
+}
+
+void GLGizmoColorMixPainter::build_ebt_weave_islands_for_volume(
+        const ModelVolume* mv, const TriangleSelectorPatch* sel,
+        std::unordered_map<int,int>& facet_weave_idx,
+        std::vector<TriangleSelectorPatch::WeaveParams>& weave_list) const
+{
+    facet_weave_idx.clear();
+    weave_list.clear();
+    if (!mv || !sel || !m_weave_preview) return;
+
+    Slic3r::ColorSci::Material mats[4];
+    std::vector<std::string>   fcolors;
+    gizmo_materials(mats, fcolors);
+    const float line_w = (float) GLGizmoColorMixPainter_top_line_width();
+
+    const auto& mgr = SurfaceEffectProfileManager::get();
+    for (int s = 1; s < MAX_SLOTS; ++s) {
+        const int pid = mv->colormix_slot_to_profile_id[s];
+        if (pid == 0) continue;
+        const SurfaceEffectProfile* p = mgr.find(pid);
+        if (!p) continue;
+        const std::map<std::string, std::string> kv = colorstitch_top_kv(*p);
+        if (kv.empty()) continue;
+
+        bool is_auto = false;
+        const float theta = colorstitch_weave_theta(kv, is_auto);
+        if (is_auto) m_weave_any_auto_angle = true;
+        const float sN = std::sin(theta), cN = std::cos(theta);
+
+        std::vector<int> src;   // parallel to its.indices → original facet index
+        const indexed_triangle_set its = sel->get_facets(static_cast<EnforcerBlockerType>(s), src);
+        if (its.indices.empty()) continue;
+
+        // -- connected components (islands) via union-find over TRIANGLES, joined by a shared
+        // EDGE (2 common vertices). Edge adjacency — not vertex adjacency — so coplanar zones
+        // that only touch at a CORNER (1 shared vertex) stay separate islands (each flat zone
+        // gets its own gradient instead of bleeding across the corner). Welded verts from
+        // get_facets give stable shared indices.
+        const int nt = int(its.indices.size());
+        std::vector<int> parent(nt);
+        std::iota(parent.begin(), parent.end(), 0);
+        auto find = [&parent](int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+        auto unite = [&](int a, int b) { a = find(a); b = find(b); if (a != b) parent[a] = b; };
+        {
+            std::map<std::pair<int,int>, int> edge_owner;   // sorted (v0,v1) → first triangle
+            auto add_edge = [&](int a, int b, int tri) {
+                if (a > b) std::swap(a, b);
+                const std::pair<int,int> key{a, b};
+                auto it = edge_owner.find(key);
+                if (it == edge_owner.end()) edge_owner.emplace(key, tri);
+                else                        unite(tri, it->second);
+            };
+            for (int k = 0; k < nt; ++k) {
+                const auto& tri = its.indices[k];
+                add_edge(tri[0], tri[1], k);
+                add_edge(tri[1], tri[2], k);
+                add_edge(tri[2], tri[0], k);
+            }
+        }
+
+        // per-island projected extent + which island each emitted triangle belongs to
+        std::map<int,int> root_to_island;
+        std::vector<float> imin, imax;
+        std::vector<int>   tri_island(its.indices.size());
+        for (size_t k = 0; k < its.indices.size(); ++k) {
+            const int root = find(int(k));
+            auto rit = root_to_island.find(root);
+            int isl;
+            if (rit == root_to_island.end()) {
+                isl = int(imin.size());
+                root_to_island.emplace(root, isl);
+                imin.push_back(1e9f); imax.push_back(-1e9f);
+            } else isl = rit->second;
+            tri_island[k] = isl;
+            for (int c = 0; c < 3; ++c) {
+                const stl_vertex& v = its.vertices[its.indices[k][c]];
+                const float pr = -v.x() * sN + v.y() * cN;
+                imin[isl] = std::min(imin[isl], pr);
+                imax[isl] = std::max(imax[isl], pr);
+            }
+        }
+
+        // build one WeaveParams per island; map its facets to the new weave_list entry
+        std::vector<int> island_weave(imin.size(), -1);
+        for (size_t isl = 0; isl < imin.size(); ++isl) {
+            TriangleSelectorPatch::WeaveParams w = colorstitch_make_weave(kv, fcolors, theta, imin[isl], imax[isl], line_w);
+            if (!w.on) continue;
+            island_weave[isl] = int(weave_list.size());
+            weave_list.push_back(std::move(w));
+        }
+        for (size_t k = 0; k < src.size(); ++k) {
+            const int wi = island_weave[tri_island[k]];
+            if (wi >= 0) facet_weave_idx[src[k]] = wi;
+        }
+    }
+}
+
 void GLGizmoColorMixPainter::refresh_selector_palettes()
 {
     const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
@@ -1539,6 +1917,14 @@ void GLGizmoColorMixPainter::refresh_selector_palettes()
         auto* tsp = dynamic_cast<TriangleSelectorPatch*>(m_triangle_selectors[idx].get());
         if (tsp) {
             tsp->set_ebt_colors(build_ebt_colors_for_volume(mv));
+            tsp->set_ebt_weave(build_ebt_weave_for_volume(mv, tsp));   // per-slot fallback
+            // per-ISLAND weave: each painted zone (stair step) scaled to its own extent.
+            {
+                std::unordered_map<int,int> fwi;
+                std::vector<TriangleSelectorPatch::WeaveParams> wl;
+                build_ebt_weave_islands_for_volume(mv, tsp, fwi, wl);
+                tsp->set_ebt_weave_islands(std::move(fwi), std::move(wl));
+            }
             tsp->request_update_render_data();
         }
     }
@@ -1575,6 +1961,33 @@ static double GLGizmoColorMixPainter_layer_height()
                       .config.option<ConfigOptionFloat>("layer_height"))
         if (o->value > 0.001) return o->value;
     return 0.2;
+}
+
+// NEOTKO_COLORSTITCH_TAG — resolved TOP-surface line width (mm), "casi real": the
+// weave runs on top-facing surfaces, so the stripe pitch should match what the slicer
+// lays there. Resolved from config WITHOUT a slice (top_surface_line_width → line_width
+// → nozzle), so a Calculate/pre-slice pass is not required for the pitch. See on-screen
+// notice for the only thing slicing would add (per-layer auto-angle).
+static double GLGizmoColorMixPainter_top_line_width()
+{
+    const auto& cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    double nozzle = 0.4;
+    if (auto* nd = wxGetApp().preset_bundle->printers.get_edited_preset()
+                       .config.option<ConfigOptionFloats>("nozzle_diameter"))
+        if (!nd->values.empty() && nd->values.front() > 0.05) nozzle = nd->values.front();
+    // base line width: 0/auto → Orca's ~nozzle default.
+    double line_w = nozzle * 1.125;
+    if (auto* lw = cfg.option<ConfigOptionFloatOrPercent>("line_width")) {
+        const double v = lw->get_abs_value(nozzle);
+        if (v > 0.05) line_w = v;
+    }
+    // top width is ratio_over line_width.
+    double top = line_w;
+    if (auto* tw = cfg.option<ConfigOptionFloatOrPercent>("top_surface_line_width")) {
+        const double v = tw->get_abs_value(line_w);
+        if (v > 0.05) top = v;
+    }
+    return (top > 0.05) ? top : 0.45;
 }
 
 // Regenera las tres paletas SOLO cuando cambia el contexto. La firma incluye
@@ -1649,6 +2062,10 @@ void GLGizmoColorMixPainter::render_palette_panel(float window_width)
 
     // (s111: el swatch "Active colour" + Save palette viven ahora en el carril
     //  izquierdo — render_left_rail.)
+
+    // NEOTKO_COLORSTITCH_TAG — the weave preview is now always on (it matches the slice);
+    // the "Preview weave" toggle + the auto-angle (!) notice were retired. m_weave_preview
+    // stays as an internal flag (default true) in case we need to disable it programmatically.
     ImGui::Separator();
 }
 
@@ -1817,6 +2234,10 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
                 SurfaceEffectProfileManager::payload_from_stacks(recipe.top, recipe.penu, *p);
                 refresh_selector_palettes();   // overlay + swatches al día en vivo
                 m_preview_dirty = true;
+                // NEOTKO_COLORSTITCH_TAG — editing a ColorStitch profile changes the saved
+                // project content, so mark it unsaved (the re-slice alone didn't flag the doc
+                // dirty → the Save/file option stayed inactive). No snapshot = no undo spam.
+                wxGetApp().plater()->set_plater_dirty(true);
                 // NEOTKO_COLORSTITCH_TAG — editar el contenido del perfil no toca las
                 // facetas ni el mapeo de slots. Agendamos el background process; la
                 // invalidación REAL la decide Print::apply, que recalcula la huella de
@@ -2871,10 +3292,23 @@ void GLGizmoColorMixPainter::update_model_object()
     ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (!mo) return;
     m_preview_dirty = true;   // s111: la pintura cambió → refrescar preview de marcados
+    const ModelInstance* mi = mo->instances.empty() ? nullptr : mo->instances.front();
     int idx = -1;
     for (ModelVolume* mv : mo->volumes) {
         if (!mv->is_model_part()) continue;
         ++idx;
+        if (idx >= (int)m_triangle_selectors.size() || !m_triangle_selectors[idx]) continue;
+        // NEOTKO_COLORSTITCH_TAG — (a) ColorStitch sólo actúa en superficies TOP, así
+        // que descartamos la pintura que cayó en paredes laterales/inferiores (el
+        // pincel pinta "a través"). Así lo pintado = lo que imprime y el weave no
+        // sangra por los lados. Se hace ANTES de serializar para que persista.
+        if (mi) {
+            const Transform3d trafo = mi->get_transformation().get_matrix() * mv->get_matrix();
+            if (m_triangle_selectors[idx]->discard_non_top_facing(trafo, 0.30f) > 0) {
+                if (auto* g = dynamic_cast<TriangleSelectorGUI*>(m_triangle_selectors[idx].get()))
+                    g->request_update_render_data(true);
+            }
+        }
         updated |= mv->color_mix_paint_facets.set(*m_triangle_selectors[idx]);
     }
     if (updated) {
@@ -2921,6 +3355,17 @@ void GLGizmoColorMixPainter::update_from_model_object(bool /*first_update*/)
             *mesh, build_ebt_colors_for_volume(mv)));
         const EnforcerBlockerType max_ebt = static_cast<EnforcerBlockerType>(MAX_SLOTS - 1);
         m_triangle_selectors.back()->deserialize(mv->color_mix_paint_facets.get_data(), false, max_ebt);
+        // (b) NEOTKO_COLORSTITCH_TAG — sembrar el weave al (re)construir el selector
+        // (entrar al gizmo / cambiar de objeto), no solo en refresh_selector_palettes;
+        // sin esto, al volver al gizmo la zona pintada no recuperaba su tejido/ángulo.
+        // DESPUÉS de deserialize: así el weave puede medir el área pintada real (get_facets).
+        if (auto* tsp = dynamic_cast<TriangleSelectorPatch*>(m_triangle_selectors.back().get())) {
+            tsp->set_ebt_weave(build_ebt_weave_for_volume(mv, tsp));   // per-slot fallback
+            std::unordered_map<int,int> fwi;
+            std::vector<TriangleSelectorPatch::WeaveParams> wl;
+            build_ebt_weave_islands_for_volume(mv, tsp, fwi, wl);
+            tsp->set_ebt_weave_islands(std::move(fwi), std::move(wl));
+        }
         m_triangle_selectors.back()->request_update_render_data();
         m_triangle_selectors.back()->set_wireframe_needed(true);
     }

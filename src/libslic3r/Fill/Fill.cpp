@@ -1695,9 +1695,16 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     // a running counter, not the band index.
                     int global_pass = 0;
 
+                    // NEOTKO_COLORSTITCH_TAG — remember the region's template-angle flag so we can
+                    // FORCE-lock it per-band for a fixed ColorStitch angle (and restore it for the
+                    // other bands), without leaking the lock across passes.
+                    const bool _orig_is_template_angle = f->is_using_template_angle;
+
                     for (int i = 0; i < n; ++i) {
                         const SurfacePass&    pass = mp_stack.passes[i];
                         const SurfacePassKind kind = pass.kind;
+                        // reset each band; the ColorStitch fixed-angle branch re-locks below.
+                        f->is_using_template_angle = _orig_is_template_angle;
 
                         // NEOTKO_PATHBLEND_TAG — Fase 5 s77 migración: compile a
                         // PathBlend pass into ramp(+cap) single-tool sublayers.
@@ -2211,6 +2218,21 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             f->angle = (cm_angle >= 0)
                                 ? Geometry::deg2rad(static_cast<float>(cm_angle))
                                 : base_angle;
+                            // NEOTKO_COLORSTITCH_TAG — a FIXED ColorStitch angle is ABSOLUTE: lock
+                            // out the per-layer _layer_angle alternation (idx&1?90:0) that solid
+                            // infill adds, so every layer keeps the painted angle = matches the 3D
+                            // weave. Auto (-1) keeps the natural per-layer rotation (good finish).
+                            if (cm_angle >= 0) f->is_using_template_angle = true;
+                            // NEOTKO_COLORSTITCH_TAG (debug) — angle resolution trace. If cm_angle=-1
+                            // here, the painted pass kv did NOT carry interlayer_colormix_angle →
+                            // falls to the alternating base_angle (the "slice doesn't match" bug).
+                            NEOTKO_LOG(COLORMIX, "ANGLE_MP layer=" << f->layer_id
+                                << " role=" << (int)_sub_role
+                                << " painter=" << (int)_mp_painter_mode
+                                << " cm_eff_override=" << (int)(cm_eff == &cm_cfg_override)
+                                << " cm_angle=" << cm_angle
+                                << " base_deg=" << (int)Geometry::rad2deg(base_angle)
+                                << " final_deg=" << (int)Geometry::rad2deg(f->angle));
                         } else {
                             f->angle = (pass.angle >= 0)
                                 ? Geometry::deg2rad(static_cast<float>(pass.angle))
@@ -2447,18 +2469,19 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         (surface_fill.params.extrusion_role == erTopSolidInfill ||
                          surface_fill.params.extrusion_role == erPenultimateInfill)) {
                         const auto& _cm_cfg_angle = layerm->region().config();
+                        const bool  _angle_is_penu = (surface_fill.params.extrusion_role == erPenultimateInfill);
                         bool _cm_angle_active = false;
+                        int  _painter_slot    = 0;   // >0 → painter mode resolved a painted slot here
                         if (_mp_painter_mode && _fp_slot_tag != 0) {   // NEOTKO_PROFILE_TAG — Fase 6c v2: natural remainder (tag==0) keeps natural angle
                             // Painter mode: active if a painted profile resolves at this layer/role
-                            const ExtrusionRole _role = surface_fill.params.extrusion_role;
                             const PrintObject* _po = this->object();
-                            const int _slot = (_role == erTopSolidInfill)
+                            _painter_slot = (!_angle_is_penu)
                                 ? SurfaceColorMix::dominant_painted_slot_in_z_range(
                                       _po, this->print_z - this->height, this->print_z)
                                 : SurfaceColorMix::dominant_painted_slot_in_z_range(
                                       _po, this->print_z, this->print_z + this->height);
-                            if (_slot > 0) {
-                                const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
+                            if (_painter_slot > 0) {
+                                const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _painter_slot);
                                 _cm_angle_active = (_pid > 0);
                             }
                         } else if (_cm_cfg_angle.interlayer_colormix_enabled.value) {
@@ -2477,11 +2500,19 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             }
                         }
                         if (_cm_angle_active) {
-                            const int _cm_angle = (surface_fill.params.extrusion_role == erTopSolidInfill)
-                                ? _cm_cfg_angle.interlayer_colormix_angle.value
-                                : _cm_cfg_angle.interlayer_colormix_penu_angle.value;
-                            if (_cm_angle >= 0)
+                            // NEOTKO_COLORSTITCH_TAG — in painter mode the fixed angle lives in the
+                            // PAINTED profile, not the region preset (which is auto=-1 there); reading
+                            // the preset made the angle fall back to the per-layer alternating base_angle.
+                            const int _cm_angle = (_painter_slot > 0)
+                                ? SurfaceColorMix::painted_colormix_angle_for_slot(this->object(), _painter_slot, _angle_is_penu)
+                                : (!_angle_is_penu ? _cm_cfg_angle.interlayer_colormix_angle.value
+                                                   : _cm_cfg_angle.interlayer_colormix_penu_angle.value);
+                            if (_cm_angle >= 0) {
                                 f->angle = Geometry::deg2rad(static_cast<float>(_cm_angle));
+                                // NEOTKO_COLORSTITCH_TAG — fixed angle is absolute: kill the per-layer
+                                // alternation so the slice keeps the painted angle every layer.
+                                f->is_using_template_angle = true;
+                            }
                         }
                     }
                     // NEOTKO_COLORMIX_TAG_END

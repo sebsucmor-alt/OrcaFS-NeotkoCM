@@ -15,6 +15,9 @@
 
 #include <memory>
 #include <optional>
+#include <cstdio>   // NEOTKO_COLORSTITCH_TAG — std::snprintf for weave uniform names
+#include <map>      // NEOTKO_COLORSTITCH_TAG — (state, weave_idx) → patch batching
+#include <utility>
 
 namespace Slic3r::GUI {
 
@@ -1277,19 +1280,41 @@ void TriangleSelectorPatch::render(ImGuiWrapper* imgui, const Transform3d& matri
         }
     }
 
+    // NEOTKO_COLORSTITCH_TAG — push this slot's weave params into the mm_gouraud
+    // uniforms (or disable). Always called so a previous patch's weave never leaks
+    // into the next draw call. Inert on the MMU shader if the uniform is absent.
+    auto apply_weave = [&shader](const TriangleSelectorPatch::WeaveParams* w) {
+        const bool on = w && w->on && !w->cols.empty();
+        shader->set_uniform("u_weave_on", on);
+        if (!on) return;
+        const int n = std::min<int>(64, (int)w->cols.size());
+        shader->set_uniform("u_weave_n", n);
+        shader->set_uniform("u_weave_tile", w->tile);   // NEOTKO_COLORSTITCH_TAG — wrap vs span
+        shader->set_uniform("u_weave_angle", w->angle_rad);
+        shader->set_uniform("u_weave_pitch", w->pitch);
+        shader->set_uniform("u_weave_p0", w->p0);
+        for (int i = 0; i < n; ++i) {
+            char nm[24];
+            std::snprintf(nm, sizeof(nm), "u_weave_cols[%d]", i);
+            const ColorRGBA& c = w->cols[i];
+            shader->set_uniform(nm, Vec3f(c.r(), c.g(), c.b()));
+        }
+    };
+
     for (size_t buffer_idx = 0; buffer_idx < m_triangle_patches.size(); ++buffer_idx) {
         if (this->has_VBOs(buffer_idx)) {
             const TrianglePatch& patch = m_triangle_patches[buffer_idx];
             ColorRGBA color;
+            size_t color_idx;
             if (patch.is_fragment() && !patch.neighbor_types.empty()) {
-                size_t color_idx = (size_t)*patch.neighbor_types.begin();
+                color_idx = (size_t)*patch.neighbor_types.begin();
                 if (color_idx >= m_ebt_colors.size())
                     continue;
                 color = m_ebt_colors[color_idx];
                 color.a(0.85);
             }
             else {
-                size_t color_idx = (size_t)patch.type;
+                color_idx = (size_t)patch.type;
                 if (color_idx >= m_ebt_colors.size())
                     continue;
                 color = m_ebt_colors[color_idx];
@@ -1297,9 +1322,16 @@ void TriangleSelectorPatch::render(ImGuiWrapper* imgui, const Transform3d& matri
             //to make black not too hard too see
             ColorRGBA new_color = adjust_color_for_rendering(color);
             shader->set_uniform("uniform_color", new_color);
+            // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave override; -1 ⇒ per-slot fallback.
+            const TriangleSelectorPatch::WeaveParams* wparam =
+                (patch.weave_idx >= 0 && patch.weave_idx < (int)m_weave_list.size())
+                    ? &m_weave_list[patch.weave_idx]
+                    : (color_idx < m_ebt_weave.size() ? &m_ebt_weave[color_idx] : nullptr);
+            apply_weave(wparam);
             this->render(buffer_idx, show_wireframe);
         }
     }
+    apply_weave(nullptr);   // leave the shader in flat mode for the contour pass
 
     render_paint_contour(matrix);
 }
@@ -1307,23 +1339,43 @@ void TriangleSelectorPatch::render(ImGuiWrapper* imgui, const Transform3d& matri
 void TriangleSelectorPatch::update_triangles_per_type()
 {
     //BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", enter");
-    m_triangle_patches.resize(m_ebt_colors.size());
-    for (int i = 0; i < m_triangle_patches.size(); i++) {
-        auto& patch = m_triangle_patches[i];
-        patch.type = (EnforcerBlockerType)i;
-        patch.triangle_indices.reserve(m_triangles.size() / 3);
-    }
+    // NEOTKO_COLORSTITCH_TAG — patches are batched by (state, weave_idx) so each painted
+    // ISLAND can carry its own gradient/pattern params. Without a per-island map this
+    // collapses to one patch per state = the original behaviour (weave_idx = -1).
+    m_triangle_patches.clear();
+    std::map<std::pair<int,int>, int> patch_of;   // (state, weave_idx) → m_triangle_patches index
 
     bool using_wireframe = (m_need_wireframe && wxGetApp().plater()->is_wireframe_enabled() && wxGetApp().plater()->is_show_wireframe()) ? true : false;
 
+    int facet_idx = -1;
     for (auto& triangle : m_triangles) {
+        ++facet_idx;
         if (!triangle.valid() || triangle.is_split())
             continue;
 
         int state = (int)triangle.get_state();
-        if (state < 0 || state >= int(m_triangle_patches.size()))
+        if (state < 0 || state >= int(m_ebt_colors.size()))
             continue;
-        auto& patch = m_triangle_patches[state];
+        int weave_idx = -1;
+        if (!m_facet_weave_idx.empty()) {
+            auto wit = m_facet_weave_idx.find(facet_idx);
+            if (wit != m_facet_weave_idx.end()) weave_idx = wit->second;
+        }
+        const std::pair<int,int> key{state, weave_idx};
+        int patch_index;
+        auto pit = patch_of.find(key);
+        if (pit == patch_of.end()) {
+            patch_index = int(m_triangle_patches.size());
+            patch_of.emplace(key, patch_index);
+            m_triangle_patches.emplace_back();
+            TrianglePatch& np = m_triangle_patches.back();
+            np.type      = (EnforcerBlockerType)state;
+            np.weave_idx = weave_idx;
+            np.triangle_indices.reserve(m_triangles.size() / 3);
+        } else {
+            patch_index = pit->second;
+        }
+        auto& patch = m_triangle_patches[patch_index];
         //patch.triangle_indices.insert(patch.triangle_indices.end(), triangle.verts_idxs.begin(), triangle.verts_idxs.end());
         for (int i = 0; i < 3; ++i) {
             int j = triangle.verts_idxs[i];

@@ -209,6 +209,14 @@ public:
     static bool             any_painted_profile_has_perim_override(
         const PrintObject* po, double print_z, double height);
 
+    // NEOTKO_COLORSTITCH_TAG — fill-angle override (degrees, >=0) carried by the
+    // PAINTED profile at `slot`, or -1 (auto). In painter mode the angle lives in the
+    // profile's stack (not the region preset), so Fill.cpp must read it from here to
+    // honour a fixed ColorStitch angle instead of falling back to the alternating
+    // base_angle. `penu` picks the penultimate stack/zone.
+    static int              painted_colormix_angle_for_slot(
+        const PrintObject* po, int slot, bool penu);
+
     // NEOTKO_PROFILE_TAG — Fase G painter-mode PathBlend override.
     // Mirror of `multipass_from_profile_payload`. Reads pathblend_* keys
     // from the kv map. PathBlendPassConfig defaults are used for absent

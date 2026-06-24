@@ -309,6 +309,29 @@ void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&c
     }
 }
 
+// NEOTKO_COLORSTITCH_TAG — keep paint on top-facing surfaces only (ColorStitch is a
+// top-surface effect). Mirrors the world-normal computation used by select_patch's
+// overhang filter, but tests the opposite hemisphere (up instead of down).
+int TriangleSelector::discard_non_top_facing(const Transform3d &trafo_no_translate, float min_world_normal_z)
+{
+    const Matrix3f normal_matrix = static_cast<Matrix3f>(
+        trafo_no_translate.matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>());
+    int cleared = 0;
+    for (Triangle &tr : m_triangles) {
+        if (!tr.valid() || tr.is_split())
+            continue;
+        if (tr.get_state() == EnforcerBlockerType::NONE)
+            continue;
+        const Vec3f &facet_normal   = m_face_normals[tr.source_triangle];
+        const float  world_normal_z = (normal_matrix * facet_normal).normalized().z();
+        if (world_normal_z < min_world_normal_z) {
+            tr.set_state(EnforcerBlockerType::NONE);
+            ++cleared;
+        }
+    }
+    return cleared;
+}
+
 bool TriangleSelector::is_facet_clipped(int facet_idx, const ClippingPlane &clp) const
 {
     for (int vert_idx : m_triangles[facet_idx].verts_idxs)
@@ -1438,6 +1461,31 @@ indexed_triangle_set TriangleSelector::get_facets(EnforcerBlockerType state) con
                 indices[i] = vertex_map[j];
             }
             out.indices.emplace_back(indices);
+        }
+    }
+    return out;
+}
+
+// NEOTKO_COLORSTITCH_TAG — get_facets(state) + originating triangle index per emitted triangle.
+indexed_triangle_set TriangleSelector::get_facets(EnforcerBlockerType state, std::vector<int>& src_facets) const
+{
+    indexed_triangle_set out;
+    src_facets.clear();
+    std::vector<int> vertex_map(m_vertices.size(), -1);
+    for (int ti = 0; ti < int(m_triangles.size()); ++ti) {
+        const Triangle& tr = m_triangles[ti];
+        if (tr.valid() && ! tr.is_split() && tr.get_state() == state) {
+            stl_triangle_vertex_indices indices;
+            for (int i=0; i<3; ++i) {
+                int j = tr.verts_idxs[i];
+                if (vertex_map[j] == -1) {
+                    vertex_map[j] = int(out.vertices.size());
+                    out.vertices.emplace_back(m_vertices[j].v);
+                }
+                indices[i] = vertex_map[j];
+            }
+            out.indices.emplace_back(indices);
+            src_facets.emplace_back(ti);
         }
     }
     return out;

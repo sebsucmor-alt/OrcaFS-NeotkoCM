@@ -13,6 +13,7 @@
 #include <GL/glew.h>
 
 #include <memory>
+#include <unordered_map>
 
 
 namespace Slic3r::GUI {
@@ -90,6 +91,10 @@ struct TrianglePatch {
     std::vector<int> triangle_indices;
     std::vector<int> facet_indices;
     EnforcerBlockerType type = EnforcerBlockerType::NONE;
+    // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave: index into TriangleSelectorPatch::m_weave_list,
+    // or -1 to fall back to the per-slot m_ebt_weave[type]. update_triangles_per_type batches
+    // by (type, weave_idx) so each painted island can carry its own gradient/pattern params.
+    int weave_idx = -1;
     std::set<EnforcerBlockerType> neighbor_types;
     // if area is larger than GapAreaMax, stop accumulate left triangle areas to improve performance
     float area = 0.f;
@@ -113,6 +118,36 @@ public:
     void update_triangles_per_patch();
 
     void set_ebt_colors(const std::vector<ColorRGBA> ebt_colors) { m_ebt_colors = ebt_colors; }
+
+    // NEOTKO_COLORSTITCH_TAG — per-slot ColorStitch weave preview. When a slot's
+    // WeaveParams has on=true, render() drives the mm_gouraud weave uniforms so
+    // the painted patch shows the woven tool sequence instead of a flat colour.
+    // Parallel-indexed to m_ebt_colors (slot s → m_ebt_weave[s]); empty = all flat.
+    struct WeaveParams {
+        bool                   on        = false;
+        bool                   tile      = false;      // NEOTKO_COLORSTITCH_TAG — true = repeat the
+                                                       // pattern at real line width (wrap); false =
+                                                       // span the surface once (gradients, clamp)
+        float                  angle_rad = 0.7853982f; // band orientation (along fill lines)
+        float                  pitch     = 0.45f;      // mm — stripe pitch (real line width when tile)
+        float                  p0        = 0.f;        // mm — projection of the surface edge
+        std::vector<ColorRGBA> cols;                   // per-line tool colours (one period when tile)
+    };
+    void set_ebt_weave(const std::vector<WeaveParams> ebt_weave) { m_ebt_weave = ebt_weave; }
+
+    // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave. `facet_weave_idx` maps a facet index
+    // (into the selector's triangle list) → an entry in `weave_list`; facets not in the
+    // map fall back to the per-slot m_ebt_weave. Forces a patch rebuild so the new
+    // (type, weave_idx) batching takes effect on the next render.
+    void set_ebt_weave_islands(std::unordered_map<int,int> facet_weave_idx,
+                               std::vector<WeaveParams> weave_list)
+    {
+        m_facet_weave_idx = std::move(facet_weave_idx);
+        m_weave_list      = std::move(weave_list);
+        m_paint_changed   = true;   // batching depends on weave_idx → rebuild patches
+        m_update_render_data = true;
+    }
+
     void set_filter_state(bool is_filter_state);
 
     constexpr static float GapAreaMin = 0.f;
@@ -167,6 +202,10 @@ protected:
     std::vector<unsigned int>   m_triangle_indices_VBO_ids;
 
     std::vector<ColorRGBA> m_ebt_colors;
+    std::vector<WeaveParams> m_ebt_weave;   // NEOTKO_COLORSTITCH_TAG — parallel to m_ebt_colors
+    // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave (overrides m_ebt_weave when a facet is mapped).
+    std::unordered_map<int,int> m_facet_weave_idx;   // facet idx → m_weave_list index
+    std::vector<WeaveParams>    m_weave_list;
 
     bool                        m_filter_state = false;
 

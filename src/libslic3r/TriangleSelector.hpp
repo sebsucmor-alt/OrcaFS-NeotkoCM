@@ -334,11 +334,23 @@ public:
                                       bool                 propagate,                  // if bucket fill is propagated to neighbor faces or if it fills the only facet of the modified mesh that the hit point belongs to.
                                       bool                 force_reselection = false); // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
 
+    // NEOTKO_COLORSTITCH_TAG — reset to NONE every painted leaf triangle whose source
+    // facet does not face up (world +Z) within the given cutoff. ColorStitch is a
+    // top-surface effect, so the painter calls this after each stroke to keep paint
+    // off side/bottom walls. `min_world_normal_z` is the cosine cutoff on the world
+    // normal's Z (e.g. 0.30 ≈ keep faces within ~72° of vertical). `trafo_no_translate`
+    // maps mesh→world (only its 3×3 is used). Returns the number of leaves cleared.
+    int                  discard_non_top_facing(const Transform3d &trafo_no_translate, float min_world_normal_z);
+
     bool                 has_facets(EnforcerBlockerType state) const;
     static bool          has_facets(const TriangleSplittingData &data, EnforcerBlockerType test_state);
     int                  num_facets(EnforcerBlockerType state) const;
     // Get facets at a given state. Don't triangulate T-joints.
     indexed_triangle_set get_facets(EnforcerBlockerType state) const;
+    // NEOTKO_COLORSTITCH_TAG — like get_facets(state), but also fills `src_facets` with the
+    // originating triangle index (into m_triangles) for each emitted triangle, parallel to
+    // the returned indices. Lets callers map connected components (islands) back to facets.
+    indexed_triangle_set get_facets(EnforcerBlockerType state, std::vector<int>& src_facets) const;
     // Get facets at a given state. Triangulate T-joints.
     indexed_triangle_set get_facets_strict(EnforcerBlockerType state) const;
     // Get edges around the selected area by seed fill.

@@ -3138,7 +3138,10 @@ void ObjectList::boolean()
     ModelVolume* new_volume = new_object->add_volume(mesh);
 
     // BBS: ensure on bed but no need to ensure locate in the center around origin
-    new_object->ensure_on_bed();
+    // NeotkoLIBRE — Assembled Boolean of floating objects keeps the combined Z (the source
+    // instance transforms are baked into the mesh by combine_mesh_fff); don't snap to bed.
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        new_object->ensure_on_bed();
     new_object->center_around_origin();
     new_object->translate_instances(-new_object->origin_translation);
     new_object->origin_translation = Vec3d::Zero();
@@ -5595,7 +5598,9 @@ void ObjectList::fix_through_netfabb()
         if (!fix_model_by_win10_sdk_gui(*(object(obj_idx)), vol_idx, progress_dlg, msg, res))
             return false;
         //wxGetApp().plater()->changed_mesh(obj_idx);
-        object(obj_idx)->ensure_on_bed();
+        // NeotkoLIBRE — keep floating Z when repairing the mesh of an existing object.
+        if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+            object(obj_idx)->ensure_on_bed();
         plater->changed_mesh(obj_idx);
 
         plater->get_partplate_list().notify_instance_update(obj_idx, 0);

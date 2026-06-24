@@ -8262,6 +8262,29 @@ std::string GCode::extrude_perimeters(const Print&                              
     for (const ObjectByExtruder::Island::Region& region : by_region)
         if (!region.perimeters.empty()) {
             m_config.apply(print.get_print_region(&region - &by_region.front()).config());
+            // NEOTKO_MULTIPASS_TAG s113 (port to SNAPOFFICIAL 2.3.4) — Perimeter Override:
+            // suppress the real-layer perimeter when this layer's sublayers ACTUALLY carry
+            // a replacement perimeter (cloned per-pass in Fill.cpp). Keying the suppression
+            // off the produced sublayer perimeters (source-of-truth) — not the global flag —
+            // keeps suppress ≡ re-emit and fixes the double-perimeter case (clone + real both
+            // emit on top of each other in the natural object tool). Non-sandwich objects /
+            // normal layers have empty subs[lid] → no behaviour change.
+            if (m_layer != nullptr) {
+                const PrintObject* po  = m_layer->object();
+                const size_t       lid = m_layer->id();
+                const auto&        subs = po->multipass_sublayers();
+                if (lid < subs.size()
+                    && std::any_of(subs[lid].begin(), subs[lid].end(),
+                           [](const MultiPassSubLayer& s){ return !s.perimeters.entities.empty(); })) {
+                    NEOTKO_LOG(MULTIPASS, "MP_PERIM_SUPPRESS: layer=" << lid
+                        << " z=" << (m_layer != nullptr ? float(m_layer->print_z) : -1.f)
+                        << " tool=T" << (m_writer.extruder() != nullptr ? int(m_writer.extruder()->id()) : -1)
+                        << " region=" << size_t(&region - &by_region.front())
+                        << " n_perim=" << int(region.perimeters.size())
+                        << " (sublayers carry replacement perimeters)");
+                    continue;
+                }
+            }
             // BBS: for first layer, we always print wall firstly to get better bed adhesive force
             // This behaviour is same with cura
             const bool should_print = is_first_layer ? !is_infill_first : (m_config.is_infill_first == is_infill_first);

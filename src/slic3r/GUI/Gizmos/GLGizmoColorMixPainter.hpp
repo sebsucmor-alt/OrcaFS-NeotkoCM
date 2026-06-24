@@ -11,6 +11,7 @@
 #include "slic3r/GUI/GLModel.hpp"                 // NEOTKO_COLORSTITCH_TAG s111 — caja-marca ×1.15
 #include "libslic3r/ColorSci/ColorPredict.hpp"   // NEOTKO_COLORSTITCH_TAG — PR.2 palette strips
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <string>
 #include <vector>
@@ -87,6 +88,30 @@ private:
 
     // Build per-volume ebt color palette from the slot→profile table + manager.
     std::vector<ColorRGBA> build_ebt_colors_for_volume(const ModelVolume* mv) const;
+
+    // NEOTKO_COLORSTITCH_TAG — per-slot weave preview data (parallel to the ebt
+    // colours). For each slot whose profile carries a ColorStitch Top pass, builds
+    // the stripe sequence (tool colours) + angle so the painted patch shows the
+    // woven effect. Off (flat) when m_weave_preview is disabled or the profile is
+    // not ColorStitch. Sets m_weave_any_auto_angle when a slot uses an auto angle.
+    // `sel` (the live painted selector for this volume) lets the weave span the
+    // PAINTED AREA per slot (projected extent of that slot's facets), not the whole
+    // object AABB — so the effect/pattern fits the selection. Null/empty ⇒ AABB fallback.
+    std::vector<TriangleSelectorPatch::WeaveParams>
+    build_ebt_weave_for_volume(const ModelVolume* mv,
+                               const TriangleSelectorPatch* sel = nullptr) const;
+
+    // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave. Splits each painted slot into connected
+    // components (islands = the flat top zones / stair steps, since painting is top-only)
+    // and builds one WeaveParams per island scaled to ITS own projected extent at the real
+    // top line width — so each zone previews like the slice instead of one shared field.
+    // Fills `facet_weave_idx` (facet → weave_list index) + `weave_list`. Needs the live `sel`.
+    void build_ebt_weave_islands_for_volume(const ModelVolume* mv,
+                                            const TriangleSelectorPatch* sel,
+                                            std::unordered_map<int,int>& facet_weave_idx,
+                                            std::vector<TriangleSelectorPatch::WeaveParams>& weave_list) const;
+    bool         m_weave_preview        = true;   // UI toggle "Preview weave"
+    mutable bool m_weave_any_auto_angle = false;  // drives the pre-slice angle notice
 
     // NEOTKO_COLORSTITCH_TAG_START — PR.2 (COLORSTITCH_PAINTER_REVAMP_PLAN.md):
     // estilo-paletas generadas por el dispatcher ColorSci::build_palette y

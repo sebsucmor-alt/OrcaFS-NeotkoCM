@@ -54,6 +54,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 6c. [Palette groups, slot cap & Save All](#6c-palette-groups-slot-cap--save-all)
    - 6d. [Painter mode at slice time](#6d-painter-mode-at-slice-time)
    - 6e. [Profile persistence and 3MF round-trip](#6e-profile-persistence-and-3mf-round-trip)
+   - 6f. [Weave preview on the painted surface](#6f-weave-preview-on-the-painted-surface)
 7. [Align & Stack — align and stack objects](#7-align--stack--align-and-stack-objects)
 8. [NeoArachne — alternative wall generator](#8-neoarachne--alternative-wall-generator)
    - 8a. [Turning it on](#8a-turning-it-on)
@@ -132,7 +133,7 @@ A **ColorStitch** pass decides which filament prints each fill line. Open its **
 | **Skip tiny areas** | Surfaces with fewer than N fill lines use Color 1 only. |
 | **ColorStitch min. line length** | Fill lines shorter than this (mm) are skipped, so they keep the surrounding colour and avoid toolchanges on tiny segments. Default **0** (don't skip). |
 | **Invert direction ⇆** | Reverses the per-line sequence after generation. |
-| **Infill angle override** | `-1 = Auto`. |
+| **Infill angle override** | `-1 = Auto`. Scroll the **mouse wheel over the pass preview bar** to rotate it live — the bar's stripes rotate with it. A **fixed** angle (≥ 0) is now honoured **exactly** in the G-code (the per-layer fill rotation is locked out for that pass), so the print keeps the angle you set. `-1 = Auto` lets the slicer alternate per layer (uniform finish, but the orientation won't match a static preview). |
 | **Gradient repetitions** | `1 = single`; higher repeats the pattern across the surface. |
 
 A live **preview** shows the resulting gradient to scale, plus an estimate of how many lines a 60×60 mm surface would have at your filament width.
@@ -254,6 +255,8 @@ While active, Libre Mode also signals the slicer: an object with no first layer 
 ### 4b. Floating objects
 
 With Libre Mode active, objects can sit at **any Z height** — floating above the bed or partly below it — instead of being snapped to the plate. The slicer still generates G-code and warns (instead of erroring) when an object has no initial layer. Use it for assemblies whose parts print at specific heights, or parts that clip into a structure already on the bed.
+
+The floating Z is **preserved across object operations** — copy/paste, *Paste Process Settings*, reload-from-disk, replace-STL, boolean, mesh simplify and *face the camera* no longer snap a floating object back to Z=0. To drop a floating object to the bed on purpose, use the **sinking** column in the object list (that path is left intact).
 
 ---
 
@@ -383,6 +386,20 @@ This "all or nothing" rule prevents mixing preset and painted effects. For each 
 Everything is saved inside the 3MF: the **profile library** (project-level base64 JSON), the **per-volume slot tables** (slot → profile id), and the **per-triangle paint** (mirroring MMU painting). Opening a 3MF restores all three. Profiles live inside the 3MF only — there is no cross-project library; save a template 3MF to reuse a set.
 
 > **Known limitation — PathBlend on Penu.** The penultimate PathBlend has a gradient-direction bug on multi-stair objects, so the PathBlend pass is restricted to the Top zone for now. The engine supports penu PathBlend; it will be re-enabled when the bug is fixed.
+
+---
+
+### 6f. Weave preview on the painted surface
+
+Painted top surfaces show the **ColorStitch weave directly on the model** — the per-line tool stripes (or dither / gradient / hard bands) instead of a flat swatch colour. The preview is built from the **same per-line sequence the slicer produces** (`build_dithered_tools_*` / `build_custom_bands` / pattern), so the **filament colours, density and pattern match the G-code**. The same sequence builder also drives the small pass strip in the **Pro tray** and the **Sandwich editor**, so the strips and the 3D view stay identical. (The preview is always on now; the old *Preview weave* toggle was retired.)
+
+**Scale fits the painted area at the real line width.** The stripe pitch comes from the **resolved top line width** (config, no slice needed), and the gradient/pattern is scaled to the **painted region's own extent** — computed **per island**: each flat zone (e.g. a stair step) is detected as a connected component (edge-adjacency, so zones that only touch at a corner stay separate) and gets its **own** gradient ramp, just like the slice. Tiled patterns repeat at the real line width (shader wrap), so the stripe width matches the print regardless of zone size.
+
+**Orientation matches the slice for a fixed angle.** The stripes run at the pass's **fixed angle**, and that angle is now **honoured exactly in the G-code**: for a fixed ColorStitch angle the slicer's per-layer fill-angle rotation is **locked out** (internally via the template-angle flag), so every layer keeps the painted orientation. Set the angle by **scrolling the mouse wheel over the pass preview bar** (Pro tray and Sandwich editor) — the bar, the 3D model and the print all rotate together in real time.
+
+> **Auto angle (`-1`).** With auto angle the slicer **alternates the fill direction every layer** (this is what gives a uniform finish), so a static preview cannot match the print. An amber **"auto angle"** tag appears next to **ADV** in that case — set a **fixed angle** (wheel over the bar) to lock the orientation.
+
+> **Remaining limitations (this version).** The stripe scale uses the painted-area projected extent, **not** the exact line count after perimeters/gap-fill are subtracted, so it can differ by a line or two. Islands wider than ~64 lines coarsen in the preview (64-entry shader LUT) — gradients just lower resolution; patterns still tile at real width. Painting is restricted to **upward-facing (top) faces**, matching where the effect actually prints.
 
 ---
 

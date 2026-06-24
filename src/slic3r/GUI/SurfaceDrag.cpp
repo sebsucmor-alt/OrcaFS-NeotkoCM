@@ -378,7 +378,9 @@ bool face_selected_volume_to_camera(const Camera &camera, GLCanvas3D &canvas, co
 
     if (volume.type() == ModelVolumeType::MODEL_PART) {
         object.invalidate_bounding_box();
-        object.ensure_on_bed();
+        // NeotkoLIBRE — "Face the camera" rotation must keep the floating Z, not snap to bed.
+        if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+            object.ensure_on_bed();
     }
 
     canvas.do_rotate(L("Face the camera"));

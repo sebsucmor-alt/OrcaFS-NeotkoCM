@@ -2844,16 +2844,27 @@ private:
         // and chip clicks. The kind selector decides Half vs Full.
         const bool is_solid = (p.kind == Kind::Solid);
         const bool is_pb    = (p.kind == Kind::PathBlend);
+        // NEOTKO_COLORSTITCH_TAG — ColorStitch now exposes its fill angle inline too
+        // (wheel over the preview rotates it; persisted in the pass colormix kv).
+        const bool is_cm    = (p.kind == Kind::ColorMix);
 
-        // Angle/Mid field is visible for Solid and PathBlend.
-        u.angle_lbl[idx]->Show(is_solid || is_pb);
-        u.angle_txt[idx]->Show(is_solid || is_pb);
+        // Angle/Mid field is visible for Solid, PathBlend and ColorStitch.
+        u.angle_lbl[idx]->Show(is_solid || is_pb || is_cm);
+        u.angle_txt[idx]->Show(is_solid || is_pb || is_cm);
         // Default to enabled; the PB-Half branch below disables when needed.
         u.angle_lbl[idx]->Enable(true);
         u.angle_txt[idx]->Enable(true);
         if (is_solid) {
             u.angle_lbl[idx]->SetLabel(_L("angle:"));
             u.angle_txt[idx]->ChangeValue(wxString::Format("%d", p.angle));
+        } else if (is_cm) {
+            u.angle_lbl[idx]->SetLabel(_L("angle:"));
+            const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
+                                              : "interlayer_colormix_angle";
+            int a = -1;
+            const auto it = p.colormix.kv.find(akey);
+            if (it != p.colormix.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
+            u.angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
         } else if (is_pb) {
             u.angle_lbl[idx]->SetLabel(_L("ramp end:"));
             Slic3r::PathBlendPassConfig pbc;
@@ -3396,6 +3407,20 @@ private:
             on_pathblend_mid_edit(z, idx);
             return;
         }
+        if (p.kind == Kind::ColorMix) {
+            // NEOTKO_COLORSTITCH_TAG — typed angle persists into the pass colormix kv.
+            long v = -1;
+            if (!m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false).ToLong(&v))
+                v = -1;
+            if (v < 0) v = -1; else if (v > 359) v = 359;
+            const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
+                                              : "interlayer_colormix_angle";
+            p.colormix.present = true;
+            p.colormix.kv[akey] = std::to_string((int)v);
+            m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", (int)v));
+            m_ui[z].preview[idx]->Refresh();
+            return;
+        }
         if (p.kind != Kind::Solid) return;
         long v = -1;
         if (!m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false).ToLong(&v))
@@ -3419,6 +3444,23 @@ private:
             const double step = (e.GetWheelRotation() > 0) ? 0.01 : -0.01;
             pbc.mid_end_mm += (float)step;
             write_pb_blob(z, idx, pbc);
+            return;
+        }
+        if (p.kind == Kind::ColorMix) {
+            // NEOTKO_COLORSTITCH_TAG — rotate the ColorStitch fill angle in the pass kv
+            // (same key the engine reads via painted_colormix_angle_for_slot).
+            const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
+                                              : "interlayer_colormix_angle";
+            int a = -1;
+            const auto it = p.colormix.kv.find(akey);
+            if (it != p.colormix.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
+            const int step = (e.GetWheelRotation() > 0) ? 5 : -5;
+            if (a < 0) a = (step > 0) ? 0 : -1;
+            else { a += step; if (a < 0) a = -1; else a %= 360; }
+            p.colormix.present = true;
+            p.colormix.kv[akey] = std::to_string(a);
+            if (m_ui[z].angle_txt[idx]) m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
+            if (m_ui[z].preview[idx])   m_ui[z].preview[idx]->Refresh();
             return;
         }
         if (p.kind != Kind::Solid) { e.Skip(); return; }
@@ -3751,13 +3793,39 @@ private:
                 dc.SetBrush(wxBrush(wxColour(90, 90, 90)));
                 dc.DrawRectangle(0, 0, sz.x, sz.y);
             } else {
-                for (int x = 0; x < sz.x; ++x) {
-                    const int si = (sz.x > 1) ? (int)((long long)x * NS / sz.x) : 0;
-                    const int t  = seq[std::min(NS - 1, std::max(0, si))];
-                    const wxColour c = (t < 0) ? wxColour(150, 150, 150)
-                                               : tool_colour(t);
-                    dc.SetPen(wxPen(c));
-                    dc.DrawLine(x, 0, x, sz.y);
+                // NEOTKO_COLORSTITCH_TAG — draw the sequence at the REAL fill angle so the
+                // preview rotates with the wheel (mirrors the Solid hatch + the 3D weave).
+                // The sequence is stretched across the projected extent (schematic, same as
+                // before) but the bands now run along the fill direction.
+                const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
+                                                  : "interlayer_colormix_angle";
+                int adeg = -1;
+                const auto it = p.colormix.kv.find(akey);
+                if (it != p.colormix.kv.end()) { try { adeg = std::stoi(it->second); } catch (...) {} }
+                const double PI  = 3.14159265358979323846;
+                const double rad = ((adeg < 0) ? 45.0 : (double)adeg) * PI / 180.0;  // = cm_angle
+                const double dx = std::cos(rad), dy = -std::sin(rad);   // stripe dir
+                const double nx = -dy,           ny = dx;               // across the lines
+                const double cx = sz.x * 0.5,    cy = sz.y * 0.5;
+                const double ext = 0.5 * std::hypot((double)sz.x, (double)sz.y) + 2.0;
+                const double step = 3.0;
+                const int    half = (int)(ext / step) + 1;
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                for (int i = -half; i <= half; ++i) {
+                    const double o0 = step * i, o1 = step * (i + 1);
+                    const double frac = (o0 + ext) / (2.0 * ext);   // stretch seq across extent
+                    int si = (int)(frac * NS);
+                    si = std::min(NS - 1, std::max(0, si));
+                    const int t = seq[si];
+                    const wxColour c = (t < 0) ? wxColour(150, 150, 150) : tool_colour(t);
+                    wxPoint poly[4] = {
+                        wxPoint((int)(cx + nx * o0 - dx * ext), (int)(cy + ny * o0 - dy * ext)),
+                        wxPoint((int)(cx + nx * o0 + dx * ext), (int)(cy + ny * o0 + dy * ext)),
+                        wxPoint((int)(cx + nx * o1 + dx * ext), (int)(cy + ny * o1 + dy * ext)),
+                        wxPoint((int)(cx + nx * o1 - dx * ext), (int)(cy + ny * o1 - dy * ext))
+                    };
+                    dc.SetBrush(wxBrush(c));
+                    dc.DrawPolygon(4, poly);
                 }
             }
         } else if (p.kind == Kind::PathBlend) {

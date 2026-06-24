@@ -2318,6 +2318,39 @@ bool SurfaceColorMix::any_painted_profile_has_perim_override(
     }
     return false;
 }
+
+// NEOTKO_COLORSTITCH_TAG — read the painted profile's ColorStitch fill-angle (deg, >=0)
+// or -1 (auto). Same source as the GUI weave preview (colorstitch_top_kv): prefer the
+// resolved stack's ColorMix pass kv, fall back to the raw colormix payload.
+int SurfaceColorMix::painted_colormix_angle_for_slot(const PrintObject* po, int slot, bool penu)
+{
+    if (po == nullptr || slot <= 0) return -1;
+    const int pid = profile_id_for_slot(po, slot);
+    if (!pid) return -1;
+    const SurfaceEffectProfile* p = Slic3r::SurfaceEffectProfileManager::get().find(pid);
+    if (!p) return -1;
+    auto read = [penu](const std::map<std::string, std::string>& kv) -> int {
+        // Penu passes carry the penu-prefixed key; fall back to the plain key.
+        auto it = kv.find(penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle");
+        if (it == kv.end() && penu) it = kv.find("interlayer_colormix_angle");
+        if (it != kv.end()) { try { return std::stoi(it->second); } catch (...) {} }
+        return -2;   // key absent
+    };
+    const std::string& js = penu ? p->stack_penu_json : p->stack_top_json;
+    if (!js.empty()) {
+        const SurfacePassStack st = SurfacePassStack::from_json(js);
+        for (const SurfacePass& sp : st.passes)
+            if (sp.kind == SurfacePassKind::ColorMix && !sp.colormix.kv.empty()) {
+                const int a = read(sp.colormix.kv);
+                if (a != -2) return a;
+            }
+    }
+    if (p->colormix.present && !p->colormix.kv.empty()) {
+        const int a = read(p->colormix.kv);
+        if (a != -2) return a;
+    }
+    return -1;
+}
 // NEOTKO_PROFILE_TAG_END
 
 

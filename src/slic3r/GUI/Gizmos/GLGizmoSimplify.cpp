@@ -546,7 +546,9 @@ void GLGizmoSimplify::apply_simplify() {
     mv->invalidate_convex_hull_2d();
     mv->set_new_unique_id();
     mv->get_object()->invalidate_bounding_box();
-    mv->get_object()->ensure_on_bed();
+    // NeotkoLIBRE — keep floating Z when simplifying the mesh of an existing object.
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        mv->get_object()->ensure_on_bed();
 
     // fix hollowing, sla support points, modifiers, ...
     plater->changed_mesh(object_idx);
