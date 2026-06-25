@@ -1695,6 +1695,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              neotower_purge_compaction))
     ((ConfigOptionEnum<NeoTowerType>, neotko_tower_type))
     ((ConfigOptionBool,               neotower_zigurat))
+    ((ConfigOptionBool,               neotower_variable_layer_height))
     // NEOTKO_NEOTOWER_TAG_END
 
     // BBS: wipe tower is only used for priming

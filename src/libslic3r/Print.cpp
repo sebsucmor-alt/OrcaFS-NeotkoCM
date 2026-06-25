@@ -1687,6 +1687,27 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     return {_u8L("Variable layer height is not supported with Organic supports.") };
         }
 
+    // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental). When this option is on AND the
+    // NeoTower planner is selected, relax the prime-tower uniform-layer-height blocks below:
+    // NeoTower purges every toolchange at the real per-layer delta-Z, so a scene may mix objects
+    // of different layer heights and may combine adaptive/variable layer height with multiple
+    // filaments. The option is exposed only under NeoTower + LibreMode (see Tab/ConfigManipulation);
+    // we still require NeoTower::is_enabled here so the Classic wipe tower never silently relaxes.
+    const auto* _neotko_var_lh_opt = m_config.option<ConfigOptionBool>("neotower_variable_layer_height");
+    const bool  _neotko_var_lh     = NeoTower::is_enabled(m_config) && _neotko_var_lh_opt && _neotko_var_lh_opt->value;
+
+    // Adaptive/variable layer height combined with multiple filaments needs per-layer
+    // variable-height purges. The Classic wipe tower cannot do it, so block unless the NeoTower
+    // Variable Layer Height (Experimental) option is on.
+    if (this->has_wipe_tower() && extruders.size() > 1 && has_custom_layering && !_neotko_var_lh) {
+        return {L("Adaptive/variable layer height combined with multiple filaments requires the "
+                  "NeoTower tower type with \"Variable layer height (Experimental)\" enabled "
+                  "(per-layer variable-height purging).\n"
+                  "Enable it under Prime tower (Tower type = NeoTower, LibreMode), "
+                  "or disable variable layer height."),
+                nullptr, "neotower_variable_layer_height"};
+    }
+
     if (this->has_wipe_tower() && ! m_objects.empty()) {
         // Make sure all extruders use same diameter filament and have the same nozzle diameter
         // EPSILON comparison is used for nozzles and 10 % tolerance is used for filaments
@@ -1742,8 +1763,10 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             for (size_t i = 1; i < m_objects.size(); ++ i) {
                 const PrintObject       *object         = m_objects[i];
                 const SlicingParameters &slicing_params = object->slicing_parameters();
-                if (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
-                    std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON)
+                // NEOTKO_NEOTOWER_TAG — skipped when Variable layer height (Experimental) is on.
+                if (!_neotko_var_lh &&
+                    (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
+                     std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON))
                     return {L("The prime tower requires that all objects have the same layer heights."), object, "initial_layer_print_height"};
                 if (slicing_params.raft_layers() != slicing_params0.raft_layers())
                     return {L("The prime tower requires that all objects are printed over the same number of raft layers."), object, "raft_layers"};
@@ -1753,7 +1776,8 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
                     return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
-                if (!equal_layering(slicing_params, slicing_params0))
+                // NEOTKO_NEOTOWER_TAG — skipped when Variable layer height (Experimental) is on.
+                if (!_neotko_var_lh && !equal_layering(slicing_params, slicing_params0))
                     return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
                 if (has_custom_layering) {
                     auto &lh         = layer_height_profile(i);
@@ -1764,7 +1788,9 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             }
 
             // BBS: remove obsolete logics and _L()
-            if (has_custom_layering) {
+            // NEOTKO_NEOTOWER_TAG — variable-layer-height uniformity check skipped when the
+            // Variable layer height (Experimental) option is on (NeoTower handles mixed profiles).
+            if (has_custom_layering && !_neotko_var_lh) {
                 std::vector<std::vector<coordf_t>> layer_z_series;
                 layer_z_series.assign(m_objects.size(), std::vector<coordf_t>());
                

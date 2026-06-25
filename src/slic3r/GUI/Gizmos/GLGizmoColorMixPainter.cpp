@@ -18,6 +18,7 @@
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/Tab.hpp" // NEOTKO_NEOTOWER_TAG — auto-promote tower type from the painter
 #include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — botón ADV → editor de patrón
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -344,7 +345,35 @@ bool GLGizmoColorMixPainter::on_mouse(const wxMouseEvent& mouse_event)
             return true;   // consumir sin pintar/borrar
     }
 
-    return GLGizmoPainterBase::on_mouse(mouse_event);
+    // NEOTKO_NEOTOWER_TAG — al terminar un trazo de pintura (LeftUp en modo pintar),
+    // promociona el tipo de torre a NeoTower si seguía en Classic, para que la UI muestre
+    // el planificador que realmente se usará (one-shot; el slice ya auto-promociona internamente).
+    const bool finished_paint_stroke = mouse_event.LeftUp() && !m_select_mode && !m_pick_mode;
+    const bool ret = GLGizmoPainterBase::on_mouse(mouse_event);
+    if (finished_paint_stroke)
+        ensure_neotower_tower_type();
+    return ret;
+}
+
+// NEOTKO_NEOTOWER_TAG — painting a zone always needs the NeoTower planner (per-layer
+// variable-height purges). The slicer already auto-promotes internally and Print::validate
+// blocks Classic, but the Tower type combo stayed on "Classic", which is confusing. When the
+// user paints, flip the print preset's tower type to NeoTower so the UI matches reality. The
+// guard makes this a one-shot: once on NeoTower it does nothing on subsequent strokes.
+void GLGizmoColorMixPainter::ensure_neotower_tower_type()
+{
+    auto& cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    auto* t = cfg.option<ConfigOptionEnum<NeoTowerType>>("neotko_tower_type");
+    if (!t || t->value == nttNeoTower)
+        return;
+    t->value = nttNeoTower;
+    // Reflect in the Print Settings tab (refresh the combo + mark the preset modified).
+    if (Tab* tab = wxGetApp().get_tab(Preset::TYPE_PRINT)) {
+        tab->reload_config();
+        tab->update_dirty();
+    }
+    if (wxGetApp().plater())
+        wxGetApp().plater()->set_plater_dirty(true);
 }
 
 PainterGizmoType GLGizmoColorMixPainter::get_painter_type() const
@@ -1274,6 +1303,17 @@ static void draw_zone_editor(const char* id, const char* label,
         int sel = 0;
         if (p.kind == K::ColorMix)       sel = 1;
         else if (p.kind == K::PathBlend) sel = is_pb_half ? 2 : 3;
+        // NEOTKO — light mode readability: the default ImGui popup theme is dark, so the open
+        // dropdown was dark text on dark bg (user report). Force a light popup background + dark
+        // text + translucent Orca header in light mode. Dark mode keeps the default (untouched).
+        const bool _kind_light = !ImGuiWrapper::is_dark_mode();
+        if (_kind_light) {
+            ImGui::PushStyleColor(ImGuiCol_PopupBg,       ImGuiWrapper::COL_WINDOW_BG);
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0.00f, 0.59f, 0.53f, 0.45f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.59f, 0.53f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0.00f, 0.59f, 0.53f, 0.55f));
+        }
         ImGui::PushItemWidth(100.f);   // s120: estrecha la banda de tipo (antes 118) — el Z-box de pass height ya no salta de línea; 100 aún cabe "ColorStitch"
         if (ImGui::BeginCombo("##kind", kind_items[sel].c_str())) {
             for (int k = 0; k < 4; ++k)
@@ -1294,6 +1334,7 @@ static void draw_zone_editor(const char* id, const char* label,
             ImGui::EndCombo();
         }
         ImGui::PopItemWidth();
+        if (_kind_light) ImGui::PopStyleColor(5);
 
         if (p.kind == K::Solid) {
             ImGui::SameLine();
@@ -2738,6 +2779,15 @@ void GLGizmoColorMixPainter::render_group_selector()
     m_imgui->text(_u8L("Palette group"));
     ImGui::SameLine();
 
+    // NEOTKO — light mode readability for the dropdown popup (see ##kind combo above).
+    const bool _grp_light = !ImGuiWrapper::is_dark_mode();
+    if (_grp_light) {
+        ImGui::PushStyleColor(ImGuiCol_PopupBg,       ImGuiWrapper::COL_WINDOW_BG);
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0.00f, 0.59f, 0.53f, 0.45f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.59f, 0.53f, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0.00f, 0.59f, 0.53f, 0.55f));
+    }
     ImGui::PushItemWidth(ImGui::GetFontSize() * 9.f);
     char gid[40];
     std::snprintf(gid, sizeof(gid), "%s %d", _u8L("Group").c_str(), m_active_group);
@@ -2750,6 +2800,7 @@ void GLGizmoColorMixPainter::render_group_selector()
         ImGui::EndCombo();
     }
     ImGui::PopItemWidth();
+    if (_grp_light) ImGui::PopStyleColor(5);
 
     // (Sin BeginDisabled: esta versión de ImGui no lo trae → dim manual + guarda.)
     const bool can_add = max_group < GLGizmoColorMixPainter::MAX_GROUPS;

@@ -896,6 +896,12 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
             config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttNeoTower;
         toggle_line("neotower_zigurat", is_neotower);
         toggle_line("neotower_purge_compaction", is_neotower);
+        // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental): visible whenever the
+        // NeoTower planner is selected so users discover it, but the field is greyed out (locked)
+        // unless LibreMode is active — it can only be switched on in LibreMode.
+        const bool libre_active_tower = wxGetApp().app_config->get_bool("neotko_libre_mode");
+        toggle_line("neotower_variable_layer_height", is_neotower);
+        toggle_field("neotower_variable_layer_height", is_neotower && libre_active_tower);
     }
 
     toggle_line("prime_volume",have_prime_tower && (!purge_in_primetower || !bSEMM));

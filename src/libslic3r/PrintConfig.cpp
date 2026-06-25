@@ -7323,6 +7323,24 @@ void PrintConfigDef::init_fff_params()
                      "the cost of rings partially supported by the sparse grid.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+    // NEOTKO_NEOTOWER_TAG — Variable Layer Height (Experimental). NeoTower + LibreMode only.
+    // When on, the slicer drops the prime-tower uniform-layer-height blocks: it no longer
+    // refuses to slice a scene that mixes objects of different layer heights, nor a scene that
+    // combines adaptive/variable layer height with more than one filament. NeoTower purges at
+    // per-layer delta-Z so it can handle those layouts; the Classic wipe tower cannot, which is
+    // why this is gated to the NeoTower planner and exposed only under LibreMode.
+    def = this->add("neotower_variable_layer_height", coBool);
+    def->label = L("Variable layer height (Experimental)");
+    def->category = L("Prime tower");
+    def->tooltip = L("Experimental. NeoTower + LibreMode only. When enabled, the slicer stops "
+                     "blocking the wipe tower when the scene mixes objects with different layer "
+                     "heights, and when adaptive/variable layer height is combined with more than "
+                     "one filament. NeoTower purges each toolchange at the real per-layer height; "
+                     "the Classic wipe tower cannot, so this only takes effect with Tower type = "
+                     "NeoTower. Leave off unless your scene depends on it.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_NEOTOWER_TAG_END
 
     def = this->add("idle_temperature", coInts);

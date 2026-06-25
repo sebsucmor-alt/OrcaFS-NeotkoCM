@@ -7,6 +7,8 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 # Neotko FullSpectrum 2.3 (beta) — on Snapmaker Orca 2.3.4 — Release Notes
 
+> 🆕 **Superseded by 2.3.1** — see `NEOTKOCM_RELEASE_2_31.md` for the incremental release that adds the Sandwich Painter weave preview, the Variable Layer Height (Experimental) unlock, and an important wipe-tower correctness fix. The notes below remain the canonical description of the 2.3 re-platforming base.
+
 > ⚠️ **This is a beta.** Several pieces below are usable but still being refined — review your generated G-code before long or production prints. Surfaces that are still in progress show a **(WIP)** marker in the UI.
 
 **Base build:** Snapmaker Orca **2.3.4 nightly** (commit **`8597556`**, 2026-06-17) with the complete **2.3.5 beta** patch set integrated on top (upstream `main` **`4d77d7f`**, 2026-06-23). See *Upstream Snapmaker Orca 2.3.5 (beta) — integrated* below for the full list.
@@ -79,7 +81,7 @@ On multi-tool prints the slicer auto-selected a dedicated wipe filament, a side 
 
 ## Work in progress / not yet in this build
 
-- **Adaptive (variable) layer height is locked by default** here, and the adaptive × multi-tool × Sandwich combination is not yet unlocked on the 2.3.4 base. It is proven and works on the 2.2 line (FullSpectrum 0.99 fork); unlocking it on 2.3.4 is still being finished. Use a fixed layer height for multi-tool Sandwich prints for now.
+- **Adaptive (variable) layer height is locked by default** here, and the adaptive × multi-tool × Sandwich combination is not yet unlocked on the 2.3.4 base. It is proven and works on the 2.2 line (FullSpectrum 0.99 fork); unlocking it on 2.3.4 is still being finished. Use a fixed layer height for multi-tool Sandwich prints for now. *(Unlocked as Experimental in 2.3.1 — see `NEOTKOCM_RELEASE_2_31.md`.)*
 - **Neoweaving + Monotonic Interlayer Nesting** are **not yet ported** to this base (coming in a later release).
 - **World-space import** is functional at a basic level; for assemblies, importing as Assembled and splitting in Libre Mode is the recommended route while it is finished.
 - **NeotkoEdge** is selectable as a wall source, but its extra tuning knobs (Wall Count Stability / Blend Distance) are not exposed yet.

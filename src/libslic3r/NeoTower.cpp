@@ -442,7 +442,14 @@ void NeoTower::collect_all_events(const Print& print)
                             auto _ord = mp_group_canon_order(znom, (int)prev);
                             std::ostringstream _co;
                             _co << "1a CANON_ORDER z_nom=" << znom << " enter=T" << prev << " order=[";
-                            for (const auto& _k : _ord) _co << "T" << _k.tool_id << "@z" << _k.z_actual << ",";
+                            // NEOTKO s148-dbg — added pass_idx/chain_key so this can be
+                            // cross-checked item-by-item against emission's MP_EMIT_ORDER
+                            // (GCode.cpp:5286). If the tool order matches per plane but the
+                            // windowed concatenation differs, the partition/entering-tool is
+                            // the divergence; if a chain_key spans planes differently, that is.
+                            for (const auto& _k : _ord)
+                                _co << "T" << _k.tool_id << "/p" << _k.pass_idx
+                                    << "/c" << _k.chain_key << "@z" << _k.z_actual << ",";
                             _co << "] final=T" << current_tool;
                             NeoDebug::write(NeoDebug::WIPETOWER, _co.str());
                         }

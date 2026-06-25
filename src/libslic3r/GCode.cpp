@@ -2020,7 +2020,26 @@ std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> GCode::collec
         throw Slic3r::SlicingErrors(errors);
     }
 
-    std::sort(ordering.begin(), ordering.end(), [](const OrderingItem& oi1, const OrderingItem& oi2) { return oi1.print_z < oi2.print_z; });
+    // NEOTKO_MULTIPASS_TAG s148 — deterministic sublayer ordering (wipe-tower drawer-skip fix).
+    // The original sort keyed ONLY on print_z. std::sort is NOT stable, so when several
+    // MultiPass/sandwich sublayers of the SAME object collide at the SAME print_z (the
+    // ColorStitch multi-tool lámina), their relative order was whatever quicksort produced —
+    // non-semantic and build-dependent. The sublayer-only branch in process_layer walks them
+    // in this order and the writer EXITS the z_nominal group on the LAST one, so an arbitrary
+    // order means an arbitrary group-exit tool. NeoTower's wipe-tower plan predicts that exit
+    // semantically (multipass_sublayers() order, per object — NeoTower.cpp:261-285) and so
+    // diverged from emission → get_tcr() MISS at the next real layer → the layer's tower
+    // drawer was skipped (s147 WT_REALIGN_MISS; with few toolchanges → empty layer → "empty
+    // first layer" abort). Tie-break by (object_idx, layer_idx) makes emission deterministic
+    // in EXACTLY the order the plan already follows, so plan == emission by construction.
+    // Only affects multi-tool same-z sublayer planes (already the buggy ones); single-tool
+    // planes and slot-indexed real layers are order-invariant. Within one z_nominal group =
+    // one drawer, so the box-in-drawer invariant (no box spans two drawers, no mega) holds.
+    std::sort(ordering.begin(), ordering.end(), [](const OrderingItem& oi1, const OrderingItem& oi2) {
+        if (oi1.print_z    != oi2.print_z)    return oi1.print_z    < oi2.print_z;
+        if (oi1.object_idx != oi2.object_idx) return oi1.object_idx < oi2.object_idx;
+        return oi1.layer_idx < oi2.layer_idx;
+    });
 
     std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print;
 
@@ -5284,6 +5303,24 @@ LayerResult GCode::process_layer(const Print& print,
                                       ? (int)m_writer.extruder()->id() : -1;
                 std::vector<size_t> order =
                     MultiPassScheduler::order_sublayers_by_tool(items, init_tool);
+                // NEOTKO s148-dbg — per-PLANE emission order (behavior-neutral). This
+                // is the ground truth NeoTower's order_sublayers_by_tool_windowed must
+                // reproduce: ONE z_actual plane per process_layer call, init_tool =
+                // entering writer, chained across calls. Dumps tool+pass_idx+chain_key
+                // per item (input order) and the resulting tool order + exit tool, so we
+                // can see WHY windowed (whole-group) diverges from this per-plane chain.
+                if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+                    std::ostringstream _me;
+                    _me << "MP_EMIT_ORDER plane_z=" << items.front().z_actual << " init=T" << init_tool
+                        << " items=[";
+                    for (const auto& _k : items)
+                        _me << "T" << _k.tool_id << "/p" << _k.pass_idx
+                            << "/c" << _k.chain_key << "@z" << _k.z_actual << ",";
+                    _me << "] order=[";
+                    for (size_t _oi : order) _me << "T" << items[_oi].tool_id << ",";
+                    _me << "] exit=T" << (order.empty() ? -1 : (int)items[order.back()].tool_id);
+                    NeoDebug::write(NeoDebug::WIPETOWER, _me.str());
+                }
                 std::vector<LayerToPrint> reordered;
                 reordered.reserve(ltps_sorted.size());
                 for (size_t oi : order)
@@ -6742,6 +6779,15 @@ LayerResult GCode::process_layer(const Print& print,
     const double nominal_layer_z          = print_z + m_config.z_offset.value;
     int          nominal_layer_start_extruder = (m_writer.extruder() != nullptr) ? int(m_writer.extruder()->id()) : -1;
 
+    // NEOTKO s148-dbg — emission-path tracker (behavior-neutral). Hoisted to this
+    // scope (not the local-z block) so the EMIT_ROTATE probe below can report it
+    // even when local_z_pass_refs is EMPTY — i.e. when the sublayer/ColorStitch
+    // group is NOT emitted via local-z phase-b but by the MultiPass/sandwich path.
+    // "none(no-phaseb)" => phase-b never ran for this layer → the writer's exit
+    // tool came from somewhere else (MultiPass sandwich dispatch) and THAT is what
+    // NeoTower's mp_group_final_tool must mirror.
+    const char* _localz_emit_path = "none(no-phaseb)";
+
     if (!local_z_pass_refs.empty()) {
         int  local_z_phase_b_active_extruder = (m_writer.extruder() != nullptr) ? int(m_writer.extruder()->id()) : -1;
         BOOST_LOG_TRIVIAL(info) << "Local-Z phase-b emitting"
@@ -6911,6 +6957,10 @@ LayerResult GCode::process_layer(const Print& print,
                        pass_ref.bucket->plan != nullptr &&
                        pass_ref.bucket->plan->dependency_group != 0;
             });
+
+        // NEOTKO s148-dbg — emission-path tracker set here (declared in the outer
+        // scope above). Default to legacy; the branches below refine it.
+        _localz_emit_path = "legacy";
 
         if (dependency_chain_mode) {
             struct ChainKey {
@@ -7091,8 +7141,10 @@ LayerResult GCode::process_layer(const Print& print,
             }
 
             if (!dependency_scheduler_ok) {
+                _localz_emit_path = "deadlock->legacy";
                 local_z_phase_b_active_extruder = emit_local_z_legacy(local_z_phase_b_active_extruder);
             } else {
+                _localz_emit_path = "chain";
                 for (const ScheduledPhase& scheduled_phase : scheduled_phases) {
                     emit_local_z_toolchange(scheduled_phase.extruder_id,
                                             pass_states[scheduled_phase.pass_state_indices.front()].pass_ref->bucket->plan->print_z);
@@ -7137,6 +7189,20 @@ LayerResult GCode::process_layer(const Print& print,
         for (unsigned int _e : layer_extruders) _er << "T" << _e << ",";
         _er << "]";
         NeoDebug::write(NeoDebug::WIPETOWER, _er.str());
+        // NEOTKO s148-dbg — group-exit/path probe (behavior-neutral), emitted here
+        // because this site ALWAYS runs (unlike the local-z block, which is skipped
+        // when local_z_pass_refs is empty). group_exit = nominal_layer_start_extruder
+        // = the writer tool the sublayer group left → the entry tool NeoTower must
+        // predict. localz_passes=0 + path=none(no-phaseb) means the ColorStitch/
+        // sandwich group was emitted by the MultiPass path, not local-z phase-b, so
+        // the exit comes from there. Compare group_exit against NeoTower's
+        // "1a SUBLAYER_GROUP_FINAL" / the plan_slot in WT_EMIT_TRACE.
+        std::ostringstream _lp;
+        _lp << "LOCALZ_EXIT_PATH print_z=" << print_z
+            << " path=" << _localz_emit_path
+            << " group_exit=T" << nominal_layer_start_extruder
+            << " localz_passes=" << local_z_pass_refs.size();
+        NeoDebug::write(NeoDebug::WIPETOWER, _lp.str());
     }
 
     // NEOTKO_MULTIPASS_TAG_START — hardening P4 (port s129): restore wipe tower expected

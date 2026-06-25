@@ -255,7 +255,7 @@ private:
     int    m_tool_d         = 3;
     int    m_grad_angle     = -1; // -1 = Auto (use OrcaSlicer defaults)
     int    m_grad_repetitions = 1; // NEOTKO_COLORMIX_TAG — s80: gradient repeats
-    double m_grad_min_length  = 1.0; // NEOTKO_COLORMIX_TAG — s90: global "ColorMix min. line length" (mm)
+    double m_grad_min_length  = 0.0; // NEOTKO_COLORMIX_TAG — s90: global "ColorMix min. line length" (mm); default 0 = colour every line
 
     // Gradient widget pointers (created in build_ui when m_cfg != nullptr).
     wxStaticBoxSizer* m_gd_sb            = nullptr;
@@ -353,7 +353,7 @@ private:
         m_grad_repetitions = gi(grad_key("repetitions"), 1); // NEOTKO_COLORMIX_TAG — s80
         // NEOTKO_COLORMIX_TAG — s90: global key (NO grad_key() prefix). Both
         // Top and Penu Advanced dialogs read/write this single value.
-        m_grad_min_length  = gf("interlayer_colormix_min_length", 1.0);
+        m_grad_min_length  = gf("interlayer_colormix_min_length", 0.0);
     }
 
     // Is the current pattern using a virtual MixedFilament digit (5-9)? If
@@ -1205,7 +1205,6 @@ private:
     wxPanel*       m_stacked_sw_penu = nullptr;
     wxPanel*       m_stacked_swatch  = nullptr;
     wxStaticText*  m_lbl_opacity_top = nullptr;
-    wxChoice*      m_choice_lane_mode = nullptr;
     wxCheckBox*    m_chk_use_virtual  = nullptr;
 
     // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): Blend Suggestion (Beer-Lambert
@@ -2040,54 +2039,8 @@ private:
         return sb;
     }
 
-    // ------------------------------------------------------------------ Lane mode builder
-    wxSizer* build_lane_panel()
-    {
-        const int PAD = 6;
-        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Line distribution mode"));
-        wxWindow* host = sb->GetStaticBox();
-
-        wxArrayString labels;
-        labels.Add(_L("Default — line index (safe, original)"));
-        labels.Add(_L("GeoSort (A) — sort by perpendicular position"));
-        labels.Add(_L("LaneQuant (B) — quantize to geometric lanes"));
-        labels.Add(_L("DirCluster (C) — cluster by direction, then quantize"));
-
-        int cur_lm = 0;
-        if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
-            cur_lm = std::clamp(o->value, 0, 3);
-
-        auto* row = new wxBoxSizer(wxHORIZONTAL);
-        row->Add(new wxStaticText(host, wxID_ANY, _L("Mode:")),
-                 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-        m_choice_lane_mode = new wxChoice(host, wxID_ANY,
-            wxDefaultPosition, wxSize(280, -1), labels);
-        m_choice_lane_mode->SetSelection(cur_lm);
-        m_choice_lane_mode->SetToolTip(
-            _L("How pattern slots are assigned to individual extrusion lines.\n\n"
-               "0 Default — slot = line_index mod n_slots (legacy).\n"
-               "1 GeoSort — sort lines by position perpendicular to fill direction.\n"
-               "2 LaneQuant — slot = quantized geometric lane (continuous stripes).\n"
-               "3 DirCluster — cluster by direction first, then LaneQuant per cluster.\n\n"
-               "Applies to ColorMix + PathBlend in Top + Penultimate."));
-        m_choice_lane_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
-            if (!m_choice_lane_mode) return;
-            const int v = std::clamp(m_choice_lane_mode->GetSelection(), 0, 3);
-            if (auto* o = m_config->option<ConfigOptionInt>("surface_color_mix_lane_mode"))
-                o->value = v;
-            m_on_change("surface_color_mix_lane_mode");
-        });
-        row->Add(m_choice_lane_mode, 1, wxALIGN_CENTER_VERTICAL);
-        sb->Add(row, 0, wxEXPAND | wxALL, PAD);
-
-        auto* note = new wxStaticText(host, wxID_ANY,
-            _L("Experimental. Default = original behaviour (no risk).\n"
-               "Modes A/B/C improve pattern fidelity on irregular shapes."));
-        note->SetForegroundColour(wxColour(100, 100, 100));
-        sb->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        return sb;
-    }
+    // NEOTKO_COLORSCI_TAG — build_lane_panel() removed (UX 2026-06-24): Line distribution mode
+    // now lives in print settings (Quality → Surface ColorStitch), not in the Sandwich editor.
 
     // ------------------------------------------------------------- Gradient Designer
     // NEOTKO_COLORSCI_TAG GD1+GD2+GD3 — diseño de rampas A→penu→B (port in-app
@@ -2587,11 +2540,9 @@ private:
                   0, wxEXPAND | wxALL, 6);
         left->Add(build_zone(1, _L("Penultimate layer")),
                   0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
-        // NEOTKO_COLORSCI_TAG GD1 — UX 2026-06-11: Line distribution baja
-        // bajo los dos sandwich; su hueco de la derecha lo ocupa el Gradient
-        // Designer (que absorbe también el stretch → la tira crece).
-        left->Add(build_lane_panel(),
-                  0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+        // NEOTKO_COLORSCI_TAG — UX 2026-06-24: Line distribution mode moved out of the
+        // Sandwich editor into print settings (Quality → Surface ColorStitch), below
+        // Minimum line length. The Gradient Designer keeps the freed right column + stretch.
         left->AddStretchSpacer(1);
 
         right->Add(build_td_panel(),       0, wxEXPAND | wxALL, 6);
@@ -2936,7 +2887,10 @@ private:
         }
         // NEOTKO_SANDWICH_TAG — s132: row box adaptativo al tema (en light mode el
         // gris (60,60,60) salía casi negro). Dark = igual que el fork; light = gris claro.
-        const bool dark = wxGetApp().dark_mode();
+        // s146-fix: wxGetApp().dark_mode() en macOS sigue la apariencia del SO, no el tema de
+        // la app → en modo día con SO oscuro daba la caja oscura. Usamos la MISMA fuente que
+        // ImGui (app_config "dark_color_mode") para que diálogo y painter coincidan.
+        const bool dark = wxGetApp().app_config->get("dark_color_mode") == "1";
         u.row_panel[idx]->SetBackgroundColour(
             thin ? (dark ? wxColour(48, 40, 32) : wxColour(248, 236, 224))
                  : (dark ? wxColour(60, 60, 60) : wxColour(228, 228, 228)));
@@ -2953,8 +2907,10 @@ private:
         ZoneUI& u = m_ui[z];
         auto* row = new wxPanel(u.rows_host);
         // NEOTKO_SANDWICH_TAG — s132: fondo inicial adaptativo (refresh_rows lo re-aplica).
-        row->SetBackgroundColour(wxGetApp().dark_mode() ? wxColour(60, 60, 60)
-                                                        : wxColour(228, 228, 228));
+        // s146-fix: usar el tema de la app (no el SO en mac) — ver refresh_rows.
+        row->SetBackgroundColour(wxGetApp().app_config->get("dark_color_mode") == "1"
+                                     ? wxColour(60, 60, 60)
+                                     : wxColour(228, 228, 228));
         auto* rv = new wxBoxSizer(wxVERTICAL);
         auto* rh = new wxBoxSizer(wxHORIZONTAL);
 
@@ -6768,6 +6724,9 @@ void TabPrint::build()
                 return sz;
             });
         optgroup->append_single_option_line("interlayer_colormix_min_length");
+        // NEOTKO_COLORSTITCH_TAG — Line distribution mode moved out of the Sandwich editor
+        // into the print settings, directly below Minimum line length (UX decision 2026-06-24).
+        optgroup->append_single_option_line("surface_color_mix_lane_mode");
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");
@@ -6998,6 +6957,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("neotko_tower_type");
         optgroup->append_single_option_line("neotower_zigurat");
         optgroup->append_single_option_line("neotower_purge_compaction");
+        // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental), shown only when
+        // Tower type = NeoTower AND LibreMode is active (toggled in ConfigManipulation).
+        optgroup->append_single_option_line("neotower_variable_layer_height");
         optgroup->append_single_option_line("multipass_prime_volume");
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");

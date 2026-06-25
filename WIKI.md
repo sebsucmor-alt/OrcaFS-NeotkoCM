@@ -183,7 +183,7 @@ Four **TD sliders** (one per filament) are saved **per machine** (`neotko_td_1..
 
 ### 1f. Line Distribution Mode
 
-This controls *how* the slicer maps colour assignments (ColorStitch slots / PathBlend positions) to the **physical fill lines** of a surface. It does not change the pattern — only how slots find which lines belong to which spatial "lane." It lives in **Quality → Line distribution mode** (Advanced) and affects both ColorStitch and PathBlend.
+This controls *how* the slicer maps colour assignments (ColorStitch slots / PathBlend positions) to the **physical fill lines** of a surface. It does not change the pattern — only how slots find which lines belong to which spatial "lane." It lives in **Quality → Surface ColorStitch → Line distribution mode** (directly below *Minimum line length*) and affects both ColorStitch and PathBlend.
 
 | Mode | Best for |
 |------|----------|
@@ -495,11 +495,15 @@ The volume (mm³) purged before each Sandwich sub-layer toolchange (Solid / Colo
 
 - **Default 10 mm³.** Lower = thinner/shorter tower; higher = better purge. Set **0** to disable. Requires a wipe tower active.
 
-### 9e. Adaptive layers × multi-tool × Sandwich (WIP)
+### 9e. Variable layer height (Experimental)
 
-Because NeoTower plans from the real post-slice toolchange list and is delta-Z aware, it is the mechanism that lets **adaptive layer height + multiple tools + a Sandwich** coexist on one coherent tower.
+Because NeoTower plans from the real post-slice toolchange list and is delta-Z aware, it is the mechanism that lets **adaptive / variable layer height + multiple tools + a Sandwich** coexist on one coherent tower. Stock Orca refuses to slice such scenes; NeoTower can purge each toolchange at the real per-layer height.
 
-> **(WIP in this build.)** **Adaptive (variable) layer height is left locked by default in this version** and is not yet unlocked for the multi-tool + Sandwich combination here. The capability is proven and **works in the 2.2 line (the older fork on FS099)**; unlocking it on this Snapmaker 2.3.4 base is still being finished. Until then, use a **fixed layer height** for multi-tool Sandwich prints.
+A new option **Variable layer height (Experimental)** sits under **Tower type** and is exposed **only with Tower type = NeoTower and Libre Mode active** (it is visible but greyed-out otherwise). **Default: off.** When **on**, the slicer stops blocking:
+- scenes that **mix objects with different layer heights**, and
+- **adaptive / variable layer height combined with more than one filament**.
+
+> **(Experimental.)** The wipe-tower issue that previously left **empty/short tower layers** (missing "drawers" on real layers, including the *"empty first layer"* abort) is **fixed in 2.3.1** — the tower now stays coherent under variable layer height. The capability is proven and was solid on the **2.2 line (older FS099 fork)**, and is now consistent on this 2.3.4 base too. It is still flagged Experimental: review G-code before long multi-tool runs. The option only takes effect with Tower type = NeoTower.
 
 ---
 
@@ -512,7 +516,7 @@ Because NeoTower plans from the real post-slice toolchange list and is delta-Z a
 | ColorStitch Studio | Sandwich Editor → **ColorStitch Studio** panel (bottom) |
 | Colour match (inverse ΔE2000) | ColorStitch Studio → **Target + Match ▸** |
 | Filament & TD preview | Sandwich Editor → **Filament & TD** panel |
-| Line distribution mode | Quality → **Line distribution mode** (Advanced) |
+| Line distribution mode | Quality → **Surface ColorStitch** → Line distribution mode (below *Minimum line length*) |
 | Top surface fill pattern (needed for ColorStitch) | Quality → **Top surface pattern → Monotonic Line** |
 | Penultimate layers / density | Strength → Top/bottom shells |
 | Neoweaving (WIP) | *Not wired in this build* |
@@ -533,6 +537,7 @@ Because NeoTower plans from the real post-slice toolchange list and is delta-Z a
 | NeoArachne sources / line widths / Preview Lab | Quality → NeoArachne section |
 | NeoTower (tower type) | Quality → Prime tower → **Tower type** |
 | Zigurat / Sandwich purge compaction / Sandwich wipe reserve | Quality → Prime tower |
+| Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower (greyed unless Libre Mode) |
 
 ---
 
@@ -568,7 +573,7 @@ By design — colours you paint are *working colours* (created on demand, cleane
 
 **Q: Can I use adaptive layer height with multiple tools and a Sandwich?**
 
-Not in this build — adaptive layer height is **locked by default** here and the combination is **WIP** (§9e). It works in the older 2.2 line. Use a fixed layer height for multi-tool Sandwich prints for now.
+Yes, as of 2.3.1 — enable **Libre Mode**, set **Tower type = NeoTower**, and turn on **Variable layer height (Experimental)** (Quality → Prime tower). The wipe-tower "missing drawers" issue that made this rough is now fixed (§9e). It is still flagged Experimental, so review G-code before long runs.
 
 **Q: My wipe tower uses more purge than expected.**
 

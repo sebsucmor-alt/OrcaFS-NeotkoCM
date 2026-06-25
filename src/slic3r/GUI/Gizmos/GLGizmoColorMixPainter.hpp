@@ -196,6 +196,9 @@ private:
     void toggle_mark(int object_idx, bool unmark);   // marcar/activar (o desmarcar)
     void switch_active_object(int object_idx);       // activar objeto + RE-APLICAR el color
     void render_tool_row();                          // fila [Select][bucket][Eraser][Pick]
+    // NEOTKO_NEOTOWER_TAG — al pintar, promociona el tipo de torre a NeoTower en el preset
+    // de impresión (one-shot, no-op si ya está) para que la UI refleje el planificador real.
+    void ensure_neotower_tower_type();
 
     // NEOTKO_COLORSTITCH_TAG — s118 (eyedropper): leer la receta de un objeto y
     // ENLAZARLA (mismo camino que un swatch guardado: bind id + load Pro). Además
