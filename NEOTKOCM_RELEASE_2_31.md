@@ -9,6 +9,8 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 > ⚠️ **This is a beta.** Several pieces below are usable but still being refined — review your generated G-code before long or production prints. Surfaces that are still in progress show a **(WIP)** marker in the UI.
 
+> 🔧 **Superseded by 2.3.2.** This release has a **known penultimate-zone limitation**: penultimate ColorStitch / PathBlend effects (and penultimate density) only generate when **Strength → Top/bottom shells → Ensure vertical shell thickness = "Ensure all"**; with the default ("Ensure moderate") the penultimate layer is silently skipped. If you rely on penultimate effects on 2.3.1, set *Ensure all* as a workaround — or move to **2.3.2**, which fixes it (see `NEOTKOCM_RELEASE_2_32.md`).
+
 **2.3.1 is an incremental release on top of 2.3** (see `NEOTKOCM_RELEASE_2_3.md` for the full re-platforming notes and the upstream Snapmaker Orca 2.3.5 beta patch set, which carry over unchanged). The headline of 2.3.1 is a **wipe-tower correctness fix** plus the **Sandwich Painter weave preview** and the **Variable Layer Height (Experimental)** unlock under NeoTower + Libre Mode. Everything remains **opt-in**: at defaults the build behaves like stock Snapmaker Orca 2.3.4.
 
 ---
@@ -65,6 +67,7 @@ Unchanged from 2.3 (Sandwich wipe reserve 10 mm³, Sandwich purge compaction 1.7
 - **Neoweaving + Monotonic Interlayer Nesting** are **not yet ported** to this base.
 - **World-space import** is functional at a basic level; importing as Assembled and splitting in Libre Mode is the recommended route.
 - **NeotkoEdge** is selectable as a wall source, but its extra tuning knobs (Wall Count Stability / Blend Distance) are not exposed yet.
+- **Penultimate effects require *Ensure all*** (known issue, fixed in 2.3.2) — see the banner at the top of this file.
 
 ---
 

@@ -1750,6 +1750,18 @@ void PrintObject::discover_vertical_shells()
 
     BOOST_LOG_TRIVIAL(info) << "Discovering vertical shells..." << log_memory_info();
 
+    // NEOTKO_COLORSTITCH_TAG — s148 dbg (penu no slicea, port-drop hunt): log INCONDICIONAL,
+    // una vez por objeto, de los DOS inputs que deciden la creación de la superficie penu:
+    //   (1) penultimate_top_layers (PrintObjectConfig — ¿llega el override per-objeto del 3mf?)
+    //   (2) object_painter_wants_penu (¿el perfil pintado declara penu y dispara autonomía?)
+    // Esta instrumentación se dejó caer en el port s129→s148; sin ella no se puede ver si el
+    // engine recibe penultimate_top_layers>0. El gate evst se loguea aparte en el bucle (abajo).
+    NEOTKO_LOG(PROFILE, "PENU_DECISION obj='"
+        << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
+        << "' mo=" << (const void*)this->model_object()
+        << " penultimate_top_layers=" << this->config().penultimate_top_layers.value
+        << " wants_penu=" << (SurfaceColorMix::object_painter_wants_penu(this->model_object()) ? 1 : 0));
+
     struct DiscoverVerticalShellsCacheEntry
     {
         // Collected polygons, offsetted
@@ -1849,6 +1861,15 @@ void PrintObject::discover_vertical_shells()
 
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         const PrintRegion &region = this->printing_region(region_id);
+        // NEOTKO_COLORSTITCH_TAG — s148 dbg: el bloque que CREA la superficie penu
+        // (stPenultimateInternalSolid) sólo corre cuando evst==evstAll; cualquier otro valor
+        // salta a discover_horizontal_shells(), que NO crea penu (sólo preserva). Si penu no
+        // se genera, este log dice si el gate evst nos está echando antes de empezar.
+        NEOTKO_LOG(PENULTIMATE, "EVST_GATE region=" << region_id
+            << " evst=" << int(region.config().ensure_vertical_shell_thickness.value)
+            << " (evstAll=" << int(evstAll) << ")"
+            << (region.config().ensure_vertical_shell_thickness.value == evstAll
+                    ? " → penu block RUNS" : " → penu block SKIPPED (horizontal_shells, no penu create)"));
         if (region.config().ensure_vertical_shell_thickness.value != evstAll )
             // This region will be handled by discover_horizontal_shells().
             continue;
@@ -4143,6 +4164,27 @@ void PrintObject::discover_horizontal_shells()
 {
     BOOST_LOG_TRIVIAL(trace) << "discover_horizontal_shells()";
 
+    // NEOTKO_MULTIPASS_TAG_START (s148) — penu role count for the discover_horizontal_shells()
+    // path. The vertical-shells path creates stPenultimateInternalSolid ONLY for regions with
+    // ensure_vertical_shell_thickness == evstAll; every other setting (incl. the stock
+    // ensure_moderate) is routed here, where penu used to be only PRESERVED, never CREATED — so
+    // penu never appeared unless the user forced "Ensure all". Mirror the vertical-shells gate:
+    // the preset's penultimate_top_layers, or a painter-autonomy override (a painted profile that
+    // declares penu) forcing 2 layers. Object-level → computed once. 0 ⇒ no penu work ⇒ objects
+    // without penu are byte-unchanged. See EVST_GATE / discover_vertical_shells (PrintObject.cpp).
+    int penultimate_layers = this->config().penultimate_top_layers.value;
+    if (penultimate_layers == 0 &&
+        SurfaceColorMix::object_painter_wants_penu(this->model_object())) {
+        penultimate_layers = 2;
+        NEOTKO_LOG(PROFILE, "PENU_AUTONOMY(horizontal) object='"
+            << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
+            << "' forced penultimate_top_layers=2 (painted profile declares penu)");
+    }
+    NEOTKO_LOG(PENULTIMATE, "HSHELL_PENU_LAYERS object='"
+        << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
+        << "' penultimate_top_layers=" << penultimate_layers);
+    // NEOTKO_MULTIPASS_TAG_END
+
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         for (size_t i = 0; i < m_layers.size(); ++ i) {
             m_print->throw_if_canceled();
@@ -4332,11 +4374,48 @@ void PrintObject::discover_horizontal_shells()
 
                     // internal-solid are the union of the existing internal-solid surfaces
                     // and new ones
+                    // NEOTKO_MULTIPASS_TAG_START (s148) — penu classification (horizontal path).
+                    // A stTop surface propagated onto a neighbour within penultimate_top_layers of
+                    // the top IS the penultimate role (same predicate as discover_vertical_shells:
+                    // layers_below_top in [1, penultimate_layers]). Snapshot the fresh top-derived
+                    // solid BEFORE it is merged with the layer's pre-existing solid so we only
+                    // reclassify the top-derived part, never bottom-derived solid sitting at the
+                    // same layer. dist = int(i) - n is >0 for stTop (the scatter walks n = i-1 down).
+                    const int  _penu_dist_below_top = int(i) - n;
+                    const bool _penu_eligible = (type == stTop) && penultimate_layers > 0
+                        && _penu_dist_below_top >= 1
+                        && _penu_dist_below_top <= penultimate_layers;
+                    // new_internal_solid is Polygons here (pre-merge). Keep _penu_fresh as Polygons
+                    // → intersection_ex/diff_ex(ExPolygons, Polygons), the same overloads the
+                    // vertical-shells penu split uses (new_penultimate_solid = intersection_ex(...)).
+                    Polygons _penu_fresh;
+                    if (_penu_eligible)
+                        _penu_fresh = new_internal_solid;
+                    // NEOTKO_MULTIPASS_TAG_END
                     SurfaceCollection backup = std::move(neighbor_layerm->fill_surfaces);
                     polygons_append(new_internal_solid, to_polygons(backup.filter_by_type(stInternalSolid)));
                     ExPolygons internal_solid = union_ex(new_internal_solid);
                     // assign new internal-solid surfaces to layer
-                    neighbor_layerm->fill_surfaces.set(internal_solid, stInternalSolid);
+                    // NEOTKO_MULTIPASS_TAG_START (s148) — split the top-derived fresh solid into the
+                    // penultimate role (so ColorStitch/PathBlend can target it); the remainder
+                    // (pre-existing or non-top-derived solid) stays stInternalSolid. internal_solid
+                    // itself is left intact for the downstream sparse-infill diff below, so only the
+                    // surface TYPE changes here — geometry/propagation are byte-identical.
+                    if (_penu_eligible && !_penu_fresh.empty()) {
+                        ExPolygons _penu_part  = intersection_ex(internal_solid, _penu_fresh);
+                        ExPolygons _solid_part = diff_ex(internal_solid, _penu_fresh);
+                        neighbor_layerm->fill_surfaces.set(_solid_part, stInternalSolid);
+                        neighbor_layerm->fill_surfaces.append(_penu_part, stPenultimateInternalSolid);
+                        if (!_penu_part.empty())
+                            NEOTKO_LOG(PENULTIMATE, "discover_horizontal_shells layer=" << n
+                                << " penultimate_polys=" << _penu_part.size()
+                                << " solid_polys=" << _solid_part.size()
+                                << " dist_below_top=" << _penu_dist_below_top
+                                << " penu_layers=" << penultimate_layers);
+                    } else {
+                        neighbor_layerm->fill_surfaces.set(internal_solid, stInternalSolid);
+                    }
+                    // NEOTKO_MULTIPASS_TAG_END
                     // NEOTKO_MULTIPASS_TAG_START (port s129): re-add penultimate surfaces from backup —
                     // fill_surfaces.set() wipes everything, so restore them explicitly.
                     neighbor_layerm->fill_surfaces.append(
