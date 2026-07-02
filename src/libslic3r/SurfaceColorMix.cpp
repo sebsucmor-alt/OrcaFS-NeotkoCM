@@ -129,6 +129,92 @@ static std::vector<Polyline> split_path_into_lines(const ExtrusionPath& path)
 }
 
 // ---------------------------------------------------------------------------
+// NEOTKO_COLORSTITCH_TAG — split_monotonic_path_into_runs
+// ColorStitch on the continuous Monotonic pattern. FillMonotonic fuses adjacent
+// scanlines into ONE ExtrusionPath via perimeter connector arcs (unlike Monotonic
+// Line, which keeps lines separate). To colour each visual line independently we
+// split a fused path into per-scanline "runs":
+//   - run.scan = the colourable scanline (clean geometry → drives lane/slot maths)
+//   - run.tail = the connector arc that FOLLOWS that scanline, kept (never dropped)
+//                and re-appended at emission so it prints in the OUTGOING colour.
+// Classification is by LANE CROSSING, not by angle, against the SURFACE fill axis
+// (ax,ay) passed in by the caller — NOT a per-path axis. A per-path axis is unstable:
+// on a fragmented penu path (short scanlines + long traversals) the dominant per-path
+// direction can flip 90°, turning connectors into "scans" → a long horizontal run that
+// then hijacks LaneQuant's global fill_dir (confirmed: penu ref=0° vs surface dom=90°).
+// One axis for the whole surface keeps every path consistent. A segment is a scanline if
+// it STAYS in its lane (perpendicular displacement < ½ line spacing) and a connector if it
+// CROSSES toward the next line (Δ⊥ ≥ ½ spacing) — robust at any connector steepness. This
+// is the same metric LaneQuant uses to assign colour, so the split agrees with the colouring.
+// A new run begins at each connector→scanline transition, so each run is [scanline][trailing
+// arc]. Entirely post-hoc — does NOT touch FillMonotonic/connect_infill.
+// ---------------------------------------------------------------------------
+struct MonotonicRun { Polyline scan; Polyline tail; };
+
+static std::vector<MonotonicRun> split_monotonic_path_into_runs(const ExtrusionPath& path,
+                                                                double ax, double ay)
+{
+    const Points& pts = path.polyline.points;
+    std::vector<MonotonicRun> runs;
+    const size_t np = pts.size();
+    if (np < 2) return runs;
+    const size_t nseg = np - 1;
+
+    // Perpendicular (lane) axis of the SURFACE fill direction.
+    const double px = -ay, py = ax;
+    // Line spacing in scaled coords ≈ extrusion width (top/penu solid infill is adjacent).
+    // Half-spacing is the lane-crossing threshold; guard against a zero/garbage width.
+    const double lane_thresh = 0.5 * std::max(1.0, double(path.width) * 1e6);
+
+    // Classify each segment by perpendicular (lane) displacement vs the surface axis:
+    //   scanline → stays in its lane (|Δ⊥| < ½ spacing)
+    //   connector → crosses toward an adjacent line (|Δ⊥| ≥ ½ spacing), at any steepness.
+    std::vector<bool> is_scan(nseg, false);
+    for (size_t i = 0; i < nseg; ++i) {
+        const double dx = double(pts[i + 1].x() - pts[i].x());
+        const double dy = double(pts[i + 1].y() - pts[i].y());
+        if (dx * dx + dy * dy < 1e-12) { is_scan[i] = (i > 0) ? is_scan[i - 1] : true; continue; }
+        const double dperp = std::abs(dx * px + dy * py);
+        is_scan[i] = (dperp < lane_thresh);
+    }
+
+    // Run starts: point 0, then every connector→scanline transition once the
+    // current run already owns a scanline (so a trailing connector stays attached).
+    std::vector<size_t> run_starts;
+    run_starts.push_back(0);
+    bool run_has_scan = false;
+    for (size_t i = 0; i < nseg; ++i) {
+        if (i > 0 && is_scan[i] && !is_scan[i - 1] && run_has_scan) {
+            run_starts.push_back(i);
+            run_has_scan = false;
+        }
+        if (is_scan[i]) run_has_scan = true;
+    }
+
+    // Materialise each run as [scan | tail].
+    for (size_t k = 0; k < run_starts.size(); ++k) {
+        const size_t s = run_starts[k];
+        const size_t e = (k + 1 < run_starts.size()) ? run_starts[k + 1] : (np - 1);
+        if (e <= s) continue;
+        // Scanline = leading run of scanline segments; tail = the rest (connector).
+        size_t scan_split = s;
+        while (scan_split < e && is_scan[scan_split]) ++scan_split;
+        MonotonicRun r;
+        if (scan_split == s) {
+            // Defensive (run begins with a connector, e.g. a path that opens on a
+            // perimeter hook): keep the whole run as scan so no geometry is lost.
+            for (size_t i = s; i <= e; ++i) r.scan.points.push_back(pts[i]);
+        } else {
+            for (size_t i = s; i <= scan_split; ++i) r.scan.points.push_back(pts[i]);
+            if (scan_split < e)
+                for (size_t i = scan_split; i <= e; ++i) r.tail.points.push_back(pts[i]);
+        }
+        if (r.scan.points.size() >= 2) runs.push_back(std::move(r));
+    }
+    return runs;
+}
+
+// ---------------------------------------------------------------------------
 // Build active tool list from the 4 explicit slots (A, B, C, D).
 // C and D are optional: -1 means disabled.
 // ---------------------------------------------------------------------------
@@ -385,8 +471,11 @@ bool SurfaceColorMix::should_process_role(ExtrusionRole role, int surface)
 // we catch the mesh-top wherever it falls within that slab.
 //
 // Frames: mesh vertices live in volume-local space; we compose
-//   print_frame = po->trafo() * mv->get_matrix() * mesh_vertex
-// before comparing Z.
+//   slice_frame = po->trafo_centered() * mv->get_matrix() * mesh_vertex
+// before comparing Z and clipping in XY. NEOTKO_COLORSTITCH_TAG s161 — this
+// MUST be trafo_centered() (not trafo()): the slice/fill ExPolygons these masks
+// are intersected against are centered by -center_offset, so bare trafo() left
+// the paint mask off-surface for assembled/off-center objects (see call sites).
 //
 // NOTE on `used_states`: we deliberately do NOT gate the scan on
 // `data.used_states[slot]` — `set_triangle_from_string` (the 3mf load path)
@@ -395,13 +484,21 @@ bool SurfaceColorMix::should_process_role(ExtrusionRole role, int surface)
 // slots via get_facets() is robust to both fresh-paint and load-from-3mf.
 // ---------------------------------------------------------------------------
 int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
-                                                       double z_min, double z_max)
+                                                       double z_min, double z_max,
+                                                       bool downward)
 {
     if (!po) return 0;
     const ModelObject* mo = po->model_object();
     if (!mo) return 0;
 
-    const Transform3d trafo = po->trafo();
+    // NEOTKO_COLORSTITCH_TAG s161 — must match the slice frame. Slicing uses
+    // trafo_centered() (trafo minus the XY center_offset); the fill/slice
+    // ExPolygons this mask is compared against live in that centered frame.
+    // Using bare trafo() shifts the paint mask by +center_offset in XY —
+    // ≈0 for a single object modeled at its origin (works by accident) but
+    // = the assembly bbox-center for an ASSEMBLED object → mask lands off the
+    // surface → 0 intersection → painted slot silently dropped to "natural".
+    const Transform3d trafo = po->trafo_centered();
     const double z_tol = 0.02; // fp slack around the layer extent
 
     int counts[ModelVolume::COLORMIX_SLOT_COUNT] = {0};   // NEOTKO_COLORSTITCH_TAG s112: 16→31
@@ -444,12 +541,17 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
                 const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
                 const Vec3d e1 = v1 - v0, e2 = v2 - v0;
                 const Vec3d n  = e1.cross(e2);
-                if (n.z() <= 0.0) continue; // upward-facing only
-                const double max_z = std::max({v0.z(), v1.z(), v2.z()});
+                // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): downward picks the underside
+                // (n.z<0, mesh-bottom = min_z); default upward keeps the legacy
+                // top scan (n.z>0, mesh-top = max_z) byte-identical.
+                if (downward ? (n.z() >= 0.0) : (n.z() <= 0.0)) continue;
+                const double pick_z = downward
+                    ? std::min({v0.z(), v1.z(), v2.z()})
+                    : std::max({v0.z(), v1.z(), v2.z()});
                 ++_dbg_up_tris;
-                _dbg_minz = std::min(_dbg_minz, max_z);
-                _dbg_maxz = std::max(_dbg_maxz, max_z);
-                if (max_z >= z_min - z_tol && max_z <= z_max + z_tol) {
+                _dbg_minz = std::min(_dbg_minz, pick_z);
+                _dbg_maxz = std::max(_dbg_maxz, pick_z);
+                if (pick_z >= z_min - z_tol && pick_z <= z_max + z_tol) {
                     counts[slot]++;
                     any_painted = true;
                     ++_dbg_in_band;
@@ -491,14 +593,15 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
 // uses to clip a painted surface so the sandwich applies ONLY where the user
 // painted — the painted shape is preserved instead of flooding the whole top.
 ExPolygons SurfaceColorMix::painted_footprint_in_z_range(const PrintObject* po, int slot,
-                                                         double z_min, double z_max)
+                                                         double z_min, double z_max,
+                                                         bool downward)
 {
     ExPolygons out;
     if (!po || slot <= 0 || slot >= ModelVolume::COLORMIX_SLOT_COUNT) return out;   // NEOTKO_COLORSTITCH_TAG s112
     const ModelObject* mo = po->model_object();
     if (!mo) return out;
 
-    const Transform3d trafo = po->trafo();
+    const Transform3d trafo = po->trafo_centered(); // NEOTKO_COLORSTITCH_TAG s161 — slice frame (see dominant_painted_slot_in_z_range)
     const double z_tol = 0.02; // same fp slack as the dominant-slot scan
     Polygons tris;             // one CCW triangle polygon per qualifying facet
 
@@ -517,9 +620,12 @@ ExPolygons SurfaceColorMix::painted_footprint_in_z_range(const PrintObject* po, 
             const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
             const Vec3d e1 = v1 - v0, e2 = v2 - v0;
             const Vec3d n  = e1.cross(e2);
-            if (n.z() <= 0.0) continue; // upward-facing only
-            const double max_z = std::max({v0.z(), v1.z(), v2.z()});
-            if (max_z < z_min - z_tol || max_z > z_max + z_tol) continue;
+            // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): mirror to the underside on demand.
+            if (downward ? (n.z() >= 0.0) : (n.z() <= 0.0)) continue;
+            const double pick_z = downward
+                ? std::min({v0.z(), v1.z(), v2.z()})
+                : std::max({v0.z(), v1.z(), v2.z()});
+            if (pick_z < z_min - z_tol || pick_z > z_max + z_tol) continue;
             Polygon p;
             p.points = { Point(scale_(v0.x()), scale_(v0.y())),
                          Point(scale_(v1.x()), scale_(v1.y())),
@@ -540,14 +646,14 @@ ExPolygons SurfaceColorMix::painted_footprint_in_z_range(const PrintObject* po, 
 // set instead of just the winner. Used to handle multiple painted profiles at
 // the same Z (twin islands with different profiles each get their own mask).
 std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
-    const PrintObject* po, double z_min, double z_max)
+    const PrintObject* po, double z_min, double z_max, bool downward)
 {
     std::vector<int> out;
     if (!po) return out;
     const ModelObject* mo = po->model_object();
     if (!mo) return out;
 
-    const Transform3d trafo = po->trafo();
+    const Transform3d trafo = po->trafo_centered(); // NEOTKO_COLORSTITCH_TAG s161 — slice frame (see dominant_painted_slot_in_z_range)
     const double z_tol = 0.02;
     bool present[ModelVolume::COLORMIX_SLOT_COUNT] = {false};   // NEOTKO_COLORSTITCH_TAG s112: 16→31
 
@@ -568,9 +674,12 @@ std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
                 const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
                 const Vec3d e1 = v1 - v0, e2 = v2 - v0;
                 const Vec3d n  = e1.cross(e2);
-                if (n.z() <= 0.0) continue;
-                const double max_z = std::max({v0.z(), v1.z(), v2.z()});
-                if (max_z >= z_min - z_tol && max_z <= z_max + z_tol) {
+                // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): underside scan on demand.
+                if (downward ? (n.z() >= 0.0) : (n.z() <= 0.0)) continue;
+                const double pick_z = downward
+                    ? std::min({v0.z(), v1.z(), v2.z()})
+                    : std::max({v0.z(), v1.z(), v2.z()});
+                if (pick_z >= z_min - z_tol && pick_z <= z_max + z_tol) {
                     present[slot] = true;
                     break;
                 }
@@ -616,7 +725,7 @@ ExPolygons SurfaceColorMix::mmu_painted_footprint_in_z_range(
         }
     if (!any_mm) return out;
 
-    const Transform3d trafo = po->trafo();
+    const Transform3d trafo = po->trafo_centered(); // NEOTKO_COLORSTITCH_TAG s161 — slice frame (MMU mirror; see dominant_painted_slot_in_z_range)
     const double      z_tol = 0.02;
     Polygons          tris;
 
@@ -855,6 +964,31 @@ bool SurfaceColorMix::object_painter_wants_penu(const ModelObject* mo)
                     if (v == 0 || v == 2) return true;
                 }
             }
+        }
+    }
+    return false;
+}
+
+// NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): Bottom is painter-only (no legacy preset
+// keys). The object declares bottom iff some painted profile carries a Bottom
+// WIP stack with a real effect. Source of truth = stack_bottom_json, mirroring
+// the s118/s119 content-driven model of object_painter_wants_penu.
+bool SurfaceColorMix::object_painter_wants_bottom(const ModelObject* mo)
+{
+    if (!mo) return false;
+    auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+    std::set<int> profile_ids_seen;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
+            const int pid = mv->colormix_slot_to_profile_id[s];
+            if (pid <= 0) continue;
+            if (!profile_ids_seen.insert(pid).second) continue;
+            const SurfaceEffectProfile* p = mgr.find(pid);
+            if (!p) continue;
+            const SurfacePassStack bottom = SurfacePassStack::from_json(p->stack_bottom_json);
+            if (bottom.any_effect())
+                return true;
         }
     }
     return false;
@@ -1156,7 +1290,13 @@ int SurfaceColorMix::assign_and_group_tools(
         if (!first_path) continue;
 
         // NEOTKO_PROFILE_TAG — Fase D (final): split painter / preset modes.
-        const bool gv_is_top_role = (first_path->role() == erTopSolidInfill);
+        // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): bottom roles (erBottomSurface, erBridgeInfill)
+        // are authored with the SAME widget as Top (draw_zone_editor penu=false), so their
+        // pass kv uses the top key names. Treat them as "top-keyed" here so the gv loader
+        // reads the right interlayer_colormix_* keys (not the empty _penu_ set).
+        const bool gv_is_top_role = (first_path->role() == erTopSolidInfill ||
+                                     first_path->role() == erBottomSurface ||
+                                     first_path->role() == erBridgeInfill);
         const SurfaceEffectProfile* eff_profile =
             gv_is_top_role ? painted_top_profile : painted_penu_profile;
         // NEOTKO_COLORSTITCH_TAG — s139 fix B (per-pieza): cuando Fill.cpp resolvió un
@@ -1181,7 +1321,12 @@ int SurfaceColorMix::assign_and_group_tools(
             // wrongly in painter mode). This logs WHICH branch ran and WHICH gate cut,
             // so "no colormix on this role" is greppable in one line, not reconstructed
             // from bucket counts.
-            const bool _cut_role = (r != erTopSolidInfill && r != erPenultimateInfill);
+            // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): admit bottom roles too, else the bottom
+            // ColorStitch EEC is never tool-encoded → eec_to_tool_buckets returns 1 bucket
+            // on the natural tool (T0) → no toolchange/color/wipetower, and the suppressed
+            // bridge fill leaves only the (overhang) wall visible.
+            const bool _cut_role = (r != erTopSolidInfill && r != erPenultimateInfill &&
+                                    r != erBottomSurface && r != erBridgeInfill);
             const bool _cut_paint = !painted_override;
             NEOTKO_LOG(PROFILE, "SCM_MODE layer=" << layer_idx << " role=" << (int)r
                 << " mode=painter gate=" << (_cut_role ? "SKIP(non-top/penu)"
@@ -1382,20 +1527,78 @@ int SurfaceColorMix::assign_and_group_tools(
         //   n_paths > 1 → Monotonic/MonotonicLine: sub already has one ExtrusionPath per line.
         //   n_paths == 1 → Rectilinear: single zig-zag path, split at direction changes.
         // Each entry: (polyline, proto attributes source)
-        struct RawLine { Polyline pl; ExtrusionRole role; double mm3; float width; float height; };
+        // NEOTKO_COLORSTITCH_TAG — `tail` carries the connector arc to re-append at emission
+        // (continuous-Monotonic split). Empty for every other path, so behaviour is unchanged.
+        struct RawLine { Polyline pl; ExtrusionRole role; double mm3; float width; float height; Polyline tail{}; };
         std::vector<RawLine> raw_lines;
 
         if (n_paths > 1) {
-            // Monotonic case: iterate all paths directly
+            // NEOTKO_COLORSTITCH_TAG — "ColorStitch on Monotonic (continuous)" gate.
+            // OFF (default): one ExtrusionPath == one colourable line. True for Monotonic Line
+            // (anchor_length_max=0 → connect_infill does NOT fuse), and unchanged here.
+            // ON: the continuous Monotonic pattern fuses several scanlines + perimeter connector
+            // arcs into one path. Split each fused path into per-scanline runs so every visual line
+            // gets its own tool; the connector arc rides with its OUTGOING scanline (run.tail), kept
+            // (never dropped) and re-appended at emission. run.scan (clean) drives lane/slot geometry.
+            // Post-hoc only — FillMonotonic / connect_infill are untouched.
+            const bool split_monotonic = config.colorstitch_monotonic_split.value;
             NEOTKO_LOG(COLORMIX, "MONOTONIC_MODE layer=" << layer_idx
-                << " n_paths=" << n_paths);
+                << " n_paths=" << n_paths << " split=" << (split_monotonic ? 1 : 0));
+
+            // NEOTKO_COLORSTITCH_TAG — SURFACE-level dominant fill axis (length-weighted
+            // doubled-angle over ALL paths). One axis for the whole surface so the per-path
+            // split is consistent; a per-path axis flips 90° on fragmented penu paths and
+            // produces a horizontal "scan" that hijacks LaneQuant's global fill_dir.
+            double surf_ax = 1.0, surf_ay = 0.0;
+            if (split_monotonic) {
+                double sa_x = 0.0, sa_y = 0.0;
+                for (auto* e : sub->entities) {
+                    const auto* p = dynamic_cast<const ExtrusionPath*>(e);
+                    if (!p) continue;
+                    const Points& pp = p->polyline.points;
+                    for (size_t i = 1; i < pp.size(); ++i) {
+                        const double dx = double(pp[i].x() - pp[i - 1].x());
+                        const double dy = double(pp[i].y() - pp[i - 1].y());
+                        const double l  = std::sqrt(dx * dx + dy * dy);
+                        if (l < 1e-6) continue;
+                        const double ux = dx / l, uy = dy / l;
+                        sa_x += (ux * ux - uy * uy) * l;   // length-weighted doubled-angle
+                        sa_y += (2.0 * ux * uy) * l;
+                    }
+                }
+                const double sang = 0.5 * std::atan2(sa_y, sa_x);
+                surf_ax = std::cos(sang);
+                surf_ay = std::sin(sang);
+                NEOTKO_LOG(COLORMIX, "  MONO_SURF_AXIS layer=" << layer_idx
+                    << " axis=" << int(std::round(std::atan2(surf_ay, surf_ax) * 180.0 / M_PI)) << "deg");
+            }
+
             for (auto* e : sub->entities) {
                 auto* p = dynamic_cast<ExtrusionPath*>(e);
                 if (!p) continue;
-                double len_mm = static_cast<double>(p->polyline.length()) / 1e6;
-                if (len_mm < min_length_mm) continue;
-                raw_lines.push_back({ p->polyline, p->role(), p->mm3_per_mm, p->width, p->height });
+                if (split_monotonic) {
+                    auto mono_runs = split_monotonic_path_into_runs(*p, surf_ax, surf_ay);
+                    for (auto& mr : mono_runs) {
+                        double len_mm = static_cast<double>(mr.scan.length()) / 1e6;
+                        if (len_mm < min_length_mm) continue;
+                        RawLine rl;
+                        rl.pl     = std::move(mr.scan);
+                        rl.role   = p->role();
+                        rl.mm3    = p->mm3_per_mm;
+                        rl.width  = p->width;
+                        rl.height = p->height;
+                        rl.tail   = std::move(mr.tail);
+                        raw_lines.push_back(std::move(rl));
+                    }
+                } else {
+                    double len_mm = static_cast<double>(p->polyline.length()) / 1e6;
+                    if (len_mm < min_length_mm) continue;
+                    raw_lines.push_back({ p->polyline, p->role(), p->mm3_per_mm, p->width, p->height });
+                }
             }
+            if (split_monotonic)
+                NEOTKO_LOG(COLORMIX, "  MONO_SPLIT layer=" << layer_idx
+                    << " fused_paths=" << n_paths << " → scan_runs=" << raw_lines.size());
         } else {
             // Rectilinear case: split the single zig-zag
             std::vector<Polyline> split = split_path_into_lines(*first_path);
@@ -1580,6 +1783,69 @@ int SurfaceColorMix::assign_and_group_tools(
                 << " lines=" << raw_lines.size() << " slots=" << n_slots);
         }
 
+        // NEOTKO_COLORSTITCH_TAG — DEBUG-ONLY axis diagnostic (no behaviour change).
+        // Penu+Monotonic shows ~2x the lane span of Top (same part, both 90°) → the global
+        // fill_dir that LaneQuant builds from a SINGLE longest line's endpoints is being skewed
+        // by one contaminated scan run. This block dumps, for monotonic surfaces:
+        //   - the fill_dir the code actually uses (longest line, endpoint-based)
+        //   - the length-weighted DOMINANT axis (the robust alternative)
+        //   - their delta (a large delta == the bug is live on this surface)
+        //   - the reference run, and the worst angular OUTLIER runs (suspected connector merged
+        //     into a scan → diagonal endpoints), sorted by length.
+        if (NeoDebug::enabled(NeoDebug::COLORMIX) && n_paths > 1 && raw_lines.size() >= 2) {
+            auto ang_norm_pi = [](double a) { while (a < 0.0) a += M_PI; while (a >= M_PI) a -= M_PI; return a; };
+            auto ang_dist_pi = [](double a, double b) { double d = std::abs(a - b); d = std::fmod(d, M_PI); if (d > M_PI / 2.0) d = M_PI - d; return d; };
+
+            // fill_dir the template uses: longest line, endpoint direction.
+            const size_t   ref      = lane_pick_reference(raw_lines);
+            const LaneVec2 fdir     = lane_direction(raw_lines[ref].pl);
+            const double   fdir_ang = ang_norm_pi(std::atan2(fdir.y, fdir.x));
+
+            // Length-weighted dominant axis (doubled-angle), endpoint direction per run.
+            double acc_x = 0.0, acc_y = 0.0;
+            for (const auto& rlx : raw_lines) {
+                const LaneVec2 d = lane_direction(rlx.pl);
+                const double   a = std::atan2(d.y, d.x);
+                const double   w = rlx.pl.length();
+                acc_x += std::cos(2.0 * a) * w;
+                acc_y += std::sin(2.0 * a) * w;
+            }
+            const double dom_ang = ang_norm_pi(0.5 * std::atan2(acc_y, acc_x));
+
+            NEOTKO_LOG(COLORMIX, "MONO_AXIS_DIAG layer=" << layer_idx
+                << " role=" << ExtrusionEntity::role_to_string(first_path->role())
+                << " n=" << raw_lines.size()
+                << " fill_dir(ref)=" << int(std::round(fdir_ang * 180.0 / M_PI)) << "deg"
+                << " dominant=" << int(std::round(dom_ang * 180.0 / M_PI)) << "deg"
+                << " delta=" << int(std::round(ang_dist_pi(fdir_ang, dom_ang) * 180.0 / M_PI)) << "deg"
+                << " ref_idx=" << ref
+                << " ref_len_mm=" << (raw_lines[ref].pl.length() / 1e6)
+                << " ref_ang=" << int(std::round(ang_norm_pi(std::atan2(lane_direction(raw_lines[ref].pl).y, lane_direction(raw_lines[ref].pl).x)) * 180.0 / M_PI)) << "deg");
+
+            // Worst outliers vs the dominant axis (the runs dragging fill_dir off-axis).
+            std::vector<std::pair<double,int>> outliers; // (len, idx) for runs >20deg off-axis
+            for (int i = 0; i < (int)raw_lines.size(); ++i) {
+                const LaneVec2 d = lane_direction(raw_lines[i].pl);
+                const double   a = ang_norm_pi(std::atan2(d.y, d.x));
+                if (ang_dist_pi(a, dom_ang) > (20.0 * M_PI / 180.0))
+                    outliers.emplace_back(raw_lines[i].pl.length(), i);
+            }
+            std::sort(outliers.begin(), outliers.end(), [](auto& l, auto& r){ return l.first > r.first; });
+            NEOTKO_LOG(COLORMIX, "  MONO_AXIS_OUTLIERS layer=" << layer_idx
+                << " count=" << outliers.size() << "/" << raw_lines.size() << " (>20deg off dominant)");
+            const size_t cap = std::min<size_t>(8, outliers.size());
+            for (size_t k = 0; k < cap; ++k) {
+                const int i = outliers[k].second;
+                const LaneVec2 d = lane_direction(raw_lines[i].pl);
+                const double   a = ang_norm_pi(std::atan2(d.y, d.x));
+                NEOTKO_LOG(COLORMIX, "    OUTLIER idx=" << i
+                    << " len_mm=" << (raw_lines[i].pl.length() / 1e6)
+                    << " pts=" << raw_lines[i].pl.points.size()
+                    << " ang=" << int(std::round(a * 180.0 / M_PI)) << "deg"
+                    << " dev=" << int(std::round(ang_dist_pi(a, dom_ang) * 180.0 / M_PI)) << "deg");
+            }
+        }
+
         std::vector<int> unique_tool_order;
         std::map<int, std::vector<ExtrusionPath*>> tool_blocks;
 
@@ -1593,6 +1859,15 @@ int SurfaceColorMix::assign_and_group_tools(
             auto& rl = raw_lines[path_idx];
             ExtrusionPath* new_path = new ExtrusionPath(rl.role, rl.mm3, rl.width, rl.height);
             new_path->polyline = std::move(rl.pl);
+            // NEOTKO_COLORSTITCH_TAG — re-attach the connector arc (continuous-Monotonic split) so it
+            // prints in the OUTGOING colour. Empty tail for every other path → no-op (byte-identical).
+            if (!rl.tail.points.empty()) {
+                auto& tp = rl.tail.points;
+                size_t k0 = (!new_path->polyline.points.empty() &&
+                             new_path->polyline.points.back() == tp.front()) ? 1 : 0;
+                for (size_t k = k0; k < tp.size(); ++k)
+                    new_path->polyline.points.push_back(tp[k]);
+            }
             encode_tool_in_path(new_path, tool_idx);
             tool_blocks[tool_idx].push_back(new_path);
         }
@@ -2632,6 +2907,7 @@ std::string SurfacePassStack::to_json() const
         root["v"]                  = 1;
         root["enabled"]            = false;
         root["perimeter_override"] = perimeter_override;
+        root["bottom_supported_control"] = bottom_supported_control;
         nlohmann::json arr = nlohmann::json::array();
         nlohmann::json e;
         e["kind"]  = static_cast<int>(SurfacePassKind::None);
@@ -2645,6 +2921,7 @@ std::string SurfacePassStack::to_json() const
     root["v"]                  = 1;
     root["enabled"]            = enabled;
     root["perimeter_override"] = perimeter_override;
+    root["bottom_supported_control"] = bottom_supported_control;
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& p : passes) {
         nlohmann::json e;
@@ -2682,6 +2959,9 @@ SurfacePassStack SurfacePassStack::from_json(const std::string& text)
         st.enabled = root["enabled"].get<bool>();
     if (root.contains("perimeter_override") && root["perimeter_override"].is_boolean())
         st.perimeter_override = root["perimeter_override"].get<bool>();
+    // NEOTKO_BOTTOM_TAG — Fase 1 §5.3: per-zone supported-bottom control opt-in.
+    if (root.contains("bottom_supported_control") && root["bottom_supported_control"].is_boolean())
+        st.bottom_supported_control = root["bottom_supported_control"].get<bool>();
 
     for (const auto& e : root["passes"]) {
         if (!e.is_object()) continue;

@@ -3,6 +3,7 @@
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Print.hpp" // NEOTKO_MIXEDFIL_SANDWICH_TAG — Print::mixed_filament_sandwich_profile_id
 #include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_PROFILE_TAG — NeoDebug PROFILE channel
 #include "libslic3r/SurfaceEffectProfile.hpp"
 #include "libslic3r/ColorSci/StackFlatten.hpp" // NEOTKO_COLORSTITCH_TAG — sandwich_colour_stacked (pro mode live preview)
@@ -1154,8 +1155,17 @@ static void pro_pass_preview(ImDrawList* dl, ImVec2 a, ImVec2 b,
 static void draw_zone_editor(const char* id, const char* label,
                              Slic3r::SurfacePassStack& st, bool allow_disable,
                              bool penu, const std::vector<std::string>& fcolors,
-                             int nfil, double layer_h, float row_avail_w)
+                             int nfil, double layer_h, float row_avail_w,
+                             bool bottom_caps = false,
+                             const char* add_label = nullptr,
+                             const char* clear_label = nullptr)
 {
+    // NEOTKO_BOTTOM_TAG — Fase 1 §5.5 (strict caps, bottom only). When bottom_caps:
+    //   · max 2 Solid passes · max 1 ColorStitch pass · PathBlend ALWAYS Full
+    //     (PB Half is hidden — a Half on the bottom would leave an empty layer and
+    //      destabilize how the print is built up). Top/Penu pass false → untouched.
+    // Caps are enforced at authoring (kind dropdown + "+ layer" default kind);
+    // total passes are already bounded by kMaxPasses (2 Solid + 1 ColorStitch = 3).
     using namespace Slic3r;
     using K = SurfacePassKind;
     ImGui::PushID(id);
@@ -1172,7 +1182,7 @@ static void draw_zone_editor(const char* id, const char* label,
             st.passes.clear();            // canonical Empty = no passes
             st.enabled = false;
             ImGui::SameLine();
-            if (ImGui::SmallButton(_u8L("+ Add penultimate").c_str())) {
+            if (ImGui::SmallButton(add_label ? add_label : _u8L("+ Add penultimate").c_str())) {
                 SurfacePass sp; sp.kind = K::ColorMix; sp.ratio = 1.0;
                 st.passes.push_back(sp);
                 pro_cm_write(st.passes.back(), penu, 0, 1, 50);  // default A/B/mix
@@ -1183,7 +1193,7 @@ static void draw_zone_editor(const char* id, const char* label,
         }
         st.enabled = true;                // has content → not Empty
         ImGui::SameLine();
-        if (ImGui::SmallButton(_u8L("x Clear penultimate").c_str())) {
+        if (ImGui::SmallButton(clear_label ? clear_label : _u8L("x Clear penultimate").c_str())) {
             st.passes.clear();
             st.enabled = false;
             ImGui::PopID();
@@ -1316,8 +1326,26 @@ static void draw_zone_editor(const char* id, const char* label,
         }
         ImGui::PushItemWidth(100.f);   // s120: estrecha la banda de tipo (antes 118) — el Z-box de pass height ya no salta de línea; 100 aún cabe "ColorStitch"
         if (ImGui::BeginCombo("##kind", kind_items[sel].c_str())) {
-            for (int k = 0; k < 4; ++k)
-                if (ImGui::Selectable(kind_items[k].c_str(), k == sel) && k != sel) {
+            // NEOTKO_BOTTOM_TAG — §5.5: count the OTHER passes' kinds so switching
+            // THIS pass to a capped kind respects the bottom caps (the target kind
+            // replaces this pass's current kind, so pass i is excluded from the count).
+            int _n_solid_other = 0, _n_cs_other = 0;
+            if (bottom_caps)
+                for (int j = 0; j < n; ++j) if (j != i) {
+                    if (st.passes[j].kind == K::Solid)         ++_n_solid_other;
+                    else if (st.passes[j].kind == K::ColorMix) ++_n_cs_other;
+                }
+            for (int k = 0; k < 4; ++k) {
+                // PB Half is never offered on the bottom (would leave an empty layer).
+                if (bottom_caps && k == 2) continue;
+                // Disable a capped kind when picking it would exceed its bottom cap.
+                const bool _capped = bottom_caps &&
+                    ((k == 0 && _n_solid_other >= 2) ||   // max 2 Solid
+                     (k == 1 && _n_cs_other    >= 1));    // max 1 ColorStitch
+                // (Sin BeginDisabled: esta versión de ImGui no lo trae → dim manual +
+                //  guarda. El Selectable sigue clicable; el `&& !_capped` veta la acción.)
+                if (_capped) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+                if (ImGui::Selectable(kind_items[k].c_str(), k == sel) && k != sel && !_capped) {
                     if (k == 0) {
                         p.kind = K::Solid;
                     } else if (k == 1) {
@@ -1331,6 +1359,14 @@ static void draw_zone_editor(const char* id, const char* label,
                         pb_collapse_mode = (k == 2) ? 0 : 1;
                     }
                 }
+                if (_capped) {
+                    ImGui::PopStyleVar();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", (k == 0)
+                            ? _u8L("Bottom: max 2 Solid passes").c_str()
+                            : _u8L("Bottom: max 1 ColorStitch pass").c_str());
+                }
+            }
             ImGui::EndCombo();
         }
         ImGui::PopItemWidth();
@@ -1613,6 +1649,20 @@ static void draw_zone_editor(const char* id, const char* label,
                     p.ratio = std::max(0.0, p.ratio) / tot * (1.0 - newR);
             SurfacePass np;
             np.ratio = newR;
+            // NEOTKO_BOTTOM_TAG — §5.5: a new bottom pass defaults to a kind that fits
+            // the caps. Solid by default; once 2 Solids exist, default to ColorStitch
+            // (2 Solid + 1 ColorStitch = kMaxPasses, so a slot always fits here).
+            if (bottom_caps) {
+                int ns = 0, nc = 0;
+                for (const auto& p : st.passes) {
+                    if (p.kind == K::Solid)         ++ns;
+                    else if (p.kind == K::ColorMix) ++nc;
+                }
+                if (ns >= 2 && nc < 1) {
+                    np.kind = K::ColorMix;
+                    pro_cm_write(np, penu, 0, 1, 50);   // default A/B/mix
+                }
+            }
             st.passes.push_back(np);    // becomes the new TOPMOST pass (#1)
         }
     }
@@ -2155,12 +2205,143 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
     // pasarlo a ambas zonas, para que Top y Penu anclen su Z-box (tamaño de capa) y
     // la banda al MISMO X (antes cada fila lo remedía y se desalineaban entre sí).
     const float pro_row_w = ImGui::GetContentRegionAvail().x;
-    draw_zone_editor("##pro_top",  _u8L("Top").c_str(),         m_pro_top,
-                     /*allow_disable=*/false, /*penu=*/false, fcolors, nfil, lh, pro_row_w);
+
+    // NEOTKO_BOTTOM_TAG — surface discriminator. The gizmo is a COMPRESSED painter
+    // (the full UX is the Surface Sandwich editor), so it shows ONE surface at a time:
+    //   Top Surface    → Top + Penultimate zones
+    //   Bottom Surface → Bottom zone + its supported-control switch
+    // Pure VIEW toggle: all three stacks persist below regardless of the active mode,
+    // so flipping it never discards authored passes (the user can't lose work). Opens
+    // on Top by default.
+    {
+        const bool top_sel = (m_pro_surface_mode == 0);
+        if (!top_sel) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.55f);
+        if (ImGui::Button(_u8L("Top Surface").c_str()) && !top_sel) m_pro_surface_mode = 0;
+        if (!top_sel) ImGui::PopStyleVar();
+        ImGui::SameLine();
+        const bool bot_sel = (m_pro_surface_mode == 1);
+        if (!bot_sel) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.55f);
+        if (ImGui::Button(_u8L("Bottom Surface").c_str()) && !bot_sel) m_pro_surface_mode = 1;
+        if (!bot_sel) ImGui::PopStyleVar();
+    }
     ImGui::Spacing();
-    draw_zone_editor("##pro_penu", _u8L("Penultimate").c_str(), m_pro_penu,
-                     /*allow_disable=*/true,  /*penu=*/true,  fcolors, nfil, lh, pro_row_w);
+
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — object-wide mode: bypasses per-face painting
+    // entirely, replacing top+penu with an auto-generated sandwich approximating
+    // the object's assigned MixedFilament (TD-aware; Fill.cpp reads it directly,
+    // see Print::resolve_mixed_filament_sandwich_profiles()). Placed above the
+    // palette/zone editors as a flat toggle row (no new collapsible section).
+    bool mf_mode_on = false;
+    {
+        ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+        std::vector<std::string> mf_fcolors;
+        if (auto* o = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour"))
+            mf_fcolors = o->values;
+        const size_t mf_num_physical = mf_fcolors.size();
+
+        int mf_extruder_id = 0;
+        if (mo)
+            for (const ModelVolume* mv : mo->volumes)
+                if (mv && mv->is_model_part()) { mf_extruder_id = mv->extruder_id(); break; }
+        const bool mf_has_mixed_filament = mo && mf_extruder_id > (int)mf_num_physical;
+
+        if (mo) {
+            if (const auto* mf_opt = dynamic_cast<const ConfigOptionBool*>(mo->config.option("mixed_filament_sandwich_mode")))
+                mf_mode_on = mf_opt->value;
+        }
+
+        m_imgui->disabled_begin(!mf_has_mixed_filament);
+        if (ImGui::Checkbox(_u8L("MixedFilament Object").c_str(), &mf_mode_on) && mo)
+            mo->config.set_key_value("mixed_filament_sandwich_mode", new ConfigOptionBool(mf_mode_on));
+        m_imgui->disabled_end();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", mf_has_mixed_filament
+                ? _u8L("Replace this object's top surface and penultimate infill with an "
+                       "auto-generated sandwich approximating this MixedFilament's colour "
+                       "(Perimeter Override forced on). Disables painting/patterns for this "
+                       "object.").c_str()
+                : _u8L("Assign a MixedFilament to this object's extruder first.").c_str());
+
+        if (mf_has_mixed_filament) {
+            ImGui::SameLine();
+            // Swatch: resolved profile from the last apply (best-effort — may be one
+            // apply-cycle stale right after editing the MixedFilament itself).
+            uint32_t mf_argb = 0;
+            if (mo) {
+                const Print& print = wxGetApp().plater()->fff_print();
+                for (const PrintObject* po : print.objects()) {
+                    if (po->model_object() != mo) continue;
+                    if (const int pid = print.mixed_filament_sandwich_profile_id(po); pid)
+                        if (const auto* p = SurfaceEffectProfileManager::get().find(pid))
+                            mf_argb = p->preview_argb;
+                    break;
+                }
+            }
+            const float sw = ImGui::GetTextLineHeight();
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            if (mf_argb) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImU32 col = IM_COL32((mf_argb >> 16) & 0xFF, (mf_argb >> 8) & 0xFF, mf_argb & 0xFF, 255);
+                dl->AddRectFilled(p0, ImVec2(p0.x + sw, p0.y + sw), col);
+                dl->AddRect(p0, ImVec2(p0.x + sw, p0.y + sw), IM_COL32(0, 0, 0, 80));
+            }
+            ImGui::Dummy(ImVec2(sw, sw));
+        }
+        if (mf_mode_on)
+            ImGui::TextDisabled("%s", _u8L("Top surface and penultimate infill are auto-generated "
+                                           "from this object's MixedFilament. Painting is disabled "
+                                           "while this mode is active.").c_str());
+    }
     ImGui::Spacing();
+
+    // Bottom stack re-loads from the selected profile (so editing profile A never
+    // leaks into B). Done regardless of the active mode so it's fresh when shown.
+    if (m_pro_bottom_loaded_id != m_selected_profile_id) {
+        const auto* bp = SurfaceEffectProfileManager::get().find(m_selected_profile_id);
+        m_pro_bottom = (bp && !bp->stack_bottom_json.empty())
+            ? Slic3r::SurfacePassStack::from_json(bp->stack_bottom_json)
+            : Slic3r::SurfacePassStack{};
+        m_pro_bottom.enabled = m_pro_bottom.any_effect();
+        m_pro_bottom_loaded_id = m_selected_profile_id;
+    }
+
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — locked out entirely while MixedFilament Object
+    // mode is on: the engine bypasses per-face painting for this object regardless
+    // of what's authored here, so editing it would be misleading busywork.
+    m_imgui->disabled_begin(mf_mode_on);
+
+    if (m_pro_surface_mode == 0) {
+        draw_zone_editor("##pro_top",  _u8L("Top").c_str(),         m_pro_top,
+                         /*allow_disable=*/false, /*penu=*/false, fcolors, nfil, lh, pro_row_w);
+        ImGui::Spacing();
+        draw_zone_editor("##pro_penu", _u8L("Penultimate").c_str(), m_pro_penu,
+                         /*allow_disable=*/true,  /*penu=*/true,  fcolors, nfil, lh, pro_row_w);
+        ImGui::Spacing();
+    } else {
+        // Bottom zone — same authoring widget, §5.5 caps, "+ Add Bottom Paint" wording.
+        draw_zone_editor("##pro_bottom", "", m_pro_bottom,
+                         /*allow_disable=*/true,  /*penu=*/false, fcolors, nfil, lh, pro_row_w,
+                         /*bottom_caps=*/true,
+                         _u8L("+ Add Bottom Paint").c_str(),
+                         _u8L("x Clear Bottom Paint").c_str());
+        ImGui::Spacing();
+
+        // NEOTKO_BOTTOM_TAG — §5.3 supported-bottom control, scoped to the Bottom
+        // surface only. OFF = single full-height pass (paint-only; a real bridge stays
+        // a bridge). ON = up to 3 Z-stacked passes (pass 0 keeps the base treatment,
+        // passes above print solid). Persists in stack_bottom_json (read at Fill.cpp).
+        {
+            bool sup = m_pro_bottom.bottom_supported_control;
+            if (ImGui::Checkbox(_u8L("Supported bottom — control (stack passes)").c_str(), &sup))
+                m_pro_bottom.bottom_supported_control = sup;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("ON: treat this painted bottom as SUPPORTED and control it "
+                                             "(up to 3 stacked passes; pass 0 keeps the base treatment, "
+                                             "passes above print solid). OFF: single full-height pass, "
+                                             "paint only — leave OFF for real bridges (overhangs over air).").c_str());
+        }
+        ImGui::Spacing();
+    }
 
     // NEOTKO_COLORSTITCH_TAG — s118: Perimeter override ÚNICO para el color (no
     // per-zona). El motor lo lee por-zona (Fill.cpp mp_stack.perimeter_override), así
@@ -2176,6 +2357,8 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
             ImGui::SetTooltip("%s", _u8L("Clone the walls into every Solid pass "
                                          "(MultiPass perimeter override).").c_str());
     }
+
+    m_imgui->disabled_end();
     ImGui::Spacing();
 
     // --- (TD) per filamento, rejilla de 2 columnas (live; invalida la caché de
@@ -2246,6 +2429,7 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
     // plegado o pase cargado sin tocar) → el motor no los degrada a Solid.
     pro_backfill_cm(m_pro_top,  /*penu=*/false);
     pro_backfill_cm(m_pro_penu, /*penu=*/true);
+    pro_backfill_cm(m_pro_bottom, /*penu=*/false);   // NEOTKO_BOTTOM_TAG — Fase 0 (WIP)
 
     CS::ColorRecipe recipe;
     recipe.top  = m_pro_top;
@@ -2264,11 +2448,14 @@ void GLGizmoColorMixPainter::render_pro_mode_panel()
         if (SurfaceEffectProfile* p = mgr.find_mut(m_selected_profile_id)) {
             const std::string tj = recipe.top.to_json();
             const std::string pj = recipe.penu.to_json();
-            if (p->stack_top_json != tj || p->stack_penu_json != pj) {
+            // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): persist the Bottom zone alongside top/penu.
+            const std::string bj = m_pro_bottom.to_json();
+            if (p->stack_top_json != tj || p->stack_penu_json != pj || p->stack_bottom_json != bj) {
                 // Reescritura live por id (NO dedup-crear): conserva el id y el
                 // nombre; refresca payload del motor desde los stacks editados.
                 p->stack_top_json = tj;
                 p->stack_penu_json = pj;
+                p->stack_bottom_json = bj;   // NEOTKO_BOTTOM_TAG — Fase 0 (WIP)
                 p->preview_argb    = recipe_argb(recipe);
                 p->colormix  = {};   // limpiar payload viejo (payload_from_stacks solo añade)
                 p->pathblend = {};
@@ -3353,9 +3540,50 @@ void GLGizmoColorMixPainter::update_model_object()
         // que descartamos la pintura que cayó en paredes laterales/inferiores (el
         // pincel pinta "a través"). Así lo pintado = lo que imprime y el weave no
         // sangra por los lados. Se hace ANTES de serializar para que persista.
+        // NEOTKO_BOTTOM_TAG — Fase 1 (§4.0): el descarte ahora es por ZONA del slot.
+        // Cada slot apunta a un perfil cuyas zonas activas (top/penu/bottom) dictan
+        // qué cara se conserva: top/penu → arriba, bottom → abajo, ambas → ambas;
+        // laterales SIEMPRE fuera (mantiene la garantía anti-bleed de s145).
+        // Además, para el SLOT que se está pintando (m_active_slot) se aplica la
+        // "active zone mode" del plan: si en el Pro tray la zona Bottom WIP está en
+        // edición (m_pro_bottom con efecto) conservamos la cara inferior AUNQUE el
+        // perfil todavía no la haya persistido — evita que la primera pincelada en la
+        // cara inferior se borre antes de que stack_bottom_json exista (trampa de
+        // autoría). Sin zona Bottom WIP en ningún perfil ni en edición → bottom todo
+        // false → comportamiento idéntico al top-only de s145.
         if (mi) {
             const Transform3d trafo = mi->get_transformation().get_matrix() * mv->get_matrix();
-            if (m_triangle_selectors[idx]->discard_non_top_facing(trafo, 0.30f) > 0) {
+            std::vector<bool> slot_wants_top(MAX_SLOTS, false), slot_wants_bottom(MAX_SLOTS, false);
+            {
+                const auto& mgr = SurfaceEffectProfileManager::get();
+                for (int s = 1; s < MAX_SLOTS; ++s) {
+                    const int pid = mv->colormix_slot_to_profile_id[s];
+                    if (pid == 0) continue;
+                    if (const SurfaceEffectProfile* p = mgr.find(pid)) {
+                        // penu es superficie del lado TOP → cuenta como top-facing.
+                        slot_wants_top[s]    = !p->stack_top_json.empty() || !p->stack_penu_json.empty();
+                        slot_wants_bottom[s] = !p->stack_bottom_json.empty();
+                    }
+                }
+                // Active-zone override sobre el slot del pincel (autoría en vivo).
+                if (m_active_slot >= 1 && m_active_slot < MAX_SLOTS) {
+                    slot_wants_top[m_active_slot]    = slot_wants_top[m_active_slot]
+                        || m_pro_top.any_effect() || (m_pro_penu.enabled && m_pro_penu.any_effect());
+                    slot_wants_bottom[m_active_slot] = slot_wants_bottom[m_active_slot]
+                        || (m_pro_bottom.enabled && m_pro_bottom.any_effect());
+                }
+            }
+            const int cleared = m_triangle_selectors[idx]->discard_non_zone_facing(
+                trafo, 0.30f, slot_wants_top, slot_wants_bottom);
+            if (NeoDebug::enabled(NeoDebug::BOTTOM)) {
+                int n_bottom_slots = 0;
+                for (int s = 1; s < MAX_SLOTS; ++s) if (slot_wants_bottom[s]) ++n_bottom_slots;
+                std::ostringstream os;
+                os << "PAINT_DISCARD vol_idx=" << idx << " cleared=" << cleared
+                   << " bottom_slots=" << n_bottom_slots;
+                NeoDebug::write(NeoDebug::BOTTOM, os.str());
+            }
+            if (cleared > 0) {
                 if (auto* g = dynamic_cast<TriangleSelectorGUI*>(m_triangle_selectors[idx].get()))
                     g->request_update_render_data(true);
             }

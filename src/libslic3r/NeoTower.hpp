@@ -293,6 +293,19 @@ private:
     // Returns max(0.04f, min(m_min_layer_height, layer_height * 0.4f))
     float sublayer_slot_height(float nominal_layer_height) const;
 
+    // NEOTKO_NEOTOWER_TAG s158 — single source of truth for a toolchange's purge
+    // volume. Collapses the historically-divergent wipe_volume sites (real body TC
+    // vs sandwich/ColorStitch sublayer) into one rule:
+    //   non-sandwich (body) → physical flush matrix (scalar floor if OOB) — byte-identical to pre-s158
+    //   sandwich, old==new  → prime_floor (the knob) — unchanged
+    //   sandwich, old!=new  → max(prime_floor, physical) — the unification
+    // The sandwich max() is the fix for the ColorStitch/MultiPass under-purge (a real
+    // colour change in a sublayer used to reserve only the knob → single starved wipe
+    // line → speed ramp never developed → hot-end choke). prime_floor doubles as the
+    // scalar fallback so each caller reproduces its own pre-s158 result exactly.
+    float resolve_wipe_volume(int old_tool, int new_tool,
+                              bool sandwich_ctx, float prime_floor) const;
+
     // -----------------------------------------------------------------------
     // Lookup key encoding
     // key = round(z_actual * 1000) * 10000 + old_tool * 100 + new_tool
@@ -313,6 +326,12 @@ private:
 
     // Wipe volume matrix [old_tool][new_tool] mm³, pre-multiplied by flush_multiplier.
     std::vector<std::vector<float>>        m_wipe_volumes;
+
+    // NEOTKO_NEOTOWER_TAG s160c — multipass_prime_volume knob (max over MP regions),
+    // computed in collect_all_events. Stored so generate()'s bridge-TC plan_toolchange
+    // sites can feed it as the resolve_wipe_volume() floor (same unification s158 gave
+    // the sublayer scheduler). Without this, bridges hardcoded 0.f → tiny purge.
+    float                                  m_mp_prime_vol    = 0.f;
 
     size_t                                 m_initial_tool    = 0;
 

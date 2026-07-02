@@ -56,6 +56,13 @@ struct SurfaceEffectProfile {
     // motor a estos stacks es un debug posterior. Vacío = sin sandwich resuelto.
     std::string          stack_top_json;
     std::string          stack_penu_json;
+    // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): bottom-surface zone stack, authored in the
+    // "Bottom WIP" zone of the Sandwich Painter Pro tray. Like the top/penu blobs it
+    // is NOT yet consumed by the slice engine — Fase 0 only instruments (logs whether
+    // a bottom stack is present for a surface/role). The engine wiring (new bottom
+    // role + sublayer compile, plus the wipe-tower-sensitive layer-0 path) lands in
+    // later phases. Empty = no bottom sandwich authored.
+    std::string          stack_bottom_json;
 };
 
 class SurfaceEffectProfileManager

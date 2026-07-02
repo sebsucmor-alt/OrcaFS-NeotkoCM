@@ -1112,7 +1112,10 @@ public:
         // Load the current state of both zones (blob, or synthesized legacy).
         m_stack[0] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
         m_stack[1] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
-        for (int z = 0; z < 2; ++z)
+        // NEOTKO_BOTTOM_TAG — Bottom (m_stack[2]) has no region-config representation
+        // (engine consumes it only via the painter), so it starts empty here and is
+        // populated when a saved profile is loaded into the dialog.
+        for (int z = 0; z < 3; ++z)
             sanitize_stack(z);
 
         // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD from app_config (same keys
@@ -1140,7 +1143,12 @@ private:
     std::function<void(const std::string&)> m_on_change;
     std::vector<std::string>                m_fcolors;
 
-    Slic3r::SurfacePassStack m_stack[2];     // 0 = Top, 1 = Penultimate
+    // NEOTKO_BOTTOM_TAG — 0 = Top, 1 = Penultimate, 2 = Bottom surface. The editor
+    // shows all three (it doubles as the saved-profile "pro" editor). Bottom is
+    // PROFILE-scoped only: commit() writes Top/Penu to region config (the engine's
+    // preset path), but the engine consumes Bottom solely via the painter (stack_
+    // bottom_json), so Bottom flows out only through on_save_profile / Update.
+    Slic3r::SurfacePassStack m_stack[3];     // 0 = Top, 1 = Penultimate, 2 = Bottom
     int m_pending_load_id = 0;               // NEOTKO_SANDWICH_TAG — deferred Load (see on_manage_profiles)
 
     // Everything is inline per row — no shared "Advanced" panel. The fill angle
@@ -1150,6 +1158,7 @@ private:
     struct ZoneUI {
         wxCheckBox*   enable_chk = nullptr;
         wxCheckBox*   perim_chk  = nullptr;
+        wxCheckBox*   supported_chk = nullptr;  // NEOTKO_BOTTOM_TAG — bottom zone only
         wxRadioBox*   slots_rb   = nullptr;
         wxPanel*      ratio_bar  = nullptr;   // stacked draggable Z-ratio bar
         wxPanel*      rows_host  = nullptr;
@@ -1183,7 +1192,7 @@ private:
         };
         std::vector<KindEntry>         kindlist;    // choice-index -> KindEntry
     };
-    ZoneUI m_ui[2];
+    ZoneUI m_ui[3];     // NEOTKO_BOTTOM_TAG — 0=Top, 1=Penu, 2=Bottom
 
     // ratio-bar drag state: which zone / which internal boundary is held.
     int m_drag_zone  = -1;
@@ -1322,7 +1331,7 @@ private:
     // NEOTKO_SANDWICH_TAG — Fase 5 s73: kind entries with explicit Half/Full
     // PathBlend distinction. Selecting either PB entry collapses the stack to
     // a single PB pass with the chosen mode (handled in on_kind_change).
-    static std::vector<ZoneUI::KindEntry> kind_entries_for_slots(int n)
+    static std::vector<ZoneUI::KindEntry> kind_entries_for_slots(int n, bool bottom = false)
     {
         using PBMode = Slic3r::PathBlendPassConfig::Mode;
         std::vector<ZoneUI::KindEntry> out;
@@ -1334,7 +1343,11 @@ private:
             out.push_back({ Kind::Solid,     -1, _L("Solid") });
         }
         out.push_back({ Kind::ColorMix,  -1,                _L("ColorStitch") }); // NEOTKO_COLORSTITCH_TAG
-        out.push_back({ Kind::PathBlend, (int)PBMode::Half, _L("PathBlend Half") });
+        // NEOTKO_BOTTOM_TAG — §5.5: PathBlend on the bottom is ALWAYS Full. A PB Half
+        // on the bottom would leave an empty layer and destabilize how the print is
+        // built up, so the Half entry is not offered for the Bottom zone.
+        if (!bottom)
+            out.push_back({ Kind::PathBlend, (int)PBMode::Half, _L("PathBlend Half") });
         out.push_back({ Kind::PathBlend, (int)PBMode::Full, _L("PathBlend Full") });
         return out;
     }
@@ -1409,8 +1422,9 @@ private:
                          tc, cm_pass_int(&p, pre + "band_count_c", 0),
                          td, cm_pass_int(&p, pre + "band_count_d", 0));
         } else {
-            const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
-                                           : "interlayer_colormix_pattern_penultimate";
+            // NEOTKO_BOTTOM_TAG — bottom (z==2) uses the top key family (matches `pre`).
+            const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
+                                           : "interlayer_colormix_pattern_top";
             const std::string pat = cm_pass_str(&p, pat_key, "");
             for (char c : pat) {
                 if      (c >= '1' && c <= '4') seq.push_back(c - '1');
@@ -1496,7 +1510,7 @@ private:
     // panels (never frees them), so it is safe on macOS (no live-NSView free).
     void reload_ui_from_stack()
     {
-        for (int z = 0; z < 2; ++z) {
+        for (int z = 0; z < 3; ++z) {
             sanitize_stack(z);
             m_ui[z].enable_chk->SetValue(m_stack[z].enabled && !m_stack[z].passes.empty());
             const int n0 = std::max(1, (int)m_stack[z].passes.size());
@@ -1504,6 +1518,9 @@ private:
             // s118: perim_chk único (sólo z==0), refleja el estado combinado.
             if (m_ui[z].perim_chk)
                 m_ui[z].perim_chk->SetValue(m_stack[0].perimeter_override || m_stack[1].perimeter_override);
+            // NEOTKO_BOTTOM_TAG — supported-bottom checkbox (only z==2).
+            if (m_ui[z].supported_chk)
+                m_ui[z].supported_chk->SetValue(m_stack[z].bottom_supported_control);
             refresh_rows(z);
             sync_zone_enabled(z);
         }
@@ -1520,6 +1537,7 @@ private:
         if (!p) return;
         m_stack[0] = Slic3r::SurfacePassStack::from_json(p->stack_top_json);
         m_stack[1] = Slic3r::SurfacePassStack::from_json(p->stack_penu_json);
+        m_stack[2] = Slic3r::SurfacePassStack::from_json(p->stack_bottom_json);  // NEOTKO_BOTTOM_TAG
         reload_ui_from_stack();
     }
 
@@ -2540,6 +2558,10 @@ private:
                   0, wxEXPAND | wxALL, 6);
         left->Add(build_zone(1, _L("Penultimate layer")),
                   0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+        // NEOTKO_BOTTOM_TAG — Bottom surface zone (profile-scoped; same authoring
+        // widget as Top/Penu, with §5.5 caps + supported-bottom control below).
+        left->Add(build_zone(2, _L("Bottom surface")),
+                  0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
         // NEOTKO_COLORSCI_TAG — UX 2026-06-24: Line distribution mode moved out of the
         // Sandwich editor into print settings (Quality → Surface ColorStitch), below
         // Minimum line length. The Gradient Designer keeps the freed right column + stretch.
@@ -2578,7 +2600,7 @@ private:
 
         SetSizerAndFit(root);
         SetMinSize(wxSize(560, 420));
-        for (int z = 0; z < 2; ++z) { refresh_rows(z); sync_zone_enabled(z); }
+        for (int z = 0; z < 3; ++z) { refresh_rows(z); sync_zone_enabled(z); }
         Layout();
     }
 
@@ -2696,6 +2718,25 @@ private:
         m_ui[z].norm_btn->Bind(wxEVT_BUTTON, [this, z](wxCommandEvent&) { normalize(z); });
         foot->Add(m_ui[z].norm_btn, 0, wxLEFT, 8);
         box->Add(foot, 0, wxEXPAND | wxALL, 6);
+
+        // NEOTKO_BOTTOM_TAG — supported-bottom control, BELOW the Bottom block only.
+        // OFF = single full-height pass (paint-only; a real bridge stays a bridge).
+        // ON = up to 3 Z-stacked passes (pass 0 keeps the base treatment, passes
+        // above print solid). Stored in m_stack[2].bottom_supported_control and
+        // serialized into stack_bottom_json when the profile is saved.
+        if (z == 2) {
+            m_ui[z].supported_chk = new wxCheckBox(boxw, wxID_ANY,
+                _L("Supported bottom — control (stack passes)"));
+            m_ui[z].supported_chk->SetValue(m_stack[z].bottom_supported_control);
+            m_ui[z].supported_chk->SetToolTip(
+                _L("ON: treat this bottom as SUPPORTED and control it (up to 3 stacked "
+                   "passes; pass 0 keeps the base treatment, passes above print solid). "
+                   "OFF: single full-height pass — leave OFF for real bridges (overhangs)."));
+            m_ui[z].supported_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
+                m_stack[z].bottom_supported_control = m_ui[z].supported_chk->GetValue();
+            });
+            box->Add(m_ui[z].supported_chk, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+        }
         return box;
     }
 
@@ -2707,7 +2748,7 @@ private:
     {
         ZoneUI& u = m_ui[z];
         const int n = (int)m_stack[z].passes.size();
-        u.kindlist = kind_entries_for_slots(n);
+        u.kindlist = kind_entries_for_slots(n, /*bottom=*/z == 2);   // NEOTKO_BOTTOM_TAG
 
         for (int idx = 0; idx < (int)u.row_panel.size(); ++idx) {
             const bool vis = idx < n;
@@ -3191,6 +3232,16 @@ private:
             while ((int)ps.size() < n) {
                 Slic3r::SurfacePass p;
                 p.kind = Kind::Solid;
+                // NEOTKO_BOTTOM_TAG — §5.5: a new bottom pass defaults to a kind that
+                // fits the caps (Solid until 2 exist, then ColorStitch).
+                if (z == 2) {
+                    int ns = 0, nc = 0;
+                    for (const auto& q : ps) {
+                        if (q.kind == Kind::Solid)         ++ns;
+                        else if (q.kind == Kind::ColorMix) ++nc;
+                    }
+                    if (ns >= 2 && nc < 1) p.kind = Kind::ColorMix;
+                }
                 ps.push_back(p);
             }
         } else if ((int)ps.size() > n) {
@@ -3242,6 +3293,21 @@ private:
                 refresh_rows(z);
             });
             return;
+        }
+        // NEOTKO_BOTTOM_TAG — §5.5 caps (bottom zone only): reject a change that would
+        // exceed max 2 Solid / max 1 ColorStitch. Non-destructive: the stack is left
+        // unchanged and refresh_rows re-selects the dropdown from it (snaps back).
+        // (PB Full-only is handled by kind_entries_for_slots dropping the Half entry.)
+        if (z == 2 && (e.kind == Kind::Solid || e.kind == Kind::ColorMix)) {
+            int ns = 0, nc = 0;
+            for (int j = 0; j < (int)m_stack[z].passes.size(); ++j) if (j != idx) {
+                if (m_stack[z].passes[j].kind == Kind::Solid)         ++ns;
+                else if (m_stack[z].passes[j].kind == Kind::ColorMix) ++nc;
+            }
+            if ((e.kind == Kind::Solid && ns >= 2) || (e.kind == Kind::ColorMix && nc >= 1)) {
+                CallAfter([this, z]() { refresh_rows(z); });   // revert the choice
+                return;
+            }
         }
         // Non-PB: slot count unchanged → kind choice items stay valid; update
         // only this row's widgets without repopulating the choice that just
@@ -3558,8 +3624,9 @@ private:
         if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
         Slic3r::SurfacePass& pass = m_stack[z].passes[idx];
 
-        const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
-                                       : "interlayer_colormix_pattern_penultimate";
+        // NEOTKO_BOTTOM_TAG — bottom (z==2) uses the top key family (matches `gp`).
+        const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
+                                       : "interlayer_colormix_pattern_top";
         const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
                                         : std::string("interlayer_colormix_");
         // Role gradient keys this editor owns (colormix_keys of the role + angle).
@@ -3990,8 +4057,11 @@ private:
     // gradient into a ColorMix pass that has no per-pass override.
     Slic3r::SurfaceEffectPayload zone_colormix_snapshot(int z) const
     {
-        const char* pat_key = (z == 0) ? "interlayer_colormix_pattern_top"
-                                       : "interlayer_colormix_pattern_penultimate";
+        // NEOTKO_BOTTOM_TAG — the Bottom zone (z==2) reads the "top" key family, same
+        // as the painter/engine for bottom (s155: a painted bottom carries the top
+        // ColorMix keys, not the penu ones). Only Penu (z==1) uses the penu family.
+        const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
+                                       : "interlayer_colormix_pattern_top";
         const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
                                         : std::string("interlayer_colormix_");
         std::vector<std::string> role_keys;
@@ -4066,10 +4136,11 @@ private:
         if (name.empty()) return;
         Slic3r::SurfaceEffectProfile p;
         p.name            = name;
-        p.stack_top_json  = normalized_zone_json(0);
-        p.stack_penu_json = normalized_zone_json(1);
-        if (p.stack_top_json.empty() && p.stack_penu_json.empty()) {
-            wxMessageBox(_L("Nothing to save: both zones are empty or disabled."),
+        p.stack_top_json    = normalized_zone_json(0);
+        p.stack_penu_json   = normalized_zone_json(1);
+        p.stack_bottom_json = normalized_zone_json(2);   // NEOTKO_BOTTOM_TAG
+        if (p.stack_top_json.empty() && p.stack_penu_json.empty() && p.stack_bottom_json.empty()) {
+            wxMessageBox(_L("Nothing to save: all zones are empty or disabled."),
                          _L("Sandwich Profile"), wxOK | wxICON_WARNING, this);
             return;
         }
@@ -4161,8 +4232,9 @@ private:
                     wxString::FromUTF8(p->name)),
                     _L("Update profile"), wxYES_NO | wxICON_QUESTION, &mdlg) != wxYES)
                 return;
-            p->stack_top_json  = normalized_zone_json(0);
-            p->stack_penu_json = normalized_zone_json(1);
+            p->stack_top_json    = normalized_zone_json(0);
+            p->stack_penu_json   = normalized_zone_json(1);
+            p->stack_bottom_json = normalized_zone_json(2);   // NEOTKO_BOTTOM_TAG
             refill();
         });
         btn_ren->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
@@ -6727,6 +6799,13 @@ void TabPrint::build()
         // NEOTKO_COLORSTITCH_TAG — Line distribution mode moved out of the Sandwich editor
         // into the print settings, directly below Minimum line length (UX decision 2026-06-24).
         optgroup->append_single_option_line("surface_color_mix_lane_mode");
+        // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan gate (self-loop micro-accumulation fix).
+        optgroup->append_single_option_line("colorstitch_monotonic_replan");
+        // NEOTKO_NEOWEAVING_TAG — Monotonic Interlayer Nesting toggle (config+engine already ported,
+        // UI lands here below Line distribution per UX 2026-06-30).
+        optgroup->append_single_option_line("neotko_interlayer_nesting_enabled");
+        // NEOTKO_COLORSTITCH_TAG — ColorStitch on continuous Monotonic (split engine = Ultracode WIP).
+        optgroup->append_single_option_line("colorstitch_monotonic_split");
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");

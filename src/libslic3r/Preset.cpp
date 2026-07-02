@@ -943,7 +943,7 @@ static std::vector<std::string> s_Preset_print_options {
      "interlayer_colormix_penu_invert", "interlayer_colormix_penu_repetitions", "interlayer_colormix_penu_band_count_a", "interlayer_colormix_penu_band_count_b", "interlayer_colormix_penu_band_count_c", "interlayer_colormix_penu_band_count_d",
      "interlayer_colormix_penu_tool_a", "interlayer_colormix_penu_tool_b", "interlayer_colormix_penu_tool_c", "interlayer_colormix_penu_tool_d", "interlayer_colormix_band_count_a", "interlayer_colormix_band_count_b",
      "interlayer_colormix_band_count_c", "interlayer_colormix_band_count_d", "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone", "interlayer_colormix_filament_filter", "interlayer_colormix_use_virtual",
-     "interlayer_colormix_angle", "interlayer_colormix_penu_angle", "surface_color_mix_lane_mode", "multipass_enabled", "multipass_surface", "multipass_num_passes",
+     "interlayer_colormix_angle", "interlayer_colormix_penu_angle", "surface_color_mix_lane_mode", "colorstitch_monotonic_replan", "colorstitch_monotonic_split", "multipass_enabled", "multipass_surface", "multipass_num_passes",
      "multipass_tool_1", "multipass_tool_2", "multipass_tool_3", "multipass_width_ratio_1", "multipass_width_ratio_2", "multipass_width_ratio_3",
      "multipass_vary_pattern", "multipass_angle_1", "multipass_angle_2", "multipass_angle_3", "multipass_pa_mode", "multipass_pa_value",
      "multipass_fan_1", "multipass_fan_2", "multipass_fan_3", "multipass_speed_pct_1", "multipass_speed_pct_2", "multipass_speed_pct_3",

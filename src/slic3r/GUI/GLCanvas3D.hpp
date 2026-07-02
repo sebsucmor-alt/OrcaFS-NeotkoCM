@@ -1053,6 +1053,9 @@ public:
     void request_extra_frame() { m_extra_frame_requested = true; }
 
     void schedule_extra_frame(int miliseconds);
+    // NEOTKO_REALCOLOR_TAG: lets GCodeViewer self-drive its idle-debounce without a new param
+    // threaded through _render_gcode()
+    bool is_camera_moving() const { return m_camera_movement; }
 
     int get_main_toolbar_item_id(const std::string& name) const { return m_main_toolbar.get_item_id(name); }
     void force_main_toolbar_left_action(int item_id) { m_main_toolbar.force_left_action(item_id, *this); }

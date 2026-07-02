@@ -342,6 +342,20 @@ public:
     // maps mesh→world (only its 3×3 is used). Returns the number of leaves cleared.
     int                  discard_non_top_facing(const Transform3d &trafo_no_translate, float min_world_normal_z);
 
+    // NEOTKO_BOTTOM_TAG — Fase 1 (§4.0): zone-aware variant of the discard above.
+    // Each painted leaf belongs to a slot (== its EnforcerBlockerType state). For that
+    // slot the caller declares which surface zone(s) its profile targets:
+    //   slot_wants_top[state]    → keep the leaf if it faces UP   (world normal_z >= +cutoff)
+    //   slot_wants_bottom[state] → keep the leaf if it faces DOWN (world normal_z <= -cutoff)
+    // A profile may target both (keeps up- and down-facing, discards laterals); one that
+    // targets neither (or a state out of range) falls back to the legacy top-only rule.
+    // Laterals (|normal_z| < cutoff) are always discarded — this preserves the s145
+    // anti-bleed guarantee while letting the Bottom WIP zone retain the underside.
+    // Returns the number of leaves cleared.
+    int                  discard_non_zone_facing(const Transform3d &trafo_no_translate, float cutoff,
+                                                 const std::vector<bool> &slot_wants_top,
+                                                 const std::vector<bool> &slot_wants_bottom);
+
     bool                 has_facets(EnforcerBlockerType state) const;
     static bool          has_facets(const TriangleSplittingData &data, EnforcerBlockerType test_state);
     int                  num_facets(EnforcerBlockerType state) const;

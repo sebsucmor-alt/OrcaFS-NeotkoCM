@@ -1,6 +1,8 @@
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
+#include "SurfaceEffectProfile.hpp"      // NEOTKO_MIXEDFIL_SANDWICH_TAG
+#include "ColorSci/ColorPredict.hpp"     // NEOTKO_MIXEDFIL_SANDWICH_TAG
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
@@ -2024,6 +2026,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         m_support_used |= object->config().enable_support;
     }
 
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — single-threaded, before any parallel Fill/
+    // slice work reads SurfaceEffectProfileManager.
+    resolve_mixed_filament_sandwich_profiles();
+
 #ifdef _DEBUG
     check_model_ids_equal(m_model, model);
 #endif /* _DEBUG */
@@ -2033,6 +2039,94 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 		m_modified_count++;
 	BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: finished,  this %2%, m_modified_count %3%, apply_status %4%, m_support_used %5%")%__LINE__ %this %m_modified_count %apply_status %m_support_used;
 	return static_cast<ApplyStatus>(apply_status);
+}
+
+// NEOTKO_MIXEDFIL_SANDWICH_TAG — resolve/create the auto-generated sandwich
+// profile for each object with "MixedFilament Object" mode enabled. See
+// Print::mixed_filament_sandwich_profile_id() (Print.hpp) for the read side,
+// consumed from SurfaceColorMix::assign_and_group_tools(). Single-threaded
+// (called once from the end of apply(), before any parallel Fill/slice work
+// reads SurfaceEffectProfileManager) — mirrors the existing invariant that the
+// profile manager is only ever written from single-threaded code.
+void Print::resolve_mixed_filament_sandwich_profiles()
+{
+    namespace CS = Slic3r::ColorSci;
+
+    m_mixed_filament_sandwich_profile_id.clear();
+
+    const size_t num_physical = m_config.filament_colour.values.size();
+    if (num_physical == 0)
+        return;
+
+    CS::Material mats[4];
+    for (int t = 0; t < 4; ++t) {
+        const std::string hex = (t < (int)m_config.filament_colour.values.size())
+            ? m_config.filament_colour.values[t] : "#808080";
+        const float td = (t < (int)m_config.neotko_td_mirror.values.size())
+            ? std::max(0.01f, std::min(10.f, (float)m_config.neotko_td_mirror.values[t])) : 1.f;
+        mats[t] = CS::material_from_hex(hex, td);
+    }
+
+    for (PrintObject *object : m_objects) {
+        if (!object || !object->config().mixed_filament_sandwich_mode.value)
+            continue;
+        const ModelObject *mo = object->model_object();
+        if (!mo)
+            continue;
+
+        // Object-wide mode: the first model_part volume's resolved extruder id
+        // is the object's assigned filament (mirrors how the gizmo will detect it).
+        int extruder_id = 0;
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv && mv->is_model_part()) { extruder_id = mv->extruder_id(); break; }
+        if (extruder_id <= (int)num_physical)
+            continue;   // not a MixedFilament (virtual) id -> mode has no effect
+
+        const MixedFilament *mf = m_mixed_filament_mgr.mixed_filament_from_id((unsigned)extruder_id, num_physical);
+        if (!mf)
+            continue;
+
+        // Content-hash: unchanged MixedFilament + materials -> reuse the same
+        // profile id instead of growing SurfaceEffectProfileManager on every apply.
+        std::string cache_key = std::to_string(mf->component_a) + "|" +
+                                 std::to_string(mf->component_b) + "|" +
+                                 std::to_string(mf->mix_b_percent);
+        for (int t = 0; t < 4; ++t)
+            cache_key += "|" + std::to_string(mats[t].rgb[0]) + "," + std::to_string(mats[t].rgb[1]) +
+                         "," + std::to_string(mats[t].rgb[2]) + "," + std::to_string(mats[t].td[0]);
+
+        int pid = 0;
+        if (auto it = m_mixed_filament_sandwich_profile_cache.find(cache_key);
+            it != m_mixed_filament_sandwich_profile_cache.end() &&
+            SurfaceEffectProfileManager::get().find(it->second) != nullptr) {
+            pid = it->second;
+        } else {
+            CS::PredictOptions opt;
+            opt.layer_height = object->config().layer_height.value > 0.001
+                ? object->config().layer_height.value : 0.2;
+            const CS::ColorRecipe recipe = CS::build_mixed_filament_recipe(*mf, num_physical, mats, opt);
+
+            // NOTE: payload_from_stacks() only lifts ColorMix/PathBlend passes into
+            // profile.colormix/pathblend — Solid passes (our whole recipe) are NOT
+            // lifted there. The engine's actual solid-stack consumption path (Fill.cpp,
+            // painter-mode branch) reads stack_top_json/stack_penu_json directly, so
+            // that's the field that must carry the recipe.
+            SurfaceEffectProfile profile;
+            profile.name = "MixedFilament auto (" + mo->name + ")";
+            profile.auto_generated = true;
+            profile.stack_top_json  = recipe.top.to_json();
+            profile.stack_penu_json = recipe.penu.to_json();
+            // Swatch hint for the gizmo's live preview (same packing as recipe_argb()
+            // in GLGizmoColorMixPainter.cpp — no cross-TU dependency needed for this).
+            profile.preview_argb = 0xFF000000u
+                | ((uint32_t)std::min(255.f, recipe.rgb[0] * 255.f) << 16)
+                | ((uint32_t)std::min(255.f, recipe.rgb[1] * 255.f) <<  8)
+                |  (uint32_t)std::min(255.f, recipe.rgb[2] * 255.f);
+            pid = SurfaceEffectProfileManager::get().add(std::move(profile));
+            m_mixed_filament_sandwich_profile_cache[cache_key] = pid;
+        }
+        m_mixed_filament_sandwich_profile_id[object] = pid;
+    }
 }
 
 } // namespace Slic3r

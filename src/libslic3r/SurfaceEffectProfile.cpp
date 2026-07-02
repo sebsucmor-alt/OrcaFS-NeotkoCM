@@ -357,6 +357,7 @@ std::string SurfaceEffectProfileManager::to_json() const
         e["multipass"]       = payload_to_json(p.multipass);
         e["stack_top_json"]  = p.stack_top_json;
         e["stack_penu_json"] = p.stack_penu_json;
+        e["stack_bottom_json"] = p.stack_bottom_json; // NEOTKO_BOTTOM_TAG — Fase 0 (WIP)
         e["auto"]            = p.auto_generated;  // NEOTKO_COLORSTITCH_TAG — PR.3
         arr.push_back(std::move(e));
     }
@@ -393,6 +394,9 @@ bool SurfaceEffectProfileManager::from_json(const std::string& text)
             p.stack_top_json  = e["stack_top_json"].get<std::string>();
         if (e.contains("stack_penu_json") && e["stack_penu_json"].is_string())
             p.stack_penu_json = e["stack_penu_json"].get<std::string>();
+        // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): absent in older profiles → "" (no bottom sandwich).
+        if (e.contains("stack_bottom_json") && e["stack_bottom_json"].is_string())
+            p.stack_bottom_json = e["stack_bottom_json"].get<std::string>();
         // NEOTKO_COLORSTITCH_TAG — PR.3: absent (legacy) → false = saved.
         if (e.contains("auto") && e["auto"].is_boolean())
             p.auto_generated = e["auto"].get<bool>();

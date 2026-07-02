@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Platform.hpp"
+#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_REALCOLOR_TAG — NeoDebug REALCOLOR channel (NEOTKO_LOG macro)
 #include "GLShadersManager.hpp"
 #include "3DScene.hpp"
 #include "GUI_App.hpp"
@@ -53,6 +54,22 @@ std::pair<bool, std::string> GLShadersManager::init()
     // used to render options in gcode preview
     if (GUI::wxGetApp().is_gl_version_greater_or_equal_to(3, 3)) {
         valid &= append_shader("gouraud_light_instanced", { prefix + "gouraud_light_instanced.vs", prefix + "gouraud_light_instanced.fs" });
+    }
+
+    // NEOTKO_REALCOLOR_TAG: depth-peeled Beer-Lambert compositing for EViewType::RealColor.
+    // Loaded unconditionally now, like every other shader here — the 110/ variants use
+    // gl_FragData[N] (core GLSL 1.10 MRT, no layout(location=N)/GL_ARB_explicit_attrib_location)
+    // so they work under the legacy/compatibility profile too, not just Core 3.1+. `prefix`
+    // (140/ vs 110/) picks the right pair automatically, same as every other shader above.
+    // Actual GPU-capability gating (FBO + float-texture support) lives in
+    // GCodeViewer.cpp::realcolor_gpu_supported(), which hides the combo entry, not the load.
+    {
+        const bool peel_ok = append_shader("realcolor_peel", { prefix + "realcolor_peel.vs", prefix + "realcolor_peel.fs" });
+        const bool accum_ok = append_shader("realcolor_accum", { prefix + "realcolor_quad.vs", prefix + "realcolor_accum.fs" });
+        const bool present_ok = append_shader("realcolor_present", { prefix + "realcolor_quad.vs", prefix + "realcolor_present.fs" });
+        valid &= peel_ok && accum_ok && present_ok;
+        NEOTKO_LOG(REALCOLOR, "GLShadersManager::init: prefix=\"" << prefix << "\" realcolor_peel=" << peel_ok
+            << " realcolor_accum=" << accum_ok << " realcolor_present=" << present_ok);
     }
 
     // used to render objects in 3d editor

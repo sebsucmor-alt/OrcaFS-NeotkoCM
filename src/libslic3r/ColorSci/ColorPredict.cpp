@@ -239,6 +239,47 @@ std::vector<ColorRecipe> build_palette(PaletteKind kind,
     return {};
 }
 
+// --- MixedFilament Object mode (NEOTKO_MIXEDFIL_SANDWICH_TAG) ---------------
+
+ColorRecipe build_mixed_filament_recipe(const MixedFilament& mf,
+                                        size_t num_physical,
+                                        const Material mats[4],
+                                        const PredictOptions& opt)
+{
+    // Target colour: TD-aware side-by-side blend of component_a/component_b by
+    // mix_b_percent (the user's configured intent), NOT the naive RGB blend
+    // that compute_mixed_filament_display_color() uses for the UI swatch list.
+    const int mix_b = std::clamp(mf.mix_b_percent, 0, 100);
+    const int a = std::clamp<int>((int)mf.component_a - 1, 0, 3);
+    const int b = std::clamp<int>((int)mf.component_b - 1, 0, 3);
+    (void)num_physical;   // component ids already validated by the caller
+    std::vector<Slice> slices;
+    slices.push_back({ a, (100 - mix_b) / 100.f });
+    slices.push_back({ b, mix_b / 100.f });
+    float target_rgb[3];
+    blend_parallel(slices, mats, target_rgb);
+
+    ColorRecipe best = suggest_flat(target_rgb, mats, opt);
+
+    // suggest_flat only ever returns 1-2 solid passes; pad to 3 by splitting the
+    // bottom-most pass in place (same tool, halved ratio each half) — exact under
+    // Beer-Lambert (T(r1)*T(r2) == T(r1+r2) for the same material), so this never
+    // changes the predicted colour, it only satisfies "up to 3 solid passes".
+    while (best.top.passes.size() < 3 && !best.top.passes.empty()) {
+        SurfacePass& bottom = best.top.passes.front();
+        const double half = bottom.ratio / 2.0;
+        SurfacePass extra = bottom;
+        bottom.ratio = half;
+        extra.ratio  = half;
+        best.top.passes.insert(best.top.passes.begin(), extra);
+    }
+    best.top.enabled = true;
+    best.top.perimeter_override = true;
+    // Top and penultimate must look identical for this mode.
+    best.penu = best.top;
+    return best;
+}
+
 } // namespace ColorSci
 } // namespace Slic3r
 // NEOTKO_COLORSCI_TAG_END

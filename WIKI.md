@@ -55,6 +55,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 6d. [Painter mode at slice time](#6d-painter-mode-at-slice-time)
    - 6e. [Profile persistence and 3MF round-trip](#6e-profile-persistence-and-3mf-round-trip)
    - 6f. [Weave preview on the painted surface](#6f-weave-preview-on-the-painted-surface)
+   - 6g. [MixedFilament Object mode (Beta)](#6g-mixedfilament-object-mode-beta)
 7. [Align & Stack — align and stack objects](#7-align--stack--align-and-stack-objects)
 8. [NeoArachne — alternative wall generator](#8-neoarachne--alternative-wall-generator)
    - 8a. [Turning it on](#8a-turning-it-on)
@@ -403,6 +404,38 @@ Painted top surfaces show the **ColorStitch weave directly on the model** — th
 
 ---
 
+### 6g. MixedFilament Object mode (Beta)
+
+A **MixedFilament** (Filament Settings → the *MixedFilament* rows built from two of your
+loaded filaments) can be assigned to a whole object as its extruder, the same way you'd
+assign any normal filament. **MixedFilament Object mode** is a one-click way to make that
+object's **top surface and penultimate layer** actually *look like* that MixedFilament's
+colour, instead of printing with whatever the default top/penu treatment would be.
+
+**How to use it**: open the **ColorStitch Painter** gizmo (§6b) on an object whose extruder
+is a MixedFilament. A new checkbox — **"MixedFilament Object"** — appears above the palette
+strips, with a small colour swatch next to it showing the approximated result.
+
+- If the object's extruder is **not** a MixedFilament, the checkbox is greyed out with a
+  tooltip telling you to assign one first.
+- Turning it **on**:
+  - Auto-generates a small sandwich (up to 3 solid passes) that approximates the
+    MixedFilament's colour using your other loaded filaments and their **TD** values
+    (§1e) — the same colour-matching math the ColorStitch Studio uses.
+  - Turns **Perimeter override** on automatically, so the walls get reprinted to match too.
+  - **Locks out** manual painting/patterns for that object (the palette strips, zone
+    editors and the Perimeter override checkbox grey out) — the object is either "painted
+    by hand" or "driven by its MixedFilament," not both at once.
+- Turning it **off** restores whatever was painted before (nothing is lost).
+
+> **Beta.** This feature is functional and print-verified in principle, but still young —
+> report anything that looks off. Two known rough edges: the swatch shows the **colour**
+> only, not a preview of the pattern/passes that will actually print; and the checkbox
+> currently lives inside the **Pro mode** panel rather than as a top-level toggle (it may
+> move up in a future update, since it changes the whole object's behaviour).
+
+---
+
 ## 7. Align & Stack — align and stack objects
 
 **Align & Stack** is a gizmo (left-side gizmo toolbar, **"Align & Stack"**) for aligning and stacking multiple objects against an anchor. Click objects in the scene to add them **in order**: **#1 becomes the anchor** and the rest move toward it; click more to extend the order, or **Reset** to start over. Object selection has been improved over earlier versions for easier picking.
@@ -532,6 +565,7 @@ A new option **Variable layer height (Experimental)** sits under **Tower type** 
 | ColorStitch Painter | Left-side gizmo toolbar |
 | Painter tools (Paint / Eraser / Pick) | Painter panel top row |
 | Palette groups / Save all / Pin to palette | Painter panel |
+| MixedFilament Object mode (Beta) | Painter panel → **Pro mode** → "MixedFilament Object" checkbox |
 | Align & Stack | Left-side gizmo toolbar → **Align & Stack** |
 | NeoArachne (enable) | Libre Mode → Quality → **Wall generator → NeoArachne** |
 | NeoArachne sources / line widths / Preview Lab | Quality → NeoArachne section |
@@ -578,6 +612,12 @@ Yes, as of 2.3.1 — enable **Libre Mode**, set **Tower type = NeoTower**, and t
 **Q: My wipe tower uses more purge than expected.**
 
 Check **Sandwich wipe reserve** (default 10 mm³) and **Sandwich purge compaction** (default 1.7) in **Quality → Prime tower** (§9). Lower the reserve for a thinner tower, or set compaction to 1.0 to disable it.
+
+**Q: The "MixedFilament Object" checkbox is greyed out — why?**
+
+The object's extruder isn't a MixedFilament. Assign one of your MixedFilament rows as the
+object's extruder (same as assigning any normal filament), then reopen the Painter — the
+checkbox and its colour swatch become active. See §6g.
 
 **Q: I want to try NeoArachne safely.**
 

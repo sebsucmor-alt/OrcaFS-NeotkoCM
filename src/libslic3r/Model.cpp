@@ -3702,6 +3702,12 @@ static uint64_t colormix_profiles_fingerprint_of(const ModelVolume& mv)
         acc += std::to_string(s) + ":";
         if (const SurfaceEffectProfile* p = mgr.find(pid)) {
             acc += p->stack_top_json;  acc += "|";  acc += p->stack_penu_json;
+            // NEOTKO_BOTTOM_TAG — Fase 1 §5.4: the Bottom zone (stack_bottom_json, which
+            // also carries bottom_supported_control + per-pass angle) is part of the
+            // profile content. Without it here, editing a painted bottom did NOT change
+            // the fingerprint → Print::apply saw "no change" → no re-slice (symptom:
+            // "bottom values don't take / don't save"). Hashing it closes that gap.
+            acc += "|";  acc += p->stack_bottom_json;
         } else {
             acc += "#deleted#";
         }

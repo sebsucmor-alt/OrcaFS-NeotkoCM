@@ -134,8 +134,12 @@ public:
     // calls this to register the same tools the SLICE will use, keeping the
     // wipe-tower plan in sync.
     static bool object_has_any_colormix_paint(const ModelObject* mo);
+    // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): `downward` mirrors the scan to the
+    // underside. Default false → upward-facing (max_z), byte-identical to the
+    // top/penu callers. true → downward-facing (min_z), for bottom surfaces.
     static int  dominant_painted_slot_in_z_range(const PrintObject* po,
-                                                  double z_min, double z_max);
+                                                  double z_min, double z_max,
+                                                  bool downward = false);
     static int  profile_id_for_slot(const PrintObject* po, int slot);
 
     // NEOTKO_PROFILE_TAG — Fase 6c: XY footprint mask of the painted triangles
@@ -145,7 +149,8 @@ public:
     // preserving the painted shape instead of flooding the whole top surface.
     // Same scan/frame as dominant_painted_slot_in_z_range. Empty if no paint.
     static ExPolygons painted_footprint_in_z_range(const PrintObject* po, int slot,
-                                                    double z_min, double z_max);
+                                                    double z_min, double z_max,
+                                                    bool downward = false);
 
     // NEOTKO_PROFILE_TAG — Fase 6c v2: every painted slot whose upward-facing
     // triangles fall in the Z band, with at least one triangle. Used to handle
@@ -154,7 +159,8 @@ public:
     // its own footprint mask and its own sandwich; the rest prints natural.
     // Returned in ascending slot order (stable).
     static std::vector<int> enumerate_painted_slots_in_z_range(const PrintObject* po,
-                                                                double z_min, double z_max);
+                                                                double z_min, double z_max,
+                                                                bool downward = false);
 
     // NEOTKO_PAINT_COEXIST_TAG s91 — MMU governance helpers.
     //
@@ -236,6 +242,10 @@ public:
     //   - colormix.present AND interlayer_colormix_surface ∈ {0, 2}, OR
     //   - pathblend.present AND pathblend_surface ∈ {0, 2}.
     static bool             object_painter_wants_penu(const ModelObject* mo);
+    // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): true if any painted profile on the object
+    // declares a non-empty Bottom WIP zone (stack_bottom_json with a real effect).
+    // Gates the bottom-surface sandwich so untouched objects stay byte-identical.
+    static bool             object_painter_wants_bottom(const ModelObject* mo);
 
     // Encode tool index in mm3_per_mm: original + (tool_idx + 1) * 10.0
     // Decode in GCode.cpp: tool = floor(mm3_per_mm / 10.0) - 1
@@ -501,6 +511,15 @@ struct SurfacePassStack {
 
     bool                     enabled            = false;
     bool                     perimeter_override = false;
+    // NEOTKO_BOTTOM_TAG — Fase 1 §5.3 (s152 OVERLAY): per-zone "this bottom is
+    // SUPPORTED, control it" opt-in. OFF (default) = bottom overlay is clamped to a
+    // single full-height pass (paint-only; a real bridge stays a bridge by
+    // construction). ON = up to kMaxPasses Z-stacked passes, where pass 0 keeps the
+    // base role and passes ≥1 take a solid role (erSolidInfill) so they print solid,
+    // not bridge. Only meaningful on the bottom zone (stack_bottom_json); harmless on
+    // top/penu stacks. Authored via the painter's Bottom WIP checkbox; round-trips in
+    // to_json/from_json like enabled/perimeter_override.
+    bool                     bottom_supported_control = false;
     std::vector<SurfacePass> passes;            // bottom -> top, 1..kMaxPasses
 
     bool empty() const { return passes.empty(); }

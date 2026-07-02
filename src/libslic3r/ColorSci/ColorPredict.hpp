@@ -27,6 +27,7 @@
 #include "ColorSci.hpp"
 #include "GradientRamp.hpp"         // GradientSpec / GradientStep (dispatcher)
 #include "../SurfaceColorMix.hpp"   // SurfacePassStack
+#include "../MixedFilament.hpp"     // MixedFilament (NEOTKO_MIXEDFIL_SANDWICH_TAG)
 
 namespace Slic3r {
 namespace ColorSci {
@@ -104,6 +105,26 @@ std::vector<ColorRecipe> build_palette(PaletteKind kind,
                                        const Material mats[4],
                                        const PredictOptions& opt,
                                        const GradientSpec* ramp = nullptr);
+
+// --- MixedFilament Object mode (NEOTKO_MIXEDFIL_SANDWICH_TAG) ---------------
+//
+// Given a MixedFilament row (component_a/component_b + mix_b_percent), build a
+// SOLID sandwich (up to kMaxPasses=3, perimeter_override forced on) that
+// approximates its TD-blended colour. The target colour is computed via
+// `blend_parallel` (side-by-side TD-aware blend — the same primitive the
+// SandwichDialog preview uses), NOT the naive RGB blend of
+// `compute_mixed_filament_display_color`. `suggest_flat` only ever returns 1-2
+// passes; if fewer than 3 come back, the bottom-most pass is split in place
+// (same tool, halved ratio) to reach 3 — Beer-Lambert stacking of the same
+// material is exact under re-splitting, so this never changes the predicted
+// colour. The same resulting stack is applied to BOTH top and penu (they must
+// look identical). Engine-safe: pure libslic3r, no app_config/wxWidgets — the
+// caller builds `mats[4]` from whatever TD source is available to it (slice-time
+// `neotko_td_mirror` in the engine, or live app_config in the GUI gizmo).
+ColorRecipe build_mixed_filament_recipe(const MixedFilament& mf,
+                                        size_t num_physical,
+                                        const Material mats[4],
+                                        const PredictOptions& opt);
 
 } // namespace ColorSci
 } // namespace Slic3r

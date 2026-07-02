@@ -1,6 +1,7 @@
 #include "Flow.hpp"
 #include "I18N.hpp"
 #include "Print.hpp"
+#include "NeoDebug.hpp"   // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): capture negative-spacing aborts
 #include <cmath>
 #include <assert.h>
 
@@ -182,8 +183,22 @@ Flow Flow::with_cross_section(float area_new) const
 float Flow::rounded_rectangle_extrusion_spacing(float width, float height)
 {
     auto out = width - height * float(1. - 0.25 * PI);
-    if (out <= 0.f)
+    if (out <= 0.f) {
+        // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): the "negative spacing" abort aborts the whole
+        // slice with no other trace. Capture the offending (width,height) before throwing so
+        // we can tell WHICH failure mode it is when painting an inter-object contact face:
+        //   height >> width (e.g. ~layer-height vs near-zero width) → degenerate THICKNESS
+        //   width ~ 0 with normal height                            → tiny painted SLIVER
+        // Logs only on the (rare) failure path → zero cost on healthy flows.
+        if (NeoDebug::enabled(NeoDebug::BOTTOM))
+            NeoDebug::write(NeoDebug::BOTTOM,
+                "FLOW_NEG_SPACING width=" + std::to_string(width)
+              + " height=" + std::to_string(height)
+              + " out=" + std::to_string(out)
+              + " k=(1-pi/4)=" + std::to_string(float(1. - 0.25 * PI))
+              + "  -> ABORT (height too large for width)");
         throw FlowErrorNegativeSpacing();
+    }
     return out;
 }
 

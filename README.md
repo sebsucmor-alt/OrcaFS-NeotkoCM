@@ -59,6 +59,8 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 6c. [Palette groups, slot cap & Save All](#6c-palette-groups-slot-cap--save-all)
    - 6d. [Painter mode at slice time](#6d-painter-mode-at-slice-time)
    - 6e. [Profile persistence and 3MF round-trip](#6e-profile-persistence-and-3mf-round-trip)
+   - 6f. [Weave preview on the painted surface](#6f-weave-preview-on-the-painted-surface)
+   - 6g. [MixedFilament Object mode (Beta)](#6g-mixedfilament-object-mode-beta)
 7. [Align & Stack — align and stack objects](#7-align--stack--align-and-stack-objects)
 8. [NeoArachne — alternative wall generator](#8-neoarachne--alternative-wall-generator)
    - 8a. [Turning it on](#8a-turning-it-on)
@@ -137,7 +139,7 @@ A **ColorStitch** pass decides which filament prints each fill line. Open its **
 | **Skip tiny areas** | Surfaces with fewer than N fill lines use Color 1 only. |
 | **ColorStitch min. line length** | Fill lines shorter than this (mm) are skipped, so they keep the surrounding colour and avoid toolchanges on tiny segments. Default **0** (don't skip). |
 | **Invert direction ⇆** | Reverses the per-line sequence after generation. |
-| **Infill angle override** | `-1 = Auto`. |
+| **Infill angle override** | `-1 = Auto`. Scroll the **mouse wheel over the pass preview bar** to rotate it live — the bar's stripes rotate with it. A **fixed** angle (≥ 0) is now honoured **exactly** in the G-code (the per-layer fill rotation is locked out for that pass), so the print keeps the angle you set. `-1 = Auto` lets the slicer alternate per layer (uniform finish, but the orientation won't match a static preview). |
 | **Gradient repetitions** | `1 = single`; higher repeats the pattern across the surface. |
 
 A live **preview** shows the resulting gradient to scale, plus an estimate of how many lines a 60×60 mm surface would have at your filament width.
@@ -187,7 +189,7 @@ Four **TD sliders** (one per filament) are saved **per machine** (`neotko_td_1..
 
 ### 1f. Line Distribution Mode
 
-This controls *how* the slicer maps colour assignments (ColorStitch slots / PathBlend positions) to the **physical fill lines** of a surface. It does not change the pattern — only how slots find which lines belong to which spatial "lane." It lives in **Quality → Line distribution mode** (Advanced) and affects both ColorStitch and PathBlend.
+This controls *how* the slicer maps colour assignments (ColorStitch slots / PathBlend positions) to the **physical fill lines** of a surface. It does not change the pattern — only how slots find which lines belong to which spatial "lane." It lives in **Quality → Surface ColorStitch → Line distribution mode** (directly below *Minimum line length*) and affects both ColorStitch and PathBlend.
 
 | Mode | Best for |
 |------|----------|
@@ -259,6 +261,8 @@ While active, Libre Mode also signals the slicer: an object with no first layer 
 ### 4b. Floating objects
 
 With Libre Mode active, objects can sit at **any Z height** — floating above the bed or partly below it — instead of being snapped to the plate. The slicer still generates G-code and warns (instead of erroring) when an object has no initial layer. Use it for assemblies whose parts print at specific heights, or parts that clip into a structure already on the bed.
+
+The floating Z is **preserved across object operations** — copy/paste, *Paste Process Settings*, reload-from-disk, replace-STL, boolean, mesh simplify and *face the camera* no longer snap a floating object back to Z=0. To drop a floating object to the bed on purpose, use the **sinking** column in the object list (that path is left intact).
 
 ---
 
@@ -391,6 +395,52 @@ Everything is saved inside the 3MF: the **profile library** (project-level base6
 
 ---
 
+### 6f. Weave preview on the painted surface
+
+Painted top surfaces show the **ColorStitch weave directly on the model** — the per-line tool stripes (or dither / gradient / hard bands) instead of a flat swatch colour. The preview is built from the **same per-line sequence the slicer produces** (`build_dithered_tools_*` / `build_custom_bands` / pattern), so the **filament colours, density and pattern match the G-code**. The same sequence builder also drives the small pass strip in the **Pro tray** and the **Sandwich editor**, so the strips and the 3D view stay identical. (The preview is always on now; the old *Preview weave* toggle was retired.)
+
+**Scale fits the painted area at the real line width.** The stripe pitch comes from the **resolved top line width** (config, no slice needed), and the gradient/pattern is scaled to the **painted region's own extent** — computed **per island**: each flat zone (e.g. a stair step) is detected as a connected component (edge-adjacency, so zones that only touch at a corner stay separate) and gets its **own** gradient ramp, just like the slice. Tiled patterns repeat at the real line width (shader wrap), so the stripe width matches the print regardless of zone size.
+
+**Orientation matches the slice for a fixed angle.** The stripes run at the pass's **fixed angle**, and that angle is now **honoured exactly in the G-code**: for a fixed ColorStitch angle the slicer's per-layer fill-angle rotation is **locked out** (internally via the template-angle flag), so every layer keeps the painted orientation. Set the angle by **scrolling the mouse wheel over the pass preview bar** (Pro tray and Sandwich editor) — the bar, the 3D model and the print all rotate together in real time.
+
+> **Auto angle (`-1`).** With auto angle the slicer **alternates the fill direction every layer** (this is what gives a uniform finish), so a static preview cannot match the print. An amber **"auto angle"** tag appears next to **ADV** in that case — set a **fixed angle** (wheel over the bar) to lock the orientation.
+
+> **Remaining limitations (this version).** The stripe scale uses the painted-area projected extent, **not** the exact line count after perimeters/gap-fill are subtracted, so it can differ by a line or two. Islands wider than ~64 lines coarsen in the preview (64-entry shader LUT) — gradients just lower resolution; patterns still tile at real width. Painting is restricted to **upward-facing (top) faces**, matching where the effect actually prints.
+
+---
+
+### 6g. MixedFilament Object mode (Beta)
+
+A **MixedFilament** (Filament Settings → the *MixedFilament* rows built from two of your
+loaded filaments) can be assigned to a whole object as its extruder, the same way you'd
+assign any normal filament. **MixedFilament Object mode** is a one-click way to make that
+object's **top surface and penultimate layer** actually *look like* that MixedFilament's
+colour, instead of printing with whatever the default top/penu treatment would be.
+
+**How to use it**: open the **ColorStitch Painter** gizmo (§6b) on an object whose extruder
+is a MixedFilament. A new checkbox — **"MixedFilament Object"** — appears above the palette
+strips, with a small colour swatch next to it showing the approximated result.
+
+- If the object's extruder is **not** a MixedFilament, the checkbox is greyed out with a
+  tooltip telling you to assign one first.
+- Turning it **on**:
+  - Auto-generates a small sandwich (up to 3 solid passes) that approximates the
+    MixedFilament's colour using your other loaded filaments and their **TD** values
+    (§1e) — the same colour-matching math the ColorStitch Studio uses.
+  - Turns **Perimeter override** on automatically, so the walls get reprinted to match too.
+  - **Locks out** manual painting/patterns for that object (the palette strips, zone
+    editors and the Perimeter override checkbox grey out) — the object is either "painted
+    by hand" or "driven by its MixedFilament," not both at once.
+- Turning it **off** restores whatever was painted before (nothing is lost).
+
+> **Beta.** This feature is functional and print-verified in principle, but still young —
+> report anything that looks off. Two known rough edges: the swatch shows the **colour**
+> only, not a preview of the pattern/passes that will actually print; and the checkbox
+> currently lives inside the **Pro mode** panel rather than as a top-level toggle (it may
+> move up in a future update, since it changes the whole object's behaviour).
+
+---
+
 ## 7. Align & Stack — align and stack objects
 
 **Align & Stack** is a gizmo (left-side gizmo toolbar, **"Align & Stack"**) for aligning and stacking multiple objects against an anchor. Click objects in the scene to add them **in order**: **#1 becomes the anchor** and the rest move toward it; click more to extend the order, or **Reset** to start over. Object selection has been improved over earlier versions for easier picking.
@@ -483,11 +533,15 @@ The volume (mm³) purged before each Sandwich sub-layer toolchange (Solid / Colo
 
 - **Default 10 mm³.** Lower = thinner/shorter tower; higher = better purge. Set **0** to disable. Requires a wipe tower active.
 
-### 9e. Adaptive layers × multi-tool × Sandwich (WIP)
+### 9e. Variable layer height (Experimental)
 
-Because NeoTower plans from the real post-slice toolchange list and is delta-Z aware, it is the mechanism that lets **adaptive layer height + multiple tools + a Sandwich** coexist on one coherent tower.
+Because NeoTower plans from the real post-slice toolchange list and is delta-Z aware, it is the mechanism that lets **adaptive / variable layer height + multiple tools + a Sandwich** coexist on one coherent tower. Stock Orca refuses to slice such scenes; NeoTower can purge each toolchange at the real per-layer height.
 
-> **(WIP in this build.)** **Adaptive (variable) layer height is left locked by default in this version** and is not yet unlocked for the multi-tool + Sandwich combination here. The capability is proven and **works in the 2.2 line (the older fork on FS099)**; unlocking it on this Snapmaker 2.3.4 base is still being finished. Until then, use a **fixed layer height** for multi-tool Sandwich prints.
+A new option **Variable layer height (Experimental)** sits under **Tower type** and is exposed **only with Tower type = NeoTower and Libre Mode active** (it is visible but greyed-out otherwise). **Default: off.** When **on**, the slicer stops blocking:
+- scenes that **mix objects with different layer heights**, and
+- **adaptive / variable layer height combined with more than one filament**.
+
+> **(Experimental.)** The wipe-tower issue that previously left **empty/short tower layers** (missing "drawers" on real layers, including the *"empty first layer"* abort) is **fixed in 2.3.1** — the tower now stays coherent under variable layer height. The capability is proven and was solid on the **2.2 line (older FS099 fork)**, and is now consistent on this 2.3.4 base too. It is still flagged Experimental: review G-code before long multi-tool runs. The option only takes effect with Tower type = NeoTower.
 
 ---
 
@@ -500,7 +554,7 @@ Because NeoTower plans from the real post-slice toolchange list and is delta-Z a
 | ColorStitch Studio | Sandwich Editor → **ColorStitch Studio** panel (bottom) |
 | Colour match (inverse ΔE2000) | ColorStitch Studio → **Target + Match ▸** |
 | Filament & TD preview | Sandwich Editor → **Filament & TD** panel |
-| Line distribution mode | Quality → **Line distribution mode** (Advanced) |
+| Line distribution mode | Quality → **Surface ColorStitch** → Line distribution mode (below *Minimum line length*) |
 | Top surface fill pattern (needed for ColorStitch) | Quality → **Top surface pattern → Monotonic Line** |
 | Penultimate layers / density | Strength → Top/bottom shells |
 | Neoweaving (WIP) | *Not wired in this build* |
@@ -516,11 +570,13 @@ Because NeoTower plans from the real post-slice toolchange list and is delta-Z a
 | ColorStitch Painter | Left-side gizmo toolbar |
 | Painter tools (Paint / Eraser / Pick) | Painter panel top row |
 | Palette groups / Save all / Pin to palette | Painter panel |
+| MixedFilament Object mode (Beta) | Painter panel → **Pro mode** → "MixedFilament Object" checkbox |
 | Align & Stack | Left-side gizmo toolbar → **Align & Stack** |
 | NeoArachne (enable) | Libre Mode → Quality → **Wall generator → NeoArachne** |
 | NeoArachne sources / line widths / Preview Lab | Quality → NeoArachne section |
 | NeoTower (tower type) | Quality → Prime tower → **Tower type** |
 | Zigurat / Sandwich purge compaction / Sandwich wipe reserve | Quality → Prime tower |
+| Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower (greyed unless Libre Mode) |
 
 ---
 
@@ -556,11 +612,17 @@ By design — colours you paint are *working colours* (created on demand, cleane
 
 **Q: Can I use adaptive layer height with multiple tools and a Sandwich?**
 
-Not in this build — adaptive layer height is **locked by default** here and the combination is **WIP** (§9e). It works in the older 2.2 line. Use a fixed layer height for multi-tool Sandwich prints for now.
+Yes, as of 2.3.1 — enable **Libre Mode**, set **Tower type = NeoTower**, and turn on **Variable layer height (Experimental)** (Quality → Prime tower). The wipe-tower "missing drawers" issue that made this rough is now fixed (§9e). It is still flagged Experimental, so review G-code before long runs.
 
 **Q: My wipe tower uses more purge than expected.**
 
 Check **Sandwich wipe reserve** (default 10 mm³) and **Sandwich purge compaction** (default 1.7) in **Quality → Prime tower** (§9). Lower the reserve for a thinner tower, or set compaction to 1.0 to disable it.
+
+**Q: The "MixedFilament Object" checkbox is greyed out — why?**
+
+The object's extruder isn't a MixedFilament. Assign one of your MixedFilament rows as the
+object's extruder (same as assigning any normal filament), then reopen the Painter — the
+checkbox and its colour swatch become active. See §6g.
 
 **Q: I want to try NeoArachne safely.**
 

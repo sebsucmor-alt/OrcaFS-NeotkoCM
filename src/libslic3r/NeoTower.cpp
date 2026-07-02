@@ -159,6 +159,44 @@ void NeoTower::collect_and_plan(const Print& print)
 }
 
 // ===========================================================================
+// NEOTKO_NEOTOWER_TAG s158 — unified toolchange purge-volume resolver.
+//
+// Historically the wipe_volume was decided by WHERE the TC sat in the plan
+// (real-layer → flush matrix; sandwich sublayer → multipass_prime_volume knob),
+// not by WHAT the TC physically is. A real colour change inside a ColorStitch /
+// MultiPass sublayer therefore reserved only the knob (~5-10 mm³) → toolchange_Wipe
+// emitted a single starved line that never climbed the speed ramp
+// (WipeTower2.cpp:2245) → hot-end choke on return to the object.
+//
+// One rule for every site:
+//   body TC (sandwich_ctx=false)          → physical (matrix, scalar floor if OOB) — pre-s158 byte-identical
+//   sandwich sublayer, old==new           → prime_floor (knob) — unchanged
+//   sandwich sublayer, real colour change → max(prime_floor, physical) — unified
+//
+// prime_floor doubles as the OOB scalar fallback so each caller passes its own
+// legacy fallback (body: prime_volume; sandwich: the knob) and reproduces its
+// prior result exactly outside the fixed case.
+//
+// The s78 concern that made the knob authoritative (a full flush per thin
+// sublayer overflowing the box + volumetric-flow spike) is now covered by the
+// s136 full-volume box reserve and s103 purge compaction — but that interaction
+// must be re-checked per-TCR before trusting it on thin sublayers.
+// ===========================================================================
+float NeoTower::resolve_wipe_volume(int old_tool, int new_tool,
+                                    bool sandwich_ctx, float prime_floor) const
+{
+    float physical = prime_floor;   // scalar fallback when the flush matrix is empty / OOB
+    if (old_tool >= 0 && (size_t)old_tool < m_wipe_volumes.size()
+        && new_tool >= 0 && (size_t)new_tool < m_wipe_volumes[old_tool].size())
+        physical = m_wipe_volumes[old_tool][new_tool];
+    if (!sandwich_ctx)
+        return physical;                        // body TC — byte-identical to pre-s158
+    if (old_tool == new_tool)
+        return prime_floor;                     // same-tool sublayer — unchanged (knob)
+    return std::max(prime_floor, physical);     // real colour change in a sublayer — unified
+}
+
+// ===========================================================================
 // PHASE 1 — collect_all_events()
 //
 // Walk the fully-built ToolOrdering and m_multipass_sublayers.
@@ -189,6 +227,9 @@ void NeoTower::collect_all_events(const Print& print)
             mp_prime_vol = std::max(mp_prime_vol,
                 static_cast<float>(lr->region().config().multipass_prime_volume.value));
     }
+    // NEOTKO_NEOTOWER_TAG s160c — stash the knob so generate()'s bridge TCs can feed it
+    // to resolve_wipe_volume() as the floor (see m_mp_prime_vol decl).
+    m_mp_prime_vol = mp_prime_vol;
 
     // z_um64 lambda: convert float Z to micron-integer key (used throughout).
     auto z_um64 = [](float z) -> uint64_t {
@@ -628,10 +669,12 @@ void NeoTower::collect_all_events(const Print& print)
                 // Wipe volume: use the matrix passed at construction (already built from
                 // flush_volumes_matrix * flush_multiplier by WipeTower2::extract_wipe_volumes).
                 // Fallback to prime_volume (scalar) when matrix is empty or out of bounds.
-                float wipe_vol = static_cast<float>(cfg.prime_volume);
-                if (current_tool < m_wipe_volumes.size() &&
-                    ext_id < m_wipe_volumes[current_tool].size())
-                    wipe_vol = m_wipe_volumes[current_tool][ext_id];
+                // NEOTKO_NEOTOWER_TAG s158 — routed through the unified resolver
+                // (sandwich_ctx=false → flush matrix / scalar fallback == the two lines
+                // this replaces, byte-identical). Body TCs keep full flush behaviour.
+                float wipe_vol = resolve_wipe_volume((int)current_tool, (int)ext_id,
+                                                     /*sandwich_ctx=*/false,
+                                                     static_cast<float>(cfg.prime_volume));
 
                 NeoTowerEvent ev;
                 ev.z_nominal    = z_nom;
@@ -837,6 +880,16 @@ void NeoTower::collect_all_events(const Print& print)
                 // sublayer → wipe-tower overflow + volumetric-flow spike. Keeping
                 // se.wipe_vol = mp_prime_vol makes the knob authoritative and tunable.
                 // (Real object-body toolchanges still use the flush matrix elsewhere.)
+                //
+                // NEOTKO_NEOTOWER_TAG s158 — SUPERSEDES the knob-only rule above now that
+                // old_tool is resolved: the knob becomes a FLOOR, not the sole value. A real
+                // colour change in a sandwich sublayer takes max(knob, flush matrix) so it
+                // purges — and climbs the wipe speed ramp — like a body change; same-tool
+                // transitions still resolve to the knob (unchanged). Concern (b) above
+                // (thin-sublayer overflow / flow spike) is now covered by the s136
+                // full-volume box reserve + s103 compaction; verify per-TCR before trusting.
+                se.wipe_vol = resolve_wipe_volume(se.old_tool, se.new_tool,
+                                                  /*sandwich_ctx=*/true, mp_prime_vol);
             }
 
             // ── Fase A2: Synthetic cross-product + entry events ─────────────
@@ -918,7 +971,12 @@ void NeoTower::collect_all_events(const Print& print)
                     // NEOTKO_NEOTOWER_TAG — s78 fix (sandwich purge knob): synthetic
                     // cross-product sublayer events also purge the reserve knob, not the
                     // flush matrix (same rationale as the real sublayer events above).
-                    se.wipe_vol  = mp_prime_vol;
+                    // NEOTKO_NEOTOWER_TAG s158 — SUPERSEDED: unify via the resolver
+                    // (sandwich_ctx=true → max(knob, flush matrix)). maybe_add_synthetic
+                    // already returns early for old_t==new_t, so this is always a real
+                    // colour transition and takes the flush matrix when it exceeds the knob.
+                    se.wipe_vol  = resolve_wipe_volume(old_t, new_t,
+                                                       /*sandwich_ctx=*/true, mp_prime_vol);
                     surf_events.push_back(se);
                     NT_LOG("NT_SYNTH_GEN src=" << src
                         << " zum=" << zum << " T" << old_t << "->T" << new_t
@@ -2379,7 +2437,13 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                                             eff_layer_height(_gev.z_actual, _gev.layer_height), // s103 delta-Z
                                             static_cast<unsigned int>(chain_tool),
                                             static_cast<unsigned int>(_gev.old_tool),
-                                            0.f,
+                                            // NEOTKO_NEOTOWER_TAG s160c — was 0.f. A bridge is a real
+                                            // colour change (chain_tool→ev.old) that must purge, else the
+                                            // first object extrusion of the new tool is contaminated
+                                            // (ColorStitch bottom TCR[1][0] = single 0.46mm line). Unify
+                                            // with the sublayer scheduler (s158): max(knob, matrix).
+                                            resolve_wipe_volume(chain_tool, (int)_gev.old_tool,
+                                                                /*sandwich_ctx=*/true, m_mp_prime_vol),
                                             /*skip_ramming=*/true,   // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
                                             /*synthetic=*/(_gev.is_sublayer && !_gev.standalone_plane), // NEOTKO_NEOTOWER_TAG s102 — bridge inherits the driving event's plane kind (s114 standalone)
                                             /*same_plane=*/_gev.is_sublayer && !_gev.standalone_plane && // s114 standalone
@@ -2469,7 +2533,11 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                                         eff_layer_height(bridge_z, all_events[ei].layer_height), // s103 delta-Z
                                         static_cast<unsigned int>(chain_tool),
                                         static_cast<unsigned int>(section1a_initial),
-                                        0.f,
+                                        // NEOTKO_NEOTOWER_TAG s160c — was 0.f (bridge purge). Unify with
+                                        // the sublayer scheduler (s158): max(knob, matrix). See the
+                                        // GROUP_SINGLE bridge above.
+                                        resolve_wipe_volume(chain_tool, section1a_initial,
+                                                            /*sandwich_ctx=*/true, m_mp_prime_vol),
                                         /*skip_ramming=*/true,   // NEOTKO_MPSCHEDULER_TAG s79b — sandwich bridge
                                         // NEOTKO_NEOTOWER_TAG s102 — bridge-at-nominal lands on the
                                         // canonical (real) plane; bridge-at-actual inherits the

@@ -1137,6 +1137,10 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posPrepareInfill);
         } else if (
                opt_key == "top_surface_pattern"
+            // NEOTKO_MULTIPASS_TAG — TEST s155: penu pattern was falling to the `else`
+            // (invalidate_all_steps). Match it to top_surface_pattern EXACTLY (posInfill only)
+            // so changing the penu infill pattern refreshes at the same cache level as top.
+            || opt_key == "penultimate_solid_infill_pattern"
             || opt_key == "bottom_surface_pattern"
             || opt_key == "internal_solid_infill_pattern"
             || opt_key == "external_fill_link_max_length"
@@ -1443,6 +1447,34 @@ void PrintObject::detect_surfaces_type()
                         bottom = layerm->slices.surfaces;
                         for (Surface &surface : bottom)
                             surface.surface_type = stBottom;
+                    }
+
+                    // NEOTKO_BOTTOM_TAG — Fase 0 (WIP) instrumentation. Record how each
+                    // bottom-facing surface is CLASSIFIED before it becomes a role in Fill.cpp
+                    // (the upstream half of BOTTOM_ROLE_GATE): stBottom → erBottomSurface,
+                    // stBottomBridge (layer>0) → erBridgeInfill. is_layer0 marks the bed-touching
+                    // first layer (no lower layer); fully_supported decides bottom vs bridge for
+                    // elevated faces over supports. No behaviour change — log only.
+                    if (NeoDebug::enabled(NeoDebug::BOTTOM) && !bottom.empty()) {
+                        // NEOTKO_BOTTOM_TAG — obj identity + Z-base: with stacked/floating
+                        // objects (LibreMode) this attributes each face to its object and
+                        // reveals whether the object is sliced from a HIGH base (=floating on
+                        // another object → Orca bridges the contact face even though it prints
+                        // fine, because detect_surfaces_type only diffs THIS object's lower
+                        // layer, never a foreign object below it).
+                        NEOTKO_LOG(BOTTOM, "BOTTOM_DECISION obj='"
+                            << (this->model_object() ? this->model_object()->name : std::string("?")) << "'"
+                            << " po=" << (const void*)this
+                            << " obj_base_z=" << this->get_layer(0)->print_z
+                            << " region=" << region_id
+                            << " layer=" << idx_layer
+                            << " print_z=" << layer->print_z
+                            << " is_layer0=" << (lower_layer == nullptr ? "1" : "0")
+                            << " fully_supported=" << (bottom_is_fully_supported ? "1" : "0")
+                            << " classified=" << (lower_layer == nullptr
+                                    ? "stBottom(first-layer)"
+                                    : (bottom_is_fully_supported ? "stBottom" : "stBottomBridge"))
+                            << " n_bottom_surfaces=" << bottom.size());
                     }
 
                     // now, if the object contained a thin membrane, we could have overlapping bottom
@@ -4404,6 +4436,38 @@ void PrintObject::discover_horizontal_shells()
                     if (_penu_eligible && !_penu_fresh.empty()) {
                         ExPolygons _penu_part  = intersection_ex(internal_solid, _penu_fresh);
                         ExPolygons _solid_part = diff_ex(internal_solid, _penu_fresh);
+                        // NEOTKO_MULTIPASS_TAG (s153) — delimit the penu with the SAME area math as the
+                        // top surface it mirrors. The penu solid is propagated from the top but clipped to
+                        // this layer's `internal` region, whose boundary was inset with `infill_wall_overlap`
+                        // (sparse-infill overlap). The real top surface is inset with
+                        // `top_bottom_infill_wall_overlap`. With a small infill_wall_overlap the penu boundary
+                        // hugs the inner perimeter → connect_infill weaves long contour anchors (breaks the
+                        // ColorStitch/Monotonic lane axis) and penu/top cover different areas (the effect
+                        // applies differently on each layer). Re-grow the penu into the perimeter zone by the
+                        // overlap delta so its reach matches the top's. The growth is confined to the wall
+                        // strip (diff against the original fill area) and to the top shadow (`solid`), so it
+                        // never eats neighbouring solid or sparse infill; `_solid_part` stays untouched. By
+                        // design penu mirrors top, so this is the coherent delimitation.
+                        {
+                            const double  _ps_mm    = unscale<double>(neighbor_layerm->flow(frPerimeter).scaled_spacing());
+                            const double  _top_ov   = region_config.top_bottom_infill_wall_overlap.get_abs_value(_ps_mm);
+                            const double  _inf_ov   = region_config.infill_wall_overlap.get_abs_value(_ps_mm);
+                            const coord_t _ov_delta = scaled<coord_t>(_top_ov - _inf_ov);
+                            if (_ov_delta > coord_t(SCALED_EPSILON) && !_penu_part.empty()) {
+                                Polygons _all_fill;
+                                for (const Surface &s : backup.surfaces)
+                                    polygons_append(_all_fill, to_polygons(s.expolygon));
+                                ExPolygons _wall_zone = diff_ex(to_polygons(neighbor_layerm->slices.surfaces), _all_fill);
+                                ExPolygons _gain = intersection_ex(offset_ex(_penu_part, float(_ov_delta)), _wall_zone);
+                                _gain = intersection_ex(_gain, solid);
+                                if (!_gain.empty()) {
+                                    _penu_part = union_ex(_penu_part, _gain);
+                                    NEOTKO_LOG(PENULTIMATE, "discover_horizontal_shells layer=" << n
+                                        << " penu_grow_to_top ov_delta_mm=" << unscale<double>(_ov_delta)
+                                        << " (top_ov=" << _top_ov << " infill_ov=" << _inf_ov << ")");
+                                }
+                            }
+                        }
                         neighbor_layerm->fill_surfaces.set(_solid_part, stInternalSolid);
                         neighbor_layerm->fill_surfaces.append(_penu_part, stPenultimateInternalSolid);
                         if (!_penu_part.empty())

@@ -263,6 +263,12 @@ class GCodeViewer
         unsigned int                path_id;
         std::vector<unsigned int>   sizes;
         std::vector<size_t>         offsets; // use size_t because we need an unsigned integer whose size matches pointer's size (used in the call glMultiDrawElements())
+        // NEOTKO_REALCOLOR_TAG: parallel to sizes/offsets — the REAL originating Path index for
+        // each sub-draw (path_id above is only the FIRST Path of the color-batch and is wrong
+        // for any sub-draw after it when paths sharing a color have different heights, e.g. a
+        // PathBlend ramp). Only consumed by GCodeViewer::render_toolpaths_realcolor(); every
+        // other renderer keeps using path_id as before.
+        std::vector<unsigned int>   path_ids;
         bool contains(size_t offset) const {
             for (size_t i = 0; i < offsets.size(); ++i) {
                 if (offsets[i] <= offset && offset <= offsets[i] + static_cast<size_t>(sizes[i] * sizeof(IBufferType)))
@@ -723,7 +729,69 @@ public:
         FilamentId,
         LayerTime,
         LayerTimeLog,
+        RealColor,
         Count
+    };
+
+    // NEOTKO_REALCOLOR_TAG: LUT of TD/rgb per physical tool for the RealColor view,
+    // read from raw filament_colour + app_config neotko_td_1..4 (same source as
+    // Sandwich Editor/Painter, see ColorSci.cpp::blend_stacked).
+    struct RealColorMaterials
+    {
+        std::array<ColorRGB, 4> rgb{};
+        std::array<float, 4>    td{};
+        bool                     valid = false;
+    };
+
+    // NEOTKO_REALCOLOR_TAG: fingerprint of everything that can invalidate the depth-peeled
+    // composite cache (camera, TD/color, layer/moves slider range, viewport size).
+    // Plain field-by-field struct, compared with memcmp — cheaper than string hashing.
+    struct RealColorFingerprint
+    {
+        std::array<float, 16> view{};
+        std::array<float, 16> proj{};
+        int canvas_w = -1, canvas_h = -1;
+        std::array<float, 4> td{};
+        std::array<ColorRGB, 4> rgb{};
+        unsigned int layers_z_range[2] = { 0, 0 };
+        unsigned int moves_first = 0, moves_last = 0;
+
+        bool operator==(const RealColorFingerprint& other) const {
+            return canvas_w == other.canvas_w && canvas_h == other.canvas_h &&
+                   layers_z_range[0] == other.layers_z_range[0] && layers_z_range[1] == other.layers_z_range[1] &&
+                   moves_first == other.moves_first && moves_last == other.moves_last &&
+                   td == other.td && rgb == other.rgb && view == other.view && proj == other.proj;
+        }
+        bool operator!=(const RealColorFingerprint& other) const { return !(*this == other); }
+    };
+
+    // NEOTKO_REALCOLOR_TAG: GL scratch state for depth-peeled Beer-Lambert compositing.
+    // 2 peel FBOs (ping-pong: color + tool/thickness meta + depth-as-texture) and 2 accum FBOs
+    // (ping-pong: running composited color + running per-channel transmittance). No
+    // GL_TEXTURE_2D_ARRAY — peels are consumed immediately into the accumulator, never stored
+    // N-deep. See docs/WIP/REALCOLOR_VIEW plan / SANDWICH.md sibling docs for the design.
+    struct RealColorCache
+    {
+        int tex_w = 0, tex_h = 0;
+
+        // GL handles stored as plain unsigned int (not GLuint) so this header doesn't need
+        // to pull in GL/glew.h — matches IBuffer::vbo/ibo convention elsewhere in this class.
+        unsigned int peel_fbo[2] = { 0, 0 };
+        unsigned int peel_color_tex[2] = { 0, 0 };  // GL_RGBA8, attachment 0: lit color of this peel
+        unsigned int peel_meta_tex[2]  = { 0, 0 };  // GL_RGBA32F, attachment 1: r=tool_id, g=thickness
+        unsigned int peel_depth_tex[2] = { 0, 0 };  // GL_DEPTH_COMPONENT32F, sampled by the next peel pass
+
+        unsigned int accum_fbo[2] = { 0, 0 };
+        unsigned int accum_color_tex[2]    = { 0, 0 }; // GL_RGBA8, running composited color
+        unsigned int accum_transmit_tex[2] = { 0, 0 }; // GL_RGBA32F, running per-channel transmittance
+        int    accum_write_slot = 0;             // accum_color_tex[accum_write_slot] = latest result
+
+        unsigned int quad_vbo = 0; // fullscreen NDC quad (4 verts, vec2), shared by accum+present
+
+        bool valid = false;
+        RealColorFingerprint fingerprint;
+
+        bool gl_objects_created() const { return peel_fbo[0] != 0; }
     };
 
     //BBS
@@ -765,6 +833,10 @@ private:
     IMSlider* m_moves_slider;
     IMSlider* m_layers_slider;
     Shells m_shells;
+    // NEOTKO_REALCOLOR_TAG: TD/rgb LUT for RealColor view, see refresh_realcolor_materials()
+    RealColorMaterials m_realcolor_materials;
+    // NEOTKO_REALCOLOR_TAG: depth-peel/accumulate GL scratch + idle-cache, see render_toolpaths_realcolor()
+    RealColorCache m_realcolor_cache;
     /*BBS GUI refactor, store displayed items in color scheme combobox */
     std::vector<EViewType> view_type_items;
     std::vector<std::string> view_type_items_str;
@@ -893,6 +965,14 @@ private:
     //BBS: always load shell at preview
     //void load_shells(const Print& print);
     void refresh_render_paths(bool keep_sequential_current_first, bool keep_sequential_current_last) const;
+    // NEOTKO_REALCOLOR_TAG: rebuilds m_realcolor_materials from raw filament colors + app_config TD
+    void refresh_realcolor_materials(const std::vector<std::string>& str_tool_colors);
+    // NEOTKO_REALCOLOR_TAG: depth-peel + Beer-Lambert accumulate pipeline, idle-cached; falls
+    // back to the cheap Tool-equivalent render while the camera is moving. See plan doc.
+    void render_toolpaths_realcolor(int canvas_width, int canvas_height);
+    bool ensure_realcolor_fbos(int w, int h);
+    void destroy_realcolor_fbos();
+    RealColorFingerprint compute_realcolor_fingerprint(int canvas_width, int canvas_height) const;
     void render_toolpaths();
     void render_shells(int canvas_width, int canvas_height);
 

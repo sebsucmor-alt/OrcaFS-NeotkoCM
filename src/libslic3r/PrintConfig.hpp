@@ -1043,6 +1043,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     // parts keep their own perimeters. Drives clip_multipart_objects per-object in slice_volumes.
     // Set from the object context menu (LibreMode only). Default true = stock behaviour.
     ((ConfigOptionBool,     neotko_assemble_boolean))
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — object-wide "MixedFilament Object" mode
+    // (Sandwich Painter). true = bypass per-face painted-slot dispatch entirely;
+    // every top-surface + penultimate region of the object uses an auto-generated
+    // sandwich (TD-approximated colour of the object's assigned MixedFilament,
+    // perimeter_override forced on). Requires the object's extruder to resolve to
+    // a MixedFilament (virtual filament id); no effect otherwise.
+    ((ConfigOptionBool,     mixed_filament_sandwich_mode))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
@@ -1280,6 +1287,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_angle))
     ((ConfigOptionInt,     interlayer_colormix_penu_angle))
     ((ConfigOptionInt,     surface_color_mix_lane_mode))
+    // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan strategy for the contour connector
+    // self-loop (cp_start==cp_end) micro-accumulation at acute corners (FillBase.cpp take_limited).
+    ((ConfigOptionInt,     colorstitch_monotonic_replan))
+    // NEOTKO_COLORSTITCH_TAG — ColorStitch on continuous Monotonic (post-hoc split in SurfaceColorMix).
+    ((ConfigOptionBool,    colorstitch_monotonic_split))
     // NEOTKO_COLORMIX_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend (multipass_prime_volume already above)
     ((ConfigOptionBool,    multipass_enabled))
@@ -1697,6 +1709,14 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               neotower_zigurat))
     ((ConfigOptionBool,               neotower_variable_layer_height))
     // NEOTKO_NEOTOWER_TAG_END
+
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — slice-time mirror of the TD-per-tool scalars
+    // (app_config "neotko_td_1".."neotko_td_4", GUI-only). Injected by the GUI at
+    // Plater::update_background_process (same site/pattern as neotko_libre_mode)
+    // so SurfaceColorMix.cpp (pure engine, no wxWidgets) can build ColorSci
+    // Material[4] for the "MixedFilament Object" auto-sandwich without reaching
+    // into app_config. 4 values, default 1.0 (opaque) each.
+    ((ConfigOptionFloats,             neotko_td_mirror))
 
     // BBS: wipe tower is only used for priming
     ((ConfigOptionFloat,              prime_volume))

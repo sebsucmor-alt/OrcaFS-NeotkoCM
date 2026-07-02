@@ -3201,7 +3201,8 @@ static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
                     const SurfacePassStack st = SurfacePassStack::from_json(js);
                     return st.enabled && !st.passes.empty();
                 };
-                if (_stack_nonempty(p->stack_top_json) || _stack_nonempty(p->stack_penu_json))
+                if (_stack_nonempty(p->stack_top_json) || _stack_nonempty(p->stack_penu_json)
+                    || _stack_nonempty(p->stack_bottom_json))
                     return true;
             }
         }

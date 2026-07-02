@@ -14,8 +14,10 @@
 //   ORCA_DEBUG_WIPETOWER    — NeoTower planner / wipe tower
 //   ORCA_DEBUG_PROFILE      — Surface Effect Profile / 3D Painter pipeline
 //   ORCA_DEBUG_DISPATCH     — extrude_entity dispatch trace
+//   ORCA_DEBUG_BOTTOM       — Bottom-surface sandwich: surface classification + role gate (WIP, Fase 0)
+//   ORCA_DEBUG_REALCOLOR    — RealColor GCode Viewer: GPU capability probe + depth-peel/accum pipeline (s163)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
-// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch}.log
+// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor}.log
 
 #include <string>
 
@@ -31,7 +33,9 @@ namespace NeoDebug {
         WIPETOWER   = 5,
         PROFILE     = 6, // NEOTKO_PROFILE_TAG
         DISPATCH    = 7, // NEOTKO_NEOARACHNE_TAG s95 — extrude_entity dispatch trace
-        CH_COUNT    = 8
+        BOTTOM      = 8, // NEOTKO_BOTTOM_TAG — bottom-surface sandwich (WIP, Fase 0)
+        REALCOLOR   = 9, // NEOTKO_REALCOLOR_TAG — RealColor GPU capability probe + render pipeline
+        CH_COUNT    = 10
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).

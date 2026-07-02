@@ -12424,6 +12424,22 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // Decoupled from bridge-infill: this only sets neotko_libre_mode, no other behaviour.
     DynamicPrintConfig _libre_full_cfg = wxGetApp().preset_bundle->full_config();
     _libre_full_cfg.set_key_value("neotko_libre_mode", new ConfigOptionBool(m_neotko_libre_cached));
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — mirror the per-tool TD scalars (app_config-only)
+    // so SurfaceColorMix.cpp (pure engine) can build ColorSci materials for the
+    // "MixedFilament Object" auto-sandwich without touching app_config.
+    {
+        std::vector<double> _td_mirror;
+        auto* _ac = wxGetApp().app_config;
+        for (int t = 0; t < 4; ++t) {
+            float td = 1.f;
+            if (_ac) {
+                const std::string v = _ac->get("neotko_td_" + std::to_string(t + 1));
+                try { if (!v.empty()) td = std::stof(v); } catch (...) {}
+            }
+            _td_mirror.push_back(std::max(0.01f, std::min(10.f, td)));
+        }
+        _libre_full_cfg.set_key_value("neotko_td_mirror", new ConfigOptionFloats(_td_mirror));
+    }
     Print::ApplyStatus invalidated = background_process.apply(this->model, _libre_full_cfg);
     // NeotkoLIBRE_END
     notify_filament_compatibility_after_apply();

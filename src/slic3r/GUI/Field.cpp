@@ -1650,6 +1650,11 @@ boost::any& Choice::get_value()
             m_value = ConfigOptionEnumsGenericNullable::nil_value();
         else if (   m_opt_id == "top_surface_pattern" || m_opt_id == "bottom_surface_pattern" ||
                     m_opt_id == "internal_solid_infill_pattern" || m_opt_id == "sparse_infill_pattern" ||
+                    // NEOTKO_MULTIPASS_TAG — s155: penu pattern was missing from this whitelist, so
+                    // its combo stored the raw dropdown index instead of mapping via enum_keys_map.
+                    // Index==enum only coincides for the first 4 patterns (mono/monoline/rect/aligned),
+                    // so Concentric (idx4→ipZigZag) and Hilbert (idx5→ipCrossZag) selected the WRONG fill.
+                    m_opt_id == "penultimate_solid_infill_pattern" ||
                     m_opt_id == "support_base_pattern" || m_opt_id == "support_interface_pattern" ||
                     m_opt_id == "ironing_pattern" || m_opt_id == "support_ironing_pattern" ||
                     m_opt_id == "support_style" || m_opt_id == "curr_bed_type")

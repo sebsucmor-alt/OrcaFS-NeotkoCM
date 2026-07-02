@@ -332,6 +332,43 @@ int TriangleSelector::discard_non_top_facing(const Transform3d &trafo_no_transla
     return cleared;
 }
 
+// NEOTKO_BOTTOM_TAG — Fase 1 (§4.0): per-slot zone-aware discard. See header.
+int TriangleSelector::discard_non_zone_facing(const Transform3d &trafo_no_translate, float cutoff,
+                                              const std::vector<bool> &slot_wants_top,
+                                              const std::vector<bool> &slot_wants_bottom)
+{
+    const Matrix3f normal_matrix = static_cast<Matrix3f>(
+        trafo_no_translate.matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>());
+    int cleared = 0;
+    for (Triangle &tr : m_triangles) {
+        if (!tr.valid() || tr.is_split())
+            continue;
+        const EnforcerBlockerType state = tr.get_state();
+        if (state == EnforcerBlockerType::NONE)
+            continue;
+        const int   slot          = static_cast<int>(state);
+        const Vec3f &facet_normal  = m_face_normals[tr.source_triangle];
+        const float  world_normal_z = (normal_matrix * facet_normal).normalized().z();
+
+        const bool wants_top    = slot >= 0 && slot < int(slot_wants_top.size())    && slot_wants_top[slot];
+        const bool wants_bottom = slot >= 0 && slot < int(slot_wants_bottom.size()) && slot_wants_bottom[slot];
+
+        bool keep;
+        if (!wants_top && !wants_bottom)
+            // Legacy fallback: unknown/empty profile → top-only, as before.
+            keep = world_normal_z >= cutoff;
+        else
+            keep = (wants_top    && world_normal_z >=  cutoff)
+                || (wants_bottom && world_normal_z <= -cutoff);
+
+        if (!keep) {
+            tr.set_state(EnforcerBlockerType::NONE);
+            ++cleared;
+        }
+    }
+    return cleared;
+}
+
 bool TriangleSelector::is_facet_clipped(int facet_idx, const ClippingPlane &clp) const
 {
     for (int vert_idx : m_triangles[facet_idx].verts_idxs)

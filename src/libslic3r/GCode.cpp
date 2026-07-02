@@ -800,6 +800,12 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     if (z == -1.) // in case no specific z was provided, print at current_z pos
         z = current_z;
 
+    // NEOTKO_NEOTOWER_TAG s159-dbg — per-TCR Z ledger entry snapshot (behaviour-neutral).
+    // Captured before any travel/toolchange/macro mutates Z; emitted at the end of the fn.
+    const double _zl_emit_z   = z;
+    const double _zl_cur_z    = current_z;
+    bool         _zl_restored = false;
+
     const bool needs_toolchange = gcodegen.writer().need_toolchange(new_extruder_id);
     const bool will_go_down     = !is_approx(z, current_z);
     const bool is_ramming       = (gcodegen.config().single_extruder_multi_material) ||
@@ -853,6 +859,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
             position.z() = z;
             gcodegen.writer().set_position(position);
             deretraction_str += gcodegen.unretract();
+            _zl_restored = true;   // NEOTKO_NEOTOWER_TAG s159-dbg — s44 Z-restore fired
         }
     }
 
@@ -908,6 +915,34 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // object cap E identical fork↔SNAP, only the WIDTH/HEIGHT tags were missing in SNAP.
     if (!gcode.empty())
         gcodegen.m_last_processor_extrusion_role = erWipeTower;
+
+    // NEOTKO_NEOTOWER_TAG s159-dbg — per-TCR Z ledger. One line per DISPATCHED TCR, in
+    // physical emission order, into /tmp/neotko_wipetower.log (gated ORCA_DEBUG_WIPETOWER).
+    // Exposes the full Z round-trip so the macro-induced desync (change_filament_gcode does
+    // position[2]+=2.0 + G91 G1 Z1.5) and any negative emit-Z / carried-in Z (physical -Z
+    // crash) are visible without dumping the multi-MB object gcode. `emit_z` is the value the
+    // s44 restore forces the nozzle to (851-854); `writer_z_in` is what a previous TCR left
+    // behind (chain of custody — watch it drift TCR→TCR); `writer_z_out` should return to
+    // writer_z_in (round-trip via the travel-back at ~887). Join to
+    // /tmp/neotko_wipetower_tcrs.txt by (print_z, T_init->T_new). Behaviour-neutral.
+    if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+        const double _zl_out  = gcodegen.writer().get_position().z();
+        const double _zl_zoff = gcodegen.config().z_offset.value;
+        std::ostringstream _zl;
+        _zl << "ZTRACE T" << tcr.initial_tool << "->T" << tcr.new_tool
+            << " print_z=" << tcr.print_z
+            << " emit_z=" << _zl_emit_z
+            << " z_offset=" << _zl_zoff
+            << " writer_z_in=" << _zl_cur_z
+            << " will_go_down=" << (int)(! is_approx(_zl_emit_z, _zl_cur_z))
+            << " restore_fired=" << (int)_zl_restored
+            << " writer_z_out=" << _zl_out;
+        if (_zl_emit_z < 0.0 || _zl_cur_z < 0.0 || _zl_out < 0.0)
+            _zl << "  [NEG_Z_CRASH]";
+        if (! _zl_restored && new_extruder_id >= 0 && needs_toolchange)
+            _zl << "  [RESTORE_SKIPPED]";
+        NeoDebug::write(NeoDebug::WIPETOWER, _zl.str());
+    }
     return gcode;
 }
 
@@ -1416,8 +1451,20 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                     ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
                                      m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool &&
                                      m_layer_idx != 0);
-                    if (m_tool_change_idx == 0 && !ignore_sparse)
+                    if (m_tool_change_idx == 0 && !ignore_sparse) {
                         wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;
+                        // NEOTKO_NEOTOWER_TAG s160 — Z-crash fix. Under NeoTower the HIT dispatch
+                        // (get_tcr) never updates m_last_wipe_tower_print_z, so on the FIRST
+                        // toolchange of a real layer (m_tool_change_idx==0) it is still the -1
+                        // sentinel → this projection yields (-1 + layer_height) = -0.8 → the
+                        // downstream append_tcr2 emits a physical G1 Z-0.8 (bed crash). NeoTower
+                        // carries the real tower-layer z on every TCR, so use it directly. Verified
+                        // by the ZTRACE ledger (s159-dbg): all 10 [NEG_Z_CRASH] rows are slot_idx=0
+                        // with emit_z==-0.8 constant across z=0.48..2.28. Gated on m_neo_tower → the
+                        // stock/Classic path is byte-identical.
+                        if (gcodegen.m_neo_tower != nullptr)
+                            wipe_tower_z = m_tool_changes[m_layer_idx].front().print_z;
+                    }
                 }
 
                 // NEOTKO s130-dbg — probe: dump the WipeTower2 plan entry the classifier reads
@@ -1504,8 +1551,20 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                             // s104-z plane-realign: a fused/redirected TCR prints at ITS plane,
                             // not the requesting layer's z (no-op for plain multitool where
                             // tcr.print_z ≈ layer_z).
+                            // NEOTKO_NEOTOWER_TAG s160b — Z-crash guard. The realign assumes
+                            // wipe_tower_z is a real plane. With wipe_tower_no_sparse_layers OFF,
+                            // wipe_tower_z stays the -1 sparse sentinel (append_tcr2:800 resolves
+                            // it to current_z). Adding (tcr.print_z - layer_z) to -1 produces a
+                            // bogus negative z (e.g. -1 + 0.2 = -0.8) that slips past the `z==-1`
+                            // guard → physical G1 Z-0.8 (bed crash). The Bottom-Surface tool
+                            // sequence triggers this by HITting a higher-plane TCR (get_tcr
+                            // returns a layer-N+1 slot for a layer-N request). Only realign off a
+                            // real base plane; the sentinel keeps stock sparse-layer semantics.
+                            // Verified by ZTRACE/WT_EMIT_TRACE: all 10 [NEG_Z_CRASH] rows are
+                            // ?→T3 realign HITs with wipe_tower_z==-1. s160 (the no_sparse branch
+                            // override) did not cover this sentinel path.
                             double emit_z = wipe_tower_z;
-                            if (tcr_opt->print_z > layer_z + NeoTowerZ::Z_EPS_PLAN)
+                            if (wipe_tower_z >= 0. && tcr_opt->print_z > layer_z + NeoTowerZ::Z_EPS_PLAN)
                                 emit_z = wipe_tower_z + ((double)tcr_opt->print_z - (double)layer_z);
                             gcode += append_tcr2(gcodegen, *tcr_opt, extruder_id, emit_z);
                         } else if (slot_idx >= 0 && slot_idx < (int)m_tool_changes[m_layer_idx].size()) {
@@ -1568,8 +1627,15 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
             wipe_tower_z  = m_last_wipe_tower_print_z;
             ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
                              m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool);
-            if (m_tool_change_idx == 0 && !ignore_sparse)
+            if (m_tool_change_idx == 0 && !ignore_sparse) {
                 wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;
+                // NEOTKO_NEOTOWER_TAG s160 — Z-crash fix (BBL mirror of the non-BBL branch
+                // above). Same -1-sentinel projection → -0.8 → G1 Z-neg crash. Gated on
+                // m_neo_tower → stock/Classic byte-identical. Not exercised on the non-BBL
+                // U1, kept in sync so a BBL NeoTower print cannot hit the same crash.
+                if (gcodegen.m_neo_tower != nullptr)
+                    wipe_tower_z = m_tool_changes[m_layer_idx].front().print_z;
+            }
         }
 
         // NEOTKO_MULTIPASS_TAG_START — single-tool T→T layers (BBL path). Mirror of the
@@ -1620,8 +1686,11 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                     const int slot_idx = m_tool_change_idx;
                     ++m_tool_change_idx; // always advance — keeps bounds in sync
                     if (tcr_opt) {
+                        // NEOTKO_NEOTOWER_TAG s160b — Z-crash guard (BBL mirror of the non-BBL
+                        // branch above). Same -1 sparse sentinel → -0.8 → G1 Z-neg crash. Only
+                        // realign off a real base plane; the sentinel keeps stock semantics.
                         double emit_z = wipe_tower_z;
-                        if (tcr_opt->print_z > layer_z + NeoTowerZ::Z_EPS_PLAN)
+                        if (wipe_tower_z >= 0. && tcr_opt->print_z > layer_z + NeoTowerZ::Z_EPS_PLAN)
                             emit_z = wipe_tower_z + ((double)tcr_opt->print_z - (double)layer_z);
                         gcode += append_tcr(gcodegen, *tcr_opt, extruder_id, emit_z);
                     } else if (slot_idx >= 0 && slot_idx < (int)m_tool_changes[m_layer_idx].size()) {

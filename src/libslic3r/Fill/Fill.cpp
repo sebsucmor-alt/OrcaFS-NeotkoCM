@@ -1255,6 +1255,19 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     }
 
     for (SurfaceFill &surface_fill : surface_fills) {
+        // NEOTKO_BOTTOM_TAG — Fase 1 §5.2 OVERLAY model (s152 plan OVERLAY).
+        // Gate ENABLED for the overlay-per-pass bottom sandwich. Unlike the s151
+        // overstep, we do NOT reclassify the surface_type and do NOT fight the bridge
+        // role: pass 0 KEEPS the base treatment Orca assigned (a real bridge stays
+        // erBridgeInfill → bridge flow/speed/fan/90°). The painted footprint just gets
+        // a co-planar ColorMix tool split (speed_pct=100, role=_sub_role=base), so the
+        // bridge prints as a bridge, multi-colour where painted. Z-stacked control of
+        // passes ≥1 lands in §5.3; per-profile knobs in §5.4. Invariant: an object with
+        // object_painter_wants_bottom==false never enters (_is_bottom / _gate_is_bottom
+        // both require it) → byte-identical to stock. Painted objects' unpainted regions
+        // fall to the natural remainder (stock). To park the whole branch again, flip
+        // this back to false (single switch, restores stock bridge).
+        constexpr bool _bottom_sandwich_gate_enabled = true;
         // Create the filler object.
         std::unique_ptr<Fill> f = std::unique_ptr<Fill>(Fill::new_from_type(surface_fill.params.pattern));
         f->set_bounding_box(bbox);
@@ -1362,14 +1375,23 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             const ExtrusionRole _role6c = surface_fill.params.extrusion_role;
             const bool _is_tp = (_role6c == erTopSolidInfill ||
                                  _role6c == erPenultimateInfill);
+            // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): bottom-surface pre-split (cat.2/3).
+            // Mirror of the top/penu path but scanning the UNDERSIDE (downward) over
+            // the band BELOW this layer. Gated by object_painter_wants_bottom so an
+            // unpainted object never enters here → byte-identical.
+            const bool _is_bottom = _bottom_sandwich_gate_enabled
+                                    && (_role6c == erBottomSurface || _role6c == erBridgeInfill)
+                                    && _mo6c
+                                    && SurfaceColorMix::object_painter_wants_bottom(_mo6c);
             // NEOTKO_PAINT_COEXIST_TAG s91 — removed `!is_mm_painted()` gate.
             // Allow painter pre-split even on MMU-painted objects: the per-piece
             // MMU governance check downstream skips pieces whose XY is owned by
             // MMU, while colormix-painter pieces on non-MMU regions emit normally.
-            if (_is_tp && _mo6c
+            if ((_is_tp || _is_bottom) && _mo6c
                 && SurfaceColorMix::object_has_any_colormix_paint(_mo6c)
                 && !surface_fill.expolygons.empty()) {
                 const PrintObject* _po6c = this->object();
+                const bool _downward6c = _is_bottom;
                 // NEOTKO_COLORSTITCH_TAG — s112 fix: el tope REAL de la malla puede
                 // quedar hasta ~1 altura de capa POR ENCIMA del print_z de la última
                 // rebanada (cuando la altura del objeto no es múltiplo limpio de la
@@ -1378,26 +1400,36 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 // para alcanzarla. Sin esto, objetos cuyo tope cae entre capas no
                 // resuelven slot y no slicean (duplicar+escalar lo "arreglaba" por
                 // alineación accidental).
-                const double _zlo = (_role6c == erTopSolidInfill)
-                    ? this->print_z - this->height : this->print_z;
-                const double _zhi = (_role6c == erTopSolidInfill)
-                    ? this->print_z + this->height
-                    : this->print_z + 2.0 * this->height;
+                // Bottom anchors the band BELOW the layer ([z-2h, z], underside);
+                // the extra layer down mirrors the s112 top slack (the mesh's true
+                // bottom can sit up to ~1 layer below this slab). Top/penu keep the
+                // legacy band above.
+                const double _zlo = _is_bottom
+                    ? this->print_z - 2.0 * this->height
+                    : ((_role6c == erTopSolidInfill)
+                        ? this->print_z - this->height : this->print_z);
+                const double _zhi = _is_bottom
+                    ? this->print_z
+                    : ((_role6c == erTopSolidInfill)
+                        ? this->print_z + this->height
+                        : this->print_z + 2.0 * this->height);
                 // Enumerate every painted slot present in the Z band, then keep
                 // only the ones whose profile has a non-empty stack for this role.
                 std::vector<int> _slots = SurfaceColorMix::enumerate_painted_slots_in_z_range(
-                    _po6c, _zlo, _zhi);
+                    _po6c, _zlo, _zhi, _downward6c);
                 std::vector<int>        _useful_slots;
                 std::vector<ExPolygons> _useful_masks;
                 for (int _slot6c : _slots) {
                     const int _pid = SurfaceColorMix::profile_id_for_slot(_po6c, _slot6c);
                     const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
                     if (!_p) continue;
-                    const std::string& _js = (_role6c == erTopSolidInfill)
-                        ? _p->stack_top_json : _p->stack_penu_json;
+                    const std::string& _js = _is_bottom
+                        ? _p->stack_bottom_json
+                        : ((_role6c == erTopSolidInfill)
+                            ? _p->stack_top_json : _p->stack_penu_json);
                     if (SurfacePassStack::from_json(_js).passes.empty()) continue;
                     ExPolygons _mask = SurfaceColorMix::painted_footprint_in_z_range(
-                        _po6c, _slot6c, _zlo, _zhi);
+                        _po6c, _slot6c, _zlo, _zhi, _downward6c);
                     if (_mask.empty()) continue;
                     _useful_slots.push_back(_slot6c);
                     _useful_masks.push_back(std::move(_mask));
@@ -1480,7 +1512,13 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 // dominant painted slot at this Z range.
                 const ModelObject* _mp_mo = (this->object() != nullptr)
                     ? this->object()->model_object() : nullptr;
-                const bool _mp_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_mp_mo);
+                // NEOTKO_MIXEDFIL_SANDWICH_TAG — object-wide mode also forces painter-mode
+                // takeover (mirrors the analogous OR in SurfaceColorMix.cpp::assign_and_group_tools;
+                // divergence between the two would desync ToolOrdering, same class of bug s112 warns about).
+                const bool _mp_mixed_filament_mode = (this->object() != nullptr)
+                    && this->object()->config().mixed_filament_sandwich_mode.value;
+                const bool _mp_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_mp_mo)
+                    || _mp_mixed_filament_mode;
                 // NEOTKO_PAINT_COEXIST_TAG s91 — per-piece MMU governance.
                 // Was: global is_mm_painted() short-circuit on the whole object.
                 // Now: object-flag fast path + per-surface_piece XY check against
@@ -1518,11 +1556,52 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             << " → sandwich keeps applying (no MMU on this XY)");
                 }
                 // NEOTKO_PROFILE_TAG_END
+                // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3) instrumentation. Trace the bottom
+                // candidates and whether the sandwich gate now ACCEPTS them:
+                //   erBottomSurface = true bottom (bed first layer / fully-supported face)
+                //   erBridgeInfill  = bottom over a support gap (the NeoWeaving target)
+                // sandwich_eligible reflects the real gate (painter + wants_bottom);
+                // the layer-0 hardlock still vetoes cat.1 downstream.
+                if (NeoDebug::enabled(NeoDebug::BOTTOM) &&
+                    (surface_fill.params.extrusion_role == erBottomSurface ||
+                     surface_fill.params.extrusion_role == erBridgeInfill)) {
+                    const size_t _b_lidx = this->id() - this->object()->get_layer(0)->id();
+                    const ModelObject* _b_mo = this->object()->model_object();
+                    const bool _b_eligible = _bottom_sandwich_gate_enabled
+                        && _mp_painter_mode
+                        && SurfaceColorMix::object_painter_wants_bottom(_mp_mo);
+                    NEOTKO_LOG(BOTTOM, "BOTTOM_ROLE_GATE obj='"
+                        << (_b_mo ? _b_mo->name : std::string("?")) << "'"
+                        << " po=" << (const void*)this->object()
+                        << " obj_base_z=" << this->object()->get_layer(0)->print_z
+                        << " z=" << this->print_z
+                        << " layer_idx_in_object=" << _b_lidx
+                        << " role=" << (int)surface_fill.params.extrusion_role
+                        << " (" << (surface_fill.params.extrusion_role == erBottomSurface
+                                        ? "erBottomSurface" : "erBridgeInfill") << ")"
+                        << " bridge=" << surface_fill.params.bridge
+                        << " painter_mode=" << (_mp_painter_mode ? "1" : "0")
+                        << " sandwich_eligible=" << (_b_eligible ? "1" : "0")
+                        << " layer0_hardlock=" << (_b_lidx == 0 ? "1" : "0"));
+                }
                 // NEOTKO_MULTIPASS_SURFACES_TAG — bifurcate enabled check by role:
                 // Top surface uses multipass_enabled; Penultimate uses its own key.
-                if (!surface_fill.params.bridge && !_mp_mm_painted &&
-                    (surface_fill.params.extrusion_role == erTopSolidInfill ||
-                     surface_fill.params.extrusion_role == erPenultimateInfill)) {
+                // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): also admit bottom roles
+                // (erBottomSurface, erBridgeInfill = cat.2/3) when the object carries
+                // a painted Bottom WIP zone. Bottom bridges have bridge=1, so the
+                // `!bridge` guard is bypassed ONLY on the bottom branch — top/penu
+                // keep requiring !bridge. The layer-0 hardlock below still excludes
+                // the bed first layer (cat.1, deferred).
+                const ExtrusionRole _gate_role = surface_fill.params.extrusion_role;
+                const bool _gate_is_tp = (_gate_role == erTopSolidInfill ||
+                                          _gate_role == erPenultimateInfill);
+                const bool _gate_is_bottom =
+                    _bottom_sandwich_gate_enabled
+                    && (_gate_role == erBottomSurface || _gate_role == erBridgeInfill)
+                    && _mp_painter_mode
+                    && SurfaceColorMix::object_painter_wants_bottom(_mp_mo);
+                if (!_mp_mm_painted &&
+                    ((!surface_fill.params.bridge && _gate_is_tp) || _gate_is_bottom)) {
                     const ExtrusionRole _mp_role = surface_fill.params.extrusion_role;
                     // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico: ¿llega un objeto
                     // pintado a la rama FASE-2 painter? Vuelca mo + painter_mode + rol.
@@ -1550,23 +1629,76 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         // its OWN slot id). When pre-split didn't run (no paint in
                         // this surface's band), fall back to dominant_slot — and a
                         // 0 tag means natural remainder, no effect.
+                        // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3): bottom roles resolve the
+                        // dominant slot from the UNDERSIDE band [z-h, z] (downward scan).
+                        const bool _mp_is_bottom = (_mp_role == erBottomSurface ||
+                                                    _mp_role == erBridgeInfill);
+
+                        // NEOTKO_MIXEDFIL_SANDWICH_TAG — object-wide mode: same profile
+                        // drives EVERY top/penu layer, no painted-slot resolution needed
+                        // (bottom role is untouched — this mode only replaces top+penu).
+                        // Resolved once, single-threaded, in
+                        // Print::resolve_mixed_filament_sandwich_profiles(); here we only
+                        // ever READ the resulting profile id.
+                        const SurfaceEffectProfile* _mixed_p = nullptr;
+                        if (_mp_mixed_filament_mode && !_mp_is_bottom) {
+                            if (const int _mfpid = _po->print()->mixed_filament_sandwich_profile_id(_po); _mfpid)
+                                _mixed_p = SurfaceEffectProfileManager::get().find(_mfpid);
+                        }
+                        if (_mixed_p) {
+                            const std::string& _mfjs = (_mp_role == erTopSolidInfill)
+                                ? _mixed_p->stack_top_json : _mixed_p->stack_penu_json;
+                            SurfacePassStack _mfst = SurfacePassStack::from_json(_mfjs);
+                            if (_mfst.any_effect()) {
+                                mp_stack   = std::move(_mfst);
+                                is_mp_fill = true;
+                                NEOTKO_LOG(PROFILE, "MIXEDFIL_STACK_OVERRIDE layer=" << f->layer_id
+                                    << " z=" << this->print_z << " role=" << (int)_mp_role
+                                    << " profile='" << _mixed_p->name << "'"
+                                    << " passes=" << mp_stack.passes.size());
+                            }
+                        }
+
                         const int _slot = (_fp_slot_tag > 0)
                             ? _fp_slot_tag
                             : (_fp_slot_tag == 0 ? 0
-                                : ((_mp_role == erTopSolidInfill)
-                                    // NEOTKO_COLORSTITCH_TAG — s112 fix: +1 capa arriba
-                                    // (top) para alcanzar el tope de malla entre capas.
+                                : (_mp_is_bottom
                                     ? SurfaceColorMix::dominant_painted_slot_in_z_range(
-                                          _po, this->print_z - this->height, this->print_z + this->height)
-                                    // penu ancla 1 capa más abajo → +2 capas arriba.
-                                    : SurfaceColorMix::dominant_painted_slot_in_z_range(
-                                          _po, this->print_z, this->print_z + 2.0 * this->height)));
-                        if (_slot > 0) {
+                                          _po, this->print_z - 2.0 * this->height, this->print_z, /*downward=*/true)
+                                    : ((_mp_role == erTopSolidInfill)
+                                        // NEOTKO_COLORSTITCH_TAG — s112 fix: +1 capa arriba
+                                        // (top) para alcanzar el tope de malla entre capas.
+                                        ? SurfaceColorMix::dominant_painted_slot_in_z_range(
+                                              _po, this->print_z - this->height, this->print_z + this->height)
+                                        // penu ancla 1 capa más abajo → +2 capas arriba.
+                                        : SurfaceColorMix::dominant_painted_slot_in_z_range(
+                                              _po, this->print_z, this->print_z + 2.0 * this->height))));
+                        // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3) probe: pinpoint where the
+                        // bottom sandwich dies (slot resolution / empty stack).
+                        if (_mp_is_bottom && NeoDebug::enabled(NeoDebug::BOTTOM)) {
+                            const int _bpid = (_slot > 0)
+                                ? SurfaceColorMix::profile_id_for_slot(_po, _slot) : 0;
+                            const auto* _bp = _bpid
+                                ? Slic3r::SurfaceEffectProfileManager::get().find(_bpid) : nullptr;
+                            const std::string _bjs = _bp ? _bp->stack_bottom_json : std::string();
+                            const SurfacePassStack _bst = SurfacePassStack::from_json(_bjs);
+                            NEOTKO_LOG(BOTTOM, "BOTTOM_RESOLVE z=" << this->print_z
+                                << " role=" << (int)_mp_role
+                                << " fp_slot_tag=" << _fp_slot_tag
+                                << " slot=" << _slot
+                                << " profile_id=" << _bpid
+                                << " bottom_json_empty=" << (_bjs.empty() ? "1" : "0")
+                                << " passes=" << _bst.passes.size()
+                                << " any_effect=" << (_bst.any_effect() ? "1" : "0"));
+                        }
+                        if (!_mixed_p && _slot > 0) {
                             const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
                             const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
                             if (_p) {
-                                const std::string& _js = (_mp_role == erTopSolidInfill)
-                                    ? _p->stack_top_json : _p->stack_penu_json;
+                                const std::string& _js = _mp_is_bottom
+                                    ? _p->stack_bottom_json
+                                    : ((_mp_role == erTopSolidInfill)
+                                        ? _p->stack_top_json : _p->stack_penu_json);
                                 SurfacePassStack _st = SurfacePassStack::from_json(_js);
                                 // NEOTKO_SANDWICH_TAG s119 (EMPTY model): the painted
                                 // CONTENT is the only source of truth. Engage iff the
@@ -1645,12 +1777,29 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 if (is_mp_fill) {
                     const size_t layer_idx_in_object =
                         this->id() - this->object()->get_layer(0)->id();
-                    if (layer_idx_in_object == 0) {
+                    // NEOTKO_BOTTOM_TAG — §7: the layer-0 hardlock historically killed ALL
+                    // MultiPass on the first object layer. Cat.1 (the bed-contact bottom,
+                    // erBottomSurface/erBridgeInfill) ONLY exists on layer 0, so the hardlock
+                    // vetoed it entirely (BOTTOM_RESOLVE any_effect=1 but never a BOTTOM_EMIT).
+                    // Carve it out: a PAINTED bottom overlay is allowed through on layer 0 —
+                    // the _gate_is_bottom gate above already vetted painter-wants-bottom, so
+                    // is_mp_fill is only true here for an authored bottom. Top/penu and preset
+                    // MultiPass stay hardlocked on layer 0 (unchanged). NOTE: this is the first
+                    // path that can introduce TOOLCHANGES on layer 0 → wipe-tower-sensitive;
+                    // inspect the layer-0 tower in the gcode.
+                    const bool _l0_bottom_overlay =
+                        (surface_fill.params.extrusion_role == erBottomSurface ||
+                         surface_fill.params.extrusion_role == erBridgeInfill);
+                    if (layer_idx_in_object == 0 && !_l0_bottom_overlay) {
                         is_mp_fill = false;
                         BOOST_LOG_TRIVIAL(warning)
                             << "[MultiPass] Disabled on first object layer (layer_height="
                             << this->height << " mm). MultiPass starts from layer 2.";
                         NEOTKO_LOG(MULTIPASS, "FASE2_CHECK: is_mp_fill forced=false (first layer hardlock)");
+                    } else if (layer_idx_in_object == 0 && _l0_bottom_overlay) {
+                        NEOTKO_LOG(BOTTOM, "L0_BOTTOM_UNLOCK z=" << this->print_z
+                            << " role=" << (int)surface_fill.params.extrusion_role
+                            << " (cat.1 bed bottom allowed on layer 0 — §7)");
                     }
                 }
 
@@ -1667,6 +1816,16 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     << " mp_enabled=" << mp_cfg.multipass_enabled.value
                     << " is_mp_fill=" << is_mp_fill);
 
+                // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3) probe: did a bottom surface reach
+                // the FASE-2 emission, and how many sublayers did it produce?
+                size_t _bottom_subs_before = 0;
+                const bool _bottom_trace =
+                    NeoDebug::enabled(NeoDebug::BOTTOM) &&
+                    (surface_fill.params.extrusion_role == erBottomSurface ||
+                     surface_fill.params.extrusion_role == erBridgeInfill);
+                if (_bottom_trace)
+                    _bottom_subs_before = this->object()->multipass_sublayers()[this->id()].size();
+
                 if (is_mp_fill) {
                     // NEOTKO_SANDWICH_TAG_START — Fase 2: the FASE 2 loop iterates
                     // the SurfacePassStack and compiles each band into sublayers:
@@ -1680,7 +1839,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     //                  NeoTower / ToolOrdering / the GCode handler
                     //                  schedule them with zero changes.
                     //   PathBlend    → never reaches here (preset gate excludes it).
-                    const int   n          = std::min<int>(3, (int)mp_stack.passes.size());
+                    const int   _n_raw     = std::min<int>(3, (int)mp_stack.passes.size());
+                    // NEOTKO_BOTTOM_TAG — Fase 1 §5.3 (s152 OVERLAY): bottom pass clamp.
+                    // A bottom overlay is a SINGLE full-height pass (paint-only; a real
+                    // bridge stays a bridge) UNLESS the painted zone opts into supported
+                    // control (bottom_supported_control). Top/penu are never clamped.
+                    const bool _is_bottom_overlay =
+                        (surface_fill.params.extrusion_role == erBottomSurface ||
+                         surface_fill.params.extrusion_role == erBridgeInfill);
+                    const bool _bottom_supported =
+                        _is_bottom_overlay && mp_stack.bottom_supported_control;
+                    const int   n          = (_is_bottom_overlay && !_bottom_supported)
+                                                 ? std::min(1, _n_raw) : _n_raw;
                     const float base_angle = surface_fill.params.angle;
                     // Beer-Lambert stadium model: A(W,H) = H*(W - H*(1-π/4)) [matches Flow.cpp]
                     constexpr double k_mp  = 1.0 - 0.25 * M_PI;
@@ -1703,6 +1873,16 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     for (int i = 0; i < n; ++i) {
                         const SurfacePass&    pass = mp_stack.passes[i];
                         const SurfacePassKind kind = pass.kind;
+                        // NEOTKO_BOTTOM_TAG — Fase 1 §5.3 (s152 OVERLAY): per-band role.
+                        // Pass 0 (the lowest band) keeps the BASE role Orca assigned — a
+                        // real bridge stays erBridgeInfill (bridge flow/speed/90°/over air).
+                        // For a SUPPORTED bottom, passes ≥1 are stacked ABOVE pass 0 (inside
+                        // the object, no longer over air) → give them erSolidInfill so they
+                        // print as controlled internal solid (45°, flow 100%, solid speed),
+                        // not bridge. Outside the supported-bottom case _band_role == _sub_role
+                        // (top/penu and single-pass bottom unchanged → byte-identical).
+                        const ExtrusionRole _band_role =
+                            (_bottom_supported && i >= 1) ? erSolidInfill : _sub_role;
                         // reset each band; the ColorStitch fixed-angle branch re-locks below.
                         f->is_using_template_angle = _orig_is_template_angle;
 
@@ -2157,7 +2337,15 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         // a classic MultiPass run with a disabled middle pass).
                         if (!is_cm && solid_tool < 0) continue;
 
-                        const double ratio = pass.ratio;
+                        // NEOTKO_BOTTOM_TAG — Fase 1 §5.3: OFF clamp must fill the FULL
+                        // layer height. When a >1-pass profile is clamped to a single
+                        // bottom pass (n==1, !supported), the surviving pass keeps its
+                        // authored ratio (<1 for a gradient) → it would print only a
+                        // fraction of the layer, leaving a void above. Force ratio=1.0 so
+                        // the single OFF pass is full height. No-op for native 1-pass
+                        // profiles (their ratio is already 1.0) → byte-identical.
+                        const double ratio = (_is_bottom_overlay && !_bottom_supported)
+                                                 ? 1.0 : pass.ratio;
 
                         // NEOTKO_MULTIPASS_MINLAYER_TAG — skip passes thinner than minimum printable height.
                         {
@@ -2211,18 +2399,46 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         // Fill angle. ColorMix needs a consistent direction (its
                         // dither runs perpendicular to the lines, MonotonicLine);
                         // Solid alternates perpendicular per pass for bonding.
+                        // NEOTKO_BOTTOM_TAG — Fase 1 §5.4: set true below when an authored
+                        // angle is in effect. A painted bottom is a BRIDGE surface, and
+                        // _infill_direction() (FillBase.cpp) forces surface->bridge_angle
+                        // over f->angle for bridges — so without clearing it at the fill
+                        // call no authored angle (solid OR colorstitch) ever took effect.
+                        bool _angle_overrides_bridge = false;
+                        // NEOTKO_BOTTOM_TAG — §7: the OFF "safe" angle suppression is meant
+                        // for REAL bridges (erBridgeInfill, over air) — there OFF keeps Orca's
+                        // planned bridge angle. The bed / fully-supported bottom (erBottomSurface,
+                        // cat.1) is NOT a bridge, so its authored angle must apply regardless of
+                        // the supported-control switch — else the painted ColorStitch/Solid angle
+                        // silently does nothing on the bed bottom. Top/penu: _bottom_is_bridge is
+                        // false (not erBridgeInfill) → byte-identical to before.
+                        const bool _bottom_is_bridge = (_sub_role == erBridgeInfill);
                         if (is_cm) {
-                            const int cm_angle = (_sub_role == erTopSolidInfill)
+                            // NEOTKO_BOTTOM_TAG — Fase 1 §5.4 (s152 OVERLAY): the Bottom zone is
+                            // authored with penu=false (draw_zone_editor .../*penu=*/false), so a
+                            // painted bottom carries the TOP key family (interlayer_colormix_angle),
+                            // NOT the penu key. Read the matching key for bottom too, else the
+                            // painted angle never reaches the slice (bug: bottom stuck at the bridge
+                            // angle, unchanged even ON). Top/penu key selection is unchanged.
+                            const bool _bottom_cm = _is_bottom_overlay;
+                            const int cm_angle = (_sub_role == erTopSolidInfill || _bottom_cm)
                                 ? cm_eff->interlayer_colormix_angle.value
                                 : cm_eff->interlayer_colormix_penu_angle.value;
-                            f->angle = (cm_angle >= 0)
+                            // OFF (safe / non-supported bottom) ALWAYS uses Orca's base (bridge)
+                            // angle, ignoring the authored cm_angle. ON (supported overlay, user's
+                            // own risk) and top/penu honor it. Byte-identical for top/penu
+                            // (_is_bottom_overlay=0 → _respect_cm_angle=1, same as before).
+                            const bool _respect_cm_angle = !(_bottom_is_bridge && !_bottom_supported);
+                            const bool _use_cm_angle = _respect_cm_angle && cm_angle >= 0;
+                            f->angle = _use_cm_angle
                                 ? Geometry::deg2rad(static_cast<float>(cm_angle))
                                 : base_angle;
                             // NEOTKO_COLORSTITCH_TAG — a FIXED ColorStitch angle is ABSOLUTE: lock
                             // out the per-layer _layer_angle alternation (idx&1?90:0) that solid
                             // infill adds, so every layer keeps the painted angle = matches the 3D
                             // weave. Auto (-1) keeps the natural per-layer rotation (good finish).
-                            if (cm_angle >= 0) f->is_using_template_angle = true;
+                            if (_use_cm_angle) f->is_using_template_angle = true;
+                            _angle_overrides_bridge = _use_cm_angle;
                             // NEOTKO_COLORSTITCH_TAG (debug) — angle resolution trace. If cm_angle=-1
                             // here, the painted pass kv did NOT carry interlayer_colormix_angle →
                             // falls to the alternating base_angle (the "slice doesn't match" bug).
@@ -2234,13 +2450,31 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 << " base_deg=" << (int)Geometry::rad2deg(base_angle)
                                 << " final_deg=" << (int)Geometry::rad2deg(f->angle));
                         } else {
-                            f->angle = (pass.angle >= 0)
+                            // NEOTKO_BOTTOM_TAG — Fase 1 §5.4 (s152 OVERLAY): angle policy.
+                            // OFF (safe / non-supported bottom) ALWAYS respects Orca's base
+                            // angle (the bridge direction it planned) — an authored pass.angle
+                            // is ignored, so the OFF clamp prints exactly like vanilla Orca.
+                            // ON (supported overlay, user's own risk) and top/penu honor the
+                            // authored pass.angle (>=0); -1 keeps the default base_angle
+                            // alternation. Byte-identical for top/penu (_is_bottom_overlay=0).
+                            const bool _respect_pass_angle = !(_bottom_is_bridge && !_bottom_supported);
+                            const bool _use_pass_angle = _respect_pass_angle && pass.angle >= 0;
+                            f->angle = _use_pass_angle
                                 ? Geometry::deg2rad(static_cast<float>(pass.angle))
                                 : base_angle + float(i % 2) * float(M_PI / 2);
+                            _angle_overrides_bridge = _use_pass_angle;
                         }
 
                         ExtrusionEntityCollection temp;
-                        f->fill_surface_extrusion(&surface_fill.surface, params, temp.entities);
+                        // NEOTKO_BOTTOM_TAG — Fase 1 §5.4: a painted bottom is a bridge surface,
+                        // so _infill_direction() (FillBase.cpp) overrides f->angle with
+                        // surface->bridge_angle. When an authored angle is in effect, fill from a
+                        // COPY with bridge_angle cleared so f->angle wins (DIRECTION only — the
+                        // role-driven bridge flow/speed/fan are untouched). No-op for top/penu and
+                        // OFF bottom (non-bridge or _angle_overrides_bridge=0) → byte-identical.
+                        Surface _surf_for_fill = surface_fill.surface;
+                        if (_angle_overrides_bridge) _surf_for_fill.bridge_angle = -1.0;
+                        f->fill_surface_extrusion(&_surf_for_fill, params, temp.entities);
                         // Beer-Lambert stadium correction to the sublayer height.
                         for (auto* e : temp.entities) {
                             auto* coll = dynamic_cast<ExtrusionEntityCollection*>(e);
@@ -2317,7 +2551,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     - double(NB - 1 - k) * kBucketZStep;
                                 sub.height    = band_height;
                                 sub.pass_idx  = global_pass++;
-                                sub.role      = _sub_role;
+                                sub.role      = _band_role;   // §5.3: i≥1 supported → erSolidInfill
                                 sub.effect    = SurfacePassKind::ColorMix;
                                 sub.tool_id   = buckets[k].first;
                                 sub.speed_pct = 100;
@@ -2367,7 +2601,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             sub.print_z     = band_top_z;
                             sub.height      = band_height;
                             sub.pass_idx    = global_pass++;
-                            sub.role        = _sub_role;
+                            sub.role        = _band_role;   // §5.3: i≥1 supported → erSolidInfill
                             sub.effect      = SurfacePassKind::Solid;
                             sub.tool_id     = solid_tool;
                             sub.speed_pct   = is_none ? 100 : pass.speed_pct;
@@ -2419,6 +2653,49 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     // NEOTKO_SANDWICH_TAG_END
 
                     f->angle = base_angle;
+
+                    // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3) probe: sublayers produced by a
+                    // bottom surface in this FASE-2 pass (delta vs before the block).
+                    if (_bottom_trace) {
+                        const size_t _after =
+                            this->object()->multipass_sublayers()[this->id()].size();
+                        // NEOTKO_BOTTOM_TAG — Fase 1: evidence of the BRIDGE treatment the
+                        // painted bottom inherits because §4.3 (premature) reused
+                        // erBridgeInfill instead of a dedicated bottom role (§4.1 skipped).
+                        // role=10/bridge=1 → bridge_speed (GCode.cpp:8691) + overhang/bridge
+                        // fan (CoolingBuffer.cpp:981) + bridge_acceleration + density~80/flow0.8.
+                        NEOTKO_LOG(BOTTOM, "BOTTOM_EMIT z=" << this->print_z
+                            << " role=" << (int)surface_fill.params.extrusion_role
+                            << " bridge=" << surface_fill.params.bridge
+                            << " density=" << surface_fill.params.density
+                            << " → INHERITS bridge speed/fan/accel/flow (role-driven)"
+                            << " is_mp_fill=1 sublayers_added=" << (_after - _bottom_subs_before));
+                        // NEOTKO_BOTTOM_TAG — Fase 1 §5.1 (s152 OVERLAY model): per-pass dump.
+                        // Read-only instrumentation, NO behavior change. Validates the future
+                        // per-pass treatment policy (§4): pass 0 must keep BASE treatment
+                        // (bridge stays bridge), passes ≥1 are controllable. base_is_bridge
+                        // marks whether the surface Orca handed us is a real bridge (over air);
+                        // for those, pass 0 must stay base. Today (gate dormant) this loop runs
+                        // 0 times for bottom — its absence in the log confirms §0 dormancy.
+                        const auto& _bslot = this->object()->multipass_sublayers()[this->id()];
+                        for (size_t _bi = _bottom_subs_before; _bi < _after; ++_bi) {
+                            const MultiPassSubLayer& _bsub = _bslot[_bi];
+                            const bool _is_pass0 = (_bi == _bottom_subs_before);
+                            NEOTKO_LOG(BOTTOM, "BOTTOM_PASS z=" << this->print_z
+                                << " pass_idx=" << _bsub.pass_idx
+                                << " slot_local=" << (_bi - _bottom_subs_before)
+                                << " is_pass0=" << (_is_pass0 ? "1" : "0")
+                                << " base_role=" << (int)surface_fill.params.extrusion_role
+                                << " sub_role=" << (int)_bsub.role
+                                << " base_is_bridge=" << surface_fill.params.bridge
+                                << " base_density=" << surface_fill.params.density
+                                << " supported_control=" << (_bottom_supported ? "1" : "0")
+                                << " n_passes=" << n
+                                << " tool_id=" << _bsub.tool_id
+                                << " speed_pct=" << _bsub.speed_pct
+                                << " height=" << _bsub.height);
+                        }
+                    }
                 } else {
                     // NEOTKO_PATHBLEND_TAG_START — angle override for PathBlend surfaces
                     // If PathBlend is active and pathblend_fill_angle >= 0, use that angle

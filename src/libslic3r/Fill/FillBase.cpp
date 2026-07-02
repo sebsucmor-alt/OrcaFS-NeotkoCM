@@ -588,9 +588,13 @@ static void take(Polyline &pl1, const Polyline &pl2, const Points &contour, Cont
     cp_end->consume_prev();
 }
 
+// NEOTKO_COLORSTITCH_TAG — self_loop_mode gates the cp_start==cp_end (acute-corner) anchor:
+//   0 = legacy (length - line_half_width), 1 = full clearance (length - 2*half_width),
+//   2 = veto self-loop (no contour anchor), 3 = local budget only (no global length clamp).
 static void take_limited(
     Polyline &pl1, const Points &contour, const std::vector<double> &params,
-    ContourIntersectionPoint *cp_start, ContourIntersectionPoint *cp_end, bool clockwise, double take_max_length, double line_half_width)
+    ContourIntersectionPoint *cp_start, ContourIntersectionPoint *cp_end, bool clockwise, double take_max_length, double line_half_width,
+    int self_loop_mode = 0)
 {
 #ifndef NDEBUG
     // This is a valid case, where a single infill line connect to two different contours (outer contour + hole or two holes).
@@ -627,14 +631,28 @@ static void take_limited(
     double length_to_go = take_max_length;
     cp_start->consumed = true;
     if (cp_start == cp_end) {
-        length_to_go = std::max(0., std::min(length_to_go, length - line_half_width));
-        length_to_go = std::min(length_to_go, clockwise ? cp_start->contour_not_taken_length_prev : cp_start->contour_not_taken_length_next);
-        cp_start->consume_prev();
-        cp_start->consume_next();
-        if (length_to_go > SCALED_EPSILON)
-            clockwise ?
-                take_cw_limited (pl1, contour, params, cp_start->point_idx, cp_start->point_idx, length_to_go) :
-                take_ccw_limited(pl1, contour, params, cp_start->point_idx, cp_start->point_idx, length_to_go);
+        // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan strategy for the self-loop (acute corner).
+        if (self_loop_mode == 2) {
+            // Veto: start and end T-joint coincide; dropping the contour anchor entirely avoids the
+            // returning overlap onto the infill line that micro-accumulates layer over layer.
+            cp_start->consume_prev();
+            cp_start->consume_next();
+        } else {
+            if (self_loop_mode == 1)
+                // Full clearance: the infill line occupies both the exit and the return side of the
+                // joint, so reserve a whole line width of gap instead of a single half-width.
+                length_to_go = std::max(0., std::min(length_to_go, length - 2. * line_half_width));
+            else if (self_loop_mode != 3)
+                // 0 = legacy global clamp (mode 3 = local budget only: skip this clamp).
+                length_to_go = std::max(0., std::min(length_to_go, length - line_half_width));
+            length_to_go = std::min(length_to_go, clockwise ? cp_start->contour_not_taken_length_prev : cp_start->contour_not_taken_length_next);
+            cp_start->consume_prev();
+            cp_start->consume_next();
+            if (length_to_go > SCALED_EPSILON)
+                clockwise ?
+                    take_cw_limited (pl1, contour, params, cp_start->point_idx, cp_start->point_idx, length_to_go) :
+                    take_ccw_limited(pl1, contour, params, cp_start->point_idx, cp_start->point_idx, length_to_go);
+        }
     } else if (clockwise) {
         // Going clockwise from cp_start to cp_end.
         assert(cp_start != cp_end);
@@ -1625,6 +1643,8 @@ void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Po
     };
 
     const double line_half_width = 0.5 * scale_(spacing);
+    // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan gate for the contour-connector self-loop.
+    const int    self_loop_mode  = params.config ? params.config->colorstitch_monotonic_replan.value : 0;
 
 #if 0
     // Connection from end of one infill line to the start of another infill line.
@@ -1747,8 +1767,8 @@ void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Po
                     }
                 } else if (anchor_length > SCALED_EPSILON) {
                     // Move along the perimeter, but don't take the whole arc.
-                    take_limited(polyline1, contour, contour_params, cp1, cp2, false, anchor_length, line_half_width);
-                    take_limited(polyline2, contour, contour_params, cp2, cp1, true,  anchor_length, line_half_width);
+                    take_limited(polyline1, contour, contour_params, cp1, cp2, false, anchor_length, line_half_width, self_loop_mode);
+                    take_limited(polyline2, contour, contour_params, cp2, cp1, true,  anchor_length, line_half_width, self_loop_mode);
                 }
             }
         }
@@ -1812,9 +1832,9 @@ void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Po
                 double l = std::max(contour_point.contour_not_taken_length_prev, contour_point.contour_not_taken_length_next);
                 if (l > SCALED_EPSILON) {
                     if (contour_point.contour_not_taken_length_prev > contour_point.contour_not_taken_length_next)
-                        take_limited(polyline, contour, contour_params, &contour_point, contour_point.prev_on_contour, true, anchor_length, line_half_width);
+                        take_limited(polyline, contour, contour_params, &contour_point, contour_point.prev_on_contour, true, anchor_length, line_half_width, self_loop_mode);
                     else
-                        take_limited(polyline, contour, contour_params, &contour_point, contour_point.next_on_contour, false, anchor_length, line_half_width);
+                        take_limited(polyline, contour, contour_params, &contour_point, contour_point.next_on_contour, false, anchor_length, line_half_width, self_loop_mode);
                 }
             }
         }

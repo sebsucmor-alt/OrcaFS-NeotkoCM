@@ -25,6 +25,7 @@
 
 #include <functional>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 #include "calib.hpp"
@@ -1016,6 +1017,14 @@ public:
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     const MixedFilamentManager& mixed_filament_manager() const { return m_mixed_filament_mgr; }
     MixedFilamentManager&       mixed_filament_manager()       { return m_mixed_filament_mgr; }
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — auto-generated sandwich profile id for objects
+    // with "MixedFilament Object" mode enabled. Resolved once, single-threaded, at
+    // the end of Print::apply() (resolve_mixed_filament_sandwich_profiles()); read
+    // (never written) from the parallel Fill/slice phase. 0 = none/not applicable.
+    int mixed_filament_sandwich_profile_id(const PrintObject* po) const {
+        auto it = m_mixed_filament_sandwich_profile_id.find(po);
+        return it == m_mixed_filament_sandwich_profile_id.end() ? 0 : it->second;
+    }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
     PrintObject*                get_object(size_t idx) { return const_cast<PrintObject*>(m_objects[idx]); }
     const PrintObject*          get_object(size_t idx) const { return m_objects[idx]; }
@@ -1142,6 +1151,9 @@ private:
     void                _make_skirt();
     void                _make_wipe_tower();
     void                finalize_first_layer_convex_hull();
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — single-threaded, called once at the end of
+    // apply(). See mixed_filament_sandwich_profile_id() above.
+    void                resolve_mixed_filament_sandwich_profiles();
 
     // Islands of objects and their supports extruded at the 1st layer.
     Polygons            first_layer_islands() const;
@@ -1150,6 +1162,12 @@ private:
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     MixedFilamentManager                    m_mixed_filament_mgr;
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — see mixed_filament_sandwich_profile_id() above.
+    std::unordered_map<const PrintObject*, int> m_mixed_filament_sandwich_profile_id;
+    // Content-hash (component_a/b + mix% + all 4 materials) -> profile id, so an
+    // unchanged MixedFilament doesn't spawn a fresh SurfaceEffectProfile on every
+    // apply() call. Persists across apply() calls (unlike the map above).
+    std::unordered_map<std::string, int> m_mixed_filament_sandwich_profile_cache;
     PrintObjectPtrs                         m_objects;
     PrintRegionPtrs                         m_print_regions;
     

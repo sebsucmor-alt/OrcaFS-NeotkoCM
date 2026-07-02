@@ -6190,6 +6190,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(true));
 
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — object-wide "MixedFilament Object" mode (Sandwich
+    // Painter gizmo). Set from the gizmo's "MixedFilament Object" checkbox, not from the
+    // print settings tab. Default off = stock per-face painted-slot behaviour.
+    def = this->add("mixed_filament_sandwich_mode", coBool);
+    def->label = L("MixedFilament Object mode");
+    def->tooltip = L("When on, every top-surface and penultimate region of this object uses an "
+                     "auto-generated sandwich approximating (via TD) the colour of the object's "
+                     "assigned MixedFilament, with Perimeter Override forced on. Disables manual "
+                     "painting/patterns for this object. Requires the object's extruder to resolve "
+                     "to a MixedFilament.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
     // NEOTKO_LIBRE_TAG_START — Feature 3: Bridge Infill Control
     def = this->add("multipass_path_gradient", coBool);
     def->label = L("Path Gradient Blend");
@@ -6471,6 +6484,45 @@ void PrintConfigDef::init_fff_params()
     def->max = 3;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
+
+    // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan: how the contour connector handles the
+    // self-loop case (cp_start == cp_end) in FillBase.cpp take_limited(). On acute corners,
+    // adjacent Monotonic scanlines snap to the same T-joint and the legacy anchor returns onto
+    // the infill line, leaving half a line-width of overlap that accumulates layer over layer.
+    // Test gate for three candidate fixes (0 = legacy, unchanged everywhere else).
+    def = this->add("colorstitch_monotonic_replan", coInt);
+    def->label = L("Monotonic Line Replan");
+    def->category = L("Quality");
+    def->tooltip = L("Anchor strategy for the contour connector self-loop at acute corners "
+                     "(Monotonic Line micro-accumulation).\n"
+                     "0 = Default — legacy clearance (length - line_half_width)\n"
+                     "1 = Full clearance — keep a whole line width of gap (length - 2*half_width)\n"
+                     "2 = Veto self-loop — drop the contour anchor entirely when start == end\n"
+                     "3 = Local budget — ignore the global length clamp, rely only on the "
+                     "per-side untaken-length budget");
+    def->min = 0;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    // NEOTKO_COLORSTITCH_TAG — ColorStitch on the continuous Monotonic pattern.
+    // FillMonotonic fuses adjacent scanlines into one continuous ExtrusionPath via perimeter
+    // connectors (unlike Monotonic Line, which keeps lines separate). When ON, ColorStitch splits
+    // each fused path into per-colour runs so every visual line carries its assigned tool; the
+    // connector arc at a colour boundary stays with the OUTGOING colour. Done entirely post-hoc in
+    // SurfaceColorMix — standard (non-ColorStitch) Monotonic infill is NOT affected. Default OFF
+    // preserves today's behaviour (ColorStitch effective only on Monotonic Line).
+    def = this->add("colorstitch_monotonic_split", coBool);
+    def->label = L("ColorStitch on Monotonic (continuous)");
+    def->category = L("Quality");
+    def->tooltip = L("Make ColorStitch work on the continuous Monotonic pattern (not just Monotonic "
+                     "Line). Splits each fused continuous path into per-colour runs — every visual "
+                     "line keeps its own tool, continuity is preserved within a same-colour run, and "
+                     "the connector arc at a colour change is kept with the outgoing colour.\n\n"
+                     "Only affects surfaces where a ColorStitch profile is active; ordinary Monotonic "
+                     "infill is untouched.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("interlayer_colormix_tool_a", coInt);
     def->label = L("First tool (A)");
@@ -7342,6 +7394,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_NEOTOWER_TAG_END
+
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — slice-time mirror of app_config "neotko_td_1".."_4"
+    // (GUI-only TD scalars per tool). Injected by the GUI at update_background_process;
+    // hidden/dev, not a user-facing print setting.
+    def = this->add("neotko_td_mirror", coFloats);
+    def->label = L("Neotko TD mirror (slice-time)");
+    def->tooltip = L("Internal: slice-time copy of the per-tool TD scalars so the engine can "
+                     "build ColorSci materials without reading app_config.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{1.f, 1.f, 1.f, 1.f});
 
     def = this->add("idle_temperature", coInts);
     def->label = L("Idle temperature");

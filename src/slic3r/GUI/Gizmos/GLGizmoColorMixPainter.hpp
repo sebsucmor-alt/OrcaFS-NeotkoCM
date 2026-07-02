@@ -174,6 +174,17 @@ private:
     Slic3r::SurfacePassStack      m_pro_penu;
     bool                          m_pro_seeded = false;   // sembrado lazy (1 pass Solid en Top)
     // NEOTKO_COLORSTITCH_TAG_END
+    // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): "Bottom WIP" zone of the Pro tray. Mirrors
+    // m_pro_top/penu but persists to SurfaceEffectProfile::stack_bottom_json. The
+    // slice engine does NOT consume it yet (Fase 0 = graphic control + instrumentation
+    // only). m_pro_bottom_loaded_id guards re-loading the stack when the selected
+    // profile changes (so editing one profile doesn't bleed into another).
+    Slic3r::SurfacePassStack      m_pro_bottom;
+    int                           m_pro_bottom_loaded_id = -1;
+    // NEOTKO_BOTTOM_TAG — Pro mode surface discriminator: 0 = Top (shows Top+Penu),
+    // 1 = Bottom (shows Bottom + supported control). VIEW toggle only — all three
+    // stacks persist regardless, so switching never discards authored work. Opens Top.
+    int                           m_pro_surface_mode = 0;
     // Refresh all triangle-selector palettes after profile/slot table changes.
     void refresh_selector_palettes();
 

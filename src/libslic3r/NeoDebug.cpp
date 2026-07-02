@@ -24,6 +24,8 @@ namespace NeoDebug {
         { "ORCA_DEBUG_WIPETOWER",   "/tmp/neotko_wipetower.log"   },
         { "ORCA_DEBUG_PROFILE",     "/tmp/neotko_profile.log"     }, // NEOTKO_PROFILE_TAG
         { "ORCA_DEBUG_DISPATCH",    "/tmp/neotko_dispatch.log"    }, // NEOTKO_NEOARACHNE_TAG s95
+        { "ORCA_DEBUG_BOTTOM",      "/tmp/neotko_bottom.log"      }, // NEOTKO_BOTTOM_TAG — Fase 0 instrumentation
+        { "ORCA_DEBUG_REALCOLOR",   "/tmp/neotko_realcolor.log"   }, // NEOTKO_REALCOLOR_TAG
     };
 
     bool enabled(Channel c)
