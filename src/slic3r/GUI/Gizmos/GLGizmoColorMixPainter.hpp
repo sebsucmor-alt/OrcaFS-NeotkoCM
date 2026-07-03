@@ -119,15 +119,41 @@ private:
     // layer height / tools del gradient), no cada frame.
     void gizmo_materials(Slic3r::ColorSci::Material out[4],
                          std::vector<std::string>& fcolors_out) const;
+    // NEOTKO_SANDWICH_TAG — Fase 2 (s167 plan): active object's already-assigned
+    // base colour (physical tool or MixedFilament approximation), for composing
+    // previews against what the object will actually print in instead of a
+    // hardcoded black background. Returns false (bg untouched) when there's no
+    // selected object or its extruder can't be resolved — callers keep black.
+    bool resolve_object_base_bg(const Slic3r::ColorSci::Material mats[4],
+                                float bg_rgb[3]) const;
+    // s169 F3 — ¿el objeto activo tiene "MixedFilament Object" en modo ON? Gate
+    // compartido: on_render_input_window lo usa para deshabilitar+banner en
+    // Paint/Palette/Pro, y on_set_state para auto-abrir el departamento Object.
+    bool active_object_mixed_filament_mode() const;
     void rebuild_palettes_if_stale();
     void render_palette_panel(float window_width);
     // Opción B del revamp — bandeja "pro mode" inline: compone Top/Penu (passes
     // Solid) + TD y produce un ColorRecipe como color activo de pintura.
     void render_pro_mode_panel();
-    // s111 — carril izquierdo del panel: swatch del color Activo + biblioteca
-    // de paletas guardadas como columna vertical con scroll.
-    void render_left_rail(float rail_w, float rail_h);
+    // s169 F1 — header persistente sobre el selector de departamentos: swatch
+    // Active re-predicho en vivo (F2 añade "+ New" + nombre editable + Pin).
+    void render_header();
+    // s169 F1 — rejilla full-width de paletas guardadas (reemplaza la columna
+    // vertical de render_left_rail, retirada junto al layout de 2 columnas).
+    void render_paint_palette_grid();
+    // s169 F3 — departamento Object: toggle "MixedFilament Object" + swatch
+    // (movido desde Pro) + live recipe (pases resueltos por el último apply).
+    void render_object_department();
     void render_group_selector();                    // s137b: fila full-width del selector de grupo
+    // s169 F0 — rejilla (TD) por filamento, extraída de render_pro_mode_panel para
+    // que Create/Object (F1/F3) puedan reusarla bajo su propio wrapper (Collapsing
+    // Header / card). Self-contained: lee fcolors/nfil por su cuenta.
+    void render_td_grid();
+    // s169 F0 — color-resultado predicho en vivo (top+penu compuestos contra el
+    // fondo real del objeto activo), extraído del lambda local de render_left_rail
+    // para que el header/Object (F2/F3) puedan predecir un swatch también.
+    uint32_t predict_argb_for(const Slic3r::SurfacePassStack& top,
+                              const Slic3r::SurfacePassStack& penu) const;
 
     // PR.3 — modelo de dos capas (auto vs guardadas):
     //  · set_active_recipe: click en swatch = SOLO fija el color activo (no crea
@@ -155,11 +181,19 @@ private:
     bool has_unsaved_palettes() const;
 
     std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_flat;
-    std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_mixed;
     std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_gradient;
+    // s171 — reemplaza a "Mixed (ColorStitch)" (nukeado: penu-dither+top-solid,
+    // siempre salía amarillo en el preview TD por venir de una ruta muerta desde
+    // s120). "ColorStitch Pattern Color": 2 pasadas (Top + Penu, ambas a ratio
+    // 1.0 = sobrepuestas, no split de Z) con los MISMOS 2 tools y el MISMO ángulo
+    // (auto en ambas), barriendo el mix ColorStitch (pct_b) de 0% a 100% — solo
+    // ColorStitch, cero Solid/PathBlend.
+    std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_cs_gradient;
     std::string m_pal_key;          // firma del contexto con el que se generaron
     int  m_grad_tool_a = 0;         // A/B del gradient (selección UI: fase posterior)
     int  m_grad_tool_b = 1;
+    int  m_cs_tool_a    = 0;        // A/B del ColorStitch Pattern Color (s171)
+    int  m_cs_tool_b    = 1;
 
     // Color activo de pintura (capa "auto"). Sin slot hasta que se pinta.
     Slic3r::ColorSci::ColorRecipe m_active_recipe;
@@ -206,7 +240,21 @@ private:
     void set_tool_mode(bool select, bool erase);     // mutuamente excluyentes
     void toggle_mark(int object_idx, bool unmark);   // marcar/activar (o desmarcar)
     void switch_active_object(int object_idx);       // activar objeto + RE-APLICAR el color
-    void render_tool_row();                          // fila [Select][bucket][Eraser][Pick]
+    void render_tool_row();                          // fila [Select][Paint][Eraser][Pick]
+
+    // s173 — iconos reales (Fable) para la toolbar: 4 variantes por icono
+    // (light/dark × normal/hover), cargadas UNA vez. Mapa PRIVADO de este painter
+    // (no toca GLGizmosManager::MENU_ICON_NAME, compartido por todos los gizmos —
+    // decisión del plan de beauty-up, más barato y sin blast radius ajeno).
+    struct ToolIconSet {
+        void* normal      = nullptr;
+        void* normal_dark = nullptr;
+        void* hover       = nullptr;
+        void* hover_dark  = nullptr;
+    };
+    ToolIconSet m_icon_select, m_icon_paint, m_icon_eraser, m_icon_pick, m_icon_erase_all;
+    bool        m_tool_icons_loaded = false;
+    void        ensure_tool_icons_loaded();
     // NEOTKO_NEOTOWER_TAG — al pintar, promociona el tipo de torre a NeoTower en el preset
     // de impresión (one-shot, no-op si ya está) para que la UI refleje el planificador real.
     void ensure_neotower_tower_type();
@@ -236,9 +284,11 @@ public:
     bool select_tool_active()             const { return m_select_mode; }
     bool has_marked()                     const { return !m_marked_objects.empty(); }
 private:
-    // s111 — altura real del cuerpo del panel medida el frame anterior (los
-    // children de ImGui 1.8x no auto-redimensionan en Y; converge en 1 frame).
-    float m_panel_col_h       = 0.f;
+    // s169 F1 — departamento activo del panel (0=Paint, 1=Create, 2=Pro, 3=Object).
+    // Sustituye el layout de 2 columnas (rail+cuerpo) por un selector segmentado;
+    // m_panel_col_h (altura medida del frame anterior para las 2 columnas) muere
+    // con él — F1 ya no lo necesita.
+    int m_department          = 0;
 
     std::map<std::string, wxString> m_desc;
 };

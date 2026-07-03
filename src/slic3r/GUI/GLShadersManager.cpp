@@ -72,6 +72,22 @@ std::pair<bool, std::string> GLShadersManager::init()
             << " realcolor_accum=" << accum_ok << " realcolor_present=" << present_ok);
     }
 
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): Phong+fresnel+SSAO shells for render_shells(), gated
+    // at USE time by NeoDebug::REALCOLOR (see render_shells() in GCodeViewer.cpp) — loaded
+    // unconditionally here like RealColor's own shaders above, so `valid` intentionally does
+    // NOT gate the overall init() result on these: if they fail to load on some GPU,
+    // render_shells() falls back to plain "gouraud_light" (same null-check pattern already used
+    // for realcolor_present in render_toolpaths_realcolor), it doesn't break shader init for the
+    // rest of the app. Not gated behind is_gl_version_greater_or_equal_to(3,1) for the same
+    // reason RealColor's aren't — the 110/ variants exist precisely to cover that legacy path.
+    {
+        const bool gbuf_ok   = append_shader("shells_gbuffer", { prefix + "shells_gbuffer.vs", prefix + "shells_gbuffer.fs" });
+        const bool lit_ok    = append_shader("shells_lit", { prefix + "shells_lit.vs", prefix + "shells_lit.fs" });
+        const bool shadow_ok = append_shader("shells_shadow", { prefix + "shells_shadow.vs", prefix + "shells_shadow.fs" });
+        NEOTKO_LOG(REALCOLOR, "GLShadersManager::init: prefix=\"" << prefix << "\" shells_gbuffer=" << gbuf_ok
+            << " shells_lit=" << lit_ok << " shells_shadow=" << shadow_ok);
+    }
+
     // used to render objects in 3d editor
     valid &= append_shader("gouraud", { prefix + "gouraud.vs", prefix + "gouraud.fs" }
 #if ENABLE_ENVIRONMENT_MAP

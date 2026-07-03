@@ -799,6 +799,8 @@ GCodeViewer::~GCodeViewer()
     // NEOTKO_REALCOLOR_TAG: FBOs/textures/quad VBO are canvas-sized persistent GL state, not
     // touched by reset() (which only clears gcode-result-derived data) — free them here.
     destroy_realcolor_fbos();
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): same idiom for the shells AO G-buffer.
+    destroy_shells_ao_fbo();
     if (m_moves_slider) {
         delete m_moves_slider;
         m_moves_slider = nullptr;
@@ -1228,10 +1230,34 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
 // clamped [0.01,10.0]. rgb comes from the raw filament hex (str_tool_colors), NOT the
 // gamma/shell-adjusted m_tools.m_tool_colors, so M4's Beer-Lambert math matches the
 // Sandwich Editor/Painter preview exactly.
+//
+// UNIT FIX (s166): neotko_td_N is defined everywhere ELSE in ratio-units — a fraction of
+// ONE nominal layer height, per ColorSci.hpp's own doc comment and confirmed by every other
+// consumer (SandwichDialog::blend_preview_zone, GLGizmoColorMixPainter::gizmo_materials):
+// they always divide a `ratio` that is itself layer-height-relative (SurfacePass::ratio,
+// Slice::ratio) by this same td, never a physical mm length. RealColor is the one place that
+// composites against a REAL mm thickness per peel (`u_thickness` = render_path's physical
+// height, see render_toolpaths_realcolor()) — so feeding it the raw ratio-units td silently
+// mixed units: `T = 0.1^(thickness_mm / td_ratio)` treats a td of e.g. 2.18 as "2.18mm",
+// when it actually means "2.18 nominal layers", i.e. ~2.18*layer_height mm. That made every
+// material ~1/layer_height times MORE transmissive than the gizmo/painter previews (at a
+// typical 0.2mm layer height, ~5x too translucent), so multi-pass tops never converged to
+// solid within any sane peel budget and rendered washed/gray. Bake the same nominal layer
+// height the gizmo uses (GLGizmoColorMixPainter_layer_height's exact idiom) into td here,
+// once, at the source — every downstream consumer (accum shader's u_material_td[], and the
+// n_max peel-budget heuristic in render_toolpaths_realcolor which already compares td against
+// a mm-space min_layer_h) then works in consistent mm-space without further changes.
 void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& str_tool_colors)
 {
     std::vector<std::string> hex = str_tool_colors;
     while (hex.size() < 4) hex.push_back("#808080");
+
+    double nominal_layer_height = 0.2;
+    if (wxGetApp().preset_bundle != nullptr) {
+        if (auto* o = wxGetApp().preset_bundle->prints.get_edited_preset()
+                          .config.option<ConfigOptionFloat>("layer_height"))
+            if (o->value > 0.001) nominal_layer_height = o->value;
+    }
 
     auto* ac = wxGetApp().app_config;
     for (int t = 0; t < 4; ++t) {
@@ -1243,7 +1269,8 @@ void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& st
             const std::string v = ac->get("neotko_td_" + std::to_string(t + 1));
             try { if (!v.empty()) td = std::stof(v); } catch (...) {}
         }
-        m_realcolor_materials.td[t] = std::max(0.01f, std::min(10.f, td));
+        td = std::max(0.01f, std::min(10.f, td));
+        m_realcolor_materials.td[t] = td * (float)nominal_layer_height;
     }
     m_realcolor_materials.valid = true;
 }
@@ -4134,6 +4161,26 @@ static constexpr int REALCOLOR_DEBOUNCE_MS = 250;
 // per SS=2 step, but the user explicitly doesn't care about render time for this view.
 static constexpr int REALCOLOR_SUPERSAMPLE = 2;
 
+// NEOTKO_REALCOLOR_TAG s166 (item 3): screen-space AO kernel constants for realcolor_present.fs
+// — C++ constants first (same pattern as REALCOLOR_N_MAX/SUPERSAMPLE above), not a user setting
+// yet. Radius is in SUPERSAMPLED pixels (the AO kernel samples peel_depth_tex[0]/
+// peel_normal_tex[0], which live at REALCOLOR_SUPERSAMPLE x resolution, see ensure_realcolor_fbos).
+static constexpr float REALCOLOR_AO_RADIUS_PX = 4.0f;
+static constexpr float REALCOLOR_AO_STRENGTH = 0.35f;
+
+// NEOTKO_REALCOLOR_TAG s166 (item 4): render_shells() Phong+SSAO path constants — mirrors the
+// pattern above, native-canvas-resolution radius (no supersampling for shells, see
+// ShellsAOCache). Debug-gated (NeoDebug::REALCOLOR) — see render_shells().
+static constexpr float SHELLS_AO_RADIUS_PX = 6.0f;
+static constexpr float SHELLS_AO_STRENGTH = 0.35f;
+static const ColorRGBA SHELLS_SHADOW_COLOR = ColorRGBA(0.f, 0.f, 0.f, 0.25f);
+
+// NEOTKO_REALCOLOR_TAG: the accumulator's seed color (what shows through any transmittance
+// left unconsumed after REALCOLOR_N_MAX passes) used to live here as a constexpr — it's now
+// m_realcolor_tuning.accum_seed_gray (GCodeViewer.hpp), live-tunable via the debug panel in
+// render_toolpaths_realcolor(). Linear-space RGB (this whole pipeline works in linear, see
+// srgb_to_linear/linear_to_srgb in realcolor_accum.fs/realcolor_present.fs).
+
 GCodeViewer::RealColorFingerprint GCodeViewer::compute_realcolor_fingerprint(int canvas_width, int canvas_height) const
 {
     RealColorFingerprint fp;
@@ -4187,18 +4234,31 @@ bool GCodeViewer::ensure_realcolor_fbos(int w, int h)
     };
 
     const GLenum two_draw_bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    // NEOTKO_REALCOLOR_TAG s166 (item 3): peel FBO grows a 3rd target (view-space normal, for
+    // SSAO in realcolor_present.fs) — accum FBO stays at 2, it never reads/writes normals.
+    // draw-buffer state set here is per-FBO-object in GL and persists across bind/unbind, so
+    // the peel loop in render_toolpaths_realcolor() doesn't need its own glDrawBuffers call.
+    const GLenum three_draw_bufs[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
 
     for (int i = 0; i < 2; ++i) {
-        // peel FBO: color (attach0, RGBA8) + tool/thickness meta (attach1, RGBA32F) + depth-as-texture
+        // peel FBO: color (attach0, RGBA8) + tool/thickness meta (attach1, RGBA32F) +
+        // view-space normal (attach2, RGBA32F, s166) + depth-as-texture
         glsafe(::glGenFramebuffers(1, &m_realcolor_cache.peel_fbo[i]));
         glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_realcolor_cache.peel_fbo[i]));
-        m_realcolor_cache.peel_color_tex[i] = make_attachment(GL_COLOR_ATTACHMENT0, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, sw, sh);
-        m_realcolor_cache.peel_meta_tex[i]  = make_attachment(GL_COLOR_ATTACHMENT1, GL_RGBA32F, GL_RGBA, GL_FLOAT, sw, sh);
+        m_realcolor_cache.peel_color_tex[i]  = make_attachment(GL_COLOR_ATTACHMENT0, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, sw, sh);
+        m_realcolor_cache.peel_meta_tex[i]   = make_attachment(GL_COLOR_ATTACHMENT1, GL_RGBA32F, GL_RGBA, GL_FLOAT, sw, sh);
+        m_realcolor_cache.peel_normal_tex[i] = make_attachment(GL_COLOR_ATTACHMENT2, GL_RGBA32F, GL_RGBA, GL_FLOAT, sw, sh);
         // NEOTKO_REALCOLOR_TAG: GL_DEPTH_COMPONENT24 instead of *32F — 24-bit fixed depth is
         // core since GL1.4 (no GL_ARB_depth_buffer_float dependency), plenty of precision for
         // peel-order comparisons, and keeps the legacy-profile capability list shorter.
         m_realcolor_cache.peel_depth_tex[i] = make_attachment(GL_DEPTH_ATTACHMENT, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, sw, sh);
-        glsafe(::glDrawBuffers(2, two_draw_bufs));
+        // NEOTKO_REALCOLOR_TAG s166: 3 draw buffers on the peel FBO — UNVERIFIED on real macOS
+        // legacy-profile hardware (GL guarantees GL_MAX_DRAW_BUFFERS>=4 since ~GL2.0, but s164
+        // already taught us "shouldn't fail" != "doesn't fail" on that profile). If this FBO
+        // comes back incomplete on the user's hardware, fall back to reconstructing the normal
+        // from screen-space derivatives of v_eye_z directly in realcolor_present.fs instead of
+        // this 3rd attachment (drop peel_normal_tex + this glDrawBuffers back to 2).
+        glsafe(::glDrawBuffers(3, three_draw_bufs));
         {
             const GLenum status = ::glCheckFramebufferStatus(GL_FRAMEBUFFER);
             if (status != GL_FRAMEBUFFER_COMPLETE) {
@@ -4248,6 +4308,7 @@ void GCodeViewer::destroy_realcolor_fbos()
     for (int i = 0; i < 2; ++i) {
         if (m_realcolor_cache.peel_color_tex[i])     glsafe(::glDeleteTextures(1, &m_realcolor_cache.peel_color_tex[i]));
         if (m_realcolor_cache.peel_meta_tex[i])      glsafe(::glDeleteTextures(1, &m_realcolor_cache.peel_meta_tex[i]));
+        if (m_realcolor_cache.peel_normal_tex[i])    glsafe(::glDeleteTextures(1, &m_realcolor_cache.peel_normal_tex[i]));
         if (m_realcolor_cache.peel_depth_tex[i])     glsafe(::glDeleteTextures(1, &m_realcolor_cache.peel_depth_tex[i]));
         if (m_realcolor_cache.peel_fbo[i])           glsafe(::glDeleteFramebuffers(1, &m_realcolor_cache.peel_fbo[i]));
         if (m_realcolor_cache.accum_color_tex[i])    glsafe(::glDeleteTextures(1, &m_realcolor_cache.accum_color_tex[i]));
@@ -4259,8 +4320,38 @@ void GCodeViewer::destroy_realcolor_fbos()
     m_realcolor_cache = RealColorCache{};
 }
 
+// NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning (GCodeViewer.hpp) as
+// live sliders — same NeoDebug channel (ORCA_DEBUG_REALCOLOR) that already gates NEOTKO_LOG
+// calls in this file, so it's zero surface for anyone not already running with that env var.
+// Forces a recompute on any change (same m_realcolor_cache.valid=false idiom ensure_realcolor_fbos
+// uses on resize) since the peel shader's uniforms only get re-pushed on the next recompute pass.
+void GCodeViewer::render_realcolor_debug_panel()
+{
+    if (!NeoDebug::enabled(NeoDebug::REALCOLOR))
+        return;
+
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    ImGui::Begin("RealColor Tuning");
+    bool changed = false;
+    changed |= imgui.slider_float("accum seed gray", &m_realcolor_tuning.accum_seed_gray, 0.0f, 1.0f);
+    changed |= imgui.slider_float("ambient ground", &m_realcolor_tuning.ambient_ground, 0.0f, 1.0f);
+    changed |= imgui.slider_float("ambient sky", &m_realcolor_tuning.ambient_sky, 0.0f, 1.0f);
+    changed |= imgui.slider_float("fresnel power", &m_realcolor_tuning.fresnel_power, 0.5f, 10.0f);
+    changed |= imgui.slider_float("fresnel strength", &m_realcolor_tuning.fresnel_strength, 0.0f, 1.0f);
+    // NEOTKO_REALCOLOR_TAG: global TD multiplier — manual override + cheap visual calibration,
+    // see the set_uniform call in the accum pass above (RealColorTuning.td_scale).
+    changed |= imgui.slider_float("TD scale", &m_realcolor_tuning.td_scale, 0.1f, 3.0f, "%.2f");
+    ImGui::End();
+    if (changed) {
+        m_realcolor_cache.valid = false;
+        NEOTKO_LOG(REALCOLOR, "render_realcolor_debug_panel: tuning changed, forcing recompute");
+    }
+}
+
 void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height)
 {
+    render_realcolor_debug_panel();
+
     GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D();
 
     // camera actively moving: skip the FBO/cache pipeline entirely, same cheap flat render
@@ -4303,7 +4394,7 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         const GLenum realcolor_two_draw_bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
         glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_realcolor_cache.accum_fbo[0]));
         glsafe(::glDrawBuffer(GL_COLOR_ATTACHMENT0));
-        glsafe(::glClearColor(0.f, 0.f, 0.f, 1.f));
+        glsafe(::glClearColor(m_realcolor_tuning.accum_seed_gray, m_realcolor_tuning.accum_seed_gray, m_realcolor_tuning.accum_seed_gray, 1.f));
         glsafe(::glClear(GL_COLOR_BUFFER_BIT));
         glsafe(::glDrawBuffer(GL_COLOR_ATTACHMENT1));
         glsafe(::glClearColor(1.f, 1.f, 1.f, 1.f));
@@ -4362,6 +4453,11 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             peel_shader->set_uniform("view_normal_matrix", (Matrix3d)Matrix3d::Identity());
             peel_shader->set_uniform("u_viewport", Vec2f((float)sw, (float)sh));
             peel_shader->set_uniform("u_has_prev_depth", pass > 0);
+            // NEOTKO_REALCOLOR_TAG: live-tunable lighting constants, see RealColorTuning (GCodeViewer.hpp)
+            peel_shader->set_uniform("u_ambient_ground", m_realcolor_tuning.ambient_ground);
+            peel_shader->set_uniform("u_ambient_sky", m_realcolor_tuning.ambient_sky);
+            peel_shader->set_uniform("u_fresnel_power", m_realcolor_tuning.fresnel_power);
+            peel_shader->set_uniform("u_fresnel_strength", m_realcolor_tuning.fresnel_strength);
             for (int t = 0; t < 4; ++t) {
                 const ColorRGB& c = m_realcolor_materials.rgb[t];
                 peel_shader->set_uniform(("u_material_rgb[" + std::to_string(t) + "]").c_str(), std::array<float, 3>{ c.r(), c.g(), c.b() });
@@ -4441,8 +4537,18 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             accum_shader->start_using();
             accum_shader->set_uniform("u_beer_lambert", true);
             accum_shader->set_uniform("u_flat_alpha", 0.5f); // unused when u_beer_lambert==true
+            // NEOTKO_REALCOLOR_TAG: global TD multiplier, live-tunable (RealColorTuning.td_scale)
+            // — scales every material's TD together instead of only touching lighting terms.
+            // s166: m_realcolor_materials.td[] is already baked to mm (nominal layer height ×
+            // ratio-units td, see refresh_realcolor_materials UNIT FIX), so 1.0 is now the
+            // physically-grounded default — this is no longer standing in for the missing
+            // layer-height conversion (that's how s165 was using it, empirically converging on
+            // ~layer_height as the "correct" value, which is exactly the bug this fixes). Left
+            // as an artistic ± knob / cheap visual calibration: print a known part, nudge this
+            // until the render matches the photo, read off the resulting scale as an
+            // approximate TD correction for that specific filament (no real TD meter needed).
             for (int t = 0; t < 4; ++t)
-                accum_shader->set_uniform(("u_material_td[" + std::to_string(t) + "]").c_str(), m_realcolor_materials.td[t]);
+                accum_shader->set_uniform(("u_material_td[" + std::to_string(t) + "]").c_str(), m_realcolor_materials.td[t] * m_realcolor_tuning.td_scale);
 
             glsafe(::glActiveTexture(GL_TEXTURE0));
             glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_cache.peel_color_tex[cur]));
@@ -4510,6 +4616,12 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
     glsafe(::glActiveTexture(GL_TEXTURE2));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_cache.peel_depth_tex[0]));
     present_shader->set_uniform("u_peel_depth0", 2);
+    // NEOTKO_REALCOLOR_TAG s166 (item 3): SSAO input — pass-0 packed view-space normal.
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_cache.peel_normal_tex[0]));
+    present_shader->set_uniform("u_peel_normal0", 3);
+    present_shader->set_uniform("u_ao_radius", REALCOLOR_AO_RADIUS_PX);
+    present_shader->set_uniform("u_ao_strength", REALCOLOR_AO_STRENGTH);
     present_shader->set_uniform("u_texel_size", Vec2f(1.0f / (float)(canvas_width * REALCOLOR_SUPERSAMPLE), 1.0f / (float)(canvas_height * REALCOLOR_SUPERSAMPLE)));
 
     const int present_position_id = present_shader->get_attrib_location("v_position");
@@ -4526,11 +4638,79 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
     glsafe(::glActiveTexture(GL_TEXTURE0));
 }
 
+// NEOTKO_REALCOLOR_TAG s166 (item 4): single-buffered G-buffer FBO for the shells AO kernel —
+// see ShellsAOCache (GCodeViewer.hpp) and 03_DEPTH_PEELING_RENDER.md's sibling
+// ensure_realcolor_fbos() for the shared make_attachment idiom (not reused directly — that
+// lambda is local to render_toolpaths_realcolor's translation unit scope, cheap enough to
+// duplicate here rather than hoist to a shared helper for one extra caller).
+bool GCodeViewer::ensure_shells_ao_fbo(int w, int h)
+{
+    if (w <= 0 || h <= 0)
+        return false;
+
+    if (m_shells_ao_cache.gl_objects_created() && m_shells_ao_cache.tex_w == w && m_shells_ao_cache.tex_h == h)
+        return true;
+
+    destroy_shells_ao_fbo();
+
+    glsafe(::glGenFramebuffers(1, &m_shells_ao_cache.fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shells_ao_cache.fbo));
+
+    glsafe(::glGenTextures(1, &m_shells_ao_cache.gbuffer_tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_shells_ao_cache.gbuffer_tex));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_shells_ao_cache.gbuffer_tex, 0));
+
+    glsafe(::glGenTextures(1, &m_shells_ao_cache.depth_tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_shells_ao_cache.depth_tex));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shells_ao_cache.depth_tex, 0));
+
+    const GLenum one_draw_buf[1] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glDrawBuffers(1, one_draw_buf));
+
+    const GLenum status = ::glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        BOOST_LOG_TRIVIAL(error) << "GCodeViewer::ensure_shells_ao_fbo: incomplete, status=0x" << std::hex << status << std::dec;
+        destroy_shells_ao_fbo();
+        return false;
+    }
+
+    m_shells_ao_cache.tex_w = w;
+    m_shells_ao_cache.tex_h = h;
+    return true;
+}
+
+void GCodeViewer::destroy_shells_ao_fbo()
+{
+    if (m_shells_ao_cache.gbuffer_tex) glsafe(::glDeleteTextures(1, &m_shells_ao_cache.gbuffer_tex));
+    if (m_shells_ao_cache.depth_tex)   glsafe(::glDeleteTextures(1, &m_shells_ao_cache.depth_tex));
+    if (m_shells_ao_cache.fbo)         glsafe(::glDeleteFramebuffers(1, &m_shells_ao_cache.fbo));
+    m_shells_ao_cache = ShellsAOCache{};
+}
+
 void GCodeViewer::render_shells(int canvas_width, int canvas_height)
 {
     //BBS: add shell previewing logic
     if ((!m_shells.previewing && !m_shells.visible) || m_shells.volumes.empty())
         //if (!m_shells.visible || m_shells.volumes.empty())
+        return;
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): Phong+fresnel+SSAO(+shadow) path — gated behind the
+    // same debug channel as the RealColor Tuning panel (see 07_LIGHTING_SSAO_SHELLS_PLAN.md
+    // item 4.4: this function runs for EVERY EViewType, not just RealColor, so its default
+    // look must not change without the user confirming it visually first). Falls through to
+    // the original plain gouraud_light path below on any missing shader/FBO.
+    if (NeoDebug::enabled(NeoDebug::REALCOLOR) && render_shells_lit(canvas_width, canvas_height, camera))
         return;
 
     GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
@@ -4541,7 +4721,6 @@ void GCodeViewer::render_shells(int canvas_width, int canvas_height)
 
     shader->start_using();
     shader->set_uniform("emission_factor", 0.1f);
-    const Camera& camera = wxGetApp().plater()->get_camera();
     shader->set_uniform("z_far", camera.get_far_z());
     shader->set_uniform("z_near", camera.get_near_z());
     m_shells.volumes.render(GLVolumeCollection::ERenderType::Transparent, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
@@ -4549,6 +4728,104 @@ void GCodeViewer::render_shells(int canvas_width, int canvas_height)
     shader->stop_using();
 
     glsafe(::glDepthMask(GL_TRUE));
+}
+
+// NEOTKO_REALCOLOR_TAG s166 (item 4): Phong+fresnel+SSAO shells path. Two passes over
+// m_shells.volumes: (1) an opaque normal+eye_z G-buffer into m_shells_ao_cache, used only for
+// AO; (2) the real lit draw into the caller's framebuffer, sampling that G-buffer per-fragment.
+// Returns false (caller falls back to gouraud_light) if a shader failed to load or the FBO came
+// back incomplete — see ensure_shells_ao_fbo's own fallback note on the untested-in-the-wild
+// MRT-adjacent GL path.
+bool GCodeViewer::render_shells_lit(int canvas_width, int canvas_height, const Camera& camera)
+{
+    GLShaderProgram* gbuf_shader = wxGetApp().get_shader("shells_gbuffer");
+    GLShaderProgram* lit_shader  = wxGetApp().get_shader("shells_lit");
+    if (gbuf_shader == nullptr || lit_shader == nullptr)
+        return false;
+    if (!ensure_shells_ao_fbo(canvas_width, canvas_height))
+        return false;
+
+    // --- pass 1: normal+eye_z G-buffer, single opaque z-tested pass, own depth buffer.
+    // ERenderType::All (not Transparent) — GLVolumeCollection::render() force-enables
+    // GL_BLEND with GL_SRC_ALPHA for ERenderType::Transparent (see 3DScene.cpp), which would
+    // corrupt this pass: out_gbuffer.a carries eye_z in real mm, not a [0,1] alpha, so hardware
+    // blending against it would produce garbage. All also covers every volume the pass-2
+    // Transparent draw will actually show (superset, never under-covers occluders).
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shells_ao_cache.fbo));
+    glsafe(::glViewport(0, 0, canvas_width, canvas_height));
+    glsafe(::glClearColor(0.5f, 0.5f, 0.5f, -1.0f)); // a=-1 sentinel "no geometry", see shells_gbuffer.fs
+    glsafe(::glClearDepth(1.0));
+    glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthFunc(GL_LESS));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glDisable(GL_BLEND));
+
+    gbuf_shader->start_using();
+    m_shells.volumes.render(GLVolumeCollection::ERenderType::All, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
+    gbuf_shader->stop_using();
+
+    // --- pass 2: lit shells into the real framebuffer, same ERenderType::Transparent + params
+    // as the original gouraud_light path (visual parity — this shouldn't newly show/hide
+    // anything relative to today, only change shading).
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    glsafe(::glViewport(0, 0, canvas_width, canvas_height));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthFunc(GL_LESS));
+    glsafe(::glDepthMask(GL_FALSE)); // matches original: shells never write depth
+
+    lit_shader->start_using();
+    lit_shader->set_uniform("emission_factor", 0.1f);
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_shells_ao_cache.gbuffer_tex));
+    lit_shader->set_uniform("u_gbuffer", 0);
+    lit_shader->set_uniform("u_viewport", Vec2f((float)canvas_width, (float)canvas_height));
+    lit_shader->set_uniform("u_ao_radius", SHELLS_AO_RADIUS_PX);
+    lit_shader->set_uniform("u_ao_strength", SHELLS_AO_STRENGTH);
+    m_shells.volumes.render(GLVolumeCollection::ERenderType::Transparent, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
+    lit_shader->set_uniform("emission_factor", 0.0f);
+    lit_shader->stop_using();
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+
+    // --- item 4.3: projected contact shadow — least-confidence sub-item of this whole plan,
+    // see shells_shadow.vs's own comment. Kept last/separate so it's trivial to comment out
+    // without touching the AO path above if it doesn't read well.
+    render_shells_shadow(canvas_width, canvas_height, camera);
+
+    glsafe(::glDepthMask(GL_TRUE));
+    return true;
+}
+
+// NEOTKO_REALCOLOR_TAG s166 (item 4.3): flattens shells onto the bed (world z=0) along
+// LIGHT_TOP_DIR and draws a translucent contact shadow, stencil-deduped so overlapping shell
+// silhouettes don't double-darken the same bed pixel. Depth-TESTED (not disabled) so the
+// shadow correctly hides behind any already depth-written geometry (bed/printer model) at that
+// pixel — see shells_shadow.vs for why it needs volume_world_matrix/u_view_matrix kept apart
+// instead of the pre-composed view_model_matrix every other shells shader uses.
+void GCodeViewer::render_shells_shadow(int canvas_width, int canvas_height, const Camera& camera)
+{
+    GLShaderProgram* shadow_shader = wxGetApp().get_shader("shells_shadow");
+    if (shadow_shader == nullptr)
+        return;
+
+    glsafe(::glEnable(GL_STENCIL_TEST));
+    glsafe(::glClear(GL_STENCIL_BUFFER_BIT));
+    glsafe(::glStencilFunc(GL_NOTEQUAL, 1, 0xFF));
+    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthFunc(GL_LESS));
+    glsafe(::glDepthMask(GL_FALSE));
+
+    shadow_shader->start_using();
+    shadow_shader->set_uniform("u_view_matrix", camera.get_view_matrix());
+    shadow_shader->set_uniform("u_shadow_color", SHELLS_SHADOW_COLOR);
+    // ERenderType::Transparent — same set of volumes as the lit pass, so the shadow matches
+    // exactly what's actually visible (render() also auto-enables GL_BLEND for this type,
+    // which is what we want here, unlike the G-buffer pass above).
+    m_shells.volumes.render(GLVolumeCollection::ERenderType::Transparent, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
+    shadow_shader->stop_using();
+
+    glsafe(::glDisable(GL_STENCIL_TEST));
 }
 
 //BBS

@@ -1129,6 +1129,10 @@ public:
                 try { if (!val.empty()) v = std::stof(val); } catch (...) {}
                 m_td[i] = std::max(0.01f, std::min(10.f, v > 0.f ? v : 1.f));
             }
+            // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): snapshot at load time so
+            // commit() can tell whether TD actually changed (gate the reslice —
+            // don't fire one just because the user opened/closed the TD panel).
+            m_td_at_open = m_td;
         }
 
         // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): preload virtual MixedColor
@@ -1207,6 +1211,9 @@ private:
     //     este panel es el punto de entrada natural para N1.1 (RGB→Lab) y
     //     N1.3 (TD por canal). Por ahora se mantiene escalar + RGB.
     std::array<float, 4>          m_td       = {};
+    // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): value at dialog-open, to gate
+    // commit()'s reslice on an actual TD change (see load block above).
+    std::array<float, 4>          m_td_at_open = {};
     std::array<wxSlider*, 4>      m_sl_td    = {};
     std::array<wxStaticText*, 4>  m_lbl_td   = {};
     std::array<wxPanel*, 4>       m_sw_td    = {};
@@ -2120,6 +2127,90 @@ private:
         return -1;
     }
 
+    // NEOTKO_SANDWICH_TAG — Fase 2.3 (s167 plan, resuelta a favor de (b), ampliada
+    // tras revisión): el Gradient Designer es un editor de PRESET (puede aplicar a
+    // 0, 1 o varios objetos del plato), a diferencia del Painter que SIEMPRE edita
+    // un objeto concreto — de ahí que aquí no hubiera un extruder_id() obvio que
+    // mirar. Pero el viewport SÍ es consultable desde Tab.cpp (misma Selection que
+    // usa el resto de la GUI, solo que el Painter llega a ella vía su propio
+    // m_c->selection_info() en vez de Plater::get_selection() — ambas caminos
+    // llegan al mismo ModelObject). Así que: si hay EXACTAMENTE un objeto
+    // seleccionado en el viewport ahora mismo, usar SU color real (mismo rigor
+    // físico/MixedFilament que el Painter, ver gd_resolve_selected_object_bg) —
+    // más preciso que el preset cuando el usuario está mirando un objeto concreto.
+    // Si no (nada seleccionado, o varios objetos con colores distintos: ambiguo),
+    // caer a "qué filamento imprime ESTE preset por defecto" — solid_infill_filament
+    // (Top se apoya en el relleno sólido, Penu vive dentro de él), wall_filament
+    // como reserva. Negro subestimaba cuánto se ve a través de una capa
+    // translúcida — misma familia del bug "gris lavado" de s165/s166, solo que
+    // aquí era la composición, no las unidades de TD.
+    void gd_resolve_base_bg(const Slic3r::ColorSci::Material mats[4], float bg[3]) const
+    {
+        if (gd_resolve_selected_object_bg(mats, bg))
+            return;
+
+        int fid = 0;
+        if (auto* o = m_config->option<ConfigOptionInt>("solid_infill_filament")) fid = o->value;
+        if (fid <= 0)
+            if (auto* o = m_config->option<ConfigOptionInt>("wall_filament")) fid = o->value;
+        const int idx = std::clamp(fid - 1, 0, 3);
+        bg[0] = mats[idx].rgb[0];
+        bg[1] = mats[idx].rgb[1];
+        bg[2] = mats[idx].rgb[2];
+    }
+
+    // Mismo patrón de resolución que GLGizmoColorMixPainter::resolve_object_base_bg
+    // (physical tool directo / MixedFilament virtual vía blend_parallel), pero
+    // partiendo de Plater::get_selection() en vez de m_c->selection_info() — este
+    // diálogo no es un gizmo, no tiene CommonGizmosDataObjectsPool. false cuando
+    // la selección no es un único objeto inequívoco o su extruder no resuelve.
+    bool gd_resolve_selected_object_bg(const Slic3r::ColorSci::Material mats[4], float bg[3]) const
+    {
+        Plater* plater = wxGetApp().plater();
+        if (!plater) return false;
+        const Selection& sel = plater->get_selection();
+        const int obj_idx = sel.get_object_idx();   // -1 salvo un único objeto en la selección
+        if (obj_idx < 0) return false;
+        const Model* model = sel.get_model();
+        if (!model || obj_idx >= (int)model->objects.size()) return false;
+        const ModelObject* mo = model->objects[obj_idx];
+        if (!mo) return false;
+
+        int extruder_id = 0;
+        for (const ModelVolume* mv : mo->volumes)
+            if (mv && mv->is_model_part()) { extruder_id = mv->extruder_id(); break; }
+        // extruder_id()==0 = sin "extruder" explícito en volumen ni objeto
+        // (Model.cpp) — el motor lo trata como T0 por defecto, no como "sin
+        // resolver". Antes esto caía a negro para el caso más común (objeto
+        // recién importado, sin tool asignado todavía).
+        if (extruder_id <= 0) extruder_id = 1;
+
+        size_t num_physical = 0;
+        if (auto* o = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour"))
+            num_physical = o->values.size();
+
+        if ((size_t)extruder_id <= num_physical) {
+            const int idx = std::clamp(extruder_id - 1, 0, 3);
+            bg[0] = mats[idx].rgb[0]; bg[1] = mats[idx].rgb[1]; bg[2] = mats[idx].rgb[2];
+            return true;
+        }
+
+        // Virtual MixedFilament id — misma aproximación TD-aware que el Painter
+        // (build_mixed_filament_recipe, ColorPredict.cpp), no el promedio RGB
+        // ingenuo de la lista de swatches.
+        const MixedFilament* mf = wxGetApp().preset_bundle->mixed_filaments
+                                       .mixed_filament_from_id((unsigned)extruder_id, num_physical);
+        if (!mf) return false;
+        const int mix_b = std::clamp(mf->mix_b_percent, 0, 100);
+        const int a = std::clamp<int>((int)mf->component_a - 1, 0, 3);
+        const int b = std::clamp<int>((int)mf->component_b - 1, 0, 3);
+        std::vector<Slic3r::ColorSci::Slice> slices;
+        slices.push_back({ a, (100 - mix_b) / 100.f });
+        slices.push_back({ b, mix_b / 100.f });
+        Slic3r::ColorSci::blend_parallel(slices, mats, bg);
+        return true;
+    }
+
     // Color previsto de un step: composición física apilada (penu abajo, top
     // B+A encima) con los TD del panel de la derecha — la tira reacciona en
     // vivo a los sliders TD vía refresh_td_previews().
@@ -2127,7 +2218,8 @@ private:
     {
         Slic3r::ColorSci::Material mats[4];
         gd_materials(mats);
-        const float bg[3] = { 0.f, 0.f, 0.f };
+        float bg[3] = { 0.f, 0.f, 0.f };
+        gd_resolve_base_bg(mats, bg);
         float rgb[3];
         Slic3r::ColorSci::sandwich_colour_stacked(g.top, g.penu, mats, bg, rgb);
         return wxColour((unsigned char)std::min(255.f, rgb[0] * 255.f),
@@ -2150,6 +2242,13 @@ private:
     {
         Slic3r::ColorSci::PredictOptions o;
         o.layer_height = layer_height_mm();
+        // NEOTKO_SANDWICH_TAG — Fase 2.3 (s167 plan, resuelta): mismo fondo real
+        // que gd_step_colour(), aquí para el modo Predict (m_gd_recipes, que
+        // hornea el color en la receta — un Refresh solo no basta, ver
+        // gd_schedule_recalc de arriba).
+        Slic3r::ColorSci::Material mats[4];
+        gd_materials(mats);
+        gd_resolve_base_bg(mats, o.bg_rgb);
         return o;
     }
 
@@ -4346,13 +4445,26 @@ private:
 
         // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD + use_virtual write-back.
         // Lane mode is committed live on its wxChoice handler (no extra work).
+        // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): AppConfig::set() only marks
+        // the in-memory store dirty (AppConfig.hpp), it never writes to disk —
+        // so a TD edit here used to survive only if the app later shut down
+        // cleanly. save() is one click on OK, cheap. The reslice is gated on an
+        // actual change (vs. m_td_at_open) so opening the dialog and clicking
+        // OK without touching TD doesn't fire a spurious background process —
+        // this bypassed the normal wb()/wi() -> m_on_change() tracking above,
+        // so nothing else in commit() was already triggering it.
+        bool td_changed = false;
         if (auto* ac = wxGetApp().app_config) {
             char buf[32];
             for (int i = 0; i < 4; ++i) {
+                if (std::abs(m_td[i] - m_td_at_open[i]) > 1e-6f) td_changed = true;
                 std::snprintf(buf, sizeof(buf), "%.3f", m_td[i]);
                 ac->set("neotko_td_" + std::to_string(i + 1), buf);
             }
+            ac->save();
         }
+        if (td_changed)
+            wxGetApp().plater()->schedule_background_process();
         if (m_chk_use_virtual) {
             if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
                 o->value = m_chk_use_virtual->GetValue();

@@ -25,6 +25,7 @@ namespace GUI {
 
 class PartPlateList;
 class OpenGLManager;
+class Camera;
 
 static const float GCODE_VIEWER_SLIDER_SCALE = 0.6f;
 static const float SLIDER_DEFAULT_RIGHT_MARGIN  = 10.0f;
@@ -735,7 +736,11 @@ public:
 
     // NEOTKO_REALCOLOR_TAG: LUT of TD/rgb per physical tool for the RealColor view,
     // read from raw filament_colour + app_config neotko_td_1..4 (same source as
-    // Sandwich Editor/Painter, see ColorSci.cpp::blend_stacked).
+    // Sandwich Editor/Painter, see ColorSci.cpp::blend_stacked). NOTE (s166): unlike the
+    // Sandwich/Painter previews, `td` here is baked to MILLIMETERS (neotko_td_N in its native
+    // ratio-units × nominal layer_height) in refresh_realcolor_materials() — RealColor's peel
+    // composites against real physical mm thickness per pass, not a layer-height-relative
+    // ratio, so it needs mm-space TD to stay consistent. See the UNIT FIX comment there.
     struct RealColorMaterials
     {
         std::array<ColorRGB, 4> rgb{};
@@ -777,9 +782,12 @@ public:
         // GL handles stored as plain unsigned int (not GLuint) so this header doesn't need
         // to pull in GL/glew.h — matches IBuffer::vbo/ibo convention elsewhere in this class.
         unsigned int peel_fbo[2] = { 0, 0 };
-        unsigned int peel_color_tex[2] = { 0, 0 };  // GL_RGBA8, attachment 0: lit color of this peel
-        unsigned int peel_meta_tex[2]  = { 0, 0 };  // GL_RGBA32F, attachment 1: r=tool_id, g=thickness
-        unsigned int peel_depth_tex[2] = { 0, 0 };  // GL_DEPTH_COMPONENT32F, sampled by the next peel pass
+        unsigned int peel_color_tex[2]  = { 0, 0 }; // GL_RGBA8, attachment 0: lit color of this peel
+        unsigned int peel_meta_tex[2]   = { 0, 0 }; // GL_RGBA32F, attachment 1: r=tool_id, g=thickness
+        // NEOTKO_REALCOLOR_TAG s166 (item 3): attachment 2, view-space normal packed [0,1] —
+        // consumed only by realcolor_present.fs's SSAO kernel, ignored by realcolor_accum.fs.
+        unsigned int peel_normal_tex[2] = { 0, 0 }; // GL_RGBA32F, attachment 2: packed view-space normal
+        unsigned int peel_depth_tex[2]  = { 0, 0 }; // GL_DEPTH_COMPONENT32F, sampled by the next peel pass
 
         unsigned int accum_fbo[2] = { 0, 0 };
         unsigned int accum_color_tex[2]    = { 0, 0 }; // GL_RGBA8, running composited color
@@ -792,6 +800,43 @@ public:
         RealColorFingerprint fingerprint;
 
         bool gl_objects_created() const { return peel_fbo[0] != 0; }
+    };
+
+    // NEOTKO_REALCOLOR_TAG: live-tunable mirrors of constants that would otherwise be baked
+    // into GCodeViewer.cpp/shader #defines — debug-only (edited via the ImGui panel gated by
+    // NeoDebug::enabled(NeoDebug::REALCOLOR) in render_toolpaths_realcolor()), not a user
+    // setting. Defaults re-calibrated s166, live, against a real print AFTER the s166 TD unit
+    // fix (see refresh_realcolor_materials) — ambient raised vs. the s164 values (0.18/0.32) to
+    // read flatter/brighter, which the user judged easier to eyeball-compare against real
+    // filament swatches than the more sculpted two-tone look; accum_seed_gray dropped to 0
+    // since post-fix convergence means it rarely shows except at genuinely thin edges.
+    struct RealColorTuning
+    {
+        float accum_seed_gray  = 0.0f;  // linear-space accumulator background, see item 1
+        float ambient_ground   = 0.35f; // realcolor_peel.vs two-tone ambient, see item 2
+        float ambient_sky      = 0.45f;
+        float fresnel_power    = 5.0f;  // realcolor_peel.vs rim term, see item 2
+        float fresnel_strength = 0.05f;
+        // NEOTKO_REALCOLOR_TAG: global multiplier applied to every m_realcolor_materials.td[t]
+        // before it reaches realcolor_accum.fs — manual override + cheap visual TD calibration
+        // (no real TD meter available), see render_realcolor_debug_panel().
+        float td_scale         = 1.0f;
+    };
+
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): single-buffered (no ping-pong — shells are opaque,
+    // one z-tested rasterization pass already resolves the nearest surface, unlike RealColor's
+    // translucent peel stack) G-buffer for the shells_lit.fs AO kernel. Native canvas
+    // resolution, no REALCOLOR_SUPERSAMPLE — shells are large solid volumes, not thin toolpath
+    // lines, so they don't share RealColor's sub-pixel aliasing problem. Created/destroyed by
+    // ensure_shells_ao_fbo()/destroy_shells_ao_fbo(), only when the debug-gated path in
+    // render_shells() is active.
+    struct ShellsAOCache
+    {
+        int tex_w = 0, tex_h = 0;
+        unsigned int fbo = 0;
+        unsigned int gbuffer_tex = 0; // GL_RGBA32F: rgb = packed view-space normal, a = eye_z (mm), a<=0 = no geometry
+        unsigned int depth_tex = 0;   // GL_DEPTH_COMPONENT24, z-test only, never sampled
+        bool gl_objects_created() const { return fbo != 0; }
     };
 
     //BBS
@@ -837,6 +882,10 @@ private:
     RealColorMaterials m_realcolor_materials;
     // NEOTKO_REALCOLOR_TAG: depth-peel/accumulate GL scratch + idle-cache, see render_toolpaths_realcolor()
     RealColorCache m_realcolor_cache;
+    // NEOTKO_REALCOLOR_TAG: debug-tunable lighting/background constants, see RealColorTuning above
+    RealColorTuning m_realcolor_tuning;
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): G-buffer for the shells Phong+SSAO path, see ShellsAOCache above
+    ShellsAOCache m_shells_ao_cache;
     /*BBS GUI refactor, store displayed items in color scheme combobox */
     std::vector<EViewType> view_type_items;
     std::vector<std::string> view_type_items_str;
@@ -972,9 +1021,20 @@ private:
     void render_toolpaths_realcolor(int canvas_width, int canvas_height);
     bool ensure_realcolor_fbos(int w, int h);
     void destroy_realcolor_fbos();
+    // NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning as live sliders,
+    // gated by NeoDebug::enabled(NeoDebug::REALCOLOR) — no-op unless ORCA_DEBUG_REALCOLOR is set
+    void render_realcolor_debug_panel();
     RealColorFingerprint compute_realcolor_fingerprint(int canvas_width, int canvas_height) const;
     void render_toolpaths();
     void render_shells(int canvas_width, int canvas_height);
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): G-buffer for the shells Phong+SSAO path — see
+    // ShellsAOCache. Only used when the debug-gated path in render_shells() is active.
+    bool ensure_shells_ao_fbo(int w, int h);
+    void destroy_shells_ao_fbo();
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): returns false (caller falls back to plain
+    // gouraud_light) if any shader/FBO isn't available — see render_shells().
+    bool render_shells_lit(int canvas_width, int canvas_height, const Camera& camera);
+    void render_shells_shadow(int canvas_width, int canvas_height, const Camera& camera);
 
     //BBS: GUI refactor: add canvas size
     void render_legend(float &legend_height, int canvas_width, int canvas_height, int right_margin);
