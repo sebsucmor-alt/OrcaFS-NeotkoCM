@@ -306,7 +306,7 @@ void PrintObject::make_perimeters()
     // single shared table per object, built from printing_region(0)'s config.
     if (this->num_printing_regions() > 0) {
         const PrintRegionConfig& tb_region_cfg = this->printing_region(0).config();
-        const Feature::TextureBump::TextureBumpConfig tb_cfg{
+        const TextureBumpConfig tb_cfg{
             tb_region_cfg.texture_bump,
             scaled<coord_t>(tb_region_cfg.texture_bump_thickness.value),
             scaled<coord_t>(tb_region_cfg.texture_bump_point_distance.value),
@@ -317,7 +317,14 @@ void PrintObject::make_perimeters()
             tb_region_cfg.texture_bump_max_angle.value * M_PI / 180.0,
             tb_region_cfg.texture_bump_blur_strength.value,
             tb_region_cfg.texture_bump_image_path.value};
-        if (tb_cfg.type != TextureBumpType::None) {
+        // NEOTKO_TEXTUREBUMP_TAG — WIP gate, requested explicitly: this feature only ever runs
+        // when LibreMode is on (same gate as NeoArachne) AND the user opted into the debug/WIP
+        // build via `export ORCA_DEBUG_ALL=1` (or ORCA_DEBUG_TEXTUREBUMP=1 specifically --
+        // NeoDebug::enabled() already treats ORCA_DEBUG_ALL as "every channel enabled"). Forcing
+        // the config to None here (rather than skipping the block) means group_region_by_texture_bump
+        // / apply_texture_bump downstream see a clean "disabled" state either way.
+        const bool tb_wip_gate_open = this->config().neotko_libre_mode.value && NeoDebug::enabled(NeoDebug::TEXTUREBUMP);
+        if (tb_cfg.type != TextureBumpType::None && tb_wip_gate_open) {
             BoundingBoxf3 tb_bounds;
             tb_bounds.min = Vec3d(-unscale_(this->size().x()) / 2.0, -unscale_(this->size().y()) / 2.0, 0.0);
             tb_bounds.max = Vec3d( unscale_(this->size().x()) / 2.0,  unscale_(this->size().y()) / 2.0, unscale_(this->size().z()));

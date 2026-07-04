@@ -150,6 +150,8 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
         }
 
         // Apply fuzzy skin if it is enabled for at least some part of the polygon.
+        // NEOTKO_TEXTUREBUMP_TAG — texture bump intentionally not applied on the Classic path, see
+        // process_classic() comment.
         const Polygon polygon = apply_fuzzy_skin(loop.polygon, perimeter_generator, loop.depth, loop.is_contour);
 
         ExtrusionPaths paths;
@@ -357,7 +359,7 @@ struct PerimeterGeneratorArachneExtrusion
 };
 
 static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& perimeter_generator, std::vector<PerimeterGeneratorArachneExtrusion>& pg_extrusions,
-    bool &steep_overhang_contour, bool &steep_overhang_hole)
+    bool &steep_overhang_contour, bool &steep_overhang_hole, int total_loops)
 {
     // Detect steep overhangs
     bool overhangs_reverse = perimeter_generator.config->overhang_reverse &&
@@ -374,7 +376,7 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         const bool  is_contour = !extrusion->is_closed || pg_extrusion.is_contour;
         apply_fuzzy_skin(extrusion, perimeter_generator, is_contour);
-        apply_texture_bump(extrusion, perimeter_generator, is_contour);
+        apply_texture_bump(extrusion, perimeter_generator, is_contour, total_loops);
 
         ExtrusionPaths paths;
         // detect overhanging/bridging perimeters
@@ -1126,6 +1128,14 @@ static void reorient_perimeters(ExtrusionEntityCollection &entities, bool steep_
 void PerimeterGenerator::process_classic()
 {
     group_region_by_fuzzify(*this);
+    // NEOTKO_TEXTUREBUMP_TAG — intentionally NOT called here. Classic's fixed-width, independently
+    // re-offset walls have no bead-width compensation for the gap that opens between adjacent
+    // walls once they're tapered by different amounts (see texture_bump_effect_scale in
+    // TextureBump.cpp) -- unlike Arachne, which at least exposes the resulting gap instead of
+    // silently over-extruding at self-intersections. Disabled after a real print test showed
+    // Classic quietly over-extruding. Also matters for NeoArachne's outer pass, which reuses this
+    // function with wall_loops forced to 1 -- texture bump must stay off here so it can't fight
+    // that forced single-wall contract.
 
     // other perimeters
     m_mm3_per_mm               		= this->perimeter_flow.mm3_per_mm();
@@ -1213,6 +1223,10 @@ void PerimeterGenerator::process_classic()
         // Set the topmost layer to be one wall
         if (loop_number > 0 && config->only_one_wall_top && this->upper_slices == nullptr)
             loop_number = 0;
+        // NEOTKO_TEXTUREBUMP_TAG — no forced minimum wall count here: texture bump is disabled on
+        // the Classic path entirely (see process_classic() comment above), and this function also
+        // serves as NeoArachne's outer pass, which needs wall_loops to stay exactly as requested
+        // (usually 1) regardless of texture bump.
 
         ExPolygons last        = union_ex(surface.expolygon.simplify_p(surface_simplify_resolution));
         ExPolygons gaps;
@@ -2083,8 +2097,7 @@ void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& order
 void PerimeterGenerator::process_arachne()
 {
     group_region_by_fuzzify(*this);
-    // NEOTKO_TEXTUREBUMP_TAG — Arachne-only for v1 (see TextureBump.hpp apply_texture_bump(Polygon)
-    // overload comment); process_classic() intentionally does not call this.
+    // NEOTKO_TEXTUREBUMP_TAG — also called from process_classic() (mirrors this).
     group_region_by_texture_bump(*this);
 
     // other perimeters
@@ -2135,7 +2148,13 @@ void PerimeterGenerator::process_arachne()
         const bool is_topmost_layer = (this->upper_slices == nullptr) ? true : false;
         if (is_topmost_layer && loop_number > 0 && config->only_one_wall_top)
             loop_number = 0;
-        
+        // NEOTKO_TEXTUREBUMP_TAG — Phase 2 (validated on real print, s178): with the position/width
+        // blend in texture_bump_extrusion_line (Combined-style anchoring), the innermost wall stays
+        // welded to infill even without a dedicated untouched middle wall, so 2 walls are enough —
+        // relaxed from the original >=3 minimum. Applied after the single-wall overrides above.
+        if (this->has_texture_bump)
+            loop_number = std::max(loop_number, 1);
+
         auto apply_precise_outer_wall = config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter;
         // Orca: properly adjust offset for the outer wall if precise_outer_wall is enabled.
         ExPolygons last = offset_ex(surface.expolygon.simplify_p(surface_simplify_resolution),
@@ -2462,7 +2481,7 @@ void PerimeterGenerator::process_arachne()
             steep_overhang_contour = true;
             steep_overhang_hole    = true;
         }
-        if (ExtrusionEntityCollection extrusion_coll = traverse_extrusions(*this, ordered_extrusions, steep_overhang_contour, steep_overhang_hole); !extrusion_coll.empty()) {
+        if (ExtrusionEntityCollection extrusion_coll = traverse_extrusions(*this, ordered_extrusions, steep_overhang_contour, steep_overhang_hole, loop_number); !extrusion_coll.empty()) {
             // All walls are counter-clockwise initially, so we don't need to reorient it if that's what we want
             if (wall_direction != WallDirection::CounterClockwise) {
                 reorient_perimeters(extrusion_coll, steep_overhang_contour, steep_overhang_hole,

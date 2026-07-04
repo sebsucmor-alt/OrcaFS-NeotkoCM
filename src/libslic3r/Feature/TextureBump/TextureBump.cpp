@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
@@ -12,6 +13,7 @@
 #include "libslic3r/PerimeterGenerator.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/Print.hpp" // needed for PrintRegion::config() in group_region_by_texture_bump
 
 #include "TextureBump.hpp"
 
@@ -20,6 +22,13 @@
 // seam-blend implementation below are this fork's own design. See docs/ATTRIBUTION_TEXTURE_BUMP.md.
 
 using namespace Slic3r;
+
+// Local mirror of SurfaceColorMix.hpp's NEOTKO_LOG macro (same pattern NeoTower.cpp uses as
+// NT_LOG) so this file doesn't need to pull in the unrelated, heavy SurfaceColorMix.hpp just for
+// one logging macro.
+#define TEXTUREBUMP_LOG(body) do { if (Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::TEXTUREBUMP)) { \
+    std::ostringstream _tbdbg_; _tbdbg_ << body;                                                   \
+    Slic3r::NeoDebug::write(Slic3r::NeoDebug::TEXTUREBUMP, _tbdbg_.str()); } } while (0)
 
 namespace Slic3r::Feature::TextureBump {
 
@@ -37,19 +46,53 @@ std::shared_ptr<const png::ImageGreyscale> load_texture_image(const std::string&
     if (it != s_cache.end())
         return it->second;
 
-    std::shared_ptr<const png::ImageGreyscale> result;
+    std::shared_ptr<png::ImageGreyscale> result;
+    bool                                 converted_from_color = false;
     std::ifstream in(path, std::ios::binary);
     if (in.is_open()) {
         std::vector<char> buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         if (!buf.empty()) {
             png::ReadBuf rbuf{ buf.data(), buf.size() };
             auto img = std::make_shared<png::ImageGreyscale>();
-            if (png::decode_png(rbuf, *img) && img->rows > 0 && img->cols > 0)
+            if (png::decode_png(rbuf, *img) && img->rows > 0 && img->cols > 0) {
                 result = img;
+            } else {
+                // NEOTKO_TEXTUREBUMP_TAG — decode_png() only accepts true 8-bit grayscale PNGs.
+                // Most user-supplied PNGs (screenshots, exports from Photoshop/GIMP) are RGB or
+                // RGBA -- this exact friction is what tripped up the community on the original
+                // Orca PR (see docs/ATTRIBUTION_TEXTURE_BUMP.md). Fall back to the colored decoder
+                // and convert to luma so any PNG works, not just pre-converted ones.
+                png::ImageColorscale cimg;
+                if (png::decode_colored_png(rbuf, cimg) && cimg.rows > 0 && cimg.cols > 0 && cimg.bytes_per_pixel >= 1) {
+                    auto gimg = std::make_shared<png::ImageGreyscale>();
+                    gimg->rows = cimg.rows;
+                    gimg->cols = cimg.cols;
+                    gimg->buf.resize(cimg.rows * cimg.cols);
+                    const int bpp = cimg.bytes_per_pixel;
+                    for (size_t r = 0; r < cimg.rows; ++r) {
+                        for (size_t c = 0; c < cimg.cols; ++c) {
+                            const size_t base = (r * cimg.cols + c) * size_t(bpp);
+                            uint8_t      luma;
+                            if (bpp >= 3) {
+                                const double rr = double(cimg.buf[base + 0]);
+                                const double gg = double(cimg.buf[base + 1]);
+                                const double bb = double(cimg.buf[base + 2]);
+                                luma = uint8_t(std::clamp(0.299 * rr + 0.587 * gg + 0.114 * bb, 0.0, 255.0));
+                            } else {
+                                luma = cimg.buf[base]; // grayscale or grayscale+alpha
+                            }
+                            gimg->buf[r * cimg.cols + c] = luma;
+                        }
+                    }
+                    result = gimg;
+                    converted_from_color = true;
+                }
+            }
         }
     }
 
-    NEOTKO_LOG(TEXTUREBUMP, "load_texture_image path='" << path << "' ok=" << (result ? 1 : 0)
+    TEXTUREBUMP_LOG("load_texture_image path='" << path << "' ok=" << (result ? 1 : 0)
+        << " converted_from_color=" << (converted_from_color ? 1 : 0)
         << (result ? (" rows=" + std::to_string(result->rows) + " cols=" + std::to_string(result->cols)) : std::string()));
 
     s_cache.emplace(path, result);
@@ -159,8 +202,8 @@ double compute_u(const Vec3d& point_mm, const Vec2d& perp_dir_normalized, Textur
             const double y = point_mm.y() - center.y();
             const double half_x = std::max(object_bounds_mm.size().x() * 0.5, 1e-6);
             const double half_y = std::max(object_bounds_mm.size().y() * 0.5, 1e-6);
-            double face_u;
-            int    face_idx;
+            double face_u = 0.0;
+            int    face_idx = 0;
             if (normal_radians >= -M_PI_4 && normal_radians < M_PI_4) {
                 face_idx = 0; face_u = 0.5 + 0.5 * (y / half_y); // East (+X)
             } else if (normal_radians >= M_PI_4 && normal_radians < 3.0 * M_PI_4) {
@@ -261,7 +304,7 @@ void apply_slope_limiter(const TextureBumpConfig& cfg, const std::vector<coordf_
         }
     }
 
-    NEOTKO_LOG(TEXTUREBUMP, "slope_limiter columns=" << num_columns << " layers=" << num_layers
+    TEXTUREBUMP_LOG("slope_limiter columns=" << num_columns << " layers=" << num_layers
         << " violated_columns=" << total_violations << " max_angle_deg=" << (cfg.max_angle_rad * 180.0 / M_PI)
         << " blur_strength=" << cfg.blur_strength);
 }
@@ -305,15 +348,21 @@ void TextureBumpTable::build(const TextureBumpConfig& cfg, const BoundingBoxf3& 
             const double raw = has_seam
                 ? sample_seam_blended(*img, u_canonical, num_periods, kSeamHalfWidth, v)
                 : (sample_image_bilinear(*img, u_canonical, v) * 2.0 - 1.0);
+            // NEOTKO_TEXTUREBUMP_TAG — outward-only: remap raw from [-1,1] to [0,1] before scaling
+            // by thickness, so the wall is only ever pushed away from the object's interior, never
+            // toward it. This is what actually prevents infill from invading the space a bumped
+            // wall now occupies (a symmetric +/-thickness range could move the wall inward, into
+            // infill computed from the unperturbed nominal geometry) -- no infill-side margin or
+            // multi-perimeter taper needed once inward displacement is impossible by construction.
             // Stored in mm (not scaled coord_t units) so apply_slope_limiter() can compare
             // directly against layer_z (also mm) when computing the inter-layer angle.
-            m_values[li * m_num_columns + ci] = raw * unscale_(cfg.thickness);
+            m_values[li * m_num_columns + ci] = ((raw + 1.0) * 0.5) * unscale_(cfg.thickness);
         }
     }
 
     apply_slope_limiter(cfg, layer_z, m_num_columns, m_values);
 
-    NEOTKO_LOG(TEXTUREBUMP, "build image='" << cfg.image_path << "' columns=" << m_num_columns
+    TEXTUREBUMP_LOG("build image='" << cfg.image_path << "' columns=" << m_num_columns
         << " layers=" << m_num_layers << " mode=" << int(cfg.projection_mode) << " axis=" << int(cfg.axis));
 }
 
@@ -401,11 +450,42 @@ bool should_apply_texture_bump(const TextureBumpConfig& config, const int layer_
 
 namespace {
 
+// NEOTKO_TEXTUREBUMP_TAG — fraction of the full displacement to apply at a given wall depth:
+// 1.0 (full effect) at loop_idx 0 (outermost wall), fading linearly to 0.0 (untouched, "real")
+// at loop_idx == total_loops (the innermost wall, the one that actually borders infill). This is
+// what keeps the object physically bonded when a strong bump is applied to more than one wall
+// (e.g. TextureBumpType::AllWalls): the innermost wall always ends up at its exact nominal
+// position, so the infill boundary (computed from unperturbed geometry) never has to invade or
+// float away from the real wall. Callers force wall_loops to at least 3 (total_loops >= 2) when
+// texture bump is active (see PerimeterGenerator::process_classic()/process_arachne()) so there is
+// always room for this taper; total_loops <= 0 (single-wall stack, shouldn't normally happen once
+// that minimum is enforced) falls back to full effect rather than guessing.
+double texture_bump_effect_scale(size_t loop_idx, int total_loops)
+{
+    if (total_loops <= 0)
+        return 1.0;
+    return 1.0 - std::min(1.0, double(loop_idx) / double(total_loops));
+}
+
+// NEOTKO_TEXTUREBUMP_TAG -- Phase 1 (see docs/ATTRIBUTION_TEXTURE_BUMP.md): position/width blend
+// so neighboring walls sharing one texture signal don't drift apart in centerline spacing as
+// effect_scale tapers between them -- the root cause of the gap (Arachne) / overlap (Classic,
+// already disabled) that the 3-wall minimum only masked. Real mm values with explicit
+// scale_()/unscale_() conversions, matching this file's own convention (table.sample() is
+// mm-native, see TextureBumpTable::build()) -- NOT FuzzySkin's scaled-coord_t style, where its
+// analogous min_extrusion_width=0.01 (FuzzySkin.cpp) ends up being ~1e-8mm, an accidental
+// near-zero floor rather than a real physical one.
+constexpr double kMinExtrusionWidthMm = 0.05; // physical floor for the modulated line width
+constexpr double kMaxWidthMultiplier  = 2.0;  // ceiling = this factor times the point's own nominal width (p1.w)
+
 // Same interpolated-point walk as FuzzySkin::fuzzy_extrusion_line, but the perpendicular offset
-// comes from the precomputed table instead of a noise module. Displacement-only for v1 (no
-// Extrusion/Combined modes, unlike Fuzzy Skin -- a texture relief is inherently about visible
-// shape, width-only modulation doesn't serve the same purpose).
-void texture_bump_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, const PerimeterGenerator& perimeter_generator, const TextureBumpConfig& cfg)
+// comes from the precomputed table instead of a noise module. Blends position displacement and
+// width modulation according to effect_scale (Combined-style anchoring, see FuzzySkinMode):
+//   effect_scale == 1 (outermost wall): 100% position, 0% width -> identical to pre-Phase-1 code.
+//   effect_scale == 0 (innermost wall): 0% position, 100% width, anchored so the interior edge
+//     (facing infill) never moves -- keeps the wall welded to infill.
+//   0 < effect_scale < 1: prorates both continuously.
+void texture_bump_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, const PerimeterGenerator& perimeter_generator, const TextureBumpConfig& cfg, double effect_scale)
 {
     if (!perimeter_generator.texture_bump_table || perimeter_generator.texture_bump_table->empty())
         return;
@@ -431,8 +511,17 @@ void texture_bump_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, const P
             const Vec2d perp_dir = perp(p0p1).cast<double>().normalized();
             const Vec3d point_mm(unscale_(pa.x()), unscale_(pa.y()), perimeter_generator.slice_z);
             const double u = compute_u(point_mm, perp_dir, cfg.projection_mode, cfg.axis, table.bounds());
-            const double r_mm = table.sample(u, perimeter_generator.layer_id);
-            out.emplace_back(pa + (perp_dir * scale_(r_mm)).cast<coord_t>(), p1.w, p1.perimeter_index);
+
+            const double r_mm_raw       = table.sample(u, perimeter_generator.layer_id); // full signal, unscaled
+            const double r_position_mm  = r_mm_raw * effect_scale;             // taper via position (same as before)
+            const double width_delta_mm = r_mm_raw * (1.0 - effect_scale);     // remainder expressed via width
+
+            const double w_mm       = unscale_(p1.w);
+            const double max_rad_mm = w_mm * kMaxWidthMultiplier;
+            const double rad_mm     = std::clamp(w_mm + width_delta_mm, kMinExtrusionWidthMm, std::max(max_rad_mm, kMinExtrusionWidthMm));
+            const double center_shift_mm = r_position_mm + (rad_mm - w_mm) / 2.0; // position taper + Combined-style anchor
+
+            out.emplace_back(pa + (perp_dir * scale_(center_shift_mm)).cast<coord_t>(), coord_t(scale_(rad_mm)), p1.perimeter_index);
         }
         dist_left_over = p0pa_dist - p0p1_size;
         p0 = &p1;
@@ -457,24 +546,31 @@ void texture_bump_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, const P
 
 } // anonymous namespace
 
-Polygon apply_texture_bump(const Polygon& polygon, const PerimeterGenerator& /*perimeter_generator*/, size_t /*loop_idx*/, bool /*is_contour*/)
+Polygon apply_texture_bump(const Polygon& polygon, const PerimeterGenerator& /*perimeter_generator*/, size_t /*loop_idx*/, bool /*is_contour*/, int /*total_loops*/)
 {
-    // NEOTKO_TEXTUREBUMP_TAG — v1 scope: Classic perimeter generator path is not implemented yet
-    // (the slope-limiter/table is only wired through the Arachne ExtrusionLine path below).
-    // Left as a documented gap rather than a silent no-op guess at Classic-mode geometry.
+    // NEOTKO_TEXTUREBUMP_TAG — Classic perimeter generator path intentionally disabled. It was
+    // ported and working (see git history), but a real print test showed it silently
+    // over-extruding: Classic re-offsets each wall independently at a fixed width with no
+    // bead-width compensation, so once adjacent walls are tapered by different amounts
+    // (texture_bump_effect_scale) the resulting gap/overlap between them isn't handled the way
+    // Arachne's variable-width beads at least partially are. Left as a documented gap rather than
+    // a silent no-op guess at Classic-mode geometry. Also matters for NeoArachne, whose outer pass
+    // reuses process_classic() with wall_loops forced to 1 -- this stub keeps that path untouched.
     return polygon;
 }
 
-void apply_texture_bump(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour)
+void apply_texture_bump(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour, int total_loops)
 {
     const auto& regions = perimeter_generator.regions_by_texture_bump;
     if (regions.empty())
         return;
 
+    const double effect_scale = texture_bump_effect_scale(size_t(extrusion->inset_idx), total_loops);
+
     if (regions.size() == 1) { // optimization, mirrors apply_fuzzy_skin
         const auto& config = regions.begin()->first;
         if (should_apply_texture_bump(config, perimeter_generator.layer_id, extrusion->inset_idx, is_contour))
-            texture_bump_extrusion_line(extrusion->junctions, perimeter_generator, config);
+            texture_bump_extrusion_line(extrusion->junctions, perimeter_generator, config, effect_scale);
         return;
     }
 
@@ -494,17 +590,17 @@ void apply_texture_bump(Arachne::ExtrusionLine* extrusion, const PerimeterGenera
             continue;
 
         if (std::all_of(splitted.begin(), splitted.end(), [](const Algorithm::SplitLineJunction& j) { return j.clipped; })) {
-            texture_bump_extrusion_line(extrusion->junctions, perimeter_generator, r.first);
+            texture_bump_extrusion_line(extrusion->junctions, perimeter_generator, r.first, effect_scale);
         } else {
             const auto                              current_ext = extrusion->junctions;
             std::vector<Arachne::ExtrusionJunction> segment;
             segment.reserve(current_ext.size());
             extrusion->junctions.clear();
 
-            const auto apply_current_segment = [&segment, &extrusion, &r, &perimeter_generator]() {
+            const auto apply_current_segment = [&segment, &extrusion, &r, &perimeter_generator, effect_scale]() {
                 extrusion->junctions.push_back(segment.front());
                 const auto back = segment.back();
-                texture_bump_extrusion_line(segment, perimeter_generator, r.first);
+                texture_bump_extrusion_line(segment, perimeter_generator, r.first, effect_scale);
                 extrusion->junctions.insert(extrusion->junctions.end(), segment.begin(), segment.end());
                 extrusion->junctions.push_back(back);
                 segment.clear();

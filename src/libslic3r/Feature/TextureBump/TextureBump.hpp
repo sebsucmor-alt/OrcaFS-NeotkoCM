@@ -88,9 +88,13 @@ void group_region_by_texture_bump(PerimeterGenerator& g);
 bool should_apply_texture_bump(const TextureBumpConfig& config, int layer_id, size_t loop_idx, bool is_contour);
 
 // Same two-overload shape as FuzzySkin::apply_fuzzy_skin (Classic Polygon path + Arachne
-// ExtrusionLine path), applied AFTER apply_fuzzy_skin at the same call sites.
-Polygon apply_texture_bump(const Polygon& polygon, const PerimeterGenerator& perimeter_generator, size_t loop_idx, bool is_contour);
-void    apply_texture_bump(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, bool is_contour);
+// ExtrusionLine path), applied AFTER apply_fuzzy_skin at the same call sites. `total_loops` is the
+// max valid loop depth for the current island (0-indexed, e.g. 2 for a 3-wall stack) -- used to
+// taper the effect to zero at the innermost wall so the object stays physically bonded to infill
+// (see texture_bump_effect_scale() in TextureBump.cpp). Callers force wall_loops to at least 3
+// while texture bump is active (PerimeterGenerator::process_classic()/process_arachne()).
+Polygon apply_texture_bump(const Polygon& polygon, const PerimeterGenerator& perimeter_generator, size_t loop_idx, bool is_contour, int total_loops);
+void    apply_texture_bump(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, bool is_contour, int total_loops);
 
 } // namespace Slic3r::Feature::TextureBump
 
