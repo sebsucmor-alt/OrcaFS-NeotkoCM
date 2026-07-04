@@ -5,6 +5,7 @@
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Feature/FuzzySkin/FuzzySkin.hpp"
+#include "Feature/TextureBump/TextureBump.hpp"
 #include "PrintConfig.hpp"
 #include "ShortestPath.hpp"
 #include "VariableWidth.hpp"
@@ -29,6 +30,7 @@ static constexpr double SMALLER_EXT_INSET_OVERLAP_TOLERANCE = 0.22;
 namespace Slic3r {
     
 using namespace Slic3r::Feature::FuzzySkin;
+using namespace Slic3r::Feature::TextureBump;
 
 // Hierarchy of perimeters.
 class PerimeterGeneratorLoop {
@@ -372,6 +374,7 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         const bool  is_contour = !extrusion->is_closed || pg_extrusion.is_contour;
         apply_fuzzy_skin(extrusion, perimeter_generator, is_contour);
+        apply_texture_bump(extrusion, perimeter_generator, is_contour);
 
         ExtrusionPaths paths;
         // detect overhanging/bridging perimeters
@@ -2080,6 +2083,9 @@ void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& order
 void PerimeterGenerator::process_arachne()
 {
     group_region_by_fuzzify(*this);
+    // NEOTKO_TEXTUREBUMP_TAG — Arachne-only for v1 (see TextureBump.hpp apply_texture_bump(Polygon)
+    // overload comment); process_classic() intentionally does not call this.
+    group_region_by_texture_bump(*this);
 
     // other perimeters
     m_mm3_per_mm = this->perimeter_flow.mm3_per_mm();

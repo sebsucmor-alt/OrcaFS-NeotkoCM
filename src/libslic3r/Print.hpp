@@ -19,6 +19,7 @@
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "MixedFilament.hpp"
+#include "Feature/TextureBump/TextureBump.hpp" // NEOTKO_TEXTUREBUMP_TAG
 #include "libslic3r.h"
 
 #include <Eigen/Geometry>
@@ -415,6 +416,12 @@ public:
     // source consumed by NeoTower + the GCode dispatcher). Indexed by layer_idx.
     const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
     std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
+    // NEOTKO_TEXTUREBUMP_TAG — precomputed, already slope-limited per-object table (v1: one
+    // shared table per object, built from printing_region(0)'s config -- see PrintObject::slice()
+    // caller in PrintObjectSlice.cpp / make_perimeters() in PrintObject.cpp). Consumed by
+    // PerimeterGenerator::texture_bump_table, set in LayerRegion::make_perimeters().
+    const Feature::TextureBump::TextureBumpTable& texture_bump_table() const { return m_texture_bump_table; }
+    Feature::TextureBump::TextureBumpTable&       texture_bump_table()       { return m_texture_bump_table; }
 
     template<typename PolysType>
     static void remove_bridges_from_contacts(
@@ -646,6 +653,8 @@ private:
     // Populated by the Sandwich engine; empty until that lands (NeoTower then
     // sees no sublayer events and uses the plain real-layer path).
     std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers;
+    // NEOTKO_TEXTUREBUMP_TAG — see texture_bump_table() accessors above.
+    Feature::TextureBump::TextureBumpTable      m_texture_bump_table;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // BBS

@@ -232,6 +232,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
+    // NEOTKO_TEXTUREBUMP_TAG — nullptr-safe: texture_bump_table() is empty() (all lookups return
+    // 0) until PrintObject builds it, so this is harmless even when the feature is disabled.
+    g.texture_bump_table    = &this->layer()->object()->texture_bump_table();
 
     if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();

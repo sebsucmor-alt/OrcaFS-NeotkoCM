@@ -269,6 +269,56 @@ private:
     // enlaza ese perfil; si 0/ inválido, cae al primer slot pintado del objeto.
     void pick_recipe_from_object(int object_idx, int picked_slot);
 
+    // NEOTKO_STICKER_TAG — herramienta Sticker: coloca un SVG de 1 color como
+    // pegatina plana sobre una cara (sin deformar el mesh), con una receta
+    // Sandwich propia (ver ColorMixSticker en Model.hpp + Fill.cpp Fase 6c v2).
+    // v1: sin arrastre/rotación/escala en viewport — la pegatina queda plana
+    // en el plano XY del frame-objeto, en la posición del click; ajustar
+    // tamaño/rotación desde el propio SVG de origen. Pulido pendiente.
+    bool        m_sticker_mode = false;
+    std::string m_pending_sticker_svg;    // SVG cargado, aún sin colocar
+    std::string m_pending_sticker_name;   // nombre a mostrar (stem del fichero)
+    bool load_sticker_svg_dialog();       // abre file picker, rellena m_pending_sticker_*
+    void place_sticker_at(const ModelVolume* mv, const Vec3f& hit_local);
+    void render_sticker_section();        // sección "Stickers (SVG)" en Palette
+
+    // NEOTKO_STICKER_TAG — modo edición (mover/rotar) de un sticker YA colocado,
+    // activado desde "Edit placement" en la lista de Palette. -1 = ninguno.
+    // v1.5: solo traslación (arrastre por raycast, sin realinear a la normal —
+    // el propio feature asume superficies top planas, ver plan §3.2) + rotación
+    // Z vía slider (no anillo 3D: GLGizmoRotate está acoplado a Selection/
+    // GLVolume, que un sticker no tiene — replicarlo suelto sería una pieza de
+    // interacción nueva y grande, desproporcionada frente al valor que añade
+    // sobre un slider ya WYSIWYG contra el overlay coloreado).
+    int   m_editing_sticker_idx = -1;
+    // Ángulo Z (grados) del sticker en edición, decodificado de su transform
+    // (atan2 del bloque 2×2 superior-izquierdo) al entrar en edición — válido
+    // porque nosotros mismos garantizamos que sticker.transform es SIEMPRE
+    // Translation*RotationZ (nunca introducimos tilt), así que la decodificación
+    // es exacta, no una aproximación.
+    float m_editing_spin_deg    = 0.f;
+    // Escala uniforme del sticker en edición, decodificada como la norma de la
+    // primera columna del bloque lineal 3x3 (invariante al ángulo: R*S tiene
+    // columnas de longitud `scale` porque R es rotación pura de columnas
+    // unitarias) — igual de exacta que la decodificación del ángulo de arriba.
+    // transform SIEMPRE se reconstruye como Translation*RotationZ*Scaling(s),
+    // nunca escala no-uniforme ni negativa (el slider clampa a positivo).
+    float m_editing_scale       = 1.f;
+    bool  m_sticker_dragging    = false;
+    void enter_sticker_edit(int idx);
+    void exit_sticker_edit();
+
+    // Overlay GL (contorno + relleno con el color del profile) del sticker en
+    // edición. Geometría construida en frame LOCAL del sticker (z=0, sin
+    // colocación) una vez al entrar en edición; mover/rotar solo cambia el
+    // uniform view_model_matrix en cada frame — mismo patrón que
+    // GLGizmoFlatten (plano coloreado sobre una cara, sin rehacer geometría).
+    GLModel m_sticker_overlay_fill;
+    GLModel m_sticker_overlay_outline;
+    int     m_sticker_overlay_built_for = -1;   // idx para el que se construyó
+    void ensure_sticker_overlay_built(const ColorMixSticker& sticker);
+    void render_sticker_edit_overlay();
+
     // s111 — preview de pintura para los objetos marcados NO-activos: el painter
     // base solo dibuja el objeto activo, así que para ver TODOS los marcados con su
     // color construimos selectors de solo-lectura por objeto (cacheados) y los

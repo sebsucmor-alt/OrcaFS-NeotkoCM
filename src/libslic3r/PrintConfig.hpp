@@ -87,6 +87,28 @@ enum class NoiseType {
     Voronoi,
 };
 
+// NEOTKO_TEXTUREBUMP_TAG — same shape as FuzzySkinType (None/External/All/AllWalls), kept as its
+// own enum so Texture Bump never shares storage/behaviour with Fuzzy Skin's existing config.
+enum class TextureBumpType {
+    None,
+    External,
+    All,
+    AllWalls,
+};
+
+enum class TextureProjectionMode {
+    Planar,
+    Cylindrical,
+    Spherical,
+    Cubic,
+};
+
+enum class TextureProjectionAxis {
+    X,
+    Y,
+    Z,
+};
+
 enum PrintHostType {
     htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, htMoonRaker_mqtt, htMoonRaker, 
 };
@@ -526,6 +548,9 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TextureBumpType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TextureProjectionMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TextureProjectionAxis)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
@@ -1373,6 +1398,20 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,  neotko_surface_passes_top))
     ((ConfigOptionString,  neotko_surface_passes_penu))
     // NEOTKO_SANDWICH_ENGINE_TAG_END
+    // NEOTKO_TEXTUREBUMP_TAG_START — Texture Bump Mapping: deterministic image-driven relief,
+    // reuses the Fuzzy Skin apply point (post-Arachne, per ExtrusionLine junctions) but samples a
+    // grayscale PNG instead of noise. See docs/ATTRIBUTION_TEXTURE_BUMP.md.
+    ((ConfigOptionEnum<TextureBumpType>,       texture_bump))
+    ((ConfigOptionString,                      texture_bump_image_path))
+    ((ConfigOptionEnum<TextureProjectionMode>, texture_bump_projection_mode))
+    ((ConfigOptionEnum<TextureProjectionAxis>, texture_bump_axis))
+    ((ConfigOptionFloat,                       texture_bump_scale))
+    ((ConfigOptionFloat,                       texture_bump_thickness))
+    ((ConfigOptionFloat,                       texture_bump_point_distance))
+    ((ConfigOptionBool,                        texture_bump_first_layer))
+    ((ConfigOptionFloat,                       texture_bump_max_angle))
+    ((ConfigOptionFloat,                       texture_bump_blur_strength))
+    // NEOTKO_TEXTUREBUMP_TAG_END
 )
 
 PRINT_CONFIG_CLASS_DEFINE(

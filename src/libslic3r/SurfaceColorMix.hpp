@@ -49,6 +49,7 @@ class ExtrusionEntityCollection;
 class PrintObject;            // NEOTKO_PROFILE_TAG
 class Surface;                // NEOTKO_PAINT_COEXIST_TAG s91 — mmu_governs_surface overload
 class ModelObject;            // NEOTKO_PROFILE_TAG
+struct ColorMixSticker;       // NEOTKO_STICKER_TAG — sticker helpers (defined in Model.hpp)
 struct SurfaceEffectProfile;  // NEOTKO_PROFILE_TAG
 struct SurfaceEffectPayload;  // NEOTKO_PROFILE_TAG — Fase F
 struct MultiPassConfig;       // NEOTKO_PROFILE_TAG — Fase F (defined below)
@@ -162,6 +163,43 @@ public:
                                                                 double z_min, double z_max,
                                                                 bool downward = false);
 
+    // NEOTKO_STICKER_TAG — Sandwich Sticker helpers (SVG masks, no facets).
+    //
+    // `object_has_any_colormix_stickers`: true if the object carries at least
+    // one sticker whose profile still exists in the manager (ghost stickers —
+    // pid 0 or dangling — are ignored, mirroring the s137b slot filter). ORed
+    // with object_has_any_colormix_paint at every painter-mode gate.
+    //
+    // `enumerate_stickers_in_z_range`: indices into mo->colormix_stickers whose
+    // anchor point (sticker-local origin, composed through trafo_centered — the
+    // s161 lesson applies identically here) lands inside [z_min, z_max] with
+    // the same 0.02 fp slack as the painted scans. Returned TOP-DOWN (pile back
+    // first): the first entry is the topmost sticker, which occludes the rest.
+    //
+    // `sticker_footprint_slice_frame`: the sticker's SVG outline as ExPolygons
+    // in the slice frame (scaled coords), ready to intersect against
+    // surface_fill.expolygons. Parses svg_data per call (nanosvg on a private
+    // copy — thread-safe; top layers are few, so no cache needed yet). Empty on
+    // parse failure or degenerate transform.
+    static bool object_has_any_colormix_stickers(const ModelObject* mo);
+    static std::vector<size_t> enumerate_stickers_in_z_range(const PrintObject* po,
+                                                             double z_min, double z_max);
+    static ExPolygons sticker_footprint_slice_frame(const ColorMixSticker& sticker,
+                                                    const PrintObject* po);
+
+    // NEOTKO_STICKER_TAG — shared core: parses `sticker.svg_data` (nanosvg on a
+    // private copy) and projects every ring (contours CCW + holes CW) through
+    // `to_target`, returning them as scaled Polygons (mm → clipper int), NOT
+    // unioned. `sticker_footprint_slice_frame` composes `to_target =
+    // po->trafo_centered() * sticker.transform` and unions the result into the
+    // slice-mask ExPolygons; the GUI edit-mode overlay (GLGizmoColorMixPainter)
+    // calls this directly with a world/GL transform instead, so the SVG
+    // parsing + projection logic lives in exactly one place. Empty on parse
+    // failure. A degenerate/mirrored `to_target` (negative XY determinant)
+    // reverses ring winding so orientation stays consistent either way.
+    static Polygons sticker_rings_in_transform(const ColorMixSticker& sticker,
+                                               const Transform3d& to_target);
+
     // NEOTKO_PAINT_COEXIST_TAG s91 — MMU governance helpers.
     //
     // `mmu_painted_footprint_in_z_range`: XY footprint of MMU-painted triangles
@@ -222,6 +260,11 @@ public:
     // base_angle. `penu` picks the penultimate stack/zone.
     static int              painted_colormix_angle_for_slot(
         const PrintObject* po, int slot, bool penu);
+
+    // NEOTKO_STICKER_TAG — same lookup as `painted_colormix_angle_for_slot`,
+    // but by profile id directly (a sticker has no slot). Both share this
+    // implementation.
+    static int              colormix_angle_for_profile_id(int profile_id, bool penu);
 
     // NEOTKO_PROFILE_TAG — Fase G painter-mode PathBlend override.
     // Mirror of `multipass_from_profile_payload`. Reads pathblend_* keys

@@ -2459,6 +2459,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             if (model_volume1.config.get() != model_volume2.config.get())
                 return false;
         }
+        // NEOTKO_STICKER_TAG — objects with different sticker piles must not share
+        // slicing results (same reason as painted facets above: the sticker mask
+        // splits the top surfaces differently per object).
+        if (model_obj1->colormix_stickers.size() != model_obj2->colormix_stickers.size())
+            return false;
+        for (size_t si = 0; si < model_obj1->colormix_stickers.size(); ++si)
+            if (model_obj1->colormix_stickers[si] != model_obj2->colormix_stickers[si])
+                return false;
         //if (!object1->config().equals(object2->config()))
         //    return false;
         if (model_obj1->config.get() != model_obj2->config.get())

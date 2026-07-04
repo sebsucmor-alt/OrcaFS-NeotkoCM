@@ -92,6 +92,7 @@ public:
         Simplify,
         BrimEars,
         AlignStack, // NEOTKO_ALIGNSTACK_TAG
+        TextureBump, // NEOTKO_TEXTUREBUMP_TAG
         //SlaSupports,
         // BBS
         //FaceRecognition,

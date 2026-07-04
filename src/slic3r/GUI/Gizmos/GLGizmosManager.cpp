@@ -29,6 +29,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoAssembly.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoTextureBump.hpp" // NEOTKO_TEXTUREBUMP_TAG
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -185,6 +186,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::AlignStack): // NEOTKO_ALIGNSTACK_TAG
             gizmo->set_icon_filename(m_is_dark ? "toolbar_align_stack_dark.svg" : "toolbar_align_stack.svg");
             break;
+        case (EType::TextureBump): // NEOTKO_TEXTUREBUMP_TAG — placeholder icon, see init()
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg");
+            break;
         }
 
     }
@@ -231,6 +235,9 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
     // NEOTKO_ALIGNSTACK_TAG — Align & Stack gizmo (LibreMode-gated via on_is_activable).
     m_gizmos.emplace_back(new GLGizmoAlignStack(m_parent, m_is_dark ? "toolbar_align_stack_dark.svg" : "toolbar_align_stack.svg", EType::AlignStack));
+    // NEOTKO_TEXTUREBUMP_TAG — placeholder icon (reuses Fuzzy Skin's, no dedicated art yet, see
+    // docs/ATTRIBUTION_TEXTURE_BUMP.md / PAINTER_TOOLBAR_ICONS plan for the real-icon convention).
+    m_gizmos.emplace_back(new GLGizmoTextureBump(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::TextureBump));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));

@@ -927,6 +927,18 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi);
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
 
+    // NEOTKO_TEXTUREBUMP_TAG — hide the sub-options while the feature is off, and only show the
+    // projection axis for the two modes that actually use it (Planar/Cubic derive their axes from
+    // the object's own bounding box, no user-facing axis needed).
+    bool texture_bump_enabled = config->opt_enum<TextureBumpType>("texture_bump") != TextureBumpType::None;
+    TextureProjectionMode texture_bump_projection_mode = config->opt_enum<TextureProjectionMode>("texture_bump_projection_mode");
+    for (auto el : { "texture_bump_image_path", "texture_bump_projection_mode", "texture_bump_scale",
+                     "texture_bump_thickness", "texture_bump_point_distance", "texture_bump_first_layer",
+                     "texture_bump_max_angle", "texture_bump_blur_strength" })
+        toggle_line(el, texture_bump_enabled);
+    toggle_line("texture_bump_axis", texture_bump_enabled &&
+        (texture_bump_projection_mode == TextureProjectionMode::Cylindrical || texture_bump_projection_mode == TextureProjectionMode::Spherical));
+
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})

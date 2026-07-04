@@ -9,6 +9,10 @@
 #include "PrintConfig.hpp"
 #include "SurfaceCollection.hpp"
 
+// NEOTKO_TEXTUREBUMP_TAG — forward declaration only (no #include) to avoid a circular dependency:
+// TextureBump.hpp includes this header, the same way FuzzySkin.hpp does.
+namespace Slic3r::Feature::TextureBump { class TextureBumpTable; }
+
 namespace Slic3r {
 struct FuzzySkinConfig
 {
@@ -37,6 +41,38 @@ struct FuzzySkinConfig
 
     bool operator!=(const FuzzySkinConfig& r) const { return !(*this == r); }
 };
+
+// NEOTKO_TEXTUREBUMP_TAG — same shape/role as FuzzySkinConfig above, kept as its own struct so
+// Texture Bump never shares storage/behaviour with Fuzzy Skin. See docs/ATTRIBUTION_TEXTURE_BUMP.md.
+struct TextureBumpConfig
+{
+    TextureBumpType       type;
+    coord_t               thickness;
+    coord_t               point_distance;
+    bool                  first_layer;
+    TextureProjectionMode projection_mode;
+    TextureProjectionAxis axis;
+    double                scale; // mm covered by the full image width/height
+    double                max_angle_rad;
+    double                blur_strength;
+    std::string           image_path;
+
+    bool operator==(const TextureBumpConfig& r) const
+    {
+        return type == r.type
+            && thickness == r.thickness
+            && point_distance == r.point_distance
+            && first_layer == r.first_layer
+            && projection_mode == r.projection_mode
+            && axis == r.axis
+            && scale == r.scale
+            && max_angle_rad == r.max_angle_rad
+            && blur_strength == r.blur_strength
+            && image_path == r.image_path;
+    }
+
+    bool operator!=(const TextureBumpConfig& r) const { return !(*this == r); }
+};
 }
 
 namespace std {
@@ -52,6 +88,24 @@ template<> struct hash<Slic3r::FuzzySkinConfig>
         boost::hash_combine(seed, std::hash<double>{}(c.noise_scale));
         boost::hash_combine(seed, std::hash<int>{}(c.noise_octaves));
         boost::hash_combine(seed, std::hash<double>{}(c.noise_persistence));
+        return seed;
+    }
+};
+
+template<> struct hash<Slic3r::TextureBumpConfig>
+{
+    size_t operator()(const Slic3r::TextureBumpConfig& c) const noexcept
+    {
+        std::size_t seed = std::hash<Slic3r::TextureBumpType>{}(c.type);
+        boost::hash_combine(seed, std::hash<coord_t>{}(c.thickness));
+        boost::hash_combine(seed, std::hash<coord_t>{}(c.point_distance));
+        boost::hash_combine(seed, std::hash<bool>{}(c.first_layer));
+        boost::hash_combine(seed, std::hash<Slic3r::TextureProjectionMode>{}(c.projection_mode));
+        boost::hash_combine(seed, std::hash<Slic3r::TextureProjectionAxis>{}(c.axis));
+        boost::hash_combine(seed, std::hash<double>{}(c.scale));
+        boost::hash_combine(seed, std::hash<double>{}(c.max_angle_rad));
+        boost::hash_combine(seed, std::hash<double>{}(c.blur_strength));
+        boost::hash_combine(seed, std::hash<std::string>{}(c.image_path));
         return seed;
     }
 };
@@ -93,7 +147,16 @@ public:
     bool                                            has_fuzzy_skin = false;
     bool                                            has_fuzzy_hole = false;
     std::unordered_map<FuzzySkinConfig, ExPolygons> regions_by_fuzzify;
-    
+
+    // NEOTKO_TEXTUREBUMP_TAG — same role as the two fields above, kept separate from fuzzy skin.
+    bool                                                has_texture_bump = false;
+    bool                                                has_texture_bump_hole = false;
+    std::unordered_map<TextureBumpConfig, ExPolygons>   regions_by_texture_bump;
+    // Precomputed per-object, already slope-limited table (see TextureBump::TextureBumpTable).
+    // Owned by PrintObject, set by whoever constructs this PerimeterGenerator for a given layer;
+    // nullptr is a valid "no table built" state (feature disabled for every region of this object).
+    const Feature::TextureBump::TextureBumpTable*      texture_bump_table = nullptr;
+
     PerimeterGenerator(
         // Input:
         const SurfaceCollection*    slices,
@@ -113,11 +176,15 @@ public:
         // Infills without the gap fills
         SurfaceCollection*          fill_surfaces,
         //BBS
-        ExPolygons*                 fill_no_overlap)
+        ExPolygons*                 fill_no_overlap,
+        // NEOTKO_TEXTUREBUMP_TAG — optional, defaults to nullptr so every existing call site
+        // keeps compiling unchanged.
+        const Feature::TextureBump::TextureBumpTable* texture_bump_table = nullptr)
         : slices(slices), compatible_regions(compatible_regions), upper_slices(nullptr), lower_slices(nullptr), layer_height(layer_height),
             slice_z(slice_z), layer_id(-1), perimeter_flow(flow), ext_perimeter_flow(flow),
             overhang_flow(flow), solid_infill_flow(flow),
             config(config), object_config(object_config), print_config(print_config),
+            texture_bump_table(texture_bump_table),
             m_spiral_vase(spiral_mode),
             m_scaled_resolution(scaled<double>(print_config->resolution.value > EPSILON ? print_config->resolution.value : EPSILON)),
             loops(loops), gap_fill(gap_fill), fill_surfaces(fill_surfaces), fill_no_overlap(fill_no_overlap),

@@ -1128,6 +1128,8 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
+    this->colormix_stickers           = rhs.colormix_stickers; // NEOTKO_STICKER_TAG
+    this->colormix_sticker_profiles_fingerprint = rhs.colormix_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
     this->cut_id.copy(rhs.cut_id);
     this->copy_transformation_caches(rhs);
 
@@ -1168,6 +1170,8 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
+    this->colormix_stickers           = std::move(rhs.colormix_stickers); // NEOTKO_STICKER_TAG
+    this->colormix_sticker_profiles_fingerprint = rhs.colormix_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -3735,6 +3739,45 @@ bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject&
                 return false;
             return true;
         });
+}
+
+// NEOTKO_STICKER_TAG — sticker-pile change detector, mirroring the painted path
+// above. Two halves: (1) the pile itself (count / order / transform / profile /
+// svg — order matters, the topmost sticker occludes); (2) the CONTENT of the
+// referenced profiles, via the same fingerprint mechanism the painted slots use
+// (stacks live in SurfaceEffectProfileManager, outside the model, so editing a
+// tool/colour would otherwise not be seen by apply()).
+static uint64_t colormix_sticker_profiles_fingerprint_of(const ModelObject& mo)
+{
+    auto& mgr = SurfaceEffectProfileManager::get();
+    std::string acc;
+    for (const ColorMixSticker& st : mo.colormix_stickers) {
+        if (st.profile_id == 0) continue;
+        acc += std::to_string(st.profile_id) + ":";
+        if (const SurfaceEffectProfile* p = mgr.find(st.profile_id)) {
+            acc += p->stack_top_json;  acc += "|";  acc += p->stack_penu_json;
+            acc += "|";  acc += p->stack_bottom_json;
+        } else {
+            acc += "#deleted#";
+        }
+        acc += ";";
+    }
+    return (uint64_t)std::hash<std::string>{}(acc);
+}
+
+bool model_colormix_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    if (mo.colormix_stickers.size() != mo_new.colormix_stickers.size())
+        return true;
+    for (size_t i = 0; i < mo.colormix_stickers.size(); ++i)
+        if (mo.colormix_stickers[i] != mo_new.colormix_stickers[i])
+            return true;
+    // Recalcular la huella de contenido AHORA y bajarla al objeto NUEVO (cache
+    // derivada) para que el snapshot del Print la conserve — mismo patrón que
+    // el fingerprint per-volume del painter (ver arriba).
+    const uint64_t fp_new = colormix_sticker_profiles_fingerprint_of(mo_new);
+    const_cast<ModelObject&>(mo_new).colormix_sticker_profiles_fingerprint = fp_new;
+    return mo.colormix_sticker_profiles_fingerprint != fp_new;
 }
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new)

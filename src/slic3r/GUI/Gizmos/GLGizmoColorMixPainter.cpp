@@ -8,6 +8,8 @@
 #include "libslic3r/SurfaceEffectProfile.hpp"
 #include "libslic3r/Utils.hpp" // s173 — resources_dir() para cargar los iconos de la toolbar
 #include "libslic3r/ColorSci/StackFlatten.hpp" // NEOTKO_COLORSTITCH_TAG — sandwich_colour_stacked (pro mode live preview)
+#include "libslic3r/ClipperUtils.hpp"      // NEOTKO_STICKER_TAG — union_ex para el overlay de edición
+#include "libslic3r/Tesselate.hpp"         // NEOTKO_STICKER_TAG — triangulate_expolygons_2f para el relleno del overlay
 
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -25,6 +27,7 @@
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include <GL/glew.h>
+#include <wx/filedlg.h> // NEOTKO_STICKER_TAG — Load SVG... file picker
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -35,7 +38,10 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <fstream>   // NEOTKO_STICKER_TAG — read the chosen SVG file into memory
+#include <sstream>   // NEOTKO_STICKER_TAG — ostringstream slurp
 #include <boost/nowide/convert.hpp>
+#include <boost/filesystem/path.hpp> // NEOTKO_STICKER_TAG — stem() for the sticker's display name
 
 namespace Slic3r::GUI {
 
@@ -122,6 +128,8 @@ void GLGizmoColorMixPainter::on_shutdown()
     garbage_collect_auto_profiles();   // PR.3: recoge colores de trabajo no usados
     m_select_mode = false;             // s111: salir de Select y limpiar marcas
     m_pick_mode   = false;             // s118: salir del eyedropper
+    m_sticker_mode = false;            // NEOTKO_STICKER_TAG
+    m_editing_sticker_idx = -1;        // NEOTKO_STICKER_TAG
     m_marked_objects.clear();
     m_parent.enable_picking(true);     // base lo hace también; explícito por claridad
     m_parent.use_slope(false);
@@ -134,9 +142,11 @@ void GLGizmoColorMixPainter::on_shutdown()
 // para auto-activarlo y poder pintar en cualquier objeto del set marcado.
 void GLGizmoColorMixPainter::set_tool_mode(bool select, bool erase)
 {
-    m_select_mode = select;
-    m_erase_mode  = erase;
-    m_pick_mode   = false;   // s118: cualquier modo normal apaga el eyedropper
+    m_select_mode  = select;
+    m_erase_mode   = erase;
+    m_pick_mode    = false;   // s118: cualquier modo normal apaga el eyedropper
+    m_sticker_mode = false;   // NEOTKO_STICKER_TAG: idem para Sticker
+    m_editing_sticker_idx = -1;   // NEOTKO_STICKER_TAG: salir de edición si estaba activa
     if (select) {
         const int active_oid = m_parent.get_selection().get_object_idx();
         if (active_oid >= 0) m_marked_objects.insert(active_oid);
@@ -248,6 +258,23 @@ void GLGizmoColorMixPainter::toggle_mark(int object_idx, bool unmark)
     }
 }
 
+// NEOTKO_STICKER_TAG — `rr_mesh_id()` indexa m_triangle_selectors, que se
+// construye 1:1 en orden con los model_part volumes de mo->volumes (ver
+// update_from_model_object). Este helper hace ese mismo recorrido para
+// resolver el ModelVolume real bajo el raycast — usado tanto al colocar un
+// sticker nuevo como al arrastrar uno ya colocado.
+static const ModelVolume* volume_for_mesh_id(const ModelObject* mo, int mesh_id)
+{
+    if (!mo || mesh_id < 0) return nullptr;
+    int vidx = 0;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv->is_model_part()) continue;
+        if (vidx == mesh_id) return mv;
+        ++vidx;
+    }
+    return nullptr;
+}
+
 bool GLGizmoColorMixPainter::on_mouse(const wxMouseEvent& mouse_event)
 {
     // NEOTKO_COLORSTITCH_TAG — s118: el botón derecho es SOLO cámara aquí (no pinta,
@@ -290,6 +317,80 @@ bool GLGizmoColorMixPainter::on_mouse(const wxMouseEvent& mouse_event)
                 }
                 pick_recipe_from_object(obj_idx, picked_slot);
                 return true;   // consumir: el pick no debe pintar
+            }
+        }
+        return false;   // resto de eventos: cámara/hover normales
+    }
+
+    // NEOTKO_STICKER_TAG — herramienta Sticker, dos sub-modos:
+    //  (a) edición de un sticker YA colocado (m_editing_sticker_idx>=0, entrado
+    //      vía "Edit placement" en la lista de Palette): arrastrar mueve su
+    //      posición (raycast por frame, sin realinear a la normal — v1.5, ver
+    //      nota del header) y consume TODO para no pintar/seleccionar mientras
+    //      se edita. La rotación Z se controla con un slider en el panel, no
+    //      aquí (ver render_sticker_section).
+    //  (b) colocar un sticker NUEVO (sin cambios de comportamiento): mismo
+    //      patrón de pre-activación en hover que el eyedropper, click coloca
+    //      el SVG pendiente tangente al punto de impacto.
+    if (m_sticker_mode) {
+        if (m_editing_sticker_idx >= 0) {
+            // Solo consumimos los eventos del botón IZQUIERDO que arrancan/continúan
+            // el arrastre — el resto (Moving suelto, drag con botón derecho/medio
+            // para orbitar cámara, rueda) pasa sin tocar, igual que el resto de
+            // modos de esta clase, para no dejar la cámara bloqueada mientras se
+            // coloca un sticker.
+            bool consumed = false;
+            if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
+                m_sticker_dragging = true;
+                consumed = true;
+            } else if (m_sticker_dragging && mouse_event.Dragging()) {
+                consumed = true;
+            } else if (mouse_event.LeftUp() && m_sticker_dragging) {
+                m_sticker_dragging = false;
+                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+                consumed = true;
+            }
+
+            if (consumed && (mouse_event.LeftDown() || mouse_event.Dragging())) {
+                ModelObject* mo_c = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+                const int mid = rr_mesh_id();
+                if (mo_c && m_editing_sticker_idx < (int)mo_c->colormix_stickers.size()) {
+                    const ModelVolume* hit_mv = volume_for_mesh_id(mo_c, mid);
+                    if (hit_mv) {
+                        const Vec3d hit_obj = hit_mv->get_matrix() * rr_hit().cast<double>();
+                        ColorMixSticker& st = mo_c->colormix_stickers[m_editing_sticker_idx];
+                        const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
+                        st.transform = Eigen::Translation3d(hit_obj) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
+                                     * Eigen::Scaling(double(m_editing_scale));
+                        m_parent.set_as_dirty();
+                        m_parent.request_extra_frame();
+                    }
+                }
+            }
+            return consumed;
+        }
+
+        if ((mouse_event.Moving() || mouse_event.LeftDown()) && !mouse_event.Dragging()) {
+            const int hovered = m_parent.get_first_hover_volume_idx();
+            int obj_idx = -1;
+            if (hovered >= 0) {
+                const GLVolumePtrs& volumes = m_parent.get_volumes().volumes;
+                if (hovered < (int)volumes.size() && volumes[hovered])
+                    obj_idx = volumes[hovered]->object_idx();
+            }
+            if (obj_idx >= 0 && obj_idx != m_parent.get_selection().get_object_idx())
+                switch_active_object(obj_idx);
+
+            if (mouse_event.LeftDown()) {
+                if (obj_idx < 0 || m_pending_sticker_svg.empty())
+                    return true;   // vacío, o nada cargado para colocar: consumir sin pintar
+                const int mid = rr_mesh_id();
+                const ModelObject* mo_c = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+                if (mid >= 0 && mo_c) {
+                    const ModelVolume* hit_mv = volume_for_mesh_id(mo_c, mid);
+                    if (hit_mv) place_sticker_at(hit_mv, rr_hit());
+                }
+                return true;   // consumir: colocar no debe además pintar
             }
         }
         return false;   // resto de eventos: cámara/hover normales
@@ -457,6 +558,7 @@ void GLGizmoColorMixPainter::render_painter_gizmo()
     }
 
     render_marked_paint();
+    render_sticker_edit_overlay();   // NEOTKO_STICKER_TAG — no-op si no hay sticker en edición
 
     glsafe(::glDisable(GL_BLEND));
 }
@@ -3460,7 +3562,11 @@ void GLGizmoColorMixPainter::render_tool_row()
     ImGui::SameLine();
     if (cs_icon_toggle_button(dark ? m_icon_paint.normal_dark : m_icon_paint.normal,
                               dark ? m_icon_paint.hover_dark  : m_icon_paint.hover,
-                              !m_select_mode && !m_erase_mode, icon_px,
+                              // NEOTKO_STICKER_TAG — Paint es el catch-all "nada más
+                              // activo"; sin excluir pick/sticker aquí se mostraba
+                              // encendido A LA VEZ que Sticker (bug reportado: "da la
+                              // sensación de que puedes hacer las dos cosas").
+                              !m_select_mode && !m_erase_mode && !m_pick_mode && !m_sticker_mode, icon_px,
                               _u8L("Paint (smart fill)").c_str()))
         set_tool_mode(/*select=*/false, /*erase=*/false);
     ImGui::SameLine();
@@ -3477,9 +3583,25 @@ void GLGizmoColorMixPainter::render_tool_row()
                               m_pick_mode, icon_px,
                               _u8L("Eyedropper — click a painted object to load its colour "
                                    "(and dump what it has painted / its base).").c_str())) {
-        m_select_mode = false;
-        m_erase_mode  = false;
-        m_pick_mode   = true;
+        m_select_mode  = false;
+        m_erase_mode   = false;
+        m_pick_mode    = true;
+        m_sticker_mode = false;        // NEOTKO_STICKER_TAG
+        m_editing_sticker_idx = -1;    // NEOTKO_STICKER_TAG
+        m_parent.set_as_dirty();
+        m_parent.request_extra_frame();
+    }
+    ImGui::SameLine();
+    // NEOTKO_STICKER_TAG — sin icono propio todavía (los 5 SVG de Fable de s173
+    // son Select/Paint/Eraser/Pick/EraseAll); texto plano hasta que haya un
+    // sexto asset, mismo idioma visual que `cs_toggle_button` (pill teal).
+    if (cs_toggle_button(_u8L("Sticker").c_str(), m_sticker_mode,
+                         _u8L("Sticker — click a flat top face to place the loaded SVG "
+                              "(load it below, in the Palette panel)").c_str())) {
+        m_select_mode  = false;
+        m_erase_mode   = false;
+        m_pick_mode    = false;
+        m_sticker_mode = true;
         m_parent.set_as_dirty();
         m_parent.request_extra_frame();
     }
@@ -3562,6 +3684,8 @@ void GLGizmoColorMixPainter::pick_recipe_from_object(int object_idx, int picked_
     if (!p) return;
     const CS::ColorRecipe r = recipe_from_profile(*p);
     m_select_mode = false; m_erase_mode = false; m_pick_mode = false;
+    m_sticker_mode = false;        // NEOTKO_STICKER_TAG
+    m_editing_sticker_idx = -1;    // NEOTKO_STICKER_TAG
     m_selected_profile_id = sel_pid;
     m_active_resolved     = false;
     m_active_slot         = slot_for_selected_profile(/*assign_if_missing=*/true);
@@ -3574,6 +3698,334 @@ void GLGizmoColorMixPainter::pick_recipe_from_object(int object_idx, int picked_
         << "' (picked_slot=" << picked_slot << (picked_pid ? " exact" : " fallback-first") << ")");
     m_parent.set_as_dirty();
     m_parent.request_extra_frame();
+}
+
+// NEOTKO_STICKER_TAG — file picker para el SVG de la pegatina. Diálogo propio
+// (no reusa `choose_svg_file()` de GLGizmoSVG.cpp: esa función es file-local a
+// ese .cpp, sin declaración en su .hpp — replicar aquí ~10 líneas es más barato
+// y seguro que exponerla, y mantiene el painter sin blast radius sobre el gizmo
+// SVG compartido, mismo criterio que los iconos privados de s173).
+bool GLGizmoColorMixPainter::load_sticker_svg_dialog()
+{
+    wxWindow* parent = nullptr;
+    wxFileDialog dlg(parent, _L("Select SVG for sticker"), wxEmptyString, wxEmptyString,
+                      file_wildcards(FT_SVG), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK) return false;
+
+    const std::string path = into_u8(dlg.GetPath());
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        NEOTKO_LOG(PROFILE, "STICKER_LOAD failed to open path='" << path << "'");
+        return false;
+    }
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    if (ss.str().empty()) return false;
+
+    m_pending_sticker_svg  = ss.str();
+    m_pending_sticker_name = boost::filesystem::path(path).stem().string();
+    NEOTKO_LOG(PROFILE, "STICKER_LOAD name='" << m_pending_sticker_name
+        << "' bytes=" << m_pending_sticker_svg.size());
+    return true;
+}
+
+// NEOTKO_STICKER_TAG — coloca el SVG pendiente como nueva pegatina: plana en el
+// plano XY del frame-objeto (v1, sin rotación), en la posición del click. `hit_local`
+// vive en el frame LOCAL del mesh del volumen impactado (rr_hit()); `mv->get_matrix()`
+// lo lleva al frame-objeto compartido — el MISMO frame que `sticker_footprint_slice_frame`
+// espera (ver comentario en Model.hpp: ColorMixSticker::transform). Se apila al FINAL
+// (back() = tope de la pila = ocluye a las demás, convención fijada en SurfaceColorMix.cpp).
+void GLGizmoColorMixPainter::place_sticker_at(const ModelVolume* mv, const Vec3f& hit_local)
+{
+    ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!mo || !mv || m_pending_sticker_svg.empty()) return;
+
+    const Vec3d hit_obj = mv->get_matrix() * hit_local.cast<double>();
+
+    ColorMixSticker st;
+    st.name       = m_pending_sticker_name;
+    st.svg_data   = m_pending_sticker_svg;
+    st.profile_id = m_selected_profile_id;   // misma fuente que "con qué color pinto ahora"
+    st.transform  = Transform3d::Identity();
+    st.transform.pretranslate(hit_obj);
+    mo->colormix_stickers.push_back(std::move(st));
+
+    m_preview_dirty = true;
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    NEOTKO_LOG(PROFILE, "STICKER_PLACE obj='" << mo->name << "' name='" << m_pending_sticker_name
+        << "' profile_id=" << m_selected_profile_id
+        << " pos=(" << hit_obj.x() << "," << hit_obj.y() << "," << hit_obj.z() << ")"
+        << " pile_size=" << mo->colormix_stickers.size());
+}
+
+// NEOTKO_STICKER_TAG — entra en modo edición (mover/rotar) para el sticker en
+// `idx`. Fuerza la herramienta Sticker activa (mutex con Select/Paint/Eraser/
+// Pick) y decodifica el ángulo Z actual de su transform para el slider — ver
+// nota del header sobre por qué esa decodificación es EXACTA (invariante
+// Translation*RotationZ que nosotros mismos garantizamos).
+void GLGizmoColorMixPainter::enter_sticker_edit(int idx)
+{
+    ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!mo || idx < 0 || idx >= (int)mo->colormix_stickers.size()) return;
+
+    m_select_mode  = false;
+    m_erase_mode   = false;
+    m_pick_mode    = false;
+    m_sticker_mode = true;
+    m_editing_sticker_idx = idx;
+    m_sticker_dragging    = false;
+
+    const ColorMixSticker& st = mo->colormix_stickers[idx];
+    m_editing_spin_deg = float(std::atan2(st.transform(1, 0), st.transform(0, 0)) * 180.0 / M_PI);
+    m_editing_scale    = float(st.transform.linear().col(0).norm());
+    m_sticker_overlay_built_for = -1;   // fuerza reconstruir el overlay para ESTE sticker
+
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+}
+
+void GLGizmoColorMixPainter::exit_sticker_edit()
+{
+    m_editing_sticker_idx = -1;
+    m_sticker_dragging    = false;
+    m_parent.set_as_dirty();
+}
+
+// NEOTKO_STICKER_TAG — construye (una vez por sticker en edición) la geometría
+// GL del overlay en frame LOCAL (z=0, sin colocación): contorno (líneas, vía
+// `sticker_rings_in_transform` + `GLModel::init_from(Polygons, z)`, soporta
+// huecos/cóncavo tal cual) + relleno (triángulos, vía `triangulate_expolygons_2f`
+// — el mismo tesselador glu que usa el resto de Orca para generar sólidos desde
+// ExPolygons, así que letras/logos con huecos salen correctos, no una
+// aproximación). Reusar `SurfaceColorMix::sticker_rings_in_transform` evita
+// duplicar el parseo NSVG que ya vive en el motor de slice.
+void GLGizmoColorMixPainter::ensure_sticker_overlay_built(const ColorMixSticker& sticker)
+{
+    if (m_sticker_overlay_built_for == m_editing_sticker_idx) return;
+    m_sticker_overlay_built_for = m_editing_sticker_idx;
+
+    m_sticker_overlay_fill.reset();
+    m_sticker_overlay_outline.reset();
+
+    const Polygons rings = SurfaceColorMix::sticker_rings_in_transform(sticker, Transform3d::Identity());
+    if (rings.empty()) return;
+
+    m_sticker_overlay_outline.init_from(rings, 0.f);
+
+    const ExPolygons local_expolys = union_ex(rings);
+    const std::vector<Vec2f> tris2d = triangulate_expolygons_2f(local_expolys);
+    if (tris2d.size() >= 3) {
+        indexed_triangle_set its;
+        its.vertices.reserve(tris2d.size());
+        for (const Vec2f& p : tris2d) its.vertices.emplace_back(p.x(), p.y(), 0.f);
+        its.indices.reserve(tris2d.size() / 3);
+        for (size_t i = 0; i + 2 < tris2d.size(); i += 3)
+            its.indices.emplace_back(int(i), int(i + 1), int(i + 2));
+        m_sticker_overlay_fill.init_from(its);
+    }
+}
+
+// NEOTKO_STICKER_TAG — dibuja el sticker en edición con SU color asignado (no
+// solo contorno), para que mover/rotar se haga sabiendo cómo va a quedar contra
+// lo que ya hay debajo/alrededor — pedido explícito del usuario. Mismo patrón
+// que GLGizmoFlatten::on_render (shader "flat", GLModel construido en frame
+// LOCAL, transform vía uniform view_model_matrix, pequeño alzado en Z mundo
+// para evitar z-fighting con la superficie real).
+void GLGizmoColorMixPainter::render_sticker_edit_overlay()
+{
+    if (m_editing_sticker_idx < 0) return;
+    const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!mo || m_editing_sticker_idx >= (int)mo->colormix_stickers.size()) { exit_sticker_edit(); return; }
+    if (mo->instances.empty()) return;
+
+    const ColorMixSticker& st = mo->colormix_stickers[m_editing_sticker_idx];
+    ensure_sticker_overlay_built(st);
+    if (!m_sticker_overlay_outline.is_initialized() && !m_sticker_overlay_fill.is_initialized()) return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (!shader) return;
+
+    const ModelInstance* mi = mo->instances.front();
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    // Alzado en Z MUNDO (no local) para evitar z-fighting con la superficie real
+    // — mismo truco que GLGizmoFlatten::update_planes ("Raise a bit above the
+    // object surface to avoid flickering"), aplicado tras el resto de la cadena
+    // para que sea robusto a la orientación de la instancia.
+    const Transform3d lift = Geometry::translation_transform(Vec3d(0.0, 0.0, 0.05));
+    const Transform3d model_matrix = lift * mi->get_transformation().get_matrix() * st.transform;
+    const Transform3d view_model_matrix = camera.get_view_matrix() * model_matrix;
+
+    shader->start_using();
+    shader->set_uniform("view_model_matrix", view_model_matrix);
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    const SurfaceEffectProfile* p = st.profile_id ? SurfaceEffectProfileManager::get().find(st.profile_id) : nullptr;
+    ColorRGBA fill_col = p ? color_for_profile(*p) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+    fill_col[3] = 0.55f;   // semi-transparente: se ve el color Y lo que hay debajo
+    if (m_sticker_overlay_fill.is_initialized()) {
+        m_sticker_overlay_fill.set_color(fill_col);
+        m_sticker_overlay_fill.render();
+    }
+    if (m_sticker_overlay_outline.is_initialized()) {
+        m_sticker_overlay_outline.set_color(ColorRGBA(1.f, 1.f, 1.f, 0.9f));
+        m_sticker_overlay_outline.render();
+    }
+
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glEnable(GL_CULL_FACE));
+    shader->stop_using();
+}
+
+// NEOTKO_STICKER_TAG — sección del departamento Palette: cargar SVG + lista de
+// pegatinas del objeto activo (orden = pila, back()=tope). Mostrada TOP-DOWN
+// (el primer row de la lista es el que OCLUYE a los de abajo) para que coincida
+// con el modelo mental de "apilar pegatinas" del plan.
+void GLGizmoColorMixPainter::render_sticker_section()
+{
+    const bool open = ImGui::CollapsingHeader(_u8L("Stickers (SVG)").c_str());
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Place a 1-colour SVG shape on a flat top face and give it "
+                                     "its own Sandwich recipe. Stack several — the topmost "
+                                     "occludes the ones below (no blending).").c_str());
+    if (!open) return;
+
+    if (m_imgui->button(_L("Load SVG...")))
+        load_sticker_svg_dialog();
+    if (!m_pending_sticker_svg.empty()) {
+        ImGui::SameLine();
+        m_imgui->text_colored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f),
+            (_u8L("Loaded:") + " " + m_pending_sticker_name).c_str());
+        ImGui::PushTextWrapPos(0.f);
+        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+            _u8L("Pick the Sticker tool above, then click a flat top face to place it.").c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!mo || mo->colormix_stickers.empty()) {
+        m_imgui->text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), _u8L("No stickers on this object yet.").c_str());
+        return;
+    }
+
+    ImGui::Separator();
+    auto& mgr = SurfaceEffectProfileManager::get();
+    const size_t n = mo->colormix_stickers.size();
+    int move_from = -1, move_to = -1;
+    int remove_idx = -1;
+    for (size_t disp = 0; disp < n; ++disp) {
+        const size_t i = n - 1 - disp;   // top-down: back() (tope) primero
+        ColorMixSticker& st = mo->colormix_stickers[i];
+        ImGui::PushID((int)i);
+
+        const SurfaceEffectProfile* p = st.profile_id ? mgr.find(st.profile_id) : nullptr;
+        const ColorRGBA sw_col = p ? color_for_profile(*p) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+        ImGui::ColorButton("##stk_sw", ImVec4(sw_col.r(), sw_col.g(), sw_col.b(), 1.f),
+                            ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                            ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(st.name.empty() ? "?" : st.name.c_str());
+        ImGui::SameLine();
+        m_imgui->text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+            (p ? cs_strip_group(p->name) : _u8L("(no profile)")).c_str());
+
+        if (m_imgui->button(_L("Assign active")))
+            st.profile_id = m_selected_profile_id;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Assign the currently selected palette profile "
+                                         "(the one you'd paint with) to this sticker").c_str());
+        ImGui::SameLine();
+        m_imgui->disabled_begin(disp == 0);
+        if (m_imgui->button("^")) { move_from = (int)i; move_to = (int)i + 1; }
+        m_imgui->disabled_end();
+        ImGui::SameLine();
+        m_imgui->disabled_begin(disp == n - 1);
+        if (m_imgui->button("v")) { move_from = (int)i; move_to = (int)i - 1; }
+        m_imgui->disabled_end();
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Remove")))
+            remove_idx = (int)i;
+
+        // NEOTKO_STICKER_TAG — mover/rotar/escalar: "Edit placement" entra en
+        // el modo descrito en on_mouse (arrastrar mueve); estos sliders rotan
+        // Z y escalan; "Done" sale. Cada slider reescribe transform EN VIVO
+        // conservando lo demás (posición/ángulo/escala) y solo agenda re-slice
+        // al soltar (IsItemDeactivatedAfterEdit), igual que el drag de
+        // posición solo re-slicea en LeftUp — evita spamear el scheduler
+        // mientras se ajusta.
+        const bool is_editing_this = ((int)i == m_editing_sticker_idx);
+        if (is_editing_this) {
+            if (m_imgui->button(_L("Done")))
+                exit_sticker_edit();
+            ImGui::SameLine();
+            ImGui::TextUnformatted(_u8L("Rotate").c_str());
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(m_imgui->scaled(6.f));
+            const std::string spin_fmt = std::string("%.0f") + I18N::translate_utf8("°", "deg");
+            if (ImGui::SliderFloat("##stk_spin", &m_editing_spin_deg, -180.f, 180.f, spin_fmt.c_str())) {
+                const Vec3d pos = st.transform.translation();
+                const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
+                st.transform = Eigen::Translation3d(pos) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
+                             * Eigen::Scaling(double(m_editing_scale));
+                m_parent.set_as_dirty();
+                m_parent.request_extra_frame();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Rotate around the vertical axis").c_str());
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+
+            ImGui::TextUnformatted(_u8L("Scale").c_str());
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(m_imgui->scaled(6.f));
+            if (ImGui::SliderFloat("##stk_scale", &m_editing_scale, 0.2f, 5.0f, "%.2fx")) {
+                const Vec3d pos = st.transform.translation();
+                const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
+                st.transform = Eigen::Translation3d(pos) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
+                             * Eigen::Scaling(double(m_editing_scale));
+                // Nota: NO hace falta invalidar m_sticker_overlay_built_for — la
+                // geometría del overlay vive en frame LOCAL (1:1, sin escalar);
+                // el tamaño en pantalla sale del uniform view_model_matrix
+                // (que ya incluye Scaling(m_editing_scale) vía st.transform),
+                // releído cada frame en render_sticker_edit_overlay().
+                m_parent.set_as_dirty();
+                m_parent.request_extra_frame();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Resize the sticker (uniform)").c_str());
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+        } else {
+            ImGui::SameLine();
+            if (m_imgui->button(_L("Edit placement")))
+                enter_sticker_edit((int)i);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Drag on the model to move it, then use the "
+                                             "slider to rotate — the colour preview shows "
+                                             "how it will land against everything else.").c_str());
+        }
+
+        ImGui::PopID();
+    }
+
+    if (move_from >= 0 && move_to >= 0 && move_to < (int)n) {
+        std::swap(mo->colormix_stickers[move_from], mo->colormix_stickers[move_to]);
+        if (m_editing_sticker_idx == move_from) m_editing_sticker_idx = move_to;
+        else if (m_editing_sticker_idx == move_to) m_editing_sticker_idx = move_from;
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    }
+    if (remove_idx >= 0 && remove_idx < (int)mo->colormix_stickers.size()) {
+        mo->colormix_stickers.erase(mo->colormix_stickers.begin() + remove_idx);
+        if (remove_idx == m_editing_sticker_idx) exit_sticker_edit();
+        else if (remove_idx < m_editing_sticker_idx) --m_editing_sticker_idx;
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    }
 }
 
 // s111 — carril izquierdo del panel (mockup del usuario): swatch del color
@@ -3789,7 +4241,11 @@ void GLGizmoColorMixPainter::render_paint_palette_grid()
     const float avail_w = ImGui::GetContentRegionAvail().x;
     const float sw      = m_imgui->scaled(2.0f);                       // lado de cada swatch
     const int   per_row = std::max(1, (int)std::floor(avail_w / (sw + 4.f)));
-    const float grid_h  = m_imgui->scaled(10.f);                       // alto máx.; scroll si desborda
+    // NEOTKO_STICKER_TAG — feedback usuario: la rejilla se comía media pantalla
+    // y dejaba la sección "Stickers (SVG)" (debajo) sin aire. Limitada a ~2
+    // filas de swatches (calculado desde `sw`, no un alto fijo, para que siga
+    // siendo robusto a DPI/escala); el resto hace scroll como siempre.
+    const float grid_h  = 2.f * (sw + 4.f) + 8.f;
 
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2.f, 2.f));
@@ -4382,6 +4838,12 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
         ImGui::Spacing();
         render_paint_palette_grid();
 
+        ImGui::Separator();
+
+        // NEOTKO_STICKER_TAG — s170 confirmó Palette como departamento destino
+        // para "pintar con SVG" (ver future_svg_sticker_sandwich.md). Card propia
+        // para no mezclar visualmente con la rejilla de paletas de arriba.
+        render_sticker_section();
         ImGui::Separator();
 
         // ---- Clipping plane ----

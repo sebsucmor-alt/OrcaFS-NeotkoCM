@@ -7228,6 +7228,20 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_persistence", "others_settings_fuzzy_skin#skin-noise-persistence");
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
 
+        // NEOTKO_TEXTUREBUMP_TAG_START — deterministic image-driven relief, see docs/ATTRIBUTION_TEXTURE_BUMP.md
+        optgroup = page->new_optgroup(L("Texture Bump"));
+        optgroup->append_single_option_line("texture_bump");
+        optgroup->append_single_option_line("texture_bump_image_path");
+        optgroup->append_single_option_line("texture_bump_projection_mode");
+        optgroup->append_single_option_line("texture_bump_axis");
+        optgroup->append_single_option_line("texture_bump_scale");
+        optgroup->append_single_option_line("texture_bump_thickness");
+        optgroup->append_single_option_line("texture_bump_point_distance");
+        optgroup->append_single_option_line("texture_bump_first_layer");
+        optgroup->append_single_option_line("texture_bump_max_angle");
+        optgroup->append_single_option_line("texture_bump_blur_strength");
+        // NEOTKO_TEXTUREBUMP_TAG_END
+
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
         optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");
         optgroup->append_single_option_line("gcode_add_line_number", "others_settings_g_code_output#add-line-number");

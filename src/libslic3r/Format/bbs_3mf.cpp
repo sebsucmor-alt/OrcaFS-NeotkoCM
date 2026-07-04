@@ -311,6 +311,60 @@ static inline std::string colormix_profiles_b64_decode(const std::string& b64)
     return out;
 }
 
+// NEOTKO_STICKER_TAG — Sandwich Stickers, per-OBJECT metadata. The whole pile is
+// one JSON array (order = pile order, back = topmost), base64-wrapped like the
+// profiles blob so the raw SVG text never meets the XML escaper
+// (bug_xml_escape_per_part_metadata). Per sticker: n=name, s=b64(svg),
+// p=profile id, t=16 row-major doubles of the object-frame transform.
+static constexpr const char* COLORMIX_STICKERS_KEY = "colormix_stickers_b64";
+
+static inline std::string serialize_colormix_stickers(const std::vector<Slic3r::ColorMixSticker>& stickers)
+{
+    if (stickers.empty()) return std::string();
+    nlohmann::json arr = nlohmann::json::array();
+    for (const Slic3r::ColorMixSticker& st : stickers) {
+        nlohmann::json j;
+        j["n"] = st.name;
+        j["s"] = colormix_profiles_b64_encode(st.svg_data);
+        j["p"] = st.profile_id;
+        nlohmann::json t = nlohmann::json::array();
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                t.push_back(st.transform.matrix()(r, c));
+        j["t"] = std::move(t);
+        arr.push_back(std::move(j));
+    }
+    return colormix_profiles_b64_encode(arr.dump());
+}
+
+static inline void parse_colormix_stickers(const std::string& b64, std::vector<Slic3r::ColorMixSticker>& stickers)
+{
+    stickers.clear();
+    const std::string json_str = colormix_profiles_b64_decode(b64);
+    if (json_str.empty()) return;
+    try {
+        const nlohmann::json arr = nlohmann::json::parse(json_str);
+        if (!arr.is_array()) return;
+        for (const auto& j : arr) {
+            Slic3r::ColorMixSticker st;
+            st.name       = j.value("n", std::string());
+            st.svg_data   = colormix_profiles_b64_decode(j.value("s", std::string()));
+            st.profile_id = j.value("p", 0);
+            if (j.contains("t") && j["t"].is_array() && j["t"].size() == 16) {
+                int k = 0;
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 4; ++c)
+                        st.transform.matrix()(r, c) = j["t"][k++].get<double>();
+            }
+            if (!st.svg_data.empty())
+                stickers.push_back(std::move(st));
+        }
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "NEOTKO_STICKER: failed to parse colormix_stickers_b64 from 3mf";
+        stickers.clear();
+    }
+}
+
 // Parse "1,2,0,3,0,..." into slots[]. Missing entries left as 0.
 static inline void parse_colormix_slot_table(const std::string& csv, int (&slots)[Slic3r::ModelVolume::COLORMIX_SLOT_COUNT])
 {
@@ -2115,6 +2169,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
+                    else if (metadata.key == COLORMIX_STICKERS_KEY) // NEOTKO_STICKER_TAG
+                        parse_colormix_stickers(metadata.value, model_object->colormix_stickers);
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -7661,6 +7717,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //BBS: store object's module name
                 if (!obj->module_name.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
+
+                // NEOTKO_STICKER_TAG — persist the Sandwich Sticker pile (b64 JSON,
+                // no xml_escape needed by construction).
+                {
+                    const std::string stickers_b64 = serialize_colormix_stickers(obj->colormix_stickers);
+                    if (!stickers_b64.empty())
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << COLORMIX_STICKERS_KEY
+                               << "\" " << VALUE_ATTR << "=\"" << stickers_b64 << "\"/>\n";
+                }
 
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {

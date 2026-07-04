@@ -12,6 +12,7 @@
 #include "Model.hpp"                  // NEOTKO_PROFILE_TAG — ModelObject/Volume access
 #include "ClipperUtils.hpp"           // NEOTKO_PROFILE_TAG — Fase 6c: union_ex for footprint mask
 #include "SurfaceEffectProfile.hpp"   // NEOTKO_PROFILE_TAG — painted-profile lookup
+#include "NSVGUtils.hpp"              // NEOTKO_STICKER_TAG — SVG → ExPolygons (sticker masks)
 #include "GCodeWriter.hpp"  // NEOTKO_NEOWEAVING_TAG — must be outside namespace Slic3r
 #include <cstdlib>
 #include <fstream>
@@ -691,6 +692,121 @@ std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// NEOTKO_STICKER_TAG — Sandwich Sticker helpers.
+//
+// A sticker (ModelObject::colormix_stickers) is a 1-colour SVG shape placed on
+// a flat top face, carrying a SurfaceEffectProfile — a VECTOR paint mask, no
+// facets. These helpers mirror the painted-slot scan trio above (has-any /
+// enumerate-in-band / footprint) so Fill.cpp's FASE 6c v2 pre-split can consume
+// stickers through the same machinery. Frames: sticker.transform maps
+// sticker-local mm (SVG plane, z=0, shape centered by NSVGUtils) into the
+// OBJECT frame; composing po->trafo_centered() (NEVER trafo(), s161) yields the
+// slice frame the fill ExPolygons live in.
+// ---------------------------------------------------------------------------
+
+bool SurfaceColorMix::object_has_any_colormix_stickers(const ModelObject* mo)
+{
+    if (!mo) return false;
+    for (const ColorMixSticker& st : mo->colormix_stickers) {
+        // Ghost filter (mirrors the s137b slot filter): a sticker without svg,
+        // without profile, or pointing at a deleted profile must not flip the
+        // object into painter mode on its own.
+        if (st.svg_data.empty() || st.profile_id == 0) continue;
+        if (Slic3r::SurfaceEffectProfileManager::get().find(st.profile_id) == nullptr) continue;
+        return true;
+    }
+    return false;
+}
+
+std::vector<size_t> SurfaceColorMix::enumerate_stickers_in_z_range(
+    const PrintObject* po, double z_min, double z_max)
+{
+    std::vector<size_t> out;
+    if (!po) return out;
+    const ModelObject* mo = po->model_object();
+    if (!mo || mo->colormix_stickers.empty()) return out;
+
+    const Transform3d trafo = po->trafo_centered(); // NEOTKO_STICKER_TAG — slice frame (s161, see dominant_painted_slot_in_z_range)
+    const double z_tol = 0.02; // same fp slack as the painted scans
+    // TOP-DOWN: back() of the pile is the topmost sticker → first in the result,
+    // so the Fill.cpp consumer can peel the remaining area in occlusion order.
+    for (size_t k = mo->colormix_stickers.size(); k-- > 0; ) {
+        const ColorMixSticker& st = mo->colormix_stickers[k];
+        if (st.svg_data.empty() || st.profile_id == 0) continue;
+        if (Slic3r::SurfaceEffectProfileManager::get().find(st.profile_id) == nullptr) continue;
+        const double anchor_z = (trafo * st.transform * Vec3d(0.0, 0.0, 0.0)).z();
+        if (anchor_z >= z_min - z_tol && anchor_z <= z_max + z_tol)
+            out.push_back(k);
+    }
+    if (!out.empty())
+        NEOTKO_LOG(PROFILE, "STICKER_ENUM band=[" << z_min << "," << z_max << "]"
+            << " pile=" << mo->colormix_stickers.size()
+            << " in_band=" << out.size() << " (top-down)");
+    return out;
+}
+
+Polygons SurfaceColorMix::sticker_rings_in_transform(const ColorMixSticker& sticker,
+                                                     const Transform3d& to_target)
+{
+    Polygons rings;
+    if (sticker.svg_data.empty()) return rings;
+
+    // nanosvg parses a private copy of the string (see NSVGUtils::nsvgParse) —
+    // safe under the parallel make_fills / GUI render thread. Top/penu layers
+    // are few per object (and GUI overlays only rebuild on edit), so the
+    // per-call parse is acceptable (revisit with a cache if a pile of many
+    // stickers ever shows up in a profile trace).
+    NSVGimage_ptr image = nsvgParse(sticker.svg_data, "mm", 96.0f);
+    if (image == nullptr || image->shapes == nullptr) {
+        NEOTKO_LOG(PROFILE, "STICKER_MASK parse FAILED name='" << sticker.name << "'");
+        return rings;
+    }
+    // Same tesselation as GLGizmoSVG::select_shape: 0.1 mm tolerance, expressed
+    // in scaled^2 units (see get_tesselation_tolerance, GLGizmoSVG.cpp:87).
+    const double tol_mm = 0.1;
+    NSVGLineParams params{ (tol_mm * tol_mm) / SCALING_FACTOR / SCALING_FACTOR };
+    const ExPolygonsWithIds shapes = create_shape_with_ids(*image, params);
+    if (shapes.empty()) return rings;
+
+    // An XY mirror (negative determinant of the 2D linear part) flips ring
+    // orientation; reverse the rings so contour/hole winding stays consistent
+    // for a NonZero union downstream (whichever caller does it).
+    const double det_xy = to_target(0, 0) * to_target(1, 1) - to_target(0, 1) * to_target(1, 0);
+
+    auto push_ring = [&](const Polygon& src) {
+        Polygon p;
+        p.points.reserve(src.points.size());
+        for (const Point& q : src.points) {
+            const Vec3d v = to_target * Vec3d(unscale<double>(q.x()), unscale<double>(q.y()), 0.0);
+            p.points.emplace_back(coord_t(scale_(v.x())), coord_t(scale_(v.y())));
+        }
+        if (det_xy < 0.0) std::reverse(p.points.begin(), p.points.end());
+        if (std::abs(p.area()) < SCALED_EPSILON) return; // degenerate
+        rings.push_back(std::move(p));
+    };
+    for (const ExPolygonsWithId& sh : shapes)
+        for (const ExPolygon& ep : sh.expoly) {
+            push_ring(ep.contour);
+            for (const Polygon& h : ep.holes) push_ring(h);
+        }
+    return rings;
+}
+
+ExPolygons SurfaceColorMix::sticker_footprint_slice_frame(const ColorMixSticker& sticker,
+                                                          const PrintObject* po)
+{
+    ExPolygons out;
+    if (!po) return out;
+    const Transform3d to_slice = po->trafo_centered() * sticker.transform;
+    const Polygons rings = sticker_rings_in_transform(sticker, to_slice);
+    if (rings.empty()) return out;
+    out = union_ex(rings); // pftNonZero → CW holes subtract, letters keep their holes
+    NEOTKO_LOG(PROFILE, "STICKER_MASK name='" << sticker.name << "'"
+        << " rings=" << rings.size() << " regions=" << out.size());
+    return out;
+}
+
 // NEOTKO_PAINT_COEXIST_TAG s91 v1.2 — MMU footprint for sandwich-top suppression.
 //
 // v1 ORIGINAL: included ALL facet orientations (lateral + bottom + top) so the
@@ -1137,7 +1253,13 @@ int SurfaceColorMix::assign_and_group_tools(
             << " obj_has_mmu=1 z=[" << _s91_z_layer_min << "," << _s91_z_layer_max
             << "] — per-EEC governance active (was global skip pre-s91)");
 
-    const bool painter_mode_obj = object_has_any_colormix_paint(model_object);
+    // NEOTKO_STICKER_TAG — a sticker-only object (no painted facets) must also
+    // take painter mode here: this gate mirrors the one in Fill.cpp's
+    // _mp_painter_mode (which is what routed this call's config_has_pass_override
+    // in the first place); divergence between the two would leave the sticker's
+    // per-piece override fighting the PRESET gate instead of being honoured.
+    const bool painter_mode_obj = object_has_any_colormix_paint(model_object)
+        || object_has_any_colormix_stickers(model_object);
     // NEOTKO_COLORSTITCH_TAG — s112 diagnóstico: ¿el objeto entra en painter-mode?
     // Recontamos los slots pintados aquí mismo (igual que object_has_any) + el
     // puntero del mo para cruzarlo con el PAINT_SLOT de PrintObjectSlice.
@@ -2591,6 +2713,27 @@ bool SurfaceColorMix::any_painted_profile_has_perim_override(
         if (p->multipass.present && painted_perim_override_from_profile(p->multipass))
             return true;
     }
+    // NEOTKO_STICKER_TAG — a sticker's stack can carry perimeter_override too;
+    // this feeds the SAME ToolOrdering prepass (fill_wipe_tower_partitions-adjacent
+    // MixedFilament pre-block) that the painted scan above feeds, so a sticker-only
+    // object must be scanned here as well (else that prepass silently misses it —
+    // same class of Plan/Emisión desync the s118 fix above closed for paint).
+    const ModelObject* mo = po->model_object();
+    if (mo && !mo->colormix_stickers.empty()) {
+        for (const bool is_penu : { false, true }) {
+            const double z_lo = is_penu ? print_z : (print_z - height);
+            const double z_hi = is_penu ? (print_z + height) : print_z;
+            for (size_t si : enumerate_stickers_in_z_range(po, z_lo, z_hi)) {
+                const ColorMixSticker& stk = mo->colormix_stickers[si];
+                const SurfaceEffectProfile* p = mgr.find(stk.profile_id);
+                if (!p) continue;
+                const std::string& js = is_penu ? p->stack_penu_json : p->stack_top_json;
+                const SurfacePassStack st = SurfacePassStack::from_json(js);
+                if (st.any_effect() && st.perimeter_override)
+                    return true;
+            }
+        }
+    }
     return false;
 }
 
@@ -2601,8 +2744,15 @@ int SurfaceColorMix::painted_colormix_angle_for_slot(const PrintObject* po, int 
 {
     if (po == nullptr || slot <= 0) return -1;
     const int pid = profile_id_for_slot(po, slot);
-    if (!pid) return -1;
-    const SurfaceEffectProfile* p = Slic3r::SurfaceEffectProfileManager::get().find(pid);
+    return colormix_angle_for_profile_id(pid, penu);
+}
+
+// NEOTKO_STICKER_TAG — factored out of painted_colormix_angle_for_slot so a
+// sticker (which has a profile id but no slot) can share the same lookup.
+int SurfaceColorMix::colormix_angle_for_profile_id(int profile_id, bool penu)
+{
+    if (!profile_id) return -1;
+    const SurfaceEffectProfile* p = Slic3r::SurfaceEffectProfileManager::get().find(profile_id);
     if (!p) return -1;
     auto read = [penu](const std::map<std::string, std::string>& kv) -> int {
         // Penu passes carry the penu-prefixed key; fall back to the plain key.

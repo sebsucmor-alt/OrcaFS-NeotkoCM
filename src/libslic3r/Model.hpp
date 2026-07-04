@@ -347,6 +347,36 @@ enum class ModelVolumeType : int {
     SUPPORT_ENFORCER,
 };
 
+// NEOTKO_STICKER_TAG — "Sandwich Sticker": a 1-colour SVG shape placed on a flat
+// top face of the object, carrying a Sandwich recipe (SurfaceEffectProfile id).
+// Unlike painted facets (per-triangle, per-volume) a sticker is a 2D vector mask
+// resolved at slice time; unlike GLGizmoSVG/Emboss it creates NO geometry — only
+// a paint mask for the FASE 6c v2 footprint clipping in Fill.cpp.
+// Frame: `transform` maps sticker-local mm coords (x, y, 0 — the SVG plane,
+// shape centered at its own origin by NSVGUtils) into the OBJECT frame (the
+// same frame ModelVolume::get_matrix() targets); instance/print placement is
+// composed later via PrintObject::trafo_centered() (s161 lesson — NEVER trafo()).
+// Pile order: index 0 = bottom of the pile, back() = topmost. On XY overlap the
+// topmost sticker WINS (occludes, does not blend) — resolved top-down in Fill.cpp.
+struct ColorMixSticker
+{
+    std::string name;                                  // display label (SVG filename stem)
+    std::string svg_data;                              // raw SVG text — persisted source of truth
+    Transform3d transform{ Transform3d::Identity() };  // sticker-local (mm, z=0) → object frame
+    int         profile_id = 0;                        // SurfaceEffectProfile id (0 = unassigned)
+
+    template<class Archive> void serialize(Archive& ar) { ar(name, svg_data, transform, profile_id); }
+};
+
+inline bool operator==(const ColorMixSticker& a, const ColorMixSticker& b)
+{
+    return a.profile_id == b.profile_id
+        && a.transform.matrix() == b.transform.matrix()
+        && a.name == b.name
+        && a.svg_data == b.svg_data;
+}
+inline bool operator!=(const ColorMixSticker& a, const ColorMixSticker& b) { return !(a == b); }
+
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
 // and possibly having multiple modifier volumes, each modifier volume with its set of parameters and materials.
 // Each ModelObject may be instantiated mutliple times, each instance having different placement on the print bed,
@@ -399,6 +429,17 @@ public:
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
+
+    // NEOTKO_STICKER_TAG — ordered pile of Sandwich Stickers (see struct above).
+    // Object-level (a sticker spans volumes), mirrored in assign_copy/serialize,
+    // persisted as per-object 3mf metadata (colormix_stickers_b64), compared in
+    // Print::apply via model_colormix_sticker_data_changed().
+    std::vector<ColorMixSticker> colormix_stickers;
+    // Derived cache — content hash of the profiles the stickers reference (the
+    // stacks live in SurfaceEffectProfileManager, outside the model). Written
+    // during apply by model_colormix_sticker_data_changed(); not serialized
+    // (a stale 0 only costs one extra re-slice, mirroring the painted path).
+    uint64_t colormix_sticker_profiles_fingerprint = 0;
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
@@ -680,10 +721,10 @@ private:
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid, 
+            m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, colormix_stickers); // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -693,10 +734,10 @@ private:
         SaveObjectGaurd gaurd(*this);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid, 
+            m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, colormix_stickers); // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)
@@ -1787,6 +1828,11 @@ extern bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObje
 // NEOTKO_PROFILE_TAG — Test whether the new ModelObject has newer ColorMix painter
 // data (facets, slot table, or referenced profile content) than the old one.
 extern bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+
+// NEOTKO_STICKER_TAG — returns true if the sticker pile differs (order, transform,
+// profile, svg) OR the CONTENT of a referenced profile changed (same fingerprint
+// mechanism as the painted path). Wired into the same PrintApply OR as paint.
+extern bool model_colormix_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 

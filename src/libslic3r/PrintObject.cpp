@@ -299,6 +299,38 @@ void PrintObject::make_perimeters()
     if (! this->set_started(posPerimeters))
         return;
 
+    // NEOTKO_TEXTUREBUMP_TAG — whole-object pre-pass, before any wall is generated: builds the
+    // already slope-limited per-column table that PerimeterGenerator consumes later (see
+    // docs/ATTRIBUTION_TEXTURE_BUMP.md for why detecting an excessive inter-layer slope needs a
+    // whole-object look-ahead in Z instead of the per-layer sampling Fuzzy Skin uses). v1: a
+    // single shared table per object, built from printing_region(0)'s config.
+    if (this->num_printing_regions() > 0) {
+        const PrintRegionConfig& tb_region_cfg = this->printing_region(0).config();
+        const Feature::TextureBump::TextureBumpConfig tb_cfg{
+            tb_region_cfg.texture_bump,
+            scaled<coord_t>(tb_region_cfg.texture_bump_thickness.value),
+            scaled<coord_t>(tb_region_cfg.texture_bump_point_distance.value),
+            tb_region_cfg.texture_bump_first_layer,
+            tb_region_cfg.texture_bump_projection_mode,
+            tb_region_cfg.texture_bump_axis,
+            tb_region_cfg.texture_bump_scale.value,
+            tb_region_cfg.texture_bump_max_angle.value * M_PI / 180.0,
+            tb_region_cfg.texture_bump_blur_strength.value,
+            tb_region_cfg.texture_bump_image_path.value};
+        if (tb_cfg.type != TextureBumpType::None) {
+            BoundingBoxf3 tb_bounds;
+            tb_bounds.min = Vec3d(-unscale_(this->size().x()) / 2.0, -unscale_(this->size().y()) / 2.0, 0.0);
+            tb_bounds.max = Vec3d( unscale_(this->size().x()) / 2.0,  unscale_(this->size().y()) / 2.0, unscale_(this->size().z()));
+            std::vector<coordf_t> tb_layer_z;
+            tb_layer_z.reserve(m_layers.size());
+            for (const Layer* l : m_layers)
+                tb_layer_z.push_back(l->slice_z);
+            m_texture_bump_table.build(tb_cfg, tb_bounds, tb_layer_z);
+        } else if (! m_texture_bump_table.empty()) {
+            m_texture_bump_table = Feature::TextureBump::TextureBumpTable();
+        }
+    }
+
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
@@ -1192,6 +1224,16 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_scale"
             || opt_key == "fuzzy_skin_octaves"
             || opt_key == "fuzzy_skin_persistence"
+            || opt_key == "texture_bump"
+            || opt_key == "texture_bump_image_path"
+            || opt_key == "texture_bump_projection_mode"
+            || opt_key == "texture_bump_axis"
+            || opt_key == "texture_bump_scale"
+            || opt_key == "texture_bump_thickness"
+            || opt_key == "texture_bump_point_distance"
+            || opt_key == "texture_bump_first_layer"
+            || opt_key == "texture_bump_max_angle"
+            || opt_key == "texture_bump_blur_strength"
             || opt_key == "detect_overhang_wall"
             || opt_key == "overhang_reverse"
             || opt_key == "overhang_reverse_internal_only"
@@ -3398,6 +3440,12 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.sparse_infill_density.value = std::min(config.sparse_infill_density.value, 100.);
     if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
         config.fuzzy_skin.value = FuzzySkinType::None;
+    // NEOTKO_TEXTUREBUMP_TAG — same degenerate-value guard as fuzzy skin above, plus an empty
+    // image path (nothing to sample).
+    if (config.texture_bump.value != TextureBumpType::None &&
+        (config.texture_bump_point_distance.value < 0.01 || config.texture_bump_thickness.value < 0.001 ||
+         config.texture_bump_image_path.value.empty()))
+        config.texture_bump.value = TextureBumpType::None;
     return config;
 }
 

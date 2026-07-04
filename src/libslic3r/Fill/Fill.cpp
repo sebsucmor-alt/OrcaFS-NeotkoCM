@@ -8,6 +8,7 @@
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
 #include "../Surface.hpp"
+#include "../Model.hpp" // NEOTKO_STICKER_TAG — ModelObject::colormix_stickers direct access (Print.hpp only forward-declares ModelObject)
 
 #include "ExtrusionEntity.hpp"
 #include "FillBase.hpp"
@@ -1369,6 +1370,11 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         // natural remainder). The wipe tower is untouched: sublayer tools still
         // come from sub.tool_id, just more sublayers per layer.
         std::vector<int> _fp_tag;   // slot id per expoly (0 = natural, -1 = no pre-split)
+        // NEOTKO_STICKER_TAG — Fase 4: sticker pile index per expoly (-1 = no
+        // sticker covers this piece — resolve via _fp_tag/slot as before).
+        // MUST be consulted BEFORE _fp_tag downstream: a sticker OCCLUDES
+        // whatever painted slot/natural remainder used to be under it.
+        std::vector<int> _fp_sticker_tag;
         {
             const ModelObject* _mo6c = (this->object() != nullptr)
                 ? this->object()->model_object() : nullptr;
@@ -1383,12 +1389,16 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     && (_role6c == erBottomSurface || _role6c == erBridgeInfill)
                                     && _mo6c
                                     && SurfaceColorMix::object_painter_wants_bottom(_mo6c);
+            // NEOTKO_STICKER_TAG — v1 scope: top/penu only (mirrors the plan §8
+            // scope note — bottom stickers are not addressed in v1).
+            const bool _has_stickers6c = _is_tp && _mo6c
+                                        && SurfaceColorMix::object_has_any_colormix_stickers(_mo6c);
             // NEOTKO_PAINT_COEXIST_TAG s91 — removed `!is_mm_painted()` gate.
             // Allow painter pre-split even on MMU-painted objects: the per-piece
             // MMU governance check downstream skips pieces whose XY is owned by
             // MMU, while colormix-painter pieces on non-MMU regions emit normally.
             if ((_is_tp || _is_bottom) && _mo6c
-                && SurfaceColorMix::object_has_any_colormix_paint(_mo6c)
+                && (SurfaceColorMix::object_has_any_colormix_paint(_mo6c) || _has_stickers6c)
                 && !surface_fill.expolygons.empty()) {
                 const PrintObject* _po6c = this->object();
                 const bool _downward6c = _is_bottom;
@@ -1468,6 +1478,82 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     _clip_log << "] natural=" << _nn;
                     NEOTKO_LOG(PROFILE, _clip_log.str());
                 }
+
+                // NEOTKO_STICKER_TAG — Fase 4: sticker peel, TOP-DOWN, over
+                // whatever surface_fill.expolygons holds right now (either the
+                // painted-slot split above, or the untouched original surface
+                // if this object has no paint — only stickers). A sticker
+                // occludes whatever is underneath (paint or natural) in its
+                // footprint, so it must run AFTER the painted split, not
+                // instead of it. `_fp_tag`/`_fp_sticker_tag` stay 1:1 aligned
+                // with the rebuilt `surface_fill.expolygons`.
+                if (_has_stickers6c) {
+                    std::vector<size_t> _stk_idx =
+                        SurfaceColorMix::enumerate_stickers_in_z_range(_po6c, _zlo, _zhi);
+                    std::vector<size_t>     _useful_stk;
+                    std::vector<ExPolygons> _useful_stk_masks;
+                    for (size_t _si : _stk_idx) {
+                        const ColorMixSticker& _stk = _mo6c->colormix_stickers[_si];
+                        const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_stk.profile_id);
+                        if (!_p) continue;
+                        const std::string& _js = (_role6c == erTopSolidInfill)
+                            ? _p->stack_top_json : _p->stack_penu_json;
+                        if (SurfacePassStack::from_json(_js).passes.empty()) continue;
+                        ExPolygons _mask = SurfaceColorMix::sticker_footprint_slice_frame(_stk, _po6c);
+                        if (_mask.empty()) continue;
+                        _useful_stk.push_back(_si);
+                        _useful_stk_masks.push_back(std::move(_mask));
+                    }
+                    if (!_useful_stk.empty()) {
+                        // Group the CURRENT pieces by their pre-sticker tag (the
+                        // natural granularity from the painted split above, or a
+                        // single -1 group if that split didn't run/apply) so each
+                        // boolean op below works on the right provenance instead
+                        // of a flat per-triangulation-piece list.
+                        ExPolygons       _pre_stk_polys = std::move(surface_fill.expolygons);
+                        std::vector<int> _pre_stk_tag   = _fp_tag; // copy: index-aligned, may be shorter/empty
+                        surface_fill.expolygons.clear();
+                        _fp_tag.clear();
+                        _fp_sticker_tag.clear();
+
+                        std::map<int, ExPolygons> _tag_groups;
+                        for (size_t i = 0; i < _pre_stk_polys.size(); ++i) {
+                            const int _t = (i < _pre_stk_tag.size()) ? _pre_stk_tag[i] : -1;
+                            _tag_groups[_t].push_back(std::move(_pre_stk_polys[i]));
+                        }
+
+                        std::ostringstream _stk_log;
+                        _stk_log << "STICKER_CLIP z=" << this->print_z
+                                 << " role=" << (int)_role6c << " stickers=[";
+                        for (size_t si = 0; si < _useful_stk.size(); ++si) {
+                            if (si) _stk_log << ",";
+                            _stk_log << _useful_stk[si];
+                        }
+                        _stk_log << "] groups=" << _tag_groups.size();
+
+                        for (auto& _kv : _tag_groups) {
+                            const int  _grp_tag = _kv.first;
+                            ExPolygons _remaining = std::move(_kv.second);
+                            // Highest pile index = topmost = peeled FIRST, so it
+                            // claims area before any sticker below it can.
+                            for (size_t si = 0; si < _useful_stk.size() && !_remaining.empty(); ++si) {
+                                ExPolygons _covered = intersection_ex(_remaining, _useful_stk_masks[si]);
+                                for (auto& e : _covered) {
+                                    surface_fill.expolygons.push_back(std::move(e));
+                                    _fp_tag.push_back(_grp_tag);
+                                    _fp_sticker_tag.push_back(static_cast<int>(_useful_stk[si]));
+                                }
+                                _remaining = diff_ex(_remaining, _useful_stk_masks[si]);
+                            }
+                            for (auto& e : _remaining) {
+                                surface_fill.expolygons.push_back(std::move(e));
+                                _fp_tag.push_back(_grp_tag);
+                                _fp_sticker_tag.push_back(-1);
+                            }
+                        }
+                        NEOTKO_LOG(PROFILE, _stk_log.str());
+                    }
+                }
             }
         }
         size_t _fp_idx = 0;
@@ -1477,6 +1563,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             // NEOTKO_PROFILE_TAG — Fase 6c v2: slot id of this piece (-1 = no
             // pre-split ran, 0 = natural remainder, >0 = painted with that slot).
             const int _fp_slot_tag = (_fp_idx < _fp_tag.size()) ? _fp_tag[_fp_idx] : -1;
+            // NEOTKO_STICKER_TAG — Fase 4: sticker pile index of this piece
+            // (-1 = no sticker here — resolve via _fp_slot_tag as before).
+            const int _fp_sticker_idx = (_fp_idx < _fp_sticker_tag.size()) ? _fp_sticker_tag[_fp_idx] : -1;
             ++_fp_idx;
 
       f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
@@ -1517,7 +1606,11 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 // divergence between the two would desync ToolOrdering, same class of bug s112 warns about).
                 const bool _mp_mixed_filament_mode = (this->object() != nullptr)
                     && this->object()->config().mixed_filament_sandwich_mode.value;
+                // NEOTKO_STICKER_TAG — a sticker-only object (no painted facets)
+                // must also take the painter-mode branch below, else it falls
+                // through to preset mode and the sticker's stack is ignored.
                 const bool _mp_painter_mode = SurfaceColorMix::object_has_any_colormix_paint(_mp_mo)
+                    || SurfaceColorMix::object_has_any_colormix_stickers(_mp_mo)
                     || _mp_mixed_filament_mode;
                 // NEOTKO_PAINT_COEXIST_TAG s91 — per-piece MMU governance.
                 // Was: global is_mm_painted() short-circuit on the whole object.
@@ -1659,6 +1752,32 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             }
                         }
 
+                        // NEOTKO_STICKER_TAG — Fase 4: a sticker OCCLUDES whatever
+                        // painted slot/natural remainder used to be under it, so
+                        // it resolves BEFORE (and instead of) the painted-slot
+                        // lookup below. Object-wide MixedFilament mode (_mixed_p)
+                        // still wins over both — same precedence the pre-sticker
+                        // code already gave it over painted slots.
+                        bool _sticker_resolved = false;
+                        if (!_mixed_p && _fp_sticker_idx >= 0 && _mp_mo
+                            && _fp_sticker_idx < (int)_mp_mo->colormix_stickers.size()) {
+                            const ColorMixSticker& _stk = _mp_mo->colormix_stickers[_fp_sticker_idx];
+                            if (const auto* _sp = SurfaceEffectProfileManager::get().find(_stk.profile_id)) {
+                                const std::string& _sjs = (_mp_role == erTopSolidInfill)
+                                    ? _sp->stack_top_json : _sp->stack_penu_json;
+                                SurfacePassStack _sst = SurfacePassStack::from_json(_sjs);
+                                if (_sst.any_effect()) {
+                                    mp_stack          = std::move(_sst);
+                                    is_mp_fill        = true;
+                                    _sticker_resolved = true;
+                                    NEOTKO_LOG(PROFILE, "STICKER_STACK_OVERRIDE layer=" << f->layer_id
+                                        << " z=" << this->print_z << " role=" << (int)_mp_role
+                                        << " sticker='" << _stk.name << "'"
+                                        << " passes=" << mp_stack.passes.size());
+                                }
+                            }
+                        }
+
                         const int _slot = (_fp_slot_tag > 0)
                             ? _fp_slot_tag
                             : (_fp_slot_tag == 0 ? 0
@@ -1691,7 +1810,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 << " passes=" << _bst.passes.size()
                                 << " any_effect=" << (_bst.any_effect() ? "1" : "0"));
                         }
-                        if (!_mixed_p && _slot > 0) {
+                        if (!_mixed_p && !_sticker_resolved && _slot > 0) {
                             const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
                             const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
                             if (_p) {
@@ -2747,9 +2866,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                          surface_fill.params.extrusion_role == erPenultimateInfill)) {
                         const auto& _cm_cfg_angle = layerm->region().config();
                         const bool  _angle_is_penu = (surface_fill.params.extrusion_role == erPenultimateInfill);
-                        bool _cm_angle_active = false;
-                        int  _painter_slot    = 0;   // >0 → painter mode resolved a painted slot here
-                        if (_mp_painter_mode && _fp_slot_tag != 0) {   // NEOTKO_PROFILE_TAG — Fase 6c v2: natural remainder (tag==0) keeps natural angle
+                        bool _cm_angle_active  = false;
+                        int  _painter_slot     = 0;   // >0 → painter mode resolved a painted slot here
+                        int  _sticker_angle_pid = 0;  // NEOTKO_STICKER_TAG — >0 → resolved via a sticker's profile
+                        if (_mp_painter_mode && _fp_sticker_idx >= 0) {
+                            // NEOTKO_STICKER_TAG — a sticker occludes whatever slot tag
+                            // was underneath (even a "natural" 0), so it must bypass the
+                            // `_fp_slot_tag != 0` gate below, not fall through it.
+                            const ModelObject* _smo = this->object() ? this->object()->model_object() : nullptr;
+                            if (_smo && _fp_sticker_idx < (int)_smo->colormix_stickers.size())
+                                _sticker_angle_pid = _smo->colormix_stickers[_fp_sticker_idx].profile_id;
+                            _cm_angle_active = (_sticker_angle_pid > 0);
+                        } else if (_mp_painter_mode && _fp_slot_tag != 0) {   // NEOTKO_PROFILE_TAG — Fase 6c v2: natural remainder (tag==0) keeps natural angle
                             // Painter mode: active if a painted profile resolves at this layer/role
                             const PrintObject* _po = this->object();
                             _painter_slot = (!_angle_is_penu)
@@ -2780,10 +2908,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // NEOTKO_COLORSTITCH_TAG — in painter mode the fixed angle lives in the
                             // PAINTED profile, not the region preset (which is auto=-1 there); reading
                             // the preset made the angle fall back to the per-layer alternating base_angle.
-                            const int _cm_angle = (_painter_slot > 0)
-                                ? SurfaceColorMix::painted_colormix_angle_for_slot(this->object(), _painter_slot, _angle_is_penu)
-                                : (!_angle_is_penu ? _cm_cfg_angle.interlayer_colormix_angle.value
-                                                   : _cm_cfg_angle.interlayer_colormix_penu_angle.value);
+                            const int _cm_angle = (_sticker_angle_pid > 0)
+                                ? SurfaceColorMix::colormix_angle_for_profile_id(_sticker_angle_pid, _angle_is_penu)
+                                : (_painter_slot > 0)
+                                    ? SurfaceColorMix::painted_colormix_angle_for_slot(this->object(), _painter_slot, _angle_is_penu)
+                                    : (!_angle_is_penu ? _cm_cfg_angle.interlayer_colormix_angle.value
+                                                       : _cm_cfg_angle.interlayer_colormix_penu_angle.value);
                             if (_cm_angle >= 0) {
                                 f->angle = Geometry::deg2rad(static_cast<float>(_cm_angle));
                                 // NEOTKO_COLORSTITCH_TAG — fixed angle is absolute: kill the per-layer
@@ -2842,7 +2972,13 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     // Painter objects are fully handled above; skip them here.
     const ModelObject* _cm_mo = (this->object() != nullptr)
         ? this->object()->model_object() : nullptr;
-    const bool _cm_painter_obj = SurfaceColorMix::object_has_any_colormix_paint(_cm_mo);
+    // NEOTKO_STICKER_TAG — a sticker-only object must ALSO disable this legacy
+    // route, else it re-dithers the WHOLE surface with the preset (this object
+    // "looks" unpainted to the paint-only check), flooding right over the
+    // sticker's FASE-2 masked subalyers — same flooding bug the comment above
+    // describes for painted objects.
+    const bool _cm_painter_obj = SurfaceColorMix::object_has_any_colormix_paint(_cm_mo)
+        || SurfaceColorMix::object_has_any_colormix_stickers(_cm_mo);
     for (LayerRegion *layerm : m_regions) {
         if (_cm_painter_obj) break;   // painter mode → real-layer route disabled
         if (layerm->fills.entities.empty()) continue;

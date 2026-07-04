@@ -527,7 +527,8 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         // comes from the painted profile's MP payload, not from the preset
         // region config (which is suppressed by painter_mode_obj).
         const bool _po_painter_mode =
-            SurfaceColorMix::object_has_any_colormix_paint(src.model_object());
+            SurfaceColorMix::object_has_any_colormix_paint(src.model_object())
+            || SurfaceColorMix::object_has_any_colormix_stickers(src.model_object()); // NEOTKO_STICKER_TAG
         int li = 0;
         for (const Layer* lyr : src.layers()) {
             if (li < (int)src.multipass_sublayers().size() &&

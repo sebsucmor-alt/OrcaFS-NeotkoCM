@@ -142,6 +142,30 @@ static t_config_enum_values s_keys_map_FuzzySkinMode {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinMode)
 
+// NEOTKO_TEXTUREBUMP_TAG — kept as its own enum family, not reused from FuzzySkinType/Mode.
+static t_config_enum_values s_keys_map_TextureBumpType {
+    { "none",           int(TextureBumpType::None) },
+    { "external",       int(TextureBumpType::External) },
+    { "all",            int(TextureBumpType::All) },
+    { "allwalls",       int(TextureBumpType::AllWalls)}
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TextureBumpType)
+
+static t_config_enum_values s_keys_map_TextureProjectionMode {
+    { "planar",         int(TextureProjectionMode::Planar) },
+    { "cylindrical",    int(TextureProjectionMode::Cylindrical) },
+    { "spherical",      int(TextureProjectionMode::Spherical) },
+    { "cubic",          int(TextureProjectionMode::Cubic) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TextureProjectionMode)
+
+static t_config_enum_values s_keys_map_TextureProjectionAxis {
+    { "x",              int(TextureProjectionAxis::X) },
+    { "y",              int(TextureProjectionAxis::Y) },
+    { "z",              int(TextureProjectionAxis::Z) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TextureProjectionAxis)
+
 // NEOTKO_NEOWEAVING_TAG_START — Neoweaving enum maps
 static t_config_enum_values s_keys_map_NeoweaveMode {
     { "wave",   int(NeoweaveMode::Wave)   },
@@ -3076,6 +3100,129 @@ void PrintConfigDef::init_fff_params()
     def->max = 1;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.5));
+
+    // NEOTKO_TEXTUREBUMP_TAG_START — deterministic image-driven relief (see docs/ATTRIBUTION_TEXTURE_BUMP.md)
+    def = this->add("texture_bump", coEnum);
+    def->label = L("Texture Bump");
+    def->category = L("Others");
+    def->tooltip = L("Apply a grayscale image as a deterministic relief (bump map) on the walls, instead of "
+                     "random fuzzy skin noise. This setting controls which walls receive the relief.");
+    def->enum_keys_map = &ConfigOptionEnum<TextureBumpType>::get_enum_values();
+    def->enum_values.push_back("none");
+    def->enum_values.push_back("external");
+    def->enum_values.push_back("all");
+    def->enum_values.push_back("allwalls");
+    def->enum_labels.push_back(L("None"));
+    def->enum_labels.push_back(L("Contour"));
+    def->enum_labels.push_back(L("Contour and hole"));
+    def->enum_labels.push_back(L("All walls"));
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionEnum<TextureBumpType>(TextureBumpType::None));
+
+    def = this->add("texture_bump_image_path", coString);
+    def->label = L("Texture image");
+    def->category = L("Others");
+    def->tooltip = L("Path to an 8-bit grayscale PNG used as the displacement map. Brighter pixels push the "
+                     "wall outward, darker pixels push it inward.");
+    def->gui_type = ConfigOptionDef::GUIType::one_string;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("texture_bump_projection_mode", coEnum);
+    def->label = L("Texture projection");
+    def->category = L("Others");
+    def->tooltip = L("How the flat image is projected onto the wall:\n"
+                     "Planar: simple XY/XZ/YZ projection, best for mostly flat walls.\n"
+                     "Cylindrical: wraps the image around the chosen axis by arc length, best for towers/cylinders.\n"
+                     "Spherical: wraps the image around the chosen axis in both angle and polar angle, best for round objects.\n"
+                     "Cubic: dominant-axis projection with a smooth blend at the face boundary, best for boxy objects.");
+    def->enum_keys_map = &ConfigOptionEnum<TextureProjectionMode>::get_enum_values();
+    def->enum_values.push_back("planar");
+    def->enum_values.push_back("cylindrical");
+    def->enum_values.push_back("spherical");
+    def->enum_values.push_back("cubic");
+    def->enum_labels.push_back(L("Planar"));
+    def->enum_labels.push_back(L("Cylindrical"));
+    def->enum_labels.push_back(L("Spherical"));
+    def->enum_labels.push_back(L("Cubic"));
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionEnum<TextureProjectionMode>(TextureProjectionMode::Planar));
+
+    def = this->add("texture_bump_axis", coEnum);
+    def->label = L("Texture axis");
+    def->category = L("Others");
+    def->tooltip = L("Axis used by the Cylindrical and Spherical projections.");
+    def->enum_keys_map = &ConfigOptionEnum<TextureProjectionAxis>::get_enum_values();
+    def->enum_values.push_back("x");
+    def->enum_values.push_back("y");
+    def->enum_values.push_back("z");
+    def->enum_labels.push_back(L("X"));
+    def->enum_labels.push_back(L("Y"));
+    def->enum_labels.push_back(L("Z"));
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionEnum<TextureProjectionAxis>(TextureProjectionAxis::Z));
+
+    def = this->add("texture_bump_scale", coFloat);
+    def->label = L("Texture scale");
+    def->category = L("Others");
+    def->tooltip = L("Physical size, in mm, covered by the full width/height of the texture image before it repeats.");
+    def->sidetext = "mm";
+    def->min = 0.1;
+    def->max = 1000;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(20.0));
+
+    def = this->add("texture_bump_thickness", coFloat);
+    def->label = L("Texture bump thickness");
+    def->category = L("Others");
+    def->tooltip = L("Maximum perpendicular displacement, in mm, applied at full-white/full-black texture value. "
+                     "It's advised to be below the outer wall line width.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 2;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(0.2));
+
+    def = this->add("texture_bump_point_distance", coFloat);
+    def->label = L("Texture bump point distance");
+    def->category = L("Others");
+    def->tooltip = L("The average distance between the sampled points introduced on each wall segment.");
+    def->sidetext = "mm";
+    def->min = 0.05;
+    def->max = 5;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(0.3));
+
+    def = this->add("texture_bump_first_layer", coBool);
+    def->label = L("Apply texture bump to first layer");
+    def->category = L("Others");
+    def->tooltip = L("Whether to apply the texture relief on the first layer.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("texture_bump_max_angle", coFloat);
+    def->label = L("Texture bump max angle");
+    def->category = L("Others");
+    def->tooltip = L("Slope-limiter threshold. If the texture relief between two consecutive layers would imply "
+                     "a wall angle steeper than this (an overhang the support generator can't see, because it "
+                     "acts on the real mesh, not on this perturbed toolpath), the affected Z window is smoothed "
+                     "with a localized blur, with a hard clamp as a fallback.");
+    def->sidetext = "°";
+    def->min = 5;
+    def->max = 90;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(45.0));
+
+    def = this->add("texture_bump_blur_strength", coFloat);
+    def->label = L("Texture bump blur strength");
+    def->category = L("Others");
+    def->tooltip = L("How strongly the slope-limiter smooths a Z window that exceeds the max angle. 0 disables "
+                     "the localized blur (only the hard clamp remains as a safety net); 1 is full strength.");
+    def->min = 0;
+    def->max = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+    // NEOTKO_TEXTUREBUMP_TAG_END
 
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");
