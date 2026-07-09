@@ -143,6 +143,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoBrimEars.hpp
     GUI/Gizmos/GLGizmoAlignStack.cpp
     GUI/Gizmos/GLGizmoAlignStack.hpp
+    GUI/Gizmos/GLGizmoPrecisionALH.cpp
+    GUI/Gizmos/GLGizmoPrecisionALH.hpp
     GUI/Gizmos/GLGizmoCut.cpp
     GUI/Gizmos/GLGizmoCut.hpp
     GUI/Gizmos/GLGizmoEmboss.cpp
@@ -187,6 +189,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoSVG.hpp
     GUI/Gizmos/GLGizmoTextureBump.cpp
     GUI/Gizmos/GLGizmoTextureBump.hpp
+    GUI/Gizmos/TextureBumpConfigUI.cpp
+    GUI/Gizmos/TextureBumpConfigUI.hpp
+    GUI/Gizmos/TextureBumpOverlayMesh.cpp
+    GUI/Gizmos/TextureBumpOverlayMesh.hpp
+    GUI/Gizmos/TextureBumpPlaneHandles.cpp
+    GUI/Gizmos/TextureBumpPlaneHandles.hpp
+    GUI/Gizmos/ZBumpConfigUI.cpp
+    GUI/Gizmos/ZBumpConfigUI.hpp
     #GUI/Gizmos/GLGizmoText.cpp
     #GUI/Gizmos/GLGizmoText.hpp
     GUI/GLCanvas3D.cpp

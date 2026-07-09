@@ -92,7 +92,8 @@ public:
         Simplify,
         BrimEars,
         AlignStack, // NEOTKO_ALIGNSTACK_TAG
-        TextureBump, // NEOTKO_TEXTUREBUMP_TAG
+        TextureBump, // NEOTKO_TEXTUREBUMP_TAG -- unified gizmo (All + Painter modes, docs/ATTRIBUTION_TEXTURE_BUMP.md §6)
+        PrecisionALH, // NEOTKO_PRECISIONALH_TAG -- point-based layer height curve editor, LibreMode-gated
         //SlaSupports,
         // BBS
         //FaceRecognition,

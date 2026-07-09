@@ -3,6 +3,7 @@
 #include "../Model.hpp"
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
 #include "../SurfaceColorMix.hpp"      // NEOTKO_PROFILE_TAG — NEOTKO_LOG + NeoDebug::PROFILE
+#include "../Feature/TextureBump/TextureBumpZone.hpp" // NEOTKO_TEXTUREBUMP_TAG — Fase 3 zone registry
 #include "../MixedFilament.hpp"
 #include "../Preset.hpp"
 #include "../Utils.hpp"
@@ -288,6 +289,11 @@ static constexpr const char* MMU_SEGMENTATION_ATTR = "paint_color";
 static constexpr const char* COLORMIX_PAINT_ATTR     = "paint_colormix";
 static constexpr const char* COLORMIX_SLOT_TABLE_KEY = "colormix_slot_to_profile_id";
 
+// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same two-part scheme as ColorMix above (per-triangle slot
+// attribute + per-volume slot->zone id table), own canvas/key so the two features never collide.
+static constexpr const char* TEXTUREBUMP_PAINT_ATTR       = "paint_texturebump";
+static constexpr const char* TEXTUREBUMP_SLOT_TABLE_KEY   = "texture_bump_slot_to_zone_id";
+
 // NEOTKO_PROFILE_TAG — base64 wrapper for the colormix_profiles JSON blob.
 // `xml_unescape` only decodes &lt; &gt; &amp; — not &quot; or &apos; — so JSON
 // strings containing '"' would not round-trip through the metadata path. Base64
@@ -363,6 +369,45 @@ static inline void parse_colormix_stickers(const std::string& b64, std::vector<S
         BOOST_LOG_TRIVIAL(warning) << "NEOTKO_STICKER: failed to parse colormix_stickers_b64 from 3mf";
         stickers.clear();
     }
+}
+
+// NEOTKO_TEXTUREBUMP_TAG — Fase 4.2, per-OBJECT metadata, same b64-JSON-of-16-doubles pattern as
+// ColorMixSticker::transform above (NOT CutConnector's cereal-only Transform3d, which never
+// reaches the 3mf -- verified while planning this fase). Omitted entirely when Identity (the
+// pre-Fase-4.2 default) so projects that never touch the new plane controls keep byte-identical
+// 3mf output.
+static constexpr const char* TEXTURE_BUMP_PLANE_TRANSFORM_KEY = "texture_bump_plane_transform_b64";
+
+static inline std::string serialize_texture_bump_plane_transform(const Slic3r::Transform3d& transform)
+{
+    if (transform.matrix() == Slic3r::Transform3d::Identity().matrix())
+        return std::string();
+    nlohmann::json t = nlohmann::json::array();
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            t.push_back(transform.matrix()(r, c));
+    return colormix_profiles_b64_encode(t.dump());
+}
+
+static inline Slic3r::Transform3d parse_texture_bump_plane_transform(const std::string& b64)
+{
+    Slic3r::Transform3d transform = Slic3r::Transform3d::Identity();
+    const std::string json_str = colormix_profiles_b64_decode(b64);
+    if (json_str.empty())
+        return transform;
+    try {
+        const nlohmann::json t = nlohmann::json::parse(json_str);
+        if (t.is_array() && t.size() == 16) {
+            int k = 0;
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c)
+                    transform.matrix()(r, c) = t[k++].get<double>();
+        }
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "NEOTKO_TEXTUREBUMP: failed to parse texture_bump_plane_transform_b64 from 3mf";
+        transform = Slic3r::Transform3d::Identity();
+    }
+    return transform;
 }
 
 // Parse "1,2,0,3,0,..." into slots[]. Missing entries left as 0.
@@ -842,6 +887,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             std::vector<std::string> mmu_segmentation;
             std::vector<std::string> fuzzy_skin;
             std::vector<std::string> colormix_paint; // NEOTKO_PROFILE_TAG — per-tri painter
+            std::vector<std::string> texturebump_paint; // NEOTKO_TEXTUREBUMP_TAG — Fase 3, own canvas
             // BBS
             std::vector<std::string> face_properties;
 
@@ -863,6 +909,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 mmu_segmentation.clear();
                 fuzzy_skin.clear();
                 colormix_paint.clear(); // NEOTKO_PROFILE_TAG
+                texturebump_paint.clear(); // NEOTKO_TEXTUREBUMP_TAG
             }
         };
 
@@ -2171,6 +2218,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         model_object->module_name = metadata.value;
                     else if (metadata.key == COLORMIX_STICKERS_KEY) // NEOTKO_STICKER_TAG
                         parse_colormix_stickers(metadata.value, model_object->colormix_stickers);
+                    else if (metadata.key == TEXTURE_BUMP_PLANE_TRANSFORM_KEY) // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
+                        model_object->texture_bump_plane_transform = parse_texture_bump_plane_transform(metadata.value);
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -3788,6 +3837,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             m_curr_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
             m_curr_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, {CUSTOM_FUZZY_SKIN_ATTR, CUSTOM_FUZZY_SKIN_ATTR_OLD}));
             m_curr_object->geometry.colormix_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, COLORMIX_PAINT_ATTR)); // NEOTKO_PROFILE_TAG
+            m_curr_object->geometry.texturebump_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, TEXTUREBUMP_PAINT_ATTR)); // NEOTKO_TEXTUREBUMP_TAG
             // BBS
             m_curr_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
         }
@@ -4952,7 +5002,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume->mmu_segmentation_facets.reserve(triangles_count);
                 volume->fuzzy_skin_facets.reserve(triangles_count);
                 volume->color_mix_paint_facets.reserve(triangles_count); // NEOTKO_PROFILE_TAG
+                volume->texture_bump_paint_facets.reserve(triangles_count); // NEOTKO_TEXTUREBUMP_TAG
                 const bool has_colormix_paint = !sub_object->geometry.colormix_paint.empty();
+                const bool has_texturebump_paint = !sub_object->geometry.texturebump_paint.empty(); // NEOTKO_TEXTUREBUMP_TAG
                 for (size_t i=0; i<triangles_count; ++i) {
                     assert(i < sub_object->geometry.custom_supports.size());
                     assert(i < sub_object->geometry.custom_seam.size());
@@ -4969,6 +5021,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     if (has_colormix_paint && i < sub_object->geometry.colormix_paint.size()
                         && !sub_object->geometry.colormix_paint[i].empty())
                         volume->color_mix_paint_facets.set_triangle_from_string(i, sub_object->geometry.colormix_paint[i]);
+                    // NEOTKO_TEXTUREBUMP_TAG — Fase 3
+                    if (has_texturebump_paint && i < sub_object->geometry.texturebump_paint.size()
+                        && !sub_object->geometry.texturebump_paint[i].empty())
+                        volume->texture_bump_paint_facets.set_triangle_from_string(i, sub_object->geometry.texturebump_paint[i]);
                 }
                 volume->supported_facets.shrink_to_fit();
                 volume->seam_facets.shrink_to_fit();
@@ -4978,6 +5034,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume->fuzzy_skin_facets.touch();
                 volume->color_mix_paint_facets.shrink_to_fit(); // NEOTKO_PROFILE_TAG
                 volume->color_mix_paint_facets.touch();
+                volume->texture_bump_paint_facets.shrink_to_fit(); // NEOTKO_TEXTUREBUMP_TAG
+                volume->texture_bump_paint_facets.touch();
             }
 
             volume->set_type(volume_data->part_type);
@@ -5016,6 +5074,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     continue;
                 else if (metadata.key == COLORMIX_SLOT_TABLE_KEY) // NEOTKO_PROFILE_TAG
                     parse_colormix_slot_table(metadata.value, volume->colormix_slot_to_profile_id);
+                else if (metadata.key == TEXTUREBUMP_SLOT_TABLE_KEY) // NEOTKO_TEXTUREBUMP_TAG
+                    parse_colormix_slot_table(metadata.value, volume->texture_bump_slot_to_zone_id);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -5122,7 +5182,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             volume->seam_facets.reserve(triangles_count);
             volume->mmu_segmentation_facets.reserve(triangles_count);
             volume->color_mix_paint_facets.reserve(triangles_count); // NEOTKO_PROFILE_TAG
+            volume->texture_bump_paint_facets.reserve(triangles_count); // NEOTKO_TEXTUREBUMP_TAG
             const bool has_colormix_paint = !geometry.colormix_paint.empty();
+            const bool has_texturebump_paint = !geometry.texturebump_paint.empty(); // NEOTKO_TEXTUREBUMP_TAG
             for (size_t i=0; i<triangles_count; ++i) {
                 size_t index = volume_data.first_triangle_id + i;
                 assert(index < geometry.custom_supports.size());
@@ -5137,11 +5199,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (has_colormix_paint && index < geometry.colormix_paint.size()
                     && !geometry.colormix_paint[index].empty())
                     volume->color_mix_paint_facets.set_triangle_from_string(i, geometry.colormix_paint[index]);
+                // NEOTKO_TEXTUREBUMP_TAG — Fase 3
+                if (has_texturebump_paint && index < geometry.texturebump_paint.size()
+                    && !geometry.texturebump_paint[index].empty())
+                    volume->texture_bump_paint_facets.set_triangle_from_string(i, geometry.texturebump_paint[index]);
             }
             volume->supported_facets.shrink_to_fit();
             volume->seam_facets.shrink_to_fit();
             volume->mmu_segmentation_facets.shrink_to_fit();
             volume->color_mix_paint_facets.shrink_to_fit(); // NEOTKO_PROFILE_TAG
+            volume->texture_bump_paint_facets.shrink_to_fit(); // NEOTKO_TEXTUREBUMP_TAG
 
             volume->set_type(volume_data.part_type);
 
@@ -5172,6 +5239,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_meters = metadata.value == "1";
                 else if (metadata.key == COLORMIX_SLOT_TABLE_KEY) // NEOTKO_PROFILE_TAG
                     parse_colormix_slot_table(metadata.value, volume->colormix_slot_to_profile_id);
+                else if (metadata.key == TEXTUREBUMP_SLOT_TABLE_KEY) // NEOTKO_TEXTUREBUMP_TAG
+                    parse_colormix_slot_table(metadata.value, volume->texture_bump_slot_to_zone_id);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -5448,6 +5517,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             current_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
             current_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, {CUSTOM_FUZZY_SKIN_ATTR, CUSTOM_FUZZY_SKIN_ATTR_OLD}));
             current_object->geometry.colormix_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, COLORMIX_PAINT_ATTR)); // NEOTKO_PROFILE_TAG
+            current_object->geometry.texturebump_paint.push_back(bbs_get_attribute_value_string(attributes, num_attributes, TEXTUREBUMP_PAINT_ATTR)); // NEOTKO_TEXTUREBUMP_TAG
             // BBS
             current_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
         }
@@ -6773,6 +6843,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
             }
 
+            // NEOTKO_TEXTUREBUMP_TAG — Fase 3: same treatment for the Texture Bump zone registry,
+            // its own project-level metadata entry (own key, own manager -- independent of the
+            // Surface Effect Profile palette above).
+            {
+                const std::string zones_json = Slic3r::TextureBumpZoneManager::get().to_json();
+                if (!zones_json.empty()
+                    && Slic3r::TextureBumpZoneManager::get().size() > 0) {
+                    metadata_item_map["texture_bump_zones_b64"] = colormix_profiles_b64_encode(zones_json);
+                }
+            }
+
             // store metadata info
             for (auto item : metadata_item_map) {
                 BOOST_LOG_TRIVIAL(info) << "bbs_3mf: save key= " << item.first << ", value = " << item.second;
@@ -6844,7 +6925,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                     && (shared_volume->seam_facets.equals(volume->seam_facets))
                                     && (shared_volume->mmu_segmentation_facets.equals(volume->mmu_segmentation_facets))
                                     && (shared_volume->fuzzy_skin_facets.equals(volume->fuzzy_skin_facets))
-                                    && (shared_volume->color_mix_paint_facets.equals(volume->color_mix_paint_facets))) // NEOTKO_PROFILE_TAG
+                                    && (shared_volume->color_mix_paint_facets.equals(volume->color_mix_paint_facets)) // NEOTKO_PROFILE_TAG
+                                    && (shared_volume->texture_bump_paint_facets.equals(volume->texture_bump_paint_facets))) // NEOTKO_TEXTUREBUMP_TAG
                                 {
                                     auto data = iter->second.first;
                                     const_cast<_BBS_3MF_Exporter *>(this)->m_volume_paths.insert({volume, {data->sub_path, data->volumes_objectID.find(iter->second.second)->second}});
@@ -7266,6 +7348,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     output_buffer += COLORMIX_PAINT_ATTR;
                     output_buffer += "=\"";
                     output_buffer += colormix_paint_data_string;
+                    output_buffer += "\"";
+                }
+
+                // NEOTKO_TEXTUREBUMP_TAG — Fase 3: own-canvas per-triangle slot
+                std::string texturebump_paint_data_string = volume->texture_bump_paint_facets.get_triangle_as_string(i);
+                if (!texturebump_paint_data_string.empty()) {
+                    output_buffer += " ";
+                    output_buffer += TEXTUREBUMP_PAINT_ATTR;
+                    output_buffer += "=\"";
+                    output_buffer += texturebump_paint_data_string;
                     output_buffer += "\"";
                 }
 
@@ -7727,6 +7819,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                << "\" " << VALUE_ATTR << "=\"" << stickers_b64 << "\"/>\n";
                 }
 
+                // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: persist the base projection-plane transform
+                // (b64 JSON, omitted entirely when Identity so untouched projects stay byte-identical).
+                {
+                    const std::string plane_transform_b64 = serialize_texture_bump_plane_transform(obj->texture_bump_plane_transform);
+                    if (!plane_transform_b64.empty())
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << TEXTURE_BUMP_PLANE_TRANSFORM_KEY
+                               << "\" " << VALUE_ATTR << "=\"" << plane_transform_b64 << "\"/>\n";
+                }
+
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape(obj->config.opt_serialize(key)) << "\"/>\n"; // NEOTKO_PROFILE_TAG — xml_escape: JSON blobs (neotko_surface_passes_*, pathblend_*) carry '\"' that breaks the XML attribute without escaping
@@ -7805,6 +7906,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                     stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\""
                                            << COLORMIX_SLOT_TABLE_KEY << "\" " << VALUE_ATTR << "=\""
                                            << slot_csv << "\"/>\n";
+                            }
+
+                            // NEOTKO_TEXTUREBUMP_TAG — Fase 3: painted-zone slot table (own canvas)
+                            {
+                                const std::string tb_slot_csv = serialize_colormix_slot_table(volume->texture_bump_slot_to_zone_id);
+                                if (!tb_slot_csv.empty())
+                                    stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\""
+                                           << TEXTUREBUMP_SLOT_TABLE_KEY << "\" " << VALUE_ATTR << "=\""
+                                           << tb_slot_csv << "\"/>\n";
                             }
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape;
@@ -8729,6 +8839,17 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
             }
         } else {
             NEOTKO_LOG(PROFILE, "3MF load: no colormix_profiles metadata in 3mf");
+        }
+    }
+
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 3: restore the Texture Bump zone registry, same b64-JSON
+    // project-level metadata pattern as the Surface Effect Profile list above, own key/manager.
+    if (res && model && model->model_info) {
+        const auto& items = model->model_info->metadata_items;
+        if (auto it = items.find("texture_bump_zones_b64"); it != items.end() && !it->second.empty()) {
+            const std::string json = colormix_profiles_b64_decode(it->second);
+            if (!json.empty() && !Slic3r::TextureBumpZoneManager::get().from_json(json))
+                BOOST_LOG_TRIVIAL(warning) << "Failed to parse texture_bump_zones from 3mf";
         }
     }
     return res;

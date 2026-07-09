@@ -152,6 +152,10 @@ set(lisbslic3r_sources
     Feature/FuzzySkin/FuzzySkin.hpp
     Feature/TextureBump/TextureBump.cpp
     Feature/TextureBump/TextureBump.hpp
+    Feature/TextureBump/TextureBumpZone.cpp
+    Feature/TextureBump/TextureBumpZone.hpp
+    Feature/ZBump/ZBump.cpp
+    Feature/ZBump/ZBump.hpp
     Feature/Interlocking/InterlockingGenerator.cpp
     Feature/Interlocking/InterlockingGenerator.hpp
     Feature/Interlocking/VoxelUtils.cpp

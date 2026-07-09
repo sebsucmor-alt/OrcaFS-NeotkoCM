@@ -19,6 +19,9 @@ enum class SurfacePassKind : int {
     Solid     = 1,   // flat colour (a classic MultiPass pass)
     ColorMix  = 2,   // dithered numeric gradient
     PathBlend = 3,   // diagonal Z+flow blend (legacy whole-surface until Fase 5)
+    // NEOTKO_ZBUMP_TAG — top-surface Z relief driven by a height map (own module,
+    // Feature/ZBump/, no shared code with PathBlend — see docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md).
+    ZBump     = 4,
 };
 
 } // namespace Slic3r

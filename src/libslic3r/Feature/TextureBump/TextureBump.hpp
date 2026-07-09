@@ -3,11 +3,13 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "libslic3r/Arachne/utils/ExtrusionJunction.hpp"
 #include "libslic3r/Arachne/utils/ExtrusionLine.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/PerimeterGenerator.hpp"
 #include "libslic3r/Point.hpp"
@@ -17,6 +19,8 @@
 // PNG instead of noise, and adds a slope-limiter pre-pass so the relief never implies a local
 // overhang the support generator can't see (it acts on the real mesh, not on this perturbed
 // toolpath). See docs/ATTRIBUTION_TEXTURE_BUMP.md for prior art and what is genuinely new here.
+
+namespace Slic3r { class PrintObject; }
 
 namespace Slic3r::Feature::TextureBump {
 
@@ -49,8 +53,16 @@ double sample_seam_blended(const png::ImageGreyscale& img, double u_canonical, i
 // the wall segment's outward normal in the XY plane (only used by Cubic, to pick the dominant
 // face -- this feature only ever bumps vertical wall perimeters, never top/bottom surfaces, so the
 // cap/pole cases that plague full mesh-displacement cube mapping never arise here).
+// `plane_transform` (Fase 4.2, docs/ATTRIBUTION_TEXTURE_BUMP.md §5 point 4) generalizes the fixed
+// `axis` choice into a freely rotatable seam + pivot WITHIN the 2D wrap-plane `axis` already
+// selects (its rotation is interpreted as a yaw around that plane's own normal, its X/Y
+// translation as a 2D pivot in that plane's own (a,b) component space -- see plane_components())
+// -- NOT a world-space transform of point_mm, which would silently reinterpret old axis=X/Y
+// projects as axis=Z the moment this field was introduced (old 3mf files never carry it, so it
+// loads as Transform3d::Identity, and Identity must reduce to the exact legacy per-axis formula).
 double compute_u(const Vec3d& point_mm, const Vec2d& perp_dir_normalized, TextureProjectionMode mode,
-                  TextureProjectionAxis axis, const BoundingBoxf3& object_bounds_mm);
+                  TextureProjectionAxis axis, const BoundingBoxf3& object_bounds_mm,
+                  const Transform3d& plane_transform = Transform3d::Identity());
 
 // Per-object, precomputed and already slope-limited displacement table. Built once per object
 // right after slicing (before any wall is generated), consumed per-layer by apply_texture_bump().
@@ -70,7 +82,7 @@ public:
     bool empty() const { return m_num_columns == 0 || m_num_layers == 0; }
 
     // The bounds/config this table was built with -- apply_texture_bump() reads these back from
-    // the table (via PerimeterGenerator::texture_bump_table) instead of needing its own copy, so
+    // the table (via PerimeterGenerator::texture_bump_tables) instead of needing its own copy, so
     // build-time and apply-time canonical-u math can never drift apart.
     const BoundingBoxf3&    bounds() const { return m_bounds_mm; }
     const TextureBumpConfig& config() const { return m_config; }
@@ -83,7 +95,51 @@ private:
     TextureBumpConfig  m_config;
 };
 
-void group_region_by_texture_bump(PerimeterGenerator& g);
+// NEOTKO_TEXTUREBUMP_TAG — Fase 3: one table per distinct TextureBumpConfig actually in use on an
+// object (union of every PrintRegion's config and every painted zone's config), replacing the v1
+// single shared table built from printing_region(0) only. Owned by PrintObject. A named class
+// (not a plain `using` alias) so PerimeterGenerator.hpp can forward-declare it and keep holding
+// only a pointer, exactly like it already does for TextureBumpTable -- a bare alias can't be
+// forward-declared and would force a real circular include between the two headers.
+class TextureBumpTableMap final : public std::unordered_map<TextureBumpConfig, TextureBumpTable> {};
+
+// Reconciles `tables` against `desired_configs`: builds a table for any config not yet present
+// (build() is deterministic per config, so an already-present exact key is left untouched), and
+// erases any table whose config is no longer desired (region reconfigured/removed, painted zone
+// deleted or un-assigned). `object_bounds_mm`/`layer_z` are shared by every table of the object.
+void build_tables_for_configs(TextureBumpTableMap& tables, const std::vector<TextureBumpConfig>& desired_configs,
+                               const BoundingBoxf3& object_bounds_mm, const std::vector<coordf_t>& layer_z);
+
+// A single painted Texture Bump zone's footprint resolved for one layer: the TextureBumpConfig
+// that zone carries (from TextureBumpZoneManager, see TextureBumpZone.hpp) plus its XY mask
+// (object-frame, scaled coord_t -- same space as PerimeterGenerator::compatible_regions' slices)
+// for THIS layer specifically.
+struct PaintedTextureBumpZone
+{
+    TextureBumpConfig config;
+    ExPolygons        mask_xy;
+};
+
+// Resolves every painted Texture Bump zone active on `po` within a single layer's Z range
+// (slice_z +/- layer_height/2). Independent of ColorMix's painted-facet scan
+// (SurfaceColorMix::painted_footprint_in_z_range): separate canvas
+// (ModelVolume::texture_bump_paint_facets, not color_mix_paint_facets), per-LAYER resolution
+// instead of a wide top/penu band (walls are generated layer by layer), and no upward-normal
+// filter (this paints walls, not horizontal surfaces -- any painted triangle whose Z range
+// intersects the layer counts, regardless of facing). Zones sharing the exact same resolved
+// TextureBumpConfig are merged into one entry. Empty if the WIP gate is closed, nothing is
+// painted, or every painted slot is orphaned (no valid zone assigned).
+std::vector<PaintedTextureBumpZone> painted_texture_bump_zones_in_layer(const PrintObject* po, double slice_z, double layer_height);
+
+// Enumerates every distinct TextureBumpConfig referenced by a painted zone anywhere on `po`,
+// independent of any specific layer -- used once per object (PrintObject::make_perimeters(),
+// before any layer is processed) to know which tables to build up front, since building one table
+// is O(columns x layers) and should happen once per config, not once per layer. Complements
+// group_region_by_texture_bump()'s per-PrintRegion configs (built from the live preset, not the
+// paint). Same WIP gate as painted_texture_bump_zones_in_layer().
+std::vector<TextureBumpConfig> collect_painted_texture_bump_configs(const PrintObject* po);
+
+void group_region_by_texture_bump(PerimeterGenerator& g, const std::vector<PaintedTextureBumpZone>& painted_zones);
 
 bool should_apply_texture_bump(const TextureBumpConfig& config, int layer_id, size_t loop_idx, bool is_contour);
 

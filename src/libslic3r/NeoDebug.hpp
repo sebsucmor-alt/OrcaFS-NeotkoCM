@@ -17,8 +17,9 @@
 //   ORCA_DEBUG_BOTTOM       — Bottom-surface sandwich: surface classification + role gate (WIP, Fase 0)
 //   ORCA_DEBUG_REALCOLOR    — RealColor GCode Viewer: GPU capability probe + depth-peel/accum pipeline (s163)
 //   ORCA_DEBUG_TEXTUREBUMP  — Texture Bump Mapping: table build + slope-limiter (see docs/ATTRIBUTION_TEXTURE_BUMP.md)
+//   ORCA_DEBUG_ZBUMP        — ZBump (Top Surface bump): height map build + top-fill sampling (see docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
-// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump}.log
+// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump|zbump}.log
 
 #include <string>
 
@@ -37,7 +38,8 @@ namespace NeoDebug {
         BOTTOM      = 8, // NEOTKO_BOTTOM_TAG — bottom-surface sandwich (WIP, Fase 0)
         REALCOLOR   = 9, // NEOTKO_REALCOLOR_TAG — RealColor GPU capability probe + render pipeline
         TEXTUREBUMP = 10, // NEOTKO_TEXTUREBUMP_TAG — Texture Bump Mapping table build + slope-limiter
-        CH_COUNT    = 11
+        ZBUMP       = 11, // NEOTKO_ZBUMP_TAG — ZBump (Top Surface) height map build + top-fill sampling
+        CH_COUNT    = 12
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).

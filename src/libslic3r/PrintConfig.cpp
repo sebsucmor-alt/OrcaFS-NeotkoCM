@@ -3108,13 +3108,18 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Apply a grayscale image as a deterministic relief (bump map) on the walls, instead of "
                      "random fuzzy skin noise. This setting controls which walls receive the relief.");
     def->enum_keys_map = &ConfigOptionEnum<TextureBumpType>::get_enum_values();
+    // NEOTKO_TEXTUREBUMP_TAG -- design decision confirmed by real print test: External/All (only
+    // the outer wall gets the bump, inner walls stay straight) are the exact shape of the bug
+    // class closed in s181 (Bug 3) and remain inherently risky for print quality even after that
+    // fix -- a wall that moves without its neighbors moving with it can create thin walls,
+    // overhangs, or non-manifold gaps. AllWalls (every wall moves together) is the only option
+    // confirmed safe. External/All are intentionally NOT offered here anymore -- s_keys_map_TextureBumpType
+    // above is untouched, so old 3mf files that already saved "external"/"all" still deserialize
+    // and slice correctly (should_apply_texture_bump() still handles all 4 enum values); this only
+    // stops NEW selections through this dropdown.
     def->enum_values.push_back("none");
-    def->enum_values.push_back("external");
-    def->enum_values.push_back("all");
     def->enum_values.push_back("allwalls");
     def->enum_labels.push_back(L("None"));
-    def->enum_labels.push_back(L("Contour"));
-    def->enum_labels.push_back(L("Contour and hole"));
     def->enum_labels.push_back(L("All walls"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<TextureBumpType>(TextureBumpType::None));
@@ -3172,6 +3177,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloat(20.0));
 
+    def = this->add("texture_bump_repeat_u", coInt);
+    def->label = L("Texture horizontal repeat");
+    def->category = L("Others");
+    def->tooltip = L("How many times the texture image repeats horizontally around the wall's perimeter "
+                      "(or around each face, for Cubic projection), independent of the vertical scale.");
+    def->min = 1;
+    def->max = 50;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInt(1));
+
     def = this->add("texture_bump_thickness", coFloat);
     def->label = L("Texture bump thickness");
     def->category = L("Others");
@@ -3223,6 +3238,132 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(1.0));
     // NEOTKO_TEXTUREBUMP_TAG_END
+
+    // NEOTKO_ZBUMP_TAG_START — Top Surface Z relief (own module, Feature/ZBump/). Independent
+    // domain from Texture Bump above: this modulates Z (top-fill height), not XY (wall
+    // displacement). See docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md.
+    def = this->add("zbump_enabled", coBool);
+    def->label = L("Z Bump (Top Surface)");
+    def->category = L("Others");
+    def->tooltip = L("Apply a grayscale image as a deterministic Z relief on the top surface fill "
+                     "(gated to a true top, i.e. no layers above).");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("zbump_image_path", coString);
+    def->label = L("Z Bump image");
+    def->category = L("Others");
+    def->tooltip = L("Path to an 8-bit grayscale PNG used as the top-surface height map. Brighter pixels "
+                     "raise the surface, darker pixels leave it at nominal Z.");
+    def->gui_type = ConfigOptionDef::GUIType::one_string;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("zbump_thickness", coFloat);
+    def->label = L("Z Bump height");
+    def->category = L("Others");
+    def->tooltip = L("Maximum Z displacement, in mm, applied at full-white texture value.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 5;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(0.4));
+
+    def = this->add("zbump_scale", coFloat);
+    def->label = L("Z Bump scale");
+    def->category = L("Others");
+    def->tooltip = L("Physical size, in mm, covered by the full width/height of the height map image "
+                     "before it repeats.");
+    def->sidetext = "mm";
+    def->min = 0.1;
+    def->max = 1000;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(20.0));
+
+    def = this->add("zbump_repeat", coInt);
+    def->label = L("Z Bump repeat");
+    def->category = L("Others");
+    def->tooltip = L("How many times the height map image repeats across the top surface.");
+    def->min = 1;
+    def->max = 50;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("zbump_offset_x", coFloat);
+    def->label = L("Z Bump offset X");
+    def->category = L("Others");
+    def->tooltip = L("Shifts the height map's tiling phase in X, in mm, to line the pattern up with a "
+                     "specific spot on the top surface.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("zbump_offset_y", coFloat);
+    def->label = L("Z Bump offset Y");
+    def->category = L("Others");
+    def->tooltip = L("Shifts the height map's tiling phase in Y, in mm, to line the pattern up with a "
+                     "specific spot on the top surface.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("zbump_edge_margin", coFloat);
+    def->label = L("Z Bump edge ramp");
+    def->category = L("Others");
+    def->tooltip = L("Margin, in mm, from the top surface's own contour over which the bump ramps "
+                     "smoothly from 0 (at the contour, flush with the wall) to full height. Keeps the "
+                     "wall itself unaware this feature exists.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.0));
+
+    def = this->add("zbump_max_slope", coFloat);
+    def->label = L("Z Bump max slope");
+    def->category = L("Others");
+    def->tooltip = L("Slope limiter: maximum mm of Z change allowed per mm of XY travel. The height map "
+                     "is pre-blurred so no scanline needs a steeper local slope than this, avoiding "
+                     "gaps or dragging from abrupt jumps.");
+    def->min = 0.01;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.5));
+
+    def = this->add("zbump_first_layer", coBool);
+    def->label = L("Apply Z Bump to first layer");
+    def->category = L("Others");
+    def->tooltip = L("Whether to apply the Z relief when the top surface itself is the first layer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("zbump_relief_segment", coFloat);
+    def->label = L("Z Bump relief segment length");
+    def->category = L("Others");
+    def->tooltip = L("Length, in mm, of the sub-segments each top-fill line is split into for point-by-point "
+                     "Z sampling. Shorter segments follow the height map more closely (a real 2D relief) at "
+                     "the cost of more, smaller G-code moves; longer segments approach one Z per line.");
+    def->sidetext = "mm";
+    def->min = 0.1;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("zbump_max_passes", coInt);
+    def->label = L("Z Bump reinforcement passes");
+    def->category = L("Others");
+    def->tooltip = L("Number of stacked print passes for the Z relief. 1 = today's behaviour (a single "
+                     "continuous pass, height silently limited only by print physics, not enforced). "
+                     "Values above 1 print additional passes on top of the previous one, each capped to a "
+                     "physically safe single-pass height (~0.8x nozzle diameter minus layer height), only "
+                     "in the areas that still need more height -- lets total relief exceed what one pass "
+                     "can safely achieve. Costs extra retraction/travel per isolated area needing "
+                     "reinforcement, more so for fine, high-frequency images.");
+    def->min = 1;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(1));
+    // NEOTKO_ZBUMP_TAG_END
 
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");

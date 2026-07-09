@@ -5493,6 +5493,12 @@ LayerResult GCode::process_layer(const Print& print,
                 m_pb_sub_nominal_z    = sub.print_z;   // ~nominal (within ~1µm); apply_path derives bottom_z
                 m_pb_sub_layer_height = sub.height;
             }
+            // NEOTKO_ZBUMP_TAG — ZBump reinforcement sublayer context (see
+            // m_zbump_reinforcement_pass declaration, GCode.hpp). Unlike PathBlend, no extra
+            // per-sub config needed, just the bool _extrude() branches on. sub.effect is set once
+            // by apply_zbump_reinforcement_passes() (ZBump.cpp) and never touched by any other
+            // MultiPassSubLayer producer, so this is independent of the PathBlend block above.
+            m_zbump_reinforcement_pass = (sub.effect == SurfacePassKind::ZBump);
 
             const double sz = sub.print_z + m_config.z_offset.value;
             // NEOTKO_PATHBLEND_TAG — s87 B-bands: when real_extrude_z is set, the
@@ -5668,6 +5674,9 @@ LayerResult GCode::process_layer(const Print& print,
                 m_pb_sub_layer_height = 0.0;
                 m_pathblend_surface_bbox = BoundingBox();
             }
+            // NEOTKO_ZBUMP_TAG — always clear, mirroring the unconditional set above (no _is_
+            // zbump_sub guard needed, this is just a bool, not a pointer into a stack local).
+            m_zbump_reinforcement_pass = false;
             // NEOTKO_PATHBLEND_TAG — s88 chain tracking. After emitting this
             // sublayer's paths, capture (tool, XY-of-last-emitted-point) so the
             // next sublayer can decide whether to continue the chain. Reset
@@ -8625,29 +8634,57 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         description += " (bridge)";
 
     const ExtrusionPathSloped* sloped = dynamic_cast<const ExtrusionPathSloped*>(&path);
+    const bool has_zbump_relief = !path.zbump_z_offset.empty();
 
     const auto get_sloped_z = [&sloped, this](double z_ratio) {
         const auto height = sloped->height;
         return lerp(m_nominal_z - height, m_nominal_z, z_ratio);
     };
+    // NEOTKO_ZBUMP_TAG — point-to-point relief stores Z as a per-vertex delta from the layer's
+    // own nominal Z (docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md §7.3) -- same delta-from-nominal
+    // convention OrcaSlicer mainline's Z Anti-Aliasing (z_contoured) uses, independently arrived
+    // at for the same reason (no MultiPassSubLayer scheduling involved).
+    const auto get_zbump_z = [this](coord_t offset) { return m_nominal_z + unscale_(offset); };
 
     bool slope_need_z_travel = false;
     if (sloped != nullptr && !sloped->is_flat()) {
         auto target_z       = get_sloped_z(sloped->slope_begin.z_ratio);
         slope_need_z_travel = m_writer.will_move_z(target_z);
+    } else if (has_zbump_relief && path.zbump_z_offset.front() != 0) {
+        slope_need_z_travel = m_writer.will_move_z(get_zbump_z(path.zbump_z_offset.front()));
     }
     // Move to first point of extrusion path
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
     // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
     if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
         const bool _last_pos_undefined = !m_last_pos_defined;
+        double first_point_z = DBL_MAX;
+        if (sloped != nullptr)
+            first_point_z = get_sloped_z(sloped->slope_begin.z_ratio);
+        else if (has_zbump_relief)
+            first_point_z = get_zbump_z(path.zbump_z_offset.front());
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
-                                 sloped == nullptr ? DBL_MAX : get_sloped_z(sloped->slope_begin.z_ratio));
+                                 first_point_z);
         m_need_change_layer_lift_z = false;
         // Orca: force restore Z after unknown last pos
         if (_last_pos_undefined && !slope_need_z_travel) {
             gcode += this->writer().travel_to_z(m_last_layer_z, "force restore Z after unknown last pos", true);
         }
+    }
+
+    // NEOTKO_ZBUMP_TAG — a preceding zbump-relief path is an open polyline, not guaranteed to
+    // land back on z_diff=0 at its last point the way the scarf-seam ramp does by construction
+    // (its `ends` segment always targets z_ratio=1.0). If the writer's physical Z drifted off
+    // this layer's nominal because of that and THIS path doesn't manage Z itself (not sloped,
+    // not zbump), force it back -- extrude_to_xy never re-specifies Z, so a stale residual would
+    // otherwise silently carry into every following plain move. Covers the case where no XY
+    // travel happens above (m_last_pos already == path.first_point()), so the Z-override on
+    // travel_to() never ran. Same guard OrcaSlicer mainline's z_contoured uses for the same
+    // reason.
+    if (!has_zbump_relief && sloped == nullptr) {
+        const double current_z = m_writer.get_position().z();
+        if (std::abs(current_z - m_nominal_z) > EPSILON)
+            gcode += this->writer().travel_to_z(m_nominal_z, "reset Z after Z bump relief", true);
     }
 
     // if needed, write the gcode_label_objects_end then gcode_label_objects_start
@@ -9219,10 +9256,12 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             // NEOTKO_PATHBLEND_TAG_END
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr) {
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || has_zbump_relief) {
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
+                size_t zbump_pt_idx = 0;
                 for (const Line& line : path.polyline.lines()) {
+                    ++zbump_pt_idx; // line.b == path.polyline.points[zbump_pt_idx]
                     std::string  tempDescription = description;
                     const double line_length     = line.length() * SCALING_FACTOR;
                     if (line_length < EPSILON)
@@ -9237,7 +9276,70 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                             tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f", oldE, line_length);
                         }
                     }
-                    if (sloped == nullptr) {
+                    if (has_zbump_relief) {
+                        // NEOTKO_ZBUMP_TAG — point-to-point relief: per-vertex Z + proportional
+                        // flow compensation. Uses the same rounded-rectangle cross-section model
+                        // as Flow::mm3_per_mm() (Flow.cpp) instead of a linear (H+dz)/H
+                        // approximation — dz can be a large fraction of H near the safe-height
+                        // warning ceiling (ZBump.cpp: compute_pass_cap_mm()).
+                        const coord_t z_off  = (zbump_pt_idx < path.zbump_z_offset.size()) ? path.zbump_z_offset[zbump_pt_idx] : coord_t(0);
+                        const double  z_diff = unscale_(z_off);
+                        double extrusion_ratio = 1.0;
+                        if (path.role() != erIroning && path.height > 0.f && path.width > 0.f) {
+                            constexpr double k = 1.0 - 0.25 * PI; // rounded-rectangle bead model, matches Flow::mm3_per_mm()
+                            const double H0 = double(path.height);
+                            const double W  = double(path.width);
+                            const double area0 = H0 * (W - H0 * k);
+                            // NEOTKO_ZBUMP_TAG — reinforcement passes (Pass 2..N) have no "normal"
+                            // top-surface content of their own: run_path.height/mm3_per_mm are
+                            // inherited verbatim from Pass 1's ORIGINAL path
+                            // (apply_zbump_reinforcement_passes(), ZBump.cpp), so H0/area0 above
+                            // still describe Pass 1's nominal layer, not what THIS pass adds. At
+                            // z_diff=0 a reinforcement point needs ZERO extra material (everything
+                            // below already covers it) — Pass 1's baseline-plus-extra ratio
+                            // ((H0+z_diff)/H0) instead extrudes a full H0-worth of flow there
+                            // regardless, over-extruding on top of what's already printed (real
+                            // print bug, confirmed via gcode: at z_diff=0 inside a reinforcement
+                            // pass, E/mm matched an ordinary non-bumped line almost exactly).
+                            // area(z_diff)/area(H0) instead: proportional purely to what THIS pass
+                            // adds, zero at zero — dividing by area0 still correctly cancels the
+                            // (also wrongly-inherited) baseline dE, since that baseline is itself
+                            // proportional to area(H0).
+                            double H1 = m_zbump_reinforcement_pass ? z_diff : (H0 + z_diff);
+                            // Numerical safety only: keeps the bead-area model positive for extreme
+                            // z_diff. Does NOT clamp z_diff or dest3d below — the Z bump itself stays
+                            // uncapped on purpose (ZBUMP_TOP_SURFACE_PLAN.md §8.2).
+                            H1 = std::min(H1, 0.9 * W / k);
+                            const double area1 = H1 * (W - H1 * k);
+                            if (area0 > 0.0)
+                                extrusion_ratio = area1 / area0;
+                            const double linear_ratio = (H0 + z_diff) / H0;
+                            if (std::abs(extrusion_ratio - linear_ratio) > 0.01)
+                                NEOTKO_LOG(ZBUMP, "exact_flow H0=" << H0 << " W=" << W << " z_diff=" << z_diff
+                                    << " reinforcement=" << m_zbump_reinforcement_pass
+                                    << " linear=" << linear_ratio << " exact=" << extrusion_ratio);
+                            // NEOTKO_ZBUMP_TAG — re-declare the ;HEIGHT: processor tag per segment.
+                            // path.height never changes for a zbump path (only zbump_z_offset does),
+                            // so the once-per-path tag emission above (~GCode.cpp:9023) freezes at the
+                            // nominal height and never reflects the true local height here — the
+                            // viewer keeps rendering every zbump point at the path's nominal height,
+                            // which is what reads as "gaps" in preview even though E is correct.
+                            // Reinforcement passes report z_diff alone (H_local == H1 above) — the
+                            // bead they're actually depositing is z_diff tall, sitting on top of
+                            // whatever's already printed, not H0+z_diff.
+                            const double H_local = m_zbump_reinforcement_pass ? z_diff : (H0 + z_diff);
+                            if (std::abs(double(m_last_height) - H_local) > EPSILON) {
+                                m_last_height = float(H_local);
+                                sprintf(buf, ";%s%g\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(), m_last_height);
+                                gcode += buf;
+                            }
+                        }
+                        Vec2d dest2d = this->point_to_gcode(line.b);
+                        Vec3d dest3d(dest2d(0), dest2d(1), m_nominal_z + z_diff);
+                        gcode += m_writer.extrude_to_xyz(dest3d, dE * extrusion_ratio,
+                                                         GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                                         path.is_force_no_extrusion());
+                    } else if (sloped == nullptr) {
                         // Normal extrusion
                         gcode += m_writer.extrude_to_xy(this->point_to_gcode(line.b), dE,
                                                         GCodeWriter::full_gcode_comment ? tempDescription : "",

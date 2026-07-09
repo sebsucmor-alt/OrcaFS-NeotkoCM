@@ -416,12 +416,12 @@ public:
     // source consumed by NeoTower + the GCode dispatcher). Indexed by layer_idx.
     const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
     std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
-    // NEOTKO_TEXTUREBUMP_TAG — precomputed, already slope-limited per-object table (v1: one
-    // shared table per object, built from printing_region(0)'s config -- see PrintObject::slice()
-    // caller in PrintObjectSlice.cpp / make_perimeters() in PrintObject.cpp). Consumed by
-    // PerimeterGenerator::texture_bump_table, set in LayerRegion::make_perimeters().
-    const Feature::TextureBump::TextureBumpTable& texture_bump_table() const { return m_texture_bump_table; }
-    Feature::TextureBump::TextureBumpTable&       texture_bump_table()       { return m_texture_bump_table; }
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 3: precomputed, already slope-limited per-object tables, one
+    // per distinct TextureBumpConfig actually in use (union of every PrintRegion's config and
+    // every painted zone's config) -- see make_perimeters() in PrintObject.cpp. Consumed by
+    // PerimeterGenerator::texture_bump_tables, set in LayerRegion::make_perimeters().
+    const Feature::TextureBump::TextureBumpTableMap& texture_bump_tables() const { return m_texture_bump_tables; }
+    Feature::TextureBump::TextureBumpTableMap&       texture_bump_tables()       { return m_texture_bump_tables; }
 
     template<typename PolysType>
     static void remove_bridges_from_contacts(
@@ -653,8 +653,8 @@ private:
     // Populated by the Sandwich engine; empty until that lands (NeoTower then
     // sees no sublayer events and uses the plain real-layer path).
     std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers;
-    // NEOTKO_TEXTUREBUMP_TAG — see texture_bump_table() accessors above.
-    Feature::TextureBump::TextureBumpTable      m_texture_bump_table;
+    // NEOTKO_TEXTUREBUMP_TAG — see texture_bump_tables() accessors above.
+    Feature::TextureBump::TextureBumpTableMap   m_texture_bump_tables;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // BBS

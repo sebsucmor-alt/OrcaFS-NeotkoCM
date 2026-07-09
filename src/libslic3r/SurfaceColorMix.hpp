@@ -465,6 +465,20 @@ struct PathBlendPassConfig {
     int     ease_mode       = 0;      // 0=Linear, 1=EaseIn (t²), 2=EaseOut, 3=EaseInOut
     int     fill_angle      = -1;     // -1 = follow top surface angle; 0..359 = override
 
+    // NEOTKO_PATHBLEND_TAG — s190 profile (Img 2/3): start/end zone of the ramp.
+    // The ramp stays flat-low (at floor) until in_t, rises linearly, and stays
+    // flat-high (at mid_end) from out_t on. in_t=0,out_t=1 (default) ⇒ profile_u
+    // is the identity ⇒ the s88 linear staircase is byte-identical (untouched).
+    // Orthogonal to Mode (Half/Full). See docs/WIP/PATHBLEND_PROFILE_PLAN.md.
+    float   in_t            = 0.0f;   // t where the ramp starts to rise  [0,1)
+    float   out_t           = 1.0f;   // t where the ramp reaches mid_end (0,1]
+
+    // Shared remap called by BOTH the ramp and the cap (and legacy apply_path)
+    // so volume conservation ramp(u)+cap(1-u)=H stays exact per Y. Monotonic
+    // non-decreasing when in_t<out_t (guaranteed by apply_constraints), so the
+    // staircase sort/scheduling stay valid. Degenerate span ⇒ falls back to t.
+    double  profile_u(double t) const;
+
     // --- Legacy view (derived from the new fields by from_*) ---
     // num_passes == 1 for Half, 2 for Full. tool[0]=tool_bottom,
     // tool[1]=tool_top (Full) or -1 (Half), tool[2..3] always -1.

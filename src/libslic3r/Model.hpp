@@ -441,6 +441,21 @@ public:
     // (a stale 0 only costs one extra re-slice, mirroring the painted path).
     uint64_t colormix_sticker_profiles_fingerprint = 0;
 
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2 (docs/ATTRIBUTION_TEXTURE_BUMP.md §5 point 4): the base
+    // (non-painted-zone) Texture Bump projection plane, orientable beyond the 3 fixed X/Y/Z axes.
+    // Restricted at the point of APPLICATION (see TextureBump.cpp's compute_u()) to yaw (rotation
+    // around world Z) + XY pivot translation only -- NOT the type, so a future Fase 4b (full 3D
+    // tilt) can widen what's allowed here without another storage migration. Identity == the 3
+    // legacy fixed axes still work unchanged (see TextureProjectionAxis, kept as a UI preset that
+    // sets this transform to a canonical rotation). Read into TextureBumpConfig::plane_transform by
+    // PrintObject::make_perimeters(); painted zones carry their OWN copy in
+    // TextureBumpZoneProfile::config.plane_transform instead (see TextureBumpZone.hpp), independent
+    // of this one. Persisted per-object to 3mf using the SAME pattern as colormix_stickers just
+    // above (Format/bbs_3mf.cpp, base64 JSON of the 16 matrix doubles) -- NOT CutConnector's
+    // Transform3d, which is cereal/undo-redo-only and never reaches the 3mf (verified s181/Fase-4
+    // planning; the memory that said otherwise was wrong).
+    Transform3d texture_bump_plane_transform{ Transform3d::Identity() };
+
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
     // BBS: production extension
@@ -724,7 +739,8 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, colormix_stickers); // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
+            cut_connectors, cut_id, colormix_stickers, // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
+            texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2, undo/redo
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -737,7 +753,8 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, colormix_stickers); // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
+            cut_connectors, cut_id, colormix_stickers, // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
+            texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2, undo/redo
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)
@@ -938,6 +955,22 @@ public:
     uint64_t            colormix_profiles_fingerprint = 0;
     // NEOTKO_PROFILE_TAG_END
 
+    // NEOTKO_TEXTUREBUMP_TAG_START — Fase 3 (paint a zone, give it its own Texture Bump). Own
+    // canvas, deliberately independent from color_mix_paint_facets above (painting a texture zone
+    // and painting a colour zone are different physical questions and need not share boundaries).
+    // Same 255-slot encoding (index 0 = unpainted, 1..254 = zones) for the same reason ColorMix
+    // uses it: FacetsAnnotation's 2-bit prefix + 4-bit extension nibble scheme already round-trips
+    // states well beyond 15.
+    FacetsAnnotation    texture_bump_paint_facets;
+    // Slot → TextureBumpZoneManager zone id mapping (TextureBumpZone.hpp). Index 0 unused.
+    int                 texture_bump_slot_to_zone_id[COLORMIX_SLOT_COUNT] = {0};
+    // Content fingerprint of the referenced zones (TextureBumpZoneManager::fingerprint_of_ids),
+    // same role as colormix_profiles_fingerprint above: zone content (image/scale/thickness) lives
+    // outside the model, so editing it without repainting wouldn't otherwise change facets/slot
+    // map and Print::apply would skip re-slicing.
+    uint64_t            texture_bump_zones_fingerprint = 0;
+    // NEOTKO_TEXTUREBUMP_TAG_END
+
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
     mutable Timestamp        mmuseg_ts;
@@ -1064,6 +1097,7 @@ public:
         this->mmu_segmentation_facets.set_new_unique_id();
         this->fuzzy_skin_facets.set_new_unique_id();
         this->color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG — duplicate gets its own paint id
+        this->texture_bump_paint_facets.set_new_unique_id(); // NEOTKO_TEXTUREBUMP_TAG — same reason
     }
 
     bool is_fdm_support_painted() const { return !this->supported_facets.empty(); }
@@ -1165,7 +1199,8 @@ private:
         name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        fuzzy_skin_facets(other.fuzzy_skin_facets), color_mix_paint_facets(other.color_mix_paint_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        fuzzy_skin_facets(other.fuzzy_skin_facets), color_mix_paint_facets(other.color_mix_paint_facets),
+        texture_bump_paint_facets(other.texture_bump_paint_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
 		assert(this->id().valid()); 
         assert(this->config.id().valid()); 
@@ -1187,6 +1222,10 @@ private:
         for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
             this->colormix_slot_to_profile_id[_s] = other.colormix_slot_to_profile_id[_s];
         this->colormix_profiles_fingerprint = other.colormix_profiles_fingerprint;
+        // NEOTKO_TEXTUREBUMP_TAG — same treatment for the Texture Bump zone slot table.
+        for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
+            this->texture_bump_slot_to_zone_id[_s] = other.texture_bump_slot_to_zone_id[_s];
+        this->texture_bump_zones_fingerprint = other.texture_bump_zones_fingerprint;
         this->set_material_id(other.material_id());
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
@@ -1261,6 +1300,9 @@ private:
         // (no formato de fichero); save/load deben mantener el MISMO orden.
         cereal::load_by_value(ar, color_mix_paint_facets);
         ar(colormix_slot_to_profile_id);
+        // NEOTKO_TEXTUREBUMP_TAG — Fase 3: same undo/redo treatment as ColorMix above.
+        cereal::load_by_value(ar, texture_bump_paint_facets);
+        ar(texture_bump_slot_to_zone_id);
         cereal::load_by_value(ar, config);
         cereal::load(ar, text_configuration);
         cereal::load(ar, emboss_shape);
@@ -1285,6 +1327,9 @@ private:
         // NEOTKO_COLORSTITCH_TAG — s139: ver load() — pintura ColorStitch en undo/redo.
         cereal::save_by_value(ar, color_mix_paint_facets);
         ar(colormix_slot_to_profile_id);
+        // NEOTKO_TEXTUREBUMP_TAG — Fase 3: see load() above.
+        cereal::save_by_value(ar, texture_bump_paint_facets);
+        ar(texture_bump_slot_to_zone_id);
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);
         cereal::save(ar, emboss_shape);
@@ -1833,6 +1878,15 @@ extern bool model_colormix_paint_data_changed(const ModelObject& mo, const Model
 // profile, svg) OR the CONTENT of a referenced profile changed (same fingerprint
 // mechanism as the painted path). Wired into the same PrintApply OR as paint.
 extern bool model_colormix_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+
+// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same role as model_colormix_paint_data_changed above, own
+// canvas (texture_bump_paint_facets / texture_bump_slot_to_zone_id / TextureBumpZoneManager).
+extern bool model_texture_bump_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+
+// NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: base (non-painted) Texture Bump projection-plane transform,
+// separate from the painted-zone path above (zones carry their own plane_transform, compared via
+// the existing TextureBumpConfig hash/equality, no new detector needed there).
+extern bool model_texture_bump_transform_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 

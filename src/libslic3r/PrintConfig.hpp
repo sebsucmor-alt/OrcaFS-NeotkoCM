@@ -1406,12 +1406,28 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionEnum<TextureProjectionMode>, texture_bump_projection_mode))
     ((ConfigOptionEnum<TextureProjectionAxis>, texture_bump_axis))
     ((ConfigOptionFloat,                       texture_bump_scale))
+    ((ConfigOptionInt,                         texture_bump_repeat_u))
     ((ConfigOptionFloat,                       texture_bump_thickness))
     ((ConfigOptionFloat,                       texture_bump_point_distance))
     ((ConfigOptionBool,                        texture_bump_first_layer))
     ((ConfigOptionFloat,                       texture_bump_max_angle))
     ((ConfigOptionFloat,                       texture_bump_blur_strength))
     // NEOTKO_TEXTUREBUMP_TAG_END
+    // NEOTKO_ZBUMP_TAG_START — Top Surface Z relief, own module (Feature/ZBump/), independent
+    // of Texture Bump/PathBlend (no shared code). See docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md.
+    ((ConfigOptionBool,    zbump_enabled))
+    ((ConfigOptionString,  zbump_image_path))
+    ((ConfigOptionFloat,   zbump_thickness))
+    ((ConfigOptionFloat,   zbump_scale))
+    ((ConfigOptionInt,     zbump_repeat))
+    ((ConfigOptionFloat,   zbump_offset_x))
+    ((ConfigOptionFloat,   zbump_offset_y))
+    ((ConfigOptionFloat,   zbump_edge_margin))
+    ((ConfigOptionFloat,   zbump_max_slope))
+    ((ConfigOptionBool,    zbump_first_layer))
+    ((ConfigOptionFloat,   zbump_relief_segment))
+    ((ConfigOptionInt,     zbump_max_passes))
+    // NEOTKO_ZBUMP_TAG_END
 )
 
 PRINT_CONFIG_CLASS_DEFINE(

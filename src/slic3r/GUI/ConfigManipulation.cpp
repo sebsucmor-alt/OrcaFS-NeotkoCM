@@ -933,8 +933,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool texture_bump_enabled = config->opt_enum<TextureBumpType>("texture_bump") != TextureBumpType::None;
     TextureProjectionMode texture_bump_projection_mode = config->opt_enum<TextureProjectionMode>("texture_bump_projection_mode");
     for (auto el : { "texture_bump_image_path", "texture_bump_projection_mode", "texture_bump_scale",
-                     "texture_bump_thickness", "texture_bump_point_distance", "texture_bump_first_layer",
-                     "texture_bump_max_angle", "texture_bump_blur_strength" })
+                     "texture_bump_repeat_u", "texture_bump_thickness", "texture_bump_point_distance",
+                     "texture_bump_first_layer", "texture_bump_max_angle", "texture_bump_blur_strength" })
         toggle_line(el, texture_bump_enabled);
     toggle_line("texture_bump_axis", texture_bump_enabled &&
         (texture_bump_projection_mode == TextureProjectionMode::Cylindrical || texture_bump_projection_mode == TextureProjectionMode::Spherical));

@@ -800,6 +800,19 @@ private:
     // NEOTKO_PATHBLEND_TAG — s88 continuous chain: track prev PB sublayer tool + last XY.
     int                        m_pb_chain_prev_tool  = -1;
     Vec2d                      m_pb_chain_prev_xy    = Vec2d::Zero();
+
+    // NEOTKO_ZBUMP_TAG — same sublayer-dispatch-context pattern as m_pb_sub_cfg above, own single
+    // bool: ZBump reinforcement passes (Pass 2..N) reuse Pass 1's ORIGINAL ExtrusionPath's
+    // .height/.mm3_per_mm verbatim (apply_zbump_reinforcement_passes(), ZBump.cpp) since they have
+    // no "normal" top-surface content of their own -- every bit of material they deposit is on
+    // top of what Pass 1 (and earlier reinforcement passes) already printed. _extrude()'s
+    // has_zbump_relief branch needs to know this to pick a zero-baseline flow formula instead of
+    // Pass 1's baseline-plus-extra one (real print bug: reinforcement passes over-extruded a full
+    // nominal layer's worth at EVERY point, confirmed via gcode E values matching Pass 1's own
+    // unbumped baseline rate even at z_diff=0, where a reinforcement point needs zero extra
+    // material). Set by process_layer()'s sublayer dispatch before calling extrude_entity, same
+    // as m_pb_sub_cfg; cleared after each sub.
+    bool                       m_zbump_reinforcement_pass = false;
     // NEOTKO_PATHBLEND_TAG_END
     int m_start_gcode_filament = -1;
 

@@ -5,6 +5,7 @@
 #include "Geometry.hpp"
 #include "PerimeterGenerator.hpp"
 #include "Print.hpp"
+#include "Feature/TextureBump/TextureBump.hpp"
 #include "Surface.hpp"
 #include "NeoArachne/NeoArachneEngine.hpp" // NEOTKO_NEOARACHNE_TAG Inc2e (port s134)
 #include "BoundingBox.hpp"
@@ -232,9 +233,20 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
-    // NEOTKO_TEXTUREBUMP_TAG — nullptr-safe: texture_bump_table() is empty() (all lookups return
-    // 0) until PrintObject builds it, so this is harmless even when the feature is disabled.
-    g.texture_bump_table    = &this->layer()->object()->texture_bump_table();
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 3: nullptr-safe/empty-safe in all the same ways the v1 single
+    // table was (find() against an empty map is just as harmless as empty() was).
+    g.texture_bump_tables    = &this->layer()->object()->texture_bump_tables();
+    // NEOTKO_TEXTUREBUMP_TAG -- fix (2026-07-08): see PerimeterGenerator.hpp's own comment on this
+    // field -- the object-level plane transform has to reach group_region_by_texture_bump()'s cfg
+    // reconstruction the same way it already reaches PrintObject::make_perimeters()'s table build.
+    g.texture_bump_plane_transform = this->layer()->object()->model_object()->texture_bump_plane_transform;
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 3: painted zones resolved for THIS layer specifically (own
+    // canvas, not ColorMix's). `painted_zones` must outlive g.process_arachne()/process_classic()
+    // below, hence the local (not a temporary) -- PerimeterGenerator only stores a pointer to it.
+    std::vector<Slic3r::Feature::TextureBump::PaintedTextureBumpZone> painted_texture_bump_zones =
+        Slic3r::Feature::TextureBump::painted_texture_bump_zones_in_layer(
+            this->layer()->object(), this->layer()->slice_z, this->layer()->height);
+    g.painted_texture_bump_zones = &painted_texture_bump_zones;
 
     if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();
@@ -1168,6 +1180,13 @@ void LayerRegion::simplify_entity_collection(ExtrusionEntityCollection* entity_c
 
 void LayerRegion::simplify_path(ExtrusionPath* path)
 {
+    // NEOTKO_ZBUMP_TAG — Douglas-Peucker/arc-fitting only look at XY; the relief's per-vertex
+    // points are often near-collinear in XY by construction (inserted along an originally
+    // straight scanline), so either would silently collapse them back to a flat line, discarding
+    // zbump_z_offset's Z data. See docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md §7.3.
+    if (!path->zbump_z_offset.empty())
+        return;
+
     const auto print_config = this->layer()->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
@@ -1192,6 +1211,10 @@ void LayerRegion::simplify_multi_path(ExtrusionMultiPath* multipath)
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
 
     for (size_t i = 0; i < multipath->paths.size(); ++i) {
+        // NEOTKO_ZBUMP_TAG — see simplify_path() above for why relief-bumped sub-paths must
+        // skip both simplification modes.
+        if (!multipath->paths[i].zbump_z_offset.empty())
+            continue;
         if (enable_arc_fitting &&
             !spiral_mode) {
             if (multipath->paths[i].role() == erInternalInfill)
@@ -1212,6 +1235,10 @@ void LayerRegion::simplify_loop(ExtrusionLoop* loop)
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
 
     for (size_t i = 0; i < loop->paths.size(); ++i) {
+        // NEOTKO_ZBUMP_TAG — see simplify_path() above for why relief-bumped sub-paths must
+        // skip both simplification modes.
+        if (!loop->paths[i].zbump_z_offset.empty())
+            continue;
         if (enable_arc_fitting &&
             !spiral_mode) {
             if (loop->paths[i].role() == erInternalInfill)

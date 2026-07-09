@@ -27,6 +27,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_BOTTOM",      "/tmp/neotko_bottom.log"      }, // NEOTKO_BOTTOM_TAG — Fase 0 instrumentation
         { "ORCA_DEBUG_REALCOLOR",   "/tmp/neotko_realcolor.log"   }, // NEOTKO_REALCOLOR_TAG
         { "ORCA_DEBUG_TEXTUREBUMP", "/tmp/neotko_texturebump.log" }, // NEOTKO_TEXTUREBUMP_TAG
+        { "ORCA_DEBUG_ZBUMP",       "/tmp/neotko_zbump.log"       }, // NEOTKO_ZBUMP_TAG
     };
 
     bool enabled(Channel c)

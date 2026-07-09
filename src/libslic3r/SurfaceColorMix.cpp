@@ -2813,21 +2813,45 @@ void PathBlendPassConfig::sync_legacy_view()
 void PathBlendPassConfig::apply_constraints(double layer_height_mm)
 {
     constexpr float kRampGap = 0.001f;  // strict mid > floor (anti-equality)
-    constexpr float kCapMin  = 0.04f;   // Full: cap flow minimum on top
+    // NEOTKO_PATHBLEND_TAG — s191: the hard 0.04 cap RESERVE is removed. mid_end
+    // may now reach H (a "techo": the ramp fills the whole layer in that zone and
+    // the cap becomes 0 there — the only way some low-TD filaments read well).
+    // kAutoCap is ONLY the auto (<0) DEFAULT target so an untouched Full still
+    // prints a thin cap exactly as before — it is NOT a limit; a manual value can
+    // go all the way to H. Zero-height cap lines are simply not emitted (Fill.cpp).
+    constexpr float kAutoCap = 0.04f;   // default-only thin cap (not a hard limit)
     const double H = std::max(0.04, layer_height_mm);
     if (mode == Mode::Full) {
-        const float floor_max = std::max(0.01f, (float)H - kCapMin - kRampGap);
+        const float floor_max = std::max(0.01f, (float)H - kRampGap);
         floor_mm   = std::clamp(floor_mm, 0.01f, floor_max);
         const float mid_min = floor_mm + kRampGap;
-        const float mid_max = std::max(mid_min, (float)H - kCapMin);
-        // Sentinel <0 ⇒ auto default: ramp the whole layer (tallest legal ramp).
-        if (mid_end_mm < 0.f) mid_end_mm = mid_max;
+        const float mid_max = (float)H;                     // s191: ceiling = H
+        // Sentinel <0 ⇒ auto default: tall ramp that still leaves a thin cap.
+        if (mid_end_mm < 0.f) mid_end_mm = std::max(mid_min, (float)H - kAutoCap);
         mid_end_mm = std::clamp(mid_end_mm, mid_min, mid_max);
     } else {  // Half
         const float floor_max = std::max(0.01f, (float)H - kRampGap);
         floor_mm   = std::clamp(floor_mm, 0.01f, floor_max);
         mid_end_mm = (float)H;  // ramp goes to layer top; no cap
     }
+    // NEOTKO_PATHBLEND_TAG — s190 profile: keep in_t<out_t with a minimum ramp
+    // span so profile_u stays monotonic (never a division-by-~0). A degenerate
+    // span would collapse the gradient into a vertical wall.
+    constexpr float kMinSpan = 0.02f;
+    in_t  = std::clamp(in_t,  0.0f, 1.0f - kMinSpan);
+    out_t = std::clamp(out_t, in_t + kMinSpan, 1.0f);
+}
+
+// NEOTKO_PATHBLEND_TAG — s190 profile remap (Img 2/3). Identity when
+// in_t=0,out_t=1 (default) ⇒ legacy linear ramp untouched. Called by the ramp,
+// the cap and legacy apply_path so both halves share one curve (conservation).
+double PathBlendPassConfig::profile_u(double t) const
+{
+    const double a = std::clamp(double(in_t),  0.0, 1.0);
+    const double b = std::clamp(double(out_t), 0.0, 1.0);
+    const double span = b - a;
+    if (span <= 1e-6) return std::clamp(t, 0.0, 1.0); // degenerate ⇒ linear
+    return std::clamp((t - a) / span, 0.0, 1.0);
 }
 
 // NEOTKO_PATHBLEND_TAG — s69 miniblob: JSON round-trip for the per-zone blob.
@@ -2839,7 +2863,7 @@ void PathBlendPassConfig::apply_constraints(double layer_height_mm)
 std::string PathBlendPassConfig::to_blob_json() const
 {
     nlohmann::json j;
-    j["v"]           = 2;
+    j["v"]           = 3;   // s190: adds in_t/out_t (absent ⇒ 0/1 = linear)
     j["mode"]        = (mode == Mode::Full) ? "full" : "half";
     j["floor_mm"]    = floor_mm;
     j["mid_end_mm"]  = mid_end_mm;
@@ -2847,6 +2871,8 @@ std::string PathBlendPassConfig::to_blob_json() const
     j["tool_top"]    = tool_top;
     j["ease_mode"]   = ease_mode;
     j["fill_angle"]  = fill_angle;
+    j["in_t"]        = in_t;
+    j["out_t"]       = out_t;
     return j.dump();
 }
 
@@ -2915,6 +2941,9 @@ PathBlendPassConfig PathBlendPassConfig::from_blob_json(const std::string& blob)
             c.tool_top    = gi("tool_top",    1);
             c.ease_mode   = std::clamp(gi("ease_mode", 0), 0, 3);
             c.fill_angle  = gi("fill_angle", -1);
+            // s190 profile (v=3): absent ⇒ 0/1 ⇒ linear ramp (v=1/v=2 back-compat).
+            c.in_t        = static_cast<float>(gf("in_t",  0.0));
+            c.out_t       = static_cast<float>(gf("out_t", 1.0));
             // Hard constraint: floor >= 0.01.
             if (c.floor_mm   < 0.01f)         c.floor_mm   = 0.01f;
             // Keep the auto sentinel (<0) intact; only clamp real values.
@@ -3431,14 +3460,15 @@ std::string PathBlendEngine::apply_path(
     // to floor (a flat, non-planar pass).
     const float mid_pref   = (pb.mid_end_mm < 0.f)
         ? ((pb.mode == PathBlendPassConfig::Mode::Full)
-               ? static_cast<float>(H - 0.04) : static_cast<float>(H))
+               ? static_cast<float>(H - 0.04) : static_cast<float>(H))  // auto default
         : pb.mid_end_mm;
-    const float mid_end_mm = std::max(floor_mm,
-        (pb.mode == PathBlendPassConfig::Mode::Full)
-            ? std::min(mid_pref, static_cast<float>(H - 0.04))
-            : std::min(mid_pref, static_cast<float>(H)));
+    // s191: hard ceiling = H for both modes (0.04 cap reserve removed).
+    const float mid_end_mm = std::max(floor_mm, std::min(mid_pref, static_cast<float>(H)));
 
-    const double ramp_thickness = double(floor_mm) + t * double(mid_end_mm - floor_mm);
+    // NEOTKO_PATHBLEND_TAG — s190 profile: composed on top of ease (t already
+    // eased above). Legacy real-layer engine (dead since s77 stack migration);
+    // kept in sync with the live Fill.cpp staircase so both share profile_u.
+    const double ramp_thickness = double(floor_mm) + pb.profile_u(t) * double(mid_end_mm - floor_mm);
     // Clamp the ramp's local thickness to [0.01, H] so cap_flow stays non-negative
     // even when a preset asked for a ramp larger than the current layer.
     const double ramp_thickness_clamped = std::clamp(ramp_thickness, 0.01, H);

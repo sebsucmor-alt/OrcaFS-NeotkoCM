@@ -22,6 +22,7 @@
 // NEOTKO_COLORMIX_TAG_START
 #include "../SurfaceColorMix.hpp"
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — Fase F painter-mode MP override
+#include "../Feature/ZBump/ZBump.hpp" // NEOTKO_ZBUMP_TAG — own module, see call site below
 // NEOTKO_COLORMIX_TAG_END
 
 namespace Slic3r {
@@ -2173,9 +2174,8 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                         ? ((pb.mode == PathBlendPassConfig::Mode::Full)
                                                ? static_cast<float>(_H_d - 0.04) : static_cast<float>(_H_d))
                                         : pb.mid_end_mm;
-                                    const float _mid_end_pb = (pb.mode == PathBlendPassConfig::Mode::Full)
-                                        ? std::min(_mid_pref_pb, static_cast<float>(_H_d - 0.04))
-                                        : std::min(_mid_pref_pb, static_cast<float>(_H_d));
+                                    // NEOTKO_PATHBLEND_TAG — s191: ceiling = H (0.04 cap reserve removed).
+                                    const float _mid_end_pb = std::min(_mid_pref_pb, static_cast<float>(_H_d));
                                     const double _range_pb = double(_mid_end_pb) - double(_floor_pb);
                                     const double _base_z = this->bottom_z();
 
@@ -2183,7 +2183,10 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     std::vector<ScanPath> _scans;
                                     auto _collect_ramp = [&](const ExtrusionPath* p) {
                                         const double t   = _t_of(p);
-                                        const double h_p = double(_floor_pb) + t * _range_pb;
+                                        // NEOTKO_PATHBLEND_TAG — s190 profile (Img 2/3):
+                                        // start/end zone remap. profile_u==t when
+                                        // in_t=0,out_t=1 ⇒ s88 linear ramp untouched.
+                                        const double h_p = double(_floor_pb) + pb.profile_u(t) * _range_pb;
                                         const double z_p = _base_z + h_p;
                                         const double ratio = (_H_d > 0.0) ? (h_p / _H_d) : 1.0;
                                         ExtrusionPath* cl = dynamic_cast<ExtrusionPath*>(p->clone());
@@ -2261,15 +2264,23 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                         ? ((pb.mode == PathBlendPassConfig::Mode::Full)
                                                ? static_cast<float>(_H_d - 0.04) : static_cast<float>(_H_d))
                                         : pb.mid_end_mm;
-                                    const float _mid_end_pb = (pb.mode == PathBlendPassConfig::Mode::Full)
-                                        ? std::min(_mid_pref_pb, static_cast<float>(_H_d - 0.04))
-                                        : std::min(_mid_pref_pb, static_cast<float>(_H_d));
+                                    // NEOTKO_PATHBLEND_TAG — s191: ceiling = H (0.04 cap reserve removed).
+                                    const float _mid_end_pb = std::min(_mid_pref_pb, static_cast<float>(_H_d));
 
                                     ExtrusionEntityCollection _cap_collected;
                                     auto _scale_and_collect = [&](const ExtrusionPath* p) {
                                         const double t = _t_of(p);
-                                        const double ramp_t = double(_floor_pb) + t * double(_mid_end_pb - _floor_pb);
-                                        const double h_cap  = std::max(0.04, _H_d - ramp_t);
+                                        // NEOTKO_PATHBLEND_TAG — s190 profile: SAME profile_u as
+                                        // the ramp so cap(H-ramp) keeps volume conservation exact.
+                                        const double ramp_t = double(_floor_pb) + pb.profile_u(t) * double(_mid_end_pb - _floor_pb);
+                                        // NEOTKO_PATHBLEND_TAG — s191/s192: 0.04 reserve gone. The cap
+                                        // thins toward 0 where the ramp reaches the ceiling (H). Any
+                                        // closing line under 0.01 mm is killed: it would be a ~0.001 mm
+                                        // sliver over an already-solid top, and hotend drip turns that
+                                        // into an over-extrusion mismatch (user s192). Ramp floor is
+                                        // already ≥0.01, so this only affects the cap.
+                                        const double h_cap  = _H_d - ramp_t;
+                                        if (h_cap < 0.01) return;
                                         const double ratio  = h_cap / _H_d;
                                         ExtrusionPath* cl = dynamic_cast<ExtrusionPath*>(p->clone());
                                         if (!cl) return;
@@ -2945,6 +2956,69 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             fclose(_lf);
                         }
                     }
+                    // NEOTKO_ZBUMP_TAG_START — Top Surface Z relief (own module, Feature/ZBump/,
+                    // zero shared code with PathBlend above — see docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md
+                    // and docs/ATTRIBUTION_TEXTURE_BUMP.md for the unrelated wall/XY feature this is
+                    // NOT sharing code with either). Runs only in this non-Sandwich fallback branch,
+                    // on genuine top surfaces, behind its own hidden WIP gate.
+                    {
+                        const bool zbump_wip_gate_open = this->object()->config().neotko_libre_mode.value
+                            && NeoDebug::enabled(NeoDebug::ZBUMP);
+                        const Feature::ZBump::ZBumpConfig zbump_cfg =
+                            Feature::ZBump::resolve_zbump_config(layerm->region().config());
+                        const bool zbump_first_layer_ok = (this->id() != 0) || zbump_cfg.first_layer;
+                        if (zbump_wip_gate_open && zbump_cfg.enabled && zbump_first_layer_ok
+                            && surface_fill.surface.surface_type == stTop) {
+                            const Vec3crd& zbump_obj_size = this->object()->size();
+                            BoundingBoxf3  zbump_bounds;
+                            zbump_bounds.min = Vec3d(-unscale_(zbump_obj_size.x()) / 2.0, -unscale_(zbump_obj_size.y()) / 2.0, 0.0);
+                            zbump_bounds.max = Vec3d( unscale_(zbump_obj_size.x()) / 2.0,  unscale_(zbump_obj_size.y()) / 2.0, unscale_(zbump_obj_size.z()));
+                            const Feature::ZBump::ZBumpHeightMap& zbump_map =
+                                Feature::ZBump::get_or_build_height_map(this->object(), zbump_cfg, zbump_bounds);
+
+                            if (!zbump_map.empty()) {
+                                // Isolate just the entities THIS surface_fill's call added above
+                                // (from _dbg_before to the end) into a temp collection -- the
+                                // region's fills accumulate across every surface_fill of this
+                                // layer, so scanning the whole thing would sample the height map
+                                // for OTHER top surfaces' paths against THIS surface's edge-ramp
+                                // distance/expolygon, which would be wrong. Point-to-point relief
+                                // mutates each path in place (no MultiPassSubLayer, nothing moved
+                                // or erased) so everything put into zbump_tmp goes back unchanged
+                                // in identity, just possibly with zbump_z_offset populated.
+                                ExtrusionEntityCollection* zbump_target = &m_regions[surface_fill.region_id]->fills;
+                                ExtrusionEntityCollection  zbump_tmp;
+                                zbump_tmp.entities.assign(zbump_target->entities.begin() + long(_dbg_before), zbump_target->entities.end());
+                                zbump_target->entities.resize(_dbg_before); // ownership moved to zbump_tmp, nothing deleted here
+
+                                const int    zbump_extruder    = std::max(0, layerm->region().config().solid_infill_filament.value - 1);
+                                const double zbump_nozzle_mm    = this->object()->print()->config().nozzle_diameter.get_at(zbump_extruder);
+                                const double zbump_pass_cap_mm  = Feature::ZBump::compute_pass_cap_mm(zbump_nozzle_mm, double(this->height));
+
+                                Feature::ZBump::apply_zbump_to_top_fill(
+                                    surface_fill.surface.expolygon, zbump_tmp, zbump_map, zbump_cfg, zbump_pass_cap_mm);
+
+                                // Reinforcement passes (Pass 2+, only if configured): read the
+                                // paths Pass 1 just bumped above and stack more height on top,
+                                // scheduled as real MultiPassSubLayers -- see
+                                // apply_zbump_reinforcement_passes() for why this needs actual
+                                // sublayer scheduling while Pass 1 itself does not.
+                                if (zbump_cfg.max_passes > 1) {
+                                    int zbump_pass_counter = 0;
+                                    std::vector<MultiPassSubLayer>& zbump_sub_slot = this->object()->multipass_sublayers()[this->id()];
+                                    Feature::ZBump::apply_zbump_reinforcement_passes(
+                                        surface_fill.surface.expolygon, zbump_tmp, this->print_z, zbump_extruder,
+                                        surface_fill.params.extrusion_role, zbump_map, zbump_cfg, zbump_pass_cap_mm,
+                                        zbump_pass_counter, zbump_sub_slot);
+                                }
+
+                                zbump_target->entities.insert(zbump_target->entities.end(),
+                                    zbump_tmp.entities.begin(), zbump_tmp.entities.end());
+                                zbump_tmp.entities.clear(); // ownership already transferred back, avoid double-delete on scope exit
+                            }
+                        }
+                    }
+                    // NEOTKO_ZBUMP_TAG_END
                 }
             }
             // NEOTKO_MULTIPASS_TAG_END

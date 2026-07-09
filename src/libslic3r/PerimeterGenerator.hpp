@@ -11,7 +11,11 @@
 
 // NEOTKO_TEXTUREBUMP_TAG — forward declaration only (no #include) to avoid a circular dependency:
 // TextureBump.hpp includes this header, the same way FuzzySkin.hpp does.
-namespace Slic3r::Feature::TextureBump { class TextureBumpTable; }
+namespace Slic3r::Feature::TextureBump {
+class TextureBumpTable;
+class TextureBumpTableMap;
+struct PaintedTextureBumpZone;
+}
 
 namespace Slic3r {
 struct FuzzySkinConfig
@@ -53,9 +57,21 @@ struct TextureBumpConfig
     TextureProjectionMode projection_mode;
     TextureProjectionAxis axis;
     double                scale; // mm covered by the full image width/height
+    int                   repeat_u; // horizontal repeat count, multiplies with Cubic's fixed 4-face period
     double                max_angle_rad;
     double                blur_strength;
     std::string           image_path;
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2 (docs/ATTRIBUTION_TEXTURE_BUMP.md §5 point 4): orientable
+    // projection plane, beyond the 3 fixed axes above. Restricted at the point of APPLICATION
+    // (compute_u()/plane_components() in TextureBump.cpp) to yaw (rotation around world Z) + XY
+    // pivot translation only -- stored as a full Transform3d (not just an angle+point) so a future
+    // Fase 4b (full 3D tilt) only needs to widen what's ALLOWED here, not migrate storage again.
+    // Identity == the 3 legacy fixed axes still behave bit-for-bit as before this field existed.
+    // Populated from ModelObject::texture_bump_plane_transform for the base/object-wide config
+    // (PrintObject::make_perimeters()), or from the zone's own copy for painted zones
+    // (TextureBumpZoneProfile::config.plane_transform, TextureBumpZone.hpp) -- the two are
+    // independent, same as every other field of this struct.
+    Transform3d           plane_transform{ Transform3d::Identity() };
 
     bool operator==(const TextureBumpConfig& r) const
     {
@@ -66,9 +82,11 @@ struct TextureBumpConfig
             && projection_mode == r.projection_mode
             && axis == r.axis
             && scale == r.scale
+            && repeat_u == r.repeat_u
             && max_angle_rad == r.max_angle_rad
             && blur_strength == r.blur_strength
-            && image_path == r.image_path;
+            && image_path == r.image_path
+            && plane_transform.matrix() == r.plane_transform.matrix();
     }
 
     bool operator!=(const TextureBumpConfig& r) const { return !(*this == r); }
@@ -103,9 +121,20 @@ template<> struct hash<Slic3r::TextureBumpConfig>
         boost::hash_combine(seed, std::hash<Slic3r::TextureProjectionMode>{}(c.projection_mode));
         boost::hash_combine(seed, std::hash<Slic3r::TextureProjectionAxis>{}(c.axis));
         boost::hash_combine(seed, std::hash<double>{}(c.scale));
+        boost::hash_combine(seed, std::hash<int>{}(c.repeat_u));
         boost::hash_combine(seed, std::hash<double>{}(c.max_angle_rad));
         boost::hash_combine(seed, std::hash<double>{}(c.blur_strength));
         boost::hash_combine(seed, std::hash<std::string>{}(c.image_path));
+        // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: hash all 16 matrix coefficients rather than deriving
+        // yaw/pivot from them -- guarantees this stays exactly consistent with operator=='s own
+        // full-matrix compare even if a future Fase 4b widens what plane_transform is allowed to
+        // hold (see PerimeterGenerator.hpp's struct comment).
+        {
+            const auto& m = c.plane_transform.matrix();
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col)
+                    boost::hash_combine(seed, std::hash<double>{}(m(row, col)));
+        }
         return seed;
     }
 };
@@ -152,10 +181,28 @@ public:
     bool                                                has_texture_bump = false;
     bool                                                has_texture_bump_hole = false;
     std::unordered_map<TextureBumpConfig, ExPolygons>   regions_by_texture_bump;
-    // Precomputed per-object, already slope-limited table (see TextureBump::TextureBumpTable).
-    // Owned by PrintObject, set by whoever constructs this PerimeterGenerator for a given layer;
-    // nullptr is a valid "no table built" state (feature disabled for every region of this object).
-    const Feature::TextureBump::TextureBumpTable*      texture_bump_table = nullptr;
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 3: one table per distinct TextureBumpConfig in use on the
+    // object (was a single shared table built from region(0) only). Owned by PrintObject, set by
+    // whoever constructs this PerimeterGenerator for a given layer; nullptr is a valid "no table
+    // built" state (feature disabled for every region/zone of this object).
+    const Feature::TextureBump::TextureBumpTableMap*   texture_bump_tables = nullptr;
+    // NEOTKO_TEXTUREBUMP_TAG -- fix (2026-07-08, real bug found reading the code, not guessed):
+    // group_region_by_texture_bump() rebuilds a TextureBumpConfig per region from PrintRegionConfig
+    // alone (TextureBump.cpp), which has NO option to carry plane_transform (it lives on
+    // ModelObject, not PrintRegionConfig -- see TextureBumpConfig::plane_transform's own comment).
+    // Without this field that rebuilt cfg silently defaulted to Identity via the struct's in-class
+    // initializer, so TextureBumpTableMap::find(cfg) (texture_bump_extrusion_line()) never matched
+    // the table actually built with the real transform (PrintObject::make_perimeters(), which DOES
+    // read it from the ModelObject) the moment the user rotated/moved the projection plane (any
+    // non-zero yaw or pivot) -- the object-level ("All"/AllWalls) case then applied silently NO
+    // effect at slice time, while painted zones (their own config copy, never rebuilt from
+    // PrintRegionConfig) were unaffected and worked. Set alongside texture_bump_tables below.
+    Transform3d                                         texture_bump_plane_transform{ Transform3d::Identity() };
+    // NEOTKO_TEXTUREBUMP_TAG — Fase 3: painted zones already resolved for THIS layer (see
+    // TextureBump::painted_texture_bump_zones_in_layer), owned by whoever constructs this
+    // PerimeterGenerator (LayerRegion::make_perimeters keeps the vector alive for the call).
+    // nullptr/empty is the common "nothing painted" case.
+    const std::vector<Feature::TextureBump::PaintedTextureBumpZone>* painted_texture_bump_zones = nullptr;
 
     PerimeterGenerator(
         // Input:
@@ -179,12 +226,12 @@ public:
         ExPolygons*                 fill_no_overlap,
         // NEOTKO_TEXTUREBUMP_TAG — optional, defaults to nullptr so every existing call site
         // keeps compiling unchanged.
-        const Feature::TextureBump::TextureBumpTable* texture_bump_table = nullptr)
+        const Feature::TextureBump::TextureBumpTableMap* texture_bump_tables = nullptr)
         : slices(slices), compatible_regions(compatible_regions), upper_slices(nullptr), lower_slices(nullptr), layer_height(layer_height),
             slice_z(slice_z), layer_id(-1), perimeter_flow(flow), ext_perimeter_flow(flow),
             overhang_flow(flow), solid_infill_flow(flow),
             config(config), object_config(object_config), print_config(print_config),
-            texture_bump_table(texture_bump_table),
+            texture_bump_tables(texture_bump_tables),
             m_spiral_vase(spiral_mode),
             m_scaled_resolution(scaled<double>(print_config->resolution.value > EPSILON ? print_config->resolution.value : EPSILON)),
             loops(loops), gap_fill(gap_fill), fill_surfaces(fill_surfaces), fill_no_overlap(fill_no_overlap),

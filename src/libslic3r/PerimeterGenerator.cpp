@@ -6,6 +6,7 @@
 #include "ExtrusionEntityCollection.hpp"
 #include "Feature/FuzzySkin/FuzzySkin.hpp"
 #include "Feature/TextureBump/TextureBump.hpp"
+#include "NeoDebug.hpp"
 #include "PrintConfig.hpp"
 #include "ShortestPath.hpp"
 #include "VariableWidth.hpp"
@@ -16,6 +17,7 @@
 #include "Line.hpp"
 #include <cmath>
 #include <cassert>
+#include <sstream>
 #include <unordered_set>
 #include <thread>
 #include "libslic3r/AABBTreeLines.hpp"
@@ -26,6 +28,14 @@ static const double narrow_loop_length_threshold = 10;
 //ext_perimeter_width + ext_perimeter_spacing  * (1 - SMALLER_EXT_INSET_OVERLAP_TOLERANCE),
 //we think it's small detail area and will generate smaller line width for it
 static constexpr double SMALLER_EXT_INSET_OVERLAP_TOLERANCE = 0.22;
+
+// NEOTKO_TEXTUREBUMP_TAG -- debug-only, local mirror of TextureBump.cpp's TEXTUREBUMP_LOG (same
+// pattern, reused channel) so this file doesn't need to pull in TextureBump.cpp's translation
+// unit just for one logging macro. Used to instrument the overhang-detection interaction with
+// Texture Bump's wall displacement (see traverse_extrusions() below).
+#define TEXTUREBUMP_OVERHANG_LOG(body) do { if (Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::TEXTUREBUMP)) { \
+    std::ostringstream _tbovh_; _tbovh_ << body;                                                            \
+    Slic3r::NeoDebug::write(Slic3r::NeoDebug::TEXTUREBUMP, _tbovh_.str()); } } while (0)
 
 namespace Slic3r {
     
@@ -449,7 +459,29 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             // get overhang paths by checking what parts of this loop fall
             // outside the grown lower slices (thus where the distance between
             // the loop centerline and original lower slices is >= half nozzle diameter
-            extrusion_paths_append(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
+            ClipperLib_Z::Paths overhang_clip = clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference);
+            // NEOTKO_TEXTUREBUMP_TAG -- debug-only instrumentation (ORCA_DEBUG_TEXTUREBUMP): this
+            // clip compares the wall AFTER Texture Bump's displacement (applied above, line 379)
+            // against the UNPERTURBED lower layer grown by only nozzle_diameter/2 -- see the
+            // matching max_abs_center_shift_mm log in texture_bump_extrusion_line() (TextureBump.cpp).
+            // Cross-referencing the two logs by layer/inset_idx tells us how much of this
+            // overhang_len_mm is really Texture Bump's own relief vs. a genuine overhang, and by
+            // how much the tolerance below would need to grow to stop misclassifying it.
+            if (perimeter_generator.has_texture_bump && Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::TEXTUREBUMP)) {
+                double overhang_len_mm = 0.0;
+                for (const auto& p : overhang_clip)
+                    for (size_t i = 1; i < p.size(); ++i)
+                        overhang_len_mm += unscale_(std::sqrt(double(p[i].x() - p[i - 1].x()) * double(p[i].x() - p[i - 1].x())
+                                                             + double(p[i].y() - p[i - 1].y()) * double(p[i].y() - p[i - 1].y())));
+                const double nozzle_diameter = perimeter_generator.print_config->nozzle_diameter.get_at(perimeter_generator.config->wall_filament - 1);
+                TEXTUREBUMP_OVERHANG_LOG("overhang_check layer=" << perimeter_generator.layer_id
+                    << " inset_idx=" << extrusion->inset_idx
+                    << " is_contour=" << is_contour
+                    << " is_external=" << is_external
+                    << " nozzle_tolerance_mm=" << (nozzle_diameter / 2.0)
+                    << " overhang_len_mm=" << overhang_len_mm);
+            }
+            extrusion_paths_append(paths, overhang_clip, erOverhangPerimeter,
                 perimeter_generator.overhang_flow);
 
             // Reapply the nearest point search for starting point.
@@ -2097,8 +2129,14 @@ void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& order
 void PerimeterGenerator::process_arachne()
 {
     group_region_by_fuzzify(*this);
-    // NEOTKO_TEXTUREBUMP_TAG — also called from process_classic() (mirrors this).
-    group_region_by_texture_bump(*this);
+    // NEOTKO_TEXTUREBUMP_TAG — Classic path never calls this (its apply_texture_bump() is an
+    // intentional no-op stub, see TextureBump.cpp). Fase 3: pass along the painted zones already
+    // resolved for this layer by LayerRegion::make_perimeters(); nullptr (no gizmo/zone activity
+    // yet) is treated as "nothing painted".
+    {
+        static const std::vector<Slic3r::Feature::TextureBump::PaintedTextureBumpZone> empty_painted_zones;
+        group_region_by_texture_bump(*this, this->painted_texture_bump_zones ? *this->painted_texture_bump_zones : empty_painted_zones);
+    }
 
     // other perimeters
     m_mm3_per_mm = this->perimeter_flow.mm3_per_mm();
@@ -2121,7 +2159,25 @@ void PerimeterGenerator::process_arachne()
         // lower layer, so we take lower slices and offset them by half the nozzle diameter used
         // in the current layer
         double nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
-        m_lower_slices_polygons = offset(*this->lower_slices, float(scale_(+nozzle_diameter / 2)));
+        double overhang_tolerance_mm = nozzle_diameter / 2;
+        // NEOTKO_TEXTUREBUMP_TAG -- confirmed via ORCA_DEBUG_TEXTUREBUMP logs (real print test,
+        // plain textured cube): the overhang check below compares each wall's ALREADY-displaced
+        // centerline (texture_bump_extrusion_line() runs before this, per-loop, further down)
+        // against this UNPERTURBED lower-layer boundary. Without this widening, the outermost
+        // wall (effect_scale=1) was misclassified as ~60-100mm of overhang on every single layer,
+        // even on a plain cube with zero real overhangs. center_shift_mm is mathematically bounded
+        // by thickness_mm (center_shift = r*0.5*(1+effect_scale), r in [0, thickness], effect_scale
+        // in [0,1] -> max at effect_scale=1 is exactly r_max <= thickness) -- confirmed empirically,
+        // max_abs_center_shift_mm never exceeded thickness_mm in the logs. Widening by the largest
+        // enabled thickness on this object is therefore an exact bound, not a guess.
+        if (this->has_texture_bump) {
+            double max_texture_bump_thickness_mm = 0.0;
+            for (const auto& region : this->regions_by_texture_bump)
+                if (region.first.type != TextureBumpType::None)
+                    max_texture_bump_thickness_mm = std::max(max_texture_bump_thickness_mm, unscale_(region.first.thickness));
+            overhang_tolerance_mm += max_texture_bump_thickness_mm;
+        }
+        m_lower_slices_polygons = offset(*this->lower_slices, float(scale_(overhang_tolerance_mm)));
     }
 
     Surfaces all_surfaces = this->slices->surfaces;
@@ -2154,6 +2210,16 @@ void PerimeterGenerator::process_arachne()
         // relaxed from the original >=3 minimum. Applied after the single-wall overrides above.
         if (this->has_texture_bump)
             loop_number = std::max(loop_number, 1);
+        // NEOTKO_TEXTUREBUMP_TAG -- debug-only (ORCA_DEBUG_TEXTUREBUMP), added to chase Bug 3 (s180,
+        // docs/ATTRIBUTION_TEXTURE_BUMP.md §5 point 3): loop_number==1 here means only 2 physical
+        // walls, and by design (texture_bump_effect_scale) the innermost of exactly 2 always gets
+        // effect_scale==0 -- zero positional shift, only width delta -- so it would look identical
+        // to "not accompanying" even with no bug at all. Cross-check against the wall_loops the
+        // object was actually configured with before chasing this further.
+        if (this->has_texture_bump)
+            TEXTUREBUMP_OVERHANG_LOG("loop_number_resolved layer=" << this->layer_id
+                << " configured_wall_loops=" << this->config->wall_loops.value
+                << " resolved_loop_number(0-indexed)=" << loop_number);
 
         auto apply_precise_outer_wall = config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter;
         // Orca: properly adjust offset for the outer wall if precise_outer_wall is enabled.

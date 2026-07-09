@@ -139,7 +139,6 @@ bool decode_colored_png(IStream &in_buf, ImageColorscale &out_img)
     out_img.rows = png_get_image_height(dsc.png, dsc.info);
     size_t color_type = png_get_color_type(dsc.png, dsc.info);
     size_t bit_depth  = png_get_bit_depth(dsc.png, dsc.info);
-    unsigned long rowbytes = png_get_rowbytes(dsc.png, dsc.info);
 
     switch(color_type)
     {
@@ -149,10 +148,22 @@ bool decode_colored_png(IStream &in_buf, ImageColorscale &out_img)
         case PNG_COLOR_TYPE_RGB_ALPHA:
             out_img.bytes_per_pixel = 4;
             break;
+        case PNG_COLOR_TYPE_PALETTE:
+            // Indexed PNGs (many map/terrain tile exports, GIF-derived assets, or anything
+            // saved with palette optimization) store per-pixel palette indices, not raw RGB --
+            // ask libpng to expand the palette during the read so the rest of this function
+            // sees the same 3-bytes-per-pixel layout as PNG_COLOR_TYPE_RGB. Must come before
+            // reading rowbytes/rows below: the transform changes the row layout libpng reports.
+            png_set_palette_to_rgb(dsc.png);
+            png_read_update_info(dsc.png, dsc.info);
+            out_img.bytes_per_pixel = 3;
+            break;
         default: //not supported currently
             png_destroy_read_struct(&dsc.png, &dsc.info, NULL);
             return false;
     }
+
+    unsigned long rowbytes = png_get_rowbytes(dsc.png, dsc.info);
 
     BOOST_LOG_TRIVIAL(info) << boost::format("png's cols %1%, rows %2%, color_type %3%, bit_depth %4%, bytes_per_pixel %5%, rowbytes %6%")%out_img.cols %out_img.rows %color_type %bit_depth %out_img.bytes_per_pixel %rowbytes;
     out_img.buf.resize(out_img.rows * rowbytes);

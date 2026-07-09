@@ -1058,6 +1058,116 @@ static void pro_pb_write(SurfacePass& p, PathBlendPassConfig pbc, double layer_h
     p.pathblend.kv["blob"] = pbc.to_blob_json();
 }
 
+// NEOTKO_PATHBLEND_TAG — s190 profile (Img 2/3). True when the ramp uses a
+// non-linear profile (start/end zone moved away from 0/1).
+static bool pro_pb_is_profiled(const PathBlendPassConfig& pbc)
+{
+    return !(pbc.in_t <= 0.001f && pbc.out_t >= 0.999f);
+}
+
+// NEOTKO_PATHBLEND_TAG — s191. Unified visual editor: a layer cross-section
+// (X = surface position t 0..1, Y = height 0..H mm). Two draggable 2D handles:
+//   • low (blue)   = (in_t, floor)     → X sets the start zone, Y the floor
+//   • high (orange)= (out_t, ramp_end) → X sets the end zone,   Y the ramp top
+// The ramp region (bottom tool) is shaded blue, the cap (top tool, Full only)
+// orange. When the high handle is dragged to the top the cap vanishes (a
+// "techo"). Half locks ramp_end = H (Y not draggable). Returns true on change.
+static bool pro_pb_profile_editor(PathBlendPassConfig& pbc, double H, bool is_half)
+{
+    bool changed = false;
+    const float W = 244.f, Hc = 168.f, pad = 14.f;
+    ImDrawList*  dl  = ImGui::GetWindowDrawList();
+    const ImVec2 org = ImGui::GetCursorScreenPos();
+    const ImVec2 p0(org.x + pad, org.y + pad);
+    const ImVec2 p1(org.x + W - pad, org.y + Hc - pad);
+    const float  pw = p1.x - p0.x, ph = p1.y - p0.y;
+    ImGui::InvisibleButton("##pb_prof_canvas", ImVec2(W, Hc));
+
+    const double Hd = std::max(0.04, H);
+    auto sx = [&](double t) { return p0.x + float(std::clamp(t, 0.0, 1.0)) * pw; };
+    auto sy = [&](double z) { return p1.y - float(std::clamp(z / Hd, 0.0, 1.0)) * ph; };
+
+    // Resolve geometry (auto sentinel <0 → display value).
+    double a  = std::clamp((double)pbc.in_t,  0.0, 1.0);
+    double b  = std::clamp((double)pbc.out_t, 0.0, 1.0);
+    if (b < a + 0.02) b = std::min(1.0, a + 0.02);
+    double fl = std::clamp((double)std::max(0.01f, pbc.floor_mm), 0.01, Hd - 0.001);
+    double re = (pbc.mid_end_mm < 0.f) ? (is_half ? Hd : Hd - 0.04) : (double)pbc.mid_end_mm;
+    if (is_half) re = Hd;
+    re = std::clamp(re, fl + 0.001, Hd);
+
+    dl->AddRectFilled(p0, p1, IM_COL32(28, 28, 32, 255), 3.f);
+
+    const ImU32 col_ramp = IM_COL32( 90, 170, 255, 70);   // bottom tool
+    const ImU32 col_cap  = IM_COL32(255, 170,  90, 55);   // top tool (Full)
+    // Ramp region (below the curve).
+    dl->AddRectFilled(ImVec2(sx(0), sy(fl)), ImVec2(sx(a), sy(0)), col_ramp);
+    dl->AddQuadFilled(ImVec2(sx(a), sy(0)), ImVec2(sx(b), sy(0)),
+                      ImVec2(sx(b), sy(re)), ImVec2(sx(a), sy(fl)), col_ramp);
+    dl->AddRectFilled(ImVec2(sx(b), sy(re)), ImVec2(sx(1), sy(0)), col_ramp);
+    // Cap region (above the curve up to H) — Full only.
+    if (!is_half) {
+        dl->AddRectFilled(ImVec2(sx(0), sy(Hd)), ImVec2(sx(a), sy(fl)), col_cap);
+        dl->AddQuadFilled(ImVec2(sx(a), sy(fl)), ImVec2(sx(b), sy(re)),
+                          ImVec2(sx(b), sy(Hd)), ImVec2(sx(a), sy(Hd)), col_cap);
+        dl->AddRectFilled(ImVec2(sx(b), sy(Hd)), ImVec2(sx(1), sy(re)), col_cap);
+    }
+    dl->AddRect(p0, p1, IM_COL32(90, 90, 100, 255), 3.f);
+
+    const ImU32 line = IM_COL32(120, 200, 255, 255);
+    dl->AddLine(ImVec2(sx(0), sy(fl)), ImVec2(sx(a), sy(fl)), line, 2.f);
+    dl->AddLine(ImVec2(sx(a), sy(fl)), ImVec2(sx(b), sy(re)), line, 2.f);
+    dl->AddLine(ImVec2(sx(b), sy(re)), ImVec2(sx(1), sy(re)), line, 2.f);
+
+    const ImVec2 h_lo(sx(a), sy(fl)), h_hi(sx(b), sy(re));
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    static int drag = -1;                          // one popup open at a time
+    if (ImGui::IsItemActivated()) {
+        const float dlo = (m.x-h_lo.x)*(m.x-h_lo.x) + (m.y-h_lo.y)*(m.y-h_lo.y);
+        const float dhi = (m.x-h_hi.x)*(m.x-h_hi.x) + (m.y-h_hi.y)*(m.y-h_hi.y);
+        drag = (dlo <= dhi) ? 0 : 1;
+    }
+    if (ImGui::IsItemActive()) {
+        const double mt = std::clamp((double)(m.x - p0.x) / pw, 0.0, 1.0);
+        const double mz = std::clamp((double)(p1.y - m.y) / ph, 0.0, 1.0) * Hd;
+        if (drag == 0) {
+            pbc.in_t     = (float)std::clamp(mt, 0.0, b - 0.02);
+            pbc.floor_mm = (float)std::clamp(mz, 0.01, re - 0.001);
+        } else {
+            pbc.out_t    = (float)std::clamp(mt, a + 0.02, 1.0);
+            if (!is_half) pbc.mid_end_mm = (float)std::clamp(mz, fl + 0.001, Hd);
+        }
+        changed = true;
+    }
+    dl->AddCircleFilled(h_lo, 6.f, IM_COL32( 90, 170, 255, 255));
+    dl->AddCircleFilled(h_hi, 6.f, IM_COL32(255, 170,  90, 255));
+    dl->AddCircle      (h_lo, 6.f, IM_COL32(255, 255, 255, 255));
+    dl->AddCircle      (h_hi, 6.f, IM_COL32(255, 255, 255, 255));
+
+    ImGui::PushItemWidth(60.f);
+    { float v = pbc.in_t;
+      if (ImGui::DragFloat("start##pbi", &v, 0.005f, 0.f, 0.98f, "%.2f")) {
+          pbc.in_t = std::clamp(v, 0.f, pbc.out_t - 0.02f); changed = true; } }
+    ImGui::SameLine();
+    { float v = pbc.out_t;
+      if (ImGui::DragFloat("end##pbo", &v, 0.005f, 0.02f, 1.f, "%.2f")) {
+          pbc.out_t = std::clamp(v, pbc.in_t + 0.02f, 1.f); changed = true; } }
+    { float v = (float)fl;
+      if (ImGui::DragFloat("floor##pbf", &v, 0.005f, 0.01f, (float)Hd, "%.2f")) {
+          pbc.floor_mm = std::clamp(v, 0.01f, (float)re - 0.001f); changed = true; } }
+    ImGui::SameLine();
+    if (is_half) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("ramp %.2f", Hd);
+    } else {
+        float v = (float)re;
+        if (ImGui::DragFloat("ramp##pbr", &v, 0.005f, (float)fl + 0.001f, (float)Hd, "%.2f")) {
+            pbc.mid_end_mm = std::clamp(v, (float)fl + 0.001f, (float)Hd); changed = true; }
+    }
+    ImGui::PopItemWidth();
+    return changed;
+}
+
 // ColorStitch kv — SAME canonical self-contained shape the Mixed palette emits
 // (ColorPredict.cpp penu_dither): zone pattern long key + tool_a / tool_b.
 static const char* pro_cm_pattern_key(bool penu)
@@ -1795,6 +1905,23 @@ static void draw_zone_editor(const char* id, const char* label,
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", _u8L("-1 = auto (follow top surface angle).").c_str());
             }
+            // NEOTKO_PATHBLEND_TAG — s190. ADV button encapsulates the ramp
+            // start/end-zone editor (Img 2/3). Default (linear) shows no mark; a
+            // profiled ramp shows "*". Same model reused by the SandwichDialog.
+            ImGui::SameLine();
+            if (ImGui::SmallButton(_u8L("ADV…##pb_prof").c_str()))
+                ImGui::OpenPopup("##pb_profile_pop");
+            if (pro_pb_is_profiled(pbc)) {
+                ImGui::SameLine(0.f, 4.f);
+                ImGui::TextColored(ImVec4(1.f, 0.7f, 0.2f, 1.f), "*");
+            }
+            if (ImGui::BeginPopup("##pb_profile_pop")) {
+                ImGui::TextUnformatted(_u8L("Ramp profile — floor / ramp end / start / end").c_str());
+                PathBlendPassConfig pbe = pro_pb_read(p);
+                if (pro_pb_profile_editor(pbe, layer_h, is_pb_half))
+                    pro_pb_write(p, pbe, layer_h);
+                ImGui::EndPopup();
+            }
         }
 
         // ---- line 3 (ColorStitch only): botón ADV → editor avanzado de patrón ----
@@ -2241,15 +2368,15 @@ pathblend_make_weave(const PathBlendPassConfig& pbc,
     if (span < 1e-3f || pbc.tool_bottom < 0) return w;   // w.on stays false
 
     // Same auto-resolution + clamp as the real ramp block (Fill.cpp): mid_end_mm
-    // < 0 means "tallest legal ramp" (H-0.04 Full / H Half).
+    // < 0 means auto (default thin cap H-0.04 Full / H Half). s191: hard ceiling
+    // is now H for both modes (0.04 cap reserve removed).
     const double H = std::max(0.01, layer_h_mm);
     const float floor_pb = std::max(0.01f, pbc.floor_mm);
     const bool  is_full  = (pbc.mode == PathBlendPassConfig::Mode::Full) && pbc.tool_top >= 0;
     const float mid_pref = (pbc.mid_end_mm < 0.f)
         ? (is_full ? float(H - 0.04) : float(H))
         : pbc.mid_end_mm;
-    const float mid_end  = is_full ? std::min(mid_pref, float(H - 0.04))
-                                   : std::min(mid_pref, float(H));
+    const float mid_end  = std::min(mid_pref, float(H));
     const double range = double(mid_end) - double(floor_pb);
 
     const int N = std::clamp((int)std::lround(span / std::max(line_w, 0.05f)), 4, 64);

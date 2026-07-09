@@ -73,6 +73,11 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 9c. [Sandwich purge compaction](#9c-sandwich-purge-compaction)
    - 9d. [Sandwich wipe reserve](#9d-sandwich-wipe-reserve)
    - 9e. [Adaptive layers × multi-tool × Sandwich (WIP)](#9e-adaptive-layers--multi-tool--sandwich-wip)
+10. [Bump Mapping Editor — texture-driven wall & top-surface relief](#10-bump-mapping-editor--texture-driven-wall--top-surface-relief)
+    - 10a. [All mode — object-wide wall texture](#10a-all-mode--object-wide-wall-texture)
+    - 10b. [Painter mode — per-zone texture](#10b-painter-mode--per-zone-texture)
+    - 10c. [Top mode — ZBump, top-surface height-map relief](#10c-top-mode--zbump-top-surface-height-map-relief)
+11. [Precision Adaptive Layer Height — point-based layer height curve](#11-precision-adaptive-layer-height--point-based-layer-height-curve)
 
 ---
 
@@ -89,8 +94,8 @@ The dialog has two columns — **Top layer** and **Penultimate layer**. Each is 
 Each pass exposes:
 - a **kind** (see §1a),
 - a **Z mm** height box,
-- an **angle** box (`-1 = auto`; scroll the wheel over the box to rotate). For a PathBlend pass this becomes **ramp end**,
-- an **Advanced ⚙** / **Edit…** button to open that pass's detailed settings (a `*` marks non-default values).
+- an **angle** box (`-1 = auto`; scroll the wheel over the box to rotate). For a PathBlend pass this same box is repurposed to show **ramp end** (the top height of the ramp, in mm) instead — PathBlend's own fill angle isn't edited from this box (see §1c),
+- an **Advanced ⚙** button to open that pass's detailed settings (a `*` marks non-default values) — for PathBlend this is where the start/end zone editor lives (§1c).
 
 A single **Perimeter override** checkbox per zone *clones the walls into every Solid pass* — useful when you want the perimeter reprinted with each glaze.
 
@@ -107,8 +112,8 @@ Each pass in a zone is one of:
 | **None** | Empty slot — no pass here. |
 | **Solid** | A normal solid fill pass with its own tool, angle and Z share. **Stack 2–3 Solid passes** and you get the classic *MultiPass* effect: cross-hatch (two angles, two colours), a glaze pass over a base, or an optical colour blend. |
 | **ColorStitch** | Decides the filament line by line across the surface — stripes, dithered blends, hard bands or a custom pattern. Configured in the **Edit gradient…** dialog (§1b). |
-| **PathBlend Half** | A gradient pass occupying half the height share — fades between filaments across the surface (§1c). |
-| **PathBlend Full** | A gradient pass occupying the full height of its slot. |
+| **PathBlend Half** | A gradient pass with **no complementary cap** — the ramp climbs from its floor straight up, one tool only (§1c). |
+| **PathBlend Full** | A gradient pass with a ramp **and** a complementary cap in a second tool, filling the rest of the layer height (§1c). |
 
 **MultiPass = multiple Solid passes.** There is no separate "MultiPass" button anymore — you simply add Solid passes and split the height between them with the dividers. Aim for the height shares to add up to the full layer for full coverage.
 
@@ -152,11 +157,22 @@ A live **preview** shows the resulting gradient to scale, plus an estimate of ho
 
 ### 1c. PathBlend pass — smooth gradient
 
-A **PathBlend** pass creates a **continuous gradient** across the surface: one filament dominates at one edge, another at the opposite edge, with proportional flow path-by-path in between — all within a single layer. Choose **Half** or **Full** height when picking the kind, set the pass's **ramp end** (its angle box becomes the gradient direction control), and use **Edit…** for the gradient details (number of passes/filaments, min/max flow, easing, invert).
+A **PathBlend** pass creates a **continuous gradient** across the surface: one filament dominates at one edge, another at the opposite edge (Full mode), with the two flows changing in exact proportion path-by-path in between — a real, physical Z gradient within a single layer, not a dithered pattern. Choose **Half** (ramp only, no cap) or **Full** (ramp + complementary cap) when picking the kind.
 
-The gradient runs across the build-plate **Y axis** — rotate the object to change direction. PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse. It shares the **Line distribution mode** (§1f) — if a gradient looks broken across holes, try **LaneQuant** or **DirCluster**.
+**Basic controls**, on the pass's own row:
+- **floor** — the ramp's starting height (mm), at the low edge of the surface.
+- **ramp end** — the ramp's top height (mm), at the high edge. In **Half** mode this is locked to the full layer height (no cap exists to fill the rest). In **Full** mode you can drag it all the way up to the layer height too — that leaves **zero** of the cap's colour in that area ("techo"), useful when a translucent (high-TD) filament needs full opaque coverage instead of a thin sliver of the wrong colour on top.
+- **Mode** — a cycling button through **Linear / Ease In / Ease Out / Ease In-Out**, shaping how quickly the ramp climbs (only used by the older Sandwich-Editor-only engine path; the per-scanline staircase engine that actually prints today ramps linearly in `t` before the start/end zone below is applied).
 
-> ⚠️ **PathBlend is the most fragile part of the engine.** Its per-scanline staircase model is validated and must not be disturbed by unrelated changes.
+**`ADV…` — start/end zone editor.** Opens a small cross-section graph of the layer: the horizontal axis is position across the surface, the vertical axis is real height in mm. Two draggable handles set the shape:
+- the **low handle** — where the ramp starts to rise, and how low its floor sits;
+- the **high handle** — where the ramp finishes rising, and how high its top reaches.
+
+By default the ramp spans the full surface edge-to-edge (the classic behaviour). Drag the low handle right to add a flat "start zone" before the ramp begins climbing; drag the high handle left to add a flat "end zone" after it's done. This is the same editor, same model, in both the **Sandwich Editor**'s `ADV…`/Advanced button and the **ColorStitch Painter**'s Pro tray — whichever one you use, they write the same pass data.
+
+The gradient runs across the build-plate **Y axis** — rotate the object to change direction. PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse. It shares the **Line distribution mode** (§1f) — if a gradient looks broken across holes, try **LaneQuant** or **DirCluster**. In the **ColorStitch Painter** specifically, PathBlend also exposes its own **fill angle** field (`-1 = auto`, or a fixed 0–359° override) next to the Mode button — the Sandwich Editor doesn't have a separate control for this and leaves it on auto.
+
+> ⚠️ **PathBlend is the most fragile part of the engine.** Its per-scanline staircase model — one physical print-height step per fill line, each step resting on the layer below and its neighbours — is validated and must not be disturbed by unrelated changes. The start/end zone and floor/ramp-end controls above are an intentionally **safe** extension of that model: left at their defaults they reproduce the exact same G-code as before. A future, more ambitious idea — letting the ramp rise **and fall** within one pass instead of always climbing — was considered and set aside for now, because the current staircase can't do that without risking unsupported overhangs at the print head; it would need a different, multi-pass engine (closer to the Bump Mapping Editor's approach, §10) to do safely.
 
 ---
 
@@ -545,6 +561,127 @@ A new option **Variable layer height (Experimental)** sits under **Tower type** 
 
 ---
 
+## 10. Bump Mapping Editor — texture-driven wall & top-surface relief
+
+The **Bump Mapping Editor** is one gizmo (`GLGizmoTextureBump`) with three modes, switched via a
+bar at the top of its panel: **All**, **Painter**, and **Top**. All three turn a grayscale (or
+any) PNG into physical Z relief at slice time — the difference is *where* the relief goes and
+*how* it's scoped.
+
+> **Hidden behind a double gate in this build — expert-only, on purpose.** The gizmo only appears
+> in the toolbar with **both** (1) **Libre Mode** active (§4a: master switch in Preferences +
+> restart, then the toolbar toggle) **and** (2) the debug env var `ORCA_DEBUG_TEXTUREBUMP` set
+> before launch; Top mode additionally needs `ORCA_DEBUG_ZBUMP` (or `ORCA_DEBUG_ALL=1`) for ZBump
+> to actually apply when slicing. This isn't a placeholder gate — some option combinations here are
+> genuinely capable of producing bad extrusion (see the Classic-wall-generator note in §10a and the
+> per-mode limitations below), so it's kept off unless you've deliberately opted in and are prepared
+> to read the resulting G-code. Full per-OS activation steps and the safety notes that go with them
+> are in `NEOTKOCM_RELEASE_2_35.md`.
+
+### 10a. All mode — object-wide wall texture
+
+Applies one texture to every wall of the selected object, projected via **Planar / Cylindrical /
+Spherical / Cubic** (Quality → wall texture settings, or the panel's Source/Relief/Transform
+sections). Three on-canvas 3D handles adjust it without leaving the viewport:
+
+| Handle | Colour | Drag controls |
+|--------|--------|---------------|
+| **V** | blue | Scale (tile size, mm) |
+| **U** | orange | Repeat count |
+| **Yaw ring** | purple | Rotation around the pivot |
+| **Pivot** | pink | Pan — moves the tile origin |
+
+A live textured overlay shows the pattern on the object before slicing, so you can line it up by
+eye. The real object dims while the gizmo is open so the projection isn't hidden behind it.
+
+> ⚠️ **Wall generator: Arachne only.** Wall-texture bump (All + Painter modes) requires the
+> **Arachne** wall generator. It's deliberately disabled on **Classic** — a real test print showed
+> Classic silently over-extrudes when adjacent walls carry different bump amounts, and the preview
+> hides it while the G-code doesn't. **NeoArachne isn't wired up for it yet either.** Even on
+> Arachne, adjacent walls with very different bump amounts can still show a visible gap between
+> them (nothing adjusts line *width* to compensate, only the centreline moves) — this is a known,
+> open limitation, not something the gate gets you past.
+
+### 10b. Painter mode — per-zone texture
+
+Paint zones on the model (same brush/erase interaction as the other painter gizmos) and assign
+each zone its **own** texture, projection mode, scale, and thickness — independent of the
+object's base (All-mode) settings and of every other zone. Each zone gets its own overlay preview
+and a thumbnail in the zone list so you can tell them apart at a glance.
+
+### 10c. Top mode — ZBump, top-surface height-map relief
+
+A different feature entirely (no shared engine code with All/Painter's wall texture) that
+modulates the **Z height of the top-surface fill**, not wall XY. A grayscale image becomes a
+literal height field: brighter pixels raise the top surface, sampled point-by-point along every
+top-fill line for a real 2D relief (not one flat Z per line).
+
+| Control | What it does |
+|---------|--------------|
+| **Height (mm)** | Max Z displacement at full-white texture value. Shown in red past a safe-height estimate (0.8× nozzle − layer height) — a warning, not a hard cap; you can go past it and judge from the resulting G-code. |
+| **Reinforcement passes** | Splits the total height across multiple stacked passes when it exceeds what one pass can safely reach on its own. |
+| **Scale / Repeat** | Physical size of one image tile, and how many times it repeats. |
+| **Pan X / Y** | Shifts the tiling phase — drag the on-canvas green handle, or type exact values. |
+| **Edge ramp (mm)** | Smoothstep margin from the top-fill's own contour, so the wall itself stays flat. |
+
+The green pan handle rests at the object's own center plus the current offset, and a live
+textured overlay (cropped to roughly where top-fill actually starts, inset from the object's
+outer edge by its perimeter walls) previews the pattern before slicing — drag the handle or the
+numeric fields, both update the same preview live.
+
+> **Preview vs. slice.** The overlay is a GUI-only approximation (perimeter inset is estimated,
+> not the engine's exact fill boundary) — always meant as a placement guide, not a pixel-perfect
+> match. It's cross-checked against the real slicing math via a calibration log
+> (`ORCA_DEBUG_ZBUMP`, `/tmp/neotko_zbump.log`) that logs identical probe points from both the
+> GUI and the engine side for direct comparison.
+
+**Known limitation:** the on-canvas scale/rotation handles (in any mode of this gizmo) can
+disappear when the print bed renders behind them, depending on camera angle — visible fine from
+below. Long-standing, not specific to any one mode; not yet root-caused.
+
+---
+
+## 11. Precision Adaptive Layer Height — point-based layer height curve
+
+A gizmo (left-side toolbar) that replaces the stock "Layers editing" brush with an exact,
+point-based curve editor for variable layer height. Instead of clicking and dragging to add/remove
+detail (imprecise — you can't say "I want exactly 0.28 mm at Z=14.2 mm"), you place **control
+points** at an exact Z and height, drag them, and set a **tension** per segment to shape the curve
+between them.
+
+> Like **Align & Stack** (§7), this gizmo is gated behind **Libre Mode** (§4) — its icon is
+> **always visible** in the toolbar but stays disabled (greyed out) until Libre Mode is active. It
+> never affects the stock Variable Layer Height dialog/brush, which remains untouched and fully
+> usable with Libre Mode off.
+
+**How to use it**
+
+1. Enable **Libre Mode** (§4a), select a single object, open the gizmo.
+2. The panel shows a graph: height (mm) across, Z across the object's height vertically.
+   - The **bottom point** (grey) is the object's fixed first layer — it can't be moved or deleted.
+   - The **top point** (amber) can be dragged in height only.
+   - **Click anywhere else in the graph** to add a new point; **drag** any non-bottom point to move
+     it; **right-click** a point to delete it.
+3. With 3+ points, a **tension slider** appears per segment below the graph: `0` = straight line
+   (identical to the engine's default linear interpolation), `1` = a smooth curve through the
+   segment (monotone — it never overshoots past the two points' heights, so it can't spike outside
+   `min`/`max layer height`).
+4. While dragging or hovering a point, a translucent band lights up **on the object itself**,
+   showing exactly which Z-slice you're affecting — teal on hover, amber while dragging. A small
+   label over the point shows the exact Z and layer height live.
+5. Every discrete edit (point add/move/delete, tension change, Reset) is a normal undo step and
+   triggers a re-slice, same as the stock brush.
+
+**Current limitations (first version)**
+- Min/max layer height are **read-only** (from the printer/nozzle) — no per-object override yet.
+- Reopening the gizmo on an object that already has a *very* dense profile (e.g. one painted with
+  the old stock brush) falls back to a flat 2-point start rather than importing hundreds of points
+  as control points.
+- No result preview from the classic Adaptive/Smooth buttons — this gizmo is a separate, precise
+  path, not a replacement for those.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -577,6 +714,9 @@ A new option **Variable layer height (Experimental)** sits under **Tower type** 
 | NeoTower (tower type) | Quality → Prime tower → **Tower type** |
 | Zigurat / Sandwich purge compaction / Sandwich wipe reserve | Quality → Prime tower |
 | Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower (greyed unless Libre Mode) |
+| PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray or Sandwich Editor's Advanced button) |
+| Bump Mapping Editor (All / Painter / Top) | Left-side gizmo toolbar *(expert gate: Libre Mode active **+** `ORCA_DEBUG_TEXTUREBUMP` set, **+** `ORCA_DEBUG_ZBUMP` for Top/ZBump — see `NEOTKOCM_RELEASE_2_35.md`)* |
+| Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
 
 ---
 
@@ -623,6 +763,10 @@ Check **Sandwich wipe reserve** (default 10 mm³) and **Sandwich purge compactio
 The object's extruder isn't a MixedFilament. Assign one of your MixedFilament rows as the
 object's extruder (same as assigning any normal filament), then reopen the Painter — the
 checkbox and its colour swatch become active. See §6g.
+
+**Q: Can I make a PathBlend gradient start or end somewhere other than the surface edges — or make it fully opaque at one end?**
+
+Yes — open **`ADV…`** on the PathBlend pass (Painter Pro tray or the Sandwich Editor's Advanced button) and drag the two handles in the graph that opens. The low handle sets where the ramp starts rising (and its floor height); the high handle sets where it finishes (and its top height). Push the high handle all the way to the top for a full "techo" — zero of the cap colour in that zone. See §1c.
 
 **Q: I want to try NeoArachne safely.**
 

@@ -27,6 +27,7 @@
 #include <oneapi/tbb/concurrent_vector.h>
 #include <oneapi/tbb/parallel_for.h>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include <boost/log/trivial.hpp>
@@ -299,32 +300,51 @@ void PrintObject::make_perimeters()
     if (! this->set_started(posPerimeters))
         return;
 
-    // NEOTKO_TEXTUREBUMP_TAG — whole-object pre-pass, before any wall is generated: builds the
-    // already slope-limited per-column table that PerimeterGenerator consumes later (see
+    // NEOTKO_TEXTUREBUMP_TAG — whole-object pre-pass, before any wall is generated: builds every
+    // already slope-limited per-column table that PerimeterGenerator will consume later (see
     // docs/ATTRIBUTION_TEXTURE_BUMP.md for why detecting an excessive inter-layer slope needs a
-    // whole-object look-ahead in Z instead of the per-layer sampling Fuzzy Skin uses). v1: a
-    // single shared table per object, built from printing_region(0)'s config.
-    if (this->num_printing_regions() > 0) {
-        const PrintRegionConfig& tb_region_cfg = this->printing_region(0).config();
-        const TextureBumpConfig tb_cfg{
-            tb_region_cfg.texture_bump,
-            scaled<coord_t>(tb_region_cfg.texture_bump_thickness.value),
-            scaled<coord_t>(tb_region_cfg.texture_bump_point_distance.value),
-            tb_region_cfg.texture_bump_first_layer,
-            tb_region_cfg.texture_bump_projection_mode,
-            tb_region_cfg.texture_bump_axis,
-            tb_region_cfg.texture_bump_scale.value,
-            tb_region_cfg.texture_bump_max_angle.value * M_PI / 180.0,
-            tb_region_cfg.texture_bump_blur_strength.value,
-            tb_region_cfg.texture_bump_image_path.value};
+    // whole-object look-ahead in Z instead of the per-layer sampling Fuzzy Skin uses). Fase 3: one
+    // table per distinct config actually in use -- union of every PrintRegion's config (was
+    // region(0) only, a v1 limitation) and every painted zone's config (new) -- instead of a
+    // single shared table.
+    {
         // NEOTKO_TEXTUREBUMP_TAG — WIP gate, requested explicitly: this feature only ever runs
         // when LibreMode is on (same gate as NeoArachne) AND the user opted into the debug/WIP
         // build via `export ORCA_DEBUG_ALL=1` (or ORCA_DEBUG_TEXTUREBUMP=1 specifically --
-        // NeoDebug::enabled() already treats ORCA_DEBUG_ALL as "every channel enabled"). Forcing
-        // the config to None here (rather than skipping the block) means group_region_by_texture_bump
-        // / apply_texture_bump downstream see a clean "disabled" state either way.
+        // NeoDebug::enabled() already treats ORCA_DEBUG_ALL as "every channel enabled").
         const bool tb_wip_gate_open = this->config().neotko_libre_mode.value && NeoDebug::enabled(NeoDebug::TEXTUREBUMP);
-        if (tb_cfg.type != TextureBumpType::None && tb_wip_gate_open) {
+
+        std::unordered_set<TextureBumpConfig> tb_desired_set;
+        if (tb_wip_gate_open) {
+            for (size_t ri = 0; ri < this->num_printing_regions(); ++ri) {
+                const PrintRegionConfig& tb_region_cfg = this->printing_region(ri).config();
+                const TextureBumpConfig  tb_cfg{
+                    tb_region_cfg.texture_bump,
+                    scaled<coord_t>(tb_region_cfg.texture_bump_thickness.value),
+                    scaled<coord_t>(tb_region_cfg.texture_bump_point_distance.value),
+                    tb_region_cfg.texture_bump_first_layer,
+                    tb_region_cfg.texture_bump_projection_mode,
+                    tb_region_cfg.texture_bump_axis,
+                    tb_region_cfg.texture_bump_scale.value,
+                    tb_region_cfg.texture_bump_repeat_u.value,
+                    tb_region_cfg.texture_bump_max_angle.value * M_PI / 180.0,
+                    tb_region_cfg.texture_bump_blur_strength.value,
+                    tb_region_cfg.texture_bump_image_path.value,
+                    // NEOTKO_TEXTUREBUMP_TAG -- Fase 4.2: base (non-painted) plane orientation,
+                    // stored per-object (see Model.hpp) rather than per-region since the projection
+                    // plane is a property of the object's own frame, not of any one PrintRegion.
+                    this->model_object()->texture_bump_plane_transform};
+                if (tb_cfg.type != TextureBumpType::None)
+                    tb_desired_set.insert(tb_cfg);
+            }
+            for (const TextureBumpConfig& zone_cfg : Feature::TextureBump::collect_painted_texture_bump_configs(this))
+                tb_desired_set.insert(zone_cfg);
+        }
+        // Forcing an empty desired-set here (rather than skipping the block) means
+        // group_region_by_texture_bump()/apply_texture_bump() downstream see a clean "disabled"
+        // state either way -- build_tables_for_configs() erases every table when desired is empty.
+
+        if (!tb_desired_set.empty() || !m_texture_bump_tables.empty()) {
             BoundingBoxf3 tb_bounds;
             tb_bounds.min = Vec3d(-unscale_(this->size().x()) / 2.0, -unscale_(this->size().y()) / 2.0, 0.0);
             tb_bounds.max = Vec3d( unscale_(this->size().x()) / 2.0,  unscale_(this->size().y()) / 2.0, unscale_(this->size().z()));
@@ -332,9 +352,8 @@ void PrintObject::make_perimeters()
             tb_layer_z.reserve(m_layers.size());
             for (const Layer* l : m_layers)
                 tb_layer_z.push_back(l->slice_z);
-            m_texture_bump_table.build(tb_cfg, tb_bounds, tb_layer_z);
-        } else if (! m_texture_bump_table.empty()) {
-            m_texture_bump_table = Feature::TextureBump::TextureBumpTable();
+            const std::vector<TextureBumpConfig> tb_desired(tb_desired_set.begin(), tb_desired_set.end());
+            Feature::TextureBump::build_tables_for_configs(m_texture_bump_tables, tb_desired, tb_bounds, tb_layer_z);
         }
     }
 
@@ -1236,6 +1255,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "texture_bump_projection_mode"
             || opt_key == "texture_bump_axis"
             || opt_key == "texture_bump_scale"
+            || opt_key == "texture_bump_repeat_u"
             || opt_key == "texture_bump_thickness"
             || opt_key == "texture_bump_point_distance"
             || opt_key == "texture_bump_first_layer"

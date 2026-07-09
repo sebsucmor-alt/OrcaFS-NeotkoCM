@@ -10,6 +10,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 #include "SurfaceEffectProfile.hpp" // NEOTKO_COLORSTITCH_TAG — huella de contenido de perfiles (re-slice on edit)
+#include "Feature/TextureBump/TextureBumpZone.hpp" // NEOTKO_TEXTUREBUMP_TAG — same reason, own zone registry
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
@@ -1130,6 +1131,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->origin_translation          = rhs.origin_translation;
     this->colormix_stickers           = rhs.colormix_stickers; // NEOTKO_STICKER_TAG
     this->colormix_sticker_profiles_fingerprint = rhs.colormix_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
+    this->texture_bump_plane_transform = rhs.texture_bump_plane_transform; // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
     this->cut_id.copy(rhs.cut_id);
     this->copy_transformation_caches(rhs);
 
@@ -1172,6 +1174,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->origin_translation          = std::move(rhs.origin_translation);
     this->colormix_stickers           = std::move(rhs.colormix_stickers); // NEOTKO_STICKER_TAG
     this->colormix_sticker_profiles_fingerprint = rhs.colormix_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
+    this->texture_bump_plane_transform = std::move(rhs.texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -3741,6 +3744,42 @@ bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject&
         });
 }
 
+// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same role as colormix_profiles_fingerprint_of above, own zone
+// registry (TextureBumpZoneManager, not SurfaceEffectProfileManager) -- a painted zone's content
+// (image/scale/thickness/...) lives outside the model, so editing it without repainting wouldn't
+// otherwise change facets/slot-map and Print::apply would skip re-slicing.
+static uint64_t texture_bump_zones_fingerprint_of(const ModelVolume& mv)
+{
+    std::vector<int> ids;
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
+        const int zid = mv.texture_bump_slot_to_zone_id[s];
+        if (zid != 0)
+            ids.push_back(zid);
+    }
+    return TextureBumpZoneManager::fingerprint_of_ids(ids);
+}
+
+bool model_texture_bump_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    return model_property_changed(mo, mo_new,
+        [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
+        [](const ModelVolume &mv_old, const ModelVolume &mv_new) {
+            if (!mv_old.texture_bump_paint_facets.timestamp_matches(mv_new.texture_bump_paint_facets))
+                return false;
+            for (int s = 0; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
+                if (mv_old.texture_bump_slot_to_zone_id[s] != mv_new.texture_bump_slot_to_zone_id[s])
+                    return false;
+            // Recompute the content fingerprint now and cache it onto the NEW volume (mirrors
+            // model_colormix_paint_data_changed above) so the next Print::apply() snapshot carries
+            // it forward; mv_old carries the one from the previous apply.
+            const uint64_t fp_new = texture_bump_zones_fingerprint_of(mv_new);
+            const_cast<ModelVolume&>(mv_new).texture_bump_zones_fingerprint = fp_new;
+            if (mv_old.texture_bump_zones_fingerprint != fp_new)
+                return false;
+            return true;
+        });
+}
+
 // NEOTKO_STICKER_TAG — sticker-pile change detector, mirroring the painted path
 // above. Two halves: (1) the pile itself (count / order / transform / profile /
 // svg — order matters, the topmost sticker occludes); (2) the CONTENT of the
@@ -3778,6 +3817,14 @@ bool model_colormix_sticker_data_changed(const ModelObject& mo, const ModelObjec
     const uint64_t fp_new = colormix_sticker_profiles_fingerprint_of(mo_new);
     const_cast<ModelObject&>(mo_new).colormix_sticker_profiles_fingerprint = fp_new;
     return mo.colormix_sticker_profiles_fingerprint != fp_new;
+}
+
+// NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: the base (non-painted) projection-plane transform lives
+// directly on ModelObject (see its declaration for why), no fingerprint indirection needed --
+// straight matrix comparison is enough.
+bool model_texture_bump_transform_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    return mo.texture_bump_plane_transform.matrix() != mo_new.texture_bump_plane_transform.matrix();
 }
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new)

@@ -1099,14 +1099,26 @@ public:
         if (auto* ac = wxGetApp().app_config) {
             Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
             Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
-            const std::string vc = ac->get("neotko_pb_chain_continuous");
-            const std::string va = ac->get("neotko_pb_chain_atomic");
-            const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
-            const std::string vk = ac->get("neotko_pb_use_canon_scheduler");
-            if (!vc.empty()) d.chain_continuous   = (vc == "1" || vc == "true");
-            if (!va.empty()) s.chain_atomic       = (va == "1" || va == "true");
-            if (!vk.empty()) s.use_canon_scheduler = (vk == "1" || vk == "true");
-            if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
+            // NEOTKO_PATHBLEND_TAG — s191: these are internal scheduler toggles,
+            // ALL ON by default. Only developer_mode can change them (and see them
+            // in the Advanced modal). For everyone else force ON — ignore any stale
+            // OFF a previous dev session may have saved — so the safe behavior can't
+            // be left broken by a hidden setting.
+            const bool dev = (ac->get("developer_mode") == "true");
+            if (dev) {
+                const std::string vc = ac->get("neotko_pb_chain_continuous");
+                const std::string va = ac->get("neotko_pb_chain_atomic");
+                const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
+                const std::string vk = ac->get("neotko_pb_use_canon_scheduler");
+                if (!vc.empty()) d.chain_continuous   = (vc == "1" || vc == "true");
+                if (!va.empty()) s.chain_atomic       = (va == "1" || va == "true");
+                if (!vk.empty()) s.use_canon_scheduler = (vk == "1" || vk == "true");
+                if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
+            } else {
+                d.chain_continuous    = true;
+                s.chain_atomic        = true;
+                s.use_canon_scheduler = true;
+            }
         }
 
         // Load the current state of both zones (blob, or synthesized legacy).
@@ -3172,13 +3184,15 @@ private:
             "    starting the next (no cross-object travels during ramp).\n"
             "  • XY threshold — beyond this distance, treat scanlines as\n"
             "    disconnected islands and bring the lift back."));
-        pb_adv->Bind(wxEVT_BUTTON, [this, pb_adv](wxCommandEvent&) {
-            // Seed runtimes from app_config on open (defensive — main seed
-            // happens at SandwichDialog ctor).
+        pb_adv->Bind(wxEVT_BUTTON, [this, pb_adv, z, idx](wxCommandEvent&) {
             auto* ac = wxGetApp().app_config;
             Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
             Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
-            if (ac) {
+            // NEOTKO_PATHBLEND_TAG — s191: chain toggles are internal, ALL ON by
+            // default, and only editable/visible under developer_mode. Everyone
+            // else just gets the ramp-profile editor.
+            const bool dev = (ac && ac->get("developer_mode") == "true");
+            if (dev && ac) {
                 const std::string vc = ac->get("neotko_pb_chain_continuous");
                 const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
                 const std::string va = ac->get("neotko_pb_chain_atomic");
@@ -3192,82 +3206,239 @@ private:
                          wxDefaultPosition, wxDefaultSize,
                          wxDEFAULT_DIALOG_STYLE);
             auto* vbox = new wxBoxSizer(wxVERTICAL);
-            auto* chk_cont = new wxCheckBox(&dlg, wxID_ANY,
-                _L("Continuous chain (suppress retract/lift between adjacent scanlines)"));
-            chk_cont->SetValue(d.chain_continuous);
-            chk_cont->SetToolTip(_L(
-                "When ON, consecutive same-tool PathBlend sublayers within the\n"
-                "XY threshold are emitted as one continuous extrusion (no\n"
-                "retract, no wipe, no z-hop). Beyond the threshold the normal\n"
-                "lift cycle returns — useful for disconnected islands."));
-            vbox->Add(chk_cont, 0, wxALL, 8);
 
-            auto* chk_atomic = new wxCheckBox(&dlg, wxID_ANY,
-                _L("Atomic chain (complete each object's PathBlend before next)"));
-            chk_atomic->SetValue(s.chain_atomic);
-            chk_atomic->SetToolTip(_L(
-                "When ON, the multi-object scheduler drains every same-tool\n"
-                "sublayer of one chain before moving on. Eliminates cross-\n"
-                "object micro-travels between scanlines when several objects\n"
-                "with PathBlend print at the same Z.\n\n"
-                "NOTE: must stay in sync between the GCode dispatcher and the\n"
-                "wipe-tower planner — never toggle mid-print."));
-            vbox->Add(chk_atomic, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+            // ---- Ramp profile editor (visual twin of the painter ADV) --------
+            // NEOTKO_PATHBLEND_TAG — s191: cross-section canvas (X = surface zone
+            // 0..1, Y = height 0..H mm) with two draggable 2D handles:
+            //   low (blue)  = (in_t, floor), high (orange) = (out_t, ramp end).
+            // Same model/math as GLGizmoColorMixPainter's pro_pb_profile_editor.
+            auto prof = std::make_shared<Slic3r::PathBlendPassConfig>(read_pb_blob(z));
+            const double Hh = layer_height_mm();
+            const bool is_half = (prof->mode == Slic3r::PathBlendPassConfig::Mode::Half);
+            const double Hd0 = std::max(0.04, Hh);
+            double re_disp = (prof->mid_end_mm < 0.f) ? (is_half ? Hd0 : Hd0 - 0.04)
+                                                      : (double)prof->mid_end_mm;
+            re_disp = std::clamp(re_disp, std::max(0.01, (double)prof->floor_mm) + 0.001, Hd0);
+            const double fl_disp = std::clamp((double)std::max(0.01f, prof->floor_mm),
+                                              0.01, re_disp - 0.001);
 
-            // NEOTKO_PATHBLEND_TAG — s89. Canon scheduler toggle.
-            auto* chk_canon = new wxCheckBox(&dlg, wxID_ANY,
-                _L("Canon scheduler (NeoTower uses dispatcher's algorithm)"));
-            chk_canon->SetValue(s.use_canon_scheduler);
-            chk_canon->SetToolTip(_L(
-                "When ON, NeoTower's sublayer scheduler uses the SAME algorithm\n"
-                "the GCode dispatcher uses (order_sublayers_by_tool), so the\n"
-                "wipe-tower plan matches actual emission by construction.\n\n"
-                "Required for multi-object atomic PathBlend with distinct tools\n"
-                "(test04 4-cube case). Safe for ColorMix and MultiPass — the\n"
-                "algorithm reduces to natural ascending-z order when items per\n"
-                "plane is 1.\n\n"
-                "Turn OFF only if a regression appears in test01 / test05 /\n"
-                "ColorMix; report logs before doing so."));
-            vbox->Add(chk_canon, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+            vbox->Add(new wxStaticText(&dlg, wxID_ANY,
+                    _L("Ramp profile — drag the handles (X = zone, Y = height):")),
+                    0, wxALL, 8);
+            auto* canvas = new wxPanel(&dlg, wxID_ANY, wxDefaultPosition, wxSize(260, 170),
+                                       wxBORDER_SIMPLE);
+            vbox->Add(canvas, 0, wxLEFT | wxRIGHT | wxALIGN_CENTER_HORIZONTAL, 8);
 
-            auto* hxy = new wxBoxSizer(wxHORIZONTAL);
-            hxy->Add(new wxStaticText(&dlg, wxID_ANY,
-                    _L("Continuous-chain XY threshold (mm):")),
-                    0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-            auto* sc_xy = new wxSpinCtrlDouble(&dlg, wxID_ANY,
-                wxEmptyString, wxDefaultPosition, wxSize(90, -1),
-                wxSP_ARROW_KEYS, 0.0, 50.0, d.chain_max_xy_mm, 0.1);
-            sc_xy->SetDigits(2);
-            sc_xy->SetToolTip(_L(
-                "Two consecutive PB sublayers are part of the same chain\n"
-                "when their XY distance is ≤ this value. Default 1.0 mm\n"
-                "is fine for most rectilinear fills (≥ 2 × spacing)."));
-            hxy->Add(sc_xy, 0, wxALIGN_CENTER_VERTICAL);
-            vbox->Add(hxy, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+            auto* hp1 = new wxBoxSizer(wxHORIZONTAL);
+            hp1->Add(new wxStaticText(&dlg, wxID_ANY, _L("start:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            auto* sc_in = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
+                wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.0, 0.98, prof->in_t, 0.02);
+            sc_in->SetDigits(2);
+            hp1->Add(sc_in, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+            hp1->Add(new wxStaticText(&dlg, wxID_ANY, _L("end:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            auto* sc_out = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
+                wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.02, 1.0, prof->out_t, 0.02);
+            sc_out->SetDigits(2);
+            hp1->Add(sc_out, 0, wxALIGN_CENTER_VERTICAL);
+            vbox->Add(hp1, 0, wxLEFT | wxRIGHT | wxTOP, 8);
 
-            vbox->Add(dlg.CreateButtonSizer(wxOK | wxCANCEL),
-                      0, wxEXPAND | wxALL, 8);
+            auto* hp2 = new wxBoxSizer(wxHORIZONTAL);
+            hp2->Add(new wxStaticText(&dlg, wxID_ANY, _L("floor:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            auto* sc_floor = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
+                wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.01, Hd0, fl_disp, 0.02);
+            sc_floor->SetDigits(2);
+            sc_floor->SetToolTip(_L("Ramp floor height (mm) — the low end."));
+            hp2->Add(sc_floor, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+            hp2->Add(new wxStaticText(&dlg, wxID_ANY, _L("ramp end:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            wxSpinCtrlDouble* sc_ramp = nullptr;
+            if (is_half) {
+                auto* t = new wxStaticText(&dlg, wxID_ANY, wxString::Format("%.2f (H)", Hd0));
+                t->Enable(false);
+                hp2->Add(t, 0, wxALIGN_CENTER_VERTICAL);
+            } else {
+                sc_ramp = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
+                    wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.01, Hd0, re_disp, 0.02);
+                sc_ramp->SetDigits(2);
+                sc_ramp->SetToolTip(_L(
+                    "Ramp top height (mm). May reach the full layer height H — the\n"
+                    "cap then vanishes there (a \"techo\" of the bottom tool)."));
+                hp2->Add(sc_ramp, 0, wxALIGN_CENTER_VERTICAL);
+            }
+            vbox->Add(hp2, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 8);
+
+            // Paint the cross-section.
+            canvas->Bind(wxEVT_PAINT, [canvas, prof, Hh, is_half](wxPaintEvent&) {
+                wxPaintDC dc(canvas);
+                const wxSize cs = canvas->GetClientSize();
+                const double pad = 12.0;
+                const double p0x = pad, p0y = pad, p1x = cs.x - pad, p1y = cs.y - pad;
+                const double pw = std::max(1.0, p1x - p0x), ph = std::max(1.0, p1y - p0y);
+                const double Hd = std::max(0.04, Hh);
+                auto SX = [&](double t){ return p0x + std::clamp(t, 0.0, 1.0) * pw; };
+                auto SY = [&](double zz){ return p1y - std::clamp(zz / Hd, 0.0, 1.0) * ph; };
+                auto Pt = [&](double t, double zz){ return wxPoint((int)std::lround(SX(t)),
+                                                                   (int)std::lround(SY(zz))); };
+                double a = std::clamp((double)prof->in_t, 0.0, 1.0);
+                double b = std::clamp((double)prof->out_t, 0.0, 1.0);
+                if (b < a + 0.02) b = std::min(1.0, a + 0.02);
+                double fl = std::clamp((double)std::max(0.01f, prof->floor_mm), 0.01, Hd - 0.001);
+                double re = (prof->mid_end_mm < 0.f) ? (is_half ? Hd : Hd - 0.04)
+                                                     : (double)prof->mid_end_mm;
+                if (is_half) re = Hd;
+                re = std::clamp(re, fl + 0.001, Hd);
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.SetBrush(wxBrush(wxColour(30, 30, 34)));
+                dc.DrawRectangle(0, 0, cs.x, cs.y);
+                { wxPoint p[] = { Pt(0,0), Pt(0,fl), Pt(a,fl), Pt(b,re), Pt(1,re), Pt(1,0) };
+                  dc.SetBrush(wxBrush(wxColour(48, 96, 158))); dc.DrawPolygon(6, p); }
+                if (!is_half) {
+                    wxPoint p[] = { Pt(0,fl), Pt(a,fl), Pt(b,re), Pt(1,re), Pt(1,Hd), Pt(0,Hd) };
+                    dc.SetBrush(wxBrush(wxColour(158, 100, 48))); dc.DrawPolygon(6, p);
+                }
+                dc.SetBrush(*wxTRANSPARENT_BRUSH);
+                dc.SetPen(wxPen(wxColour(90, 90, 100)));
+                dc.DrawRectangle((int)p0x, (int)p0y, (int)pw, (int)ph);
+                dc.SetPen(wxPen(wxColour(150, 210, 255), 2));
+                dc.DrawLine(Pt(0,fl), Pt(a,fl));
+                dc.DrawLine(Pt(a,fl), Pt(b,re));
+                dc.DrawLine(Pt(b,re), Pt(1,re));
+                dc.SetPen(wxPen(*wxWHITE, 1));
+                dc.SetBrush(wxBrush(wxColour(90, 170, 255)));  dc.DrawCircle(Pt(a,fl), 6);
+                dc.SetBrush(wxBrush(wxColour(255, 170, 90)));  dc.DrawCircle(Pt(b,re), 6);
+            });
+
+            // Drag the handles. One lambda bound to LEFT_DOWN + MOTION.
+            auto drag = std::make_shared<int>(-1);
+            auto onMouse = [canvas, prof, Hh, is_half, drag, sc_in, sc_out, sc_floor, sc_ramp]
+                           (wxMouseEvent& e) {
+                const wxSize cs = canvas->GetClientSize();
+                const double pad = 12.0;
+                const double p0x = pad, p0y = pad, p1x = cs.x - pad, p1y = cs.y - pad;
+                const double pw = std::max(1.0, p1x - p0x), ph = std::max(1.0, p1y - p0y);
+                const double Hd = std::max(0.04, Hh);
+                auto SX = [&](double t){ return p0x + std::clamp(t, 0.0, 1.0) * pw; };
+                auto SY = [&](double zz){ return p1y - std::clamp(zz / Hd, 0.0, 1.0) * ph; };
+                double a = std::clamp((double)prof->in_t, 0.0, 1.0);
+                double b = std::clamp((double)prof->out_t, 0.0, 1.0);
+                if (b < a + 0.02) b = std::min(1.0, a + 0.02);
+                double fl = std::clamp((double)std::max(0.01f, prof->floor_mm), 0.01, Hd - 0.001);
+                double re = (prof->mid_end_mm < 0.f) ? (is_half ? Hd : Hd - 0.04)
+                                                     : (double)prof->mid_end_mm;
+                if (is_half) re = Hd;
+                re = std::clamp(re, fl + 0.001, Hd);
+                const double mx = e.GetX(), my = e.GetY();
+                if (e.LeftDown()) {
+                    const double dlo = (mx-SX(a))*(mx-SX(a)) + (my-SY(fl))*(my-SY(fl));
+                    const double dhi = (mx-SX(b))*(mx-SX(b)) + (my-SY(re))*(my-SY(re));
+                    *drag = (dlo <= dhi) ? 0 : 1;
+                    if (!canvas->HasCapture()) canvas->CaptureMouse();
+                }
+                if (*drag < 0) { e.Skip(); return; }
+                if (!e.LeftDown() && !(e.Dragging() && e.LeftIsDown())) { e.Skip(); return; }
+                const double mt = std::clamp((mx - p0x) / pw, 0.0, 1.0);
+                const double mz = std::clamp((p1y - my) / ph, 0.0, 1.0) * Hd;
+                if (*drag == 0) {
+                    prof->in_t     = (float)std::clamp(mt, 0.0, b - 0.02);
+                    prof->floor_mm = (float)std::clamp(mz, 0.01, re - 0.001);
+                } else {
+                    prof->out_t    = (float)std::clamp(mt, a + 0.02, 1.0);
+                    if (!is_half) prof->mid_end_mm = (float)std::clamp(mz, fl + 0.001, Hd);
+                }
+                sc_in->SetValue(prof->in_t);
+                sc_out->SetValue(prof->out_t);
+                sc_floor->SetValue(std::max(0.01f, prof->floor_mm));
+                if (sc_ramp) sc_ramp->SetValue((prof->mid_end_mm < 0.f) ? re : (double)prof->mid_end_mm);
+                canvas->Refresh();
+            };
+            canvas->Bind(wxEVT_LEFT_DOWN, onMouse);
+            canvas->Bind(wxEVT_MOTION,    onMouse);
+            canvas->Bind(wxEVT_LEFT_UP,   [canvas, drag](wxMouseEvent&) {
+                *drag = -1; if (canvas->HasCapture()) canvas->ReleaseMouse(); });
+            canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST,
+                         [drag](wxMouseCaptureLostEvent&) { *drag = -1; });
+
+            // Numeric edits feed the same shared config + repaint.
+            sc_in->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_in, sc_out, canvas](wxSpinDoubleEvent&) {
+                prof->in_t = (float)sc_in->GetValue();
+                if ((double)prof->out_t < prof->in_t + 0.02) {
+                    prof->out_t = std::min(1.0f, prof->in_t + 0.02f); sc_out->SetValue(prof->out_t); }
+                canvas->Refresh();
+            });
+            sc_out->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_in, sc_out, canvas](wxSpinDoubleEvent&) {
+                prof->out_t = (float)sc_out->GetValue();
+                if ((double)prof->in_t > prof->out_t - 0.02) {
+                    prof->in_t = std::max(0.0f, prof->out_t - 0.02f); sc_in->SetValue(prof->in_t); }
+                canvas->Refresh();
+            });
+            sc_floor->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_floor, canvas](wxSpinDoubleEvent&) {
+                prof->floor_mm = (float)sc_floor->GetValue(); canvas->Refresh();
+            });
+            if (sc_ramp) sc_ramp->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_ramp, canvas](wxSpinDoubleEvent&) {
+                prof->mid_end_mm = (float)sc_ramp->GetValue(); canvas->Refresh();
+            });
+
+            // ---- Developer-only internal scheduler toggles -------------------
+            wxCheckBox *chk_cont = nullptr, *chk_atomic = nullptr, *chk_canon = nullptr;
+            wxSpinCtrlDouble* sc_xy = nullptr;
+            if (dev) {
+                vbox->Add(new wxStaticLine(&dlg), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
+                chk_cont = new wxCheckBox(&dlg, wxID_ANY,
+                    _L("Continuous chain (suppress retract/lift between adjacent scanlines)"));
+                chk_cont->SetValue(d.chain_continuous);
+                vbox->Add(chk_cont, 0, wxALL, 8);
+                chk_atomic = new wxCheckBox(&dlg, wxID_ANY,
+                    _L("Atomic chain (complete each object's PathBlend before next)"));
+                chk_atomic->SetValue(s.chain_atomic);
+                vbox->Add(chk_atomic, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+                chk_canon = new wxCheckBox(&dlg, wxID_ANY,
+                    _L("Canon scheduler (NeoTower uses dispatcher's algorithm)"));
+                chk_canon->SetValue(s.use_canon_scheduler);
+                vbox->Add(chk_canon, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+                auto* hxy = new wxBoxSizer(wxHORIZONTAL);
+                hxy->Add(new wxStaticText(&dlg, wxID_ANY,
+                        _L("Continuous-chain XY threshold (mm):")),
+                        0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+                sc_xy = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                        wxSize(90, -1), wxSP_ARROW_KEYS, 0.0, 50.0, d.chain_max_xy_mm, 0.1);
+                sc_xy->SetDigits(2);
+                hxy->Add(sc_xy, 0, wxALIGN_CENTER_VERTICAL);
+                vbox->Add(hxy, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+            }
+
+            vbox->Add(dlg.CreateButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 8);
             dlg.SetSizerAndFit(vbox);
             if (dlg.ShowModal() == wxID_OK) {
-                d.chain_continuous    = chk_cont->GetValue();
-                s.chain_atomic        = chk_atomic->GetValue();
-                s.use_canon_scheduler = chk_canon->GetValue();
-                d.chain_max_xy_mm     = sc_xy->GetValue();
-                if (ac) {
-                    ac->set("neotko_pb_chain_continuous",    d.chain_continuous    ? "1" : "0");
-                    ac->set("neotko_pb_chain_atomic",        s.chain_atomic        ? "1" : "0");
-                    ac->set("neotko_pb_use_canon_scheduler", s.use_canon_scheduler ? "1" : "0");
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "%.4f", d.chain_max_xy_mm);
-                    ac->set("neotko_pb_chain_max_xy_mm",  buf);
-                    ac->save();
+                if (dev) {
+                    d.chain_continuous    = chk_cont->GetValue();
+                    s.chain_atomic        = chk_atomic->GetValue();
+                    s.use_canon_scheduler = chk_canon->GetValue();
+                    d.chain_max_xy_mm     = sc_xy->GetValue();
+                    if (ac) {
+                        ac->set("neotko_pb_chain_continuous",    d.chain_continuous    ? "1" : "0");
+                        ac->set("neotko_pb_chain_atomic",        s.chain_atomic        ? "1" : "0");
+                        ac->set("neotko_pb_use_canon_scheduler", s.use_canon_scheduler ? "1" : "0");
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%.4f", d.chain_max_xy_mm);
+                        ac->set("neotko_pb_chain_max_xy_mm",  buf);
+                        ac->save();
+                    }
                 }
-                // Refresh the button label to reflect new state.
-                pb_adv->SetLabel(
-                    (d.chain_continuous && s.chain_atomic && s.use_canon_scheduler
-                        && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6)
-                    ? _L("Advanced \xE2\x9A\x99")
-                    : _L("Advanced \xE2\x9A\x99 *"));
+                // Commit the profile (spins are the source of truth; drag keeps
+                // them in sync). write_pb_blob applies apply_constraints + re-syncs.
+                prof->in_t     = (float)sc_in->GetValue();
+                prof->out_t    = (float)sc_out->GetValue();
+                prof->floor_mm = (float)sc_floor->GetValue();
+                if (sc_ramp) prof->mid_end_mm = (float)sc_ramp->GetValue();
+                write_pb_blob(z, idx, *prof);
+                const bool prof_lin  = (prof->in_t <= 0.001f && prof->out_t >= 0.999f);
+                const bool chain_def = (d.chain_continuous && s.chain_atomic
+                    && s.use_canon_scheduler && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6);
+                pb_adv->SetLabel((prof_lin && chain_def)
+                    ? _L("Advanced \xE2\x9A\x99") : _L("Advanced \xE2\x9A\x99 *"));
             }
         });
 
@@ -6338,7 +6509,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     //Orca: sync filament num if it's a multi tool printer
     if (opt_key == "extruders_count" && !m_config->opt_bool("single_extruder_multi_material")){
-        auto num_extruder = static_cast<size_t>(boost::any_cast<int>(value));
+        const auto *nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(m_config->option("nozzle_diameter"));
+        size_t num_extruder = (nozzle_diameter != nullptr) ? nozzle_diameter->values.size() : 0;
         int         old_filament_size = wxGetApp().preset_bundle->filament_presets.size();
         std::vector<std::string> new_colors;
         for (int i = old_filament_size; i < num_extruder; ++i) {
@@ -7228,19 +7400,12 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_persistence", "others_settings_fuzzy_skin#skin-noise-persistence");
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
 
-        // NEOTKO_TEXTUREBUMP_TAG_START — deterministic image-driven relief, see docs/ATTRIBUTION_TEXTURE_BUMP.md
-        optgroup = page->new_optgroup(L("Texture Bump"));
-        optgroup->append_single_option_line("texture_bump");
-        optgroup->append_single_option_line("texture_bump_image_path");
-        optgroup->append_single_option_line("texture_bump_projection_mode");
-        optgroup->append_single_option_line("texture_bump_axis");
-        optgroup->append_single_option_line("texture_bump_scale");
-        optgroup->append_single_option_line("texture_bump_thickness");
-        optgroup->append_single_option_line("texture_bump_point_distance");
-        optgroup->append_single_option_line("texture_bump_first_layer");
-        optgroup->append_single_option_line("texture_bump_max_angle");
-        optgroup->append_single_option_line("texture_bump_blur_strength");
-        // NEOTKO_TEXTUREBUMP_TAG_END
+        // NEOTKO_TEXTUREBUMP_TAG -- removed from Object Settings (unification pass, docs/
+        // ATTRIBUTION_TEXTURE_BUMP.md §6): all texture_bump_* options now live exclusively in the
+        // Bump Mapping Editor gizmo (GLGizmoTextureBump), which is the only place that edits them.
+        // Having them here too was the exact "second place to look at/keep in sync" the gizmo's
+        // own consolidation comment already warned about. The ConfigOptionDef entries themselves
+        // stay in PrintConfig.cpp (still needed for 3mf/CLI/presets) -- only this UI page changed.
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
         optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");
@@ -8380,7 +8545,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_cost");
         //BBS
         optgroup->append_single_option_line("temperature_vitrification");
-        optgroup->append_single_option_line("filament_is_high_temperature");
+        // filament_is_high_temperature is controlled by preset data, not user-facing
         optgroup->append_single_option_line("idle_temperature");
         optgroup->append_single_option_line("filament_tower_ironing_area");
         Line line = { L("Recommended nozzle temperature"), L("Recommended nozzle temperature range of this filament. 0 means no set") };

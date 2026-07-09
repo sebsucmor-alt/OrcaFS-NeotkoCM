@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+ <path fill="#6B6B6B" fill-rule="evenodd" clip-rule="evenodd" d="
+  M12,2 L19,5 L19,11 C19,17 15,20.5 12,22 C9,20.5 5,17 5,11 L5,5 Z
+  M11.2,7 H12.8 V14 H11.2 Z
+  M11.2,16 H12.8 V17.6 H11.2 Z"/>
+</svg>
