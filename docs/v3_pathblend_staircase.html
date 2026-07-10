@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM — PathBlend, ramp + cap</title>
+<title>NeotkoCM · PathBlend, ramp + cap</title>
 <style>
   :root{
     --bg:#0d1626;
@@ -124,7 +124,7 @@
     <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
     <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
     <text x="78" y="-56" class="label">TOP + PENU</text>
-    <text x="78" y="-42" class="label label-dim">PathBlend lives here</text>
+    <text x="78" y="-42" class="label label-dim">PathBlend prints here</text>
     <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
     <text x="78" y="44" class="label">BULK</text>
     <text x="78" y="58" class="label label-dim">untouched by PathBlend</text>
@@ -154,7 +154,7 @@
   <g id="studio" transform="translate(420,470)">
 
     <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">PATHBLEND</text>
-    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">a Z-thickness ramp — always fills the whole layer height</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">a Z-thickness ramp that always fills the whole layer height</text>
 
     <!-- pass consumes the whole layer height, no room for another pass -->
     <g data-fade id="slot-collapse" transform="translate(0,-260)">
@@ -194,11 +194,11 @@
       <text x="40" y="4" class="label" style="font-size:10px">Y (object)</text>
       <line x1="0" y1="0" x2="0" y2="-34" style="stroke:var(--teal);stroke-width:1.4" marker-end="url(#arrow)"/>
       <text x="4" y="-40" class="label" style="font-size:10px;fill:var(--teal)">Z (in-layer)</text>
-      <text x="0" y="24" class="label label-dim" style="font-size:9px">confined to Top/Penu — still not the object's Z</text>
+      <text x="0" y="24" class="label label-dim" style="font-size:9px">Top/Penu only · a thin Z slice</text>
     </g>
 
     <!-- transparency / TD callout -->
-    <text x="-110" y="80" class="label label-dim" data-fade id="lbl-td">extruded thickness ≠ color choice — the blend is optical, through the filament's own TD</text>
+    <text x="-110" y="80" class="label label-dim" data-fade id="lbl-td">extruded thickness ≠ colour choice. The blend is optical, seen through the filament's own TD</text>
 
     <!-- coarse vs smooth + line distribution compare -->
     <g data-fade id="compare-widget" transform="translate(-110,150)">
@@ -277,7 +277,7 @@
 <div id="dimmer"></div>
 <div id="tag">
   <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p>not just colors, <em>the full Sandwich</em>.</p>
+  <p>your colors and <em>the full Sandwich</em>.</p>
 </div>
 
 <button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
@@ -402,7 +402,7 @@ const states = [
     $('#face-right').classList.add('dimmed');
     fade('face-top-glow',true);
     setText('top-label','TOP FACE · SANDWICH ZONE');
-    setText('top-sub','PathBlend lives here — nowhere else');
+    setText('top-sub','PathBlend only prints on this face');
   },
   // STEP 3 — contrast: ColorStitch per-LINE color vs PathBlend per-PATH thickness
   ()=>{
@@ -460,7 +460,7 @@ const states = [
     setText('cmp-right-label','MANY · fine steps');
     renderCompareSteps('cmp-left-bands', 5);
     renderCompareSteps('cmp-right-bands', 24);
-    setText('cmp-warn','⚠ most fragile part of the engine — validated staircase, do not disturb');
+    setText('cmp-warn','⚠ most fragile part of the engine · validated staircase, do not disturb');
     setText('top-sub','small surfaces = few scanlines = a visibly coarse ramp');
   }
 ];

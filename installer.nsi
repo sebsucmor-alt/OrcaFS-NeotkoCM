@@ -3,8 +3,8 @@
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 
-!define PRODUCT_NAME "Snapmaker Orca"
-!define PRODUCT_PUBLISHER "Snapmaker"
+!define PRODUCT_NAME "SnapMaker-NeotkoCM"
+!define PRODUCT_PUBLISHER "Neotko"
 !define PRODUCT_WEB_SITE "https://github.com/Snapmaker/OrcaSlicer"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
@@ -19,12 +19,12 @@
 !endif
 !define PACK_SOURCE_DIR "${SOURCE_DIR}"
 
-; 64-bit app: use PROGRAMFILES64 so default path is C:\Program Files\Snapmaker_Orca, not (x86)
-!define INSTALL_DIR_RUNTIME "$PROGRAMFILES64\Snapmaker_Orca"
+; 64-bit app: use PROGRAMFILES64 so default path is C:\Program Files\SnapMaker-NeotkoCM, not (x86)
+!define INSTALL_DIR_RUNTIME "$PROGRAMFILES64\SnapMaker-NeotkoCM"
 InstallDir "${INSTALL_DIR_RUNTIME}"
 
 !ifndef OUTPUT_FILE
-    !define OUTPUT_FILE "Snapmaker_Orca_Windows_Installer_V${VERSION}.exe"
+    !define OUTPUT_FILE "SnapMaker-NeotkoCM_Windows_Installer_V${VERSION}.exe"
 !endif
 
 ; License page: show LICENSE.txt from repo root (same dir as this .nsi)
@@ -149,14 +149,14 @@ SectionEnd
 Section "Desktop shortcut" SecDesktop
     DetailPrint "Creating desktop shortcut..."
     SetShellVarContext current
-    CreateShortcut "$DESKTOP\Snapmaker Orca.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+    CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
     SetShellVarContext all
 SectionEnd
 
 Section "Start menu shortcut" SecStartMenu
     DetailPrint "Creating start menu shortcut..."
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Snapmaker Orca.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
     CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\Uninstall.exe" 0
 SectionEnd
 
@@ -202,21 +202,27 @@ Function LaunchApp
     ExecShell "open" "$INSTDIR\snapmaker-orca.exe"
 FunctionEnd
 
-; Prevent overwriting locked DLLs when snapmaker-orca (or legacy Snapmaker_Orca.exe) is still running.
+; Prevent overwriting locked files when THIS install's own snapmaker-orca.exe is running.
+; We test the exe in $INSTDIR for a write lock rather than matching by process name:
+; the official Snapmaker Orca shares the exe name but lives in another folder, so it never
+; locks our file and must not trigger this prompt. If $INSTDIR\snapmaker-orca.exe cannot be
+; opened for writing, a running instance is holding it; if it doesn't exist yet (fresh install)
+; or opens fine, we are clear to proceed.
 Function EnsureSnapmakerNotRunning
     snapmaker_check_loop:
-        ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq snapmaker-orca.exe" 2>nul | find /i "snapmaker-orca.exe" >nul' $0
-        IntCmp $0 0 snapmaker_in_use snapmaker_try_legacy snapmaker_try_legacy
-    snapmaker_try_legacy:
-        ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq Snapmaker_Orca.exe" 2>nul | find /i "Snapmaker_Orca.exe" >nul' $0
-        IntCmp $0 0 snapmaker_in_use snapmaker_idle snapmaker_idle
+        IfFileExists "$INSTDIR\snapmaker-orca.exe" 0 snapmaker_idle
+        ClearErrors
+        FileOpen $0 "$INSTDIR\snapmaker-orca.exe" a
+        IfErrors snapmaker_in_use
+        FileClose $0
+        Goto snapmaker_idle
     snapmaker_in_use:
         IfSilent snapmaker_silent snapmaker_prompt
     snapmaker_silent:
         SetErrorLevel 7
         Quit
     snapmaker_prompt:
-        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Snapmaker Orca is still running (snapmaker-orca.exe).$\r$\nClose the program, then click Retry, or Cancel to exit the installer." IDRETRY snapmaker_check_loop
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "SnapMaker-NeotkoCM is still running.$\r$\nClose the program, then click Retry, or Cancel to exit the installer." IDRETRY snapmaker_check_loop
         Abort
     snapmaker_idle:
 FunctionEnd

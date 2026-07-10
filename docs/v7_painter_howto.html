@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM — How to paint a Sandwich (real app)</title>
+<title>NeotkoCM · How to paint a Sandwich (real app)</title>
 <style>
   :root{
     --bg:#0d1626;
@@ -109,7 +109,7 @@
   <!-- ============== TITLE ============== -->
   <text x="800" y="70" text-anchor="middle" class="disp" data-fade id="lbl-title"
         style="fill:var(--line);font-size:34px">HOW TO PAINT A SANDWICH</text>
-  <text x="800" y="98" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">ColorStitch Painter · real app, real clicks — 7 steps</text>
+  <text x="800" y="98" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">ColorStitch Painter · real app, real clicks · 7 steps</text>
 
   <!-- ============== ANNOTATION PANEL (right side, updated per step) ============== -->
   <g data-fade id="annot" transform="translate(1010,260)">
@@ -229,7 +229,7 @@
     </g>
     <text x="1315" y="660" text-anchor="middle" class="label">OBJECT</text>
     <text x="1315" y="678" text-anchor="middle" class="label label-dim" style="font-size:9px">MixedFilament → auto TD blend</text>
-    <text x="800" y="730" text-anchor="middle" class="label label-dim" data-fade id="depts-caption">Palette keeps it · Generator makes it fast · Pro makes it exact · Object automates it</text>
+    <text x="800" y="730" text-anchor="middle" class="label label-dim" data-fade id="depts-caption">Palette stores colours · Generator builds quick blends · Pro gives full control · Object automates a MixedFilament</text>
   </g>
 
 </svg>
@@ -238,7 +238,7 @@
 <div id="dimmer"></div>
 <div id="tag">
   <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p>not just colors, <em>the full Sandwich</em>.</p>
+  <p>your colors and <em>the full Sandwich</em>.</p>
 </div>
 
 <button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
@@ -282,7 +282,7 @@ const states = [
     showShot('shot01');
     annot('STEP 1 · OPEN', 'Open the Painter',
       'ColorStitch Painter lives in the main toolbar.',
-      'Click the icon — or just press M.',
+      'Click the icon, or press M.',
       'It works on any object with top surfaces.');
   },
   // STEP 2 — Generator: pick a Gradient ramp swatch
@@ -290,14 +290,14 @@ const states = [
     showShot('shot02');
     annot('STEP 2 · PICK A BLEND', 'Generator department',
       'Gradient ramp builds a 2-color mix for you.',
-      'Each swatch is a real recipe — hover shows the',
+      'Each swatch is a real recipe. Hover to see the',
       'sub-layers and their exact mm (A 0.09 / B 0.11).');
   },
   // STEP 3 — click the top surface
   ()=>{
     showShot('shot03');
     annot('STEP 3 · PAINT', 'Click the top surface',
-      'One click flood-fills that flat top — done.',
+      'One click flood-fills that flat top.',
       'Right-click stays camera-only, and',
       'Shift+click is a one-shot erase.');
   },
@@ -314,15 +314,15 @@ const states = [
     showShot('shot05');
     annot('STEP 5 · STACK MORE', 'Add sub-layers',
       '+ layer adds another Solid sub-pass.',
-      'Three colors now share the top thickness —',
-      'each row keeps its own mm share.');
+      'Three colors now share the top thickness,',
+      'and each row keeps its own mm share.');
   },
   // STEP 6 — change the pass type
   ()=>{
     showShot('shot06');
     annot('STEP 6 · SWITCH TYPE', 'Any pass, any effect',
-      'A sub-pass can become ColorStitch — or the whole',
-      'top can switch to PathBlend Half / Full.',
+      'A sub-pass can become ColorStitch, or the whole',
+      'top can switch to PathBlend Half or Full.',
       'PathBlend fills 100% of the layer: no sub-passes.');
   },
   // STEP 7 — ColorStitch Stripes live + save the recipe
@@ -333,7 +333,7 @@ const states = [
     annot('STEP 7 · LIVE + SAVE', 'See it, keep it',
       'ColorStitch Stripes redraws the model preview',
       'from the same per-line sequence the slicer prints.',
-      'Save keeps the recipe — it travels inside the 3MF.');
+      'Save keeps the recipe. It travels inside the 3MF.');
   },
   // STEP 8 — TD: why the predicted Result color
   ()=>{
@@ -341,9 +341,9 @@ const states = [
     fade('spot-cube',false); fade('spot-save',false);
     fade('spot-td',true); fade('spot-recipe',true);
     annot('STEP 8 · TD', 'Transmission Density',
-      'TD = how translucent a filament is: 0.1–0.5 opaque,',
-      '3+ translucent. Set per machine, it describes YOUR spools.',
-      'The Result swatch predicts the printed color before slicing.');
+      'TD is how translucent a filament is: 0.1–0.5 opaque,',
+      '3+ translucent. Saved per machine, it describes your spools.',
+      'The Result swatch predicts the printed color before you slice.');
   },
   // STEP 9 — the four departments
   ()=>{

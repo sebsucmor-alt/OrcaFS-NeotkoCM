@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM — MultiPass, cross-hatch and glaze</title>
+<title>NeotkoCM · MultiPass, cross-hatch and glaze</title>
 <style>
   :root{
     --bg:#0d1626;
@@ -125,7 +125,7 @@
     <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
     <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
     <text x="78" y="-56" class="label">TOP + PENU</text>
-    <text x="78" y="-42" class="label label-dim">MultiPass lives here</text>
+    <text x="78" y="-42" class="label label-dim">MultiPass prints here</text>
     <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
     <text x="78" y="44" class="label">BULK</text>
     <text x="78" y="58" class="label label-dim">untouched by MultiPass</text>
@@ -152,7 +152,7 @@
   <g id="studio" transform="translate(420,470)">
 
     <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">MULTIPASS</text>
-    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">2-3 stacked Solid passes — no separate button anymore</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">two or three stacked Solid passes, no separate button any more</text>
 
     <!-- pass slots being added -->
     <g data-fade id="pass-slots" transform="translate(0,-260)">
@@ -277,7 +277,7 @@
 <div id="dimmer"></div>
 <div id="tag">
   <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p>not just colors, <em>the full Sandwich</em>.</p>
+  <p>your colors and <em>the full Sandwich</em>.</p>
 </div>
 
 <button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
@@ -386,7 +386,7 @@ const states = [
     $('#face-right').classList.add('dimmed');
     fade('face-top-glow',true);
     setText('top-label','TOP FACE · SANDWICH ZONE');
-    setText('top-sub','MultiPass lives here — nowhere else');
+    setText('top-sub','MultiPass only prints on this face');
   },
   // STEP 3 — "where did MultiPass go" — pass slots, only slot 1 active
   ()=>{

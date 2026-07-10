@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM — ColorStitch Painter, staircase</title>
+<title>NeotkoCM · ColorStitch Painter, staircase</title>
 <style>
   :root{
     --bg:#0d1626;
@@ -149,7 +149,7 @@
   <g id="studio" transform="translate(420,470)">
 
     <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">COLORSTITCH PAINTER</text>
-    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">paint each step's top — not the whole object</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">paint each step's own top face</text>
 
     <!-- toolbar: Paint / Eraser / Pick -->
     <g data-fade id="toolbar" transform="translate(0,-262)">
@@ -212,11 +212,11 @@
 
     <!-- all-or-nothing gotcha: small schematic, not a real 4th step -->
     <g data-fade id="gotcha-icon" transform="translate(-260,120)">
-      <text x="0" y="-8" class="label label-dim" style="fill:#ffb199">⚠ all or nothing — per object</text>
+      <text x="0" y="-8" class="label label-dim" style="fill:#ffb199">⚠ all or nothing · per object</text>
       <rect x="0" y="0" width="26" height="26" fill="#ff15a5"/>
       <rect x="32" y="0" width="26" height="26" fill="#e3ff2a"/>
       <rect x="64" y="0" width="26" height="26" fill="none" stroke="#ff5566" stroke-width="1.4" stroke-dasharray="3 2"/>
-      <text x="45" y="42" text-anchor="middle" class="label label-dim" style="font-size:9px">unpainted step → NO effect, not the preset</text>
+      <text x="45" y="42" text-anchor="middle" class="label label-dim" style="font-size:9px">unpainted step → no effect at all</text>
     </g>
   </g>
 
@@ -302,9 +302,9 @@
     <g transform="translate(1190,300)">
       <text x="0" y="0" class="label">PRO = THE WHOLE SANDWICH</text>
       <text x="0" y="30" class="label label-dim" style="font-size:10px">· every sub-pass: tool, mm, style, angle</text>
-      <text x="0" y="52" class="label label-dim" style="font-size:10px">· penultimate slot — PathBlend lives there</text>
+      <text x="0" y="52" class="label label-dim" style="font-size:10px">· penultimate slot · PathBlend goes here</text>
       <text x="0" y="74" class="label label-dim" style="font-size:10px">· TD preview → predicted Result color</text>
-      <text x="0" y="96" class="label label-dim" style="font-size:10px">· Bottom Surface paintable — even zones</text>
+      <text x="0" y="96" class="label label-dim" style="font-size:10px">· Bottom Surface is paintable, even zones</text>
       <text x="0" y="118" class="label label-dim" style="font-size:10px">&#160;&#160;that sit on supports</text>
     </g>
   </g>
@@ -343,7 +343,7 @@
 <div id="dimmer"></div>
 <div id="tag">
   <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p>not just colors, <em>the full Sandwich</em>.</p>
+  <p>your colors and <em>the full Sandwich</em>.</p>
 </div>
 
 <button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
@@ -489,7 +489,7 @@ const states = [
   // STEP 9 — all-or-nothing gotcha
   ()=>{
     fade('gotcha-icon',true);
-    setText('top-sub','leave a step unpainted → it gets NO effect, not the preset');
+    setText('top-sub','leave a step unpainted → it prints with no effect at all');
   },
   // STEP 10 — weave preview matches G-code + top-faces-only
   ()=>{

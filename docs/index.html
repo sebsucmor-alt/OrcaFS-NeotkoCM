@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM — Video series</title>
+<title>NeotkoCM Video Series</title>
 <style>
   :root{
     --bg:#0d1626;
@@ -64,73 +64,73 @@
 <header>
   <div class="kicker">Snapmaker Orca · Neotko FullSpectrum · video series</div>
   <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p class="claim">not just colors, <em>the full Sandwich</em>.</p>
-  <p class="byline">Features designed by <b>Neotko</b> — inventor of <b>Neosanding</b>, known today as “Ironing” in Orca, Prusa, Bambu &amp; Cura.
-    Everything is opt-in: at defaults the build behaves like stock Snapmaker Orca.</p>
+  <p class="claim">your colors and <em>the full Sandwich</em>.</p>
+  <p class="byline">Features designed by <b>Neotko</b>, who invented Neosanding (now called "Ironing" in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura).
+    Every feature is opt-in. At its defaults the build behaves like stock Snapmaker Orca.</p>
 </header>
 
 <div class="grid">
 
   <a class="card" href="v1_sandwich_to_cube.html">
     <div class="num">V1 · PITCH</div>
-    <h2>Why I forked Orca — meet the Sandwich</h2>
-    <div class="what">The core idea of the pack: the Top and Penultimate layers become a <b>stack of passes you design</b> — Solid, ColorStitch or PathBlend — instead of one flat fill.</div>
+    <h2>Why I forked Orca</h2>
+    <div class="what">The core idea of the pack. The Top and Penultimate layers stop being one flat fill. You build them as a small stack of passes yourself, choosing Solid, ColorStitch or PathBlend for each one.</div>
     <div class="fact"><b>Where:</b> Quality → Surface ColorStitch → Sandwich editor… Drag the dividers to split the layer height between passes.</div>
     <div class="meta"><span>5 steps</span><span class="go">watch →</span></div>
   </a>
 
   <a class="card" href="v2_colorstitch_gradient.html">
     <div class="num">V2 · COLORSTITCH</div>
-    <h2>Per-line gradients, not painted layers</h2>
-    <div class="what">A ColorStitch pass picks the filament for <b>each fill line</b>: smooth dithered blends (2–3 colours), exact manual stripes, or a custom typed pattern — all on the top surface only.</div>
-    <div class="fact"><b>Must-know:</b> set Quality → Top surface pattern → <b>Monotonic Line</b>, or complex tops mis-sequence. Fragmented stripes across holes? Switch Line distribution to LaneQuant.</div>
+    <h2>Colour, chosen line by line</h2>
+    <div class="what">A ColorStitch pass picks the filament for every fill line. You can set smooth dithered blends of two or three colours, exact manual stripes, or a pattern you type by hand. It only touches the top surface.</div>
+    <div class="fact"><b>Must-know:</b> set Quality → Top surface pattern → <b>Monotonic Line</b>, or complex tops come out mis-sequenced. If stripes fragment across holes, switch Line distribution to LaneQuant.</div>
     <div class="meta"><span>13 steps · real panels + real print</span><span class="go">watch →</span></div>
   </a>
 
   <a class="card" href="v3_pathblend_staircase.html">
     <div class="num">V3 · PATHBLEND</div>
-    <h2>A Z-thickness ramp, not a color switch</h2>
-    <div class="what">One filament climbs as a physical ramp inside the layer; in Full mode a second one caps the rest. The visible gradient is <b>optical</b> — thickness vs the filament's TD, not a mixed color.</div>
-    <div class="fact"><b>Must-know:</b> the gradient runs along the build-plate <b>Y axis</b> — rotate the object to aim it. The <b>ADV…</b> editor adds flat start/end zones and a full-opacity “techo”.</div>
+    <h2>A ramp of real thickness</h2>
+    <div class="what">One filament climbs as a physical ramp inside the layer, and in Full mode a second one caps the rest. The gradient you see is optical. It comes from the ramp's changing thickness seen through the filament's TD, so no colour is ever mixed.</div>
+    <div class="fact"><b>Must-know:</b> the gradient runs along the build-plate <b>Y axis</b>, so rotate the object to aim it. The <b>ADV…</b> editor adds flat start and end zones, plus a full-opacity "techo".</div>
     <div class="meta"><span>10 steps</span><span class="go">watch →</span></div>
   </a>
 
   <a class="card" href="v4_multipass_crosshatch.html">
     <div class="num">V4 · MULTIPASS</div>
-    <h2>Stacking Solid passes — cross-hatch &amp; glaze</h2>
-    <div class="what">There is no MultiPass button anymore: stack <b>2–3 Solid passes</b>, give each its own tool, angle and Z share, and you get cross-hatch, glazes and optical blends.</div>
-    <div class="fact"><b>Must-know:</b> aim for the Z shares to add up to the full layer height. <b>Perimeter override</b> clones the walls into every Solid pass so the rim matches each glaze.</div>
+    <h2>Stacking Solid passes for cross-hatch and glaze</h2>
+    <div class="what">There is no MultiPass button any more. Stack two or three Solid passes, give each one its own tool, angle and Z share, and you get cross-hatch, glazes and optical blends.</div>
+    <div class="fact"><b>Must-know:</b> the Z shares should add up to the full layer height. <b>Perimeter override</b> clones the walls into every Solid pass, so the rim matches each glaze.</div>
     <div class="meta"><span>11 steps · real prints</span><span class="go">watch →</span></div>
   </a>
 
   <a class="card" href="v5_painter_zones.html">
     <div class="num">V5 · PAINTER</div>
-    <h2>Paint each top — not the whole object</h2>
-    <div class="what">Save Sandwiches as <b>profiles</b> and flood-fill them onto individual top faces with the ColorStitch Painter. Different steps of one object can carry different recipes — bottoms too.</div>
-    <div class="fact"><b>Must-know:</b> painted objects are <b>all-or-nothing</b> — unpainted areas get no effect, not the preset. Profiles and paint travel inside the 3MF.</div>
+    <h2>Paint each top face on its own</h2>
+    <div class="what">Save Sandwiches as profiles, then flood-fill them onto individual top faces with the ColorStitch Painter. Different steps of one object can each hold a different recipe, and bottom faces work too.</div>
+    <div class="fact"><b>Must-know:</b> painted objects are <b>all-or-nothing</b>. Any area you leave unpainted prints with no effect at all, and the preset is ignored. Profiles and paint both save inside the 3MF.</div>
     <div class="meta"><span>12 steps · real panels</span><span class="go">watch →</span></div>
   </a>
 
   <a class="card" href="v6_all_together.html">
     <div class="num">V6 · FINALE</div>
-    <h2>All together — one print, every technique</h2>
-    <div class="what">One staircase object: ColorStitch, MultiPass and PathBlend on separate tops, repainted live, previewed with <b>RealColor</b> and proven against real prints.</div>
-    <div class="fact"><b>Must-know:</b> RealColor is a TD-based optical approximation, not a guarantee. Any Sandwich scene auto-promotes the wipe tower to <b>NeoTower</b> to keep purges in sync.</div>
+    <h2>Everything on one print</h2>
+    <div class="what">One staircase object carries ColorStitch, MultiPass and PathBlend on separate top faces. Repaint them live, preview the result with <b>RealColor</b>, then check it against the real prints.</div>
+    <div class="fact"><b>Must-know:</b> RealColor gives a TD-based optical preview of the final colour, so read it as a guide. Any Sandwich scene moves the wipe tower to <b>NeoTower</b> on its own, to keep the purges in sync.</div>
     <div class="meta"><span>14 steps · RealColor + prints</span><span class="go">watch →</span></div>
   </a>
 
   <a class="card" href="v7_painter_howto.html">
     <div class="num">V7 · TUTORIAL</div>
-    <h2>How to paint a Sandwich — real app</h2>
-    <div class="what">Seven real clicks in the actual UI: open the Painter, grab a Generator blend, click a top, refine it in Pro, stack sub-passes, switch effects, save the recipe.</div>
-    <div class="fact"><b>Must-know:</b> press <b>M</b> to open the Painter. TD scale: 0.1–0.5 opaque · 3+ translucent — the Result swatch predicts the printed colour before slicing.</div>
+    <h2>How to paint a Sandwich, step by step</h2>
+    <div class="what">Seven real clicks in the actual app: open the Painter, grab a Generator blend, click a top face, refine it in Pro, stack sub-passes, switch effects, and save the recipe.</div>
+    <div class="fact"><b>Must-know:</b> press <b>M</b> to open the Painter. On the TD scale, 0.1–0.5 is opaque and 3 or more is translucent. The Result swatch predicts the printed colour before you slice.</div>
     <div class="meta"><span>9 steps · 100% screenshots</span><span class="go">watch →</span></div>
   </a>
 
 </div>
 
 <footer>
-  Every video plays on its own — click the on-screen controls, or use <kbd>→</kbd> next · <kbd>←</kbd> back · <kbd>Space</kbd> play/pause · <kbd>R</kbd> reset · <kbd>F</kbd> fullscreen · <kbd>H</kbd> clean view.<br>
+  Every video plays on its own. Click the on-screen controls, or use <kbd>→</kbd> next · <kbd>←</kbd> back · <kbd>Space</kbd> play/pause · <kbd>R</kbd> reset · <kbd>F</kbd> fullscreen · <kbd>H</kbd> clean view.<br>
   Browsing a video by hand pauses it; <kbd>Esc</kbd> or the <b>‹ Menu</b> button brings you back here.
 </footer>
 

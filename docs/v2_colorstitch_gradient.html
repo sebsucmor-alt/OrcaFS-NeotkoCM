@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM — ColorStitch, top surface only</title>
+<title>NeotkoCM · ColorStitch, top surface only</title>
 <style>
   :root{
     --bg:#0d1626;
@@ -127,7 +127,7 @@
     <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
     <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
     <text x="78" y="-56" class="label">TOP + PENU</text>
-    <text x="78" y="-42" class="label label-dim">Sandwich lives here</text>
+    <text x="78" y="-42" class="label label-dim">the Sandwich prints here</text>
     <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
     <text x="78" y="44" class="label">BULK</text>
     <text x="78" y="58" class="label label-dim">untouched by ColorStitch</text>
@@ -137,7 +137,7 @@
   <g id="studio" transform="translate(420,470)">
 
     <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">COLORSTITCH</text>
-    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">per-line color on the top surface — not a Z gradient</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">a colour for every fill line across the top surface</text>
 
     <!-- 4 style pills (real WIKI §1b styles) -->
     <g data-fade id="style-pills" transform="translate(0,-255)">
@@ -295,7 +295,7 @@
       <rect class="spot" x="116" y="299" width="164" height="34" rx="8"/>
       <rect class="spot2" x="10" y="394" width="608" height="42" rx="8"/>
     </g>
-    <text x="800" y="830" text-anchor="middle" class="label label-dim">6 transition shapes (Even · Slow start/end · S-curve · custom γ · Hard step) — and the preview bar IS the exact per-line sequence that prints</text>
+    <text x="800" y="830" text-anchor="middle" class="label label-dim">6 transition shapes (Even · Slow start/end · S-curve · custom γ · Hard step). The preview bar shows the exact per-line sequence that prints</text>
   </g>
 
   <!-- STEP 12 · 3-colour S-curve + Stripes, side by side -->
@@ -316,7 +316,7 @@
       <image href="images/colotstitch-stripes.png" x="0" y="0" width="637" height="491"/>
       <rect class="spot" x="144" y="238" width="106" height="108" rx="8"/>
     </g>
-    <text x="800" y="830" text-anchor="middle" class="label label-dim">3 colours share the surface by % · Stripes repeat exact counts — 10×A, 20×B, until full</text>
+    <text x="800" y="830" text-anchor="middle" class="label label-dim">3 colours share the surface by %. Stripes repeat exact counts: 10×A, 20×B, until the surface is full</text>
   </g>
 
   <!-- STEP 13 · real print proof: gcode vs printed part -->
@@ -334,7 +334,7 @@
       <text class="shot-name" x="320" y="-22" text-anchor="middle">THE ACTUAL PRINT</text>
       <image href="images/REALPRINTS/RealPrint-01B_web.png" x="0" y="0" width="640" height="480" preserveAspectRatio="xMidYMid meet"/>
     </g>
-    <text x="800" y="830" text-anchor="middle" class="label label-dim">same per-line engine, sliced and printed — dither pattern survives all the way to plastic</text>
+    <text x="800" y="830" text-anchor="middle" class="label label-dim">same per-line engine, sliced and printed. The dither pattern survives all the way to plastic</text>
   </g>
 
 </svg>
@@ -343,7 +343,7 @@
 <div id="dimmer"></div>
 <div id="tag">
   <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p>not just colors, <em>the full Sandwich</em>.</p>
+  <p>your colors and <em>the full Sandwich</em>.</p>
 </div>
 
 <button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
@@ -472,7 +472,7 @@ const states = [
     $('#face-right').classList.add('dimmed');
     fade('face-top-glow',true);
     setText('top-label','TOP FACE · SANDWICH ZONE');
-    setText('top-sub','ColorStitch lives here — nowhere else');
+    setText('top-sub','ColorStitch only prints on this face');
   },
   // STEP 3 — mini-sandwich stack hovers above the top face (Solid + ColorStitch passes)
   ()=>{
