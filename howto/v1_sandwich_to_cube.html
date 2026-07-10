@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeotkoCM — Sandwich to Cube</title>
+<style>
+  :root{
+    --bg:#0d1626;
+    --grid:rgba(110,150,205,.09);
+    --grid2:rgba(110,150,205,.20);
+    --line:#e6fbf7;
+    --dim:rgba(230,251,247,.55);
+    --teal:#009688;
+    --pink:#ff15a5;
+    --yellow:#e3ff2a;
+    --blue:#2196f3;
+    --dark:#2b3436;
+    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--line);font-family:var(--mono);overflow:hidden}
+  body{
+    background-image:
+      linear-gradient(var(--grid2) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+  }
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  svg{width:min(100vw,100vh*1.77);height:auto;max-height:100vh}
+
+  .ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:12px;font-size:12px;color:var(--dim);pointer-events:none;letter-spacing:.08em;text-transform:uppercase}
+  .ui.hidden{opacity:0}
+  .ui kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line)}
+  .step-num{position:fixed;top:21px;left:150px;font-size:11px;color:var(--dim);letter-spacing:.2em}
+  .title{position:fixed;top:20px;right:24px;font-size:11px;color:var(--dim);letter-spacing:.2em;text-align:right}
+
+  .stroke{stroke:var(--line);stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .stroke-dim{stroke:var(--dim);stroke-width:1;fill:none;stroke-dasharray:3 4}
+  .label{font-family:var(--mono);fill:var(--line);font-size:11px;letter-spacing:.12em}
+  .label-dim{fill:var(--dim)}
+  .label-big{font-size:20px;letter-spacing:.2em}
+  .label-mid{font-size:14px;letter-spacing:.15em}
+
+  [data-fade]{opacity:0;transition:opacity .6s ease}
+  [data-fade].on{opacity:1}
+
+  .ingredient,#topbun{
+    transition: transform 1s cubic-bezier(.5,0,.2,1), opacity .6s ease;
+  }
+  .ingredient.flying{
+    transition: transform 1.4s cubic-bezier(.5,0,.2,1), opacity .8s ease;
+  }
+
+  .face{transition:fill .8s ease,opacity .6s ease}
+  .face-base{fill:#1f6fb8;stroke:var(--line);stroke-width:1.4;stroke-linejoin:round}
+  .face-side-dark{fill:#155a93}
+  .face-top{fill:#2d8de0}
+
+  /* dimmer for final pop — kills the grid + any leftover text behind */
+  #dimmer{position:fixed;inset:0;background:rgba(6,18,18,.88);opacity:0;transition:opacity .9s ease;pointer-events:none;backdrop-filter:blur(2px)}
+  #dimmer.on{opacity:1}
+
+  #tag{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .8s ease .3s;pointer-events:none}
+  #tag.on{opacity:1}
+  #tag h1{font-family:var(--mono);font-size:34px;letter-spacing:.18em;margin:0;color:var(--line)}
+  #tag h1 span{color:var(--teal)}
+  #tag p{margin:18px 0 0;color:var(--dim);font-size:14px;letter-spacing:.25em;text-transform:uppercase}
+  #tag em{color:var(--pink);font-style:normal}
+
+  .connector{stroke:var(--teal);stroke-width:1;fill:none;stroke-dasharray:4 3;opacity:0;transition:opacity .5s}
+  .connector.on{opacity:.85}
+
+  #cube.spin{animation:spin360 4s linear 1}
+  @keyframes spin360{0%{transform:rotateY(0deg)}100%{transform:rotateY(360deg)}}
+
+  /* overlay slices: merge animation in step 5 */
+  #slice-solid, #slice-colormix{
+    transition: transform 1.2s cubic-bezier(.5,0,.2,1), opacity .8s ease;
+  }
+  /* land EXACTLY on the top face: yellow slice (y=-30) → y=0, colormix (y=-70) → y=0 */
+  #slice-solid.merge{ transform: translateY(30px); opacity:.55 !important; }
+  #slice-colormix.merge{ transform: translateY(70px); opacity:.55 !important; }
+
+  /* impact pulse when topbun lands */
+  @keyframes thud{
+    0%{transform:translateY(0) scale(1,1)}
+    40%{transform:translateY(0) scale(1.04,.92)}
+    100%{transform:translateY(0) scale(1,1)}
+  }
+  .thud{animation:thud .35s ease-out}
+
+  /* ---- interactive controls (s195) ---- */
+  #progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);z-index:6;transition:width .5s ease}
+  #backBtn{position:fixed;top:15px;left:22px;z-index:7;font-family:var(--mono);font-size:12px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.82);
+    border:1px solid rgba(110,150,205,.32);border-radius:8px;padding:8px 14px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s,transform .15s}
+  #backBtn:hover{color:var(--line);border-color:var(--teal);transform:translateX(-2px)}
+  #backBtn b{font-size:16px;line-height:1;font-weight:400}
+  .ui{pointer-events:none}
+  .ui button.uibtn{pointer-events:auto;font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.78);
+    border:1px solid rgba(110,150,205,.28);border-radius:7px;padding:6px 11px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s,background .15s}
+  .ui button.uibtn:hover{color:var(--line);border-color:var(--teal);background:rgba(10,20,36,.95)}
+  .ui button.uibtn kbd{border:1px solid currentColor;padding:1px 5px;border-radius:3px;opacity:.75;font-size:10px}
+  .ui button#btnPlay{color:var(--line);border-color:rgba(0,150,136,.6)}
+  .ui button#btnPlay .pglyph{font-size:11px;opacity:.9}
+  body.clean #ui,body.clean #backBtn,body.clean #progress,body.clean .step-num,body.clean .title{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div class="step-num" id="stepNum">STEP 01 / 05</div>
+<div class="title">NEOTKOCM · FULLSPECTRUM · v1</div>
+
+<div id="stage">
+<svg viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="colormix" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+      <rect width="5" height="10" fill="#ff15a5"/>
+      <rect x="5" width="5" height="10" fill="#2196f3"/>
+    </pattern>
+    <pattern id="solidyellow" patternUnits="userSpaceOnUse" width="10" height="3">
+      <rect width="10" height="3" fill="#e3ff2a"/>
+      <rect width="10" height="0.6" fill="#b8c700"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#009688"/>
+    </marker>
+  </defs>
+
+  <!-- ============== SANDWICH (left) ============== -->
+  <g id="sandwich" transform="translate(360,460)">
+
+    <!-- bottom bun: always visible from step 1 -->
+    <g data-fade id="bottombun">
+      <ellipse cx="0" cy="120" rx="170" ry="32" class="stroke"/>
+      <path d="M -170 120 Q -170 150 -130 158 Q -60 168 0 168 Q 60 168 130 158 Q 170 150 170 120"
+            class="stroke" style="fill:rgba(43,52,54,.3)"/>
+    </g>
+
+    <!-- lettuce -->
+    <g class="ingredient" id="ing-lettuce" data-fade>
+      <path d="M -160 85 Q -140 70 -110 85 Q -70 60 -30 85 Q 0 65 30 85 Q 70 60 110 85 Q 140 70 160 85 L 160 100 L -160 100 Z"
+            fill="#009688" stroke="#e6fbf7" stroke-width="1.4"/>
+    </g>
+
+    <!-- cheese / Solid pass -->
+    <g class="ingredient" id="ing-cheese" data-fade>
+      <rect x="-155" y="50" width="310" height="22" rx="2" fill="url(#solidyellow)" stroke="#e6fbf7" stroke-width="1.4"/>
+      <path d="M -155 72 L -135 78 L -110 72 L -85 80 L -55 72 L -30 78 L 0 72 L 25 80 L 55 72 L 80 78 L 110 72 L 135 80 L 155 72"
+            class="stroke" style="stroke-width:1"/>
+    </g>
+
+    <!-- magenta / ColorMix -->
+    <g class="ingredient" id="ing-tomato" data-fade>
+      <rect x="-150" y="20" width="300" height="22" rx="3" fill="url(#colormix)" stroke="#e6fbf7" stroke-width="1.4"/>
+    </g>
+
+    <!-- top bun: lands last -->
+    <g id="topbun" data-fade>
+      <path d="M -170 0 Q -170 -60 -100 -78 Q -40 -90 0 -90 Q 40 -90 100 -78 Q 170 -60 170 0 Z"
+            class="stroke" style="fill:rgba(43,52,54,.3)"/>
+      <circle cx="-60" cy="-40" r="2.5" fill="#e6fbf7"/>
+      <circle cx="-10" cy="-55" r="2.5" fill="#e6fbf7"/>
+      <circle cx="40" cy="-45" r="2.5" fill="#e6fbf7"/>
+      <circle cx="80" cy="-30" r="2.5" fill="#e6fbf7"/>
+      <circle cx="-90" cy="-25" r="2.5" fill="#e6fbf7"/>
+    </g>
+
+    <text x="0" y="-130" text-anchor="middle" class="label label-big" data-fade id="lbl-sandwich">SANDWICH</text>
+    <text x="0" y="-110" text-anchor="middle" class="label label-dim" data-fade id="lbl-sandwich2">[ FullSpectrum surface stack ]</text>
+
+    <!-- editor-style ingredient labels (step 3+) -->
+    <g data-fade id="ing-labels">
+      <line x1="170" y1="31" x2="240" y2="31" class="stroke-dim"/>
+      <text x="248" y="35" class="label">[01] COLORMIX · pass 2</text>
+      <text x="248" y="50" class="label label-dim">stripes 45° · pink ⇄ blue</text>
+
+      <line x1="170" y1="61" x2="240" y2="61" class="stroke-dim"/>
+      <text x="248" y="65" class="label">[02] SOLID · pass 1</text>
+      <text x="248" y="80" class="label label-dim">yellow fill · 0.10 mm</text>
+
+      <line x1="-170" y1="92" x2="-240" y2="92" class="stroke-dim"/>
+      <text x="-248" y="96" text-anchor="end" class="label">[03] BASE</text>
+      <text x="-248" y="111" text-anchor="end" class="label label-dim">blue infill body</text>
+    </g>
+
+    <line x1="-200" y1="160" x2="200" y2="160" class="stroke-dim"/>
+  </g>
+
+  <!-- ============== CUBE (right) ============== -->
+  <g id="cube-wrapper" transform="translate(1180,470)">
+    <g id="cube" data-fade>
+      <polygon id="face-right" class="face face-base face-side-dark"
+        points="0,0 190,-110 190,140 0,250"/>
+      <polygon id="face-left" class="face face-base"
+        points="0,0 -190,-110 -190,140 0,250"/>
+      <polygon id="face-top" class="face face-base face-top"
+        points="0,0 190,-110 0,-220 -190,-110"/>
+      <g class="stroke">
+        <polyline points="-190,-110 -190,-95 -175,-110"/>
+        <polyline points="190,-110 190,-95 175,-110"/>
+        <polyline points="0,-220 -12,-213 0,-205"/>
+        <polyline points="0,250 -12,243 0,235"/>
+      </g>
+    </g>
+
+    <text x="0" y="320" text-anchor="middle" class="label label-dim" data-fade id="lbl-snap">snapmaker</text>
+    <line x1="-260" y1="295" x2="260" y2="295" class="stroke-dim" data-fade id="lbl-snap2"/>
+
+    <g data-fade id="cube-labels">
+      <line x1="0" y1="-225" x2="0" y2="-260" class="stroke-dim"/>
+      <text x="0" y="-272" text-anchor="middle" class="label" id="top-label">CUBE · BASE STATE</text>
+      <text x="0" y="-288" text-anchor="middle" class="label label-dim" id="top-sub">single tool · uniform color</text>
+    </g>
+  </g>
+
+  <!-- CAD connectors sandwich → cube -->
+  <g>
+    <path id="conn-cheese" class="connector" d="M 515 510 Q 800 380 990 470" marker-end="url(#arrow)"/>
+    <path id="conn-tomato" class="connector" d="M 510 480 Q 800 320 990 360" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ============== OVERLAY SLICES on top of cube (rendered LAST → above everything) ============== -->
+  <!-- Anchored to cube top center: (1180, 360). Iso top diamond half-w=190, half-h=110 -->
+  <g id="overlay" transform="translate(1180,360)">
+    <!-- yellow Solid slice (lower, sits closer to cube top) -->
+    <g id="slice-solid" data-fade>
+      <polygon points="0,-30 190,-140 0,-250 -190,-140"
+               fill="url(#solidyellow)" stroke="#e6fbf7" stroke-width="1.4" opacity="0.88"/>
+      <text x="200" y="-140" class="label">SOLID</text>
+      <text x="200" y="-126" class="label label-dim">pass 1 · yellow</text>
+      <line x1="190" y1="-140" x2="198" y2="-140" class="stroke-dim"/>
+    </g>
+    <!-- magenta+blue ColorMix slice (higher, floats above yellow) -->
+    <g id="slice-colormix" data-fade>
+      <polygon points="0,-70 190,-180 0,-290 -190,-180"
+               fill="url(#colormix)" stroke="#e6fbf7" stroke-width="1.4" opacity="0.88"/>
+      <text x="200" y="-180" class="label">COLORMIX</text>
+      <text x="200" y="-166" class="label label-dim">pass 2 · stripes 45°</text>
+      <line x1="190" y1="-180" x2="198" y2="-180" class="stroke-dim"/>
+    </g>
+  </g>
+
+  <!-- intro cursor -->
+  <g data-fade id="intro-cursor">
+    <text x="800" y="450" text-anchor="middle" class="label label-mid">_</text>
+  </g>
+
+</svg>
+</div>
+
+<div id="dimmer"></div>
+<div id="tag">
+  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
+  <p>not just colors, <em>the full Sandwich</em>.</p>
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
+<div id="progress"></div>
+
+<div class="ui" id="ui">
+  <button class="uibtn" id="btnPrev" title="Previous step (Left arrow)"><kbd>&larr;</kbd>prev</button>
+  <button class="uibtn" id="btnPlay" title="Play / pause (Space)"><span id="playGlyph" class="pglyph">&#8214;</span><span id="playLbl">pause</span></button>
+  <button class="uibtn" id="btnNext" title="Next step (Right arrow)">next<kbd>&rarr;</kbd></button>
+  <button class="uibtn" id="btnReset" title="Restart (R)"><kbd>R</kbd>reset</button>
+  <button class="uibtn" id="btnFull" title="Fullscreen (F)"><kbd>F</kbd>full</button>
+  <button class="uibtn" id="btnHide" title="Hide UI for clean capture (H)"><kbd>H</kbd>hide</button>
+</div>
+
+<script>
+const TOTAL = 5;
+let step = 0;
+let autoplay = null;
+
+const $  = q => document.querySelector(q);
+const $$ = q => document.querySelectorAll(q);
+const setText = (id,t) => { const e=document.getElementById(id); if(e) e.textContent=t; };
+const fade = (id,on) => { const e=document.getElementById(id); if(e) e.classList.toggle('on',on); };
+
+// fly target onto cube top face: skew + scale to look isometric, with vertical offset (stack)
+function flyTransform(yOffset){
+  // translation from sandwich center (360,~520 world) to top-of-cube (~1180, 360 + yOffset)
+  return `translate(820px, ${-160 + yOffset}px) scale(0.58) skewX(-30deg) scaleY(0.62)`;
+}
+
+function setCubeTopFill(mode){
+  const top = $('#face-top');
+  if(mode==='base')     top.setAttribute('fill','#2d8de0');
+  if(mode==='solid')    top.setAttribute('fill','url(#solidyellow)');
+  if(mode==='colormix') top.setAttribute('fill','url(#colormix)');
+}
+
+function dropFrom(id, delay){
+  const el = document.getElementById(id);
+  // lift instantly, no transition
+  el.style.transition = 'none';
+  el.style.transform = 'translateY(-700px)';
+  el.style.opacity = '0';
+  el.classList.remove('on');
+  // force layout
+  void el.getBoundingClientRect();
+  setTimeout(()=>{
+    el.style.transition = '';
+    el.style.transform = '';
+    el.style.opacity = '';      // FIX: clear inline opacity so .on (CSS) can take effect
+    el.classList.add('on');
+    if(id==='topbun') setTimeout(()=>{ el.classList.add('thud'); setTimeout(()=>el.classList.remove('thud'),400); }, 950);
+  }, delay);
+}
+
+const states = [
+  // STEP 1 — intro
+  ()=>{
+    fade('lbl-sandwich',true);
+    fade('lbl-sandwich2',true);
+    fade('intro-cursor',true);
+  },
+  // STEP 2 — ingredients fall from above, top bun lands last; cube appears
+  ()=>{
+    fade('intro-cursor',false);
+    fade('bottombun',true);
+    fade('cube',true);
+    fade('lbl-snap',true); fade('lbl-snap2',true);
+    fade('cube-labels',true);
+    setText('top-label','CUBE · BASE STATE');
+    setText('top-sub','single tool · uniform color');
+    setCubeTopFill('base');
+
+    // staggered drop: lettuce → cheese → tomato → topbun
+    dropFrom('ing-lettuce', 50);
+    dropFrom('ing-cheese',  350);
+    dropFrom('ing-tomato',  650);
+    dropFrom('topbun',      1050);
+  },
+  // STEP 3 — Sandwich Editor: labels appear, top bun lifts
+  ()=>{
+    fade('ing-labels',true);
+    setText('top-label','SANDWICH EDITOR');
+    setText('top-sub','top layer · passes 1 + 2');
+    const t = $('#topbun');
+    // keep existing transform-clearing then offset
+    t.style.transform = 'translateY(-30px)';
+    $('#ing-tomato').style.transform = 'translate(0,-8px)';
+  },
+  // STEP 4 — slices appear stacked above the cube top (like the attached screenshot)
+  ()=>{
+    fade('conn-cheese',true);
+    fade('conn-tomato',true);
+    // sandwich ingredients dim a bit to suggest "they're now on the cube"
+    $('#ing-cheese').style.opacity = '0.35';
+    $('#ing-tomato').style.opacity = '0.35';
+    // overlay slices fade in stacked above top face
+    fade('slice-solid',true);
+    setTimeout(()=>fade('slice-colormix',true), 350);
+    setText('top-label','STACK · SOLID + COLORMIX');
+    setText('top-sub','two passes hovering above top layer');
+  },
+  // STEP 5 — merge: slices descend and rest exactly on the top face with transparency. No spin.
+  ()=>{
+    $('#slice-solid').classList.add('merge');
+    $('#slice-colormix').classList.add('merge');
+    fade('conn-cheese',false);
+    fade('conn-tomato',false);
+    setText('top-label','RESULT · FULL SANDWICH');
+    setText('top-sub','solid + colormix · stacked · z = 0.20 mm');
+  }
+];
+
+function rebuildTo(n){
+  // wipe everything to a clean baseline
+  $$('[data-fade]').forEach(e=>e.classList.remove('on'));
+  ['ing-lettuce','ing-cheese','ing-tomato','topbun'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.style.transition='none';
+    el.style.transform='';
+    el.style.opacity='';
+    el.classList.remove('flying','thud');
+    void el.getBoundingClientRect();
+    el.style.transition='';
+  });
+  $('#tag').classList.remove('on');
+  $('#dimmer').classList.remove('on');
+  $('#cube').classList.remove('spin');
+  // reset overlay slices
+  ['slice-solid','slice-colormix'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.classList.remove('merge');
+    el.style.opacity='';
+    el.style.transform='';
+  });
+  setCubeTopFill('base');
+  // re-run states up to n inclusive
+  for(let i=0;i<=n;i++) states[i]();
+}
+
+function next(){
+  if(step < TOTAL-1){
+    step++;
+    states[step]();
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / 0'+TOTAL);
+  }
+}
+function prev(){
+  if(step > 0){
+    step--;
+    rebuildTo(step);
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / 0'+TOTAL);
+  }
+}
+function reset(){
+  step = 0;
+  rebuildTo(0);
+  setText('stepNum','STEP 01 / 0'+TOTAL);
+}
+
+let playing = false;
+const STEP_MS = 2600;
+
+function updateProgress(){
+  const p = document.getElementById('progress');
+  if(p) p.style.width = (TOTAL<=1 ? 100 : (step/(TOTAL-1))*100) + '%';
+}
+function updatePlayBtn(){
+  const l = document.getElementById('playLbl');
+  if(l) l.textContent = playing ? 'pause' : 'play';
+  const g = document.getElementById('playGlyph');
+  if(g) g.textContent = playing ? '\u2016' : '\u25B6';
+}
+function startAuto(){
+  if(autoplay) return;
+  playing = true; updatePlayBtn();
+  autoplay = setInterval(()=>{
+    if(step >= TOTAL-1) reset(); else next();
+    updateProgress();
+  }, STEP_MS);
+}
+function stopAuto(){
+  if(autoplay){ clearInterval(autoplay); autoplay = null; }
+  playing = false; updatePlayBtn();
+}
+function toggleAuto(){ playing ? stopAuto() : startAuto(); }
+function userNext(){ stopAuto(); next(); updateProgress(); }
+function userPrev(){ stopAuto(); prev(); updateProgress(); }
+function userReset(){ stopAuto(); reset(); updateProgress(); }
+function toggleClean(){ document.body.classList.toggle('clean'); }
+function toggleFull(){
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.getElementById('btnPrev').onclick  = userPrev;
+document.getElementById('btnNext').onclick  = userNext;
+document.getElementById('btnPlay').onclick  = toggleAuto;
+document.getElementById('btnReset').onclick = userReset;
+document.getElementById('btnFull').onclick  = toggleFull;
+document.getElementById('btnHide').onclick  = toggleClean;
+
+// buttons must not keep keyboard focus, or Space would double-fire (click + shortcut)
+document.querySelectorAll('.ui button, #backBtn').forEach(b=> b.addEventListener('mousedown', e=>e.preventDefault()));
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight') userNext();
+  else if(e.key==='ArrowLeft') userPrev();
+  else if(e.key===' '){ e.preventDefault(); toggleAuto(); }
+  else if(e.key==='r'||e.key==='R') userReset();
+  else if(e.key==='f'||e.key==='F') toggleFull();
+  else if(e.key==='h'||e.key==='H') toggleClean();
+  else if(e.key==='Escape') location.href='index.html';
+});
+
+reset();
+updateProgress();
+startAuto();
+</script>
+</body>
+</html>

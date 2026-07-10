@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeotkoCM — PathBlend, ramp + cap</title>
+<style>
+  :root{
+    --bg:#0d1626;
+    --grid:rgba(110,150,205,.09);
+    --grid2:rgba(110,150,205,.20);
+    --line:#e6fbf7;
+    --dim:rgba(230,251,247,.55);
+    --teal:#009688;
+    --pink:#ff15a5;
+    --yellow:#e3ff2a;
+    --blue:#2196f3;
+    --dark:#2b3436;
+    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--line);font-family:var(--mono);overflow:hidden}
+  body{
+    background-image:
+      linear-gradient(var(--grid2) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+  }
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  svg{width:min(100vw,100vh*1.77);height:auto;max-height:100vh}
+
+  .ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:12px;font-size:12px;color:var(--dim);pointer-events:none;letter-spacing:.08em;text-transform:uppercase}
+  .ui.hidden{opacity:0}
+  .ui kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line)}
+  .step-num{position:fixed;top:21px;left:150px;font-size:11px;color:var(--dim);letter-spacing:.2em}
+  .title{position:fixed;top:20px;right:24px;font-size:11px;color:var(--dim);letter-spacing:.2em;text-align:right}
+
+  .stroke{stroke:var(--line);stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .stroke-dim{stroke:var(--dim);stroke-width:1;fill:none;stroke-dasharray:3 4}
+  .label{font-family:var(--mono);fill:var(--line);font-size:11px;letter-spacing:.12em}
+  .label-dim{fill:var(--dim)}
+  .label-big{font-size:20px;letter-spacing:.2em}
+  .label-mid{font-size:14px;letter-spacing:.15em}
+  .label-warn{fill:#ffb199}
+
+  [data-fade]{opacity:0;transition:opacity .6s ease}
+  [data-fade].on{opacity:1}
+
+  .face{transition:fill .8s ease,opacity .6s ease}
+  .face-base{fill:#454b4d;stroke:var(--line);stroke-width:1.4;stroke-linejoin:round}
+  .face-side-dark{fill:#2e3335}
+  .face-top{fill:#5a6266}
+  .face-base.dimmed{opacity:.32}
+
+  .pill{transition:opacity .4s ease, stroke .4s ease, fill .4s ease}
+  .pill-box{fill:none;stroke:#e6fbf7;stroke-width:1.2}
+  .pill-box.active{fill:rgba(0,150,136,.35);stroke:var(--teal)}
+  .pill-txt{fill:var(--dim)}
+  .pill-txt.active{fill:var(--line)}
+
+  rect.band{shape-rendering:crispEdges}
+
+  @keyframes pulseGlow{0%,100%{stroke-opacity:.3}50%{stroke-opacity:1}}
+  .pulse{animation:pulseGlow 1.8s ease-in-out infinite}
+  @keyframes pulseWarn{0%,100%{opacity:.5}50%{opacity:1}}
+  .pulse-warn{animation:pulseWarn 1.4s ease-in-out infinite}
+
+  #dimmer{position:fixed;inset:0;background:rgba(6,18,18,.88);opacity:0;transition:opacity .9s ease;pointer-events:none;backdrop-filter:blur(2px)}
+  #dimmer.on{opacity:1}
+
+  #tag{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .8s ease .3s;pointer-events:none}
+  #tag.on{opacity:1}
+  #tag h1{font-family:var(--mono);font-size:34px;letter-spacing:.18em;margin:0;color:var(--line)}
+  #tag h1 span{color:var(--teal)}
+  #tag p{margin:18px 0 0;color:var(--dim);font-size:14px;letter-spacing:.25em;text-transform:uppercase}
+  #tag em{color:var(--pink);font-style:normal}
+
+  .connector{stroke:var(--teal);stroke-width:1;fill:none;stroke-dasharray:4 3;opacity:0;transition:opacity .5s}
+  .connector.on{opacity:.85}
+
+  /* ---- interactive controls (s195) ---- */
+  #progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);z-index:6;transition:width .5s ease}
+  #backBtn{position:fixed;top:15px;left:22px;z-index:7;font-family:var(--mono);font-size:12px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.82);
+    border:1px solid rgba(110,150,205,.32);border-radius:8px;padding:8px 14px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s,transform .15s}
+  #backBtn:hover{color:var(--line);border-color:var(--teal);transform:translateX(-2px)}
+  #backBtn b{font-size:16px;line-height:1;font-weight:400}
+  .ui{pointer-events:none}
+  .ui button.uibtn{pointer-events:auto;font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.78);
+    border:1px solid rgba(110,150,205,.28);border-radius:7px;padding:6px 11px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s,background .15s}
+  .ui button.uibtn:hover{color:var(--line);border-color:var(--teal);background:rgba(10,20,36,.95)}
+  .ui button.uibtn kbd{border:1px solid currentColor;padding:1px 5px;border-radius:3px;opacity:.75;font-size:10px}
+  .ui button#btnPlay{color:var(--line);border-color:rgba(0,150,136,.6)}
+  .ui button#btnPlay .pglyph{font-size:11px;opacity:.9}
+  body.clean #ui,body.clean #backBtn,body.clean #progress,body.clean .step-num,body.clean .title{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div class="step-num" id="stepNum">STEP 01 / 10</div>
+<div class="title">NEOTKOCM · PATHBLEND · v3</div>
+
+<div id="stage">
+<svg viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#009688"/>
+    </marker>
+    <linearGradient id="pb-gradient" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#e3ff2a"/>
+      <stop offset="100%" stop-color="#2196f3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Z-BRACKET (intro only) -->
+  <g data-fade id="zbracket" transform="translate(800,150)">
+    <text x="0" y="-90" text-anchor="middle" class="label label-dim">OBJECT · SIDE VIEW</text>
+    <rect x="-16" y="-70" width="32" height="140" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+    <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
+    <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
+    <text x="78" y="-56" class="label">TOP + PENU</text>
+    <text x="78" y="-42" class="label label-dim">PathBlend lives here</text>
+    <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
+    <text x="78" y="44" class="label">BULK</text>
+    <text x="78" y="58" class="label label-dim">untouched by PathBlend</text>
+  </g>
+
+  <!-- ColorStitch vs PathBlend contrast icons (step 3) -->
+  <g data-fade id="contrast" transform="translate(800,130)">
+    <g transform="translate(-140,0)">
+      <rect x="-55" y="-10" width="110" height="70" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+      <rect x="-50" y="-5" width="100" height="12" fill="#ff15a5"/>
+      <rect x="-50" y="9"  width="100" height="12" fill="#2196f3"/>
+      <rect x="-50" y="23" width="100" height="12" fill="#ff15a5"/>
+      <rect x="-50" y="37" width="100" height="12" fill="#ff15a5"/>
+      <text x="0" y="80" text-anchor="middle" class="label" style="font-size:10px">COLORSTITCH</text>
+      <text x="0" y="94" text-anchor="middle" class="label label-dim" style="font-size:9px">per-LINE color choice</text>
+    </g>
+    <g transform="translate(140,0)">
+      <rect x="-55" y="-10" width="110" height="70" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+      <polygon points="-50,55 -50,50 -25,42 0,32 25,20 50,4 50,55" fill="#e3ff2a"/>
+      <polygon points="-50,50 -25,42 0,32 25,20 50,4 50,-10 -50,-10" fill="#2196f3" opacity="0.75"/>
+      <text x="0" y="80" text-anchor="middle" class="label" style="font-size:10px">PATHBLEND</text>
+      <text x="0" y="94" text-anchor="middle" class="label label-dim" style="font-size:9px">per-PATH thickness ramp</text>
+    </g>
+  </g>
+
+  <!-- ============== LEFT: PathBlend pass — cross-section (side view, NOT top-down) ============== -->
+  <g id="studio" transform="translate(420,470)">
+
+    <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">PATHBLEND</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">a Z-thickness ramp — always fills the whole layer height</text>
+
+    <!-- pass consumes the whole layer height, no room for another pass -->
+    <g data-fade id="slot-collapse" transform="translate(0,-260)">
+      <rect class="pill pill-box active" x="-160" y="-14" width="320" height="28" rx="14"/>
+      <text x="0" y="5" text-anchor="middle" class="label pill pill-txt active" style="font-size:9px">PATHBLEND · fills 100% of the layer height</text>
+      <text x="0" y="34" class="label label-dim" style="font-size:9px" text-anchor="middle">Half = 1 material (bottom) · Full = 2 materials (bottom + cap)</text>
+    </g>
+
+    <!-- tool chips + mode pills -->
+    <g data-fade id="stops" transform="translate(0,-205)">
+      <circle cx="-230" cy="0" r="14" fill="#e3ff2a" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="-230" y="30" text-anchor="middle" class="label" style="font-size:9px">bottom</text>
+      <circle cx="-190" cy="0" r="14" fill="#2196f3" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="-190" y="30" text-anchor="middle" class="label" style="font-size:9px">top (cap)</text>
+      <g id="mode-half"><rect class="pill pill-box" x="30" y="-14" width="100" height="28" rx="14"/><text x="80" y="5" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">HALF</text></g>
+      <g id="mode-full"><rect class="pill pill-box active" x="140" y="-14" width="100" height="28" rx="14"/><text x="190" y="5" text-anchor="middle" class="label pill pill-txt active" style="font-size:9px">FULL</text></g>
+    </g>
+
+    <!-- cross-section inset: X = position along object Y (t=0..1), Y = Z height in the layer -->
+    <g data-fade id="inset" transform="translate(-110,-160)">
+      <rect x="0" y="0" width="220" height="220" fill="#155a93" stroke="#e6fbf7" stroke-width="1.4"/>
+      <g id="ramp-bars"></g>
+      <g id="cap-bars"></g>
+      <line x1="0" y1="0" x2="220" y2="0" class="stroke-dim"/>
+      <text x="-6" y="4" text-anchor="end" class="label label-dim" style="font-size:9px">H</text>
+      <line x1="0" y1="220" x2="220" y2="220" class="stroke-dim"/>
+      <text x="-6" y="224" text-anchor="end" class="label label-dim" style="font-size:9px">0</text>
+      <rect x="0" y="0" width="220" height="220" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="0" y="-14" class="label label-dim">cross-section (side view) · not top-down</text>
+      <text x="0" y="238" class="label label-dim" style="font-size:9px">t=0 (floor_mm)</text>
+      <text x="220" y="238" text-anchor="end" class="label label-dim" style="font-size:9px">t=1 (mid_end_mm)</text>
+    </g>
+
+    <!-- axis gizmo: cross-section uses Z on the vertical axis, this is intentional here -->
+    <g data-fade id="xy-gizmo" transform="translate(150,-185)">
+      <line x1="0" y1="0" x2="34" y2="0" class="stroke" marker-end="url(#arrow)"/>
+      <text x="40" y="4" class="label" style="font-size:10px">Y (object)</text>
+      <line x1="0" y1="0" x2="0" y2="-34" style="stroke:var(--teal);stroke-width:1.4" marker-end="url(#arrow)"/>
+      <text x="4" y="-40" class="label" style="font-size:10px;fill:var(--teal)">Z (in-layer)</text>
+      <text x="0" y="24" class="label label-dim" style="font-size:9px">confined to Top/Penu — still not the object's Z</text>
+    </g>
+
+    <!-- transparency / TD callout -->
+    <text x="-110" y="80" class="label label-dim" data-fade id="lbl-td">extruded thickness ≠ color choice — the blend is optical, through the filament's own TD</text>
+
+    <!-- coarse vs smooth + line distribution compare -->
+    <g data-fade id="compare-widget" transform="translate(-110,150)">
+      <text x="0" y="-14" class="label label-dim" id="cmp-heading">FEW SCANLINES VS MANY</text>
+      <g>
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <g id="cmp-left-bands"></g>
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <text x="45" y="108" text-anchor="middle" class="label label-dim" id="cmp-left-label" style="font-size:9px">FEW</text>
+      </g>
+      <g transform="translate(130,0)">
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <g id="cmp-right-bands"></g>
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <text x="45" y="108" text-anchor="middle" class="label label-dim" id="cmp-right-label" style="font-size:9px">MANY</text>
+      </g>
+      <text x="0" y="126" class="label label-warn pulse-warn" id="cmp-warn" style="font-size:9px;opacity:0"></text>
+    </g>
+  </g>
+
+  <!-- ============== RIGHT: CUBE ============== -->
+  <g id="cube-wrapper" transform="translate(1180,470)">
+    <g id="cube" data-fade>
+      <polygon id="face-right" class="face face-base face-side-dark"
+        points="0,0 190,-110 190,140 0,250"/>
+      <polygon id="face-left" class="face face-base"
+        points="0,0 -190,-110 -190,140 0,250"/>
+      <polygon id="face-top" class="face face-base face-top"
+        points="0,0 190,-110 0,-220 -190,-110"/>
+      <g class="stroke">
+        <polyline points="-190,-110 -190,-95 -175,-110"/>
+        <polyline points="190,-110 190,-95 175,-110"/>
+        <polyline points="0,-220 -12,-213 0,-205"/>
+        <polyline points="0,250 -12,243 0,235"/>
+      </g>
+    </g>
+
+    <polygon id="face-top-glow" data-fade class="pulse"
+      points="0,0 190,-110 0,-220 -190,-110" fill="none" stroke="var(--teal)" stroke-width="3"/>
+
+    <!-- mini-sandwich stack hovering above the top face -->
+    <g data-fade id="hover-stack">
+      <polygon id="hover-pb" points="0,-100 190,-210 0,-320 -190,-210"
+        fill="#e3ff2a" stroke="#e6fbf7" stroke-width="1.2" opacity="0.5"/>
+      <text x="215" y="-206" class="label" style="font-size:10px">PATHBLEND pass</text>
+      <text x="215" y="-192" class="label label-dim" style="font-size:9px">100% of layer height (next)</text>
+    </g>
+
+    <text x="0" y="320" text-anchor="middle" class="label label-dim" data-fade id="lbl-snap">snapmaker</text>
+    <line x1="-260" y1="295" x2="260" y2="295" class="stroke-dim" data-fade id="lbl-snap2"/>
+
+    <g data-fade id="cube-labels">
+      <line x1="0" y1="-225" x2="0" y2="-260" class="stroke-dim"/>
+      <text x="0" y="-272" text-anchor="middle" class="label" id="top-label">CUBE · BASE STATE</text>
+      <text x="0" y="-288" text-anchor="middle" class="label label-dim" id="top-sub">single tool · uniform color</text>
+    </g>
+  </g>
+
+  <path id="conn-ramp" class="connector" d="M 545 400 Q 850 380 990 365" marker-end="url(#arrow)"/>
+
+  <g data-fade id="intro-cursor">
+    <text x="800" y="450" text-anchor="middle" class="label label-mid">_</text>
+  </g>
+
+  <!-- FINAL OVERLAY: the RESULT as seen from directly above, mapped onto the ACTUAL top face
+       via the same 2-axis matrix as v2. Full mode = smooth optical gradient (flat surface).
+       Half mode = single color + faint relief hint lines (physically sloped surface). -->
+  <g id="topface-pattern-wrap" data-fade transform="translate(1180,470) matrix(0.86364,-0.5,-0.86364,-0.5,0,0)">
+    <rect id="cubetop-fill" x="0" y="0" width="220" height="220" fill="url(#pb-gradient)"/>
+    <g id="cubetop-relief"></g>
+  </g>
+
+</svg>
+</div>
+
+<div id="dimmer"></div>
+<div id="tag">
+  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
+  <p>not just colors, <em>the full Sandwich</em>.</p>
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
+<div id="progress"></div>
+
+<div class="ui" id="ui">
+  <button class="uibtn" id="btnPrev" title="Previous step (Left arrow)"><kbd>&larr;</kbd>prev</button>
+  <button class="uibtn" id="btnPlay" title="Play / pause (Space)"><span id="playGlyph" class="pglyph">&#8214;</span><span id="playLbl">pause</span></button>
+  <button class="uibtn" id="btnNext" title="Next step (Right arrow)">next<kbd>&rarr;</kbd></button>
+  <button class="uibtn" id="btnReset" title="Restart (R)"><kbd>R</kbd>reset</button>
+  <button class="uibtn" id="btnFull" title="Fullscreen (F)"><kbd>F</kbd>full</button>
+  <button class="uibtn" id="btnHide" title="Hide UI for clean capture (H)"><kbd>H</kbd>hide</button>
+</div>
+
+<script>
+const TOTAL = 10;
+let step = 0;
+let autoplay = null;
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const S = 220;               // cross-section box size (H on Y axis, t on X axis)
+const COL_BOTTOM = '#e3ff2a'; // ramp / bottom tool
+const COL_TOP    = '#2196f3'; // cap / top tool
+
+const $  = q => document.querySelector(q);
+const $$ = q => document.querySelectorAll(q);
+const setText = (id,t) => { const e=document.getElementById(id); if(e) e.textContent=t; };
+const fade = (id,on) => { const e=document.getElementById(id); if(e) e.classList.toggle('on',on); };
+const setPill = (id,on) => {
+  const g = document.getElementById(id);
+  if(!g) return;
+  g.querySelector('.pill-box').classList.toggle('active',on);
+  const t = g.querySelector('.pill-txt'); if(t) t.classList.toggle('active',on);
+};
+
+// Ground truth: SurfaceColorMix.hpp PathBlendPassConfig + Fill.cpp PathBlend band loop.
+//   h_ramp(t) = floor_mm + t*(mid_end_mm - floor_mm)      — per-scanline, resting on bottom_z
+//   Half: mid_end_mm forced = H (no cap; area above is empty — the ramp IS the surface)
+//   Full: mid_end_mm <= H-0.04; h_cap(t) = H - h_ramp(t) at a FLAT nominal Z (the cap)
+// flow (extrusion) scales with h/H in both cases — "extrusión acorde" per scanline.
+function renderCrossSection(mode, K){
+  const rampG = document.getElementById('ramp-bars');
+  const capG  = document.getElementById('cap-bars');
+  rampG.innerHTML = ''; capG.innerHTML = '';
+  const floor = 10;                 // px, ~ floor_mm
+  const midEnd = (mode === 'half') ? S : (S - 20); // Half: forced to H. Full: leaves a residual.
+  const band = S / K;
+  for(let i=0;i<K;i++){
+    const t = i/(K-1);
+    const hRamp = floor + t*(midEnd - floor);
+    const rr = document.createElementNS(SVGNS,'rect');
+    rr.setAttribute('class','band');
+    rr.setAttribute('x', i*band); rr.setAttribute('y', S - hRamp);
+    rr.setAttribute('width', band+0.5); rr.setAttribute('height', hRamp);
+    rr.setAttribute('fill', COL_BOTTOM);
+    rampG.appendChild(rr);
+    if(mode === 'full'){
+      const hCap = S - hRamp;
+      const capOpacity = Math.max(0.35, Math.min(1, hCap / (S - floor)));
+      const rc = document.createElementNS(SVGNS,'rect');
+      rc.setAttribute('class','band');
+      rc.setAttribute('x', i*band); rc.setAttribute('y', 0);
+      rc.setAttribute('width', band+0.5); rc.setAttribute('height', hCap);
+      rc.setAttribute('fill', COL_TOP);
+      rc.setAttribute('opacity', capOpacity.toFixed(2));
+      capG.appendChild(rc);
+    }
+  }
+}
+
+function renderResult(mode){
+  const fill = document.getElementById('cubetop-fill');
+  const relief = document.getElementById('cubetop-relief');
+  relief.innerHTML = '';
+  if(mode === 'full'){
+    fill.setAttribute('fill', 'url(#pb-gradient)');
+    fill.setAttribute('opacity', '1');
+  } else {
+    // Half: no cap, but the ramp's own thickness still varies per scanline (floor→H).
+    // There is no second tool to blend with — but the SAME physics still applies:
+    // a thin printed layer transmits more of whatever sits underneath (the object's
+    // own base color standing in for "the previous layer"), a thick one blocks it.
+    // So: no fill on the base rect (let the real cube top color show through), and
+    // draw K bands whose OPACITY (not color) tracks h/H — this is the same TD/
+    // Beer-Lambert idea as the cap, just carried by a single material's own thickness.
+    fill.setAttribute('fill', 'none');
+    const K = 18;
+    const floor = 10, midEnd = S; // matches renderCrossSection's Half geometry (floor..S)
+    const band = S / K;
+    for(let i=0;i<K;i++){
+      const t = i/(K-1);
+      const h = floor + t*(midEnd - floor);
+      const opacity = Math.max(0.2, Math.min(1, h / S));
+      const r = document.createElementNS(SVGNS,'rect');
+      r.setAttribute('x', 0); r.setAttribute('y', i*band);
+      r.setAttribute('width', S); r.setAttribute('height', band+0.5);
+      r.setAttribute('fill', COL_BOTTOM);
+      r.setAttribute('opacity', opacity.toFixed(2));
+      relief.appendChild(r);
+    }
+  }
+}
+
+let curMode = 'full';
+
+const states = [
+  // STEP 1 — intro: title, Z-bracket, cube base
+  ()=>{
+    fade('lbl-title',true);
+    fade('lbl-sub',true);
+    fade('zbracket',true);
+    fade('intro-cursor',true);
+    fade('cube',true);
+    fade('lbl-snap',true); fade('lbl-snap2',true);
+    fade('cube-labels',true);
+  },
+  // STEP 2 — isolate the top face
+  ()=>{
+    fade('intro-cursor',false);
+    fade('zbracket',false);
+    $('#face-left').classList.add('dimmed');
+    $('#face-right').classList.add('dimmed');
+    fade('face-top-glow',true);
+    setText('top-label','TOP FACE · SANDWICH ZONE');
+    setText('top-sub','PathBlend lives here — nowhere else');
+  },
+  // STEP 3 — contrast: ColorStitch per-LINE color vs PathBlend per-PATH thickness
+  ()=>{
+    fade('contrast',true);
+  },
+  // STEP 4 — PathBlend always fills 100% of the layer height (no sibling pass)
+  ()=>{
+    fade('contrast',false);
+    fade('slot-collapse',true);
+    fade('hover-stack',true);
+  },
+  // STEP 5 — zoom in: cross-section inset, tool chips, Half/Full pills, gizmo
+  ()=>{
+    fade('slot-collapse',false);
+    fade('inset',true);
+    fade('xy-gizmo',true);
+    fade('stops',true);
+    setText('top-sub','opening the PathBlend pass · a Z profile, not X/Y');
+  },
+  // STEP 6 — build the RAMP (Full mode): K ascending columns, bottom tool
+  ()=>{
+    curMode = 'full';
+    renderCrossSection('full', 18);
+    setText('top-sub','ramp: h(t) = floor + t·(mid_end−floor) · flow scales with h/H');
+  },
+  // STEP 7 — add the CAP: residual fill, ramp+cap = H everywhere
+  ()=>{
+    fade('lbl-td',true);
+    setText('top-sub','cap fills the residual · ramp+cap = H, always');
+  },
+  // STEP 8 — MERGE (Full): smooth optical gradient on the real top face
+  ()=>{
+    fade('hover-stack',false);
+    fade('conn-ramp',true);
+    fade('topface-pattern-wrap',true);
+    renderResult('full');
+    setText('top-label','PATHBLEND · FULL');
+    setText('top-sub','flat surface · optical blend via cap thickness + TD');
+  },
+  // STEP 9 — switch to HALF: no cap, ramp IS the surface, physically sloped
+  ()=>{
+    curMode = 'half';
+    setPill('mode-full',false);
+    setPill('mode-half',true);
+    renderCrossSection('half', 18);
+    renderResult('half');
+    setText('top-label','PATHBLEND · HALF');
+    setText('top-sub','no cap · opacity here = h/H · same TD transmission, one material');
+  },
+  // STEP 10 — coarse (few scanlines) vs smooth (many scanlines) + fragile-engine warning
+  ()=>{
+    fade('compare-widget',true);
+    setText('cmp-heading','FEW SCANLINES VS MANY');
+    setText('cmp-left-label','FEW · coarse steps');
+    setText('cmp-right-label','MANY · fine steps');
+    renderCompareSteps('cmp-left-bands', 5);
+    renderCompareSteps('cmp-right-bands', 24);
+    setText('cmp-warn','⚠ most fragile part of the engine — validated staircase, do not disturb');
+    setText('top-sub','small surfaces = few scanlines = a visibly coarse ramp');
+  }
+];
+
+function renderCompareSteps(containerId, K){
+  const g = document.getElementById(containerId);
+  g.innerHTML = '';
+  const size = 90, floor = 4, mid = size - 8, band = size/K;
+  for(let i=0;i<K;i++){
+    const t = i/(K-1);
+    const h = floor + t*(mid-floor);
+    const r = document.createElementNS(SVGNS,'rect');
+    r.setAttribute('class','band');
+    r.setAttribute('x', i*band); r.setAttribute('y', size-h);
+    r.setAttribute('width', band+0.5); r.setAttribute('height', h);
+    r.setAttribute('fill', COL_BOTTOM);
+    g.appendChild(r);
+  }
+}
+
+function rebuildTo(n){
+  $$('[data-fade]').forEach(e=>e.classList.remove('on'));
+  $('#face-left').classList.remove('dimmed');
+  $('#face-right').classList.remove('dimmed');
+  $('#tag').classList.remove('on');
+  $('#dimmer').classList.remove('on');
+  curMode = 'full';
+  setPill('mode-half',false); setPill('mode-full',true);
+  ['ramp-bars','cap-bars','cmp-left-bands','cmp-right-bands','cubetop-relief'].forEach(id=>{
+    const e=document.getElementById(id); if(e) e.innerHTML='';
+  });
+  $('#cubetop-fill').setAttribute('fill','url(#pb-gradient)');
+  setText('top-label','CUBE · BASE STATE');
+  setText('top-sub','single tool · uniform color');
+  setText('cmp-heading','FEW SCANLINES VS MANY');
+  setText('cmp-left-label','FEW');
+  setText('cmp-right-label','MANY');
+  setText('cmp-warn','');
+  for(let i=0;i<=n;i++) states[i]();
+}
+
+function next(){
+  if(step < TOTAL-1){
+    step++;
+    states[step]();
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function prev(){
+  if(step > 0){
+    step--;
+    rebuildTo(step);
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function reset(){
+  step = 0;
+  rebuildTo(0);
+  setText('stepNum','STEP 01 / '+String(TOTAL).padStart(2,'0'));
+}
+
+let playing = false;
+const STEP_MS = 2600;
+
+function updateProgress(){
+  const p = document.getElementById('progress');
+  if(p) p.style.width = (TOTAL<=1 ? 100 : (step/(TOTAL-1))*100) + '%';
+}
+function updatePlayBtn(){
+  const l = document.getElementById('playLbl');
+  if(l) l.textContent = playing ? 'pause' : 'play';
+  const g = document.getElementById('playGlyph');
+  if(g) g.textContent = playing ? '\u2016' : '\u25B6';
+}
+function startAuto(){
+  if(autoplay) return;
+  playing = true; updatePlayBtn();
+  autoplay = setInterval(()=>{
+    if(step >= TOTAL-1) reset(); else next();
+    updateProgress();
+  }, STEP_MS);
+}
+function stopAuto(){
+  if(autoplay){ clearInterval(autoplay); autoplay = null; }
+  playing = false; updatePlayBtn();
+}
+function toggleAuto(){ playing ? stopAuto() : startAuto(); }
+function userNext(){ stopAuto(); next(); updateProgress(); }
+function userPrev(){ stopAuto(); prev(); updateProgress(); }
+function userReset(){ stopAuto(); reset(); updateProgress(); }
+function toggleClean(){ document.body.classList.toggle('clean'); }
+function toggleFull(){
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.getElementById('btnPrev').onclick  = userPrev;
+document.getElementById('btnNext').onclick  = userNext;
+document.getElementById('btnPlay').onclick  = toggleAuto;
+document.getElementById('btnReset').onclick = userReset;
+document.getElementById('btnFull').onclick  = toggleFull;
+document.getElementById('btnHide').onclick  = toggleClean;
+
+// buttons must not keep keyboard focus, or Space would double-fire (click + shortcut)
+document.querySelectorAll('.ui button, #backBtn').forEach(b=> b.addEventListener('mousedown', e=>e.preventDefault()));
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight') userNext();
+  else if(e.key==='ArrowLeft') userPrev();
+  else if(e.key===' '){ e.preventDefault(); toggleAuto(); }
+  else if(e.key==='r'||e.key==='R') userReset();
+  else if(e.key==='f'||e.key==='F') toggleFull();
+  else if(e.key==='h'||e.key==='H') toggleClean();
+  else if(e.key==='Escape') location.href='index.html';
+});
+
+reset();
+updateProgress();
+startAuto();
+</script>
+</body>
+</html>

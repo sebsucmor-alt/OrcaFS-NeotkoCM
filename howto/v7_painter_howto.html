@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeotkoCM — How to paint a Sandwich (real app)</title>
+<style>
+  :root{
+    --bg:#0d1626;
+    --grid:rgba(110,150,205,.09);
+    --grid2:rgba(110,150,205,.20);
+    --line:#e6fbf7;
+    --dim:rgba(230,251,247,.55);
+    --teal:#009688;
+    --pink:#ff15a5;
+    --yellow:#e3ff2a;
+    --blue:#2196f3;
+    --dark:#2b3436;
+    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
+    --disp:'Avenir Next','Helvetica Neue',Futura,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--line);font-family:var(--mono);overflow:hidden}
+  body{
+    background-image:
+      linear-gradient(var(--grid2) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+  }
+  /* soft vignette so the grid never competes with the screenshots */
+  body::after{content:'';position:fixed;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse at center, transparent 55%, rgba(3,8,16,.55) 100%)}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  svg{width:min(100vw,100vh*1.77);height:auto;max-height:100vh}
+
+  .ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:12px;font-size:12px;color:var(--dim);pointer-events:none;letter-spacing:.08em;text-transform:uppercase;z-index:3}
+  .ui.hidden{opacity:0}
+  .ui kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line)}
+  .step-num{position:fixed;top:21px;left:150px;font-size:11px;color:var(--dim);letter-spacing:.2em}
+  .title{position:fixed;top:20px;right:24px;font-size:11px;color:var(--dim);letter-spacing:.2em;text-align:right}
+
+  .stroke{stroke:var(--line);stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .stroke-dim{stroke:var(--dim);stroke-width:1;fill:none;stroke-dasharray:3 4}
+  .label{font-family:var(--mono);fill:var(--line);font-size:11px;letter-spacing:.12em}
+  .label-dim{fill:var(--dim)}
+  .label-big{font-size:20px;letter-spacing:.2em}
+  .label-mid{font-size:14px;letter-spacing:.15em}
+  .disp{font-family:var(--disp);font-weight:600;letter-spacing:.06em}
+
+  [data-fade]{opacity:0;transition:opacity .6s ease}
+  [data-fade].on{opacity:1}
+
+  /* ---- screenshot card: app-window frame + drop shadow ---- */
+  .shot-card{filter:drop-shadow(0 16px 30px rgba(0,0,0,.6))}
+  .shot-frame{fill:#0d1726;stroke:rgba(0,150,136,.8);stroke-width:1.5}
+  .shot-bar{fill:rgba(0,150,136,.16)}
+  .shot-name{fill:var(--dim);font-family:var(--mono);font-size:11px;letter-spacing:.16em}
+
+  /* ---- spotlight rings over the UI element being discussed ---- */
+  @keyframes spotPulse{0%,100%{stroke-opacity:.35}50%{stroke-opacity:1}}
+  .spot{fill:none;stroke:var(--yellow);stroke-width:2.6;animation:spotPulse 1.6s ease-in-out infinite}
+  .spot2{fill:none;stroke:var(--pink);stroke-width:2.2;animation:spotPulse 1.6s ease-in-out infinite;animation-delay:.4s}
+
+  /* annotation panel */
+  .annot-h{font-family:var(--disp);font-weight:600;fill:var(--line);font-size:24px;letter-spacing:.04em}
+  .annot-line{fill:var(--dim);font-size:13px;letter-spacing:.06em}
+  .annot-step{fill:var(--teal);font-size:12px;letter-spacing:.3em}
+
+  #dimmer{position:fixed;inset:0;background:rgba(6,18,18,.88);opacity:0;transition:opacity .9s ease;pointer-events:none;backdrop-filter:blur(2px);z-index:2}
+  #dimmer.on{opacity:1}
+
+  #tag{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .8s ease .3s;pointer-events:none;z-index:2}
+  #tag.on{opacity:1}
+  #tag h1{font-family:var(--mono);font-size:34px;letter-spacing:.18em;margin:0;color:var(--line)}
+  #tag h1 span{color:var(--teal)}
+  #tag p{margin:18px 0 0;color:var(--dim);font-size:14px;letter-spacing:.25em;text-transform:uppercase}
+  #tag em{color:var(--pink);font-style:normal}
+
+  /* ---- interactive controls (s195) ---- */
+  #progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);z-index:6;transition:width .5s ease}
+  #backBtn{position:fixed;top:15px;left:22px;z-index:7;font-family:var(--mono);font-size:12px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.82);
+    border:1px solid rgba(110,150,205,.32);border-radius:8px;padding:8px 14px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s,transform .15s}
+  #backBtn:hover{color:var(--line);border-color:var(--teal);transform:translateX(-2px)}
+  #backBtn b{font-size:16px;line-height:1;font-weight:400}
+  .ui{pointer-events:none}
+  .ui button.uibtn{pointer-events:auto;font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.78);
+    border:1px solid rgba(110,150,205,.28);border-radius:7px;padding:6px 11px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s,background .15s}
+  .ui button.uibtn:hover{color:var(--line);border-color:var(--teal);background:rgba(10,20,36,.95)}
+  .ui button.uibtn kbd{border:1px solid currentColor;padding:1px 5px;border-radius:3px;opacity:.75;font-size:10px}
+  .ui button#btnPlay{color:var(--line);border-color:rgba(0,150,136,.6)}
+  .ui button#btnPlay .pglyph{font-size:11px;opacity:.9}
+  body.clean #ui,body.clean #backBtn,body.clean #progress,body.clean .step-num,body.clean .title{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div class="step-num" id="stepNum">STEP 01 / 09</div>
+<div class="title">NEOTKOCM · PAINTER HOW-TO · v7</div>
+
+<div id="stage">
+<svg viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- ============== TITLE ============== -->
+  <text x="800" y="70" text-anchor="middle" class="disp" data-fade id="lbl-title"
+        style="fill:var(--line);font-size:34px">HOW TO PAINT A SANDWICH</text>
+  <text x="800" y="98" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">ColorStitch Painter · real app, real clicks — 7 steps</text>
+
+  <!-- ============== ANNOTATION PANEL (right side, updated per step) ============== -->
+  <g data-fade id="annot" transform="translate(1010,260)">
+    <text class="annot-step" id="annot-step" x="0" y="0">STEP 1 · OPEN</text>
+    <text class="annot-h" id="annot-h" x="0" y="44">Open the Painter</text>
+    <text class="annot-line" id="annot-1" x="0" y="88">—</text>
+    <text class="annot-line" id="annot-2" x="0" y="114">—</text>
+    <text class="annot-line" id="annot-3" x="0" y="140">—</text>
+    <line x1="0" y1="16" x2="520" y2="16" class="stroke-dim"/>
+  </g>
+
+  <!-- ============== SCREENSHOTS (one slot, crossfaded; all near end of SVG for z-order) ============== -->
+
+  <!-- 01 · toolbar icon (529x583) -->
+  <g class="shot-card" data-fade id="shot01" transform="translate(180,190)">
+    <rect class="shot-frame" x="-14" y="-42" width="557" height="639" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="557" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="264" y="-22" text-anchor="middle">ORCA · TOOLBAR</text>
+    <image href="images/Como-Pintar-SandwichMultipass01.png" x="0" y="0" width="529" height="583"/>
+    <rect class="spot" x="358" y="-2" width="44" height="40" rx="8"/>
+  </g>
+
+  <!-- 02 · Generator, pick a Gradient ramp swatch (729x535) -->
+  <g class="shot-card" data-fade id="shot02" transform="translate(120,210)">
+    <rect class="shot-frame" x="-14" y="-42" width="757" height="591" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="757" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="364" y="-22" text-anchor="middle">COLORSTITCH PAINTER · GENERATOR</text>
+    <image href="images/Como-Pintar-SandwichMultipass02.png" x="0" y="0" width="729" height="535"/>
+    <rect class="spot" x="408" y="231" width="42" height="40" rx="8"/>
+    <rect class="spot2" x="384" y="103" width="126" height="28" rx="14"/>
+  </g>
+
+  <!-- 03 · click the top surface (726x530) -->
+  <g class="shot-card" data-fade id="shot03" transform="translate(120,210)">
+    <rect class="shot-frame" x="-14" y="-42" width="754" height="586" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="754" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="363" y="-22" text-anchor="middle">VIEWPORT · PAINT THE TOP</text>
+    <image href="images/Como-Pintar-SandwichMultipass03.png" x="0" y="0" width="726" height="530"/>
+    <rect class="spot" x="4" y="260" width="212" height="106" rx="10"/>
+  </g>
+
+  <!-- 04 · Pro panel, the mix decomposed (719x608) -->
+  <g class="shot-card" data-fade id="shot04" transform="translate(130,190)">
+    <rect class="shot-frame" x="-14" y="-42" width="747" height="664" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="747" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="359" y="-22" text-anchor="middle">COLORSTITCH PAINTER · PRO</text>
+    <image href="images/Como-Pintar-SandwichMultipass04.png" x="0" y="0" width="719" height="608"/>
+    <rect class="spot" x="486" y="100" width="110" height="30" rx="14"/>
+    <rect class="spot2" x="268" y="192" width="452" height="182" rx="8"/>
+  </g>
+
+  <!-- 05 · add more sub-layers (721x646) -->
+  <g class="shot-card" data-fade id="shot05" transform="translate(130,175)">
+    <rect class="shot-frame" x="-14" y="-42" width="749" height="702" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="749" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="360" y="-22" text-anchor="middle">PRO · 3 SOLID SUB-PASSES</text>
+    <image href="images/Como-Pintar-SandwichMultipass05.png" x="0" y="0" width="721" height="646"/>
+    <rect class="spot" x="268" y="306" width="452" height="70" rx="8"/>
+  </g>
+
+  <!-- 06 · change the sub-pass type (723x638) -->
+  <g class="shot-card" data-fade id="shot06" transform="translate(130,178)">
+    <rect class="shot-frame" x="-14" y="-42" width="751" height="694" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="751" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="361" y="-22" text-anchor="middle">PRO · PASS TYPE</text>
+    <image href="images/Como-Pintar-SandwichMultipass06.png" x="0" y="0" width="723" height="638"/>
+    <rect class="spot" x="438" y="282" width="122" height="114" rx="8"/>
+  </g>
+
+  <!-- 07 · ColorStitch Stripes live + Save (715x672) — also reused by step 8 (TD spots) -->
+  <g class="shot-card" data-fade id="shot07" transform="translate(130,168)">
+    <rect class="shot-frame" x="-14" y="-42" width="743" height="728" rx="10"/>
+    <rect class="shot-bar" x="-14" y="-42" width="743" height="30" rx="10"/>
+    <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+    <text class="shot-name" x="357" y="-22" text-anchor="middle">PRO · COLORSTITCH STRIPES · LIVE</text>
+    <image href="images/Como-Pintar-SandwichMultipass07.png" x="0" y="0" width="715" height="672"/>
+    <rect class="spot" data-fade id="spot-cube" x="2" y="252" width="206" height="146" rx="10"/>
+    <rect class="spot2" data-fade id="spot-save" x="362" y="47" width="44" height="34" rx="8"/>
+    <rect class="spot" data-fade id="spot-td" x="8" y="480" width="678" height="96" rx="8"/>
+    <rect class="spot2" data-fade id="spot-recipe" x="268" y="592" width="222" height="76" rx="8"/>
+  </g>
+
+  <!-- ============== STEP 9: the 4 departments, side by side ============== -->
+  <g data-fade id="depts">
+    <text x="800" y="168" text-anchor="middle" class="disp" style="fill:var(--line);font-size:22px">ONE GIZMO · FOUR DEPARTMENTS</text>
+    <g class="shot-card" transform="translate(70,220) scale(0.714)">
+      <rect class="shot-frame" x="-14" y="-42" width="495" height="616" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="495" height="30" rx="10"/>
+      <image href="images/sandwich-editor-gizmo01.png" x="0" y="0" width="467" height="560"/>
+    </g>
+    <text x="240" y="660" text-anchor="middle" class="label">PALETTE</text>
+    <text x="240" y="678" text-anchor="middle" class="label label-dim" style="font-size:9px">saved colors · SVG stickers</text>
+    <g class="shot-card" transform="translate(440,220) scale(0.717)">
+      <rect class="shot-frame" x="-14" y="-42" width="489" height="614" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="489" height="30" rx="10"/>
+      <image href="images/sandwich-editor-gizmo02.png" x="0" y="0" width="461" height="558"/>
+    </g>
+    <text x="605" y="660" text-anchor="middle" class="label">GENERATOR</text>
+    <text x="605" y="678" text-anchor="middle" class="label label-dim" style="font-size:9px">quick blends · ramp / flat / pattern</text>
+    <g class="shot-card" transform="translate(810,220) scale(0.494)">
+      <rect class="shot-frame" x="-14" y="-42" width="486" height="866" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="486" height="30" rx="10"/>
+      <image href="images/sandwich-editor-gizmo03a.png" x="0" y="0" width="458" height="810"/>
+    </g>
+    <text x="925" y="660" text-anchor="middle" class="label">PRO</text>
+    <text x="925" y="678" text-anchor="middle" class="label label-dim" style="font-size:9px">full pass stack · Top / Penu / Bottom</text>
+    <g class="shot-card" transform="translate(1130,250) scale(0.82)">
+      <rect class="shot-frame" x="-14" y="-42" width="489" height="506" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="489" height="30" rx="10"/>
+      <image href="images/sandwich-editor-gizmo04.png" x="0" y="0" width="461" height="450"/>
+    </g>
+    <text x="1315" y="660" text-anchor="middle" class="label">OBJECT</text>
+    <text x="1315" y="678" text-anchor="middle" class="label label-dim" style="font-size:9px">MixedFilament → auto TD blend</text>
+    <text x="800" y="730" text-anchor="middle" class="label label-dim" data-fade id="depts-caption">Palette keeps it · Generator makes it fast · Pro makes it exact · Object automates it</text>
+  </g>
+
+</svg>
+</div>
+
+<div id="dimmer"></div>
+<div id="tag">
+  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
+  <p>not just colors, <em>the full Sandwich</em>.</p>
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
+<div id="progress"></div>
+
+<div class="ui" id="ui">
+  <button class="uibtn" id="btnPrev" title="Previous step (Left arrow)"><kbd>&larr;</kbd>prev</button>
+  <button class="uibtn" id="btnPlay" title="Play / pause (Space)"><span id="playGlyph" class="pglyph">&#8214;</span><span id="playLbl">pause</span></button>
+  <button class="uibtn" id="btnNext" title="Next step (Right arrow)">next<kbd>&rarr;</kbd></button>
+  <button class="uibtn" id="btnReset" title="Restart (R)"><kbd>R</kbd>reset</button>
+  <button class="uibtn" id="btnFull" title="Fullscreen (F)"><kbd>F</kbd>full</button>
+  <button class="uibtn" id="btnHide" title="Hide UI for clean capture (H)"><kbd>H</kbd>hide</button>
+</div>
+
+<script>
+const TOTAL = 9;
+let step = 0;
+let autoplay = null;
+
+const $  = q => document.querySelector(q);
+const $$ = q => document.querySelectorAll(q);
+const setText = (id,t) => { const e=document.getElementById(id); if(e) e.textContent=t; };
+const fade = (id,on) => { const e=document.getElementById(id); if(e) e.classList.toggle('on',on); };
+
+const SHOTS = ['shot01','shot02','shot03','shot04','shot05','shot06','shot07'];
+function showShot(id){ SHOTS.forEach(s=>fade(s, s===id)); }
+
+function annot(stepTxt, head, l1, l2, l3){
+  setText('annot-step', stepTxt);
+  setText('annot-h', head);
+  setText('annot-1', l1 || '');
+  setText('annot-2', l2 || '');
+  setText('annot-3', l3 || '');
+}
+
+const states = [
+  // STEP 1 — intro + open the gizmo (toolbar icon)
+  ()=>{
+    fade('lbl-title',true); fade('lbl-sub',true);
+    fade('annot',true);
+    showShot('shot01');
+    annot('STEP 1 · OPEN', 'Open the Painter',
+      'ColorStitch Painter lives in the main toolbar.',
+      'Click the icon — or just press M.',
+      'It works on any object with top surfaces.');
+  },
+  // STEP 2 — Generator: pick a Gradient ramp swatch
+  ()=>{
+    showShot('shot02');
+    annot('STEP 2 · PICK A BLEND', 'Generator department',
+      'Gradient ramp builds a 2-color mix for you.',
+      'Each swatch is a real recipe — hover shows the',
+      'sub-layers and their exact mm (A 0.09 / B 0.11).');
+  },
+  // STEP 3 — click the top surface
+  ()=>{
+    showShot('shot03');
+    annot('STEP 3 · PAINT', 'Click the top surface',
+      'One click flood-fills that flat top — done.',
+      'Right-click stays camera-only, and',
+      'Shift+click is a one-shot erase.');
+  },
+  // STEP 4 — Pro: the simple mix, decomposed
+  ()=>{
+    showShot('shot04');
+    annot('STEP 4 · GO PRO', 'Same mix, opened in Pro',
+      'The quick blend is really a stack of sub-passes.',
+      'Pro shows each one: tool, share, style, angle.',
+      'Everything the Generator made is editable here.');
+  },
+  // STEP 5 — add more sub-layers
+  ()=>{
+    showShot('shot05');
+    annot('STEP 5 · STACK MORE', 'Add sub-layers',
+      '+ layer adds another Solid sub-pass.',
+      'Three colors now share the top thickness —',
+      'each row keeps its own mm share.');
+  },
+  // STEP 6 — change the pass type
+  ()=>{
+    showShot('shot06');
+    annot('STEP 6 · SWITCH TYPE', 'Any pass, any effect',
+      'A sub-pass can become ColorStitch — or the whole',
+      'top can switch to PathBlend Half / Full.',
+      'PathBlend fills 100% of the layer: no sub-passes.');
+  },
+  // STEP 7 — ColorStitch Stripes live + save the recipe
+  ()=>{
+    showShot('shot07');
+    fade('spot-cube',true); fade('spot-save',true);
+    fade('spot-td',false); fade('spot-recipe',false);
+    annot('STEP 7 · LIVE + SAVE', 'See it, keep it',
+      'ColorStitch Stripes redraws the model preview',
+      'from the same per-line sequence the slicer prints.',
+      'Save keeps the recipe — it travels inside the 3MF.');
+  },
+  // STEP 8 — TD: why the predicted Result color
+  ()=>{
+    showShot('shot07');
+    fade('spot-cube',false); fade('spot-save',false);
+    fade('spot-td',true); fade('spot-recipe',true);
+    annot('STEP 8 · TD', 'Transmission Density',
+      'TD = how translucent a filament is: 0.1–0.5 opaque,',
+      '3+ translucent. Set per machine, it describes YOUR spools.',
+      'The Result swatch predicts the printed color before slicing.');
+  },
+  // STEP 9 — the four departments
+  ()=>{
+    SHOTS.forEach(s=>fade(s,false));
+    fade('annot',false);
+    fade('lbl-title',false); fade('lbl-sub',false);
+    fade('depts',true);
+    fade('depts-caption',true);
+  }
+];
+
+function rebuildTo(n){
+  $$('[data-fade]').forEach(e=>e.classList.remove('on'));
+  $('#tag').classList.remove('on');
+  $('#dimmer').classList.remove('on');
+  for(let i=0;i<=n;i++) states[i]();
+}
+
+function next(){
+  if(step < TOTAL-1){
+    step++;
+    states[step]();
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function prev(){
+  if(step > 0){
+    step--;
+    rebuildTo(step);
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function reset(){
+  step = 0;
+  rebuildTo(0);
+  setText('stepNum','STEP 01 / '+String(TOTAL).padStart(2,'0'));
+}
+
+let playing = false;
+const STEP_MS = 3400;
+
+function updateProgress(){
+  const p = document.getElementById('progress');
+  if(p) p.style.width = (TOTAL<=1 ? 100 : (step/(TOTAL-1))*100) + '%';
+}
+function updatePlayBtn(){
+  const l = document.getElementById('playLbl');
+  if(l) l.textContent = playing ? 'pause' : 'play';
+  const g = document.getElementById('playGlyph');
+  if(g) g.textContent = playing ? '\u2016' : '\u25B6';
+}
+function startAuto(){
+  if(autoplay) return;
+  playing = true; updatePlayBtn();
+  autoplay = setInterval(()=>{
+    if(step >= TOTAL-1) reset(); else next();
+    updateProgress();
+  }, STEP_MS);
+}
+function stopAuto(){
+  if(autoplay){ clearInterval(autoplay); autoplay = null; }
+  playing = false; updatePlayBtn();
+}
+function toggleAuto(){ playing ? stopAuto() : startAuto(); }
+function userNext(){ stopAuto(); next(); updateProgress(); }
+function userPrev(){ stopAuto(); prev(); updateProgress(); }
+function userReset(){ stopAuto(); reset(); updateProgress(); }
+function toggleClean(){ document.body.classList.toggle('clean'); }
+function toggleFull(){
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.getElementById('btnPrev').onclick  = userPrev;
+document.getElementById('btnNext').onclick  = userNext;
+document.getElementById('btnPlay').onclick  = toggleAuto;
+document.getElementById('btnReset').onclick = userReset;
+document.getElementById('btnFull').onclick  = toggleFull;
+document.getElementById('btnHide').onclick  = toggleClean;
+
+// buttons must not keep keyboard focus, or Space would double-fire (click + shortcut)
+document.querySelectorAll('.ui button, #backBtn').forEach(b=> b.addEventListener('mousedown', e=>e.preventDefault()));
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight') userNext();
+  else if(e.key==='ArrowLeft') userPrev();
+  else if(e.key===' '){ e.preventDefault(); toggleAuto(); }
+  else if(e.key==='r'||e.key==='R') userReset();
+  else if(e.key==='f'||e.key==='F') toggleFull();
+  else if(e.key==='h'||e.key==='H') toggleClean();
+  else if(e.key==='Escape') location.href='index.html';
+});
+
+reset();
+updateProgress();
+startAuto();
+</script>
+</body>
+</html>
