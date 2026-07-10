@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeotkoCM — MultiPass, cross-hatch and glaze</title>
+<style>
+  :root{
+    --bg:#0d1626;
+    --grid:rgba(110,150,205,.09);
+    --grid2:rgba(110,150,205,.20);
+    --line:#e6fbf7;
+    --dim:rgba(230,251,247,.55);
+    --teal:#009688;
+    --pink:#ff15a5;
+    --yellow:#e3ff2a;
+    --blue:#2196f3;
+    --dark:#2b3436;
+    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--line);font-family:var(--mono);overflow:hidden}
+  body{
+    background-image:
+      linear-gradient(var(--grid2) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+  }
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  svg{width:min(100vw,100vh*1.77);height:auto;max-height:100vh}
+
+  .ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:12px;font-size:12px;color:var(--dim);pointer-events:none;letter-spacing:.08em;text-transform:uppercase}
+  .ui.hidden{opacity:0}
+  .ui kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line)}
+  .step-num{position:fixed;top:21px;left:150px;font-size:11px;color:var(--dim);letter-spacing:.2em}
+  .title{position:fixed;top:20px;right:24px;font-size:11px;color:var(--dim);letter-spacing:.2em;text-align:right}
+
+  .stroke{stroke:var(--line);stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .stroke-dim{stroke:var(--dim);stroke-width:1;fill:none;stroke-dasharray:3 4}
+  .label{font-family:var(--mono);fill:var(--line);font-size:11px;letter-spacing:.12em}
+  .label-dim{fill:var(--dim)}
+  .label-big{font-size:20px;letter-spacing:.2em}
+  .label-mid{font-size:14px;letter-spacing:.15em}
+
+  [data-fade]{opacity:0;transition:opacity .6s ease}
+  [data-fade].on{opacity:1}
+
+  .face{transition:fill .8s ease,opacity .6s ease}
+  .face-base{fill:#1f6fb8;stroke:var(--line);stroke-width:1.4;stroke-linejoin:round}
+  .face-side-dark{fill:#155a93}
+  .face-top{fill:#2d8de0}
+  .face-base.dimmed{opacity:.32}
+
+  .pill{transition:opacity .4s ease, stroke .4s ease, fill .4s ease}
+  .pill-box{fill:none;stroke:#e6fbf7;stroke-width:1.2}
+  .pill-box.active{fill:rgba(0,150,136,.35);stroke:var(--teal)}
+  .pill-txt{fill:var(--dim)}
+  .pill-txt.active{fill:var(--line)}
+
+  rect.band{shape-rendering:crispEdges}
+  #inset-pass2,#cubetop-pass2{transition:opacity .6s ease}
+
+  @keyframes pulseGlow{0%,100%{stroke-opacity:.3}50%{stroke-opacity:1}}
+  .pulse{animation:pulseGlow 1.8s ease-in-out infinite}
+
+  #dimmer{position:fixed;inset:0;background:rgba(6,18,18,.88);opacity:0;transition:opacity .9s ease;pointer-events:none;backdrop-filter:blur(2px)}
+  #dimmer.on{opacity:1}
+
+  #tag{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .8s ease .3s;pointer-events:none}
+  #tag.on{opacity:1}
+  #tag h1{font-family:var(--mono);font-size:34px;letter-spacing:.18em;margin:0;color:var(--line)}
+  #tag h1 span{color:var(--teal)}
+  #tag p{margin:18px 0 0;color:var(--dim);font-size:14px;letter-spacing:.25em;text-transform:uppercase}
+  #tag em{color:var(--pink);font-style:normal}
+
+  .connector{stroke:var(--teal);stroke-width:1;fill:none;stroke-dasharray:4 3;opacity:0;transition:opacity .5s}
+  .connector.on{opacity:.85}
+
+  /* ---- real-print cards (step 11) ---- */
+  .shot-card{filter:drop-shadow(0 16px 30px rgba(0,0,0,.6))}
+  .shot-frame{fill:#0d1726;stroke:rgba(0,150,136,.8);stroke-width:1.5}
+  .shot-bar{fill:rgba(0,150,136,.16)}
+  .shot-name{fill:var(--dim);font-family:var(--mono);font-size:11px;letter-spacing:.16em}
+  #shotdim{transition:opacity .6s ease}
+
+  /* ---- interactive controls (s195) ---- */
+  #progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);z-index:6;transition:width .5s ease}
+  #backBtn{position:fixed;top:15px;left:22px;z-index:7;font-family:var(--mono);font-size:12px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.82);
+    border:1px solid rgba(110,150,205,.32);border-radius:8px;padding:8px 14px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s,transform .15s}
+  #backBtn:hover{color:var(--line);border-color:var(--teal);transform:translateX(-2px)}
+  #backBtn b{font-size:16px;line-height:1;font-weight:400}
+  .ui{pointer-events:none}
+  .ui button.uibtn{pointer-events:auto;font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.78);
+    border:1px solid rgba(110,150,205,.28);border-radius:7px;padding:6px 11px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s,background .15s}
+  .ui button.uibtn:hover{color:var(--line);border-color:var(--teal);background:rgba(10,20,36,.95)}
+  .ui button.uibtn kbd{border:1px solid currentColor;padding:1px 5px;border-radius:3px;opacity:.75;font-size:10px}
+  .ui button#btnPlay{color:var(--line);border-color:rgba(0,150,136,.6)}
+  .ui button#btnPlay .pglyph{font-size:11px;opacity:.9}
+  body.clean #ui,body.clean #backBtn,body.clean #progress,body.clean .step-num,body.clean .title{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div class="step-num" id="stepNum">STEP 01 / 11</div>
+<div class="title">NEOTKOCM · MULTIPASS · v4</div>
+
+<div id="stage">
+<svg viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#009688"/>
+    </marker>
+  </defs>
+
+  <!-- Z-BRACKET (intro only) -->
+  <g data-fade id="zbracket" transform="translate(800,150)">
+    <text x="0" y="-90" text-anchor="middle" class="label label-dim">OBJECT · SIDE VIEW</text>
+    <rect x="-16" y="-70" width="32" height="140" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+    <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
+    <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
+    <text x="78" y="-56" class="label">TOP + PENU</text>
+    <text x="78" y="-42" class="label label-dim">MultiPass lives here</text>
+    <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
+    <text x="78" y="44" class="label">BULK</text>
+    <text x="78" y="58" class="label label-dim">untouched by MultiPass</text>
+  </g>
+
+  <!-- Z-bracket zoomed: divider between 2-3 Solid passes inside the same tiny top slice -->
+  <g data-fade id="zdivider" transform="translate(800,150)">
+    <text x="0" y="-90" text-anchor="middle" class="label label-dim">TOP + PENU · SHARE SPLIT</text>
+    <rect x="-16" y="-70" width="32" height="140" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+    <rect x="-16" y="-70" width="32" height="34" fill="#e3ff2a" opacity="0.7"/>
+    <rect x="-16" y="-36" width="32" height="26" fill="#2196f3" opacity="0.7"/>
+    <rect x="-16" y="-10" width="32" height="80" fill="#2b3436" opacity="0.5"/>
+    <line x1="-16" y1="-36" x2="16" y2="-36" style="stroke:#e6fbf7;stroke-width:1.6"/>
+    <line x1="20" y1="-53" x2="70" y2="-53" class="stroke-dim"/>
+    <text x="78" y="-49" class="label" style="font-size:10px">PASS 1 · 60%</text>
+    <line x1="20" y1="-23" x2="70" y2="-23" class="stroke-dim"/>
+    <text x="78" y="-19" class="label" style="font-size:10px">PASS 2 · 40%</text>
+    <text x="78" y="0" class="label label-dim" style="font-size:9px">dividers set the Z share</text>
+    <line x1="20" y1="30" x2="70" y2="30" class="stroke-dim"/>
+    <text x="78" y="34" class="label label-dim" style="font-size:9px">rest of the object · untouched</text>
+  </g>
+
+  <!-- ============== LEFT: MultiPass authoring view ============== -->
+  <g id="studio" transform="translate(420,470)">
+
+    <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">MULTIPASS</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">2-3 stacked Solid passes — no separate button anymore</text>
+
+    <!-- pass slots being added -->
+    <g data-fade id="pass-slots" transform="translate(0,-260)">
+      <g id="slot-p1"><rect class="pill pill-box active" x="-260" y="-14" width="150" height="28" rx="14"/><text x="-185" y="5" text-anchor="middle" class="label pill pill-txt active" style="font-size:9px">SOLID · 0°</text></g>
+      <g id="slot-p2"><rect class="pill pill-box" x="-90" y="-14" width="150" height="28" rx="14"/><text x="-15" y="5" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">SOLID · 90°</text></g>
+      <g id="slot-p3"><rect class="pill pill-box" x="80" y="-14" width="150" height="28" rx="14"/><text x="155" y="5" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">+ SOLID · 3rd</text></g>
+    </g>
+
+    <!-- mode pills: cross-hatch vs glaze -->
+    <g data-fade id="mode-pills" transform="translate(0,-205)">
+      <g id="mode-hatch"><rect class="pill pill-box active" x="-150" y="-14" width="150" height="28" rx="14"/><text x="-75" y="5" text-anchor="middle" class="label pill pill-txt active" style="font-size:9px">CROSS-HATCH</text></g>
+      <g id="mode-glaze"><rect class="pill pill-box" x="10" y="-14" width="150" height="28" rx="14"/><text x="85" y="5" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">GLAZE</text></g>
+    </g>
+
+    <!-- inset: flattened X/Y view -->
+    <g data-fade id="inset" transform="translate(-110,-160)">
+      <rect x="0" y="0" width="220" height="220" fill="#155a93" stroke="#e6fbf7" stroke-width="1.4"/>
+      <g id="inset-pass1"></g>
+      <g id="inset-pass2"></g>
+      <rect x="0" y="0" width="220" height="220" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="0" y="-14" class="label label-dim">MultiPass · top-down view</text>
+    </g>
+
+    <!-- axis gizmo -->
+    <g data-fade id="xy-gizmo" transform="translate(150,-185)">
+      <line x1="0" y1="0" x2="34" y2="0" class="stroke" marker-end="url(#arrow)"/>
+      <text x="40" y="4" class="label" style="font-size:10px">X</text>
+      <line x1="0" y1="0" x2="0" y2="-34" class="stroke" marker-end="url(#arrow)"/>
+      <text x="4" y="-40" class="label" style="font-size:10px">Y</text>
+      <line x1="-8" y1="18" x2="22" y2="-16" style="stroke:var(--dim);stroke-width:1"/>
+      <line x1="-10" y1="-2" x2="24" y2="20" style="stroke:#ff5566;stroke-width:1.6"/>
+      <text x="28" y="30" class="label" style="font-size:9px;fill:#ff8899">Z ✗ not the object's Z</text>
+    </g>
+
+    <!-- TD slider for glaze translucency -->
+    <g data-fade id="td-slider" transform="translate(-110,150)">
+      <text x="0" y="-14" class="label label-dim">Pass 2 · Transmission Density (TD)</text>
+      <line x1="0" y1="10" x2="220" y2="10" class="stroke-dim"/>
+      <circle id="td-marker" cx="150" cy="10" r="6" fill="var(--teal)" stroke="#e6fbf7" stroke-width="1.2"/>
+      <text x="0" y="34" class="label" style="font-size:9px">opaque</text>
+      <text x="220" y="34" text-anchor="end" class="label" style="font-size:9px">translucent</text>
+      <text x="0" y="56" class="label label-dim" id="td-readout" style="font-size:10px">TD 3.2 · penu shows through</text>
+    </g>
+
+    <!-- perimeter override note -->
+    <text x="-110" y="80" class="label label-dim" data-fade id="lbl-perim">perimeter override · reprints the outer wall in the active pass color</text>
+  </g>
+
+  <!-- ============== RIGHT: CUBE ============== -->
+  <g id="cube-wrapper" transform="translate(1180,470)">
+    <g id="cube" data-fade>
+      <polygon id="face-right" class="face face-base face-side-dark"
+        points="0,0 190,-110 190,140 0,250"/>
+      <polygon id="face-left" class="face face-base"
+        points="0,0 -190,-110 -190,140 0,250"/>
+      <polygon id="face-top" class="face face-base face-top"
+        points="0,0 190,-110 0,-220 -190,-110"/>
+      <g class="stroke">
+        <polyline points="-190,-110 -190,-95 -175,-110"/>
+        <polyline points="190,-110 190,-95 175,-110"/>
+        <polyline points="0,-220 -12,-213 0,-205"/>
+        <polyline points="0,250 -12,243 0,235"/>
+      </g>
+    </g>
+
+    <polygon id="face-top-glow" data-fade class="pulse"
+      points="0,0 190,-110 0,-220 -190,-110" fill="none" stroke="var(--teal)" stroke-width="3"/>
+
+    <!-- mini-sandwich stack hovering above the top face -->
+    <g data-fade id="hover-stack">
+      <polygon id="hover-p1" points="0,-60 190,-170 0,-280 -190,-170"
+        fill="#e3ff2a" stroke="#e6fbf7" stroke-width="1.2" opacity="0.55"/>
+      <text x="215" y="-166" class="label" style="font-size:10px">SOLID pass 1 · 0°</text>
+      <polygon id="hover-p2" points="0,-100 190,-210 0,-320 -190,-210"
+        fill="#2196f3" stroke="#e6fbf7" stroke-width="1.2" opacity="0.5"/>
+      <text x="215" y="-206" class="label" style="font-size:10px">SOLID pass 2 · 90°</text>
+    </g>
+
+    <text x="0" y="320" text-anchor="middle" class="label label-dim" data-fade id="lbl-snap">snapmaker</text>
+    <line x1="-260" y1="295" x2="260" y2="295" class="stroke-dim" data-fade id="lbl-snap2"/>
+
+    <g data-fade id="cube-labels">
+      <line x1="0" y1="-225" x2="0" y2="-260" class="stroke-dim"/>
+      <text x="0" y="-272" text-anchor="middle" class="label" id="top-label">CUBE · BASE STATE</text>
+      <text x="0" y="-288" text-anchor="middle" class="label label-dim" id="top-sub">single tool · uniform color</text>
+    </g>
+  </g>
+
+  <path id="conn-ramp" class="connector" d="M 545 400 Q 850 380 990 365" marker-end="url(#arrow)"/>
+
+  <g data-fade id="intro-cursor">
+    <text x="800" y="450" text-anchor="middle" class="label label-mid">_</text>
+  </g>
+
+  <!-- FINAL OVERLAY: real cross-hatch/glaze mapped onto the ACTUAL top face via the same 2-axis matrix as v2/v3 -->
+  <g id="topface-pattern-wrap" data-fade transform="translate(1180,470) matrix(0.86364,-0.5,-0.86364,-0.5,0,0)">
+    <g id="cubetop-pass1"></g>
+    <g id="cubetop-pass2"></g>
+  </g>
+
+  <!-- ============== STEP 11: real prints — gradient Solid passes (kept LAST for z-order) ============== -->
+  <rect id="shotdim" data-fade x="0" y="0" width="1600" height="900" fill="rgba(5,11,20,.92)"/>
+  <g data-fade id="shot-print">
+    <text x="800" y="130" text-anchor="middle" class="label label-big">REAL PRINTS · GRADIENT SOLID PASSES</text>
+    <g class="shot-card" transform="translate(450,190)">
+      <rect class="shot-frame" x="-14" y="-42" width="728" height="339" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="728" height="30" rx="10"/>
+      <text class="shot-name" x="350" y="-22" text-anchor="middle">2-COLOUR SOLID PASSES · % STEPPED PER TILE</text>
+      <image href="images/REALPRINTS/RealPrint-04a.webp" x="0" y="0" width="700" height="287" preserveAspectRatio="xMidYMid meet"/>
+    </g>
+    <g class="shot-card" transform="translate(450,540)">
+      <rect class="shot-frame" x="-14" y="-42" width="728" height="354" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="728" height="30" rx="10"/>
+      <text class="shot-name" x="350" y="-22" text-anchor="middle">SAME RECIPE · SECOND PAIR OF FILAMENTS</text>
+      <image href="images/REALPRINTS/RealPrint-04b.webp" x="0" y="0" width="700" height="302" preserveAspectRatio="xMidYMid meet"/>
+    </g>
+  </g>
+
+</svg>
+</div>
+
+<div id="dimmer"></div>
+<div id="tag">
+  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
+  <p>not just colors, <em>the full Sandwich</em>.</p>
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
+<div id="progress"></div>
+
+<div class="ui" id="ui">
+  <button class="uibtn" id="btnPrev" title="Previous step (Left arrow)"><kbd>&larr;</kbd>prev</button>
+  <button class="uibtn" id="btnPlay" title="Play / pause (Space)"><span id="playGlyph" class="pglyph">&#8214;</span><span id="playLbl">pause</span></button>
+  <button class="uibtn" id="btnNext" title="Next step (Right arrow)">next<kbd>&rarr;</kbd></button>
+  <button class="uibtn" id="btnReset" title="Restart (R)"><kbd>R</kbd>reset</button>
+  <button class="uibtn" id="btnFull" title="Fullscreen (F)"><kbd>F</kbd>full</button>
+  <button class="uibtn" id="btnHide" title="Hide UI for clean capture (H)"><kbd>H</kbd>hide</button>
+</div>
+
+<script>
+const TOTAL = 11;
+let step = 0;
+let autoplay = null;
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const S = 220;
+const COL_1 = '#e3ff2a'; // Solid pass canonical color
+const COL_2 = '#2196f3'; // second Solid pass
+
+const $  = q => document.querySelector(q);
+const $$ = q => document.querySelectorAll(q);
+const setText = (id,t) => { const e=document.getElementById(id); if(e) e.textContent=t; };
+const fade = (id,on) => { const e=document.getElementById(id); if(e) e.classList.toggle('on',on); };
+const setPill = (id,on) => {
+  const g = document.getElementById(id);
+  if(!g) return;
+  g.querySelector('.pill-box').classList.toggle('active',on);
+  const t = g.querySelector('.pill-txt'); if(t) t.classList.toggle('active',on);
+};
+
+// draws a coarse hatch: `density` bands, alternating `color`/transparent, in local [0,size]^2 square.
+// orientation 'rows' = fill direction along X (0°); 'cols' = fill direction along Y (90°, perpendicular).
+function renderHatch(containerId, color, orientation, size, density){
+  const g = document.getElementById(containerId);
+  if(!g) return;
+  g.innerHTML = '';
+  const band = size / density;
+  for(let i=0;i<density;i++){
+    if(i % 2 !== 0) continue; // skip every other band -> visible hatch lines with gaps
+    const r = document.createElementNS(SVGNS,'rect');
+    r.setAttribute('class','band');
+    r.setAttribute('fill', color);
+    if(orientation === 'cols'){
+      r.setAttribute('x', i*band); r.setAttribute('y', 0);
+      r.setAttribute('width', band*0.85); r.setAttribute('height', size);
+    } else {
+      r.setAttribute('x', 0); r.setAttribute('y', i*band);
+      r.setAttribute('width', size); r.setAttribute('height', band*0.85);
+    }
+    g.appendChild(r);
+  }
+}
+
+function renderSolidFill(containerId, color, size){
+  const g = document.getElementById(containerId);
+  if(!g) return;
+  g.innerHTML = '';
+  const r = document.createElementNS(SVGNS,'rect');
+  r.setAttribute('x',0); r.setAttribute('y',0);
+  r.setAttribute('width',size); r.setAttribute('height',size);
+  r.setAttribute('fill', color);
+  g.appendChild(r);
+}
+
+let curMode = 'hatch'; // 'hatch' | 'glaze'
+
+function redrawMain(){
+  if(curMode === 'hatch'){
+    renderHatch('inset-pass1', COL_1, 'rows', S, 12);
+    renderHatch('inset-pass2', COL_2, 'cols', S, 12);
+    renderHatch('cubetop-pass1', COL_1, 'rows', S, 12);
+    renderHatch('cubetop-pass2', COL_2, 'cols', S, 12);
+    $('#inset-pass2').style.opacity = '0.85';
+    $('#cubetop-pass2').style.opacity = '0.85';
+  } else {
+    renderSolidFill('inset-pass1', COL_1, S);
+    renderSolidFill('inset-pass2', COL_2, S);
+    renderSolidFill('cubetop-pass1', COL_1, S);
+    renderSolidFill('cubetop-pass2', COL_2, S);
+    $('#inset-pass2').style.opacity = '0.4';
+    $('#cubetop-pass2').style.opacity = '0.4';
+  }
+}
+
+const states = [
+  // STEP 1 — intro: title, Z-bracket, cube base
+  ()=>{
+    fade('lbl-title',true);
+    fade('lbl-sub',true);
+    fade('zbracket',true);
+    fade('intro-cursor',true);
+    fade('cube',true);
+    fade('lbl-snap',true); fade('lbl-snap2',true);
+    fade('cube-labels',true);
+  },
+  // STEP 2 — isolate the top face
+  ()=>{
+    fade('intro-cursor',false);
+    fade('zbracket',false);
+    $('#face-left').classList.add('dimmed');
+    $('#face-right').classList.add('dimmed');
+    fade('face-top-glow',true);
+    setText('top-label','TOP FACE · SANDWICH ZONE');
+    setText('top-sub','MultiPass lives here — nowhere else');
+  },
+  // STEP 3 — "where did MultiPass go" — pass slots, only slot 1 active
+  ()=>{
+    fade('pass-slots',true);
+    fade('inset',true);
+    fade('xy-gizmo',true);
+  },
+  // STEP 4 — Pass 1: Solid, 0°, yellow — hatch fill appears
+  ()=>{
+    curMode='hatch';
+    renderHatch('inset-pass1', COL_1, 'rows', S, 12);
+    setPill('slot-p1',true);
+    setText('top-sub','Pass 1 · Solid · 0° · yellow');
+  },
+  // STEP 5 — add Pass 2: Solid, 90°, blue — cross-hatch appears in the inset
+  ()=>{
+    setPill('slot-p2',true);
+    renderHatch('inset-pass2', COL_2, 'cols', S, 12);
+    $('#inset-pass2').style.opacity = '0.85';
+    fade('mode-pills',true);
+    fade('hover-stack',true);
+    setText('top-sub','Pass 2 · Solid · 90° · blue → cross-hatch');
+  },
+  // STEP 6 — MERGE onto the real top face
+  ()=>{
+    fade('hover-stack',false);
+    fade('conn-ramp',true);
+    fade('topface-pattern-wrap',true);
+    renderHatch('cubetop-pass1', COL_1, 'rows', S, 12);
+    renderHatch('cubetop-pass2', COL_2, 'cols', S, 12);
+    $('#cubetop-pass2').style.opacity = '0.85';
+    setText('top-label','MULTIPASS · CROSS-HATCH');
+    setText('top-sub','same 2 passes · real top face · Z untouched');
+  },
+  // STEP 7 — switch to Glaze: opaque base + translucent top, TD slider
+  ()=>{
+    curMode='glaze';
+    redrawMain();
+    setPill('mode-hatch',false);
+    setPill('mode-glaze',true);
+    fade('td-slider',true);
+    setText('top-label','MULTIPASS · GLAZE');
+    setText('top-sub','opaque base + translucent top, tinted by TD');
+  },
+  // STEP 8 — Z-height divider: same tiny top slice, subdivided between the 2 passes
+  ()=>{
+    fade('zdivider',true);
+    setText('top-sub','dividers split the top Z share between passes');
+  },
+  // STEP 9 — perimeter override: outer wall follows the active pass color
+  ()=>{
+    fade('zdivider',false);
+    fade('lbl-perim',true);
+    $('#face-top-glow').style.stroke = COL_2;
+    setText('top-sub','perimeter override ON · wall reprinted per pass');
+  },
+  // STEP 10 — 3rd pass note
+  ()=>{
+    setPill('slot-p3',true);
+    setText('top-sub','up to 3 Solid passes · shares must add up to the full layer');
+  },
+  // STEP 11 — real prints: gradient Solid passes, % stepped per tile
+  ()=>{
+    fade('shotdim',true);
+    fade('shot-print',true);
+  }
+];
+
+function rebuildTo(n){
+  $$('[data-fade]').forEach(e=>e.classList.remove('on'));
+  $('#face-left').classList.remove('dimmed');
+  $('#face-right').classList.remove('dimmed');
+  $('#face-top-glow').style.stroke = '';
+  $('#tag').classList.remove('on');
+  $('#dimmer').classList.remove('on');
+  curMode='hatch';
+  ['inset-pass1','inset-pass2','cubetop-pass1','cubetop-pass2'].forEach(id=>{
+    const e=document.getElementById(id); if(e){ e.innerHTML=''; e.style.opacity=''; }
+  });
+  ['slot-p1','slot-p2','slot-p3','mode-hatch','mode-glaze'].forEach(id=>setPill(id,false));
+  setPill('mode-hatch',true);
+  setText('top-label','CUBE · BASE STATE');
+  setText('top-sub','single tool · uniform color');
+  for(let i=0;i<=n;i++) states[i]();
+}
+
+function next(){
+  if(step < TOTAL-1){
+    step++;
+    states[step]();
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function prev(){
+  if(step > 0){
+    step--;
+    rebuildTo(step);
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function reset(){
+  step = 0;
+  rebuildTo(0);
+  setText('stepNum','STEP 01 / '+String(TOTAL).padStart(2,'0'));
+}
+
+let playing = false;
+const STEP_MS = 2600;
+
+function updateProgress(){
+  const p = document.getElementById('progress');
+  if(p) p.style.width = (TOTAL<=1 ? 100 : (step/(TOTAL-1))*100) + '%';
+}
+function updatePlayBtn(){
+  const l = document.getElementById('playLbl');
+  if(l) l.textContent = playing ? 'pause' : 'play';
+  const g = document.getElementById('playGlyph');
+  if(g) g.textContent = playing ? '\u2016' : '\u25B6';
+}
+function startAuto(){
+  if(autoplay) return;
+  playing = true; updatePlayBtn();
+  autoplay = setInterval(()=>{
+    if(step >= TOTAL-1) reset(); else next();
+    updateProgress();
+  }, STEP_MS);
+}
+function stopAuto(){
+  if(autoplay){ clearInterval(autoplay); autoplay = null; }
+  playing = false; updatePlayBtn();
+}
+function toggleAuto(){ playing ? stopAuto() : startAuto(); }
+function userNext(){ stopAuto(); next(); updateProgress(); }
+function userPrev(){ stopAuto(); prev(); updateProgress(); }
+function userReset(){ stopAuto(); reset(); updateProgress(); }
+function toggleClean(){ document.body.classList.toggle('clean'); }
+function toggleFull(){
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.getElementById('btnPrev').onclick  = userPrev;
+document.getElementById('btnNext').onclick  = userNext;
+document.getElementById('btnPlay').onclick  = toggleAuto;
+document.getElementById('btnReset').onclick = userReset;
+document.getElementById('btnFull').onclick  = toggleFull;
+document.getElementById('btnHide').onclick  = toggleClean;
+
+// buttons must not keep keyboard focus, or Space would double-fire (click + shortcut)
+document.querySelectorAll('.ui button, #backBtn').forEach(b=> b.addEventListener('mousedown', e=>e.preventDefault()));
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight') userNext();
+  else if(e.key==='ArrowLeft') userPrev();
+  else if(e.key===' '){ e.preventDefault(); toggleAuto(); }
+  else if(e.key==='r'||e.key==='R') userReset();
+  else if(e.key==='f'||e.key==='F') toggleFull();
+  else if(e.key==='h'||e.key==='H') toggleClean();
+  else if(e.key==='Escape') location.href='index.html';
+});
+
+reset();
+updateProgress();
+startAuto();
+</script>
+</body>
+</html>

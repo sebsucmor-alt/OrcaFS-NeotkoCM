@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeotkoCM — ColorStitch, top surface only</title>
+<style>
+  :root{
+    --bg:#0d1626;
+    --grid:rgba(110,150,205,.09);
+    --grid2:rgba(110,150,205,.20);
+    --line:#e6fbf7;
+    --dim:rgba(230,251,247,.55);
+    --teal:#009688;
+    --pink:#ff15a5;
+    --yellow:#e3ff2a;
+    --blue:#2196f3;
+    --dark:#2b3436;
+    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--line);font-family:var(--mono);overflow:hidden}
+  body{
+    background-image:
+      linear-gradient(var(--grid2) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+  }
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  svg{width:min(100vw,100vh*1.77);height:auto;max-height:100vh}
+
+  .ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:12px;font-size:12px;color:var(--dim);pointer-events:none;letter-spacing:.08em;text-transform:uppercase}
+  .ui.hidden{opacity:0}
+  .ui kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line)}
+  .step-num{position:fixed;top:21px;left:150px;font-size:11px;color:var(--dim);letter-spacing:.2em}
+  .title{position:fixed;top:20px;right:24px;font-size:11px;color:var(--dim);letter-spacing:.2em;text-align:right}
+
+  .stroke{stroke:var(--line);stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .stroke-dim{stroke:var(--dim);stroke-width:1;fill:none;stroke-dasharray:3 4}
+  .label{font-family:var(--mono);fill:var(--line);font-size:11px;letter-spacing:.12em}
+  .label-dim{fill:var(--dim)}
+  .label-big{font-size:20px;letter-spacing:.2em}
+  .label-mid{font-size:14px;letter-spacing:.15em}
+
+  [data-fade]{opacity:0;transition:opacity .6s ease}
+  [data-fade].on{opacity:1}
+
+  .face{transition:fill .8s ease,opacity .6s ease}
+  .face-base{fill:#1f6fb8;stroke:var(--line);stroke-width:1.4;stroke-linejoin:round}
+  .face-side-dark{fill:#155a93}
+  .face-top{fill:#2d8de0}
+  .face-base.dimmed{opacity:.32}
+
+  .pill{transition:opacity .4s ease, stroke .4s ease, fill .4s ease}
+  .pill-box{fill:none;stroke:#e6fbf7;stroke-width:1.2}
+  .pill-box.active{fill:rgba(0,150,136,.35);stroke:var(--teal)}
+  .pill-txt{fill:var(--dim)}
+  .pill-txt.active{fill:var(--line)}
+
+  rect.band{shape-rendering:crispEdges}
+
+  @keyframes pulseGlow{0%,100%{stroke-opacity:.3}50%{stroke-opacity:1}}
+  .pulse{animation:pulseGlow 1.8s ease-in-out infinite}
+
+  #dimmer{position:fixed;inset:0;background:rgba(6,18,18,.88);opacity:0;transition:opacity .9s ease;pointer-events:none;backdrop-filter:blur(2px)}
+  #dimmer.on{opacity:1}
+
+  #tag{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .8s ease .3s;pointer-events:none}
+  #tag.on{opacity:1}
+  #tag h1{font-family:var(--mono);font-size:34px;letter-spacing:.18em;margin:0;color:var(--line)}
+  #tag h1 span{color:var(--teal)}
+  #tag p{margin:18px 0 0;color:var(--dim);font-size:14px;letter-spacing:.25em;text-transform:uppercase}
+  #tag em{color:var(--pink);font-style:normal}
+
+  .connector{stroke:var(--teal);stroke-width:1;fill:none;stroke-dasharray:4 3;opacity:0;transition:opacity .5s}
+  .connector.on{opacity:.85}
+
+  /* ---- real-app screenshot cards (steps 11-13) ---- */
+  .shot-card{filter:drop-shadow(0 16px 30px rgba(0,0,0,.6))}
+  .shot-frame{fill:#0d1726;stroke:rgba(0,150,136,.8);stroke-width:1.5}
+  .shot-bar{fill:rgba(0,150,136,.16)}
+  .shot-name{fill:var(--dim);font-family:var(--mono);font-size:11px;letter-spacing:.16em}
+  @keyframes spotPulse{0%,100%{stroke-opacity:.35}50%{stroke-opacity:1}}
+  .spot{fill:none;stroke:var(--yellow);stroke-width:2.6;animation:spotPulse 1.6s ease-in-out infinite}
+  .spot2{fill:none;stroke:var(--pink);stroke-width:2.2;animation:spotPulse 1.6s ease-in-out infinite;animation-delay:.4s}
+  #shotdim{transition:opacity .6s ease}
+
+  /* ---- interactive controls (s195) ---- */
+  #progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);z-index:6;transition:width .5s ease}
+  #backBtn{position:fixed;top:15px;left:22px;z-index:7;font-family:var(--mono);font-size:12px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.82);
+    border:1px solid rgba(110,150,205,.32);border-radius:8px;padding:8px 14px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s,transform .15s}
+  #backBtn:hover{color:var(--line);border-color:var(--teal);transform:translateX(-2px)}
+  #backBtn b{font-size:16px;line-height:1;font-weight:400}
+  .ui{pointer-events:none}
+  .ui button.uibtn{pointer-events:auto;font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.78);
+    border:1px solid rgba(110,150,205,.28);border-radius:7px;padding:6px 11px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s,background .15s}
+  .ui button.uibtn:hover{color:var(--line);border-color:var(--teal);background:rgba(10,20,36,.95)}
+  .ui button.uibtn kbd{border:1px solid currentColor;padding:1px 5px;border-radius:3px;opacity:.75;font-size:10px}
+  .ui button#btnPlay{color:var(--line);border-color:rgba(0,150,136,.6)}
+  .ui button#btnPlay .pglyph{font-size:11px;opacity:.9}
+  body.clean #ui,body.clean #backBtn,body.clean #progress,body.clean .step-num,body.clean .title{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div class="step-num" id="stepNum">STEP 01 / 13</div>
+<div class="title">NEOTKOCM · COLORSTITCH · v2</div>
+
+<div id="stage">
+<svg viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#009688"/>
+    </marker>
+  </defs>
+
+  <!-- ============== Z-BRACKET (intro only): proves the effect is a thin top slice, not the whole body ============== -->
+  <g data-fade id="zbracket" transform="translate(800,150)">
+    <text x="0" y="-90" text-anchor="middle" class="label label-dim">OBJECT · SIDE VIEW</text>
+    <rect x="-16" y="-70" width="32" height="140" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+    <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
+    <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
+    <text x="78" y="-56" class="label">TOP + PENU</text>
+    <text x="78" y="-42" class="label label-dim">Sandwich lives here</text>
+    <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
+    <text x="78" y="44" class="label">BULK</text>
+    <text x="78" y="58" class="label label-dim">untouched by ColorStitch</text>
+  </g>
+
+  <!-- ============== LEFT: ColorStitch pass — flattened top-down (X/Y) authoring view ============== -->
+  <g id="studio" transform="translate(420,470)">
+
+    <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">COLORSTITCH</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">per-line color on the top surface — not a Z gradient</text>
+
+    <!-- 4 style pills (real WIKI §1b styles) -->
+    <g data-fade id="style-pills" transform="translate(0,-255)">
+      <g id="pill-custom">
+        <rect class="pill pill-box" x="-260" y="-14" width="110" height="28" rx="14"/>
+        <text x="-205" y="5" text-anchor="middle" class="label pill pill-txt">CUSTOM</text>
+      </g>
+      <g id="pill-smooth2">
+        <rect class="pill pill-box" x="-140" y="-14" width="150" height="28" rx="14"/>
+        <text x="-65" y="5" text-anchor="middle" class="label pill pill-txt">SMOOTH · 2C</text>
+      </g>
+      <g id="pill-smooth3">
+        <rect class="pill pill-box" x="20" y="-14" width="150" height="28" rx="14"/>
+        <text x="95" y="5" text-anchor="middle" class="label pill pill-txt">SMOOTH · 3C</text>
+      </g>
+      <g id="pill-stripes">
+        <rect class="pill pill-box" x="180" y="-14" width="110" height="28" rx="14"/>
+        <text x="235" y="5" text-anchor="middle" class="label pill pill-txt">STRIPES</text>
+      </g>
+    </g>
+
+    <!-- color stops A / B -->
+    <g data-fade id="stops" transform="translate(0,-205)">
+      <circle cx="-230" cy="0" r="14" fill="#ff15a5" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="-230" y="30" text-anchor="middle" class="label">A</text>
+      <circle cx="230" cy="0" r="14" fill="#2196f3" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="230" y="30" text-anchor="middle" class="label">B</text>
+    </g>
+
+    <!-- inset: flattened X/Y view of the pass, square so it maps 1:1 onto the real top face later -->
+    <g data-fade id="inset" transform="translate(-110,-160)">
+      <rect x="0" y="0" width="220" height="220" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+      <g id="inset-bands"></g>
+      <rect x="0" y="0" width="220" height="220" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+      <text x="0" y="-14" class="label label-dim">ColorStitch pass · top-down view</text>
+    </g>
+
+    <!-- axis gizmo: this whole pass lives in one X/Y plane, Z is not involved -->
+    <g data-fade id="xy-gizmo" transform="translate(150,-185)">
+      <line x1="0" y1="0" x2="34" y2="0" class="stroke" marker-end="url(#arrow)"/>
+      <text x="40" y="4" class="label" style="font-size:10px">X</text>
+      <line x1="0" y1="0" x2="0" y2="-34" class="stroke" marker-end="url(#arrow)"/>
+      <text x="4" y="-40" class="label" style="font-size:10px">Y</text>
+      <line x1="-8" y1="18" x2="22" y2="-16" style="stroke:var(--dim);stroke-width:1"/>
+      <line x1="-10" y1="-2" x2="24" y2="20" style="stroke:#ff5566;stroke-width:1.6"/>
+      <text x="28" y="30" class="label" style="font-size:9px;fill:#ff8899">Z ✗ not used here</text>
+    </g>
+
+    <!-- transition shape mini-pills -->
+    <g data-fade id="shape-pills" transform="translate(140,60)">
+      <text x="0" y="-14" class="label label-dim">transition shape</text>
+      <g id="pill-even">
+        <rect class="pill pill-box" x="0" y="0" width="90" height="24" rx="12"/>
+        <text x="45" y="16" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">EVEN</text>
+      </g>
+      <g id="pill-scurve">
+        <rect class="pill pill-box" x="98" y="0" width="90" height="24" rx="12"/>
+        <text x="143" y="16" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">S-CURVE</text>
+      </g>
+      <g id="pill-hard">
+        <rect class="pill pill-box" x="196" y="0" width="90" height="24" rx="12"/>
+        <text x="241" y="16" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">HARD STEP</text>
+      </g>
+    </g>
+
+    <!-- compare widget: reused for Line Distribution Mode (step 9) then Monotonic Line gotcha (step 10) -->
+    <g data-fade id="compare-widget" transform="translate(-110,150)">
+      <text x="0" y="-14" class="label label-dim" id="cmp-heading">LINE DISTRIBUTION MODE</text>
+      <g>
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <g id="cmp-left-bands"></g>
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <text x="45" y="108" text-anchor="middle" class="label label-dim" id="cmp-left-label" style="font-size:9px">DEFAULT</text>
+      </g>
+      <g transform="translate(130,0)">
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <g id="cmp-right-bands"></g>
+        <rect x="0" y="0" width="90" height="90" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+        <text x="45" y="108" text-anchor="middle" class="label label-dim" id="cmp-right-label" style="font-size:9px">LANEQUANT</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============== RIGHT: CUBE ============== -->
+  <g id="cube-wrapper" transform="translate(1180,470)">
+    <g id="cube" data-fade>
+      <polygon id="face-right" class="face face-base face-side-dark"
+        points="0,0 190,-110 190,140 0,250"/>
+      <polygon id="face-left" class="face face-base"
+        points="0,0 -190,-110 -190,140 0,250"/>
+      <polygon id="face-top" class="face face-base face-top"
+        points="0,0 190,-110 0,-220 -190,-110"/>
+      <g class="stroke">
+        <polyline points="-190,-110 -190,-95 -175,-110"/>
+        <polyline points="190,-110 190,-95 175,-110"/>
+        <polyline points="0,-220 -12,-213 0,-205"/>
+        <polyline points="0,250 -12,243 0,235"/>
+      </g>
+    </g>
+
+    <!-- top face outline glow: marks the Sandwich zone -->
+    <polygon id="face-top-glow" data-fade class="pulse"
+      points="0,0 190,-110 0,-220 -190,-110" fill="none" stroke="var(--teal)" stroke-width="3"/>
+
+    <!-- mini-sandwich stack hovering above the top face (callback to v1) -->
+    <g data-fade id="hover-stack">
+      <polygon id="hover-solid" points="0,-60 190,-170 0,-280 -190,-170"
+        fill="#cfd8dc" stroke="#e6fbf7" stroke-width="1.2" opacity="0.55"/>
+      <text x="215" y="-166" class="label" style="font-size:10px">SOLID pass</text>
+      <polygon id="hover-cs" points="0,-100 190,-210 0,-320 -190,-210"
+        fill="#ff15a5" stroke="#e6fbf7" stroke-width="1.2" opacity="0.5"/>
+      <text x="215" y="-206" class="label" style="font-size:10px">COLORSTITCH pass</text>
+      <text x="215" y="-192" class="label label-dim" style="font-size:9px">per-line pattern (next)</text>
+    </g>
+
+    <text x="0" y="320" text-anchor="middle" class="label label-dim" data-fade id="lbl-snap">snapmaker</text>
+    <line x1="-260" y1="295" x2="260" y2="295" class="stroke-dim" data-fade id="lbl-snap2"/>
+
+    <g data-fade id="cube-labels">
+      <line x1="0" y1="-225" x2="0" y2="-260" class="stroke-dim"/>
+      <text x="0" y="-272" text-anchor="middle" class="label" id="top-label">CUBE · BASE STATE</text>
+      <text x="0" y="-288" text-anchor="middle" class="label label-dim" id="top-sub">single tool · uniform color</text>
+    </g>
+  </g>
+
+  <!-- CAD connector inset → real top face -->
+  <path id="conn-ramp" class="connector" d="M 545 400 Q 850 380 990 365" marker-end="url(#arrow)"/>
+
+  <!-- intro cursor -->
+  <g data-fade id="intro-cursor">
+    <text x="800" y="450" text-anchor="middle" class="label label-mid">_</text>
+  </g>
+
+  <!-- ============== FINAL OVERLAY: real per-line pattern mapped onto the ACTUAL top face ==============
+       face-top polygon "0,0 190,-110 0,-220 -190,-110" is a parallelogram spanned by
+       u=(190,-110) and w=(-190,-110) from origin (0,0). A local square [0,S]x[0,S] maps onto it
+       exactly via matrix(u.x/S, u.y/S, w.x/S, w.y/S, 0,0) — no skew/rotate approximation, no clip needed.
+       Placed LAST in the SVG so it always paints above the cube (SVG z-order = DOM order). -->
+  <g id="topface-pattern-wrap" data-fade transform="translate(1180,470) matrix(0.86364,-0.5,-0.86364,-0.5,0,0)">
+    <g id="cubetop-bands"></g>
+  </g>
+
+  <!-- ============== STEPS 11-13: the real app + the real print (kept LAST for z-order) ============== -->
+  <rect id="shotdim" data-fade x="0" y="0" width="1600" height="900" fill="rgba(5,11,20,.92)"/>
+
+  <!-- STEP 11 · advanced panel, Smooth blend 2C + Slow start -->
+  <g data-fade id="shot-smooth">
+    <text x="800" y="120" text-anchor="middle" class="label label-big">IN THE APP · SMOOTH BLEND</text>
+    <g class="shot-card" transform="translate(485,190)">
+      <rect class="shot-frame" x="-14" y="-42" width="659" height="629" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="659" height="30" rx="10"/>
+      <circle cx="4" cy="-27" r="4.5" fill="#ff5f57"/><circle cx="20" cy="-27" r="4.5" fill="#febc2e"/><circle cx="36" cy="-27" r="4.5" fill="#28c840"/>
+      <text class="shot-name" x="315" y="-22" text-anchor="middle">COLORSTITCH · TOP SURFACE · ADVANCED</text>
+      <image href="images/colotstitch-slowstart.png" x="0" y="0" width="631" height="573"/>
+      <rect class="spot" x="116" y="299" width="164" height="34" rx="8"/>
+      <rect class="spot2" x="10" y="394" width="608" height="42" rx="8"/>
+    </g>
+    <text x="800" y="830" text-anchor="middle" class="label label-dim">6 transition shapes (Even · Slow start/end · S-curve · custom γ · Hard step) — and the preview bar IS the exact per-line sequence that prints</text>
+  </g>
+
+  <!-- STEP 12 · 3-colour S-curve + Stripes, side by side -->
+  <g data-fade id="shot-styles">
+    <text x="800" y="120" text-anchor="middle" class="label label-big">3-COLOUR BLEND · EXACT STRIPES</text>
+    <g class="shot-card" transform="translate(125,250) scale(0.82)">
+      <rect class="shot-frame" x="-14" y="-42" width="653" height="499" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="653" height="30" rx="10"/>
+      <text class="shot-name" x="312" y="-22" text-anchor="middle">SMOOTH BLEND · 3 COLOURS · S-CURVE</text>
+      <image href="images/colotstitch-S-curve-3colorblend.png" x="0" y="0" width="625" height="443"/>
+      <rect class="spot" x="52" y="44" width="572" height="32" rx="8"/>
+      <rect class="spot2" x="14" y="322" width="597" height="44" rx="8"/>
+    </g>
+    <g class="shot-card" transform="translate(800,250) scale(0.82)">
+      <rect class="shot-frame" x="-14" y="-42" width="665" height="547" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="665" height="30" rx="10"/>
+      <text class="shot-name" x="318" y="-22" text-anchor="middle">STRIPES · MANUAL BAND SIZES</text>
+      <image href="images/colotstitch-stripes.png" x="0" y="0" width="637" height="491"/>
+      <rect class="spot" x="144" y="238" width="106" height="108" rx="8"/>
+    </g>
+    <text x="800" y="830" text-anchor="middle" class="label label-dim">3 colours share the surface by % · Stripes repeat exact counts — 10×A, 20×B, until full</text>
+  </g>
+
+  <!-- STEP 13 · real print proof: gcode vs printed part -->
+  <g data-fade id="shot-print">
+    <text x="800" y="120" text-anchor="middle" class="label label-big">REAL PRINT · NOT A RENDER</text>
+    <g class="shot-card" transform="translate(100,290)">
+      <rect class="shot-frame" x="-14" y="-42" width="680" height="410" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="680" height="30" rx="10"/>
+      <text class="shot-name" x="326" y="-22" text-anchor="middle">G-CODE · HILBERT × COLORSTITCH · EXPERIMENTAL</text>
+      <image href="images/REALPRINTS/RealPrint-01A.webp" x="0" y="0" width="652" height="327" preserveAspectRatio="xMidYMid meet"/>
+    </g>
+    <g class="shot-card" transform="translate(850,240)">
+      <rect class="shot-frame" x="-14" y="-42" width="668" height="534" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="668" height="30" rx="10"/>
+      <text class="shot-name" x="320" y="-22" text-anchor="middle">THE ACTUAL PRINT</text>
+      <image href="images/REALPRINTS/RealPrint-01B_web.png" x="0" y="0" width="640" height="480" preserveAspectRatio="xMidYMid meet"/>
+    </g>
+    <text x="800" y="830" text-anchor="middle" class="label label-dim">same per-line engine, sliced and printed — dither pattern survives all the way to plastic</text>
+  </g>
+
+</svg>
+</div>
+
+<div id="dimmer"></div>
+<div id="tag">
+  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
+  <p>not just colors, <em>the full Sandwich</em>.</p>
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
+<div id="progress"></div>
+
+<div class="ui" id="ui">
+  <button class="uibtn" id="btnPrev" title="Previous step (Left arrow)"><kbd>&larr;</kbd>prev</button>
+  <button class="uibtn" id="btnPlay" title="Play / pause (Space)"><span id="playGlyph" class="pglyph">&#8214;</span><span id="playLbl">pause</span></button>
+  <button class="uibtn" id="btnNext" title="Next step (Right arrow)">next<kbd>&rarr;</kbd></button>
+  <button class="uibtn" id="btnReset" title="Restart (R)"><kbd>R</kbd>reset</button>
+  <button class="uibtn" id="btnFull" title="Fullscreen (F)"><kbd>F</kbd>full</button>
+  <button class="uibtn" id="btnHide" title="Hide UI for clean capture (H)"><kbd>H</kbd>hide</button>
+</div>
+
+<script>
+const TOTAL = 13;
+let step = 0;
+let autoplay = null;
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const S = 220;              // local square size — same for the inset AND the real top-face mapping
+const N = 22;                 // number of virtual fill lines (220/22 = 10 exact)
+const COL_A = '#ff15a5';     // filament A
+const COL_B = '#2196f3';     // filament B
+
+const $  = q => document.querySelector(q);
+const $$ = q => document.querySelectorAll(q);
+const setText = (id,t) => { const e=document.getElementById(id); if(e) e.textContent=t; };
+const fade = (id,on) => { const e=document.getElementById(id); if(e) e.classList.toggle('on',on); };
+const setPill = (id,on) => {
+  const g = document.getElementById(id);
+  if(!g) return;
+  g.querySelector('.pill-box').classList.toggle('active',on);
+  g.querySelector('.pill-txt').classList.toggle('active',on);
+};
+
+// low-discrepancy ordered dither: deterministic, reads as real per-line dithering (not random noise)
+function ditherThreshold(i){ return (i * 0.6180339887498949) % 1; }
+
+function shapeEase(r, shape){
+  if(shape==='scurve') return r*r*(3-2*r);
+  if(shape==='hard')   return r < 0.5 ? 0 : 1;
+  return r; // even
+}
+
+// returns N colors, index 0 = one edge, N-1 = opposite edge
+function buildLineColors(style, shape){
+  const colors = [];
+  for(let j=0;j<N;j++){
+    if(style==='stripes'){
+      // manual band pattern: 3 lines A, 2 lines B, repeating (WIKI §1b "Stripes — manual band sizes")
+      colors.push((j % 5) < 3 ? COL_A : COL_B);
+      continue;
+    }
+    const r = 1 - (j/(N-1));
+    const adj = shapeEase(r, shape);
+    const d = ditherThreshold(j);
+    colors.push(d < adj ? COL_B : COL_A);
+  }
+  return colors;
+}
+
+// deterministic scramble — for the "wrong / fragmented" side of the compare widgets
+function scramble(colors){
+  return colors.map((_,i)=>colors[(i*7+3) % colors.length]);
+}
+
+// draws `colors` as bands inside a local [0,size]x[0,size] square.
+// orientation 'rows' = bands run along X, stacked along Y (default fill-line direction).
+// orientation 'cols' = bands run along Y, stacked along X (infill angle rotated in-plane).
+function renderBandsLocal(containerId, colors, size, orientation){
+  const g = document.getElementById(containerId);
+  if(!g) return;
+  g.innerHTML = '';
+  const band = size / colors.length;
+  colors.forEach((c,i)=>{
+    const r = document.createElementNS(SVGNS,'rect');
+    r.setAttribute('class','band');
+    r.setAttribute('fill', c);
+    if(orientation === 'cols'){
+      r.setAttribute('x', i*band); r.setAttribute('y', 0);
+      r.setAttribute('width', band+0.5); r.setAttribute('height', size);
+    } else {
+      r.setAttribute('x', 0); r.setAttribute('y', i*band);
+      r.setAttribute('width', size); r.setAttribute('height', band+0.5);
+    }
+    g.appendChild(r);
+  });
+}
+
+let curStyle = 'smooth2';
+let curShape = 'even';
+let curOrientation = 'rows';
+
+// the SAME array feeds both the flattened inset AND the real top-face mapping — same data, two views
+function redrawMain(){
+  const colors = buildLineColors(curStyle, curShape);
+  renderBandsLocal('inset-bands', colors, S, curOrientation);
+  renderBandsLocal('cubetop-bands', colors, S, curOrientation);
+}
+
+function redrawCompare(heading, leftLabel, rightLabel, leftColors, rightColors){
+  setText('cmp-heading', heading);
+  setText('cmp-left-label', leftLabel);
+  setText('cmp-right-label', rightLabel);
+  renderBandsLocal('cmp-left-bands', leftColors, 90, 'rows');
+  renderBandsLocal('cmp-right-bands', rightColors, 90, 'rows');
+}
+
+const states = [
+  // STEP 1 — intro: title, Z-bracket (proves this is top-only), cube base
+  ()=>{
+    fade('lbl-title',true);
+    fade('lbl-sub',true);
+    fade('zbracket',true);
+    fade('intro-cursor',true);
+    fade('cube',true);
+    fade('lbl-snap',true); fade('lbl-snap2',true);
+    fade('cube-labels',true);
+  },
+  // STEP 2 — isolate the top face: dim the side walls, glow the top diamond
+  ()=>{
+    fade('intro-cursor',false);
+    fade('zbracket',false);
+    $('#face-left').classList.add('dimmed');
+    $('#face-right').classList.add('dimmed');
+    fade('face-top-glow',true);
+    setText('top-label','TOP FACE · SANDWICH ZONE');
+    setText('top-sub','ColorStitch lives here — nowhere else');
+  },
+  // STEP 3 — mini-sandwich stack hovers above the top face (Solid + ColorStitch passes)
+  ()=>{
+    fade('hover-stack',true);
+  },
+  // STEP 4 — zoom into the ColorStitch pass: reveal its authoring surface (inset, gizmo, pills, stops)
+  ()=>{
+    $('#hover-solid').style.opacity = '0.2';
+    $('#hover-cs').style.opacity = '0.85';
+    fade('style-pills',true);
+    fade('stops',true);
+    fade('inset',true);
+    fade('xy-gizmo',true);
+    setPill('pill-smooth2',true);
+    setText('top-sub','opening the ColorStitch pass · X/Y plane only');
+  },
+  // STEP 5 — compute + draw the per-line pattern (Smooth blend 2C, Even shape)
+  ()=>{
+    curStyle='smooth2'; curShape='even'; curOrientation='rows';
+    redrawMain();
+    fade('shape-pills',true);
+    setPill('pill-even',true);
+    setText('top-sub','N fill lines · dithered A↔B');
+  },
+  // STEP 6 — MERGE: same array lands on the real top face via the true parallelogram mapping
+  ()=>{
+    fade('hover-stack',false);
+    fade('conn-ramp',true);
+    fade('topface-pattern-wrap',true);
+    setText('top-label','COLORSTITCH · SMOOTH BLEND 2C');
+    setText('top-sub','same per-line array · real top face · Z untouched');
+  },
+  // STEP 7 — infill angle: rotate the pattern in-plane (rows -> cols), still confined to the top
+  ()=>{
+    curOrientation='cols';
+    redrawMain();
+    setText('top-sub','infill angle rotated · still X/Y only, never Z');
+  },
+  // STEP 8 — transition shape: Even -> S-curve (back to default orientation for clarity)
+  ()=>{
+    curOrientation='rows';
+    curShape='scurve';
+    redrawMain();
+    setPill('pill-even',false);
+    setPill('pill-scurve',true);
+    setText('top-sub','S-curve · sharper 50/50 crossover, same 2 colors');
+  },
+  // STEP 9 — Line Distribution Mode: same colors, wrong order vs. clean order on complex tops
+  ()=>{
+    fade('compare-widget',true);
+    const clean = buildLineColors('smooth2','scurve');
+    redrawCompare('LINE DISTRIBUTION MODE', 'DEFAULT · fragmented', 'LANEQUANT · clean', scramble(clean), clean);
+    setText('top-sub','holes/concavities can scramble print order');
+  },
+  // STEP 10 — switch style to Stripes + Monotonic Line gotcha (reuse compare widget)
+  ()=>{
+    curStyle='stripes';
+    redrawMain();
+    setPill('pill-smooth2',false);
+    setPill('pill-stripes',true);
+    const stripes = buildLineColors('stripes','even');
+    redrawCompare('TOP SURFACE FILL PATTERN', 'WRONG PATTERN · fragmented', 'MONOTONIC LINE ✓', scramble(stripes), stripes);
+    setText('top-label','COLORSTITCH · STRIPES · MANUAL BANDS');
+    setText('top-sub','same engine · exact repeats, requires Monotonic Line');
+  },
+  // STEP 11 — the real advanced panel: Smooth blend + Slow start + preview bar
+  ()=>{
+    fade('shotdim',true);
+    fade('shot-smooth',true);
+  },
+  // STEP 12 — 3-colour S-curve + Stripes panels side by side
+  ()=>{
+    fade('shot-smooth',false);
+    fade('shot-styles',true);
+  },
+  // STEP 13 — real print: gcode vs printed part (Hilbert × ColorStitch)
+  ()=>{
+    fade('shot-styles',false);
+    fade('shot-print',true);
+  }
+];
+
+function rebuildTo(n){
+  $$('[data-fade]').forEach(e=>e.classList.remove('on'));
+  ['pill-custom','pill-smooth2','pill-smooth3','pill-stripes','pill-even','pill-scurve','pill-hard'].forEach(id=>setPill(id,false));
+  $('#face-left').classList.remove('dimmed');
+  $('#face-right').classList.remove('dimmed');
+  $('#hover-solid').style.opacity = '';
+  $('#hover-cs').style.opacity = '';
+  $('#tag').classList.remove('on');
+  $('#dimmer').classList.remove('on');
+  curStyle='smooth2'; curShape='even'; curOrientation='rows';
+  ['inset-bands','cubetop-bands','cmp-left-bands','cmp-right-bands'].forEach(id=>{ const e=document.getElementById(id); if(e) e.innerHTML=''; });
+  setText('top-label','CUBE · BASE STATE');
+  setText('top-sub','single tool · uniform color');
+  setText('cmp-heading','LINE DISTRIBUTION MODE');
+  setText('cmp-left-label','DEFAULT');
+  setText('cmp-right-label','LANEQUANT');
+  for(let i=0;i<=n;i++) states[i]();
+}
+
+function next(){
+  if(step < TOTAL-1){
+    step++;
+    states[step]();
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function prev(){
+  if(step > 0){
+    step--;
+    rebuildTo(step);
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function reset(){
+  step = 0;
+  rebuildTo(0);
+  setText('stepNum','STEP 01 / '+String(TOTAL).padStart(2,'0'));
+}
+
+let playing = false;
+const STEP_MS = 2600;
+
+function updateProgress(){
+  const p = document.getElementById('progress');
+  if(p) p.style.width = (TOTAL<=1 ? 100 : (step/(TOTAL-1))*100) + '%';
+}
+function updatePlayBtn(){
+  const l = document.getElementById('playLbl');
+  if(l) l.textContent = playing ? 'pause' : 'play';
+  const g = document.getElementById('playGlyph');
+  if(g) g.textContent = playing ? '\u2016' : '\u25B6';
+}
+function startAuto(){
+  if(autoplay) return;
+  playing = true; updatePlayBtn();
+  autoplay = setInterval(()=>{
+    if(step >= TOTAL-1) reset(); else next();
+    updateProgress();
+  }, STEP_MS);
+}
+function stopAuto(){
+  if(autoplay){ clearInterval(autoplay); autoplay = null; }
+  playing = false; updatePlayBtn();
+}
+function toggleAuto(){ playing ? stopAuto() : startAuto(); }
+function userNext(){ stopAuto(); next(); updateProgress(); }
+function userPrev(){ stopAuto(); prev(); updateProgress(); }
+function userReset(){ stopAuto(); reset(); updateProgress(); }
+function toggleClean(){ document.body.classList.toggle('clean'); }
+function toggleFull(){
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.getElementById('btnPrev').onclick  = userPrev;
+document.getElementById('btnNext').onclick  = userNext;
+document.getElementById('btnPlay').onclick  = toggleAuto;
+document.getElementById('btnReset').onclick = userReset;
+document.getElementById('btnFull').onclick  = toggleFull;
+document.getElementById('btnHide').onclick  = toggleClean;
+
+// buttons must not keep keyboard focus, or Space would double-fire (click + shortcut)
+document.querySelectorAll('.ui button, #backBtn').forEach(b=> b.addEventListener('mousedown', e=>e.preventDefault()));
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight') userNext();
+  else if(e.key==='ArrowLeft') userPrev();
+  else if(e.key===' '){ e.preventDefault(); toggleAuto(); }
+  else if(e.key==='r'||e.key==='R') userReset();
+  else if(e.key==='f'||e.key==='F') toggleFull();
+  else if(e.key==='h'||e.key==='H') toggleClean();
+  else if(e.key==='Escape') location.href='index.html';
+});
+
+reset();
+updateProgress();
+startAuto();
+</script>
+</body>
+</html>

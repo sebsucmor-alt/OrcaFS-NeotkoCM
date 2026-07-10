@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeotkoCM — ColorStitch Painter, staircase</title>
+<style>
+  :root{
+    --bg:#0d1626;
+    --grid:rgba(110,150,205,.09);
+    --grid2:rgba(110,150,205,.20);
+    --line:#e6fbf7;
+    --dim:rgba(230,251,247,.55);
+    --teal:#009688;
+    --pink:#ff15a5;
+    --yellow:#e3ff2a;
+    --blue:#2196f3;
+    --dark:#2b3436;
+    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--line);font-family:var(--mono);overflow:hidden}
+  body{
+    background-image:
+      linear-gradient(var(--grid2) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+  }
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  svg{width:min(100vw,100vh*1.77);height:auto;max-height:100vh}
+
+  .ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:12px;font-size:12px;color:var(--dim);pointer-events:none;letter-spacing:.08em;text-transform:uppercase}
+  .ui.hidden{opacity:0}
+  .ui kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line)}
+  .step-num{position:fixed;top:21px;left:150px;font-size:11px;color:var(--dim);letter-spacing:.2em}
+  .title{position:fixed;top:20px;right:24px;font-size:11px;color:var(--dim);letter-spacing:.2em;text-align:right}
+
+  .stroke{stroke:var(--line);stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .stroke-dim{stroke:var(--dim);stroke-width:1;fill:none;stroke-dasharray:3 4}
+  .label{font-family:var(--mono);fill:var(--line);font-size:11px;letter-spacing:.12em}
+  .label-dim{fill:var(--dim)}
+  .label-big{font-size:20px;letter-spacing:.2em}
+  .label-mid{font-size:14px;letter-spacing:.15em}
+
+  [data-fade]{opacity:0;transition:opacity .6s ease}
+  [data-fade].on{opacity:1}
+
+  .face{transition:fill .8s ease,opacity .6s ease}
+  .face-base{fill:#1f6fb8;stroke:var(--line);stroke-width:1.4;stroke-linejoin:round}
+  .face-side-dark{fill:#155a93}
+  .face-top{fill:#2d8de0}
+  .face-base.dimmed{opacity:.32}
+
+  .pill{transition:opacity .4s ease, stroke .4s ease, fill .4s ease}
+  .pill-box{fill:none;stroke:#e6fbf7;stroke-width:1.2}
+  .pill-box.active{fill:rgba(0,150,136,.35);stroke:var(--teal)}
+  .pill-txt{fill:var(--dim)}
+  .pill-txt.active{fill:var(--line)}
+
+  rect.band{shape-rendering:crispEdges}
+
+  @keyframes pulseGlow{0%,100%{stroke-opacity:.3}50%{stroke-opacity:1}}
+  .pulse{animation:pulseGlow 1.8s ease-in-out infinite}
+
+  .swatch-working{stroke:#ffb74d;stroke-width:2}
+  .swatch-saved{stroke:#e6fbf7;stroke-width:1.4}
+
+  #dimmer{position:fixed;inset:0;background:rgba(6,18,18,.88);opacity:0;transition:opacity .9s ease;pointer-events:none;backdrop-filter:blur(2px)}
+  #dimmer.on{opacity:1}
+
+  #tag{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .8s ease .3s;pointer-events:none}
+  #tag.on{opacity:1}
+  #tag h1{font-family:var(--mono);font-size:34px;letter-spacing:.18em;margin:0;color:var(--line)}
+  #tag h1 span{color:var(--teal)}
+  #tag p{margin:18px 0 0;color:var(--dim);font-size:14px;letter-spacing:.25em;text-transform:uppercase}
+  #tag em{color:var(--pink);font-style:normal}
+
+  .connector{stroke:var(--teal);stroke-width:1;fill:none;stroke-dasharray:4 3;opacity:0;transition:opacity .5s}
+  .connector.on{opacity:.85}
+
+  /* ---- real-app screenshot cards (steps 10-11) ---- */
+  .shot-card{filter:drop-shadow(0 16px 30px rgba(0,0,0,.6))}
+  .shot-frame{fill:#0d1726;stroke:rgba(0,150,136,.8);stroke-width:1.5}
+  .shot-bar{fill:rgba(0,150,136,.16)}
+  .shot-name{fill:var(--dim);font-family:var(--mono);font-size:11px;letter-spacing:.16em}
+  @keyframes spotPulse{0%,100%{stroke-opacity:.35}50%{stroke-opacity:1}}
+  .spot{fill:none;stroke:var(--yellow);stroke-width:2.6;animation:spotPulse 1.6s ease-in-out infinite}
+  .spot2{fill:none;stroke:var(--pink);stroke-width:2.2;animation:spotPulse 1.6s ease-in-out infinite;animation-delay:.4s}
+  #shotdim{transition:opacity .6s ease}
+
+  /* ---- interactive controls (s195) ---- */
+  #progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);z-index:6;transition:width .5s ease}
+  #backBtn{position:fixed;top:15px;left:22px;z-index:7;font-family:var(--mono);font-size:12px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.82);
+    border:1px solid rgba(110,150,205,.32);border-radius:8px;padding:8px 14px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s,transform .15s}
+  #backBtn:hover{color:var(--line);border-color:var(--teal);transform:translateX(-2px)}
+  #backBtn b{font-size:16px;line-height:1;font-weight:400}
+  .ui{pointer-events:none}
+  .ui button.uibtn{pointer-events:auto;font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);background:rgba(10,20,36,.78);
+    border:1px solid rgba(110,150,205,.28);border-radius:7px;padding:6px 11px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s,background .15s}
+  .ui button.uibtn:hover{color:var(--line);border-color:var(--teal);background:rgba(10,20,36,.95)}
+  .ui button.uibtn kbd{border:1px solid currentColor;padding:1px 5px;border-radius:3px;opacity:.75;font-size:10px}
+  .ui button#btnPlay{color:var(--line);border-color:rgba(0,150,136,.6)}
+  .ui button#btnPlay .pglyph{font-size:11px;opacity:.9}
+  body.clean #ui,body.clean #backBtn,body.clean #progress,body.clean .step-num,body.clean .title{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div class="step-num" id="stepNum">STEP 01 / 12</div>
+<div class="title">NEOTKOCM · PAINTER · v5</div>
+
+<div id="stage">
+<svg viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#009688"/>
+    </marker>
+    <linearGradient id="pb-gradient" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#e3ff2a"/>
+      <stop offset="100%" stop-color="#2196f3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Z-BRACKET (intro only) -->
+  <g data-fade id="zbracket" transform="translate(700,150)">
+    <text x="0" y="-90" text-anchor="middle" class="label label-dim">EACH TOP SURFACE · SIDE VIEW</text>
+    <rect x="-16" y="-70" width="32" height="140" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+    <rect x="-16" y="-70" width="32" height="20" fill="#ff15a5" opacity="0.6"/>
+    <line x1="20" y1="-60" x2="70" y2="-60" class="stroke-dim"/>
+    <text x="78" y="-56" class="label">TOP + PENU</text>
+    <text x="78" y="-42" class="label label-dim">the Painter paints here too</text>
+    <line x1="20" y1="40" x2="70" y2="40" class="stroke-dim"/>
+    <text x="78" y="44" class="label">BULK</text>
+    <text x="78" y="58" class="label label-dim">untouched, per step</text>
+  </g>
+
+  <!-- staircase intro label -->
+  <g data-fade id="staircase-intro" transform="translate(1250,760)">
+    <text x="0" y="0" text-anchor="middle" class="label label-dim">3 fused steps · 1 object · 3 independent top surfaces</text>
+  </g>
+
+  <!-- ============== LEFT: Painter panel + 3 per-step inset previews ============== -->
+  <g id="studio" transform="translate(420,470)">
+
+    <text x="0" y="-330" text-anchor="middle" class="label label-big" data-fade id="lbl-title">COLORSTITCH PAINTER</text>
+    <text x="0" y="-308" text-anchor="middle" class="label label-dim" data-fade id="lbl-sub">paint each step's top — not the whole object</text>
+
+    <!-- toolbar: Paint / Eraser / Pick -->
+    <g data-fade id="toolbar" transform="translate(0,-262)">
+      <g id="tool-paint"><rect class="pill pill-box active" x="-260" y="-14" width="110" height="28" rx="14"/><text x="-205" y="5" text-anchor="middle" class="label pill pill-txt active" style="font-size:9px">PAINT</text></g>
+      <g id="tool-eraser"><rect class="pill pill-box" x="-140" y="-14" width="110" height="28" rx="14"/><text x="-85" y="5" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">ERASER</text></g>
+      <g id="tool-pick"><rect class="pill pill-box" x="-20" y="-14" width="110" height="28" rx="14"/><text x="35" y="5" text-anchor="middle" class="label pill pill-txt" style="font-size:9px">PICK</text></g>
+    </g>
+
+    <!-- palette strips -->
+    <g data-fade id="palette-strip" transform="translate(0,-215)">
+      <text x="-260" y="4" class="label label-dim" style="font-size:9px">GRADIENT RAMP</text>
+      <circle cx="-150" cy="0" r="10" fill="#ff15a5"/>
+      <circle cx="-125" cy="0" r="10" fill="#c060c0"/>
+      <circle cx="-100" cy="0" r="10" fill="#2196f3"/>
+      <text x="10" y="4" class="label label-dim" style="font-size:9px">FLAT COLOR</text>
+      <circle cx="90" cy="0" r="10" fill="#e3ff2a"/>
+      <circle cx="115" cy="0" r="10" fill="#009688"/>
+    </g>
+
+    <!-- Pro mode panel (step 6) -->
+    <g data-fade id="pro-mode" transform="translate(0,-170)">
+      <rect x="-260" y="-14" width="300" height="28" rx="6" fill="none" stroke="#e6fbf7" stroke-width="1.2"/>
+      <text x="-110" y="5" text-anchor="middle" class="label" style="font-size:9px">PRO MODE · TOP = PATHBLEND FULL</text>
+    </g>
+
+    <!-- 3 per-step flattened previews -->
+    <g data-fade id="insets" transform="translate(-260,-140)">
+      <g transform="translate(0,0)">
+        <rect x="0" y="0" width="100" height="100" fill="#155a93" stroke="#e6fbf7" stroke-width="1.4"/>
+        <g id="step1-content"></g>
+        <rect x="0" y="0" width="100" height="100" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+        <text x="50" y="118" text-anchor="middle" class="label label-dim" style="font-size:9px">STEP 1</text>
+      </g>
+      <g transform="translate(140,0)">
+        <rect x="0" y="0" width="100" height="100" fill="#155a93" stroke="#e6fbf7" stroke-width="1.4"/>
+        <g id="step2-content"></g>
+        <rect x="0" y="0" width="100" height="100" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+        <text x="50" y="118" text-anchor="middle" class="label label-dim" style="font-size:9px">STEP 2</text>
+      </g>
+      <g transform="translate(280,0)">
+        <rect x="0" y="0" width="100" height="100" fill="#155a93" stroke="#e6fbf7" stroke-width="1.4"/>
+        <g id="step3-content"></g>
+        <rect x="0" y="0" width="100" height="100" fill="none" stroke="#e6fbf7" stroke-width="1.4"/>
+        <text x="50" y="118" text-anchor="middle" class="label label-dim" style="font-size:9px">STEP 3</text>
+      </g>
+      <g data-fade id="paint-cursor-1" transform="translate(50,50)"><text text-anchor="middle" class="label label-mid">_</text></g>
+      <g data-fade id="paint-cursor-2" transform="translate(190,50)"><text text-anchor="middle" class="label label-mid">_</text></g>
+      <g data-fade id="paint-cursor-3" transform="translate(330,50)"><text text-anchor="middle" class="label label-mid">_</text></g>
+    </g>
+
+    <!-- working vs saved colors -->
+    <g data-fade id="palette-mgmt" transform="translate(-260,60)">
+      <text x="0" y="0" class="label label-dim">WORKING (amber) vs SAVED profiles</text>
+      <circle cx="16" cy="24" r="12" fill="#ff15a5" class="swatch-working"/>
+      <circle cx="48" cy="24" r="12" fill="#e3ff2a" class="swatch-working"/>
+      <circle cx="80" cy="24" r="12" fill="#2196f3" class="swatch-saved"/>
+      <text x="100" y="28" class="label" style="font-size:9px">← Pin to palette</text>
+      <text x="0" y="56" class="label label-dim" style="font-size:9px">SAVE ALL → promotes every working color at once</text>
+    </g>
+
+    <!-- all-or-nothing gotcha: small schematic, not a real 4th step -->
+    <g data-fade id="gotcha-icon" transform="translate(-260,120)">
+      <text x="0" y="-8" class="label label-dim" style="fill:#ffb199">⚠ all or nothing — per object</text>
+      <rect x="0" y="0" width="26" height="26" fill="#ff15a5"/>
+      <rect x="32" y="0" width="26" height="26" fill="#e3ff2a"/>
+      <rect x="64" y="0" width="26" height="26" fill="none" stroke="#ff5566" stroke-width="1.4" stroke-dasharray="3 2"/>
+      <text x="45" y="42" text-anchor="middle" class="label label-dim" style="font-size:9px">unpainted step → NO effect, not the preset</text>
+    </g>
+  </g>
+
+  <!-- ============== RIGHT: 3-STEP STAIRCASE (drawn back-to-front: 3, 2, 1) ============== -->
+  <g id="staircase-wrapper" transform="translate(1250,640)">
+
+    <g data-fade id="step3-box">
+      <g transform="translate(-200,-296)">
+        <polygon id="s3-right" class="face face-base face-side-dark" points="0,0 100,-58 100,32 0,90"/>
+        <polygon id="s3-left"  class="face face-base" points="0,0 -100,-58 -100,32 0,90"/>
+        <polygon id="s3-top"   class="face face-base face-top" points="0,0 100,-58 0,-116 -100,-58"/>
+        <polygon id="s3-top-glow" data-fade class="pulse" points="0,0 100,-58 0,-116 -100,-58" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
+      </g>
+    </g>
+
+    <g data-fade id="step2-box">
+      <g transform="translate(-100,-148)">
+        <polygon id="s2-right" class="face face-base face-side-dark" points="0,0 100,-58 100,32 0,90"/>
+        <polygon id="s2-left"  class="face face-base" points="0,0 -100,-58 -100,32 0,90"/>
+        <polygon id="s2-top"   class="face face-base face-top" points="0,0 100,-58 0,-116 -100,-58"/>
+        <polygon id="s2-top-glow" data-fade class="pulse" points="0,0 100,-58 0,-116 -100,-58" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
+      </g>
+    </g>
+
+    <g data-fade id="step1-box">
+      <g transform="translate(0,0)">
+        <polygon id="s1-right" class="face face-base face-side-dark" points="0,0 100,-58 100,32 0,90"/>
+        <polygon id="s1-left"  class="face face-base" points="0,0 -100,-58 -100,32 0,90"/>
+        <polygon id="s1-top"   class="face face-base face-top" points="0,0 100,-58 0,-116 -100,-58"/>
+        <polygon id="s1-top-glow" data-fade class="pulse" points="0,0 100,-58 0,-116 -100,-58" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
+      </g>
+    </g>
+
+    <text x="0" y="150" text-anchor="middle" class="label label-dim" data-fade id="lbl-snap">snapmaker</text>
+    <line x1="-260" y1="120" x2="260" y2="120" class="stroke-dim" data-fade id="lbl-snap2"/>
+
+    <g data-fade id="cube-labels" transform="translate(-260,-320)">
+      <text x="0" y="0" class="label" id="top-label">STAIRCASE · BASE STATE</text>
+      <text x="0" y="16" class="label label-dim" id="top-sub">single tool · uniform color</text>
+    </g>
+  </g>
+
+  <path id="conn-ramp" class="connector" d="M 190 400 Q 500 380 950 500" marker-end="url(#arrow)"/>
+
+  <g data-fade id="intro-cursor">
+    <text x="800" y="450" text-anchor="middle" class="label label-mid">_</text>
+  </g>
+
+  <!-- FINAL OVERLAYS: one per step, each its own 2-axis matrix (u=(100,-58), w=(-100,-58), S=100),
+       origin = that step's world translate within #staircase-wrapper. Placed LAST → paint on top. -->
+  <g id="paint-step1" data-fade transform="translate(1250,640) matrix(1,-0.58,-1,-0.58,0,0)">
+    <g id="cubetop-step1"></g>
+  </g>
+  <g id="paint-step2" data-fade transform="translate(1150,492) matrix(1,-0.58,-1,-0.58,0,0)">
+    <g id="cubetop-step2"></g>
+  </g>
+  <g id="paint-step3" data-fade transform="translate(1050,344) matrix(1,-0.58,-1,-0.58,0,0)">
+    <g id="cubetop-step3"></g>
+  </g>
+
+  <!-- ============== STEPS 10-11: the real Painter panels (kept LAST for z-order) ============== -->
+  <rect id="shotdim" data-fade x="0" y="0" width="1600" height="900" fill="rgba(5,11,20,.92)"/>
+
+  <!-- STEP 10 · Pro department: Top stack + Bottom Surface -->
+  <g data-fade id="shot-pro">
+    <text x="800" y="110" text-anchor="middle" class="label label-big">THE REAL PAINTER · PRO</text>
+    <g class="shot-card" transform="translate(300,210) scale(0.62)">
+      <rect class="shot-frame" x="-14" y="-42" width="486" height="866" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="486" height="30" rx="10"/>
+      <text class="shot-name" x="229" y="-22" text-anchor="middle">TOP SURFACE · FULL STACK + PENU</text>
+      <image href="images/sandwich-editor-gizmo03a.png" x="0" y="0" width="458" height="810"/>
+      <rect class="spot" x="10" y="446" width="438" height="126" rx="8"/>
+      <rect class="spot2" x="10" y="702" width="215" height="106" rx="8"/>
+    </g>
+    <g class="shot-card" transform="translate(730,240) scale(0.82)">
+      <rect class="shot-frame" x="-14" y="-42" width="487" height="648" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="487" height="30" rx="10"/>
+      <text class="shot-name" x="229" y="-22" text-anchor="middle">BOTTOM SURFACE · YES, THE BOTTOM TOO</text>
+      <image href="images/sandwich-editor-gizmo03b.png" x="0" y="0" width="459" height="596"/>
+      <rect class="spot" x="98" y="141" width="116" height="30" rx="14"/>
+      <rect class="spot2" x="14" y="326" width="340" height="32" rx="8"/>
+    </g>
+    <g transform="translate(1190,300)">
+      <text x="0" y="0" class="label">PRO = THE WHOLE SANDWICH</text>
+      <text x="0" y="30" class="label label-dim" style="font-size:10px">· every sub-pass: tool, mm, style, angle</text>
+      <text x="0" y="52" class="label label-dim" style="font-size:10px">· penultimate slot — PathBlend lives there</text>
+      <text x="0" y="74" class="label label-dim" style="font-size:10px">· TD preview → predicted Result color</text>
+      <text x="0" y="96" class="label label-dim" style="font-size:10px">· Bottom Surface paintable — even zones</text>
+      <text x="0" y="118" class="label label-dim" style="font-size:10px">&#160;&#160;that sit on supports</text>
+    </g>
+  </g>
+
+  <!-- STEP 11 · Perimeter override + Object/MixedFilament auto-TD -->
+  <g data-fade id="shot-auto">
+    <text x="800" y="110" text-anchor="middle" class="label label-big">PERIMETERS + AUTO BLENDS</text>
+    <g class="shot-card" transform="translate(300,220) scale(0.82)">
+      <rect class="shot-frame" x="-14" y="-42" width="485" height="696" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="485" height="30" rx="10"/>
+      <text class="shot-name" x="228" y="-22" text-anchor="middle">PERIMETER OVERRIDE · SANDWICH RUNS THE WALLS</text>
+      <image href="images/sandwich-editor-TD-control.png" x="0" y="0" width="457" height="644"/>
+      <rect class="spot" x="14" y="416" width="250" height="34" rx="8"/>
+      <rect class="spot2" x="368" y="204" width="74" height="30" rx="8"/>
+    </g>
+    <g class="shot-card" transform="translate(800,280) scale(0.95)">
+      <rect class="shot-frame" x="-14" y="-42" width="489" height="502" rx="10"/>
+      <rect class="shot-bar" x="-14" y="-42" width="489" height="30" rx="10"/>
+      <text class="shot-name" x="230" y="-22" text-anchor="middle">OBJECT · MIXEDFILAMENT → AUTO TD BLEND</text>
+      <image href="images/sandwich-editor-gizmo04.png" x="0" y="0" width="461" height="450"/>
+      <rect class="spot" x="8" y="178" width="240" height="32" rx="8"/>
+      <rect class="spot2" x="8" y="304" width="444" height="82" rx="8"/>
+    </g>
+    <g transform="translate(1310,340)">
+      <text x="0" y="0" class="label">SET &amp; FORGET</text>
+      <text x="0" y="30" class="label label-dim" style="font-size:10px">· override ON → wall color</text>
+      <text x="0" y="52" class="label label-dim" style="font-size:10px">&#160;&#160;follows each pass, automagically</text>
+      <text x="0" y="82" class="label label-dim" style="font-size:10px">· MixedFilament object → the fork</text>
+      <text x="0" y="104" class="label label-dim" style="font-size:10px">&#160;&#160;builds the closest TD blend for you</text>
+    </g>
+  </g>
+
+</svg>
+</div>
+
+<div id="dimmer"></div>
+<div id="tag">
+  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
+  <p>not just colors, <em>the full Sandwich</em>.</p>
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'" title="Back to menu (Esc)"><b>&lsaquo;</b> Menu</button>
+<div id="progress"></div>
+
+<div class="ui" id="ui">
+  <button class="uibtn" id="btnPrev" title="Previous step (Left arrow)"><kbd>&larr;</kbd>prev</button>
+  <button class="uibtn" id="btnPlay" title="Play / pause (Space)"><span id="playGlyph" class="pglyph">&#8214;</span><span id="playLbl">pause</span></button>
+  <button class="uibtn" id="btnNext" title="Next step (Right arrow)">next<kbd>&rarr;</kbd></button>
+  <button class="uibtn" id="btnReset" title="Restart (R)"><kbd>R</kbd>reset</button>
+  <button class="uibtn" id="btnFull" title="Fullscreen (F)"><kbd>F</kbd>full</button>
+  <button class="uibtn" id="btnHide" title="Hide UI for clean capture (H)"><kbd>H</kbd>hide</button>
+</div>
+
+<script>
+const TOTAL = 12;
+let step = 0;
+let autoplay = null;
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const S = 100;
+const COL_A = '#ff15a5';
+const COL_B = '#2196f3';
+const COL_1 = '#e3ff2a';
+
+const $  = q => document.querySelector(q);
+const $$ = q => document.querySelectorAll(q);
+const setText = (id,t) => { const e=document.getElementById(id); if(e) e.textContent=t; };
+const fade = (id,on) => { const e=document.getElementById(id); if(e) e.classList.toggle('on',on); };
+
+function ditherThreshold(i){ return (i * 0.6180339887498949) % 1; }
+function shapeEase(r){ return r*r*(3-2*r); }
+
+// step 1 preview: ColorStitch smooth-blend dithered bands, on a full [0,S]x[0,S] square
+function renderStep1(containerId){
+  const g = document.getElementById(containerId);
+  g.innerHTML = '';
+  const n = 10;
+  const band = S/n;
+  for(let j=0;j<n;j++){
+    const r = 1-(j/(n-1));
+    const adj = shapeEase(r);
+    const d = ditherThreshold(j);
+    const color = d < adj ? COL_B : COL_A;
+    const rect = document.createElementNS(SVGNS,'rect');
+    rect.setAttribute('x',0); rect.setAttribute('y', j*band);
+    rect.setAttribute('width', S); rect.setAttribute('height', band+0.5);
+    rect.setAttribute('fill', color); rect.setAttribute('class','band');
+    g.appendChild(rect);
+  }
+}
+
+// step 2 preview: MultiPass glaze — opaque base + translucent tint
+function renderStep2(containerId){
+  const g = document.getElementById(containerId);
+  g.innerHTML = '';
+  const base = document.createElementNS(SVGNS,'rect');
+  base.setAttribute('x',0); base.setAttribute('y',0);
+  base.setAttribute('width',S); base.setAttribute('height',S);
+  base.setAttribute('fill', COL_1);
+  g.appendChild(base);
+  const tint = document.createElementNS(SVGNS,'rect');
+  tint.setAttribute('x',0); tint.setAttribute('y',0);
+  tint.setAttribute('width',S); tint.setAttribute('height',S);
+  tint.setAttribute('fill', '#009688'); tint.setAttribute('opacity','0.4');
+  g.appendChild(tint);
+}
+
+// step 3 preview: PathBlend Full result — flat surface, optical gradient (see v3)
+function renderStep3(containerId){
+  const g = document.getElementById(containerId);
+  g.innerHTML = '';
+  const r = document.createElementNS(SVGNS,'rect');
+  r.setAttribute('x',0); r.setAttribute('y',0);
+  r.setAttribute('width',S); r.setAttribute('height',S);
+  r.setAttribute('fill', 'url(#pb-gradient)');
+  g.appendChild(r);
+}
+
+const states = [
+  // STEP 1 — intro: title, Z-bracket, staircase base
+  ()=>{
+    fade('lbl-title',true);
+    fade('lbl-sub',true);
+    fade('zbracket',true);
+    fade('intro-cursor',true);
+    fade('step1-box',true); fade('step2-box',true); fade('step3-box',true);
+    fade('lbl-snap',true); fade('lbl-snap2',true);
+    fade('cube-labels',true);
+  },
+  // STEP 2 — isolate the 3 tops: glow each step's top face
+  ()=>{
+    fade('intro-cursor',false);
+    fade('zbracket',false);
+    fade('staircase-intro',true);
+    fade('s1-top-glow',true); fade('s2-top-glow',true); fade('s3-top-glow',true);
+    setText('top-label','3 TOP FACES · SANDWICH ZONE');
+    setText('top-sub','each step keeps its own, independent top surface');
+  },
+  // STEP 3 — toolbar + palette strips + 3 preview insets appear
+  ()=>{
+    fade('toolbar',true);
+    fade('palette-strip',true);
+    fade('insets',true);
+  },
+  // STEP 4 — paint step 1 with a Gradient-ramp swatch (ColorStitch smooth-blend)
+  ()=>{
+    fade('paint-cursor-1',true);
+    renderStep1('step1-content');
+    setText('top-sub','step 1 painted · ColorStitch smooth-blend');
+  },
+  // STEP 5 — paint step 2 with a Flat-color swatch (Solid glaze)
+  ()=>{
+    fade('paint-cursor-1',false);
+    fade('paint-cursor-2',true);
+    renderStep2('step2-content');
+    setText('top-sub','step 2 painted · Solid glaze (MultiPass)');
+  },
+  // STEP 6 — paint step 3 via Pro mode (PathBlend Full)
+  ()=>{
+    fade('paint-cursor-2',false);
+    fade('paint-cursor-3',true);
+    fade('pro-mode',true);
+    renderStep3('step3-content');
+    setText('top-sub','step 3 painted · Pro mode · PathBlend Full');
+  },
+  // STEP 7 — MERGE: all 3 land on their real, separate top faces
+  ()=>{
+    fade('paint-cursor-3',false);
+    fade('conn-ramp',true);
+    fade('paint-step1',true); fade('paint-step2',true); fade('paint-step3',true);
+    renderStep1('cubetop-step1');
+    renderStep2('cubetop-step2');
+    renderStep3('cubetop-step3');
+    setText('top-label','3 STEPS · 3 SANDWICHES · 1 OBJECT');
+    setText('top-sub','each top keeps its own recipe, none touch the others');
+  },
+  // STEP 8 — working vs saved colors
+  ()=>{
+    fade('palette-mgmt',true);
+    setText('top-sub','working colors (amber) vs saved profiles');
+  },
+  // STEP 9 — all-or-nothing gotcha
+  ()=>{
+    fade('gotcha-icon',true);
+    setText('top-sub','leave a step unpainted → it gets NO effect, not the preset');
+  },
+  // STEP 10 — weave preview matches G-code + top-faces-only
+  ()=>{
+    setText('top-label','WEAVE PREVIEW');
+    setText('top-sub','preview = same per-line sequence the slicer prints · top faces only');
+  },
+  // STEP 11 — the real Pro department: Top stack + Bottom Surface
+  ()=>{
+    fade('shotdim',true);
+    fade('shot-pro',true);
+  },
+  // STEP 12 — perimeter override + Object/MixedFilament auto TD blend
+  ()=>{
+    fade('shot-pro',false);
+    fade('shot-auto',true);
+  }
+];
+
+function rebuildTo(n){
+  $$('[data-fade]').forEach(e=>e.classList.remove('on'));
+  ['step1-content','step2-content','step3-content',
+   'cubetop-step1','cubetop-step2','cubetop-step3'].forEach(id=>{
+    const e=document.getElementById(id); if(e) e.innerHTML='';
+  });
+  $('#tag').classList.remove('on');
+  $('#dimmer').classList.remove('on');
+  setText('top-label','STAIRCASE · BASE STATE');
+  setText('top-sub','single tool · uniform color');
+  for(let i=0;i<=n;i++) states[i]();
+}
+
+function next(){
+  if(step < TOTAL-1){
+    step++;
+    states[step]();
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function prev(){
+  if(step > 0){
+    step--;
+    rebuildTo(step);
+    setText('stepNum','STEP '+String(step+1).padStart(2,'0')+' / '+String(TOTAL).padStart(2,'0'));
+  }
+}
+function reset(){
+  step = 0;
+  rebuildTo(0);
+  setText('stepNum','STEP 01 / '+String(TOTAL).padStart(2,'0'));
+}
+
+let playing = false;
+const STEP_MS = 2600;
+
+function updateProgress(){
+  const p = document.getElementById('progress');
+  if(p) p.style.width = (TOTAL<=1 ? 100 : (step/(TOTAL-1))*100) + '%';
+}
+function updatePlayBtn(){
+  const l = document.getElementById('playLbl');
+  if(l) l.textContent = playing ? 'pause' : 'play';
+  const g = document.getElementById('playGlyph');
+  if(g) g.textContent = playing ? '\u2016' : '\u25B6';
+}
+function startAuto(){
+  if(autoplay) return;
+  playing = true; updatePlayBtn();
+  autoplay = setInterval(()=>{
+    if(step >= TOTAL-1) reset(); else next();
+    updateProgress();
+  }, STEP_MS);
+}
+function stopAuto(){
+  if(autoplay){ clearInterval(autoplay); autoplay = null; }
+  playing = false; updatePlayBtn();
+}
+function toggleAuto(){ playing ? stopAuto() : startAuto(); }
+function userNext(){ stopAuto(); next(); updateProgress(); }
+function userPrev(){ stopAuto(); prev(); updateProgress(); }
+function userReset(){ stopAuto(); reset(); updateProgress(); }
+function toggleClean(){ document.body.classList.toggle('clean'); }
+function toggleFull(){
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.getElementById('btnPrev').onclick  = userPrev;
+document.getElementById('btnNext').onclick  = userNext;
+document.getElementById('btnPlay').onclick  = toggleAuto;
+document.getElementById('btnReset').onclick = userReset;
+document.getElementById('btnFull').onclick  = toggleFull;
+document.getElementById('btnHide').onclick  = toggleClean;
+
+// buttons must not keep keyboard focus, or Space would double-fire (click + shortcut)
+document.querySelectorAll('.ui button, #backBtn').forEach(b=> b.addEventListener('mousedown', e=>e.preventDefault()));
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight') userNext();
+  else if(e.key==='ArrowLeft') userPrev();
+  else if(e.key===' '){ e.preventDefault(); toggleAuto(); }
+  else if(e.key==='r'||e.key==='R') userReset();
+  else if(e.key==='f'||e.key==='F') toggleFull();
+  else if(e.key==='h'||e.key==='H') toggleClean();
+  else if(e.key==='Escape') location.href='index.html';
+});
+
+reset();
+updateProgress();
+startAuto();
+</script>
+</body>
+</html>
