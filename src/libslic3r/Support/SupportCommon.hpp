@@ -79,6 +79,22 @@ void generate_support_toolpaths(
 	const SupportGeneratorLayersPtr   	&interface_layers,
     const SupportGeneratorLayersPtr   	&base_interface_layers);
 
+// NEOTKO_WAVESUPPORT_TAG_TOOLPATHS — forked copy of generate_support_toolpaths() dedicated to
+// SupportType::stWaveSupport (WAVESUPPORT_PLAN.md Fase 2b). Literal copy as of the fork date; the
+// original above is NEVER touched by WaveSupport changes, preserving Normal/Tree byte-identical.
+// Divergence (Fase 4: hollow pillar + FillWaveRoof) happens ONLY inside this copy.
+void wavesupport_generate_toolpaths(
+	SupportLayerPtrs    				&support_layers,
+	const PrintObjectConfig 			&config,
+	const SupportParameters 			&support_params,
+	const SlicingParameters 			&slicing_params,
+    const SupportGeneratorLayersPtr 	&raft_layers,
+    const SupportGeneratorLayersPtr   	&bottom_contacts,
+    const SupportGeneratorLayersPtr   	&top_contacts,
+    const SupportGeneratorLayersPtr   	&intermediate_layers,
+	const SupportGeneratorLayersPtr   	&interface_layers,
+    const SupportGeneratorLayersPtr   	&base_interface_layers);
+
 // FN_HIGHER_EQUAL: the provided object pointer has a Z value >= of an internal threshold.
 // Find the first item with Z value >= of an internal threshold of fn_higher_equal.
 // If no vec item with Z value >= of an internal threshold of fn_higher_equal is found, return vec.size()

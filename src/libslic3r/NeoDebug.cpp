@@ -28,6 +28,8 @@ namespace NeoDebug {
         { "ORCA_DEBUG_REALCOLOR",   "/tmp/neotko_realcolor.log"   }, // NEOTKO_REALCOLOR_TAG
         { "ORCA_DEBUG_TEXTUREBUMP", "/tmp/neotko_texturebump.log" }, // NEOTKO_TEXTUREBUMP_TAG
         { "ORCA_DEBUG_ZBUMP",       "/tmp/neotko_zbump.log"       }, // NEOTKO_ZBUMP_TAG
+        { "ORCA_DEBUG_WAVESUPPORT", "/tmp/neotko_wavesupport.log" }, // NEOTKO_WAVESUPPORT_TAG
+        { "ORCA_DEBUG_WAVEROOF",    "/tmp/neotko_waveroof.log"    }, // NEOTKO_WAVESUPPORT_TAG
     };
 
     bool enabled(Channel c)

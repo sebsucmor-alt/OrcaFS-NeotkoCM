@@ -18,8 +18,10 @@
 //   ORCA_DEBUG_REALCOLOR    — RealColor GCode Viewer: GPU capability probe + depth-peel/accum pipeline (s163)
 //   ORCA_DEBUG_TEXTUREBUMP  — Texture Bump Mapping: table build + slope-limiter (see docs/ATTRIBUTION_TEXTURE_BUMP.md)
 //   ORCA_DEBUG_ZBUMP        — ZBump (Top Surface bump): height map build + top-fill sampling (see docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md)
+//   ORCA_DEBUG_WAVESUPPORT  — NEOTKO_WAVESUPPORT_TAG: WaveSupport zone/footprint generation (see docs/FUTURE/WAVESUPPORT_PLAN.md)
+//   ORCA_DEBUG_WAVEROOF     — NEOTKO_WAVESUPPORT_TAG: Wave-Huygens roof algorithm (wavefronts, convergence) (see docs/FUTURE/WAVESUPPORT_PLAN.md)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
-// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump|zbump}.log
+// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump|zbump|wavesupport|waveroof}.log
 
 #include <string>
 
@@ -39,7 +41,9 @@ namespace NeoDebug {
         REALCOLOR   = 9, // NEOTKO_REALCOLOR_TAG — RealColor GPU capability probe + render pipeline
         TEXTUREBUMP = 10, // NEOTKO_TEXTUREBUMP_TAG — Texture Bump Mapping table build + slope-limiter
         ZBUMP       = 11, // NEOTKO_ZBUMP_TAG — ZBump (Top Surface) height map build + top-fill sampling
-        CH_COUNT    = 12
+        WAVESUPPORT = 12, // NEOTKO_WAVESUPPORT_TAG — WaveSupport zone/footprint generation (dedicated support branch)
+        WAVEROOF    = 13, // NEOTKO_WAVESUPPORT_TAG — Wave-Huygens roof algorithm (wavefronts, points/wavefront, timing)
+        CH_COUNT    = 14
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).

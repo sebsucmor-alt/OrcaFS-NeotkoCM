@@ -195,6 +195,8 @@ set(lisbslic3r_sources
     Fill/FillTpmsD.hpp
     Fill/FillTpmsFK.cpp
     Fill/FillTpmsFK.hpp
+    Fill/FillWaveRoof.cpp
+    Fill/FillWaveRoof.hpp
     Fill/Lightning/DistanceField.cpp
     Fill/Lightning/DistanceField.hpp
     Fill/Lightning/Generator.cpp
@@ -365,6 +367,8 @@ set(lisbslic3r_sources
     ColorSci/ColorSci.hpp
     ColorSci/ColorPredict.cpp
     ColorSci/ColorPredict.hpp
+    ColorSci/ColorHeightEnvelope.cpp
+    ColorSci/ColorHeightEnvelope.hpp
     ColorSci/GradientRamp.cpp
     ColorSci/GradientRamp.hpp
     ColorSci/StackFlatten.cpp
@@ -488,6 +492,8 @@ set(lisbslic3r_sources
     Support/SupportParameters.hpp
     Support/SupportSpotsGenerator.cpp
     Support/SupportSpotsGenerator.hpp
+    Support/WaveSupport.cpp
+    Support/WaveSupport.hpp
     Support/TreeModelVolumes.cpp
     Support/TreeModelVolumes.hpp
     Support/TreeSupport3D.cpp

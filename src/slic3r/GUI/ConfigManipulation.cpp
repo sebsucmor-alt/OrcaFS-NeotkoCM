@@ -783,6 +783,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
     //toggle_field("support_closing_radius", have_support_material && support_style == smsSnug);
 
+    // NEOTKO_WAVESUPPORT_TAG_VARIANTS — Fase 4c: the Wave roof variant controls apply only to the
+    // NeoWave roof (support type NeoWave + interface pattern Wave). smipWave itself is only selectable
+    // under LibreMode, so gating on it implicitly respects the LibreMode Tier-B gate.
+    bool have_wave_roof = have_support_material && support_type == stWaveSupport &&
+        config->opt_enum<SupportMaterialInterfacePattern>("support_interface_pattern") == smipWave;
+    toggle_line("wavesupport_roof_pattern", have_wave_roof);
+    toggle_line("wavesupport_roof_order",   have_wave_roof);
+    toggle_line("wavesupport_roof_reverse", have_wave_roof);
+    toggle_line("wavesupport_wall_loops",   have_wave_roof);
+
     bool support_is_tree = config->opt_bool("enable_support") && is_tree(support_type);
     bool support_is_normal_tree = support_is_tree && support_style != smsTreeOrganic &&
     // Orca: use organic as default

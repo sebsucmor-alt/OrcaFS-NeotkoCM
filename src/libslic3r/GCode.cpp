@@ -9187,15 +9187,35 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
                 apply_role_based_fan_speed();
             }
+            // NEOTKO_NEOWEAVING_PORT_TAG_START — WAVESUPPORT_PLAN.md Fase 1: force G1 branch when
+            // neoweaving (arc moves can't carry per-line Z offsets). Ported from FULLSPECTRUM095
+            // GCode.cpp:9490-9518 alongside NeoweaveEngine itself (SurfaceColorMix.cpp).
+            const bool any_neoweave = (sloped == nullptr) && NeoweaveEngine::needs_weave(path, m_config);
+            // NEOTKO_NEOWEAVING_PORT_TAG_END
             // NEOTKO_PATHBLEND_TAG_START — Fase 5 s77: PathBlend runs ONLY as a sublayer
             // (Fill.cpp FASE 2 compiles it into ramp/cap single-tool sublayers). The trigger
             // is the sublayer context set by process_layer's sublayer dispatch (m_pb_sub_*),
             // NOT a real-layer config gate. m_pb_sub_pass == -1 for everything else (ColorMix,
             // normal extrusion) → this branch never fires there → zero impact. Forces the G1
             // path (variable-Z gradient is incompatible with arc fitting).
-            const bool any_pathblend = (sloped == nullptr)
+            const bool any_pathblend = !any_neoweave
+                && (sloped == nullptr)
                 && (m_pb_sub_pass >= 0)
                 && (m_pb_sub_cfg != nullptr);
+            if (any_neoweave) {
+                // NEOTKO_NEOWEAVING_PORT_TAG — full path delegated to NeoweaveEngine (Wave +
+                // Linear Z-motion logic). SAFC flow compensation is not applied to neoweaved paths
+                // (surface fills are never small-area candidates; infill override is a rare edge
+                // case) — same as legacy.
+                gcode += NeoweaveEngine::apply_path(
+                    path, m_config, m_writer,
+                    m_layer_index, m_nominal_z, F, e_per_mm,
+                    path.is_force_no_extrusion(),
+                    [this](const Point& p) { return this->point_to_gcode(p); });
+                gcode += NeoweaveEngine::restore_z(
+                    m_config, m_writer, m_nominal_z, F,
+                    path.role() != erInternalInfill);
+            } else
             if (any_pathblend) {
                 // pass_idx comes directly from the sublayer context (0 = ramp, 1 = cap).
                 const int pass_idx = m_pb_sub_pass;

@@ -58,6 +58,15 @@ enum class NeoweaveFilter {
     All,      // affects all solid infill (top, penultimate, bottom internal)
     TopOnly   // only affects top layers (stTop + stPenultimateInternalSolid)
 };
+
+// NEOTKO_NEOWEAVING_PORT_TAG — per-object infill override (ported from FULLSPECTRUM095
+// SurfaceColorMix.hpp, WAVESUPPORT_PLAN.md Fase 1). Tristate so an object can force infill
+// neoweaving on/off regardless of the global interlayer_neoweave_enabled preset value.
+enum class InfillNeoweaveOverride {
+    Inherit,  // use global interlayer_neoweave_enabled
+    Enable,   // force-enable for this object
+    Disable   // force-disable for this object
+};
 // NEOTKO_NEOWEAVING_TAG_END
 
 enum GCodeFlavor : unsigned char {
@@ -209,12 +218,37 @@ enum LongRectrationLevel
 };
 
 enum SupportMaterialInterfacePattern {
-    smipAuto, smipRectilinear, smipConcentric, smipRectilinearInterlaced, smipGrid
+    smipAuto, smipRectilinear, smipConcentric, smipRectilinearInterlaced, smipGrid,
+    smipWave // NEOTKO_WAVESUPPORT_TAG_UI — WAVESUPPORT_PLAN.md Fase 4b: Wave-Huygens roof, honoured
+             // only by SupportType::stWaveSupport (wavesupport_generate_toolpaths). Appended last so
+             // existing serialized indices are unchanged.
+};
+
+// NEOTKO_WAVESUPPORT_TAG_VARIANTS — WAVESUPPORT_PLAN.md Fase 4d. Config-layer mirrors of
+// FillWaveRoof's WaveRoofShape / WaveRoofPattern (translated in wavesupport_generate_toolpaths,
+// same idiom as smip*→ip*). Own Tier-B keys, isolated from stable support.
+// 1st level — the roof SHAPE (visually distinct):
+enum SupportMaterialWaveRoofPattern {
+    smwrpConcentric, smwrpWave
+};
+// 2nd level — the print ORDER/stitching (same geometry, different traversal):
+enum SupportMaterialWaveRoofOrder {
+    smwroSmart, smwroZigZag, smwroMonotonic
 };
 
 // BBS
 enum SupportType {
-    stNormalAuto, stTreeAuto, stNormal, stTree
+    stNormalAuto, stTreeAuto, stNormal, stTree,
+    // NEOTKO_WAVESUPPORT_TAG — WAVESUPPORT_PLAN.md Fase 2 (revised): WaveSupport is its own Type,
+    // not a support_style value under Normal — architecturally it deserves the same standing as
+    // Tree (its own dedicated engine/options, not a variant nested inside another Type's Style
+    // combo). Appended at the end to preserve existing enum ints. Audited (2026-07-11): zero
+    // `switch` statements over SupportType/support_type in the whole tree; the ~9 real comparison
+    // sites are plain `if`/`==` checks that degrade safely for an unhandled value (grep for
+    // "support_type.value ==" / "support_type ==" across src/ to re-verify if this drifts).
+    // Gated behind LibreMode in the UI (Tab.cpp); dispatched in
+    // PrintObject::_generate_support_material() alongside is_tree(), not nested under it.
+    stWaveSupport,
 };
 inline bool is_tree(SupportType stype)
 {
@@ -557,6 +591,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialStyle)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialInterfacePattern)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialWaveRoofPattern) // NEOTKO_WAVESUPPORT_TAG_VARIANTS
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialWaveRoofOrder)   // NEOTKO_WAVESUPPORT_TAG_VARIANTS
 // BBS
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
@@ -962,6 +998,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_interface_speed))
     ((ConfigOptionEnum<SupportMaterialPattern>, support_base_pattern))
     ((ConfigOptionEnum<SupportMaterialInterfacePattern>, support_interface_pattern))
+    // NEOTKO_WAVESUPPORT_TAG_VARIANTS — Fase 4d: Wave roof SHAPE (Concentric/Wave) + print ORDER
+    // (Smart/ZigZag/Monotonic) + reverse toggle. Only honoured when SupportType::stWaveSupport +
+    // support_interface_pattern == smipWave.
+    ((ConfigOptionEnum<SupportMaterialWaveRoofPattern>, wavesupport_roof_pattern))
+    ((ConfigOptionEnum<SupportMaterialWaveRoofOrder>,   wavesupport_roof_order))
+    ((ConfigOptionBool,                wavesupport_roof_reverse))
+    // Hollow pillar: N concentric perimeters, no infill (0 = solid, current behaviour).
+    ((ConfigOptionInt,                 wavesupport_wall_loops))
     // Spacing between support material lines (the hatching distance).
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))
@@ -1264,10 +1308,22 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // re-verify no neoweaving-code dependency when SurfaceColorMix.cpp lands).
     ((ConfigOptionBool,                   neotko_interlayer_nesting_enabled))
     // NEOTKO_NEOWEAVING_TAG — angle-lock keys consumed by Fill (_infill_direction).
-    // The full wave engine (NeoweaveEngine) + numeric keys live with GCode/SurfaceColorMix.
     ((ConfigOptionBool,                   interlayer_neoweave_enabled))
     ((ConfigOptionEnum<NeoweaveMode>,     interlayer_neoweave_mode))
     ((ConfigOptionEnum<NeoweaveFilter>,   neoweave_filter))
+    // NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1: numeric + infill-override keys
+    // ported from FULLSPECTRUM095 (legacy) alongside NeoweaveEngine itself — the engine's
+    // apply_path()/needs_weave() read these directly (SurfaceColorMix.cpp).
+    ((ConfigOptionFloat,                  interlayer_neoweave_amplitude))
+    ((ConfigOptionFloat,                  interlayer_neoweave_period))
+    ((ConfigOptionFloat,                  interlayer_neoweave_max_z_speed))
+    ((ConfigOptionFloat,                  interlayer_neoweave_min_length))
+    ((ConfigOptionInt,                    neoweave_penultimate_layers))
+    ((ConfigOptionInt,                    neoweave_speed_pct))
+    ((ConfigOptionEnum<InfillNeoweaveOverride>, infill_neoweave_enabled))
+    ((ConfigOptionFloat,                  infill_neoweave_amplitude))
+    ((ConfigOptionFloat,                  infill_neoweave_period))
+    ((ConfigOptionFloat,                  infill_neoweave_max_z_speed))
     // NEOTKO_COLORMIX_TAG_START — Surface ColorMix
     ((ConfigOptionBool,    interlayer_colormix_enabled))
     ((ConfigOptionInt,     interlayer_colormix_surface))

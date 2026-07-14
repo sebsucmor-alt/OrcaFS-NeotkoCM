@@ -2779,6 +2779,259 @@ int SurfaceColorMix::colormix_angle_for_profile_id(int profile_id, bool penu)
 // NEOTKO_PROFILE_TAG_END
 
 
+// NEOTKO_NEOWEAVING_PORT_TAG_START — WAVESUPPORT_PLAN.md Fase 1: NeoweaveEngine ported from
+// FULLSPECTRUM095 (legacy) SurfaceColorMix.cpp:2313-2527. All Z-motion computation lives here;
+// GCode.cpp calls needs_weave() + apply_path() + restore_z(). Attribution: the Z-axis
+// interdigitation concept ("Neoweaving") is prior art internal to this fork, invented by Neotko
+// in a session before WaveSupport — see docs/FUTURE/ATTRIBUTION_WAVESUPPORT.md §1.
+// (GCodeWriter.hpp included at file top, outside namespace Slic3r — see include comment.)
+
+// Keep M_PI available without relying on platform extensions
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+bool NeoweaveEngine::needs_weave(const ExtrusionPath& path, const PrintRegionConfig& cfg)
+{
+    if (!cfg.interlayer_neoweave_enabled.value)
+        return (cfg.infill_neoweave_enabled.value == InfillNeoweaveOverride::Enable
+                && path.role() == erInternalInfill);
+
+    // NEOTKO_NEOWEAVING_PORT_TAG — legacy disabled Wave mode here (known OOM crash: apply_path()'s
+    // Wave micro-segment loop grew `gcode` with unreserved `+=` calls, exhausting RAM on complex
+    // top surfaces). The fix (gcode.reserve() before that loop) is applied in apply_path() below,
+    // ported alongside the engine per WAVESUPPORT_PLAN.md Fase 1 ("portar YA con el fix aplicado;
+    // no reproducir el bug a propósito para arreglarlo después") — Wave mode is enabled here.
+
+    const bool linear = (cfg.interlayer_neoweave_mode.value == NeoweaveMode::Linear);
+    const NeoweaveFilter filter = cfg.neoweave_filter.value;
+
+    // Surface/penultimate roles always qualify
+    if (path.role() == erTopSolidInfill)
+        return true;
+    // Penultimate: respect neoweave_penultimate_layers (0 = disabled)
+    if (path.role() == erPenultimateInfill)
+        return cfg.neoweave_penultimate_layers.value > 0;
+    // Solid infill in Linear+All mode for interlayer angle-lock synergy
+    if (linear && path.role() == erSolidInfill && filter == NeoweaveFilter::All)
+        return true;
+    // Infill override (tristate)
+    if (cfg.infill_neoweave_enabled.value == InfillNeoweaveOverride::Enable
+            && path.role() == erInternalInfill)
+        return true;
+    return false;
+}
+
+std::string NeoweaveEngine::apply_path(
+    const ExtrusionPath&                       path,
+    const PrintRegionConfig&                   cfg,
+    GCodeWriter&                               writer,
+    int                                        layer_index,
+    double                                     nominal_z,
+    double                                     F,
+    double                                     e_per_mm,
+    bool                                       is_force_no_extr,
+    const std::function<Vec2d(const Point&)>&  point_to_gcode,
+    bool                                       contact_mode)
+{
+    std::string gcode;
+
+    // ── Resolve which weave mode applies ────────────────────────────────────────
+    const bool surface_enabled = cfg.interlayer_neoweave_enabled.value;
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — Fase 5: contact mode is always WAVE (never Linear), so the
+    // support contact-layer gets the sinusoidal microgaps described in WAVESUPPORT_PLAN.md §1.
+    const bool linear          = !contact_mode && surface_enabled
+                              && (cfg.interlayer_neoweave_mode.value == NeoweaveMode::Linear);
+    const NeoweaveFilter filter = cfg.neoweave_filter.value;
+
+    const bool surface_weave =
+        surface_enabled &&
+        (path.role() == erTopSolidInfill
+         || path.role() == erPenultimateInfill
+         || (linear && path.role() == erSolidInfill && filter == NeoweaveFilter::All));
+
+    const bool infill_weave =
+        (cfg.infill_neoweave_enabled.value == InfillNeoweaveOverride::Enable)
+        && path.role() == erInternalInfill;
+
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — Fase 5: contact mode bypasses the role gate entirely (the
+    // bottom contact layer is erBridgeInfill/erSolidInfill, which none of the branches above accept)
+    // and reuses the interlayer_neoweave_* parameter set below.
+    const bool any_weave = surface_weave || infill_weave || contact_mode;
+    if (!any_weave)
+        return gcode; // caller handles normal extrusion
+
+    // ── Resolve parameter set ────────────────────────────────────────────────────
+    // Contact mode and surface weave both read the interlayer_* keys; only pure infill override
+    // reads the infill_* keys.
+    const bool use_surface_params = surface_weave || contact_mode;
+    double weave_period = use_surface_params ? cfg.interlayer_neoweave_period.value
+                                             : cfg.infill_neoweave_period.value;
+    if (weave_period < 1e-9) {
+        weave_period = unscale<double>(path.width);
+        if (weave_period < 1e-9) weave_period = 0.4;
+    }
+    const double weave_amplitude = use_surface_params ? cfg.interlayer_neoweave_amplitude.value
+                                                      : cfg.infill_neoweave_amplitude.value;
+    const double weave_max_z_speed = use_surface_params ? cfg.interlayer_neoweave_max_z_speed.value
+                                                        : cfg.infill_neoweave_max_z_speed.value;
+    const double weave_min_length  = cfg.interlayer_neoweave_min_length.value;
+
+    if (weave_amplitude < 1e-9)
+        return gcode; // degenerate — nothing to emit; caller falls through to normal
+
+    // ── Wave mode: cap XY speed globally ────────────────────────────────────────
+    double weave_F = F;
+    if (!linear && weave_period > 1e-9) {
+        const double xy_speed_max = weave_max_z_speed * weave_period / (2.0 * M_PI * weave_amplitude);
+        const double xy_F_max     = xy_speed_max * 60.0; // mm/min
+        weave_F = std::min(F, xy_F_max);
+        if (std::abs(weave_F - F) > 1e-9)
+            gcode += writer.set_speed(weave_F, "", "");
+    }
+
+    // ── Speed override (Linear mode) ────────────────────────────────────────────
+    // neoweave_speed_pct scales the G1 F on the Z move; firmware inherits it for
+    // the following extrude_to_xy (no explicit F emitted there). restore_z resets
+    // to the original F via its own G1 Z move.
+    const int speed_pct = std::max(1, std::min(200, cfg.neoweave_speed_pct.value));
+    const double weave_line_F = F * speed_pct / 100.0;
+
+    // NEOTKO_NEOWEAVING_PORT_TAG — OOM fix (WAVESUPPORT_PLAN.md Fase 1 / WAVESUPPORT_RESEARCH.md
+    // §6): pre-reserve so the `gcode +=` calls in the Wave micro-segment loop below don't
+    // repeatedly reallocate on wide/complex top surfaces (10k+ lines, each split into >=8 Wave
+    // micro-segments per oscillation period) — this is the fix that was documented but never
+    // applied in the legacy engine (Wave mode was force-disabled there instead, see needs_weave()).
+    // Estimate: total path length / segment size = total micro-segments emitted; ~48 bytes is a
+    // conservative per-segment G1 line length (e.g. "G1 X123.456 Y123.456 Z0.12345 E0.01234\n").
+    if (!linear && weave_period > 1e-9) {
+        double total_len = 0.0;
+        for (const Line& line : path.polyline.lines())
+            total_len += line.length() * SCALING_FACTOR;
+        const int    n_per_period  = 8;
+        const double seg_target    = weave_period / double(n_per_period);
+        const size_t est_segments  = seg_target > 1e-9
+            ? size_t(total_len / seg_target) + path.polyline.lines().size()
+            : path.polyline.lines().size();
+        gcode.reserve(gcode.size() + est_segments * 48);
+    }
+
+    // ── Per-line state ────────────────────────────────────────────────────────────
+    double weave_dist    = 0.0;
+    int    weave_line_idx = 0;
+
+    for (const Line& line : path.polyline.lines()) {
+        const double line_length = line.length() * SCALING_FACTOR;
+        if (line_length < 1e-9) continue;
+        const double dE = e_per_mm * line_length;
+
+        if (linear && surface_weave) {
+            // ── Linear mode ───────────────────────────────────────────────────────
+            // Auto-minimum: max(user_min_length, 2×line_width) filters connector segments.
+            const double auto_min     = std::max(weave_min_length,
+                                                  2.0 * unscale<double>(path.width));
+            const bool   line_too_short = line_length < auto_min;
+
+            if (line_too_short) {
+                // Connector — extrude at current Z, do not count toward line index
+                gcode += writer.extrude_to_xy(point_to_gcode(line.b), dE, "", is_force_no_extr);
+            } else {
+                // Alternate per-line: 0/+A with layer parity flip for interlayer nesting.
+                // 0/+A (never below nominal) avoids moiré interference between objects.
+                const bool layer_flip   = (layer_index % 2 != 0);
+                const bool line_is_even = (weave_line_idx % 2 == 0);
+                const bool elevated     = (line_is_even == layer_flip); // XOR → elevated
+                const double target_z   = nominal_z + (elevated ? weave_amplitude : 0.0);
+
+                // G1 Z move at neoweave speed (NOT travel speed — legacy §7.6 NeoweaveF bug).
+                // weave_line_F = F * neoweave_speed_pct/100; firmware inherits it for
+                // the following extrude_to_xy. restore_z resets back to F.
+                {
+                    GCodeG1Formatter w;
+                    w.emit_z(target_z);
+                    w.emit_f(weave_line_F);
+                    w.emit_comment(GCodeWriter::full_gcode_comment,
+                        elevated ? "Neoweaving: line Z +A" : "Neoweaving: line Z nominal");
+                    gcode += w.string();
+                    writer.get_position().z() = target_z;
+                }
+                gcode += writer.extrude_to_xy(point_to_gcode(line.b), dE, "", is_force_no_extr);
+                ++weave_line_idx;
+            }
+            weave_dist += line_length;
+
+        } else if (!linear && weave_period > 1e-9) {
+            // ── Wave mode ─────────────────────────────────────────────────────────
+            // Subdivide line into ≥8 micro-segments per period for smooth sinusoid.
+            const int    n_per_period = 8;
+            const double seg_target   = weave_period / double(n_per_period);
+            const int    n_segs       = std::max(1, (int)std::ceil(line_length / seg_target));
+            const double seg_len      = line_length / double(n_segs);
+            const double dE_seg       = dE / double(n_segs);
+
+            const Vec2d pt_a = point_to_gcode(line.a);
+            const Vec2d pt_b = point_to_gcode(line.b);
+
+            for (int si = 0; si < n_segs; ++si) {
+                const double t     = double(si + 1) / double(n_segs);
+                const Vec2d  pt    = pt_a + t * (pt_b - pt_a);
+                const double d     = weave_dist + seg_len * double(si + 1);
+                const double phase = (d / weave_period) * 2.0 * M_PI;
+                // NEOTKO_NEOWEAVE_CONTACT_TAG — Fase 5: contact mode is UPWARD-ONLY (rectified
+                // sine) → valleys sit at nominal_z (touch the support roof), crests lift to
+                // nominal_z+A (air gap). Never below nominal_z, so the nozzle can never penetrate
+                // the roof regardless of A (§4 NEVER-do satisfied by construction). Regular
+                // top/penu/infill weaving keeps the symmetric ±A sine (unchanged).
+                const double z_off = contact_mode ? weave_amplitude * std::abs(std::sin(phase))
+                                                  : weave_amplitude * std::sin(phase);
+                const Vec3d  dest3d(pt(0), pt(1), nominal_z + z_off);
+                gcode += writer.extrude_to_xyz(dest3d, dE_seg, "", is_force_no_extr);
+            }
+            weave_dist += line_length;
+
+        } else {
+            // Degenerate (wave with zero period) — plain extrusion
+            gcode += writer.extrude_to_xy(point_to_gcode(line.b), dE, "", is_force_no_extr);
+        }
+    }
+
+    return gcode;
+}
+
+std::string NeoweaveEngine::restore_z(
+    const PrintRegionConfig& cfg,
+    GCodeWriter&             writer,
+    double                   nominal_z,
+    double                   F,
+    bool                     surface_weave_active,
+    bool                     contact_mode)
+{
+    std::string gcode;
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — Fase 5: contact mode always weaves in Wave, so restore via the
+    // Wave branch (travel_to_z) even if the region happens to have interlayer neoweave set to Linear.
+    const bool linear = !contact_mode
+                     && cfg.interlayer_neoweave_enabled.value
+                     && (cfg.interlayer_neoweave_mode.value == NeoweaveMode::Linear);
+
+    const char* comment = surface_weave_active
+        ? "Neotko Neoweaving: restore layer Z"
+        : "Neotko infill neoweaving: restore layer Z";
+
+    if (linear) {
+        // G1 Z move at print speed to avoid travel_to_z emitting travel F (legacy §7.6 fix)
+        GCodeG1Formatter w;
+        w.emit_z(nominal_z);
+        w.emit_f(F);
+        w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        gcode += w.string();
+        writer.get_position().z() = nominal_z;
+    } else {
+        gcode += writer.travel_to_z(nominal_z, comment);
+    }
+    return gcode;
+}
+// NEOTKO_NEOWEAVING_PORT_TAG_END
+
 
 // NEOTKO_PATHBLEND_TAG_START — PathBlendPassConfig implementation
 

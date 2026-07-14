@@ -649,6 +649,71 @@ struct SurfacePassStack {
 class GCodeWriter;
 struct ExtrusionPath;
 
+// NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1: ported from FULLSPECTRUM095
+// (legacy) SurfaceColorMix.hpp:597-639, where this class was fully implemented and print-tested
+// (Linear mode) but never carried over to the SNAPOFFICIAL canonical port (Tier B keys were
+// dropped, see PrintConfig.hpp/CMakeLists.txt comments). Wave mode was disabled in the legacy
+// engine due to a known OOM crash (unbounded std::string growth in apply_path()'s micro-segment
+// loop on complex top surfaces, 10k+ lines) — the fix (pre-reserve the gcode buffer) is applied
+// in this port's apply_path() (SurfaceColorMix.cpp), so Wave mode is enabled here from the start.
+// WaveSupport (docs/FUTURE/WAVESUPPORT_PLAN.md) Mecanismo 2 depends on this engine's Wave mode to
+// create the contact-layer microgaps described there — Fase 5, not part of this port.
+class NeoweaveEngine {
+public:
+    // Returns true if neoweaving should apply to this path.
+    // When true, the caller MUST skip arc-fitting and use G1 extrusion.
+    static bool needs_weave(const ExtrusionPath& path, const PrintRegionConfig& cfg);
+
+    // Apply neowave to a complete ExtrusionPath (all lines in its polyline).
+    // Appends to gcode_out. Both Wave and Linear modes handled.
+    // Does NOT include the final Z-restore after the path; call restore_z() after.
+    //
+    // Parameters:
+    //   path              — path to extrude (polyline + role + width)
+    //   cfg               — region config (mode, amplitude, period, etc.)
+    //   writer            — GCodeWriter for emit helpers (extrude_to_xy/xyz, get_position)
+    //   layer_index       — m_layer_index (parity used for Linear mode)
+    //   nominal_z         — m_nominal_z (layer base Z)
+    //   F                 — current print speed (mm/min)
+    //   e_per_mm          — extrusion per mm for this path
+    //   is_force_no_extr  — pass-through path flag
+    //   point_to_gcode    — converts Slic3r Point → Vec2d GCode coords (lambda from GCode.cpp)
+    //   contact_mode      — WAVESUPPORT_PLAN.md Fase 5 (Mecanismo 2). When true: force WAVE mode
+    //                       and apply to ANY role (bypassing the role gate), using the
+    //                       interlayer_neoweave_* parameter set. The oscillation is UPWARD-ONLY
+    //                       (z ∈ [nominal_z, nominal_z + amplitude], rectified sine) so the contact
+    //                       layer's valleys touch the support roof at nominal_z and its crests lift
+    //                       into air — never dipping below nominal_z. This structurally guarantees
+    //                       the "amplitude ≤ layer_height/2 → no penetration of the previous layer"
+    //                       NEVER-do (§4): the nozzle cannot penetrate the roof regardless of A.
+    //                       (This supersedes the plan's literal "negative amplitude / valley-down"
+    //                       wording, which a symmetric ±A sine would violate.) Default false =
+    //                       byte-identical legacy behaviour for top/penu/infill neoweaving.
+    static std::string apply_path(
+        const ExtrusionPath&                       path,
+        const PrintRegionConfig&                   cfg,
+        GCodeWriter&                               writer,
+        int                                        layer_index,
+        double                                     nominal_z,
+        double                                     F,
+        double                                     e_per_mm,
+        bool                                       is_force_no_extr,
+        const std::function<Vec2d(const Point&)>&  point_to_gcode,
+        bool                                       contact_mode = false
+    );
+
+    // Restore the nozzle to nominal_z after a weaving path.
+    // Linear mode: emits a G1 Z move at path speed F (NOT travel speed).
+    // Wave mode:   emits travel_to_z (speed already capped via weave_F).
+    static std::string restore_z(
+        const PrintRegionConfig& cfg,
+        GCodeWriter&             writer,
+        double                   nominal_z,
+        double                   F,
+        bool                     surface_weave_active, // true=top/penultimate, false=infill
+        bool                     contact_mode = false  // Fase 5: force the Wave restore branch
+    );
+};
 // NEOTKO_NEOWEAVING_TAG_END
 
 // NEOTKO_MULTIPASS_TAG_START — PathBlend: Z+flow gradient intra-path

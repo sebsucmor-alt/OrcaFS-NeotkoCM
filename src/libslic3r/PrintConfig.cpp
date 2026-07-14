@@ -178,6 +178,14 @@ static t_config_enum_values s_keys_map_NeoweaveFilter {
     { "top_only", int(NeoweaveFilter::TopOnly) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoweaveFilter)
+
+// NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1
+static t_config_enum_values s_keys_map_InfillNeoweaveOverride {
+    { "inherit", int(InfillNeoweaveOverride::Inherit) },
+    { "enable",  int(InfillNeoweaveOverride::Enable)  },
+    { "disable", int(InfillNeoweaveOverride::Disable) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillNeoweaveOverride)
 // NEOTKO_NEOWEAVING_TAG_END
 
 static t_config_enum_values s_keys_map_InfillPattern {
@@ -294,15 +302,30 @@ static t_config_enum_values s_keys_map_SupportMaterialInterfacePattern {
     { "rectilinear",    smipRectilinear },
     { "concentric",     smipConcentric },
     { "rectilinear_interlaced", smipRectilinearInterlaced},
-    { "grid",           smipGrid }
+    { "grid",           smipGrid },
+    { "wave",           smipWave } // NEOTKO_WAVESUPPORT_TAG_UI — Fase 4b
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialInterfacePattern)
+
+// NEOTKO_WAVESUPPORT_TAG_VARIANTS — Fase 4d
+static t_config_enum_values s_keys_map_SupportMaterialWaveRoofPattern {
+    { "concentric", smwrpConcentric },
+    { "wave",       smwrpWave }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialWaveRoofPattern)
+static t_config_enum_values s_keys_map_SupportMaterialWaveRoofOrder {
+    { "smart",     smwroSmart },
+    { "zigzag",    smwroZigZag },
+    { "monotonic", smwroMonotonic }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialWaveRoofOrder)
 
 static t_config_enum_values s_keys_map_SupportType{
     { "normal(auto)",   stNormalAuto },
     { "tree(auto)", stTreeAuto },
     { "normal(manual)", stNormal },
-    { "tree(manual)", stTree }
+    { "tree(manual)", stTree },
+    { "neowave", stWaveSupport } // NEOTKO_WAVESUPPORT_TAG — WAVESUPPORT_PLAN.md Fase 2 (revised)
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportType)
 
@@ -5549,10 +5572,16 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("tree(auto)");
     def->enum_values.push_back("normal(manual)");
     def->enum_values.push_back("tree(manual)");
+    // NEOTKO_WAVESUPPORT_TAG — WAVESUPPORT_PLAN.md Fase 2 (revised, s197): "NeoWave", its own Type
+    // (not a support_style value under Normal — see PrintConfig.hpp SupportType comment for the
+    // architecture rationale). Gated behind LibreMode — hidden from this combo's visible list when
+    // LibreMode is off (Tab.cpp toggle_options(), same rebuild-the-combo pattern used elsewhere).
+    def->enum_values.push_back("neowave");
     def->enum_labels.push_back(L("Normal (auto)"));
     def->enum_labels.push_back(L("Tree (auto)"));
     def->enum_labels.push_back(L("Normal (manual)"));
     def->enum_labels.push_back(L("Tree (manual)"));
+    def->enum_labels.push_back(L("NeoWave"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<SupportType>(stNormalAuto));
 
@@ -5792,13 +5821,71 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("concentric");
     def->enum_values.push_back("rectilinear_interlaced");
     def->enum_values.push_back("grid");
+    def->enum_values.push_back("wave"); // NEOTKO_WAVESUPPORT_TAG_UI — Fase 4b
     def->enum_labels.push_back(L("Default"));
     def->enum_labels.push_back(L("Rectilinear"));
     def->enum_labels.push_back(L("Concentric"));
     def->enum_labels.push_back(L("Rectilinear Interlaced"));
     def->enum_labels.push_back(L("Grid"));
+    def->enum_labels.push_back(L("Wave (NeoWave roof)")); // NEOTKO_WAVESUPPORT_TAG_UI — Fase 4b
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SupportMaterialInterfacePattern>(smipAuto));
+
+    // NEOTKO_WAVESUPPORT_TAG_VARIANTS — Fase 4d: Wave roof SHAPE (1st level) + ORDER (2nd) + reverse.
+    def = this->add("wavesupport_roof_pattern", coEnum);
+    def->label = L("Wave roof shape");
+    def->category = L("Support");
+    def->tooltip = L("Shape of the NeoWave support roof. Concentric collapses nested rings inward "
+                     "from the boundary (good for bridging over a hollow pillar). Wave sweeps open "
+                     "arcs across the region, diffracting around concavities (better on irregular "
+                     "roofs). Only used when the support type is NeoWave and the interface pattern is Wave.");
+    def->enum_keys_map = &ConfigOptionEnum<SupportMaterialWaveRoofPattern>::get_enum_values();
+    def->enum_values.push_back("concentric");
+    def->enum_values.push_back("wave");
+    def->enum_labels.push_back(L("Concentric"));
+    def->enum_labels.push_back(L("Wave"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SupportMaterialWaveRoofPattern>(smwrpWave));
+
+    def = this->add("wavesupport_roof_order", coEnum);
+    def->label = L("Wave roof order");
+    def->category = L("Support");
+    def->tooltip = L("Print order of the NeoWave roof fronts (the drawn shape is the same, only the "
+                     "traversal changes). Smart minimises travels, ZigZag chains fronts into one "
+                     "continuous path (fewer retractions), Monotonic keeps each front separate. "
+                     "Only used when the support type is NeoWave and the interface pattern is Wave.");
+    def->enum_keys_map = &ConfigOptionEnum<SupportMaterialWaveRoofOrder>::get_enum_values();
+    def->enum_values.push_back("smart");
+    def->enum_values.push_back("zigzag");
+    def->enum_values.push_back("monotonic");
+    def->enum_labels.push_back(L("Smart"));
+    def->enum_labels.push_back(L("ZigZag"));
+    def->enum_labels.push_back(L("Monotonic"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SupportMaterialWaveRoofOrder>(smwroSmart));
+
+    def = this->add("wavesupport_roof_reverse", coBool);
+    def->label = L("Reverse wave roof order");
+    def->category = L("Support");
+    def->tooltip = L("Invert the print order of the NeoWave roof fronts. Controls whether the roof "
+                     "is laid from the outer perimeter inward or from the centre outward — the "
+                     "former lets the roof close over a hollow (perimeter-only) support pillar. "
+                     "Only used when the support type is NeoWave and the interface pattern is Wave.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_WAVESUPPORT_TAG_ROOF — Fase 4: hollow NeoWave pillar.
+    def = this->add("wavesupport_wall_loops", coInt);
+    def->label = L("Hollow pillar walls");
+    def->category = L("Support");
+    def->tooltip = L("Number of perimeter walls of the NeoWave support body, printed with NO infill "
+                     "(a hollow pillar) so a wave roof can cap a lightweight support. 0 keeps the "
+                     "normal solid support body. The first layer stays solid for bed adhesion. "
+                     "Only used when the support type is NeoWave and the interface pattern is Wave.");
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("support_base_pattern_spacing", coFloat);
     def->label = L("Base pattern spacing");
@@ -6747,6 +6834,118 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Top only (recommended)"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<NeoweaveFilter>(NeoweaveFilter::TopOnly));
+
+    // NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1: numeric keys ported from
+    // FULLSPECTRUM095 PrintConfig.cpp verbatim (labels/tooltips/ranges/defaults unchanged).
+    def = this->add("interlayer_neoweave_min_length", coFloat);
+    def->label = L("Minimum line length for linear neoweave");
+    def->category = L("Quality");
+    def->tooltip = L("Linear neoweave mode only. Lines shorter than this are printed at nominal Z without ramp.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 50.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.0));
+
+    def = this->add("interlayer_neoweave_amplitude", coFloat);
+    def->label = L("Neoweave Z amplitude");
+    def->category = L("Quality");
+    def->tooltip = L("Peak Z deviation during oscillation. Typical: 0.05-0.2 mm.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("interlayer_neoweave_period", coFloat);
+    def->label = L("Neoweave oscillation period");
+    def->category = L("Quality");
+    def->tooltip = L("Distance for one complete Z oscillation cycle. 0 = auto (line width).");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("interlayer_neoweave_max_z_speed", coFloat);
+    def->label = L("Neoweave max Z speed");
+    def->category = L("Quality");
+    def->tooltip = L("Maximum Z axis speed during neoweaving. XY speed is capped to stay within this limit.");
+    def->sidetext = "mm/s";
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(20.));
+
+    def = this->add("neoweave_penultimate_layers", coInt);
+    def->label = L("Neoweave penultimate layers");
+    def->category = L("Quality");
+    def->tooltip = L("Number of penultimate layers that receive neoweaving. "
+                     "0 = disabled (only top surface is neoweaved). "
+                     "1+ = that many penultimate layers also get Z-motion treatment.");
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("neoweave_speed_pct", coInt);
+    def->label = L("Neoweave speed %");
+    def->category = L("Quality");
+    def->tooltip = L("Speed multiplier for neoweaved lines (Linear mode). "
+                     "100 = no change. Lower values improve Z precision on narrow lines. "
+                     "Applied to the G1 Z move; firmware inherits this speed for the following extrusion.");
+    def->sidetext = "%";
+    def->min = 1;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(100));
+
+    def = this->add("infill_neoweave_enabled", coEnum);
+    def->label = L("Infill Neoweaving");
+    def->category = L("Strength");
+    def->tooltip = L("Per-object override for infill neoweaving.\n\n"
+                     "Inherit: use global preset setting.\n"
+                     "Enable: force-enable for this object.\n"
+                     "Disable: force-disable for this object.");
+    def->enum_keys_map = &ConfigOptionEnum<InfillNeoweaveOverride>::get_enum_values();
+    def->enum_values.push_back("inherit");
+    def->enum_values.push_back("enable");
+    def->enum_values.push_back("disable");
+    def->enum_labels.push_back(L("Inherit from preset"));
+    def->enum_labels.push_back(L("Enable"));
+    def->enum_labels.push_back(L("Disable"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<InfillNeoweaveOverride>(InfillNeoweaveOverride::Inherit));
+
+    def = this->add("infill_neoweave_amplitude", coFloat);
+    def->label = L("Infill neoweave Z amplitude");
+    def->category = L("Strength");
+    def->tooltip = L("Peak Z deviation during infill oscillation. Typical: 0.05-0.3 mm.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("infill_neoweave_period", coFloat);
+    def->label = L("Infill neoweave oscillation period");
+    def->category = L("Strength");
+    def->tooltip = L("Distance for one complete Z oscillation cycle in infill. 0 = auto (line width).");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("infill_neoweave_max_z_speed", coFloat);
+    def->label = L("Infill neoweave max Z speed");
+    def->category = L("Strength");
+    def->tooltip = L("Maximum Z speed during infill neoweaving. XY sparse infill speed is capped accordingly.");
+    def->sidetext = "mm/s";
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(20.));
     // NEOTKO_NEOWEAVING_TAG_END
 
     // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice wipe tower planner

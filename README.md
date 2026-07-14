@@ -77,6 +77,16 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 9c. [Sandwich purge compaction](#9c-sandwich-purge-compaction)
    - 9d. [Sandwich wipe reserve](#9d-sandwich-wipe-reserve)
    - 9e. [Adaptive layers × multi-tool × Sandwich (WIP)](#9e-adaptive-layers--multi-tool--sandwich-wip)
+10. [Bump Mapping Editor — texture-driven wall & top-surface relief](#10-bump-mapping-editor--texture-driven-wall--top-surface-relief)
+    - 10a. [All mode — object-wide wall texture](#10a-all-mode--object-wide-wall-texture)
+    - 10b. [Painter mode — per-zone texture](#10b-painter-mode--per-zone-texture)
+    - 10c. [Top mode — ZBump, top-surface height-map relief](#10c-top-mode--zbump-top-surface-height-map-relief)
+11. [Precision Adaptive Layer Height — point-based layer height curve](#11-precision-adaptive-layer-height--point-based-layer-height-curve)
+12. [NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar](#12-neowave-support-wip--wave-huygens-roof--hollow-pillar)
+13. [Painter Pro Mode — precision tools for the stock Color Painting gizmo](#13-painter-pro-mode--precision-tools-for-the-stock-color-painting-gizmo)
+    - 13a. [Brush precision](#13a-brush-precision)
+    - 13b. [Paint perimeters only + Extra walls](#13b-paint-perimeters-only--extra-walls)
+    - 13c. [Rectangle & Polygon masks](#13c-rectangle--polygon-masks)
 
 ---
 
@@ -93,8 +103,8 @@ The dialog has two columns — **Top layer** and **Penultimate layer**. Each is 
 Each pass exposes:
 - a **kind** (see §1a),
 - a **Z mm** height box,
-- an **angle** box (`-1 = auto`; scroll the wheel over the box to rotate). For a PathBlend pass this becomes **ramp end**,
-- an **Advanced ⚙** / **Edit…** button to open that pass's detailed settings (a `*` marks non-default values).
+- an **angle** box (`-1 = auto`; scroll the wheel over the box to rotate). For a PathBlend pass this same box is repurposed to show **ramp end** (the top height of the ramp, in mm) instead — PathBlend's own fill angle isn't edited from this box (see §1c),
+- an **Advanced ⚙** button to open that pass's detailed settings (a `*` marks non-default values) — for PathBlend this is where the start/end zone editor lives (§1c).
 
 A single **Perimeter override** checkbox per zone *clones the walls into every Solid pass* — useful when you want the perimeter reprinted with each glaze.
 
@@ -111,8 +121,8 @@ Each pass in a zone is one of:
 | **None** | Empty slot — no pass here. |
 | **Solid** | A normal solid fill pass with its own tool, angle and Z share. **Stack 2–3 Solid passes** and you get the classic *MultiPass* effect: cross-hatch (two angles, two colours), a glaze pass over a base, or an optical colour blend. |
 | **ColorStitch** | Decides the filament line by line across the surface — stripes, dithered blends, hard bands or a custom pattern. Configured in the **Edit gradient…** dialog (§1b). |
-| **PathBlend Half** | A gradient pass occupying half the height share — fades between filaments across the surface (§1c). |
-| **PathBlend Full** | A gradient pass occupying the full height of its slot. |
+| **PathBlend Half** | A gradient pass with **no complementary cap** — the ramp climbs from its floor straight up, one tool only (§1c). |
+| **PathBlend Full** | A gradient pass with a ramp **and** a complementary cap in a second tool, filling the rest of the layer height (§1c). |
 
 **MultiPass = multiple Solid passes.** There is no separate "MultiPass" button anymore — you simply add Solid passes and split the height between them with the dividers. Aim for the height shares to add up to the full layer for full coverage.
 
@@ -122,33 +132,56 @@ PathBlend is always a single full-height gradient — when you pick a PathBlend 
 
 ### 1b. ColorStitch pass — per-line color patterns
 
-A **ColorStitch** pass decides which filament prints each fill line. Open its **Edit gradient…** button to configure it. The pattern is chosen with the **Style** dropdown:
+A **ColorStitch** pass decides which filament prints each fill line. Open its **Edit gradient…** button to configure it — the same editor also opens from the **ColorStitch Painter**'s Pro tray (**`ADV…`** button), so whichever entry point you use, you get the identical dialog.
+
+**Pattern style** picks *where the pattern comes from*. Only one style is active at a time — they're mutually exclusive by design (a custom string, a MixedFilament recipe, a weave, a blend and a set of stripes can't all drive the same pass at once), and a one-line note under the selector always says what the active style does, shown in amber when it overrides everything else:
 
 | Style | What it produces |
 |-------|------------------|
-| **Custom text pattern** | You type a string of colour digits using the colour buttons; the slicer loops it across lines (line 1 → first digit, etc.). For exact, repeating stripes. |
+| **Custom pattern** | Click filament buttons to build a digit string by hand; the slicer loops it across lines (line 1 → first digit, etc.). For exact, repeating stripes you design yourself. `Clear` / `⌫ Undo digit` / `Invert` live here. |
+| **MixedFilament recipe** | Pick one of your MixedFilament combinations (e.g. *F1+F2 50/50*) — it becomes the whole pattern. Only shown when MixedFilament virtual digits are enabled. Switching to another style clears the active recipe. |
+| **Textile weave** | Ready-made weave structures generated for you — see below. |
 | **Smooth blend — 2 colours** | Two filaments distributed across the surface with a percentage split, dithered so the transition looks smooth. The most common choice. |
 | **Smooth blend — 3 colours** | Three filaments at configurable percentages; the middle colour concentrates in the centre. |
 | **Stripes — manual band sizes** | Explicit band counts: N lines of Colour 1, M of Colour 2, … repeating. |
 
-**Colours used** — pick **Color 1–4** (each maps to a loaded filament).
+**Colours used** — pick **Color 1–4** (each maps to a loaded filament). Only shown for the two blend styles and Stripes — Custom/MixedFilament/Weave patterns already carry their own colours in the digit string.
 
-**Blend controls** (smooth-blend styles):
+**Preview** — a horizontal strip plus a square "how it will look" sample, drawn at the pass's infill angle, always visible for **whatever style is active**, including Custom strings and MixedFilament recipes (previously these had no colour preview at all). Blends **stretch to fill the square once**, the same way the slicer spreads a gradient across the whole surface; patterns (Custom, MixedFilament, Weave, Stripes) **tile** as a repeating motif, matching how they actually print.
+
+**Blend controls** (Smooth blend styles):
 
 | Control | What it does |
 |---------|--------------|
 | **How much Color 1 / Color 2** | The percentage split. (In 3-colour, *Color 3 fills the rest* automatically.) |
 | **Color overlap (soft ← hard zones)** | How much colours bleed into each other in 3-colour blends. |
-| **Transition shape** | Even (same density everywhere) · Slow start · Slow end · S-curve (smooth start & end) · Custom shape (set **γ**) · Hard step. |
+| **Transition shape** | Even (same density everywhere) · **Slow start** (the default when you first pick a blend style) · Slow end · S-curve (smooth start & end) · Custom shape (set **γ**) · Hard step. |
 | **Skip tiny areas** | Surfaces with fewer than N fill lines use Color 1 only. |
-| **ColorStitch min. line length** | Fill lines shorter than this (mm) are skipped, so they keep the surrounding colour and avoid toolchanges on tiny segments. Default **0** (don't skip). |
-| **Invert direction ⇆** | Reverses the per-line sequence after generation. |
+| **Invert direction ⇆** | Reverses the per-line sequence (blend and stripe styles; Custom/Weave have their own `Invert` button instead). |
+
+**Textile weave** — classic weave structures from real fabric construction, generated as pattern strings from two colours you pick:
+
+| Weave | Pattern | Look |
+|-------|---------|------|
+| **Plain (tafetán)** | `1212` alternation | Balanced 50/50 mix, neither colour dominates. |
+| **Twill 2/2 (sarga)** | `1122` | Diagonal weave — the true per-layer diagonal offset isn't implemented yet, so today it prints as a static repeat (the dialog flags this). |
+| **Twill 3/1** | `1112` | One colour dominates, the other marks a diagonal (same offset caveat). |
+| **Satin 5 (satén)** | `11112` | One colour covers ~80% of the surface; the other appears as scattered accent points. |
+| **Houndstooth** | `1122` top / `2211` penultimate | The classic pattern only appears where Top and Penultimate cross at 90° — the dialog writes the correct half automatically for the surface you're editing and shows you the matching string for the other one. |
+
+Pick **Colour A** / **Colour B** to substitute into the weave; if you set both to the same filament, Colour B is nudged to the next one automatically (a one-colour weave isn't a weave). **Edit as custom pattern…** copies the generated string into the Custom style for hand-tweaking.
+
+**Stripes controls** — for each of Color 1–4: a swatch (following the colour picked above) and a **lines:** count. Bands repeat `[Color 1 × lines, Color 2 × lines, …]` until the surface is filled; 0 lines skips that colour.
+
+**Print options** (apply to every style):
+
+| Control | What it does |
+|---------|--------------|
 | **Infill angle override** | `-1 = Auto`. Scroll the **mouse wheel over the pass preview bar** to rotate it live — the bar's stripes rotate with it. A **fixed** angle (≥ 0) is now honoured **exactly** in the G-code (the per-layer fill rotation is locked out for that pass), so the print keeps the angle you set. `-1 = Auto` lets the slicer alternate per layer (uniform finish, but the orientation won't match a static preview). |
 | **Gradient repetitions** | `1 = single`; higher repeats the pattern across the surface. |
+| **ColorStitch min. line length** | Fill lines shorter than this (mm) are skipped, so they keep the surrounding colour and avoid toolchanges on tiny segments. Default **0** (don't skip). |
 
-A live **preview** shows the resulting gradient to scale, plus an estimate of how many lines a 60×60 mm surface would have at your filament width.
-
-> **MixedFilament note.** If the pattern uses a MixedFilament digit (5–9) or an active MixedFilament recipe, the gradient options are disabled — *the MixedFilament is the pattern.*
+An estimate of how many lines a 60×60 mm surface would have at your filament width is shown next to the strip preview.
 
 **⚠️ Required fill pattern: Monotonic Line.** ColorStitch only works correctly with the **MonotonicLine** top-surface fill pattern, because the slicer pre-splits the surface into individual straight paths before assigning tools. Monotonic and Rectilinear look fine on simple convex shapes but mis-sequence on complex objects. Set **Quality → Top surface pattern → Monotonic Line** before using ColorStitch.
 
@@ -156,11 +189,22 @@ A live **preview** shows the resulting gradient to scale, plus an estimate of ho
 
 ### 1c. PathBlend pass — smooth gradient
 
-A **PathBlend** pass creates a **continuous gradient** across the surface: one filament dominates at one edge, another at the opposite edge, with proportional flow path-by-path in between — all within a single layer. Choose **Half** or **Full** height when picking the kind, set the pass's **ramp end** (its angle box becomes the gradient direction control), and use **Edit…** for the gradient details (number of passes/filaments, min/max flow, easing, invert).
+A **PathBlend** pass creates a **continuous gradient** across the surface: one filament dominates at one edge, another at the opposite edge (Full mode), with the two flows changing in exact proportion path-by-path in between — a real, physical Z gradient within a single layer, not a dithered pattern. Choose **Half** (ramp only, no cap) or **Full** (ramp + complementary cap) when picking the kind.
 
-The gradient runs across the build-plate **Y axis** — rotate the object to change direction. PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse. It shares the **Line distribution mode** (§1f) — if a gradient looks broken across holes, try **LaneQuant** or **DirCluster**.
+**Basic controls**, on the pass's own row:
+- **floor** — the ramp's starting height (mm), at the low edge of the surface.
+- **ramp end** — the ramp's top height (mm), at the high edge. In **Half** mode this is locked to the full layer height (no cap exists to fill the rest). In **Full** mode you can drag it all the way up to the layer height too — that leaves **zero** of the cap's colour in that area ("techo"), useful when a translucent (high-TD) filament needs full opaque coverage instead of a thin sliver of the wrong colour on top.
+- **Mode** — a cycling button through **Linear / Ease In / Ease Out / Ease In-Out**, shaping how quickly the ramp climbs (only used by the older Sandwich-Editor-only engine path; the per-scanline staircase engine that actually prints today ramps linearly in `t` before the start/end zone below is applied).
 
-> ⚠️ **PathBlend is the most fragile part of the engine.** Its per-scanline staircase model is validated and must not be disturbed by unrelated changes.
+**`ADV…` — start/end zone editor.** Opens a small cross-section graph of the layer: the horizontal axis is position across the surface, the vertical axis is real height in mm. Two draggable handles set the shape:
+- the **low handle** — where the ramp starts to rise, and how low its floor sits;
+- the **high handle** — where the ramp finishes rising, and how high its top reaches.
+
+By default the ramp spans the full surface edge-to-edge (the classic behaviour). Drag the low handle right to add a flat "start zone" before the ramp begins climbing; drag the high handle left to add a flat "end zone" after it's done. This is the same editor, same model, in both the **Sandwich Editor**'s `ADV…`/Advanced button and the **ColorStitch Painter**'s Pro tray — whichever one you use, they write the same pass data.
+
+The gradient runs across the build-plate **Y axis** — rotate the object to change direction. PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse. It shares the **Line distribution mode** (§1f) — if a gradient looks broken across holes, try **LaneQuant** or **DirCluster**. In the **ColorStitch Painter** specifically, PathBlend also exposes its own **fill angle** field (`-1 = auto`, or a fixed 0–359° override) next to the Mode button — the Sandwich Editor doesn't have a separate control for this and leaves it on auto.
+
+> ⚠️ **PathBlend is the most fragile part of the engine.** Its per-scanline staircase model — one physical print-height step per fill line, each step resting on the layer below and its neighbours — is validated and must not be disturbed by unrelated changes. The start/end zone and floor/ramp-end controls above are an intentionally **safe** extension of that model: left at their defaults they reproduce the exact same G-code as before. A future, more ambitious idea — letting the ramp rise **and fall** within one pass instead of always climbing — was considered and set aside for now, because the current staircase can't do that without risking unsupported overhangs at the print head; it would need a different, multi-pass engine (closer to the Bump Mapping Editor's approach, §10) to do safely.
 
 ---
 
@@ -549,6 +593,213 @@ A new option **Variable layer height (Experimental)** sits under **Tower type** 
 
 ---
 
+## 10. Bump Mapping Editor — texture-driven wall & top-surface relief
+
+The **Bump Mapping Editor** is one gizmo (`GLGizmoTextureBump`) with three modes, switched via a
+bar at the top of its panel: **All**, **Painter**, and **Top**. All three turn a grayscale (or
+any) PNG into physical Z relief at slice time — the difference is *where* the relief goes and
+*how* it's scoped.
+
+> **Hidden behind a double gate in this build — expert-only, on purpose.** The gizmo only appears
+> in the toolbar with **both** (1) **Libre Mode** active (§4a: master switch in Preferences +
+> restart, then the toolbar toggle) **and** (2) the debug env var `ORCA_DEBUG_TEXTUREBUMP` set
+> before launch; Top mode additionally needs `ORCA_DEBUG_ZBUMP` (or `ORCA_DEBUG_ALL=1`) for ZBump
+> to actually apply when slicing. This isn't a placeholder gate — some option combinations here are
+> genuinely capable of producing bad extrusion (see the Classic-wall-generator note in §10a and the
+> per-mode limitations below), so it's kept off unless you've deliberately opted in and are prepared
+> to read the resulting G-code. Full per-OS activation steps and the safety notes that go with them
+> are in `NEOTKOCM_RELEASE_2_35.md`.
+
+### 10a. All mode — object-wide wall texture
+
+Applies one texture to every wall of the selected object, projected via **Planar / Cylindrical /
+Spherical / Cubic** (Quality → wall texture settings, or the panel's Source/Relief/Transform
+sections). Three on-canvas 3D handles adjust it without leaving the viewport:
+
+| Handle | Colour | Drag controls |
+|--------|--------|---------------|
+| **V** | blue | Scale (tile size, mm) |
+| **U** | orange | Repeat count |
+| **Yaw ring** | purple | Rotation around the pivot |
+| **Pivot** | pink | Pan — moves the tile origin |
+
+A live textured overlay shows the pattern on the object before slicing, so you can line it up by
+eye. The real object dims while the gizmo is open so the projection isn't hidden behind it.
+
+> ⚠️ **Wall generator: Arachne only.** Wall-texture bump (All + Painter modes) requires the
+> **Arachne** wall generator. It's deliberately disabled on **Classic** — a real test print showed
+> Classic silently over-extrudes when adjacent walls carry different bump amounts, and the preview
+> hides it while the G-code doesn't. **NeoArachne isn't wired up for it yet either.** Even on
+> Arachne, adjacent walls with very different bump amounts can still show a visible gap between
+> them (nothing adjusts line *width* to compensate, only the centreline moves) — this is a known,
+> open limitation, not something the gate gets you past.
+
+### 10b. Painter mode — per-zone texture
+
+Paint zones on the model (same brush/erase interaction as the other painter gizmos) and assign
+each zone its **own** texture, projection mode, scale, and thickness — independent of the
+object's base (All-mode) settings and of every other zone. Each zone gets its own overlay preview
+and a thumbnail in the zone list so you can tell them apart at a glance.
+
+### 10c. Top mode — ZBump, top-surface height-map relief
+
+A different feature entirely (no shared engine code with All/Painter's wall texture) that
+modulates the **Z height of the top-surface fill**, not wall XY. A grayscale image becomes a
+literal height field: brighter pixels raise the top surface, sampled point-by-point along every
+top-fill line for a real 2D relief (not one flat Z per line).
+
+| Control | What it does |
+|---------|--------------|
+| **Height (mm)** | Max Z displacement at full-white texture value. Shown in red past a safe-height estimate (0.8× nozzle − layer height) — a warning, not a hard cap; you can go past it and judge from the resulting G-code. |
+| **Reinforcement passes** | Splits the total height across multiple stacked passes when it exceeds what one pass can safely reach on its own. |
+| **Scale / Repeat** | Physical size of one image tile, and how many times it repeats. |
+| **Pan X / Y** | Shifts the tiling phase — drag the on-canvas green handle, or type exact values. |
+| **Edge ramp (mm)** | Smoothstep margin from the top-fill's own contour, so the wall itself stays flat. |
+
+The green pan handle rests at the object's own center plus the current offset, and a live
+textured overlay (cropped to roughly where top-fill actually starts, inset from the object's
+outer edge by its perimeter walls) previews the pattern before slicing — drag the handle or the
+numeric fields, both update the same preview live.
+
+> **Preview vs. slice.** The overlay is a GUI-only approximation (perimeter inset is estimated,
+> not the engine's exact fill boundary) — always meant as a placement guide, not a pixel-perfect
+> match. It's cross-checked against the real slicing math via a calibration log
+> (`ORCA_DEBUG_ZBUMP`, `/tmp/neotko_zbump.log`) that logs identical probe points from both the
+> GUI and the engine side for direct comparison.
+
+**Known limitation:** the on-canvas scale/rotation handles (in any mode of this gizmo) can
+disappear when the print bed renders behind them, depending on camera angle — visible fine from
+below. Long-standing, not specific to any one mode; not yet root-caused.
+
+---
+
+## 11. Precision Adaptive Layer Height — point-based layer height curve
+
+A gizmo (left-side toolbar) that replaces the stock "Layers editing" brush with an exact,
+point-based curve editor for variable layer height. Instead of clicking and dragging to add/remove
+detail (imprecise — you can't say "I want exactly 0.28 mm at Z=14.2 mm"), you place **control
+points** at an exact Z and height, drag them, and set a **tension** per segment to shape the curve
+between them.
+
+> Like **Align & Stack** (§7), this gizmo is gated behind **Libre Mode** (§4) — its icon is
+> **always visible** in the toolbar but stays disabled (greyed out) until Libre Mode is active. It
+> never affects the stock Variable Layer Height dialog/brush, which remains untouched and fully
+> usable with Libre Mode off.
+
+**How to use it**
+
+1. Enable **Libre Mode** (§4a), select a single object, open the gizmo.
+2. The panel shows a graph: height (mm) across, Z across the object's height vertically.
+   - The **bottom point** (grey) is the object's fixed first layer — it can't be moved or deleted.
+   - The **top point** (amber) can be dragged in height only.
+   - **Click anywhere else in the graph** to add a new point; **drag** any non-bottom point to move
+     it; **right-click** a point to delete it.
+3. With 3+ points, a **tension slider** appears per segment below the graph: `0` = straight line
+   (identical to the engine's default linear interpolation), `1` = a smooth curve through the
+   segment (monotone — it never overshoots past the two points' heights, so it can't spike outside
+   `min`/`max layer height`).
+4. While dragging or hovering a point, a translucent band lights up **on the object itself**,
+   showing exactly which Z-slice you're affecting — teal on hover, amber while dragging. A small
+   label over the point shows the exact Z and layer height live.
+5. Every discrete edit (point add/move/delete, tension change, Reset) is a normal undo step and
+   triggers a re-slice, same as the stock brush.
+
+**Current limitations (first version)**
+- Min/max layer height are **read-only** (from the printer/nozzle) — no per-object override yet.
+- Reopening the gizmo on an object that already has a *very* dense profile (e.g. one painted with
+  the old stock brush) falls back to a flat 2-point start rather than importing hundreds of points
+  as control points.
+- No result preview from the classic Adaptive/Smooth buttons — this gizmo is a separate, precise
+  path, not a replacement for those.
+
+---
+
+## 12. NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar
+
+> **(WIP, paused mid-implementation — Libre Mode only.)** The support roof and hollow pillar
+> described below are implemented and **print-validated**. The second half of the feature — a
+> matching contact layer on the object's first printed layer above the roof, meant to reduce
+> bonding for easier support removal — is designed but **not wired in this build**. Both the
+> support engine and the future contact layer are experimental; expect this section to expand in a
+> later release.
+
+**NeoWave** is a support type that replaces the interface/roof fill with a *wave-front* pattern —
+long, continuous paths that diffract around concavities (ported from a published wave-overhang
+algorithm), instead of straight parallel lines. It optionally hollows out the support body itself
+(perimeter-only, no infill) underneath that roof, trading material and print time for a support
+that still closes cleanly on top.
+
+> **Exposed only under Libre Mode** (§4): the **NeoWave** entry in **Support type**, and the Wave
+> roof controls below, appear only when Libre Mode is active.
+
+**Turning it on**
+
+1. Enable **Libre Mode** (§4a).
+2. **Support → Support type**: select **NeoWave**.
+3. **Support → Interface pattern**: select **Wave** — this is what actually switches the roof fill
+   to the wave engine. With any other pattern (Default/Grid/etc.), a NeoWave support prints its roof
+   like a normal support.
+
+**Wave roof controls** (appear once Interface pattern = Wave)
+
+| Control | Options / default | What it does |
+|---------|-------------------|--------------|
+| **Wave roof shape** | Concentric / **Wave** | *Concentric* collapses nested rings inward from the roof boundary. *Wave* sweeps open arcs across the region, diffracting around concavities. **Print-tested: Wave is the one that works — Concentric fails to close cleanly over a hollow pillar (see below).** |
+| **Wave roof order** | **Smart** / ZigZag / Monotonic | Print order of the same fronts — the drawn shape doesn't change, only how it's traversed. Smart hooks each front onto whatever is already printed (fewest long travels); ZigZag chains fronts into one continuous path; Monotonic keeps every front separate. |
+| **Reverse wave roof order** | on/off, default **off** | Flips which edge (or, for Concentric, which ring) the fill starts from. |
+| **Hollow pillar walls** | 0–10, default **0** | Number of perimeter walls for the support body, printed with **no infill** — a hollow pillar. `0` keeps the normal solid body. The first layer always stays solid for bed adhesion. |
+
+> **🖨️ Print result so far**: a hollow pillar (**Hollow pillar walls ≥ 1**) capped with a **Wave**
+> roof of **2 interface layers** printed cleanly. The same pillar capped with a **Concentric** roof
+> did **not** close properly over the hollow — use **Wave**, which is already the default shape.
+
+**Known gaps (this build)**
+
+- No dedicated key yet for roof layer count — it uses the existing **Interface top layers** setting.
+- The contact-layer half of the idea (a matching wave pattern on the object's own first layer,
+  meant to further ease removal) is designed but not implemented — see the WIP note above.
+- No dedicated UI panel/gizmo yet; all controls above live as plain fields under **Support**.
+
+---
+
+## 13. Painter Pro Mode — precision tools for the stock Color Painting gizmo
+
+> **Not the same gizmo as §6.** This section is about Orca's own **stock multi-material painter** — the **Color Painting** tool in the left-side gizmo toolbar (needs 2+ filaments configured; it's what you'd use to hand-assign filaments to triangles in any Orca build). It is a **different tool** from this pack's own **ColorStitch Painter** (§6), which paints *Sandwich effect profiles*, not raw filament assignment. **Pro Mode** is a collapsible section added to the bottom of the stock Color Painting panel with four precision add-ons on top of the regular brush. It is **always available** — no Libre Mode needed.
+
+The stock brush paints by hand with a circle/sphere cursor, which is naturally imprecise on small or fine details — a click can bleed well past where you meant to paint. Pro Mode's four tools attack that problem from different angles: finer brush subdivision, limiting paint to a thin perimeter ring instead of filling solid, and two "mask" tools that paint an exact area in one shot instead of brushing it by hand.
+
+### 13a. Brush precision
+
+A **Precision** slider (1×–8×) in Pro Mode subdivides the mesh more finely right where you're painting, so the edge of a brush stroke follows the surface more closely instead of stair-stepping at low mesh resolution. Higher values cost more memory/CPU on dense meshes. Default `1×` = identical to a build without Pro Mode.
+
+### 13b. Paint perimeters only + Extra walls
+
+Two checkboxes/fields that change *where* a painted colour actually gets used, without touching the brush itself:
+
+| Control | What it does |
+|---------|--------------|
+| **Paint perimeters only** | Limits the painted colour to a ring near the painted region's contour (about wall-count × line-width wide) instead of filling the whole painted area solid. The interior reverts to the object's base colour. Reduces wasted filament and colour changes buried in solid infill where nobody will ever see them. |
+| **Extra walls** | Adds this many extra perimeter walls to the painted region **only**, on top of the object's normal wall count — for a painted logo or trim that needs a bit more wall depth than the rest of the print. `0` = disabled. |
+
+Turning on **Extra walls** automatically widens the **Paint perimeters only** ring to make room for them — if you raise Extra walls after already enabling the ring, the ring re-widens to match.
+
+> **By design: Extra walls has no effect where the painted colour matches the object's own filament.** If you paint a region with the same colour the object already prints in, there is no visible colour change there anyway — so Extra Walls is skipped for that region automatically, rather than silently doubling up walls in the same physical spot for no visible benefit. This only matters if you're using the painter to add wall thickness rather than colour — paint with a genuinely different colour (even one you don't intend to keep) to force the extra walls, or use a plain modifier mesh instead for pure geometry changes.
+
+### 13c. Rectangle & Polygon masks
+
+Two alternative "paint" tools for when hand-brushing an exact shape is fiddly — you outline an area on screen and it gets painted in one shot with whichever colour is currently active, instead of brushing it by hand.
+
+| Tool | How to use it |
+|------|---------------|
+| **Rectangle mask** | Enable the checkbox, then click-drag a box anywhere on screen; release to paint everything under it. |
+| **Polygon mask** | Enable the checkbox, then **click** to place vertices one at a time. **Click near the first vertex again** (with at least 3 placed) to close the shape and paint it. **Click-drag an existing vertex** to reposition it before closing. **Right-click** cancels and clears the in-progress shape. |
+
+Both tools only paint **front-facing** triangles — the side of the mesh actually facing the camera — so a mask never bleeds through to the back of the object the way a naive screen-space fill would. The two checkboxes are mutually exclusive (turning one on turns the other off), the same way Vertical/Horizontal work elsewhere in this panel. Works with either **Classic** or **Arachne** as the wall generator.
+
+> **Escape doesn't cancel a polygon in progress — right-click does.** Keep that in mind if you're used to Escape backing out of in-progress tools elsewhere in Orca.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -581,6 +832,12 @@ A new option **Variable layer height (Experimental)** sits under **Tower type** 
 | NeoTower (tower type) | Quality → Prime tower → **Tower type** |
 | Zigurat / Sandwich purge compaction / Sandwich wipe reserve | Quality → Prime tower |
 | Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower (greyed unless Libre Mode) |
+| PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray or Sandwich Editor's Advanced button) |
+| Bump Mapping Editor (All / Painter / Top) | Left-side gizmo toolbar *(expert gate: Libre Mode active **+** `ORCA_DEBUG_TEXTUREBUMP` set, **+** `ORCA_DEBUG_ZBUMP` for Top/ZBump — see `NEOTKOCM_RELEASE_2_35.md`)* |
+| Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
+| NeoWave Support (enable) | Libre Mode → Support → **Support type → NeoWave** |
+| Wave roof (shape/order/reverse/hollow pillar) | Support → **Interface pattern → Wave** to reveal the controls (§12) |
+| Painter Pro Mode (Precision / Paint perimeters only / Extra walls / Rectangle & Polygon masks) | Left-side gizmo toolbar → **Color Painting** → **Pro Mode** section *(always available, no Libre Mode needed)* |
 
 ---
 
@@ -628,9 +885,25 @@ The object's extruder isn't a MixedFilament. Assign one of your MixedFilament ro
 object's extruder (same as assigning any normal filament), then reopen the Painter — the
 checkbox and its colour swatch become active. See §6g.
 
+**Q: Can I make a PathBlend gradient start or end somewhere other than the surface edges — or make it fully opaque at one end?**
+
+Yes — open **`ADV…`** on the PathBlend pass (Painter Pro tray or the Sandwich Editor's Advanced button) and drag the two handles in the graph that opens. The low handle sets where the ramp starts rising (and its floor height); the high handle sets where it finishes (and its top height). Push the high handle all the way to the top for a full "techo" — zero of the cap colour in that zone. See §1c.
+
 **Q: I want to try NeoArachne safely.**
 
 Enable Libre Mode, set **Quality → Wall generator → NeoArachne**, leave the new controls at defaults (Neotko Hybrid v2), and slice. Switch back to Arachne/Classic anytime — the NeoArachne controls don't touch existing settings.
+
+**Q: Is the "Color Painting" gizmo's Pro Mode the same thing as the ColorStitch Painter?**
+
+No — different tools. **Color Painting** (§13) is Orca's own stock multi-material painter, and Pro Mode adds precision brushing/masking on top of it. The **ColorStitch Painter** (§6) is this pack's own gizmo for painting *Sandwich effect profiles* (pass stacks, gradients, patterns). Both live in the left-side toolbar as separate icons.
+
+**Q: I turned on "Extra walls" but the painted area doesn't seem to have more walls.**
+
+Check whether the colour you painted with is the **same** as the object's own filament — Extra Walls is skipped there by design, since it wouldn't be visible anyway (§13b). Paint with a genuinely different colour to see the extra walls take effect.
+
+**Q: My Rectangle/Polygon mask painted something on the far side of the object too.**
+
+It shouldn't — both tools only paint faces pointing toward the camera. Rotate the view to confirm what you're actually seeing is the front-facing paint, not a leak through the back.
 
 ---
 

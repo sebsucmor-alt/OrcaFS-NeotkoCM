@@ -12,6 +12,7 @@
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
 #include "Support/TreeSupport.hpp"
+#include "Support/WaveSupport.hpp" // NEOTKO_WAVESUPPORT_TAG_SKELETON — WAVESUPPORT_PLAN.md Fase 2
 #include "Surface.hpp"
 #include "Slicing.hpp"
 #include "Tesselate.hpp"
@@ -4724,12 +4725,36 @@ void PrintObject::combine_infill()
 
 void PrintObject::_generate_support_material()
 {
+    // NEOTKO_WAVESUPPORT_TAG — Fase 7 instrumentation pulled forward for debug: log the dispatch
+    // decision unconditionally (gated by channel, not by a hypothesis) so a "no support generated"
+    // report can be diagnosed from the log alone, without guessing which branch ran.
+    NEOTKO_LOG(WAVESUPPORT, "DISPATCH is_tree=" << (is_tree(m_config.support_type.value) ? 1 : 0)
+        << " support_type=" << int(m_config.support_type.value)
+        << " (stWaveSupport=" << int(stWaveSupport) << ")"
+        << " neotko_libre_mode=" << (m_config.neotko_libre_mode.value ? 1 : 0)
+        << " enable_support=" << (m_config.enable_support.value ? 1 : 0)
+        << " enforce_support_layers=" << m_config.enforce_support_layers.value);
     if (is_tree(m_config.support_type.value)) {
         TreeSupport tree_support(*this, m_slicing_params);
         tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
         tree_support.generate();
     }
+    // NEOTKO_WAVESUPPORT_TAG_SKELETON — WAVESUPPORT_PLAN.md Fase 2 (revised, s197): WaveSupport
+    // ("NeoWave") is its own SupportType, not a support_style value nested under Normal — see
+    // PrintConfig.hpp SupportType comment for the architecture rationale (audited: zero switches
+    // over SupportType in the tree, safe to extend the enum). WaveSupport.{hpp,cpp} is still a
+    // duplicate of the Normal support engine (SupportMaterial.{hpp,cpp}) internally. Re-check
+    // neotko_libre_mode here (not just the Tab.cpp combo visibility) — same defense-in-depth
+    // pattern as NeoArachne (LayerRegion.cpp process()): a preset/3mf saved with
+    // support_type=stWaveSupport while LibreMode was on must fall back to stock Normal behaviour
+    // if reopened with LibreMode off, not silently keep using the experimental engine.
+    else if (m_config.support_type.value == stWaveSupport && m_config.neotko_libre_mode.value) {
+        NEOTKO_LOG(WAVESUPPORT, "DISPATCH -> WaveSupport::generate()");
+        WaveSupport wave_support(this, m_slicing_params);
+        wave_support.generate(*this);
+    }
     else {
+        NEOTKO_LOG(WAVESUPPORT, "DISPATCH -> PrintObjectSupportMaterial::generate() (fallback)");
         PrintObjectSupportMaterial support_material(this, m_slicing_params);
         support_material.generate(*this);
     }

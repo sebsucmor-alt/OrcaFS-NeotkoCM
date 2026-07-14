@@ -1897,7 +1897,18 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 if (!used_facet_states[state_idx])
                     continue;
                 if (state_idx <= num_total_filaments) {
-                    painting_extruders.emplace_back(static_cast<unsigned int>(state_idx));
+                    // NEOTKO_WIPETOWER_BUGFIX_TAG — only physical filament IDs may enter
+                    // painting_extruders directly: this list ends up on PrintRegion's
+                    // wall_filament/solid_infill_filament/sparse_infill_filament, which
+                    // ToolOrdering::collect_extruders() later feeds into
+                    // reorder_extruders_for_minimum_flush_volume()'s wipe_volumes matrix —
+                    // that matrix is sized for physical extruders only (flush_volumes_matrix).
+                    // A raw virtual/MixedColor state_idx here indexes it out of bounds and
+                    // crashes solve_extruder_order(). append_mixed_component_extruders()
+                    // below already resolves virtual states to their physical components;
+                    // it must be the only path a virtual id takes into painting_extruders.
+                    if (state_idx <= num_extruders)
+                        painting_extruders.emplace_back(static_cast<unsigned int>(state_idx));
                     append_mixed_component_extruders(m_mixed_filament_mgr,
                                                      static_cast<unsigned int>(state_idx),
                                                      num_extruders,

@@ -41,15 +41,52 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
                                               float                       base_layer_height,
                                               const PrintObject*          current_object = nullptr)
 {
-    if (!(mixed_mgr && mixed_mgr->is_mixed(filament_id_1based, num_physical)))
+    // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change beyond
+    // the previously-applied fallback (kept below). Traces every exit path for a
+    // suspect id so we can see exactly which branch hands back an out-of-range
+    // value, since the plain fallback alone did not stop the crash.
+    const bool dbg = NeoDebug::enabled(NeoDebug::TOOLORDER) && filament_id_1based > num_physical && num_physical > 0;
+    const bool is_mixed_result = mixed_mgr && mixed_mgr->is_mixed(filament_id_1based, num_physical);
+    if (dbg) {
+        std::ostringstream _s;
+        _s << "RESOLVE_MIXED_ENTER id=" << filament_id_1based << " num_physical=" << num_physical
+           << " is_mixed=" << is_mixed_result << " layer_index=" << layer_index;
+        NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+    }
+
+    if (!(mixed_mgr && is_mixed_result)) {
+        // NEOTKO_WIPETOWER_BUGFIX_TAG — filament_id_1based > num_physical but
+        // is_mixed() says false: mixed_index_from_filament_id() couldn't find an
+        // enabled MixedColor row for this id (e.g. it was disabled/deleted after
+        // being assigned to this object's support/wall/infill filament). That is
+        // NOT a valid physical id either, so returning it raw leaks an
+        // out-of-range value into ToolOrdering's lt.extruders, which later indexes
+        // wipe_volumes (sized for num_physical only) out of bounds and crashes
+        // solve_extruder_order(). Physical ids are always <= num_physical, so fall
+        // back to filament 1 instead of propagating the broken virtual id.
+        if (num_physical > 0 && filament_id_1based > num_physical) {
+            if (dbg) NeoDebug::write(NeoDebug::TOOLORDER, "RESOLVE_MIXED_EXIT branch=not_mixed_fallback result=1");
+            return 1;
+        }
+        if (dbg) NeoDebug::write(NeoDebug::TOOLORDER, "RESOLVE_MIXED_EXIT branch=not_mixed_passthrough result=" + std::to_string(filament_id_1based));
         return filament_id_1based;
+    }
 
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
+    if (dbg) {
+        std::ostringstream _s;
+        _s << "RESOLVE_MIXED_ROW found=" << (mixed_row != nullptr)
+           << " component_a=" << (mixed_row ? mixed_row->component_a : 0u)
+           << " component_b=" << (mixed_row ? mixed_row->component_b : 0u)
+           << " gradient_enabled=" << (mixed_row ? mixed_row->gradient_enabled : false)
+           << " custom=" << (mixed_row ? mixed_row->custom : false);
+        NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+    }
 
     // Z-direction gradient short-circuits the legacy A/B layer cycle below: the
     // gradient path needs the per-(object, layer) run lookup performed inside
     // MixedFilamentManager::resolve.
-    const bool gradient_active = 
+    const bool gradient_active =
         (mixed_row != nullptr && current_object != nullptr) &&
         (mixed_row->gradient_enabled && mixed_row->component_a != mixed_row->component_b) &&
         (layer_index > 0);
@@ -63,12 +100,16 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
         if (cycle > 0) {
             if (mixed_row != nullptr) {
                 const int pos = ((layer_index % cycle) + cycle) % cycle;
-                return pos < ratio_a ? mixed_row->component_a : mixed_row->component_b;
+                const unsigned int result = pos < ratio_a ? mixed_row->component_a : mixed_row->component_b;
+                if (dbg) NeoDebug::write(NeoDebug::TOOLORDER, "RESOLVE_MIXED_EXIT branch=layer_height_cycle result=" + std::to_string(result));
+                return result;
             }
         }
     }
 
-    return mixed_mgr->resolve(filament_id_1based, num_physical, layer_index, layer_print_z, layer_height, false, current_object);
+    const unsigned int final_result = mixed_mgr->resolve(filament_id_1based, num_physical, layer_index, layer_print_z, layer_height, false, current_object);
+    if (dbg) NeoDebug::write(NeoDebug::TOOLORDER, "RESOLVE_MIXED_EXIT branch=mixed_mgr_resolve result=" + std::to_string(final_result));
+    return final_result;
 }
 
 bool has_grouped_manual_pattern(const MixedFilamentManager *mixed_mgr,
@@ -428,6 +469,19 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
 
 bool ToolOrdering::insert_wipe_tower_extruder()
 {
+    // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change.
+    // wipe_tower_filament is pushed into lt.extruders raw (0-based, `-1`) below,
+    // with NO resolve_mixed()/MixedFilament pass at all — if it's set to a
+    // MixedColor id this leaks straight through to ToolOrdering/wipe_volumes
+    // indexing. Log unconditionally (cheap, called once per ToolOrdering ctor)
+    // so we can see the config value regardless of which branch fires.
+    if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+        std::ostringstream _s;
+        _s << "INSERT_WIPE_TOWER_EXTRUDER enable_prime_tower=" << m_print_config_ptr->enable_prime_tower.value
+           << " wipe_tower_filament=" << m_print_config_ptr->wipe_tower_filament.value
+           << " m_num_physical=" << m_num_physical;
+        NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+    }
     if(!m_print_config_ptr->enable_prime_tower)
         return false;
     // In case that wipe_tower_extruder is set to non-zero, we must make sure that the extruder will be in the list.
@@ -439,8 +493,10 @@ bool ToolOrdering::insert_wipe_tower_extruder()
                 sort_remove_duplicates(lt.extruders);
                 changed = true;
             }
-        }  
+        }
     }
+    if (NeoDebug::enabled(NeoDebug::TOOLORDER))
+        NeoDebug::write(NeoDebug::TOOLORDER, std::string("INSERT_WIPE_TOWER_EXTRUDER_EXIT changed=") + (changed ? "1" : "0"));
     return changed;
 }
 
@@ -689,7 +745,15 @@ std::vector<unsigned int> ToolOrdering::generate_first_layer_tool_order(const Pr
         auto first_layer = object->get_layer(0);
         for (auto layerm : first_layer->regions()) {
             int extruder_id = layerm->region().config().option("wall_filament")->getInt();
-            
+            // NEOTKO_WIPETOWER_BUGFIX_TAG — same raw-id leak as the PrintObject overload
+            // above (generate_first_layer_tool_order(const PrintObject&)): wall_filament
+            // can be a MixedColor virtual id and this never resolved it. THIS overload
+            // (const Print&) is the one actually used by the "all objects at once"
+            // ToolOrdering constructor, i.e. the one in the crashing backtrace — fixing
+            // only the other overload earlier did not stop the crash. Resolve here too.
+            extruder_id = int(resolve_mixed(unsigned(extruder_id), 0, float(first_layer->print_z),
+                                            float(first_layer->height), object));
+
             for (auto expoly : layerm->raw_slices) {
                 const double nozzle_diameter = print.config().nozzle_diameter.get_at(0);
                 const coordf_t initial_layer_line_width = print.config().get_abs_value("initial_layer_line_width", nozzle_diameter);
@@ -735,6 +799,18 @@ std::vector<unsigned int> ToolOrdering::generate_first_layer_tool_order(const Pr
     auto first_layer = object.get_layer(0);
     for (auto layerm : first_layer->regions()) {
         int extruder_id = layerm->region().config().option("wall_filament")->getInt();
+        // NEOTKO_WIPETOWER_BUGFIX_TAG — wall_filament can be a MixedColor virtual id
+        // (id > physical extruder count). Every other consumer of wall_filament in
+        // this file resolves it through resolve_mixed() first; this one didn't, so a
+        // raw virtual id flowed into tool_order_layer0 -> reorder_extruders(vector),
+        // which force-injects tool_order_layer0[0] into whichever LayerTools entry
+        // sorts first by z. With a MultiPass/Sandwich sublayer preceding the object's
+        // real first layer, that's the sublayer's entry (meant to stay empty), not
+        // the object's first layer -> the raw id got reindexed to 0-based (id-1) and
+        // fed into ToolOrdering::solve_extruder_order(), which crashed indexing
+        // wipe_volumes out of bounds. Resolve here exactly like every other consumer.
+        extruder_id = int(resolve_mixed(unsigned(extruder_id), 0, float(first_layer->print_z),
+                                        float(first_layer->height), &object));
         for (auto expoly : layerm->raw_slices) {
             const double nozzle_diameter = object.print()->config().nozzle_diameter.get_at(0);
             const coordf_t line_width = object.config().get_abs_value("line_width", nozzle_diameter);
@@ -917,6 +993,27 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                                                         float(support_layer->print_z),
                                                         float(support_layer->height),
                                                         &object);
+        // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change.
+        // resolve_mixed_with_layer_heights never traced id=8 anywhere in prior runs,
+        // yet lt.extruders=[8] still showed up at the very first support layer — so
+        // either the raw config value isn't what we think, or it bypasses resolve_mixed
+        // some other way. Log the raw config + resolved values unconditionally for the
+        // first support layer so we can see exactly what's happening here.
+        if (NeoDebug::enabled(NeoDebug::TOOLORDER) &&
+            (object.config().support_filament.value > (int)m_num_physical ||
+             object.config().support_interface_filament.value > (int)m_num_physical ||
+             extruder_support > m_num_physical || extruder_interface > m_num_physical)) {
+            std::ostringstream _s;
+            _s << "TOOLORDER_SUPPORT_RAW z=" << support_layer->print_z
+               << " raw_support_filament=" << object.config().support_filament.value
+               << " raw_support_interface_filament=" << object.config().support_interface_filament.value
+               << " m_num_physical=" << m_num_physical
+               << " resolved_extruder_support=" << extruder_support
+               << " resolved_extruder_interface=" << extruder_interface
+               << " has_support=" << has_support << " has_interface=" << has_interface
+               << " role=" << int(role);
+            NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+        }
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
@@ -1428,8 +1525,32 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
                         // If it is a bug, it's likely not critical, because this code is unchanged for a long time. It might
                         // still be worth looking into it more and decide if it is a bug or an obsolete assert.
                         //assert(lt_prev.extruders.back() == lt_next.extruders.front());
+                        // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change.
+                        // The assert() above is compiled out in release builds. If lt_next.extruders
+                        // is empty, .front() below is undefined behavior — this is a prime suspect
+                        // for the mystery id=8 that never traces through resolve_mixed anywhere else.
+                        // z=0.125 (this synthetic layer's typical value here) matches exactly.
+                        if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                            std::ostringstream _s;
+                            _s << "TOOLORDER_RAFT_GAP_INSERT lt.print_z=" << lt.print_z
+                               << " lt_object.print_z=" << lt_object.print_z
+                               << " lt_new.print_z=" << lt_new.print_z << " j=" << j
+                               << " m_layer_tools[j-1].extruders.empty()=" << m_layer_tools[j - 1].extruders.empty()
+                               << " lt_next.extruders.empty()=" << lt_next.extruders.empty()
+                               << " lt_next.extruders.size()=" << lt_next.extruders.size()
+                               << " lt_next.print_z=" << lt_next.print_z
+                               << " lt_next.has_object=" << lt_next.has_object
+                               << " lt_next.has_support=" << lt_next.has_support;
+                            if (!lt_next.extruders.empty()) {
+                                _s << " lt_next.extruders=[";
+                                for (size_t k = 0; k < lt_next.extruders.size(); ++k)
+                                    _s << (k ? "," : "") << lt_next.extruders[k];
+                                _s << "]";
+                            }
+                            NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                        }
                         lt_extra.has_wipe_tower = true;
-                        lt_extra.extruders.push_back(lt_next.extruders.front());
+                        lt_extra.extruders.push_back(lt_next.extruders.empty() ? 0u : lt_next.extruders.front());
                         lt_extra.wipe_tower_partitions = lt_next.wipe_tower_partitions;
                     }
                 }
@@ -1607,6 +1728,16 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             wipe_volumes.push_back(std::vector<float>(number_of_extruders, print_config->prime_volume));
     }
 
+    // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change.
+    // wipe_volumes is sized for PHYSICAL extruders only (flush_volumes_matrix).
+    // Baseline so we can confirm the physical count this run actually used.
+    if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+        std::ostringstream _s;
+        _s << "TOOLORDER_WIPE_VOLUMES number_of_extruders=" << number_of_extruders
+           << " wipe_volumes.size()=" << wipe_volumes.size();
+        NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+    }
+
     auto extruders_to_hash_key = [](const std::vector<unsigned int>& extruders,
                                     std::optional<unsigned int>      initial_extruder_id) -> uint32_t {
         uint32_t hash_key = 0;
@@ -1644,6 +1775,35 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         LayerTools& lt = m_layer_tools[i];
         if (lt.extruders.empty())
             continue;
+        // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change.
+        // Unconditional, unlike the OOB_RISK check further down: this covers EVERY
+        // layer including i==0 and the preserve_extruder_order/custom_seq branches
+        // below, none of which go through get_extruders_order() but ALL of which do
+        // `current_extruder_id = lt.extruders.back();` — so a bad id here still seeds
+        // start_extruder_id for a LATER layer's solve_extruder_order() call, where
+        // it gets inserted into all_extruders (see the `all_extruders.insert(...)` a
+        // few lines into solve_extruder_order) and can index wipe_volumes out of
+        // bounds even if that later layer's OWN lt.extruders was totally clean.
+        if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+            unsigned int raw_max = 0;
+            for (unsigned int id : lt.extruders)
+                raw_max = std::max(raw_max, id);
+            if (raw_max >= wipe_volumes.size()) {
+                std::ostringstream _s;
+                _s << "TOOLORDER_LAYER_RAW_OOB layer_i=" << i << " z=" << lt.print_z
+                   << " wipe_volumes.size()=" << wipe_volumes.size()
+                   << " preserve_extruder_order=" << lt.preserve_extruder_order
+                   << " has_object=" << lt.has_object << " has_support=" << lt.has_support
+                   << " is_mp_sublayer=" << lt.is_mp_sublayer
+                   << " wipe_tower_partitions=" << lt.wipe_tower_partitions
+                   << " lt.extruders=[";
+                for (size_t k = 0; k < lt.extruders.size(); ++k)
+                    _s << (k ? "," : "") << lt.extruders[k];
+                _s << "] raw_max=" << raw_max << " will_become_current_extruder_id="
+                   << lt.extruders.back();
+                NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+            }
+        }
         if (lt.preserve_extruder_order) {
             current_extruder_id = lt.extruders.back();
             continue;
@@ -1667,6 +1827,47 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 
         // The algorithm complexity is O(n2*2^n)
         if (i != 0) {
+            // NEOTKO_WIPETOWER_DEBUG_TAG — instrumentation only, no behavior change.
+            // solve_extruder_order() indexes wipe_volumes[id][id2] using raw values from
+            // lt.extruders. wipe_volumes only has number_of_extruders (physical) rows, so
+            // any id here above that bound is an out-of-bounds read waiting to happen
+            // (matches the EXC_BAD_ACCESS in solve_extruder_order at ToolOrdering.cpp:201).
+            // Log BEFORE the call so the offending id + its layer survive even if it crashes
+            // right after (NeoDebug::write flushes synchronously per call).
+            if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                unsigned int max_id = 0;
+                for (unsigned int id : lt.extruders)
+                    max_id = std::max(max_id, id);
+                if (max_id >= wipe_volumes.size()) {
+                    std::ostringstream _s;
+                    _s << "TOOLORDER_OOB_RISK layer_i=" << i << " z=" << lt.print_z
+                       << " wipe_volumes.size()=" << wipe_volumes.size()
+                       << " current_extruder_id=" << (current_extruder_id ? std::to_string(*current_extruder_id) : "none")
+                       << " lt.extruders=[";
+                    for (size_t k = 0; k < lt.extruders.size(); ++k)
+                        _s << (k ? "," : "") << lt.extruders[k];
+                    _s << "] max_id=" << max_id << " (>= wipe_volumes.size() → OOB on next call)";
+                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                }
+                // NEOTKO_WIPETOWER_DEBUG_TAG — the check above only covers lt.extruders.
+                // solve_extruder_order() ALSO inserts start_extruder_id (= current_extruder_id
+                // here) into all_extruders if it isn't already one of lt.extruders' values
+                // (see `all_extruders.insert(all_extruders.begin(), *start_extruder_id)` near
+                // the top of solve_extruder_order), and that inserted value is just as capable
+                // of indexing wipe_volumes out of bounds. current_extruder_id is carried over
+                // from a PREVIOUS layer's lt.extruders.back() — including layer i==0, which
+                // never goes through this OOB check (see TOOLORDER_LAYER_RAW_OOB above) — so
+                // this is the other half of the picture.
+                if (current_extruder_id && *current_extruder_id >= wipe_volumes.size()) {
+                    std::ostringstream _s;
+                    _s << "TOOLORDER_START_ID_OOB layer_i=" << i << " z=" << lt.print_z
+                       << " wipe_volumes.size()=" << wipe_volumes.size()
+                       << " current_extruder_id=" << *current_extruder_id
+                       << " (this is start_extruder_id in solve_extruder_order and gets"
+                       << " inserted into all_extruders if not already present → OOB)";
+                    NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+                }
+            }
             auto hash_key = extruders_to_hash_key(lt.extruders, current_extruder_id);
             auto iter = m_tool_order_cache.find(hash_key);
             if (iter == m_tool_order_cache.end()) {

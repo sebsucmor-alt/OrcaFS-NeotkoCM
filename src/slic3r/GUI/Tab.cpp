@@ -134,8 +134,92 @@ private:
     }
 };
 
+// NEOTKO_COLORSTITCH_TAG — s195: SurfaceSwatchPanel
+// Square "how will it look" sample: renders the active line sequence as
+// parallel stripes at the infill angle, tiled until the square is filled —
+// the unified preview works for EVERY pattern source (custom string,
+// MixedFilament recipe, textile weave, blends and stripes alike).
+class SurfaceSwatchPanel : public wxPanel {
+public:
+    SurfaceSwatchPanel(wxWindow* parent, int side = 96)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(side, side))
+    {
+        SetMinSize(wxSize(side, side));
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        Bind(wxEVT_PAINT, &SurfaceSwatchPanel::on_paint, this);
+    }
+    // stretch=true (blends): the whole sequence spans the square ONCE — the
+    // engine distributes the gradient across the entire surface, so it must
+    // fill the sample, not tile. stretch=false (patterns/stripes): the
+    // sequence is a repeating motif — tile it at a fixed line width.
+    void set_sequence(const std::vector<int>& tool_seq,
+                      const std::vector<wxColour>& tool_colors,
+                      int angle_deg, bool stretch)
+    {
+        m_seq     = tool_seq;
+        m_colors  = tool_colors;
+        m_angle   = angle_deg;
+        m_stretch = stretch;
+        Refresh();
+    }
+private:
+    std::vector<int>      m_seq;
+    std::vector<wxColour> m_colors;
+    int                   m_angle   = -1;
+    bool                  m_stretch = false;
+
+    void on_paint(wxPaintEvent&) {
+        wxPaintDC dc(this);
+        const wxSize sz = GetSize();
+        dc.SetBackground(wxBrush(wxColour(45, 45, 45)));
+        dc.Clear();
+        const int m = (int)m_seq.size();
+        if (m == 0) return;
+        // -1 = Auto → draw at 45° as a representative orientation.
+        const double a  = ((m_angle >= 0 ? m_angle : 45) % 360)
+                          * (3.14159265358979323846 / 180.0);
+        const double ux =  std::cos(a), uy = -std::sin(a);   // line direction (y down)
+        const double nx = -uy,          ny =  ux;            // stripe advance
+        const double cx = sz.x / 2.0, cy = sz.y / 2.0;
+        const double diag = std::sqrt(double(sz.x) * sz.x + double(sz.y) * sz.y);
+        // Extent of the square measured along the stripe-advance axis — how
+        // far we must step to cover the visible area from centre to corner.
+        const double half_ext = (std::abs(nx) * sz.x + std::abs(ny) * sz.y) / 2.0 + 2.0;
+        // In stretch mode one line per sequence entry (spans the extent once);
+        // in tile mode a fixed ~3px line width repeats the motif.
+        const int    n = m_stretch ? m : std::max(1, (int)std::ceil(2.0 * half_ext / 3.0));
+        const double step = (2.0 * half_ext) / std::max(1, n);
+        // Pen 1px wider than the step so adjacent lines overlap — no dark
+        // gaps bleeding through between parallel diagonals (fix: #1).
+        const int    pen_w = std::max(1, (int)std::ceil(step) + 1);
+        dc.SetClippingRegion(0, 0, sz.x, sz.y);
+        for (int i = 0; i < n; ++i) {
+            const double off  = -half_ext + (i + 0.5) * step;
+            int tool;
+            if (m_stretch) {
+                tool = m_seq[std::min(i, m - 1)];
+            } else {
+                // fixed-width tiling → index by physical position so the motif
+                // period is stable regardless of the square's pixel size.
+                const int k = ((int)std::floor((off + half_ext) / step)) % m;
+                tool = m_seq[(k + m) % m];
+            }
+            wxColour c = (tool >= 0 && tool < (int)m_colors.size())
+                ? m_colors[tool] : wxColour(160, 160, 160);
+            dc.SetPen(wxPen(c, pen_w));
+            const double px = cx + nx * off, py = cy + ny * off;
+            dc.DrawLine((int)std::lround(px - ux * diag), (int)std::lround(py - uy * diag),
+                        (int)std::lround(px + ux * diag), (int)std::lround(py + uy * diag));
+        }
+        dc.DestroyClippingRegion();
+        dc.SetPen(wxPen(wxColour(30, 30, 30), 1));
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.DrawRectangle(0, 0, sz.x, sz.y);
+    }
+};
+
 // NEOTKO_MULTIPASS_TAG — ColorSwatch (forward-moved from below to be visible
-// from ColorMixPatternDialog::build_gradient_section). Small coloured panel
+// from ColorMixPatternDialog::build_slots_box). Small coloured panel
 // used in the gradient slot pickers.
 class ColorSwatch : public wxPanel {
     wxColour m_col;
@@ -172,7 +256,9 @@ public:
                           DynamicPrintConfig*                             cfg = nullptr,
                           int                                             surface_id = 0)
         : wxDialog(parent, wxID_ANY,
-                   surface_id == 0 ? _L("ColorStitch — Top surface") : _L("ColorStitch — Penultimate"),
+                   surface_id == 1 ? _L("ColorStitch — Penultimate")
+                 : surface_id == 2 ? _L("ColorStitch — Bottom surface")
+                                   : _L("ColorStitch — Top surface"),
                    wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
         , m_colours(filament_colours)
@@ -204,7 +290,17 @@ public:
     // NEOTKO_COLORMIX_TAG — s60: gradient getters consumed by open_edit_for()
     // after the dialog closes with OK. Each returns the value as edited in the
     // dialog widgets; the caller writes them back to DynamicPrintConfig.
-    int    get_grad_mode()       const { return m_choice_grad_mode  ? m_choice_grad_mode->GetSelection() : m_grad_mode; }
+    // s195: the UI selector now carries CATEGORIES (custom/Mixed/weave/blends/
+    // stripes); map back to the engine's mode 0-3 (string sources are mode 0).
+    int    get_grad_mode()       const {
+        if (!m_choice_cat) return m_grad_mode;
+        switch (current_cat()) {
+            case CAT_BLEND2:  return 1;
+            case CAT_BLEND3:  return 2;
+            case CAT_STRIPES: return 3;
+            default:          return 0;
+        }
+    }
     int    get_grad_pct_a()      const { return m_sl_pct_a          ? m_sl_pct_a->GetValue()             : m_grad_pct_a; }
     int    get_grad_pct_b()      const { return m_sl_pct_b          ? m_sl_pct_b->GetValue()             : m_grad_pct_b; }
     int    get_grad_easing()     const { return m_choice_easing     ? m_choice_easing->GetSelection()    : m_grad_easing; }
@@ -257,9 +353,7 @@ private:
     int    m_grad_repetitions = 1; // NEOTKO_COLORMIX_TAG — s80: gradient repeats
     double m_grad_min_length  = 0.0; // NEOTKO_COLORMIX_TAG — s90: global "ColorMix min. line length" (mm); default 0 = colour every line
 
-    // Gradient widget pointers (created in build_ui when m_cfg != nullptr).
-    wxStaticBoxSizer* m_gd_sb            = nullptr;
-    wxChoice*         m_choice_grad_mode = nullptr;
+    // Widget pointers (created in build_ui when m_cfg != nullptr).
     wxChoice*         m_choice_tool_a    = nullptr;
     wxChoice*         m_choice_tool_b    = nullptr;
     wxChoice*         m_choice_tool_c    = nullptr;
@@ -284,7 +378,6 @@ private:
     wxStaticText*     m_lbl_lines_est    = nullptr;
     wxPanel*          m_panel_linear     = nullptr;
     wxPanel*          m_panel_bands      = nullptr;
-    wxStaticText*     m_lbl_mf_lock_note = nullptr; // shown when pattern is using a MixedFilament digit
     GradientStripPanel* m_strip          = nullptr; // visual colour preview
     wxSlider*         m_sl_overlap       = nullptr; // s60: color overlap slider
     wxStaticText*     m_lbl_overlap      = nullptr;
@@ -294,7 +387,34 @@ private:
     wxSpinCtrl*       m_sc_repetitions   = nullptr; // NEOTKO_COLORMIX_TAG — s80: gradient repetitions
     wxSpinCtrlDouble* m_sc_min_length    = nullptr; // NEOTKO_COLORMIX_TAG — s90: global min line length (mm)
     bool                         m_mixed_filament_selected = false;
-    std::vector<wxButton*>       m_physical_buttons;
+
+    // ── NEOTKO_COLORSTITCH_TAG — s195 ADV revamp: category machinery ──
+    // UI categories (NOT config values — get_grad_mode() maps them back to
+    // the interlayer_colormix_mode 0-3 the engine understands).
+    enum UICat { CAT_CUSTOM = 0, CAT_MIXED, CAT_WEAVE, CAT_BLEND2, CAT_BLEND3, CAT_STRIPES };
+    int               m_category      = CAT_CUSTOM;
+    int               m_loaded_mode   = 0;       // config mode at open (Slow-start rule)
+    std::string       m_custom_stash;            // hand-built pattern kept across category trips
+    wxChoice*         m_choice_cat    = nullptr; // "Pattern style" selector
+    std::vector<int>  m_cat_ids;                 // choice index → UICat (Mixed row is optional)
+    wxStaticText*     m_lbl_cat_note  = nullptr; // per-category explanation / exclusion notice
+    wxPanel*          m_panel_custom  = nullptr;
+    wxPanel*          m_panel_mixed   = nullptr;
+    wxPanel*          m_panel_weave   = nullptr;
+    wxPanel*          m_panel_slots   = nullptr; // "Colours used" (blends + stripes)
+    wxChoice*         m_choice_weave   = nullptr;
+    wxChoice*         m_choice_weave_a = nullptr;
+    wxChoice*         m_choice_weave_b = nullptr;
+    ColorSwatch*      m_sw_weave_a     = nullptr;
+    ColorSwatch*      m_sw_weave_b     = nullptr;
+    wxStaticText*     m_lbl_weave_pat  = nullptr;
+    wxStaticText*     m_lbl_weave_note = nullptr;
+    int               m_weave_idx = 1, m_weave_a = 0, m_weave_b = 1;
+    wxStaticText*     m_lbl_mixed_active = nullptr;
+    SurfaceSwatchPanel* m_square = nullptr;      // square "how it looks" sample
+    ColorSwatch*      m_sw_band[4] = { nullptr, nullptr, nullptr, nullptr };
+    wxArrayString          m_tool_labels;        // "T0".."T3" for the slot pickers
+    std::vector<wxColour>  m_tool_cols;
 
     // NEOTKO_COLORMIX_TAG — s61: role-aware config key prefix.
     // m_surface_id 0 = Top → reads/writes the original (top-role) keys.
@@ -325,6 +445,7 @@ private:
             return o ? o->value : def;
         };
         m_grad_mode      = gi(grad_key("mode"), 0);
+        m_loaded_mode    = m_grad_mode; // s195: drives the Slow-start default rule
         m_grad_pct_a     = gi(grad_key("pct_a"), 50);
         m_grad_pct_b     = gi(grad_key("pct_b"), 33);
         m_grad_easing    = gi(grad_key("easing"), 0);
@@ -411,520 +532,874 @@ private:
             Fit();
         }
         m_disp->Refresh();
-        refresh_grad_lock(); // a newly-appended virtual digit (5-9) locks gradient
-        refresh_grad_preview(); // strip should reflect the pattern in legacy mode
+        refresh_grad_preview(); // s195: unified preview reflects the string live
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // NEOTKO_COLORSTITCH_TAG — s195 ADV revamp. The old dialog stacked the
+    // filament buttons, the Mixed recipes and the whole "Gradient (numeric
+    // dither)" box in one flat column; the strip preview only existed for the
+    // blend modes, and Mixed↔gradient exclusion was a grey-out + amber note.
+    // Now every pattern SOURCE is a category of its own (mutually exclusive by
+    // construction — you pick ONE in the "Pattern style" selector):
+    //   Custom pattern / MixedFilament recipe / Textile weave (WeaveLibrary) /
+    //   Smooth blend 2 / Smooth blend 3 / Stripes.
+    // A single always-visible Preview box (strip + square swatch at the infill
+    // angle) renders the ACTIVE source, whatever it is — including custom
+    // strings and Mixed recipes, which previously had no colour preview.
+    // Config mapping unchanged: Custom/Mixed/Weave → mode 0 (pattern string),
+    // Blend2 → 1, Blend3 → 2, Stripes → 3. No config key is renamed.
+    // ────────────────────────────────────────────────────────────────────────
     void build_ui(const std::vector<Slic3r::ColorMixOption>& options)
     {
-        m_mixed_filament_selected = false;
-        if (!m_pattern.empty()) {
-            for (const auto& opt : options) {
-                if (!opt.is_physical) {
-                    std::string rev = opt.pattern;
-                    std::reverse(rev.begin(), rev.end());
-                    if (opt.pattern == m_pattern || rev == m_pattern) {
-                        m_mixed_filament_selected = true;
-                        break;
-                    }
-                }
-            }
-        }
-        m_physical_buttons.clear();
+        detect_mixed_selected(options);
+        build_tool_tables(options);
 
         const int PAD = 6;
         auto* vs = new wxBoxSizer(wxVERTICAL);
 
-        vs->Add(new wxStaticText(this, wxID_ANY,
-                                  _L("Click filaments to build pattern:")),
-                0, wxLEFT|wxTOP|wxBOTTOM, PAD);
+        if (!m_cfg) {
+            // Legacy minimal mode (no config → no categories, no preview):
+            // pattern buttons + bar only. Both current call sites pass a cfg.
+            build_custom_panel(vs, options, PAD);
+            if (m_use_virtual) build_mixed_panel(vs, options, PAD);
+            vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
+                    0, wxALL | wxALIGN_RIGHT, PAD);
+            SetSizerAndFit(vs);
+            return;
+        }
+
+        detect_category();
+
+        // ── Pattern style (category) selector ──────────────────────────
+        {
+            wxArrayString labels;
+            m_cat_ids.clear();
+            auto add_cat = [&](int id, const wxString& lbl) {
+                m_cat_ids.push_back(id);
+                labels.Add(lbl);
+            };
+            add_cat(CAT_CUSTOM,  _L("Custom pattern — click filaments"));
+            if (m_use_virtual)
+                add_cat(CAT_MIXED, _L("MixedFilament recipe"));
+            add_cat(CAT_WEAVE,   _L("Textile weave — plain / twill / satin…"));
+            add_cat(CAT_BLEND2,  _L("Smooth blend — 2 colours"));
+            add_cat(CAT_BLEND3,  _L("Smooth blend — 3 colours"));
+            add_cat(CAT_STRIPES, _L("Stripes — manual band sizes"));
+
+            m_choice_cat = new wxChoice(this, wxID_ANY,
+                wxDefaultPosition, wxSize(380, -1), labels);
+            int sel = 0;
+            for (size_t i = 0; i < m_cat_ids.size(); ++i)
+                if (m_cat_ids[i] == m_category) { sel = (int)i; break; }
+            m_choice_cat->SetSelection(sel);
+
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(this, wxID_ANY, _L("Pattern style:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            row->Add(m_choice_cat, 1, wxALIGN_CENTER_VERTICAL);
+            vs->Add(row, 0, wxEXPAND | wxALL, PAD);
+
+            // One-line explanation of the active category — amber when the
+            // source excludes the others (MixedFilament). This replaces the
+            // old grey-out + lock note as the mutual-exclusion feedback.
+            m_lbl_cat_note = new wxStaticText(this, wxID_ANY, "");
+            m_lbl_cat_note->SetForegroundColour(wxColour(130, 130, 130));
+            vs->Add(m_lbl_cat_note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        }
+
+        // Source panels (one visible at a time) + shared sections.
+        build_custom_panel(vs, options, PAD);
+        if (m_use_virtual) build_mixed_panel(vs, options, PAD);
+        build_weave_panel(vs, PAD);
+        build_slots_box(vs, PAD);
+        build_linear_panel(vs, PAD);
+        build_bands_panel(vs, PAD);
+        build_preview_box(vs, PAD);
+        build_options_box(vs, PAD);
+
+        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
+                0, wxALL | wxALIGN_RIGHT, PAD);
+        SetSizerAndFit(vs);
+
+        m_choice_cat->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { on_category_changed(); });
+        if (m_category == CAT_WEAVE)
+            apply_weave();           // sync note/labels (idempotent on the string)
+        refresh_category_visibility();
+        refresh_grad_preview();
+    }
+
+    // ── s195: category detection on open ────────────────────────────────
+    // Order matters: explicit blend/stripe modes win; then Mixed (recipe
+    // match or virtual digits — preserves the old lock detection); then a
+    // weave whose digit substitution reproduces the pattern; else Custom.
+    void detect_category()
+    {
+        if      (m_grad_mode == 1) { m_category = CAT_BLEND2;  return; }
+        else if (m_grad_mode == 2) { m_category = CAT_BLEND3;  return; }
+        else if (m_grad_mode == 3) { m_category = CAT_STRIPES; return; }
+        if (m_use_virtual && (m_mixed_filament_selected || pattern_uses_mixed_filament())) {
+            m_category = CAT_MIXED;
+            return;
+        }
+        if (detect_weave_match()) { m_category = CAT_WEAVE; return; }
+        m_category = CAT_CUSTOM;
+    }
+
+    void detect_mixed_selected(const std::vector<Slic3r::ColorMixOption>& options)
+    {
+        m_mixed_filament_selected = false;
+        if (m_pattern.empty()) return;
+        for (const auto& opt : options) {
+            if (opt.is_physical) continue;
+            std::string rev = opt.pattern;
+            std::reverse(rev.begin(), rev.end());
+            if (opt.pattern == m_pattern || rev == m_pattern) {
+                m_mixed_filament_selected = true;
+                break;
+            }
+        }
+    }
+
+    // Does some weave preset + a consistent digit substitution (preset '1'/'2'
+    // → filament digits) reproduce m_pattern? Fills m_weave_idx/_a/_b.
+    bool detect_weave_match()
+    {
+        const auto& presets = Slic3r::ColorSci::weave_presets();
+        if (m_pattern.empty()) return false;
+        for (size_t i = 1; i < presets.size(); ++i) {
+            const auto& wp = presets[i];
+            const char* base = (wp.paired && m_surface_id == 1 &&
+                                wp.pattern_penu && wp.pattern_penu[0])
+                               ? wp.pattern_penu : wp.pattern_top;
+            const std::string P(base ? base : "");
+            if (P.empty() || P.size() != m_pattern.size()) continue;
+            char ma = 0, mb = 0;
+            bool ok = true;
+            for (size_t j = 0; j < P.size() && ok; ++j) {
+                const char pc = P[j];
+                if (pc != '1' && pc != '2') { ok = false; break; }
+                char& m = (pc == '1') ? ma : mb;
+                if (m == 0) m = m_pattern[j];
+                else if (m != m_pattern[j]) ok = false;
+            }
+            if (!ok || ma == 0 || mb == 0 || ma == mb) continue;
+            if (ma < '1' || ma > '4' || mb < '1' || mb > '4') continue;
+            m_weave_idx = (int)i;
+            m_weave_a   = ma - '1';
+            m_weave_b   = mb - '1';
+            return true;
+        }
+        return false;
+    }
+
+    int current_cat() const
+    {
+        if (!m_choice_cat) return m_category;
+        const int sel = m_choice_cat->GetSelection();
+        return (sel >= 0 && sel < (int)m_cat_ids.size()) ? m_cat_ids[sel] : m_category;
+    }
+
+    wxColour digit_colour(char d) const
+    {
+        auto it = m_digit_colors.find(d);
+        return it != m_digit_colors.end() ? it->second : wxColour(160, 160, 160);
+    }
+
+    // Tool label/colour tables shared by the slot pickers ("Colours used").
+    void build_tool_tables(const std::vector<Slic3r::ColorMixOption>& options)
+    {
+        m_tool_labels.Clear();
+        m_tool_cols.clear();
+        for (const auto& opt : options) {
+            if (!opt.is_physical) continue;
+            if (opt.filament_id < 1 || opt.filament_id > 4) continue;
+            const int idx = opt.filament_id - 1;
+            while ((int)m_tool_cols.size() <= idx)
+                m_tool_cols.push_back(wxColour(160, 160, 160));
+            m_tool_cols[idx] = hex_to_colour(opt.display_color);
+            m_tool_labels.Add(wxString::Format("T%d", idx));
+        }
+        if (m_tool_labels.IsEmpty()) {
+            for (int i = 0; i < 4; ++i) {
+                m_tool_labels.Add(wxString::Format("T%d", i));
+                m_tool_cols.push_back(wxColour(160, 160, 160));
+            }
+        }
+    }
+
+    wxColour colour_for_tool(int t) const
+    {
+        return (t >= 0 && t < (int)m_tool_cols.size()) ? m_tool_cols[t]
+                                                       : wxColour(160, 160, 160);
+    }
+
+    // ── Source panel: Custom pattern ─────────────────────────────────────
+    void build_custom_panel(wxBoxSizer* vs, const std::vector<Slic3r::ColorMixOption>& options, int PAD)
+    {
+        m_panel_custom = new wxPanel(this);
+        auto* pv = new wxBoxSizer(wxVERTICAL);
+        pv->Add(new wxStaticText(m_panel_custom, wxID_ANY,
+                                 _L("Click filaments to build pattern:")),
+                0, wxBOTTOM, 4);
 
         auto* btn_row = new wxBoxSizer(wxHORIZONTAL);
-
-        // Physical filament buttons — always shown (existing behaviour).
         for (const auto& opt : options) {
             if (!opt.is_physical || opt.filament_id < 1 || opt.filament_id > 9) continue;
-            auto* b = new wxButton(this, wxID_ANY, wxString::FromUTF8(opt.label),
+            auto* b = new wxButton(m_panel_custom, wxID_ANY, wxString::FromUTF8(opt.label),
                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
             b->SetBackgroundColour(hex_to_colour(opt.display_color));
             b->SetToolTip(wxString::FromUTF8(opt.display_color));
             int fid = opt.filament_id;
             b->Bind(wxEVT_BUTTON, [this, fid](wxCommandEvent&) { append_digit(fid); });
-            btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
-            m_physical_buttons.push_back(b);
+            btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
         }
+        pv->Add(btn_row, 0, wxBOTTOM, 4);
 
-        // Virtual (Mixed Filament) buttons — shown only when use_virtual gate is ON.
-        // NEOTKO_COLORMIX_TAG_START — virtual filament buttons
-        if (m_use_virtual) {
-            bool separator_added = false;
-            for (const auto& opt : options) {
-                if (opt.is_physical || opt.filament_id < 1 || opt.filament_id > 9) continue;
-                if (!separator_added) {
-                    // Vertical line separator between physical and virtual groups.
-                    auto* sep = new wxStaticLine(this, wxID_ANY,
-                                                 wxDefaultPosition, wxDefaultSize,
-                                                 wxLI_VERTICAL);
-                    btn_row->Add(sep, 0, wxEXPAND|wxLEFT|wxRIGHT, 4);
-                    separator_added = true;
-                }
-                // Short label: strip "Mixed (" prefix for compact buttons.
-                wxString short_lbl = wxString::FromUTF8(opt.label);
-                if (short_lbl.StartsWith("Mixed (") && short_lbl.EndsWith(")"))
-                    short_lbl = short_lbl.Mid(7, short_lbl.Len() - 8); // "F1+F2"
-                auto* b = new wxButton(this, wxID_ANY, short_lbl,
-                                       wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                b->SetBackgroundColour(hex_to_colour(opt.display_color));
-                b->SetToolTip(wxString::FromUTF8(opt.label)
-                              + wxString::Format(" [digit %d]", opt.filament_id));
-                std::string recipe = opt.pattern;
-                b->Bind(wxEVT_BUTTON, [this, recipe](wxCommandEvent&) {
-                    m_pattern = recipe;
-                    m_mixed_filament_selected = true;
-                    const int needed = (int)m_pattern.size() * 26 + 8;
-                    if (needed > m_disp->GetMinWidth()) {
-                        m_disp->SetMinSize(wxSize(needed, 26));
-                        Fit();
-                    }
-                    m_disp->Refresh();
-                    this->refresh_grad_lock();
-                    this->refresh_grad_preview();
-                });
-                btn_row->Add(b, 0, wxALIGN_CENTER_VERTICAL|wxRIGHT, 2);
-            }
-        }
-        // NEOTKO_COLORMIX_TAG_END
-
-        vs->Add(btn_row, 0, wxLEFT|wxRIGHT|wxBOTTOM, PAD);
-
-        // Pattern display panel
+        // Pattern display panel (digit blocks)
         const int init_w = std::max(160, (int)m_pattern.size() * 26 + 8);
-        m_disp = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(init_w, 26));
+        m_disp = new wxPanel(m_panel_custom, wxID_ANY, wxDefaultPosition, wxSize(init_w, 26));
         m_disp->SetMinSize(wxSize(160, 26));
         m_disp->SetBackgroundStyle(wxBG_STYLE_PAINT);
         m_disp->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
             wxPaintDC dc(m_disp);
             paint_pattern(dc, m_pattern, m_disp);
         });
-        vs->Add(m_disp, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, PAD);
+        pv->Add(m_disp, 0, wxEXPAND | wxBOTTOM, 4);
 
-        // Action buttons row below pattern display
-        auto* btn_action_row = new wxBoxSizer(wxHORIZONTAL);
-
-        auto* bcl = new wxButton(this, wxID_ANY, _L("Clear"),
-                                  wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        auto* action_row = new wxBoxSizer(wxHORIZONTAL);
+        auto* bcl = new wxButton(m_panel_custom, wxID_ANY, _L("Clear"),
+                                 wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
         bcl->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             m_pattern.clear();
+            m_custom_stash.clear();
             m_mixed_filament_selected = false;
             m_disp->SetMinSize(wxSize(160, 26));
             Fit();
             m_disp->Refresh();
-            this->refresh_grad_lock();   // pattern changed → re-evaluate MF gray-out
-            this->refresh_grad_preview(); // strip should reflect empty pattern
-        });
-        btn_action_row->Add(bcl, 0, wxRIGHT, 12); // Premium 12px spacing to prevent clutter
-
-        m_btn_invert = new wxButton(this, wxID_ANY, _L("Invert"),
-                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        m_btn_invert->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            if (!m_pattern.empty()) {
-                std::reverse(m_pattern.begin(), m_pattern.end());
-                m_disp->Refresh();
-                this->refresh_grad_preview();
-            }
-        });
-        btn_action_row->Add(m_btn_invert, 0, 0, 0);
-
-        vs->Add(btn_action_row, 0, wxLEFT|wxBOTTOM, PAD);
-
-        // ── Gradient section (numeric dither) — s60. ────────────────────────
-        // Only built when m_cfg is provided AND the dialog is in ColorMix
-        // context (the caller passes m_cfg from SurfaceColorMixerDialog).
-        // For MultiPass/PathBlend roles the dialog is never opened, so this
-        // is always safe to add when m_cfg != nullptr.
-        if (m_cfg) build_gradient_section(vs, options);
-
-        vs->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL),
-                0, wxALL|wxALIGN_RIGHT, PAD);
-        this->refresh_grad_lock();
-        SetSizerAndFit(vs);
-    }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // NEOTKO_COLORMIX_TAG — s60: Gradient (numeric dither) section.
-    // Inserted into the per-role ColorMix Advanced dialog. Edits 14 config
-    // keys (mode, pct_a/b, easing, gamma, min_lines, band_a/b/c/d, tool_a/b/c/d)
-    // that apply to the active surface(s). Tool slots A/B/C/D are exposed as
-    // wxChoice combos showing the physical tool index (T0/T1/…) and a colour
-    // swatch — the user picks WHICH physical tool occupies each slot, then
-    // the gradient/bands controls reference the slot.
-    // ────────────────────────────────────────────────────────────────────────
-    void build_gradient_section(wxBoxSizer* vs, const std::vector<Slic3r::ColorMixOption>& options)
-    {
-        const int PAD = 6;
-        m_gd_sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Gradient (numeric dither)"));
-
-        // ── Style row (friendlier than "Mode") ───────────────────────────
-        {
-            wxArrayString labels;
-            labels.Add(_L("Custom text pattern  (use the colour buttons above)"));
-            labels.Add(_L("Smooth blend — 2 colours"));
-            labels.Add(_L("Smooth blend — 3 colours"));
-            labels.Add(_L("Stripes — manual band sizes"));
-            m_choice_grad_mode = new wxChoice(this, wxID_ANY,
-                wxDefaultPosition, wxSize(360, -1), labels);
-            m_choice_grad_mode->SetSelection(std::clamp(m_grad_mode, 0, 3));
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(this, wxID_ANY, _L("Style:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            row->Add(m_choice_grad_mode, 1, wxALIGN_CENTER_VERTICAL);
-            m_gd_sb->Add(row, 0, wxEXPAND | wxALL, PAD / 2);
-        }
-
-        // ── Tool slots A/B/C/D picker row ──────────────────────────────
-        wxArrayString tool_labels;
-        std::vector<wxColour> tool_colors_for_idx;
-        for (const auto& opt : options) {
-            if (!opt.is_physical) continue;
-            if (opt.filament_id < 1 || opt.filament_id > 4) continue;
-            const int idx = opt.filament_id - 1;
-            while ((int)tool_colors_for_idx.size() <= idx)
-                tool_colors_for_idx.push_back(wxColour(160,160,160));
-            tool_colors_for_idx[idx] = hex_to_colour(opt.display_color);
-            tool_labels.Add(wxString::Format("T%d", idx));
-        }
-        if (tool_labels.IsEmpty()) {
-            for (int i = 0; i < 4; ++i) {
-                tool_labels.Add(wxString::Format("T%d", i));
-                tool_colors_for_idx.push_back(wxColour(160,160,160));
-            }
-        }
-        auto colour_for_tool = [tool_colors_for_idx](int t) -> wxColour {
-            if (t >= 0 && t < (int)tool_colors_for_idx.size()) return tool_colors_for_idx[t];
-            return wxColour(160,160,160);
-        };
-        {
-            auto* sb_tools = new wxStaticBoxSizer(wxHORIZONTAL, this, _L("Colours used"));
-            auto make_slot = [&](const wxString& slot_lbl, int cur_tool,
-                                 wxChoice*& out_choice, ColorSwatch*& out_swatch)
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(this, wxID_ANY, slot_lbl),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                out_choice = new wxChoice(this, wxID_ANY,
-                    wxDefaultPosition, wxSize(60, -1), tool_labels);
-                const int sel = std::clamp(cur_tool, 0, (int)tool_labels.GetCount() - 1);
-                out_choice->SetSelection(sel);
-                row->Add(out_choice, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                out_swatch = new ColorSwatch(this, colour_for_tool(sel));
-                row->Add(out_swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
-                out_choice->Bind(wxEVT_CHOICE, [this, out_choice, out_swatch, colour_for_tool](wxCommandEvent&) {
-                    out_swatch->set_color(colour_for_tool(out_choice->GetSelection()));
-                    this->refresh_grad_preview();
-                });
-                sb_tools->Add(row, 0, wxALIGN_CENTER_VERTICAL);
-            };
-            make_slot(_L("Color 1:"), m_tool_a, m_choice_tool_a, m_sw_tool_a);
-            make_slot(_L("Color 2:"), m_tool_b, m_choice_tool_b, m_sw_tool_b);
-            make_slot(_L("Color 3:"), m_tool_c, m_choice_tool_c, m_sw_tool_c);
-            make_slot(_L("Color 4:"), m_tool_d, m_choice_tool_d, m_sw_tool_d);
-            m_gd_sb->Add(sb_tools, 0, wxEXPAND | wxALL, PAD / 2);
-        }
-
-        // ── Linear panel (modes 1 + 2) ─────────────────────────────────
-        m_panel_linear = new wxPanel(this);
-        {
-            auto* pv = new wxBoxSizer(wxVERTICAL);
-            auto add_pct_row = [&](const wxString& tag, int init_v,
-                                   wxSlider*& out_sl, wxStaticText*& out_lbl)
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY, tag),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                out_sl = new wxSlider(m_panel_linear, wxID_ANY, init_v, 0, 100,
-                    wxDefaultPosition, wxSize(220, -1), wxSL_HORIZONTAL);
-                out_lbl = new wxStaticText(m_panel_linear, wxID_ANY,
-                    wxString::Format("%d%%", init_v));
-                row->Add(out_sl, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                row->Add(out_lbl, 0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            };
-            add_pct_row(_L("How much Color 1:"), m_grad_pct_a, m_sl_pct_a, m_lbl_pct_a);
-            add_pct_row(_L("How much Color 2 (3-colour blend only):"),
-                        m_grad_pct_b, m_sl_pct_b, m_lbl_pct_b);
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                            _L("Color 3 fills the rest (auto):")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                m_lbl_pct_c = new wxStaticText(m_panel_linear, wxID_ANY, "17%");
-                row->Add(m_lbl_pct_c, 0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            }
-            // ── Color overlap slider (controls how much colours bleed) ──
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                            _L("Color overlap (soft ← hard zones):")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                const int init_ov_pct = static_cast<int>(std::lround(m_grad_overlap * 100.0));
-                m_sl_overlap = new wxSlider(m_panel_linear, wxID_ANY,
-                    init_ov_pct, 0, 100,
-                    wxDefaultPosition, wxSize(180, -1), wxSL_HORIZONTAL);
-                m_sl_overlap->SetToolTip(_L(
-                    "0%   = hard zones (sharp bands)\n"
-                    "60% = default — soft transitions, colours sprinkle into "
-                    "neighbours\n"
-                    "100% = strong overlap — every colour appears throughout"));
-                m_lbl_overlap = new wxStaticText(m_panel_linear, wxID_ANY,
-                    wxString::Format("%d%%", init_ov_pct));
-                row->Add(m_sl_overlap, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                row->Add(m_lbl_overlap, 0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            }
-            {
-                wxArrayString ease_labels;
-                ease_labels.Add(_L("Even — same density everywhere"));
-                ease_labels.Add(_L("Slow start"));
-                ease_labels.Add(_L("Slow end"));
-                ease_labels.Add(_L("S-curve (smooth start & end)"));
-                ease_labels.Add(_L("Custom shape (set γ →)"));
-                ease_labels.Add(_L("Hard step"));
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                            _L("Transition shape:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                m_choice_easing = new wxChoice(m_panel_linear, wxID_ANY,
-                    wxDefaultPosition, wxSize(180, -1), ease_labels);
-                m_choice_easing->SetSelection(std::clamp(m_grad_easing, 0, 5));
-                row->Add(m_choice_easing, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("γ:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                m_sc_gamma = new wxSpinCtrlDouble(m_panel_linear, wxID_ANY,
-                    wxEmptyString, wxDefaultPosition, wxSize(80, -1),
-                    wxSP_ARROW_KEYS, 0.1, 10.0,
-                    std::clamp(m_grad_gamma, 0.1, 10.0), 0.1);
-                m_sc_gamma->SetDigits(2);
-                m_sc_gamma->SetToolTip(_L(
-                    "Only used when Transition shape = \"Custom shape\".\n"
-                    "γ = 1   linear\n"
-                    "γ > 1   delays the change toward the end\n"
-                    "γ < 1   pushes the change toward the start"));
-                row->Add(m_sc_gamma, 0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            }
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                            _L("Skip tiny areas — fewer than N lines use Color 1 only:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                m_sc_min_lines = new wxSpinCtrl(m_panel_linear, wxID_ANY,
-                    wxString::Format("%d", m_grad_min_lines),
-                    wxDefaultPosition, wxSize(80, -1),
-                    wxSP_ARROW_KEYS, 0, 100, m_grad_min_lines);
-                row->Add(m_sc_min_lines, 0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            }
-            // NEOTKO_COLORMIX_TAG — s90: ported from the legacy
-            // SurfaceColorMixerDialog. Global "ColorMix min. line length" — skips
-            // lines shorter than this value (they keep the region's default tool).
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                            _L("ColorStitch min. line length:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                const double cur_ml = std::max(0.0, std::min(50.0, m_grad_min_length));
-                m_sc_min_length = new wxSpinCtrlDouble(m_panel_linear, wxID_ANY,
-                    wxEmptyString, wxDefaultPosition, wxSize(80, -1),
-                    wxSP_ARROW_KEYS, 0.0, 50.0, cur_ml, 0.5);
-                m_sc_min_length->SetDigits(1);
-                m_sc_min_length->SetToolTip(
-                    _L("ColorStitch skips lines shorter than this value — they keep the "
-                       "region's default tool.\n"
-                       "Higher values = fewer tool changes but more uncoloured gaps near edges.\n"
-                       "0 = colour every line regardless of length.\n"
-                       "Tip: if you see empty zones, lower this value.\n"
-                       "(Global setting — applies to all ColorMix passes, both Top and Penu.)"));
-                row->Add(m_sc_min_length, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("mm")),
-                         0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            }
-            // ── Visual gradient preview ─────────────────────────────────
-            {
-                // Header row: label on the left, "Invert direction ⇆" toggle
-                // on the right. Placing the invert toggle next to the preview
-                // makes the cause/effect immediately visible — flip the box
-                // and the strip flips with it.
-                auto* hdr = new wxBoxSizer(wxHORIZONTAL);
-                hdr->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                            _L("Preview of the resulting gradient:")),
-                         1, wxALIGN_CENTER_VERTICAL);
-                m_chk_invert = new wxCheckBox(m_panel_linear, wxID_ANY,
-                    _L("Invert direction ⇆"));
-                m_chk_invert->SetValue(m_grad_invert);
-                m_chk_invert->SetToolTip(_L(
-                    "Reverses the gradient order. Useful when the lower layer's\n"
-                    "natural fill direction makes the gradient look mirrored —\n"
-                    "flipping this is faster than swapping Color 1 / Color 2."));
-                hdr->Add(m_chk_invert, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
-                pv->Add(hdr, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
-
-                m_strip = new GradientStripPanel(m_panel_linear, 360, 32);
-                pv->Add(m_strip, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
-
-                m_lbl_lines_est = new wxStaticText(m_panel_linear, wxID_ANY,
-                    _L("On a 60×60 mm surface — about: —"));
-                m_lbl_lines_est->SetForegroundColour(wxColour(100, 100, 100));
-                pv->Add(m_lbl_lines_est, 0, wxEXPAND | wxLEFT | wxRIGHT, 4);
-
-                // The legacy ASCII preview is hidden by default — the strip
-                // above is the new visual feedback. We keep the widget alive
-                // (Tools that read it during refresh_grad_preview).
-                m_lbl_preview = new wxStaticText(m_panel_linear, wxID_ANY, "");
-                m_lbl_preview->Hide();
-                pv->Add(m_lbl_preview, 0);
-            }
-            m_panel_linear->SetSizer(pv);
-            m_gd_sb->Add(m_panel_linear, 0, wxEXPAND | wxALL, PAD / 2);
-        }
-
-        // ── Custom bands panel (mode 3) ────────────────────────────────
-        m_panel_bands = new wxPanel(this);
-        {
-            auto* pv = new wxBoxSizer(wxVERTICAL);
-            auto make_band_row = [&](const wxString& slot_lbl, int cur_tool,
-                                     int init_count, wxSpinCtrl*& out_spin)
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(m_panel_bands, wxID_ANY,
-                            wxString::Format("%s  T%d", slot_lbl, cur_tool)),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                row->Add(new ColorSwatch(m_panel_bands, colour_for_tool(cur_tool)),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                row->Add(new wxStaticText(m_panel_bands, wxID_ANY, _L("count:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                out_spin = new wxSpinCtrl(m_panel_bands, wxID_ANY,
-                    wxString::Format("%d", init_count),
-                    wxDefaultPosition, wxSize(80, -1),
-                    wxSP_ARROW_KEYS, 0, 200, init_count);
-                row->Add(out_spin, 0, wxALIGN_CENTER_VERTICAL);
-                pv->Add(row, 0, wxEXPAND | wxALL, 2);
-            };
-            make_band_row(_L("Color 1"), m_tool_a, m_grad_band_a, m_sc_band_a);
-            make_band_row(_L("Color 2"), m_tool_b, m_grad_band_b, m_sc_band_b);
-            make_band_row(_L("Color 3"), m_tool_c, m_grad_band_c, m_sc_band_c);
-            make_band_row(_L("Color 4"), m_tool_d, m_grad_band_d, m_sc_band_d);
-            auto* note = new wxStaticText(m_panel_bands, wxID_ANY,
-                _L("Stripes repeat: [Color 1 × count, Color 2 × count, …] until\n"
-                   "the surface is filled. Set count = 0 to skip a colour."));
-            note->SetForegroundColour(wxColour(100, 100, 100));
-            pv->Add(note, 0, wxEXPAND | wxALL, 2);
-            m_panel_bands->SetSizer(pv);
-            m_gd_sb->Add(m_panel_bands, 0, wxEXPAND | wxALL, PAD / 2);
-        }
-
-        // ── MixedFilament gray-out note (hidden by default) ────────────
-        m_lbl_mf_lock_note = new wxStaticText(this, wxID_ANY,
-            _L("⚠ Pattern uses a MixedFilament digit (5-9). Gradient options "
-               "are disabled — the MixedFilament IS the pattern."));
-        m_lbl_mf_lock_note->SetForegroundColour(wxColour(180, 100, 0));
-        m_lbl_mf_lock_note->Hide();
-        m_gd_sb->Add(m_lbl_mf_lock_note, 0, wxEXPAND | wxALL, 4);
-
-        // ── Infill angle override ─────────────────────────────────────────
-        // -1 = Auto (standard OrcaSlicer solid_infill_direction/rotate_template).
-        // >= 0 = Force this fixed angle (degrees) on all ColorMix-active layers.
-        {
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(this, wxID_ANY, _L("Infill angle override:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            m_sc_angle = new wxSpinCtrl(this, wxID_ANY,
-                wxString::Format("%d", m_grad_angle),
-                wxDefaultPosition, wxSize(80, -1),
-                wxSP_ARROW_KEYS, -1, 359, m_grad_angle);
-            m_sc_angle->SetToolTip(_L(
-                "-1 = Auto — use standard solid infill rotation settings.\n"
-                "0 to 359 = Force this fixed angle in degrees on all layers\n"
-                "where ColorMix is active, overriding solid_infill_direction\n"
-                "and any rotation template."));
-            row->Add(m_sc_angle, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-            auto* lbl_auto = new wxStaticText(this, wxID_ANY, _L("(-1 = Auto)"));
-            lbl_auto->SetForegroundColour(wxColour(120, 120, 120));
-            row->Add(lbl_auto, 0, wxALIGN_CENTER_VERTICAL);
-            m_gd_sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
-        }
-
-        // ── Gradient repetitions ──────────────────────────────────────────
-        // NEOTKO_COLORMIX_TAG — s80: repeat the whole gradient N times across
-        // the surface (1 = single sweep). The surface is still analysed line by
-        // line; the gradient is built over a 1/N slice and tiled N times.
-        {
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(this, wxID_ANY, _L("Gradient repetitions:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            m_sc_repetitions = new wxSpinCtrl(this, wxID_ANY,
-                wxString::Format("%d", m_grad_repetitions),
-                wxDefaultPosition, wxSize(80, -1),
-                wxSP_ARROW_KEYS, 1, 50, std::max(1, m_grad_repetitions));
-            m_sc_repetitions->SetToolTip(_L(
-                "How many times the gradient repeats across the surface.\n"
-                "1 = a single A→B sweep.\n"
-                "N = the same gradient repeated N times back-to-back\n"
-                "(e.g. a 1→2 gradient with 3 = three 1→2 gradients)."));
-            row->Add(m_sc_repetitions, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-            auto* lbl_one = new wxStaticText(this, wxID_ANY, _L("(1 = single)"));
-            lbl_one->SetForegroundColour(wxColour(120, 120, 120));
-            row->Add(lbl_one, 0, wxALIGN_CENTER_VERTICAL);
-            m_gd_sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD / 2);
-        }
-
-        vs->Add(m_gd_sb, 0, wxEXPAND | wxALL, PAD / 2);
-
-        // ── Listeners ──────────────────────────────────────────────────
-        m_choice_grad_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
-            refresh_grad_visibility();
             refresh_grad_preview();
         });
+        action_row->Add(bcl, 0, wxRIGHT, 8);
+
+        auto* bbk = new wxButton(m_panel_custom, wxID_ANY, _L("⌫ Undo digit"),
+                                 wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        bbk->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            if (m_pattern.empty()) return;
+            m_pattern.pop_back();
+            m_disp->Refresh();
+            refresh_grad_preview();
+        });
+        action_row->Add(bbk, 0, wxRIGHT, 8);
+
+        m_btn_invert = new wxButton(m_panel_custom, wxID_ANY, _L("Invert"),
+                                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        m_btn_invert->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            if (m_pattern.empty()) return;
+            std::reverse(m_pattern.begin(), m_pattern.end());
+            m_disp->Refresh();
+            refresh_grad_preview();
+        });
+        action_row->Add(m_btn_invert, 0, 0, 0);
+        pv->Add(action_row, 0, 0, 0);
+
+        m_panel_custom->SetSizer(pv);
+        vs->Add(m_panel_custom, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+    }
+
+    // ── Source panel: MixedFilament recipes ──────────────────────────────
+    void build_mixed_panel(wxBoxSizer* vs, const std::vector<Slic3r::ColorMixOption>& options, int PAD)
+    {
+        m_panel_mixed = new wxPanel(this);
+        auto* pv = new wxBoxSizer(wxVERTICAL);
+        pv->Add(new wxStaticText(m_panel_mixed, wxID_ANY,
+                    _L("Pick a recipe — it becomes the whole pattern:")),
+                0, wxBOTTOM, 4);
+
+        // s195 fix #3: recipe labels are wide ("Mixed 1: F1+F2 (50%/50%)"); a
+        // single row grew the dialog out of bounds past ~2 recipes. Lay them
+        // out 2 per row, wrapping downward, with equal-width columns.
+        auto* btn_grid = new wxFlexGridSizer(0, 2, 4, 4);
+        btn_grid->AddGrowableCol(0, 1);
+        btn_grid->AddGrowableCol(1, 1);
+        wxString active_lbl;
+        for (const auto& opt : options) {
+            if (opt.is_physical || opt.filament_id < 1 || opt.filament_id > 9) continue;
+            const wxString lbl = wxString::FromUTF8(opt.label);
+            auto* b = new wxButton(m_panel_mixed, wxID_ANY, lbl);
+            b->SetBackgroundColour(hex_to_colour(opt.display_color));
+            b->SetToolTip(lbl + wxString::Format(" [digit %d]", opt.filament_id));
+            std::string recipe = opt.pattern;
+            b->Bind(wxEVT_BUTTON, [this, recipe, lbl](wxCommandEvent&) {
+                m_pattern = recipe;
+                m_mixed_filament_selected = true;
+                if (m_lbl_mixed_active)
+                    m_lbl_mixed_active->SetLabel(_L("Active recipe:") + " " + lbl);
+                if (m_disp) m_disp->Refresh();
+                refresh_grad_preview();
+                Layout();
+            });
+            btn_grid->Add(b, 1, wxEXPAND);
+            if (m_mixed_filament_selected && active_lbl.IsEmpty()) {
+                std::string rev = opt.pattern;
+                std::reverse(rev.begin(), rev.end());
+                if (opt.pattern == m_pattern || rev == m_pattern)
+                    active_lbl = lbl;
+            }
+        }
+        pv->Add(btn_grid, 0, wxEXPAND | wxBOTTOM, 4);
+
+        auto* status_row = new wxBoxSizer(wxHORIZONTAL);
+        m_lbl_mixed_active = new wxStaticText(m_panel_mixed, wxID_ANY,
+            active_lbl.IsEmpty() ? wxString(_L("No recipe selected."))
+                                 : _L("Active recipe:") + " " + active_lbl);
+        m_lbl_mixed_active->SetForegroundColour(wxColour(130, 130, 130));
+        status_row->Add(m_lbl_mixed_active, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+        auto* bclr = new wxButton(m_panel_mixed, wxID_ANY, _L("Clear recipe"),
+                                  wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        bclr->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            m_pattern.clear();
+            m_mixed_filament_selected = false;
+            m_lbl_mixed_active->SetLabel(_L("No recipe selected."));
+            if (m_disp) m_disp->Refresh();
+            refresh_grad_preview();
+            Layout();
+        });
+        status_row->Add(bclr, 0, wxALIGN_CENTER_VERTICAL);
+        pv->Add(status_row, 0, wxEXPAND, 0);
+
+        m_panel_mixed->SetSizer(pv);
+        vs->Add(m_panel_mixed, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+    }
+
+    // ── Source panel: Textile weave (ColorSci::WeaveLibrary) ─────────────
+    void build_weave_panel(wxBoxSizer* vs, int PAD)
+    {
+        const auto& presets = Slic3r::ColorSci::weave_presets();
+        m_panel_weave = new wxPanel(this);
+        auto* pv = new wxBoxSizer(wxVERTICAL);
+
+        {
+            wxArrayString labels;
+            for (size_t i = 1; i < presets.size(); ++i)
+                labels.Add(_L(presets[i].name));
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_weave, wxID_ANY, _L("Weave:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_choice_weave = new wxChoice(m_panel_weave, wxID_ANY,
+                wxDefaultPosition, wxSize(220, -1), labels);
+            m_choice_weave->SetSelection(
+                std::clamp(m_weave_idx - 1, 0, (int)labels.GetCount() - 1));
+            row->Add(m_choice_weave, 0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxBOTTOM, 4);
+        }
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            auto make_pick = [&](const wxString& lbl, int cur,
+                                 wxChoice*& out_c, ColorSwatch*& out_s) {
+                row->Add(new wxStaticText(m_panel_weave, wxID_ANY, lbl),
+                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                wxArrayString fl;
+                const int n = std::clamp((int)m_colours.size(), 1, 4);
+                for (int i = 0; i < n; ++i) fl.Add(wxString::Format("F%d", i + 1));
+                out_c = new wxChoice(m_panel_weave, wxID_ANY,
+                    wxDefaultPosition, wxSize(60, -1), fl);
+                out_c->SetSelection(std::clamp(cur, 0, n - 1));
+                row->Add(out_c, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                out_s = new ColorSwatch(m_panel_weave,
+                    digit_colour((char)('1' + out_c->GetSelection())));
+                row->Add(out_s, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+            };
+            make_pick(_L("Colour A:"), m_weave_a, m_choice_weave_a, m_sw_weave_a);
+            make_pick(_L("Colour B:"), m_weave_b, m_choice_weave_b, m_sw_weave_b);
+            pv->Add(row, 0, wxEXPAND | wxBOTTOM, 4);
+        }
+        m_lbl_weave_pat = new wxStaticText(m_panel_weave, wxID_ANY, "");
+        m_lbl_weave_pat->SetForegroundColour(wxColour(130, 130, 130));
+        pv->Add(m_lbl_weave_pat, 0, wxEXPAND | wxBOTTOM, 2);
+        m_lbl_weave_note = new wxStaticText(m_panel_weave, wxID_ANY, "");
+        m_lbl_weave_note->SetForegroundColour(wxColour(130, 130, 130));
+        pv->Add(m_lbl_weave_note, 0, wxEXPAND, 0);
+
+        auto* bedit = new wxButton(m_panel_weave, wxID_ANY, _L("Edit as custom pattern…"),
+                                   wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        bedit->SetToolTip(_L("Copies this weave string into the Custom pattern editor for hand-tweaking."));
+        bedit->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            m_custom_stash = m_pattern;
+            if (m_choice_cat) m_choice_cat->SetSelection(0); // Custom is always first
+            on_category_changed();
+        });
+        pv->Add(bedit, 0, wxTOP, 4);
+
+        m_panel_weave->SetSizer(pv);
+        vs->Add(m_panel_weave, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        auto on_change = [this](wxCommandEvent&) { apply_weave(); };
+        m_choice_weave  ->Bind(wxEVT_CHOICE, on_change);
+        m_choice_weave_a->Bind(wxEVT_CHOICE, on_change);
+        m_choice_weave_b->Bind(wxEVT_CHOICE, on_change);
+    }
+
+    // Regenerate m_pattern from the selected weave + colour substitution.
+    // The pattern digits map STRAIGHT to physical filaments (engine
+    // build_tool_list_from_pattern) — no slot indirection in mode 0.
+    void apply_weave()
+    {
+        const auto& presets = Slic3r::ColorSci::weave_presets();
+        if (presets.size() < 2) return;
+        const int sel = m_choice_weave ? m_choice_weave->GetSelection() : (m_weave_idx - 1);
+        m_weave_idx = std::clamp(sel + 1, 1, (int)presets.size() - 1);
+        if (m_choice_weave_a) m_weave_a = m_choice_weave_a->GetSelection();
+        if (m_choice_weave_b) m_weave_b = m_choice_weave_b->GetSelection();
+        if (m_weave_a == m_weave_b && m_choice_weave_b && m_choice_weave_b->GetCount() > 1) {
+            // A == B collapses the weave into a solid — nudge B along.
+            m_weave_b = (m_weave_b + 1) % (int)m_choice_weave_b->GetCount();
+            m_choice_weave_b->SetSelection(m_weave_b);
+        }
+        const auto& wp = presets[m_weave_idx];
+        const bool  penu_half = wp.paired && m_surface_id == 1 &&
+                                wp.pattern_penu && wp.pattern_penu[0];
+        const std::string base = penu_half ? wp.pattern_penu : wp.pattern_top;
+        const char da = (char)('1' + m_weave_a), db = (char)('1' + m_weave_b);
+        std::string out;
+        out.reserve(base.size());
+        for (char c : base) out += (c == '1') ? da : db;
+        m_pattern = out;
+        m_mixed_filament_selected = false;
+
+        if (m_sw_weave_a) m_sw_weave_a->set_color(digit_colour(da));
+        if (m_sw_weave_b) m_sw_weave_b->set_color(digit_colour(db));
+        if (m_lbl_weave_pat)
+            m_lbl_weave_pat->SetLabel(_L("Pattern:") + " " + wxString::FromUTF8(out));
+
+        wxString note = _L(wp.note);
+        if (wp.offset_per_layer > 0)
+            note += "\n" + _L("⚠ Per-layer diagonal offset is not implemented yet — prints as a static repeat.");
+        if (wp.paired) {
+            const char* ob = penu_half ? wp.pattern_top
+                             : (wp.pattern_penu && wp.pattern_penu[0] ? wp.pattern_penu
+                                                                      : wp.pattern_top);
+            std::string other;
+            for (const char* q = ob; *q; ++q) other += (*q == '1') ? da : db;
+            note += "\n" + wxString::Format(
+                _L("Pair it: set \"%s\" on the %s surface at 90° for the full effect."),
+                wxString::FromUTF8(other),
+                m_surface_id == 1 ? _L("top") : _L("penultimate"));
+        } else {
+            note += "\n" + _L("Tip: the same weave on the other surface at 90° completes the fabric illusion.");
+        }
+        if (m_lbl_weave_note) m_lbl_weave_note->SetLabel(note);
+
+        if (m_disp) m_disp->Refresh();
+        refresh_grad_preview();
+        Layout();
+        Fit();
+    }
+
+    // ── "Colours used" slot pickers (blends + stripes only) ──────────────
+    // Mode 0 sources don't use tool_a..d — the engine maps pattern digits
+    // straight to filaments — so showing the slots there was misleading.
+    void build_slots_box(wxBoxSizer* vs, int PAD)
+    {
+        m_panel_slots = new wxPanel(this);
+        auto* sb = new wxStaticBoxSizer(wxHORIZONTAL, m_panel_slots, _L("Colours used"));
+        auto make_slot = [&](const wxString& slot_lbl, int cur_tool,
+                             wxChoice*& out_choice, ColorSwatch*& out_swatch)
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_slots, wxID_ANY, slot_lbl),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            out_choice = new wxChoice(m_panel_slots, wxID_ANY,
+                wxDefaultPosition, wxSize(60, -1), m_tool_labels);
+            const int sel = std::clamp(cur_tool, 0, (int)m_tool_labels.GetCount() - 1);
+            out_choice->SetSelection(sel);
+            row->Add(out_choice, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            out_swatch = new ColorSwatch(m_panel_slots, colour_for_tool(sel));
+            row->Add(out_swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+            out_choice->Bind(wxEVT_CHOICE, [this, out_choice, out_swatch](wxCommandEvent&) {
+                out_swatch->set_color(colour_for_tool(out_choice->GetSelection()));
+                refresh_grad_preview();
+            });
+            sb->Add(row, 0, wxALIGN_CENTER_VERTICAL);
+        };
+        make_slot(_L("Color 1:"), m_tool_a, m_choice_tool_a, m_sw_tool_a);
+        make_slot(_L("Color 2:"), m_tool_b, m_choice_tool_b, m_sw_tool_b);
+        make_slot(_L("Color 3:"), m_tool_c, m_choice_tool_c, m_sw_tool_c);
+        make_slot(_L("Color 4:"), m_tool_d, m_choice_tool_d, m_sw_tool_d);
+        m_panel_slots->SetSizer(sb);
+        vs->Add(m_panel_slots, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+    }
+
+    // ── Blend panel (Blend2 + Blend3) — the "Gradient (numeric dither)"
+    // knobs of the old dialog, now scoped to their own category. ─────────
+    void build_linear_panel(wxBoxSizer* vs, int PAD)
+    {
+        m_panel_linear = new wxPanel(this);
+        auto* pv = new wxBoxSizer(wxVERTICAL);
+        auto add_pct_row = [&](const wxString& tag, int init_v,
+                               wxSlider*& out_sl, wxStaticText*& out_lbl)
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY, tag),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            out_sl = new wxSlider(m_panel_linear, wxID_ANY, init_v, 0, 100,
+                wxDefaultPosition, wxSize(220, -1), wxSL_HORIZONTAL);
+            out_lbl = new wxStaticText(m_panel_linear, wxID_ANY,
+                wxString::Format("%d%%", init_v));
+            row->Add(out_sl, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            row->Add(out_lbl, 0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxALL, 2);
+        };
+        add_pct_row(_L("How much Color 1:"), m_grad_pct_a, m_sl_pct_a, m_lbl_pct_a);
+        add_pct_row(_L("How much Color 2 (3-colour blend only):"),
+                    m_grad_pct_b, m_sl_pct_b, m_lbl_pct_b);
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                        _L("Color 3 fills the rest (auto):")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_lbl_pct_c = new wxStaticText(m_panel_linear, wxID_ANY, "17%");
+            row->Add(m_lbl_pct_c, 0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxALL, 2);
+        }
+        // ── Color overlap slider (controls how much colours bleed) ──
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                        _L("Color overlap (soft ← hard zones):")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            const int init_ov_pct = static_cast<int>(std::lround(m_grad_overlap * 100.0));
+            m_sl_overlap = new wxSlider(m_panel_linear, wxID_ANY,
+                init_ov_pct, 0, 100,
+                wxDefaultPosition, wxSize(180, -1), wxSL_HORIZONTAL);
+            m_sl_overlap->SetToolTip(_L(
+                "0%   = hard zones (sharp bands)\n"
+                "60% = default — soft transitions, colours sprinkle into "
+                "neighbours\n"
+                "100% = strong overlap — every colour appears throughout"));
+            m_lbl_overlap = new wxStaticText(m_panel_linear, wxID_ANY,
+                wxString::Format("%d%%", init_ov_pct));
+            row->Add(m_sl_overlap, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            row->Add(m_lbl_overlap, 0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxALL, 2);
+        }
+        {
+            // s195: "Slow start" is the recommended default for new blends
+            // (on_category_changed applies it when entering a blend category).
+            wxArrayString ease_labels;
+            ease_labels.Add(_L("Even — same density everywhere"));
+            ease_labels.Add(_L("Slow start (recommended)"));
+            ease_labels.Add(_L("Slow end"));
+            ease_labels.Add(_L("S-curve (smooth start & end)"));
+            ease_labels.Add(_L("Custom shape (set γ →)"));
+            ease_labels.Add(_L("Hard step"));
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                        _L("Transition shape:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_choice_easing = new wxChoice(m_panel_linear, wxID_ANY,
+                wxDefaultPosition, wxSize(200, -1), ease_labels);
+            m_choice_easing->SetSelection(std::clamp(m_grad_easing, 0, 5));
+            row->Add(m_choice_easing, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("γ:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            m_sc_gamma = new wxSpinCtrlDouble(m_panel_linear, wxID_ANY,
+                wxEmptyString, wxDefaultPosition, wxSize(80, -1),
+                wxSP_ARROW_KEYS, 0.1, 10.0,
+                std::clamp(m_grad_gamma, 0.1, 10.0), 0.1);
+            m_sc_gamma->SetDigits(2);
+            m_sc_gamma->SetToolTip(_L(
+                "Only used when Transition shape = \"Custom shape\".\n"
+                "γ = 1   linear\n"
+                "γ > 1   delays the change toward the end\n"
+                "γ < 1   pushes the change toward the start"));
+            row->Add(m_sc_gamma, 0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxALL, 2);
+        }
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
+                        _L("Skip tiny areas — fewer than N lines use Color 1 only:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_sc_min_lines = new wxSpinCtrl(m_panel_linear, wxID_ANY,
+                wxString::Format("%d", m_grad_min_lines),
+                wxDefaultPosition, wxSize(80, -1),
+                wxSP_ARROW_KEYS, 0, 100, m_grad_min_lines);
+            row->Add(m_sc_min_lines, 0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxALL, 2);
+        }
+        m_panel_linear->SetSizer(pv);
+        vs->Add(m_panel_linear, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
         m_sl_pct_a->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
         m_sl_pct_b->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
-        if (m_sl_overlap)
-            m_sl_overlap->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
-        if (m_chk_invert)
-            m_chk_invert->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { refresh_grad_preview(); });
+        m_sl_overlap->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) { refresh_grad_preview(); });
         m_choice_easing->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { refresh_grad_preview(); });
-        if (m_sc_repetitions)
-            m_sc_repetitions->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_gamma->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { refresh_grad_preview(); });
+        m_sc_min_lines->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+    }
+
+    // ── Stripes panel (manual bands) — s195 reorganized as a grid whose
+    // swatches follow the "Colours used" slot pickers live. ──────────────
+    void build_bands_panel(wxBoxSizer* vs, int PAD)
+    {
+        m_panel_bands = new wxPanel(this);
+        auto* pv = new wxBoxSizer(wxVERTICAL);
+        auto* grid = new wxFlexGridSizer(4, 4, 4, 8);
+        auto band_row = [&](int slot, const wxString& lbl, int init_count,
+                            wxSpinCtrl*& out_spin)
+        {
+            grid->Add(new wxStaticText(m_panel_bands, wxID_ANY, lbl),
+                      0, wxALIGN_CENTER_VERTICAL);
+            m_sw_band[slot] = new ColorSwatch(m_panel_bands, colour_for_tool(slot));
+            grid->Add(m_sw_band[slot], 0, wxALIGN_CENTER_VERTICAL);
+            grid->Add(new wxStaticText(m_panel_bands, wxID_ANY, _L("lines:")),
+                      0, wxALIGN_CENTER_VERTICAL);
+            out_spin = new wxSpinCtrl(m_panel_bands, wxID_ANY,
+                wxString::Format("%d", init_count),
+                wxDefaultPosition, wxSize(80, -1),
+                wxSP_ARROW_KEYS, 0, 200, init_count);
+            grid->Add(out_spin, 0, wxALIGN_CENTER_VERTICAL);
+        };
+        band_row(0, _L("Color 1"), m_grad_band_a, m_sc_band_a);
+        band_row(1, _L("Color 2"), m_grad_band_b, m_sc_band_b);
+        band_row(2, _L("Color 3"), m_grad_band_c, m_sc_band_c);
+        band_row(3, _L("Color 4"), m_grad_band_d, m_sc_band_d);
+        pv->Add(grid, 0, wxALL, 2);
+        auto* note = new wxStaticText(m_panel_bands, wxID_ANY,
+            _L("Bands repeat [Color 1 × lines, Color 2 × lines, …] until the surface\n"
+               "is filled. 0 lines = skip that colour. Pick the filaments in\n"
+               "\"Colours used\" above."));
+        note->SetForegroundColour(wxColour(130, 130, 130));
+        pv->Add(note, 0, wxEXPAND | wxALL, 2);
+        m_panel_bands->SetSizer(pv);
+        vs->Add(m_panel_bands, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
         m_sc_band_a->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_band_b->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_band_c->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_band_d->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
-
-        refresh_grad_visibility();
-        refresh_grad_preview();
-        refresh_grad_lock();
     }
 
-    void refresh_grad_visibility()
+    // ── Unified preview (ALL sources) — s195. Strip + square sample at the
+    // infill angle; the old dialog only previewed the blend modes. ───────
+    void build_preview_box(wxBoxSizer* vs, int PAD)
     {
-        if (!m_choice_grad_mode) return;
-        const int m = m_choice_grad_mode->GetSelection();
-        const bool linear = (m == 1 || m == 2);
-        const bool bands  = (m == 3);
-        if (m_panel_linear) m_panel_linear->Show(linear);
-        if (m_panel_bands)  m_panel_bands ->Show(bands);
-        const bool b_active = (m == 2);
-        if (m_sl_pct_b)  m_sl_pct_b ->Enable(b_active);
-        if (m_lbl_pct_b) m_lbl_pct_b->Enable(b_active);
-        if (m_lbl_pct_c) m_lbl_pct_c->Enable(b_active);
-        Layout(); Fit();
+        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this,
+            _L("Preview — how the surface will look"));
+        auto* row  = new wxBoxSizer(wxHORIZONTAL);
+        auto* left = new wxBoxSizer(wxVERTICAL);
+        m_strip = new GradientStripPanel(this, 360, 32);
+        left->Add(m_strip, 0, wxEXPAND | wxBOTTOM, 4);
+        auto* hdr = new wxBoxSizer(wxHORIZONTAL);
+        m_lbl_lines_est = new wxStaticText(this, wxID_ANY,
+            _L("On a 60×60 mm surface — about: —"));
+        m_lbl_lines_est->SetForegroundColour(wxColour(100, 100, 100));
+        hdr->Add(m_lbl_lines_est, 1, wxALIGN_CENTER_VERTICAL);
+        m_chk_invert = new wxCheckBox(this, wxID_ANY, _L("Invert direction ⇆"));
+        m_chk_invert->SetValue(m_grad_invert);
+        m_chk_invert->SetToolTip(_L(
+            "Reverses the gradient order. Useful when the lower layer's\n"
+            "natural fill direction makes the gradient look mirrored —\n"
+            "flipping this is faster than swapping Color 1 / Color 2."));
+        hdr->Add(m_chk_invert, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
+        left->Add(hdr, 0, wxEXPAND, 0);
+        row->Add(left, 1, wxEXPAND | wxRIGHT, 8);
+        m_square = new SurfaceSwatchPanel(this, 96);
+        m_square->SetToolTip(_L(
+            "Sample square drawn at the infill angle override\n"
+            "(-1 = Auto is shown at 45°)."));
+        row->Add(m_square, 0, wxALIGN_TOP, 0);
+        sb->Add(row, 0, wxEXPAND | wxALL, 4);
+
+        // Hidden ASCII preview kept alive — tools read it during refresh.
+        m_lbl_preview = new wxStaticText(this, wxID_ANY, "");
+        m_lbl_preview->Hide();
+        sb->Add(m_lbl_preview, 0);
+
+        vs->Add(sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+        m_chk_invert->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { refresh_grad_preview(); });
     }
 
+    // ── Print options (shared by every source) ───────────────────────────
+    void build_options_box(wxBoxSizer* vs, int PAD)
+    {
+        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Print options"));
+        auto* grid = new wxFlexGridSizer(3, 3, 4, 8);
+        // Infill angle override — -1 = Auto (standard rotation), >= 0 = fixed.
+        grid->Add(new wxStaticText(this, wxID_ANY, _L("Infill angle override:")),
+                  0, wxALIGN_CENTER_VERTICAL);
+        m_sc_angle = new wxSpinCtrl(this, wxID_ANY,
+            wxString::Format("%d", m_grad_angle),
+            wxDefaultPosition, wxSize(80, -1),
+            wxSP_ARROW_KEYS, -1, 359, m_grad_angle);
+        m_sc_angle->SetToolTip(_L(
+            "-1 = Auto — use standard solid infill rotation settings.\n"
+            "0 to 359 = Force this fixed angle in degrees on all layers\n"
+            "where ColorStitch is active, overriding solid_infill_direction\n"
+            "and any rotation template."));
+        grid->Add(m_sc_angle, 0, wxALIGN_CENTER_VERTICAL);
+        {
+            auto* lbl = new wxStaticText(this, wxID_ANY, _L("(-1 = Auto)"));
+            lbl->SetForegroundColour(wxColour(120, 120, 120));
+            grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+        }
+        // Repetitions (s80) — tile the gradient N times across the surface.
+        grid->Add(new wxStaticText(this, wxID_ANY, _L("Gradient repetitions:")),
+                  0, wxALIGN_CENTER_VERTICAL);
+        m_sc_repetitions = new wxSpinCtrl(this, wxID_ANY,
+            wxString::Format("%d", m_grad_repetitions),
+            wxDefaultPosition, wxSize(80, -1),
+            wxSP_ARROW_KEYS, 1, 50, std::max(1, m_grad_repetitions));
+        m_sc_repetitions->SetToolTip(_L(
+            "How many times the gradient repeats across the surface.\n"
+            "1 = a single A→B sweep.\n"
+            "N = the same gradient repeated N times back-to-back\n"
+            "(e.g. a 1→2 gradient with 3 = three 1→2 gradients)."));
+        grid->Add(m_sc_repetitions, 0, wxALIGN_CENTER_VERTICAL);
+        {
+            auto* lbl = new wxStaticText(this, wxID_ANY, _L("(1 = single)"));
+            lbl->SetForegroundColour(wxColour(120, 120, 120));
+            grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+        }
+        // NEOTKO_COLORMIX_TAG — s90: global min line length, shared by ALL
+        // ColorStitch passes (Top and Penu). Moved out of the blend panel so
+        // it's visible for every category — it applies to all of them.
+        grid->Add(new wxStaticText(this, wxID_ANY, _L("ColorStitch min. line length:")),
+                  0, wxALIGN_CENTER_VERTICAL);
+        const double cur_ml = std::max(0.0, std::min(50.0, m_grad_min_length));
+        m_sc_min_length = new wxSpinCtrlDouble(this, wxID_ANY,
+            wxEmptyString, wxDefaultPosition, wxSize(80, -1),
+            wxSP_ARROW_KEYS, 0.0, 50.0, cur_ml, 0.5);
+        m_sc_min_length->SetDigits(1);
+        m_sc_min_length->SetToolTip(
+            _L("ColorStitch skips lines shorter than this value — they keep the "
+               "region's default tool.\n"
+               "Higher values = fewer tool changes but more uncoloured gaps near edges.\n"
+               "0 = colour every line regardless of length.\n"
+               "Tip: if you see empty zones, lower this value.\n"
+               "(Global setting — applies to all ColorMix passes, both Top and Penu.)"));
+        grid->Add(m_sc_min_length, 0, wxALIGN_CENTER_VERTICAL);
+        {
+            auto* lbl = new wxStaticText(this, wxID_ANY, _L("mm"));
+            lbl->SetForegroundColour(wxColour(120, 120, 120));
+            grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+        }
+        sb->Add(grid, 0, wxALL, 4);
+        vs->Add(sb, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        m_sc_angle->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+        m_sc_repetitions->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
+    }
+
+    // ── Category switching ────────────────────────────────────────────────
+    void on_category_changed()
+    {
+        const int prev = m_category;
+        m_category = current_cat();
+        if (prev == m_category) return;
+
+        // Leaving Custom: stash the hand-built string so an accidental trip
+        // through Weave/Mixed can't destroy it.
+        if (prev == CAT_CUSTOM)
+            m_custom_stash = m_pattern;
+
+        // Leaving Mixed with a recipe active: the recipe IS the pattern and
+        // cannot coexist with any other source — deselect it (this replaces
+        // the old grey-out lock, which made the combo unreachable).
+        if (prev == CAT_MIXED &&
+            (m_mixed_filament_selected || pattern_uses_mixed_filament())) {
+            m_pattern.clear();
+            m_mixed_filament_selected = false;
+            if (m_lbl_mixed_active)
+                m_lbl_mixed_active->SetLabel(_L("No recipe selected."));
+            if (m_disp) { m_disp->SetMinSize(wxSize(160, 26)); m_disp->Refresh(); }
+        }
+
+        // Entering Custom: restore the stash if we have one.
+        if (m_category == CAT_CUSTOM && !m_custom_stash.empty()) {
+            m_pattern = m_custom_stash;
+            if (m_disp) m_disp->Refresh();
+        }
+
+        // s195 point 2: blends default to "Slow start" unless this pass was
+        // already configured as a blend (respect the saved easing then).
+        if ((m_category == CAT_BLEND2 || m_category == CAT_BLEND3) &&
+            m_loaded_mode != 1 && m_loaded_mode != 2 &&
+            m_choice_easing && m_choice_easing->GetSelection() == 0)
+            m_choice_easing->SetSelection(1); // Slow start
+
+        if (m_category == CAT_WEAVE)
+            apply_weave();
+
+        refresh_category_visibility();
+        refresh_grad_preview();
+    }
+
+    void refresh_category_visibility()
+    {
+        const int  c    = m_category;
+        const bool grad = (c == CAT_BLEND2 || c == CAT_BLEND3);
+        if (m_panel_custom) m_panel_custom->Show(c == CAT_CUSTOM);
+        if (m_panel_mixed)  m_panel_mixed ->Show(c == CAT_MIXED);
+        if (m_panel_weave)  m_panel_weave ->Show(c == CAT_WEAVE);
+        if (m_panel_slots)  m_panel_slots ->Show(grad || c == CAT_STRIPES);
+        if (m_panel_linear) m_panel_linear->Show(grad);
+        if (m_panel_bands)  m_panel_bands ->Show(c == CAT_STRIPES);
+        const bool b3 = (c == CAT_BLEND3);
+        if (m_sl_pct_b)  m_sl_pct_b ->Enable(b3);
+        if (m_lbl_pct_b) m_lbl_pct_b->Enable(b3);
+        if (m_lbl_pct_c) m_lbl_pct_c->Enable(b3);
+        // The engine invert flag belongs to the generated modes; for string
+        // sources the Invert button (reverses the string) is the real thing.
+        if (m_chk_invert) m_chk_invert->Enable(grad || c == CAT_STRIPES);
+        if (m_lbl_cat_note) {
+            wxString note;
+            wxColour col(130, 130, 130);
+            switch (c) {
+            case CAT_CUSTOM:
+                note = _L("The digit sequence repeats line by line across the surface. Digits map straight to filaments F1-F4.");
+                break;
+            case CAT_MIXED:
+                note = _L("⚠ The recipe IS the pattern — blends, stripes and custom digits don't apply while a recipe is active.");
+                col  = wxColour(200, 140, 30);
+                break;
+            case CAT_WEAVE:
+                note = _L("Classic textile weaves as ready-made line patterns — pick the two colours below.");
+                break;
+            case CAT_BLEND2:
+                note = _L("Numeric dither between two colours. Any custom/Mixed pattern string is ignored in this style.");
+                break;
+            case CAT_BLEND3:
+                note = _L("Numeric dither across three colours. Any custom/Mixed pattern string is ignored in this style.");
+                break;
+            case CAT_STRIPES:
+                note = _L("Fixed bands repeating until the surface is filled. Any custom/Mixed pattern string is ignored.");
+                break;
+            }
+            m_lbl_cat_note->SetLabel(note);
+            m_lbl_cat_note->SetForegroundColour(col);
+        }
+        Layout();
+        // s195 fix #2: SetSizeHints recomputes the dialog's MIN size from only
+        // the currently-shown panels and resizes to it. A bare Fit() couldn't
+        // shrink below the min set by the initial SetSizerAndFit (all panels
+        // shown), so the window kept the tallest layout's height in every mode.
+        if (auto* s = GetSizer()) {
+            SetMinSize(wxDefaultSize);
+            s->SetSizeHints(this);
+        }
+    }
+
+    // ── s195 unified preview: renders the ACTIVE source. Blends/stripes go
+    // through the engine builders (slot colours); string sources (custom,
+    // Mixed recipe, weave) tile the digit sequence with the digits mapped
+    // straight to filament colours — matching build_tool_list_from_pattern,
+    // which does NOT remap mode-0 digits through tool_a..d (the old preview
+    // wrongly did, and painted MixedFilament digits neutral grey).
     void refresh_grad_preview()
     {
-        if (!m_choice_grad_mode) return;
-        const int mode    = m_choice_grad_mode->GetSelection();
+        if (!m_cfg || !m_choice_cat) return;
+        const int cat     = m_category;
         const int pct_a   = m_sl_pct_a ? m_sl_pct_a->GetValue() : m_grad_pct_a;
         const int pct_b   = m_sl_pct_b ? m_sl_pct_b->GetValue() : m_grad_pct_b;
         const int easing  = m_choice_easing ? m_choice_easing->GetSelection() : m_grad_easing;
@@ -941,10 +1416,7 @@ private:
             m_lbl_overlap->SetLabel(wxString::Format("%d%%", ov_pct));
         }
 
-        // Build the colour table for the strip preview. We map LOCAL slot
-        // indices 0..3 to whatever physical tool the user has assigned via
-        // the slot pickers, then look up the filament colour. This guarantees
-        // the strip shows the actual print colours, not generic placeholders.
+        // Slot → filament colour (blend/stripe modes only — see note above).
         auto pick_color = [&](int slot_idx) -> wxColour {
             int tool = 0;
             switch (slot_idx) {
@@ -957,23 +1429,28 @@ private:
                 return hex_to_colour(m_colours[tool]);
             return wxColour(160, 160, 160);
         };
-        std::vector<wxColour> slot_colors {
-            pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
 
-        std::vector<int> seq;
-        const int N = 240; // wider strip = more detail
+        std::vector<int>      seq;
+        std::vector<wxColour> colors;
+        const int N = 240; // strip resolution
         // NEOTKO_COLORMIX_TAG — s80: mirror the engine's repetitions tiling so
         // the preview shows the repeated gradients. Build over N/reps, tile to N.
         const int reps    = m_sc_repetitions ? std::max(1, m_sc_repetitions->GetValue())
                                              : std::max(1, m_grad_repetitions);
         const int build_N = (reps > 1) ? std::max(2, N / reps) : N;
-        if (mode == 1) {
+        const bool generated = (cat == CAT_BLEND2 || cat == CAT_BLEND3 || cat == CAT_STRIPES);
+        if (cat == CAT_BLEND2) {
+            colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
             seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(
                 build_N, 0, 1, pct_a, easing, gamma);
-        } else if (mode == 2) {
+        } else if (cat == CAT_BLEND3) {
+            colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
             seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(
                 build_N, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
-        } else if (mode == 3) {
+        } else if (cat == CAT_STRIPES) {
+            colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
+            for (int i = 0; i < 4; ++i)
+                if (m_sw_band[i]) m_sw_band[i]->set_color(pick_color(i));
             const int ca = m_sc_band_a ? m_sc_band_a->GetValue() : 0;
             const int cb = m_sc_band_b ? m_sc_band_b->GetValue() : 0;
             const int cc = m_sc_band_c ? m_sc_band_c->GetValue() : 0;
@@ -981,40 +1458,50 @@ private:
             seq = Slic3r::SurfaceColorMix::build_custom_bands(
                 build_N, 0, ca, 1, cb, 2, cc, 3, cd);
         } else {
-            // Pattern-string mode: render the actual pattern (if any) so the
-            // user sees its real colour layout. Map each digit 1..4 to slot
-            // 0..3 (digits 5-9 are MixedFilament — show as neutral grey).
-            for (char c : m_pattern) {
-                if (c >= '1' && c <= '4') seq.push_back(c - '1');
-                else                       seq.push_back(-1); // unknown → grey
-            }
-            if (seq.empty()) seq.push_back(-1);
+            // String sources: digit d → colour of filament/recipe digit d
+            // (digits 5-9 = MixedFilament recipes with their blended colour).
+            for (int d = 0; d < 9; ++d)
+                colors.push_back(digit_colour((char)('1' + d)));
+            std::vector<int> unit;
+            for (char ch : m_pattern)
+                if (ch >= '1' && ch <= '9') unit.push_back(ch - '1');
+            if (unit.empty()) unit.push_back(-1);
+            seq.reserve(N);
+            for (int i = 0; i < N; ++i) seq.push_back(unit[i % (int)unit.size()]);
         }
-        // NEOTKO_COLORMIX_TAG — s80: tile the built period to fill the strip
-        // (modes 1-3 only; pattern-string mode is verbatim).
-        if (reps > 1 && mode >= 1 && mode <= 3 && !seq.empty() && (int)seq.size() < N) {
+        // s80: tile the built period so the strip shows the repetitions.
+        if (reps > 1 && generated && !seq.empty() && (int)seq.size() < N) {
             const int period = (int)seq.size();
-            std::vector<int> tiled; tiled.reserve(N);
+            std::vector<int> tiled;
+            tiled.reserve(N);
             for (int i = 0; i < N; ++i) tiled.push_back(seq[i % period]);
             seq.swap(tiled);
         }
 
-        // s60: invert mirrors the sequence so the strip preview matches what
-        // the slicer will produce when the checkbox is enabled.
-        const bool invert = m_chk_invert ? m_chk_invert->GetValue() : m_grad_invert;
+        // s60: mirror only when the engine will honour the invert flag
+        // (generated modes) — string sources use the Invert button instead.
+        const bool invert = m_chk_invert && m_chk_invert->IsEnabled() && m_chk_invert->GetValue();
         if (invert && seq.size() > 1)
             std::reverse(seq.begin(), seq.end());
-        if (m_strip) m_strip->set_sequence(seq, slot_colors);
+
+        if (m_strip) m_strip->set_sequence(seq, colors);
+        if (m_square) {
+            const int angle = m_sc_angle ? m_sc_angle->GetValue() : m_grad_angle;
+            // Blends stretch to fill the square once (the engine spreads the
+            // gradient over the whole surface); patterns/stripes tile.
+            const bool stretch = (cat == CAT_BLEND2 || cat == CAT_BLEND3);
+            m_square->set_sequence(seq, colors, angle, stretch);
+        }
 
         // Keep the hidden ASCII preview in sync for tools that read it.
         if (m_lbl_preview) {
             std::string preview;
             for (int t : seq)
-                preview += (t < 0 ? '?' : static_cast<char>('1' + std::clamp(t, 0, 3)));
+                preview += (t < 0 ? '?' : static_cast<char>('1' + std::clamp(t, 0, 8)));
             m_lbl_preview->SetLabel(wxString::FromUTF8(preview));
         }
 
-        if (m_lbl_lines_est && m_cfg) {
+        if (m_lbl_lines_est) {
             double lw = 0.4;
             if (auto* o = m_cfg->option<ConfigOptionFloatOrPercent>("top_surface_line_width"))
                 if (!o->percent) lw = std::max(0.05, o->value);
@@ -1023,33 +1510,6 @@ private:
             m_lbl_lines_est->SetLabel(wxString::Format(
                 _L("On a 60×60 mm surface — about %d lines  (filament width %.2f mm)"),
                 est, lw));
-        }
-    }
-
-    void refresh_grad_lock()
-    {
-        const bool locked = pattern_uses_mixed_filament() || m_mixed_filament_selected;
-        if (m_panel_linear) m_panel_linear->Enable(!locked);
-        if (m_panel_bands)  m_panel_bands ->Enable(!locked);
-        if (m_choice_grad_mode) m_choice_grad_mode->Enable(!locked);
-        if (m_choice_tool_a) m_choice_tool_a->Enable(!locked);
-        if (m_choice_tool_b) m_choice_tool_b->Enable(!locked);
-        if (m_choice_tool_c) m_choice_tool_c->Enable(!locked);
-        if (m_choice_tool_d) m_choice_tool_d->Enable(!locked);
-        if (m_lbl_mf_lock_note) {
-            if (m_mixed_filament_selected) {
-                m_lbl_mf_lock_note->SetLabel(_L("⚠ A MixedFilament recipe is active. Gradient options are disabled — the MixedFilament IS the pattern."));
-            } else {
-                m_lbl_mf_lock_note->SetLabel(_L("⚠ Pattern uses a MixedFilament digit (5-9). Gradient options are disabled — the MixedFilament IS the pattern."));
-            }
-            m_lbl_mf_lock_note->Show(locked);
-            Layout(); Fit();
-        }
-        for (auto* btn : m_physical_buttons) {
-            if (btn) btn->Enable(!m_mixed_filament_selected);
-        }
-        if (m_btn_invert) {
-            m_btn_invert->Enable(m_mixed_filament_selected);
         }
     }
 };
@@ -7267,6 +7727,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_interface_top_layers", "support_settings_advanced#interface-layers");
         optgroup->append_single_option_line("support_interface_bottom_layers", "support_settings_advanced#interface-layers");
         optgroup->append_single_option_line("support_interface_pattern", "support_settings_advanced#interface-pattern");
+        // NEOTKO_WAVESUPPORT_TAG_VARIANTS — Fase 4d: Wave roof shape + order + reverse. Shown/hidden
+        // by toggle_options() (LibreMode + NeoWave + interface pattern == Wave).
+        optgroup->append_single_option_line("wavesupport_roof_pattern");
+        optgroup->append_single_option_line("wavesupport_roof_order");
+        optgroup->append_single_option_line("wavesupport_roof_reverse");
+        optgroup->append_single_option_line("wavesupport_wall_loops");
         optgroup->append_single_option_line("support_interface_spacing", "support_settings_advanced#interface-spacing");
         optgroup->append_single_option_line("support_bottom_interface_spacing", "support_settings_advanced#interface-spacing");
         optgroup->append_single_option_line("support_expansion", "support_settings_advanced#normal-support-expansion");
@@ -7595,6 +8061,64 @@ void TabPrint::toggle_options()
                 for (size_t i = 0; i < def->enum_values.size() && i < def->enum_labels.size(); ++i) {
                     if (def->enum_values[i] == "neoarachne" && !libre_active)
                         continue; // drop NeoArachne from the visible list when LibreMode is off
+                    opt.enum_values.push_back(def->enum_values[i]);
+                    opt.enum_labels.push_back(def->enum_labels[i]);
+                    cb->Append(_(def->enum_labels[i]));
+                }
+                cb->SetValue(cur);
+            }
+        }
+    }
+
+    // NEOTKO_WAVESUPPORT_TAG — WAVESUPPORT_PLAN.md Fase 2 (revised, s197): hide "NeoWave" from the
+    // support_type combo unless LibreMode is active (Tier-B gate), same pattern as "NeoArachne" in
+    // wall_generator above. The serialized value still round-trips if saved while LibreMode was on;
+    // PrintObject::_generate_support_material() re-checks LibreMode before dispatching to WaveSupport.
+    {
+        Field* st_field = m_active_page->get_field("support_type");
+        if (auto st_choice = dynamic_cast<Choice*>(st_field)) {
+            const bool libre_active = wxGetApp().app_config->get_bool("neotko_libre_mode");
+            auto  def = print_config_def.get("support_type");
+            auto& opt = const_cast<ConfigOptionDef&>(st_field->m_opt);
+            auto  cb  = dynamic_cast<ComboBox*>(st_choice->window);
+            if (cb && def) {
+                auto cur = cb->GetValue();
+                opt.enum_values.clear();
+                opt.enum_labels.clear();
+                cb->Clear();
+                for (size_t i = 0; i < def->enum_values.size() && i < def->enum_labels.size(); ++i) {
+                    if (def->enum_values[i] == "neowave" && !libre_active)
+                        continue; // drop NeoWave from the visible list when LibreMode is off
+                    opt.enum_values.push_back(def->enum_values[i]);
+                    opt.enum_labels.push_back(def->enum_labels[i]);
+                    cb->Append(_(def->enum_labels[i]));
+                }
+                cb->SetValue(cur);
+            }
+        }
+    }
+
+    // NEOTKO_WAVESUPPORT_TAG_UI — WAVESUPPORT_PLAN.md Fase 4b: expose "Wave (NeoWave roof)" in the
+    // support_interface_pattern combo ONLY when LibreMode is active AND the support type is NeoWave.
+    // The engine honours smipWave only inside wavesupport_generate_toolpaths, so showing it for other
+    // support types would be a dead option. Same rebuild-combo pattern as the support_type block above.
+    {
+        Field* ip_field = m_active_page ? m_active_page->get_field("support_interface_pattern") : nullptr;
+        if (auto ip_choice = dynamic_cast<Choice*>(ip_field)) {
+            const bool libre_active = wxGetApp().app_config->get_bool("neotko_libre_mode");
+            const bool is_neowave   = m_config->opt_enum<SupportType>("support_type") == stWaveSupport;
+            const bool show_wave    = libre_active && is_neowave;
+            auto  def = print_config_def.get("support_interface_pattern");
+            auto& opt = const_cast<ConfigOptionDef&>(ip_field->m_opt);
+            auto  cb  = dynamic_cast<ComboBox*>(ip_choice->window);
+            if (cb && def) {
+                auto cur = cb->GetValue();
+                opt.enum_values.clear();
+                opt.enum_labels.clear();
+                cb->Clear();
+                for (size_t i = 0; i < def->enum_values.size() && i < def->enum_labels.size(); ++i) {
+                    if (def->enum_values[i] == "wave" && !show_wave)
+                        continue; // drop Wave unless LibreMode + NeoWave support type
                     opt.enum_values.push_back(def->enum_values[i]);
                     opt.enum_labels.push_back(def->enum_labels[i]);
                     cb->Append(_(def->enum_labels[i]));

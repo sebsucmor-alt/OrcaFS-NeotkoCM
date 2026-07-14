@@ -882,6 +882,14 @@ static std::vector<std::string> s_Preset_print_options {
     "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence",
     "texture_bump", "texture_bump_image_path", "texture_bump_projection_mode", "texture_bump_axis", "texture_bump_scale", "texture_bump_thickness", "texture_bump_point_distance", "texture_bump_first_layer", "texture_bump_max_angle", "texture_bump_blur_strength",
     "zbump_enabled", "zbump_image_path", "zbump_thickness", "zbump_scale", "zbump_repeat", "zbump_offset_x", "zbump_offset_y", "zbump_edge_margin", "zbump_max_slope", "zbump_first_layer", "zbump_relief_segment", "zbump_max_passes",
+    // NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1: register so these persist in
+    // presets/3mf (previously defined in PrintConfig but absent from this list — dev-only, config-
+    // file-editable only). No Tab.cpp panel yet (WaveSupport Mecanismo 2 will drive these through
+    // the Sandwich Editor's SurfacePassKind::NeoweaveContact, Fase 5 — see WAVESUPPORT_PLAN.md).
+    "interlayer_neoweave_enabled", "interlayer_neoweave_mode", "neoweave_filter",
+    "interlayer_neoweave_amplitude", "interlayer_neoweave_period", "interlayer_neoweave_max_z_speed", "interlayer_neoweave_min_length",
+    "neoweave_penultimate_layers", "neoweave_speed_pct",
+    "infill_neoweave_enabled", "infill_neoweave_amplitude", "infill_neoweave_period", "infill_neoweave_max_z_speed",
     "max_volumetric_extrusion_rate_slope", "max_volumetric_extrusion_rate_slope_segment_length","extrusion_rate_smoothing_external_perimeter_only",
     "inner_wall_speed", "outer_wall_speed", "sparse_infill_speed", "internal_solid_infill_speed",
     "top_surface_speed", "support_speed", "support_object_xy_distance", "support_object_first_layer_gap", "support_interface_speed",
@@ -892,7 +900,8 @@ static std::vector<std::string> s_Preset_print_options {
     "support_base_pattern", "support_base_pattern_spacing", "support_expansion", "support_style",
     "independent_support_layer_height",
     "support_angle", "support_interface_top_layers", "support_interface_bottom_layers",
-    "support_interface_pattern", "support_interface_spacing", "support_interface_loop_pattern",
+    "support_interface_pattern", "wavesupport_roof_pattern", "wavesupport_roof_order", "wavesupport_roof_reverse", "wavesupport_wall_loops",
+    "support_interface_spacing", "support_interface_loop_pattern",
     "support_top_z_distance", "support_on_build_plate_only","support_critical_regions_only", "bridge_no_support", "thick_bridges", "thick_internal_bridges","dont_filter_internal_bridges","enable_extra_bridge_layer", "max_bridge_length", "print_sequence", "print_order", "support_remove_small_overhang",
     "filename_format", "wall_filament", "support_bottom_z_distance",
     "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament","support_interface_not_for_body",

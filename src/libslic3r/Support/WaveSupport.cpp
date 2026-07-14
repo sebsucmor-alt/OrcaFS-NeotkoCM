@@ -1,14 +1,19 @@
+// NEOTKO_WAVESUPPORT_TAG_SKELETON — WAVESUPPORT_PLAN.md Fase 2: duplicated verbatim (rename only,
+// no logic changes yet) from Support/SupportMaterial.cpp. See WaveSupport.hpp for rationale
+// (Normal support base, not Tree) and base-version note.
 #include "ClipperUtils.hpp"
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Layer.hpp"
 #include "Print.hpp"
-#include "SupportMaterial.hpp"
+#include "WaveSupport.hpp"
 #include "SupportCommon.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
+#include "NeoDebug.hpp" // NEOTKO_WAVESUPPORT_TAG — lightweight, no SurfaceColorMix.hpp dependency
 
+#include <sstream>
 #include <cmath>
 #include <memory>
 #include <boost/log/trivial.hpp>
@@ -49,6 +54,18 @@
 // #undef NDEBUG
 #include <cassert>
 
+// NEOTKO_WAVESUPPORT_TAG — local equivalent of SurfaceColorMix.hpp's NEOTKO_LOG macro, named
+// differently on purpose (WAVESUPPORT_LOG) so this file never collides if it ever also includes
+// SurfaceColorMix.hpp — WaveSupport.cpp only depends on the lightweight NeoDebug.hpp.
+#define WAVESUPPORT_LOG(channel, body)                          \
+    do {                                                        \
+        if (Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::channel)) { \
+            std::ostringstream _ndbg_;                          \
+            _ndbg_ << body;                                     \
+            Slic3r::NeoDebug::write(Slic3r::NeoDebug::channel, _ndbg_.str()); \
+        }                                                        \
+    } while (0)
+
 namespace Slic3r {
 
 // how much we extend support around the actual contact area
@@ -70,7 +87,10 @@ namespace Slic3r {
 static constexpr bool support_with_sheath = false;
 
 #ifdef SLIC3R_DEBUG
-const char* support_surface_type_to_color_name(const SupporLayerType surface_type)
+// NEOTKO_WAVESUPPORT_TAG_SKELETON — static: inert in a normal Release build (SLIC3R_DEBUG is off
+// by default, see build log), but would collide the same way as collect_slices_outer() etc. above
+// if someone ever builds with SLIC3R_DEBUG on. Fixed proactively while already in this block.
+static const char* support_surface_type_to_color_name(const SupporLayerType surface_type)
 {
     switch (surface_type) {
         case SupporLayerType::TopContact:     return "rgb(255,0,0)"; // "red";
@@ -85,12 +105,12 @@ const char* support_surface_type_to_color_name(const SupporLayerType surface_typ
     };
 }
 
-Point export_support_surface_type_legend_to_svg_box_size()
+static Point export_support_surface_type_legend_to_svg_box_size()
 {
-    return Point(scale_(1.+10.*8.), scale_(3.)); 
+    return Point(scale_(1.+10.*8.), scale_(3.));
 }
 
-void export_support_surface_type_legend_to_svg(SVG &svg, const Point &pos)
+static void export_support_surface_type_legend_to_svg(SVG &svg, const Point &pos)
 {
     // 1st row
     coord_t pos_x0 = pos(0) + scale_(1.);
@@ -118,7 +138,7 @@ void export_support_surface_type_legend_to_svg(SVG &svg, const Point &pos)
     svg.draw_legend(Point(pos_x, pos_y), "intermediate"   , support_surface_type_to_color_name(SupporLayerType::Intermediate));
 }
 
-void export_print_z_polygons_to_svg(const char *path, SupportGeneratorLayer ** const layers, size_t n_layers)
+static void export_print_z_polygons_to_svg(const char *path, SupportGeneratorLayer ** const layers, size_t n_layers)
 {
     BoundingBox bbox;
     for (int i = 0; i < n_layers; ++ i)
@@ -136,8 +156,8 @@ void export_print_z_polygons_to_svg(const char *path, SupportGeneratorLayer ** c
     svg.Close();
 }
 
-void export_print_z_polygons_and_extrusions_to_svg(
-    const char                                      *path, 
+static void export_print_z_polygons_and_extrusions_to_svg(
+    const char                                      *path,
     SupportGeneratorLayer ** const     layers, 
     size_t                                           n_layers,
     SupportLayer                                    &support_layer)
@@ -329,7 +349,7 @@ static Polygons contours_simplified(const Vec2i32 &grid_size, const double pixel
 }
 #endif // SUPPORT_USE_AGG_RASTERIZER
 
-PrintObjectSupportMaterial::PrintObjectSupportMaterial(const PrintObject *object, const SlicingParameters &slicing_params) :
+WaveSupport::WaveSupport(const PrintObject *object, const SlicingParameters &slicing_params) :
     m_print_config          (&object->print()->config()),
     m_object_config         (&object->config()),
     m_slicing_params        (slicing_params),
@@ -371,9 +391,25 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
     SupporLayerType::RaftInterface, SupporLayerType::BottomContact, SupporLayerType::BottomInterface, SupporLayerType::TopContact, SupporLayerType::TopInterface
 };
 
-void PrintObjectSupportMaterial::generate(PrintObject &object)
+void WaveSupport::generate(PrintObject &object)
 {
     BOOST_LOG_TRIVIAL(info) << "Support generator - Start";
+    // NEOTKO_WAVESUPPORT_TAG — Fase 7 instrumentation pulled forward for debug (see
+    // PrintObject::_generate_support_material() for the dispatch-side log).
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() ENTER layer_count=" << object.layer_count()
+        << " enable_support=" << (m_object_config->enable_support.value ? 1 : 0)
+        << " support_on_build_plate_only=" << (m_object_config->support_on_build_plate_only.value ? 1 : 0)
+        << " support_threshold_angle=" << m_object_config->support_threshold_angle.value);
+    // NEOTKO_WAVESUPPORT_TAG — a SupportGeneratorLayer entry existing in one of these vectors does
+    // NOT mean it carries geometry — generate_support_layers() (SupportCommon.cpp:1401) only
+    // creates a real SupportLayer on the object for Z-groups where at least one layer->polygons is
+    // non-empty. Track total polygon count alongside container size at each stage to see exactly
+    // where content disappears if the container count is non-zero but nothing prints.
+    auto _wsdbg_poly_count = [](const SupportGeneratorLayersPtr& v) {
+        size_t n = 0;
+        for (const SupportGeneratorLayer* l : v) n += l->polygons.size();
+        return n;
+    };
 
     coordf_t max_object_layer_height = 0.;
     for (size_t i = 0; i < object.layer_count(); ++ i)
@@ -395,9 +431,15 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // that it will be effective, regardless of how it's built below.
     // If raft is to be generated, the 1st top_contact layer will contain the 1st object layer silhouette without holes.
     SupportGeneratorLayersPtr top_contacts = this->top_contact_layers(object, buildplate_covered, layer_storage);
-    if (top_contacts.empty())
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() top_contacts.size()=" << top_contacts.size()
+        << " polys=" << _wsdbg_poly_count(top_contacts));
+    if (top_contacts.empty()) {
         // Nothing is supported, no supports are generated.
+        WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() EARLY RETURN — top_contacts empty, "
+            "no overhangs detected (or support_threshold_angle/enable_support/detect_overhang_wall "
+            "settings exclude everything on this object).");
         return;
+    }
 
     if (object.print()->canceled())
         return;
@@ -421,6 +463,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     SupportGeneratorLayersPtr bottom_contacts = this->bottom_contact_layers_and_layer_support_areas(
         object, top_contacts, buildplate_covered,
         layer_storage, layer_support_areas);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() bottom_contacts.size()=" << bottom_contacts.size()
+        << " polys=" << _wsdbg_poly_count(bottom_contacts));
 
     if (object.print()->canceled())
         return;
@@ -441,8 +485,12 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // wastes less material, if there are as little tool changes as possible.
     SupportGeneratorLayersPtr intermediate_layers = this->raft_and_intermediate_support_layers(
         object, bottom_contacts, top_contacts, layer_storage);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() intermediate_layers.size()=" << intermediate_layers.size()
+        << " polys=" << _wsdbg_poly_count(intermediate_layers));
 
     this->trim_support_layers_by_object(object, top_contacts, m_slicing_params.gap_support_object, m_slicing_params.gap_object_support, m_support_params.gap_xy);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() after trim_support_layers_by_object: top_contacts polys="
+        << _wsdbg_poly_count(top_contacts));
 
 #ifdef SLIC3R_DEBUG
     for (const SupportGeneratorLayer *layer : top_contacts)
@@ -470,14 +518,20 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // Rather trim the top contacts by their overlapping bottom contacts to leave a gap instead of over extruding
     // top contacts over the bottom contacts.
     this->trim_top_contacts_by_bottom_contacts(object, bottom_contacts, top_contacts);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() after trim_top_contacts_by_bottom_contacts: top_contacts polys="
+        << _wsdbg_poly_count(top_contacts));
 
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating interfaces";
 
-    // Propagate top / bottom contact layers to generate interface layers 
+    // Propagate top / bottom contact layers to generate interface layers
     // and base interface layers (for soluble interface / non souble base only)
 	SupportGeneratorLayersPtr empty_layers;
     auto [interface_layers, base_interface_layers] = generate_interface_layers(*m_object_config, m_support_params, bottom_contacts, top_contacts, empty_layers, empty_layers, intermediate_layers, layer_storage);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() interface_layers.size()=" << interface_layers.size()
+        << " polys=" << _wsdbg_poly_count(interface_layers)
+        << " base_interface_layers.size()=" << base_interface_layers.size()
+        << " polys=" << _wsdbg_poly_count(base_interface_layers));
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating raft";
 
@@ -485,6 +539,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // There is also a 1st intermediate layer containing bases of support columns.
     // Inflate the bases of the support columns and create the raft base under the object.
     SupportGeneratorLayersPtr raft_layers = generate_raft_base(object, m_support_params, m_slicing_params, top_contacts, interface_layers, base_interface_layers, intermediate_layers, layer_storage);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() raft_layers.size()=" << raft_layers.size()
+        << " polys=" << _wsdbg_poly_count(raft_layers));
 
     if (object.print()->canceled())
         return;
@@ -521,6 +577,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     SupportGeneratorLayersPtr layers_sorted =
 #endif // SLIC3R_DEBUG
     generate_support_layers(object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() after generate_support_layers(): object.support_layers().size()="
+        << object.support_layers().size());
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Generating tool paths";
 
@@ -552,7 +610,17 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
 #endif /* SLIC3R_DEBUG */
 
     // Generate the actual toolpaths and save them into each layer.
-    generate_support_toolpaths(object.support_layers(), *m_object_config, m_support_params, m_slicing_params, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+    // NEOTKO_WAVESUPPORT_TAG_TOOLPATHS — forked copy (SupportCommon.cpp), NOT the shared
+    // generate_support_toolpaths() used by Normal/Tree. See WAVESUPPORT_PLAN.md Fase 2b.
+    wavesupport_generate_toolpaths(object.support_layers(), *m_object_config, m_support_params, m_slicing_params, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+    {
+        // NEOTKO_WAVESUPPORT_TAG — ground truth: this is what actually reaches the g-code exporter.
+        size_t total_entities = 0;
+        for (const SupportLayer* sl : object.support_layers())
+            total_entities += sl->support_fills.entities.size();
+        WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() EXIT object.support_layers().size()="
+            << object.support_layers().size() << " total support_fills.entities=" << total_entities);
+    }
 
 #ifdef SLIC3R_DEBUG
     {
@@ -584,8 +652,12 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     BOOST_LOG_TRIVIAL(info) << "Support generator - End";
 }
 
+// NEOTKO_WAVESUPPORT_TAG_SKELETON — static: this free function (external linkage in the original
+// SupportMaterial.cpp) collided at link time with WaveSupport.cpp's identical copy (duplicate
+// symbol, both TUs link into liblibslic3r.a). Not declared in any header / not called from outside
+// this file, so internal linkage here is correct and doesn't change behaviour.
 // Collect all polygons of all regions in a layer with a given surface type.
-Polygons collect_region_slices_by_type(const Layer &layer, SurfaceType surface_type)
+static Polygons collect_region_slices_by_type(const Layer &layer, SurfaceType surface_type)
 {
     // 1) Count the new polygons first.
     size_t n_polygons_new = 0;
@@ -603,9 +675,10 @@ Polygons collect_region_slices_by_type(const Layer &layer, SurfaceType surface_t
     return out;
 }
 
+// NEOTKO_WAVESUPPORT_TAG_SKELETON — static, same duplicate-symbol fix as collect_region_slices_by_type() above.
 // Collect outer contours of all slices of this layer.
 // This is useful for calculating the support base with holes filled.
-Polygons collect_slices_outer(const Layer &layer)
+static Polygons collect_slices_outer(const Layer &layer)
 {
     Polygons out;
     out.reserve(out.size() + layer.lslices.size());
@@ -1294,14 +1367,14 @@ namespace SupportMaterialInternal {
     }
 }
 
-std::vector<Polygons> PrintObjectSupportMaterial::buildplate_covered(const PrintObject &object) const
+std::vector<Polygons> WaveSupport::buildplate_covered(const PrintObject &object) const
 {
     // Build support on a build plate only? If so, then collect and union all the surfaces below the current layer.
     // Unfortunately this is an inherently serial process.
     const bool            buildplate_only = this->build_plate_only();
     std::vector<Polygons> buildplate_covered;
     if (buildplate_only) {
-        BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::buildplate_covered() - start";
+        BOOST_LOG_TRIVIAL(debug) << "WaveSupport::buildplate_covered() - start";
         buildplate_covered.assign(object.layers().size(), Polygons());
         //FIXME prefix sum algorithm, parallelize it! Parallelization will also likely be more numerically stable.
         for (size_t layer_id = 1; layer_id < object.layers().size(); ++ layer_id) {
@@ -1316,7 +1389,7 @@ std::vector<Polygons> PrintObjectSupportMaterial::buildplate_covered(const Print
             polygons_append(covered, offset(lower_layer.lslices, scale_(0.01)));
             covered = union_(covered);
         }
-        BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::buildplate_covered() - end";
+        BOOST_LOG_TRIVIAL(debug) << "WaveSupport::buildplate_covered() - end";
     }
     return buildplate_covered;
 }
@@ -1382,7 +1455,13 @@ static inline ExPolygons detect_overhangs(
     Polygons overhang_polygons;
 
     // BBS.
-    const bool   auto_normal_support = object_config.support_type.value == stNormalAuto;
+    // NEOTKO_WAVESUPPORT_TAG — Fase 2 (revised, s197): stWaveSupport has no auto/manual split of
+    // its own yet (single "NeoWave" entry in the Type combo) — treat it as the auto-detecting
+    // variant so overhang detection actually runs by default, matching stNormalAuto's behaviour.
+    // Local to this file on purpose — NOT touching the shared is_auto()/stNormalAuto checks used
+    // elsewhere in the codebase for unrelated logic (e.g. PrintObject.cpp's bridge density calc).
+    const bool   auto_normal_support = object_config.support_type.value == stNormalAuto
+        || object_config.support_type.value == stWaveSupport;
     const bool   buildplate_only = ! annotations.buildplate_covered.empty();
     // If user specified a custom angle threshold, convert it to radians.
     // Zero means automatic overhang detection.
@@ -1568,7 +1647,13 @@ static inline std::tuple<Polygons, Polygons, double> detect_contacts(
     Polygons enforcer_polygons;
 
     // BBS.
-    const bool   auto_normal_support = object_config.support_type.value == stNormalAuto;
+    // NEOTKO_WAVESUPPORT_TAG — Fase 2 (revised, s197): stWaveSupport has no auto/manual split of
+    // its own yet (single "NeoWave" entry in the Type combo) — treat it as the auto-detecting
+    // variant so overhang detection actually runs by default, matching stNormalAuto's behaviour.
+    // Local to this file on purpose — NOT touching the shared is_auto()/stNormalAuto checks used
+    // elsewhere in the codebase for unrelated logic (e.g. PrintObject.cpp's bridge density calc).
+    const bool   auto_normal_support = object_config.support_type.value == stNormalAuto
+        || object_config.support_type.value == stWaveSupport;
     const bool   buildplate_only = !annotations.buildplate_covered.empty();
     float        no_interface_offset = 0.f;
 
@@ -1673,9 +1758,10 @@ static inline std::tuple<Polygons, Polygons, double> detect_contacts(
     return std::make_tuple(std::move(contact_polygons), std::move(enforcer_polygons), no_interface_offset);
 }
 
+// NEOTKO_WAVESUPPORT_TAG_SKELETON — static, same duplicate-symbol fix as collect_region_slices_by_type()/collect_slices_outer() above.
 // find the object layer that is closest to the {layer.bottom_z-gap_support_object} for top contact,
 // or {layer.print_z+gap_object_support} for bottom contact
-Layer* sync_gap_with_object_layer(const Layer& layer, const coordf_t gap_support_object, bool is_top_contact)
+static Layer* sync_gap_with_object_layer(const Layer& layer, const coordf_t gap_support_object, bool is_top_contact)
 {
     // sync gap with the object layer height
     float gap_synced = 0;
@@ -2091,7 +2177,7 @@ static OverhangCluster* add_overhang(std::vector<OverhangCluster>& clusters, ExP
 // Generate top contact layers supporting overhangs.
 // For a soluble interface material synchronize the layer heights with the object, otherwise leave the layer height undefined.
 // If supports over bed surface only are requested, don't generate contact layers over an object.
-SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
+SupportGeneratorLayersPtr WaveSupport::top_contact_layers(
     const PrintObject &object, const std::vector<Polygons> &buildplate_covered, SupportGeneratorLayerStorage &layer_storage) const
 {
 #ifdef SLIC3R_DEBUG
@@ -2102,7 +2188,17 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
 
     // BBS: tree support is selected so normal supports need not be generated.
     // Note we still need to go through the following steps if support is disabled but raft is enabled.
-    if (m_object_config->enable_support.value && (m_object_config->support_type.value != stNormalAuto && m_object_config->support_type.value != stNormal)) {
+    // NEOTKO_WAVESUPPORT_TAG — WAVESUPPORT_PLAN.md Fase 2 (revised, s197): critical fix for the
+    // Type-based dispatch — WaveSupport is dispatched via support_type==stWaveSupport (not
+    // stNormalAuto/stNormal, see PrintObject::_generate_support_material()), so this guard
+    // (copied verbatim from SupportMaterial.cpp, where it's dead code that can never trigger since
+    // that engine is only ever dispatched for the Normal family) would otherwise ALWAYS return
+    // empty here — WaveSupport calling itself would look exactly like "tree support is selected,
+    // skip". Must accept its own type too.
+    if (m_object_config->enable_support.value
+        && m_object_config->support_type.value != stNormalAuto
+        && m_object_config->support_type.value != stNormal
+        && m_object_config->support_type.value != stWaveSupport) {
         return SupportGeneratorLayersPtr();
     }
 
@@ -2112,7 +2208,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     // Output layers, sorted by top Z.
     SupportGeneratorLayersPtr contact_out;
 
-    BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::top_contact_layers() in parallel - start";
+    BOOST_LOG_TRIVIAL(debug) << "WaveSupport::top_contact_layers() in parallel - start";
     // Determine top contact areas.
     // If generating raft only (no support), only calculate top contact areas for the 0th layer.
     // If having a raft, start with 0th layer, otherwise with 1st layer.
@@ -2124,19 +2220,25 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     contact_out.assign(num_layers * 2, nullptr);
 
     std::vector<ExPolygons> overhangs_per_layers(num_layers);
-    // NEOTKO_WAVESUPPORT_TAG — bugfix (2026-07-11, found via WaveSupport debug session, ported back
-    // here since it's a general Normal-support bug, not specific to WaveSupport). Layer 0 is always
-    // compared against an EMPTY lower_layer_polygons a few lines below (layer_id == 0 ? Polygons()
-    // : ...), which is the geometrically correct thing to do when nothing is physically below the
-    // object's first sliced layer. But layer 0 was only ever included in this loop when a raft is
-    // configured — for a non-raft object that doesn't rest on the bed (LibreMode floating objects;
-    // an assembled multi-part object with one part elevated in Z), the entire underside of the
-    // first layer is a 100%-unsupported overhang that this loop never even looks at, so no support
-    // gets generated under it. Purely geometric check (bottom_z() > bed), independent of any
-    // LibreMode/floating-mode flag — correct for any reason the first layer isn't on the bed.
+    // NEOTKO_WAVESUPPORT_TAG — bugfix (2026-07-11, found via s196-197 WaveSupport debug session):
+    // layer_id 0 is always compared against an EMPTY lower_layer_polygons a few lines below
+    // (layer_id == 0 ? Polygons() : ...), which is the geometrically correct thing to do when
+    // nothing is physically below the object's first sliced layer. But layer 0 was only ever
+    // included in this loop when a raft is configured — for a non-raft object that doesn't rest on
+    // the bed (LibreMode floating objects; an assembled multi-part object with one part elevated in
+    // Z), the entire underside of the first layer is a 100%-unsupported overhang that this loop
+    // never even looks at, so no support gets generated under it. Detected via TreeSupport working
+    // fine (separate detect_overhangs() implementation) while this engine produced zero support on
+    // a floating cube with a Bottom Surface Sandwich painted on its underside.
+    // Purely geometric check (bottom_z() > bed), independent of any LibreMode/floating-mode flag —
+    // correct for any reason the first layer isn't resting on the bed, not just the one feature.
     const bool first_layer_floating = !object.layers().empty()
         && object.layers().front()->bottom_z() > EPSILON;
     size_t layer_id_start = (this->has_raft() || first_layer_floating) ? 0 : 1;
+    WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::top_contact_layers() has_raft=" << (this->has_raft() ? 1 : 0)
+        << " first_layer_floating=" << (first_layer_floating ? 1 : 0)
+        << " first_layer_bottom_z=" << (object.layers().empty() ? -1.0 : object.layers().front()->bottom_z())
+        << " layer_id_start=" << layer_id_start);
      // main part of overhang detection can be parallel
     tbb::parallel_for(tbb::blocked_range<size_t>(layer_id_start, num_layers),
         [&](const tbb::blocked_range<size_t>& range) {
@@ -2163,7 +2265,11 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     bool detect_first_sharp_tail_only = false;
     const coordf_t extrusion_width = m_object_config->line_width.get_abs_value(object.print()->config().nozzle_diameter.get_at(object.config().support_interface_filament-1));
     const coordf_t extrusion_width_scaled = scale_(extrusion_width);
-    if (is_auto(m_object_config->support_type.value) && g_config_support_sharp_tails && !detect_first_sharp_tail_only) {
+    // NEOTKO_WAVESUPPORT_TAG — Fase 2 (revised, s197): same reasoning as auto_normal_support above
+    // — stWaveSupport isn't in the shared is_auto() set (stNormalAuto/stTreeAuto only), extend
+    // locally rather than touching that shared helper.
+    if ((is_auto(m_object_config->support_type.value) || m_object_config->support_type.value == stWaveSupport)
+        && g_config_support_sharp_tails && !detect_first_sharp_tail_only) {
         for (size_t layer_nr = layer_id_start; layer_nr < num_layers; layer_nr++) {
             if (object.print()->canceled())
                 break;
@@ -2374,7 +2480,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     // the top contact layer is merged into the bottom contact layer.
     merge_contact_layers(m_slicing_params, m_support_params.support_layer_height_min, contact_out);
 
-    BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::top_contact_layers() in parallel - end";
+    BOOST_LOG_TRIVIAL(debug) << "WaveSupport::top_contact_layers() in parallel - end";
 
     return contact_out;
 }
@@ -2600,7 +2706,7 @@ static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer 
 // Generate bottom contact layers supporting the top contact layers.
 // For a soluble interface material synchronize the layer heights with the object, 
 // otherwise set the layer height to a bridging flow of a support interface nozzle.
-SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_layer_support_areas(
+SupportGeneratorLayersPtr WaveSupport::bottom_contact_layers_and_layer_support_areas(
     const PrintObject &object, const SupportGeneratorLayersPtr &top_contacts, std::vector<Polygons> &buildplate_covered, 
     SupportGeneratorLayerStorage &layer_storage, std::vector<Polygons> &layer_support_areas) const
 {
@@ -2743,7 +2849,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
 }
 
 // Trim the top_contacts layers with the bottom_contacts layers if they overlap, so there would not be enough vertical space for both of them.
-void PrintObjectSupportMaterial::trim_top_contacts_by_bottom_contacts(
+void WaveSupport::trim_top_contacts_by_bottom_contacts(
     const PrintObject &object, const SupportGeneratorLayersPtr &bottom_contacts, SupportGeneratorLayersPtr &top_contacts) const
 {
     tbb::parallel_for(tbb::blocked_range<int>(0, int(top_contacts.size())),
@@ -2768,7 +2874,7 @@ void PrintObjectSupportMaterial::trim_top_contacts_by_bottom_contacts(
         });
 }
 
-SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_support_layers(
+SupportGeneratorLayersPtr WaveSupport::raft_and_intermediate_support_layers(
     const PrintObject   &object,
     const SupportGeneratorLayersPtr   &bottom_contacts,
     const SupportGeneratorLayersPtr   &top_contacts,
@@ -2958,7 +3064,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
 
 // At this stage there shall be intermediate_layers allocated between bottom_contacts and top_contacts, but they have no polygons assigned.
 // Also the bottom/top_contacts shall have a layer thickness assigned already.
-void PrintObjectSupportMaterial::generate_base_layers(
+void WaveSupport::generate_base_layers(
     const PrintObject   &object,
     const SupportGeneratorLayersPtr   &bottom_contacts,
     const SupportGeneratorLayersPtr   &top_contacts,
@@ -2973,7 +3079,7 @@ void PrintObjectSupportMaterial::generate_base_layers(
         // No top contacts -> no intermediate layers will be produced.
         return;
 
-    BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::generate_base_layers() in parallel - start";
+    BOOST_LOG_TRIVIAL(debug) << "WaveSupport::generate_base_layers() in parallel - start";
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, intermediate_layers.size()),
         [&object, &bottom_contacts, &top_contacts, &intermediate_layers, &layer_support_areas](const tbb::blocked_range<size_t>& range) {
@@ -3098,7 +3204,7 @@ void PrintObjectSupportMaterial::generate_base_layers(
         #endif
             }
         });
-    BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::generate_base_layers() in parallel - end";
+    BOOST_LOG_TRIVIAL(debug) << "WaveSupport::generate_base_layers() in parallel - end";
 
 #ifdef SLIC3R_DEBUG
     for (SupportGeneratorLayersPtr::const_iterator it = intermediate_layers.begin(); it != intermediate_layers.end(); ++it)
@@ -3111,7 +3217,7 @@ void PrintObjectSupportMaterial::generate_base_layers(
     this->trim_support_layers_by_object(object, intermediate_layers, m_slicing_params.gap_support_object, m_slicing_params.gap_object_support, m_support_params.gap_xy);
 }
 
-void PrintObjectSupportMaterial::trim_support_layers_by_object(
+void WaveSupport::trim_support_layers_by_object(
     const PrintObject   &object,
     SupportGeneratorLayersPtr         &support_layers,
     const coordf_t       gap_extra_above,
@@ -3132,7 +3238,7 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
     }
 
     // For all intermediate support layers:
-    BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::trim_support_layers_by_object() in parallel - start";
+    BOOST_LOG_TRIVIAL(debug) << "WaveSupport::trim_support_layers_by_object() in parallel - start";
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, nonempty_layers.size()),
         [this, &object, &nonempty_layers, gap_extra_above, gap_extra_below, gap_xy_scaled](const tbb::blocked_range<size_t>& range) {
@@ -3209,11 +3315,11 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                 support_layer.polygons = diff(support_layer.polygons, polygons_trimming);
             }
         });
-    BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::trim_support_layers_by_object() in parallel - end";
+    BOOST_LOG_TRIVIAL(debug) << "WaveSupport::trim_support_layers_by_object() in parallel - end";
 }
 
 /*
-void PrintObjectSupportMaterial::clip_by_pillars(
+void WaveSupport::clip_by_pillars(
     const PrintObject   &object,
     LayersPtr           &bottom_contacts,
     LayersPtr           &top_contacts,
