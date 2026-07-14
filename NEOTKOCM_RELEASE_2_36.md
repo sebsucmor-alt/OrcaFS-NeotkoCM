@@ -30,8 +30,14 @@ part of the build** — previously this whole section required Libre Mode to be 
   flooding the whole cross-section, using the existing `mmu_segmented_region_max_width` mechanism.
 - **F2 — Extra walls in the painted zone.** Adds extra perimeter loops just to the painted region,
   independent of the rest of the object's wall count.
+
+  ![How the Extra walls option affects the painted zone's walls](docs/images/Painter-Walls.webp)
+
 - **F3 — Brush precision.** A slider that scales how finely a stroke subdivides the mesh, so small
   brushes paint small areas instead of ballooning into much larger triangles.
+
+  ![Precision x6 sharpening a painted edge instead of leaving it jagged](docs/images/Painter-Precision.png.webp)
+
 - **F4 — Rectangle and free-form polygon masks (new this release).** Drag a rectangle, or click to
   place polygon vertices (click near the first vertex to close, click-drag an existing vertex to
   move it, right-click to cancel) — both show a live on-screen overlay while you build them and paint
@@ -63,6 +69,8 @@ style's controls show:
 - **Smooth blend — 2 / 3 colours** and **Stripes — manual band sizes** — same controls as before,
   reorganized into their own panel; new blends now default their transition shape to **Slow start**
   instead of Even.
+
+![The redesigned ADV dialog: pick a Pattern style, only that style's controls show](docs/images/ColorStitch-newADVUX.png)
 
 A single **preview** — a strip plus a square "how it will look" sample at the pass's fill angle — is
 now always visible and reflects **whatever style is active**, including custom strings and

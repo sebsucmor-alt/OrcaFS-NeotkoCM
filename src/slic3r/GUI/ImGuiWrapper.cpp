@@ -2442,6 +2442,10 @@ void ImGuiWrapper::push_toolbar_style(const float scale)
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));                            // 14
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));                     // 15
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));                      // 16
+        // NEOTKO_TOOLTIP_DAYMODE_TAG — PopupBg was never pushed here, so SetTooltip()/BeginTooltip()
+        // (which open a popup) fell back to ImGui's default dark PopupBg; harmless in dark mode but
+        // unreadable in light mode paired with the light-mode Text color below.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGuiWrapper::COL_WINDOW_BG_DARK);                                    // 17
     }
     else {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f * scale);
@@ -2466,13 +2470,15 @@ void ImGuiWrapper::push_toolbar_style(const float scale)
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
+        // NEOTKO_TOOLTIP_DAYMODE_TAG — see dark-mode branch above.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGuiWrapper::COL_WINDOW_BG);                                    // 17
     }
 }
 
 void ImGuiWrapper::pop_toolbar_style()
 {
     // size in push toolbar style
-    ImGui::PopStyleColor(16);
+    ImGui::PopStyleColor(17);
     ImGui::PopStyleVar(6);
 }
 
@@ -2527,6 +2533,9 @@ void ImGuiWrapper::push_common_window_style(const float scale) {
         ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));                           // 12
         ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(43 / 255.0f, 64 / 255.0f, 54 / 255.0f, 1.00f));    // 13
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.00f, 0.59f, 0.53f, 1.00f));                       // 14
+        // NEOTKO_TOOLTIP_DAYMODE_TAG — see push_toolbar_style: PopupBg was never pushed here either,
+        // so tooltips opened inside this style scope fell back to ImGui's default dark PopupBg.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGuiWrapper::COL_WINDOW_BG_DARK);                               // 15
     }
     else {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f * scale);
@@ -2548,11 +2557,13 @@ void ImGuiWrapper::push_common_window_style(const float scale) {
         ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));                           // 12
         ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImGuiWrapper::COL_GREEN_LIGHT);                           // 13
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.00f, 0.59f, 0.53f, 1.00f));                       // 14
+        // NEOTKO_TOOLTIP_DAYMODE_TAG — see dark-mode branch above.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGuiWrapper::COL_WINDOW_BG);                                    // 15
     }
 }
 
 void ImGuiWrapper::pop_common_window_style() {
-    ImGui::PopStyleColor(14);
+    ImGui::PopStyleColor(15);
     ImGui::PopStyleVar(5);
 }
 
