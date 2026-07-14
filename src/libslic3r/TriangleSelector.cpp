@@ -244,10 +244,17 @@ void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&c
     // In case user changed cursor size since last time, update triangle edge limit.
     // It is necessary to compare the internal radius in m_cursor! radius is in
     // world coords and does not change after scaling.
+    // NEOTKO_PAINTERPRO_TAG — Rectangle/PolygonProjectionCursor (Painter Pro Mode F4) have no
+    // meaningful world-space "radius" (they're screen-space shape tests), so they're treated like
+    // HeightRange below: fixed edge_limit, and seeded from every facet instead of a single BFS
+    // start point.
+    const bool is_area_cursor = dynamic_cast<TriangleSelector::HeightRange*>(m_cursor.get()) != nullptr
+        || dynamic_cast<TriangleSelector::RectangleProjectionCursor*>(m_cursor.get()) != nullptr
+        || dynamic_cast<TriangleSelector::PolygonProjectionCursor*>(m_cursor.get()) != nullptr;
+
     if (m_old_cursor_radius_sqr != m_cursor->radius_sqr) {
         // BBS: improve details for large cursor radius
-        TriangleSelector::HeightRange* hr_cursor = dynamic_cast<TriangleSelector::HeightRange*>(m_cursor.get());
-        if (hr_cursor == nullptr) {
+        if (!is_area_cursor) {
             // NEOTKO_PAINTERPRO_TAG — m_precision_factor is 1.f by default (stock behavior).
             set_edge_limit(std::min(std::sqrt(m_cursor->radius_sqr) / (5.f * m_precision_factor), 0.05f / m_precision_factor));
             m_old_cursor_radius_sqr = m_cursor->radius_sqr;
@@ -262,11 +269,18 @@ void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&c
 
     // BBS
     std::vector<int> start_facets;
-    HeightRange* hr_cursor = dynamic_cast<HeightRange*>(m_cursor.get());
-    if (hr_cursor) {
+    if (is_area_cursor) {
         for (int facet_id = 0; facet_id < m_orig_size_indices; facet_id++) {
             const Triangle& tr = m_triangles[facet_id];
-            if (m_cursor->is_edge_inside_cursor(tr, m_vertices)) {
+            // NEOTKO_PAINTERPRO_TAG — is_facet_visible() used to only gate BFS *expansion* to
+            // neighbors (see the while() loop below), never this initial seed list, so
+            // Rectangle/PolygonProjectionCursor (which have a real front/back test) were seeding
+            // and painting back-facing facets directly, bypassing occlusion entirely. HeightRange
+            // always returns true here, so this is a no-op for it — zero change to F1/F2/F3.
+            // is_pointer_in_triangle() additionally seeds a facet so large that it swallows the
+            // whole cursor shape (no edge crossing at all); false for HeightRange, so also no-op.
+            if ((m_cursor->is_edge_inside_cursor(tr, m_vertices) || m_cursor->is_pointer_in_triangle(tr, m_vertices))
+             && m_cursor->is_facet_visible(facet_id, m_face_normals)) {
                 start_facets.push_back(facet_id);
             }
         }
@@ -980,7 +994,19 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
      && ! m_cursor->is_edge_inside_cursor(*tr, m_vertices))
         return false;
 
-    if (num_of_inside_vertices == 3) {
+    // NEOTKO_PAINTERPRO_TAG — "3 vertices inside => whole triangle inside" only holds for convex
+    // cursors. A concave screen polygon (F4) can poke a notch into this triangle's interior while
+    // all 3 vertices stay inside; painting it whole here (and dumping its subdivision!) flattens
+    // the notch and no amount of edge_limit/precision can recover it, because the split path below
+    // is never reached. For such cursors, double-check whether the cursor boundary reaches inside
+    // the triangle and, if so, fall through to the subdividing branch instead.
+    bool whole_triangle_inside = num_of_inside_vertices == 3;
+    if (whole_triangle_inside
+     && ! m_cursor->all_vertices_inside_implies_whole_triangle_inside()
+     && m_cursor->is_pointer_in_triangle(*tr, m_vertices))
+        whole_triangle_inside = false;
+
+    if (whole_triangle_inside) {
         // dump any subdivision and select whole triangle
         undivide_triangle(facet_idx);
         tr->set_state(type);
@@ -2339,6 +2365,234 @@ bool TriangleSelector::Capsule2D::is_edge_inside_cursor(const Triangle &tr, cons
         if (edge_inside_rectangle(edge_a, edge_b, rectangle_a, (rectangle_d - rectangle_a)) || edge_inside_rectangle(edge_a, edge_b, rectangle_d, (rectangle_a - rectangle_d)))
             return true;
     }
+
+    return false;
+}
+
+// NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A/B. Projects a mesh-local point to screen
+// pixels (Y down) the same way CameraUtils::project()/igl::project() do: clip = proj*view*p,
+// ndc = clip.xyz/clip.w, then viewport + Y-flip. Kept dependency-free from the GUI/igl layer since
+// TriangleSelector lives in libslic3r; the caller (GLGizmoPainterBase) precomputes the combined
+// view_projection_matrix and passes it in as plain data. Shared by Rectangle- and
+// PolygonProjectionCursor (Sesion B), which only differ in the screen-space shape test.
+static bool project_mesh_point_to_screen(const Transform3f &trafo, const Matrix4d &view_projection_matrix,
+                                          const std::array<int, 4> &viewport, const Vec3f &mesh_point, Vec2f &out_screen)
+{
+    const Vec3d world_point = (trafo * mesh_point).cast<double>();
+    const Vec4d clip        = view_projection_matrix * Vec4d(world_point.x(), world_point.y(), world_point.z(), 1.0);
+    if (clip.w() <= 0.0)
+        // Behind the camera (or at the eye) - can't be meaningfully compared to a screen shape.
+        return false;
+
+    const Vec3d  ndc         = clip.head<3>() / clip.w();
+    const double screen_x    = viewport[0] + (ndc.x() * 0.5 + 0.5) * viewport[2];
+    const double screen_y_gl = viewport[1] + (ndc.y() * 0.5 + 0.5) * viewport[3];
+    out_screen = Vec2f(float(screen_x), float(viewport[3] - screen_y_gl));
+    return true;
+}
+
+bool TriangleSelector::RectangleProjectionCursor::project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const
+{
+    return project_mesh_point_to_screen(this->trafo, m_view_projection_matrix, m_viewport, mesh_point, out_screen);
+}
+
+bool TriangleSelector::RectangleProjectionCursor::is_mesh_point_inside(const Vec3f &point) const
+{
+    Vec2f screen;
+    if (!project_to_screen(point, screen))
+        return false;
+    if (screen.x() < m_rect_min.x() || screen.x() > m_rect_max.x() || screen.y() < m_rect_min.y() || screen.y() > m_rect_max.y())
+        return false;
+
+    return is_mesh_point_not_clipped(point, clipping_plane);
+}
+
+static bool point_in_screen_rect(const Vec2f &p, const Vec2f &rect_min, const Vec2f &rect_max)
+{
+    return p.x() >= rect_min.x() && p.x() <= rect_max.x() && p.y() >= rect_min.y() && p.y() <= rect_max.y();
+}
+
+static bool screen_segments_intersect(const Vec2f &p1, const Vec2f &p2, const Vec2f &p3, const Vec2f &p4)
+{
+    auto cross2 = [](const Vec2f &o, const Vec2f &a, const Vec2f &b) -> float {
+        return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x());
+    };
+    const float d1 = cross2(p3, p4, p1);
+    const float d2 = cross2(p3, p4, p2);
+    const float d3 = cross2(p1, p2, p3);
+    const float d4 = cross2(p1, p2, p4);
+    return ((d1 > 0.f && d2 < 0.f) || (d1 < 0.f && d2 > 0.f)) && ((d3 > 0.f && d4 < 0.f) || (d3 < 0.f && d4 > 0.f));
+}
+
+// True if the 2D segment [a,b] enters the screen-space rectangle: either endpoint lies inside it,
+// or the segment crosses one of its 4 sides.
+static bool screen_segment_intersects_rect(const Vec2f &a, const Vec2f &b, const Vec2f &rect_min, const Vec2f &rect_max)
+{
+    if (point_in_screen_rect(a, rect_min, rect_max) || point_in_screen_rect(b, rect_min, rect_max))
+        return true;
+
+    const std::array<Vec2f, 4> corners = {
+        Vec2f(rect_min.x(), rect_min.y()), Vec2f(rect_max.x(), rect_min.y()),
+        Vec2f(rect_max.x(), rect_max.y()), Vec2f(rect_min.x(), rect_max.y())
+    };
+    for (int i = 0; i < 4; ++i)
+        if (screen_segments_intersect(a, b, corners[i], corners[(i + 1) % 4]))
+            return true;
+
+    return false;
+}
+
+// NEOTKO_PAINTERPRO_TAG — 2D point-in-triangle via consistent sign of the three edge cross
+// products (works for either triangle winding).
+static bool point_in_screen_triangle(const Vec2f &p, const Vec2f &t1, const Vec2f &t2, const Vec2f &t3)
+{
+    auto cross2 = [](const Vec2f &a, const Vec2f &b, const Vec2f &c) -> float {
+        return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+    };
+    const float d1 = cross2(t1, t2, p);
+    const float d2 = cross2(t2, t3, p);
+    const float d3 = cross2(t3, t1, p);
+    const bool has_neg = (d1 < 0.f) || (d2 < 0.f) || (d3 < 0.f);
+    const bool has_pos = (d1 > 0.f) || (d2 > 0.f) || (d3 > 0.f);
+    return !(has_neg && has_pos);
+}
+
+// NEOTKO_PAINTERPRO_TAG — the "swallowed by one huge facet" case: the whole rectangle sits inside
+// the projected triangle, so no triangle vertex is inside the rectangle and no triangle edge
+// crosses it. Checking one rectangle corner against the projected triangle is enough to catch it
+// (if only part of the rectangle overlapped, an edge crossing would have been detected instead) —
+// but all 4 are checked for robustness at triangle borders.
+bool TriangleSelector::RectangleProjectionCursor::is_pointer_in_triangle(const Vec3f &p1, const Vec3f &p2, const Vec3f &p3) const
+{
+    std::array<Vec2f, 3> tri;
+    if (!project_to_screen(p1, tri[0]) || !project_to_screen(p2, tri[1]) || !project_to_screen(p3, tri[2]))
+        return false;
+
+    const std::array<Vec2f, 4> corners = {
+        Vec2f(m_rect_min.x(), m_rect_min.y()), Vec2f(m_rect_max.x(), m_rect_min.y()),
+        Vec2f(m_rect_max.x(), m_rect_max.y()), Vec2f(m_rect_min.x(), m_rect_max.y())
+    };
+    for (const Vec2f &corner : corners)
+        if (point_in_screen_triangle(corner, tri[0], tri[1], tri[2]))
+            return true;
+
+    return false;
+}
+
+bool TriangleSelector::RectangleProjectionCursor::is_edge_inside_cursor(const Triangle &tr, const std::vector<Vertex> &vertices) const
+{
+    std::array<Vec2f, 3> pts;
+    std::array<bool, 3>  valid;
+    for (int i = 0; i < 3; ++i)
+        valid[i] = project_to_screen(vertices[tr.verts_idxs[i]].v, pts[i]);
+
+    for (int side = 0; side < 3; ++side) {
+        const int a = side;
+        const int b = side < 2 ? side + 1 : 0;
+        if (valid[a] && valid[b] && screen_segment_intersects_rect(pts[a], pts[b], m_rect_min, m_rect_max))
+            return true;
+    }
+
+    return false;
+}
+
+// NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B (fix s201: found by testing a
+// self-intersecting/zigzag polygon, which showed notches missing from the fill). Nonzero winding
+// number test instead of even-odd ray-casting: for a simple (non-self-crossing) polygon the two
+// rules agree, but even-odd flips parity at every self-intersection, punching unwanted holes in
+// exactly the crossing zones - nonzero winding fills the whole area a self-intersecting polygon
+// visually encloses instead, which is what a hand-drawn shape is expected to do. Same algorithm
+// SVG/PDF call fill-rule "nonzero" vs "evenodd". Standard formulation (Sunday, "isLeft" test).
+static float point_side_of_line(const Vec2f &a, const Vec2f &b, const Vec2f &p)
+{
+    return (b.x() - a.x()) * (p.y() - a.y()) - (p.x() - a.x()) * (b.y() - a.y());
+}
+
+static bool point_in_screen_polygon(const Vec2f &p, const std::vector<Vec2f> &polygon)
+{
+    int winding_number = 0;
+    for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        const Vec2f &a = polygon[j];
+        const Vec2f &b = polygon[i];
+        if (a.y() <= p.y()) {
+            if (b.y() > p.y() && point_side_of_line(a, b, p) > 0.f)
+                ++winding_number;
+        } else {
+            if (b.y() <= p.y() && point_side_of_line(a, b, p) < 0.f)
+                --winding_number;
+        }
+    }
+    return winding_number != 0;
+}
+
+// True if the 2D segment [a,b] enters the screen-space polygon: either endpoint lies inside it,
+// or the segment crosses one of its edges. Mirrors screen_segment_intersects_rect but walks an
+// arbitrary vertex list instead of 4 fixed corners.
+static bool screen_segment_intersects_polygon(const Vec2f &a, const Vec2f &b, const std::vector<Vec2f> &polygon)
+{
+    if (point_in_screen_polygon(a, polygon) || point_in_screen_polygon(b, polygon))
+        return true;
+
+    for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++)
+        if (screen_segments_intersect(a, b, polygon[j], polygon[i]))
+            return true;
+
+    return false;
+}
+
+bool TriangleSelector::PolygonProjectionCursor::project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const
+{
+    return project_mesh_point_to_screen(this->trafo, m_view_projection_matrix, m_viewport, mesh_point, out_screen);
+}
+
+bool TriangleSelector::PolygonProjectionCursor::is_mesh_point_inside(const Vec3f &point) const
+{
+    Vec2f screen;
+    if (!project_to_screen(point, screen))
+        return false;
+    if (!point_in_screen_polygon(screen, m_polygon))
+        return false;
+
+    return is_mesh_point_not_clipped(point, clipping_plane);
+}
+
+bool TriangleSelector::PolygonProjectionCursor::is_edge_inside_cursor(const Triangle &tr, const std::vector<Vertex> &vertices) const
+{
+    std::array<Vec2f, 3> pts;
+    std::array<bool, 3>  valid;
+    for (int i = 0; i < 3; ++i)
+        valid[i] = project_to_screen(vertices[tr.verts_idxs[i]].v, pts[i]);
+
+    for (int side = 0; side < 3; ++side) {
+        const int a = side;
+        const int b = side < 2 ? side + 1 : 0;
+        if (valid[a] && valid[b] && screen_segment_intersects_polygon(pts[a], pts[b], m_polygon))
+            return true;
+    }
+
+    return false;
+}
+
+// NEOTKO_PAINTERPRO_TAG — does the polygon's boundary reach inside this triangle? Two ways it
+// can, both invisible to the vertex-count and triangle-edge tests: a polygon vertex sits inside
+// the projected triangle (a concave notch poking in, or the entire polygon swallowed by one huge
+// facet), or a polygon edge passes clean through, crossing triangle edges. This is what lets
+// select_triangle_recursive() subdivide a triangle whose 3 vertices are all inside a CONCAVE
+// polygon instead of painting it whole and flattening the notch.
+bool TriangleSelector::PolygonProjectionCursor::is_pointer_in_triangle(const Vec3f &p1, const Vec3f &p2, const Vec3f &p3) const
+{
+    std::array<Vec2f, 3> tri;
+    if (!project_to_screen(p1, tri[0]) || !project_to_screen(p2, tri[1]) || !project_to_screen(p3, tri[2]))
+        return false;
+
+    for (const Vec2f &polygon_vertex : m_polygon)
+        if (point_in_screen_triangle(polygon_vertex, tri[0], tri[1], tri[2]))
+            return true;
+
+    for (size_t i = 0, j = m_polygon.size() - 1; i < m_polygon.size(); j = i++)
+        for (int side = 0; side < 3; ++side)
+            if (screen_segments_intersect(m_polygon[j], m_polygon[i], tri[side], tri[side < 2 ? side + 1 : 0]))
+                return true;
 
     return false;
 }

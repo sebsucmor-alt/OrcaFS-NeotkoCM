@@ -123,6 +123,14 @@ protected:
     // Minimal context for gradient rendering; only physical_colors is used
     MixedFilamentDisplayContext       m_mixed_display_context;
 
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A/B: rectangle/polygon mask toggles.
+    // Mutually exclusive (like the existing Vertical/Horizontal checkboxes below). Override
+    // m_tool_type regardless of which toolbar icon is selected (mirrors how F1/F2/F3 live as Pro
+    // Mode toggles rather than new toolbar buttons - a new toolbar icon needs a new glyph in the
+    // ImGui icon font, out of scope here).
+    bool                              m_rectangle_mask_active = false;
+    bool                              m_polygon_mask_active   = false;
+
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
 private:

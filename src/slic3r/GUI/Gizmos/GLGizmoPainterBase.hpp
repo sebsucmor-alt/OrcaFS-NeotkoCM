@@ -262,6 +262,10 @@ protected:
     void render_cursor_sphere(const Transform3d& trafo) const;
     // BBS
     void render_cursor_height_range(const Transform3d& trafo) const;
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4: screen-space overlays, independent of any
+    // mesh raycast (the user can drag past the object's silhouette while masking).
+    void render_cursor_rectangle();
+    void render_cursor_polygon();
     //BBS: add logic to distinguish the first_time_update and later_update
     virtual void update_model_object() = 0;
     virtual void update_from_model_object(bool first_update) = 0;
@@ -303,6 +307,12 @@ protected:
         SMART_FILL,
         // BBS
         GAP_FILL,
+        // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A: screen-space rectangle mask.
+        // See docs/FUTURE/PAINTER_PROMODE_PLAN.md and TriangleSelector::RectangleProjectionCursor.
+        RECTANGLE,
+        // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B: screen-space free polygon mask.
+        // See TriangleSelector::PolygonProjectionCursor.
+        POLYGON,
     };
 
     struct ProjectedMousePosition
@@ -324,12 +334,40 @@ protected:
     ToolType m_tool_type                  = ToolType::BRUSH;
     float    m_smart_fill_angle           = 30.f;
 
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A: RECTANGLE tool state. Unlike
+    // BRUSH/BUCKET_FILL/SMART_FILL, it doesn't paint on every Dragging event: it just tracks the
+    // screen-space rectangle while the button is held and applies the mask once on release
+    // (see gizmo_event()'s LeftUp/RightUp handling and apply_rectangle_mask()).
+    Vec2d m_rect_start_corner = Vec2d::Zero();
+    Vec2d m_rect_end_corner   = Vec2d::Zero();
+    bool  m_rect_dragging     = false;
+
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B: POLYGON tool state. Vertices are
+    // added one click at a time (screen-space, canvas-local coords); the shape is applied once
+    // it's closed (click near the first vertex, or a dedicated close action) via
+    // apply_polygon_mask(). Escape/right-click cancels and clears m_polygon_points.
+    std::vector<Vec2d> m_polygon_points;
+    // If >= 0, index into m_polygon_points of a vertex currently being dragged (edit-in-place,
+    // "vértices editables" per the plan) instead of appending a new one.
+    int m_polygon_dragged_vertex = -1;
+    static constexpr float PolygonCloseRadiusPx = 8.f;
+
     bool     m_paint_on_overhangs_only          = false;
     float    m_highlight_by_angle_threshold_deg = 0.f;
 
     GLModel m_circle;
     Vec2d m_old_center{ Vec2d::Zero() };
     float m_old_cursor_radius{ 0.0f };
+
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4: rectangle/polygon screen overlays. Rebuilt
+    // whenever the corners/points differ from last frame, same caching pattern as m_circle above.
+    GLModel m_rect_overlay;
+    Vec2d   m_old_rect_start_corner = Vec2d::Zero();
+    Vec2d   m_old_rect_end_corner   = Vec2d::Zero();
+    // Polygon overlay is rebuilt unconditionally each frame: point count is tiny (a handful of
+    // clicks) and it changes on almost every frame anyway (rubber-band segment follows the mouse).
+    GLModel m_polygon_overlay;
+
     static constexpr float SmartFillAngleMin  = 0.0f;
     static constexpr float SmartFillAngleMax  = 90.f;
     static constexpr float SmartFillAngleStep = 1.f;
@@ -362,6 +400,13 @@ private:
     std::vector<std::vector<ProjectedMousePosition>> get_projected_mouse_positions(const Vec2d &mouse_position, double resolution, const std::vector<Transform3d> &trafo_matrices) const;
 
     std::vector<ProjectedHeightRange> get_projected_height_range(const Vec2d& mouse_position, double resolution, const std::vector<const ModelVolume*>& part_volumes, const std::vector<Transform3d>& trafo_matrices) const;
+
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A: applies the RECTANGLE mask
+    // (m_rect_start_corner..m_rect_end_corner) to every mesh, called once on mouse release.
+    void apply_rectangle_mask(EnforcerBlockerType new_state);
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B: applies the POLYGON mask
+    // (m_polygon_points) to every mesh, called once the polygon is closed.
+    void apply_polygon_mask(EnforcerBlockerType new_state);
 
     bool is_mesh_point_clipped(const Vec3d& point, const Transform3d& trafo) const;
     void update_raycast_cache(const Vec2d& mouse_position,

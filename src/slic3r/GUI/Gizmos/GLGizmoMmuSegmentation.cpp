@@ -892,11 +892,21 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         }
     }
 
-    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode. See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode. Ungated from LibreMode (s201): the feature set
+    // (F1-F4) is low-risk enough to ship as a permanent part of this fork rather than behind the
+    // LibreMode flag. See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
     ImGui::Separator();
     if (ImGui::CollapsingHeader(_u8L("Pro Mode").c_str())) {
         render_pro_mode_section(sliders_left_width, sliders_width, slider_icon_width);
     }
+
+    // NEOTKO_PAINTERPRO_TAG — F4 Sesion A/B: the toolbar row above (lines ~721-881) unconditionally
+    // sets m_tool_type from whichever icon is selected, every frame - so rectangle/polygon mask
+    // have to win here, after that logic runs, rather than being just another toolbar icon.
+    if (m_rectangle_mask_active)
+        m_tool_type = ToolType::RECTANGLE;
+    else if (m_polygon_mask_active)
+        m_tool_type = ToolType::POLYGON;
 
     ImGui::Separator();
 
@@ -1207,8 +1217,9 @@ void GLMmSegmentationGizmo3DScene::finalize_triangle_indices()
 }
 
 // NEOTKO_PAINTERPRO_TAG — Pro Mode section: brush precision (F3), paint-perimeters-only (F1),
-// extra walls on painted regions (F2). All convenience wrappers over engine options — see
-// docs/FUTURE/PAINTER_PROMODE_PLAN.md for the investigation behind them.
+// extra walls on painted regions (F2), rectangle/polygon masks (F4). All convenience wrappers
+// over engine options — see docs/FUTURE/PAINTER_PROMODE_PLAN.md
+// for the investigation behind them.
 void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width)
 {
     const float drag_left_width = ImGui::GetStyle().WindowPadding.x + sliders_width - m_imgui->get_style_scaling() * 8;
@@ -1286,6 +1297,29 @@ void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, f
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", _u8L("Adds this many extra perimeter walls to the painted region only, "
             "on top of the object's normal wall count. 0 = disabled.").c_str());
+
+    // --- F4 Sesion A/B: screen-space rectangle/polygon masks (TriangleSelector::Rectangle/
+    // PolygonProjectionCursor, see on_render_input_window()'s override of m_tool_type right after
+    // this Pro Mode section). Mutually exclusive, like Vertical/Horizontal further down. ---
+    if (ImGui::Checkbox(_u8L("Rectangle mask").c_str(), &m_rectangle_mask_active)) {
+        m_polygon_mask_active = false;
+        m_polygon_points.clear();
+        m_polygon_dragged_vertex = -1;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Drag a rectangle on screen to paint every visible facet under it "
+            "with the selected filament, instead of brushing by hand. Only front-facing triangles are "
+            "painted (nothing behind the object gets masked).").c_str());
+
+    if (ImGui::Checkbox(_u8L("Polygon mask").c_str(), &m_polygon_mask_active)) {
+        m_rectangle_mask_active = false;
+        m_polygon_points.clear();
+        m_polygon_dragged_vertex = -1;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Click to place vertices of a free polygon on screen; click "
+            "near the first vertex again (with at least 3 placed) to close it and paint every "
+            "visible facet inside. Click an existing vertex to drag it. Right-click cancels.").c_str());
 }
 
 void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float max_tooltip_width)

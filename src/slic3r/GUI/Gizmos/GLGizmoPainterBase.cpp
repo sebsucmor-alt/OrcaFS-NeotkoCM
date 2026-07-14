@@ -136,6 +136,18 @@ void GLGizmoPainterBase::render_triangles(const Selection& selection) const
 
 void GLGizmoPainterBase::render_cursor()
 {
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4: RECTANGLE/POLYGON are pure screen-space
+    // overlays, independent of whatever the raycast below finds under the mouse (the user can
+    // drag/click past the object's silhouette while masking), so handle them before it.
+    if (m_tool_type == ToolType::RECTANGLE) {
+        render_cursor_rectangle();
+        return;
+    }
+    if (m_tool_type == ToolType::POLYGON) {
+        render_cursor_polygon();
+        return;
+    }
+
     // First check that the mouse pointer is on an object.
     const ModelObject* mo = m_c->selection_info()->model_object();
     const Selection& selection = m_parent.get_selection();
@@ -337,6 +349,124 @@ void GLGizmoPainterBase::render_cursor_height_range(const Transform3d& trafo) co
     }
 
     shader->stop_using();
+}
+
+// NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A (deuda pendiente de esta sesión: no
+// se había implementado el overlay). Screen-space quad outline while dragging, same NDC-from-
+// pixels/"flat" shader pattern as render_cursor_circle() above and GLSelectionRectangle.
+void GLGizmoPainterBase::render_cursor_rectangle()
+{
+    if (!m_rect_dragging)
+        return;
+
+    const Size cnv_size = m_parent.get_canvas_size();
+    const float cnv_width  = float(cnv_size.get_width());
+    const float cnv_height = float(cnv_size.get_height());
+    if (cnv_width == 0.0f || cnv_height == 0.0f)
+        return;
+    const float cnv_inv_width  = 1.0f / cnv_width;
+    const float cnv_inv_height = 1.0f / cnv_height;
+
+    glsafe(::glLineWidth(1.5f));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glPushAttrib(GL_ENABLE_BIT));
+    glsafe(::glLineStipple(4, 0xAAAA));
+    glsafe(::glEnable(GL_LINE_STIPPLE));
+
+    if (!m_rect_overlay.is_initialized() || !m_old_rect_start_corner.isApprox(m_rect_start_corner)
+     || !m_old_rect_end_corner.isApprox(m_rect_end_corner)) {
+        m_old_rect_start_corner = m_rect_start_corner;
+        m_old_rect_end_corner   = m_rect_end_corner;
+        m_rect_overlay.reset();
+
+        const float left   = float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x()));
+        const float right  = float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x()));
+        const float top    = float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y()));
+        const float bottom = float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y()));
+        auto to_ndc = [cnv_inv_width, cnv_inv_height](float x, float y) {
+            return Vec2f(2.0f * (x * cnv_inv_width - 0.5f), -2.0f * (y * cnv_inv_height - 0.5f));
+        };
+
+        GLModel::Geometry init_data;
+        init_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2 };
+        init_data.color  = { 0.0f, 1.0f, 0.3f, 1.0f };
+        init_data.reserve_vertices(4);
+        init_data.reserve_indices(4);
+        init_data.add_vertex(to_ndc(left, top));
+        init_data.add_vertex(to_ndc(right, top));
+        init_data.add_vertex(to_ndc(right, bottom));
+        init_data.add_vertex(to_ndc(left, bottom));
+        for (unsigned int i = 0; i < 4; ++i)
+            init_data.add_index(i);
+
+        m_rect_overlay.init_from(std::move(init_data));
+    }
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
+        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+        shader->set_uniform("projection_matrix", Transform3d::Identity());
+        m_rect_overlay.render();
+        shader->stop_using();
+    }
+
+    glsafe(::glPopAttrib());
+    glsafe(::glEnable(GL_DEPTH_TEST));
+}
+
+// NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B. Draws the polygon built so far as an
+// open line strip, plus a rubber-band segment from the last placed vertex to the current mouse
+// position. Rebuilt every frame (see m_polygon_overlay's declaration for why that's fine here).
+void GLGizmoPainterBase::render_cursor_polygon()
+{
+    if (m_polygon_points.empty())
+        return;
+
+    const Size cnv_size = m_parent.get_canvas_size();
+    const float cnv_width  = float(cnv_size.get_width());
+    const float cnv_height = float(cnv_size.get_height());
+    if (cnv_width == 0.0f || cnv_height == 0.0f)
+        return;
+    const float cnv_inv_width  = 1.0f / cnv_width;
+    const float cnv_inv_height = 1.0f / cnv_height;
+    auto to_ndc = [cnv_inv_width, cnv_inv_height](const Vec2d &p) {
+        return Vec2f(2.0f * (float(p.x()) * cnv_inv_width - 0.5f), -2.0f * (float(p.y()) * cnv_inv_height - 0.5f));
+    };
+
+    glsafe(::glLineWidth(1.5f));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glPushAttrib(GL_ENABLE_BIT));
+    glsafe(::glLineStipple(4, 0xAAAA));
+    glsafe(::glEnable(GL_LINE_STIPPLE));
+
+    m_polygon_overlay.reset();
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::LineStrip, GLModel::Geometry::EVertexLayout::P2 };
+    init_data.color  = { 0.0f, 1.0f, 0.3f, 1.0f };
+    const size_t n = m_polygon_points.size() + 1; // + rubber-band point to the current mouse
+    init_data.reserve_vertices(n);
+    init_data.reserve_indices(n);
+    for (size_t i = 0; i < m_polygon_points.size(); ++i) {
+        init_data.add_vertex(to_ndc(m_polygon_points[i]));
+        init_data.add_index((unsigned int) i);
+    }
+    init_data.add_vertex(to_ndc(m_parent.get_local_mouse_position()));
+    init_data.add_index((unsigned int) m_polygon_points.size());
+
+    m_polygon_overlay.init_from(std::move(init_data));
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
+        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+        shader->set_uniform("projection_matrix", Transform3d::Identity());
+        m_polygon_overlay.render();
+        shader->stop_using();
+    }
+
+    glsafe(::glPopAttrib());
+    glsafe(::glEnable(GL_DEPTH_TEST));
 }
 
 BoundingBoxf3 GLGizmoPainterBase::bounding_box() const
@@ -655,6 +785,94 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         return true;
     }
 
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A: RECTANGLE doesn't paint on every
+    // Dragging event like BRUSH/BUCKET_FILL/SMART_FILL do below — it only tracks the
+    // screen-space rectangle corners while the button is held. The mask is applied once, on
+    // release, in the LeftUp/RightUp handling further down (apply_rectangle_mask()).
+    if (m_tool_type == ToolType::RECTANGLE
+     && (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown
+      || (action == SLAGizmoEventType::Dragging && m_button_down != Button::None))) {
+        if (m_triangle_selectors.empty())
+            return false;
+
+        if (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown) {
+            m_button_down       = (action == SLAGizmoEventType::LeftDown) ? Button::Left : Button::Right;
+            m_rect_start_corner = mouse_position;
+            m_rect_dragging     = true;
+        }
+        m_rect_end_corner = mouse_position;
+        m_parent.set_as_dirty();
+        return true;
+    }
+
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B: POLYGON builds its shape from
+    // discrete clicks (not a single continuous drag like RECTANGLE), but still needs to claim
+    // every Dragging event between a LeftDown and its LeftUp — otherwise incidental mouse
+    // movement while clicking (near-unavoidable with a real hand) falls through unclaimed and the
+    // camera orbits mid-click (bug found in testing, s201). So m_button_down IS used here, exactly
+    // like RECTANGLE, purely to swallow that in-between Dragging stream; m_polygon_dragged_vertex
+    // still separately tracks whether a placed vertex is actually being repositioned. LeftDown
+    // either: (a) starts editing an existing vertex if the click landed on one, (b) closes and
+    // applies the polygon if that vertex is the first one and there are already >= 3 points, or
+    // (c) appends a new vertex. RightDown cancels. Escape isn't wired to painter gizmos
+    // generically (GLGizmosManager.cpp only special-cases Measure/Assembly) - touching that shared
+    // file for this would be a bigger, riskier change than it's worth here.
+    if (m_tool_type == ToolType::POLYGON
+     && (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown
+      || action == SLAGizmoEventType::LeftUp
+      || (action == SLAGizmoEventType::Dragging && m_button_down != Button::None))) {
+        if (m_triangle_selectors.empty())
+            return false;
+
+        if (action == SLAGizmoEventType::RightDown) {
+            m_polygon_points.clear();
+            m_polygon_dragged_vertex = -1;
+            m_button_down = Button::None;
+            m_parent.set_as_dirty();
+            return true;
+        }
+
+        if (action == SLAGizmoEventType::LeftUp) {
+            m_polygon_dragged_vertex = -1;
+            m_button_down = Button::None;
+            return true;
+        }
+
+        if (action == SLAGizmoEventType::Dragging) {
+            if (m_polygon_dragged_vertex >= 0 && m_polygon_dragged_vertex < int(m_polygon_points.size()))
+                m_polygon_points[m_polygon_dragged_vertex] = mouse_position;
+            m_parent.set_as_dirty();
+            return true;
+        }
+
+        // LeftDown from here on: claim the button for the whole click gesture (see comment
+        // above), then hit-test existing vertices - editing/closing takes priority over
+        // appending a brand new one.
+        m_button_down = Button::Left;
+
+        int hit_vertex = -1;
+        for (int i = 0; i < int(m_polygon_points.size()); ++i)
+            if ((m_polygon_points[i] - mouse_position).norm() <= double(PolygonCloseRadiusPx)) {
+                hit_vertex = i;
+                break;
+            }
+
+        if (hit_vertex == 0 && m_polygon_points.size() >= 3) {
+            EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE : this->get_left_button_state_type();
+            wxString action_name = this->handle_snapshot_action_name(shift_down, Button::Left);
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()), UndoRedo::SnapshotType::GizmoAction);
+            apply_polygon_mask(new_state);
+            update_model_object();
+            m_polygon_points.clear();
+        } else if (hit_vertex >= 0) {
+            m_polygon_dragged_vertex = hit_vertex;
+        } else {
+            m_polygon_points.push_back(mouse_position);
+        }
+        m_parent.set_as_dirty();
+        return true;
+    }
+
     if (action == SLAGizmoEventType::LeftDown
      || action == SLAGizmoEventType::RightDown
     || (action == SLAGizmoEventType::Dragging && m_button_down != Button::None)) {
@@ -903,6 +1121,18 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
     if ((action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
       && m_button_down != Button::None) {
+
+        // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A: this is where RECTANGLE
+        // actually applies its mask (BRUSH/BUCKET_FILL/SMART_FILL already mutated
+        // m_triangle_selectors during the preceding Dragging events; this just brings
+        // RECTANGLE up to the same point before the shared snapshot/update_model_object below).
+        if (m_tool_type == ToolType::RECTANGLE && m_rect_dragging) {
+            EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE
+                : (m_button_down == Button::Left ? this->get_left_button_state_type() : this->get_right_button_state_type());
+            apply_rectangle_mask(new_state);
+            m_rect_dragging = false;
+        }
+
         // Take snapshot and update ModelVolume data.
         wxString action_name = this->handle_snapshot_action_name(shift_down, m_button_down);
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()), UndoRedo::SnapshotType::GizmoAction);
@@ -914,6 +1144,127 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     }
 
     return false;
+}
+
+// NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion A (docs/FUTURE/PAINTER_PROMODE_PLAN.md).
+// Applies the screen-space rectangle (m_rect_start_corner..m_rect_end_corner) as a paint mask on
+// every model-part mesh. Mirrors the trafo/camera precompute the BRUSH/BUCKET_FILL path does in
+// gizmo_event() above, but projects via the real camera view*projection matrix (TriangleSelector::
+// RectangleProjectionCursor) instead of the small-brush "distance to a ray" approximation Circle/
+// Sphere use, since a rectangle can span most of the screen.
+void GLGizmoPainterBase::apply_rectangle_mask(EnforcerBlockerType new_state)
+{
+    if (m_triangle_selectors.empty())
+        return;
+
+    const Vec2f rect_min(float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x())),
+                          float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y())));
+    const Vec2f rect_max(float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x())),
+                          float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y())));
+    // Ignore a plain click (no real drag) - nothing to mask.
+    if (rect_max.x() - rect_min.x() < 2.f || rect_max.y() - rect_min.y() < 2.f)
+        return;
+
+    const Camera        &camera    = wxGetApp().plater()->get_camera();
+    const Selection      &selection = m_parent.get_selection();
+    const ModelObject    *mo        = m_c->selection_info()->model_object();
+    const ModelInstance  *mi        = mo->instances[selection.get_instance_idx()];
+    const Transform3d     instance_trafo = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
+        mi->get_assemble_transformation().get_matrix() :
+        mi->get_transformation().get_matrix();
+
+    std::vector<Transform3d> trafo_matrices;
+    std::vector<Transform3d> trafo_matrices_not_translate;
+    for (const ModelVolume *mv : mo->volumes)
+        if (mv->is_model_part()) {
+            trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
+            trafo_matrices_not_translate.emplace_back(
+                (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
+                    mi->get_assemble_transformation().get_matrix_no_offset() :
+                    mi->get_transformation().get_matrix_no_offset())
+                * mv->get_matrix_no_offset());
+        }
+
+    const Matrix4d view_projection_matrix = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+    const std::array<int, 4> viewport = camera.get_viewport();
+    const Vec3d camera_pos_world    = camera.get_position();
+    const Vec3d camera_target_world = camera_pos_world + camera.get_dir_forward();
+
+    for (size_t mesh_idx = 0; mesh_idx < trafo_matrices.size(); ++mesh_idx) {
+        const Transform3d &trafo_matrix               = trafo_matrices[mesh_idx];
+        const Transform3d &trafo_matrix_not_translate  = trafo_matrices_not_translate[mesh_idx];
+        const Transform3d  trafo_matrix_inv            = trafo_matrix.inverse();
+
+        const Vec3f camera_pos_mesh    = (trafo_matrix_inv * camera_pos_world).cast<float>();
+        const Vec3f camera_target_mesh = (trafo_matrix_inv * camera_target_world).cast<float>();
+        const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+
+        std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::RectangleProjectionCursor::cursor_factory(
+            camera_pos_mesh, camera_target_mesh, view_projection_matrix, viewport, rect_min, rect_max, trafo_matrix, clp);
+
+        m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
+        m_triangle_selectors[mesh_idx]->select_patch(0, std::move(cursor), new_state, trafo_matrix_not_translate,
+            m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+        m_triangle_selectors[mesh_idx]->request_update_render_data(true);
+    }
+}
+
+// NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F4, Sesion B. Same idea as apply_rectangle_mask()
+// above (see its comment for the camera/trafo precompute), but with an arbitrary closed polygon
+// (TriangleSelector::PolygonProjectionCursor) instead of a 4-corner box. Called once the polygon
+// is closed (see gizmo_event()'s POLYGON handling).
+void GLGizmoPainterBase::apply_polygon_mask(EnforcerBlockerType new_state)
+{
+    if (m_triangle_selectors.empty() || m_polygon_points.size() < 3)
+        return;
+
+    std::vector<Vec2f> polygon;
+    polygon.reserve(m_polygon_points.size());
+    for (const Vec2d &p : m_polygon_points)
+        polygon.emplace_back(float(p.x()), float(p.y()));
+
+    const Camera        &camera    = wxGetApp().plater()->get_camera();
+    const Selection      &selection = m_parent.get_selection();
+    const ModelObject    *mo        = m_c->selection_info()->model_object();
+    const ModelInstance  *mi        = mo->instances[selection.get_instance_idx()];
+    const Transform3d     instance_trafo = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
+        mi->get_assemble_transformation().get_matrix() :
+        mi->get_transformation().get_matrix();
+
+    std::vector<Transform3d> trafo_matrices;
+    std::vector<Transform3d> trafo_matrices_not_translate;
+    for (const ModelVolume *mv : mo->volumes)
+        if (mv->is_model_part()) {
+            trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
+            trafo_matrices_not_translate.emplace_back(
+                (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
+                    mi->get_assemble_transformation().get_matrix_no_offset() :
+                    mi->get_transformation().get_matrix_no_offset())
+                * mv->get_matrix_no_offset());
+        }
+
+    const Matrix4d view_projection_matrix = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+    const std::array<int, 4> viewport = camera.get_viewport();
+    const Vec3d camera_pos_world    = camera.get_position();
+    const Vec3d camera_target_world = camera_pos_world + camera.get_dir_forward();
+
+    for (size_t mesh_idx = 0; mesh_idx < trafo_matrices.size(); ++mesh_idx) {
+        const Transform3d &trafo_matrix               = trafo_matrices[mesh_idx];
+        const Transform3d &trafo_matrix_not_translate  = trafo_matrices_not_translate[mesh_idx];
+        const Transform3d  trafo_matrix_inv            = trafo_matrix.inverse();
+
+        const Vec3f camera_pos_mesh    = (trafo_matrix_inv * camera_pos_world).cast<float>();
+        const Vec3f camera_target_mesh = (trafo_matrix_inv * camera_target_world).cast<float>();
+        const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+
+        std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::PolygonProjectionCursor::cursor_factory(
+            camera_pos_mesh, camera_target_mesh, view_projection_matrix, viewport, polygon, trafo_matrix, clp);
+
+        m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
+        m_triangle_selectors[mesh_idx]->select_patch(0, std::move(cursor), new_state, trafo_matrix_not_translate,
+            m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+        m_triangle_selectors[mesh_idx]->request_update_render_data(true);
+    }
 }
 
 bool GLGizmoPainterBase::on_mouse(const wxMouseEvent &mouse_event)
