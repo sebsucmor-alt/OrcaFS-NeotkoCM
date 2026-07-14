@@ -1093,7 +1093,21 @@ static PrintObjectRegions* generate_print_object_regions(
                     // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode "extra walls": only the painted
                     // region's config is touched, the parent region (and thus the rest of the
                     // object) keeps its normal wall_loops.
-                    if (mmu_segmented_region_extra_walls > 0)
+                    //
+                    // Bugfix s201: skip this when painted_extruder_id is the SAME filament the
+                    // parent already uses for wall_filament (paint color == base color). Forcing
+                    // wall_loops to differ here breaks the "alias back to parent" interning below
+                    // even though the color never actually changed, which makes
+                    // PrintObjectSlice.cpp's parent/painted-region reconciliation (its
+                    // self_extruder_id check compares by filament NUMBER, not by PrintRegion
+                    // identity) treat this as a genuinely different region: the parent then keeps
+                    // its full, un-trimmed silhouette (nothing tells it to give up the ring) while
+                    // this new region ALSO prints its own ring on top of it — literal duplicate
+                    // walls in the same spot, same material, same-color overextrusion. Since
+                    // same-color "extra walls" wouldn't be visible anyway, nothing is lost by
+                    // skipping it here.
+                    if (mmu_segmented_region_extra_walls > 0
+                     && painted_extruder_id != unsigned(parent_region.region->config().wall_filament.value))
                         cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + mmu_segmented_region_extra_walls;
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
