@@ -7,6 +7,10 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 > Check https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/ For a Basic tutorial and Introduction to the world of delicious Color Sandwiches!
 
+# Download Lastest Version
+
+> https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/releases
+
 # Snapmaker Orca — Neotko FullSpectrum Feature Pack · User Guide
 
 > Features conceived and designed by **[Neotko](https://github.com/neotko)** — inventor of *Neosanding*, now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura.
