@@ -11,6 +11,7 @@
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Model.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -891,6 +892,12 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         }
     }
 
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode. See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader(_u8L("Pro Mode").c_str())) {
+        render_pro_mode_section(sliders_left_width, sliders_width, slider_icon_width);
+    }
+
     ImGui::Separator();
 
 
@@ -1197,6 +1204,88 @@ void GLMmSegmentationGizmo3DScene::finalize_triangle_indices()
             triangle_indices.clear();
         }
     }
+}
+
+// NEOTKO_PAINTERPRO_TAG — Pro Mode section: brush precision (F3), paint-perimeters-only (F1),
+// extra walls on painted regions (F2). All convenience wrappers over engine options — see
+// docs/FUTURE/PAINTER_PROMODE_PLAN.md for the investigation behind them.
+void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width)
+{
+    const float drag_left_width = ImGui::GetStyle().WindowPadding.x + sliders_width - m_imgui->get_style_scaling() * 8;
+
+    // --- F3: brush precision (finer triangle subdivision at the paint boundary) ---
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Precision"));
+    ImGui::SameLine(sliders_left_width);
+    ImGui::PushItemWidth(sliders_width);
+    m_imgui->bbl_slider_float_style("##precision_factor", &m_precision_factor, PrecisionFactorMin, PrecisionFactorMax, "%.0fx", 1.0f, true);
+    ImGui::SameLine(drag_left_width + sliders_left_width);
+    ImGui::PushItemWidth(1.5f * slider_icon_width);
+    ImGui::BBLDragFloat("##precision_factor_input", &m_precision_factor, 0.5f, PrecisionFactorMin, PrecisionFactorMax, "%.0fx");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Subdivides the mesh more finely while painting, reducing the "
+            "staircase look at the edge of a stroke. Higher values cost more memory/CPU on dense meshes.").c_str());
+
+    ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+
+    // --- F1: paint perimeters only (reuses the existing mmu_segmented_region_max_width,
+    // see cut_segmented_layers() in MultiMaterialSegmentation.cpp) ---
+    bool perimeters_only = mo && mo->config.has("mmu_segmented_region_max_width")
+        && mo->config.opt_float("mmu_segmented_region_max_width") > 0.0;
+
+    // NEOTKO_PAINTERPRO_TAG — the painted region is its own LayerRegion, clipped to this
+    // width by cut_segmented_layers() *before* Arachne runs; Arachne then only has room to
+    // draw as many loops as fit in that width, regardless of wall_loops. So the ring must be
+    // sized for wall_loops + extra_walls, not just wall_loops, or F2 "Extra walls" has no
+    // physical space to draw into while F1 is active.
+    auto perimeters_only_width = [mo]() -> double {
+        const DynamicPrintConfig &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        const double nozzle = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_float("nozzle_diameter", 0);
+        double line_width = print_cfg.get_abs_value("line_width", nozzle);
+        if (line_width <= 0.0)
+            line_width = nozzle > 0.0 ? nozzle : 0.4;
+        const int wall_loops = std::max(1, print_cfg.opt_int("wall_loops"));
+        const int extra_walls = (mo && mo->config.has("mmu_segmented_region_extra_walls"))
+            ? mo->config.opt_int("mmu_segmented_region_extra_walls") : 0;
+        return (wall_loops + extra_walls) * line_width;
+    };
+
+    if (ImGui::Checkbox(_u8L("Paint perimeters only").c_str(), &perimeters_only) && mo) {
+        wxGetApp().plater()->take_snapshot("Painter: perimeters only");
+        if (perimeters_only)
+            mo->config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(perimeters_only_width()));
+        else
+            mo->config.erase("mmu_segmented_region_max_width");
+        wxGetApp().plater()->update();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Limits the painted color to a ring near the region's contour "
+            "(about wall count x line width) instead of filling the whole selected area. Reduces "
+            "wasted filament and color changes in solid infill.").c_str());
+
+    // --- F2: extra walls on painted regions only (mmu_segmented_region_extra_walls,
+    // see generate_print_object_regions() in PrintApply.cpp) ---
+    int extra_walls = (mo && mo->config.has("mmu_segmented_region_extra_walls"))
+        ? mo->config.opt_int("mmu_segmented_region_extra_walls") : 0;
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Extra walls"));
+    ImGui::SameLine(sliders_left_width);
+    ImGui::PushItemWidth(sliders_width);
+    if (ImGui::InputInt("##mmu_extra_walls", &extra_walls, 1, 1) && mo) {
+        extra_walls = std::clamp(extra_walls, 0, 8);
+        wxGetApp().plater()->take_snapshot("Painter: extra walls");
+        if (extra_walls > 0)
+            mo->config.set_key_value("mmu_segmented_region_extra_walls", new ConfigOptionInt(extra_walls));
+        else
+            mo->config.erase("mmu_segmented_region_extra_walls");
+        // Widen the perimeters-only ring so the extra loops have room to be drawn.
+        if (perimeters_only)
+            mo->config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(perimeters_only_width()));
+        wxGetApp().plater()->update();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Adds this many extra perimeter walls to the painted region only, "
+            "on top of the object's normal wall count. 0 = disabled.").c_str());
 }
 
 void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float max_tooltip_width)

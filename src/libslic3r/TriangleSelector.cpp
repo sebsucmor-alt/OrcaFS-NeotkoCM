@@ -248,11 +248,12 @@ void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&c
         // BBS: improve details for large cursor radius
         TriangleSelector::HeightRange* hr_cursor = dynamic_cast<TriangleSelector::HeightRange*>(m_cursor.get());
         if (hr_cursor == nullptr) {
-            set_edge_limit(std::min(std::sqrt(m_cursor->radius_sqr) / 5.f, 0.05f));
+            // NEOTKO_PAINTERPRO_TAG — m_precision_factor is 1.f by default (stock behavior).
+            set_edge_limit(std::min(std::sqrt(m_cursor->radius_sqr) / (5.f * m_precision_factor), 0.05f / m_precision_factor));
             m_old_cursor_radius_sqr = m_cursor->radius_sqr;
         }
         else {
-            set_edge_limit(0.1);
+            set_edge_limit(0.1f / m_precision_factor);
             m_old_cursor_radius_sqr = 0.1;
         }
     }
@@ -1362,6 +1363,15 @@ void TriangleSelector::reset()
 void TriangleSelector::set_edge_limit(float edge_limit)
 {
     m_edge_limit_sqr = std::pow(edge_limit, 2.f);
+}
+
+void TriangleSelector::set_precision_factor(float factor)
+{
+    m_precision_factor = std::clamp(factor, 1.f, 16.f);
+    // 0 is the documented "uninitialized" sentinel for m_old_cursor_radius_sqr (see its
+    // declaration), so this forces select_patch() to recompute edge_limit on its very next
+    // call even if the cursor radius itself didn't change.
+    m_old_cursor_radius_sqr = 0.f;
 }
 
 int TriangleSelector::push_triangle(int a, int b, int c, int source_triangle, const EnforcerBlockerType state)

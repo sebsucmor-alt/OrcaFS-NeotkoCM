@@ -985,7 +985,10 @@ static PrintObjectRegions* generate_print_object_regions(
     size_t                                       num_extruders,
     const float                                  xy_contour_compensation,
     const std::vector<unsigned int>             &painting_extruders,
-    const bool                                   has_painted_fuzzy_skin)
+    const bool                                   has_painted_fuzzy_skin,
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode "extra walls" (mmu_segmented_region_extra_walls):
+    // added on top of a painted region's own wall_loops, see the painting-regions loop below.
+    const int                                    mmu_segmented_region_extra_walls)
 {
     // Reuse the old object or generate a new one.
     auto out = print_object_regions_old ? std::unique_ptr<PrintObjectRegions>(print_object_regions_old) : std::make_unique<PrintObjectRegions>();
@@ -1087,6 +1090,11 @@ static PrintObjectRegions* generate_print_object_regions(
                     cfg.wall_filament.value    = painted_extruder_id;
                     cfg.solid_infill_filament.value = painted_extruder_id;
                     cfg.sparse_infill_filament.value       = painted_extruder_id;
+                    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode "extra walls": only the painted
+                    // region's config is touched, the parent region (and thus the rest of the
+                    // object) keeps its normal wall_loops.
+                    if (mmu_segmented_region_extra_walls > 0)
+                        cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + mmu_segmented_region_extra_walls;
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
@@ -1988,7 +1996,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 num_total_filaments ,
                 print_object.is_mm_painted() ? 0.f : float(print_object.config().xy_contour_compensation.value),
                 painting_extruders,
-                print_object.is_fuzzy_skin_painted());
+                print_object.is_fuzzy_skin_painted(),
+                print_object.config().mmu_segmented_region_extra_walls.value);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it)
             if ((*it)->m_shared_regions) {

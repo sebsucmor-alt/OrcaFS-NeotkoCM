@@ -295,6 +295,12 @@ public:
     // Called by select_patch() internally. Made public for debugging purposes, see TriangleSelectorGUI::render_debug().
     void set_edge_limit(float edge_limit);
 
+    // NEOTKO_PAINTERPRO_TAG — Pro Mode "brush precision": divides the edge_limit that
+    // select_patch() computes from the cursor radius, so the mesh subdivides more finely
+    // at the boundary of a stroke (less staircase look). 1.f = stock behavior. Forces
+    // select_patch() to recompute edge_limit on its next call regardless of cursor radius.
+    void set_precision_factor(float factor);
+
     // Create new object on a TriangleMesh. The referenced mesh must
     // stay valid, a ptr to it is saved and used.
     explicit TriangleSelector(const TriangleMesh& mesh, float edge_limit = 0.6f);
@@ -496,6 +502,9 @@ protected:
 
     // BBS
     float m_edge_limit = 0.6f;
+
+    // NEOTKO_PAINTERPRO_TAG — see set_precision_factor(). 1.f = stock behavior.
+    float m_precision_factor = 1.f;
 
     // Number of invalid triangles (to trigger garbage collection).
     int m_invalid_triangles;

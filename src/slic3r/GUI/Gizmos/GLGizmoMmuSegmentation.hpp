@@ -149,6 +149,11 @@ private:
     void remap_filament_assignments();
     void render_filament_remap_ui(float window_width, float max_tooltip_width);
 
+    // NEOTKO_PAINTERPRO_TAG — Pro Mode section: brush precision (F3), paint-perimeters-only
+    // (F1), extra walls on painted regions (F2), rectangle/polygon masks (F4).
+    // See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
+    void render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width);
+
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
     std::map<std::string, wxString> m_desc;

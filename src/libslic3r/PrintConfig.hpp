@@ -927,6 +927,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               layer_height))
     ((ConfigOptionFloat,               mmu_segmented_region_max_width))
     ((ConfigOptionFloat,               mmu_segmented_region_interlocking_depth))
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode "extra walls": adds this many perimeter
+    // walls to painted regions only. Consumed in PrintApply.cpp's generate_print_object_regions().
+    ((ConfigOptionInt,                 mmu_segmented_region_extra_walls))
     ((ConfigOptionFloat,               raft_contact_distance))
     ((ConfigOptionFloat,               raft_expansion))
     ((ConfigOptionPercent,             raft_first_layer_density))

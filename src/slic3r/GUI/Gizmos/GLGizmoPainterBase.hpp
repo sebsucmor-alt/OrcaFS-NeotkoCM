@@ -280,6 +280,14 @@ protected:
     static constexpr float CursorRadiusMin  = 0.4f; // cannot be zero
     static constexpr float CursorRadiusMax  = 8.f;
     static constexpr float CursorRadiusStep = 0.2f;
+
+    // NEOTKO_PAINTERPRO_TAG — Pro Mode "brush precision" (GLGizmoMmuSegmentation only;
+    // default 1.f leaves every other painter gizmo derived from this base unaffected).
+    // See TriangleSelector::set_precision_factor().
+    float m_precision_factor = 1.f;
+    static constexpr float PrecisionFactorMin  = 1.f;
+    static constexpr float PrecisionFactorMax  = 8.f;
+    static constexpr float PrecisionFactorStep = 1.f;
     static constexpr float CursorHeightMin = 0.1f; // cannot be zero
     static constexpr float CursorHeightMax = 8.f;
     static constexpr float CursorHeightStep = 0.2f;

@@ -960,7 +960,7 @@ static std::vector<std::string> s_Preset_print_options {
      "pathblend_fill_angle", "pathblend_top", "pathblend_penu", "neotko_surface_passes_top", "neotko_surface_passes_penu",
      // NEOTKO_SANDWICH_ENGINE_TAG_END
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
-     "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
+     "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth", "mmu_segmented_region_extra_walls",
      "small_area_infill_flow_compensation", "small_area_infill_flow_compensation_model",
      "seam_slope_type", "seam_slope_conditional", "scarf_angle_threshold", "scarf_joint_speed", "scarf_joint_flow_ratio", "seam_slope_start_height", "seam_slope_entire_loop", "seam_slope_min_length", "seam_slope_steps", "seam_slope_inner_walls", "scarf_overhang_threshold",
      "interlocking_beam", "interlocking_orientation", "interlocking_beam_layer_count", "interlocking_depth", "interlocking_boundary_avoidance", "interlocking_beam_width",
