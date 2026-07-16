@@ -1006,6 +1006,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                wavesupport_roof_reverse))
     // Hollow pillar: N concentric perimeters, no infill (0 = solid, current behaviour).
     ((ConfigOptionInt,                 wavesupport_wall_loops))
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — WAVESUPPORT_PLAN.md Fase 5 (Mecanismo 2): neoweave the object's
+    // first layer that rests on a support roof — a Z oscillation applied at GCode time to whatever
+    // already prints there (colour/pattern untouched), to create contact microgaps → easier support
+    // removal. Independent of Sandwich painting. On/off + wave params, shown in Support settings.
+    ((ConfigOptionBool,                support_neoweave_enabled))
+    ((ConfigOptionFloat,               support_neoweave_amplitude))
+    ((ConfigOptionFloat,               support_neoweave_period))
     // Spacing between support material lines (the hatching distance).
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))

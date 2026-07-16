@@ -277,6 +277,10 @@ set(lisbslic3r_sources
     GCode/ToolOrdering.hpp
     GCode/WipeTower2.cpp
     GCode/WipeTower2.hpp
+    GCode/NeoWipeTower.cpp
+    GCode/NeoWipeTower.hpp
+    GCode/NeoTowerDispatch.cpp
+
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
     GCodeWriter.cpp

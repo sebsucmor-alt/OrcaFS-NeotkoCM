@@ -33,6 +33,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <optional>   // NEOTKO_NEOTOWER_TAG s205-5b.3b — dispatch_neotower_structural_tc return type
 #include <cfloat>
 
 namespace Slic3r {
@@ -193,6 +194,31 @@ private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
     std::string append_tcr(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
     std::string append_tcr2(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
+    // NEOTKO_NEOTOWER_TAG s205-5b.3a — NeoTower real-layer dispatch, extracted verbatim
+    // from tool_change() into fork-owned GCode/NeoTowerDispatch.cpp (keeps GCode.cpp's
+    // upstream footprint small). Non-const: advance m_tool_change_idx. Kept as two
+    // separate mirrors (non-BBL append_tcr2 / BBL append_tcr) — do NOT unify.
+    std::string dispatch_neotower_real_layer_tc(GCode &gcodegen, int extruder_id, double wipe_tower_z);
+    std::string dispatch_neotower_real_layer_tc_bbl(GCode &gcodegen, int extruder_id, double wipe_tower_z);
+    // NEOTKO_NEOTOWER_TAG s205-5b.3b — structural finish-layer dispatch, extracted verbatim
+    // from tool_change() into fork-owned GCode/NeoTowerDispatch.cpp. Returns an ENGAGED
+    // optional (= "return this gcode from tool_change") when a structural TCR is found, or
+    // std::nullopt (= "no structural TCR, fall through to ignore_sparse") — reproducing the
+    // original block's early-return / fall-through exactly. Non-const: advance
+    // m_tool_change_idx and update m_last_wipe_tower_print_z on the emit path. Kept as two
+    // separate mirrors (non-BBL append_tcr2 / BBL append_tcr) — do NOT unify.
+    std::optional<std::string> dispatch_neotower_structural_tc(GCode &gcodegen, int extruder_id);
+    std::optional<std::string> dispatch_neotower_structural_tc_bbl(GCode &gcodegen, int extruder_id);
+    // NEOTKO_NEOTOWER_TAG s205-5b.3c — sublayer-prime dispatch, extracted verbatim from the
+    // emit_local_z_unplanned_toolchange lambda into fork-owned GCode/NeoTowerDispatch.cpp.
+    // Engaged optional = "return this from the lambda" (sublayer TCR HIT), std::nullopt =
+    // "fall through to the stock Local-Z path" (MISS). Single block (BBL/non-BBL ternary
+    // was ALWAYS inline here — NOT a split mirror, so extracting verbatim keeps the ternary;
+    // this does not violate the do-not-unify rule that applies to the real-layer/structural
+    // split blocks). Keyed get_tcr(sublayer_ctx) + s104-z realign INTACT — extract ≠ flip.
+    std::optional<std::string> dispatch_neotower_sublayer_prime(
+        GCode &gcodegen, int extruder_id, double toolchange_print_z, double tower_z,
+        bool local_z_sublayer_ctx);
 
     // Postprocesses gcode: rotates and moves G1 extrusions and returns result
     std::string post_process_wipe_tower_moves(const WipeTower::ToolChangeResult& tcr, const Vec2f& translation, float angle) const;

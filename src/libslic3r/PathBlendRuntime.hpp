@@ -16,12 +16,11 @@ namespace Slic3r {
 // PathBlend SCHEDULER runtime — consumed by NeoTower (Fase B sublayer scheduler).
 struct PathBlendSchedulerRuntime {
     bool chain_atomic = true;
-    // When true, NeoTower's Fase B sublayer scheduler uses
-    // MultiPassScheduler::order_sublayers_by_tool (the SAME algorithm the GCode
-    // dispatcher uses) instead of its home-grown FusedGroup chain-greedy. Aligns
-    // plan with emission for atomic-chain multi-object PathBlend. Fusion of
-    // contiguous same-(old,new) runs is preserved as a post-process.
-    bool use_canon_scheduler = true;
+    // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — `use_canon_scheduler` removed. The canon scheduler
+    // (MultiPassScheduler::order_sublayers_by_tool_windowed, the SAME algorithm GCode dispatches
+    // with) is now NeoTower's only sublayer scheduler; the legacy FusedGroup chain-greedy was
+    // deleted. The toggle was a latent bug: emission always used canon, so the OFF position
+    // broke plan≡emission. See NeoTower.cpp collect_all_events / docs/FUTURE/NEOTOWER_REFACTOR_PLAN.md.
 
     static PathBlendSchedulerRuntime&       mut();
     static const PathBlendSchedulerRuntime& get();

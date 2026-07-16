@@ -699,7 +699,10 @@ public:
         double                                     e_per_mm,
         bool                                       is_force_no_extr,
         const std::function<Vec2d(const Point&)>&  point_to_gcode,
-        bool                                       contact_mode = false
+        bool                                       contact_mode = false,
+        // Contact mode only: explicit wave params (the Support-section keys). <0 = read from cfg.
+        double                                     contact_amplitude = -1.0,
+        double                                     contact_period = -1.0
     );
 
     // Restore the nozzle to nominal_z after a weaving path.

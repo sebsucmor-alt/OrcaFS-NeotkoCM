@@ -1,0 +1,692 @@
+// test_neotower.cpp — deterministic regression tests for the NeoTower planner.
+//
+// NEOTKO_NEOTOWER_TAG s205 (Fase 2 of docs/FUTURE/NEOTOWER_REFACTOR_PLAN.md).
+//
+// NeoTower is a "second, mirror calculation" of the toolchange sequence that
+// GCode.cpp re-derives at emission time (NEOTOWER.md §10 invariant: plan ≡
+// emission ≡ TCR). Its whole class of historical bugs (s79f, s88, s89, s102,
+// s148, s158) is one divergence or another between those two calculations in a
+// corner case. These tests are DETERMINISTIC (fixed input → known output): they
+// freeze today's verified-correct behaviour as a non-regression net, so the later
+// single-source rewrite (Fase 5) is safe. They are NOT a fuzzer (deferred; see the
+// plan). Each TEST_CASE cites the session whose bug it pins.
+//
+// Everything under test here is PURE (no Print, no slicing): the header-only
+// MultiPassScheduler / NeoTowerZ, plus the kernels hoisted to NeoTowerPure.hpp.
+
+#include <catch2/catch.hpp>
+
+#include <algorithm>
+#include <cstdint>
+#include <vector>
+
+#include "libslic3r/MultiPassScheduler.hpp"
+#include "libslic3r/NeoTowerZ.hpp"
+#include "libslic3r/NeoTowerPure.hpp"   // pulls NeoTower.hpp (NeoTowerEvent)
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+// ===========================================================================
+// MultiPassScheduler — the ONE shared function (plan side + emission side call
+// it identically, so plan == emission by construction). s79/s88/s89/s102/s148.
+// ===========================================================================
+
+namespace {
+
+using MultiPassScheduler::SublayerKey;
+
+// Build one sublayer entry.
+SublayerKey sk(uint64_t chain, int pass, int tool, double z, bool atomic = false)
+{
+    SublayerKey s;
+    s.chain_key    = chain;
+    s.pass_idx     = pass;
+    s.tool_id      = tool;
+    s.z_actual     = z;
+    s.atomic_chain = atomic;
+    return s;
+}
+
+// Number of toolchanges in the emitted tool sequence for a given order.
+int count_toolchanges(const std::vector<SublayerKey>& items,
+                      const std::vector<size_t>&      order,
+                      int                             initial_tool)
+{
+    int tc = 0, cur = initial_tool;
+    for (size_t idx : order) {
+        if (items[idx].tool_id != cur) { ++tc; cur = items[idx].tool_id; }
+    }
+    return tc;
+}
+
+// True iff `order` is a permutation of [0, items.size()).
+bool is_permutation_of_indices(const std::vector<SublayerKey>& items,
+                               const std::vector<size_t>&      order)
+{
+    if (order.size() != items.size()) return false;
+    std::vector<char> seen(items.size(), 0);
+    for (size_t idx : order) {
+        if (idx >= items.size() || seen[idx]) return false;
+        seen[idx] = 1;
+    }
+    return true;
+}
+
+// True iff, for every chain, pass_idx values appear in ascending (causal) order.
+bool causal_order_respected(const std::vector<SublayerKey>& items,
+                            const std::vector<size_t>&      order)
+{
+    std::vector<uint64_t> keys;
+    for (const auto& it : items)
+        if (std::find(keys.begin(), keys.end(), it.chain_key) == keys.end())
+            keys.push_back(it.chain_key);
+    for (uint64_t key : keys) {
+        int last_pass = -1;
+        for (size_t idx : order) {
+            if (items[idx].chain_key != key) continue;
+            if (items[idx].pass_idx < last_pass) return false;
+            last_pass = items[idx].pass_idx;
+        }
+    }
+    return true;
+}
+
+// Position of a (chain_key, pass_idx) item within `order`.
+size_t pos_of(const std::vector<SublayerKey>& items,
+              const std::vector<size_t>&      order,
+              uint64_t chain, int pass)
+{
+    for (size_t p = 0; p < order.size(); ++p) {
+        const auto& it = items[order[p]];
+        if (it.chain_key == chain && it.pass_idx == pass) return p;
+    }
+    return order.size(); // not found
+}
+
+} // namespace
+
+TEST_CASE("MultiPassScheduler: empty input yields empty order", "[NeoTower][MPScheduler]")
+{
+    std::vector<SublayerKey> items;
+    REQUIRE(MultiPassScheduler::order_sublayers_by_tool(items, 0).empty());
+    REQUIRE(MultiPassScheduler::order_sublayers_by_tool_windowed(items, 0, 1e-4).empty());
+}
+
+TEST_CASE("MultiPassScheduler: output is a complete deterministic permutation",
+          "[NeoTower][MPScheduler]")
+{
+    // Two objects, inverted tools per pass (s148 shape).
+    std::vector<SublayerKey> items = {
+        sk(/*A*/1, 0, 0, 1.00), sk(1, 1, 1, 1.00),
+        sk(/*B*/2, 0, 1, 1.00), sk(2, 1, 0, 1.00),
+    };
+    const auto o1 = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+    const auto o2 = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+
+    REQUIRE(is_permutation_of_indices(items, o1));
+    REQUIRE(o1 == o2);                       // deterministic
+    REQUIRE(causal_order_respected(items, o1));
+}
+
+TEST_CASE("MultiPassScheduler: keeps the current tool when it has ready work",
+          "[NeoTower][MPScheduler]")
+{
+    // First emitted item must belong to initial_tool if any ready item uses it
+    // (zero-cost toolchange preference).
+    std::vector<SublayerKey> items = {
+        sk(1, 0, 1, 1.00),  // tool 1
+        sk(2, 0, 0, 1.00),  // tool 0  ← initial_tool
+    };
+    const auto order = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+    REQUIRE(items[order.front()].tool_id == 0);
+}
+
+TEST_CASE("MultiPassScheduler: groups same-tool work behind one toolchange (s89/s148)",
+          "[NeoTower][MPScheduler]")
+{
+    // Three single-pass chains, tools T0,T1,T0. Naive object-major order
+    // (A,B,C) costs 2 toolchanges (T0→T1→T0); the scheduler groups the two T0
+    // together for exactly ONE toolchange.
+    std::vector<SublayerKey> items = {
+        sk(1, 0, 0, 1.00),  // A  T0
+        sk(2, 0, 1, 1.00),  // B  T1
+        sk(3, 0, 0, 1.00),  // C  T0
+    };
+    const auto order = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+
+    REQUIRE(count_toolchanges(items, order, 0) == 1);
+    // The lone T1 must be emitted last (both T0 grouped first).
+    REQUIRE(items[order.back()].tool_id == 1);
+}
+
+TEST_CASE("MultiPassScheduler: atomic chain drains consecutive same-tool passes (s88)",
+          "[NeoTower][MPScheduler]")
+{
+    // Chain A has two stacked T0 passes locked in pass order (p1 not ready until
+    // p0 emits) plus a T1 tapa; chain B has a single T0. With atomic_chain, A's
+    // rampa (p0,p1) drains fully before B's T0 — no cross-object micro-travel.
+    auto make = [](bool atomic) {
+        return std::vector<SublayerKey>{
+            sk(/*A*/1, 0, 0, 1.00, atomic),
+            sk(/*A*/1, 1, 0, 1.01, atomic),
+            sk(/*A*/1, 2, 1, 1.02, atomic),
+            sk(/*B*/2, 0, 0, 1.05, atomic),
+        };
+    };
+
+    SECTION("atomic: A.p0 and A.p1 are contiguous") {
+        auto items = make(true);
+        const auto order = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+        REQUIRE(is_permutation_of_indices(items, order));
+        const size_t a0 = pos_of(items, order, 1, 0);
+        const size_t a1 = pos_of(items, order, 1, 1);
+        REQUIRE(a1 == a0 + 1);              // drained back-to-back
+    }
+
+    SECTION("non-atomic: B.p0 slips between A.p0 and A.p1") {
+        auto items = make(false);
+        const auto order = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+        const size_t a0 = pos_of(items, order, 1, 0);
+        const size_t a1 = pos_of(items, order, 1, 1);
+        const size_t b0 = pos_of(items, order, 2, 0);
+        REQUIRE(a0 < b0);
+        REQUIRE(b0 < a1);                   // interleaved when not atomic
+    }
+}
+
+TEST_CASE("MultiPassScheduler: single window degenerates to the global order (s102)",
+          "[NeoTower][MPScheduler]")
+{
+    // All z within window_eps → one window → windowed == global (bit-for-bit,
+    // preserving s88/s89 semantics for PathBlend scanline chains 1e-7 apart).
+    std::vector<SublayerKey> items = {
+        sk(1, 0, 0, 1.0000000), sk(1, 1, 1, 1.0000001),
+        sk(2, 0, 1, 1.0000002), sk(2, 1, 0, 1.0000003),
+    };
+    const auto global   = MultiPassScheduler::order_sublayers_by_tool(items, 0);
+    const auto windowed = MultiPassScheduler::order_sublayers_by_tool_windowed(items, 0, 1e-4);
+    REQUIRE(windowed == global);
+}
+
+TEST_CASE("MultiPassScheduler: windows chain the running tool across planes (s102)",
+          "[NeoTower][MPScheduler]")
+{
+    // Two classic MP planes ~0.001 apart → two separate windows. The exit tool of
+    // window 1 must carry into window 2 (the writer carries over between
+    // process_layer calls) — the s102 fix that stopped predicting the wrong
+    // real-layer rotation.
+    std::vector<SublayerKey> items = {
+        sk(1, 0, 0, 1.000),   // window 1: T0
+        sk(1, 1, 1, 1.001),   // window 2: T1  (chain-locked behind p0)
+    };
+    const auto order = MultiPassScheduler::order_sublayers_by_tool_windowed(items, 0, 1e-4);
+
+    REQUIRE(is_permutation_of_indices(items, order));
+    REQUIRE(causal_order_respected(items, order));
+    // p0 (z=1.000) before p1 (z=1.001): windows are ascending in z.
+    REQUIRE(items[order.front()].tool_id == 0);
+    REQUIRE(items[order.back()].tool_id == 1);
+}
+
+// ===========================================================================
+// NeoTowerZ — single source of truth for Z epsilons + quantization.
+// ===========================================================================
+
+TEST_CASE("NeoTowerZ: epsilon ordering invariants hold", "[NeoTower][NeoTowerZ]")
+{
+    // These mirror the header static_asserts; re-stated so a future edit that
+    // loosens one shows up as a test failure, not only a compile break.
+    STATIC_REQUIRE(NeoTowerZ::NOMINAL_LH_MIN  > NeoTowerZ::SUBLAYER_GAP);
+    STATIC_REQUIRE(NeoTowerZ::SUBLAYER_GAP    > NeoTowerZ::Z_EPS_PLAN);
+    STATIC_REQUIRE(NeoTowerZ::Z_EPS_PLAN      > NeoTowerZ::Z_EPS_GROUP);
+    STATIC_REQUIRE(NeoTowerZ::Z_EPS_FUTURE_TC < NeoTowerZ::NOMINAL_LH_MIN);
+    STATIC_REQUIRE(NeoTowerZ::Z_EPS_FUTURE_TC > NeoTowerZ::SUBLAYER_GAP);
+    STATIC_REQUIRE(NeoTowerZ::SAME_PLANE_MAX_OFF < NeoTowerZ::NOMINAL_LH_MIN);
+    STATIC_REQUIRE(NeoTowerZ::SAME_PLANE_MAX_OFF > 5.f * NeoTowerZ::SUBLAYER_GAP);
+}
+
+TEST_CASE("NeoTowerZ: quantization rounds to micron / nanometre keys", "[NeoTower][NeoTowerZ]")
+{
+    REQUIRE(NeoTowerZ::to_key_um(0.880f) == 880);
+    REQUIRE(NeoTowerZ::to_key_um(0.8798f) == 880);   // rounds up
+    REQUIRE(NeoTowerZ::to_key_um(0.0004f) == 0);     // rounds down
+    REQUIRE(NeoTowerZ::to_nm(0.001f)      == 1000);
+}
+
+TEST_CASE("NeoTowerZ: lamina vs staircase classification threshold (s102-h)",
+          "[NeoTower][NeoTowerZ]")
+{
+    // Lámina: same physical plane as the real layer, small offset → skip frame.
+    const float lamina_off    = 0.0022f;  // largest observed stacked-lamina offset
+    // Staircase: distinct plane in the gap, smallest offset == NOMINAL_LH_MIN.
+    const float staircase_off = NeoTowerZ::NOMINAL_LH_MIN;
+
+    REQUIRE(lamina_off    <  NeoTowerZ::SAME_PLANE_MAX_OFF);
+    REQUIRE(staircase_off >= NeoTowerZ::SAME_PLANE_MAX_OFF);
+}
+
+// ===========================================================================
+// NeoTowerPure::make_key — Hallazgo VII (sublayer/real Z collision).
+// ===========================================================================
+
+TEST_CASE("NeoTowerPure::make_key packs z and tools", "[NeoTower][Pure]")
+{
+    // key = round(z*1000) * 10000 + old*100 + new.
+    REQUIRE(NeoTowerPure::make_key(1.0f, 2, 3) == 1000ULL * 10000ULL + 2 * 100 + 3);
+    REQUIRE(NeoTowerPure::make_key(0.0f, 0, 0) == 0);
+}
+
+TEST_CASE("NeoTowerPure::make_key: sublayer and real Z collide by design (Hallazgo VII)",
+          "[NeoTower][Pure]")
+{
+    // sub z=0.7998 and nominal z=0.8 both quantize to 800 µm, so a sub TC and a
+    // real TC with the same (old,new) produce IDENTICAL keys — which is exactly
+    // why the callers keep them in separate maps (m_tcr_index vs m_tcr_index_sub).
+    REQUIRE(NeoTowerPure::make_key(0.7998f, 0, 1) == NeoTowerPure::make_key(0.8f, 0, 1));
+    // Distinct (old,new) at the same z stay distinct.
+    REQUIRE(NeoTowerPure::make_key(0.8f, 0, 1) != NeoTowerPure::make_key(0.8f, 1, 0));
+}
+
+// ===========================================================================
+// NeoTowerPure::resolve_wipe_volume — s158 unified purge volume, 3 branches.
+// ===========================================================================
+
+TEST_CASE("NeoTowerPure::resolve_wipe_volume: three branches (s158)", "[NeoTower][Pure]")
+{
+    // matrix[old][new] mm³.
+    const std::vector<std::vector<float>> matrix = {{0.f, 10.f}, {20.f, 0.f}};
+
+    SECTION("body TC uses the physical flush matrix (byte-identical to pre-s158)") {
+        REQUIRE_THAT(NeoTowerPure::resolve_wipe_volume(matrix, 0, 1, /*sandwich*/false, 5.f),
+                     WithinAbs(10.f, 1e-6));
+    }
+    SECTION("body TC out of matrix bounds falls back to the scalar floor") {
+        REQUIRE_THAT(NeoTowerPure::resolve_wipe_volume(matrix, 0, 5, false, 5.f),
+                     WithinAbs(5.f, 1e-6));
+    }
+    SECTION("sandwich same-tool sublayer keeps the prime-volume knob") {
+        // matrix[1][1] == 0, but same-tool sublayers reserve the knob unchanged.
+        REQUIRE_THAT(NeoTowerPure::resolve_wipe_volume(matrix, 1, 1, /*sandwich*/true, 7.f),
+                     WithinAbs(7.f, 1e-6));
+    }
+    SECTION("sandwich real colour change unifies to max(knob, physical) — the fix") {
+        // Knob below physical → physical wins (the under-purge fix).
+        REQUIRE_THAT(NeoTowerPure::resolve_wipe_volume(matrix, 0, 1, true, 3.f),
+                     WithinAbs(10.f, 1e-6));
+        // Knob above physical → knob wins.
+        REQUIRE_THAT(NeoTowerPure::resolve_wipe_volume(matrix, 1, 0, true, 30.f),
+                     WithinAbs(30.f, 1e-6));
+    }
+}
+
+// ===========================================================================
+// NeoTowerPure::sublayer_slot_height — <=40% of nominal, floored at 0.04 mm.
+// ===========================================================================
+
+TEST_CASE("NeoTowerPure::sublayer_slot_height bounds", "[NeoTower][Pure]")
+{
+    // min_lh below 40% of nominal → min_lh wins.
+    REQUIRE_THAT(NeoTowerPure::sublayer_slot_height(0.1f, 0.3f),  WithinAbs(0.1f, 1e-6));
+    // 40% of nominal below min_lh → 40% wins.
+    REQUIRE_THAT(NeoTowerPure::sublayer_slot_height(0.2f, 0.2f),  WithinAbs(0.08f, 1e-6));
+    // Both below the 0.04 mm floor → floor wins.
+    REQUIRE_THAT(NeoTowerPure::sublayer_slot_height(0.02f, 0.05f), WithinAbs(0.04f, 1e-6));
+}
+
+// ===========================================================================
+// NeoTowerPure::eff_layer_height — s103 delta-Z height normalization.
+// ===========================================================================
+
+TEST_CASE("NeoTowerPure::eff_layer_height: staircase shrinks, sparse gap unchanged (s103)",
+          "[NeoTower][Pure]")
+{
+    SECTION("staircase plane in a half-size gap uses the delta height") {
+        // 0.1 mm above the previous emitting plane, nominal 0.2 → shrink to 0.1.
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(2.1f, 0.2f, /*last_plane*/2.0f),
+                     WithinAbs(0.1f, 1e-3));
+    }
+    SECTION("delta below the 0.04 mm floor is clamped up, never below NOMINAL_LH_MIN") {
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(2.02f, 0.2f, 2.0f),
+                     WithinAbs(NeoTowerZ::NOMINAL_LH_MIN, 1e-4));
+    }
+    SECTION("delta >= nominal (sparse gap) keeps the nominal height unchanged") {
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(0.5f, 0.2f, 0.0f),
+                     WithinAbs(0.2f, 1e-6));
+    }
+    SECTION("no advance (delta ~ 0) keeps the nominal height") {
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(2.0f, 0.2f, 2.0f),
+                     WithinAbs(0.2f, 1e-6));
+    }
+}
+
+// ===========================================================================
+// NeoTowerPure::dedup_events — s79f real-over-sublayer promotion + max not sum.
+// ===========================================================================
+
+namespace {
+NeoTowerEvent ev(float z, size_t old_t, size_t new_t, float vol, bool sub)
+{
+    NeoTowerEvent e;
+    e.z_actual    = z;
+    e.old_tool    = old_t;
+    e.new_tool    = new_t;
+    e.wipe_volume = vol;
+    e.is_sublayer = sub;
+    return e;
+}
+} // namespace
+
+TEST_CASE("NeoTowerPure::dedup_events: real event promoted over colliding sublayer (s79f)",
+          "[NeoTower][Pure]")
+{
+    // sub z=0.9998 and real z=1.0 both quantize to z_um=1000 with the same
+    // (0→1) pair. The original bug kept the FIRST (sublayer) and dropped the
+    // real, starving the canonical layer's purge. Fix: promote to the real,
+    // absorbing the sublayer's smaller purge via max().
+    std::vector<NeoTowerEvent> evts = {
+        ev(0.9998f, 0, 1, 5.f,  /*sub*/true),
+        ev(1.0f,    0, 1, 20.f, /*sub*/false),
+    };
+    NeoTowerPure::dedup_events(evts);
+
+    REQUIRE(evts.size() == 1);
+    REQUIRE(evts[0].is_sublayer == false);          // promoted to real
+    REQUIRE_THAT(evts[0].z_actual, WithinAbs(1.0f, 1e-6));   // real Z kept
+    REQUIRE_THAT(evts[0].wipe_volume, WithinAbs(20.f, 1e-6));
+}
+
+TEST_CASE("NeoTowerPure::dedup_events: duplicate purge uses max, never the sum",
+          "[NeoTower][Pure]")
+{
+    // Two objects generating the same TC at one Z: the tower purges ONCE with the
+    // worst-case volume (max), not once per object (sum).
+    std::vector<NeoTowerEvent> evts = {
+        ev(0.65f, 0, 1, 10.f, false),
+        ev(0.65f, 0, 1, 15.f, false),
+    };
+    NeoTowerPure::dedup_events(evts);
+
+    REQUIRE(evts.size() == 1);
+    REQUIRE_THAT(evts[0].wipe_volume, WithinAbs(15.f, 1e-6));  // max(10,15), not 25
+}
+
+TEST_CASE("NeoTowerPure::dedup_events: distinct keys are all preserved", "[NeoTower][Pure]")
+{
+    std::vector<NeoTowerEvent> evts = {
+        ev(0.60f, 0, 1, 10.f, false),   // distinct z
+        ev(0.65f, 0, 1, 10.f, false),
+        ev(0.65f, 1, 0, 10.f, false),   // same z, distinct (old,new)
+    };
+    NeoTowerPure::dedup_events(evts);
+    REQUIRE(evts.size() == 3);
+}
+
+// ===========================================================================
+// NeoTowerPure::validate_emission_bijection — V18 (s205-5b.1).
+// The canonical emission-order list must be a faithful bijection of the four
+// emittable lookup maps. These freeze the healthy case (silent) and each way the
+// shadow can diverge from the maps, which is exactly what the later positional
+// consume (5b.3) must not hit.
+// ===========================================================================
+
+namespace {
+
+using PairMap  = std::unordered_map<uint64_t, std::pair<size_t, size_t>>;
+using IdxMap   = std::unordered_map<uint64_t, size_t>;
+
+// One Real TowerEvent + its m_tcr_index entry, kept in sync.
+TowerEvent te_real(float z, size_t o, size_t n, size_t li, size_t si)
+{
+    return TowerEvent{z, o, n, LayerKind::Real, NeoTowerPure::make_key(z, o, n), li, si};
+}
+
+} // namespace
+
+TEST_CASE("V18: a faithful shadow of all four maps is silent", "[NeoTower][V18]")
+{
+    std::vector<TowerEvent> order;
+    PairMap tcr, tcr_sub, finish;
+    IdxMap  merged;
+
+    // Real TC.
+    {
+        auto k = NeoTowerPure::make_key(1.0f, 0, 1);
+        order.push_back(TowerEvent{1.0f, 0, 1, LayerKind::Real, k, 3, 2});
+        tcr[k] = {3, 2};
+    }
+    // Sublayer TC (same z_um as a real can collide across channels — legal).
+    {
+        auto k = NeoTowerPure::make_key(1.0f, 1, 2);
+        order.push_back(TowerEvent{1.0f, 1, 2, LayerKind::Sublayer, k, 4, 0});
+        tcr_sub[k] = {4, 0};
+    }
+    // Structural (z-only key).
+    {
+        uint64_t zk = (uint64_t) std::llround(2.0f * 1000.f);
+        order.push_back(TowerEvent{2.0f, 1, 1, LayerKind::Structural, zk, 5, 0});
+        finish[zk] = {5, 0};
+    }
+    // Bridge — shares the tcr_index map with Real.
+    {
+        auto k = NeoTowerPure::make_key(1.5f, 2, 0);
+        order.push_back(TowerEvent{1.5f, 2, 0, LayerKind::Bridge, k, 6, 1});
+        tcr[k] = {6, 1};
+    }
+    // Bridge-merged — index into m_merged_tcrs.
+    {
+        auto k = NeoTowerPure::make_key(1.5f, 2, 3);
+        order.push_back(TowerEvent{1.5f, 2, 3, LayerKind::BridgeMerged, k, 0, 0});
+        merged[k] = 0;
+    }
+
+    auto v = NeoTowerPure::validate_emission_bijection(order, tcr, tcr_sub, finish, merged);
+    REQUIRE(v.empty());
+}
+
+TEST_CASE("V18: list entry whose key is absent from its map is flagged", "[NeoTower][V18]")
+{
+    std::vector<TowerEvent> order = { te_real(1.0f, 0, 1, 0, 0) };
+    PairMap tcr, tcr_sub, finish; IdxMap merged;   // tcr is EMPTY — key missing
+    auto v = NeoTowerPure::validate_emission_bijection(order, tcr, tcr_sub, finish, merged);
+    REQUIRE_FALSE(v.empty());
+}
+
+TEST_CASE("V18: target {li,si} mismatch between list and map is flagged", "[NeoTower][V18]")
+{
+    auto e = te_real(1.0f, 0, 1, 3, 2);
+    std::vector<TowerEvent> order = { e };
+    PairMap tcr = { {e.key, {9, 9}} };             // map points elsewhere
+    PairMap tcr_sub, finish; IdxMap merged;
+    auto v = NeoTowerPure::validate_emission_bijection(order, tcr, tcr_sub, finish, merged);
+    REQUIRE_FALSE(v.empty());
+}
+
+TEST_CASE("V18: orphan map entry with no list entry is flagged (count check)", "[NeoTower][V18]")
+{
+    auto e = te_real(1.0f, 0, 1, 3, 2);
+    std::vector<TowerEvent> order = { e };
+    PairMap tcr = { {e.key, {3, 2}}, {NeoTowerPure::make_key(2.f, 0, 1), {7, 0}} }; // extra orphan
+    PairMap tcr_sub, finish; IdxMap merged;
+    auto v = NeoTowerPure::validate_emission_bijection(order, tcr, tcr_sub, finish, merged);
+    REQUIRE_FALSE(v.empty());   // list has 1, map has 2 → count mismatch
+}
+
+TEST_CASE("V18: Real and Bridge counts combine into tcr_index", "[NeoTower][V18]")
+{
+    // One Real + one Bridge, both into tcr_index (size 2). Combined count = 2 → OK.
+    auto r = te_real(1.0f, 0, 1, 0, 0);
+    auto bk = NeoTowerPure::make_key(1.5f, 2, 0);
+    std::vector<TowerEvent> order = { r, TowerEvent{1.5f, 2, 0, LayerKind::Bridge, bk, 1, 0} };
+    PairMap tcr = { {r.key, {0, 0}}, {bk, {1, 0}} };
+    PairMap tcr_sub, finish; IdxMap merged;
+    auto v = NeoTowerPure::validate_emission_bijection(order, tcr, tcr_sub, finish, merged);
+    REQUIRE(v.empty());
+}
+
+// ===========================================================================
+// NeoTowerPure::validate_shadow_consumption — runtime shadow (s205-5b.2).
+// Every emitted TCR ↔ exactly one canonical entry; a folded Bridge = census.
+// ===========================================================================
+
+namespace {
+
+TowerEvent tev(LayerKind k, size_t li, size_t si)
+{
+    TowerEvent te; te.kind = k; te.key = 1000 + li * 10 + si; te.li = li; te.si = si; return te;
+}
+TowerEvent tev_spec(LayerKind k, size_t li, size_t si)   // speculative spare (5b.2c)
+{
+    TowerEvent te = tev(k, li, si); te.speculative = true; return te;
+}
+ShadowSlot emit_tcr(size_t li, size_t si)    { return ShadowSlot{false, false, li, si}; }
+ShadowSlot emit_merged(size_t idx)           { return ShadowSlot{true,  false, idx, 0}; }
+ShadowSlot emit_finish(size_t li, size_t si) { return ShadowSlot{false, true,  li, si}; }
+
+} // namespace
+
+TEST_CASE("Shadow: healthy — each entry emitted once, folded Bridge = census", "[NeoTower][Shadow]")
+{
+    std::vector<TowerEvent> order = {
+        tev(LayerKind::Real,         0, 0),
+        tev(LayerKind::Sublayer,     1, 0),
+        tev(LayerKind::Structural,   2, 0),
+        tev(LayerKind::Bridge,       3, 1),   // folded into its merged → emitted 0×
+        tev(LayerKind::BridgeMerged, 0, 0),   // li = index into m_merged_tcrs
+    };
+    std::vector<ShadowSlot> seq = {
+        emit_tcr(0, 0), emit_tcr(1, 0), emit_finish(2, 0), emit_merged(0),
+    };
+    auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+    REQUIRE(rep.violations.empty());
+    REQUIRE(rep.census.size() == 1);   // the standalone Bridge, emitted 0×
+    REQUIRE(rep.emitted == 4);
+}
+
+TEST_CASE("Shadow: an entry emitted twice is a violation", "[NeoTower][Shadow]")
+{
+    std::vector<TowerEvent> order = { tev(LayerKind::Real, 0, 0) };
+    std::vector<ShadowSlot> seq   = { emit_tcr(0, 0), emit_tcr(0, 0) };
+    auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+    REQUIRE_FALSE(rep.violations.empty());
+}
+
+TEST_CASE("Shadow: a non-Bridge entry never emitted is a phantom violation", "[NeoTower][Shadow]")
+{
+    std::vector<TowerEvent> order = { tev(LayerKind::Real, 0, 0) };
+    std::vector<ShadowSlot> seq   = {};   // emitted nothing
+    auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+    REQUIRE_FALSE(rep.violations.empty());
+}
+
+TEST_CASE("Shadow: emitting a slot with no canonical entry is a violation", "[NeoTower][Shadow]")
+{
+    std::vector<TowerEvent> order = { tev(LayerKind::Real, 0, 0) };
+    std::vector<ShadowSlot> seq   = { emit_tcr(0, 0), emit_tcr(9, 9) };  // 9,9 is phantom
+    auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+    REQUIRE_FALSE(rep.violations.empty());
+}
+
+TEST_CASE("Shadow: Structural and Real at the same slot don't alias (from_finish)", "[NeoTower][Shadow]")
+{
+    // A finish-channel Structural and a tcr-channel Real can both land on m_result[1][0];
+    // from_finish keeps them apart so neither is a false double/phantom.
+    std::vector<TowerEvent> order = {
+        tev(LayerKind::Real,       1, 0),
+        tev(LayerKind::Structural, 1, 0),
+    };
+    std::vector<ShadowSlot> seq = { emit_tcr(1, 0), emit_finish(1, 0) };
+    auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+    REQUIRE(rep.violations.empty());
+    REQUIRE(rep.census.empty());
+}
+
+TEST_CASE("Shadow: growth/structural fallback emissions clear the 5b.2 phantoms", "[NeoTower][Shadow]")
+{
+    // Regression for 5b.2b. Structural growth events are dispatched at runtime via the
+    // get_tcr-MISS → planned-slot fallback (GCode.cpp), NOT get_finish_layer. Before 5b.2b
+    // that path recorded nothing, so every growth entry showed as a "phantom" violation.
+    // 5b.2b records each fallback emission as a finish-channel slot (from_finish=true, si=0);
+    // once every structural entry is emitted exactly once, the shadow is clean.
+    std::vector<TowerEvent> order = {
+        tev(LayerKind::Real,       0, 0),
+        tev(LayerKind::Structural, 5, 0),   // growth events on several plan layers
+        tev(LayerKind::Structural, 6, 0),
+        tev(LayerKind::Structural, 7, 0),
+    };
+    SECTION("all structural growth emitted via the instrumented fallback → clean") {
+        std::vector<ShadowSlot> seq = {
+            emit_tcr(0, 0), emit_finish(5, 0), emit_finish(6, 0), emit_finish(7, 0),
+        };
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE(rep.violations.empty());
+        REQUIRE(rep.census.empty());
+    }
+    SECTION("an uninstrumented growth emission still surfaces as a phantom") {
+        // If a future emission path is missed, the entry stays unrecorded → violation.
+        std::vector<ShadowSlot> seq = {
+            emit_tcr(0, 0), emit_finish(5, 0), emit_finish(6, 0), // (7,0) missing
+        };
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE_FALSE(rep.violations.empty());
+    }
+}
+
+TEST_CASE("Shadow: speculative spares consumed 0× are census, not violations", "[NeoTower][Shadow]")
+{
+    // 5b.2c. The MP sublayer scheduler seeds synthetic cross-product TCs (and sublayer-
+    // plane structural finishes / folded merged) that runtime grouping may legitimately
+    // NOT consume. A speculative entry at 0× is expected → census; a NON-speculative one
+    // at 0× is still a real phantom violation (the safety net must not be silenced).
+    SECTION("speculative spare never consumed → census, zero violations") {
+        std::vector<TowerEvent> order = {
+            tev(LayerKind::Sublayer,      0, 0),   // real painted sublayer — must emit
+            tev_spec(LayerKind::Sublayer, 1, 0),   // synthetic spare — may be 0×
+            tev_spec(LayerKind::Structural, 2, 0), // sublayer-plane finish spare
+            tev_spec(LayerKind::BridgeMerged, 0, 0),
+        };
+        std::vector<ShadowSlot> seq = { emit_tcr(0, 0) };   // only the real one emitted
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE(rep.violations.empty());
+        REQUIRE(rep.census.size() == 3);   // the 3 spares
+    }
+    SECTION("speculative spare consumed once → clean (no census, no violation)") {
+        std::vector<TowerEvent> order = { tev_spec(LayerKind::Sublayer, 1, 0) };
+        std::vector<ShadowSlot> seq   = { emit_tcr(1, 0) };
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE(rep.violations.empty());
+        REQUIRE(rep.census.empty());
+    }
+    SECTION("non-speculative entry at 0× is STILL a violation (safety net holds)") {
+        std::vector<TowerEvent> order = {
+            tev_spec(LayerKind::Sublayer, 1, 0),   // spare, 0× ok
+            tev(LayerKind::Real,          2, 0),   // real, 0× = bug
+        };
+        std::vector<ShadowSlot> seq = {};
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE(rep.violations.size() == 1);       // only the real Real entry
+    }
+}
+
+TEST_CASE("Shadow: a colliding-key twin at 0× is census, not a phantom", "[NeoTower][Shadow]")
+{
+    // 5b.2c. A real sublayer chain TC and a synthetic TC can share make_key(z,old,new) but
+    // point at different m_result slots. Only one wins m_tcr_index_sub[key]; get_tcr resolves
+    // by key so it emits that one, leaving the twin at 0×. Both encode the same transition →
+    // the 0× twin is benign even when it is the NON-speculative (real) one.
+    TowerEvent real_tc  = tev(LayerKind::Sublayer, 3, 0);       real_tc.key  = 5000;
+    TowerEvent synth_tc = tev_spec(LayerKind::Sublayer, 4, 0);  synth_tc.key = 5000; // twin
+    SECTION("synthetic twin wins the map → real twin 0× = census (no violation)") {
+        std::vector<TowerEvent> order = { real_tc, synth_tc };
+        std::vector<ShadowSlot> seq   = { emit_tcr(4, 0) };      // synth slot emitted
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE(rep.violations.empty());
+        REQUIRE(rep.census.size() == 1);                        // the real twin, covered by key
+    }
+    SECTION("neither twin emitted → still a real phantom (key never covered)") {
+        std::vector<TowerEvent> order = { real_tc, synth_tc };
+        std::vector<ShadowSlot> seq   = {};
+        auto rep = NeoTowerPure::validate_shadow_consumption(order, seq);
+        REQUIRE_FALSE(rep.violations.empty());                  // real twin: key 0× → phantom
+    }
+}

@@ -2832,7 +2832,9 @@ std::string NeoweaveEngine::apply_path(
     double                                     e_per_mm,
     bool                                       is_force_no_extr,
     const std::function<Vec2d(const Point&)>&  point_to_gcode,
-    bool                                       contact_mode)
+    bool                                       contact_mode,
+    double                                     contact_amplitude,
+    double                                     contact_period)
 {
     std::string gcode;
 
@@ -2867,12 +2869,26 @@ std::string NeoweaveEngine::apply_path(
     const bool use_surface_params = surface_weave || contact_mode;
     double weave_period = use_surface_params ? cfg.interlayer_neoweave_period.value
                                              : cfg.infill_neoweave_period.value;
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — contact mode overrides period/amplitude from the Support keys.
+    if (contact_mode && contact_period >= 0.0) weave_period = contact_period;
     if (weave_period < 1e-9) {
         weave_period = unscale<double>(path.width);
         if (weave_period < 1e-9) weave_period = 0.4;
     }
-    const double weave_amplitude = use_surface_params ? cfg.interlayer_neoweave_amplitude.value
-                                                      : cfg.infill_neoweave_amplitude.value;
+    // NEOTKO_NEOWEAVING_PORT_TAG — HANG GUARD. Wave mode subdivides each line into
+    // n_segs = ceil(8·line_length / weave_period) micro-segments. A tiny period (a mis-set or
+    // near-zero value that still passes the 1e-9 check above — e.g. 1e-6) makes n_segs astronomical:
+    // the emit loop runs for ~ever AND gcode.reserve(est_segments·48) tries to reserve gigabytes.
+    // This is why Wave mode was abandoned in an earlier fork and never documented. Floor the period
+    // at a physically printable minimum (a Z wave finer than ~one line width is unprintable anyway),
+    // so n_segs stays bounded. The per-line hard cap below is the belt-and-suspenders backstop.
+    {
+        const double _min_wave_period = std::max(0.2, unscale<double>(path.width));
+        if (weave_period < _min_wave_period) weave_period = _min_wave_period;
+    }
+    double weave_amplitude = use_surface_params ? cfg.interlayer_neoweave_amplitude.value
+                                                : cfg.infill_neoweave_amplitude.value;
+    if (contact_mode && contact_amplitude >= 0.0) weave_amplitude = contact_amplitude;
     const double weave_max_z_speed = use_surface_params ? cfg.interlayer_neoweave_max_z_speed.value
                                                         : cfg.infill_neoweave_max_z_speed.value;
     const double weave_min_length  = cfg.interlayer_neoweave_min_length.value;
@@ -2965,7 +2981,11 @@ std::string NeoweaveEngine::apply_path(
             // Subdivide line into ≥8 micro-segments per period for smooth sinusoid.
             const int    n_per_period = 8;
             const double seg_target   = weave_period / double(n_per_period);
-            const int    n_segs       = std::max(1, (int)std::ceil(line_length / seg_target));
+            // NEOTKO_NEOWEAVING_PORT_TAG — HANG GUARD backstop: even with the period floor above,
+            // a single very long line still can't be allowed to emit unbounded micro-segments.
+            static constexpr int kMaxSegsPerLine = 4096;
+            const int    n_segs       = std::min(kMaxSegsPerLine,
+                                                 std::max(1, (int)std::ceil(line_length / seg_target)));
             const double seg_len      = line_length / double(n_segs);
             const double dE_seg       = dE / double(n_segs);
 

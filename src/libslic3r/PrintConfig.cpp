@@ -5887,6 +5887,42 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — WAVESUPPORT_PLAN.md Fase 5 (Mecanismo 2).
+    def = this->add("support_neoweave_enabled", coBool);
+    def->label = L("Neoweave contact layer");
+    def->category = L("Support");
+    def->tooltip = L("Oscillate the object's first layer resting on a support roof up and down in Z "
+                     "(the printed colour/pattern is untouched — only the Z path waves), creating "
+                     "intermittent contact so the object separates from the support more easily. "
+                     "Applies to every bottom-bridge surface over support, independent of any painted "
+                     "Sandwich zone. Real bridges over air are also affected — leave off if the model "
+                     "has unsupported bridges you don't want waved.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_neoweave_amplitude", coFloat);
+    def->label = L("Neoweave Z amplitude");
+    def->category = L("Support");
+    def->tooltip = L("Peak upward Z deviation of the contact wave. Valleys touch the roof, crests "
+                     "lift into air. Typical: 0.05-0.2 mm. Keep at or below half the layer height.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("support_neoweave_period", coFloat);
+    def->label = L("Neoweave oscillation period");
+    def->category = L("Support");
+    def->tooltip = L("Distance between wave crests along each printed line. Smaller = finer wave. "
+                     "Floored internally to about one line width (a finer wave is unprintable). "
+                     "0 = auto (line width).");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 10.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.6));
+
     def = this->add("support_base_pattern_spacing", coFloat);
     def->label = L("Base pattern spacing");
     def->category = L("Support");

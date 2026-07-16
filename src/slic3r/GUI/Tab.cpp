@@ -1569,15 +1569,14 @@ public:
                 const std::string vc = ac->get("neotko_pb_chain_continuous");
                 const std::string va = ac->get("neotko_pb_chain_atomic");
                 const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
-                const std::string vk = ac->get("neotko_pb_use_canon_scheduler");
+                // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — use_canon_scheduler removed (canon is the
+                // only scheduler now); the neotko_pb_use_canon_scheduler app_config key is dead.
                 if (!vc.empty()) d.chain_continuous   = (vc == "1" || vc == "true");
                 if (!va.empty()) s.chain_atomic       = (va == "1" || va == "true");
-                if (!vk.empty()) s.use_canon_scheduler = (vk == "1" || vk == "true");
                 if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
             } else {
                 d.chain_continuous    = true;
                 s.chain_atomic        = true;
-                s.use_canon_scheduler = true;
             }
         }
 
@@ -3472,7 +3471,6 @@ private:
                 const auto& d = Slic3r::PathBlendDispatcherRuntime::get();
                 const auto& s = Slic3r::PathBlendSchedulerRuntime::get();
                 const bool all_default = d.chain_continuous && s.chain_atomic
-                    && s.use_canon_scheduler
                     && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6;
                 u.pb_advanced_btn[idx]->SetLabel(
                     all_default ? _L("Advanced \xE2\x9A\x99")
@@ -3656,10 +3654,9 @@ private:
                 const std::string vc = ac->get("neotko_pb_chain_continuous");
                 const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
                 const std::string va = ac->get("neotko_pb_chain_atomic");
-                const std::string vk = ac->get("neotko_pb_use_canon_scheduler");
+                // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — use_canon_scheduler removed (canon-only).
                 if (!vc.empty()) d.chain_continuous    = (vc == "1" || vc == "true");
                 if (!va.empty()) s.chain_atomic        = (va == "1" || va == "true");
-                if (!vk.empty()) s.use_canon_scheduler = (vk == "1" || vk == "true");
                 if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
             }
             wxDialog dlg(pb_adv, wxID_ANY, _L("PathBlend Advanced"),
@@ -3842,7 +3839,7 @@ private:
             });
 
             // ---- Developer-only internal scheduler toggles -------------------
-            wxCheckBox *chk_cont = nullptr, *chk_atomic = nullptr, *chk_canon = nullptr;
+            wxCheckBox *chk_cont = nullptr, *chk_atomic = nullptr;  // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — chk_canon removed (canon-only scheduler)
             wxSpinCtrlDouble* sc_xy = nullptr;
             if (dev) {
                 vbox->Add(new wxStaticLine(&dlg), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
@@ -3854,10 +3851,6 @@ private:
                     _L("Atomic chain (complete each object's PathBlend before next)"));
                 chk_atomic->SetValue(s.chain_atomic);
                 vbox->Add(chk_atomic, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-                chk_canon = new wxCheckBox(&dlg, wxID_ANY,
-                    _L("Canon scheduler (NeoTower uses dispatcher's algorithm)"));
-                chk_canon->SetValue(s.use_canon_scheduler);
-                vbox->Add(chk_canon, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
                 auto* hxy = new wxBoxSizer(wxHORIZONTAL);
                 hxy->Add(new wxStaticText(&dlg, wxID_ANY,
                         _L("Continuous-chain XY threshold (mm):")),
@@ -3875,12 +3868,10 @@ private:
                 if (dev) {
                     d.chain_continuous    = chk_cont->GetValue();
                     s.chain_atomic        = chk_atomic->GetValue();
-                    s.use_canon_scheduler = chk_canon->GetValue();
                     d.chain_max_xy_mm     = sc_xy->GetValue();
                     if (ac) {
                         ac->set("neotko_pb_chain_continuous",    d.chain_continuous    ? "1" : "0");
                         ac->set("neotko_pb_chain_atomic",        s.chain_atomic        ? "1" : "0");
-                        ac->set("neotko_pb_use_canon_scheduler", s.use_canon_scheduler ? "1" : "0");
                         char buf[32];
                         std::snprintf(buf, sizeof(buf), "%.4f", d.chain_max_xy_mm);
                         ac->set("neotko_pb_chain_max_xy_mm",  buf);
@@ -3896,7 +3887,7 @@ private:
                 write_pb_blob(z, idx, *prof);
                 const bool prof_lin  = (prof->in_t <= 0.001f && prof->out_t >= 0.999f);
                 const bool chain_def = (d.chain_continuous && s.chain_atomic
-                    && s.use_canon_scheduler && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6);
+                    && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6);
                 pb_adv->SetLabel((prof_lin && chain_def)
                     ? _L("Advanced \xE2\x9A\x99") : _L("Advanced \xE2\x9A\x99 *"));
             }
@@ -7733,6 +7724,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("wavesupport_roof_order");
         optgroup->append_single_option_line("wavesupport_roof_reverse");
         optgroup->append_single_option_line("wavesupport_wall_loops");
+        // NEOTKO_NEOWEAVE_CONTACT_TAG — Fase 5: contact-layer neoweave (toggle + wave params).
+        // Amplitude/period shown/hidden by toggle_options() when the toggle is on.
+        optgroup->append_single_option_line("support_neoweave_enabled");
+        optgroup->append_single_option_line("support_neoweave_amplitude");
+        optgroup->append_single_option_line("support_neoweave_period");
         optgroup->append_single_option_line("support_interface_spacing", "support_settings_advanced#interface-spacing");
         optgroup->append_single_option_line("support_bottom_interface_spacing", "support_settings_advanced#interface-spacing");
         optgroup->append_single_option_line("support_expansion", "support_settings_advanced#normal-support-expansion");
@@ -8096,6 +8092,17 @@ void TabPrint::toggle_options()
                 cb->SetValue(cur);
             }
         }
+    }
+
+    // NEOTKO_NEOWEAVE_CONTACT_TAG — WAVESUPPORT_PLAN.md Fase 5: contact-layer neoweave toggle
+    // (Tier-B, LibreMode gate like the rest of WaveSupport). Amplitude/period only make sense — and
+    // only show — when the toggle is on.
+    {
+        const bool libre_active = wxGetApp().app_config->get_bool("neotko_libre_mode");
+        const bool nw_on = m_config->opt_bool("support_neoweave_enabled");
+        toggle_line("support_neoweave_enabled",   libre_active);
+        toggle_line("support_neoweave_amplitude", libre_active && nw_on);
+        toggle_line("support_neoweave_period",    libre_active && nw_on);
     }
 
     // NEOTKO_WAVESUPPORT_TAG_UI — WAVESUPPORT_PLAN.md Fase 4b: expose "Wave (NeoWave roof)" in the

@@ -41,7 +41,7 @@
 
 #include "libslic3r/libslic3r.h"           // coordf_t
 #include "libslic3r/GCode/WipeTower.hpp"   // WipeTower::ToolChangeResult, box_coordinates
-#include "libslic3r/GCode/WipeTower2.hpp"  // WipeTower2 (used for GCode generation)
+#include "libslic3r/GCode/NeoWipeTower.hpp"  // NEOTKO_NEOWIPETOWER_TAG s205-5a.1 — own copy of WipeTower2, isolates NeoTower from upstream WipeTower2
 
 namespace Slic3r {
 
@@ -102,6 +102,68 @@ struct NeoTowerEvent {
     // the post-sandwich perimeter recovery TC. Body real-layer TCs leave this false (they
     // keep full ramming — their box is large enough that ramming doesn't starve the wipe).
     bool   no_ramming   = false;
+
+    // NEOTKO_NEOTOWER_TAG s205-5b.2c — synthetic cross-product spare. The MP sublayer
+    // scheduler seeds every (old,new) pair a plane MIGHT need (obj==nullptr synthetics,
+    // CANON_SYNTH loop) because the same-colour grouping / tetris stacking order is
+    // decided at EMISSION time, not plan time. Such a spare consumed 0× at runtime is
+    // expected (the grouping chose another entry chain) → shadow census, not a phantom
+    // violation. Real chain events and real painted sublayers leave this false.
+    bool   speculative  = false;
+};
+
+// ---------------------------------------------------------------------------
+// LayerKind / TowerEvent — NEOTKO_NEOTOWER_TAG s205-5b.1 (single-source, step 1)
+//
+// TowerEvent is the CANONICAL, emission-ordered record of one TCR that GCode
+// consumes. It is a faithful shadow of the five lookup maps, built in generate()
+// in the exact order the maps are populated. Step 5b.1 only PRODUCES this list
+// (data-only) + validates it (V18 bijection); GCode still consumes via get_tcr().
+// Later 5b sub-phases make GCode consume this list positionally and demolish the
+// mirror. LayerKind tags which emittable channel each entry belongs to; it is a
+// classification of the TCR, NOT (yet) a replacement of NeoTowerEvent's bools.
+// ---------------------------------------------------------------------------
+enum class LayerKind : uint8_t {
+    Real,          // real-layer toolchange   → m_tcr_index
+    Sublayer,      // MultiPass sublayer TC    → m_tcr_index_sub
+    Structural,    // T→T finish_layer         → m_finish_layer_index (si always 0)
+    Bridge,        // bridge TC (chain gap)    → m_tcr_index
+    BridgeMerged,  // fused bridge+real TCR     → m_merged_index (li = idx into m_merged_tcrs)
+};
+
+struct TowerEvent {
+    float     z_actual = 0.f;
+    size_t    old_tool = 0;
+    size_t    new_tool = 0;
+    LayerKind kind     = LayerKind::Real;
+    // The map key this entry was registered under: make_key(z,old,new) for
+    // Real/Sublayer/Bridge/BridgeMerged, z_um(z) for Structural.
+    uint64_t  key      = 0;
+    // Target: {li, si} into m_result for Real/Sublayer/Structural/Bridge.
+    // For BridgeMerged, li = index into m_merged_tcrs, si unused (0).
+    size_t    li       = 0;
+    size_t    si       = 0;
+    // NEOTKO_NEOTOWER_TAG s205-5b.2c — speculative spare: the plan registered this
+    // slot but runtime grouping may legitimately not consume it (0× → census, not a
+    // phantom violation). Set for: synthetic sublayer TCs (NeoTowerEvent::speculative),
+    // sublayer-plane structural finishes (is_sublayer identity), and BridgeMerged
+    // (folded away when the bridge isn't needed). Real TCs / real frame-growth = false.
+    bool      speculative = false;
+};
+
+// NEOTKO_NEOTOWER_TAG s205-5b.2 — one runtime emission: the actual TCR slot that
+// get_tcr()/get_finish_layer() resolved and GCode emitted. `merged` picks the
+// storage: m_merged_tcrs[a] (merged==true) vs m_result[a][b]. The ordered vector
+// of these captures the EMPIRICAL emission order for free (input to 5b.3's queue).
+struct ShadowSlot {
+    bool   merged      = false;  // m_merged_tcrs[a] vs m_result[a][b]
+    // from_finish disambiguates the two channels that can point at the SAME
+    // m_result[a][b] slot: get_finish_layer() (Structural, true) vs get_tcr()
+    // (Real/Sublayer/Bridge, false). Without it a Structural{li,0} and a Real{li,0}
+    // would alias in the reverse map → false double-emit + false phantom.
+    bool   from_finish = false;
+    size_t a           = 0;
+    size_t b           = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -209,6 +271,16 @@ public:
     void validate_plan() const;
     // NEOTKO_NEOTOWER_TAG_END
 
+    // NEOTKO_NEOTOWER_TAG s205 (Fase 3) — V14 (frame) + V17 (delta-Z height) slice-time
+    // invariants, extracted from generate() into a single named call site. It MUST run
+    // inside generate()'s flow, not in validate_plan(): it reads the generate()-local
+    // all_events *after* its standalone_plane marking (NeoTower.cpp:1934) and scans the
+    // freshly built raw_result — neither is visible to the const validate_plan(). Pure
+    // validation: const, log-only, no gcode/behaviour change.
+    void validate_result_frame_and_height(
+        const std::vector<std::vector<WipeTower::ToolChangeResult>>& raw_result,
+        const std::vector<NeoTowerEvent>&                            all_events) const;
+
     // -----------------------------------------------------------------------
     // Phase 3: fill result with ToolChangeResults.
     // result[layer_idx][slot_idx] mirrors WipeTower2::generate() output layout.
@@ -234,10 +306,16 @@ public:
     // dispatches pass true; real-layer / recovery dispatches keep the default.
     // Resolution falls back to the other channel (logged CROSS_CHANNEL) so legacy
     // behaviour is preserved wherever the channels do not collide.
+    // NEOTKO_NEOTOWER_TAG s205-5b.2 — record_consumption: when true (the default,
+    // used by every EMITTING dispatch site), a HIT appends the resolved slot to
+    // m_shadow_sequence for the runtime consumption/order shadow. PEEK sites
+    // (recovery diagnostics / decision guards in GCode.cpp that call get_tcr as a
+    // boolean without emitting) MUST pass false so they don't count as an emission.
     std::optional<WipeTower::ToolChangeResult> get_tcr(float  z_actual,
                                                         size_t old_tool,
                                                         size_t new_tool,
-                                                        bool   sublayer_ctx = false) const;
+                                                        bool   sublayer_ctx = false,
+                                                        bool   record_consumption = true) const;
 
     // -----------------------------------------------------------------------
     // Structural-layer TCR lookup for GCode.cpp.
@@ -251,6 +329,27 @@ public:
     // Returns nullopt if no structural layer was planned at this Z.
     // -----------------------------------------------------------------------
     std::optional<WipeTower::ToolChangeResult> get_finish_layer(float z) const;
+
+    // NEOTKO_NEOTOWER_TAG s205-5b.2 — runtime consumption/order shadow report.
+    // Called once at end of gcode emission (WipeTowerIntegration::finalize). Checks
+    // that every emitted TCR maps to exactly one canonical TowerEvent (runtime
+    // counterpart of V18's static bijection) and that no canonical entry was
+    // double-emitted or skipped; a standalone Bridge never emitted (folded into its
+    // merged) is expected → reported as census, not a violation. Also logs the
+    // captured empirical emission order (input to 5b.3's per-plane queue). const:
+    // reads m_emission_order + the mutable m_shadow_sequence, logs only.
+    void finalize_shadow() const;
+
+    // NEOTKO_NEOTOWER_TAG s205-5b.2b — record a tower TCR emission that GCode.cpp
+    // dispatches OUTSIDE get_tcr()/get_finish_layer() (the get_tcr-MISS → planned-slot
+    // fallback, the realign find_if path, orphan-finish emission, and their BBL mirrors).
+    // Those sites emit m_result[a][b] directly, so without this the shadow under-counts
+    // and flags spurious "phantom" violations (the growth/structural events measured in
+    // 5b.2). `a`/`b` are the m_result [li][si] indices (== GCode's m_layer_idx/slot_idx,
+    // since m_tool_changes IS m_result); `from_finish` = identity/structural slot (finish
+    // channel), `merged` = false for these paths (merged TCRs always resolve via get_tcr).
+    // const: appends to the mutable m_shadow_sequence only, like get_tcr().
+    void record_shadow_slot(bool merged, bool from_finish, size_t a, size_t b) const;
 
     // -----------------------------------------------------------------------
     // Accessors replacing WipeTower2 equivalents in Print.cpp / GCode.cpp
@@ -351,6 +450,16 @@ private:
 
     // Phase 3 output — m_result[layer_idx][slot_idx].
     std::vector<std::vector<WipeTower::ToolChangeResult>> m_result;
+
+    // NEOTKO_NEOTOWER_TAG s205-5b.1 — canonical emission-ordered TCR list, a
+    // faithful shadow of the five lookup maps (built in generate() alongside them).
+    // Data-only in 5b.1; V18 (validate_plan) checks it is a bijection of the maps.
+    std::vector<TowerEvent>                m_emission_order;
+
+    // NEOTKO_NEOTOWER_TAG s205-5b.2 — runtime shadow: the ordered slots that
+    // get_tcr()/get_finish_layer() actually emitted (mutable so the const lookups
+    // can append). Reset in generate(); consumed by finalize_shadow().
+    mutable std::vector<ShadowSlot>        m_shadow_sequence;
 
     // O(1) TCR lookup: make_key(...) → {layer_idx, slot_idx} into m_result.
     // NEOTKO_NEOTOWER_TAG s102 — dual channel: m_tcr_index holds REAL-layer TCs,

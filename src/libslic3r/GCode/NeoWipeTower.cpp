@@ -1,5 +1,6 @@
-// Orca: WipeTower2 for all non bbl printers, support all MMU device and toolchanger.
-#include "WipeTower2.hpp"
+// Orca: NeoWipeTower for all non bbl printers, support all MMU device and toolchanger.
+#include "NeoWipeTower.hpp"
+#include "../NeoTowerZ.hpp"  // NEOTKO_NEOTOWER_TAG — synthetic/same_plane thresholds (NOMINAL_LH_MIN)
 
 #include <cassert>
 #include <iostream>
@@ -33,6 +34,14 @@ static constexpr size_t LEGACY_NO_TOOL                 = static_cast<size_t>(std
 #define SCALED_WIPE_TOWER_RESOLUTION (WIPE_TOWER_RESOLUTION / SCALING_FACTOR_INTERNAL)
 enum class LimitFlow { None, LimitPrintFlow, LimitRammingFlow };
 static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
+
+// NEOTKO_NEOWIPETOWER_TAG s205-5a.1 — these file-scope geometry helpers (and the
+// Segment/IntersectionInfo/PointWithFlag structs below) are a verbatim copy of the
+// ones in WipeTower2.cpp. They have external linkage there; keeping them external
+// here too would produce duplicate-symbol link errors (and ODR UB for the structs).
+// Wrapping the whole block in an anonymous namespace gives them internal linkage,
+// isolating this TU from WipeTower2.cpp. Behavior unchanged (helpers are TU-local).
+namespace {
 
 inline bool is_no_tool_sentinel(size_t tool)
 {
@@ -560,13 +569,15 @@ static float length_to_volume(float length, float line_width, float layer_height
     return std::max(0.f, length * layer_height * (line_width - layer_height * (1.f - float(M_PI) / 4.f)));
 }
 
-class WipeTowerWriter2
+} // anonymous namespace (NeoWipeTower file-scope geometry helpers — see s205-5a.1 tag above)
+
+class NeoWipeTowerWriter
 {
 public:
-    WipeTowerWriter2(float                                              layer_height,
+    NeoWipeTowerWriter(float                                              layer_height,
                      float                                              line_width,
                      GCodeFlavor                                        flavor,
-                     const std::vector<WipeTower2::FilamentParameters>& filament_parameters,
+                     const std::vector<NeoWipeTower::FilamentParameters>& filament_parameters,
                      bool                                               enable_arc_fitting,
                      const std::string&                                 printer_model)
         : m_current_pos(std::numeric_limits<float>::max(), std::numeric_limits<float>::max())
@@ -592,7 +603,7 @@ public:
         change_analyzer_line_width(line_width);
     }
 
-    WipeTowerWriter2& change_analyzer_line_width(float line_width)
+    NeoWipeTowerWriter& change_analyzer_line_width(float line_width)
     {
         // adds tag for analyzer:
         std::stringstream str;
@@ -601,7 +612,7 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& set_initial_position(const Vec2f& pos, float width = 0.f, float depth = 0.f, float internal_angle = 0.f)
+    NeoWipeTowerWriter& set_initial_position(const Vec2f& pos, float width = 0.f, float depth = 0.f, float internal_angle = 0.f)
     {
         m_wipe_tower_width = width;
         m_wipe_tower_depth = depth;
@@ -611,38 +622,38 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& set_position(const Vec2f& pos)
+    NeoWipeTowerWriter& set_position(const Vec2f& pos)
     {
         m_current_pos = pos;
         return *this;
     }
 
-    WipeTowerWriter2& set_initial_tool(size_t tool)
+    NeoWipeTowerWriter& set_initial_tool(size_t tool)
     {
         m_current_tool = tool;
         return *this;
     }
 
-    WipeTowerWriter2& set_z(float z)
+    NeoWipeTowerWriter& set_z(float z)
     {
         m_current_z = z;
         return *this;
     }
 
-    WipeTowerWriter2& set_extrusion_flow(float flow)
+    NeoWipeTowerWriter& set_extrusion_flow(float flow)
     {
         m_extrusion_flow = flow;
         return *this;
     }
 
-    WipeTowerWriter2& set_y_shift(float shift)
+    NeoWipeTowerWriter& set_y_shift(float shift)
     {
         m_current_pos.y() -= shift - m_y_shift;
         m_y_shift = shift;
         return (*this);
     }
 
-    WipeTowerWriter2& disable_linear_advance()
+    NeoWipeTowerWriter& disable_linear_advance()
     {
         if (m_gcode_flavor == gcfRepRapSprinter || m_gcode_flavor == gcfRepRapFirmware)
             m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S0\n");
@@ -656,7 +667,7 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& disable_linear_advance_value(float value = 0.0)
+    NeoWipeTowerWriter& disable_linear_advance_value(float value = 0.0)
     {
         if (m_gcode_flavor == gcfRepRapSprinter || m_gcode_flavor == gcfRepRapFirmware)
             m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + std::to_string(value) + "\n");
@@ -669,7 +680,7 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& switch_filament_monitoring(bool enable)
+    NeoWipeTowerWriter& switch_filament_monitoring(bool enable)
     {
         m_gcode += std::string("G4 S0\n") + "M591 " + (enable ? "R" : "S0") + "\n";
         return *this;
@@ -678,18 +689,18 @@ public:
     // Suppress / resume G-code preview in Slic3r. Slic3r will have difficulty to differentiate the various
     // filament loading and cooling moves from normal extrusion moves. Therefore the writer
     // is asked to suppres output of some lines, which look like extrusions.
-    WipeTowerWriter2& suppress_preview()
+    NeoWipeTowerWriter& suppress_preview()
     {
         m_preview_suppressed = true;
         return *this;
     }
-    WipeTowerWriter2& resume_preview()
+    NeoWipeTowerWriter& resume_preview()
     {
         m_preview_suppressed = false;
         return *this;
     }
 
-    WipeTowerWriter2& feedrate(float f)
+    NeoWipeTowerWriter& feedrate(float f)
     {
         if (f != m_current_feedrate) {
             m_gcode += "G1" + set_format_F(f) + "\n";
@@ -714,7 +725,7 @@ public:
     }
 
     // Extrude with an explicitely provided amount of extrusion.
-    WipeTowerWriter2& extrude_explicit(
+    NeoWipeTowerWriter& extrude_explicit(
         float x, float y, float e, float f = 0.f, bool record_length = false, bool limit_volumetric_flow = true)
     {
         if (x == m_current_pos.x() && y == m_current_pos.y() && e == 0.f && (f == 0.f || f == m_current_feedrate))
@@ -775,28 +786,28 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& extrude_explicit(
+    NeoWipeTowerWriter& extrude_explicit(
         const Vec2f& dest, float e, float f = 0.f, bool record_length = false, bool limit_volumetric_flow = true)
     {
         return extrude_explicit(dest.x(), dest.y(), e, f, record_length);
     }
 
     // Travel to a new XY position. f=0 means use the current value.
-    WipeTowerWriter2& travel(float x, float y, float f = 0.f) { return extrude_explicit(x, y, 0.f, f); }
+    NeoWipeTowerWriter& travel(float x, float y, float f = 0.f) { return extrude_explicit(x, y, 0.f, f); }
 
-    WipeTowerWriter2& travel(const Vec2f& dest, float f = 0.f) { return extrude_explicit(dest.x(), dest.y(), 0.f, f); }
+    NeoWipeTowerWriter& travel(const Vec2f& dest, float f = 0.f) { return extrude_explicit(dest.x(), dest.y(), 0.f, f); }
 
     // Extrude a line from current position to x, y with the extrusion amount given by m_extrusion_flow.
-    WipeTowerWriter2& extrude(float x, float y, float f = 0.f)
+    NeoWipeTowerWriter& extrude(float x, float y, float f = 0.f)
     {
         float dx = x - m_current_pos.x();
         float dy = y - m_current_pos.y();
         return extrude_explicit(x, y, std::sqrt(dx * dx + dy * dy) * m_extrusion_flow, f, true);
     }
 
-    WipeTowerWriter2& extrude(const Vec2f& dest, const float f = 0.f) { return extrude(dest.x(), dest.y(), f); }
+    NeoWipeTowerWriter& extrude(const Vec2f& dest, const float f = 0.f) { return extrude(dest.x(), dest.y(), f); }
 
-    WipeTowerWriter2& rectangle(const Vec2f& ld, float width, float height, const float f = 0.f)
+    NeoWipeTowerWriter& rectangle(const Vec2f& ld, float width, float height, const float f = 0.f)
     {
         Vec2f corners[4];
         corners[0]           = ld;
@@ -822,13 +833,13 @@ public:
         return (*this);
     }
 
-    WipeTowerWriter2& rectangle(const WipeTower::box_coordinates& box, const float f = 0.f)
+    NeoWipeTowerWriter& rectangle(const WipeTower::box_coordinates& box, const float f = 0.f)
     {
         rectangle(Vec2f(box.ld.x(), box.ld.y()), box.ru.x() - box.lu.x(), box.ru.y() - box.rd.y(), f);
         return (*this);
     }
 
-    WipeTowerWriter2& load(float e, float f = 0.f)
+    NeoWipeTowerWriter& load(float e, float f = 0.f)
     {
         if (e == 0.f && (f == 0.f || f == m_current_feedrate))
             return *this;
@@ -841,10 +852,10 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& retract(float e, float f = 0.f) { return load(-e, f); }
+    NeoWipeTowerWriter& retract(float e, float f = 0.f) { return load(-e, f); }
 
     // Loads filament while also moving towards given points in x-axis (x feedrate is limited by cutting the distance short if necessary)
-    WipeTowerWriter2& load_move_x_advanced(float farthest_x, float loading_dist, float loading_speed, float max_x_speed = 50.f)
+    NeoWipeTowerWriter& load_move_x_advanced(float farthest_x, float loading_dist, float loading_speed, float max_x_speed = 50.f)
     {
         float time       = std::abs(loading_dist / loading_speed); // time that the move must take
         float x_distance = std::abs(farthest_x - x());             // max x-distance that we can travel
@@ -862,7 +873,7 @@ public:
 
     // Loads filament while also moving towards given point in x-axis. Unlike the previous function, this one respects
     // both the loading_speed and x_speed. Can shorten the move.
-    WipeTowerWriter2& load_move_x_advanced_there_and_back(float farthest_x, float e_dist, float e_speed, float x_speed)
+    NeoWipeTowerWriter& load_move_x_advanced_there_and_back(float farthest_x, float e_dist, float e_speed, float x_speed)
     {
         float old_x      = x();
         float time       = std::abs(e_dist / e_speed);           // time that the whole move must take
@@ -880,7 +891,7 @@ public:
     }
 
     // Elevate the extruder head above the current print_z position.
-    WipeTowerWriter2& z_hop(float hop, float f = 0.f)
+    NeoWipeTowerWriter& z_hop(float hop, float f = 0.f)
     {
         m_gcode += std::string("G1") + set_format_Z(m_current_z + hop);
         if (f != 0 && f != m_current_feedrate)
@@ -890,11 +901,11 @@ public:
     }
 
     // Lower the extruder head back to the current print_z position.
-    WipeTowerWriter2& z_hop_reset(float f = 0.f) { return z_hop(0, f); }
+    NeoWipeTowerWriter& z_hop_reset(float f = 0.f) { return z_hop(0, f); }
 
     // Move to x1, +y_increment,
     // extrude quickly amount e to x2 with feed f.
-    WipeTowerWriter2& ram(float x1, float x2, float dy, float e0, float e, float f)
+    NeoWipeTowerWriter& ram(float x1, float x2, float dy, float e0, float e, float f)
     {
         extrude_explicit(x1, m_current_pos.y() + dy, e0, f, true, false);
         extrude_explicit(x2, m_current_pos.y(), e, 0.f, true, false);
@@ -904,21 +915,21 @@ public:
     // Let the end of the pulled out filament cool down in the cooling tube
     // by moving up and down and moving the print head left / right
     // at the current Y position to spread the leaking material.
-    WipeTowerWriter2& cool(float x1, float x2, float e1, float e2, float f)
+    NeoWipeTowerWriter& cool(float x1, float x2, float e1, float e2, float f)
     {
         extrude_explicit(x1, m_current_pos.y(), e1, f, false, false);
         extrude_explicit(x2, m_current_pos.y(), e2, false, false);
         return *this;
     }
 
-    WipeTowerWriter2& set_tool(size_t tool)
+    NeoWipeTowerWriter& set_tool(size_t tool)
     {
         m_current_tool = tool;
         return *this;
     }
 
     // Set extruder temperature, don't wait by default.
-    WipeTowerWriter2& set_extruder_temp(int temperature, bool wait = false)
+    NeoWipeTowerWriter& set_extruder_temp(int temperature, bool wait = false)
     {
         m_gcode += "G4 S0\n"; // to flush planner queue
         m_gcode += "M" + std::to_string(wait ? 109 : 104) + " S" + std::to_string(temperature) + "\n";
@@ -926,7 +937,7 @@ public:
     }
 
     // Wait for a period of time (seconds).
-    WipeTowerWriter2& wait(float time)
+    NeoWipeTowerWriter& wait(float time)
     {
         if (time == 0.f)
             return *this;
@@ -935,14 +946,14 @@ public:
     }
 
     // Set speed factor override percentage.
-    WipeTowerWriter2& speed_override(int speed)
+    NeoWipeTowerWriter& speed_override(int speed)
     {
         m_gcode += "M220 S" + std::to_string(speed) + "\n";
         return *this;
     }
 
     // Let the firmware back up the active speed override value.
-    WipeTowerWriter2& speed_override_backup()
+    NeoWipeTowerWriter& speed_override_backup()
     {
         // This is only supported by Prusa at this point (https://github.com/prusa3d/PrusaSlicer/issues/3114)
         if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware || is_snapmaker_u1()) {
@@ -953,7 +964,7 @@ public:
     }
 
     // Let the firmware restore the active speed override value.
-    WipeTowerWriter2& speed_override_restore()
+    NeoWipeTowerWriter& speed_override_restore()
     {
         if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware || is_snapmaker_u1()) {
             // u1 特殊处理
@@ -963,7 +974,7 @@ public:
     }
 
     // Set digital trimpot motor
-    WipeTowerWriter2& set_extruder_trimpot(int current)
+    NeoWipeTowerWriter& set_extruder_trimpot(int current)
     {
         if (m_gcode_flavor == gcfKlipper)
             return *this;
@@ -975,26 +986,26 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& flush_planner_queue()
+    NeoWipeTowerWriter& flush_planner_queue()
     {
         m_gcode += "G4 S0\n";
         return *this;
     }
 
     // Reset internal extruder counter.
-    WipeTowerWriter2& reset_extruder()
+    NeoWipeTowerWriter& reset_extruder()
     {
         m_gcode += "G92 E0\n";
         return *this;
     }
 
-    WipeTowerWriter2& comment_with_value(const char* comment, int value)
+    NeoWipeTowerWriter& comment_with_value(const char* comment, int value)
     {
         m_gcode += std::string(";") + comment + std::to_string(value) + "\n";
         return *this;
     }
 
-    WipeTowerWriter2& set_fan(unsigned speed)
+    NeoWipeTowerWriter& set_fan(unsigned speed)
     {
         if (speed == m_last_fan_speed)
             return *this;
@@ -1006,7 +1017,7 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& append(const std::string& text)
+    NeoWipeTowerWriter& append(const std::string& text)
     {
         m_gcode += text;
         return *this;
@@ -1014,16 +1025,16 @@ public:
 
     const std::vector<Vec2f>& wipe_path() const { return m_wipe_path; }
 
-    WipeTowerWriter2& add_wipe_point(const Vec2f& pt)
+    NeoWipeTowerWriter& add_wipe_point(const Vec2f& pt)
     {
         m_wipe_path.push_back(rotate(pt));
         return *this;
     }
 
-    WipeTowerWriter2& add_wipe_point(float x, float y) { return add_wipe_point(Vec2f(x, y)); }
+    NeoWipeTowerWriter& add_wipe_point(float x, float y) { return add_wipe_point(Vec2f(x, y)); }
 
     // Extrude with an explicitely provided amount of extrusion.
-    WipeTowerWriter2& extrude_arc_explicit(ArcSegment& arc,
+    NeoWipeTowerWriter& extrude_arc_explicit(ArcSegment& arc,
                                            float       f             = 0.f,
                                            bool        record_length = false,
                                            LimitFlow   limit_flow    = LimitFlow::LimitPrintFlow)
@@ -1104,7 +1115,7 @@ public:
         return *this;
     }
 
-    WipeTowerWriter2& extrude_arc(ArcSegment& arc, float f = 0.f, LimitFlow limit_flow = LimitFlow::LimitPrintFlow)
+    NeoWipeTowerWriter& extrude_arc(ArcSegment& arc, float f = 0.f, LimitFlow limit_flow = LimitFlow::LimitPrintFlow)
     {
         return extrude_arc_explicit(arc, f, false, limit_flow);
     }
@@ -1225,7 +1236,7 @@ private:
     float                                              m_used_filament_length = 0.f;
     GCodeFlavor                                        m_gcode_flavor;
     bool                                               m_enable_arc_fitting = false;
-    const std::vector<WipeTower2::FilamentParameters>& m_filpar;
+    const std::vector<NeoWipeTower::FilamentParameters>& m_filpar;
     std::string                                        m_printer_model;
     bool m_is_prime = false;
 
@@ -1258,7 +1269,7 @@ private:
     std::string set_format_I(float i) { return " I" + Slic3r::float_to_string_decimal_point(i, 3); }
     std::string set_format_J(float j) { return " J" + Slic3r::float_to_string_decimal_point(j, 3); }
 
-    WipeTowerWriter2& operator=(const WipeTowerWriter2& rhs);
+    NeoWipeTowerWriter& operator=(const NeoWipeTowerWriter& rhs);
 
 public:
     // Rotate the point around center of the wipe tower about given angle (in degrees)
@@ -1274,9 +1285,9 @@ public:
         return result;
     }
 
-}; // class WipeTowerWriter2
+}; // class NeoWipeTowerWriter
 
-WipeTower::ToolChangeResult WipeTower2::construct_tcr(WipeTowerWriter2& writer, bool priming, size_t old_tool, bool is_finish) const
+WipeTower::ToolChangeResult NeoWipeTower::construct_tcr(NeoWipeTowerWriter& writer, bool priming, size_t old_tool, bool is_finish) const
 {
     WipeTower::ToolChangeResult result;
     result.priming         = priming;
@@ -1294,7 +1305,7 @@ WipeTower::ToolChangeResult WipeTower2::construct_tcr(WipeTowerWriter2& writer, 
     return result;
 }
 
-WipeTower2::WipeTower2(const PrintConfig&                     config,
+NeoWipeTower::NeoWipeTower(const PrintConfig&                     config,
                        const PrintRegionConfig&               default_region_config,
                        int                                    plate_idx,
                        Vec3d                                  plate_origin,
@@ -1313,6 +1324,8 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_extra_spacing_wipe(float(config.wipe_tower_extra_spacing / 100. * config.wipe_tower_extra_flow / 100.))
     , m_extra_spacing_ramming(float(config.wipe_tower_extra_spacing / 100.))
     , m_local_z_wipe_tower_purge_lines(float(config.local_z_wipe_tower_purge_lines))
+    , m_neo_purge_compaction(float(config.neotower_purge_compaction)) // NEOTKO_NEOTOWER_TAG s104
+    , m_neo_zigurat(config.neotower_zigurat.value)                    // NEOTKO_NEOTOWER_TAG s104
     , m_y_shift(0.f)
     , m_z_pos(0.f)
     , m_bridging(float(config.wipe_tower_bridging))
@@ -1384,10 +1397,16 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     m_bed_bottom_left = m_bed_shape == RectangularBed ? Vec2f(bed_points.front().x(), bed_points.front().y()) : Vec2f::Zero();
 }
 
-void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
+void NeoWipeTower::set_extruder(size_t idx, const PrintConfig& config)
 {
-    // while (m_filpar.size() < idx+1)   // makes sure the required element is in the vector
-    m_filpar.push_back(FilamentParameters());
+    // NEOTKO_NEOTOWER_TAG s137b — RESTAURADO el guard original. NeoTower::generate
+    // registra solo los tools USADOS (std::set), que puede tener huecos (p.ej. un
+    // stripe con T1 count=0 → tools {T0,T2}). Con un push_back único, set_extruder(2)
+    // dejaba m_filpar.size()=2 e indexaba [2] → OOB → heap corruption (EXC_BAD_ACCESS
+    // 0x434f4e44 "COND" en ramming_speed.push_back). El while crece hasta idx+1
+    // rellenando los huecos con FilamentParameters por defecto (seguro).
+    while (m_filpar.size() < idx + 1)   // makes sure the required element is in the vector
+        m_filpar.push_back(FilamentParameters());
 
     m_filpar[idx].material = config.filament_type.get_at(idx);
     m_filpar[idx].is_soluble = config.wipe_tower_filament == 0 ? config.filament_soluble.get_at(idx) :
@@ -1461,7 +1480,7 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
 }
 
 // Returns gcode to prime the nozzles at the front edge of the print bed.
-std::vector<WipeTower::ToolChangeResult> WipeTower2::prime(
+std::vector<WipeTower::ToolChangeResult> NeoWipeTower::prime(
     // print_z of the first layer.
     float initial_layer_print_height,
     // Extruder indices, in the order to be primed. The last extruder will later print the wipe tower brim, print brim and the object.
@@ -1494,7 +1513,7 @@ std::vector<WipeTower::ToolChangeResult> WipeTower2::prime(
     for (size_t idx_tool = 0; idx_tool < tools.size(); ++idx_tool) {
         size_t old_tool = m_current_tool;
 
-        WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
+        NeoWipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
         writer.set_extrusion_flow(m_extrusion_flow).set_z(m_z_pos).set_initial_tool(m_current_tool);
         writer.set_is_prime(true);
 
@@ -1563,7 +1582,7 @@ std::vector<WipeTower::ToolChangeResult> WipeTower2::prime(
     return results;
 }
 
-WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTowerInfo::ToolChange *tool_change)
+WipeTower::ToolChangeResult NeoWipeTower::emit_planned_tool_change(const WipeTowerInfo::ToolChange *tool_change)
 {
     if (tool_change != nullptr && m_current_tool != tool_change->old_tool) {
         BOOST_LOG_TRIVIAL(warning) << "Wipe tower tool state mismatch, realigning to planned toolchange"
@@ -1588,7 +1607,7 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
                                             (!is_no_tool_sentinel(tool) ? wipe_area + m_depth_traversed - 0.5f * m_perimeter_width :
                                                                           m_wipe_tower_depth - m_perimeter_width));
 
-    WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
+    NeoWipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
@@ -1658,7 +1677,7 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
     return result;
 }
 
-WipeTower::ToolChangeResult WipeTower2::tool_change(size_t tool)
+WipeTower::ToolChangeResult NeoWipeTower::tool_change(size_t tool)
 {
     const WipeTowerInfo::ToolChange *planned_tool_change = nullptr;
     if (!is_no_tool_sentinel(tool)) {
@@ -1695,13 +1714,13 @@ WipeTower::ToolChangeResult WipeTower2::tool_change(size_t tool)
     return emit_planned_tool_change(planned_tool_change);
 }
 
-WipeTower::ToolChangeResult WipeTower2::local_z_tool_change(size_t new_tool,
+WipeTower::ToolChangeResult NeoWipeTower::local_z_tool_change(size_t new_tool,
                                                             const WipeTower::box_coordinates& cleaning_box,
                                                             float wipe_volume)
 {
     const size_t old_tool = m_current_tool;
 
-    WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
+    NeoWipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
@@ -1756,7 +1775,7 @@ WipeTower::ToolChangeResult WipeTower2::local_z_tool_change(size_t new_tool,
     return result;
 }
 
-float WipeTower2::predict_ramming_end_x(int old_tool, float layer_height) const
+float NeoWipeTower::predict_ramming_end_x(int old_tool, float layer_height) const
 {
     float line_width = m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator;
 
@@ -1789,7 +1808,7 @@ float WipeTower2::predict_ramming_end_x(int old_tool, float layer_height) const
 }
 
 // Ram the hot material out of the melt zone, retract the filament into the cooling tubes and let it cool.
-void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
+void NeoWipeTower::toolchange_Unload(NeoWipeTowerWriter&                 writer,
                                    const WipeTower::box_coordinates& cleaning_box,
                                    const std::string&                current_material,
                                    const int                         old_temperature,
@@ -1816,6 +1835,16 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     const bool do_ramming   = (m_semm && m_enable_filament_ramming) || m_filpar[m_current_tool].multitool_ramming;
     const bool cold_ramming = m_is_mk4mmu3;
 
+    // NEOTKO_MPSCHEDULER_TAG s79b — sandwich sublayer TCs: keep the TRAVEL to the tower
+    // (drip-control visit, still gated by do_ramming) but skip the ramming EXTRUSION
+    // (deposit). On a multi-tool machine the filament swap is done by the printer macro,
+    // so the tower ramming is redundant — and in the small sandwich box it ate the box,
+    // starving the useful pre-print wipe. With ram_deposit=false the box is left empty
+    // for the wipe to fill. Body real-layer TCs (skip_ramming=false) keep full ramming.
+    // Inert on stock: m_active_tool_change->skip_ramming is false for every non-NeoTower TC.
+    const bool ram_deposit  = do_ramming &&
+                              !(m_active_tool_change != nullptr && m_active_tool_change->skip_ramming);
+
     if (do_ramming) {
         writer.travel(ramming_start_pos); // move to starting position
         if (!m_is_mk4mmu3) {
@@ -1830,7 +1859,9 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
         writer.set_position(ramming_start_pos);
 
     // if the ending point of the ram would end up in mid air, align it with the end of the wipe tower:
-    if (do_ramming &&
+    // NEOTKO_MPSCHEDULER_TAG s79b — gated by ram_deposit: the alignment extrude is part
+    // of the ramming deposit, skipped together with it on skip_ramming TCs.
+    if (ram_deposit &&
         (m_layer_info > m_plan.begin() && m_layer_info < m_plan.end() && (m_layer_info - 1 != m_plan.begin() || !m_adhesion))) {
         // this is y of the center of previous sparse infill border
         float sparse_beginning_y = 0.f;
@@ -1863,11 +1894,18 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     }
 
     // now the ramming itself:
-    while (do_ramming && i < m_filpar[m_current_tool].ramming_speed.size() && !is_over_tower_height) {
+    // NEOTKO_MPSCHEDULER_TAG s79b — gated by ram_deposit (skip the deposit on skip_ramming TCs).
+    while (ram_deposit && i < m_filpar[m_current_tool].ramming_speed.size() && !is_over_tower_height) {
         // The time step is different for SEMM ramming and the MM ramming. See comments in set_extruder() for details.
         const float time_step = m_semm ? 0.25f : m_filpar[m_current_tool].multitool_ramming_time;
 
-        const float x    = volume_to_length(m_filpar[m_current_tool].ramming_speed[i] * time_step, line_width, m_layer_height);
+        // NEOTKO_NEOTOWER_TAG s104 — adaptive-height floor, ramming side (twin of the
+        // plan_toolchange depth floor): the ramming_depth was reserved with
+        // height_for_depth = max(h, 0.04); emitting the ram length at the REAL sub-0.04
+        // height makes it up to ~4x longer (feedrate ~4x faster) → the ram walks past
+        // its reserved depth and out of the tower. E is volumetric (height-independent),
+        // so flooring only the length keeps the deposited volume exact. No-op for h ≥ 0.04.
+        const float x    = volume_to_length(m_filpar[m_current_tool].ramming_speed[i] * time_step, line_width, std::max(m_layer_height, 0.04f));
         const float e    = m_filpar[m_current_tool].ramming_speed[i] * time_step / filament_area(); // transform volume per sec to E move;
         float dist = remaining;
         const float actual_time = dist / x * time_step;
@@ -2005,7 +2043,7 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
 }
 
 // Change the tool, set a speed override for soluble and flex materials.
-void WipeTower2::toolchange_Change(WipeTowerWriter2& writer, const size_t new_tool, const std::string& new_material)
+void NeoWipeTower::toolchange_Change(NeoWipeTowerWriter& writer, const size_t new_tool, const std::string& new_material)
 {
     // Ask the writer about how much of the old filament we consumed:
     if (m_current_tool < m_used_filament_length.size())
@@ -2076,7 +2114,7 @@ void WipeTower2::toolchange_Change(WipeTowerWriter2& writer, const size_t new_to
     m_current_tool = new_tool;
 }
 
-void WipeTower2::toolchange_Load(WipeTowerWriter2& writer, const WipeTower::box_coordinates& cleaning_box)
+void NeoWipeTower::toolchange_Load(NeoWipeTowerWriter& writer, const WipeTower::box_coordinates& cleaning_box)
 {
     if (m_semm && m_enable_filament_ramming && (m_parking_pos_retraction != 0 || m_extra_loading_move != 0)) {
         float xl   = cleaning_box.ld.x() + m_perimeter_width * 0.75f;
@@ -2103,25 +2141,100 @@ void WipeTower2::toolchange_Load(WipeTowerWriter2& writer, const WipeTower::box_
 }
 
 // Wipe the newly loaded filament until the end of the assigned wipe area.
-void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_coordinates& cleaning_box, float wipe_volume)
+void NeoWipeTower::toolchange_Wipe(NeoWipeTowerWriter& writer, const WipeTower::box_coordinates& cleaning_box, float wipe_volume)
 {
     // Increase flow on first layer, slow down print.
     writer.set_extrusion_flow(m_extrusion_flow * (is_first_layer() ? 1.18f : 1.f)).append("; CP TOOLCHANGE WIPE\n");
     const float& xl = cleaning_box.ld.x();
     const float& xr = cleaning_box.rd.x();
 
-    writer.set_extrusion_flow(m_extrusion_flow * m_extra_flow);
+    // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction: read back the flow multiplier
+    // this toolchange was PLANNED with (see plan_toolchange). E per mm scales by mult,
+    // swept length divides by mult → deposited volume is bit-identical to stock; only
+    // the band depth shrinks. Inert on stock (flow_mult==1 for every non-NeoTower TC).
+    const float _neo_mult = (m_active_tool_change != nullptr) ? m_active_tool_change->flow_mult : 1.f;
+
+    // NEOTKO_NEOTOWER_TAG s117 — box-in-drawer WIPE gap (DRAWER INVARIANT), companion
+    // to the finish_layer wall boost (_bd_wall_mult). The wall ring reaches down to the
+    // previous REAL plane; the wipe rasters must too, or they float over the step.
+    // INVARIANT: a wipe box lives inside ONE drawer (one real layer) — gap measured to
+    // the immediately-previous real plane only (walk back skipping synthetic shells),
+    // clamped to 5x. Inert on stock (requires a synthetic entry below).
+    float _bd_wipe_gap  = 0.f;
+    float _bd_wipe_mult = 1.f;
+    if (m_layer_info != m_plan.end() && m_layer_info != m_plan.begin()
+        && (m_layer_info - 1)->is_synthetic && m_layer_height > WT_EPSILON) {
+        auto _prev_real = m_layer_info - 1;
+        while (_prev_real != m_plan.begin() && _prev_real->is_synthetic)
+            --_prev_real;
+        if (!_prev_real->is_synthetic) {
+            _bd_wipe_gap      = m_layer_info->z - _prev_real->z;
+            const float _mult = _bd_wipe_gap / m_layer_height;
+            if (_mult > 1.01f)
+                _bd_wipe_mult = std::min(_mult, 5.f);
+        }
+    }
+    // s117-dbg — WIPE_COVERAGE: per-wipe vertical ledger, mirror of WALL_COVERAGE.
+    {
+        static const bool _wt_dbgw = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        if (_wt_dbgw && m_layer_info != m_plan.end()) {
+            static std::ofstream _wt_logw("/tmp/neotko_wipetower.log", std::ios::app);
+            const float _h_nom = std::max(m_layer_height, 0.04f);
+            _wt_logw << "[NEOTOWER] WIPE_COVERAGE"
+                     << " z=" << m_layer_info->z
+                     << " lh=" << m_layer_height
+                     << " tool=T" << m_current_tool
+                     << " drawer_gap=" << _bd_wipe_gap
+                     << " wipe_mult=" << _bd_wipe_mult
+                     << " h_nominal=" << _h_nom
+                     << " h_emitted=" << (_bd_wipe_mult > 1.f ? _bd_wipe_mult * m_layer_height : _h_nom)
+                     << " synth_prev=" << (int)(m_layer_info != m_plan.begin() && (m_layer_info - 1)->is_synthetic)
+                     << (_bd_wipe_gap > 1e-3f && _bd_wipe_mult <= 1.f ? " [WIPE_FLOATS]" : "")
+                     << "\n";
+            _wt_logw.flush();
+        }
+    }
+
+    // NEOTKO_NEOTOWER_TAG s104/s78 — adaptive-height floor. plan_toolchange reserves
+    // depth with height_for_depth = max(h, 0.04); emit the wipe at the same floored
+    // height so reserve == emission (sweep an h=0.04 purge length at an 0.04 bead's
+    // flow → deposited volume unchanged). No-op for heights ≥ 0.04 (every stock layer).
+    const float _h_wipe     = std::max(m_layer_height, 0.04f);
+    const float _flow_wipe  = (_h_wipe > m_layer_height + WT_EPSILON) ? extrusion_flow(_h_wipe) : m_extrusion_flow;
+
+    // NEOTKO_NEOTOWER_TAG s117 — box-in-drawer wipe anchoring: boost the wipe FLOW
+    // (not the raster path) so each box fills its drawer down to the real plane below,
+    // same mechanism the wall uses. _neo_mult (depth compaction) and _bd_wipe_mult
+    // (vertical fill) are orthogonal. No-op (mult=1) on stock.
+    writer.set_extrusion_flow(_flow_wipe * m_extra_flow * _neo_mult * _bd_wipe_mult);
+    if (_bd_wipe_mult > 1.f)
+        writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
+                      + float_to_string_decimal_point(_bd_wipe_mult * m_layer_height) + "\n");
     const float line_width = m_perimeter_width * m_extra_flow;
-    writer.change_analyzer_line_width(line_width);
+    writer.change_analyzer_line_width(line_width * _neo_mult);
 
     // Variables x_to_wipe and traversed_x are here to be able to make sure it always wipes at least
     //   the ordered volume, even if it means violating the box. This can later be removed and simply
     // wipe until the end of the assigned area.
 
-    float x_to_wipe = volume_to_length(wipe_volume, m_perimeter_width, m_layer_height) / m_extra_flow;
+    float x_to_wipe = volume_to_length(wipe_volume, m_perimeter_width, _h_wipe) / (m_extra_flow * _neo_mult);
     float dy        = (is_first_layer() ? m_extra_flow : m_extra_spacing_wipe) *
                m_perimeter_width; // Don't use the extra spacing for the first layer, but do use the spacing resulting from increased flow.
     // All the calculations in all other places take the spacing into account for all the layers.
+
+    // NEOTKO_NEOTOWER_TAG s136-dbg — purge-truncation ledger (debug-first, NO behavior change).
+    // Proves whether a wipe box ran out of DEPTH before depositing the ordered volume:
+    // the box-full break (~line 2288) fires BEFORE the volume-satisfied break (~2293), so a
+    // box that is too shallow for the ordered volume truncates the purge (the carolina-ibiza
+    // #18 ColorStitch case: real-event slot_height = nominal 0.2 → shallow box → 4 passes).
+    // Gated by ORCA_DEBUG_WIPETOWER / ORCA_DEBUG_ALL; emits to /tmp/neotko_wipetower.log.
+    static const bool _wt_dbgtr = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                               || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+    const float _tr_box_depth = cleaning_box.lu.y() - cleaning_box.ld.y();
+    const float _tr_x_ordered = x_to_wipe; // length still in mm before the loop consumes it
+    int         _tr_exit      = 0;         // 1 = box-full (truncated), 2 = volume satisfied
+    int         _tr_lines     = 0;
 
     // If spare layers are excluded->if 1 or less toolchange has been done, it must be sill the first layer, too.So slow down.
     const float target_speed = is_first_layer() || (m_num_tool_changes <= 1 && m_no_sparse_layers) ?
@@ -2201,17 +2314,42 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
                 writer.extrude(xl + m_perimeter_width / 2.f, writer.y(), wipe_speed);
         }
 
-        if (writer.y() + float(EPSILON) > cleaning_box.lu.y() - 0.5f * line_width)
+        if (writer.y() + float(EPSILON) > cleaning_box.lu.y() - 0.5f * line_width) {
+            _tr_exit = 1; _tr_lines = i; // NEOTKO_NEOTOWER_TAG s136-dbg — box-full (may truncate)
             break; // in case next line would not fit
+        }
 
         traversed_x -= writer.x();
         x_to_wipe -= std::abs(traversed_x);
         if (x_to_wipe < WT_EPSILON) {
+            _tr_exit = 2; _tr_lines = i; // NEOTKO_NEOTOWER_TAG s136-dbg — ordered volume satisfied
             break;
         }
         // stepping to the next line:
         writer.extrude(writer.x(), writer.y() + dy);
         m_left_to_right = !m_left_to_right;
+    }
+
+    // NEOTKO_NEOTOWER_TAG s136-dbg — emit the purge-truncation ledger for this toolchange.
+    if (_wt_dbgtr && m_layer_info != m_plan.end()) {
+        static std::ofstream _wt_logtr("/tmp/neotko_wipetower.log", std::ios::app);
+        const bool _under = (_tr_exit == 1 && x_to_wipe > WT_EPSILON);
+        _wt_logtr << "[NEOTOWER] PURGE_TRUNC"
+                  << " z="          << m_layer_info->z
+                  << " lh="         << m_layer_height
+                  << " h_wipe="     << _h_wipe
+                  << " tool=T"      << m_current_tool
+                  << " vol_ordered="<< wipe_volume
+                  << " len_ordered="<< _tr_x_ordered
+                  << " len_residual="<< x_to_wipe          // >0 with BOX_FULL == material NOT purged
+                  << " box_depth="  << _tr_box_depth
+                  << " neo_mult="   << _neo_mult
+                  << " wipe_mult="  << _bd_wipe_mult
+                  << " lines="      << (_tr_exit == 0 ? -1 : _tr_lines + 1)
+                  << " exit="       << (_tr_exit == 1 ? "BOX_FULL" : _tr_exit == 2 ? "VOL_OK" : "loop_end")
+                  << (_under ? " [UNDER_PURGE]" : "")
+                  << "\n";
+        _wt_logtr.flush();
     }
 
     // We may be going back to the model - wipe the nozzle. If this is followed
@@ -2235,14 +2373,14 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
     writer.change_analyzer_line_width(m_perimeter_width);
 }
 
-WipeTower::ToolChangeResult WipeTower2::finish_layer()
+WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
 {
     assert(!this->layer_finished());
     m_current_layer_finished = true;
 
     size_t old_tool = m_current_tool;
 
-    WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
+    NeoWipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
@@ -2257,16 +2395,108 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
     float reserve_depth = m_layer_info->local_z_reserve_depth();
     float current_depth = std::max(0.f, m_layer_info->depth - m_layer_info->toolchanges_depth() - reserve_depth);
     float fill_depth    = std::max(0.f, current_depth - m_perimeter_width);
-    WipeTower::box_coordinates fill_box(Vec2f(m_perimeter_width, m_layer_info->depth - fill_depth),
-                                        m_wipe_tower_width - 2 * m_perimeter_width, fill_depth);
+    // NEOTKO_NEOTOWER_TAG s103-bd — synthetic entries keep the original (config)
+    // box: 1 extra bead of X-inset inside the grown drawer, so their grid never
+    // touches the canonical wall channel. Real entries use the full drawer.
+    const float _bd_inset_fi = (m_layer_info != m_plan.end() && m_layer_info->is_synthetic)
+                               ? m_perimeter_width : 0.f;
+    WipeTower::box_coordinates fill_box(Vec2f(m_perimeter_width + _bd_inset_fi, m_layer_info->depth - fill_depth),
+                                        m_wipe_tower_width - 2 * m_perimeter_width - 2.f * _bd_inset_fi, fill_depth);
 
     writer.set_initial_position((m_left_to_right ? fill_box.ru : fill_box.lu), // so there is never a diagonal travel
                                 m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
     bool toolchanges_on_layer = m_layer_info->toolchanges_depth() > WT_EPSILON;
 
+    // NEOTKO_NEOTOWER_TAG s101 — synthetic-sublayer detection (used by empty-grid
+    // and brim guards below). NeoTower splits one real layer into N WipeTowerInfo
+    // entries (sublayer gaps ~SUBLAYER_GAP = 2e-4 mm); finish_layer() runs per
+    // entry → without a guard, the tower FRAME blocks (empty grid + brim chamfer)
+    // would be emitted multiple times on the same physical layer at HEIGHT:layer_height
+    // → over-extrusion. The canonical real-layer entry is always the last of its
+    // sublayer group (gap to next plan entry ≥ NOMINAL_LH_MIN). Any earlier entry
+    // with a tiny gap (< NOMINAL_LH_MIN) to its next neighbour is synthetic.
+    // s102-e: the guard now suppresses the FULL structural set on synthetic
+    // entries — empty grid, brim chamfer, inner sparse perimeter AND outer wall
+    // (user-verified stacking: T0's partial frame at z=0.878 under T1's frame at
+    // z=0.880). The wall polygon is still computed (extrude_perimeter=false) for
+    // the post-brim wipe points. s102-g: the cone branch got the same flag — the
+    // user's profile uses wtwCone, so the s102-e rib-only guard left one wall
+    // rectangle per sub-entry (degenerate cone = rectangle, found via TCR dump).
+    // NEOTKO_NEOTOWER_TAG s102 — the guard now reads the explicit per-entry flag
+    // set by plan_toolchange() (NeoTower declares which entries are synthetic).
+    // The old float-gap inference is kept BELOW for the diagnostic log only, so a
+    // divergence between "declared" and "inferred" is visible during the transition.
+    // NEOTKO_NEOTOWER_TAG s102-h — two-tier guard:
+    //   _na_synth_any           any synthetic entry  → skip brim, excluded from dist_to_1st
+    //   _na_skip_frame_synth_sub lámina entries only → ALSO skip wall + grid + sparse perimeter
+    // Staircase entries (synthetic, not same-plane) keep wall+grid+perimeter: they
+    // are distinct physical planes between real layers and their frame is the
+    // structural shell supporting the gap purges (user-verified failure without
+    // it: floating wipes between z=2.28 and z=2.48).
+    const bool _na_synth_any = (m_layer_info != m_plan.end()) && m_layer_info->is_synthetic;
+    bool _na_skip_frame_synth_sub = _na_synth_any && m_layer_info->is_same_plane;
+    const bool _na_has_next = (m_layer_info != m_plan.end()) && (m_layer_info + 1 != m_plan.end());
+    float _na_next_dz_dbg = -1.f;
+    bool  _na_gap_heuristic_dbg = false;
+    if (_na_has_next) {
+        _na_next_dz_dbg = (m_layer_info + 1)->z - m_layer_info->z;
+        if (_na_next_dz_dbg > 0.f && _na_next_dz_dbg < NeoTowerZ::NOMINAL_LH_MIN)
+            _na_gap_heuristic_dbg = true;
+    }
+    // NEOTKO_NEOTOWER_TAG s101 — UNCONDITIONAL diagnostic log: every finish_layer
+    // call dumps its state so we can see why the guard fires or not. Remove or
+    // gate after the bug is understood.
+    {
+        // NEOTKO_NEOTOWER_TAG s102 — also honor ORCA_DEBUG_ALL (NeoDebug::enabled
+        // accepts both; the s101 gate only checked the channel var, so slicing with
+        // ORCA_DEBUG_ALL produced NT_LOG output but silenced this instrumentation).
+        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                 || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        if (_wt_dbg) {
+            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
+            const bool _at_end = (m_layer_info == m_plan.end());
+            _wt_log << "[NEOTOWER] finish_layer ENTER"
+                    << " idx=" << (_at_end ? -1 : (int)(m_layer_info - m_plan.begin()))
+                    << " / " << m_plan.size()
+                    << " z=" << (_at_end ? -1.f : m_layer_info->z)
+                    << " height=" << (_at_end ? -1.f : m_layer_info->height)
+                    << " has_next=" << _na_has_next
+                    << " next_z=" << (_na_has_next ? (m_layer_info + 1)->z : -1.f)
+                    << " next_dz=" << _na_next_dz_dbg
+                    << " is_synthetic=" << (_at_end ? -1 : (int)m_layer_info->is_synthetic)
+                    << " is_same_plane=" << (_at_end ? -1 : (int)m_layer_info->is_same_plane)
+                    << " gap_heuristic=" << _na_gap_heuristic_dbg
+                    << " synth_guard=" << _na_skip_frame_synth_sub
+                    << " first_layer=" << first_layer
+                    << " NOMINAL_LH_MIN=" << NeoTowerZ::NOMINAL_LH_MIN
+                    << (!_at_end && (_na_gap_heuristic_dbg != m_layer_info->is_synthetic)
+                        ? " *** FLAG_VS_GAP_DIVERGENCE ***" : "")
+                    << "\n";
+            _wt_log.flush();
+        }
+    }
+    if (_na_skip_frame_synth_sub) {
+        static const bool _wt_dbg2 = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr); // NEOTKO_NEOTOWER_TAG s102
+        if (_wt_dbg2) {
+            static std::ofstream _wt_log2("/tmp/neotko_wipetower.log", std::ios::app);
+            _wt_log2 << "[NEOTOWER] finish_layer SKIP_FRAME_SYNTH_SUB"
+                     << " z=" << m_layer_info->z
+                     << " next_z=" << (m_layer_info + 1)->z
+                     << " dz=" << _na_next_dz_dbg
+                     << " idx=" << (m_layer_info - m_plan.begin())
+                     << " / " << m_plan.size()
+                     << " (skips empty_grid + brim + sparse_perimeter + outer_wall)\n";
+            _wt_log2.flush();
+        }
+    }
+
     // inner perimeter of the sparse section, if there is space for it:
-    if (fill_box.ru.y() - fill_box.rd.y() > m_perimeter_width - WT_EPSILON)
+    // NEOTKO_NEOTOWER_TAG s102-e — skipped on synthetic sub-entries (same physical
+    // plane as the canonical entry; stacking it per-entry accumulates material in
+    // the structural zone, see outer-wall note below).
+    if (!_na_skip_frame_synth_sub && fill_box.ru.y() - fill_box.rd.y() > m_perimeter_width - WT_EPSILON)
         writer.rectangle(fill_box.ld, fill_box.rd.x() - fill_box.ld.x(), fill_box.ru.y() - fill_box.rd.y(), feedrate);
 
     // we are in one of the corners, travel to ld along the perimeter:
@@ -2279,7 +2509,9 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
     const float dy    = (fill_box.lu.y() - fill_box.ld.y() - m_perimeter_width);
     float       left  = fill_box.lu.x() + 2 * m_perimeter_width;
     float       right = fill_box.ru.x() - 2 * m_perimeter_width;
-    if (dy > m_perimeter_width) {
+    // NEOTKO_NEOTOWER_TAG s101 — skip empty grid on synthetic sublayers
+    // (see _na_skip_frame_synth_sub comment above).
+    if (dy > m_perimeter_width && !_na_skip_frame_synth_sub) {
         writer.travel(fill_box.ld + Vec2f(m_perimeter_width * 2, 0.f))
             .append(";--------------------\n"
                     "; CP EMPTY GRID START\n")
@@ -2327,53 +2559,203 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
     feedrate = first_layer ? m_first_layer_speed * 60.f : std::min(m_wipe_tower_max_purge_speed * 60.f, m_perimeter_speed * 60.f);
 
     Polygon poly;
+    // NEOTKO_NEOTOWER_TAG s103-bd — synthetic shells (staircase) draw their wall
+    // ring on the ORIGINAL box, 1 bead inside the drawer: the canonical wall's
+    // full-height channel stays free of synthetic material.
+    const float _bd_x0 = _na_synth_any ? m_perimeter_width : 0.f;
+
+    // NEOTKO_NEOTOWER_TAG s103-bd — full-height canonical wall.
+    // A real entry that closes a synthetic window extrudes its wipes at the
+    // delta-Z height (gap to the staircase plane below, s103) but its wall ring
+    // has a RESERVED channel down to the previous real ring (box-in-drawer).
+    // Boost the wall flow by full_gap/entry_height (same mechanism as
+    // m_extra_flow in toolchange_Wipe) and tag the real height for the preview,
+    // so the tower skin reads as one continuous full-height perimeter per real
+    // layer. Restored right after the wall, before the brim block.
+    float _bd_wall_mult = 1.f;
+    float _bd_full_gap  = 0.f;
+    if (!_na_synth_any && m_layer_info != m_plan.end() && m_layer_info != m_plan.begin()
+        && (m_layer_info - 1)->is_synthetic && m_layer_height > WT_EPSILON) {
+        auto _prev_real = m_layer_info - 1;
+        while (_prev_real != m_plan.begin() && _prev_real->is_synthetic)
+            --_prev_real;
+        if (!_prev_real->is_synthetic) {
+            _bd_full_gap      = m_layer_info->z - _prev_real->z;
+            const float _mult = _bd_full_gap / m_layer_height;
+            // NEOTKO_NEOTOWER_TAG s104 — CLAMP to the cap instead of rejecting.
+            // With nominal 0.2 layers and the 0.04 height floor the COMMON case
+            // is exactly 5.0, which fell outside the old `< 4` sanity window and
+            // silently emitted a 0.04-flow ring across a 0.2 step → visible
+            // perimeter gap (tetris02 print, first model to exercise this
+            // branch). A clamped partial fill is always >= the unboosted ring.
+            if (_mult > 1.01f)
+                _bd_wall_mult = std::min(_mult, 5.f);
+        }
+    }
+    if (_bd_wall_mult > 1.f) {
+        writer.set_extrusion_flow(m_extrusion_flow * _bd_wall_mult);
+        // s104 — tag the DEPOSITED thickness (mult x h), not the raw gap: they
+        // match in the common case, but when the clamp kicks in (gap > 5x h)
+        // the preview must show what was actually extruded.
+        writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
+                      + float_to_string_decimal_point(_bd_wall_mult * m_layer_height) + "\n");
+    }
+
+    // NEOTKO_NEOTOWER_TAG s115-dbg — WALL_COVERAGE: vertical coverage ledger.
+    // One line per finish_layer tying the EMITTED wall height (with box-in-drawer
+    // boost) and brim height to the air gap left below the previous REAL layer.
+    // PERMANENT regression canary — these failures historically come back; do NOT
+    // remove. GAP is the primary signal (measured from real z's, robust).
+    {
+        static const bool _wt_dbgc = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        if (_wt_dbgc) {
+            static std::ofstream _wt_logc("/tmp/neotko_wipetower.log", std::ios::app);
+            static float _cov_last_real_top = -1.f;
+            const float _cov_z          = m_layer_info->z;
+            const float _cov_wall_h     = _bd_wall_mult * m_layer_height;
+            const float _cov_brim_h     = _bd_wall_mult * m_layer_height;
+            const float _cov_wall_bot   = _cov_z - _cov_wall_h;
+            const bool  _cov_synth_prev = (m_layer_info != m_plan.begin()
+                                           && (m_layer_info - 1)->is_synthetic);
+            const float _cov_gap = (!_na_synth_any && _cov_last_real_top >= 0.f)
+                                   ? (_cov_wall_bot - _cov_last_real_top) : 0.f;
+            _wt_logc << "[NEOTOWER] WALL_COVERAGE"
+                     << " z=" << _cov_z
+                     << " lh=" << m_layer_height
+                     << " wall_mult=" << _bd_wall_mult
+                     << " full_gap=" << _bd_full_gap
+                     << " wall_h=" << _cov_wall_h
+                     << " brim_h=" << _cov_brim_h
+                     << " wall_bottom=" << _cov_wall_bot
+                     << " prev_real_top=" << _cov_last_real_top
+                     << " GAP=" << _cov_gap
+                     << " synth_prev=" << (int) _cov_synth_prev
+                     << " na_synth_any=" << (int) _na_synth_any
+                     << " first_layer=" << (int) first_layer
+                     << (std::fabs(_cov_wall_h - _cov_brim_h) > 1e-4f ? " [WALL!=BRIM]" : "")
+                     << (_cov_gap > 1e-3f ? " [AIR_GAP]" : "")
+                     << "\n";
+            _wt_logc.flush();
+            if (first_layer)      _cov_last_real_top = -1.f;     // reset per tower
+            if (!_na_synth_any)   _cov_last_real_top = _cov_z;   // advance real top
+        }
+    }
+
     if (m_wall_type == (int) wtwCone) {
-        WipeTower::box_coordinates wt_box(Vec2f(0.f, (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f)),
-                                          m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
+        WipeTower::box_coordinates wt_box(Vec2f(_bd_x0, (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f)),
+                                          m_wipe_tower_width - 2.f * _bd_x0, m_layer_info->depth + m_perimeter_width);
         // outer contour (always)
         bool infill_cone = first_layer && m_wipe_tower_width > 2 * spacing && m_wipe_tower_depth > 2 * spacing;
         std::vector<Vec2f> skip_points = get_wall_skip_points(m_layer_info - m_plan.begin());
-        poly = generate_support_cone_wall(writer, wt_box, feedrate, infill_cone, spacing, skip_points);
+        // NEOTKO_NEOTOWER_TAG s102-g — synthetic sub-entries get the polygon only
+        // (extrude_perimeter=false): one wall rectangle was being stacked per
+        // sub-entry. skip_points (Snapmaker) preserved.
+        poly = generate_support_cone_wall(writer, wt_box, feedrate, infill_cone, spacing, skip_points,
+                                          /*extrude_perimeter=*/!_na_skip_frame_synth_sub);
     } else {
-        WipeTower::box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
+        WipeTower::box_coordinates wt_box(Vec2f(_bd_x0, 0.f), m_wipe_tower_width - 2.f * _bd_x0 /* s103-bd */,
+                                          m_layer_info->depth + m_perimeter_width);
         std::vector<Vec2f> skip_points = get_wall_skip_points(m_layer_info - m_plan.begin());
-        poly = generate_support_rib_wall(writer, wt_box, feedrate, first_layer, m_wall_type == (int) wtwRib, true, skip_points);
+        // NEOTKO_NEOTOWER_TAG s102-e — synthetic sub-entries skip the OUTER WALL
+        // extrusion too. extrude_perimeter=false still computes and returns the
+        // wall polygon for the post-brim wipe points. skip_points (Snapmaker) preserved.
+        poly = generate_support_rib_wall(writer, wt_box, feedrate, first_layer, m_wall_type == (int) wtwRib,
+                                         /*extrude_perimeter=*/!_na_skip_frame_synth_sub, skip_points);
     }
+
+    // NEOTKO_NEOTOWER_TAG s115 — WALL==BRIM: the box-in-drawer wall above bridges
+    // the full real-layer gap (flow x _bd_wall_mult, height _bd_wall_mult*lh,
+    // anchored at the last real plane). The brim ring belongs to the SAME bridged
+    // layer, so it MUST share the boost — otherwise it deposits at nominal lh and
+    // floats over the step. The flow/height restore is therefore DEFERRED to AFTER
+    // the brim block (below), so the brim inherits the canonical wall's boost.
 
     // brim with chamfer (gradual layer-by-layer reduction)
     int loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
 
+    // NEOTKO_NEOTOWER_TAG s102 — debug capture for the BRIM_DECISION log below.
+    const int _na_dbg_loops_initial   = loops_num;
+    int       _na_dbg_dist_to_1st    = -1;
+    int       _na_dbg_chamfer_loops  = -1;
+    int       _na_dbg_depth_changed  = -1;   // -1 = branch not reached
+
+    // NEOTKO_NEOTOWER_TAG s101/s102-h — brim is skipped on ANY synthetic entry
+    // (lámina or staircase): the chamfer belongs to the real layer only.
+    if (_na_synth_any)
+        loops_num = 0;
+
     // Apply brim logic based on chamfer setting
-    if (m_wipe_tower_brim_width > 0) {
+    if (m_wipe_tower_brim_width > 0 && !_na_synth_any) {
         if (first_layer) {
             // First layer: always print full brim (loops_num unchanged)
         } else if (m_prime_tower_brim_chamfer) {
             // Non-first layer + chamfer enabled: apply gradual reduction
-            // Calculate distance from first layer with tool changes
-            size_t current_idx = m_layer_info - m_plan.begin();
-            int    dist_to_1st = (int) current_idx - (int) m_first_layer_idx;
+            // NEOTKO_NEOTOWER_TAG s101/s102 — count REAL layers only (skip synthetic
+            // NeoTower sublayer entries) via the explicit per-entry flag. Before this
+            // fix, current_idx counted every plan entry → sublayers inflated
+            // dist_to_1st → loops_num went negative → chamfer brim disappeared on the
+            // canonical real-layer entry too. The chamfer must progress by real-layer
+            // index, not raw plan index.
+            size_t real_layers_seen = 0;
+            if (m_first_layer_idx != size_t(-1) && m_first_layer_idx < m_plan.size()) {
+                for (auto _it = m_plan.begin() + m_first_layer_idx; _it != m_layer_info; ++_it)
+                    if (!_it->is_synthetic)
+                        ++real_layers_seen;
+            }
+            int dist_to_1st = (int) real_layers_seen;
+            _na_dbg_dist_to_1st = dist_to_1st; // NEOTKO_NEOTOWER_TAG s102
 
             // Validate m_first_layer_idx to prevent invalid index access
             if (m_first_layer_idx == size_t(-1) || m_first_layer_idx >= m_plan.size()) {
                 // Invalid first layer index, don't print brim
                 loops_num = 0;
             } else {
-            // Stop print chamfer if depth changes
-            bool depth_changed = (m_layer_info->depth != m_plan[m_first_layer_idx].depth);
-            if (depth_changed) {
-                loops_num = 0;
-            } else {
-                // Limit max chamfer width to configured value
-                int chamfer_loops_num = (int) (m_prime_tower_brim_chamfer_max_width / spacing);
-                loops_num             = std::min(loops_num, chamfer_loops_num) - dist_to_1st;
-                // Ensure loops_num doesn't go negative
-                if (loops_num < 0)
+                // Stop print chamfer if depth changes
+                bool depth_changed = (m_layer_info->depth != m_plan[m_first_layer_idx].depth);
+                _na_dbg_depth_changed = depth_changed ? 1 : 0; // NEOTKO_NEOTOWER_TAG s102
+                if (depth_changed) {
                     loops_num = 0;
+                } else {
+                    // Limit max chamfer width to configured value
+                    int chamfer_loops_num = (int) (m_prime_tower_brim_chamfer_max_width / spacing);
+                    _na_dbg_chamfer_loops = chamfer_loops_num; // NEOTKO_NEOTOWER_TAG s102
+                    loops_num             = std::min(loops_num, chamfer_loops_num) - dist_to_1st;
+                    // Ensure loops_num doesn't go negative
+                    if (loops_num < 0)
+                        loops_num = 0;
+                }
             }
-        }
         } else {
             // Non-first layer + chamfer disabled: don't print brim (revert to original behavior)
             loops_num = 0;
+        }
+    }
+
+    // NEOTKO_NEOTOWER_TAG s102 — BRIM_DECISION: one line per finish_layer call
+    // showing exactly which branch decided the final loops_num.
+    {
+        static const bool _wt_dbg3 = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        if (_wt_dbg3) {
+            static std::ofstream _wt_log3("/tmp/neotko_wipetower.log", std::ios::app);
+            _wt_log3 << "[NEOTOWER] finish_layer BRIM_DECISION"
+                     << " idx=" << (int)(m_layer_info - m_plan.begin())
+                     << " z=" << m_layer_info->z
+                     << " first_layer=" << first_layer
+                     << " synth_guard=" << _na_skip_frame_synth_sub
+                     << " brim_width=" << m_wipe_tower_brim_width
+                     << " chamfer_en=" << m_prime_tower_brim_chamfer
+                     << " loops_initial=" << _na_dbg_loops_initial
+                     << " chamfer_loops=" << _na_dbg_chamfer_loops
+                     << " dist_to_1st=" << _na_dbg_dist_to_1st
+                     << " depth_changed=" << _na_dbg_depth_changed
+                     << " layer_depth=" << m_layer_info->depth
+                     << " first_depth=" << ((m_first_layer_idx != size_t(-1) && m_first_layer_idx < m_plan.size())
+                                            ? m_plan[m_first_layer_idx].depth : -1.f)
+                     << " loops_final=" << loops_num
+                     << "\n";
+            _wt_log3.flush();
         }
     }
 
@@ -2402,6 +2784,15 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         }
     }
 
+    // NEOTKO_NEOTOWER_TAG s115 WALL==BRIM — restore normal flow + height tag now
+    // that BOTH the canonical wall AND its brim have been emitted at the box-in-
+    // drawer boost. Moved here so the brim shares the wall's bridge.
+    if (_bd_wall_mult > 1.f) {
+        writer.set_extrusion_flow(m_extrusion_flow);
+        writer.append(std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
+                      + float_to_string_decimal_point(m_layer_height) + "\n");
+    }
+
     // Now prepare future wipe.
     int i = poly.closest_point_index(Point::new_scale(writer.x(), writer.y()));
     writer.add_wipe_point(writer.pos());
@@ -2421,7 +2812,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
 }
 
 // Static method to get the radius and x-scaling of the stabilizing cone base.
-std::pair<double, double> WipeTower2::get_wipe_tower_cone_base(double width, double height, double depth, double angle_deg)
+std::pair<double, double> NeoWipeTower::get_wipe_tower_cone_base(double width, double height, double depth, double angle_deg)
 {
     double R             = std::tan(Geometry::deg2rad(angle_deg / 2.)) * height;
     double fake_width    = 0.66 * width;
@@ -2438,7 +2829,7 @@ std::pair<double, double> WipeTower2::get_wipe_tower_cone_base(double width, dou
 }
 
 // Static method to extract wipe_volumes[from][to] from the configuration.
-std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConfig& config)
+std::vector<std::vector<float>> NeoWipeTower::extract_wipe_volumes(const PrintConfig& config)
 {
     // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
     std::vector<float> wiping_matrix(cast<float>(config.flush_volumes_matrix.values));
@@ -2464,21 +2855,44 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
     return wipe_volumes;
 }
 
-static float get_wipe_depth(float volume, float layer_height, float perimeter_width, float extra_flow, float extra_spacing, float width)
+static float get_wipe_depth(float volume, float layer_height, float perimeter_width, float extra_flow, float extra_spacing, float width, int line_cushion = 1)
 {
     float length_to_extrude = (volume_to_length(volume, perimeter_width, layer_height)) / extra_flow;
     length_to_extrude       = std::max(length_to_extrude, 0.f);
 
-    return (int(length_to_extrude / width) + 1) * perimeter_width * extra_spacing;
+    // NEOTKO_NEOTOWER_TAG s136 — line_cushion default 1 keeps the stock reservation
+    // byte-identical; NeoTower passes 2 to absorb the raster's box-full half-line margin.
+    return (int(length_to_extrude / width) + line_cushion) * perimeter_width * extra_spacing;
 }
 
 // Appends a toolchange into m_plan and calculates neccessary depth of the corresponding box
-void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume)
+void NeoWipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume, bool skip_ramming, bool synthetic, bool same_plane)
 {
     assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON); // refuses to add a layer below the last one
 
-    if (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par) // if we moved to a new layer, we'll add it to m_plan first
+    // NEOTKO_FIX s49 / NEOTKO_NEOTOWER_TAG hardening P2 — use a tighter epsilon for
+    // new-layer creation. WT_EPSILON (1e-3) was too large: the last sublayer of a
+    // MultiPass group sits ~0.0002mm below the nominal real-layer z, so WT_EPSILON
+    // would merge the sublayer z-group and the real-layer z-group into ONE plan
+    // entry, mixing incompatible tool-change chains. Z_EPS_PLAN (1e-4) keeps them
+    // separate; real consecutive layers are ≥0.05mm apart so none legitimately merge.
+    constexpr float WT_LAYER_Z_EPS = NeoTowerZ::Z_EPS_PLAN;
+    if (m_plan.empty() || m_plan.back().z + WT_LAYER_Z_EPS < z_par) { // if we moved to a new layer, we'll add it to m_plan first
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
+        // NEOTKO_NEOTOWER_TAG s102/s102-h — caller-declared synthetic flags
+        // (NeoTower knows; we no longer infer from float gaps).
+        m_plan.back().is_synthetic  = synthetic;
+        m_plan.back().is_same_plane = synthetic && same_plane;
+    } else if (!m_plan.empty()) {
+        if (!synthetic) {
+            // A real-plane event landing on an existing entry promotes it to real.
+            m_plan.back().is_synthetic  = false;
+            m_plan.back().is_same_plane = false;
+        } else if (!same_plane) {
+            // A staircase event landing on a lámina-flagged entry demotes it.
+            m_plan.back().is_same_plane = false;
+        }
+    }
 
     if (m_first_layer_idx == size_t(-1) && (!m_no_sparse_layers || old_tool != new_tool || m_plan.size() == 1))
         m_first_layer_idx = m_plan.size() - 1;
@@ -2488,28 +2902,76 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
 
     // this is an actual toolchange - let's calculate depth to reserve on the wipe tower
     float ramming_lw = m_perimeter_width * m_filpar[old_tool].ramming_line_width_multiplicator;
-    float width      = m_wipe_tower_width - m_perimeter_width - 2 * ramming_lw;
+    // NEOTKO_NEOTOWER_TAG s103-bd — synthetic toolchanges wipe inside the original
+    // box (1 bead X-inset per side in the grown drawer) → their usable width is
+    // 2·pw narrower. With drawer growth = +2·pw this recovers the pre-s103-bd width.
+    // Additive: synthetic=false (stock) leaves the Snapmaker multitool formula intact.
+    float width      = m_wipe_tower_width - m_perimeter_width - 2 * ramming_lw
+                       - (synthetic ? 2.f * m_perimeter_width : 0.f);
     // Orca: For non-SEMM multi-toolhead, ramming_speed contains only flow (not speed), so 0.25f * flow is meaningless.
     // Use the actual multitool_ramming_volume instead.
     float ramming_volume = m_semm
         ? 0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(), m_filpar[old_tool].ramming_speed.end(), 0.f)
         : m_filpar[old_tool].multitool_ramming_volume;
-    float length_to_extrude = volume_to_length(ramming_volume, ramming_lw, layer_height_par);
-    bool  has_ramming       = m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming;
+    // NEOTKO_NEOTOWER_TAG s67/s78 — wipe-tower depth flooring. Synthetic MultiPass /
+    // Local-Z sublayers can carry microscopic heights (0.04 vs 0.2) → the depth
+    // divisor shrinks → wiping/ramming depth inflates and the tower becomes huge.
+    // Floor the height used for DEPTH MATH ONLY to the real min layer height (0.04).
+    // The G-code E values still use the true micro-sublayer height, so flow is 100%
+    // unchanged. No-op for heights ≥ 0.04 (every stock layer) → inert on the stock path.
+    float height_for_depth  = std::max(layer_height_par, 0.04f);
+    // NEOTKO_NEOTOWER_TAG s104 — F1 purge compaction. For synthetic (sandwich)
+    // toolchanges only: boost the wipe flow up to the configured cap, never past an
+    // equivalent height of nozzle/2 (~the nominal layer height, same anchor s67 used).
+    // The wipe then needs 1/mult of the band depth; the deposited VOLUME is unchanged
+    // (length/mult x flow*mult). mult is stored on the ToolChange so toolchange_Wipe
+    // emits with the exact value this reservation was computed with (reserve == emission).
+    // Inert on stock: synthetic=false → _neo_mult stays 1.
+    float _neo_mult = 1.f;
+    if (synthetic && m_neo_purge_compaction > 1.f + WT_EPSILON) {
+        const float _h_cap = 0.5f * m_filpar[old_tool].nozzle_diameter;
+        const float _h_eff = std::min(_h_cap, height_for_depth * m_neo_purge_compaction);
+        _neo_mult = std::max(1.f, _h_eff / height_for_depth);
+    }
+    float length_to_extrude = volume_to_length(ramming_volume, ramming_lw, height_for_depth);
+    // NEOTKO_NEOTOWER_TAG s127 — skip_ramming TCs (sandwich sublayers/bridges, s79b)
+    // skip the ramming DEPOSIT in toolchange_Unload; they must also reserve NO ramming
+    // DEPTH here. The 2.3.4 multitool formula (multitool_ramming_volume, default 10mm³)
+    // reserves it unconditionally → the per-sublayer reservation SUMS and plan_tower
+    // propagates a giant depth downward → tower inflates ~3× (27.4 vs 9.4mm, sandwich
+    // top). The fork's old 0.25*accumulate(ramming_speed) gave ~0 for multitool (empty
+    // ramming_speed), so this never surfaced. Gating by skip_ramming restores the fork's
+    // effective behavior. Inert on the stock path (stock TCs pass skip_ramming=false).
+    bool  has_ramming       = !skip_ramming && (m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming);
     float num_lines         = has_ramming ? std::max(1.0f, std::ceil(length_to_extrude / width)) : 0.f;
     float ramming_depth     = num_lines * ramming_lw * m_filpar[old_tool].ramming_step_multiplicator *
                               m_extra_spacing_ramming;
     float first_wipe_line   = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
 
-    float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height_par);
-    float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height_par, m_perimeter_width, m_extra_flow,
-                                             m_extra_spacing_wipe, width);
+    float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow * _neo_mult, height_for_depth);
+    // NEOTKO_NEOTOWER_TAG s136 — wipe-box coherence (Plan == Emisión == raster).
+    // The stock reserve models (wipe_volume − first_wipe) with a single line cushion, but
+    // toolchange_Wipe sweeps the FULL wipe_volume and its box-full break (writer.y() >
+    // lu.y − 0.5·line_width) eats ~half a line. At low line-counts — sandwich/ColorStitch
+    // sublayers carry low volume (5 mm³) at the high delta-Z height eff_layer_height gives
+    // the FIRST sublayer of a drawer group — that cushion is consumed and the box truncates
+    // the purge before the ordered volume (carolina #18: 4 lines instead of ~6 → ~35% of the
+    // colour flush lost → cold-start + feed noise when it returns to the part). For NeoTower-
+    // driven towers (gap_wall OFF, set in NeoTower::generate) reserve for the FULL volume and
+    // add one extra cushion line so reserve ≥ raster. Inert on the stock Classic tower
+    // (gap_wall default ON → original first_wipe subtraction + cushion 1, byte-identical).
+    const bool  _neo_driven    = !m_use_gap_wall;
+    const float _vol_for_depth = _neo_driven ? wipe_volume : (wipe_volume - first_wipe_volume);
+    const int   _line_cushion  = _neo_driven ? 2 : 1;
+    float wiping_depth      = get_wipe_depth(_vol_for_depth, height_for_depth, m_perimeter_width, m_extra_flow * _neo_mult,
+                                             m_extra_spacing_wipe, width, _line_cushion);
 
     m_plan.back().tool_changes.push_back(
-        WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume));
+        WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume, skip_ramming));
+    m_plan.back().tool_changes.back().flow_mult = _neo_mult; // NEOTKO_NEOTOWER_TAG s104
 }
 
-void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume)
+void NeoWipeTower::plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume)
 {
     assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON);
 
@@ -2542,7 +3004,7 @@ void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, un
         WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume));
 }
 
-void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_t reserve_slot_count, float wipe_volume)
+void NeoWipeTower::plan_local_z_reserve(float z_par, float layer_height_par, size_t reserve_slot_count, float wipe_volume)
 {
     if (reserve_slot_count == 0)
         return;
@@ -2592,7 +3054,7 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
     layer.local_z_reserve_slot_count += reserve_slot_count;
 }
 
-void WipeTower2::plan_tower()
+void NeoWipeTower::plan_tower()
 {
     // Calculate m_wipe_tower_depth (maximum depth for all the layers) and propagate depths downwards
     m_wipe_tower_depth = 0.f;
@@ -2601,21 +3063,71 @@ void WipeTower2::plan_tower()
     m_wipe_tower_height = m_plan.empty() ? 0.f : m_plan.back().z;
     m_current_height    = 0.f;
 
+    // NEOTKO_NEOTOWER_TAG s103-bd — window rule (box-in-drawer, Y axis). Each real
+    // (canonical) entry must enclose its window's synthetic content by one bead per
+    // side in Y: depth_real ≥ max(depth_synth in the preceding synthetic run) + 2·pw.
+    // Runs BEFORE the propagation loop so the enlarged canonical depth propagates down.
+    // No-op without synthetic entries (stock + non-sandwich NeoTower unchanged).
+    {
+        float synth_max_depth = -1.f;
+        for (auto& layer : m_plan) {
+            if (layer.is_synthetic) {
+                synth_max_depth = std::max(synth_max_depth, layer.planned_depth());
+            } else {
+                if (synth_max_depth > 0.f)
+                    layer.depth = std::max(layer.depth, synth_max_depth + 2.f * m_perimeter_width);
+                synth_max_depth = -1.f;
+            }
+        }
+    }
+
     for (int layer_index = int(m_plan.size()) - 1; layer_index >= 0; --layer_index) {
         float this_layer_depth    = std::max(m_plan[layer_index].depth, m_plan[layer_index].planned_depth());
         m_plan[layer_index].depth = this_layer_depth;
+
+        // NEOTKO_NEOTOWER_TAG s103-bd — synthetic entries are not part of the
+        // structural support chain (their boxes live 1 bead INSIDE the drawer; the
+        // skin is canonical-to-canonical). They keep their own planned depth and
+        // neither receive nor source the lower-≥-upper propagation. Inert on stock.
+        if (m_plan[layer_index].is_synthetic)
+            continue;
 
         if (this_layer_depth > m_wipe_tower_depth - m_perimeter_width)
             m_wipe_tower_depth = this_layer_depth + m_perimeter_width;
 
         for (int i = layer_index - 1; i >= 0; i--) {
+            if (m_plan[i].is_synthetic) // s103-bd — keep the inset
+                continue;
             if (m_plan[i].depth - this_layer_depth < 2 * m_perimeter_width)
                 m_plan[i].depth = this_layer_depth;
         }
     }
+
+    // NEOTKO_NEOTOWER_TAG s103/s104 — wall-on-wall taper constraint (zigurat).
+    // Bounds the per-layer depth SHRINK to 2·pw (one perimeter per side) so every
+    // canonical wall ring rests on the ring below. Reference is the previous EMITTING
+    // (canonical) plane; synthetic shells are skipped (box-in-drawer, out of the skin
+    // chain). m_wipe_tower_depth (global max) is unaffected.
+    // ⚠️ Opt-in guard: the fork runs this unconditionally (NeoTower is the only tower
+    // there), but neotower_zigurat defaults ON, so on the SHARED stock path it would
+    // change depths. Gated on synthetic presence (proxy for "NeoTower active") to keep
+    // the Snapmaker stock tower bit-identical. Replace with the real neotko_wipe_tower
+    // gate when NeoTower is cabled (#4).
+    bool _neo_has_synth = false;
+    for (const auto& layer : m_plan)
+        if (layer.is_synthetic) { _neo_has_synth = true; break; }
+    if (m_neo_zigurat && _neo_has_synth) {
+        size_t prev_emitting = 0;
+        for (size_t i = 1; i < m_plan.size(); ++i) {
+            if (m_plan[i].is_synthetic) // s103-bd — inset shells, out of the skin chain
+                continue;
+            m_plan[i].depth = std::max(m_plan[i].depth, m_plan[prev_emitting].depth - 2 * m_perimeter_width);
+            prev_emitting = i;
+        }
+    }
 }
 
-void WipeTower2::save_on_last_wipe()
+void NeoWipeTower::save_on_last_wipe()
 {
     for (m_layer_info = m_plan.begin(); m_layer_info < m_plan.end(); ++m_layer_info) {
         set_layer(m_layer_info->z, m_layer_info->height, 0, m_layer_info->z == m_plan.front().z, m_layer_info->z == m_plan.back().z);
@@ -2656,7 +3168,7 @@ void WipeTower2::save_on_last_wipe()
 
 // Return index of first toolchange that switches to non-soluble extruder
 // ot -1 if there is no such toolchange.
-int WipeTower2::first_toolchange_to_nonsoluble(const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const
+int NeoWipeTower::first_toolchange_to_nonsoluble(const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const
 {
     // 使用 wipe_tower_filament 配置来决定哪个挤出机用于 wipe tower
     for (size_t idx = 0; idx < tool_changes.size(); ++idx) {
@@ -2666,7 +3178,7 @@ int WipeTower2::first_toolchange_to_nonsoluble(const std::vector<WipeTowerInfo::
     return -1;
 }
 
-bool WipeTower2::layer_has_soluble_toolchange(const WipeTowerInfo &layer) const
+bool NeoWipeTower::layer_has_soluble_toolchange(const WipeTowerInfo &layer) const
 {
     auto has_soluble = [this](const std::vector<WipeTowerInfo::ToolChange> &tool_changes) {
         return std::any_of(tool_changes.begin(), tool_changes.end(), [this](const WipeTowerInfo::ToolChange &toolchange) {
@@ -2677,7 +3189,7 @@ bool WipeTower2::layer_has_soluble_toolchange(const WipeTowerInfo &layer) const
     return has_soluble(layer.local_z_tool_changes) || has_soluble(layer.tool_changes);
 }
 
-float WipeTower2::cumulative_toolchange_depth_before(const WipeTowerInfo::ToolChange *tool_change) const
+float NeoWipeTower::cumulative_toolchange_depth_before(const WipeTowerInfo::ToolChange *tool_change) const
 {
     if (tool_change == nullptr || m_layer_info == m_plan.end())
         return 0.f;
@@ -2715,7 +3227,7 @@ static WipeTower::ToolChangeResult merge_tcr(WipeTower::ToolChangeResult& first,
 
 // For each layer, compute gap positions on the outer wall where B filament will enter.
 // Gap X: on the wall closest to where ramming ends. Gap Y: ramming end + turnaround step + half line widths.
-void WipeTower2::get_all_wall_skip_points()
+void NeoWipeTower::get_all_wall_skip_points()
 {
     m_wall_skip_points.clear();
     m_wall_skip_points.resize(m_plan.size());
@@ -2741,7 +3253,7 @@ void WipeTower2::get_all_wall_skip_points()
 }
 
 // Return pre-computed gap points for a given layer, with bounds check.
-std::vector<Vec2f> WipeTower2::get_wall_skip_points(size_t layer_id)
+std::vector<Vec2f> NeoWipeTower::get_wall_skip_points(size_t layer_id)
 {
     if (layer_id < m_wall_skip_points.size())
         return m_wall_skip_points[layer_id];
@@ -2750,7 +3262,79 @@ std::vector<Vec2f> WipeTower2::get_wall_skip_points(size_t layer_id)
 // Processes vector m_plan and calls respective functions to generate G-code for the wipe tower.
 // Normal per-layer toolchanges are appended into "result", while Local-Z phase-b toolchanges are
 // emitted into "local_z_result" so G-code can consume them before the nominal layer loop.
-void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& result,
+// NEOTKO_NEOTOWER_TAG s104-F2 — Tetris Y allocator (plan-time). Synthetic sub-layer
+// entries would otherwise all center on the tower depth and stack on top of each
+// other in Y. Pack each synthetic group inside its canonical entry's window, after
+// the canonical's own purge band. No-op without synthetic entries (every stock and
+// non-sandwich-NeoTower group has i == start so the inner block never runs).
+void NeoWipeTower::neo_plan_group_y_offsets()
+{
+    const float D  = m_wipe_tower_depth;
+    const float pw = m_perimeter_width;
+    static const bool _t_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
+                            || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+
+    size_t start = 0;
+    for (size_t i = 0; i < m_plan.size(); ++i) {
+        if (m_plan[i].is_synthetic)
+            continue;                       // group continues until its canonical
+        if (i > start) {                    // group with at least one synthetic
+            const WipeTowerInfo& canon = m_plan[i];
+            // Physical window = the canonical's box, placed with the STOCK formula
+            // generate() will use for it (centered when smaller than the tower, else
+            // shift 0) and its parity. Window length is parity-independent.
+            const float s_c     = (canon.depth < D - pw) ? (D - canon.depth - pw) / 2.f : 0.f;
+            const float box_c   = canon.depth + pw;
+            const bool  flip_c  = (i % 2 == 0);   // m_internal_rotation = 180·(i+1)
+            // Window = canonical box MINUS 1·pw per side (the s103-bd window rule
+            // delivered the wall-channel Y-inset via centering; with allocated
+            // positions the inset is enforced by the window bounds instead).
+            const float win_lo  = (flip_c ? std::max(0.f, D - s_c - box_c) : s_c) + pw;
+            const float win_hi  = win_lo + box_c - 2.f * pw;
+            // Canonical's own purge band (local [0..toolchanges_depth], shift s_c).
+            const float tc_c    = canon.toolchanges_depth();
+            const float band_lo = flip_c ? (D - s_c - tc_c) : s_c;
+            const float band_hi = band_lo + tc_c;
+            const float after_band = (band_hi > win_lo - 0.01f && band_hi < win_hi - 0.01f) ? band_hi : win_lo;
+            float cursor = after_band;
+            // Two passes: lámina entries FIRST (same plane as canonical → must claim
+            // the after-band zone while free), then staircase entries (own plane).
+            for (int pass = 0; pass < 2; ++pass)
+            for (size_t k = start; k < i; ++k) {
+                WipeTowerInfo& e = m_plan[k];
+                if ((pass == 0) != e.is_same_plane)
+                    continue;
+                const float box_e = e.depth + pw;
+                if (box_e > (win_hi - win_lo) + 0.01f)
+                    continue;               // cannot fit: keep stock centering
+                if (cursor + box_e > win_hi + 0.01f)
+                    cursor = win_lo;        // wrap (accepted stacking)
+                const float p      = cursor;
+                const bool  flip_e = (k % 2 == 0);
+                const float s      = flip_e ? (D - p - box_e) : p;
+                if (s >= -0.01f && s + box_e <= D + 0.01f) {
+                    e.neo_y_shift_planned = std::max(0.f, s);
+                    cursor = p + box_e;
+                    if (_t_dbg) {
+                        static std::ofstream _t_log("/tmp/neotko_wipetower.log", std::ios::app);
+                        _t_log << "[TETRIS-F2] alloc entry=" << k << " z=" << e.z
+                               << " box=" << box_e
+                               << " phys=[" << p << ".." << (p + box_e) << "]"
+                               << " shift=" << e.neo_y_shift_planned
+                               << " flip=" << flip_e
+                               << " win=[" << win_lo << ".." << win_hi << "]"
+                               << " canon_band=[" << band_lo << ".." << band_hi << "]"
+                               << "\n";
+                        _t_log.flush();
+                    }
+                }
+            }
+        }
+        start = i + 1;
+    }
+}
+
+void NeoWipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& result,
                           std::vector<std::vector<WipeTower::ToolChangeResult>>& local_z_result)
 {
     if (m_plan.empty())
@@ -2783,6 +3367,8 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
     if (m_use_gap_wall)
         get_all_wall_skip_points();
 
+    neo_plan_group_y_offsets(); // NEOTKO_NEOTOWER_TAG s104-F2 (after depths are final)
+
     m_layer_info     = m_plan.begin();
     m_current_height = 0.f;
 
@@ -2804,7 +3390,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
 
     m_old_temperature = -1; // reset last temperature written in the gcode
 
-    for (const WipeTower2::WipeTowerInfo& layer : m_plan) {
+    for (const NeoWipeTower::WipeTowerInfo& layer : m_plan) {
         std::vector<WipeTower::ToolChangeResult> layer_result;
         std::vector<WipeTower::ToolChangeResult> local_z_layer_result;
         BOOST_LOG_TRIVIAL(debug) << "Wipe tower layer plan"
@@ -2815,12 +3401,73 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
                                  << " reserve_slots=" << layer.local_z_reserve_slot_count
                                  << " planned_depth=" << layer.planned_depth();
         set_layer(layer.z, layer.height, 0, false /*layer.z == m_plan.front().z*/, layer.z == m_plan.back().z);
+        // NEOTKO_NEOTOWER_TAG s102 — hard-sync m_layer_info to the entry being
+        // generated (Teoría C). set_layer()'s while loop advances only while
+        // m_layer_info->z < print_z - WT_EPSILON (1e-3); NeoTower sub-entries sit
+        // 0.0002–0.001 mm apart, so the iterator stalls one entry behind and every
+        // m_layer_info-derived value (depth, height, tool_overrides key, synthetic
+        // guards) reads the wrong entry. Inside this loop we know the exact entry,
+        // so assign the iterator directly. Inert on stock (epsilon walk lands here too).
+        m_layer_info = m_plan.begin() + (&layer - m_plan.data());
         m_internal_rotation += 180.f;
 
-        if (m_layer_info->depth < m_wipe_tower_depth - m_perimeter_width)
+        // NEOTKO_NEOTOWER_TAG s104-F2 — Tetris-allocated position for this synthetic
+        // entry (see neo_plan_group_y_offsets); overrides centering. Inert on stock
+        // (neo_y_shift_planned stays -1 for every non-synthetic entry → falls through
+        // to the exact stock centering below).
+        if (m_layer_info->neo_y_shift_planned >= 0.f)
+            m_y_shift = m_layer_info->neo_y_shift_planned;
+        else if (m_layer_info->depth < m_wipe_tower_depth - m_perimeter_width)
             m_y_shift = (m_wipe_tower_depth - m_layer_info->depth - m_perimeter_width) / 2.f;
+        else
+            // NEOTKO_NEOTOWER_TAG s103-bd — reset the shift for full-depth entries.
+            // m_y_shift PERSISTS across plan entries; with synthetic (small-depth → large
+            // centering shift) entries interleaving full-depth real ones, a real entry that
+            // skipped the if kept the previous synthetic's shift, flipped each layer by the
+            // 180° internal rotation = the zig-zag tower the user sees in side view. Stock
+            // never hits this (uniform depth propagation → consecutive depths equal → the
+            // if is consistently taken or not, and m_y_shift starts at 0) → Classic-safe.
+            m_y_shift = 0.f;
+
+        // NEOTKO_NEOTOWER_TAG — apply cross-group tool state override if registered.
+        // NeoTower sets these before generate() when a sublayer identity event (T→T)
+        // leaves m_current_tool at the wrong value for the next plan layer. Inert on
+        // stock: m_tool_overrides is empty for every non-NeoTower slice.
+        {
+            const size_t _plan_li = static_cast<size_t>(m_layer_info - m_plan.begin());
+            auto _ov = m_tool_overrides.find(_plan_li);
+            if (_ov != m_tool_overrides.end())
+                m_current_tool = _ov->second;
+        }
+
+        // NEOTKO_NEOTOWER_TAG s104 — TETRIS2.0 INSTRUMENTATION INJECTION POINT (not ported).
+        // The fork emits a per-entry [TETRIS2.0] log here (read-only diagnosis of the Y
+        // allocator: group idx/size, summed planned depth in group, canonical depth,
+        // margin, y_shift). Skipped to keep this port lean. To re-activate when debugging
+        // a wired NeoTower, copy from the fork:
+        //   FULLSPECTRUM095/src/libslic3r/GCode/NeoWipeTower.cpp
+        //     · group arrays  _t_group_idx / _t_group_size / _t_group_sum /
+        //       _t_group_canon_depth  — built once BEFORE this emission loop (fork ~3260,
+        //       "Tetris Fase 2.0 instrumentation (read-only)").
+        //     · the per-entry log block itself (fork ~3341-3366).
+        // ⚠️ This generate() diverged from the fork (Snapmaker Local-Z + rib re-plan +
+        // gap_wall), so line numbers drift — match by the comment tags, not by line.
+        // Gate is the usual ORCA_DEBUG_WIPETOWER / ORCA_DEBUG_ALL.
 
         int idx = first_toolchange_to_nonsoluble(layer.tool_changes);
+        // NEOTKO_NEOTOWER_TAG s103-bd — post-sandwich layers: merge the finish (grid +
+        // canonical wall ring) into the LAST nonsoluble toolchange, not the first. When
+        // the entry below is synthetic, GCode's writer can enter this layer already on
+        // the first planned TC's new_tool, so that first TCR is never dispatched and the
+        // ring merged into it is lost. The layer's LAST TC defines its exit state and is
+        // always requested. Inert on stock (requires a synthetic entry below).
+        if (idx != -1 && m_layer_info != m_plan.begin() && (m_layer_info - 1)->is_synthetic) {
+            for (int k = int(layer.tool_changes.size()) - 1; k > idx; --k)
+                if (!m_filpar[layer.tool_changes[k].new_tool].is_soluble) {
+                    idx = k;
+                    break;
+                }
+        }
         WipeTower::ToolChangeResult finish_layer_tcr;
 
         for (const WipeTowerInfo::ToolChange &toolchange : layer.local_z_tool_changes)
@@ -2859,7 +3506,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
     }
 }
 
-std::vector<std::pair<float, float>> WipeTower2::get_z_and_depth_pairs() const
+std::vector<std::pair<float, float>> NeoWipeTower::get_z_and_depth_pairs() const
 {
     std::vector<std::pair<float, float>> out = {{0.f, m_wipe_tower_depth}};
     for (const WipeTowerInfo& wti : m_plan) {
@@ -2884,7 +3531,7 @@ static Vec2f rotate_local_z_reserve_point(const Vec2f& pt, float tower_width, fl
                  float(shifted.x() * s + shifted.y() * c) + tower_depth / 2.f);
 }
 
-std::vector<std::vector<WipeTower::box_coordinates>> WipeTower2::get_local_z_reserve_boxes() const
+std::vector<std::vector<WipeTower::box_coordinates>> NeoWipeTower::get_local_z_reserve_boxes() const
 {
     std::vector<std::vector<WipeTower::box_coordinates>> out;
     out.reserve(m_plan.size());
@@ -2930,7 +3577,7 @@ std::vector<std::vector<WipeTower::box_coordinates>> WipeTower2::get_local_z_res
     return out;
 }
 
-Polygon WipeTower2::generate_rib_polygon(const WipeTower::box_coordinates& wt_box)
+Polygon NeoWipeTower::generate_rib_polygon(const WipeTower::box_coordinates& wt_box)
 {
     auto get_current_layer_rib_len = [](float cur_height, float max_height, float max_len) -> float {
         return std::abs(max_height - cur_height) / max_height * max_len;
@@ -2965,7 +3612,7 @@ Polygon WipeTower2::generate_rib_polygon(const WipeTower::box_coordinates& wt_bo
 }
 
 // from plan_toolchange
-WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume)
+NeoWipeTower::WipeTowerInfo::ToolChange NeoWipeTower::set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume)
 {
     float ramming_volume = m_semm
         ? 0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(), m_filpar[old_tool].ramming_speed.end(), 0.f)
@@ -2990,7 +3637,7 @@ WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, i
     return WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume);
 }
 
-Polygon WipeTower2::generate_support_rib_wall(WipeTowerWriter2&                 writer,
+Polygon NeoWipeTower::generate_support_rib_wall(NeoWipeTowerWriter&                 writer,
                                               const WipeTower::box_coordinates& wt_box,
                                               double                            feedrate,
                                               bool                              first_layer,
@@ -3033,8 +3680,9 @@ Polygon WipeTower2::generate_support_rib_wall(WipeTowerWriter2&                 
 
 // This block creates the stabilization cone.
 // First define a lambda to draw the rectangle with stabilization.
-Polygon WipeTower2::generate_support_cone_wall(
-    WipeTowerWriter2& writer, const WipeTower::box_coordinates& wt_box, double feedrate, bool infill_cone, float spacing, const std::vector<Vec2f>& skip_points)
+Polygon NeoWipeTower::generate_support_cone_wall(
+    NeoWipeTowerWriter& writer, const WipeTower::box_coordinates& wt_box, double feedrate, bool infill_cone, float spacing,
+    const std::vector<Vec2f>& skip_points, bool extrude_perimeter) // NEOTKO_NEOTOWER_TAG s102-g — extrude_perimeter added; skip_points (Snapmaker) kept
 {
     const auto [R, support_scale] = get_wipe_tower_cone_base(m_wipe_tower_width, m_wipe_tower_height, m_wipe_tower_depth,
                                                              m_wipe_tower_cone_angle);
@@ -3068,6 +3716,11 @@ Polygon WipeTower2::generate_support_cone_wall(
     Polygon poly;
     for (const auto& [pt, tag] : pts)
         poly.points.push_back(Point::new_scale(pt));
+
+    // NEOTKO_NEOTOWER_TAG s102-g — polygon-only mode for the synthetic sub-entry
+    // frame guard (mirrors the rib variant's !extrude_perimeter early return).
+    if (!extrude_perimeter)
+        return poly;
 
     // Prepare polygons to be filled by infill.
     Polylines polylines;

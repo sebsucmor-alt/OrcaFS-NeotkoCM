@@ -3,7 +3,7 @@
 set -e
 set -o pipefail
 
-while getopts ":dpa:snt:xbc:j:1DCSHh" opt; do
+while getopts ":dpa:snt:xbc:j:1DCSHTh" opt; do
   case "${opt}" in
     d )
         export BUILD_TARGET="deps"
@@ -52,6 +52,14 @@ while getopts ":dpa:snt:xbc:j:1DCSHh" opt; do
     j )
         export EXPLICIT_JOBS="$OPTARG"
         ;;
+    T )
+        # NEOTKO: -T flag — ADDITIVE. After the normal build finishes, also build &
+        # run the Catch2 unit tests (NeoTower suite). It does NOT replace the app
+        # build, so append it to your usual command: -s -x -j 3 -CS -T (build the
+        # app, THEN tests). Reuses the build dir; compiles only fff_print_tests.
+        # Pair it with -s (running -T alone triggers a full deps+slicer build first).
+        export RUN_TESTS="1"
+        ;;
     h ) echo "Usage: ./build_release_macos.sh [-d]"
         echo "   -d: Build deps only"
         echo "   -a: Set ARCHITECTURE (arm64 or x86_64 or universal)"
@@ -67,6 +75,9 @@ while getopts ":dpa:snt:xbc:j:1DCSHh" opt; do
         echo "   -H: Limit to 50% CPU (uses half the available cores, runs at lower priority)"
         echo "   -j N: Use exactly N cores (also runs at lower priority, e.g. -j 2)"
         echo "   -1: Use single job for building"
+        echo "   -T: Additive — after the build, also build & run the Catch2 unit"
+        echo "       tests ([NeoTower] suite). Append to your usual command,"
+        echo "       e.g. -s -x -j 3 -CS -T. Compiles only fff_print_tests."
         exit 0
         ;;
     * )
@@ -283,6 +294,7 @@ function build_slicer() {
                         -G "${SLICER_CMAKE_GENERATOR}" \
                         -DBBL_RELEASE_TO_PUBLIC=1 \
                         -DORCA_TOOLS=ON \
+                        -DBUILD_TESTS=OFF \
                         ${ORCA_UPDATER_SIG_KEY:+-DORCA_UPDATER_SIG_KEY="$ORCA_UPDATER_SIG_KEY"} \
                         -DCMAKE_PREFIX_PATH="$DEPS/usr/local" \
                         -DBOOST_ROOT="$DEPS/usr/local" \
@@ -508,6 +520,46 @@ function build_universal() {
     ls -la "${DSYM_DIR}" 2>/dev/null || echo "No dSYM files generated"
 }
 
+# NEOTKO: -T flag — build & run the Catch2 unit tests (NeoTower suite), NOT the app.
+# Reuses the EXISTING build dir + every cached CMake var (deps paths, arch, generator),
+# only flipping BUILD_TESTS=ON, then compiles just the fff_print_tests target and runs
+# the [NeoTower] tests directly (bypasses ctest so tag-filtering is reliable). Never
+# touches the app build or packaging. Requires a prior normal build (needs the cache).
+function build_tests() {
+    for _ARCH in x86_64 arm64; do
+        if [ "$ARCH" == "universal" ] || [ "$ARCH" == "$_ARCH" ]; then
+
+            PROJECT_BUILD_DIR="$PROJECT_DIR/build/$_ARCH"
+
+            if [ ! -f "$PROJECT_BUILD_DIR/CMakeCache.txt" ]; then
+                echo "❌ No CMake cache at $PROJECT_BUILD_DIR."
+                echo "   Do a normal app build first (e.g. -s -x), then re-run with -T."
+                exit 1
+            fi
+
+            echo "🧪 Configuring tests for $_ARCH (BUILD_TESTS=ON, reusing cache)..."
+            (
+                set -x
+                cd "$PROJECT_BUILD_DIR"
+                # Minimal reconfigure: only flip BUILD_TESTS on; all other vars stay
+                # exactly as the app build left them (no -G → keep the cache generator).
+                cmake "${PROJECT_DIR}" -DBUILD_TESTS=ON
+                cmake --build . --config "$BUILD_CONFIG" --target fff_print_tests
+            )
+
+            TEST_BIN=$(find "$PROJECT_BUILD_DIR/tests/fff_print" -name fff_print_tests -type f -perm +111 2>/dev/null | head -1)
+            if [ -z "$TEST_BIN" ]; then
+                echo "❌ fff_print_tests binary not found under $PROJECT_BUILD_DIR/tests/fff_print"
+                exit 1
+            fi
+
+            echo "🧪 Running NeoTower tests: $TEST_BIN \"[NeoTower]\""
+            "$TEST_BIN" "[NeoTower]" --order rand --warn NoAssertions
+            echo "✅ NeoTower tests done for $_ARCH"
+        fi
+    done
+}
+
 case "${BUILD_TARGET}" in
     all)
         build_deps
@@ -531,4 +583,9 @@ fi
 
 if [ "1." == "$PACK_DEPS". ]; then
     pack_deps
+fi
+
+# NEOTKO: -T flag — run AFTER the app build so `-s ... -T` builds the app then the tests.
+if [ "1" = "$RUN_TESTS" ]; then
+    build_tests
 fi
