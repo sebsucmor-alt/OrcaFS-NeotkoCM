@@ -1371,6 +1371,14 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         // natural remainder). The wipe tower is untouched: sublayer tools still
         // come from sub.tool_id, just more sublayers per layer.
         std::vector<int> _fp_tag;   // slot id per expoly (0 = natural, -1 = no pre-split)
+        // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — slot id → owning ModelVolume index
+        // for the painted slots split this layer/role. Keyed by slot (NOT piece
+        // index) so it survives the sticker rebuild below untouched (which
+        // preserves each piece's slot in _fp_tag/_grp_tag). Consulted at the
+        // recipe/angle resolution downstream to pick the OWNER volume's profile
+        // instead of first-volume-wins. Empty ⇒ nothing to disambiguate (single
+        // volume or no paint) ⇒ resolution falls back to profile_id_for_slot.
+        std::map<int,int> _fp_slot_owner;
         // NEOTKO_STICKER_TAG — Fase 4: sticker pile index per expoly (-1 = no
         // sticker covers this piece — resolve via _fp_tag/slot as before).
         // MUST be consulted BEFORE _fp_tag downstream: a sticker OCCLUDES
@@ -1430,8 +1438,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     _po6c, _zlo, _zhi, _downward6c);
                 std::vector<int>        _useful_slots;
                 std::vector<ExPolygons> _useful_masks;
+                std::vector<int>        _useful_owner;   // NEOTKO_XVOL_CLIP_TAG (s212) — owning volume index per useful slot
                 for (int _slot6c : _slots) {
-                    const int _pid = SurfaceColorMix::profile_id_for_slot(_po6c, _slot6c);
+                    // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — resolve the OWNER volume of
+                    // this slot's paint in the band up front, and gate "useful" on the
+                    // OWNER's recipe (not first-volume-wins). A merged object where two
+                    // pieces reuse slot N for different recipes was resolving both to
+                    // the first piece's profile; the owner-aware lookup fixes it. -1
+                    // (owner not found) → profile_id_for_slot_in_volume falls back to
+                    // the legacy scan, so single-volume objects are byte-identical.
+                    const int _owner6c = SurfaceColorMix::painted_slot_owner_volume_index_in_z_range(
+                                             _po6c, _slot6c, _zlo, _zhi, _downward6c);
+                    const int _pid = SurfaceColorMix::profile_id_for_slot_in_volume(_po6c, _slot6c, _owner6c);
                     const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
                     if (!_p) continue;
                     const std::string& _js = _is_bottom
@@ -1444,35 +1462,84 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     if (_mask.empty()) continue;
                     _useful_slots.push_back(_slot6c);
                     _useful_masks.push_back(std::move(_mask));
+                    _useful_owner.push_back(_owner6c);
+                    _fp_slot_owner[_slot6c] = _owner6c;   // survives the sticker rebuild (keyed by slot); read at recipe/angle resolution
                 }
                 if (!_useful_slots.empty()) {
-                    // Split: per-slot painted pieces + natural remainder = surface
-                    // minus the union of all painted masks. Iteration order of
-                    // surface_fill.expolygons after the split: slot1 pieces,
-                    // slot2 pieces, ..., natural pieces. _fp_tag aligns 1:1.
-                    ExPolygons _all_masks_union;
-                    for (const auto& m : _useful_masks)
-                        for (const auto& e : m) _all_masks_union.push_back(e);
-                    _all_masks_union = union_ex(_all_masks_union);
+                    // NEOTKO_XVOL_CLIP_TAG (s210) — order painted zones from
+                    // DIFFERENT ModelVolumes by merge/assemble priority before
+                    // peeling: higher mo->volumes index (later-merged piece)
+                    // claims its painted area FIRST, mirroring both the
+                    // sticker peel just below and the plain-geometry clip's
+                    // own precedent (PrintObjectSlice.cpp "Clip every
+                    // non-zero region preceding it" — later volume survives).
+                    // Two painted slots from the SAME volume (twin islands,
+                    // s112) tie here and keep their relative order
+                    // (stable_sort) — no behaviour change for that case.
+                    std::vector<size_t> _peel_order(_useful_slots.size());
+                    for (size_t k = 0; k < _peel_order.size(); ++k) _peel_order[k] = k;
+                    std::stable_sort(_peel_order.begin(), _peel_order.end(),
+                        [&](size_t a, size_t b) {
+                            // NEOTKO_XVOL_CLIP_TAG (s212) — owner indices precomputed
+                            // into _useful_owner above (this was an O(n·log n) re-scan
+                            // of painted_slot_owner_volume_index_in_z_range).
+                            return _useful_owner[a] > _useful_owner[b];
+                        });
 
+                    // Split: per-slot painted pieces (peeled in volume-priority
+                    // order, so a later-merged volume's recipe wins wherever two
+                    // volumes' painted zones physically collide) + natural
+                    // remainder = surface minus the union of all painted masks
+                    // (`_remaining` after the loop IS that remainder — diffing
+                    // masks out one at a time from `_orig` equals diffing their
+                    // union in one shot). Byte-identical to the previous
+                    // independent-intersection behaviour whenever masks don't
+                    // actually overlap: diffing a disjoint mask out of
+                    // `_remaining` removes nothing relevant to the next one.
                     ExPolygons _orig = std::move(surface_fill.expolygons);
                     surface_fill.expolygons.clear();
                     std::ostringstream _clip_log;
                     _clip_log << "FOOTPRINT_CLIP z=" << this->print_z
                               << " role=" << (int)_role6c << " slots=[";
-                    for (size_t k = 0; k < _useful_slots.size(); ++k) {
-                        ExPolygons _painted = intersection_ex(_orig, _useful_masks[k]);
+                    ExPolygons _remaining = _orig;
+                    for (size_t oi = 0; oi < _peel_order.size(); ++oi) {
+                        const size_t k = _peel_order[oi];
+                        ExPolygons _painted = intersection_ex(_remaining, _useful_masks[k]);
                         const size_t _np = _painted.size();
+                        if (oi > 0) {
+                            // A higher-priority volume already claimed part of
+                            // this slot's footprint iff what it actually got
+                            // (against the shrunk `_remaining`) is smaller than
+                            // what it would have gotten alone (against `_orig`).
+                            ExPolygons _full = intersection_ex(_orig, _useful_masks[k]);
+                            double _full_area = 0.0;
+                            for (const auto& e : _full) _full_area += e.area();
+                            double _got_area = 0.0;
+                            for (const auto& e : _painted) _got_area += e.area();
+                            if (_got_area + SCALED_EPSILON < _full_area) {
+                                const size_t _winner_k = _peel_order[0];
+                                const int _winner_pid = SurfaceColorMix::profile_id_for_slot_in_volume(_po6c, _useful_slots[_winner_k], _useful_owner[_winner_k]);
+                                const int _loser_pid  = SurfaceColorMix::profile_id_for_slot_in_volume(_po6c, _useful_slots[k], _useful_owner[k]);
+                                const auto* _winner_p = Slic3r::SurfaceEffectProfileManager::get().find(_winner_pid);
+                                const auto* _loser_p  = Slic3r::SurfaceEffectProfileManager::get().find(_loser_pid);
+                                std::ostringstream _warn;
+                                _warn << "Recipe \"" << (_winner_p ? _winner_p->name : "?")
+                                      << "\" overwrote recipe \"" << (_loser_p ? _loser_p->name : "?")
+                                      << "\" in an area where assembled parts overlap.";
+                                if (this->object())
+                                    this->object()->push_gcode_overlap_warning(_warn.str());
+                            }
+                        }
                         for (auto& e : _painted) {
                             surface_fill.expolygons.push_back(std::move(e));
                             _fp_tag.push_back(_useful_slots[k]);
                         }
-                        if (k) _clip_log << ",";
+                        _remaining = diff_ex(_remaining, _useful_masks[k]);
+                        if (oi) _clip_log << ",";
                         _clip_log << _useful_slots[k] << ":" << _np;
                     }
-                    ExPolygons _natural = diff_ex(_orig, _all_masks_union);
-                    const size_t _nn = _natural.size();
-                    for (auto& e : _natural) {
+                    const size_t _nn = _remaining.size();
+                    for (auto& e : _remaining) {
                         surface_fill.expolygons.push_back(std::move(e));
                         _fp_tag.push_back(0);
                     }
@@ -1793,11 +1860,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                         // penu ancla 1 capa más abajo → +2 capas arriba.
                                         : SurfaceColorMix::dominant_painted_slot_in_z_range(
                                               _po, this->print_z, this->print_z + 2.0 * this->height))));
+                        // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — owner volume of this
+                        // slot's paint, recorded by the FASE 6c peel above (keyed by
+                        // slot, so it's still valid after the sticker rebuild). Absent
+                        // (fallback slot from dominant_*, or single-volume object) → -1
+                        // → profile_id_for_slot_in_volume falls back to first-wins.
+                        const int _slot_owner = (_slot > 0 && _fp_slot_owner.count(_slot))
+                            ? _fp_slot_owner.at(_slot) : -1;
                         // NEOTKO_BOTTOM_TAG — Fase 1 (§4.3) probe: pinpoint where the
                         // bottom sandwich dies (slot resolution / empty stack).
                         if (_mp_is_bottom && NeoDebug::enabled(NeoDebug::BOTTOM)) {
                             const int _bpid = (_slot > 0)
-                                ? SurfaceColorMix::profile_id_for_slot(_po, _slot) : 0;
+                                ? SurfaceColorMix::profile_id_for_slot_in_volume(_po, _slot, _slot_owner) : 0;
                             const auto* _bp = _bpid
                                 ? Slic3r::SurfaceEffectProfileManager::get().find(_bpid) : nullptr;
                             const std::string _bjs = _bp ? _bp->stack_bottom_json : std::string();
@@ -1812,7 +1886,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 << " any_effect=" << (_bst.any_effect() ? "1" : "0"));
                         }
                         if (!_mixed_p && !_sticker_resolved && _slot > 0) {
-                            const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
+                            const int _pid = SurfaceColorMix::profile_id_for_slot_in_volume(_po, _slot, _slot_owner);
                             const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
                             if (_p) {
                                 const std::string& _js = _mp_is_bottom
@@ -2845,7 +2919,10 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 : SurfaceColorMix::dominant_painted_slot_in_z_range(
                                       _po, this->print_z, this->print_z + this->height);
                             if (_slot > 0) {
-                                const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _slot);
+                                // NEOTKO_XVOL_CLIP_TAG (s212) — owner-aware so the angle
+                                // tracks the SAME recipe the STACK_OVERRIDE emitted.
+                                const int _slot_owner = _fp_slot_owner.count(_slot) ? _fp_slot_owner.at(_slot) : -1;
+                                const int _pid = SurfaceColorMix::profile_id_for_slot_in_volume(_po, _slot, _slot_owner);
                                 const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_pid);
                                 if (_p && _p->pathblend.present) {
                                     const PathBlendPassConfig pb_ang =
@@ -2897,7 +2974,10 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 : SurfaceColorMix::dominant_painted_slot_in_z_range(
                                       _po, this->print_z, this->print_z + this->height);
                             if (_painter_slot > 0) {
-                                const int _pid = SurfaceColorMix::profile_id_for_slot(_po, _painter_slot);
+                                // NEOTKO_XVOL_CLIP_TAG (s212) — owner-aware for consistency
+                                // with the angle-value resolution below (same recipe).
+                                const int _slot_owner = _fp_slot_owner.count(_painter_slot) ? _fp_slot_owner.at(_painter_slot) : -1;
+                                const int _pid = SurfaceColorMix::profile_id_for_slot_in_volume(_po, _painter_slot, _slot_owner);
                                 _cm_angle_active = (_pid > 0);
                             }
                         } else if (_cm_cfg_angle.interlayer_colormix_enabled.value) {
@@ -2922,7 +3002,13 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             const int _cm_angle = (_sticker_angle_pid > 0)
                                 ? SurfaceColorMix::colormix_angle_for_profile_id(_sticker_angle_pid, _angle_is_penu)
                                 : (_painter_slot > 0)
-                                    ? SurfaceColorMix::painted_colormix_angle_for_slot(this->object(), _painter_slot, _angle_is_penu)
+                                    // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — resolve the OWNER
+                                    // volume's profile (not first-wins), then reuse the shared
+                                    // angle reader. Byte-identical for single-volume objects.
+                                    ? SurfaceColorMix::colormix_angle_for_profile_id(
+                                          SurfaceColorMix::profile_id_for_slot_in_volume(this->object(), _painter_slot,
+                                              _fp_slot_owner.count(_painter_slot) ? _fp_slot_owner.at(_painter_slot) : -1),
+                                          _angle_is_penu)
                                     : (!_angle_is_penu ? _cm_cfg_angle.interlayer_colormix_angle.value
                                                        : _cm_cfg_angle.interlayer_colormix_penu_angle.value);
                             if (_cm_angle >= 0) {

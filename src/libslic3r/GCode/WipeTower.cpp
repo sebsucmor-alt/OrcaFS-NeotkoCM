@@ -603,7 +603,8 @@ const std::map<float, float> WipeTower::min_depth_per_height = {
     {100.f, 20.f}, {250.f, 40.f}
 };
 
-WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float prime_volume, size_t initial_tool, const float wipe_tower_height) :
+WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float prime_volume, size_t initial_tool, const float wipe_tower_height, bool neotko_libre_mode) :
+    m_neotko_libre_mode(neotko_libre_mode),
     m_semm(config.single_extruder_multi_material.value),
     m_wipe_tower_pos(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx)),
     m_wipe_tower_width(float(config.prime_tower_width)),
@@ -781,7 +782,13 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
               .append(";--------------------\n");
 
     writer.speed_override_backup();
-	writer.speed_override(100);
+	// NEOTKO_GCODE_REPROCESSOR: this unconditional reset to 100% (with no real restore behind it,
+	// see speed_override_restore() below — backup/restore is #if 0'd out upstream) silently wipes
+	// any manual/reprocessor M220 speed override on every single toolchange. Stock behaviour is
+	// unchanged (still resets); LibreMode users can opt out to keep a speed override across color
+	// changes. See docs/LIBREMODE.md §5.
+	if (!m_neotko_libre_mode)
+		writer.speed_override(100);
 
 	Vec2f initial_position = cleaning_box.ld + Vec2f(0.f, m_depth_traversed);
     writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);

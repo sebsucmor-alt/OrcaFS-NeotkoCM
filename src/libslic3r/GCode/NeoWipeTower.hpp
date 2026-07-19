@@ -38,11 +38,16 @@ public:
 	// y			-- y coordinates of wipe tower in mm ( left bottom corner )
 	// width		-- width of wipe tower in mm ( default 60 mm - leave as it is )
 	// wipe_area	-- space available for one toolchange in mm
+    // NEOTKO_GCODE_REPROCESSOR: neotko_libre_mode is PrintObjectConfig-only, not reachable from
+    // PrintConfig here, so it's plumbed in as an explicit constructor param from the call site
+    // (NeoTower.cpp) instead. Default false keeps stock behaviour (M220 S100 reset on every
+    // toolchange/priming block) byte-identical when LibreMode is off.
     NeoWipeTower(const PrintConfig& config,
 	          const PrintRegionConfig& default_region_config,
 			  int plate_idx, Vec3d plate_origin,
 			  const std::vector<std::vector<float>>& wiping_matrix,
-			  size_t initial_tool);
+			  size_t initial_tool,
+			  bool neotko_libre_mode = false);
 
 	// Set the extruder properties.
     void set_extruder(size_t idx, const PrintConfig& config);
@@ -209,6 +214,10 @@ private:
         return m_filpar[0].filament_area; // all extruders are assumed to have the same filament diameter at this point
     }
 
+	// NEOTKO_GCODE_REPROCESSOR: when true, skips the unconditional M220 S100 reset emitted at
+	// every priming/toolchange block (see NeoWipeTower.cpp toolchange_* / tool_change / priming),
+	// so a manual/reprocessor speed override can survive instead of being wiped every time.
+	bool   m_neotko_libre_mode       = false;
 	bool   m_change_pressure         = true;
     float  m_change_pressure_value   = 0.0;
     float  m_ramming_width_ratio     = 2.0;

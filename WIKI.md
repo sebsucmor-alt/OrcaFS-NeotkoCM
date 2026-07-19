@@ -78,6 +78,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
     - 13a. [Brush precision](#13a-brush-precision)
     - 13b. [Paint perimeters only + Extra walls](#13b-paint-perimeters-only--extra-walls)
     - 13c. [Rectangle & Polygon masks](#13c-rectangle--polygon-masks)
+14. [NeoStitch Interlock (WIP, ⚠️ UNTESTED) — Z-axis layer interlocking](#14-neostitch-interlock-wip--untested--z-axis-layer-interlocking)
 
 ---
 
@@ -705,13 +706,13 @@ between them.
 
 ---
 
-## 12. NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar
+## 12. NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar + contact layer
 
 > **(WIP, paused mid-implementation — Libre Mode only.)** The support roof and hollow pillar
-> described below are implemented and **print-validated**. The second half of the feature — a
-> matching contact layer on the object's first printed layer above the roof, meant to reduce
-> bonding for easier support removal — is designed but **not wired in this build**. Both the
-> support engine and the future contact layer are experimental; expect this section to expand in a
+> described below are implemented and **print-validated**. The second mechanism — a **contact-layer
+> toggle** (§12a) that ripples the object's own bridge fill directly above the roof — is now shipped
+> and **slice-verified**, but has not yet been through a real print (its first print is still ahead).
+> Both the support engine and the contact layer are experimental; expect this section to expand in a
 > later release.
 
 **NeoWave** is a support type that replaces the interface/roof fill with a *wave-front* pattern —
@@ -744,11 +745,30 @@ that still closes cleanly on top.
 > roof of **2 interface layers** printed cleanly. The same pillar capped with a **Concentric** roof
 > did **not** close properly over the hollow — use **Wave**, which is already the default shape.
 
+### 12a. Contact layer (new, WIP — slice-verified, print-pending)
+
+A separate, independent toggle that ripples the Z of the object's own bridge fill wherever it lands
+directly above a support roof — valleys touch the roof, crests stay in the air, leaving intentional
+microscopic contact gaps meant to reduce bonding force so the support separates more easily. Unlike
+the original idea (a paintable Sandwich effect), this shipped as a **plain on/off toggle under
+Support**, independent of the Sandwich/ColorStitch system entirely: it works whether or not the
+object has any painting on it, and it never touches colour/pattern — only Z.
+
+| Control | Options / default | What it does |
+|---------|-------------------|--------------|
+| **Support neoweave contact** | on/off, default **off** | Enables the wave ripple on bridge fill directly above a support roof. |
+| **Contact wave amplitude** | mm, default **0.1** | How far the wave deflects (upward only — it never digs into the roof below, by construction). |
+| **Contact wave period** | mm, default **0.6** | Distance between successive wave peaks along the fill line. |
+
+> ⚠️ **Slice-verified, print-pending.** The toggle is confirmed to fire correctly wherever bridge
+> fill sits over a support roof, and the resulting G-code looks correct — but this specific mechanism
+> has never been through a real print. Orca's G-code preview also **doesn't render the Z variation**
+> this produces (same known limitation as Neoweave top/penu and ZBump) — the G-code is right even
+> though the on-screen preview looks flat.
+
 **Known gaps (this build)**
 
 - No dedicated key yet for roof layer count — it uses the existing **Interface top layers** setting.
-- The contact-layer half of the idea (a matching wave pattern on the object's own first layer,
-  meant to further ease removal) is designed but not implemented — see the WIP note above.
 - No dedicated UI panel/gizmo yet; all controls above live as plain fields under **Support**.
 
 ---
@@ -791,6 +811,77 @@ Both tools only paint **front-facing** triangles — the side of the mesh actual
 
 ---
 
+## 14. NeoStitch Interlock (WIP, ⚠️ UNTESTED) — Z-axis layer interlocking
+
+> ⚠️ **Brand new, work-in-progress, and genuinely UNTESTED — preview-only, never printed.** Everything
+> below is confirmed working **in the 3D preview only**. Treat this section as a curiosity/early-look,
+> not a feature to rely on. One of its own controls (fill speed, see table below) is a **confirmed
+> no-op bug** — turning it doesn't currently change anything in the resulting G-code.
+
+**NeoStitch** interlocks consecutive printed layers of a chosen wall **without ever moving Z**. Along
+the wall's own path, each layer alternates short **notch** segments (the wall deflects inward, leaving
+a gap at the nominal position) and **fill** segments (the wall over-extrudes there instead to fill the
+gap left by the layer above/below). The pattern's phase flips on alternating layers, so a fill segment
+always lands over the notch of the layer beneath it — a vertical "stitch" between layers, mechanically
+different from a Z-brick-layer interlock (Z itself never moves; only XY position and extrusion width
+change).
+
+**Where to find it**: **Strength → NeoStitch Interlock** (per-region setting, same place/pattern as
+Fuzzy Skin).
+
+| Control | Default | What it does |
+|---------|---------|---------------|
+| **NeoStitch Interlock** | **Disabled** | Which wall gets the interlock: Outermost / Second / Third / Innermost wall. |
+| **Stitch depth** | 0 mm (**auto** = the wall's own line width) | How far the notch deflects inward. An explicit value overrides the auto. |
+| **Stitch length** | 3.0 mm | The flat plateau length of each notch/fill segment. |
+| **Ramp length** | 1.0 mm | The transition ramp in/out of each segment (also smooths the pressure/flow change). |
+| **Stitch period** | 10.0 mm | Distance between successive notch/fill events along the wall. |
+| **Stitch flow** | 100% | Scales the fill segment's extra extrusion; 100% = automatic volume conservation for the notch depth being filled. |
+| **Skip bottom layers** | 3 | Extra layers to skip above the object's first layer before the interlock starts. |
+| **Fill speed** | 75% | ⚠️ **Known bug — does not currently work.** Intended to slow down only the fill segments (Klipper's pressure advance doesn't like the non-constant flow at full speed); confirmed via G-code inspection that the speed does not actually change yet. Root cause not yet found. |
+| **Fill margin** | 1.0 mm | Shrinks the fill segment shorter than its matching notch by this much per side, so the over-extrusion lands *inside* the gap instead of bridging across it. **Confirmed working.** |
+
+**Why "notch"/"fill" instead of moving Z**: the whole point is to interlock layers without changing
+layer height or printing outside the normal Z steps — it's a pure XY-deflection + flow-modulation
+effect, always fully backward compatible with normal slicing when turned off (**Disabled** by default,
+per-region, exactly like Fuzzy Skin).
+
+**Known limitations / open items (this build)**:
+- **Fill speed control doesn't work yet** (see table above) — everything else in this section is
+  otherwise implemented.
+- Only verified visually in the 3D preview — the alternating notch/fill pattern is visible and
+  registers correctly from layer to layer, but **no real print has been made with it yet**.
+- Only Arachne wall generation is supported (v1); Classic walls are unaffected by this setting.
+- Interacts with Fuzzy Skin / Bump Mapping by mutual exclusion, not composition — if either of those
+  is active on the same wall, NeoStitch skips that wall rather than stacking effects.
+- A cascade to neighbouring walls (so an interior wall "follows" the perturbed contour of the wall
+  NeoStitch targets, instead of keeping its original offset) is designed but not implemented.
+
+---
+
+## 15. Expert G-code Reprocessor (basic beta, 2.3.7) — layer-ranged G-code post-processing
+
+> 🧪 **Basic beta — quick first cut, Libre Mode only.** Functional and safe, but minimal: no
+> temperature/Z-offset rules yet, fan control is a hard override (not a smart clamp). Edits real
+> G-code — a warning shows before every Apply.
+
+**Where to find it**: G-code **Preview**, next to the RealColor view selector, when **Libre Mode**
+is on.
+
+Panel with two rule lists, each row: enable checkbox, layer **from**/**to** (`-1` = to the end),
+and a value. "+ Add rule at current layer" pre-fills **from** with whatever layer the Preview
+slider is on. **Apply** writes the rules and reslices; the G-code is rewritten on export.
+
+- **Speed override rules** — `M220 S<percent>` from layer X to Y.
+- **Fan override rules** — `M106 S<0-255>` (raw PWM, not percent) from layer X to Y.
+
+Also fixed alongside this: Snapmaker U1/Klipper toolchanges were forcing `M220 S100` on every
+color change (wiping any manual speed override) and emitting `M220 B`/`M220 R` — both leftover
+from older Marlin-based Snapmaker machines and meaningless on the U1's Klipper firmware. Both are
+gone now; toolchange G-code is simpler and no longer fights a manual speed setting.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -828,7 +919,9 @@ Both tools only paint **front-facing** triangles — the side of the mesh actual
 | Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
 | NeoWave Support (enable) | Libre Mode → Support → **Support type → NeoWave** |
 | Wave roof (shape/order/reverse/hollow pillar) | Support → **Interface pattern → Wave** to reveal the controls (§12) |
+| NeoWave contact layer (WIP, print-pending) | Support → Advanced → **Support neoweave contact** toggle (§12a) |
 | Painter Pro Mode (Precision / Paint perimeters only / Extra walls / Rectangle & Polygon masks) | Left-side gizmo toolbar → **Color Painting** → **Pro Mode** section *(always available, no Libre Mode needed)* |
+| NeoStitch Interlock (WIP, ⚠️ untested) | Strength → **NeoStitch Interlock** (§14) |
 
 ---
 

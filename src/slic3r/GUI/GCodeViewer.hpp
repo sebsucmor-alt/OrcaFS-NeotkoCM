@@ -9,6 +9,7 @@
 #include "I18N.hpp"
 
 #include <boost/iostreams/device/mapped_file.hpp>
+#include <nlohmann/json.hpp> // NEOTKO_GCODE_REPROCESSOR — ExpertReprocessorPanelState::unknown_rules
 
 #include <cstdint>
 #include <float.h>
@@ -839,6 +840,40 @@ public:
         bool gl_objects_created() const { return fbo != 0; }
     };
 
+    // NEOTKO_GCODE_REPROCESSOR — one editable "speed_multiplier" rule as shown in the panel.
+    // Phase 1 only; unrelated to the JSON's forward-compat "unknown type" rules, those aren't
+    // editable here and are round-tripped as opaque blobs when re-saving (see GCodeViewer.cpp
+    // render_expert_gcode_reprocessor_panel()).
+    struct ExpertReprocessorRule
+    {
+        bool enabled = true;
+        int layer_from = 0;
+        int layer_to = -1; // -1 == "to end of file"
+        int value = 100;   // M220 S<value>, percent
+    };
+
+    // NEOTKO_GCODE_REPROCESSOR — one editable "fan_override" rule. Same shape as
+    // ExpertReprocessorRule but `value` is a raw M106 S value (0-255), not a percent.
+    struct ExpertReprocessorFanRule
+    {
+        bool enabled = true;
+        int layer_from = 0;
+        int layer_to = -1; // -1 == "to end of file"
+        int value = 255;   // M106 S<value>, 0-255
+    };
+
+    // NEOTKO_GCODE_REPROCESSOR — panel state, live-edited, only serialized to the
+    // "expert_gcode_reprocessor_rules" project config option when the user presses Apply.
+    struct ExpertReprocessorPanelState
+    {
+        std::vector<ExpertReprocessorRule> rules;
+        std::vector<ExpertReprocessorFanRule> fan_rules;
+        // Opaque rule objects from the JSON whose "type" this build doesn't understand — kept
+        // verbatim and re-emitted on Apply so an older build never destroys a newer build's rules.
+        std::vector<nlohmann::json> unknown_rules;
+        bool loaded_from_config = false;
+    };
+
     //BBS
     ConflictResultOpt m_conflict_result;
 private:
@@ -886,6 +921,9 @@ private:
     RealColorTuning m_realcolor_tuning;
     // NEOTKO_REALCOLOR_TAG s166 (item 4): G-buffer for the shells Phong+SSAO path, see ShellsAOCache above
     ShellsAOCache m_shells_ao_cache;
+    // NEOTKO_GCODE_REPROCESSOR — LibreMode-gated rule editor panel state, see
+    // render_expert_gcode_reprocessor_panel().
+    ExpertReprocessorPanelState m_expert_reprocessor;
     /*BBS GUI refactor, store displayed items in color scheme combobox */
     std::vector<EViewType> view_type_items;
     std::vector<std::string> view_type_items_str;
@@ -1024,6 +1062,11 @@ private:
     // NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning as live sliders,
     // gated by NeoDebug::enabled(NeoDebug::REALCOLOR) — no-op unless ORCA_DEBUG_REALCOLOR is set
     void render_realcolor_debug_panel();
+    // NEOTKO_GCODE_REPROCESSOR — PRO-only rule editor panel, gated on app_config
+    // "neotko_libre_mode" (not a NeoDebug channel — this is a real user-facing feature).
+    // Called from render_legend(). See ExpertGCodeReprocessor.cpp for the engine that consumes
+    // the JSON this panel writes to config option "expert_gcode_reprocessor_rules".
+    void render_expert_gcode_reprocessor_panel();
     RealColorFingerprint compute_realcolor_fingerprint(int canvas_width, int canvas_height) const;
     void render_toolpaths();
     void render_shells(int canvas_width, int canvas_height);

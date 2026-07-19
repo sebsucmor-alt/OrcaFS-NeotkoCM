@@ -3,6 +3,7 @@
 #include "Print.hpp"
 #include "SurfaceEffectProfile.hpp"      // NEOTKO_MIXEDFIL_SANDWICH_TAG
 #include "ColorSci/ColorPredict.hpp"     // NEOTKO_MIXEDFIL_SANDWICH_TAG
+#include "SurfaceColorMix.hpp"           // NEOTKO_TD_RECALC_DEBUG_TAG — NeoDebug + NEOTKO_LOG reuse (bug #3 instrumentation)
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
@@ -1364,6 +1365,26 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     //BBS: add plate index
     t_config_option_keys print_diff       = print_config_diffs(m_config, new_full_config, filament_overrides, this->m_plate_index);
     t_config_option_keys full_config_diff = full_print_config_diffs(m_full_print_config, new_full_config, this->m_plate_index);
+
+    // NEOTKO_TD_RECALC_DEBUG_TAG — bug #3 (docs/BUG_HUNTING_QUEUE.md): instrument whether
+    // print_diff/full_config_diff actually catch a TD change, and what m_config holds
+    // right before the (gated) refresh below. Set ORCA_DEBUG_PROFILE=1 or ORCA_DEBUG_ALL=1.
+    if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+        const bool _td_in_print_diff = std::find(print_diff.begin(), print_diff.end(), "neotko_td_mirror") != print_diff.end();
+        const bool _td_in_full_diff  = std::find(full_config_diff.begin(), full_config_diff.end(), "neotko_td_mirror") != full_config_diff.end();
+        std::ostringstream _td_oss;
+        _td_oss << "TD_DIFF this=" << (const void*)this
+                << " print_diff_has_td=" << _td_in_print_diff
+                << " full_config_diff_has_td=" << _td_in_full_diff
+                << " pre_m_config_td=[";
+        for (double v : m_config.neotko_td_mirror.values) _td_oss << v << ",";
+        _td_oss << "] new_full_config_td=[";
+        if (const auto *opt = new_full_config.option<ConfigOptionFloats>("neotko_td_mirror"))
+            for (double v : opt->values) _td_oss << v << ",";
+        _td_oss << "]";
+        NeoDebug::write(NeoDebug::PROFILE, _td_oss.str());
+    }
+
     // Collect changes to object and region configs.
     t_config_option_keys object_diff      = m_default_object_config.diff(new_full_config);
     t_config_option_keys region_diff      = m_default_region_config.diff(new_full_config);
@@ -1417,6 +1438,21 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             num_extruders  = m_config.filament_diameter.size();
             num_extruders_changed  = true;
         }
+    }
+
+    // NEOTKO_TD_RECALC_DEBUG_TAG — bug #3: post-state of m_config.neotko_td_mirror right
+    // after the gated refresh above. If pre_m_config_td (previous log) == post_m_config_td
+    // here despite the user having changed TD, the gate (`full_config_diff.empty()`) is
+    // the culprit; if post already matches the new value, the staleness is downstream
+    // (see TD_RESOLVE log in resolve_mixed_filament_sandwich_profiles()).
+    if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+        std::ostringstream _td_oss;
+        _td_oss << "TD_DIFF this=" << (const void*)this
+                << " full_config_diff_was_empty=" << full_config_diff.empty()
+                << " post_m_config_td=[";
+        for (double v : m_config.neotko_td_mirror.values) _td_oss << v << ",";
+        _td_oss << "]";
+        NeoDebug::write(NeoDebug::PROFILE, _td_oss.str());
     }
 
     int   mixed_gradient_mode   = 0;
@@ -2104,6 +2140,19 @@ void Print::resolve_mixed_filament_sandwich_profiles()
         mats[t] = CS::material_from_hex(hex, td);
     }
 
+    // NEOTKO_TD_RECALC_DEBUG_TAG — bug #3: TD values this resolve pass actually reads
+    // from m_config (whatever it holds NOW — see the two TD_DIFF logs in Print::apply()
+    // for whether that reflects the user's latest change).
+    if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+        std::ostringstream _td_oss;
+        _td_oss << "TD_RESOLVE this=" << (const void*)this << " m_config_td=[";
+        for (double v : m_config.neotko_td_mirror.values) _td_oss << v << ",";
+        _td_oss << "] mats_td=[";
+        for (int t = 0; t < 4; ++t) _td_oss << mats[t].td[0] << ",";
+        _td_oss << "]";
+        NeoDebug::write(NeoDebug::PROFILE, _td_oss.str());
+    }
+
     for (PrintObject *object : m_objects) {
         if (!object || !object->config().mixed_filament_sandwich_mode.value)
             continue;
@@ -2133,10 +2182,12 @@ void Print::resolve_mixed_filament_sandwich_profiles()
                          "," + std::to_string(mats[t].rgb[2]) + "," + std::to_string(mats[t].td[0]);
 
         int pid = 0;
+        bool _td_cache_hit = false;
         if (auto it = m_mixed_filament_sandwich_profile_cache.find(cache_key);
             it != m_mixed_filament_sandwich_profile_cache.end() &&
             SurfaceEffectProfileManager::get().find(it->second) != nullptr) {
             pid = it->second;
+            _td_cache_hit = true;
         } else {
             CS::PredictOptions opt;
             opt.layer_height = object->config().layer_height.value > 0.001
@@ -2163,6 +2214,11 @@ void Print::resolve_mixed_filament_sandwich_profiles()
             m_mixed_filament_sandwich_profile_cache[cache_key] = pid;
         }
         m_mixed_filament_sandwich_profile_id[object] = pid;
+
+        // NEOTKO_TD_RECALC_DEBUG_TAG — bug #3: did this object's recipe reuse a cached
+        // profile (built from a possibly-stale TD) or recompute fresh?
+        NEOTKO_LOG(PROFILE, "TD_RESOLVE obj=" << (const void*)object
+            << " cache_key=" << cache_key << " cache_hit=" << _td_cache_hit << " pid=" << pid);
     }
 }
 

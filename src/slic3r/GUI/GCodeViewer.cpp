@@ -28,6 +28,7 @@
 #include "Widgets/ProgressDialog.hpp"
 
 #include <imgui/imgui_internal.h>
+#include <nlohmann/json.hpp> // NEOTKO_GCODE_REPROCESSOR — rule list editor panel
 
 #include <GL/glew.h>
 #include <boost/log/trivial.hpp>
@@ -1356,6 +1357,8 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
         render_toolpaths();
     float legend_height = 0.0f;
     render_legend(legend_height, canvas_width, canvas_height, right_margin);
+    // NEOTKO_GCODE_REPROCESSOR — own floating ImGui window, doesn't need the legend's layout math
+    render_expert_gcode_reprocessor_panel();
 
     if (m_user_mode != wxGetApp().get_mode()) {
         update_by_mode(wxGetApp().get_mode());
@@ -4346,6 +4349,177 @@ void GCodeViewer::render_realcolor_debug_panel()
         m_realcolor_cache.valid = false;
         NEOTKO_LOG(REALCOLOR, "render_realcolor_debug_panel: tuning changed, forcing recompute");
     }
+}
+
+// NEOTKO_GCODE_REPROCESSOR — PRO-only rule editor. Gated on app_config "neotko_libre_mode"
+// (real user feature, not a NeoDebug channel — see docs/LIBREMODE.md §5). Phase 1: a single rule
+// type, "speed_multiplier" (M220 override between two layers). Unknown rule types already present
+// in the saved JSON (written by a newer build) are round-tripped verbatim in
+// m_expert_reprocessor.unknown_rules so this build never destroys rules it doesn't understand.
+void GCodeViewer::render_expert_gcode_reprocessor_panel()
+{
+    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        return;
+
+    using json = nlohmann::json;
+
+    if (!m_expert_reprocessor.loaded_from_config) {
+        m_expert_reprocessor.loaded_from_config = true;
+        std::string raw;
+        if (wxGetApp().preset_bundle->project_config.has("expert_gcode_reprocessor_rules"))
+            raw = wxGetApp().preset_bundle->project_config.opt_string("expert_gcode_reprocessor_rules");
+        if (!raw.empty()) {
+            try {
+                json root = json::parse(raw);
+                if (root.contains("rules") && root["rules"].is_array()) {
+                    for (const auto& r : root["rules"]) {
+                        if (r.is_object() && r.contains("type") && r["type"].is_string() &&
+                            r["type"].get<std::string>() == "speed_multiplier") {
+                            ExpertReprocessorRule rule;
+                            rule.enabled = r.value("enabled", true);
+                            rule.layer_from = r.value("layer_from", 0);
+                            rule.layer_to = r.value("layer_to", -1);
+                            rule.value = r.value("value", 100);
+                            m_expert_reprocessor.rules.push_back(rule);
+                        } else if (r.is_object() && r.contains("type") && r["type"].is_string() &&
+                                   r["type"].get<std::string>() == "fan_override") {
+                            ExpertReprocessorFanRule fan_rule;
+                            fan_rule.enabled = r.value("enabled", true);
+                            fan_rule.layer_from = r.value("layer_from", 0);
+                            fan_rule.layer_to = r.value("layer_to", -1);
+                            fan_rule.value = r.value("value", 255);
+                            m_expert_reprocessor.fan_rules.push_back(fan_rule);
+                        } else {
+                            m_expert_reprocessor.unknown_rules.push_back(r);
+                        }
+                    }
+                }
+            } catch (const std::exception&) {
+                // corrupt or foreign JSON: start from an empty rule list rather than crash the panel
+            }
+        }
+    }
+
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    ImGui::Begin("Expert G-code Reprocessor");
+
+    const std::string warning_text = _u8L("PRO: edits real G-code. Wrong values can damage the machine.");
+    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.1f, 1.0f), "%s", warning_text.c_str());
+
+    // NEOTKO_GCODE_REPROCESSOR: engine/storage stay 0-based (matches build_layer_line_ranges in
+    // ExpertGCodeReprocessor.cpp), but the slider the user actually looks at is 1-based ("Layer
+    // 1" for the first layer) — display/edit fields below are +1'd so what you type here matches
+    // what you see on the slider.
+    const int current_layer = static_cast<int>(m_layers_z_range[1]);
+    imgui.text(_L("Current layer") + ": " + std::to_string(current_layer + 1));
+
+    ImGui::Separator();
+    imgui.text(_L("Speed override rules (M220)"));
+
+    int remove_idx = -1;
+    for (int i = 0; i < (int)m_expert_reprocessor.rules.size(); ++i) {
+        ExpertReprocessorRule& rule = m_expert_reprocessor.rules[i];
+        ImGui::PushID(i);
+        imgui.checkbox("##enabled", rule.enabled);
+        ImGui::SameLine();
+        int disp_from = rule.layer_from + 1;
+        ImGui::SetNextItemWidth(70.0f);
+        if (ImGui::DragInt("from", &disp_from, 1.0f, 1, 100001))
+            rule.layer_from = disp_from - 1;
+        ImGui::SameLine();
+        int disp_to = (rule.layer_to < 0) ? -1 : rule.layer_to + 1;
+        ImGui::SetNextItemWidth(90.0f);
+        if (ImGui::DragInt("to (-1=end)", &disp_to, 1.0f, -1, 100001))
+            rule.layer_to = (disp_to < 0) ? -1 : disp_to - 1;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0f);
+        ImGui::DragInt("%", &rule.value, 1.0f, 1, 300);
+        ImGui::SameLine();
+        if (imgui.button("X"))
+            remove_idx = i;
+        ImGui::PopID();
+    }
+    if (remove_idx >= 0)
+        m_expert_reprocessor.rules.erase(m_expert_reprocessor.rules.begin() + remove_idx);
+
+    if (imgui.button(_L("+ Add rule at current layer"))) {
+        ExpertReprocessorRule rule;
+        rule.layer_from = current_layer;
+        m_expert_reprocessor.rules.push_back(rule);
+    }
+
+    ImGui::Separator();
+    imgui.text(_L("Fan override rules (M106, raw 0-255)"));
+
+    int remove_fan_idx = -1;
+    for (int i = 0; i < (int)m_expert_reprocessor.fan_rules.size(); ++i) {
+        ExpertReprocessorFanRule& rule = m_expert_reprocessor.fan_rules[i];
+        ImGui::PushID(1000 + i); // offset so IDs never collide with the speed rule loop above
+        imgui.checkbox("##fan_enabled", rule.enabled);
+        ImGui::SameLine();
+        int disp_from = rule.layer_from + 1;
+        ImGui::SetNextItemWidth(70.0f);
+        if (ImGui::DragInt("from", &disp_from, 1.0f, 1, 100001))
+            rule.layer_from = disp_from - 1;
+        ImGui::SameLine();
+        int disp_to = (rule.layer_to < 0) ? -1 : rule.layer_to + 1;
+        ImGui::SetNextItemWidth(90.0f);
+        if (ImGui::DragInt("to (-1=end)", &disp_to, 1.0f, -1, 100001))
+            rule.layer_to = (disp_to < 0) ? -1 : disp_to - 1;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0f);
+        ImGui::DragInt("S", &rule.value, 1.0f, 0, 255);
+        ImGui::SameLine();
+        if (imgui.button("X"))
+            remove_fan_idx = i;
+        ImGui::PopID();
+    }
+    if (remove_fan_idx >= 0)
+        m_expert_reprocessor.fan_rules.erase(m_expert_reprocessor.fan_rules.begin() + remove_fan_idx);
+
+    if (imgui.button(_L("+ Add fan rule at current layer"))) {
+        ExpertReprocessorFanRule fan_rule;
+        fan_rule.layer_from = current_layer;
+        m_expert_reprocessor.fan_rules.push_back(fan_rule);
+    }
+
+    ImGui::Separator();
+    if (imgui.button(_L("Apply (rewrites G-code on next export)"))) {
+        warning_catcher(wxGetApp().mainframe,
+            _L("You are about to modify the exported G-code directly (speed override). "
+               "Incorrectly configured rules can damage the machine or ruin the print. "
+               "Only continue if you know what you are doing."));
+
+        json root;
+        root["reprocessor_version"] = 1;
+        json rules_arr = json::array();
+        for (const ExpertReprocessorRule& rule : m_expert_reprocessor.rules) {
+            json r;
+            r["type"] = "speed_multiplier";
+            r["enabled"] = rule.enabled;
+            r["layer_from"] = rule.layer_from;
+            r["layer_to"] = rule.layer_to;
+            r["value"] = rule.value;
+            rules_arr.push_back(r);
+        }
+        for (const ExpertReprocessorFanRule& rule : m_expert_reprocessor.fan_rules) {
+            json r;
+            r["type"] = "fan_override";
+            r["enabled"] = rule.enabled;
+            r["layer_from"] = rule.layer_from;
+            r["layer_to"] = rule.layer_to;
+            r["value"] = rule.value;
+            rules_arr.push_back(r);
+        }
+        for (const auto& unknown : m_expert_reprocessor.unknown_rules)
+            rules_arr.push_back(unknown);
+        root["rules"] = rules_arr;
+
+        wxGetApp().preset_bundle->project_config.set_key_value("expert_gcode_reprocessor_rules", new ConfigOptionString(root.dump()));
+        wxGetApp().plater()->schedule_background_process();
+    }
+
+    ImGui::End();
 }
 
 void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height)

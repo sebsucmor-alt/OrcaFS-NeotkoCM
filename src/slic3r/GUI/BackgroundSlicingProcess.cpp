@@ -20,6 +20,7 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
+#include "libslic3r/GCode/ExpertGCodeReprocessor.hpp"
 #include "libslic3r/Format/SL1.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/libslic3r.h"
@@ -798,8 +799,46 @@ void BackgroundSlicingProcess::finalize_gcode()
 	// is calculated for the unprocessed G-code and it references lines in the memory mapped G-code file by line numbers.
 	// export_path may be changed by the post-processing script as well if the post processing script decides so, see GH #6042.
 	bool post_processed = run_post_process_scripts(output_path, true, "File", export_path, m_fff_print->full_print_config());
-	auto remove_post_processed_temp_file = [post_processed, &output_path]() {
-		if (post_processed)
+
+	// NEOTKO_GCODE_REPROCESSOR — PRO-only, LibreMode-gated. Runs after the regular post-process
+	// scripts, before the final copy. Gate lives at the call site (not inside
+	// run_expert_gcode_reprocessor itself), same convention as every other LibreMode-only engine
+	// behaviour — see docs/LIBREMODE.md §5.
+	// IMPORTANT: never rewrite in place when !post_processed — in that case output_path IS
+	// m_temp_output_path, which the G-code viewer memory-maps and correlates against
+	// m_gcode_result by line number (see comment above). Inserting lines into it here would
+	// desync the already-open preview. Always reprocess a private copy instead.
+	bool libre_reprocessed = false;
+	if (m_fff_print->full_print_config().has("neotko_libre_mode") && m_fff_print->full_print_config().opt_bool("neotko_libre_mode")
+		&& m_gcode_result != nullptr) {
+		std::string reprocessor_path = output_path;
+		bool have_private_copy = post_processed;
+		if (!have_private_copy) {
+			reprocessor_path = output_path + ".egr";
+			std::string copy_error;
+			have_private_copy = (copy_file(output_path, reprocessor_path, copy_error) == CopyFileResult::SUCCESS);
+			if (!have_private_copy)
+				BOOST_LOG_TRIVIAL(error) << "ExpertGCodeReprocessor: failed to copy " << output_path << " to " << reprocessor_path << ": " << copy_error;
+		}
+		if (have_private_copy) {
+			try {
+				if (run_expert_gcode_reprocessor(reprocessor_path, m_fff_print->full_print_config(), *m_gcode_result)) {
+					output_path = reprocessor_path;
+					libre_reprocessed = true;
+				} else if (reprocessor_path != output_path) {
+					// no rule applied: drop the unused copy
+					try { boost::filesystem::remove(reprocessor_path); } catch (...) {}
+				}
+			} catch (const std::exception &ex) {
+				BOOST_LOG_TRIVIAL(error) << "ExpertGCodeReprocessor failed: " << ex.what();
+				if (reprocessor_path != output_path)
+					try { boost::filesystem::remove(reprocessor_path); } catch (...) {}
+			}
+		}
+	}
+
+	auto remove_post_processed_temp_file = [post_processed, libre_reprocessed, &output_path]() {
+		if (post_processed || libre_reprocessed)
 			try {
 				boost::filesystem::remove(output_path);
 			} catch (const std::exception &ex) {

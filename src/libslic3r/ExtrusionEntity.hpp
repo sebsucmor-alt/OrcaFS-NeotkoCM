@@ -175,6 +175,18 @@ public:
     // investigation (OrcaSlicer mainline's Z Anti-Aliasing/z_contoured uses the same base-class
     // placement for the same reason).
     std::vector<coord_t> zbump_z_offset;
+    // NEOTKO_NEOSTITCH_TAG — F2b (docs/FUTURE/NEOSTITCH_PLAN.md §5.3): set by
+    // Feature::NeoStitch::apply_neostitch_fill_speed() on any path whose width was widened by a
+    // NeoStitch fill event, so GCode.cpp's speed selection can slow just that path down. A plain
+    // per-path bool (unlike zbump_z_offset, which is per-vertex) -- copy/move is all it needs.
+    bool neostitch_fill_event = false;
+    // NEOTKO_NEOSTITCH_TAG — visualization only (docs/FUTURE/NEOSTITCH_PLAN.md §5.3/§6): extra mm
+    // added to the DISPLAYED ;HEIGHT: tag for this path (GCode.cpp), so the gcode viewer's
+    // reconstructed mesh approximates the fill bead reaching into the notch void one layer below.
+    // Never touches path.height itself (used for the real mm3_per_mm/E, already fixed by the time
+    // this is set) or the real toolpath Z -- 0 = no bump, matches the "0 = no override" convention
+    // used elsewhere in this class.
+    float neostitch_visual_height_mm = 0.0f;
 
     ExtrusionPath() : mm3_per_mm(-1), width(-1), height(-1), m_role(erNone), m_no_extrusion(false) {}
     ExtrusionPath(ExtrusionRole role) : mm3_per_mm(-1), width(-1), height(-1), m_role(role), m_no_extrusion(false) {}
@@ -186,6 +198,8 @@ public:
         , width(rhs.width)
         , height(rhs.height)
         , zbump_z_offset(rhs.zbump_z_offset)
+        , neostitch_fill_event(rhs.neostitch_fill_event)
+        , neostitch_visual_height_mm(rhs.neostitch_visual_height_mm)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -199,6 +213,8 @@ public:
         , width(rhs.width)
         , height(rhs.height)
         , zbump_z_offset(std::move(rhs.zbump_z_offset))
+        , neostitch_fill_event(rhs.neostitch_fill_event)
+        , neostitch_visual_height_mm(rhs.neostitch_visual_height_mm)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -212,6 +228,8 @@ public:
         , width(rhs.width)
         , height(rhs.height)
         , zbump_z_offset(rhs.zbump_z_offset)
+        , neostitch_fill_event(rhs.neostitch_fill_event)
+        , neostitch_visual_height_mm(rhs.neostitch_visual_height_mm)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -225,6 +243,8 @@ public:
         , width(rhs.width)
         , height(rhs.height)
         , zbump_z_offset(rhs.zbump_z_offset)
+        , neostitch_fill_event(rhs.neostitch_fill_event)
+        , neostitch_visual_height_mm(rhs.neostitch_visual_height_mm)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -242,6 +262,8 @@ public:
         this->height = rhs.height;
         this->polyline = rhs.polyline;
         this->zbump_z_offset = rhs.zbump_z_offset;
+        this->neostitch_fill_event = rhs.neostitch_fill_event;
+        this->neostitch_visual_height_mm = rhs.neostitch_visual_height_mm;
         this->inset_idx = rhs.inset_idx;
         this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
         return *this;
@@ -255,6 +277,8 @@ public:
         this->height = rhs.height;
         this->polyline = std::move(rhs.polyline);
         this->zbump_z_offset = std::move(rhs.zbump_z_offset);
+        this->neostitch_fill_event = rhs.neostitch_fill_event;
+        this->neostitch_visual_height_mm = rhs.neostitch_visual_height_mm;
         this->inset_idx = rhs.inset_idx;
         this->force_no_spiral_lift = rhs.force_no_spiral_lift; // NEOTKO_NEOARACHNE_TAG Inc2a
         return *this;

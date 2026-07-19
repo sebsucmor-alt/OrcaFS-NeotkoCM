@@ -7600,6 +7600,20 @@ void TabPrint::build()
         optgroup->append_single_option_line("filter_out_gap_fill", "strength_settings_infill#filter-out-tiny-gaps");
         optgroup->append_single_option_line("infill_wall_overlap", "strength_settings_infill#infill-wall-overlap");
 
+        // NEOTKO_NEOSTITCH_TAG — NeoStitch Interlock (docs/FUTURE/NEOSTITCH_PLAN.md). Plain numeric
+        // per-region settings (no spatial painting, no gizmo). Lives here (Strength), not Others --
+        // it's a mechanical layer-to-layer interlock, same family as infill_wall_overlap above.
+        optgroup = page->new_optgroup(L("NeoStitch Interlock"));
+        optgroup->append_single_option_line("neostitch");
+        optgroup->append_single_option_line("neostitch_depth");
+        optgroup->append_single_option_line("neostitch_flat_length");
+        optgroup->append_single_option_line("neostitch_ramp_length");
+        optgroup->append_single_option_line("neostitch_period");
+        optgroup->append_single_option_line("neostitch_flow");
+        optgroup->append_single_option_line("neostitch_skip_layers");
+        optgroup->append_single_option_line("neostitch_fill_margin");
+        optgroup->append_single_option_line("neostitch_fill_speed");
+
         optgroup = page->new_optgroup(L("Advanced"), L"param_advanced");
         optgroup->append_single_option_line("align_infill_direction_to_model", "strength_settings_advanced#align-infill-direction-to-model");
         optgroup->append_single_option_line("extra_solid_infills", "strength_settings_infill#extra-solid-infill");
@@ -7862,6 +7876,10 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_octaves", "others_settings_fuzzy_skin#skin-noise-octaves");
         optgroup->append_single_option_line("fuzzy_skin_persistence", "others_settings_fuzzy_skin#skin-noise-persistence");
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
+
+        // NEOTKO_NEOSTITCH_TAG -- moved to the Strength page (docs/FUTURE/NEOSTITCH_PLAN.md, s206
+        // cosmetic pass): thematically it's a mechanical-interlock/strength setting, not an
+        // "others" catch-all one -- see the optgroup next to infill_wall_overlap.
 
         // NEOTKO_TEXTUREBUMP_TAG -- removed from Object Settings (unification pass, docs/
         // ATTRIBUTION_TEXTURE_BUMP.md §6): all texture_bump_* options now live exclusively in the

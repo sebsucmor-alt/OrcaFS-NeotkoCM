@@ -1210,12 +1210,15 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
             const size_t       current_tool = gcodegen.writer().extruder()->id();
             std::vector<std::vector<float>> wipe_volumes = WipeTower2::extract_wipe_volumes(print_config);
 
+            // NEOTKO_GCODE_REPROCESSOR: same LibreMode threading as the main WipeTower2 instance
+            // in Print.cpp — see m_neotko_libre_mode in WipeTower2.hpp.
             WipeTower2 local_z_wipe_tower(print_config,
                                           print.default_region_config(),
                                           print.get_plate_index(),
                                           print.get_plate_origin(),
                                           wipe_volumes,
-                                          current_tool);
+                                          current_tool,
+                                          !print.objects().empty() && print.objects().front()->config().neotko_libre_mode.value);
             for (size_t extruder_idx = 0; extruder_idx < print_config.nozzle_diameter.size(); ++extruder_idx)
                 local_z_wipe_tower.set_extruder(extruder_idx, print_config);
 
@@ -8616,11 +8619,23 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             if (sloped) {
                 speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(m_config.get_abs_value("inner_wall_speed")));
             }
+            // NEOTKO_NEOSTITCH_TAG — F2b (docs/FUTURE/NEOSTITCH_PLAN.md §5.3): fill segments print
+            // slower so the extra material actually drops into the notch void below instead of just
+            // bulging outward. Mirrors the scarf_joint_speed clamp just above -- same
+            // coFloatOrPercent-over-the-resolved-speed pattern, not a new mechanism. Deliberately
+            // NOT composed with the overhang/bridge speed override elsewhere in this function: a
+            // path reclassified as erOverhangPerimeter/erBridgeInfill takes a DIFFERENT branch below
+            // (path.role() can only be one value), so bridge speed already wins outright there,
+            // exactly like every other speed override in this function -- no min()/multiply needed.
+            if (path.neostitch_fill_event)
+                speed = std::min(speed, m_config.neostitch_fill_speed.get_abs_value(speed));
         } else if (path.role() == erExternalPerimeter) {
             speed = m_config.get_abs_value("outer_wall_speed");
             if (sloped) {
                 speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(m_config.get_abs_value("outer_wall_speed")));
             }
+            if (path.neostitch_fill_event)
+                speed = std::min(speed, m_config.neostitch_fill_speed.get_abs_value(speed));
         } else if (path.role() == erInternalBridgeInfill) {
             speed = m_config.get_abs_value("internal_bridge_speed");
         } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {
@@ -8858,8 +8873,14 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     }
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
-    if (last_was_wipe_tower || std::abs(m_last_height - path.height) > EPSILON) {
-        m_last_height = path.height;
+    // NEOTKO_NEOSTITCH_TAG — visualization only (docs/FUTURE/NEOSTITCH_PLAN.md §5.3/§6): fill
+    // segments report a taller ;HEIGHT: to the gcode viewer so its reconstructed mesh approximates
+    // the bead reaching into the notch void one layer below. path.height itself (the real value
+    // driving mm3_per_mm/E above, and the actual toolpath Z elsewhere in this function) is NEVER
+    // touched -- only what gets written into this comment for the previewer to read back.
+    const float neostitch_display_height = path.height + path.neostitch_visual_height_mm;
+    if (last_was_wipe_tower || std::abs(m_last_height - neostitch_display_height) > EPSILON) {
+        m_last_height = neostitch_display_height;
         sprintf(buf, ";%s%g\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(), m_last_height);
         gcode += buf;
     }

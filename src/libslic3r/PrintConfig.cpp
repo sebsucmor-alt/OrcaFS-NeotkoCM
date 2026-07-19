@@ -166,6 +166,16 @@ static t_config_enum_values s_keys_map_TextureProjectionAxis {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TextureProjectionAxis)
 
+// NEOTKO_NEOSTITCH_TAG — kept as its own enum family, not reused from FuzzySkinType/TextureBumpType.
+static t_config_enum_values s_keys_map_NeoStitchTarget {
+    { "disabled",   int(NeoStitchTarget::Disabled) },
+    { "outermost",  int(NeoStitchTarget::Outermost) },
+    { "second",     int(NeoStitchTarget::SecondWall) },
+    { "third",      int(NeoStitchTarget::ThirdWall) },
+    { "innermost",  int(NeoStitchTarget::Innermost) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoStitchTarget)
+
 // NEOTKO_NEOWEAVING_TAG_START — Neoweaving enum maps
 static t_config_enum_values s_keys_map_NeoweaveMode {
     { "wave",   int(NeoweaveMode::Wave)   },
@@ -3262,6 +3272,127 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(1.0));
     // NEOTKO_TEXTUREBUMP_TAG_END
 
+    // NEOTKO_NEOSTITCH_TAG_START — Z-Stitch Interlock (docs/FUTURE/NEOSTITCH_PLAN.md). Mechanical
+    // layer-to-layer interlock: the target wall alternates NOTCH (moves inward) and FILL (widens,
+    // outer edge anchored) segments, phase-flipped every other layer so a fill always lands on the
+    // notch left one layer below -- Z is never touched (unlike "brick layers", which shift Z by
+    // half a layer; see plan §0 for the explicit distinction).
+    def = this->add("neostitch", coEnum);
+    def->label = L("NeoStitch Interlock");
+    def->category = L("Strength");
+    def->tooltip = L("Adds a mechanical interlock between layers on the chosen wall, without ever moving in Z: "
+                     "the wall alternates small inward notches with widened fill segments, phase-shifted every "
+                     "other layer so each fill plugs the notch left by the layer below. This setting controls "
+                     "which wall receives the effect.");
+    def->enum_keys_map = &ConfigOptionEnum<NeoStitchTarget>::get_enum_values();
+    def->enum_values.push_back("disabled");
+    def->enum_values.push_back("outermost");
+    def->enum_values.push_back("second");
+    def->enum_values.push_back("third");
+    def->enum_values.push_back("innermost");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("Outermost wall"));
+    def->enum_labels.push_back(L("Second wall"));
+    def->enum_labels.push_back(L("Third wall"));
+    def->enum_labels.push_back(L("Innermost wall"));
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionEnum<NeoStitchTarget>(NeoStitchTarget::Disabled));
+
+    def = this->add("neostitch_depth", coFloat);
+    def->label = L("Stitch depth");
+    def->category = L("Strength");
+    def->tooltip = L("How far the notch reaches inward, in mm. Also sets the fill's target width delta at "
+                     "100%% flow (added cross-section == removed cross-section). 0 = auto, matches this "
+                     "object's own Inner wall line width.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("neostitch_flat_length", coFloat);
+    def->label = L("Stitch length");
+    def->category = L("Strength");
+    def->tooltip = L("Plateau length of one notch/fill event, in mm.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.0));
+
+    def = this->add("neostitch_ramp_length", coFloat);
+    def->label = L("Ramp length");
+    def->category = L("Strength");
+    def->tooltip = L("Lead-in/lead-out length either side of the plateau, in mm. Longer ramps mean fewer, "
+                     "gentler direction changes (less speed impact); shorter ramps mean a sharper notch/fill.");
+    def->sidetext = "mm";
+    def->min = 0.1;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("neostitch_period", coFloat);
+    def->label = L("Stitch period");
+    def->category = L("Strength");
+    def->tooltip = L("Nominal spacing, in mm, between one notch/fill event and the next around the wall.");
+    def->sidetext = "mm";
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10.0));
+
+    def = this->add("neostitch_flow", coPercent);
+    def->label = L("Stitch flow");
+    def->category = L("Strength");
+    def->tooltip = L("Percentage of the auto-derived fill width delta actually applied. 100%% conserves volume "
+                     "exactly (added cross-section == the notch's removed cross-section).");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("neostitch_skip_layers", coInt);
+    def->label = L("Skip bottom layers");
+    def->category = L("Strength");
+    def->tooltip = L("Extra layers to skip above the first non-bottom layer before the interlock starts "
+                     "(on top of the layer immediately above the first layer, which is always skipped).");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(3));
+
+    // NEOTKO_NEOSTITCH_TAG — F2b (plan §5.3): "real drop" recipe, added on top of the already-shipped
+    // F1/F2 mechanism. Precedent for the fill actually bridging into the notch void: PathBlend Full
+    // (this fork, print-validated) already demonstrates contained extrusion dropping into an exact
+    // gap -- the two knobs below reproduce that recipe (containment + reduced speed).
+    def = this->add("neostitch_fill_margin", coFloat);
+    def->label = L("Fill margin");
+    def->category = L("Strength");
+    def->tooltip = L("Shrinks the fill event by this much per side relative to the notch it plugs, in mm, "
+                     "so the bead is contained inside the notch void instead of bridging across its "
+                     "shoulders. 0 = fill the same length as the notch (bridges instead of dropping in).");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.0));
+
+    def = this->add("neostitch_fill_speed", coFloatOrPercent);
+    def->label = L("Fill speed");
+    def->category = L("Strength");
+    def->tooltip = L("Speed of the fill segments only, as a percentage of the wall's own speed (or an "
+                     "absolute mm/s value). Printing fill segments slower helps the extra material "
+                     "actually drop into the notch void below instead of just bulging outward -- 75%% "
+                     "(not 50%%) is enough in practice because pressure advance regulates over a "
+                     "non-constant flow here, not a steady extra rate.");
+    def->sidetext = "% or mm/s";
+    def->ratio_over = "inner_wall_speed";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(75, true));
+    // NEOTKO_NEOSTITCH_TAG_END
+
     // NEOTKO_ZBUMP_TAG_START — Top Surface Z relief (own module, Feature/ZBump/). Independent
     // domain from Texture Bump above: this modulates Z (top-fill height), not XY (wall
     // displacement). See docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md.
@@ -4566,6 +4697,15 @@ void PrintConfigDef::init_fff_params()
     def->height = 6;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionStrings());
+
+    // NEOTKO_GCODE_REPROCESSOR — internal, never shown in a Tab (comDevelop + not registered
+    // in any OptionsGroup). Holds the JSON rule list edited from the Expert G-code Reprocessor
+    // panel in Preview; consumed post-slice, before the final G-code copy.
+    def = this->add("expert_gcode_reprocessor_rules", coString);
+    def->label = L("Expert G-code Reprocessor Rules (internal)");
+    def->tooltip = L("Internal JSON blob storing G-code Reprocessor rules. Not meant to be edited directly.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("mixed_color_layer_height_a", coFloat);
     def->label = L("Dithering cadence height A");

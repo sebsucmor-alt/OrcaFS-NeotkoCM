@@ -140,7 +140,11 @@ public:
 	// width		-- width of wipe tower in mm ( default 60 mm - leave as it is )
 	// wipe_area	-- space available for one toolchange in mm
 	// BBS: add partplate logic
-	WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float wipe_volume, size_t initial_tool, const float wipe_tower_height);
+	// NEOTKO_GCODE_REPROCESSOR: neotko_libre_mode is PrintObjectConfig-only (see PrintConfig.hpp),
+	// not reachable from PrintConfig here, so it's plumbed in as an explicit constructor param
+	// from the one real call site (Print.cpp) instead. Default false keeps stock behaviour
+	// (M220 S100 reset on every toolchange) byte-identical when LibreMode is off.
+	WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float wipe_volume, size_t initial_tool, const float wipe_tower_height, bool neotko_libre_mode = false);
 
 
 	// Set the extruder properties.
@@ -285,6 +289,10 @@ private:
     }
 
 	bool   m_enable_timelapse_print = false;
+	// NEOTKO_GCODE_REPROCESSOR: when true, toolchange() skips the unconditional M220 S100 reset
+	// (see toolchange() body) so a manual/reprocessor speed override can survive a color change
+	// instead of being silently wiped on every single toolchange. Off by default.
+	bool   m_neotko_libre_mode = false;
 	bool   m_semm               = true; // Are we using a single extruder multimaterial printer?
 	bool   m_purge_in_prime_tower = false; // Do we purge in the prime tower?
     Vec2f  m_wipe_tower_pos; 			// Left front corner of the wipe tower in mm.

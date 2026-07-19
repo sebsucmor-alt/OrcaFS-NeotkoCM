@@ -881,6 +881,7 @@ static std::vector<std::string> s_Preset_print_options {
     "max_travel_detour_distance",
     "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence",
     "texture_bump", "texture_bump_image_path", "texture_bump_projection_mode", "texture_bump_axis", "texture_bump_scale", "texture_bump_thickness", "texture_bump_point_distance", "texture_bump_first_layer", "texture_bump_max_angle", "texture_bump_blur_strength",
+    "neostitch", "neostitch_depth", "neostitch_flat_length", "neostitch_ramp_length", "neostitch_period", "neostitch_flow", "neostitch_skip_layers", "neostitch_fill_margin", "neostitch_fill_speed",
     "zbump_enabled", "zbump_image_path", "zbump_thickness", "zbump_scale", "zbump_repeat", "zbump_offset_x", "zbump_offset_y", "zbump_edge_margin", "zbump_max_slope", "zbump_first_layer", "zbump_relief_segment", "zbump_max_passes",
     // NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1: register so these persist in
     // presets/3mf (previously defined in PrintConfig but absent from this list — dev-only, config-

@@ -248,6 +248,15 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
             this->layer()->object(), this->layer()->slice_z, this->layer()->height);
     g.painted_texture_bump_zones = &painted_texture_bump_zones;
 
+    // NEOTKO_NEOSTITCH_TAG — Z-Stitch Interlock (docs/FUTURE/NEOSTITCH_PLAN.md): object-centered mm
+    // bounds, same formula as TextureBump's own tb_bounds (PrintObject.cpp's build_tables_for_configs
+    // call site) so NeoStitch's compute_u() call shares the exact same world-space convention.
+    {
+        const Vec3crd& obj_size = this->layer()->object()->size();
+        g.neostitch_bounds.min = Vec3d(-unscale_(obj_size.x()) / 2.0, -unscale_(obj_size.y()) / 2.0, 0.0);
+        g.neostitch_bounds.max = Vec3d( unscale_(obj_size.x()) / 2.0,  unscale_(obj_size.y()) / 2.0,  unscale_(obj_size.z()));
+    }
+
     if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();
     // NEOTKO_NEOARACHNE_TAG Inc2e (port s134) — NeoArachne hybrid wall generator. The real engine

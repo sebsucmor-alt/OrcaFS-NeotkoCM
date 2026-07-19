@@ -4558,8 +4558,11 @@ void GLGizmoColorMixPainter::render_object_department()
     }
 
     m_imgui->disabled_begin(!mf_has_mixed_filament);
-    if (ImGui::Checkbox(_u8L("MixedFilament Object").c_str(), &mf_mode_on) && mo)
+    if (ImGui::Checkbox(_u8L("MixedFilament Object").c_str(), &mf_mode_on) && mo) {
+        wxGetApp().plater()->take_snapshot("Toggle MixedFilament Object");
         mo->config.set_key_value("mixed_filament_sandwich_mode", new ConfigOptionBool(mf_mode_on));
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    }
     m_imgui->disabled_end();
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", mf_has_mixed_filament
@@ -5116,6 +5119,7 @@ void GLGizmoColorMixPainter::update_model_object()
         }
         const ModelObjectPtrs& mos = wxGetApp().model().objects;
         wxGetApp().obj_list()->update_info_items(std::find(mos.begin(), mos.end(), mo) - mos.begin());
+        refresh_selector_palettes();   // sincroniza m_ebt_colors: el slot recién pintado puede no estar "horneado" todavía
         // El re-slice por paint ya lo dispara el cambio de facetas/slot (timestamp); la
         // huella de contenido la recalcula Print::apply. Solo agendamos el proceso.
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));

@@ -409,6 +409,19 @@ public:
     const PrintInstances&        instances() const      { return m_instances; }
     PrintInstances &instances() { return m_instances; }
 
+    // NEOTKO_XVOL_CLIP_TAG (s210) — thin public passthrough for one specific
+    // notice. Layer::make_fills (Fill.cpp) needs to raise a non-blocking
+    // "painted zones from two assembled/boolean-overlapping volumes collided"
+    // warning, but active_step_add_warning() itself is protected
+    // (PrintObjectBaseWithState) — Layer is not a PrintObject member/friend.
+    // Exposes only this one call instead of granting Layer broad friendship
+    // onto PrintObject's protected surface.
+    void push_gcode_overlap_warning(const std::string& message)
+    {
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message,
+                                       PrintStateBase::SlicingGcodeOverlap);
+    }
+
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
     LayerPtrs&                   layers()               { return m_layers; }
     SupportLayerPtrs&            support_layers()       { return m_support_layers; }

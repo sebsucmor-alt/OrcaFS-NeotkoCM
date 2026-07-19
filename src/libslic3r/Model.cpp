@@ -10,6 +10,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 #include "SurfaceEffectProfile.hpp" // NEOTKO_COLORSTITCH_TAG — huella de contenido de perfiles (re-slice on edit)
+#include "NeoDebug.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-recipe-loss instrumentation (s212 bug-hunt)
 #include "Feature/TextureBump/TextureBumpZone.hpp" // NEOTKO_TEXTUREBUMP_TAG — same reason, own zone registry
 
 #include "Format/AMF.hpp"
@@ -1986,6 +1987,55 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
     all_meshes.reserve(this->volumes.size() * 5);
     bool is_multi_volume_object = (this->volumes.size() > 1);
 
+    // NEOTKO_PROFILE_TAG (s212 bug-hunt) — baseline: does the SOURCE object have the
+    // sandwich-enable flag before split touches anything?
+    if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+        const ConfigOptionBool* src_en = this->config.get().option<ConfigOptionBool>("interlayer_colormix_enabled");
+        std::ostringstream _ndbg_;
+        _ndbg_ << "SPLIT_BASELINE obj='" << this->name << "' volumes=" << this->volumes.size()
+               << " src_config_has_flag=" << (src_en != nullptr)
+               << " src_flag_value=" << (src_en ? src_en->value : false)
+               << " src_stickers=" << this->colormix_stickers.size();
+        NeoDebug::write(NeoDebug::PROFILE, _ndbg_.str());
+    }
+
+    // NEOTKO_STICKER_TAG (s212, bug #9/split) — Sandwich Stickers live on the OBJECT
+    // (colormix_stickers, no per-volume ownership field), so splitting a multi-volume
+    // object into one new object per volume otherwise drops every sticker silently —
+    // none of the resulting objects has any claim to them. Resolve ownership here,
+    // BEFORE volume meshes are moved out below (`std::move(volume->mesh())`), by
+    // testing each sticker's anchor point against every model_part volume's
+    // object-frame bounding box. Heuristic, not exact geometry (no raycast against
+    // the actual mesh surface) — correct whenever split pieces don't overlap in XY,
+    // which is the case this bug was reported for (disjoint bodies merged/imported
+    // into one object) and the common case for "Split to Objects" in general.
+    std::map<int, std::vector<size_t>> volume_idx_to_sticker_indices;
+    if (is_multi_volume_object && !this->colormix_stickers.empty()) {
+        std::vector<std::pair<int, BoundingBoxf3>> volume_bboxes;
+        for (int vi = 0; vi < (int)this->volumes.size(); ++vi) {
+            const ModelVolume* v = this->volumes[vi];
+            if (v->type() != ModelVolumeType::MODEL_PART || v->mesh().empty()) continue;
+            volume_bboxes.emplace_back(vi, v->mesh().transformed_bounding_box(v->get_matrix()));
+        }
+        for (size_t si = 0; si < this->colormix_stickers.size(); ++si) {
+            const ColorMixSticker& st = this->colormix_stickers[si];
+            const Vec3d anchor = st.transform * Vec3d::Zero();
+            int best_vi = -1;
+            double best_z_gap = std::numeric_limits<double>::max();
+            for (const auto& [vi, bbox] : volume_bboxes) {
+                if (anchor.x() < bbox.min.x() || anchor.x() > bbox.max.x() ||
+                    anchor.y() < bbox.min.y() || anchor.y() > bbox.max.y())
+                    continue; // outside this volume's XY footprint
+                const double z_gap = std::abs(anchor.z() - bbox.max.z());
+                if (z_gap < best_z_gap) { best_z_gap = z_gap; best_vi = vi; }
+            }
+            if (best_vi < 0 && !volume_bboxes.empty())
+                best_vi = volume_bboxes.front().first; // ambiguous/no match: keep it rather than drop it silently
+            if (best_vi >= 0)
+                volume_idx_to_sticker_indices[best_vi].push_back(si);
+        }
+    }
+
     for (int volume_idx = 0; volume_idx < this->volumes.size(); volume_idx++) {
         ModelVolume* volume = this->volumes[volume_idx];
         if (volume->type() != ModelVolumeType::MODEL_PART)
@@ -2055,6 +2105,17 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
             new_object->config.assign_config(this->config);
             new_object->config.apply(volume->config, true);
 
+            // NEOTKO_PROFILE_TAG (s212 bug-hunt) — right after the config copy, before
+            // anything else can touch it: did the sandwich-enable flag survive?
+            if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+                const ConfigOptionBool* new_en = new_object->config.get().option<ConfigOptionBool>("interlayer_colormix_enabled");
+                std::ostringstream _ndbg_;
+                _ndbg_ << "SPLIT_CONFIG_COPY new_obj='" << new_object->name
+                       << "' new_config_has_flag=" << (new_en != nullptr)
+                       << " new_flag_value=" << (new_en ? new_en->value : false);
+                NeoDebug::write(NeoDebug::PROFILE, _ndbg_.str());
+            }
+
             assert(new_object->config.id().valid());
             assert(new_object->config.id() != this->config.id());
             new_object->instances.reserve(this->instances.size());
@@ -2074,6 +2135,20 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                 std::copy(std::begin(volume->colormix_slot_to_profile_id),
                           std::end  (volume->colormix_slot_to_profile_id),
                           std::begin(new_vol->colormix_slot_to_profile_id));
+
+                // NEOTKO_PROFILE_TAG (s212 bug-hunt) — did the per-volume paint data
+                // (facets + slot table) actually land on new_vol?
+                if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+                    int nonzero_slots = 0;
+                    for (int _s = 0; _s < 255; ++_s)
+                        if (new_vol->colormix_slot_to_profile_id[_s] != 0) ++nonzero_slots;
+                    std::ostringstream _ndbg_;
+                    _ndbg_ << "SPLIT_VOL_COPY new_obj='" << new_object->name
+                           << "' src_facets_empty=" << volume->color_mix_paint_facets.empty()
+                           << " new_facets_empty=" << new_vol->color_mix_paint_facets.empty()
+                           << " new_nonzero_slots=" << nonzero_slots;
+                    NeoDebug::write(NeoDebug::PROFILE, _ndbg_.str());
+                }
             }
 
             // BBS: clear volume's config, as we already set them into object
@@ -2093,6 +2168,29 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                 Transform3d new_assemble_transform      = assemble_matrix * new_instance_inverse_matrix;
                 model_instance->set_assemble_from_transform(new_assemble_transform);
                 model_instance->set_offset_to_assembly(new_vol->get_offset());
+            }
+
+            // NEOTKO_STICKER_TAG (s212, bug #9/split) — attach the stickers resolved to
+            // THIS original volume (mesh_info.first) above, BEFORE new_vol's offset is
+            // zeroed just below. A sticker's transform maps sticker-local mm → OBJECT
+            // frame (pre-instance, same frame volume->get_matrix() operates in); since
+            // new_vol was copy-constructed from `volume` its matrix (offset included)
+            // still matches the OLD object frame at this exact point, but the
+            // offset-zeroing 2 lines down shifts what "object frame" means for the new
+            // object (the instance loop above compensates the VOLUME's position, not
+            // free-floating content like a sticker) — translating by -offset keeps the
+            // sticker's physical placement correct in the new object.
+            {
+                auto it_stk = volume_idx_to_sticker_indices.find(mesh_info.first);
+                if (it_stk != volume_idx_to_sticker_indices.end()) {
+                    Transform3d frame_shift = Transform3d::Identity();
+                    frame_shift.translation() = -new_vol->get_offset();
+                    for (size_t si : it_stk->second) {
+                        ColorMixSticker new_sticker = this->colormix_stickers[si];
+                        new_sticker.transform = frame_shift * new_sticker.transform;
+                        new_object->colormix_stickers.emplace_back(std::move(new_sticker));
+                    }
+                }
             }
 
             new_vol->set_offset(Vec3d::Zero());

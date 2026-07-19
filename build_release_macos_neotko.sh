@@ -3,6 +3,23 @@
 set -e
 set -o pipefail
 
+# NEOTKO_OSX_SYSROOT — s211: default to the SDK 2.3.6 was actually built/working against.
+# On macOS 26 (Tahoe), Xcode's default SDK (26.x) makes WKWebView enforce new Local Network
+# rules that silently break the Home/Device Flutter webviews (NSURLErrorCannotConnectToHost,
+# -1004) even with NSLocalNetworkUsageDescription in Info.plist + proper signing — confirmed
+# by otool: working builds link WebKit against SDK 14.5, broken ones against SDK 26.x, same
+# source code. Override by exporting NEOTKO_OSX_SYSROOT yourself before calling this script
+# (e.g. to test SDK 26 again, or point at a different SDK). Silently falls back to the
+# toolchain default if 14.5 isn't installed (e.g. a fresh machine / CI).
+if [ -z "${NEOTKO_OSX_SYSROOT+x}" ]; then
+    _neotko_default_sdk="/Library/Developer/CommandLineTools/SDKs/MacOSX14.5.sdk"
+    if [ -d "$_neotko_default_sdk" ]; then
+        export NEOTKO_OSX_SYSROOT="$_neotko_default_sdk"
+        echo "NEOTKO: defaulting CMAKE_OSX_SYSROOT to $NEOTKO_OSX_SYSROOT (see comment above; export NEOTKO_OSX_SYSROOT= empty to disable)"
+    fi
+    unset _neotko_default_sdk
+fi
+
 while getopts ":dpa:snt:xbc:j:1DCSHTh" opt; do
   case "${opt}" in
     d )
@@ -179,6 +196,7 @@ function build_deps() {
                         -DOPENSSL_ARCH="darwin64-${_ARCH}-cc" \
                         -DCMAKE_BUILD_TYPE="$BUILD_CONFIG" \
                         -DCMAKE_OSX_ARCHITECTURES:STRING="${_ARCH}" \
+                        ${NEOTKO_OSX_SYSROOT:+-DCMAKE_OSX_SYSROOT="$NEOTKO_OSX_SYSROOT"} \
                         -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}"
                 fi
                 cmake --build . --config "$BUILD_CONFIG" --target deps
@@ -307,6 +325,7 @@ function build_slicer() {
                         -DCMAKE_INSTALL_RPATH="${DEPS}/usr/local" \
                         -DCMAKE_MACOSX_BUNDLE=ON \
                         -DCMAKE_OSX_ARCHITECTURES="${_ARCH}" \
+                        ${NEOTKO_OSX_SYSROOT:+-DCMAKE_OSX_SYSROOT="$NEOTKO_OSX_SYSROOT"} \
                         -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}" \
                         ${ORCA_DEBUG_PENULTIMATE:+-DCMAKE_CXX_FLAGS="-DORCA_DEBUG_PENULTIMATE"}
                 fi

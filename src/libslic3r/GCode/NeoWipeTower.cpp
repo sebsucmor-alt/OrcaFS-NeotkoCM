@@ -956,8 +956,12 @@ public:
     NeoWipeTowerWriter& speed_override_backup()
     {
         // This is only supported by Prusa at this point (https://github.com/prusa3d/PrusaSlicer/issues/3114)
-        if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware || is_snapmaker_u1()) {
-            // u1 特殊处理
+        // NEOTKO_GCODE_REPROCESSOR: dropped "|| is_snapmaker_u1()" — M220 B/R don't exist on the
+        // U1's Klipper firmware (gcode_flavor=klipper, resources/profiles/Snapmaker/machine/
+        // fdm_U1.json), they're a Marlin-only feature apparently copied over from an older
+        // Marlin-based Snapmaker machine. Real Marlin Snapmakers (A250/A350/A400/Artisan/J1,
+        // gcode_flavor=marlin2) are unaffected, they already match the flavor check below.
+        if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware) {
             m_gcode += "M220 B\n";
         }
         return *this;
@@ -966,8 +970,8 @@ public:
     // Let the firmware restore the active speed override value.
     NeoWipeTowerWriter& speed_override_restore()
     {
-        if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware || is_snapmaker_u1()) {
-            // u1 特殊处理
+        // NEOTKO_GCODE_REPROCESSOR: see speed_override_backup() above.
+        if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware) {
             m_gcode += "M220 R\n";
         }
         return *this;
@@ -1310,8 +1314,10 @@ NeoWipeTower::NeoWipeTower(const PrintConfig&                     config,
                        int                                    plate_idx,
                        Vec3d                                  plate_origin,
                        const std::vector<std::vector<float>>& wiping_matrix,
-                       size_t                                 initial_tool)
-    : m_semm(config.single_extruder_multi_material.value)
+                       size_t                                 initial_tool,
+                       bool                                   neotko_libre_mode)
+    : m_neotko_libre_mode(neotko_libre_mode)
+    , m_semm(config.single_extruder_multi_material.value)
     , m_enable_filament_ramming(config.enable_filament_ramming.value)
     , m_wipe_tower_pos(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx))
     , m_wipe_tower_width(float(config.prime_tower_width))
@@ -1523,8 +1529,12 @@ std::vector<WipeTower::ToolChangeResult> NeoWipeTower::prime(
                 .append(";--------------------\n"
                         "; CP PRIMING START\n")
                 .append(";--------------------\n")
-                .speed_override_backup()
-                .speed_override(100)
+                .speed_override_backup();
+            // NEOTKO_GCODE_REPROCESSOR: skip the priming-block M220 S100 reset in LibreMode, see
+            // m_neotko_libre_mode in NeoWipeTower.hpp.
+            if (!m_neotko_libre_mode)
+                writer.speed_override(100);
+            writer
                 .set_initial_position(Vec2f::Zero()) // Always move to the starting position
                 .travel(cleaning_box.ld, 7200);
             if (m_set_extruder_trimpot)
@@ -1627,7 +1637,10 @@ WipeTower::ToolChangeResult NeoWipeTower::emit_planned_tool_change(const WipeTow
     }
 
     writer.speed_override_backup();
-    writer.speed_override(100);
+    // NEOTKO_GCODE_REPROCESSOR: skip the toolchange M220 S100 reset in LibreMode, see
+    // m_neotko_libre_mode in NeoWipeTower.hpp.
+    if (!m_neotko_libre_mode)
+        writer.speed_override(100);
 
     Vec2f initial_position = cleaning_box.ld + Vec2f(0.f, m_depth_traversed);
     writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
@@ -1735,7 +1748,10 @@ WipeTower::ToolChangeResult NeoWipeTower::local_z_tool_change(size_t new_tool,
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
 
     writer.speed_override_backup();
-    writer.speed_override(100);
+    // NEOTKO_GCODE_REPROCESSOR: skip the local-Z toolchange M220 S100 reset in LibreMode, see
+    // m_neotko_libre_mode in NeoWipeTower.hpp.
+    if (!m_neotko_libre_mode)
+        writer.speed_override(100);
     writer.set_initial_position(cleaning_box.ld, m_wipe_tower_width, m_wipe_tower_depth, 0.f);
 
     if (m_set_extruder_trimpot)

@@ -411,9 +411,15 @@ if (SLIC3R_ASAN)
 endif ()
 
 if (APPLE)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror=partial-availability -Werror=unguarded-availability -Werror=unguarded-availability-new")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror=partial-availability -Werror=unguarded-availability -Werror=unguarded-availability-new")
-    
+    # NEOTKO: when diagnosing with an older SDK via NEOTKO_OSX_SYSROOT, APIs that only
+    # became "the newest" relative to that older SDK trip -Wunguarded-availability-new
+    # even though they don't with the normal (newer) SDK. Downgrade to non-fatal only
+    # for that opt-in diagnostic path; normal builds keep the strict -Werror.
+    if ("$ENV{NEOTKO_OSX_SYSROOT}" STREQUAL "")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror=partial-availability -Werror=unguarded-availability -Werror=unguarded-availability-new")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror=partial-availability -Werror=unguarded-availability -Werror=unguarded-availability-new")
+    endif ()
+
     # Generate debug symbols for Release builds on macOS (required for dSYM generation and Sentry crash reporting)
     # This adds -g flag to produce DWARF debug info that dsymutil can extract
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -g")

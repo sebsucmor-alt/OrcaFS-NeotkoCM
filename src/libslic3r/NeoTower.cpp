@@ -162,6 +162,9 @@ void NeoTower::collect_and_plan(const Print& print)
     NeoDebug::write_session_banner("collect_and_plan");
 
     NT_LOG("collect_and_plan() START");
+    // NEOTKO_GCODE_REPROCESSOR: cache LibreMode here (Print& is available), consumed later by
+    // generate() when it constructs NeoWipeTower — see m_neotko_libre_mode in NeoTower.hpp.
+    m_neotko_libre_mode = !print.objects().empty() && print.objects().front()->config().neotko_libre_mode.value;
     collect_all_events(print);
     plan();
     NT_LOG("collect_and_plan() DONE — " << m_events.size() << " real_tc + "
@@ -2006,7 +2009,8 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                    m_plate_idx,
                    m_plate_origin,
                    m_wipe_volumes,
-                   effective_initial);  // NEOTKO_NEOTOWER_TAG
+                   effective_initial,
+                   m_neotko_libre_mode);  // NEOTKO_NEOTOWER_TAG
 
     // Register all extruders so WipeTower2's m_filpar is fully populated.
     std::set<size_t> all_tools;

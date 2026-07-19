@@ -204,6 +204,13 @@ public:
     // nullptr/empty is the common "nothing painted" case.
     const std::vector<Feature::TextureBump::PaintedTextureBumpZone>* painted_texture_bump_zones = nullptr;
 
+    // NEOTKO_NEOSTITCH_TAG — Z-Stitch Interlock (docs/FUTURE/NEOSTITCH_PLAN.md): object-centered mm
+    // bounds (same convention as TextureBump's per-table bounds, PrintObject.cpp's tb_bounds), fed
+    // to TextureBump::compute_u() for the world-stable angular coordinate the notch/fill signal is
+    // phased on. Set by LayerRegion::make_perimeters(); a default-constructed (empty) box is a
+    // harmless no-op when NeoStitch is disabled (F1: no PrintRegionConfig gate yet, always set).
+    BoundingBoxf3 neostitch_bounds;
+
     PerimeterGenerator(
         // Input:
         const SurfaceCollection*    slices,

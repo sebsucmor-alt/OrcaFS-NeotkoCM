@@ -43,6 +43,7 @@
 #include <boost/uuid/uuid_io.hpp>
 
 #include <wx/sizer.h>
+#include <wx/display.h> // NEOTKO_LIBRE_TAG s211 — validate the remembered floating rect against live displays
 #include <wx/stattext.h>
 #include <wx/button.h>
 #include <wx/bmpcbox.h>
@@ -84,6 +85,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
 #include "libslic3r/SLA/Hollowing.hpp"
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
@@ -8894,7 +8896,16 @@ struct Plater::priv
     wxString m_default_window_layout;
     // NeotkoLIBRE_START — s133: detachable Process panel (LibreMode).
     bool     m_params_panel_floated = false;
-    wxString m_libre_window_layout;
+    // s211: replaced whole-AuiMgr perspective (m_libre_window_layout) with just this one
+    // pane's remembered floating rect. Reloading a full manager perspective on Libre-toggle
+    // also touched sidebar/main-view geometry, and an invalid width/height (e.g. carried over
+    // from a different screen/machine) corrupted the whole layout — panel ended up not
+    // floating/docking anywhere sane. Invalid (width<=0) means "nothing remembered yet".
+    wxRect   m_libre_panel_rect = wxRect(-1, -1, -1, -1);
+    // s211: separate from m_libre_panel_rect — remembers the DOCKED width (the common case:
+    // user leaves the pane docked right and just drags the sash) so it survives across
+    // sessions too, not only the floating-rect case. -1 = nothing remembered yet.
+    int      m_libre_panel_dock_width = -1;
     // s133: cached LibreMode active state, mirrored into the print config at apply time so the
     // slicer can relax bed/boundary checks. Set ONLY via set_neotko_libre_cached() (toggle/startup).
     bool     m_neotko_libre_cached = false;
@@ -9605,8 +9616,25 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             m_aui_mgr.LoadPerspective(layout, false);
             sidebar_layout.is_collapsed = !sidebar.IsShown();
         }
-        // NeotkoLIBRE — s133: remember the floating-Process-panel layout across sessions.
-        m_libre_window_layout = wxString::FromUTF8(cfg->get("libre_window_layout"));
+        // NeotkoLIBRE — s133/s211: remember the floating-Process-panel RECT (not a whole
+        // perspective, see m_libre_panel_rect comment) across sessions.
+        {
+            const std::string rect_str = cfg->get("libre_panel_rect");
+            int x = -1, y = -1, w = -1, h = -1;
+            char comma;
+            std::istringstream rect_iss(rect_str);
+            if ((rect_iss >> x >> comma >> y >> comma >> w >> comma >> h) && w > 0 && h > 0)
+                m_libre_panel_rect = wxRect(x, y, w, h);
+        }
+        // s211: remembered DOCKED width (covers the common case — pane left docked right,
+        // user just drags the sash — which the floating rect above never captures).
+        {
+            const std::string w_str = cfg->get("libre_panel_dock_width");
+            int w = -1;
+            std::istringstream w_iss(w_str);
+            if ((w_iss >> w) && w > 0)
+                m_libre_panel_dock_width = w;
+        }
 
         // Keep tracking the current sidebar size, by storing it using `best_size`, which will be stored
         // in the config and re-applied when the app is opened again.
@@ -10238,8 +10266,13 @@ void Plater::priv::float_params_panel(bool do_float)
         // to the AuiMgr as a right-docked, floatable "Process" pane.
         scrolled_sizer->Detach(pp);
         pp->Reparent(q);
+        // s211: force a fresh layout pass under the new parent before AddPane reads any size
+        // hint from it — reparenting without this left the pane's own best-size stale and the
+        // dock collapsed to a sliver on first activation.
+        pp->Layout();
 
         const int em = wxGetApp().em_unit();
+        const int dock_w = m_libre_panel_dock_width > 0 ? m_libre_panel_dock_width : 45 * em;
         m_aui_mgr.AddPane(pp, wxAuiPaneInfo()
             .Name("params_panel")
             .Caption(_L("Process"))
@@ -10248,23 +10281,49 @@ void Plater::priv::float_params_panel(bool do_float)
             .CloseButton(false)
             .TopDockable(false)
             .BottomDockable(false)
-            .BestSize(wxSize(45 * em, -1)));
+            .MinSize(wxSize(20 * em, -1)) // s211: floor so it can never collapse to a sliver
+            .BestSize(wxSize(dock_w, -1)));
 
-        if (!m_libre_window_layout.empty())
-            m_aui_mgr.LoadPerspective(m_libre_window_layout, false);
+        // s211: restore only the remembered FLOATING RECT for this one pane (if any, and
+        // only if it still falls on a currently-connected display) instead of reloading a
+        // whole-manager perspective — that also repositioned the sidebar/main-view panes and
+        // could leave everything (not just this pane) docked/sized wrong after a screen or
+        // machine change. No remembered/valid rect -> keep the sane ".Right()" dock coded above.
+        if (m_libre_panel_rect.width > 0 && m_libre_panel_rect.height > 0) {
+            bool rect_on_a_live_display = false;
+            for (unsigned i = 0; i < wxDisplay::GetCount() && !rect_on_a_live_display; ++i)
+                rect_on_a_live_display = wxDisplay(i).GetClientArea().Intersects(m_libre_panel_rect);
+            if (rect_on_a_live_display) {
+                auto& pane = m_aui_mgr.GetPane(pp);
+                pane.Float().FloatingPosition(m_libre_panel_rect.GetPosition())
+                            .FloatingSize(m_libre_panel_rect.GetSize());
+            }
+        }
 
         m_aui_mgr.Update();
         scrolled_sizer->Layout();
         m_params_panel_floated = true;
     } else {
-        // Persist the floating layout, dock it back, then return ownership to the sidebar sizer.
-        m_libre_window_layout = m_aui_mgr.SavePerspective();
-        wxGetApp().app_config->set("libre_window_layout", m_libre_window_layout.utf8_string());
-
+        // Persist the pane's current size before docking it back, then return ownership to the
+        // sidebar sizer. s211: capture the width in BOTH cases (docked-and-resized is the
+        // common case — user just drags the sash — not only the floated-out case), so a manual
+        // resize survives across sessions either way.
         {
-            auto& pane = m_aui_mgr.GetPane("params_panel");
-            if (pane.IsOk() && pane.IsFloating()) {
-                pane.Dock().Right();
+            auto& pane = m_aui_mgr.GetPane(pp);
+            if (pane.IsOk()) {
+                if (pane.IsFloating()) {
+                    m_libre_panel_rect = wxRect(pane.floating_pos, pane.floating_size);
+                    std::ostringstream rect_oss;
+                    rect_oss << m_libre_panel_rect.x << ',' << m_libre_panel_rect.y << ','
+                             << m_libre_panel_rect.width << ',' << m_libre_panel_rect.height;
+                    wxGetApp().app_config->set("libre_panel_rect", rect_oss.str());
+                    m_libre_panel_dock_width = m_libre_panel_rect.width;
+                    pane.Dock().Right();
+                } else if (pane.rect.GetWidth() > 0) {
+                    m_libre_panel_dock_width = pane.rect.GetWidth();
+                }
+                if (m_libre_panel_dock_width > 0)
+                    wxGetApp().app_config->set("libre_panel_dock_width", std::to_string(m_libre_panel_dock_width));
                 m_aui_mgr.Update();
             }
         }
@@ -12139,9 +12198,28 @@ void Plater::priv::split_object()
     Model new_model = model;
     ModelObject* current_model_object = new_model.objects[obj_idx];
 
+    // NEOTKO_PROFILE_TAG (s212 bug-hunt) — ModelObject::split() only drops painted
+    // Sandwich recipes/Stickers for a SINGLE ModelVolume whose mesh contains multiple
+    // disconnected islands (`volume->mesh().split()` path, no facet/sticker copy code
+    // exists there at all). True multi-volume objects (volumes.size() > 1) go through
+    // a different path (NEOTKO_PROFILE_TAG/NEOTKO_STICKER_TAG blocks) that DOES copy
+    // both correctly — confirmed with logs on a 51-volume Assembled object, nothing
+    // lost. Only warn for the single-volume case; warning on a safe multi-volume split
+    // would be a false positive.
+    const bool is_single_volume_multi_island = current_model_object->volumes.size() == 1;
+    const bool had_paint    = is_single_volume_multi_island && SurfaceColorMix::object_has_any_colormix_paint(current_model_object);
+    const bool had_stickers = is_single_volume_multi_island && SurfaceColorMix::object_has_any_colormix_stickers(current_model_object);
+    const bool had_sandwich_paint = had_paint || had_stickers;
+    NEOTKO_LOG(PROFILE, "SPLIT_OBJECTS_WARN_CHECK obj='" << current_model_object->name
+        << "' volumes=" << current_model_object->volumes.size()
+        << " single_vol_multi_island=" << is_single_volume_multi_island
+        << " had_paint=" << had_paint << " had_stickers=" << had_stickers
+        << " will_warn=" << had_sandwich_paint);
+
     wxBusyCursor wait;
     ModelObjectPtrs new_objects;
     current_model_object->split(&new_objects);
+    NEOTKO_LOG(PROFILE, "SPLIT_OBJECTS_RESULT new_objects=" << new_objects.size());
     if (new_objects.size() == 1)
         // #ysFIXME use notification
         Slic3r::GUI::warning_catcher(q, _L("The selected object couldn't be split."));
@@ -12168,6 +12246,13 @@ void Plater::priv::split_object()
         {
             get_selection().add_object((unsigned int)idx, false);
         }
+
+        // NEOTKO_PROFILE_TAG (s212 bug-hunt) — see had_sandwich_paint above. A toast
+        // notification here didn't reliably show (queued right before remove()/
+        // load_model_objects() tear down and rebuild the plate), so use the same
+        // modal warning_catcher already used a few lines up in this function.
+        if (had_sandwich_paint)
+            Slic3r::GUI::warning_catcher(q, _L("Sandwich Color Recipes and Stickers will be lost"));
     }
 }
 

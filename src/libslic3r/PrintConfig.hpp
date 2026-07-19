@@ -118,6 +118,16 @@ enum class TextureProjectionAxis {
     Z,
 };
 
+// NEOTKO_NEOSTITCH_TAG — Z-Stitch Interlock target wall (docs/FUTURE/NEOSTITCH_PLAN.md §3.2).
+// Kept as its own enum family, not reused from FuzzySkinType/TextureBumpType -- same convention.
+enum class NeoStitchTarget {
+    Disabled,
+    Outermost,
+    SecondWall,
+    ThirdWall,
+    Innermost,
+};
+
 enum PrintHostType {
     htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, htMoonRaker_mqtt, htMoonRaker, 
 };
@@ -585,6 +595,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TextureBumpType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TextureProjectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TextureProjectionAxis)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NeoStitchTarget)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
@@ -1479,6 +1490,23 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,                       texture_bump_max_angle))
     ((ConfigOptionFloat,                       texture_bump_blur_strength))
     // NEOTKO_TEXTUREBUMP_TAG_END
+    // NEOTKO_NEOSTITCH_TAG_START — Z-Stitch Interlock: mechanical layer-to-layer interlock that
+    // never changes Z (notch/fill alternating along the target wall). See
+    // docs/FUTURE/NEOSTITCH_PLAN.md §3.1/§5.3 for the model these 9 keys implement.
+    ((ConfigOptionEnum<NeoStitchTarget>, neostitch))
+    ((ConfigOptionFloat,                 neostitch_depth))
+    ((ConfigOptionFloat,                 neostitch_flat_length))
+    ((ConfigOptionFloat,                 neostitch_ramp_length))
+    ((ConfigOptionFloat,                 neostitch_period))
+    ((ConfigOptionPercent,               neostitch_flow))
+    ((ConfigOptionInt,                   neostitch_skip_layers))
+    // NEOTKO_NEOSTITCH_TAG — F2b (plan §5.3): "real drop" recipe -- fill contained inside the
+    // notch (shorter, by a margin) instead of bridging its shoulders, and fill segments printed
+    // slower (Klipper regulates pressure over a non-constant flow -- empirical 75%, not a naive
+    // 50% from double-flow).
+    ((ConfigOptionFloat,                 neostitch_fill_margin))
+    ((ConfigOptionFloatOrPercent,        neostitch_fill_speed))
+    // NEOTKO_NEOSTITCH_TAG_END
     // NEOTKO_ZBUMP_TAG_START — Top Surface Z relief, own module (Feature/ZBump/), independent
     // of Texture Bump/PathBlend (no shared code). See docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md.
     ((ConfigOptionBool,    zbump_enabled))
@@ -1749,6 +1777,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               ooze_prevention))
     ((ConfigOptionString,             filename_format))
     ((ConfigOptionStrings,            post_process))
+    // NEOTKO_GCODE_REPROCESSOR — internal JSON blob storing Expert G-code Reprocessor rules
+    // (layer-ranged M220/SET_GCODE_OFFSET/etc injection). Not a real slicing parameter, dev-only,
+    // never rendered in any Tab. See libslic3r/GCode/ExpertGCodeReprocessor.cpp for the consumer.
+    ((ConfigOptionString,             expert_gcode_reprocessor_rules))
     ((ConfigOptionFloat,              mixed_color_layer_height_a))
     ((ConfigOptionFloat,              mixed_color_layer_height_b))
     ((ConfigOptionBool,               mixed_filament_gradient_mode))

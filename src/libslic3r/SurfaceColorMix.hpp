@@ -163,6 +163,32 @@ public:
                                                                 double z_min, double z_max,
                                                                 bool downward = false);
 
+    // NEOTKO_XVOL_CLIP_TAG (s210) — index (into mo->volumes) of the first
+    // model_part volume that contributes a qualifying triangle for `slot`
+    // within the Z band, or -1 if none. Used ONLY to order painted zones from
+    // DIFFERENT ModelVolumes by merge/assemble priority when two boolean-
+    // overlapping pieces (Assemble, neotko_assemble_boolean=true) have painted
+    // recipes whose footprints collide in the same band: the volume with the
+    // HIGHER index (later in the merge) wins, mirroring the exact criterion
+    // PrintObjectSlice.cpp's clip_multipart_objects already uses for plain
+    // geometry ("Clip every non-zero region preceding it" — later volume
+    // survives). Same scan/frame as dominant_painted_slot_in_z_range, stops at
+    // the first match instead of counting.
+    static int  painted_slot_owner_volume_index_in_z_range(const PrintObject* po, int slot,
+                                                             double z_min, double z_max,
+                                                             bool downward = false);
+
+    // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — volume-aware profile_id_for_slot.
+    // Slot tables (colormix_slot_to_profile_id) are per-ModelVolume: a merged
+    // object where two pieces each number slot N to a DIFFERENT recipe makes the
+    // first-volume-wins scan of profile_id_for_slot() return the wrong recipe for
+    // whichever piece isn't first. This resolves the profile from the SPECIFIC
+    // volume that owns the painted footprint here (vol_idx, typically from
+    // painted_slot_owner_volume_index_in_z_range). vol_idx < 0 (owner unknown, or
+    // natural remainder) falls back to profile_id_for_slot — byte-identical for
+    // single-volume objects, where the owner IS the only model_part.
+    static int  profile_id_for_slot_in_volume(const PrintObject* po, int slot, int vol_idx);
+
     // NEOTKO_STICKER_TAG — Sandwich Sticker helpers (SVG masks, no facets).
     //
     // `object_has_any_colormix_stickers`: true if the object carries at least

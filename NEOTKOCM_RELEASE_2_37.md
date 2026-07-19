@@ -5,7 +5,7 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 ---
 
-# Neotko FullSpectrum 2.3.7 (draft, in progress) — on Snapmaker Orca 2.3.4 — Release Notes
+# Neotko FullSpectrum 2.3.7 (released) — on Snapmaker Orca 2.3.4 — Release Notes
 
 > ⚠️ ** Review your generated G-code before long or production prints, especially if you
 > turn on anything marked **expert-only** below.
@@ -13,12 +13,32 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 **2.3.7 is an incremental release on top of 2.3.6** (see `NEOTKOCM_RELEASE_2_36.md` and earlier notes
 for the full feature set). This notes file is a **running draft** — it grows as sessions land, the same
 way 2.3.6's did, until this version ships. So far it includes a fix for **tooltip colours in day/light
-mode** across Painter Pro Mode, ColorStitch Painter and the Bump Mapping Editor. Everything remains
+mode** across Painter Pro Mode, ColorStitch Painter and the Bump Mapping Editor, a first WIP cut of
+**NeoWave Support's contact-layer toggle**, an early **untested WIP** of **NeoStitch Interlock**
+(Z-axis layer interlocking), and a batch of Sandwich/ColorStitch Painter bug fixes. Everything remains
 **opt-in**: at defaults the build behaves like stock Snapmaker Orca.
 
 ---
 
 ## What's new in 2.3.7
+
+### Expert G-code Reprocessor (basic beta, Libre Mode, PRO/expert-only)
+
+New panel in the G-code Preview (next to the RealColor view selector): layer-ranged G-code
+post-processing rules, applied to the exported file right before it's written to disk. Only
+visible with Libre Mode on; shows a warning before applying since it edits real G-code.
+
+- **Speed override rules** — force `M220 S<percent>` from layer X to layer Y (or to the end).
+  Also fixes a real Snapmaker U1/Klipper issue: WipeTower toolchanges were forcing `M220 S100`
+  on every single color change, silently wiping any manual speed override — the gcode is now
+  a single clean speed adjustment instead of a constant reset/re-apply.
+- **Fan override rules** — force `M106 S<0-255>` from layer X to layer Y (or to the end).
+- Also removed `M220 B`/`M220 R` from the U1's toolchange gcode — those are leftover from older
+  Marlin-based Snapmaker machines and don't exist on the U1's Klipper firmware.
+
+This is a **basic/quick first cut** — functional and safe to use, but still basic beta: no
+temperature or nozzle Z-offset rules yet (Z-offset needs careful toolchange handling, coming
+later), and fan control is a hard override, not a smart clamp. Gated to Libre Mode, opt-in only.
 
 ### Tooltip colours fixed in day/light mode (bug fix)
 
@@ -41,6 +61,112 @@ affected — it doesn't use this shared style path.
 **Confirmed fixed** by Neotko across all three surfaces after rebuilding.
 
 **Nothing else changes** — this is a colour-only fix with no config or slicing impact.
+
+### NeoWave Support — contact-layer toggle shipped (new, WIP, Libre Mode only, print-pending)
+
+**NeoWave Support** (§12 of `WIKI.md`) gets its second mechanism: a **contact-layer toggle** that
+applies a Neoweave-style Z-oscillation to the object's own bridge fill directly above a support roof —
+valleys touch the roof, crests stay in the air, leaving microscopic contact gaps meant to reduce
+bonding force for easier support removal. It ships as **three new toggles under Support → Advanced**
+(Libre Mode only): an on/off switch plus an amplitude and a period for the wave, independent of the
+Sandwich system entirely — turning it on doesn't require painting anything, and it leaves the printed
+colour/pattern of that surface untouched, it only modulates Z.
+
+![NeoWave Support: hollow supports, the Wave-Huygens roof (Andersons, Sanchez, Vaneker — Twente University), and the new NeoWeaving low-contact oscillating contact layer](docs/images/NeoWave-ContactLayer.jpeg)
+
+**Design note:** the original plan called for this to be a paintable Sandwich pass; after review it
+shipped instead as a plain Support-section toggle that gates on the bridge-fill role wherever supports
+meet the model, which is simpler to reason about and works whether or not the object has any Sandwich
+painting at all.
+
+**⚠️ WIP — slice-verified, not yet print-validated.** The toggle is confirmed wiring correctly end to
+end (log-verified: the wave engine fires on every bridge-fill segment above a support roof, at the
+configured amplitude/period) and the resulting G-code looks correct, but this specific mechanism has
+never been through a real print yet — treat it as an early preview if you turn it on. Also note: Orca's
+G-code **preview doesn't render the Z variation** this produces (same known limitation as the existing
+Neoweave top/penu effect and ZBump) — the G-code is correct even though the on-screen preview looks flat.
+
+**Nothing changes if you don't open it.** The toggle defaults off; nothing about supports changes
+unless you turn it on.
+
+### NeoStitch Interlock — Z-axis layer interlocking (new, WIP, ⚠️ UNTESTED — preview only, no print yet)
+
+An early, **work-in-progress, completely untested** mechanism that interlocks consecutive layers of a
+chosen wall (Outermost / Second / Third / Innermost) **without ever moving Z**: along its own path,
+each layer alternates short **notch** segments (the wall deflects inward, leaving a gap at the nominal
+position) and **fill** segments (the wall over-extrudes there instead), and the pattern flips phase on
+alternating layers so every fill segment lands over the notch of the layer below it — a vertical
+"stitch" rather than a brick-style Z offset. Configured per-region under **Strength → NeoStitch
+Interlock** (stitch depth/length/period/flow, a fill-speed knob and a fill-margin knob to keep the
+over-extrusion contained inside its notch).
+
+![Z NeoStitch Interlayer Lock: alternating notch/fill segments on a cylinder wall, front view and top view showing the phase flip between layers](docs/images/NeoStitch-InterlayerLock.jpeg)
+
+**⚠️ This is genuinely untested — do not rely on it for anything beyond curiosity/preview.** So far it
+has only been checked in the **3D preview** (the alternating notches/fills are visible and register
+correctly layer to layer, exactly as designed) — **it has never been through a real print**, and one
+of its own sub-controls (the reduced fill-speed override) is a **known, confirmed-not-working bug**:
+setting it does not currently change the resulting G-code speed for those segments, root cause not yet
+found. Expect this section to expand (and the bug above to get fixed) in a later build as the feature
+matures. If you turn it on before then, inspect the G-code carefully and don't expect the fill-speed
+control to do anything yet.
+
+**Nothing changes if you don't touch it.** Off by default, per-region opt-in like Fuzzy Skin.
+
+### Bug fixes (Sandwich / ColorStitch Painter / Libre Mode)
+
+A batch of bugs found and fixed while stress-testing the Sandwich/ColorStitch Painter pipeline on
+multi-piece (Assembled) objects, plus one Libre Mode UI bug:
+
+- **Libre Mode's floating panel could drift off-screen or stop docking.** A leftover window-layout
+  state from a previous session (or a different monitor setup) could feed back into itself every time
+  Libre Mode was toggled, leaving the Process panel stuck floating in the wrong place or impossible to
+  dock. Fixed by validating the saved panel position against the currently connected screens before
+  reapplying it, falling back to the default docked position when it doesn't fit. **Confirmed fixed by
+  Neotko after rebuilding**, across two rounds (the drift itself, and a follow-up on panel size/persistence).
+- **"MixedFilament Object" toggle (ColorStitch Painter → Object) didn't trigger a re-slice.** Turning
+  the toggle on correctly changed the object's mode internally but never asked the slicer to recompute
+  — you had to make an unrelated change elsewhere to see the effect. Fixed: the toggle now schedules a
+  background re-slice the same way its sibling controls in the same gizmo already did. **Confirmed
+  fixed by Neotko after rebuilding.**
+- **Painting a new colour over an already-painted zone didn't refresh the 3D view.** The stroke's data
+  was applied correctly, but the on-screen colour only updated after clicking anywhere in the colour
+  palette (even reselecting the same colour). Fixed: finishing a paint stroke now refreshes the
+  painted-colour table the same way a palette click already did. **Confirmed fixed by Neotko after
+  rebuilding.**
+- **Assembling painted pieces that reused the same internal paint "slot" number could print the wrong
+  piece's recipe.** Each piece numbers its own painted zones independently (1, 2, 3…); if two Assembled
+  pieces both happened to use, say, slot 3 for two *different* recipes, the slicer could resolve both
+  to whichever piece's recipe it found first — visually correct in the Painter, wrong in the resulting
+  G-code. Fixed with two changes: new pieces being Assembled now get renumbered so no two pieces ever
+  reuse the same slot number going forward, and (as a safety net for objects already saved in this
+  state) slot lookups at slice time now resolve against the *specific* piece that actually owns the
+  paint in that spot instead of "whichever piece has that slot number first." **Confirmed fixed by
+  Neotko after rebuilding**, including the edge case of two steps of two different Assembled pieces
+  sitting only one layer height apart.
+- **Sandwich Stickers could vanish after Assemble.** The sticker data itself survived the merge intact,
+  but a housekeeping step that re-centres a newly Assembled object's geometry moved every mesh/volume
+  while leaving each sticker's stored position untouched — on a typical multi-piece assembly this
+  silently pushed every sticker's effective height above the top of the model, so it never printed
+  again (not a data loss, a position drift out of range). Fixed: stickers now get the same re-centring
+  shift applied to them as the geometry. **Confirmed fixed by Neotko after rebuilding** — a follow-up
+  fix for the mirror case (a sticker not surviving **Split to Objects**, the reverse of Assemble) is
+  also in this build but **not yet confirmed** by testing.
+- **A sticker appearing to render on only one volume of a multi-volume object turned out to be a
+  false alarm.** Re-tested after the fixes above with a multi-volume object (never Assembled — a
+  single STL import with many separate mesh bodies) painted with different recipes per volume: every
+  sticker stays correct, including with mismatched recipes. **Confirmed by Neotko.**
+- **Splitting a painted object (Split → To Objects or To Parts) could silently lose its Sandwich
+  recipes (ColorMix/PathBlend/Solid) or Stickers, with no warning.** "To Parts" always re-splits the
+  mesh into fresh volumes and never carried the paint data across, no matter the object's shape. "To
+  Objects" only loses it for objects made of a **single mesh volume** containing many disconnected
+  triangle islands (a common way to import a multi-body STL) — a true multi-volume object (e.g. an
+  Assembled multi-piece object) already carries its paint across correctly and is unaffected. A proper
+  fix (re-mapping each painted triangle to the piece it ends up in) is a bigger job for a future build;
+  for now, both Split commands warn up front when they're about to lose something — "Sandwich Color
+  Recipes and Stickers will be lost" — using the same branded dialog style as the rest of the app.
+  **Confirmed by Neotko** on both Split to Objects and Split to Parts, including that "To Objects" no
+  longer warns unnecessarily on a safe multi-volume split.
 
 ---
 
@@ -81,10 +207,14 @@ shape it was saved with.
   type "NeoWave" + Interface pattern "Wave". The core mechanism (roof shape Concentric/Wave, print order
   Smart/ZigZag/Monotonic, a reverse-direction toggle, and a hollow-pillar mode via a wall-loop count) is
   implemented and **print-validated for the Wave roof shape**, which closes cleanly over a hollow pillar
-  — Concentric fails over a hollow pillar and is kept only as a comparison option. Not finished: the
-  second mechanism (a Neoweave-style contact layer between roof and part, to reduce bonding force) is
-  designed but not wired up yet, and roof thickness still borrows the existing "Top interface layers"
-  setting rather than having its own key. Work is currently paused between sessions.
+  — Concentric fails over a hollow pillar and is kept only as a comparison option. The second mechanism
+  (a Neoweave-style contact layer, now shipped this build as its own Support → Advanced toggle — see
+  "What's new" above) is slice-verified but **print-pending** — its first real print is still ahead.
+  Roof thickness still borrows the existing "Top interface layers" setting rather than having its own
+  key. Work is currently paused between sessions.
+- **NeoStitch Interlock (⚠️ new, WIP, UNTESTED)** — see "What's new" above. Preview-verified only, never
+  printed, and its fill-speed control is a confirmed no-op for now. Treat anything you see with it on as
+  provisional.
 - **Monotonic Interlayer Nesting** is **not yet ported** to this base.
 - **World-space import** is functional at a basic level; importing as Assembled and splitting in Libre
   Mode is the recommended route.
@@ -117,6 +247,18 @@ shape it was saved with.
 ## Backward Compatibility
 
 - **Tooltip colour fix**: visual-only, no config keys or slicing behavior touched.
+- **NeoWave Support contact-layer toggle**: new keys, default off, Support-section only — a scene
+  without it turned on slices identically to before.
+- **NeoStitch Interlock**: new per-region keys, default `Disabled` — an object that doesn't set it
+  slices identically to before.
+- **Sandwich/Sticker bug fixes**: the Assemble-time slot-renumbering and sticker re-centring fixes only
+  change behavior for objects that previously hit the bug (colliding slot numbers, or stickers drifting
+  off the model after Assemble); a merge that doesn't hit either condition produces the same result as
+  before.
+- **Split warning**: purely a UI confirmation dialog shown before a Split that would lose painted data
+  — no config keys, no slicing behaviour change. Splitting an unpainted object, or an object whose
+  paint already survives the split (true multi-volume objects), shows no dialog and behaves exactly
+  as before.
 - **Painter Pro Mode ungated from Libre Mode** (2.3.6): the whole F1-F4 section is visible without Libre
   Mode on, but F1-F4 stay individually opt-in and off by default — nothing changes for a paint job that
   doesn't touch them.

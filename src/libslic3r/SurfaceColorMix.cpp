@@ -692,6 +692,50 @@ std::vector<int> SurfaceColorMix::enumerate_painted_slots_in_z_range(
     return out;
 }
 
+// NEOTKO_XVOL_CLIP_TAG (s210) — see header comment. Mirrors the scan/frame of
+// dominant_painted_slot_in_z_range but walks mo->volumes BY INDEX and returns
+// on the first qualifying triangle instead of counting — this is a pure
+// "who owns this slot's paint in this band" lookup, not a new resolution
+// algorithm, so it stays a sibling of the trio above rather than touching
+// their signatures.
+int SurfaceColorMix::painted_slot_owner_volume_index_in_z_range(const PrintObject* po, int slot,
+                                                                  double z_min, double z_max,
+                                                                  bool downward)
+{
+    if (!po || slot <= 0 || slot >= ModelVolume::COLORMIX_SLOT_COUNT) return -1;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return -1;
+
+    const Transform3d trafo = po->trafo_centered(); // NEOTKO_COLORSTITCH_TAG s161 — slice frame (see dominant_painted_slot_in_z_range)
+    const double z_tol = 0.02;
+
+    for (size_t vi = 0; vi < mo->volumes.size(); ++vi) {
+        const ModelVolume* mv = mo->volumes[vi];
+        if (!mv || !mv->is_model_part()) continue;
+        const Transform3d vt = trafo * mv->get_matrix();
+        const indexed_triangle_set its = mv->color_mix_paint_facets.get_facets(
+            *mv, static_cast<EnforcerBlockerType>(slot));
+        if (its.indices.empty()) continue;
+        for (const auto& tri : its.indices) {
+            const Vec3f& v0f = its.vertices[tri[0]];
+            const Vec3f& v1f = its.vertices[tri[1]];
+            const Vec3f& v2f = its.vertices[tri[2]];
+            const Vec3d v0 = vt * Vec3d(v0f.x(), v0f.y(), v0f.z());
+            const Vec3d v1 = vt * Vec3d(v1f.x(), v1f.y(), v1f.z());
+            const Vec3d v2 = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
+            const Vec3d e1 = v1 - v0, e2 = v2 - v0;
+            const Vec3d n  = e1.cross(e2);
+            if (downward ? (n.z() >= 0.0) : (n.z() <= 0.0)) continue;
+            const double pick_z = downward
+                ? std::min({v0.z(), v1.z(), v2.z()})
+                : std::max({v0.z(), v1.z(), v2.z()});
+            if (pick_z >= z_min - z_tol && pick_z <= z_max + z_tol)
+                return static_cast<int>(vi);
+        }
+    }
+    return -1;
+}
+
 // ---------------------------------------------------------------------------
 // NEOTKO_STICKER_TAG — Sandwich Sticker helpers.
 //
@@ -733,9 +777,22 @@ std::vector<size_t> SurfaceColorMix::enumerate_stickers_in_z_range(
     // so the Fill.cpp consumer can peel the remaining area in occlusion order.
     for (size_t k = mo->colormix_stickers.size(); k-- > 0; ) {
         const ColorMixSticker& st = mo->colormix_stickers[k];
-        if (st.svg_data.empty() || st.profile_id == 0) continue;
-        if (Slic3r::SurfaceEffectProfileManager::get().find(st.profile_id) == nullptr) continue;
-        const double anchor_z = (trafo * st.transform * Vec3d(0.0, 0.0, 0.0)).z();
+        // NEOTKO_STICKER_TAG (s212, debug — bug: stickers "disappear" on Assemble) —
+        // unconditional per-sticker trace (unlike the summary log below, gated on
+        // !out.empty()), so a sticker that fails EVERY band gets its failure reason
+        // recorded at least once instead of silently never appearing in any log.
+        const bool profile_found = st.profile_id != 0
+            && Slic3r::SurfaceEffectProfileManager::get().find(st.profile_id) != nullptr;
+        const Vec3d anchor_dbg = trafo * st.transform * Vec3d(0.0, 0.0, 0.0);
+        if (NeoDebug::enabled(NeoDebug::PROFILE))
+            NEOTKO_LOG(PROFILE, "STICKER_CHECK idx=" << k << " name='" << st.name << "'"
+                << " band=[" << z_min << "," << z_max << "]"
+                << " svg_empty=" << (st.svg_data.empty() ? "1" : "0")
+                << " profile_id=" << st.profile_id
+                << " profile_found=" << (profile_found ? "1" : "0")
+                << " anchor=[" << anchor_dbg.x() << "," << anchor_dbg.y() << "," << anchor_dbg.z() << "]");
+        if (st.svg_data.empty() || !profile_found) continue;
+        const double anchor_z = anchor_dbg.z();
         if (anchor_z >= z_min - z_tol && anchor_z <= z_max + z_tol)
             out.push_back(k);
     }
@@ -1002,6 +1059,26 @@ int SurfaceColorMix::profile_id_for_slot(const PrintObject* po, int slot)
             return mv->colormix_slot_to_profile_id[slot];
     }
     return 0;
+}
+
+// NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — volume-aware variant. Resolves the
+// profile from the slot table of a SPECIFIC volume (vol_idx, the owner of this
+// painted footprint), so a merged object where two pieces reuse the same slot
+// number for DIFFERENT recipes emits each piece's OWN recipe instead of the
+// first-volume-wins one. vol_idx < 0 or a volume with no entry at this slot
+// falls back to profile_id_for_slot() — byte-identical for single-volume
+// objects (owner resolves to the only model_part → same table).
+int SurfaceColorMix::profile_id_for_slot_in_volume(const PrintObject* po, int slot, int vol_idx)
+{
+    if (!po || slot <= 0 || slot >= ModelVolume::COLORMIX_SLOT_COUNT) return 0;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return 0;
+    if (vol_idx >= 0 && vol_idx < (int)mo->volumes.size()) {
+        const ModelVolume* mv = mo->volumes[vol_idx];
+        if (mv && mv->is_model_part() && mv->colormix_slot_to_profile_id[slot] != 0)
+            return mv->colormix_slot_to_profile_id[slot];
+    }
+    return profile_id_for_slot(po, slot);   // fallback: first-volume-wins (legacy)
 }
 
 // NEOTKO_PROFILE_TAG — true if any model_part volume has at least one slot

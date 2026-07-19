@@ -6,6 +6,7 @@
 #include "ExtrusionEntityCollection.hpp"
 #include "Feature/FuzzySkin/FuzzySkin.hpp"
 #include "Feature/TextureBump/TextureBump.hpp"
+#include "Feature/NeoStitch/NeoStitch.hpp"
 #include "NeoDebug.hpp"
 #include "PrintConfig.hpp"
 #include "ShortestPath.hpp"
@@ -387,6 +388,12 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
         const bool  is_contour = !extrusion->is_closed || pg_extrusion.is_contour;
         apply_fuzzy_skin(extrusion, perimeter_generator, is_contour);
         apply_texture_bump(extrusion, perimeter_generator, is_contour, total_loops);
+        // NEOTKO_NEOSTITCH_TAG — Z-Stitch Interlock (docs/FUTURE/NEOSTITCH_PLAN.md), applied last so
+        // it sees whatever fuzzy skin/texture bump already did to this line's junctions. Captured
+        // bool drives apply_neostitch_fill_speed() below (F2b, plan §5.3) once `paths` is built --
+        // that call needs a fully-formed ExtrusionPaths (per-path resolved width), not the
+        // junctions this returns from.
+        const bool neostitch_applied = Slic3r::Feature::NeoStitch::apply_neostitch(extrusion, perimeter_generator, is_contour, total_loops);
 
         ExtrusionPaths paths;
         // detect overhanging/bridging perimeters
@@ -546,6 +553,14 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         // Append paths to collection.
         if (!paths.empty()) {
+            // NEOTKO_NEOSTITCH_TAG — F2b (plan §5.3): tag the fill sub-path(s) for GCode.cpp's speed
+            // selection, now that `paths` is fully built (both the overhang-clip branch above and
+            // the plain else branch converge here) -- see apply_neostitch_fill_speed()'s own comment
+            // for why width-comparison at this point is correct and preferred over re-deriving the
+            // signal at gcode-emission time.
+            if (neostitch_applied)
+                Slic3r::Feature::NeoStitch::apply_neostitch_fill_speed(paths, perimeter_generator, *extrusion);
+
             const int inset_idx = int(extrusion->inset_idx);
             for (ExtrusionPath &path : paths)
                 path.inset_idx = inset_idx;

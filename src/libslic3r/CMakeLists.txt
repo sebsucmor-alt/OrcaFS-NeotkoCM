@@ -154,6 +154,8 @@ set(lisbslic3r_sources
     Feature/TextureBump/TextureBump.hpp
     Feature/TextureBump/TextureBumpZone.cpp
     Feature/TextureBump/TextureBumpZone.hpp
+    Feature/NeoStitch/NeoStitch.cpp
+    Feature/NeoStitch/NeoStitch.hpp
     Feature/ZBump/ZBump.cpp
     Feature/ZBump/ZBump.hpp
     Feature/Interlocking/InterlockingGenerator.cpp
@@ -246,6 +248,8 @@ set(lisbslic3r_sources
     GCode/ExtrusionProcessor.hpp
     GCode/FanMover.cpp
     GCode/FanMover.hpp
+    GCode/ExpertGCodeReprocessor.cpp
+    GCode/ExpertGCodeReprocessor.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     GCode.hpp

@@ -3448,8 +3448,12 @@ void Print::_make_wipe_tower()
 
     if (!bUseWipeTower2) {
         // in BBL machine, wipe tower is only use to prime extruder. So just use a global wipe volume.
+        // NEOTKO_GCODE_REPROCESSOR: neotko_libre_mode lives on PrintObjectConfig (per-object), not
+        // on m_config (PrintConfig) — read it off the first object, same pattern GCode.cpp:1793
+        // already uses. It's a global LibreMode toggle in practice, so any object's value matches.
         WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_config.prime_volume, m_wipe_tower_data.tool_ordering.first_extruder(),
-                             m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z);
+                             m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z,
+                             !m_objects.empty() && m_objects.front()->config().neotko_libre_mode.value);
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
@@ -3544,8 +3548,12 @@ void Print::_make_wipe_tower()
                                                   {scale_(origin.x()), scale_(origin.y())});
     } else {
         // Initialize the wipe tower.
+        // NEOTKO_GCODE_REPROCESSOR: neotko_libre_mode lives on PrintObjectConfig (per-object), not
+        // on m_config (PrintConfig) — read it off the first object, same pattern GCode.cpp:1793
+        // already uses. It's a global LibreMode toggle in practice, so any object's value matches.
         WipeTower2 wipe_tower(m_config, m_default_region_config, m_plate_index, m_origin, wipe_volumes,
-                              m_wipe_tower_data.tool_ordering.first_extruder());
+                              m_wipe_tower_data.tool_ordering.first_extruder(),
+                              !m_objects.empty() && m_objects.front()->config().neotko_libre_mode.value);
         const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print = GCode::collect_layers_to_print(*this);
         size_t layers_to_print_idx = 0;
 

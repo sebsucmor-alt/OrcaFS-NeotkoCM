@@ -419,6 +419,12 @@ private:
     const PrintConfig*                     m_print_config    = nullptr;
     const PrintRegionConfig*               m_region_config   = nullptr;
 
+    // NEOTKO_GCODE_REPROCESSOR: cached from the Print in collect_and_plan() (neotko_libre_mode
+    // lives on PrintObjectConfig, not reachable from m_print_config), threaded into the
+    // NeoWipeTower it constructs in generate() so LibreMode can skip its M220 S100 toolchange
+    // reset the same way the Classic WipeTower2 path does.
+    bool                                   m_neotko_libre_mode = false;
+
     // plate_idx and plate_origin stored for WipeTower2 construction in generate().
     int                                    m_plate_idx       = 0;
     Vec3d                                  m_plate_origin    = Vec3d::Zero();

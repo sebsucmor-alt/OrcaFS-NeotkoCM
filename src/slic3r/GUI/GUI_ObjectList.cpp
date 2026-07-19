@@ -4,6 +4,7 @@
 #include "GUI_Factories.hpp"
 //#include "GUI_ObjectLayers.hpp"
 #include "GUI_App.hpp"
+#include "GUI.hpp" // NEOTKO_PROFILE_TAG — warning_catcher() for split() sandwich-loss warning
 #include "I18N.hpp"
 #include "Plater.hpp"
 #include "BitmapComboBox.hpp"
@@ -14,6 +15,9 @@
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/NeoDebug.hpp"
+#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
+#include <sstream>
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "PartPlate.hpp"
@@ -2763,6 +2767,18 @@ void ObjectList::split()
         return;
     }
 
+    // NEOTKO_PROFILE_TAG (s212 bug-hunt) — same paint-loss risk as "Split to Objects":
+    // volume->split() renumbers triangles into new volumes, invalidating the old
+    // per-facet paint indices. Warn up front rather than fix every code path.
+    ModelObject* model_object_pre_split = (*m_objects)[obj_idx];
+    const bool had_paint    = SurfaceColorMix::object_has_any_colormix_paint(model_object_pre_split);
+    const bool had_stickers = SurfaceColorMix::object_has_any_colormix_stickers(model_object_pre_split);
+    const bool had_sandwich_paint = had_paint || had_stickers;
+    NEOTKO_LOG(PROFILE, "SPLIT_PARTS_WARN_CHECK obj='" << model_object_pre_split->name
+        << "' volumes=" << model_object_pre_split->volumes.size()
+        << " had_paint=" << had_paint << " had_stickers=" << had_stickers
+        << " will_warn=" << had_sandwich_paint);
+
     take_snapshot("Split to parts");
 
     volume->split(filament_cnt);
@@ -2800,6 +2816,12 @@ void ObjectList::split()
     notify_instance_updated(obj_idx);
 
     update_info_items(obj_idx);
+
+    // NEOTKO_PROFILE_TAG (s212 bug-hunt) — see had_sandwich_paint above. Use the
+    // same branded warning_catcher dialog as "Split to Objects" (Plater.cpp) for
+    // a consistent look, instead of the plain OS wxMessageBox.
+    if (had_sandwich_paint)
+        Slic3r::GUI::warning_catcher(this, _L("Sandwich Color Recipes and Stickers will be lost"));
 }
 
 void ObjectList::merge(bool to_multipart_object)
@@ -2908,8 +2930,67 @@ void ObjectList::merge(bool to_multipart_object)
 
         Slic3r::SaveObjectGaurd gaurd(*new_object);
 
+        // NEOTKO_PENU_MERGE_TAG (s210) — penultimate_top_layers is an object-wide value; unlike
+        // extruder/color (resolved per volume by the wipe-tower pipeline), the engine has no
+        // per-piece resolution for it. Left to the generic "first source wins" merge below, a
+        // piece that wanted more depth than another would silently lose it with no indication.
+        // Collect every source object's effective value here; resolved to MAX (never silently
+        // shrinks a user's authored depth) + a heads-up notification once all sources are known.
+        std::vector<int> penu_values_seen;
+
+        // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — Sandwich ColorMix "slot" numbers
+        // (colormix_slot_to_profile_id) are per-source-object: each object numbers
+        // its own painted zones 1..N independently. If two merged objects both used
+        // slot N for a DIFFERENT recipe, every consumer that resolves "profile for
+        // slot N on this PrintObject" collapses to one recipe for BOTH — the wrong
+        // one for whichever object isn't picked. Renumbering here, BEFORE volumes are
+        // merged, makes slot numbers unique across the whole merged object, so the
+        // collision cannot occur downstream (Fill.cpp / SurfaceColorMix.cpp) by
+        // construction. 254 usable slots (COLORMIX_SLOT_COUNT=255, index 0=unpainted)
+        // — plenty of headroom for realistic paint jobs. Cero cambio de comportamiento
+        // si los objetos fusionados no repiten número de slot entre sí (caso común).
+        std::set<int> used_colormix_slots;
+
         for (int obj_idx : obj_idxs) {
             ModelObject* object = (*m_objects)[obj_idx];
+
+            {
+                const ConfigOption* penu_opt = object->config.option("penultimate_top_layers");
+                const int penu_val = penu_opt ? penu_opt->getInt()
+                    : DynamicPrintConfig::new_from_defaults_keys({ "penultimate_top_layers" })->option("penultimate_top_layers")->getInt();
+                penu_values_seen.push_back(penu_val);
+            }
+
+            // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — collect this object's OWN colormix
+            // slots (union across its volumes; a single source object's volumes already
+            // share one consistent numbering, see profile_id_for_slot's comment) and, if
+            // any collide with a slot number an EARLIER merged object already claimed,
+            // build a remap that moves this object's WHOLE slot set to a fresh
+            // contiguous block. Applied to each of this object's volumes just below, in
+            // the existing "merge volumes" loop.
+            std::map<int,int> colormix_slot_remap;   // old slot → new slot, this object only
+            {
+                std::set<int> this_obj_slots;
+                for (const ModelVolume* volume : object->volumes)
+                    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
+                        if (volume->colormix_slot_to_profile_id[s] != 0)
+                            this_obj_slots.insert(s);
+                bool collides = std::any_of(this_obj_slots.begin(), this_obj_slots.end(),
+                    [&used_colormix_slots](int s) { return used_colormix_slots.count(s) != 0; });
+                if (collides && !this_obj_slots.empty()) {
+                    int next_free = used_colormix_slots.empty() ? 1 : (*used_colormix_slots.rbegin() + 1);
+                    if (next_free + (int)this_obj_slots.size() - 1 < ModelVolume::COLORMIX_SLOT_COUNT) {
+                        for (int old_slot : this_obj_slots)
+                            colormix_slot_remap[old_slot] = next_free++;
+                    }
+                    // else: would overflow the 254-slot range — extremely unlikely in
+                    // practice (would need 254+ distinct recipes across the merge).
+                    // Leave unmapped rather than risk corrupting the slot table; falls
+                    // back to the legacy first-object-wins resolution for this object.
+                }
+                for (int s : this_obj_slots)
+                    used_colormix_slots.insert(colormix_slot_remap.count(s) ? colormix_slot_remap.at(s) : s);
+            }
 
             const Geometry::Transformation& transformation = object->instances[0]->get_transformation();
             //const Vec3d scale     = transformation.get_scaling_factor();
@@ -2963,8 +3044,57 @@ void ObjectList::merge(bool to_multipart_object)
 
 
                 new_volume->mmu_segmentation_facets.assign(std::move(volume->mmu_segmentation_facets));
+
+                // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — apply this object's colormix
+                // slot remap (computed above, before this loop): re-tag every painted
+                // triangle AND move the slot→profile table entries in lockstep, so the
+                // table and the per-triangle tags stay consistent.
+                if (!colormix_slot_remap.empty()) {
+                    EnforcerBlockerStateMap state_map;
+                    for (size_t i = 0; i < state_map.size(); ++i)
+                        state_map[i] = EnforcerBlockerType(i);   // identity by default
+                    for (const auto& [old_slot, new_slot] : colormix_slot_remap)
+                        state_map[old_slot] = EnforcerBlockerType(new_slot);
+                    new_volume->color_mix_paint_facets.remap_enforcer_block_types(
+                        *new_volume, EnforcerBlockerType::ExtruderMax, state_map);
+
+                    int old_table[ModelVolume::COLORMIX_SLOT_COUNT];
+                    std::copy(std::begin(new_volume->colormix_slot_to_profile_id),
+                              std::end(new_volume->colormix_slot_to_profile_id), old_table);
+                    std::fill(std::begin(new_volume->colormix_slot_to_profile_id),
+                              std::end(new_volume->colormix_slot_to_profile_id), 0);
+                    for (const auto& [old_slot, new_slot] : colormix_slot_remap)
+                        new_volume->colormix_slot_to_profile_id[new_slot] = old_table[old_slot];
+                }
             }
             new_object->sort_volumes(true);
+
+            // NEOTKO_STICKER_TAG — merge Sandwich Stickers: transform is sticker-local(mm,z=0)->object
+            // frame, so it needs the same instance transform baked into the volumes above (line ~2929)
+            // to land correctly in the merged object's single-instance frame. profile_id is left as-is:
+            // SurfaceEffectProfileManager is a global singleton, not per-object, so ids are already
+            // valid across the merge.
+            for (const ColorMixSticker& sticker : object->colormix_stickers) {
+                ColorMixSticker new_sticker = sticker;
+                new_sticker.transform = transformation_matrix * sticker.transform;
+                // NEOTKO_STICKER_TAG (s212, debug — bug: stickers "disappear" on Assemble)
+                // — unconditional (no !out.empty() gate like enumerate_stickers_in_z_range),
+                // so we see EVERY sticker's anchor before/after the merge transform, not
+                // just the ones that happen to still resolve downstream.
+                if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+                    const Vec3d old_anchor = sticker.transform * Vec3d::Zero();
+                    const Vec3d new_anchor = new_sticker.transform * Vec3d::Zero();
+                    std::ostringstream _sdbg;
+                    _sdbg << "STICKER_MERGE name='" << sticker.name << "'"
+                          << " profile_id=" << sticker.profile_id
+                          << " svg_empty=" << (sticker.svg_data.empty() ? "1" : "0")
+                          << " src_obj='" << object->name << "'"
+                          << " old_anchor=[" << old_anchor.x() << "," << old_anchor.y() << "," << old_anchor.z() << "]"
+                          << " new_anchor=[" << new_anchor.x() << "," << new_anchor.y() << "," << new_anchor.z() << "]";
+                    NeoDebug::write(NeoDebug::PROFILE, _sdbg.str());
+                }
+                new_object->colormix_stickers.emplace_back(std::move(new_sticker));
+            }
 
             // merge settings
             auto new_opt_keys = config.keys();
@@ -2995,6 +3125,22 @@ void ObjectList::merge(bool to_multipart_object)
                 new_object->layer_config_ranges.emplace(range);
         }
 
+        // NEOTKO_PENU_MERGE_TAG (s210) — see collection above. If the sources disagreed, override
+        // whatever the generic per-key merge loop picked (first source, silently) with the MAX seen,
+        // and tell the user — Assemble can't give each part its own depth, only Split+LibreMode can.
+        if (!penu_values_seen.empty()) {
+            const int penu_max = *std::max_element(penu_values_seen.begin(), penu_values_seen.end());
+            const bool penu_differs = std::any_of(penu_values_seen.begin(), penu_values_seen.end(),
+                [penu_max](int v) { return v != penu_max; });
+            if (penu_differs) {
+                config.set_key_value("penultimate_top_layers", new ConfigOptionInt(penu_max));
+                wxGetApp().plater()->get_notification_manager()->push_notification(
+                    "Assembled parts had different Penultimate layer counts — using the highest ("
+                    + std::to_string(penu_max) + ") for the whole object. Assemble can't give each part "
+                    "its own depth; Split the parts and use LibreMode for real per-part control.");
+            }
+        }
+
         //BBS: ensure on bed, and no need to center around origin
         // NeotkoLIBRE_START — s133: in LibreMode keep the assembled (merged) group at its Z instead
         // of snapping to bed. center_around_origin + translate_instances below preserve world XYZ;
@@ -3003,6 +3149,23 @@ void ObjectList::merge(bool to_multipart_object)
             new_object->ensure_on_bed();
         // NeotkoLIBRE_END
         new_object->center_around_origin();
+        // NEOTKO_STICKER_TAG (s212, bug: stickers vanish after Assemble) —
+        // center_around_origin() just above shifts every ModelVolume's local offset
+        // by `shift` (== new_object->origin_translation at this exact point) and the
+        // translate_instances() call below compensates by moving the instance the
+        // opposite way — but neither call touches colormix_stickers. A sticker's
+        // transform, still expressed in the PRE-shift object-local frame, silently
+        // drifts by `shift` relative to the now-recentred mesh: for a merged object
+        // whose combined bounding box isn't centred on Z=0 (the common case), this
+        // typically pushes every sticker's world Z clean off the model's height
+        // range, so it never intersects a layer again — "disappears" with no error.
+        // Debug repro (s212): 4 stickers survived the merge (data intact, confirmed
+        // via STICKER_ENUM pile=4) but landed at world Z=13.8/16.8/17.7 on a model
+        // whose top is Z=12.8 — floating above the print, out of every query band.
+        // Applying the SAME shift here keeps each sticker glued to the same physical
+        // point on the mesh, exactly like the volumes/instance above.
+        for (ColorMixSticker& st : new_object->colormix_stickers)
+            st.transform = Eigen::Translation3d(new_object->origin_translation) * st.transform;
         new_object->translate_instances(-new_object->origin_translation);
         new_object->origin_translation = Vec3d::Zero();
         //BBS init asssmble transformation
