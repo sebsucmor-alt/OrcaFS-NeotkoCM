@@ -5290,6 +5290,10 @@ void PrintObject::slice_volumes()
 
     this->apply_conical_overhang();
 
+    // NEOTKO_PAINTERPRO_TAG (Idea A) — always reset; refilled below only when MMU painting is
+    // present, so un-painting an object cannot leave a stale surface-depth mask behind.
+    m_painted_depth_solid_mask.clear();
+
     // Is any ModelVolume multi-material painted?
     if (const auto& volumes = this->model_object()->volumes;
         m_print->config().filament_diameter.size() > 1 && // BBS
@@ -5306,7 +5310,8 @@ void PrintObject::slice_volumes()
         }
 
         BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - MMU segmentation";
-        std::vector<std::vector<ExPolygons>> mm_segmentation = multi_material_segmentation_by_painting(*this, [print]() { print->throw_if_canceled(); });
+        std::vector<std::vector<ExPolygons>> mm_segmentation = multi_material_segmentation_by_painting(*this, [print]() { print->throw_if_canceled(); },
+                                                                                                       &m_painted_depth_solid_mask);
         apply_mixed_surface_indentation(*this, mm_segmentation);
         apply_mixed_component_surface_offsets(*this, mm_segmentation);
         std::vector<std::vector<ExPolygons>> local_z_segmentation =

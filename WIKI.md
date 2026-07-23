@@ -1,6 +1,6 @@
 # Snapmaker Orca — Neotko FullSpectrum Feature Pack · User Guide
 
-> Features conceived and designed by **[Neotko](https://github.com/neotko)** — inventor of *Neosanding*, now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura.
+> Features conceived and designed by **[Neotko](https://github.com/sebsucmor-alt)** — inventor of *Neosanding*, now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura.
 
 This is the **Neotko FullSpectrum** feature pack ported on top of the official **Snapmaker Orca 2.3.4** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
 
@@ -73,11 +73,15 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
     - 10b. [Painter mode — per-zone texture](#10b-painter-mode--per-zone-texture)
     - 10c. [Top mode — ZBump, top-surface height-map relief](#10c-top-mode--zbump-top-surface-height-map-relief)
 11. [Precision Adaptive Layer Height — point-based layer height curve](#11-precision-adaptive-layer-height--point-based-layer-height-curve)
+    - 11a. [Adapt to Color — color-aware height guidance](#11a-adapt-to-color-238-wip--color-aware-height-guidance)
+    - 11b. [Slope Pattern Recolor — keep the pattern alive on slopes](#11b-slope-pattern-recolor-238-wipexperimental--keep-the-pattern-alive-on-slopes)
 12. [NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar](#12-neowave-support-wip--wave-huygens-roof--hollow-pillar)
 13. [Painter Pro Mode — precision tools for the stock Color Painting gizmo](#13-painter-pro-mode--precision-tools-for-the-stock-color-painting-gizmo)
     - 13a. [Brush precision](#13a-brush-precision)
     - 13b. [Paint perimeters only + Extra walls](#13b-paint-perimeters-only--extra-walls)
     - 13c. [Rectangle & Polygon masks](#13c-rectangle--polygon-masks)
+    - 13d. [Surface depth (2.3.8) — project a painted surface into the object](#13d-surface-depth-238--project-a-painted-surface-into-the-object)
+    - 13e. [Per color (2.3.8) — different Walls / Depth per painted color](#13e-per-color-238--different-walls--depth-per-painted-color)
 14. [NeoStitch Interlock (WIP, ⚠️ UNTESTED) — Z-axis layer interlocking](#14-neostitch-interlock-wip--untested--z-axis-layer-interlocking)
 
 ---
@@ -704,6 +708,68 @@ between them.
 - No result preview from the classic Adaptive/Smooth buttons — this gizmo is a separate, precise
   path, not a replacement for those.
 
+### 11a. Adapt to Color (2.3.8, WIP) — color-aware height guidance
+
+Layer height and MixedFilament color are not independent: the height you slice at changes how the
+color reads on the part. Turn on the **Adapt to Color** checkbox and the height editor shades the
+ranges where the object's color setup actually works:
+
+- **Red on the right — pattern-resolution ceiling.** Above the mix band (follows the "Dithering
+  cadence" upper bound in your print settings), a Cycle/gradient pattern gets too coarse to read
+  as a blend. Applies object-wide to any object with a mixed pattern, paint or Sandwich.
+- **Red on the left — color-fidelity floor (Sandwich zones only).** Where the mesh has a plausible
+  Sandwich top surface, the filaments' **TD** (translucency, from the ColorStitch settings) sets a
+  minimum thickness: thinner than this and a translucent pass washes out over what's below. This
+  never applies outside real Sandwich zones — a plain Cycle object shows only the ceiling.
+- **Green line — optimal height per Z**, and a **Snap to optimal** button that rewrites every
+  editable point of your curve to it in one click.
+
+Dragging stays completely free within the nozzle limits — the guidance is visual (a point sitting
+in a red zone turns **orange**), and the emitted profile is hard-clamped to the safe range only at
+commit, so what reaches the slicer always respects the color. The info panel shows the color-safe
+range for whichever point you hover or drag.
+
+### 11b. Slope Pattern Recolor (2.3.8, WIP/experimental) — keep the pattern alive on slopes
+
+**The problem (no stock slicer addresses this):** on a sloped surface, each layer's contour steps
+inward, and that staircase ledge exposes the **interior perimeter rings** to view. Those rings
+print in whatever the layer's color happens to be, so a clean MixedFilament banding degrades into
+noise exactly where the model curves. The wider the step (`d = layer height × tan(slope)`), the
+more rings show — at 0.2 mm on a steep slope you're already looking at one or two interior rings.
+
+**What it does:** with the **Slope recolor** checkbox on, the gizmo scans the mesh for slope
+bands, computes at your committed layer heights how many interior rings each band exposes, and
+stores a per-object recolor plan (in the project 3mf, undoable, erased when you untick). At slice
+time the engine applies it:
+
+- The **external perimeter is never touched** — its per-layer alternation IS the pattern's visible
+  rhythm and it keeps printing exactly as your recipe dictates.
+- The **exposed interior rings** print a side-by-side combination of the recipe's own components,
+  chosen by ΔE2000 color distance so the ledge's blended appearance matches the recipe's intended
+  mix color — the step fills with the mix instead of a random solid.
+
+![Adaptive Slope MixedFilament — RealColor gcode preview (TD values): default left, everything on + Sandwich auto TD right](docs/images/Adaptive-Slope-MixedFilament.png)
+
+Works with Cycle, gradients and manual patterns. The **violet shading** in the height editor shows
+which heights expose rings at each Z (drag the curve below the violet edge and thin layers cover
+the slope instead — the two strategies are complementary), and the info panel reports the exposed
+ring count plus the suggested ring colors for the focused point.
+
+**Interaction with adaptive height:** you now have both answers to the same geometry problem —
+**fine layers** shrink the ledge until nothing extra shows (slow, maximum quality), **Slope
+recolor** accepts tall layers and colors what shows (fast, great finish at 0.12–0.2 mm). Use the
+violet shading to choose per zone.
+
+**Current limitations (WIP — needs broad print testing)**
+- Best on surfaces with one dominant slope. Two very different slopes sharing the same height
+  range currently share one plan (the steeper wins) — refinement planned.
+- The plan is per height-band, not per-region: on a model that is sloped on one side and vertical
+  on the other at the same Z, the vertical side's interior rings recolor too (invisible there, but
+  it costs tool changes).
+- A "Sandwich + slope" zone (top surface on a slope) still prioritizes the thick-top Sandwich —
+  spreading the recipe across several thin top layers ("Sandwich 2.0") is a planned future system;
+  the panel warns when you're in one of these zones.
+
 ---
 
 ## 12. NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar + contact layer
@@ -777,7 +843,7 @@ object has any painting on it, and it never touches colour/pattern — only Z.
 
 > **Not the same gizmo as §6.** This section is about Orca's own **stock multi-material painter** — the **Color Painting** tool in the left-side gizmo toolbar (needs 2+ filaments configured; it's what you'd use to hand-assign filaments to triangles in any Orca build). It is a **different tool** from this pack's own **ColorStitch Painter** (§6), which paints *Sandwich effect profiles*, not raw filament assignment. **Pro Mode** is a collapsible section added to the bottom of the stock Color Painting panel with four precision add-ons on top of the regular brush. It is **always available** — no Libre Mode needed.
 
-The stock brush paints by hand with a circle/sphere cursor, which is naturally imprecise on small or fine details — a click can bleed well past where you meant to paint. Pro Mode's four tools attack that problem from different angles: finer brush subdivision, limiting paint to a thin perimeter ring instead of filling solid, and two "mask" tools that paint an exact area in one shot instead of brushing it by hand.
+The stock brush paints by hand with a circle/sphere cursor, which is naturally imprecise on small or fine details — a click can bleed well past where you meant to paint. Pro Mode's tools attack that problem from different angles: finer brush subdivision, limiting paint to a thin perimeter ring instead of filling solid, two "mask" tools that paint an exact area in one shot instead of brushing it by hand, and (2.3.8) **Surface depth** — projecting a painted top/bottom design into the object as solid material, with optional per-color control.
 
 ### 13a. Brush precision
 
@@ -808,6 +874,25 @@ Two alternative "paint" tools for when hand-brushing an exact shape is fiddly �
 Both tools only paint **front-facing** triangles — the side of the mesh actually facing the camera — so a mask never bleeds through to the back of the object the way a naive screen-space fill would. The two checkboxes are mutually exclusive (turning one on turns the other off), the same way Vertical/Horizontal work elsewhere in this panel. Works with either **Classic** or **Arachne** as the wall generator.
 
 > **Escape doesn't cancel a polygon in progress — right-click does.** Keep that in mind if you're used to Escape backing out of in-progress tools elsewhere in Orca.
+
+### 13d. Surface depth (2.3.8) — project a painted surface into the object
+
+Paint a design on the top (or bottom) of an object — a logo, a letter, a mark — and **Surface depth** extends it *into* the object as **solid infill of the painted color**, following the painted silhouette exactly, for as many layers as you choose (`0`–`20`, `0` = off).
+
+- The painted shape projects **straight down** (or straight up from a bottom surface), layer after layer, keeping its size — only trimmed where the object's real geometry changes. It is not a cosmetic reclassification: those layers genuinely print as solid walls-to-walls material of the painted color, surrounded by whatever sparse infill the rest of the layer uses.
+- Depth is counted in **extra layers past the painted surface** (the painted surface itself is already solid). Where the projection overlaps areas that were already solid (your normal top shell layers, vertical shells, Sandwich internals), nothing double-counts — the projection only converts sparse infill, and never touches Sandwich's penultimate layers.
+- Works symmetrically for **bottom-painted** surfaces, projecting upward.
+- Deep projections can add tool changes on layers that previously had none — same as if you had painted deeper by hand. The wipe tower handles it with its normal machinery.
+
+### 13e. Per color (2.3.8) — different Walls / Depth per painted color
+
+The **Per color** checkbox switches "Extra walls" and "Surface depth" from one global value to a **per-color table**: one row per filament, showing its color swatch plus a **Walls** (`0`–`8`) and a **Depth** (`0`–`20`) field. A value of `0` in the table means "use the global value" — so you can, say, give a silver logo 8 extra walls and 5 layers of depth while a red mark next to it gets 2 and 20, without touching each other.
+
+- Clicking a **color swatch** in the table also selects that color for painting — same colors, same selection highlight as the filament strip at the top of the panel.
+- With the checkbox off, the two global fields behave exactly as before.
+- Mixed-filament note: **Depth** distinguishes mixed slots individually; **Extra walls** for mixed slots falls back to the global value (mixed paint resolves to its physical components at wall-generation time).
+
+> **Known edge case (not a Surface depth bug):** a MixedFilament blend that **ends in the same color as the object's own filament** will not generate its lower blend layers either — the whole blend chain is skipped, not just the (correctly redundant) top layer. Suspected stock-pipeline gap. Workaround: don't end the blend on the object's base color.
 
 ---
 
@@ -859,26 +944,62 @@ per-region, exactly like Fuzzy Skin).
 
 ---
 
-## 15. Expert G-code Reprocessor (basic beta, 2.3.7) — layer-ranged G-code post-processing
+## 15. Expert G-code Reprocessor (2.3.8) — layer-ranged, per-tool G-code post-processing
 
-> 🧪 **Basic beta — quick first cut, Libre Mode only.** Functional and safe, but minimal: no
-> temperature/Z-offset rules yet, fan control is a hard override (not a smart clamp). Edits real
-> G-code — a warning shows before every Apply.
+> 🧪 **Expert-only, Libre Mode only.** Edits real G-code. A warning shows once, when you turn the
+> panel on. **Print-verified** (2.3.8): a real multi-tool print ran clean with by-tool speed/flow/
+> fan/Z-offset rules active, and the exported G-code was checked afterward line-by-line.
+> **"Avoid Wipetower" is separately G-code-verified** (2.3.8): checked directly against an
+> exported file to confirm a rule with it enabled never touches wipe-tower purge G-code.
 
-**Where to find it**: G-code **Preview**, next to the RealColor view selector, when **Libre Mode**
-is on.
+**Where to find it**: G-code **Preview** → the view-type dropdown (the same one **RealColor**
+lives in) → **"Gcode Reprocessor"**, when **Libre Mode** is on. It renders inside the same legend
+panel as every other view mode — no separate floating window.
 
-Panel with two rule lists, each row: enable checkbox, layer **from**/**to** (`-1` = to the end),
-and a value. "+ Add rule at current layer" pre-fills **from** with whatever layer the Preview
-slider is on. **Apply** writes the rules and reslices; the G-code is rewritten on export.
+Master **"Reprocessor enabled"** checkbox at the top gates the whole panel — when off, none of the
+rules below do anything, however many you have. Below it, a **GLOBAL / BY TOOL** toggle switches
+the chart between rules that apply everywhere and rules scoped to one tool; each tool gets its own
+column (**T0, T1, T2, ...** — 0-based, matching the real `T<n>` G-code command).
 
-- **Speed override rules** — `M220 S<percent>` from layer X to Y.
+**The chart is the only editor** — there's no separate list of fields to fill in:
+- **Right-click empty space** in the chart to add a rule at that layer (and tool, in BY TOOL
+  view) — a small menu offers the four rule types, color-coded.
+- **Drag either endpoint** of a rule's bar to change its layer range — dragging the top endpoint
+  all the way up snaps it to "to the end of the file."
+- **Click a rule's colored value badge** (in the text summary below the chart) to type its exact
+  number — percent for speed/flow, raw PWM for fan, mm for Z-offset.
+- **Right-click an existing point** for a menu with **"Skip WT" / "Don't Skip WT"** (see below)
+  and **"Delete this rule."**
+
+A rule whose layer range no longer exists (e.g. the object got shorter after the rule was
+created) shows its dot pinned to the chart's edge in gray instead of disappearing off-screen —
+still fully draggable and deletable from there.
+
+- **Speed override rules** — `M220 S<1-300%>` from layer X to Y (or a tool's active stretch).
+- **Flow override rules** (2.3.8, new) — `M221 S<20-200%>`, same behaviour as speed.
 - **Fan override rules** — `M106 S<0-255>` (raw PWM, not percent) from layer X to Y.
+- **Z-offset rules** (2.3.8, new) — `SET_GCODE_OFFSET Z=<value>`, clamped to **±0.3mm, 0.01mm
+  steps**. By-tool Z-offset rules restore right before a toolchange and re-apply right after —
+  timed around the physical tool swap on purpose.
 
-Also fixed alongside this: Snapmaker U1/Klipper toolchanges were forcing `M220 S100` on every
-color change (wiping any manual speed override) and emitting `M220 B`/`M220 R` — both leftover
-from older Marlin-based Snapmaker machines and meaningless on the U1's Klipper firmware. Both are
-gone now; toolchange G-code is simpler and no longer fights a manual speed setting.
+Global rules (the default) affect the whole ranged layers; by-tool rules only affect that range
+while the picked tool is actually active — the effect automatically reverts when the print
+switches to another tool, and re-applies when it comes back, all without touching the wipe
+tower's own toolchange G-code. Mode is per rule, so a global fan rule and a by-tool speed rule can
+both be active together. **No "Apply" button** — every edit saves immediately.
+
+**"Avoid Wipetower" (2.3.8, new)** — any rule can independently opt out of applying inside wipe
+tower G-code, shown as a permanent gold glow on its chart bar. On machines where the wipe tower
+fires between layers for drip control, not only at toolchanges, a rule's range can otherwise land
+inside that purge G-code rather than only "real" printing — this excludes every wipe-tower
+segment from the rule's active range, splitting the range around a purge that falls in the
+middle rather than skipping the whole thing.
+
+Also fixed in 2.3.7 alongside the original version of this panel: Snapmaker U1/Klipper
+toolchanges were forcing `M220 S100` on every color change (wiping any manual speed override) and
+emitting `M220 B`/`M220 R` — both leftover from older Marlin-based Snapmaker machines and
+meaningless on the U1's Klipper firmware. Both are gone now; toolchange G-code is simpler and no
+longer fights a manual speed setting.
 
 ---
 

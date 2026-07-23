@@ -98,11 +98,12 @@ void Plan::run(PerimeterGenerator& g)
     cfg.min_feature_size_pct = original_cfg->neoarachne_min_feature_size_pct.value;
     cfg.keep_short_tails     = original_cfg->neoarachne_keep_short_tails.value;
     // Fase 3 — NeotkoEdgeBeadingStrategy knobs.
+    cfg.pin_outer_width           = original_cfg->neoarachne_pin_outer_width.value;
     cfg.bead_count_hysteresis_pct = original_cfg->neoarachne_bead_count_hysteresis_pct.value;
     // Fase 4 — SkeletalTrapezoidation transition smoothing.
     cfg.transition_filter_dist_mm = original_cfg->neoarachne_transition_filter_dist_mm.value;
-    // cfg.pin_outer_width keeps its default true; a future UI Advanced ⚙ may
-    // expose it. Pinning is gated upstream by neotko_edge_active anyway.
+    // pin_outer_width is gated upstream by neotko_edge_active anyway (ConfigManipulation
+    // hides the control unless outer or inner wall source is ArachneNeotkoEdge).
     // Merge global advanced toggles from Runtime singleton (Fase 6 will fill these).
     const Config& runtime = Runtime::get().cfg;
     cfg.emit_svg_per_layer  = runtime.emit_svg_per_layer;

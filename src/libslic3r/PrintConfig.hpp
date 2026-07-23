@@ -977,6 +977,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode "extra walls": adds this many perimeter
     // walls to painted regions only. Consumed in PrintApply.cpp's generate_print_object_regions().
     ((ConfigOptionInt,                 mmu_segmented_region_extra_walls))
+    ((ConfigOptionInt,                 mmu_segmented_region_surface_depth))
+    // NEOTKO_PAINTERPRO_TAG — per-color overrides, indexed by 1-based paint slot id (entry 0
+    // unused). Entry 0/absent = fall back to the scalar (global) key above.
+    ((ConfigOptionInts,                mmu_segmented_region_extra_walls_per_color))
+    ((ConfigOptionInts,                mmu_segmented_region_surface_depth_per_color))
     ((ConfigOptionFloat,               raft_contact_distance))
     ((ConfigOptionFloat,               raft_expansion))
     ((ConfigOptionPercent,             raft_first_layer_density))
@@ -1308,6 +1313,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercent, neoarachne_max_bead_width_pct))
     ((ConfigOptionPercent, neoarachne_min_feature_size_pct))
     ((ConfigOptionBool,    neoarachne_keep_short_tails))
+    ((ConfigOptionBool,    neoarachne_pin_outer_width))
     ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
     ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
 
@@ -1474,6 +1480,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // NEOTKO_SANDWICH_TAG — Sandwich pass-stack blob (1 coString JSON per zone).
     ((ConfigOptionString,  neotko_surface_passes_top))
     ((ConfigOptionString,  neotko_surface_passes_penu))
+    // NEOTKO_ALHCOLOR_TAG — Fase 5.3: slope-perimeter recolor blob (JSON array of
+    // {z_lo_mm, z_hi_mm, tool_per_perimeter[]}), written per-object by the Precision ALH
+    // gizmo when its opt-in toggle is on; consumed by GCode/ToolOrdering in Fase 5.4 only.
+    ((ConfigOptionString,  neotko_slope_perimeter_recolor))
     // NEOTKO_SANDWICH_ENGINE_TAG_END
     // NEOTKO_TEXTUREBUMP_TAG_START — Texture Bump Mapping: deterministic image-driven relief,
     // reuses the Fuzzy Skin apply point (post-Arachne, per ExtrusionLine junctions) but samples a

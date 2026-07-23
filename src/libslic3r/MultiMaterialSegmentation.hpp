@@ -37,6 +37,9 @@ struct ModelVolumeFacetsInfo {
 };
 
 // Returns segmentation based on painting in segmentation gizmos.
+// NEOTKO_PAINTERPRO_TAG (Idea A) — painted_depth_solid_mask_out, when non-null, receives one
+// ExPolygons per layer: the painted top/bottom silhouette projected up to
+// mmu_segmented_region_surface_depth layers into the object (used later to force solid infill).
 std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject                                               &print_object,
                                                               const std::function<ModelVolumeFacetsInfo(const ModelVolume &)> &extract_facets_info,
                                                               size_t                                                           num_facets_states,
@@ -44,10 +47,12 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                                               float                                                            segmentation_interlocking_depth,
                                                               bool                                                             segmentation_interlocking_beam,
                                                               IncludeTopAndBottomLayers                                        include_top_and_bottom_layers,
-                                                              const std::function<void()>                                     &throw_on_cancel_callback);
+                                                              const std::function<void()>                                     &throw_on_cancel_callback,
+                                                              std::vector<ExPolygons>                                         *painted_depth_solid_mask_out = nullptr);
 
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
-std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
+std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback,
+                                                                             std::vector<ExPolygons> *painted_depth_solid_mask_out = nullptr);
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo
 std::vector<std::vector<ExPolygons>> fuzzy_skin_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);

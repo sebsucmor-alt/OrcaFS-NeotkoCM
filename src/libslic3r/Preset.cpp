@@ -928,7 +928,7 @@ static std::vector<std::string> s_Preset_print_options {
      "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill",
      "neoarachne_allowed_overlap_pct", "neoarachne_min_bead_width_pct",
      "neoarachne_max_bead_width_pct", "neoarachne_min_feature_size_pct",
-     "neoarachne_keep_short_tails", "neoarachne_bead_count_hysteresis_pct",
+     "neoarachne_keep_short_tails", "neoarachne_pin_outer_width", "neoarachne_bead_count_hysteresis_pct",
      "neoarachne_transition_filter_dist_mm",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "min_length_factor",
      "small_perimeter_speed", "small_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
@@ -945,6 +945,10 @@ static std::vector<std::string> s_Preset_print_options {
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice planner + options
      "neotko_wipe_tower", "neotower_purge_compaction", "neotko_tower_type", "neotower_zigurat",
+     // NEOTKO_NEOTOWER_TAG — variable layer height (Experimental). Was missing from this
+     // list, so the toggle never persisted to presets/3mf and always loaded back off
+     // (user-reported s223) — an option absent here is invisible to save/load entirely.
+     "neotower_variable_layer_height",
      // NEOTKO_NEOTOWER_TAG_END
      "multipass_prime_volume", // NEOTKO_MULTIPASS_PRIME_TAG — per-region sublayer prime volume
      // NEOTKO_SANDWICH_ENGINE_TAG_START — Sandwich engine per-region/object keys (Fase 2)
@@ -969,9 +973,11 @@ static std::vector<std::string> s_Preset_print_options {
      "pathblend_tool_2", "pathblend_tool_3", "pathblend_tool_4", "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3",
      "pathblend_layer_ratio_4", "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface", "pathblend_invert_gradient",
      "pathblend_fill_angle", "pathblend_top", "pathblend_penu", "neotko_surface_passes_top", "neotko_surface_passes_penu",
+     "neotko_slope_perimeter_recolor",
      // NEOTKO_SANDWICH_ENGINE_TAG_END
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
-     "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth", "mmu_segmented_region_extra_walls",
+     "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth", "mmu_segmented_region_extra_walls", "mmu_segmented_region_surface_depth",
+     "mmu_segmented_region_extra_walls_per_color", "mmu_segmented_region_surface_depth_per_color",
      "small_area_infill_flow_compensation", "small_area_infill_flow_compensation_model",
      "seam_slope_type", "seam_slope_conditional", "scarf_angle_threshold", "scarf_joint_speed", "scarf_joint_flow_ratio", "seam_slope_start_height", "seam_slope_entire_loop", "seam_slope_min_length", "seam_slope_steps", "seam_slope_inner_walls", "scarf_overhang_threshold",
      "interlocking_beam", "interlocking_orientation", "interlocking_beam_layer_count", "interlocking_depth", "interlocking_boundary_avoidance", "interlocking_beam_width",

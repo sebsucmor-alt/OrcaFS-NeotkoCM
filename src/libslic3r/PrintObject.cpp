@@ -23,6 +23,7 @@
 #include "Format/STL.hpp"
 #include "format.hpp"
 
+#include <atomic> // NEOTKO_PAINTERPRO_TAG (Idea A) — apply_painted_surface_depth counter
 #include <float.h>
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/concurrent_vector.h>
@@ -516,6 +517,12 @@ void PrintObject::prepare_infill()
     // Orca: Brought this function call before the process_external_surfaces, to allow bridges over holes to expand more than
     // one perimeter. Example of this is the bridge over the benchy lettering.
     this->discover_horizontal_shells();
+    m_print->throw_if_canceled();
+
+    // NEOTKO_PAINTERPRO_TAG (Idea A) — after the standard shell classification, force solid
+    // infill under/over painted surfaces up to the configured surface depth. Runs before
+    // process_external_surfaces() so the new solid receives the standard expansion/cleanup.
+    this->apply_painted_surface_depth();
     m_print->throw_if_canceled();
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -1043,6 +1050,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "mmu_segmented_region_max_width"
             || opt_key == "mmu_segmented_region_interlocking_depth"
             || opt_key == "mmu_segmented_region_extra_walls"
+            || opt_key == "mmu_segmented_region_surface_depth"
+            || opt_key == "mmu_segmented_region_extra_walls_per_color"
+            || opt_key == "mmu_segmented_region_surface_depth_per_color"
             || opt_key == "raft_layers"
             || opt_key == "raft_contact_distance"
             || opt_key == "slice_closing_radius"
@@ -4605,6 +4615,65 @@ void PrintObject::discover_horizontal_shells()
     }     // for each region
 #endif    /* SLIC3R_DEBUG_SLICE_PROCESSING */
 } // void PrintObject::discover_horizontal_shells()
+
+// NEOTKO_PAINTERPRO_TAG_START (Idea A, s223) — painted-surface depth.
+// Forces solid infill under a painted top surface (and over a painted bottom surface) up to
+// mmu_segmented_region_surface_depth layers, following the painted silhouette. The per-layer
+// mask was captured during MMU segmentation (see segmentation_top_and_bottom_layers()) and is
+// intersected here ONLY against stInternal fill surfaces:
+//  - areas already solid (top_shell_layers, vertical shells, Sandwich penultimate) are not
+//    stInternal, so the intersection is empty there — union semantics for free, never overwrite;
+//  - stPenultimateInternalSolid is never touched, so Sandwich recipes stay intact.
+// See docs/FUTURE/SURFACE_ANCHOR_AND_CONTACT_DETECTION_RESEARCH.md §1.
+void PrintObject::apply_painted_surface_depth()
+{
+    // The mask is only ever filled when some depth (global or per-color) was active during MMU
+    // segmentation, so gate on the mask itself — not on the global scalar alone.
+    const int depth = m_config.mmu_segmented_region_surface_depth.value;
+    if (m_painted_depth_solid_mask.empty()
+        || std::none_of(m_painted_depth_solid_mask.begin(), m_painted_depth_solid_mask.end(),
+                        [](const ExPolygons &ex) { return !ex.empty(); }))
+        return;
+
+    const size_t num_layers = std::min(m_layers.size(), m_painted_depth_solid_mask.size());
+    std::atomic<size_t> reclassified_layers{0};
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers),
+        [this, &reclassified_layers](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
+                m_print->throw_if_canceled();
+                const ExPolygons &mask = m_painted_depth_solid_mask[layer_idx];
+                if (mask.empty())
+                    continue;
+                for (LayerRegion *layerm : m_layers[layer_idx]->regions()) {
+                    Polygons internal_pg = to_polygons(layerm->fill_surfaces.filter_by_type(stInternal));
+                    if (internal_pg.empty())
+                        continue;
+                    ExPolygons new_solid = intersection_ex(mask, internal_pg);
+                    if (new_solid.empty())
+                        continue;
+                    // Same backup + rebuild idiom as discover_horizontal_shells(): every surface
+                    // type other than stInternal / stInternalSolid is restored untouched.
+                    SurfaceCollection backup = std::move(layerm->fill_surfaces);
+                    ExPolygons remaining_internal = diff_ex(internal_pg, new_solid);
+                    Polygons solid_pg = to_polygons(std::move(new_solid));
+                    polygons_append(solid_pg, to_polygons(backup.filter_by_type(stInternalSolid)));
+                    ExPolygons internal_solid = union_ex(solid_pg);
+                    layerm->fill_surfaces.clear();
+                    for (Surface &surface : backup.surfaces)
+                        if (surface.surface_type != stInternal && surface.surface_type != stInternalSolid)
+                            layerm->fill_surfaces.surfaces.emplace_back(std::move(surface));
+                    layerm->fill_surfaces.append(remaining_internal, stInternal);
+                    layerm->fill_surfaces.append(internal_solid, stInternalSolid);
+                    ++reclassified_layers;
+                }
+            }
+        });
+    NEOTKO_LOG(PROFILE, "apply_painted_surface_depth depth=" << depth
+        << " mask_layers=" << std::count_if(m_painted_depth_solid_mask.begin(), m_painted_depth_solid_mask.end(),
+                                            [](const ExPolygons &ex) { return !ex.empty(); })
+        << " reclassified_region_layers=" << reclassified_layers.load());
+} // void PrintObject::apply_painted_surface_depth()
+// NEOTKO_PAINTERPRO_TAG_END
 
 // combine fill surfaces across layers to honor the "infill every N layers" option
 // Idempotence of this method is guaranteed by the fact that we don't remove things from

@@ -1249,15 +1249,53 @@ void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, f
     // draw as many loops as fit in that width, regardless of wall_loops. So the ring must be
     // sized for wall_loops + extra_walls, not just wall_loops, or F2 "Extra walls" has no
     // physical space to draw into while F1 is active.
-    auto perimeters_only_width = [mo]() -> double {
+    // NEOTKO_PAINTERPRO_TAG — per-color override helpers (ConfigOptionInts indexed by 1-based
+    // paint slot id; entry 0 unused; value 0 = "use the global scalar"). Shared by "Extra walls"
+    // and "Surface depth" below.
+    auto per_color_get = [mo](const char *key, int state) -> int {
+        if (mo == nullptr || !mo->config.has(key))
+            return 0;
+        const auto *opt = static_cast<const ConfigOptionInts *>(mo->config.option(key));
+        if (opt == nullptr || state < 0 || state >= int(opt->values.size()))
+            return 0;
+        return opt->values[state];
+    };
+    auto per_color_set = [mo](const char *key, int state, int value) {
+        if (mo == nullptr || state <= 0)
+            return;
+        std::vector<int> vals;
+        if (mo->config.has(key))
+            if (const auto *opt = static_cast<const ConfigOptionInts *>(mo->config.option(key)); opt != nullptr)
+                vals = opt->values;
+        if (int(vals.size()) <= state)
+            vals.resize(state + 1, 0);
+        vals[state] = value;
+        if (std::all_of(vals.begin(), vals.end(), [](int v) { return v == 0; }))
+            mo->config.erase(key);
+        else
+            mo->config.set_key_value(key, new ConfigOptionInts(vals));
+    };
+    auto per_color_max = [mo](const char *key) -> int {
+        if (mo == nullptr || !mo->config.has(key))
+            return 0;
+        const auto *opt = static_cast<const ConfigOptionInts *>(mo->config.option(key));
+        int out = 0;
+        if (opt != nullptr)
+            for (int v : opt->values)
+                out = std::max(out, v);
+        return out;
+    };
+    auto perimeters_only_width = [mo, &per_color_max]() -> double {
         const DynamicPrintConfig &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
         const double nozzle = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_float("nozzle_diameter", 0);
         double line_width = print_cfg.get_abs_value("line_width", nozzle);
         if (line_width <= 0.0)
             line_width = nozzle > 0.0 ? nozzle : 0.4;
         const int wall_loops = std::max(1, print_cfg.opt_int("wall_loops"));
-        const int extra_walls = (mo && mo->config.has("mmu_segmented_region_extra_walls"))
+        int extra_walls = (mo && mo->config.has("mmu_segmented_region_extra_walls"))
             ? mo->config.opt_int("mmu_segmented_region_extra_walls") : 0;
+        // Per-color overrides: the ring must fit the color with the MOST walls.
+        extra_walls = std::max(extra_walls, per_color_max("mmu_segmented_region_extra_walls_per_color"));
         return (wall_loops + extra_walls) * line_width;
     };
 
@@ -1274,29 +1312,140 @@ void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, f
             "(about wall count x line width) instead of filling the whole selected area. Reduces "
             "wasted filament and color changes in solid infill.").c_str());
 
-    // --- F2: extra walls on painted regions only (mmu_segmented_region_extra_walls,
-    // see generate_print_object_regions() in PrintApply.cpp) ---
-    int extra_walls = (mo && mo->config.has("mmu_segmented_region_extra_walls"))
-        ? mo->config.opt_int("mmu_segmented_region_extra_walls") : 0;
-    ImGui::AlignTextToFramePadding();
-    m_imgui->text(_L("Extra walls"));
-    ImGui::SameLine(sliders_left_width);
-    ImGui::PushItemWidth(sliders_width);
-    if (ImGui::InputInt("##mmu_extra_walls", &extra_walls, 1, 1) && mo) {
-        extra_walls = std::clamp(extra_walls, 0, 8);
-        wxGetApp().plater()->take_snapshot("Painter: extra walls");
-        if (extra_walls > 0)
-            mo->config.set_key_value("mmu_segmented_region_extra_walls", new ConfigOptionInt(extra_walls));
-        else
-            mo->config.erase("mmu_segmented_region_extra_walls");
-        // Widen the perimeters-only ring so the extra loops have room to be drawn.
-        if (perimeters_only)
-            mo->config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(perimeters_only_width()));
-        wxGetApp().plater()->update();
-    }
+    // --- Per-color mode toggle: OFF = the two global inputs below; ON = a compact per-color
+    // table (one row per filament: color swatch + Walls + Depth), so the user sees every
+    // assignment at a glance instead of a hidden value tied to the current paint selection. ---
+    ImGui::Checkbox(_u8L("Per color").c_str(), &m_per_color_values);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Adds this many extra perimeter walls to the painted region only, "
-            "on top of the object's normal wall count. 0 = disabled.").c_str());
+        ImGui::SetTooltip("%s", _u8L("Assign \"Extra walls\" and \"Surface depth\" per paint color "
+            "in a table (0 = use the global value). When disabled, one global value applies to "
+            "all painted colors.").c_str());
+
+    if (!m_per_color_values) {
+        // --- F2: extra walls on painted regions only (mmu_segmented_region_extra_walls,
+        // see generate_print_object_regions() in PrintApply.cpp) ---
+        int extra_walls = (mo && mo->config.has("mmu_segmented_region_extra_walls"))
+            ? mo->config.opt_int("mmu_segmented_region_extra_walls") : 0;
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_L("Extra walls"));
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        if (ImGui::InputInt("##mmu_extra_walls", &extra_walls, 1, 1) && mo) {
+            extra_walls = std::clamp(extra_walls, 0, 8);
+            wxGetApp().plater()->take_snapshot("Painter: extra walls");
+            if (extra_walls > 0)
+                mo->config.set_key_value("mmu_segmented_region_extra_walls", new ConfigOptionInt(extra_walls));
+            else
+                mo->config.erase("mmu_segmented_region_extra_walls");
+            // Widen the perimeters-only ring so the extra loops have room to be drawn.
+            if (perimeters_only)
+                mo->config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(perimeters_only_width()));
+            wxGetApp().plater()->update();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Adds this many extra perimeter walls to the painted region only, "
+                "on top of the object's normal wall count. 0 = disabled.").c_str());
+
+        // --- Idea A: painted-surface depth (mmu_segmented_region_surface_depth, see
+        // apply_painted_surface_depth() in PrintObject.cpp and
+        // docs/FUTURE/SURFACE_ANCHOR_AND_CONTACT_DETECTION_RESEARCH.md §1) ---
+        int surface_depth = (mo && mo->config.has("mmu_segmented_region_surface_depth"))
+            ? mo->config.opt_int("mmu_segmented_region_surface_depth") : 0;
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_L("Surface depth"));
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        if (ImGui::InputInt("##mmu_surface_depth", &surface_depth, 1, 1) && mo) {
+            surface_depth = std::clamp(surface_depth, 0, 20);
+            wxGetApp().plater()->take_snapshot("Painter: surface depth");
+            if (surface_depth > 0)
+                mo->config.set_key_value("mmu_segmented_region_surface_depth", new ConfigOptionInt(surface_depth));
+            else
+                mo->config.erase("mmu_segmented_region_surface_depth");
+            wxGetApp().plater()->update();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Extends a painted top/bottom surface this many layers into the "
+                "object as solid infill of the painted color, following the painted silhouette. "
+                "0 = disabled.").c_str());
+    } else {
+        // --- Per-color table: swatch + Walls + Depth per filament, laid out in TWO column
+        // groups (entries alternate left/right) so long filament lists don't push the rest of
+        // the panel down. Clicking a swatch also selects that color for painting (same id space
+        // as the strip at the top). Input width is sized so the number stays visible next to
+        // ImGui's -/+ step buttons. ---
+        const float swatch_size  = ImGui::GetFrameHeight();
+        const float input_width  = m_imgui->scaled(4.6f);
+        const float col_gap      = m_imgui->scaled(0.6f);
+        const float base_x       = ImGui::GetCursorPosX();
+        const float group_width  = swatch_size + col_gap + (input_width + col_gap) * 2.f;
+        const float group_x[2]   = { base_x, base_x + group_width + m_imgui->scaled(1.2f) };
+        auto walls_x = [&](int g) { return group_x[g] + swatch_size + col_gap; };
+        auto depth_x = [&](int g) { return walls_x(g) + input_width + col_gap; };
+
+        // Header row (the leading blank anchors the line so SameLine targets it, not the checkbox).
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(" ");
+        for (int g = 0; g < 2; ++g) {
+            ImGui::SameLine(walls_x(g));
+            m_imgui->text(_L("Walls"));
+            ImGui::SameLine(depth_x(g));
+            m_imgui->text(_L("Depth"));
+        }
+
+        auto render_per_color_entry = [&](size_t row_idx, int g) {
+            const unsigned int slot_id = m_display_filament_ids[row_idx];
+            if (slot_id == 0 || slot_id > m_extruders_colors.size())
+                return;
+            const ImVec4 color_vec = ImGuiWrapper::to_ImVec4(m_extruders_colors[slot_id - 1]);
+            const std::string row_tag = std::to_string(row_idx);
+
+            // Swatch: highlight the currently selected paint color, click to select it.
+            if (g > 0)
+                ImGui::SameLine(group_x[g]);
+            ImGuiColorEditFlags flags = ImGuiColorEditFlags_NoTooltip;
+            if (row_idx != m_selected_extruder_idx)
+                flags |= ImGuiColorEditFlags_NoBorder;
+            if (ImGui::ColorButton(("##pcv_color_" + row_tag).c_str(), color_vec, flags, ImVec2(swatch_size, swatch_size)))
+                m_selected_extruder_idx = row_idx;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s %u", _u8L("Filament").c_str(), unsigned(row_idx + 1));
+
+            // Walls input.
+            ImGui::SameLine(walls_x(g));
+            ImGui::PushItemWidth(input_width);
+            int row_walls = per_color_get("mmu_segmented_region_extra_walls_per_color", int(slot_id));
+            if (ImGui::InputInt(("##pcv_walls_" + row_tag).c_str(), &row_walls, 1, 1) && mo) {
+                row_walls = std::clamp(row_walls, 0, 8);
+                wxGetApp().plater()->take_snapshot("Painter: extra walls per color");
+                per_color_set("mmu_segmented_region_extra_walls_per_color", int(slot_id), row_walls);
+                if (perimeters_only)
+                    mo->config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(perimeters_only_width()));
+                wxGetApp().plater()->update();
+            }
+            ImGui::PopItemWidth();
+
+            // Depth input.
+            ImGui::SameLine(depth_x(g));
+            ImGui::PushItemWidth(input_width);
+            int row_depth = per_color_get("mmu_segmented_region_surface_depth_per_color", int(slot_id));
+            if (ImGui::InputInt(("##pcv_depth_" + row_tag).c_str(), &row_depth, 1, 1) && mo) {
+                row_depth = std::clamp(row_depth, 0, 20);
+                wxGetApp().plater()->take_snapshot("Painter: surface depth per color");
+                per_color_set("mmu_segmented_region_surface_depth_per_color", int(slot_id), row_depth);
+                wxGetApp().plater()->update();
+            }
+            ImGui::PopItemWidth();
+        };
+
+        const size_t n_rows = std::min(GLGizmoMmuSegmentation::EXTRUDERS_LIMIT, m_display_filament_ids.size());
+        for (size_t row_idx = 0; row_idx < n_rows; row_idx += 2) {
+            render_per_color_entry(row_idx, 0);
+            if (row_idx + 1 < n_rows)
+                render_per_color_entry(row_idx + 1, 1);
+        }
+        m_imgui->text(_L("0 = use global value"));
+    }
 
     // --- F4 Sesion A/B: screen-space rectangle/polygon masks (TriangleSelector::Rectangle/
     // PolygonProjectionCursor, see on_render_input_window()'s override of m_tool_type right after

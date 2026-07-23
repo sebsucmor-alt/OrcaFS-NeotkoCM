@@ -1072,16 +1072,32 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                     unsigned int       wall_ext        = layer_tools.mp_perim_override_active
                         ? resolve_mixed_component_a(m_mixed_mgr, m_num_physical, configured_wall)
                         : resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height), &object);
-                    const unsigned int grouped_id = layer_tools.mp_perim_override_active
+                    unsigned int grouped_id = layer_tools.mp_perim_override_active
                         ? 0u  // skip grouped pattern cycling when override is active
                         : grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_wall);
+                    // NEOTKO_ALHCOLOR_TAG — Fase 5.4b. A slope-recolor plan gives Cycle/
+                    // gradient rows (no manual pattern → grouped_id == 0) a per-ring axis
+                    // for the layers its z bands cover — route them through the same
+                    // per-ring planning path so the wipe tower sees every tool the
+                    // emission side will actually use. Mirrors GCode.cpp's split gate.
+                    if (grouped_id == 0 && !layer_tools.mp_perim_override_active
+                        && m_mixed_mgr != nullptr && m_num_physical > 0
+                        && m_mixed_mgr->is_mixed(configured_wall, m_num_physical)
+                        && slope_recolor::ring_count(&object, float(layer->print_z)) > 0)
+                        grouped_id = configured_wall;
                     if (grouped_id != 0) {
                         const std::vector<unsigned int> ordered =
                             m_mixed_mgr->ordered_perimeter_extruders(grouped_id,
                                                                      m_num_physical,
                                                                      layerCount,
                                                                      float(layer->print_z),
-                                                                     float(layer->height));
+                                                                     float(layer->height),
+                                                                     false,
+                                                                     // NEOTKO_ALHCOLOR_TAG — Fase 5.4: the object
+                                                                     // context lets resolve_perimeter apply the
+                                                                     // slope-recolor plan HERE too — planner and
+                                                                     // emitter share one source by construction.
+                                                                     &object);
                         if (!ordered.empty()) {
                             if (ordered.size() >= 2)
                                 layer_tools.preserve_extruder_order = true;

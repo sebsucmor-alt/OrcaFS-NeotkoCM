@@ -634,6 +634,9 @@ private:
     void bridge_over_infill();
     void clip_fill_surfaces();
     void discover_horizontal_shells();
+    // NEOTKO_PAINTERPRO_TAG (Idea A) — force solid infill under/over painted surfaces up to
+    // mmu_segmented_region_surface_depth layers, using the mask captured during MMU segmentation.
+    void apply_painted_surface_depth();
     void combine_infill();
     void _generate_support_material();
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
@@ -682,6 +685,11 @@ private:
 
     std::vector < VolumeSlices >            firstLayerObjSliceByVolume;
     std::vector<groupedVolumeSlices>        firstLayerObjSliceByGroups;
+
+    // NEOTKO_PAINTERPRO_TAG (Idea A) — one entry per layer: painted top/bottom silhouette
+    // projected up to mmu_segmented_region_surface_depth layers into the object. Filled during
+    // MMU segmentation (posSlice), consumed by apply_painted_surface_depth() (posPrepareInfill).
+    std::vector<ExPolygons>                 m_painted_depth_solid_mask;
 
     // BBS: per object skirt
     ExtrusionEntityCollection               m_skirt;

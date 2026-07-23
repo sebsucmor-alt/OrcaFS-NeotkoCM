@@ -732,6 +732,10 @@ public:
         LayerTime,
         LayerTimeLog,
         RealColor,
+        // NEOTKO_GCODE_REPROCESSOR (s216): folds the rule editor into the legend's view-type
+        // combo (same pattern as RealColor above) instead of a separate floating ImGui window —
+        // see render_legend()'s early-return branch and render_expert_gcode_reprocessor_panel().
+        GCodeReprocessor,
         Count
     };
 
@@ -822,6 +826,38 @@ public:
         // before it reaches realcolor_accum.fs — manual override + cheap visual TD calibration
         // (no real TD meter available), see render_realcolor_debug_panel().
         float td_scale         = 1.0f;
+
+        // NEOTKO_REALCOLOR_TAG s214 (PBR item 1, docs/WIP/REALCOLOR_VIEW/08_PBR_IBL_SSS_PLAN.md):
+        // single-probe analytic IBL tints for realcolor_peel.{vs,fs} — additive on top of item
+        // 2's shipped achromatic ambient/rim, not a replacement. (1,1,1) on any of the three
+        // collapses back to the exact s166 behaviour. Defaults: a subtle cool-sky/warm-ground
+        // split, picked so the look doesn't jump hard on first compile — retune live like every
+        // other slider here.
+        std::array<float, 3> ambient_ground_tint = { 1.00f, 0.96f, 0.90f };
+        std::array<float, 3> ambient_sky_tint    = { 0.90f, 0.95f, 1.00f };
+        std::array<float, 3> fresnel_tint        = { 0.85f, 0.92f, 1.00f };
+
+        // NEOTKO_REALCOLOR_TAG s214 (PBR item 2): single-pass screen-space subsurface scattering
+        // in realcolor_present.fs — see compute_sss() there. sss_strength=0 is bit-identical to
+        // pre-s214 output.
+        float sss_strength     = 0.35f;
+        float sss_radius_px    = 6.0f;
+        float sss_reference_td = 1.0f;
+    };
+
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
+    // procedural equirectangular "studio" environment — two flat baked GL_RGBA8 textures, no
+    // mipmaps (see 09's rationale for why GLTexture::load_from_raw_data isn't reused: its manual
+    // mip generation re-uploads the same full-res buffer at every declared LOD size without
+    // actually downsampling it — a pre-existing bug in that class, not touched here, just not
+    // relied upon). Regenerated only when the ambient/tint sliders that feed the generator
+    // change (see render_realcolor_debug_panel()), not every recompute.
+    struct RealColorEnvCache
+    {
+        unsigned int mirror_tex     = 0; // GL_RGBA8, REALCOLOR_ENV_MIRROR_W x REALCOLOR_ENV_MIRROR_H, sharp
+        unsigned int irradiance_tex = 0; // GL_RGBA8, REALCOLOR_ENV_IRRADIANCE_W x _H, pre-averaged/blurred
+        bool valid = false;
+        bool gl_objects_created() const { return mirror_tex != 0; }
     };
 
     // NEOTKO_REALCOLOR_TAG s166 (item 4): single-buffered (no ping-pong — shells are opaque,
@@ -840,16 +876,27 @@ public:
         bool gl_objects_created() const { return fbo != 0; }
     };
 
+    // NEOTKO_GCODE_REPROCESSOR schema v2 (s215): `by_tool`/`tool` mirror the engine's
+    // RuleMode::ByTool + tool id (ExpertGCodeReprocessor.cpp) — false/-1 means "global", the old
+    // Phase 1/3 behaviour. `tool` is only meaningful when by_tool is true (0-based extruder
+    // index, shown as T<tool> in the panel — matches the real gcode T<n> command numbering, T0
+    // is the first tool, unlike the 1-based layer display elsewhere in this panel).
+
     // NEOTKO_GCODE_REPROCESSOR — one editable "speed_multiplier" rule as shown in the panel.
-    // Phase 1 only; unrelated to the JSON's forward-compat "unknown type" rules, those aren't
-    // editable here and are round-tripped as opaque blobs when re-saving (see GCodeViewer.cpp
+    // Unrelated to the JSON's forward-compat "unknown type" rules, those aren't editable here and
+    // are round-tripped as opaque blobs when re-saving (see GCodeViewer.cpp
     // render_expert_gcode_reprocessor_panel()).
     struct ExpertReprocessorRule
     {
         bool enabled = true;
+        bool by_tool = false;
+        int tool = 0;
         int layer_from = 0;
         int layer_to = -1; // -1 == "to end of file"
         int value = 100;   // M220 S<value>, percent
+        // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i) — see ExpertGCodeReprocessor.cpp's
+        // SpeedRule/build_wipetower_windows()/subtract_windows() for the engine side.
+        bool avoid_wipetower = false;
     };
 
     // NEOTKO_GCODE_REPROCESSOR — one editable "fan_override" rule. Same shape as
@@ -857,21 +904,79 @@ public:
     struct ExpertReprocessorFanRule
     {
         bool enabled = true;
+        bool by_tool = false;
+        int tool = 0;
         int layer_from = 0;
         int layer_to = -1; // -1 == "to end of file"
         int value = 255;   // M106 S<value>, 0-255
+        bool avoid_wipetower = false; // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i)
     };
 
-    // NEOTKO_GCODE_REPROCESSOR — panel state, live-edited, only serialized to the
-    // "expert_gcode_reprocessor_rules" project config option when the user presses Apply.
+    // NEOTKO_GCODE_REPROCESSOR Phase 2 — one editable "z_offset" rule. `value` is an absolute
+    // SET_GCODE_OFFSET Z value in mm (e.g. -0.03), clamped to [-0.3, 0.3] (s215, user request —
+    // keeps a bad value in "underextrusion/aggressive ironing" territory, not physically
+    // dangerous); the engine restores with a plain Z=0, not the inverse of `value` — see
+    // OffsetRule in ExpertGCodeReprocessor.cpp for why.
+    struct ExpertReprocessorOffsetRule
+    {
+        bool enabled = true;
+        bool by_tool = false;
+        int tool = 0;
+        int layer_from = 0;
+        int layer_to = -1; // -1 == "to end of file"
+        double value = 0.0; // mm, absolute SET_GCODE_OFFSET Z value, clamped to [-0.3, 0.3]
+        bool avoid_wipetower = false; // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i)
+    };
+
+    // NEOTKO_GCODE_REPROCESSOR (s215) — one editable "flow_multiplier" rule. Same shape as
+    // ExpertReprocessorRule (M220 speed) but M221 and clamped to [20, 200] instead of [1, 300].
+    struct ExpertReprocessorFlowRule
+    {
+        bool enabled = true;
+        bool by_tool = false;
+        int tool = 0;
+        int layer_from = 0;
+        int layer_to = -1; // -1 == "to end of file"
+        int value = 100;   // M221 S<value>, percent, clamped [20, 200]
+        bool avoid_wipetower = false; // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i)
+    };
+
+    // NEOTKO_GCODE_REPROCESSOR — panel state, live-edited, auto-saved to the
+    // "expert_gcode_reprocessor_rules" project config option on every change (s215: dropped the
+    // old "Apply" button — see render_expert_gcode_reprocessor_panel() for why).
     struct ExpertReprocessorPanelState
     {
+        // NEOTKO_GCODE_REPROCESSOR (s215): master ON/OFF — mirrors the JSON root's "enabled" key.
+        // When false, run_expert_gcode_reprocessor() no-ops entirely regardless of what rules
+        // exist, without the user having to delete/disable every rule individually.
+        bool enabled = true;
         std::vector<ExpertReprocessorRule> rules;
         std::vector<ExpertReprocessorFanRule> fan_rules;
+        std::vector<ExpertReprocessorOffsetRule> offset_rules;
+        std::vector<ExpertReprocessorFlowRule> flow_rules;
         // Opaque rule objects from the JSON whose "type" this build doesn't understand — kept
-        // verbatim and re-emitted on Apply so an older build never destroys a newer build's rules.
+        // verbatim and re-emitted on save so an older build never destroys a newer build's rules.
         std::vector<nlohmann::json> unknown_rules;
         bool loaded_from_config = false;
+        // NEOTKO_GCODE_REPROCESSOR (s216): GLOBAL/BY TOOL toggle for the chart in
+        // render_expert_gcode_reprocessor_chart() — pure view filter, not persisted (deliberately
+        // absent from the JSON save block), doesn't affect any rule's own by_tool flag.
+        bool chart_by_tool_mode = true;
+        // NEOTKO_GCODE_REPROCESSOR (s216b): transient chart-interaction state, never persisted.
+        // A drag in progress is identified by (rule-type ordinal, index within that type's own
+        // vector, which endpoint) — stable across frames because add/remove can't happen
+        // mid-drag (both hands are on the mouse button the whole time).
+        int chart_drag_kind  = -1; // RuleKind ordinal of the endpoint being dragged, -1 = none
+        int chart_drag_index = -1;
+        int chart_drag_end   = 0;  // 0 = layer_from endpoint, 1 = layer_to endpoint
+        // Context captured when the right-click "add rule here" popup opens (popup outlives the
+        // click by several frames, so the click position must be remembered, not re-read).
+        int chart_add_tool  = -1;  // -1 = add a global rule (GLOBAL view)
+        int chart_add_layer = 0;   // 0-based
+        // NEOTKO_GCODE_REPROCESSOR (s216c): identity of the rule targeted by the right-click
+        // "delete this rule" popup — same (kind ordinal, index) addressing as chart_drag_*.
+        int chart_delete_kind  = -1;
+        int chart_delete_index = -1;
     };
 
     //BBS
@@ -919,6 +1024,9 @@ private:
     RealColorCache m_realcolor_cache;
     // NEOTKO_REALCOLOR_TAG: debug-tunable lighting/background constants, see RealColorTuning above
     RealColorTuning m_realcolor_tuning;
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): procedural equirect environment textures, see
+    // RealColorEnvCache above / ensure_realcolor_env_textures()
+    RealColorEnvCache m_realcolor_env;
     // NEOTKO_REALCOLOR_TAG s166 (item 4): G-buffer for the shells Phong+SSAO path, see ShellsAOCache above
     ShellsAOCache m_shells_ao_cache;
     // NEOTKO_GCODE_REPROCESSOR — LibreMode-gated rule editor panel state, see
@@ -1059,14 +1167,36 @@ private:
     void render_toolpaths_realcolor(int canvas_width, int canvas_height);
     bool ensure_realcolor_fbos(int w, int h);
     void destroy_realcolor_fbos();
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
+    // lazily creates + (re)generates the procedural equirect env textures. force_regen=true
+    // re-bakes the pixel content even if the GL objects already exist (tuning changed).
+    bool ensure_realcolor_env_textures(bool force_regen);
+    void destroy_realcolor_env_textures();
     // NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning as live sliders,
     // gated by NeoDebug::enabled(NeoDebug::REALCOLOR) — no-op unless ORCA_DEBUG_REALCOLOR is set
     void render_realcolor_debug_panel();
-    // NEOTKO_GCODE_REPROCESSOR — PRO-only rule editor panel, gated on app_config
-    // "neotko_libre_mode" (not a NeoDebug channel — this is a real user-facing feature).
-    // Called from render_legend(). See ExpertGCodeReprocessor.cpp for the engine that consumes
-    // the JSON this panel writes to config option "expert_gcode_reprocessor_rules".
+    // NEOTKO_GCODE_REPROCESSOR — PRO-only rule editor, gated on app_config "neotko_libre_mode"
+    // (not a NeoDebug channel — this is a real user-facing feature). s216: renders inline inside
+    // the already-open "Legend" ImGui window, called only when m_view_type ==
+    // EViewType::GCodeReprocessor (see render_legend()'s early-return branch, right after the
+    // m_fold check) — no longer its own floating window. See ExpertGCodeReprocessor.cpp for the
+    // engine that consumes the JSON this panel writes to config option
+    // "expert_gcode_reprocessor_rules".
     void render_expert_gcode_reprocessor_panel();
+    // NEOTKO_GCODE_REPROCESSOR (s216 Fase 2, interactive since s216b, sole editor since s216c) —
+    // drawn near the top of render_expert_gcode_reprocessor_panel(): GLOBAL/BY TOOL toggle + a
+    // per-tool bar chart (one lane per rule type, colored) + a plain-text summary, all over
+    // m_expert_reprocessor. This is the ONLY editor now (the old per-type checkbox/DragInt rows
+    // were removed once this covered full CRUD): dragging an endpoint dot edits that rule's
+    // layer_from/layer_to (top of the chart snaps to "END"); clicking a summary row's value badge
+    // opens a popup to type its number (percent/S-value/mm); right-clicking empty chart space
+    // opens an "add rule here" popup; right-clicking an existing point opens a "delete this rule"
+    // popup. All the drag/popup state lives in ExpertReprocessorPanelState's chart_* fields above.
+    // Returns true when an edit committed (drag released, value typed, rule added/deleted) so the
+    // caller folds it into the panel's auto-save accumulator. Tool columns are
+    // T0..T(extruders_count-1), 0-based to match the real gcode T<n> command — NOT 1-based like
+    // the layer fields in this panel.
+    bool render_expert_gcode_reprocessor_chart();
     RealColorFingerprint compute_realcolor_fingerprint(int canvas_width, int canvas_height) const;
     void render_toolpaths();
     void render_shells(int canvas_width, int canvas_height);

@@ -4655,7 +4655,13 @@ static bool split_extrusion_collection_for_multi_perimeter_pattern(
     int                                                      layer_index,
     std::vector<std::unique_ptr<ExtrusionEntityCollection>>& out_by_extruder,
     size_t&                                                  out_bucket_count,
-    const PrintObject*                                       current_object = nullptr)
+    const PrintObject*                                       current_object = nullptr,
+    // NEOTKO_ALHCOLOR_TAG — Fase 5.4: real layer z/height so resolve_perimeter() can match
+    // the slope-recolor plan's z bands (adaptive heights make layer_index*nominal wrong).
+    // Grouped manual patterns themselves only use layer_index, so passing the real values
+    // is behavior-neutral for everything that existed before this phase.
+    float                                                    layer_print_z = 0.f,
+    float                                                    layer_height  = 0.f)
 {
     out_by_extruder.clear();
     out_by_extruder.resize(num_physical);
@@ -4675,7 +4681,7 @@ static bool split_extrusion_collection_for_multi_perimeter_pattern(
             perimeter_index = entity->role() == erExternalPerimeter ? 0 : 1;
 
         const unsigned int extruder_id = mixed_mgr.resolve_perimeter(
-            mixed_filament_id, num_physical, layer_index, perimeter_index, 0.f, 0.f, false, current_object);
+            mixed_filament_id, num_physical, layer_index, perimeter_index, layer_print_z, layer_height, false, current_object);
         if (extruder_id == 0 || extruder_id > num_physical)
             continue;
 
@@ -6487,13 +6493,27 @@ LayerResult GCode::process_layer(const Print& print,
                             layer_tools.mixed_mgr != nullptr &&
                             layer_tools.num_physical > 0 &&
                             correct_extruder_id >= 0) {
-                            const unsigned int mixed_filament_id =
+                            unsigned int mixed_filament_id =
                                 grouped_manual_pattern_mixed_filament_id(entity_type, *filtered_extrusions, region);
+                            const PrintObject* current_object_for_gradient =
+                                layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
+                            // NEOTKO_ALHCOLOR_TAG — Fase 5.4b. A slope-recolor plan gives
+                            // Cycle/gradient rows (no manual pattern) a per-ring axis for
+                            // the layers its z bands cover — activate the same split path
+                            // so those rings reach resolve_perimeter() (which applies the
+                            // override; rings past the plan fall through to the layer's
+                            // normal Cycle tool). Mirrors ToolOrdering's grouped_id gate.
+                            if (mixed_filament_id == 0
+                                && slope_recolor::ring_count(current_object_for_gradient, float(layer_tools.print_z)) > 0) {
+                                const unsigned int configured_id =
+                                    configured_filament_id_1based(entity_type, *filtered_extrusions, region);
+                                if (configured_id != 0
+                                    && layer_tools.mixed_mgr->is_mixed(configured_id, layer_tools.num_physical))
+                                    mixed_filament_id = configured_id;
+                            }
                             if (mixed_filament_id != 0) {
                                 std::vector<std::unique_ptr<ExtrusionEntityCollection>> split_by_extruder;
                                 size_t bucket_count = 0;
-                                const PrintObject* current_object_for_gradient =
-                                    layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
                                 if (split_extrusion_collection_for_multi_perimeter_pattern(*filtered_extrusions,
                                                                                            *layer_tools.mixed_mgr,
                                                                                            mixed_filament_id,
@@ -6501,7 +6521,9 @@ LayerResult GCode::process_layer(const Print& print,
                                                                                            layer_tools.layer_index,
                                                                                            split_by_extruder,
                                                                                            bucket_count,
-                                                                                           current_object_for_gradient)) {
+                                                                                           current_object_for_gradient,
+                                                                                           float(layer_tools.print_z),
+                                                                                           float(layer_tools.layer_height))) {
                                     if (bucket_count >= 2) {
                                         for (size_t extruder_idx = 0; extruder_idx < split_by_extruder.size(); ++extruder_idx) {
                                             std::unique_ptr<ExtrusionEntityCollection>& split_collection = split_by_extruder[extruder_idx];

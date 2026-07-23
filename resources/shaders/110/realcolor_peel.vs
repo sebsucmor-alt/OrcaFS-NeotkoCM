@@ -21,11 +21,13 @@ const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
 // GCodeViewer::RealColorTuning + the debug panel in render_toolpaths_realcolor() (see
 // GCodeViewer.cpp set_uniform calls right before this shader's peel draw) — uniforms instead of
 // #define so they can be retuned without recompiling shaders.
-uniform float u_ambient_ground;
-uniform float u_ambient_sky;
-uniform float u_fresnel_power;
-uniform float u_fresnel_strength;
-
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
+// u_ambient_ground/sky, the tints, and u_fresnel_power/strength/tint all moved OUT of this file
+// — ambient/rim are now real texture samples in realcolor_peel.fs (see that file), because
+// texture sampling from a vertex shader (VTF) isn't guaranteed on the legacy/compatibility GL
+// profile this app already knows it can land on (s164). item 1b's v_ambient_rgb/v_rim_rgb
+// varyings and their per-vertex mix are gone too, superseded (not run in parallel) by item 3's
+// per-fragment env sampling.
 uniform mat4 view_model_matrix;
 uniform mat4 projection_matrix;
 uniform mat3 view_normal_matrix;
@@ -33,8 +35,16 @@ uniform mat3 view_normal_matrix;
 attribute vec3 v_position;
 attribute vec3 v_normal;
 
-// x = tainted, y = specular;
+// x = direct-light diffuse only (ambient comes from the env texture now, see realcolor_peel.fs),
+// y = specular;
 varying vec2 intensity;
+
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 3): raw world-space position, pass-through (v_position is
+// already world space — no per-object model matrix for gcode toolpaths, see 09's coordinate-
+// space note). realcolor_peel.fs needs this to build a WORLD-space view direction for the env
+// mirror reflection, consistent with the world-space normal (v_view_normal) — reusing the
+// eye-space `position` computed below for that would mix reference frames.
+varying vec3 v_world_pos;
 
 // NEOTKO_REALCOLOR_TAG: linear eye-space depth (camera-space distance along the view axis),
 // used by realcolor_peel.fs for the peel-order comparison instead of gl_FragCoord.z. NDC depth
@@ -54,20 +64,17 @@ void main()
 {
     vec3 normal = normalize(view_normal_matrix * v_normal);
     v_view_normal = normal;
+    v_world_pos = v_position; // pass-through, already world space
 
     float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
+    intensity.x = NdotL * LIGHT_TOP_DIFFUSE; // direct light only, ambient is env-sampled in .fs
 
-    float sky_mix = normal.y * 0.5 + 0.5; // 0 = ground, 1 = sky
-    intensity.x = mix(u_ambient_ground, u_ambient_sky, sky_mix) + NdotL * LIGHT_TOP_DIFFUSE;
     vec4 position = view_model_matrix * vec4(v_position, 1.0);
     intensity.y = LIGHT_TOP_SPECULAR * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
     v_eye_z = -position.z; // right-handed eye space, camera looks down -Z
 
     NdotL = max(dot(normal, LIGHT_FRONT_DIR), 0.0);
     intensity.x += NdotL * LIGHT_FRONT_DIFFUSE;
-
-    float fres = pow(1.0 - max(dot(normalize(-position.xyz), normal), 0.0), u_fresnel_power);
-    intensity.y += u_fresnel_strength * fres;
 
     gl_Position = projection_matrix * position;
 }

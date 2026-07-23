@@ -330,6 +330,7 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentSlopeRecolor.cpp
     filament_mixer.cpp
     filament_mixer.h
     filament_mixer_model.h
@@ -377,6 +378,10 @@ set(lisbslic3r_sources
     ColorSci/ColorPredict.hpp
     ColorSci/ColorHeightEnvelope.cpp
     ColorSci/ColorHeightEnvelope.hpp
+    ColorSci/ColorTopZoneProxy.cpp
+    ColorSci/ColorTopZoneProxy.hpp
+    ColorSci/SlopePerimeterRecolor.cpp
+    ColorSci/SlopePerimeterRecolor.hpp
     ColorSci/GradientRamp.cpp
     ColorSci/GradientRamp.hpp
     ColorSci/StackFlatten.cpp

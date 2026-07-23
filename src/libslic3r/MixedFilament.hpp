@@ -313,7 +313,8 @@ public:
                                                           int          layer_index,
                                                           float        layer_print_z = 0.f,
                                                           float        layer_height  = 0.f,
-                                                          bool         force_height_weighted = false) const;
+                                                          bool         force_height_weighted = false,
+                                                          const PrintObject* current_object = nullptr) const;
 
     // Map virtual filament ID (1-based, after physical IDs) to index into
     // m_mixed. Virtual IDs enumerate enabled mixed rows only.
@@ -417,6 +418,22 @@ inline bool is_simple_gradient(const MixedFilament& mf)
         && MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern).empty()
         && count_ids(mf.gradient_component_ids) < 3;
 }
+
+// NEOTKO_ALHCOLOR_TAG — Fase 5.4 (slope-perimeter recolor). Free functions implemented in
+// MixedFilamentSlopeRecolor.cpp (own TU on purpose: it needs Model/Print.hpp, whose
+// transitive Color.hpp `using RGB` collides with MixedFilament.cpp's pigment RGB structs).
+// Declared here so MixedFilament.cpp, GCode.cpp and ToolOrdering.cpp all share one source.
+//   override_1based — 1-based tool the stored per-object plan assigns to (z, ring);
+//                     0 = no override, fall through to normal resolution. Ring 0 (the
+//                     external perimeter) is NEVER overridden — its per-layer alternation
+//                     is the pattern's own texture; only newly-exposed interior rings
+//                     take plan colors (s222 fix, "slope zone turned solid").
+//   ring_count      — rings the plan covers at z (0 = no plan there); any per-layer
+//                     planner must enumerate at least this many rings or Plan != Emisión.
+namespace slope_recolor {
+int    override_1based(const PrintObject* po, float z, int perimeter_index, size_t num_physical);
+size_t ring_count(const PrintObject* po, float z);
+} // namespace slope_recolor
 
 } // namespace Slic3r
 

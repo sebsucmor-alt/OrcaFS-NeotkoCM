@@ -7454,6 +7454,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("neoarachne_max_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
         optgroup->append_single_option_line("neoarachne_min_feature_size_pct", "quality_settings_wall_generator#neoarachne-edge-closure");
         optgroup->append_single_option_line("neoarachne_keep_short_tails",     "quality_settings_wall_generator#neoarachne-edge-closure");
+        optgroup->append_single_option_line("neoarachne_pin_outer_width",      "quality_settings_wall_generator#neoarachne-neotkoedge");
         optgroup->append_single_option_line("neoarachne_bead_count_hysteresis_pct", "quality_settings_wall_generator#neoarachne-neotkoedge");
         optgroup->append_single_option_line("neoarachne_transition_filter_dist_mm",  "quality_settings_wall_generator#neoarachne-neotkoedge");
 

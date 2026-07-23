@@ -989,7 +989,9 @@ static PrintObjectRegions* generate_print_object_regions(
     const bool                                   has_painted_fuzzy_skin,
     // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode "extra walls" (mmu_segmented_region_extra_walls):
     // added on top of a painted region's own wall_loops, see the painting-regions loop below.
-    const int                                    mmu_segmented_region_extra_walls)
+    // Per-color overrides (indexed by 1-based paint slot id, 0/absent = use the scalar).
+    const int                                    mmu_segmented_region_extra_walls,
+    const std::vector<int>                      &mmu_segmented_region_extra_walls_per_color)
 {
     // Reuse the old object or generate a new one.
     auto out = print_object_regions_old ? std::unique_ptr<PrintObjectRegions>(print_object_regions_old) : std::make_unique<PrintObjectRegions>();
@@ -1107,9 +1109,15 @@ static PrintObjectRegions* generate_print_object_regions(
                     // walls in the same spot, same material, same-color overextrusion. Since
                     // same-color "extra walls" wouldn't be visible anyway, nothing is lost by
                     // skipping it here.
-                    if (mmu_segmented_region_extra_walls > 0
+                    // NEOTKO_PAINTERPRO_TAG — per-color override wins over the scalar (0 = fallback).
+                    const int painted_extra_walls =
+                        (painted_extruder_id < mmu_segmented_region_extra_walls_per_color.size()
+                         && mmu_segmented_region_extra_walls_per_color[painted_extruder_id] > 0)
+                            ? std::min(mmu_segmented_region_extra_walls_per_color[painted_extruder_id], 8)
+                            : mmu_segmented_region_extra_walls;
+                    if (painted_extra_walls > 0
                      && painted_extruder_id != unsigned(parent_region.region->config().wall_filament.value))
-                        cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + mmu_segmented_region_extra_walls;
+                        cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + painted_extra_walls;
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
@@ -2058,7 +2066,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_object.is_mm_painted() ? 0.f : float(print_object.config().xy_contour_compensation.value),
                 painting_extruders,
                 print_object.is_fuzzy_skin_painted(),
-                print_object.config().mmu_segmented_region_extra_walls.value);
+                print_object.config().mmu_segmented_region_extra_walls.value,
+                print_object.config().mmu_segmented_region_extra_walls_per_color.values);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it)
             if ((*it)->m_shared_regions) {

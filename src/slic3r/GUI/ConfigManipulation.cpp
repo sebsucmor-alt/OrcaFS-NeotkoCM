@@ -983,6 +983,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     const bool neotko_edge_active = have_neoarachne &&
         (inner_src == NeoArachneWallSource::ArachneNeotkoEdge ||
          outer_src == NeoArachneWallSource::ArachneNeotkoEdge);
+    toggle_line("neoarachne_pin_outer_width", neotko_edge_active);
     toggle_line("neoarachne_bead_count_hysteresis_pct", neotko_edge_active);
     toggle_line("neoarachne_transition_filter_dist_mm", have_neoarachne && inner_is_arachne);
 

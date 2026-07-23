@@ -17,6 +17,15 @@ uniform vec2 u_texel_size;         // 1 / supersampled peel/accum texture resolu
 uniform float u_ao_radius;         // px, in the same supersampled texel space as u_texel_size
 uniform float u_ao_strength;       // 0 = AO off, 1 = full strength
 
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 2, docs/WIP/REALCOLOR_VIEW/08_PBR_IBL_SSS_PLAN.md):
+// single-pass screen-space subsurface scattering — same material TD array realcolor_accum.fs
+// already indexes dynamically by tool_id (proven to work on this hardware since s163), reused
+// here to scale the blur radius per-pixel by how translucent the surface under it is.
+uniform float u_material_td[4];
+uniform float u_sss_strength;      // 0 = off (bit-identical to pre-s214), 1 = full blur
+uniform float u_sss_radius_px;     // px, same supersampled texel space as u_ao_radius
+uniform float u_sss_reference_td;  // mm — a material at exactly this TD blurs at u_sss_radius_px
+
 in vec2 uv;
 out vec4 frag_color;
 
@@ -78,6 +87,61 @@ float compute_ao(vec2 center_uv)
     return 1.0 - clamp(occlusion, 0.0, 1.0);
 }
 
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 2): single-pass screen-space subsurface scattering —
+// same 8-tap disc pattern as compute_ao() above, adapted to accumulate blurred NEIGHBOR COLOR
+// (from u_accum_color) instead of occlusion, with the same bilateral edge-stopping (depth delta
+// + normal agreement) so the blur never bleeds color across a real silhouette edge. Deliberately
+// NOT a separable 2-pass Gaussian (the "textbook" SSS technique) — see 08_PBR_IBL_SSS_PLAN.md for
+// why a single disc pass was chosen (reuses these exact bound textures, zero new FBOs/passes).
+const float REALCOLOR_SSS_MAX_DELTA_MM = 1.5; // same silhouette-edge cutoff as REALCOLOR_AO_MAX_DELTA_MM
+
+void sss_sample(vec2 center_uv, float center_z, vec3 center_n, vec2 dir, float radius_px,
+                 inout vec3 accum_color, inout float accum_weight)
+{
+    vec2 s_uv = center_uv + dir * u_texel_size * radius_px;
+    vec4 s_meta = texture(u_peel_meta0, s_uv);
+    if (s_meta.a < 0.5)
+        return; // no geometry at this tap — doesn't contribute
+    float delta = abs(center_z - s_meta.b);
+    float range_falloff = clamp(1.0 - delta / REALCOLOR_SSS_MAX_DELTA_MM, 0.0, 1.0);
+    vec3 s_n = normalize(texture(u_peel_normal0, s_uv).rgb * 2.0 - 1.0);
+    float weight = range_falloff * max(dot(center_n, s_n), 0.0);
+    accum_color += texture(u_accum_color, s_uv).rgb * weight;
+    accum_weight += weight;
+}
+
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 2): `sharp_lin` is the already box-filtered color at this
+// output pixel — seeding the accumulator with it (weight 1.0) means a neighborhood fully
+// rejected by edge-stopping degrades gracefully back to the sharp color instead of going black.
+vec3 compute_sss(vec2 center_uv, vec3 sharp_lin)
+{
+    vec4 center_meta = texture(u_peel_meta0, center_uv);
+    if (center_meta.a < 0.5 || u_sss_strength <= 0.0)
+        return sharp_lin;
+
+    int tool = int(center_meta.r + 0.5);
+    float radius_px = u_sss_radius_px * clamp(u_material_td[tool] / max(u_sss_reference_td, 1e-4), 0.15, 4.0);
+    if (radius_px < 0.5)
+        return sharp_lin;
+
+    float center_z = center_meta.b;
+    vec3 center_n = normalize(texture(u_peel_normal0, center_uv).rgb * 2.0 - 1.0);
+
+    vec3 accum_color = sharp_lin;
+    float accum_weight = 1.0;
+
+    sss_sample(center_uv, center_z, center_n, vec2( 1.0,  0.0), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2(-1.0,  0.0), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2( 0.0,  1.0), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2( 0.0, -1.0), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2( 0.7,  0.7), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2(-0.7,  0.7), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2( 0.7, -0.7), radius_px, accum_color, accum_weight);
+    sss_sample(center_uv, center_z, center_n, vec2(-0.7, -0.7), radius_px, accum_color, accum_weight);
+
+    return mix(sharp_lin, accum_color / accum_weight, u_sss_strength);
+}
+
 // NEOTKO_REALCOLOR_TAG: 2x2 box-filter downsample from the REALCOLOR_SUPERSAMPLE-resolution
 // peel/accum textures to the real canvas pixel — fixes thin ColorStitch/PathBlend geometry
 // vanishing at single-sample resolution (root cause: the default framebuffer gets 4x MSAA via
@@ -114,6 +178,12 @@ void main()
     float d3 = mix(1.0, texture(u_peel_depth0, uv + o3).r, a3);
     float d4 = mix(1.0, texture(u_peel_depth0, uv + o4).r, a4);
     float min_depth = min(min(d1, d2), min(d3, d4));
+
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 2): subsurface blur runs BEFORE AO — AO is a shading/
+    // occlusion modulation that should apply to the already-diffused material color, not the
+    // other way around. See compute_sss() above; realcolor_accum.fs is untouched, this never
+    // feeds back into the Beer-Lambert composite either.
+    lin = compute_sss(uv, lin);
 
     // NEOTKO_REALCOLOR_TAG s166 (item 3): AO is a post-process on the already box-filtered
     // color, computed once per output pixel (not once per box-filter tap) — see compute_ao()

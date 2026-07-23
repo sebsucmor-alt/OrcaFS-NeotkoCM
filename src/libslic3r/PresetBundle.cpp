@@ -209,6 +209,13 @@ static std::vector<std::string> s_project_options {
     "dithering_local_z_infill",
     "dithering_local_z_direct_multicolor",
     "dithering_step_painted_zones_only",
+    // NEOTKO_GCODE_REPROCESSOR (s216h): root cause of "reprocessor rules don't reload after
+    // reopening a saved .3mf" — this list is the allowlist load_config_file_config() (below)
+    // uses to copy keys from the freshly-loaded project config into the live
+    // preset_bundle->project_config; a key missing here is silently never copied back in, even
+    // though it round-trips into Metadata/project_settings.config on save just fine (confirmed:
+    // the saved JSON had the rule intact, project_config.has(...) was still false after reload).
+    "expert_gcode_reprocessor_rules",
 };
 
 // SM_FEATURE: add Snapmaker machine as default

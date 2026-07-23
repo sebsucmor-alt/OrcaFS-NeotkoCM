@@ -130,6 +130,9 @@ protected:
     // ImGui icon font, out of scope here).
     bool                              m_rectangle_mask_active = false;
     bool                              m_polygon_mask_active   = false;
+    // NEOTKO_PAINTERPRO_TAG — when true, "Extra walls" / "Surface depth" edit the per-color
+    // override of the currently selected paint color instead of the global value.
+    bool                              m_per_color_values      = false;
 
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 

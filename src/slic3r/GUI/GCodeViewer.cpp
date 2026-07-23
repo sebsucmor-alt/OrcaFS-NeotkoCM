@@ -84,6 +84,8 @@ else if (view_type == GCodeViewer::EViewType::LayerTimeLog)
         return _u8L("Layer Time (log)");
     else if (view_type == GCodeViewer::EViewType::RealColor)
         return _u8L("RealColor");
+    else if (view_type == GCodeViewer::EViewType::GCodeReprocessor)
+        return _u8L("Gcode Reprocessor");
     return "";
 }
 
@@ -802,6 +804,8 @@ GCodeViewer::~GCodeViewer()
     destroy_realcolor_fbos();
     // NEOTKO_REALCOLOR_TAG s166 (item 4): same idiom for the shells AO G-buffer.
     destroy_shells_ao_fbo();
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): same idiom for the procedural env textures.
+    destroy_realcolor_env_textures();
     if (m_moves_slider) {
         delete m_moves_slider;
         m_moves_slider = nullptr;
@@ -948,6 +952,15 @@ view_type_items.push_back(EViewType::LayerTimeLog);
     // version check.
     if (realcolor_gpu_supported())
         view_type_items.push_back(EViewType::RealColor);
+
+    // NEOTKO_GCODE_REPROCESSOR (s216): PRO-only entry in the same combo, mirroring the RealColor
+    // gate above but keyed on neotko_libre_mode instead of GPU support — must be pushed here
+    // (before the label loop below), not down with FilamentId, or it would render with no text in
+    // the combo the way FilamentId deliberately does (that one is an internal-only render mode,
+    // never meant to be user-selectable — see the temporary set_view_type(FilamentId) swap
+    // elsewhere in this file).
+    if (wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        view_type_items.push_back(EViewType::GCodeReprocessor);
 
     for (int i = 0; i < view_type_items.size(); i++) {
         view_type_items_str.push_back(get_view_type_string(view_type_items[i]));
@@ -1333,6 +1346,21 @@ void GCodeViewer::reset()
     m_statistics.reset_all();
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
     m_contained_in_bed = true;
+
+    // NEOTKO_GCODE_REPROCESSOR (s216e): reset() runs once per genuinely NEW gcode_result — the
+    // start of load(), guarded there by the m_last_result_id check, so this doesn't fire on
+    // trivial re-renders. m_expert_reprocessor.loaded_from_config previously stuck at true for
+    // the lifetime of this GCodeViewer instance once ANY project's rules had been read, so
+    // opening a second (or the same) project later in the same running session never re-read
+    // "expert_gcode_reprocessor_rules" from that project's own project_config — the panel just
+    // kept showing whatever the FIRST project in the session had loaded (or nothing, if that one
+    // had none). Confirmed via a real repro: a project with a valid, non-empty
+    // expert_gcode_reprocessor_rules JSON (checked directly inside its saved .3mf) showed an
+    // empty chart in both GLOBAL and BY TOOL after switching to it from another project without
+    // restarting the whole app. Resetting the whole struct here forces
+    // render_expert_gcode_reprocessor_panel() to re-read project_config fresh the next time it
+    // renders, same as a first load.
+    m_expert_reprocessor = ExpertReprocessorPanelState();
 }
 
 //BBS: GUI refactor: add canvas width and height
@@ -1356,9 +1384,10 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     else
         render_toolpaths();
     float legend_height = 0.0f;
+    // NEOTKO_GCODE_REPROCESSOR (s216): render_expert_gcode_reprocessor_panel() now renders inside
+    // the Legend window itself (early-return branch right after the m_fold check, when
+    // m_view_type == EViewType::GCodeReprocessor) — no separate call needed here anymore.
     render_legend(legend_height, canvas_width, canvas_height, right_margin);
-    // NEOTKO_GCODE_REPROCESSOR — own floating ImGui window, doesn't need the legend's layout math
-    render_expert_gcode_reprocessor_panel();
 
     if (m_user_mode != wxGetApp().get_mode()) {
         update_by_mode(wxGetApp().get_mode());
@@ -3317,7 +3346,8 @@ void GCodeViewer::refresh_render_paths(bool keep_sequential_current_first, bool 
         case EViewType::LayerTimeLog:   { color = m_extrusions.ranges.layer_duration_log.get_color_at(path.layer_time); break; }
         case EViewType::VolumetricRate: { color = m_extrusions.ranges.volumetric_rate.get_color_at(path.volumetric_rate); break; }
         case EViewType::Tool:
-        case EViewType::RealColor:      { color = m_tools.m_tool_colors[path.extruder_id]; break; } // NEOTKO_REALCOLOR_TAG: M1 flat fallback, real compositing lives in render_toolpaths_realcolor()
+        case EViewType::RealColor:      // NEOTKO_REALCOLOR_TAG: M1 flat fallback, real compositing lives in render_toolpaths_realcolor()
+        case EViewType::GCodeReprocessor: { color = m_tools.m_tool_colors[path.extruder_id]; break; } // NEOTKO_GCODE_REPROCESSOR (s216): color by tool while editing by-tool rules, same as Tool/RealColor
         case EViewType::ColorPrint:     {
             if (path.cp_color_id >= static_cast<unsigned char>(m_tools.m_tool_colors.size()))
                 color = ColorRGBA::GRAY();
@@ -3588,7 +3618,7 @@ m_no_render_path = false;
         }
         case EMoveType::Travel: {
             if (!top_layer_only || m_sequential_view.current.last == global_endpoints.last || is_travel_in_layers_range(path_id, m_layers_z_range[1], m_layers_z_range[1]))
-                color = (m_view_type == EViewType::Feedrate || m_view_type == EViewType::Tool || m_view_type == EViewType::RealColor) ? extrusion_color(path) : travel_color(path);
+                color = (m_view_type == EViewType::Feedrate || m_view_type == EViewType::Tool || m_view_type == EViewType::RealColor || m_view_type == EViewType::GCodeReprocessor) ? extrusion_color(path) : travel_color(path);
             else
                 color = Neutral_Color;
 
@@ -4178,6 +4208,61 @@ static constexpr float SHELLS_AO_RADIUS_PX = 6.0f;
 static constexpr float SHELLS_AO_STRENGTH = 0.35f;
 static const ColorRGBA SHELLS_SHADOW_COLOR = ColorRGBA(0.f, 0.f, 0.f, 0.25f);
 
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
+// procedural equirect environment texture sizes. Mirror stays sharp (used for the specular/rim
+// reflection); irradiance is deliberately tiny — every one of its texels is itself an average of
+// REALCOLOR_ENV_IRRADIANCE_SUPERSAMPLE^2 sub-samples of the same generator, approximating a
+// diffuse convolution without writing a real blur pass.
+static constexpr int REALCOLOR_ENV_MIRROR_W = 128;
+static constexpr int REALCOLOR_ENV_MIRROR_H = 64;
+static constexpr int REALCOLOR_ENV_IRRADIANCE_W = 16;
+static constexpr int REALCOLOR_ENV_IRRADIANCE_H = 8;
+static constexpr int REALCOLOR_ENV_IRRADIANCE_SUPERSAMPLE = 4;
+
+// NEOTKO_REALCOLOR_TAG s214: 3 fixed "studio softbox" lights, not exposed as sliders this
+// session (see 09_HDR_ENVIRONMENT_PLAN.md "fuera de alcance") — dot-product falloff (not
+// UV/great-circle distance) so there's no seam at the equirect wrap boundary. `tint` is a plain
+// Vec3f, NOT ColorRGB — ColorRGB's constructor/setters clamp to [0,1] on every write, which
+// would silently cap the intentionally-HDR-ish light intensities (>1.0) before they even reach
+// the accumulator below.
+struct RealColorStudioLight { Vec3f dir; float cos_radius; float intensity; Vec3f tint; };
+static const RealColorStudioLight REALCOLOR_STUDIO_LIGHTS[3] = {
+    { Vec3f(-0.55f, 0.62f, 0.56f).normalized(), std::cos(18.0f * float(M_PI) / 180.0f), 1.6f, Vec3f(1.00f, 0.97f, 0.90f) }, // key, warm
+    { Vec3f( 0.60f, 0.45f, 0.40f).normalized(), std::cos(24.0f * float(M_PI) / 180.0f), 0.9f, Vec3f(0.85f, 0.92f, 1.00f) }, // fill, cool
+    { Vec3f( 0.05f,-0.35f,-0.85f).normalized(), std::cos(32.0f * float(M_PI) / 180.0f), 0.4f, Vec3f(0.90f, 0.90f, 0.95f) }, // subtle rim/under
+};
+
+// NEOTKO_REALCOLOR_TAG s214: same equirect direction<->uv convention as equirect_uv() in
+// realcolor_peel.fs (110+140) — v=0 is straight up (sky), v=1 is straight down (ground),
+// matching the existing normal.y-based sky_mix convention from PBR item 1b. Pure function, no
+// GL state — called both for the sharp mirror texture and (supersampled) for the irradiance one.
+// Returns unclamped linear RGB (see the Vec3f note above) — callers clamp to [0,1] only once,
+// at final byte-pack time.
+static Vec3f realcolor_env_sample(float u, float v, const GCodeViewer::RealColorTuning& tuning)
+{
+    const float theta = (u - 0.5f) * 2.0f * float(M_PI);
+    const float phi = (0.5f - v) * float(M_PI);
+    const float y = std::sin(phi);
+    const float r = std::cos(phi);
+    const Vec3f dir(r * std::cos(theta), y, r * std::sin(theta));
+
+    const float sky_mix = std::clamp(y * 0.5f + 0.5f, 0.0f, 1.0f); // 0=ground, 1=sky
+    Vec3f color = Vec3f::Zero();
+    for (int c = 0; c < 3; ++c) {
+        const float ground = tuning.ambient_ground * tuning.ambient_ground_tint[c];
+        const float sky = tuning.ambient_sky * tuning.ambient_sky_tint[c];
+        color[c] = ground + (sky - ground) * sky_mix;
+    }
+
+    for (const RealColorStudioLight& light : REALCOLOR_STUDIO_LIGHTS) {
+        const float cos_angle = dir.dot(light.dir);
+        const float w = std::clamp((cos_angle - (light.cos_radius - 0.05f)) / 0.05f, 0.0f, 1.0f);
+        const float smooth_w = w * w * (3.0f - 2.0f * w); // smoothstep
+        color += (smooth_w * light.intensity) * light.tint;
+    }
+    return color;
+}
+
 // NEOTKO_REALCOLOR_TAG: the accumulator's seed color (what shows through any transmittance
 // left unconsumed after REALCOLOR_N_MAX passes) used to live here as a constexpr — it's now
 // m_realcolor_tuning.accum_seed_gray (GCodeViewer.hpp), live-tunable via the debug panel in
@@ -4323,6 +4408,76 @@ void GCodeViewer::destroy_realcolor_fbos()
     m_realcolor_cache = RealColorCache{};
 }
 
+// NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
+// bakes realcolor_env_sample() into the two flat GL_RGBA8 textures and uploads them. Plain
+// glTexImage2D, GL_LINEAR filtering, NO mipmaps (see RealColorEnvCache's comment in
+// GCodeViewer.hpp for why GLTexture::load_from_raw_data isn't reused here) — about as
+// GL-version-safe as texture creation gets, no MRT/float-texture/FBO capability risk like the
+// rest of RealColor had to work around in s163-166. Wrap: GL_REPEAT on S (longitude wraps),
+// GL_CLAMP_TO_EDGE on T (poles don't). force_regen=false only (re)creates the GL objects if they
+// don't exist yet; force_regen=true also re-bakes pixel content into already-existing textures
+// (tuning changed) via glTexSubImage2D, no realloc.
+static void realcolor_bake_env_texture(unsigned int& tex, int w, int h, int supersample,
+                                        const GCodeViewer::RealColorTuning& tuning, bool create_new)
+{
+    std::vector<unsigned char> pixels(static_cast<size_t>(w) * h * 4);
+    const float inv_ss2 = 1.0f / float(supersample * supersample);
+    for (int py = 0; py < h; ++py) {
+        for (int px = 0; px < w; ++px) {
+            Vec3f accum = Vec3f::Zero();
+            for (int sy = 0; sy < supersample; ++sy) {
+                for (int sx = 0; sx < supersample; ++sx) {
+                    const float u = (px + (sx + 0.5f) / supersample) / float(w);
+                    const float v = (py + (sy + 0.5f) / supersample) / float(h);
+                    accum += realcolor_env_sample(u, v, tuning);
+                }
+            }
+            accum *= inv_ss2;
+            unsigned char* p = &pixels[(static_cast<size_t>(py) * w + px) * 4];
+            p[0] = static_cast<unsigned char>(std::clamp(accum.x(), 0.0f, 1.0f) * 255.0f);
+            p[1] = static_cast<unsigned char>(std::clamp(accum.y(), 0.0f, 1.0f) * 255.0f);
+            p[2] = static_cast<unsigned char>(std::clamp(accum.z(), 0.0f, 1.0f) * 255.0f);
+            p[3] = 255;
+        }
+    }
+
+    if (create_new) {
+        glsafe(::glGenTextures(1, &tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data()));
+    } else {
+        glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+        glsafe(::glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data()));
+    }
+}
+
+bool GCodeViewer::ensure_realcolor_env_textures(bool force_regen)
+{
+    const bool create_new = !m_realcolor_env.gl_objects_created();
+    if (!create_new && !force_regen)
+        return true; // already exists and nothing asked for a re-bake
+
+    NEOTKO_LOG(REALCOLOR, "ensure_realcolor_env_textures: " << (create_new ? "creating" : "re-baking") << " procedural env textures");
+    realcolor_bake_env_texture(m_realcolor_env.mirror_tex, REALCOLOR_ENV_MIRROR_W, REALCOLOR_ENV_MIRROR_H,
+                                1, m_realcolor_tuning, create_new);
+    realcolor_bake_env_texture(m_realcolor_env.irradiance_tex, REALCOLOR_ENV_IRRADIANCE_W, REALCOLOR_ENV_IRRADIANCE_H,
+                                REALCOLOR_ENV_IRRADIANCE_SUPERSAMPLE, m_realcolor_tuning, create_new);
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    m_realcolor_env.valid = true;
+    return true;
+}
+
+void GCodeViewer::destroy_realcolor_env_textures()
+{
+    if (m_realcolor_env.mirror_tex)     glsafe(::glDeleteTextures(1, &m_realcolor_env.mirror_tex));
+    if (m_realcolor_env.irradiance_tex) glsafe(::glDeleteTextures(1, &m_realcolor_env.irradiance_tex));
+    m_realcolor_env = RealColorEnvCache{};
+}
+
 // NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning (GCodeViewer.hpp) as
 // live sliders — same NeoDebug channel (ORCA_DEBUG_REALCOLOR) that already gates NEOTKO_LOG
 // calls in this file, so it's zero surface for anyone not already running with that env var.
@@ -4344,18 +4499,65 @@ void GCodeViewer::render_realcolor_debug_panel()
     // NEOTKO_REALCOLOR_TAG: global TD multiplier — manual override + cheap visual calibration,
     // see the set_uniform call in the accum pass above (RealColorTuning.td_scale).
     changed |= imgui.slider_float("TD scale", &m_realcolor_tuning.td_scale, 0.1f, 3.0f, "%.2f");
+
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 1/3, 08_PBR_IBL_SSS_PLAN.md / 09_HDR_ENVIRONMENT_PLAN.md):
+    // ambient_ground/sky above + these 3 tints now BAKE the procedural env textures (item 3)
+    // instead of feeding realcolor_peel.vs directly (item 1, superseded) — see
+    // realcolor_env_sample() in this file. No ColorEdit3 wrapper in ImGuiWrapper — this file
+    // already mixes imgui.slider_float with raw ImGui::DragInt/TextColored calls elsewhere (see
+    // render_expert_gcode_reprocessor_panel above), same pattern here.
+    ImGui::Separator();
+    ImGui::TextUnformatted("PBR (env texture tints, item 2: subsurface scattering)");
+    changed |= ImGui::ColorEdit3("ambient ground tint", m_realcolor_tuning.ambient_ground_tint.data());
+    changed |= ImGui::ColorEdit3("ambient sky tint", m_realcolor_tuning.ambient_sky_tint.data());
+    changed |= ImGui::ColorEdit3("fresnel/rim tint", m_realcolor_tuning.fresnel_tint.data());
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 2): see compute_sss() in realcolor_present.fs.
+    changed |= imgui.slider_float("SSS strength", &m_realcolor_tuning.sss_strength, 0.0f, 1.0f);
+    changed |= imgui.slider_float("SSS radius (px)", &m_realcolor_tuning.sss_radius_px, 0.0f, 24.0f);
+    changed |= imgui.slider_float("SSS reference TD (mm)", &m_realcolor_tuning.sss_reference_td, 0.05f, 5.0f);
     ImGui::End();
     if (changed) {
         m_realcolor_cache.valid = false;
+        // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): also re-bake the env textures — cheap (a few
+        // thousand realcolor_env_sample() calls on the CPU, see ensure_realcolor_env_textures),
+        // simplest to just always invalidate rather than track which specific sliders feed the
+        // generator vs. the shader directly.
+        m_realcolor_env.valid = false;
         NEOTKO_LOG(REALCOLOR, "render_realcolor_debug_panel: tuning changed, forcing recompute");
     }
 }
 
 // NEOTKO_GCODE_REPROCESSOR — PRO-only rule editor. Gated on app_config "neotko_libre_mode"
-// (real user feature, not a NeoDebug channel — see docs/LIBREMODE.md §5). Phase 1: a single rule
-// type, "speed_multiplier" (M220 override between two layers). Unknown rule types already present
-// in the saved JSON (written by a newer build) are round-tripped verbatim in
-// m_expert_reprocessor.unknown_rules so this build never destroys rules it doesn't understand.
+// (real user feature, not a NeoDebug channel — see docs/LIBREMODE.md §5). Four rule types:
+// "speed_multiplier" (M220), "flow_multiplier" (M221), "fan_override" (M106/M107), "z_offset"
+// (SET_GCODE_OFFSET). Each rule also carries schema v2's "mode" (global or by_tool, edited via the
+// chart's GLOBAL/BY TOOL toggle — see render_expert_gcode_reprocessor_chart()) — see
+// ExpertGCodeReprocessor.cpp for what the engine does with all of this. Unknown rule types
+// already present in the saved JSON (written by
+// a newer build) are round-tripped verbatim in m_expert_reprocessor.unknown_rules so this build
+// never destroys rules it doesn't understand.
+//
+// s216: no more own floating window (dropped the ImGui::Begin/End pair that used to wrap this
+// whole function). Now called from render_legend()'s early-return branch only when m_view_type ==
+// EViewType::GCodeReprocessor is selected in the legend's view-type combo — same integration as
+// RealColor (see update_by_mode() for the gated push into view_type_items, and
+// get_view_type_string() for the combo label). Renders straight into the already-open "Legend"
+// ImGui window instead of a second floating one, per the user's request to stop having loose
+// floating windows on screen.
+//
+// s215: dropped the old "Apply" button. It called schedule_background_process(), which turned out
+// to be what was still prompting the user to reslice on every edit even after
+// "expert_gcode_reprocessor_rules" was added to Print::steps_ignore (Print.cpp) to stop the
+// config-diff invalidation — schedule_background_process() itself independently arms Plater's
+// restart timer and visibly asks for a re-slice, and there was never a real reason for this panel
+// to touch the background process at all: run_expert_gcode_reprocessor()'s only call site
+// (BackgroundSlicingProcess::finalize_gcode()) always reads "expert_gcode_reprocessor_rules"
+// fresh, straight from project_config, at export time. So all this panel needs to do is keep that
+// config key up to date — every control below now saves immediately on change (the `changed`
+// accumulator + the save block at the bottom) instead of waiting for a button click. The warning
+// dialog moved with it: it now fires on the master `enabled` toggle's OFF->ON transition instead
+// of on a button click, since firing it on every micro-edit (e.g. every frame while dragging a
+// slider) would spam a blocking modal.
 void GCodeViewer::render_expert_gcode_reprocessor_panel()
 {
     if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
@@ -4371,24 +4573,52 @@ void GCodeViewer::render_expert_gcode_reprocessor_panel()
         if (!raw.empty()) {
             try {
                 json root = json::parse(raw);
+                m_expert_reprocessor.enabled = root.value("enabled", true);
                 if (root.contains("rules") && root["rules"].is_array()) {
                     for (const auto& r : root["rules"]) {
-                        if (r.is_object() && r.contains("type") && r["type"].is_string() &&
-                            r["type"].get<std::string>() == "speed_multiplier") {
+                        const std::string rule_type = (r.is_object() && r.contains("type") && r["type"].is_string())
+                            ? r["type"].get<std::string>() : std::string();
+                        const bool by_tool = r.is_object() && r.value("mode", std::string("global")) == "by_tool";
+                        if (rule_type == "speed_multiplier") {
                             ExpertReprocessorRule rule;
                             rule.enabled = r.value("enabled", true);
+                            rule.by_tool = by_tool;
+                            rule.tool = r.value("tool", 0);
                             rule.layer_from = r.value("layer_from", 0);
                             rule.layer_to = r.value("layer_to", -1);
                             rule.value = r.value("value", 100);
+                            rule.avoid_wipetower = r.value("avoid_wipetower", false);
                             m_expert_reprocessor.rules.push_back(rule);
-                        } else if (r.is_object() && r.contains("type") && r["type"].is_string() &&
-                                   r["type"].get<std::string>() == "fan_override") {
+                        } else if (rule_type == "flow_multiplier") {
+                            ExpertReprocessorFlowRule flow_rule;
+                            flow_rule.enabled = r.value("enabled", true);
+                            flow_rule.by_tool = by_tool;
+                            flow_rule.tool = r.value("tool", 0);
+                            flow_rule.layer_from = r.value("layer_from", 0);
+                            flow_rule.layer_to = r.value("layer_to", -1);
+                            flow_rule.value = r.value("value", 100);
+                            flow_rule.avoid_wipetower = r.value("avoid_wipetower", false);
+                            m_expert_reprocessor.flow_rules.push_back(flow_rule);
+                        } else if (rule_type == "fan_override") {
                             ExpertReprocessorFanRule fan_rule;
                             fan_rule.enabled = r.value("enabled", true);
+                            fan_rule.by_tool = by_tool;
+                            fan_rule.tool = r.value("tool", 0);
                             fan_rule.layer_from = r.value("layer_from", 0);
                             fan_rule.layer_to = r.value("layer_to", -1);
                             fan_rule.value = r.value("value", 255);
+                            fan_rule.avoid_wipetower = r.value("avoid_wipetower", false);
                             m_expert_reprocessor.fan_rules.push_back(fan_rule);
+                        } else if (rule_type == "z_offset") {
+                            ExpertReprocessorOffsetRule offset_rule;
+                            offset_rule.enabled = r.value("enabled", true);
+                            offset_rule.by_tool = by_tool;
+                            offset_rule.tool = r.value("tool", 0);
+                            offset_rule.layer_from = r.value("layer_from", 0);
+                            offset_rule.layer_to = r.value("layer_to", -1);
+                            offset_rule.value = r.value("value", 0.0);
+                            offset_rule.avoid_wipetower = r.value("avoid_wipetower", false);
+                            m_expert_reprocessor.offset_rules.push_back(offset_rule);
                         } else {
                             m_expert_reprocessor.unknown_rules.push_back(r);
                         }
@@ -4401,10 +4631,24 @@ void GCodeViewer::render_expert_gcode_reprocessor_panel()
     }
 
     ImGuiWrapper& imgui = *wxGetApp().imgui();
-    ImGui::Begin("Expert G-code Reprocessor");
 
     const std::string warning_text = _u8L("PRO: edits real G-code. Wrong values can damage the machine.");
     ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.1f, 1.0f), "%s", warning_text.c_str());
+
+    bool changed = false;
+
+    // NEOTKO_GCODE_REPROCESSOR (s215): master ON/OFF — see reprocessor_globally_enabled() in
+    // ExpertGCodeReprocessor.cpp for the engine-side short-circuit this drives. Warning fires only
+    // on the OFF->ON transition, not on every edit below.
+    const bool was_enabled = m_expert_reprocessor.enabled;
+    if (imgui.checkbox(_L("Reprocessor enabled"), m_expert_reprocessor.enabled)) {
+        changed = true;
+        if (!was_enabled && m_expert_reprocessor.enabled)
+            warning_catcher(wxGetApp().mainframe,
+                _L("You are about to enable direct G-code modification (speed/flow/fan/Z-offset "
+                   "override). Incorrectly configured rules can damage the machine or ruin the "
+                   "print. Only continue if you know what you are doing."));
+    }
 
     // NEOTKO_GCODE_REPROCESSOR: engine/storage stay 0-based (matches build_layer_line_ranges in
     // ExpertGCodeReprocessor.cpp), but the slider the user actually looks at is 1-based ("Layer
@@ -4414,101 +4658,74 @@ void GCodeViewer::render_expert_gcode_reprocessor_panel()
     imgui.text(_L("Current layer") + ": " + std::to_string(current_layer + 1));
 
     ImGui::Separator();
-    imgui.text(_L("Speed override rules (M220)"));
+    changed |= render_expert_gcode_reprocessor_chart();
 
-    int remove_idx = -1;
-    for (int i = 0; i < (int)m_expert_reprocessor.rules.size(); ++i) {
-        ExpertReprocessorRule& rule = m_expert_reprocessor.rules[i];
-        ImGui::PushID(i);
-        imgui.checkbox("##enabled", rule.enabled);
-        ImGui::SameLine();
-        int disp_from = rule.layer_from + 1;
-        ImGui::SetNextItemWidth(70.0f);
-        if (ImGui::DragInt("from", &disp_from, 1.0f, 1, 100001))
-            rule.layer_from = disp_from - 1;
-        ImGui::SameLine();
-        int disp_to = (rule.layer_to < 0) ? -1 : rule.layer_to + 1;
-        ImGui::SetNextItemWidth(90.0f);
-        if (ImGui::DragInt("to (-1=end)", &disp_to, 1.0f, -1, 100001))
-            rule.layer_to = (disp_to < 0) ? -1 : disp_to - 1;
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(70.0f);
-        ImGui::DragInt("%", &rule.value, 1.0f, 1, 300);
-        ImGui::SameLine();
-        if (imgui.button("X"))
-            remove_idx = i;
-        ImGui::PopID();
-    }
-    if (remove_idx >= 0)
-        m_expert_reprocessor.rules.erase(m_expert_reprocessor.rules.begin() + remove_idx);
-
-    if (imgui.button(_L("+ Add rule at current layer"))) {
-        ExpertReprocessorRule rule;
-        rule.layer_from = current_layer;
-        m_expert_reprocessor.rules.push_back(rule);
-    }
-
-    ImGui::Separator();
-    imgui.text(_L("Fan override rules (M106, raw 0-255)"));
-
-    int remove_fan_idx = -1;
-    for (int i = 0; i < (int)m_expert_reprocessor.fan_rules.size(); ++i) {
-        ExpertReprocessorFanRule& rule = m_expert_reprocessor.fan_rules[i];
-        ImGui::PushID(1000 + i); // offset so IDs never collide with the speed rule loop above
-        imgui.checkbox("##fan_enabled", rule.enabled);
-        ImGui::SameLine();
-        int disp_from = rule.layer_from + 1;
-        ImGui::SetNextItemWidth(70.0f);
-        if (ImGui::DragInt("from", &disp_from, 1.0f, 1, 100001))
-            rule.layer_from = disp_from - 1;
-        ImGui::SameLine();
-        int disp_to = (rule.layer_to < 0) ? -1 : rule.layer_to + 1;
-        ImGui::SetNextItemWidth(90.0f);
-        if (ImGui::DragInt("to (-1=end)", &disp_to, 1.0f, -1, 100001))
-            rule.layer_to = (disp_to < 0) ? -1 : disp_to - 1;
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(70.0f);
-        ImGui::DragInt("S", &rule.value, 1.0f, 0, 255);
-        ImGui::SameLine();
-        if (imgui.button("X"))
-            remove_fan_idx = i;
-        ImGui::PopID();
-    }
-    if (remove_fan_idx >= 0)
-        m_expert_reprocessor.fan_rules.erase(m_expert_reprocessor.fan_rules.begin() + remove_fan_idx);
-
-    if (imgui.button(_L("+ Add fan rule at current layer"))) {
-        ExpertReprocessorFanRule fan_rule;
-        fan_rule.layer_from = current_layer;
-        m_expert_reprocessor.fan_rules.push_back(fan_rule);
-    }
-
-    ImGui::Separator();
-    if (imgui.button(_L("Apply (rewrites G-code on next export)"))) {
-        warning_catcher(wxGetApp().mainframe,
-            _L("You are about to modify the exported G-code directly (speed override). "
-               "Incorrectly configured rules can damage the machine or ruin the print. "
-               "Only continue if you know what you are doing."));
-
+    // NEOTKO_GCODE_REPROCESSOR (s216c): the per-type checkbox/DragInt/X rows and their "+ Add
+    // rule at current layer" buttons that used to live here are GONE — the chart above is now the
+    // only editor (drag an endpoint to move a rule, click its value badge in the summary to edit
+    // the number, right-click an empty spot to add, right-click a point to delete). Removed at
+    // the user's explicit request once the chart covered full CRUD, rather than keeping both UIs
+    // in parallel. `render_expert_reprocessor_mode_row()` (the shared "By tool" checkbox+combo
+    // row those loops used) was deleted with them — nothing else called it.
+    //
+    // NEOTKO_GCODE_REPROCESSOR (s215): no more "Apply" button — every control above already fed
+    // into `changed`, so just re-serialize and save now if anything did. See the doc comment at
+    // the top of this function for why this no longer calls schedule_background_process().
+    if (changed) {
         json root;
-        root["reprocessor_version"] = 1;
+        root["reprocessor_version"] = 3; // v3 (s216i): + "avoid_wipetower" per rule (v2 was s215: "mode"/"tool" per rule, root "enabled", "flow_multiplier"/"z_offset" types)
+        root["enabled"] = m_expert_reprocessor.enabled;
         json rules_arr = json::array();
         for (const ExpertReprocessorRule& rule : m_expert_reprocessor.rules) {
             json r;
             r["type"] = "speed_multiplier";
             r["enabled"] = rule.enabled;
+            r["mode"] = rule.by_tool ? "by_tool" : "global";
+            if (rule.by_tool)
+                r["tool"] = rule.tool;
             r["layer_from"] = rule.layer_from;
             r["layer_to"] = rule.layer_to;
             r["value"] = rule.value;
+            r["avoid_wipetower"] = rule.avoid_wipetower;
+            rules_arr.push_back(r);
+        }
+        for (const ExpertReprocessorFlowRule& rule : m_expert_reprocessor.flow_rules) {
+            json r;
+            r["type"] = "flow_multiplier";
+            r["enabled"] = rule.enabled;
+            r["mode"] = rule.by_tool ? "by_tool" : "global";
+            if (rule.by_tool)
+                r["tool"] = rule.tool;
+            r["layer_from"] = rule.layer_from;
+            r["layer_to"] = rule.layer_to;
+            r["value"] = rule.value;
+            r["avoid_wipetower"] = rule.avoid_wipetower;
             rules_arr.push_back(r);
         }
         for (const ExpertReprocessorFanRule& rule : m_expert_reprocessor.fan_rules) {
             json r;
             r["type"] = "fan_override";
             r["enabled"] = rule.enabled;
+            r["mode"] = rule.by_tool ? "by_tool" : "global";
+            if (rule.by_tool)
+                r["tool"] = rule.tool;
             r["layer_from"] = rule.layer_from;
             r["layer_to"] = rule.layer_to;
             r["value"] = rule.value;
+            r["avoid_wipetower"] = rule.avoid_wipetower;
+            rules_arr.push_back(r);
+        }
+        for (const ExpertReprocessorOffsetRule& rule : m_expert_reprocessor.offset_rules) {
+            json r;
+            r["type"] = "z_offset";
+            r["enabled"] = rule.enabled;
+            r["mode"] = rule.by_tool ? "by_tool" : "global";
+            if (rule.by_tool)
+                r["tool"] = rule.tool;
+            r["layer_from"] = rule.layer_from;
+            r["layer_to"] = rule.layer_to;
+            r["value"] = rule.value;
+            r["avoid_wipetower"] = rule.avoid_wipetower;
             rules_arr.push_back(r);
         }
         for (const auto& unknown : m_expert_reprocessor.unknown_rules)
@@ -4516,10 +4733,603 @@ void GCodeViewer::render_expert_gcode_reprocessor_panel()
         root["rules"] = rules_arr;
 
         wxGetApp().preset_bundle->project_config.set_key_value("expert_gcode_reprocessor_rules", new ConfigOptionString(root.dump()));
-        wxGetApp().plater()->schedule_background_process();
+    }
+}
+
+// NEOTKO_GCODE_REPROCESSOR (s216 Fase 2, interactive s216b, sole editor s216c) — visual editor:
+// GLOBAL/BY TOOL toggle + bar chart (columns = tools T0..T(n-1), one lane per rule type, colored
+// FAN=green/SPEED=blue/FLOW=orange/OFFSET=magenta) + a plain-text summary underneath. The bars are
+// LIVE: dragging an endpoint dot rewrites that rule's layer_from/layer_to directly in
+// m_expert_reprocessor, clicking a summary row's value badge opens a popup to type its number,
+// right-clicking empty chart space opens an "add rule here" popup, and right-clicking an existing
+// point opens a "delete this rule" popup. Returns true when an edit was committed (drag released,
+// value typed, rule added/deleted) so the caller folds it into the panel's auto-save accumulator —
+// deliberately NOT true on every dragged frame, to avoid re-serializing the JSON at mouse-move
+// frequency.
+//
+// Drawn with raw ImDrawList calls; the chart body itself is an InvisibleButton so it owns the
+// mouse (hover/click/drag) inside its rect without fighting the Legend window. Layout runs in two
+// passes: lane layout stamps each entry's screen-x (lane_cx) first, the interaction pass hit-tests
+// and possibly mutates the layer values, and only then the draw pass computes final endpoint
+// positions — so a dragged dot renders at its new position with no one-frame lag. Tool numbering
+// is 0-based (T0..T(n-1)) to match the real gcode T<n> command — NOT 1-based like the layer
+// fields in this panel. This is now the ONLY editor for the reprocessor's rules (s216c): the
+// per-type checkbox/DragInt rows this chart replaced are gone, along with the "By tool"
+// checkbox+combo row they shared (render_expert_reprocessor_mode_row(), deleted with them).
+bool GCodeViewer::render_expert_gcode_reprocessor_chart()
+{
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    const float scale = m_scale;
+    bool changed = false;
+
+    enum class RuleKind : int { Speed = 0, Flow = 1, Fan = 2, Offset = 3 };
+    struct ChartEntry
+    {
+        RuleKind kind;
+        int index;      // index inside its own rule-type vector — stable drag identity across frames
+        bool by_tool;
+        int tool;
+        int layer_from; // 0-based, matches the engine
+        int layer_to;   // 0-based, -1 == to end of file
+        std::string value_label; // pre-formatted, e.g. "80%", "S110", "Z-0.03mm"
+        // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i) — drives the gold halo in the draw
+        // pass below and the "Skip WT"/"Don't Skip WT" toggle in the right-click "delete this
+        // rule" popup (s216j: moved there from the value-edit popup, see that popup's handler).
+        // Positional brace-init below (entries.push_back({...})) only supplies members up through
+        // this one — MUST be set explicitly at all 4 call sites, or it silently defaults to false
+        // (no compile error) for that rule type only.
+        bool avoid_wipetower = false;
+        float lane_cx = 0.0f;    // screen-x of this entry's lane, stamped by the lane layout pass
+        bool placed = false;     // false = filtered out by the current GLOBAL/BY TOOL view
+    };
+
+    // NOTE: `index` is the position in the FULL vector (not just among enabled rules) so it can
+    // address the rule directly when a drag commits.
+    std::vector<ChartEntry> entries;
+    for (int i = 0; i < (int)m_expert_reprocessor.rules.size(); ++i) {
+        const ExpertReprocessorRule& r = m_expert_reprocessor.rules[i];
+        if (r.enabled)
+            entries.push_back({ RuleKind::Speed, i, r.by_tool, r.tool, r.layer_from, r.layer_to, std::to_string(r.value) + "%", r.avoid_wipetower });
+    }
+    for (int i = 0; i < (int)m_expert_reprocessor.flow_rules.size(); ++i) {
+        const ExpertReprocessorFlowRule& r = m_expert_reprocessor.flow_rules[i];
+        if (r.enabled)
+            entries.push_back({ RuleKind::Flow, i, r.by_tool, r.tool, r.layer_from, r.layer_to, std::to_string(r.value) + "%", r.avoid_wipetower });
+    }
+    for (int i = 0; i < (int)m_expert_reprocessor.fan_rules.size(); ++i) {
+        const ExpertReprocessorFanRule& r = m_expert_reprocessor.fan_rules[i];
+        if (r.enabled)
+            entries.push_back({ RuleKind::Fan, i, r.by_tool, r.tool, r.layer_from, r.layer_to, "S" + std::to_string(r.value), r.avoid_wipetower });
+    }
+    for (int i = 0; i < (int)m_expert_reprocessor.offset_rules.size(); ++i) {
+        const ExpertReprocessorOffsetRule& r = m_expert_reprocessor.offset_rules[i];
+        if (!r.enabled)
+            continue;
+        char buf[32];
+        ::sprintf(buf, "Z%.2fmm", r.value);
+        entries.push_back({ RuleKind::Offset, i, r.by_tool, r.tool, r.layer_from, r.layer_to, std::string(buf), r.avoid_wipetower });
     }
 
-    ImGui::End();
+    // No early-out when empty anymore (s216b): the empty chart stays visible as the "right-click
+    // to add" surface, with a hint drawn in the middle instead of rule bars.
+
+    static const ColorRGBA kSpeedColor  = ColorRGBA(0.30f, 0.55f, 0.95f, 1.0f);
+    static const ColorRGBA kFlowColor   = ColorRGBA(0.95f, 0.62f, 0.10f, 1.0f);
+    static const ColorRGBA kFanColor    = ColorRGBA(0.35f, 0.72f, 0.32f, 1.0f);
+    static const ColorRGBA kOffsetColor = ColorRGBA(0.75f, 0.22f, 0.62f, 1.0f);
+    // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i): permanent glow color for rules with
+    // avoid_wipetower set, distinct from all 4 rule-type colors above and from the white
+    // hover/drag halo below — gold/amber reads as "special property", not "selected".
+    static const ColorRGBA kAvoidWipetowerColor = ColorRGBA(1.0f, 0.78f, 0.20f, 1.0f);
+    auto kind_color = [](RuleKind k) -> const ColorRGBA& {
+        switch (k) {
+        case RuleKind::Speed: return kSpeedColor;
+        case RuleKind::Flow:  return kFlowColor;
+        case RuleKind::Fan:   return kFanColor;
+        default:              return kOffsetColor;
+        }
+    };
+    auto kind_name = [](RuleKind k) -> std::string {
+        switch (k) {
+        case RuleKind::Speed: return "SPEED";
+        case RuleKind::Flow:  return "FLOW";
+        case RuleKind::Fan:   return "FAN";
+        default:              return "OFFSET";
+        }
+    };
+
+    // GLOBAL / BY TOOL toggle — pure view filter (which subset of already-existing rules the
+    // chart shows), does not touch any rule's own by_tool flag.
+    //
+    // s216d: a rule saved in the OTHER mode used to just vanish silently — chart_by_tool_mode
+    // isn't persisted, so it always starts on BY TOOL, and a GLOBAL rule loaded from an old
+    // project (or one saved with the pre-chart floating panel) would be there in
+    // m_expert_reprocessor but invisible with no indication anything was hidden (found via a
+    // real repro: a project_settings.config extracted straight from a saved .3mf had the rule,
+    // JSON intact, but the chart showed empty on that project's default BY TOOL view). Fixed with
+    // counts on the tab labels themselves, so a non-empty "other" tab is never silent.
+    const bool by_tool_view = m_expert_reprocessor.chart_by_tool_mode;
+    const int global_count = static_cast<int>(std::count_if(entries.begin(), entries.end(), [](const ChartEntry& e) { return !e.by_tool; }));
+    const int by_tool_count = static_cast<int>(entries.size()) - global_count;
+    wxString global_label = _L("GLOBAL");
+    if (global_count > 0)
+        global_label += wxString::Format(" (%d)", global_count);
+    wxString by_tool_label = _L("BY TOOL");
+    if (by_tool_count > 0)
+        by_tool_label += wxString::Format(" (%d)", by_tool_count);
+
+    auto toggle_button = [&imgui](const wxString& label, bool active) {
+        const ImVec4 base = active ? ImVec4(0.20f, 0.55f, 0.35f, 1.0f) : ImVec4(0.30f, 0.30f, 0.30f, 1.0f);
+        const ImVec4 hover = active ? ImVec4(0.24f, 0.62f, 0.40f, 1.0f) : ImVec4(0.38f, 0.38f, 0.38f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, base);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, hover);
+        const bool clicked = imgui.button(label);
+        ImGui::PopStyleColor(3);
+        return clicked;
+    };
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f); // pill-shaped segmented toggle
+    if (toggle_button(global_label, !by_tool_view))
+        m_expert_reprocessor.chart_by_tool_mode = false;
+    ImGui::SameLine();
+    if (toggle_button(by_tool_label, by_tool_view))
+        m_expert_reprocessor.chart_by_tool_mode = true;
+    ImGui::PopStyleVar();
+    ImGui::Spacing();
+
+    const int tool_count = by_tool_view ? std::max(1, static_cast<int>(m_extruders_count)) : 1;
+    const int total_layers = std::max(1, static_cast<int>(m_layers.get_zs().size()));
+
+    // bucket entries into columns (T0..T(n-1), or a single unlabeled column in GLOBAL mode).
+    // Mutable pointers: the drag handler below refreshes the pointed-to entry so the draw pass
+    // renders the moved bar the same frame.
+    std::vector<std::vector<ChartEntry*>> columns(tool_count);
+    for (ChartEntry& e : entries) {
+        if (by_tool_view) {
+            if (!e.by_tool || e.tool < 0 || e.tool >= tool_count)
+                continue;
+            columns[e.tool].push_back(&e);
+        } else {
+            if (e.by_tool)
+                continue;
+            columns[0].push_back(&e);
+        }
+    }
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const float avail_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const float axis_label_w = 24.0f * scale; // room for the top/bottom layer-count scale text
+    const float chart_width = std::max(40.0f * scale, avail_width - axis_label_w);
+    const float chart_height = 130.0f * scale;
+    const float column_width = chart_width / static_cast<float>(tool_count);
+    const ImU32 white = ImGuiWrapper::to_ImU32(ColorRGBA::WHITE());
+    const ImU32 dim = ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.55f));
+
+    // column headers (T0..T(n-1)) — skipped in GLOBAL mode, there's only one unlabeled column
+    const float header_h = by_tool_view ? (ImGui::GetTextLineHeight() + 4.0f * scale) : 0.0f;
+    if (by_tool_view) {
+        const ImVec2 header_origin = ImGui::GetCursorScreenPos();
+        for (int t = 0; t < tool_count; ++t) {
+            const std::string label = "T" + std::to_string(t);
+            const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
+            const float cx = header_origin.x + (t + 0.5f) * column_width;
+            draw_list->AddText(ImVec2(cx - 0.5f * text_size.x, header_origin.y), dim, label.c_str());
+        }
+        ImGui::Dummy(ImVec2(avail_width, header_h));
+    }
+
+    const ImVec2 chart_min = ImGui::GetCursorScreenPos();
+    const ImVec2 chart_max = ImVec2(chart_min.x + chart_width, chart_min.y + chart_height);
+
+    // The chart body is a real (invisible) widget: it owns hover/click/drag inside its rect and
+    // reserves the layout space that the old code reserved with a Dummy.
+    ImGui::InvisibleButton("##reproc_chart_body", ImVec2(avail_width, chart_height));
+    const bool chart_hovered = ImGui::IsItemHovered();
+
+    auto layer_to_y = [chart_min, chart_max, total_layers](int layer_1based) {
+        // NEOTKO_GCODE_REPROCESSOR (s216k): clamped — a rule can outlive the layer range it was
+        // created against (e.g. the object got shorter after resizing), and without this an
+        // out-of-range endpoint used to plot way outside the chart box, landing on top of
+        // unrelated widgets above it where it could no longer be hovered, dragged, or
+        // right-clicked to delete. Clamping keeps it pinned at the box edge, always reachable —
+        // see the `oob` (out-of-bounds) check in the draw pass below for the gray coloring that
+        // flags this state to the user.
+        float t = (total_layers > 1) ? static_cast<float>(layer_1based - 1) / static_cast<float>(total_layers - 1) : 0.0f;
+        t = std::clamp(t, 0.0f, 1.0f);
+        return chart_max.y - t * (chart_max.y - chart_min.y);
+    };
+    auto y_to_layer = [chart_min, chart_max, total_layers](float y) { // inverse of layer_to_y, 1-based
+        const float h = chart_max.y - chart_min.y;
+        float t = (h > 0.0f) ? (chart_max.y - y) / h : 0.0f;
+        t = std::clamp(t, 0.0f, 1.0f);
+        return 1 + static_cast<int>(t * static_cast<float>(total_layers - 1) + 0.5f);
+    };
+
+    // lane layout pass — fixed lane order (Speed, Flow, Fan, Offset) so the same rule type always
+    // lands in the same lane across columns; stamps each entry's lane_cx for the passes below
+    for (int col = 0; col < tool_count; ++col) {
+        std::array<std::vector<ChartEntry*>, 4> lanes;
+        for (ChartEntry* e : columns[col])
+            lanes[static_cast<int>(e->kind)].push_back(e);
+
+        const int active_lanes = static_cast<int>(std::count_if(lanes.begin(), lanes.end(), [](const std::vector<ChartEntry*>& v) { return !v.empty(); }));
+        if (active_lanes == 0)
+            continue;
+        const float lane_width = column_width / static_cast<float>(active_lanes);
+
+        int lane_idx = 0;
+        for (int k = 0; k < 4; ++k) {
+            if (lanes[k].empty())
+                continue;
+            const float lane_cx = chart_min.x + col * column_width + (lane_idx + 0.5f) * lane_width;
+            ++lane_idx;
+            for (ChartEntry* e : lanes[k]) {
+                e->lane_cx = lane_cx;
+                e->placed = true;
+            }
+        }
+    }
+
+    // ---- interaction pass ----
+    // Resolves a drag identity (kind ordinal + index) back to the ACTUAL rule's layer fields.
+    // Returns nulls if the index no longer exists (rule deleted via its X button mid-frame).
+    auto rule_range = [this](int kind, int idx) -> std::pair<int*, int*> {
+        switch (kind) {
+        case 0: if (idx >= 0 && idx < (int)m_expert_reprocessor.rules.size())        return { &m_expert_reprocessor.rules[idx].layer_from,        &m_expert_reprocessor.rules[idx].layer_to };        break;
+        case 1: if (idx >= 0 && idx < (int)m_expert_reprocessor.flow_rules.size())   return { &m_expert_reprocessor.flow_rules[idx].layer_from,   &m_expert_reprocessor.flow_rules[idx].layer_to };   break;
+        case 2: if (idx >= 0 && idx < (int)m_expert_reprocessor.fan_rules.size())    return { &m_expert_reprocessor.fan_rules[idx].layer_from,    &m_expert_reprocessor.fan_rules[idx].layer_to };    break;
+        case 3: if (idx >= 0 && idx < (int)m_expert_reprocessor.offset_rules.size()) return { &m_expert_reprocessor.offset_rules[idx].layer_from, &m_expert_reprocessor.offset_rules[idx].layer_to }; break;
+        }
+        return { nullptr, nullptr };
+    };
+
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const float hit_r = 8.0f * scale;
+    ChartEntry* hover_entry = nullptr;
+    int hover_end = 0;
+    if (chart_hovered && m_expert_reprocessor.chart_drag_kind < 0) {
+        float best = hit_r * hit_r;
+        for (ChartEntry& e : entries) {
+            if (!e.placed)
+                continue;
+            const float ys[2] = { layer_to_y(e.layer_from + 1), layer_to_y(e.layer_to < 0 ? total_layers : e.layer_to + 1) };
+            for (int end = 0; end < 2; ++end) {
+                const float dx = mouse.x - e.lane_cx;
+                const float dy = mouse.y - ys[end];
+                const float d2 = dx * dx + dy * dy;
+                if (d2 < best) {
+                    best = d2;
+                    hover_entry = &e;
+                    hover_end = end;
+                }
+            }
+        }
+        if (hover_entry != nullptr) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            const int shown = (hover_end == 0) ? hover_entry->layer_from + 1
+                                               : (hover_entry->layer_to < 0 ? total_layers : hover_entry->layer_to + 1);
+            ImGui::SetTooltip("%s %s %d — %s", kind_name(hover_entry->kind).c_str(), _u8L("layer").c_str(), shown, _u8L("drag to move").c_str());
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                m_expert_reprocessor.chart_drag_kind = static_cast<int>(hover_entry->kind);
+                m_expert_reprocessor.chart_drag_index = hover_entry->index;
+                m_expert_reprocessor.chart_drag_end = hover_end;
+            }
+        }
+    }
+
+    if (m_expert_reprocessor.chart_drag_kind >= 0) {
+        auto [p_from, p_to] = rule_range(m_expert_reprocessor.chart_drag_kind, m_expert_reprocessor.chart_drag_index);
+        if (p_from == nullptr || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            // drop finished (or the rule vanished) — persist ONCE here, not per dragged frame
+            if (p_from != nullptr)
+                changed = true;
+            m_expert_reprocessor.chart_drag_kind = -1;
+            m_expert_reprocessor.chart_drag_index = -1;
+        } else {
+            const int layer0 = y_to_layer(mouse.y) - 1; // back to the engine's 0-based space
+            if (m_expert_reprocessor.chart_drag_end == 0) {
+                const int to_eff = (*p_to < 0) ? total_layers - 1 : *p_to;
+                *p_from = std::clamp(layer0, 0, to_eff);
+            } else {
+                const int v = std::clamp(layer0, *p_from, total_layers - 1);
+                *p_to = (v >= total_layers - 1) ? -1 : v; // dragging to the top snaps to "END"
+            }
+            // refresh the local copy so this same frame draws the moved bar
+            for (ChartEntry& e : entries) {
+                if (static_cast<int>(e.kind) == m_expert_reprocessor.chart_drag_kind && e.index == m_expert_reprocessor.chart_drag_index) {
+                    e.layer_from = *p_from;
+                    e.layer_to = *p_to;
+                }
+            }
+            const int shown = (m_expert_reprocessor.chart_drag_end == 0) ? *p_from + 1
+                                                                         : (*p_to < 0 ? total_layers : *p_to + 1);
+            if (m_expert_reprocessor.chart_drag_end == 1 && *p_to < 0)
+                ImGui::SetTooltip("%s", _u8L("END").c_str());
+            else
+                ImGui::SetTooltip("%s %d", _u8L("Layer").c_str(), shown);
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            hover_entry = nullptr; // the drag ring below already highlights this dot
+        }
+    }
+
+    // Right-click means two different things depending on where it lands: on an existing point
+    // it offers to delete that rule; on empty chart space it offers to add a new one at that
+    // spot. `hover_entry` is already the nearest-point hit-test from the block above — it's only
+    // non-null here when no drag is in progress (see its guard), which is what we want: a right
+    // click can't happen mid-left-drag anyway.
+    if (chart_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        if (hover_entry != nullptr) {
+            m_expert_reprocessor.chart_delete_kind = static_cast<int>(hover_entry->kind);
+            m_expert_reprocessor.chart_delete_index = hover_entry->index;
+            ImGui::OpenPopup("##reproc_chart_delete");
+        } else {
+            m_expert_reprocessor.chart_add_tool = by_tool_view
+                ? std::clamp(static_cast<int>((mouse.x - chart_min.x) / column_width), 0, tool_count - 1)
+                : -1;
+            m_expert_reprocessor.chart_add_layer = std::clamp(y_to_layer(mouse.y) - 1, 0, total_layers - 1);
+            ImGui::OpenPopup("##reproc_chart_add");
+        }
+    }
+
+    // ---- draw pass ----
+    draw_list->AddRectFilled(chart_min, chart_max, ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.04f)), 4.0f * scale);
+    for (int g = 1; g < 4; ++g) { // faint quarter gridlines
+        const float gy = chart_min.y + g * 0.25f * (chart_max.y - chart_min.y);
+        draw_list->AddLine(ImVec2(chart_min.x, gy), ImVec2(chart_max.x, gy), ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.06f)));
+    }
+    for (int t = 1; t < tool_count; ++t) {
+        const float cx = chart_min.x + t * column_width;
+        draw_list->AddLine(ImVec2(cx, chart_min.y), ImVec2(cx, chart_max.y), ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.10f)));
+    }
+    draw_list->AddRect(chart_min, chart_max, ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.35f)), 4.0f * scale);
+
+    // subtle marker for the layer the preview slider is on ("Current layer" readout above)
+    {
+        const float cy = layer_to_y(static_cast<int>(m_layers_z_range[1]) + 1);
+        draw_list->AddLine(ImVec2(chart_min.x, cy), ImVec2(chart_max.x, cy), ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.18f)));
+    }
+
+    // y-axis scale: bottom = layer 1, top = last layer
+    draw_list->AddText(ImVec2(chart_max.x + 4.0f * scale, chart_min.y - 0.5f * ImGui::GetTextLineHeight()), dim, std::to_string(total_layers).c_str());
+    draw_list->AddText(ImVec2(chart_max.x + 4.0f * scale, chart_max.y - 0.5f * ImGui::GetTextLineHeight()), dim, "1");
+
+    bool any_placed = false;
+    for (const ChartEntry& e : entries)
+        any_placed |= e.placed;
+    if (!any_placed) {
+        // s216d: distinguish "genuinely no rules" from "rules exist, just not in this
+        // GLOBAL/BY TOOL view" — the second case used to look identical to the first, which is
+        // exactly what made a loaded rule look silently missing.
+        const std::string hint = entries.empty()
+            ? _u8L("Right-click to add a rule")
+            : (by_tool_view ? _u8L("No by-tool rules — click GLOBAL above") : _u8L("No global rules — click BY TOOL above"));
+        const ImVec2 ts = ImGui::CalcTextSize(hint.c_str());
+        draw_list->AddText(ImVec2(0.5f * (chart_min.x + chart_max.x) - 0.5f * ts.x, 0.5f * (chart_min.y + chart_max.y) - 0.5f * ts.y),
+                           ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.35f)), hint.c_str());
+    }
+
+    // NEOTKO_GCODE_REPROCESSOR (s216k): neutral gray for an endpoint whose referenced layer no
+    // longer exists (object got shorter after this rule was created) — paired with the clamp in
+    // layer_to_y() above, which keeps such a point pinned at the box edge instead of off-screen.
+    static const ColorRGBA kOutOfRangeColor = ColorRGBA(0.55f, 0.55f, 0.55f, 1.0f);
+
+    const bool dragging = m_expert_reprocessor.chart_drag_kind >= 0;
+    for (const ChartEntry& e : entries) {
+        if (!e.placed)
+            continue;
+        const float y_from = layer_to_y(e.layer_from + 1);
+        const float y_to = layer_to_y(e.layer_to < 0 ? total_layers : e.layer_to + 1);
+        const bool from_oob = (e.layer_from + 1) > total_layers || (e.layer_from + 1) < 1;
+        const bool to_oob = e.layer_to >= 0 && ((e.layer_to + 1) > total_layers || (e.layer_to + 1) < 1); // layer_to<0 == "END", always in range
+        const ImU32 from_color = ImGuiWrapper::to_ImU32(from_oob ? kOutOfRangeColor : kind_color(e.kind));
+        const ImU32 to_color = ImGuiWrapper::to_ImU32(to_oob ? kOutOfRangeColor : kind_color(e.kind));
+        const ImU32 line_color = (from_oob || to_oob) ? ImGuiWrapper::to_ImU32(kOutOfRangeColor) : ImGuiWrapper::to_ImU32(kind_color(e.kind));
+        // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216i): permanent gold glow underneath the
+        // normal line — a wider, translucent duplicate, same fake-glow technique as the white
+        // hover/drag halo below but always-on rather than interaction-only.
+        if (e.avoid_wipetower)
+            draw_list->AddLine(ImVec2(e.lane_cx, y_from), ImVec2(e.lane_cx, y_to), ImGuiWrapper::to_ImU32(ColorRGBA(kAvoidWipetowerColor.r(), kAvoidWipetowerColor.g(), kAvoidWipetowerColor.b(), 0.45f)), 8.0f * scale);
+        draw_list->AddLine(ImVec2(e.lane_cx, y_from), ImVec2(e.lane_cx, y_to), line_color, 4.0f * scale);
+        const float ys[2] = { y_from, y_to };
+        const ImU32 end_colors[2] = { from_color, to_color };
+        for (int end = 0; end < 2; ++end) {
+            const bool hot = (&e == hover_entry && end == hover_end) ||
+                             (dragging && static_cast<int>(e.kind) == m_expert_reprocessor.chart_drag_kind &&
+                              e.index == m_expert_reprocessor.chart_drag_index && end == m_expert_reprocessor.chart_drag_end);
+            // Gold halo first (permanent, if avoid_wipetower), white "hot" halo on top of that (if
+            // hovered/dragged) — different colors/sizes so both can show at once without clashing.
+            if (e.avoid_wipetower)
+                draw_list->AddCircleFilled(ImVec2(e.lane_cx, ys[end]), 7.5f * scale, ImGuiWrapper::to_ImU32(ColorRGBA(kAvoidWipetowerColor.r(), kAvoidWipetowerColor.g(), kAvoidWipetowerColor.b(), 0.55f)));
+            if (hot) // white halo behind the grabbed/hovered dot
+                draw_list->AddCircleFilled(ImVec2(e.lane_cx, ys[end]), 6.5f * scale, ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.9f)));
+            draw_list->AddCircleFilled(ImVec2(e.lane_cx, ys[end]), 4.0f * scale, end_colors[end]);
+        }
+        // start-layer number, drawn just below the lower endpoint (mockup's "22"/"13"/"7")
+        const std::string from_label = std::to_string(e.layer_from + 1);
+        const ImVec2 label_size = ImGui::CalcTextSize(from_label.c_str());
+        draw_list->AddText(ImVec2(e.lane_cx - 0.5f * label_size.x, std::max(y_from, y_to) + 4.0f * scale), from_color, from_label.c_str());
+    }
+
+    // reserve layout space for the from-labels, which spill a little below the chart body
+    const float bottom_label_h = ImGui::GetTextLineHeight() + 4.0f * scale;
+    ImGui::Dummy(ImVec2(avail_width, bottom_label_h));
+
+    // color legend row, manually laid out for the same reason as the chart above (mixing this
+    // with ImGui::SameLine()-chained widgets is more fragile than just tracking an x cursor)
+    {
+        const ImVec2 legend_origin = ImGui::GetCursorScreenPos();
+        const float sq = ImGui::GetTextLineHeight() * 0.6f;
+        const float row_h = ImGui::GetTextLineHeight();
+        float cx = legend_origin.x;
+        auto draw_legend_item = [&](const ColorRGBA& color, const char* label) {
+            draw_list->AddRectFilled(ImVec2(cx, legend_origin.y + 0.5f * (row_h - sq)), ImVec2(cx + sq, legend_origin.y + 0.5f * (row_h - sq) + sq), ImGuiWrapper::to_ImU32(color));
+            cx += sq + 4.0f * scale;
+            draw_list->AddText(ImVec2(cx, legend_origin.y), white, label);
+            cx += ImGui::CalcTextSize(label).x + 16.0f * scale;
+        };
+        draw_legend_item(kFanColor, "FAN");
+        draw_legend_item(kSpeedColor, "SPEED");
+        draw_legend_item(kFlowColor, "FLOW");
+        draw_legend_item(kOffsetColor, "OFFSET");
+        ImGui::Dummy(ImVec2(avail_width, row_h));
+    }
+
+    // plain-text summary, grouped per column in the same fixed type order as the lanes above.
+    // The layer range isn't editable here — dragging the chart dot handles that — but the
+    // trailing value badge is: it's a small colored button that opens a popup with a numeric
+    // field bound directly to that rule's value (percent / raw S / mm, matching its own clamp).
+    ImGui::Spacing();
+    for (int col = 0; col < tool_count; ++col) {
+        if (columns[col].empty())
+            continue;
+        const std::string col_label = by_tool_view ? ("T" + std::to_string(col)) : std::string();
+        bool first_row = true;
+        for (int k = 0; k < 4; ++k) {
+            for (const ChartEntry* e : columns[col]) {
+                if (static_cast<int>(e->kind) != k)
+                    continue;
+                const std::string to_str = (e->layer_to < 0) ? std::string("END") : std::to_string(e->layer_to + 1);
+                std::string prefix;
+                if (!col_label.empty())
+                    prefix = (first_row ? col_label : std::string(col_label.size(), ' ')) + "  ";
+                prefix += kind_name(e->kind) + " " + std::to_string(e->layer_from + 1) + " to " + to_str + " - ";
+                first_row = false;
+
+                imgui.text(prefix);
+                ImGui::SameLine(0.0f, 2.0f * scale);
+
+                ImGui::PushID(static_cast<int>(e->kind) * 100000 + e->index);
+                const ColorRGBA& kc = kind_color(e->kind);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGuiWrapper::to_ImU32(ColorRGBA(kc.r(), kc.g(), kc.b(), 0.30f)));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGuiWrapper::to_ImU32(ColorRGBA(kc.r(), kc.g(), kc.b(), 0.45f)));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGuiWrapper::to_ImU32(ColorRGBA(kc.r(), kc.g(), kc.b(), 0.55f)));
+                ImGui::PushStyleColor(ImGuiCol_Text, white);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                if (ImGui::Button(e->value_label.c_str()))
+                    ImGui::OpenPopup("##edit_value");
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
+
+                if (ImGui::BeginPopup("##edit_value")) {
+                    imgui.text(kind_name(e->kind) + " " + _u8L("value"));
+                    ImGui::SetNextItemWidth(90.0f * scale);
+                    switch (e->kind) {
+                    case RuleKind::Speed:
+                        if (e->index < (int)m_expert_reprocessor.rules.size())
+                            changed |= ImGui::DragInt("%##v", &m_expert_reprocessor.rules[e->index].value, 1.0f, 1, 300);
+                        break;
+                    case RuleKind::Flow:
+                        if (e->index < (int)m_expert_reprocessor.flow_rules.size())
+                            changed |= ImGui::DragInt("%##v", &m_expert_reprocessor.flow_rules[e->index].value, 1.0f, 20, 200);
+                        break;
+                    case RuleKind::Fan:
+                        if (e->index < (int)m_expert_reprocessor.fan_rules.size())
+                            changed |= ImGui::DragInt("S##v", &m_expert_reprocessor.fan_rules[e->index].value, 1.0f, 0, 255);
+                        break;
+                    case RuleKind::Offset:
+                        if (e->index < (int)m_expert_reprocessor.offset_rules.size()) {
+                            float vf = static_cast<float>(m_expert_reprocessor.offset_rules[e->index].value);
+                            if (ImGui::DragFloat("mm##v", &vf, 0.01f, -0.3f, 0.3f, "%.2f")) {
+                                m_expert_reprocessor.offset_rules[e->index].value = static_cast<double>(vf);
+                                changed = true;
+                            }
+                        }
+                        break;
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+            }
+        }
+    }
+
+    // "add rule here" popup (opened by the right-click-on-empty-space handler in the interaction
+    // pass above). The new rule is pushed AFTER the summary loop so no ChartEntry pointer into
+    // `entries` is ever read past a push_back; it shows up in the chart next frame.
+    int pending_kind = -1;
+    if (ImGui::BeginPopup("##reproc_chart_add")) {
+        std::string where = _u8L("Add rule at layer") + " " + std::to_string(m_expert_reprocessor.chart_add_layer + 1);
+        if (m_expert_reprocessor.chart_add_tool >= 0)
+            where += "  -  T" + std::to_string(m_expert_reprocessor.chart_add_tool);
+        imgui.text(where);
+        ImGui::Separator();
+        for (int k = 0; k < 4; ++k) {
+            const RuleKind kind = static_cast<RuleKind>(k);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::to_ImU32(kind_color(kind)));
+            if (ImGui::Selectable(("+ " + kind_name(kind)).c_str()))
+                pending_kind = k;
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndPopup();
+    }
+    if (pending_kind >= 0) {
+        const bool add_by_tool = m_expert_reprocessor.chart_add_tool >= 0;
+        const int add_tool = std::max(0, m_expert_reprocessor.chart_add_tool);
+        const int add_from = m_expert_reprocessor.chart_add_layer;
+        // layer_to stays at its default -1 ("END") — one drag on the new top dot sets the range
+        switch (pending_kind) {
+        case 0: { ExpertReprocessorRule r;       r.by_tool = add_by_tool; r.tool = add_tool; r.layer_from = add_from; m_expert_reprocessor.rules.push_back(r);        break; }
+        case 1: { ExpertReprocessorFlowRule r;   r.by_tool = add_by_tool; r.tool = add_tool; r.layer_from = add_from; m_expert_reprocessor.flow_rules.push_back(r);   break; }
+        case 2: { ExpertReprocessorFanRule r;    r.by_tool = add_by_tool; r.tool = add_tool; r.layer_from = add_from; m_expert_reprocessor.fan_rules.push_back(r);    break; }
+        default: { ExpertReprocessorOffsetRule r; r.by_tool = add_by_tool; r.tool = add_tool; r.layer_from = add_from; m_expert_reprocessor.offset_rules.push_back(r); break; }
+        }
+        changed = true;
+    }
+
+    // "delete this rule" popup (opened by the right-click-on-a-point handler above). Deletion is
+    // deferred to here for the same reason the add case defers its push_back — erasing mid-loop
+    // would invalidate other entries' indices while they're still being iterated above.
+    bool pending_delete = false;
+    if (ImGui::BeginPopup("##reproc_chart_delete")) {
+        std::string label = "?";
+        for (const ChartEntry& e : entries) {
+            if (static_cast<int>(e.kind) == m_expert_reprocessor.chart_delete_kind && e.index == m_expert_reprocessor.chart_delete_index) {
+                const std::string to_str = (e.layer_to < 0) ? std::string("END") : std::to_string(e.layer_to + 1);
+                label = kind_name(e.kind) + " " + std::to_string(e.layer_from + 1) + " to " + to_str + " - " + e.value_label;
+                break;
+            }
+        }
+        imgui.text(label);
+        ImGui::Separator();
+
+        // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216j): moved here from the value-edit
+        // popup after user feedback — this right-click-on-a-point popup is where they actually
+        // looked for it, same "second button" they already use for delete. Addresses the rule via
+        // chart_delete_kind/chart_delete_index, the same identity already captured for the delete
+        // action below (RuleKind ordinal: 0=Speed, 1=Flow, 2=Fan, 3=Offset).
+        bool* avoid_wt = nullptr;
+        switch (m_expert_reprocessor.chart_delete_kind) {
+        case 0: if (m_expert_reprocessor.chart_delete_index < (int)m_expert_reprocessor.rules.size())        avoid_wt = &m_expert_reprocessor.rules[m_expert_reprocessor.chart_delete_index].avoid_wipetower;        break;
+        case 1: if (m_expert_reprocessor.chart_delete_index < (int)m_expert_reprocessor.flow_rules.size())   avoid_wt = &m_expert_reprocessor.flow_rules[m_expert_reprocessor.chart_delete_index].avoid_wipetower;   break;
+        case 2: if (m_expert_reprocessor.chart_delete_index < (int)m_expert_reprocessor.fan_rules.size())    avoid_wt = &m_expert_reprocessor.fan_rules[m_expert_reprocessor.chart_delete_index].avoid_wipetower;    break;
+        case 3: if (m_expert_reprocessor.chart_delete_index < (int)m_expert_reprocessor.offset_rules.size()) avoid_wt = &m_expert_reprocessor.offset_rules[m_expert_reprocessor.chart_delete_index].avoid_wipetower; break;
+        }
+        if (avoid_wt != nullptr) {
+            if (ImGui::Selectable(*avoid_wt ? _u8L("Don't Skip WT").c_str() : _u8L("Skip WT").c_str())) {
+                *avoid_wt = !*avoid_wt;
+                changed = true;
+            }
+            ImGui::Separator();
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f)); // red-ish warning tone — this is destructive
+        if (ImGui::Selectable(_u8L("Delete this rule").c_str()))
+            pending_delete = true;
+        ImGui::PopStyleColor();
+        ImGui::EndPopup();
+    }
+    if (pending_delete) {
+        auto erase_at = [](auto& vec, int idx) { if (idx >= 0 && idx < (int)vec.size()) vec.erase(vec.begin() + idx); };
+        switch (m_expert_reprocessor.chart_delete_kind) {
+        case 0: erase_at(m_expert_reprocessor.rules, m_expert_reprocessor.chart_delete_index); break;
+        case 1: erase_at(m_expert_reprocessor.flow_rules, m_expert_reprocessor.chart_delete_index); break;
+        case 2: erase_at(m_expert_reprocessor.fan_rules, m_expert_reprocessor.chart_delete_index); break;
+        case 3: erase_at(m_expert_reprocessor.offset_rules, m_expert_reprocessor.chart_delete_index); break;
+        }
+        changed = true;
+    }
+
+    return changed;
 }
 
 void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height)
@@ -4540,6 +5350,10 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         render_toolpaths(); // FBOs failed (e.g. incomplete on this GPU) — fall back rather than render nothing
         return;
     }
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, 09_HDR_ENVIRONMENT_PLAN.md): lazily (re)bakes the
+    // procedural env textures — no-ops if they already exist and nothing invalidated them (see
+    // render_realcolor_debug_panel(), which clears m_realcolor_env.valid on any tuning change).
+    ensure_realcolor_env_textures(!m_realcolor_env.valid);
 
     const RealColorFingerprint fp = compute_realcolor_fingerprint(canvas_width, canvas_height);
     const bool need_recompute = !m_realcolor_cache.valid || fp != m_realcolor_cache.fingerprint;
@@ -4627,11 +5441,25 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             peel_shader->set_uniform("view_normal_matrix", (Matrix3d)Matrix3d::Identity());
             peel_shader->set_uniform("u_viewport", Vec2f((float)sw, (float)sh));
             peel_shader->set_uniform("u_has_prev_depth", pass > 0);
-            // NEOTKO_REALCOLOR_TAG: live-tunable lighting constants, see RealColorTuning (GCodeViewer.hpp)
-            peel_shader->set_uniform("u_ambient_ground", m_realcolor_tuning.ambient_ground);
-            peel_shader->set_uniform("u_ambient_sky", m_realcolor_tuning.ambient_sky);
+            // NEOTKO_REALCOLOR_TAG: live-tunable Fresnel/rim constants, see RealColorTuning
+            // (GCodeViewer.hpp) — u_ambient_ground/sky and the ambient tints no longer reach this
+            // shader directly (PBR item 3, 09_HDR_ENVIRONMENT_PLAN.md): they feed
+            // realcolor_env_sample() when (re)baking the env textures below instead.
             peel_shader->set_uniform("u_fresnel_power", m_realcolor_tuning.fresnel_power);
             peel_shader->set_uniform("u_fresnel_strength", m_realcolor_tuning.fresnel_strength);
+            peel_shader->set_uniform("u_fresnel_tint", m_realcolor_tuning.fresnel_tint);
+            // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): procedural env textures + world-space
+            // camera position for the env-mirror reflection, see realcolor_peel.fs. Bound on
+            // GL_TEXTURE1/2 — unit 0 is u_prev_meta below, only set from pass 1 onward, so no
+            // collision even though these two are set unconditionally every pass.
+            glsafe(::glActiveTexture(GL_TEXTURE1));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_env.irradiance_tex));
+            peel_shader->set_uniform("u_env_irradiance", 1);
+            glsafe(::glActiveTexture(GL_TEXTURE2));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_env.mirror_tex));
+            peel_shader->set_uniform("u_env_mirror", 2);
+            const Vec3f camera_pos_world = camera.get_position().cast<float>();
+            peel_shader->set_uniform("u_camera_pos_world", camera_pos_world);
             for (int t = 0; t < 4; ++t) {
                 const ColorRGB& c = m_realcolor_materials.rgb[t];
                 peel_shader->set_uniform(("u_material_rgb[" + std::to_string(t) + "]").c_str(), std::array<float, 3>{ c.r(), c.g(), c.b() });
@@ -4797,6 +5625,14 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
     present_shader->set_uniform("u_ao_radius", REALCOLOR_AO_RADIUS_PX);
     present_shader->set_uniform("u_ao_strength", REALCOLOR_AO_STRENGTH);
     present_shader->set_uniform("u_texel_size", Vec2f(1.0f / (float)(canvas_width * REALCOLOR_SUPERSAMPLE), 1.0f / (float)(canvas_height * REALCOLOR_SUPERSAMPLE)));
+    // NEOTKO_REALCOLOR_TAG s214 (PBR item 2, 08_PBR_IBL_SSS_PLAN.md): same TD array/scale
+    // already fed to accum_shader above, reused here so compute_sss() can scale its blur radius
+    // per-pixel by the material's own translucency.
+    for (int t = 0; t < 4; ++t)
+        present_shader->set_uniform(("u_material_td[" + std::to_string(t) + "]").c_str(), m_realcolor_materials.td[t] * m_realcolor_tuning.td_scale);
+    present_shader->set_uniform("u_sss_strength", m_realcolor_tuning.sss_strength);
+    present_shader->set_uniform("u_sss_radius_px", m_realcolor_tuning.sss_radius_px);
+    present_shader->set_uniform("u_sss_reference_td", m_realcolor_tuning.sss_reference_td);
 
     const int present_position_id = present_shader->get_attrib_location("v_position");
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_realcolor_cache.quad_vbo));
@@ -5679,6 +6515,22 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
         legend_height = ImGui::GetFrameHeight() + window_padding * 4; // ORCA using 4 instead 2 gives correct toolbar margins while its folded
         ImGui::SameLine(window_width);                // ORCA use stored window width while folded. This prevents annoying position change on fold/expand button
         ImGui::Dummy({ 0, 0 });
+        imgui.end();
+        ImGui::PopStyleColor(6);
+        ImGui::PopStyleVar(2);
+        return;
+    }
+
+    // NEOTKO_GCODE_REPROCESSOR (s216): own tab in this combo instead of a floating window (user
+    // request — "así no tenemos ventanas flotantes sueltas"), same integration pattern as
+    // RealColor above. Short-circuits before the extrusion-role/time-estimate content below,
+    // none of which applies to the rule editor. Mirrors the m_fold branch's cleanup exactly
+    // (same window, same style pushes from the top of this function) since this reuses the
+    // already-open "Legend" window rather than opening a second one.
+    if (m_view_type == EViewType::GCodeReprocessor) {
+        render_expert_gcode_reprocessor_panel();
+        legend_height = ImGui::GetCurrentWindow()->Size.y;
+        ImGui::Dummy({ window_padding, window_padding });
         imgui.end();
         ImGui::PopStyleColor(6);
         ImGui::PopStyleVar(2);

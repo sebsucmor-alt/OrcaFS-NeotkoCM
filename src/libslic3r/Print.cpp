@@ -665,7 +665,16 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filament_retraction_distances_when_cut"
     };
 
-    static std::unordered_set<std::string> steps_ignore;
+    // NEOTKO_GCODE_REPROCESSOR: this option is never read by Print/PrintObject/GCodeGenerator —
+    // it's consumed entirely post-hoc, in BackgroundSlicingProcess::finalize_gcode() (a rewrite of
+    // a COPY of the already-finished gcode file), well after Print::process() and gcode export are
+    // both done. Without this, it fell through to the "unknown option -> invalidate everything"
+    // catch-all below, which flips Plater's m_slice_result_valid to false on every Apply click in
+    // the Expert G-code Reprocessor panel and forces a full re-slice before Export re-enables,
+    // even though nothing about the sliced geometry or gcode ever needed to change.
+    static std::unordered_set<std::string> steps_ignore = {
+        "expert_gcode_reprocessor_rules"
+    };
 
     std::vector<PrintStep> steps;
     std::vector<PrintObjectStep> osteps;

@@ -3997,6 +3997,44 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // NEOTKO_PAINTERPRO_TAG (Idea A, s223) — painted-surface depth: force this many layers of
+    // solid infill under (top) / over (bottom) a painted surface, following the painted silhouette.
+    // See docs/FUTURE/SURFACE_ANCHOR_AND_CONTACT_DETECTION_RESEARCH.md §1.
+    def           = this->add("mmu_segmented_region_surface_depth", coInt);
+    def->label    = L("Surface depth of painted regions");
+    def->tooltip  = L("Extends a painted top/bottom surface this many layers into the object as "
+                    "solid infill of the painted color, following the painted silhouette. "
+                    "Zero disables this feature.");
+    def->min      = 0;
+    def->max      = 20;
+    def->category = L("Advanced");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    // NEOTKO_PAINTERPRO_TAG — per-color overrides for the two options above, indexed by 1-based
+    // paint slot id (entry 0 unused). An entry of 0 (or a missing entry) falls back to the
+    // corresponding scalar/global option. Edited from the MMU painting gizmo (Pro Mode), not
+    // from the parameter tabs.
+    def           = this->add("mmu_segmented_region_extra_walls_per_color", coInts);
+    def->label    = L("Extra walls per painted color");
+    def->tooltip  = L("Per-color override of \"Extra walls on segmented regions\", indexed by "
+                    "paint color slot. 0 = use the global value.");
+    def->min      = 0;
+    def->max      = 8;
+    def->category = L("Advanced");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInts());
+
+    def           = this->add("mmu_segmented_region_surface_depth_per_color", coInts);
+    def->label    = L("Surface depth per painted color");
+    def->tooltip  = L("Per-color override of \"Surface depth of painted regions\", indexed by "
+                    "paint color slot. 0 = use the global value.");
+    def->min      = 0;
+    def->max      = 20;
+    def->category = L("Advanced");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInts());
+
     def           = this->add("interlocking_beam", coBool);
     def->label    = L("Use beam interlocking");
     def->tooltip  = L("Generate interlocking beam structure at the locations where different filaments touch. This improves the adhesion between filaments, especially models printed in different materials.");
@@ -6960,6 +6998,14 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Sandwich pass stack (Penultimate)");
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionString(""));
+
+    // NEOTKO_ALHCOLOR_TAG — Fase 5.3. Hidden blob key, same contract as the Sandwich pass
+    // stacks above: written/erased per-object by the Precision ALH gizmo (opt-in), never
+    // shown in optgroups. Consumed by the engine only from Fase 5.4 on.
+    def = this->add("neotko_slope_perimeter_recolor", coString);
+    def->label = L("Slope perimeter recolor plan");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
     // NEOTKO_SANDWICH_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — Neotko Neoweaving
@@ -8314,6 +8360,19 @@ void PrintConfigDef::init_fff_params()
         "segments are typically the closure tails that approach the outer perimeter — exactly "
         "what we want to keep for clean seam closing. Disable only if you see speckled artifacts "
         "from extremely short segments.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    // NEOTKO_NEOARACHNE_TAG fase3 — pin outer wall width.
+    def = this->add("neoarachne_pin_outer_width", coBool);
+    def->label = L("Pin Outer Wall Width");
+    def->category = L("Quality");
+    def->tooltip = L("When the outer or inner wall source is \"Arachne (NeotkoEdge)\" and the bead "
+        "count for a region is 1 or 2, force the outer wall width to the nominal nozzle width "
+        "exactly. Upstream Arachne (via RedistributeBeadingStrategy) already pins the outer width "
+        "for bead counts of 3 or more; this extends the same constant-width behaviour to the "
+        "thinnest regions (1-2 beads), where it otherwise \"breathes\" as thickness/bead_count. "
+        "Disable to fall back to stock Arachne behaviour for those thin regions.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 

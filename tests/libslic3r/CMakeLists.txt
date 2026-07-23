@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament.cpp
 	test_realcolor_blend.cpp
 	test_color_height_envelope.cpp
+	test_slope_perimeter_recolor.cpp
 	test_triangle_selector.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp

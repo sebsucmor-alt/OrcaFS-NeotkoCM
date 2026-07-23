@@ -1923,7 +1923,7 @@ void NeoWipeTower::toolchange_Unload(NeoWipeTowerWriter&                 writer,
         // so flooring only the length keeps the deposited volume exact. No-op for h ≥ 0.04.
         const float x    = volume_to_length(m_filpar[m_current_tool].ramming_speed[i] * time_step, line_width, std::max(m_layer_height, 0.04f));
         const float e    = m_filpar[m_current_tool].ramming_speed[i] * time_step / filament_area(); // transform volume per sec to E move;
-        float dist = remaining;
+        const float dist = std::min(x - e_done, remaining);
         const float actual_time = dist / x * time_step;
         writer.ram(writer.x(), writer.x() + (m_left_to_right ? 1.f : -1.f) * dist, 0.f, 0.f, e * (dist / x), dist / (actual_time / 60.f));
         remaining -= dist;

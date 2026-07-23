@@ -2381,6 +2381,12 @@ unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
     if (mixed_idx < 0)
         return filament_id;
 
+    // NEOTKO_ALHCOLOR_TAG — Fase 5.4. The per-object slope-recolor plan (opt-in, stored by
+    // the Precision ALH gizmo) overrides the pattern's answer for the rings it covers —
+    // single source for every caller, see the block comment above the parser.
+    if (const int ov = slope_recolor::override_1based(current_object, layer_print_z, perimeter_index, num_physical); ov > 0)
+        return (unsigned int)(ov);
+
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
     if (!mf.manual_pattern.empty()) {
         const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
@@ -2476,7 +2482,8 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
                                                                             int          layer_index,
                                                                             float        layer_print_z,
                                                                             float        layer_height,
-                                                                            bool         force_height_weighted) const
+                                                                            bool         force_height_weighted,
+                                                                            const PrintObject* current_object) const
 {
     std::vector<unsigned int> ordered;
 
@@ -2487,18 +2494,27 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
     }
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
+    // NEOTKO_ALHCOLOR_TAG — Fase 5.4/5.4b. Enumerate at least as many rings as the
+    // slope-recolor plan covers at this z: emission resolves per ACTUAL entity ring, so a
+    // plan wider than the pattern's comma-groups — or a plan on a row with NO manual
+    // pattern at all (Cycle/gradient, 5.4b) — would otherwise print tools this planner
+    // never reported (Plan != Emisión — the failure mode this phase exists to prevent).
+    // resolve_perimeter() itself applies the override per ring.
+    const size_t plan_rings = slope_recolor::ring_count(current_object, layer_print_z);
     if (!mf.manual_pattern.empty()) {
         const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
         if (!pattern_groups.empty()) {
-            ordered.reserve(pattern_groups.size());
-            for (size_t group_idx = 0; group_idx < pattern_groups.size(); ++group_idx) {
+            const size_t ring_count = std::max(pattern_groups.size(), plan_rings);
+            ordered.reserve(ring_count);
+            for (size_t group_idx = 0; group_idx < ring_count; ++group_idx) {
                 const unsigned int resolved = resolve_perimeter(filament_id,
                                                                 num_physical,
                                                                 layer_index,
                                                                 int(group_idx),
                                                                 layer_print_z,
                                                                 layer_height,
-                                                                force_height_weighted);
+                                                                force_height_weighted,
+                                                                current_object);
                 if (resolved < 1 || resolved > num_physical)
                     continue;
                 if (std::find(ordered.begin(), ordered.end(), resolved) == ordered.end())
@@ -2507,6 +2523,27 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
             if (!ordered.empty())
                 return ordered;
         }
+    } else if (plan_rings > 0) {
+        // NEOTKO_ALHCOLOR_TAG — Fase 5.4b: Cycle/gradient rows have no per-ring axis of
+        // their own. Enumerate the plan's rings (the override answers those) PLUS one ring
+        // past the plan — resolve_perimeter falls through to resolve() there, i.e. the
+        // layer's normal Cycle tool, which the walls beyond the plan will actually print.
+        for (size_t k = 0; k <= plan_rings; ++k) {
+            const unsigned int resolved = resolve_perimeter(filament_id,
+                                                            num_physical,
+                                                            layer_index,
+                                                            int(k),
+                                                            layer_print_z,
+                                                            layer_height,
+                                                            force_height_weighted,
+                                                            current_object);
+            if (resolved < 1 || resolved > num_physical)
+                continue;
+            if (std::find(ordered.begin(), ordered.end(), resolved) == ordered.end())
+                ordered.emplace_back(resolved);
+        }
+        if (!ordered.empty())
+            return ordered;
     }
 
     ordered.emplace_back(resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted));
