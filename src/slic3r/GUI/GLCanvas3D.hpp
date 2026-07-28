@@ -5,6 +5,8 @@
 #include <memory>
 #include <chrono>
 #include <cstdint>
+#include <map>
+#include <utility>
 
 #include "GLToolbar.hpp"
 #include "Event.hpp"
@@ -547,6 +549,12 @@ private:
     GLVolumeCollection m_volumes;
     GCodeViewer m_gcode_viewer;
 
+    // NEOTKO_SNAPDRAG_TAG s227 — Fase C: per-drag hysteresis state, keyed by (object_idx,
+    // instance_idx). true = last frame this instance was resting on another object (not the
+    // bed) — kept with the low engage_ratio so it doesn't flicker off near a pillar's edge.
+    // Cleared at the start of every new drag. See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §4.
+    std::map<std::pair<int, int>, bool> m_snapdrag_engaged;
+
     RenderTimer m_render_timer;
 
     Selection m_selection;
@@ -667,6 +675,38 @@ public:
 
     SequentialPrintClearance m_sequential_print_clearance;
     bool m_sequential_print_clearance_first_displacement{ true };
+
+    // NEOTKO_SNAPDRAG_TAG s227 — visual "landing point" reference while dragging with Snap &
+    // Drag engaged: a translucent shadow of the dragged instance's footprint on the real
+    // resting surface, plus a short vertical beam through it so the spot stays visible even
+    // when the shadow itself is hidden under the dragged object from the current camera angle.
+    // One indicator only (not per-instance): covers the common single-object drag; a
+    // multi-object drag just shows the first engaged instance found that frame.
+    class SnapDragIndicator
+    {
+        // Cheap "almost realistic" contact shadow: a few concentric, low-alpha dark rings
+        // (scaled about the footprint centroid) rendered UNDER the functional cyan cue below.
+        // Composited with standard alpha blending this reads as a soft radial falloff without
+        // a texture or a new shader — purely decorative, see SnapDragIndicator::set() in the .cpp.
+        static constexpr size_t SHADOW_RING_COUNT = 4;
+        GLModel m_shadow_rings[SHADOW_RING_COUNT];
+        GLModel m_fill;
+        GLModel m_outline;
+        GLModel m_beam;
+        bool    m_visible{ false };
+
+    public:
+        // `footprint_world` = convex-hull polygon (scaled units, world XY) of the dragged
+        // instance; `landing_z` = the real surface Z it is resting on, in mm.
+        void set(const Polygon& footprint_world, double landing_z);
+        void set_visible(bool visible) { m_visible = visible; }
+        bool is_visible() const { return m_visible; }
+        void render();
+
+        friend class GLCanvas3D;
+    };
+
+    SnapDragIndicator m_snapdrag_indicator;
 
     struct ToolbarHighlighter
     {
@@ -1181,6 +1221,9 @@ private:
     void _render_plane() const;
     void _render_selection();
     void _render_sequential_clearance();
+    // NEOTKO_SNAPDRAG_TAG s227 — landing indicator (shadow + beam), see §"visual" follow-up in
+    // docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md.
+    void _render_snapdrag_indicator();
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER

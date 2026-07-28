@@ -160,6 +160,23 @@ void AppConfig::set_defaults()
             set_bool("neotko_libre_enabled", false);
         // NeotkoLIBRE_END
 
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: "True Objects" (Gravity) is its own axis now, and it
+        // owns the floating/anchoring behaviour that used to live under LibreMode. ONE-TIME
+        // migration: a user already running LibreMode had objects floating off the bed that must
+        // keep floating, so seed the new key to true for them; a fresh install starts at stock
+        // (false). The empty() guard fires this exactly once — afterwards the button owns the key.
+        // See docs/FUTURE/GRAVITY_MASTER_PLAN.md §6.3.
+        // ⚠️ set_defaults() also runs from the constructor (reset()) on EMPTY storage, BEFORE load()
+        // merges the ini. If we seeded here unconditionally, the constructor pass would write
+        // neotko_true_objects=false while neotko_libre_mode is still absent, and the post-load pass
+        // would then see the key as non-empty and skip the real migration — LibreMode users would
+        // silently lose their floating. So gate on neotko_libre_mode being PRESENT: it is absent in
+        // the constructor pass (skipped, no premature write) and present only after an existing
+        // LibreMode user's ini is loaded (migrated correctly). A fresh install has neither key and
+        // stays at the false default via get_bool(); the button creates the key on first toggle.
+        if (get("neotko_true_objects").empty() && !get("neotko_libre_mode").empty())
+            set_bool("neotko_true_objects", get_bool("neotko_libre_mode"));
+
 #ifdef SUPPORT_REMEMBER_OUTPUT_PATH
         if (get("remember_output_path").empty())
             set_bool("remember_output_path", true);

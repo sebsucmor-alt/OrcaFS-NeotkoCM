@@ -139,8 +139,13 @@ private:
     wxMenuItem* append_menu_item_printable(wxMenu* menu);
     // NeotkoLIBRE — "Assembled Mode (Boolean)" check item (per-object, LibreMode only).
     wxMenuItem* append_menu_item_assemble_boolean(wxMenu* menu);
+    // NEOTKO_SNAPDRAG_TAG s227 — "Snap & Drag" check item (only enabled/checkable while
+    // True Objects is on). See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §5 (revised placement).
+    wxMenuItem* append_menu_item_snap_drag(wxMenu* menu);
     // NeotkoLIBRE — Copy (by block: Speed/Quality/Strength/All) + Paste Process Settings.
     void append_menu_items_process_clipboard(wxMenu* menu);
+    // NEOTKO — "Remove Slice Cache": high-level manual full-reslice escape hatch.
+    void append_menu_item_remove_slice_cache(wxMenu* menu);
     void        append_menu_item_rename(wxMenu* menu);
     wxMenuItem* append_menu_item_fix_through_netfabb(wxMenu* menu);
     //wxMenuItem* append_menu_item_simplify(wxMenu* menu);

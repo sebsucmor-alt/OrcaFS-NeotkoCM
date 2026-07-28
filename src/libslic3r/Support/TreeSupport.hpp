@@ -321,6 +321,13 @@ public:
     // union contours of all layers below
     std::vector<ExPolygons> m_layer_outlines_below;
 
+    // NEOTKO_XOBJ_TAG s225 — A1 cross-object avoidance: per-layer footprint of the OTHER
+    // objects' instances (object-local frame, RAW/undilated — calculate_collision offsets
+    // it by radius + m_xy_distance per query). Kept separate from m_layer_outlines /
+    // m_layer_outlines_below on purpose: those carry "my own object" semantics (sharp-tail
+    // contours, rests-on-model tests) that must not see the neighbors. Empty = inactive.
+    std::vector<Polygons> m_neighbor_occupancy;
+
     std::vector<double> m_max_move_distances;
 
     /*!

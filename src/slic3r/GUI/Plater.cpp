@@ -11324,8 +11324,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         //  - the object already carries instances (factory/S3D files are world-space), or
         //  - LibreMode is active (preserve the file's original XYZ so importing many
         //    parts without assemble keeps each part's origin Z).
-        const bool _ws_libre = wxGetApp().app_config != nullptr
-            && wxGetApp().app_config->get_bool("neotko_libre_mode");
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+        const bool _ws_libre = gravity_allow_free_z();
         // NEOTKO_LIBRE_TAG — world-space import diagnostics (ORCA_DEBUG_LIBRE=1).
         if (auto* _lg = neotko_ws_log())
             *_lg << "file_loop libre=" << _ws_libre
@@ -11635,7 +11635,8 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
         // NeotkoLIBRE_START — s133: in LibreMode keep the object's Z (don't snap to bed). This is
         // what makes "Split to objects" preserve the floating Z of the source object (split objects
         // arrive here with their instance transforms). Fresh world-space import is handled separately.
-        const bool _eob_libre = wxGetApp().app_config->get_bool("neotko_libre_mode");
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+        const bool _eob_libre = gravity_allow_free_z();
         // Fresh imports always snap to bed (XY world kept); only pre-existing-instance
         // objects respect LibreMode Z (factory/3mf/split keep their world height).
         const bool _eob_ensure = _lmo_was_fresh || !_eob_libre;
@@ -12511,6 +12512,12 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // Decoupled from bridge-infill: this only sets neotko_libre_mode, no other behaviour.
     DynamicPrintConfig _libre_full_cfg = wxGetApp().preset_bundle->full_config();
     _libre_full_cfg.set_key_value("neotko_libre_mode", new ConfigOptionBool(m_neotko_libre_cached));
+    // NEOTKO_GRAVITY_TAG s226 — same pattern, own axis: Gravity is its own toggle, not a
+    // sub-state of LibreMode (docs/FUTURE/GRAVITY_MASTER_PLAN.md §6). Read here rather than
+    // cached because there is no Gravity SideButton yet (Fase 6); the read is a cheap
+    // app_config lookup on a path that already rebuilds the whole config.
+    _libre_full_cfg.set_key_value("neotko_true_objects",
+        new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_true_objects")));
     // NEOTKO_MIXEDFIL_SANDWICH_TAG — mirror the per-tool TD scalars (app_config-only)
     // so SurfaceColorMix.cpp (pure engine) can build ColorSci materials for the
     // "MixedFilament Object" auto-sandwich without touching app_config.
@@ -12944,7 +12951,7 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     std::swap(old_model_object->volumes[volume_idx], old_model_object->volumes.back());
     old_model_object->delete_volume(old_model_object->volumes.size() - 1);
     // NeotkoLIBRE — keep floating Z when replacing a volume of an existing object.
-    if (!sinking && !wxGetApp().app_config->get_bool("neotko_libre_mode"))
+    if (!sinking && !gravity_allow_free_z() /* NEOTKO_GRAVITY_TAG s226 Fase 6.3 */)
         old_model_object->ensure_on_bed();
     old_model_object->sort_volumes(true);
 
@@ -13348,7 +13355,7 @@ void Plater::priv::reload_from_disk()
                 std::swap(old_model_object->volumes[vol_idx], old_model_object->volumes.back());
                 old_model_object->delete_volume(old_model_object->volumes.size() - 1);
                 // NeotkoLIBRE — keep floating Z on reload-from-disk of an existing object.
-                if (!sinking && !wxGetApp().app_config->get_bool("neotko_libre_mode")) old_model_object->ensure_on_bed();
+                if (!sinking && !gravity_allow_free_z() /* NEOTKO_GRAVITY_TAG s226 Fase 6.3 */) old_model_object->ensure_on_bed();
                 old_model_object->sort_volumes(wxGetApp().app_config->get("order_volumes") == "1");
 
                 sla::reproject_points_and_holes(old_model_object);
@@ -13421,7 +13428,7 @@ void Plater::priv::reload_from_disk()
                 std::swap(old_model_object->volumes[sel_v.volume_idx], old_model_object->volumes.back());
                 old_model_object->delete_volume(old_model_object->volumes.size() - 1);
                 // NeotkoLIBRE — keep floating Z on reload-from-disk of an existing object.
-                if (!sinking && !wxGetApp().app_config->get_bool("neotko_libre_mode"))
+                if (!sinking && !gravity_allow_free_z() /* NEOTKO_GRAVITY_TAG s226 Fase 6.3 */)
                     old_model_object->ensure_on_bed();
                 old_model_object->sort_volumes(true);
 
@@ -21853,6 +21860,20 @@ void Plater::copy_process_settings(const std::string& category) { p->copy_proces
 void Plater::paste_process_settings()                           { p->paste_process_settings(); }
 bool Plater::has_process_settings_clipboard() const             { return p->has_process_settings_clipboard(); }
 
+// NEOTKO — "Remove Slice Cache": highest-level manual cache wipe (replaces the old "Refresh Part"
+// side button). Stop any running slice so the print state can be touched safely, invalidate every
+// step of the Print and all its PrintObjects (PrintObject::invalidate_all_steps cascades to the
+// owning Print), drop the derived tree-support preview cache, then reschedule so the NEXT slice
+// runs entirely from scratch with no incremental reuse. A deliberate escape hatch for when the
+// incremental slice cache gets into a bad state; harmless when nothing is loaded.
+void Plater::remove_slice_cache()
+{
+    p->background_process.stop();
+    if (Print* print = p->background_process.fff_print())
+        print->invalidate_all_object_steps();
+    p->schedule_background_process();
+}
+
 void Plater::changed_object(ModelObject &object){
     assert(object.get_model() == &p->model); // is object from same model?
     object.invalidate_bounding_box();
@@ -21860,7 +21881,8 @@ void Plater::changed_object(ModelObject &object){
     // NeotkoLIBRE_START — in LibreMode an object edit (settings paste, emboss, drag/drop,
     // per-object config change, ...) must NOT snap the object back to Z=0. Floating objects keep
     // their Z; the user drops to bed explicitly via the sinking column. Non-libre = stock behavior.
-    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+    if (!gravity_allow_free_z())
         // recenter and re - align to Z = 0
         object.ensure_on_bed(p->printer_technology != ptSLA);
     // NeotkoLIBRE_END
@@ -21898,7 +21920,8 @@ void Plater::changed_objects(const std::vector<size_t>& object_idxs)
 
     // NeotkoLIBRE — in LibreMode never auto-snap to Z=0 on object change (copy/paste, paste
     // process settings, calibration regen, ...): floating objects must keep their Z.
-    const bool _libre = wxGetApp().app_config->get_bool("neotko_libre_mode");
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+    const bool _libre = gravity_allow_free_z();
     for (size_t obj_idx : object_idxs) {
         if (obj_idx < p->model.objects.size()) {
             if (!_libre && p->model.objects[obj_idx]->min_z() >= SINKING_Z_THRESHOLD)

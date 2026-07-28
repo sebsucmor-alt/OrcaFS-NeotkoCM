@@ -47,6 +47,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 4f. [Assembled Parts — full options](#4f-assembled-parts--full-options)
    - 4g. [World-space import (WIP)](#4g-world-space-import-wip)
    - 4h. [Internal-bridge handling](#4h-internal-bridge-handling)
+   - 4i. [Realistic Shading (2.3.9) — Phong + SSAO + contact shadow in Prepare](#4i-realistic-shading-239--phong--ssao--contact-shadow-in-prepare)
 5. [S3DFactory — Simplify3D project import](#5-s3dfactory--simplify3d-project-import)
 6. [Surface Effect Profiles & ColorStitch Painter](#6-surface-effect-profiles--colorstitch-painter)
    - 6a. [Saving and managing profiles](#6a-saving-and-managing-profiles)
@@ -56,7 +57,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 6e. [Profile persistence and 3MF round-trip](#6e-profile-persistence-and-3mf-round-trip)
    - 6f. [Weave preview on the painted surface](#6f-weave-preview-on-the-painted-surface)
    - 6g. [MixedFilament Object mode (Beta)](#6g-mixedfilament-object-mode-beta)
-7. [Align & Stack — align and stack objects](#7-align--stack--align-and-stack-objects)
+7. [Align & Stack — align and stack two objects](#7-align--stack--align-and-stack-two-objects)
 8. [NeoArachne — alternative wall generator](#8-neoarachne--alternative-wall-generator)
    - 8a. [Turning it on](#8a-turning-it-on)
    - 8b. [Per-feature engine choice](#8b-per-feature-engine-choice)
@@ -83,6 +84,11 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
     - 13d. [Surface depth (2.3.8) — project a painted surface into the object](#13d-surface-depth-238--project-a-painted-surface-into-the-object)
     - 13e. [Per color (2.3.8) — different Walls / Depth per painted color](#13e-per-color-238--different-walls--depth-per-painted-color)
 14. [NeoStitch Interlock (WIP, ⚠️ UNTESTED) — Z-axis layer interlocking](#14-neostitch-interlock-wip--untested--z-axis-layer-interlocking)
+15. [Expert G-code Reprocessor (2.3.8) — layer-ranged, per-tool G-code post-processing](#15-expert-g-code-reprocessor-238--layer-ranged-per-tool-g-code-post-processing)
+16. [PerObject Support (2.3.9) — support that avoids the other objects on the plate](#16-perobject-support-239--support-that-avoids-the-other-objects-on-the-plate)
+17. [Gravity ("True Objects") — real floor, honest bridges](#17-gravity-true-objects--real-floor-honest-bridges)
+    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239)
+18. [Typographic Spacing (2.3.9) — real kerning for embossed text](#18-typographic-spacing-239--real-kerning-for-embossed-text)
 
 ---
 
@@ -304,9 +310,17 @@ While active, Libre Mode also signals the slicer: an object with no first layer 
 
 ### 4b. Floating objects
 
-With Libre Mode active, objects can sit at **any Z height** — floating above the bed or partly below it — instead of being snapped to the plate. The slicer still generates G-code and warns (instead of erroring) when an object has no initial layer. Use it for assemblies whose parts print at specific heights, or parts that clip into a structure already on the bed.
+> ⚠️ **Moved.** Floating/anchoring is no longer part of Libre Mode — it is its own independent
+> toggle, **"True Objects"** (Gravity), covered in full in **§17**. This section stays as a pointer
+> so old links keep working. Libre Mode still opens the door to it (the button only exists once
+> the Libre Mode master switch is on), but turning Libre Mode itself on/off no longer affects
+> whether objects float — only **True Objects** does.
 
-The floating Z is **preserved across object operations** — copy/paste, *Paste Process Settings*, reload-from-disk, replace-STL, boolean, mesh simplify and *face the camera* no longer snap a floating object back to Z=0. To drop a floating object to the bed on purpose, use the **sinking** column in the object list (that path is left intact).
+With **True Objects** active, objects can sit at **any Z height** — floating above the bed or partly below it — instead of being snapped to the plate. The slicer still generates G-code and warns (instead of erroring) when an object has no initial layer. Use it for assemblies whose parts print at specific heights, or parts that clip into a structure already on the bed.
+
+The floating Z is **preserved across object operations** — copy/paste, *Paste Process Settings*, reload-from-disk, replace-STL, boolean, mesh simplify, move/rotate/scale/mirror and *face the camera* no longer snap a floating object back to Z=0. To drop a floating object to the bed on purpose, use the **sinking** column in the object list (that path is left intact).
+
+**Real "is it floating?" detection.** The stock warning used a blind heuristic — *empty first layer = floating* — which is wrong the moment an object rests **on top of another object** (empty first layer of its own, but not floating). This build measures it instead: for an object whose lowest geometry starts above the bed, each instance is checked against the bed **and** against the top surface of every other object's instances — real Z gap, real XY footprint, per-instance. An object stacked on another no longer gets a bogus warning, and a genuinely floating island still surfaces one (the old blanket suppression that could hide real floaters is gone). The tree-support sharp-tail seed uses the same check. This is also the foundation of **PerObject Support** (§16) and **True Objects / Gravity** (§17), which goes further than "can it float" into "what does the slicer actually do with a stacked piece" (honest bridges instead of guesswork).
 
 ---
 
@@ -335,7 +349,7 @@ Use it to propagate a tuned block across many parts without overwriting their ot
 
 ### 4f. Assembled Parts — full options
 
-In stock OrcaSlicer the **parts** inside an Assembled object expose only a limited subset of settings. With Libre Mode active each part's settings tab exposes the **full option set** (the combined Print-object + Print-region keys), and a **↺ Refresh Part** side button rebuilds the view if it gets out of sync.
+In stock OrcaSlicer the **parts** inside an Assembled object expose only a limited subset of settings. With Libre Mode active each part's settings tab exposes the **full option set** (the combined Print-object + Print-region keys).
 
 > ⚠️ The parts tab is built once at start-up — toggling Libre Mode may need a restart for the full set to appear.
 
@@ -352,6 +366,21 @@ In stock OrcaSlicer the **parts** inside an Assembled object expose only a limit
 ### 4h. Internal-bridge handling
 
 On floating objects and unusual geometries, internal-bridge detection can misfire and apply bridging where it isn't wanted. Note that the **stock 2.3.4 default** `internal_bridge_density` is 25% — if a top surface looks unexpectedly filled or empty, that stock setting is usually the cause, separate from Libre Mode. (The older fork's automatic "disable internal bridges" behaviour is deliberately **not** carried as-is here; it caused a layer-count bug and will return later as an explicit opt-in.)
+
+---
+
+### 4i. Realistic Shading (2.3.9) — Phong + SSAO + contact shadow in Prepare
+
+With Libre Mode active, the **Prepare** tab's 3D objects render with the same Phong + fresnel +
+screen-space ambient occlusion + projected contact shadow shading that RealColor already used for
+shells in the **Preview** tab. Turn Libre Mode off and objects go back to the stock flat/Gouraud
+look — nothing changes for a normal build.
+
+- Applies to the normal opaque object view only; the Assemble tab and the sinking/transparent
+  pass are untouched.
+- The contact shadow appears on the bed under each object, same as it already did in Preview.
+- No new toggle to learn — it's automatic once Libre Mode is on, and falls back silently to the
+  stock shader if a shader/framebuffer isn't available on your GPU.
 
 ---
 
@@ -485,20 +514,22 @@ strips, with a small colour swatch next to it showing the approximated result.
 
 ---
 
-## 7. Align & Stack — align and stack objects
+## 7. Align & Stack — align and stack two objects
 
-**Align & Stack** is a gizmo (left-side gizmo toolbar, **"Align & Stack"**) for aligning and stacking multiple objects against an anchor. Click objects in the scene to add them **in order**: **#1 becomes the anchor** and the rest move toward it; click more to extend the order, or **Reset** to start over. Object selection has been improved over earlier versions for easier picking.
+**Align & Stack** is a gizmo (left-side gizmo toolbar, **"Align & Stack"**) for placing one object against another — **#1**, the object clicked first, is the **anchor**; **#2** is the one that moves. Click two objects in the scene to set them (click a third to swap out #2 — the gizmo only ever relates two objects, so there's no chain to manage); click a chip or **Reset** to clear.
 
 **Two modes:**
 
 | Mode | What it does |
 |------|--------------|
-| **Place against** | Objects come to rest **touching the chosen face of #1**, chained (#2 on #1, #3 on #2 …). This is the stacking mode — build a vertical sequence of parts. |
-| **Align flush** | Same-side faces become **coplanar** with #1 (Illustrator-style alignment). |
+| **Place against** | #2 comes to rest **touching the chosen face of #1**. This is the stacking mode. |
+| **Align flush** | #2's same-side face becomes **coplanar** with #1's (Illustrator-style alignment). |
 
 A row of **face / centre buttons** picks which face or centre axis to align or stack against (the tooltip changes with the mode). **Z gap (mm)** sets a controllable gap between stacked objects, and **Drop to bed (Z = 0)** drops every ordered object back onto the plate.
 
-> Works together with Libre Mode (§4) for floating/assembled workflows — align or stack the parts, then slice with the arrangement you need.
+**Viewport AABB aid — see the landing spot before you click it.** With #1 picked, its bounding box is drawn as a wireframe "zone" directly in the 3D view. Once #2 is picked too, every possible placement (all 5 face ops + the 3 centering ops) is previewed live as a translucent **ghost wireframe of #2** at exactly the position it would land — computed with the same math the click would run, so the preview never lies. Each ghost carries its own big, semi-transparent **mini-cube icon** floating right at the seam between #1 and the ghost: hover it for a tooltip, click it to run that placement immediately, no need to go back to the side panel or decode which abstract X‑/X+ button means "behind". Ghost previews only show for a #1+#2 pair currently on-screen; from a camera angle where a given ghost isn't really visible, its icon simply doesn't appear rather than showing up somewhere meaningless.
+
+> Works together with Libre Mode (§4) for floating/assembled workflows — align or stack the parts, then slice with the arrangement you need. Pair it with **True Objects / Gravity (§17)** when stacking *separate* (non-Assembled) objects — Align & Stack places the pieces exactly, Gravity is what makes the slicer treat the touching face honestly instead of as a false bridge.
 
 ---
 
@@ -793,10 +824,11 @@ that still closes cleanly on top.
 **Turning it on**
 
 1. Enable **Libre Mode** (§4a).
-2. **Support → Support type**: select **NeoWave**.
-3. **Support → Interface pattern**: select **Wave** — this is what actually switches the roof fill
-   to the wave engine. With any other pattern (Default/Grid/etc.), a NeoWave support prints its roof
-   like a normal support.
+2. **Support → Support type**: select **NeoWave**. Selecting NeoWave now **locks the support to its
+   tested shape automatically** — **Base pattern → Hollow** and **Interface pattern → Wave (NeoWave
+   roof)** are set for you and greyed out, since the other base/interface patterns don't apply to
+   NeoWave and only added clutter. Switch back to a normal support type and the full choices return.
+   (Previously you had to set both by hand.)
 
 **Wave roof controls** (appear once Interface pattern = Wave)
 
@@ -1003,6 +1035,209 @@ longer fights a manual speed setting.
 
 ---
 
+## 16. PerObject Support (2.3.9) — support that avoids the other objects on the plate
+
+Stock slicers generate each object's support as if it were alone on the plate. Two separate
+(non-Assembled) objects close enough that their supports share space produce a collision — each
+support grows through the other object and through the other's support. The only stock workaround is
+to merge everything into one Assembled object, which changes how the parts slice and defeats the
+point when they're meant to be separate.
+
+**PerObject Support** (checkbox directly under **Support → Enable support**, `support_cross_object_avoidance`,
+default **off**) makes an object's support treat every *other* object on the plate — its body **and**
+its already-generated support — as collision geometry to route around, keeping the normal
+support/object XY distance from them. No Assemble, no boolean union: the objects stay independent and
+the support simply stops colliding.
+
+![PerObject Support — tree supports building around two separate (non-Assembled) objects, each routing around the other instead of through it](docs/images/Per-Object-Supports.gif)
+
+**Turning it on**
+
+1. **Support → Enable support**.
+2. Tick **PerObject Support** on each object that should avoid the others.
+3. Slice. It only takes effect when the plate prints **all objects at once (by layer)** — in
+   sequential by-object printing the neighbors aren't on the bed yet, so avoidance is inert.
+
+**What it covers**
+
+| Support kind | Cross-object avoidance |
+|--------------|------------------------|
+| Tree — Default / Slim / Strong / Hybrid | ✅ (hybrid tree engine) |
+| Tree — Organic | ✅ (separate organic engine) |
+| Normal / Grid | ✅ (classic engine) |
+| NeoWave (§12) | ✅ (built on the classic engine) |
+
+- **Support vs. support** — not just bodies. When two objects' supports would tangle, the one
+  generated second routes around the first's finished support, not only around its body.
+- **Move-aware** — nudging one object regenerates every nearby object's support against the new
+  position. (Stock Orca never invalidated an object's own support on a move, because support was a
+  per-object silo; PerObject Support adds that dependency.)
+
+**Trade-off (deliberate).** The wide first-layer base/brim that support engines grow for bed
+adhesion is a free outward offset stock code never clips against anything (exaggerate it and it
+collides even with itself). Under PerObject Support that first-layer expansion is dropped to keep
+bases from spilling across objects — supports grab the bed a little less at the very first layer in
+exchange for never colliding. Only applies while the toggle is on.
+
+Built on the real cross-instance contact detector (§4b): support avoidance and floating-object
+detection share the same geometry. Stored per-object in the project (3mf). First appearance of
+cross-object support avoidance in this slicer family.
+
+---
+
+## 17. Gravity ("True Objects") — real floor, honest bridges
+
+Stock slicing assumes a few things that are only true when an object sits alone on the bed: "my
+layer 0 is the bed", "below me is only my own previous layer", "support only ever grows from the
+bed". Those assumptions break the moment two **separate** (non-Assembled) objects are placed one
+on top of the other — a face resting on another object gets misclassified as a bridge over thin
+air, even though there's solid material right underneath it.
+
+**Gravity** measures what's *really* underneath every surface — the bed, another object, or
+genuine air — and slices accordingly, **by area, not by object**: the part of a face that rests on
+something solid prints as a normal contact surface; the part that's genuinely unsupported still
+prints as a real bridge, in the same layer if that's how the geometry actually sits.
+
+**Turning it on**
+
+The toggle is called **"True Objects: On/Off"**, a toolbar side button next to the Libre Mode
+button — it appears once the Libre Mode **master switch** is on (Preferences → Enable Neotko
+LibreMode), but it is its own **independent axis**: turning Libre Mode's own active state on/off
+does **not** turn True Objects on/off, and vice versa. Think of it as: *Libre Mode opens the door
+to the fork's pro features; True Objects decides whether things fall.*
+
+> Upgrading from an older build that already had Libre Mode's floating active? True Objects is
+> seeded to match it automatically the first time, so existing floating/stacked projects keep
+> working exactly as before — nothing falls to the bed on upgrade.
+
+**What changes with True Objects on**
+
+| Before (stock) | With True Objects |
+|---|---|
+| A face resting on another object → false bridge (bridge speed/fan, wrong angle) | Same face → normal solid contact surface, correct fill angle |
+| An object's own floating first layer → always solid, even over open air | The part genuinely over air → a real bridge |
+| Perimeter overhang measured only against this object's own layer below | Measured against the *real* floor — a wall resting on a neighbor isn't flagged overhang |
+| Support requested under a face that's actually resting on another object | No support requested there — the neighbor's top counts as ground |
+| Elephant-foot compensation applied to any first layer, even a stacked one | Never applied to a face that isn't touching the bed — stacked contact faces keep their true size |
+| PerObject Support (§16) is opt-in per object | Forced on for every object while True Objects is active (nothing is overwritten — turn True Objects off and each object's own PerObject Support setting is exactly as you left it) |
+
+**Where it shows up**: two objects stacked exactly on top of each other (pair this with **Align &
+Stack**, §7, to place them precisely) — the touching face prints solid instead of showing up as a
+bridge in the preview. An object resting **partly** on another and partly hanging over open air
+shows **both** in the same layer: solid where it's supported, bridge where it truly isn't — that
+split is the clearest way to see the feature working.
+
+**A note on Assembled objects.** If your stacked pieces are already combined into one **Assembled**
+object (one `ModelObject`, multiple parts), this was never broken — the slicer already sees the
+whole stack as one body. Gravity/True Objects is specifically for pieces that stay **separate**
+objects on the plate.
+
+**Limits (v1)** — things Gravity does not do yet:
+- Support still only lands on the bed or on the object's own body — it does not yet *land on* the
+  top of another object (that's a future extension).
+- Auto-arrange/auto-orient can still scatter a hand-placed stack across the plate — it has no
+  concept of "these objects are meant to stay stacked". Don't run auto-arrange after stacking by
+  hand.
+- Only takes effect in **by-layer** printing (the whole plate rises together); in sequential
+  by-object printing a neighbor object may not exist yet at a given height, so nothing is treated
+  as floor there.
+
+### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9)
+
+With **True Objects** on, dragging an object in the viewport can rest it on whatever it is really
+above, instead of leaving it floating wherever you dropped it. Enable it per-session from the
+object's **right-click menu → Snap & Drag** (greyed out and unavailable while True Objects itself
+is off — it's a sub-behaviour of True Objects, not a separate axis).
+
+**How it decides where to land.** Detection is by 2D footprint overlap, not a raycast under the
+cursor — a corner that only barely overlaps a pillar is not treated as resting on it (the overlap
+must clear a threshold before it engages, and a slightly lower threshold to stay engaged once it
+has — this hysteresis is what stops the object flickering up/down when you drag near a pillar's
+edge). Once a candidate qualifies, its landing height is sampled with a handful of real raycasts
+against the candidate's **actual mesh**, not its flat bounding-box top — so a hollow box (tall
+rim, low interior floor) resolves correctly depending on exactly where the overlap lands, instead
+of always reporting rim height. If several candidates qualify, the object rests on the **highest**
+real surface under it; if an object has more than one instance and they'd land on pillars of
+different heights, the whole object uses the **lowest** of those targets, so one instance landing
+on something tall never silently drags the others up with it.
+
+If nothing qualifies underneath, the object is left exactly where it is — Snap & Drag only ever
+pulls something *down* onto a floor it actually finds; it never invents a bed-drop the way stock
+placement does, since that would defeat True Objects' own "nothing auto-drops" promise.
+
+**Landing indicator.** While a drag is engaged, a soft shadow (a few layered translucent rings,
+darker toward the centre) is projected onto the real landing surface under the object's footprint,
+with a short vertical marker through its centre so the spot stays visible even from angles where
+the shadow itself is hidden under the object. Purely visual — it plays no part in the landing
+calculation.
+
+**Limits (v1):** vertical (-Z) detection only — it does not help with side-by-side mating inside
+Assemble View, which has no single "down" direction. No chaining: moving the object something is
+resting on does not drag the resting object along with it.
+
+---
+
+## 18. Typographic Spacing (2.3.9) — real kerning for embossed text
+
+Stock Orca doesn't compose text, it **drops glyphs**: every letter is placed at a fixed advance and
+that is the whole of it. The **Char gap** control it offers is *tracking* — one shift applied
+identically between every pair of characters. That is not kerning.
+
+**Kerning** is the correction the type designer builds into the font for *specific pairs*, so that
+`AV`, `To` or `Wa` close the diagonal gap that plain advances leave gaping. Orca never read it.
+
+### 18a. Turning it on
+
+**Left-side gizmo toolbar → Text (Emboss) → Advanced → Font kerning.**
+
+Tick it and the embossed text uses the kerning pairs stored in the font. **Char gap** is unchanged
+and the two are independent: tracking shifts everything uniformly, kerning fixes individual pairs.
+The setting is stored per style in the project (`.3mf`).
+
+With **Font kerning** off, embossed text is identical to what earlier versions produced — this is a
+pure opt-in.
+
+### 18b. When the checkbox is greyed out
+
+Not every font ships kerning data. When the selected font carries none, the checkbox is disabled and
+labelled **"Font has no kerning data"** instead of silently doing nothing.
+
+Typical fonts without kerning data: monospaced faces (Courier, Andale Mono, SF Mono), symbol and
+Braille fonts, CJK fallbacks, and a number of display faces (Copperplate, Big Caslon, Bodoni 72).
+Across a typical macOS font library of ~900 styles, roughly three quarters do carry usable kerning.
+
+### 18c. macOS fonts — a fix specific to this fork
+
+The font library Orca is built on reads the **Microsoft `kern`** table and **OpenType GPOS**, but
+silently ignores the **Apple `kern` version 1.0** table. That is precisely the format the macOS
+system fonts use — Helvetica included. Without a fix, "Font kerning" would appear to work for some
+fonts (Helvetica Neue, most Google/Microsoft fonts) and do nothing at all for others, with no
+explanation.
+
+This fork adds a reader for the Apple format, so both layouts work.
+
+A handful of fonts use Apple's state-machine kerning subtables (formats 2/3 — Geeza Pro, Apple
+Chancery); those are still reported as having no usable kerning data.
+
+### 18d. Font search actually filters now
+
+Unrelated to kerning but in the same gizmo: typing in the font selector used to make the entire list
+**disappear** instead of narrowing it. The search was implemented correctly — but the cached font
+list, which is what you get from your second launch onward, populated only the names drawn on screen
+and left the list the search matches against empty, so any keystroke matched zero fonts. Only a
+first launch on a clean profile ever worked.
+
+Fixed: the font selector filters as you type. The bug is present in upstream Orca as well.
+
+### 18e. Under the hood (and what comes next)
+
+The glyph advance used to be baked into the shape cache, which is keyed by character alone — so a
+per-*pair* value could not be expressed at any price. Text composition now happens in one place,
+`Emboss::layout_text()`, which the geometry goes through and which future typographic controls
+(manual pair kerning, baseline shift, per-range scaling) will hook into.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -1021,7 +1256,11 @@ longer fights a manual speed setting.
 | Assembled Boolean mode | Right-click an object (Libre Mode) |
 | Per-volume XY compensation | Part settings inside an Assembled object (Libre Mode) |
 | Copy / Paste Process Settings | Right-click object → Copy/Paste Process Settings (Libre Mode) |
-| Assembled Parts full options / ↺ Refresh Part | Part settings tab (Libre Mode) |
+| Assembled Parts full options | Part settings tab (Libre Mode) |
+| Remove Slice Cache (force a full re-slice) | Right-click object(s) → **Remove Slice Cache** (always available) |
+| PerObject Support (§16) | Support → Enable support → **PerObject Support** checkbox, per object |
+| True Objects / Gravity (§17) | Toolbar side button **"True Objects: On/Off"** (independent from Libre Mode) |
+| Snap & Drag (§17a) | Right-click an object → **Snap & Drag** (requires True Objects on) |
 | World-space import (WIP) | Import with Libre Mode active *(recommend assembled → split)* |
 | S3DFactory import | File → Import → Import 3D model → `.factory` *(loads assembled; split in Libre Mode)* |
 | Save / Manage profiles | Sandwich Editor → **Save as profile… / Manage Sandwich Profiles** |
@@ -1043,6 +1282,7 @@ longer fights a manual speed setting.
 | NeoWave contact layer (WIP, print-pending) | Support → Advanced → **Support neoweave contact** toggle (§12a) |
 | Painter Pro Mode (Precision / Paint perimeters only / Extra walls / Rectangle & Polygon masks) | Left-side gizmo toolbar → **Color Painting** → **Pro Mode** section *(always available, no Libre Mode needed)* |
 | NeoStitch Interlock (WIP, ⚠️ untested) | Strength → **NeoStitch Interlock** (§14) |
+| Font kerning / Typographic Spacing (§18) | Left-side gizmo toolbar → **Text** → Advanced → **Font kerning** |
 
 ---
 

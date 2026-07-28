@@ -7531,5 +7531,12 @@ bool is_support_filament(int extruder_id)
     return support_option->get_at(0);
 };
 
+// NEOTKO_GRAVITY_TAG s226 — Fase 6.3: see GUI_App.hpp. Floating/anchoring is the Gravity axis now.
+bool gravity_allow_free_z()
+{
+    auto *ac = wxGetApp().app_config;
+    return ac != nullptr && ac->get_bool("neotko_true_objects");
+}
+
 } // GUI
 } //Slic3r

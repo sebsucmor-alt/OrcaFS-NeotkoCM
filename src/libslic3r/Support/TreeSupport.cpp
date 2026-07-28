@@ -6,6 +6,8 @@
 #include "Fill/FillBase.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
+#include "InstanceContact.hpp" // NEOTKO_CONTACT_TAG s224 C1.2
+#include "../Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 4 — real floor
 #include "MinimumSpanningTree.hpp"
 #include "Print.hpp"
 #include "ShortestPath.hpp"
@@ -612,6 +614,13 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     m_raft_layers = slicing_params.base_raft_layers + slicing_params.interface_raft_layers;
     support_type = m_object_config->support_type;
 
+    // NEOTKO_GRAVITY_TAG s226 — Organic tree is incompatible with PerObject Support (its
+    // TreeModelVolumes is rebuilt fresh per run and its first contact layer misgenerates over a
+    // neighbour). The UI blocks the combination (Tab.cpp), but a preset/3mf could carry both;
+    // fall back to Hybrid here so it never actually runs Organic under PerObject Support.
+    if (m_object_config->support_cross_object_avoidance && m_support_params.support_style == smsTreeOrganic)
+        m_support_params.support_style = smsTreeHybrid;
+
     SupportMaterialPattern support_pattern  = m_object_config->support_base_pattern;
     if (m_support_params.support_style == smsTreeHybrid && support_pattern == smpDefault)
         support_pattern = smpRectilinear;
@@ -781,6 +790,11 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     typedef std::chrono::high_resolution_clock clock_;
     typedef std::chrono::duration<double, std::ratio<1> > second_;
     std::chrono::time_point<clock_> t0{ clock_::now() };
+    // NEOTKO_GRAVITY_TAG s226 — Fase 4 (tree engine): real floor of this object (top of any OTHER
+    // object it rests on), object-local, per object-layer. Empty unless Gravity is active → zero
+    // cost. Computed once (single-threaded) and OR-ed into the lower-layer polygons of the overhang
+    // diff below, so a face resting on a neighbour is not detected as an overhang needing support.
+    const std::vector<Polygons> gravity_floor = Gravity::foreign_floor(*m_object);
     // main part of overhang detection can be parallel
     tbb::concurrent_vector<ExPolygons> overhangs_all_layers(m_object->layer_count());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, m_object->layer_count()),
@@ -815,6 +829,12 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
 
                 // normal overhang
                 ExPolygons lower_layer_offseted = offset_ex(lower_polys, support_offset_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS);
+                // NEOTKO_GRAVITY_TAG s226 — Fase 4: the neighbour top under this layer is supported
+                // ground too. Add it (same offset as the own lower layer) so the overhang diff does
+                // not flag the resting area. No-op when gravity_floor is empty.
+                if (layer_nr < gravity_floor.size() && !gravity_floor[layer_nr].empty())
+                    append(lower_layer_offseted,
+                           offset_ex(union_ex(gravity_floor[layer_nr]), support_offset_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS));
                 overhangs_all_layers[layer_nr] = std::move(diff_ex(curr_polys, lower_layer_offseted));
 
                 double duration{ std::chrono::duration_cast<second_>(clock_::now() - t0).count() };
@@ -833,6 +853,15 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                         // this is a sharp tail region if it's floating and non-ignorable
                         if (!overlaps(offset_ex(expoly, 0.1 * extrusion_width_scaled), lower_polys)) {
                             is_sharp_tail = !offset_ex(expoly, -0.1 * extrusion_width_scaled).empty();
+                            // NEOTKO_CONTACT_TAG s224 C1.2 — "nothing below" is a per-object silo:
+                            // this island may be resting on the top surface of ANOTHER object of the
+                            // plate (gap <= 0.01mm, measured for every instance). In that case it is
+                            // not floating — don't flag it. Scoped to the support-necessity check
+                            // (the warning path) only, so real tree support generation is unchanged.
+                            if (is_sharp_tail && check_support_necessity
+                                && InstanceContact::island_rests_on_other_object(*m_object, expoly, layer->bottom_z()))
+                                is_sharp_tail = false;
+                            // NEOTKO_CONTACT_END
                         }
 
                         if (is_sharp_tail) {
@@ -1359,12 +1388,16 @@ void TreeSupport::generate_toolpaths()
             raft_areas.push_back(expoly);
     }
 
-    raft_areas = std::move(offset_ex(raft_areas, scale_(object_config.raft_first_layer_expansion)));
+    // NEOTKO_XOBJ_TAG s225 — same uncollided first-layer expansion as the organic path
+    // (see SupportCommon.cpp): clamp to 0 under cross-object avoidance so raft/base bases
+    // don't spill across objects.
+    const double raft_1st_expansion = InstanceContact::cross_object_active(*m_object) ? 0. : object_config.raft_first_layer_expansion.value;
+    raft_areas = std::move(offset_ex(raft_areas, scale_(raft_1st_expansion)));
 
     size_t layer_nr = 0;
     for (; layer_nr < m_slicing_params.base_raft_layers; layer_nr++) {
         SupportLayer *ts_layer = m_object->get_support_layer(layer_nr);
-        coordf_t expand_offset = (layer_nr == 0 ? m_object_config->raft_first_layer_expansion.value : 0.);
+        coordf_t expand_offset = (layer_nr == 0 ? raft_1st_expansion : 0.);
         auto raft_areas1 = offset_ex(raft_areas, scale_(expand_offset));
 
         Flow support_flow = Flow(support_extrusion_width, ts_layer->height, nozzle_diameter);
@@ -2002,16 +2035,26 @@ void TreeSupport::draw_circles()
                 auto             get_collision = [&](bool sharp_tail) -> ExPolygons             &{
                     ExPolygons &collision = sharp_tail ? collision_sharp_tails : collision_base;
                     if (collision.empty()) {
-                        collision = offset_ex(m_ts_data->m_layer_outlines[obj_layer_nr],
-                                              sharp_tail ? scale_(top_z_distance) :
-                                                           scale_((obj_layer_nr == 0) ? config.support_object_first_layer_gap : m_ts_data->m_xy_distance));
+                        // NEOTKO_XOBJ_TAG s225 — Slim/Strong/Hybrid clip their drawn areas
+                        // (circles, roofs) against THIS local collision, not against the
+                        // TreeSupportData::calculate_collision cache — merge the cross-object
+                        // occupancy here too or the support gets drawn inside the neighbor.
+                        auto outlines_at = [&](size_t idx, double ofs_mm) -> ExPolygons {
+                            ExPolygons out = offset_ex(m_ts_data->m_layer_outlines[idx], scale_(ofs_mm));
+                            if (idx < m_ts_data->m_neighbor_occupancy.size() && !m_ts_data->m_neighbor_occupancy[idx].empty())
+                                out = union_ex(out, offset_ex(union_ex(m_ts_data->m_neighbor_occupancy[idx]), scale_(ofs_mm)));
+                            return out;
+                        };
+                        collision = outlines_at(obj_layer_nr,
+                                              sharp_tail ? top_z_distance :
+                                                           ((obj_layer_nr == 0) ? config.support_object_first_layer_gap : m_ts_data->m_xy_distance));
                         // the top layers may be too close to interface with adaptive layer heights and very small overhang angle
                         if (top_z_distance > EPSILON) {
                             float accum_height = 0;
                             for (size_t layer_id = obj_layer_nr + 1;
                                  layer_id < m_ts_data->m_layer_outlines.size() && (accum_height += m_object->get_layer(layer_id)->height) && accum_height <= top_z_distance;
                                  layer_id++) {
-                                collision = union_ex(collision, offset_ex(m_ts_data->m_layer_outlines[layer_id], scale_(top_z_distance)));
+                                collision = union_ex(collision, outlines_at(layer_id, top_z_distance));
                             }
                         }
                     }
@@ -2065,10 +2108,37 @@ void TreeSupport::draw_circles()
                             }
                         }
                         if (obj_layer_nr == 0 && m_raft_layers == 0) {
-                            double brim_width = !config.tree_support_auto_brim ? tree_brim_width : std::max(MIN_BRANCH_RADIUS_FIRST_LAYER, std::min(node.radius + node.dist_mm_to_top / (scale * branch_radius) * 0.5, MAX_BRANCH_RADIUS_FIRST_LAYER) - node.radius);
-                            auto tmp=offset(circle, scale_(brim_width));
-                            if(!tmp.empty())
-                                circle = tmp[0];
+                            // NEOTKO_XOBJ_TAG s225 A2 (B-light) — the wide first-layer brim
+                            // is a free outward offset; two adjacent objects' brims overlap
+                            // in layer 0 even though A1/A2 keep the TRUNKS apart, and the
+                            // serial generation order makes the clip asymmetric (the first
+                            // object of the group never sees the others). When this object
+                            // has neighbors (occupancy non-empty = toggle on with a nearby
+                            // object) we simply skip the wide brim: the unexpanded trunks
+                            // don't collide. A deliberate trade-off — less bed adhesion for
+                            // the support in exchange for the more realistic cross-object
+                            // behavior. No-op for every normal print (occupancy empty).
+                            const bool xobj_active = obj_layer_nr < m_ts_data->m_neighbor_occupancy.size()
+                                                     && !m_ts_data->m_neighbor_occupancy[obj_layer_nr].empty();
+                            if (!xobj_active) {
+                                double brim_width = !config.tree_support_auto_brim ? tree_brim_width : std::max(MIN_BRANCH_RADIUS_FIRST_LAYER, std::min(node.radius + node.dist_mm_to_top / (scale * branch_radius) * 0.5, MAX_BRANCH_RADIUS_FIRST_LAYER) - node.radius);
+                                auto tmp=offset(circle, scale_(brim_width));
+                                if(!tmp.empty())
+                                    circle = tmp[0];
+                            } else {
+                                // Still keep the bare trunk out of the neighbor (body +
+                                // already-generated support) by the first-layer gap.
+                                ExPolygons kept = diff_ex(ExPolygon(circle),
+                                    offset_ex(union_ex(m_ts_data->m_neighbor_occupancy[obj_layer_nr]), scale_(config.support_object_first_layer_gap)));
+                                int    best_i = -1;
+                                double best_a = 0;
+                                for (int i = 0; i < int(kept.size()); ++i)
+                                    if (double a = kept[i].contour.area(); a > best_a) { best_a = a; best_i = i; }
+                                if (best_i >= 0)
+                                    circle = kept[best_i].contour;
+                                else
+                                    circle.points.clear();
+                            }
                         }
                         area = avoid_object_remove_extra_small_parts(ExPolygon(circle), get_collision(node.is_sharp_tail && node.distance_to_top <= 0));
                         // area = diff_clipped({ ExPolygon(circle) }, get_collision(node.is_sharp_tail && node.distance_to_top <= 0));
@@ -3236,6 +3306,10 @@ void TreeSupport::generate_contact_points()
 
             // take the least restrictive avoidance possible
             ExPolygons relevant_forbidden = offset_ex(m_ts_data->m_layer_outlines[layer_nr - 1], scale_(MIN_BRANCH_RADIUS));
+            // NEOTKO_XOBJ_TAG s225 — never seed a contact tip physically inside a neighbor
+            // (only bites when the two objects overlap in Z at this layer).
+            if (size_t idx = layer_nr - 1; idx < m_ts_data->m_neighbor_occupancy.size() && !m_ts_data->m_neighbor_occupancy[idx].empty())
+                relevant_forbidden = union_ex(relevant_forbidden, offset_ex(union_ex(m_ts_data->m_neighbor_occupancy[idx]), scale_(MIN_BRANCH_RADIUS)));
             // prevent rounding errors down the line, points placed directly on the line of the forbidden area may not be added otherwise.
             relevant_forbidden = offset_ex(union_ex(relevant_forbidden), scaled<float>(0.005), jtMiter, 1.2);
 
@@ -3409,6 +3483,10 @@ TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance
         else
             m_layer_outlines_below.push_back(union_ex(m_layer_outlines_below.end()[-1], outline));
     }
+
+    // NEOTKO_XOBJ_TAG s225 — A1: the other objects' instances become collision geometry.
+    // Self-gated (returns empty when the toggle is off / sequential print / no neighbor).
+    m_neighbor_occupancy = InstanceContact::neighbor_occupancy(object);
 }
 
 const ExPolygons& TreeSupportData::get_collision(coordf_t radius, size_t layer_nr) const
@@ -3490,6 +3568,12 @@ const ExPolygons& TreeSupportData::calculate_collision(const RadiusLayerPair& ke
     assert(key.layer_nr < m_layer_outlines.size());
 
     ExPolygons collision_areas = offset_ex(m_layer_outlines[key.layer_nr], scale_(key.radius+m_xy_distance));
+    // NEOTKO_XOBJ_TAG s225 — A1: neighbors dilate exactly like the own body (radius + xy
+    // distance per queried radius); avoidances inherit the obstacle because
+    // calculate_avoidance derives from this collision.
+    if (key.layer_nr < m_neighbor_occupancy.size() && !m_neighbor_occupancy[key.layer_nr].empty())
+        collision_areas = union_ex(collision_areas,
+            offset_ex(union_ex(m_neighbor_occupancy[key.layer_nr]), scale_(key.radius + m_xy_distance)));
     collision_areas = expolygons_simplify(collision_areas, scale_(m_radius_sample_resolution));
     // collision_areas.emplace_back(m_machine_border);
     const auto ret = m_collision_cache.insert({ key, std::move(collision_areas) });

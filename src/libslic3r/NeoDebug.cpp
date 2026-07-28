@@ -31,10 +31,19 @@ namespace NeoDebug {
         { "ORCA_DEBUG_WAVESUPPORT", "/tmp/neotko_wavesupport.log" }, // NEOTKO_WAVESUPPORT_TAG
         { "ORCA_DEBUG_WAVEROOF",    "/tmp/neotko_waveroof.log"    }, // NEOTKO_WAVESUPPORT_TAG
         { "ORCA_DEBUG_NEOSTITCH",   "/tmp/neotko_neostitch.log"   }, // NEOTKO_NEOSTITCH_TAG
+        { "ORCA_DEBUG_CONTACT",     "/tmp/neotko_contact.log"     }, // NEOTKO_CONTACT_TAG s224
+        { "ORCA_DEBUG_XOBJ",        "/tmp/neotko_xobj.log"        }, // NEOTKO_XOBJ_TAG s225
+        { "ORCA_DEBUG_GRAVITY",     "/tmp/neotko_gravity.log"     }, // NEOTKO_GRAVITY_TAG s226
     };
 
     bool enabled(Channel c)
     {
+        // NEOTKO_GRAVITY_TAG — GRAVITY fires from the Snap & Drag mouse-move handler, so it can
+        // write many MB/s while dragging an object. Force it off unconditionally (even under
+        // ORCA_DEBUG_ALL) until it's needed for a specific debug session again.
+        if (c == GRAVITY)
+            return false;
+
         // Static arrays — safe: worst case is benign double-init from two threads.
         static bool s_checked[CH_COUNT] = {};
         static bool s_active [CH_COUNT] = {};

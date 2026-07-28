@@ -48,7 +48,13 @@ namespace Emboss
         // to be able store points without floating points
         ExPolygons shape;
 
-        // values are in font points
+        // NOTE(Typographic Spacing, phase 0): raw metrics in FONT UNITS, exactly as returned by
+        // stbtt_GetGlyphHMetrics(). They are NOT scaled by SHAPE_SCALE and they do NOT contain
+        // the user tracking (FontProp::char_gap) anymore.
+        // Before phase 0 the tracking was baked in here, which was wrong: this cache is keyed by
+        // unicode only (see Glyphs below), so an advance that depends on FontProp could survive a
+        // property change, and a per-PAIR value (kerning) could never be expressed at all.
+        // Tracking / kerning are now applied by Emboss::layout_text().
         int advance_width=0, left_side_bearing=0;
     };
     // cache for glyph by unicode
@@ -143,6 +149,43 @@ namespace Emboss
     /// <param name="flatness">Precision of lettter outline curve in conversion to lines</param>
     /// <returns>inner polygon cw(outer ccw)</returns>
     std::optional<Glyph> letter2glyph(const FontFile &font, unsigned int font_index, int letter, float flatness);
+
+    /// <summary>
+    /// Does this font carry a usable legacy 'kern' table?
+    /// stb_truetype cannot read kerning from GPOS, so a font may very well have kerning pairs
+    /// designed by its author and still answer false here. The GUI uses this to tell the user why
+    /// enabling font kerning changes nothing, instead of leaving them fighting a dead checkbox.
+    /// </summary>
+    bool has_kerning_table(const FontFile &font, unsigned int font_index = 0);
+
+    /// Placement of one character of the source text, computed by layout_text().
+    /// There is exactly one entry per wchar_t of the input string - including '\n', '\t', '\r'
+    /// and characters missing from the font - so indices stay aligned with the source text.
+    struct GlyphPlacement
+    {
+        // Position of the glyph origin, in the same coordinates as the glyph shapes
+        // (i.e. already divided by SHAPE_SCALE).
+        Point position{0, 0};
+
+        // False for line breaks, tabs, carriage returns and glyphs without a definition in the
+        // font. Those characters take part in the layout but produce no geometry.
+        bool has_shape{false};
+    };
+    using GlyphPlacements = std::vector<GlyphPlacement>;
+
+    /// <summary>
+    /// Compose the text in 2D: resolve the position of every character.
+    /// This is THE single source of truth for text layout - both the geometry and (later) the
+    /// preview must go through here, otherwise they diverge like they historically did.
+    /// Currently applies: glyph advance, tracking (FontProp::char_gap), line breaks and tabs.
+    /// Phase 1 of "Typographic Spacing" plugs real kerning in here.
+    /// </summary>
+    /// <param name="font">Define fonts + cache, which could extend</param>
+    /// <param name="text">Characters to compose</param>
+    /// <param name="font_prop">User defined property of the font</param>
+    /// <param name="was_canceled">Way to interupt processing</param>
+    /// <returns>One placement per character, empty when canceled</returns>
+    GlyphPlacements layout_text(FontFileWithCache &font, const std::wstring &text, const FontProp &font_prop, const std::function<bool()> &was_canceled = []() { return false; });
 
     /// <summary>
     /// Convert text into polygons

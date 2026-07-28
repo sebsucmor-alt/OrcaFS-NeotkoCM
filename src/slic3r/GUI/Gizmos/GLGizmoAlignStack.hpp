@@ -8,6 +8,7 @@
 #include "libslic3r/Color.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <array>
 #include <map>
 #include <memory>
 #include <tuple>
@@ -15,13 +16,20 @@
 
 namespace Slic3r { namespace GUI {
 
-// Align & Stack gizmo v2: two visual controls.
-//  - "Place / Align": six face buttons drawn as isometric mini-cubes (the
+// Align & Stack gizmo v3: relates exactly two objects, #1 (anchor) and #2
+// (the one that moves) — a third click swaps out #2 rather than growing a
+// chain nobody used.
+//  - "Place / Align": five face buttons drawn as isometric mini-cubes (the
 //    highlighted face + incoming plane tells the story) plus three center
-//    buttons. Touch mode chains objects against the anchor face; Flush mode
-//    aligns same-side faces Illustrator-style.
-//  - "Stack on face": pick a real face on A in the viewport, drop B onto it.
-// Order A/B/C is assigned by clicking objects in the scene while the gizmo
+//    buttons. Touch mode moves #2 against the anchor face; Flush mode aligns
+//    same-side faces Illustrator-style.
+//  - Viewport AABB aid: wireframes of #1/#2's bbox plus one translucent ghost
+//    wireframe per placement op showing exactly where #2 would land, each
+//    with its own clickable mini-cube icon at the predicted position — so the
+//    operation can be read directly off the scene instead of decoded from an
+//    abstract X-/X+ icon.
+//  - "Stack on face": pick a real face on #1 in the viewport, drop #2 onto it.
+// Order #1/#2 is assigned by clicking objects in the scene while the gizmo
 // is open (selection is mirrored so Selection::translate keeps working).
 class GLGizmoAlignStack : public GLGizmoBase
 {
@@ -40,9 +48,10 @@ protected:
     void        on_set_state() override;
 
 private:
-    // --- Order tracking (A, B, C, ... assigned by in-gizmo clicks) ---------
-    // Object indices (into Model::objects) in user click order. Seeded from
-    // the selection when the gizmo opens; afterwards owned by the gizmo.
+    // --- Order tracking (#1 anchor, #2 the object that moves) --------------
+    // Object indices (into Model::objects) in user click order, capped to two
+    // (kMaxOrdered): this gizmo only ever relates one object against another.
+    // Seeded from the selection when the gizmo opens; afterwards owned by it.
     std::vector<int> m_ordered_object_idxs;
 
     // --- Params -------------------------------------------------------------
@@ -84,6 +93,26 @@ private:
     // volume rebuilds (no dangling pointers).
     std::map<std::tuple<int, int, int>, ColorRGBA> m_saved_colors;
 
+    // --- Zone / ghost placement preview (viewport AABB aid) -----------------
+    // Wireframe of #1's bbox ("the zone") and #2's current bbox, plus one
+    // wireframe ghost per placement operation showing where #2 would land if
+    // that operation were applied right now. Each GLModel is rebuilt only
+    // when its source bbox actually changes (see rebuild_wire_box_if_needed).
+    GLModel       m_zone_box_a;
+    BoundingBoxf3 m_zone_box_a_bbox;
+    GLModel       m_zone_box_b;
+    BoundingBoxf3 m_zone_box_b_bbox;
+    std::array<GLModel, 5>       m_ghost_face_models;   // Z+, X-, X+, Y-, Y+
+    std::array<BoundingBoxf3, 5> m_ghost_face_bboxes;
+    std::array<GLModel, 3>       m_ghost_center_models; // center X, Y, Z
+    std::array<BoundingBoxf3, 3> m_ghost_center_bboxes;
+
+    // Screen-space rects (ImGui coords) of the ghost icons drawn by the last
+    // render pass; on_mouse hit-tests clicks against them to run the matching
+    // operation. dir is ignored when is_center.
+    struct GhostIconRect { float x0, y0, x1, y1; int axis; int dir; bool is_center; };
+    std::vector<GhostIconRect> m_ghost_icon_rects;
+
     // --- Helpers ------------------------------------------------------------
     void seed_order_from_selection();
     void prune_dead_objects();
@@ -106,15 +135,31 @@ private:
     // Translate every instance of the object by delta (selection-backed).
     void translate_object(int object_idx, const Vec3d& delta);
 
-    // Touch: chain B against A's face on `axis` toward `dir` (+1/-1),
-    // C against B, etc. Z+ uses epsilon gap; lateral contact is exact.
+    // Touch: move #2 against #1's face on `axis` toward `dir` (+1/-1).
+    // Z+ uses the epsilon gap; lateral contact is exact.
     void apply_touch(int axis, int dir);
-    // Flush: same-side faces of B, C... coplanar with A's (dir>0: max, else min).
+    // Flush: #2's same-side face becomes coplanar with #1's (dir>0: max, else min).
     void apply_flush(int axis, int dir);
-    // Center every non-anchor object on A along axis.
+    // Center #2 on #1 along axis.
     void apply_center(int axis);
     // Every ordered object to min_z = 0.
     void apply_all_on_bed();
+
+    // Pure math shared by apply_touch/apply_flush/apply_center AND by the
+    // ghost preview (so the ghost never lies about what a click will do).
+    Vec3d compute_place_delta(int axis, int dir, bool flush,
+                              const BoundingBoxf3& a_bb, const BoundingBoxf3& b_bb) const;
+    Vec3d compute_center_delta(int axis, const BoundingBoxf3& a_bb, const BoundingBoxf3& b_bb) const;
+
+    // Rebuilds `model` (a 12-edge line box) only if `bb` differs from
+    // `cached_bbox`, and updates `cached_bbox`. Resets `model` if bb is empty.
+    void rebuild_wire_box_if_needed(GLModel& model, BoundingBoxf3& cached_bbox, const BoundingBoxf3& bb) const;
+    void reset_ghost_geometry();
+    // Draws #1/#2's bbox wireframes plus one translucent ghost wireframe per
+    // placement op, and a floating clickable mini-cube icon at each ghost
+    // (same icon as the panel) so the user can click the actual predicted
+    // position instead of decoding an abstract X-/X+ button.
+    void render_zone_and_ghosts();
 
     void apply_place_on_picked_face();
     void clear_face_pick();

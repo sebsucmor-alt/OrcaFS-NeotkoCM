@@ -84,8 +84,13 @@ std::pair<bool, std::string> GLShadersManager::init()
         const bool gbuf_ok   = append_shader("shells_gbuffer", { prefix + "shells_gbuffer.vs", prefix + "shells_gbuffer.fs" });
         const bool lit_ok    = append_shader("shells_lit", { prefix + "shells_lit.vs", prefix + "shells_lit.fs" });
         const bool shadow_ok = append_shader("shells_shadow", { prefix + "shells_shadow.vs", prefix + "shells_shadow.fs" });
+        // NEOTKO_SHADOW_TAG s229 (Fase 2): depth-only pass rendered from the light, feeding the
+        // real directional shadow map that shells_lit.fs samples. Same not-gating-`valid` policy as
+        // the shaders above: if it fails to load, render_volumes_lit() just runs with
+        // u_shadow_enabled=false and keeps the AO + SSCS path, it doesn't break shader init.
+        const bool sdepth_ok = append_shader("shadow_depth", { prefix + "shadow_depth.vs", prefix + "shadow_depth.fs" });
         NEOTKO_LOG(REALCOLOR, "GLShadersManager::init: prefix=\"" << prefix << "\" shells_gbuffer=" << gbuf_ok
-            << " shells_lit=" << lit_ok << " shells_shadow=" << shadow_ok);
+            << " shells_lit=" << lit_ok << " shells_shadow=" << shadow_ok << " shadow_depth=" << sdepth_ok);
     }
 
     // used to render objects in 3d editor

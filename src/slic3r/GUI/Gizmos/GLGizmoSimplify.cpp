@@ -547,7 +547,8 @@ void GLGizmoSimplify::apply_simplify() {
     mv->set_new_unique_id();
     mv->get_object()->invalidate_bounding_box();
     // NeotkoLIBRE — keep floating Z when simplifying the mesh of an existing object.
-    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+    if (!gravity_allow_free_z())
         mv->get_object()->ensure_on_bed();
 
     // fix hollowing, sla support points, modifiers, ...

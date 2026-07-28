@@ -16,6 +16,7 @@
 #include "GCode/WipeTower2.hpp"
 #include "ShortestPath.hpp"
 #include "MixedFilament.hpp"
+#include "InstanceContact.hpp" // NEOTKO_CONTACT_TAG s224
 #include "Print.hpp"
 #include "Utils.hpp"
 #include "ClipperUtils.hpp"
@@ -29,6 +30,7 @@
 #include "SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — painter-mode PB gate
 #include <algorithm>
 #include <cmath>
+#include <cstdio> // NEOTKO_CONTACT_TAG s224 — snprintf for the measured-gap note
 #include <cstdlib>
 #include <chrono>
 #include <iostream>
@@ -1757,6 +1759,17 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
     size_t              idx_object_layer     = 0;
     size_t              idx_support_layer    = 0;
     const LayerToPrint* last_extrusion_layer = nullptr;
+    // NEOTKO_CONTACT_TAG s224 — lazy per-object contact measurement (C1), shared by the two
+    // floating-related checks below (empty first layer + bottom empty-layer warning range).
+    bool                            contact_checked = false;
+    InstanceContact::ObjectContact  contact_cache;
+    auto contact = [&]() -> const InstanceContact::ObjectContact& {
+        if (!contact_checked) {
+            contact_checked = true;
+            contact_cache   = InstanceContact::analyze_object(object);
+        }
+        return contact_cache;
+    };
     while (idx_object_layer < object.layers().size() || idx_support_layer < object.support_layers().size()) {
         LayerToPrint layer_to_print;
         double       print_z_min = std::numeric_limits<double>::max();
@@ -1790,19 +1803,34 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
         // first layer may result in skirt/brim in the air and maybe other issues.
         if (layers_to_print.size() == 1u) {
             if (!has_extrusions) {
-                // NeotkoLIBRE_START — s133: in LibreMode the empty first layer is expected (the object
-                // is intentionally floating). Downgrade the hard error to a non-critical warning so the
-                // slice can proceed, instead of blocking it. Flag injected at apply (no bridge behaviour).
-                if (object.config().neotko_libre_mode.value) {
+                // NEOTKO_CONTACT_TAG s224 — C1: measure real contact before complaining. An empty
+                // first layer is legitimate when every instance of the object rests (gap <= 0.01mm,
+                // or overlapping) on the top surface of another object on the plate — the old
+                // post-hoc "floating" warning/error was pure noise in that case, so suppress it.
+                // When the object IS genuinely floating, report the measured gap instead of guessing.
+                if (!contact().all_supported) {
+                    std::string gap_note;
+                    if (std::isfinite(contact().worst_gap_mm)) {
+                        char buf[64];
+                        std::snprintf(buf, sizeof(buf), " (measured gap below: %.3f mm)", contact().worst_gap_mm);
+                        gap_note = buf;
+                    }
+                // NEOTKO_CONTACT_END
+                // NEOTKO_GRAVITY_TAG s226 — Fase 6.3.3: an intentionally floating object with an empty
+                // first layer is the Gravity ("True Objects") axis now, not LibreMode. When Gravity is
+                // on, downgrade the hard error to a non-critical warning so the slice proceeds instead
+                // of blocking. Flag injected at apply (no bridge behaviour).
+                if (object.config().neotko_true_objects.value) {
                     const_cast<Print*>(object.print())->active_step_add_warning(
                         PrintStateBase::WarningLevel::NON_CRITICAL,
                         _(L("One object has empty initial layer (floating object). "
-                            "LibreMode: slicing continues, expect potential artifacts.")));
+                            "True Objects: slicing continues, expect potential artifacts.")) + gap_note);
                 } else
                 // NeotkoLIBRE_END
                 throw Slic3r::SlicingError(
-                    _(L("One object has empty initial layer and can't be printed. Please Cut the bottom or enable supports.")),
+                    _(L("One object has empty initial layer and can't be printed. Please Cut the bottom or enable supports.")) + gap_note,
                     object.id().id);
+                } // NEOTKO_CONTACT_TAG s224 — supported on another object: no warning at all
             }
         }
 
@@ -1833,9 +1861,16 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                                      std::max(0., extra_gap);
             // Negative support_contact_z is not taken into account, it can result in false positives in cases
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON)
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON) {
+                // NEOTKO_CONTACT_TAG s224 — the bottom range (nothing extruded below yet) is the
+                // "floating object" case: before warning, measure real contact. Resting on another
+                // object on the plate => the gap is filled by that object's body, not thin air —
+                // suppress. Mid-object ranges (real internal gaps) keep warning untouched.
+                if (!(last_extrusion_layer == nullptr && contact().all_supported))
+                // NEOTKO_CONTACT_END
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
+            }
         }
         // Remember last layer with extrusions.
         if (has_extrusions)

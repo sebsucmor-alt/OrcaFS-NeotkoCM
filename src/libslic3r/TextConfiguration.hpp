@@ -43,6 +43,20 @@ struct FontProp
     // Distiguish projection per glyph
     bool per_glyph;
 
+    ///////
+    // Typographic Spacing (NeotkoCM) - see docs/FUTURE/EMBOSS_TYPOGRAPHIC_SPACING_PLAN.md
+    // All of it is optional and defaults to the historical Orca behaviour, so that projects
+    // saved by stock Orca keep producing the exact same geometry.
+    ///////
+
+    // Use the kerning pairs stored in the font ('kern' table) to tighten/loosen specific pairs
+    // like "AV" or "To".
+    // NOTE: stb_truetype only reads the legacy 'kern' table, it does NOT read GPOS. Fonts that
+    // ship kerning only in GPOS (many modern OpenType/CFF fonts) will not be affected.
+    // Use Emboss::has_kerning_table() to tell the user when that is the case.
+    // When not set kerning is off, which is what Orca has always done.
+    std::optional<bool> use_font_kerning;
+
     // NOTE: way of serialize to 3mf force that zero must be default value
     enum class HorizontalAlign { left = 0, center, right };
     enum class VerticalAlign { top = 0, center, bottom };
@@ -77,9 +91,10 @@ struct FontProp
 
     bool operator==(const FontProp& other) const {
         return 
-            char_gap == other.char_gap && 
+            char_gap == other.char_gap &&
             line_gap == other.line_gap &&
             per_glyph == other.per_glyph &&
+            use_font_kerning == other.use_font_kerning &&
             align == other.align &&
             is_approx(size_in_mm, other.size_in_mm) && 
             is_approx(boldness, other.boldness) &&
@@ -95,6 +110,9 @@ struct FontProp
         cereal::save(ar, boldness);
         cereal::save(ar, skew);
         cereal::save(ar, collection_number);
+        // Typographic Spacing. Appended at the end on purpose: this archive is only used for the
+        // in-memory undo/redo stack, never for .3mf, so save and load always match.
+        cereal::save(ar, use_font_kerning);
     }
     template<class Archive> void load(Archive &ar)
     {
@@ -104,6 +122,8 @@ struct FontProp
         cereal::load(ar, boldness);
         cereal::load(ar, skew);
         cereal::load(ar, collection_number);
+        // Typographic Spacing - see note in save()
+        cereal::load(ar, use_font_kerning);
     }
 };
 

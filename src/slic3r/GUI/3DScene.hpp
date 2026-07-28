@@ -513,6 +513,10 @@ public:
     void set_slope_normal_z(float normal_z) { m_slope.normal_z = normal_z; }
     void set_default_slope_normal_z() { m_slope.normal_z = -::cos(Geometry::deg2rad(90.0f - 45.0f)); }
     void set_show_sinking_contours(bool show) { m_show_sinking_contours = show; }
+    // NEOTKO_SHADOW_TAG s229: needed so GCodeViewer::render_shadow_map() can suppress the sinking
+    // contours for its depth-only pass (they draw with glDepthFunc(GL_ALWAYS), which would stamp
+    // garbage depth into the shadow map) and restore the caller's setting afterwards.
+    bool is_show_sinking_contours() const { return m_show_sinking_contours; }
 
     // returns true if all the volumes are completely contained in the print volume
     // returns the containment state in the given out_state, if non-null

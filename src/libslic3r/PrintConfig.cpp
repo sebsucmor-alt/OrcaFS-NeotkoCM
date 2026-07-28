@@ -5785,6 +5785,17 @@ void PrintConfigDef::init_fff_params()
     //Support with too small spacing may touch the object and difficult to remove.
     def->set_default_value(new ConfigOptionFloat(0.2));
 
+    // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance (A1).
+    def = this->add("support_cross_object_avoidance", coBool);
+    def->label = L("PerObject Support");
+    def->category = L("Support");
+    def->tooltip = L("Tree support avoids the other objects on the plate (and keeps the "
+                     "support/object XY distance from them) instead of generating through them. "
+                     "Useful when separate objects touch or overlap. Only active when printing "
+                     "all objects at once (by layer).");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("support_angle", coFloat);
     def->label = L("Pattern angle");
     def->category = L("Support");
@@ -6778,6 +6789,29 @@ void PrintConfigDef::init_fff_params()
                      "checks for intentionally floating objects. Carries no bridge-infill behaviour.");
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_GRAVITY_TAG s226 — slice-time mirror of the "True Objects" toggle (app_config
+    // "neotko_true_objects"). Hidden/dev; default off → stock behaviour byte-identical.
+    def = this->add("neotko_true_objects", coBool);
+    def->label = L("Neotko True Objects mode (slice-time)");
+    def->tooltip = L("Internal: true while True Objects mode is active. The slicer then measures what "
+                     "is really underneath each surface (the bed, this object, or ANOTHER object on "
+                     "the plate) instead of assuming that anything not resting on its own previous "
+                     "layer is bridging over air.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_GRAVITY_TAG s226 — see PrintConfig.hpp: ratio of the layer height, not millimetres.
+    def = this->add("gravity_contact_gap_ratio", coFloat);
+    def->label = L("Gravity contact tolerance");
+    def->tooltip = L("How close a surface must be to what lies underneath to count as resting on it, "
+                     "as a fraction of the layer height. The mesh is sliced at one plane per layer, at "
+                     "mid-height, so a gap under half a layer cannot be distinguished by the slicer "
+                     "anyway. Lower values are stricter (more bridges).");
+    def->min = 0.;
+    def->max = 1.;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(0.5));
 
     // NeotkoLIBRE — Assembled Boolean mode (per-object). Default true = stock boolean union of
     // the object's parts. Set false from the object context menu (LibreMode) to slice the

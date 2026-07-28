@@ -876,6 +876,21 @@ public:
         bool gl_objects_created() const { return fbo != 0; }
     };
 
+    // NEOTKO_SHADOW_TAG s229 (Fase 2): real directional shadow map — the scene rendered depth-only
+    // from the light's point of view, then sampled per-fragment in shells_lit.fs. Replaces nothing:
+    // it ADDS object-on-object and self shadowing, which the old flattened-to-bed shells_shadow pass
+    // structurally cannot do (its receiver plane is hardcoded at world z=0). The planar bed shadow
+    // stays because the printbed is NOT one of these volumes and so receives no shadow from this map
+    // — see render_volumes_shadow()'s note and the study's §6 follow-up.
+    // Depth-only FBO: no color attachment at all (glDrawBuffer(GL_NONE)). Square, fixed resolution.
+    struct ShadowMapCache
+    {
+        int res = 0;
+        unsigned int fbo = 0;
+        unsigned int depth_tex = 0; // GL_DEPTH_COMPONENT24, sampled manually (compare mode NONE)
+        bool gl_objects_created() const { return fbo != 0 && depth_tex != 0; }
+    };
+
     // NEOTKO_GCODE_REPROCESSOR schema v2 (s215): `by_tool`/`tool` mirror the engine's
     // RuleMode::ByTool + tool id (ExpertGCodeReprocessor.cpp) — false/-1 means "global", the old
     // Phase 1/3 behaviour. `tool` is only meaningful when by_tool is true (0-based extruder
@@ -1029,6 +1044,18 @@ private:
     RealColorEnvCache m_realcolor_env;
     // NEOTKO_REALCOLOR_TAG s166 (item 4): G-buffer for the shells Phong+SSAO path, see ShellsAOCache above
     ShellsAOCache m_shells_ao_cache;
+    // NEOTKO_SHADOW_TAG s229 (Fase 2): directional shadow map, see ShadowMapCache above.
+    ShadowMapCache m_shadow_map_cache;
+    // World -> light clip transform for the current frame's shadow map, and the world-space size of
+    // one of its texels (mm) which drives the normal-offset bias. Both recomputed by
+    // render_shadow_map() and consumed by render_volumes_lit() when setting shells_lit's uniforms.
+    // Deliberately a raw Matrix4d, NOT a Transform3d: it is a projection*view product, and
+    // Transform3d's affine fast path is exactly what corrupted the Align & Stack projection in s227
+    // (see render_shadow_map()'s own note). An orthographic projection happens to be affine, so
+    // Transform3d would work today — the raw type makes it impossible to break by swapping in a
+    // perspective/spot light later.
+    Matrix4d m_shadow_light_proj_view{ Matrix4d::Identity() };
+    float m_shadow_texel_world_mm{ 0.0f };
     // NEOTKO_GCODE_REPROCESSOR — LibreMode-gated rule editor panel state, see
     // render_expert_gcode_reprocessor_panel().
     ExpertReprocessorPanelState m_expert_reprocessor;
@@ -1155,6 +1182,27 @@ public:
     void push_combo_style();
     void pop_combo_style();
 
+    // NEOTKO_REALCOLOR_TAG s166 (item 4), promoted to LibreMode s228: generic version of
+    // render_shells_lit()'s Phong+fresnel+SSAO(+shadow) pipeline, parametrized over an arbitrary
+    // GLVolumeCollection/ERenderType/filter instead of hardcoding m_shells.volumes+Transparent, so
+    // GLCanvas3D::_render_objects() can reuse it against the Prepare tab's own m_volumes. Shares
+    // the same shells_gbuffer/shells_lit/shells_shadow shaders and m_shells_ao_cache FBO as the
+    // Preview-only path (see render_shells_lit below, now a thin wrapper over this). Returns false
+    // (caller falls back to its normal shader) on any missing shader/FBO — see
+    // ensure_shells_ao_fbo's own fallback note.
+    bool render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollection::ERenderType type, bool depth_mask, bool with_shadow,
+                             int canvas_width, int canvas_height, const Camera& camera,
+                             const std::function<bool(const GLVolume&)>& filter = std::function<bool(const GLVolume&)>(),
+                             bool partly_inside_enable = true);
+    // NEOTKO_LIBREMODE_TAG s228: standalone contact-shadow pass split out of render_volumes_lit —
+    // see its definition (GCodeViewer.cpp) for why: callers whose bed is drawn AFTER their object
+    // pass (GLCanvas3D's Prepare tab) must call this separately, later in the frame, once the bed
+    // is actually in the depth/color buffer for the shadow to test against and blend onto.
+    void render_volumes_shadow(GLVolumeCollection& volumes, GLVolumeCollection::ERenderType type,
+                                int canvas_width, int canvas_height, const Camera& camera,
+                                const std::function<bool(const GLVolume&)>& filter = std::function<bool(const GLVolume&)>(),
+                                bool partly_inside_enable = true);
+
 private:
     void load_toolpaths(const GCodeProcessorResult& gcode_result, const BuildVolume& build_volume, const std::vector<BoundingBoxf3>& exclude_bounding_box);
     //BBS: always load shell at preview
@@ -1201,13 +1249,27 @@ private:
     void render_toolpaths();
     void render_shells(int canvas_width, int canvas_height);
     // NEOTKO_REALCOLOR_TAG s166 (item 4): G-buffer for the shells Phong+SSAO path — see
-    // ShellsAOCache. Only used when the debug-gated path in render_shells() is active.
+    // ShellsAOCache. Shared by render_shells_lit() (Preview) and render_volumes_lit() (Prepare,
+    // see public section above), both gated on app_config "neotko_libre_mode".
     bool ensure_shells_ao_fbo(int w, int h);
     void destroy_shells_ao_fbo();
-    // NEOTKO_REALCOLOR_TAG s166 (item 4): returns false (caller falls back to plain
-    // gouraud_light) if any shader/FBO isn't available — see render_shells().
+    // NEOTKO_SHADOW_TAG s229 (Fase 2): directional shadow map — see ShadowMapCache. Depth-only FBO,
+    // square, fixed resolution (SHADOW_MAP_RES in GCodeViewer.cpp).
+    bool ensure_shadow_map_fbo(int res);
+    void destroy_shadow_map_fbo();
+    // Fits an orthographic light frustum to `volumes`' world bounding box along the world-space key
+    // light direction, writes m_shadow_light_proj_view + m_shadow_texel_world_mm, and renders the
+    // depth-only pass into m_shadow_map_cache. Returns false if the shader/FBO is unavailable or the
+    // collection has no usable bounding box, in which case render_volumes_lit() proceeds with
+    // u_shadow_enabled=false (AO + SSCS still apply — nothing looks broken, just no cast shadow).
+    // (No ERenderType parameter on purpose: the depth pass always uses ERenderType::All, because a
+    // caster must never be missing from the map just for being transparent in the camera pass.)
+    bool render_shadow_map(GLVolumeCollection& volumes,
+                           const std::function<bool(const GLVolume&)>& filter, bool partly_inside_enable);
+    // NEOTKO_REALCOLOR_TAG s166 (item 4): thin wrapper over render_volumes_lit() bound to
+    // m_shells.volumes+Transparent, kept for render_shells()'s existing call site. Returns false
+    // (caller falls back to plain gouraud_light) if any shader/FBO isn't available.
     bool render_shells_lit(int canvas_width, int canvas_height, const Camera& camera);
-    void render_shells_shadow(int canvas_width, int canvas_height, const Camera& camera);
 
     //BBS: GUI refactor: add canvas size
     void render_legend(float &legend_height, int canvas_width, int canvas_height, int right_margin);

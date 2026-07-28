@@ -9,6 +9,7 @@
 #include "../MutablePolygon.hpp"
 #include "../Geometry.hpp"
 #include "../Point.hpp"
+#include "../InstanceContact.hpp" // NEOTKO_XOBJ_TAG s225 — cross_object_active() clamp
 #include "clipper/clipper_z.hpp"
 
 #include <cmath>
@@ -359,7 +360,13 @@ SupportGeneratorLayersPtr generate_raft_base(
 
     // How much to inflate the support columns to be stable. This also applies to the 1st layer, if no raft layers are to be printed.
     const float inflate_factor_fine      = float(scale_((slicing_params.raft_layers() > 1) ? 0.5 : EPSILON));
-    const float inflate_factor_1st_layer = std::max(0.f, float(scale_(object.config().raft_first_layer_expansion)) - inflate_factor_fine);
+    // NEOTKO_XOBJ_TAG s225 — this first-layer inflation (the organic engine's version of
+    // the tree brim) is a free outward offset that never gets clipped against anything —
+    // exaggerate it and the bases collide even with themselves. It's the reason organic
+    // support bases overlap across objects. Clamp it to 0 under cross-object avoidance so
+    // organic bases stay put; a deliberate adhesion/no-collision trade of the mode.
+    const float raft_1st_expansion       = InstanceContact::cross_object_active(object) ? 0.f : float(scale_(object.config().raft_first_layer_expansion));
+    const float inflate_factor_1st_layer = std::max(0.f, raft_1st_expansion - inflate_factor_fine);
     SupportGeneratorLayer       *contacts         = top_contacts         .empty() ? nullptr : top_contacts         .front();
     SupportGeneratorLayer       *interfaces       = interface_layers     .empty() ? nullptr : interface_layers     .front();
     SupportGeneratorLayer       *base_interfaces  = base_interface_layers.empty() ? nullptr : base_interface_layers.front();

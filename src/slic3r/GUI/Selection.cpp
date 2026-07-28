@@ -1596,7 +1596,8 @@ void Selection::scale_and_translate(const Vec3d &scale, const Vec3d &world_trans
 
     // NeotkoLIBRE_START — s133: skip the per-frame bed snap during scale/mirror drag so
     // floating objects keep their Z while being transformed (the post-drag gates live in GLCanvas3D).
-    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+    if (!gravity_allow_free_z())
         ensure_on_bed();
     // NeotkoLIBRE_END
     set_bounding_boxes_dirty();

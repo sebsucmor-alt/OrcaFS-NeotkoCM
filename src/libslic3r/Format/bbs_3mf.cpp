@@ -521,6 +521,9 @@ static constexpr const char *LINE_HEIGHT_ATTR = "line_height";
 static constexpr const char *BOLDNESS_ATTR    = "boldness";
 static constexpr const char *SKEW_ATTR        = "skew";
 static constexpr const char *PER_GLYPH_ATTR   = "per_glyph";
+// NeotkoCM Typographic Spacing. Attribute based format, so old projects simply lack it and old
+// slicers simply ignore it - no version bump needed.
+static constexpr const char *USE_FONT_KERNING_ATTR = "neotko_font_kerning";
 static constexpr const char *HORIZONTAL_ALIGN_ATTR  = "horizontal";
 static constexpr const char *VERTICAL_ALIGN_ATTR    = "vertical";
 static constexpr const char *COLLECTION_NUMBER_ATTR = "collection";
@@ -9085,6 +9088,8 @@ void TextConfigurationSerialization::to_xml(std::stringstream &stream, const Tex
         stream << SKEW_ATTR << "=\"" << *fp.skew << "\" ";
     if (fp.per_glyph)
         stream << PER_GLYPH_ATTR << "=\"" << 1 << "\" ";
+    if (fp.use_font_kerning.value_or(false))
+        stream << USE_FONT_KERNING_ATTR << "=\"" << 1 << "\" ";
     stream << HORIZONTAL_ALIGN_ATTR << "=\"" << bimap_cvt(horizontal_align_to_name, fp.align.first, dafault_type) << "\" ";
     stream << VERTICAL_ALIGN_ATTR   << "=\"" << bimap_cvt(vertical_align_to_name,  fp.align.second, dafault_type) << "\" ";
     if (fp.collection_number.has_value())
@@ -9159,6 +9164,9 @@ std::optional<TextConfiguration> TextConfigurationSerialization::read(const char
         fp.skew = skew;
     int per_glyph = bbs_get_attribute_value_int(attributes, num_attributes, PER_GLYPH_ATTR);
     if (per_glyph == 1) fp.per_glyph = true;
+    // Missing attribute (any project not saved by NeotkoCM) leaves the optional unset = kerning off
+    int use_font_kerning = bbs_get_attribute_value_int(attributes, num_attributes, USE_FONT_KERNING_ATTR);
+    if (use_font_kerning == 1) fp.use_font_kerning = true;
 
     fp.align = FontProp::Align(
         read_horizontal_align(attributes, num_attributes, horizontal_align_to_name),

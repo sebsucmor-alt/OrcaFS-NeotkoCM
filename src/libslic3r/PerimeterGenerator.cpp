@@ -166,7 +166,10 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
         const Polygon polygon = apply_fuzzy_skin(loop.polygon, perimeter_generator, loop.depth, loop.is_contour);
 
         ExtrusionPaths paths;
-        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {
+        // NEOTKO_GRAVITY_TAG s226 — Fase 3: also run overhang detection on the object's base layer
+        // (layer_id <= raft_layers) when it rests on a foreign floor, so the part hanging over air
+        // is still classified as overhang. has_gravity_floor is false for ordinary raft/bed layers.
+        if (perimeter_generator.config->detect_overhang_wall && (perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers || perimeter_generator.has_gravity_floor)) {
             // detect overhanging/bridging perimeters
 
             // get non 100% overhang paths by intersecting this loop with the grown lower slices
@@ -397,7 +400,9 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         ExtrusionPaths paths;
         // detect overhanging/bridging perimeters
-        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {
+        // NEOTKO_GRAVITY_TAG s226 — Fase 3 (Arachne path): same base-layer relaxation as the classic
+        // path above — run overhang detection on a base layer resting on a foreign floor.
+        if (perimeter_generator.config->detect_overhang_wall && (perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers || perimeter_generator.has_gravity_floor)) {
             ClipperLib_Z::Path extrusion_path;
             extrusion_path.reserve(extrusion->size());
             BoundingBox extrusion_path_bbox;

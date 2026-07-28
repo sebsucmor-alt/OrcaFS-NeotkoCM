@@ -635,6 +635,8 @@ public:
     void copy_process_settings(const std::string& category);
     void paste_process_settings();
     bool has_process_settings_clipboard() const;
+    // NEOTKO — high-level manual slice-cache wipe: force the next slice to run fully from scratch.
+    void remove_slice_cache();
     // find all empty cells on the plate and won't overlap with exclusion areas
     static std::vector<Vec2f> get_empty_cells(const Vec2f step);
 

@@ -1,5 +1,6 @@
 #include <numeric>
 #include "Emboss.hpp"
+#include <map> // glyph index cache used by layout_text
 #include <stdio.h>
 #include <numeric>
 #include <cstdlib>
@@ -785,12 +786,10 @@ const Glyph* get_glyph(
     if (!glyph_opt.has_value()) return nullptr;
 
     Glyph &glyph = *glyph_opt;
-    if (font_prop.char_gap.has_value()) 
-        glyph.advance_width += *font_prop.char_gap;
-
-    // scale glyph size
-    glyph.advance_width = static_cast<int>(glyph.advance_width / SHAPE_SCALE);
-    glyph.left_side_bearing = static_cast<int>(glyph.left_side_bearing / SHAPE_SCALE);
+    // NOTE(Typographic Spacing, phase 0): advance_width / left_side_bearing are deliberately left
+    // in raw font units here. Baking FontProp::char_gap into a cache keyed by unicode only was the
+    // root reason why no per-pair value (kerning) could ever be expressed - see Emboss::Glyph.
+    // The tracking and the SHAPE_SCALE conversion now happen in layout_text().
 
     if (!glyph.shape.empty()) {
         if (font_prop.boldness.has_value()) {
@@ -1182,6 +1181,28 @@ const FontFile::Info &Emboss::get_font_info(const FontFile &font, const FontProp
     return font.infos[font_index];
 }
 
+bool Emboss::has_kerning_table(const FontFile &font, unsigned int font_index)
+{
+    if (!is_valid(font, font_index))
+        return false;
+    fontinfo_opt font_info = load_font_info(font.data->data(), font_index);
+    if (!font_info.has_value())
+        return false;
+    if (font_info->gpos != 0)
+        return true; // modern OpenType kerning, read by stb_truetype
+    if (font_info->kern == 0)
+        return false;
+    // A 'kern' table exists, but only two layouts can actually be read: the Microsoft version 0
+    // (handled by stb_truetype) and the Apple version 1.0 (handled by apple_kern_advance).
+    // Anything else would leave the user with a checkbox that does nothing, so report false.
+    const unsigned char *table = font_info->data + font_info->kern;
+    uint32_t version = (static_cast<uint32_t>(table[0]) << 24) | (static_cast<uint32_t>(table[1]) << 16) |
+                       (static_cast<uint32_t>(table[2]) << 8) | static_cast<uint32_t>(table[3]);
+    if (version == 0x00010000u)
+        return true;                         // Apple v1.0
+    return (table[0] << 8 | table[1]) == 0;  // Microsoft v0
+}
+
 int Emboss::get_line_height(const FontFile &font, const FontProp &prop) {
     const FontFile::Info &info = get_font_info(font, prop);
     int line_height = info.ascent - info.descent + info.linegap;
@@ -1190,49 +1211,98 @@ int Emboss::get_line_height(const FontFile &font, const FontProp &prop) {
 }
 
 namespace {
-ExPolygons letter2shapes(
-    wchar_t letter, Point &cursor, FontFileWithCache &font_with_cache, const FontProp &font_prop, fontinfo_opt& font_info_cache)
+/// <summary>
+/// Horizontal advance of one glyph, expressed in shape coordinates (already divided by
+/// SHAPE_SCALE), user tracking included.
+/// IMPORTANT: the arithmetic is intentionally kept as ONE division of the summed font-unit value,
+/// exactly as the pre-phase-0 code did inside get_glyph(). Splitting it into two divisions could
+/// shift the result by one unit (SHAPE_SCALE is not exactly representable in binary) and silently
+/// change the geometry of existing projects.
+/// </summary>
+int glyph_advance(const Glyph &glyph, const FontProp &font_prop)
 {
-    assert(font_with_cache.has_value());
-    if (!font_with_cache.has_value())
-        return {};
+    int advance_in_font_units = glyph.advance_width + font_prop.char_gap.value_or(0);
+    return static_cast<int>(advance_in_font_units / SHAPE_SCALE);
+}
 
-    Glyphs &cache = *font_with_cache.cache;
-    const FontFile &font  = *font_with_cache.font_file;
+/////
+// NEOTKO_TYPOSPACING_TAG - Apple 'kern' table reader
+//
+// stb_truetype only understands the Microsoft 'kern' table (version 0: uint16 version + uint16
+// number of tables). Apple ships version 1.0 (uint32 0x00010000 + uint32 number of tables, and a
+// wider subtable header), and stb bails out on it: stbtt__GetGlyphKernInfoAdvance() reads
+// ttUSHORT(data+2) as the table count, which for 0x00010000 is 0, so it returns 0 for every pair.
+//
+// This matters a lot on macOS: the system fonts (Helvetica and friends) use the Apple format, so
+// without this reader "font kerning" is silently dead for exactly the fonts a Mac user reaches for
+// first. Verified against /System/Library/Fonts/Helvetica.ttc (Apple v1.0) vs Arial/Times/Verdana
+// (Microsoft v0, which stb reads fine).
+//
+// Format 0 subtable only, which is what kerning pairs actually use.
+/////
+uint16_t be_u16(const unsigned char *p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
+int16_t  be_s16(const unsigned char *p) { return static_cast<int16_t>((p[0] << 8) | p[1]); }
+uint32_t be_u32(const unsigned char *p)
+{
+    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+}
 
-    if (letter == '\n') {
-        cursor.x() = 0;
-        // 2d shape has opposit direction of y
-        cursor.y() -= get_line_height(font, font_prop);
-        return {};
+/// Kerning of a pair from an Apple version 1.0 'kern' table. Returns 0 when the font does not use
+/// that format, so it can safely be added to whatever stb_truetype reports.
+int apple_kern_advance(const stbtt_fontinfo &font_info, int glyph1, int glyph2)
+{
+    if (font_info.kern == 0)
+        return 0;
+    const unsigned char *table = font_info.data + font_info.kern;
+    if (be_u32(table) != 0x00010000u)
+        return 0; // not the Apple format, stb_truetype already handled it
+
+    uint32_t             count    = be_u32(table + 4);
+    const unsigned char *subtable = table + 8;
+    for (uint32_t t = 0; t < count; ++t) {
+        uint32_t length   = be_u32(subtable);
+        uint16_t coverage = be_u16(subtable + 4);
+        if (length < 16)
+            break; // malformed, do not walk further
+
+        const bool is_vertical = (coverage & 0x8000) != 0;
+        const int  format      = coverage & 0x00FF;
+        if (!is_vertical && format == 0) {
+            uint16_t             pair_count = be_u16(subtable + 8);
+            const unsigned char *pairs      = subtable + 16;
+            // Pairs are sorted by (left << 16 | right), same as the Microsoft format
+            uint32_t needle = (static_cast<uint32_t>(glyph1) << 16) | static_cast<uint32_t>(glyph2);
+            int      lo = 0, hi = static_cast<int>(pair_count) - 1;
+            while (lo <= hi) {
+                int      mid  = (lo + hi) >> 1;
+                uint32_t straw = be_u32(pairs + mid * 6);
+                if (needle < straw)
+                    hi = mid - 1;
+                else if (needle > straw)
+                    lo = mid + 1;
+                else
+                    return be_s16(pairs + mid * 6 + 4);
+            }
+            return 0; // horizontal format 0 subtable found, pair simply has no kerning
+        }
+        subtable += length;
     }
-    if (letter == '\t') {
-        // '\t' = 4*space => same as imgui
-        const int count_spaces = 4;
-        const Glyph *space = get_glyph(int(' '), font, font_prop, cache, font_info_cache);
-        if (space == nullptr)
-            return {};
-        cursor.x() += count_spaces * space->advance_width;
-        return {};
-    }
-    if (letter == '\r')
-        return {};
+    return 0;
+}
 
-    int unicode = static_cast<int>(letter);
+/// <summary>
+/// Index of a glyph inside the font file, cached per unicode.
+/// Kerning is addressed by glyph index, not by unicode, so this lookup is unavoidable.
+/// </summary>
+int glyph_index(int unicode, const stbtt_fontinfo &font_info, std::map<int, int> &cache)
+{
     auto it = cache.find(unicode);
-
-    // Create glyph from font file and cache it
-    const Glyph *glyph_ptr = (it != cache.end()) ? &it->second : get_glyph(unicode, font, font_prop, cache, font_info_cache);
-    if (glyph_ptr == nullptr)
-        return {};
-
-    // move glyph to cursor position
-    ExPolygons expolygons = glyph_ptr->shape; // copy
-    for (ExPolygon &expolygon : expolygons)
-        expolygon.translate(cursor);
-
-    cursor.x() += glyph_ptr->advance_width;
-    return expolygons;
+    if (it != cache.end())
+        return it->second;
+    int index = stbtt_FindGlyphIndex(&font_info, unicode);
+    cache[unicode] = index;
+    return index;
 }
 
 // Check cancel every X letters in text
@@ -1311,6 +1381,106 @@ namespace {
 void align_shape(ExPolygonsWithIds &shapes, const std::wstring &text, const FontProp &prop, const FontFile &font);
 }
 
+Emboss::GlyphPlacements Emboss::layout_text(
+    FontFileWithCache &font_with_cache, const std::wstring &text, const FontProp &font_prop, const std::function<bool()> &was_canceled)
+{
+    assert(font_with_cache.has_value());
+    if (!font_with_cache.has_value())
+        return {};
+
+    Glyphs         &cache = *font_with_cache.cache;
+    const FontFile &font  = *font_with_cache.font_file;
+
+    unsigned int font_index = font_prop.collection_number.value_or(0);
+    if (!is_valid(font, font_index))
+        return {};
+
+    fontinfo_opt font_info_cache;
+    unsigned     counter = 0;
+    Point        cursor(0, 0);
+
+    // Kerning needs the font info even when every glyph shape is already cached, so load it up
+    // front instead of relying on get_glyph() to do it lazily.
+    const bool use_kerning = font_prop.use_font_kerning.value_or(false);
+    std::map<int, int> glyph_index_cache;
+    if (use_kerning && !font_info_cache.has_value())
+        font_info_cache = load_font_info(font.data->data(), font_index);
+    const bool can_kern = use_kerning && font_info_cache.has_value();
+
+    // Glyph index of the previous character of the current line, when there is one to kern against
+    std::optional<int> prev_glyph_index;
+
+
+    GlyphPlacements result;
+    result.reserve(text.size());
+    for (wchar_t letter : text) {
+        // Creating a glyph shape is the expensive part and it happens here, so this is where
+        // cancelation has to be checked.
+        if (++counter == CANCEL_CHECK) {
+            counter = 0;
+            if (was_canceled())
+                return {};
+        }
+
+        if (letter == '\n') {
+            cursor.x() = 0;
+            // 2d shape has opposit direction of y
+            cursor.y() -= get_line_height(font, font_prop);
+            prev_glyph_index.reset(); // never kern across a line break
+            result.push_back({cursor, false});
+            continue;
+        }
+        if (letter == '\t') {
+            // '\t' = 4*space => same as imgui
+            const int    count_spaces = 4;
+            const Glyph *space        = get_glyph(int(' '), font, font_prop, cache, font_info_cache);
+            if (space != nullptr)
+                cursor.x() += count_spaces * glyph_advance(*space, font_prop);
+            prev_glyph_index.reset(); // a tab is an explicit spacing, kerning across it is meaningless
+            result.push_back({cursor, false});
+            continue;
+        }
+        if (letter == '\r') {
+            result.push_back({cursor, false});
+            continue;
+        }
+
+        int  unicode = static_cast<int>(letter);
+        auto it      = cache.find(unicode);
+
+        // Create glyph from font file and cache it
+        const Glyph *glyph_ptr = (it != cache.end()) ? &it->second : get_glyph(unicode, font, font_prop, cache, font_info_cache);
+        if (glyph_ptr == nullptr) {
+            // Character has no definition in this font: it takes no space, exactly as before.
+            prev_glyph_index.reset();
+            result.push_back({cursor, false});
+            continue;
+        }
+
+        if (can_kern) {
+            int index = glyph_index(unicode, *font_info_cache, glyph_index_cache);
+            if (prev_glyph_index.has_value()) {
+                // Kerning of the pair (previous, current), in font units.
+                // NOTE: this is applied as its own term instead of being folded into the previous
+                // advance. That keeps the kerning-off path arithmetically identical to the code
+                // before Typographic Spacing existed - see glyph_advance().
+                // stb reads the Microsoft 'kern' table and GPOS; apple_kern_advance() covers the
+                // Apple version 1.0 table that stb silently ignores (macOS system fonts).
+                // The two are mutually exclusive by table version, so summing them is safe.
+                int kern = stbtt_GetGlyphKernAdvance(&(*font_info_cache), *prev_glyph_index, index) +
+                           apple_kern_advance(*font_info_cache, *prev_glyph_index, index);
+                if (kern != 0)
+                    cursor.x() += static_cast<int>(kern / SHAPE_SCALE);
+            }
+            prev_glyph_index = index;
+        }
+
+        result.push_back({cursor, true});
+        cursor.x() += glyph_advance(*glyph_ptr, font_prop);
+    }
+    return result;
+}
+
 ExPolygonsWithIds Emboss::text2vshapes(FontFileWithCache &font_with_cache, const std::wstring& text, const FontProp &font_prop, const std::function<bool()>& was_canceled){
     assert(font_with_cache.has_value());
     const FontFile &font = *font_with_cache.font_file;
@@ -1318,20 +1488,37 @@ ExPolygonsWithIds Emboss::text2vshapes(FontFileWithCache &font_with_cache, const
     if (!is_valid(font, font_index))
         return {};
 
-    unsigned counter = 0;
-    Point cursor(0, 0);
+    // Compose in 2d first, then only place the shapes. Layout is not recomputed here.
+    GlyphPlacements placements = layout_text(font_with_cache, text, font_prop, was_canceled);
+    if (placements.size() != text.size())
+        return {}; // canceled or invalid font
 
-    fontinfo_opt font_info_cache;  
+    Glyphs &cache = *font_with_cache.cache;
+    fontinfo_opt font_info_cache;
+
     ExPolygonsWithIds result;
     result.reserve(text.size());
-    for (wchar_t letter : text) {
-        if (++counter == CANCEL_CHECK) {
-            counter = 0;
-            if (was_canceled())
-                return {};
+    for (size_t i = 0; i < text.size(); ++i) {
+        const GlyphPlacement &placement = placements[i];
+        unsigned id = static_cast<unsigned>(text[i]);
+
+        if (!placement.has_shape) {
+            result.push_back({id, {}});
+            continue;
         }
-        unsigned id = static_cast<unsigned>(letter);
-        result.push_back({id, letter2shapes(letter, cursor, font_with_cache, font_prop, font_info_cache)});
+
+        // Glyph is already in the cache, layout_text() made sure of it.
+        const Glyph *glyph_ptr = get_glyph(static_cast<int>(text[i]), font, font_prop, cache, font_info_cache);
+        assert(glyph_ptr != nullptr);
+        if (glyph_ptr == nullptr) {
+            result.push_back({id, {}});
+            continue;
+        }
+
+        ExPolygons expolygons = glyph_ptr->shape; // copy
+        for (ExPolygon &expolygon : expolygons)
+            expolygon.translate(placement.position);
+        result.push_back({id, std::move(expolygons)});
     }
 
     align_shape(result, text, font_prop, font);

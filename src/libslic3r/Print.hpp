@@ -435,6 +435,13 @@ public:
     // PerimeterGenerator::texture_bump_tables, set in LayerRegion::make_perimeters().
     const Feature::TextureBump::TextureBumpTableMap& texture_bump_tables() const { return m_texture_bump_tables; }
     Feature::TextureBump::TextureBumpTableMap&       texture_bump_tables()       { return m_texture_bump_tables; }
+    // NEOTKO_GRAVITY_TAG s226 — Fase 3: this object's real floor (top of any OTHER object under
+    // each layer), object-local, indexed by layer. Built ONCE per object in make_perimeters()
+    // (single-threaded, after every object is sliced) and read by LayerRegion::make_perimeters()
+    // to feed PerimeterGenerator::lower_slices, so a wall resting on a neighbour is not flagged
+    // overhang. Empty vector unless Gravity is active. Derived geometry, never serialized.
+    const std::vector<Polygons>& gravity_floor() const { return m_gravity_floor; }
+    std::vector<Polygons>&       gravity_floor()       { return m_gravity_floor; }
 
     template<typename PolysType>
     static void remove_bridges_from_contacts(
@@ -671,6 +678,8 @@ private:
     std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers;
     // NEOTKO_TEXTUREBUMP_TAG — see texture_bump_tables() accessors above.
     Feature::TextureBump::TextureBumpTableMap   m_texture_bump_tables;
+    // NEOTKO_GRAVITY_TAG s226 — see gravity_floor() accessors above. Rebuilt each make_perimeters().
+    std::vector<Polygons>                       m_gravity_floor;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // BBS
@@ -1056,6 +1065,12 @@ public:
         return it == m_mixed_filament_sandwich_profile_id.end() ? 0 : it->second;
     }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
+    // NEOTKO — "Remove Slice Cache": force every object (and this Print) to re-slice from scratch.
+    // Print is a friend of PrintObject, so it can reach the otherwise-private per-object
+    // invalidate_all_steps() that the GUI cannot call directly. Also drops each object's derived
+    // tree-support preview cache. Call ONLY with the background slicing thread stopped. Returns
+    // true if anything was actually invalidated.
+    bool                        invalidate_all_object_steps();
     PrintObject*                get_object(size_t idx) { return const_cast<PrintObject*>(m_objects[idx]); }
     const PrintObject*          get_object(size_t idx) const { return m_objects[idx]; }
     // PrintObject by its ObjectID, to be used to uniquely bind slicing warnings to their source PrintObjects

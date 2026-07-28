@@ -150,6 +150,11 @@ public:
     const ExPolygons            *upper_slices;
     const SurfaceCollection     *upper_slices_same_region;
     const ExPolygons            *lower_slices;
+    // NEOTKO_GRAVITY_TAG s226 — Fase 3: true when lower_slices was widened with a foreign floor
+    // (this object rests on ANOTHER object at this layer). Lets the layer-0 overhang guard run
+    // even when layer_id <= raft_layers, WITHOUT relaxing it for ordinary raft/bed layers (where
+    // this stays false). Set in LayerRegion::make_perimeters(); default false = stock behaviour.
+    bool                         has_gravity_floor = false;
     double                       layer_height;
     int                          layer_id;
     coordf_t                     slice_z;

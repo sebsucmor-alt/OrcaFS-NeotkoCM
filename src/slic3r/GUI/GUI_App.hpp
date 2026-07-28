@@ -971,6 +971,13 @@ DECLARE_APP(GUI_App)
 wxDECLARE_EVENT(EVT_CONNECT_LAN_MODE_PRINT, wxCommandEvent);
 
 bool is_support_filament(int extruder_id);
+
+// NEOTKO_GRAVITY_TAG s226 — Fase 6.3: single source of truth for "may an object keep a free Z
+// (not be auto-dropped to the bed)?". After the LibreMode/Gravity split this is owned by the
+// "True Objects" (Gravity) axis, NOT by LibreMode. Every ensure_on_bed() call site that used to
+// read app_config "neotko_libre_mode" for the floating relax must read this instead. Safe before
+// app_config exists (returns false). See docs/FUTURE/GRAVITY_MASTER_PLAN.md §6.3.
+bool gravity_allow_free_z();
 } // namespace GUI
 } // Slic3r
 

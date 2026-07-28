@@ -1,4 +1,5 @@
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/NeoDebug.hpp" // NEOTKO_LIBREMODE_TAG s228 DEBUG — _render_objects Prepare-tab trace
 #include "GLCanvas3D.hpp"
 
 #include <igl/unproject.h>
@@ -24,6 +25,7 @@
 #include "Plater.hpp"
 #include "MainFrame.hpp"
 #include "GUI_App.hpp"
+#include "GravitySnap.hpp" // NEOTKO_SNAPDRAG_TAG s227
 #include "GUI_ObjectList.hpp"
 #include "GUI_Colors.hpp"
 #include "Mouse3DController.hpp"
@@ -998,6 +1000,152 @@ void GLCanvas3D::SequentialPrintClearance::render()
     //BBS: add height limit
     m_height_limit.set_color(m_render_fill ? FILL_COLOR : NO_FILL_COLOR);
     m_height_limit.render();
+
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+
+    shader->stop_using();
+}
+
+// NEOTKO_SNAPDRAG_TAG s227 — scales `p` toward/away from `centroid` by `factor` (both in scaled
+// clipper units). A uniform scale about the centroid, not a true polygon offset — plenty for a
+// soft-blob illusion and far cheaper than an offset() call per ring, per frame.
+static Point snapdrag_scale_about(const Point& p, const Point& centroid, double factor)
+{
+    const Vec2d pd(unscale_(p.x()), unscale_(p.y()));
+    const Vec2d cd(unscale_(centroid.x()), unscale_(centroid.y()));
+    const Vec2d r = cd + (pd - cd) * factor;
+    return Point::new_scale(r.x(), r.y());
+}
+
+// NEOTKO_SNAPDRAG_TAG s227 — see GLCanvas3D.hpp for the class purpose.
+void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, double landing_z)
+{
+    for (GLModel& ring : m_shadow_rings)
+        ring.reset();
+    m_fill.reset();
+    m_outline.reset();
+    m_beam.reset();
+    m_visible = false;
+
+    if (footprint_world.empty())
+        return;
+
+    // Cheap "almost realistic" contact shadow: a few concentric rings grown/shrunk about the
+    // footprint centroid, darker and smaller toward the middle. Rendered UNDER the functional
+    // cyan cue below with standard alpha blending, this composites into a soft radial falloff
+    // without a texture or a new shader. Purely decorative — never read by GravitySnap.
+    struct RingSpec { double scale; float alpha; };
+    static constexpr RingSpec SHADOW_RINGS[SHADOW_RING_COUNT] = {
+        { 1.20, 0.10f },
+        { 1.10, 0.15f },
+        { 1.00, 0.20f },
+        { 0.72, 0.30f },
+    };
+    const Point centroid = footprint_world.centroid();
+    for (size_t i = 0; i < SHADOW_RING_COUNT; ++i) {
+        Polygon ring_poly;
+        ring_poly.points.reserve(footprint_world.points.size());
+        for (const Point& p : footprint_world.points)
+            ring_poly.points.push_back(snapdrag_scale_about(p, centroid, SHADOW_RINGS[i].scale));
+        if (ring_poly.empty())
+            continue;
+
+        // Each ring gets its own tiny Z step so coplanar rings don't z-fight each other; all of
+        // them stay below the cyan fill/outline's own Z (landing_z + 0.05 / + 0.07 below).
+        const double ring_z = landing_z + 0.005 * double(i + 1);
+        const ExPolygon ring_ex(ring_poly);
+        const std::vector<Vec3d> ring_tris = triangulate_expolygon_3d(ring_ex, ring_z);
+
+        GLModel::Geometry ring_data;
+        ring_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        ring_data.color  = { 0.02f, 0.02f, 0.02f, SHADOW_RINGS[i].alpha };
+        ring_data.reserve_vertices(ring_tris.size());
+        ring_data.reserve_indices(ring_tris.size());
+        unsigned int ring_vertices_counter = 0;
+        for (const Vec3d& v : ring_tris) {
+            ring_data.add_vertex((Vec3f)v.cast<float>());
+            ++ring_vertices_counter;
+            if (ring_vertices_counter % 3 == 0)
+                ring_data.add_triangle(ring_vertices_counter - 3, ring_vertices_counter - 2, ring_vertices_counter - 1);
+        }
+        m_shadow_rings[i].init_from(std::move(ring_data));
+    }
+
+    // Small positive lift to avoid z-fighting with the real resting surface underneath.
+    const double z = landing_z + 0.05;
+
+    // Shadow fill
+    GLModel::Geometry fill_data;
+    fill_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+    fill_data.color  = { 0.3f, 0.9f, 1.0f, 0.35f };
+    const ExPolygon ex(footprint_world);
+    const std::vector<Vec3d> triangulation = triangulate_expolygon_3d(ex, z);
+    fill_data.reserve_vertices(triangulation.size());
+    fill_data.reserve_indices(triangulation.size());
+    unsigned int vertices_counter = 0;
+    for (const Vec3d& v : triangulation) {
+        fill_data.add_vertex((Vec3f)v.cast<float>());
+        ++vertices_counter;
+        if (vertices_counter % 3 == 0)
+            fill_data.add_triangle(vertices_counter - 3, vertices_counter - 2, vertices_counter - 1);
+    }
+    m_fill.init_from(std::move(fill_data));
+
+    // Shadow outline
+    m_outline.init_from(Polygons{ footprint_world }, float(z + 0.02));
+    m_outline.set_color({ 0.3f, 0.9f, 1.0f, 0.9f });
+
+    // Beam: short vertical tick through the landing point, at the footprint centroid. Fixed
+    // height (not tied to the dragged object's own height) — it is a spotlight marking the
+    // spot, not a gap measurement.
+    constexpr double BEAM_HEIGHT = 15.0; // mm
+    const Vec3f base(float(unscale_(centroid.x())), float(unscale_(centroid.y())), float(landing_z));
+
+    GLModel::Geometry beam_data;
+    beam_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    beam_data.color  = { 0.3f, 0.9f, 1.0f, 0.6f };
+    beam_data.reserve_vertices(2);
+    beam_data.reserve_indices(2);
+    const Vec3f tip = base + Vec3f(0.0f, 0.0f, float(BEAM_HEIGHT));
+    beam_data.add_vertex(base);
+    beam_data.add_vertex(tip);
+    beam_data.add_line(0, 1);
+    m_beam.init_from(std::move(beam_data));
+
+    m_visible = true;
+}
+
+void GLCanvas3D::SnapDragIndicator::render()
+{
+    if (!m_visible)
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    shader->start_using();
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    // Shadow rings first (largest/faintest to smallest/darkest — the order they were built in),
+    // so the functional cyan cue on top stays the clearest thing in the stack.
+    for (GLModel& ring : m_shadow_rings)
+        ring.render();
+
+    m_fill.render();
+    m_outline.render();
+
+    glsafe(::glLineWidth(1.5f));
+    m_beam.render();
 
     glsafe(::glDisable(GL_BLEND));
     glsafe(::glEnable(GL_CULL_FACE));
@@ -1981,6 +2129,18 @@ void GLCanvas3D::render(bool only_init)
             _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
         if (!no_partplate) //BBS: add outline logic
             _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid);
+        // NEOTKO_LIBREMODE_TAG s228: the shells contact shadow depth-tests/blends against the bed,
+        // so it has to be cast here — AFTER the bed/plate are actually in the depth+color buffer —
+        // not inside the Opaque _render_objects() call above (which runs BEFORE the bed in this
+        // canvas' draw order, unlike Preview). shells_shadow.fs samples no texture, so it was never
+        // affected by the render_with_outline() texture-unit conflict the lit pass had — no
+        // selection special-case needed here (or there anymore, see render_volumes_lit's comment).
+        if (wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+            m_gcode_viewer.render_volumes_shadow(m_volumes, GLVolumeCollection::ERenderType::Opaque,
+                cnv_size.get_width(), cnv_size.get_height(), camera,
+                [this](const GLVolume& volume) { return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0); },
+                /*partly_inside_enable*/ true); // this branch is always CanvasView3D — see _render_objects's own derivation
+        }
         _render_objects(GLVolumeCollection::ERenderType::Transparent, !m_gizmos.is_running());
     }
     /* preview render */
@@ -2010,6 +2170,7 @@ void GLCanvas3D::render(bool only_init)
     }
 
     _render_sequential_clearance();
+    _render_snapdrag_indicator(); // NEOTKO_SNAPDRAG_TAG s227
 #if ENABLE_RENDER_SELECTION_CENTER
     _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER
@@ -4297,6 +4458,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                             m_volumes.volumes[volume_idx]->hover = GLVolume::HS_None;
                             // The dragging operation is initiated.
                             m_mouse.drag.move_volume_idx = volume_idx;
+                            // NEOTKO_SNAPDRAG_TAG s227 — fresh hysteresis state for this drag.
+                            m_snapdrag_engaged.clear();
                             m_selection.setup_cache();
                             m_mouse.drag.start_position_3D = m_mouse.scene_position;
                             m_sequential_print_clearance_first_displacement = true;
@@ -4349,6 +4512,60 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 TransformationType trafo_type;
                 trafo_type.set_relative();
                 m_selection.translate(cur_pos - m_mouse.drag.start_position_3D, trafo_type);
+
+                // NEOTKO_SNAPDRAG_TAG s227 — Fase C: live floor snap while dragging. GLVolume-only
+                // (visual): the ModelObject is written once, on mouse-up, in do_move (Fase B) —
+                // so an interrupted/aborted drag never leaves the model in an inconsistent state.
+                if (GravitySnap::enabled()) {
+                    std::set<std::pair<int, int>> moving;
+                    for (unsigned int idx : m_selection.get_volume_idxs()) {
+                        const GLVolume* gv = m_volumes.volumes[idx];
+                        if (gv->is_wipe_tower || gv->is_modifier)
+                            continue;
+                        moving.insert({ gv->object_idx(), gv->instance_idx() });
+                    }
+                    // NEOTKO_SNAPDRAG_TAG s227 — shows the landing shadow/beam for the first
+                    // engaged instance found this frame; set false again below if none engage.
+                    bool indicator_shown = false;
+                    for (const std::pair<int, int>& id : moving) {
+                        const bool was_engaged = m_snapdrag_engaged[id];
+                        const double engage_ratio = was_engaged ? 0.08 : 0.20;
+                        const std::optional<double> found_z = GravitySnap::floor_z_for_instance(m_volumes, id.first, id.second, moving, engage_ratio);
+                        m_snapdrag_engaged[id] = found_z.has_value();
+                        // No floor detected -> leave this instance exactly where the drag put it
+                        // (free floating). Must NOT fall back to the bed here (s227 regression).
+                        if (!found_z.has_value())
+                            continue;
+                        const double target_z = *found_z;
+
+                        if (!indicator_shown) {
+                            const Polygon footprint = GravitySnap::instance_footprint(m_volumes, id.first, id.second);
+                            m_snapdrag_indicator.set(footprint, target_z);
+                            indicator_shown = m_snapdrag_indicator.is_visible();
+                        }
+
+                        double min_z = DBL_MAX;
+                        for (const GLVolume* gv : m_volumes.volumes) {
+                            if (gv->object_idx() == id.first && gv->instance_idx() == id.second && !gv->is_wipe_tower && !gv->is_modifier)
+                                min_z = std::min(min_z, gv->transformed_convex_hull_bounding_box().min.z());
+                        }
+                        if (min_z == DBL_MAX)
+                            continue;
+
+                        const double dz = target_z - min_z;
+                        if (std::abs(dz) > EPSILON) {
+                            for (GLVolume* gv : m_volumes.volumes) {
+                                if (gv->object_idx() == id.first && gv->instance_idx() == id.second)
+                                    gv->set_instance_offset(Z, gv->get_instance_offset(Z) + dz);
+                            }
+                        }
+                    }
+                    if (!indicator_shown)
+                        m_snapdrag_indicator.set_visible(false);
+                } else {
+                    m_snapdrag_indicator.set_visible(false);
+                }
+
                 if (current_printer_technology() == ptFFF && (fff_print()->config().print_sequence == PrintSequence::ByObject))
                     update_sequential_clearance();
                 // BBS
@@ -4792,10 +5009,34 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, 0);
 
     // Fixes flying instances
-    // NeotkoLIBRE_START — s133: in LibreMode (FFF) allow floating objects above the bed (no drop on move).
-    const bool _nlm_move = !wxGetApp().app_config->get_bool("neotko_libre_mode") ||
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was missed: this reimplements ensure_on_bed's drop-to-bed
+    // correction inline instead of calling it, so the ensure_on_bed migration pass never saw it).
+    // Floating is the Gravity axis now, not LibreMode.
+    const bool _nlm_move = !gravity_allow_free_z() ||
                             current_printer_technology() == ptSLA;
-    // NeotkoLIBRE_END
+
+    // NEOTKO_SNAPDRAG_TAG s227 — Fase B: with True Objects ON (non-SLA) the block above never
+    // fires, so the moved object is left floating wherever it was dropped (s226 behaviour).
+    // With Snap & Drag also ON, resolve where it should actually rest: the lowest real floor
+    // detected under its footprint (docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §3). One target Z
+    // per OBJECT, the min across the instances that actually found a floor (plan §1 rule 2) — an
+    // object cannot be half on the bed, half stacked. An object with NO instance resting on
+    // anything gets NO entry here and is left untouched below: nullopt must never become "drop
+    // to bed", or True Objects' whole "nothing auto-drops" promise breaks (s227 regression).
+    std::map<int, double> _snapdrag_target_z;
+    const bool _snapdrag_active = !_nlm_move && GravitySnap::enabled();
+    if (_snapdrag_active) {
+        const std::set<std::pair<int, int>> moving(done.begin(), done.end());
+        for (const std::pair<int, int>& i : done) {
+            const std::optional<double> z = GravitySnap::floor_z_for_instance(m_volumes, i.first, i.second, moving, 0.20);
+            if (!z.has_value())
+                continue;
+            auto it = _snapdrag_target_z.find(i.first);
+            if (it == _snapdrag_target_z.end() || *z < it->second)
+                _snapdrag_target_z[i.first] = *z;
+        }
+    }
+
     for (const std::pair<int, int>& i : done) {
         ModelObject* m = m_model->objects[i.first];
         const double shift_z = m->get_instance_min_z(i.second);
@@ -4806,6 +5047,22 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
             m->translate_instance(i.second, shift);
             //BBS: notify instance updates to part plater list
             m_selection.notify_instance_update(i.first, i.second);
+        }
+        // NEOTKO_SNAPDRAG_TAG s227 — Fase B: apply the resolved floor Z (see block above). No
+        // entry for this object = nothing detected under it = leave it exactly where it is.
+        else if (_snapdrag_active && _snapdrag_target_z.count(i.first) != 0) {
+            const double target_z = _snapdrag_target_z.at(i.first);
+            const double snap_shift_z = shift_z - target_z;
+            // NOTE: SINKING_Z_THRESHOLD (-0.001) is a signed sink-detection threshold, not a
+            // magnitude epsilon — fabs(x) > SINKING_Z_THRESHOLD is always true. Use EPSILON to
+            // actually skip a negligible/no-op shift here.
+            if (std::fabs(snap_shift_z) > EPSILON) {
+                const Vec3d shift(0.0, 0.0, -snap_shift_z);
+                m_selection.translate(i.first, i.second, shift);
+                m->translate_instance(i.second, shift);
+                //BBS: notify instance updates to part plater list
+                m_selection.notify_instance_update(i.first, i.second);
+            }
         }
         wxGetApp().obj_list()->update_info_items(static_cast<size_t>(i.first));
     }
@@ -4908,9 +5165,9 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
     m_selection.notify_instance_update(-1, -1);
     if (m_canvas_type != CanvasAssembleView) {
         // Fixes sinking/flying instances
-        // NeotkoLIBRE_START — s133: in LibreMode allow floating on rotate (no drop to bed).
-        const bool _nlm_rot = !wxGetApp().app_config->get_bool("neotko_libre_mode");
-        // NeotkoLIBRE_END
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was missed, same reason as do_move above).
+        // Floating is the Gravity axis now, not LibreMode.
+        const bool _nlm_rot = !gravity_allow_free_z();
         for (const std::pair<int, int> &i : done) {
             ModelObject *m = m_model->objects[i.first];
 
@@ -5002,8 +5259,9 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
         //BBS: don't call translate if the z is zero
         double shift_z = m->get_instance_min_z(i.second);
         // leave sinking instances as sinking
-        // NeotkoLIBRE — s133: in LibreMode allow floating on scale (skip the drop-to-bed shift).
-        if (!wxGetApp().app_config->get_bool("neotko_libre_mode") && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was missed, same reason as do_move above).
+        // Floating is the Gravity axis now, not LibreMode.
+        if (!gravity_allow_free_z() && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
             Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -5106,8 +5364,9 @@ void GLCanvas3D::do_mirror(const std::string& snapshot_type)
         //BBS: don't call translate if the z is zero
         double shift_z = m->get_instance_min_z(i.second);
         // leave sinking instances as sinking
-        // NeotkoLIBRE — s133: in LibreMode allow floating on mirror/translate (skip drop-to-bed).
-        if (!wxGetApp().app_config->get_bool("neotko_libre_mode") && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD)&&(shift_z != 0.0f)) {
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was missed, same reason as do_move above).
+        // Floating is the Gravity axis now, not LibreMode.
+        if (!gravity_allow_free_z() && (min_zs.empty() || min_zs.find({ i.first, i.second })->second >= SINKING_Z_THRESHOLD || shift_z > SINKING_Z_THRESHOLD)&&(shift_z != 0.0f)) {
             Vec3d shift(0.0, 0.0, -shift_z);
             m_selection.translate(i.first, i.second, shift);
             m->translate_instance(i.second, shift);
@@ -5330,6 +5589,7 @@ void GLCanvas3D::mouse_up_cleanup()
     m_moving = false;
     m_camera_movement = false;
     m_mouse.drag.move_volume_idx = -1;
+    m_snapdrag_indicator.set_visible(false); // NEOTKO_SNAPDRAG_TAG s227
     m_mouse.set_start_position_3D_as_invalid();
     m_mouse.set_start_position_2D_as_invalid();
     m_mouse.dragging = false;
@@ -7450,15 +7710,46 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                     //BBS:add assemble view related logic
                     // do not cull backfaces to show broken geometry, if any
                 const Camera& camera = wxGetApp().plater()->get_camera();
-                    m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, [this, canvas_type](const GLVolume& volume) {
+                    auto volume_filter = [this, canvas_type](const GLVolume& volume) {
                         if (canvas_type == ECanvasType::CanvasAssembleView) {
                             return !volume.is_modifier && !volume.is_wipe_tower;
                         }
                         else {
                             return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0);
                         }
-                        },
-                        partly_inside_enable);
+                        };
+                    // NEOTKO_LIBREMODE_TAG s228: reuse GCodeViewer's Phong+fresnel+SSAO+shadow
+                    // shells pipeline (see docs/FUTURE — promoted from Preview-only RealColor
+                    // item 4) for the Prepare tab's own opaque object draw, gated on
+                    // "neotko_libre_mode" (docs/LIBREMODE.md §5). Scoped to CanvasView3D only —
+                    // Preview already gets this via GCodeViewer::render_shells(), Assemble view is
+                    // left untouched. depth_mask=true (unlike the Preview shells overlay) so
+                    // normal solid-object depth/occlusion behavior is unchanged; falls back to the
+                    // plain "gouraud" draw below on any missing shader/FBO.
+                    bool rendered_lit = false;
+                    const bool libre_mode_on = wxGetApp().app_config->get_bool("neotko_libre_mode");
+                    // NEOTKO_LIBREMODE_TAG s228: previously skipped this whole pipeline while
+                    // anything was selected, because GLVolume::render_with_outline() (3DScene.cpp,
+                    // the selected-volume silhouette pass) and the environment-map path both rebind
+                    // GL_TEXTURE_2D on unit 0 mid-loop, stomping shells_lit's u_gbuffer sample there.
+                    // Fixed at the root instead — render_volumes_lit's u_gbuffer now lives on
+                    // GL_TEXTURE5 (a unit neither of those touches), so selection no longer needs
+                    // special-casing here; see render_volumes_lit's own comment (GCodeViewer.cpp).
+                    if (canvas_type == ECanvasType::CanvasView3D && libre_mode_on) {
+                        shader->stop_using();
+                        // with_shadow=false: this Opaque object pass runs BEFORE _render_bed() in
+                        // the Prepare tab's render order (unlike Preview, where GCodeViewer::render()
+                        // runs after the bed) — the contact shadow needs to depth-test/blend against
+                        // an already-drawn bed, so it's cast separately later, see the standalone
+                        // render_volumes_shadow() call after _render_bed()/_render_platelist() below.
+                        rendered_lit = m_gcode_viewer.render_volumes_lit(m_volumes, type, /*depth_mask*/true, /*with_shadow*/false,
+                            cvn_size.get_width(), cvn_size.get_height(), camera, volume_filter, partly_inside_enable);
+                        shader->start_using();
+                    }
+                    if (!rendered_lit) {
+                        m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, volume_filter,
+                            partly_inside_enable);
+                    }
                 }
             }
             else {
@@ -7566,6 +7857,12 @@ void GLCanvas3D::_render_sequential_clearance()
         || can_sequential_clearance_show_in_gizmo()) {
         m_sequential_print_clearance.render();
     }
+}
+
+// NEOTKO_SNAPDRAG_TAG s227
+void GLCanvas3D::_render_snapdrag_indicator()
+{
+    m_snapdrag_indicator.render();
 }
 
 #if ENABLE_RENDER_SELECTION_CENTER

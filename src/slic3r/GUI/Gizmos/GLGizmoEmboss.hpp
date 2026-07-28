@@ -198,6 +198,13 @@ private:
     // True when m_text contain character unknown by selected font
     bool m_text_contain_unknown_glyph = false;
 
+    // NeotkoCM Typographic Spacing: cached answer of Emboss::has_kerning_table() for the active
+    // font. Probing it parses the font header, and draw_advanced() runs every frame, so the
+    // result is kept until the font file actually changes.
+    const void *m_kerning_probe_font   = nullptr;
+    bool        m_kerning_probe_result = false;
+    bool        font_has_kerning_table();
+
     // cancel for previous update of volume to cancel finalize part
     std::shared_ptr<std::atomic<bool>> m_job_cancel = nullptr;
 

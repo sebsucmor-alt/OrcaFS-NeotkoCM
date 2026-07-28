@@ -29,6 +29,11 @@ namespace Slic3r { namespace GUI {
 
 namespace {
 
+// This gizmo only ever relates one object against another (#1 anchor, #2 the
+// one that moves) — an ordered chain of 3+ was never actually used, just
+// confusing. Picking a third object swaps out #2 instead of extending it.
+constexpr size_t kMaxOrdered = 2;
+
 const ImU32 kOrderColors[] = {
     IM_COL32(255, 140,   0, 235), // A orange
     IM_COL32(240, 200,   0, 235), // B yellow
@@ -63,35 +68,38 @@ enum class CubeIcon {
     CenterZ,    // mid slab perpendicular to Z
 };
 
-// Isometric mini-cube icon button. The highlighted face + incoming plane with
-// arrows tells the user what the operation does. In flush mode the plane is
-// drawn nearly coincident with the face (faces become coplanar, not stacked).
-bool cube_icon_button(const char* id, CubeIcon icon, float size, bool flush_mode,
-                      const char* axis_label)
+// Isometric mini-cube icon, drawn at an absolute position into any draw list.
+// The highlighted face + incoming plane with arrows tells the user what the
+// operation does. In flush mode the plane is drawn nearly coincident with the
+// face (faces become coplanar, not stacked). Shared by the panel buttons
+// (window draw list) and the viewport ghost icons (foreground draw list).
+void draw_cube_icon(ImDrawList* dl, const ImVec2& p0, float size, CubeIcon icon,
+                    bool flush_mode, bool hovered, const char* axis_label,
+                    float opacity = 1.0f)
 {
-    const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
-    const bool hovered = ImGui::IsItemHovered();
-
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 p0 = ImGui::GetItemRectMin();
-
     const bool mirror = (icon == CubeIcon::TouchXNeg || icon == CubeIcon::TouchYPos);
     auto P = [&](float u, float v) {
         if (mirror) u = 1.0f - u;
         return ImVec2(p0.x + u * size, p0.y + v * size);
     };
+    // Scale every color's alpha so the whole icon can be drawn semi-transparent
+    // (viewport ghost icons request 70% opacity; panel buttons stay opaque).
+    auto A = [&](ImU32 c) -> ImU32 {
+        const unsigned a = (unsigned)(((c >> IM_COL32_A_SHIFT) & 0xFF) * opacity + 0.5f);
+        return (c & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+    };
 
     // Colors
-    const ImU32 col_line  = IM_COL32(43, 52, 62, 255);
-    const ImU32 col_top   = IM_COL32(214, 214, 214, 255);
-    const ImU32 col_left  = IM_COL32(168, 168, 168, 255);
-    const ImU32 col_right = IM_COL32(128, 128, 128, 255);
-    const ImU32 col_hl    = hovered ? IM_COL32(38, 198, 182, 255)
-                                    : IM_COL32(0, 150, 136, 255); // Orca teal
-    const ImU32 col_plane_fill = IM_COL32(255, 255, 255, 60);
+    const ImU32 col_line  = A(IM_COL32(43, 52, 62, 255));
+    const ImU32 col_top   = A(IM_COL32(214, 214, 214, 255));
+    const ImU32 col_left  = A(IM_COL32(168, 168, 168, 255));
+    const ImU32 col_right = A(IM_COL32(128, 128, 128, 255));
+    const ImU32 col_hl    = A(hovered ? IM_COL32(38, 198, 182, 255)
+                                      : IM_COL32(0, 150, 136, 255)); // Orca teal
+    const ImU32 col_plane_fill = A(IM_COL32(255, 255, 255, 60));
 
     if (hovered)
-        dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+        dl->AddRectFilled(p0, ImVec2(p0.x + size, p0.y + size),
                           IM_COL32(255, 255, 255, 26), 4.0f);
 
     // Base cube geometry in [0,1] button space (slightly low, room for planes).
@@ -195,9 +203,36 @@ bool cube_icon_button(const char* id, CubeIcon icon, float size, bool flush_mode
         dl->AddText(ImGui::GetFont(), size * 0.26f,
                     ImVec2(p0.x + 2.0f, p0.y + size - size * 0.26f - 1.0f),
                     col_line, axis_label);
+}
 
+// Panel form of the icon: a regular ImGui button in the current window.
+bool cube_icon_button(const char* id, CubeIcon icon, float size, bool flush_mode,
+                      const char* axis_label)
+{
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+    draw_cube_icon(ImGui::GetWindowDrawList(), ImGui::GetItemRectMin(), size, icon,
+                   flush_mode, ImGui::IsItemHovered(), axis_label);
     return pressed;
 }
+
+// Single source of truth for the 5 face-touch/flush ops and the 3 center ops,
+// shared by the ImGui panel and by the 3D ghost-preview overlay so labels,
+// tooltips and icon choice can never drift between the two.
+struct FaceBtn { const char* id; CubeIcon icon; const char* label; int axis; int dir; const char* tip_touch; const char* tip_flush; };
+const std::array<FaceBtn, 5> kFaceBtns = { {
+    { "as_zpos", CubeIcon::TouchZPos, "Z",  2, +1, "Stack on top of #1, with gap", "Top faces flush with #1" },
+    { "as_xneg", CubeIcon::TouchXNeg, "X-", 0, -1, "Place against #1's left side", "Left faces flush with #1" },
+    { "as_xpos", CubeIcon::TouchXPos, "X+", 0, +1, "Place against #1's right side", "Right faces flush with #1" },
+    { "as_yneg", CubeIcon::TouchYNeg, "Y-", 1, -1, "Place against #1's front side", "Front faces flush with #1" },
+    { "as_ypos", CubeIcon::TouchYPos, "Y+", 1, +1, "Place against #1's back side", "Back faces flush with #1" },
+} };
+
+struct CenterBtn { const char* id; CubeIcon icon; const char* label; int axis; const char* tip; };
+const std::array<CenterBtn, 3> kCenterBtns = { {
+    { "as_cx", CubeIcon::CenterX, "X", 0, "Center on #1 in X" },
+    { "as_cy", CubeIcon::CenterY, "Y", 1, "Center on #1 in Y" },
+    { "as_cz", CubeIcon::CenterZ, "Z", 2, "Center on #1 in Z" },
+} };
 
 } // anonymous namespace
 
@@ -238,6 +273,7 @@ void GLGizmoAlignStack::on_set_state()
         restore_highlight();
         m_ordered_object_idxs.clear();
         clear_face_pick();
+        reset_ghost_geometry();
     }
 }
 
@@ -281,6 +317,13 @@ void GLGizmoAlignStack::toggle_object_order(int object_idx)
         m_ordered_object_idxs.erase(it);
         sel.remove_object((unsigned int)object_idx);
     } else {
+        // Only #1 (anchor) and #2 (the one that moves) ever matter here.
+        // Clicking a third object swaps out #2 rather than growing a chain.
+        if (m_ordered_object_idxs.size() >= kMaxOrdered) {
+            const int old_b = m_ordered_object_idxs.back();
+            sel.remove_object((unsigned int)old_b);
+            m_ordered_object_idxs.pop_back();
+        }
         m_ordered_object_idxs.push_back(object_idx);
         sel.add_object((unsigned int)object_idx, false);
     }
@@ -383,6 +426,7 @@ void GLGizmoAlignStack::on_render()
 {
     prune_dead_objects();
     render_face_highlights();
+    render_zone_and_ghosts();
     render_badges();
 }
 
@@ -392,7 +436,7 @@ void GLGizmoAlignStack::render_badges()
         return;
 
     const Camera& camera = wxGetApp().plater()->get_camera();
-    const Matrix4d proj_view = (camera.get_projection_matrix() * camera.get_view_matrix()).matrix();
+    const Matrix4d proj_view = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
     const std::array<int, 4>& viewport = camera.get_viewport();
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -435,6 +479,22 @@ void GLGizmoAlignStack::render_badges()
 
 bool GLGizmoAlignStack::on_mouse(const wxMouseEvent& mouse_event)
 {
+    // A click on a floating ghost icon runs its operation. Checked first so an
+    // icon overlapping an object consumes the click instead of toggling the
+    // order. ImGui's mouse position is used because the icon rects live in
+    // ImGui screen space (rects were recorded by the previous render pass).
+    if (mouse_event.LeftDown() && !m_ghost_icon_rects.empty()) {
+        const ImVec2 mpos = ImGui::GetIO().MousePos;
+        for (const GhostIconRect& r : m_ghost_icon_rects) {
+            if (mpos.x < r.x0 || mpos.x > r.x1 || mpos.y < r.y0 || mpos.y > r.y1)
+                continue;
+            if (r.is_center)       apply_center(r.axis);
+            else if (m_flush_mode) apply_flush(r.axis, r.dir);
+            else                   apply_touch(r.axis, r.dir);
+            return true;
+        }
+    }
+
     if (m_face_pick_mode) {
         // Hover feedback: remember where the cursor is so on_render can light up
         // the triangle under it. Don't consume Moving — camera/hover stay live.
@@ -688,7 +748,7 @@ void GLGizmoAlignStack::render_face_highlights()
 }
 
 // -----------------------------------------------------------------------------
-// Transform application — A is always the anchor; B, C... move toward it.
+// Transform application — #1 is always the anchor; #2 moves toward it.
 // -----------------------------------------------------------------------------
 
 void GLGizmoAlignStack::translate_object(int object_idx, const Vec3d& delta)
@@ -704,6 +764,32 @@ void GLGizmoAlignStack::translate_object(int object_idx, const Vec3d& delta)
         sel.translate((unsigned int)object_idx, (unsigned int)i, delta);
 }
 
+Vec3d GLGizmoAlignStack::compute_place_delta(int axis, int dir, bool flush,
+                                             const BoundingBoxf3& a_bb, const BoundingBoxf3& b_bb) const
+{
+    Vec3d delta = Vec3d::Zero();
+    if (!a_bb.defined || !b_bb.defined)
+        return delta;
+    if (flush) {
+        const double target = (dir > 0) ? a_bb.max(axis) : a_bb.min(axis);
+        delta(axis) = target - ((dir > 0) ? b_bb.max(axis) : b_bb.min(axis));
+    } else {
+        // Z contact gets the epsilon gap (slicing sanity); lateral contact is exact.
+        const double gap = (axis == 2) ? (double)m_epsilon_mm : 0.0;
+        delta(axis) = (dir > 0) ? (a_bb.max(axis) + gap - b_bb.min(axis))
+                                : (a_bb.min(axis) - gap - b_bb.max(axis));
+    }
+    return delta;
+}
+
+Vec3d GLGizmoAlignStack::compute_center_delta(int axis, const BoundingBoxf3& a_bb, const BoundingBoxf3& b_bb) const
+{
+    Vec3d delta = Vec3d::Zero();
+    if (a_bb.defined && b_bb.defined)
+        delta(axis) = a_bb.center()(axis) - b_bb.center()(axis);
+    return delta;
+}
+
 void GLGizmoAlignStack::apply_touch(int axis, int dir)
 {
     if (m_ordered_object_idxs.size() < 2)
@@ -712,26 +798,14 @@ void GLGizmoAlignStack::apply_touch(int axis, int dir)
     Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: place against");
 
     if (axis == 2 && dir > 0 && m_place_a_on_bed) {
-        const BoundingBoxf3 abb = world_bbox_of_object(m_ordered_object_idxs.front());
+        const BoundingBoxf3 abb = world_bbox_of_object(m_ordered_object_idxs[0]);
         if (abb.defined)
-            translate_object(m_ordered_object_idxs.front(), Vec3d(0.0, 0.0, -abb.min.z()));
+            translate_object(m_ordered_object_idxs[0], Vec3d(0.0, 0.0, -abb.min.z()));
     }
 
-    // Z contact gets the epsilon gap (slicing sanity); lateral contact is exact.
-    const double gap = (axis == 2) ? (double)m_epsilon_mm : 0.0;
-
-    BoundingBoxf3 ref = world_bbox_of_object(m_ordered_object_idxs.front());
-    for (size_t i = 1; i < m_ordered_object_idxs.size(); ++i) {
-        const int idx = m_ordered_object_idxs[i];
-        const BoundingBoxf3 bb = world_bbox_of_object(idx);
-        if (!bb.defined || !ref.defined)
-            continue;
-        Vec3d delta = Vec3d::Zero();
-        delta(axis) = (dir > 0) ? (ref.max(axis) + gap - bb.min(axis))
-                                : (ref.min(axis) - gap - bb.max(axis));
-        translate_object(idx, delta);
-        ref = world_bbox_of_object(idx); // chain: C goes against B
-    }
+    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs[0]);
+    const BoundingBoxf3 b_bb = world_bbox_of_object(m_ordered_object_idxs[1]);
+    translate_object(m_ordered_object_idxs[1], compute_place_delta(axis, dir, false, a_bb, b_bb));
     m_parent.do_move("");
 }
 
@@ -742,20 +816,9 @@ void GLGizmoAlignStack::apply_flush(int axis, int dir)
 
     Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: flush align");
 
-    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs.front());
-    if (!a_bb.defined)
-        return;
-    const double target = (dir > 0) ? a_bb.max(axis) : a_bb.min(axis);
-
-    for (size_t i = 1; i < m_ordered_object_idxs.size(); ++i) {
-        const int idx = m_ordered_object_idxs[i];
-        const BoundingBoxf3 bb = world_bbox_of_object(idx);
-        if (!bb.defined)
-            continue;
-        Vec3d delta = Vec3d::Zero();
-        delta(axis) = target - ((dir > 0) ? bb.max(axis) : bb.min(axis));
-        translate_object(idx, delta);
-    }
+    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs[0]);
+    const BoundingBoxf3 b_bb = world_bbox_of_object(m_ordered_object_idxs[1]);
+    translate_object(m_ordered_object_idxs[1], compute_place_delta(axis, dir, true, a_bb, b_bb));
     m_parent.do_move("");
 }
 
@@ -766,20 +829,9 @@ void GLGizmoAlignStack::apply_center(int axis)
 
     Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Stack: center");
 
-    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs.front());
-    if (!a_bb.defined)
-        return;
-    const double target = a_bb.center()(axis);
-
-    for (size_t i = 1; i < m_ordered_object_idxs.size(); ++i) {
-        const int idx = m_ordered_object_idxs[i];
-        const BoundingBoxf3 bb = world_bbox_of_object(idx);
-        if (!bb.defined)
-            continue;
-        Vec3d delta = Vec3d::Zero();
-        delta(axis) = target - bb.center()(axis);
-        translate_object(idx, delta);
-    }
+    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs[0]);
+    const BoundingBoxf3 b_bb = world_bbox_of_object(m_ordered_object_idxs[1]);
+    translate_object(m_ordered_object_idxs[1], compute_center_delta(axis, a_bb, b_bb));
     m_parent.do_move("");
 }
 
@@ -810,6 +862,219 @@ void GLGizmoAlignStack::apply_place_on_picked_face()
 }
 
 // -----------------------------------------------------------------------------
+// Zone / ghost placement preview — AABB wireframes in the viewport for #1 and
+// #2, plus one translucent ghost wireframe per placement op showing exactly
+// where #2 would land, each with a floating clickable mini-cube icon (the
+// same icon language as the panel) sitting right at the predicted position.
+// -----------------------------------------------------------------------------
+
+void GLGizmoAlignStack::rebuild_wire_box_if_needed(GLModel& model, BoundingBoxf3& cached_bbox, const BoundingBoxf3& bb) const
+{
+    if (!bb.defined) {
+        model.reset();
+        cached_bbox = BoundingBoxf3();
+        return;
+    }
+    if (model.is_initialized() && cached_bbox.defined &&
+        (bb.min - cached_bbox.min).norm() < 1e-6 && (bb.max - cached_bbox.max).norm() < 1e-6)
+        return; // unchanged since last frame, keep the existing GPU buffers
+
+    cached_bbox = bb;
+
+    const Vec3f mn = bb.min.cast<float>();
+    const Vec3f mx = bb.max.cast<float>();
+    const Vec3f c[8] = {
+        { mn.x(), mn.y(), mn.z() }, { mx.x(), mn.y(), mn.z() }, { mx.x(), mx.y(), mn.z() }, { mn.x(), mx.y(), mn.z() },
+        { mn.x(), mn.y(), mx.z() }, { mx.x(), mn.y(), mx.z() }, { mx.x(), mx.y(), mx.z() }, { mn.x(), mx.y(), mx.z() },
+    };
+    static const int edges[12][2] = {
+        { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
+    };
+
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    init_data.reserve_vertices(24);
+    init_data.reserve_indices(24);
+    for (const auto& e : edges) {
+        init_data.add_vertex(c[e[0]]);
+        init_data.add_vertex(c[e[1]]);
+    }
+    for (unsigned int i = 0; i < 24; ++i)
+        init_data.add_index(i);
+
+    model.reset();
+    model.init_from(std::move(init_data));
+}
+
+void GLGizmoAlignStack::reset_ghost_geometry()
+{
+    m_zone_box_a.reset(); m_zone_box_a_bbox = BoundingBoxf3();
+    m_zone_box_b.reset(); m_zone_box_b_bbox = BoundingBoxf3();
+    for (size_t i = 0; i < m_ghost_face_models.size(); ++i) {
+        m_ghost_face_models[i].reset();
+        m_ghost_face_bboxes[i] = BoundingBoxf3();
+    }
+    for (size_t i = 0; i < m_ghost_center_models.size(); ++i) {
+        m_ghost_center_models[i].reset();
+        m_ghost_center_bboxes[i] = BoundingBoxf3();
+    }
+    m_ghost_icon_rects.clear();
+}
+
+void GLGizmoAlignStack::render_zone_and_ghosts()
+{
+    // Rebuilt from scratch every frame; cleared up-front so any early return
+    // leaves no stale clickable rects behind for on_mouse to hit.
+    m_ghost_icon_rects.clear();
+
+    // While picking a face, the scene is already ghosted and the face overlay
+    // owns the read — showing placement ghosts on top would just be clutter.
+    if (m_face_pick_mode || m_ordered_object_idxs.empty())
+        return;
+
+    const BoundingBoxf3 a_bb = world_bbox_of_object(m_ordered_object_idxs[0]);
+    if (!a_bb.defined)
+        return;
+    rebuild_wire_box_if_needed(m_zone_box_a, m_zone_box_a_bbox, a_bb);
+
+    const bool have_b = m_ordered_object_idxs.size() >= 2;
+    BoundingBoxf3 b_bb;
+    if (have_b) {
+        b_bb = world_bbox_of_object(m_ordered_object_idxs[1]);
+        if (b_bb.defined)
+            rebuild_wire_box_if_needed(m_zone_box_b, m_zone_box_b_bbox, b_bb);
+    }
+    const bool show_ghosts = have_b && b_bb.defined;
+
+    // Ghost bbox per op, computed with the exact same math the click would
+    // use (compute_place_delta / compute_center_delta) — the preview cannot
+    // lie about what will happen. #1's Z reference mirrors "place #1 on bed
+    // first" so the Z+ ghost matches apply_touch()'s real behavior.
+    std::array<BoundingBoxf3, 5> face_ghosts;
+    std::array<BoundingBoxf3, 3> center_ghosts;
+    if (show_ghosts) {
+        BoundingBoxf3 a_bb_for_z = a_bb;
+        if (m_place_a_on_bed)
+            a_bb_for_z.translate(Vec3d(0.0, 0.0, -a_bb.min.z()));
+
+        for (size_t i = 0; i < kFaceBtns.size(); ++i) {
+            const FaceBtn& b = kFaceBtns[i];
+            const BoundingBoxf3& a_ref = (b.axis == 2) ? a_bb_for_z : a_bb;
+            BoundingBoxf3 g = b_bb;
+            g.translate(compute_place_delta(b.axis, b.dir, m_flush_mode, a_ref, b_bb));
+            face_ghosts[i] = g;
+            rebuild_wire_box_if_needed(m_ghost_face_models[i], m_ghost_face_bboxes[i], g);
+        }
+        for (size_t i = 0; i < kCenterBtns.size(); ++i) {
+            BoundingBoxf3 g = b_bb;
+            g.translate(compute_center_delta(kCenterBtns[i].axis, a_bb, b_bb));
+            center_ghosts[i] = g;
+            rebuild_wire_box_if_needed(m_ghost_center_models[i], m_ghost_center_bboxes[i], g);
+        }
+    }
+
+    // --- GL pass: every wireframe box in one shader bind. -------------------
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
+        glsafe(::glEnable(GL_DEPTH_TEST));
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+        const Camera& camera = wxGetApp().plater()->get_camera();
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+        glsafe(::glLineWidth(2.0f));
+        m_zone_box_a.set_color(order_color_rgba(0));
+        m_zone_box_a.render();
+        if (show_ghosts) {
+            m_zone_box_b.set_color(order_color_rgba(1));
+            m_zone_box_b.render();
+        }
+
+        if (show_ghosts) {
+            ColorRGBA ghost_col = order_color_rgba(1);
+            ghost_col[3] = 0.35f;
+            glsafe(::glLineWidth(3.6f)); // 3x the old 1.2f — was barely visible
+            for (GLModel& m : m_ghost_face_models)   { m.set_color(ghost_col); m.render(); }
+            for (GLModel& m : m_ghost_center_models) { m.set_color(ghost_col); m.render(); }
+        }
+
+        glsafe(::glDisable(GL_BLEND));
+        shader->stop_using();
+    }
+
+    if (!show_ghosts)
+        return; // #1 only: nothing to click yet, wait for a #2
+
+    // --- Clickable icons, one per ghost, anchored at the seam face (where the
+    // ghost touches #1). Drawn straight into the foreground draw list — same
+    // channel and coordinate space as the numbered badges. No ImGui windows:
+    // hover is hit-tested against the mouse here, clicks against the same
+    // recorded rects in on_mouse(). -----------------------------------------
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const Matrix4d proj_view = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+    const std::array<int, 4>& viewport = camera.get_viewport();
+
+    // World → ImGui screen point. False when the point is behind the camera or
+    // far outside the frustum: dividing by a ~0/negative clip.w() there yields
+    // a garbage position, and no icon beats a stray one parked in a corner.
+    auto ghost_ss = [&](const Vec3d& world_pos, ImVec2& out) -> bool {
+        const Vec4d clip = TransformHelper::world_to_clip(world_pos, proj_view);
+        if (clip.w() <= 1e-6)
+            return false;
+        const Vec3d ndc = TransformHelper::clip_to_ndc(clip);
+        if (std::abs(ndc.x()) > 1.2 || std::abs(ndc.y()) > 1.2)
+            return false;
+        const Vec2d ss = TransformHelper::ndc_to_ss(ndc, viewport);
+        out = ImVec2((float)ss.x(), (float)(viewport[3] - ss.y()));
+        return true;
+    };
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float  icon_size = 80.0f; // Manual edit Icon Size
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+    auto ghost_icon = [&](const Vec3d& anchor, CubeIcon icon, bool flush,
+                          const char* label, const char* tip,
+                          int axis, int dir, bool is_center) {
+        ImVec2 c;
+        if (!ghost_ss(anchor, c))
+            return;
+        const ImVec2 p0(c.x - 0.5f * icon_size, c.y - 0.5f * icon_size);
+        const ImVec2 p1(p0.x + icon_size, p0.y + icon_size);
+        const bool hovered = mouse.x >= p0.x && mouse.x <= p1.x &&
+                             mouse.y >= p0.y && mouse.y <= p1.y;
+        // 60% visible overall. Manual edit: chip + icon alphas scaled by 0.6.
+        const float kIconOpacity = 0.6f;
+        // Backdrop chip so the icon reads over any scene color (dark mode too).
+        fg->AddRectFilled(p0, p1, IM_COL32(32, 38, 46, (int)((hovered ? 240 : 185) * kIconOpacity)), 0.16f * icon_size);
+        fg->AddRect(p0, p1,
+                    hovered ? IM_COL32(38, 198, 182, (int)(255 * kIconOpacity))
+                            : IM_COL32(255, 255, 255, (int)(90 * kIconOpacity)),
+                    0.16f * icon_size, 0, hovered ? 2.0f : 1.0f);
+        draw_cube_icon(fg, p0, icon_size, icon, flush, hovered, label, kIconOpacity);
+        if (hovered)
+            ImGui::SetTooltip("%s", _u8L(tip).c_str());
+        m_ghost_icon_rects.push_back({ p0.x, p0.y, p1.x, p1.y, axis, dir, is_center });
+    };
+
+    for (size_t i = 0; i < kFaceBtns.size(); ++i) {
+        const FaceBtn& b = kFaceBtns[i];
+        Vec3d anchor = face_ghosts[i].center();
+        anchor(b.axis) = (b.dir > 0) ? face_ghosts[i].min(b.axis) : face_ghosts[i].max(b.axis);
+        ghost_icon(anchor, b.icon, m_flush_mode, b.label,
+                   m_flush_mode ? b.tip_flush : b.tip_touch, b.axis, b.dir, false);
+    }
+    for (size_t i = 0; i < kCenterBtns.size(); ++i) {
+        const CenterBtn& b = kCenterBtns[i];
+        ghost_icon(center_ghosts[i].center(), b.icon, false, b.label, b.tip,
+                   b.axis, 0, true);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Input window (panel)
 // -----------------------------------------------------------------------------
 
@@ -830,9 +1095,11 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
 
     // --- Order chips ---------------------------------------------------------
     if (n == 0)
-        ImGui::TextWrapped("%s", _u8L("Click objects in the scene to add them in order. #1 becomes the anchor; the rest move toward it.").c_str());
+        ImGui::TextWrapped("%s", _u8L("Click an object, then a second one: #1 becomes the anchor, #2 is the one you move. Ghost previews of every possible landing spot appear in the viewport once both are picked.").c_str());
+    else if (n == 1)
+        ImGui::TextWrapped("%s", _u8L("Click a second object to move it against #1.").c_str());
     else
-        ImGui::TextWrapped("%s", _u8L("Click more objects to extend the order. #1 is the anchor.").c_str());
+        ImGui::TextWrapped("%s", _u8L("Click a ghost in the viewport, or a button below, to move #2. Clicking a new object swaps #2.").c_str());
 
     for (size_t i = 0; i < n; ++i) {
         const int obj_idx = m_ordered_object_idxs[i];
@@ -872,7 +1139,7 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
     if (ImGui::RadioButton(_u8L("Place against").c_str(), !m_flush_mode))
         m_flush_mode = false;
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Objects come to rest touching the chosen face of #1 (chained: #2 on #1, #3 on #2...)").c_str());
+        ImGui::SetTooltip("%s", _u8L("#2 comes to rest touching the chosen face of #1").c_str());
     ImGui::SameLine(0.0f, 14.0f);
     if (ImGui::RadioButton(_u8L("Align flush").c_str(), m_flush_mode))
         m_flush_mode = true;
@@ -884,23 +1151,11 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
     m_imgui->disabled_begin(!can_apply);
 
     const float bs = 46.0f;
-    struct FaceBtn { const char* id; CubeIcon icon; const char* label; int axis; int dir; const char* tip_touch; const char* tip_flush; };
-    const FaceBtn face_btns[] = {
-        { "##as_zpos", CubeIcon::TouchZPos, "Z",  2, +1,
-          "Stack on top of #1 (#2 on #1, #3 on #2...), with gap", "Top faces flush with #1" },
-        { "##as_xneg", CubeIcon::TouchXNeg, "X-", 0, -1,
-          "Place against #1's left side", "Left faces flush with #1" },
-        { "##as_xpos", CubeIcon::TouchXPos, "X+", 0, +1,
-          "Place against #1's right side", "Right faces flush with #1" },
-        { "##as_yneg", CubeIcon::TouchYNeg, "Y-", 1, -1,
-          "Place against #1's front side", "Front faces flush with #1" },
-        { "##as_ypos", CubeIcon::TouchYPos, "Y+", 1, +1,
-          "Place against #1's back side", "Back faces flush with #1" },
-    };
-    for (size_t i = 0; i < sizeof(face_btns) / sizeof(face_btns[0]); ++i) {
+    for (size_t i = 0; i < kFaceBtns.size(); ++i) {
         if (i > 0) ImGui::SameLine(0.0f, 6.0f);
-        const FaceBtn& b = face_btns[i];
-        if (cube_icon_button(b.id, b.icon, bs, m_flush_mode, b.label)) {
+        const FaceBtn& b = kFaceBtns[i];
+        const std::string btn_id = std::string("##") + b.id;
+        if (cube_icon_button(btn_id.c_str(), b.icon, bs, m_flush_mode, b.label)) {
             if (m_flush_mode) apply_flush(b.axis, b.dir);
             else              apply_touch(b.axis, b.dir);
         }
@@ -909,17 +1164,14 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
     }
 
     // --- Center row + bed --------------------------------------------------------
-    const struct { const char* id; CubeIcon icon; const char* label; int axis; const char* tip; } center_btns[] = {
-        { "##as_cx", CubeIcon::CenterX, "X", 0, "Center on #1 in X" },
-        { "##as_cy", CubeIcon::CenterY, "Y", 1, "Center on #1 in Y" },
-        { "##as_cz", CubeIcon::CenterZ, "Z", 2, "Center on #1 in Z" },
-    };
-    for (size_t i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < kCenterBtns.size(); ++i) {
         if (i > 0) ImGui::SameLine(0.0f, 6.0f);
-        if (cube_icon_button(center_btns[i].id, center_btns[i].icon, bs, false, center_btns[i].label))
-            apply_center(center_btns[i].axis);
+        const CenterBtn& b = kCenterBtns[i];
+        const std::string btn_id = std::string("##") + b.id;
+        if (cube_icon_button(btn_id.c_str(), b.icon, bs, false, b.label))
+            apply_center(b.axis);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L(center_btns[i].tip).c_str());
+            ImGui::SetTooltip("%s", _u8L(b.tip).c_str());
     }
     m_imgui->disabled_end();
 
@@ -961,7 +1213,7 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
     if (m_has_picked_face) {
         ImGui::SameLine();
         ImGui::Text(_u8L("Z = %.3f mm").c_str(), m_picked_face_world_z);
-        if (ImGui::Button(_u8L("Place B on picked face").c_str()))
+        if (ImGui::Button(_u8L("Place #2 on picked face").c_str()))
             apply_place_on_picked_face();
     } else if (m_face_pick_mode) {
         ImGui::SameLine();

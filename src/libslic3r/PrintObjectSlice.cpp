@@ -21,6 +21,7 @@
 //BBS
 #include "ShortestPath.hpp"
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
+#include "libslic3r/Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 5 — elephant foot
 
 //! macro used to mark string used at localization, return same string
 #define L(s) Slic3r::I18N::translate(s)
@@ -5358,7 +5359,14 @@ void PrintObject::slice_volumes()
         const size_t num_extruders = print->config().filament_diameter.size();
         const auto   xy_hole_scaled = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_hole_compensation.value);
         const auto   xy_contour_scaled            = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_contour_compensation.value);
-        const float  elephant_foot_compensation_scaled = (m_config.raft_layers == 0) ?
+        // NEOTKO_GRAVITY_TAG s226 — Fase 5: elephant foot compensates the extra material that
+        // squishes out against the BED on the first real layer. A face that rests on ANOTHER
+        // piece has no such squish, so compensating there only shrinks the contact face (a
+        // silent dimensional error, not a conservative default — see GRAVITY_MASTER_PLAN.md
+        // §Fase 5). Suppress it when Gravity is active and this object does not touch the bed.
+        // Byte-identical with the gate off (rests_on_bed default true / active() false).
+        const bool   gravity_lifts_off_bed = Gravity::active(*this) && ! Gravity::rests_on_bed(*this);
+        const float  elephant_foot_compensation_scaled = (m_config.raft_layers == 0 && ! gravity_lifts_off_bed) ?
         	// Only enable Elephant foot compensation if printing directly on the print bed.
             float(scale_(m_config.elefant_foot_compensation.value)) :
         	0.f;

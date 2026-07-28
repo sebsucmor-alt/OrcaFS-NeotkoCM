@@ -1048,6 +1048,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent,      support_threshold_overlap))
     ((ConfigOptionFloat,               support_object_xy_distance))
     ((ConfigOptionFloat,               support_object_first_layer_gap))
+    // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance (A1): tree support of this
+    // object treats every OTHER object's instances on the plate as collision geometry.
+    ((ConfigOptionBool,                support_cross_object_avoidance))
     ((ConfigOptionBool,                support_ironing))
     ((ConfigOptionEnum<InfillPattern>, support_ironing_pattern))
     ((ConfigOptionPercent,             support_ironing_flow))
@@ -1133,6 +1136,17 @@ PRINT_CONFIG_CLASS_DEFINE(
     // is on (e.g. downgrade the empty-first-layer error for intentionally floating objects).
     // Hidden/dev; carries no bridge-infill behaviour.
     ((ConfigOptionBool,     neotko_libre_mode))
+    // NEOTKO_GRAVITY_TAG s226 — "True Objects" mode (user-facing name of the Gravity mechanism;
+    // docs/FUTURE/GRAVITY_MASTER_PLAN.md). Slice-time mirror of the app_config "neotko_true_objects"
+    // toggle. false = stock: the slicer assumes "below me = my own previous layer" and "my layer 0
+    // is the bed". true = each object is treated as a real independent body — the real floor is
+    // measured against the other objects on the plate, so a face resting on another piece stops
+    // being a false bridge and a face hanging in the air stops being false solid.
+    ((ConfigOptionBool,     neotko_true_objects))
+    // NEOTKO_GRAVITY_TAG s226 — contact tolerance as a FRACTION OF THE LAYER HEIGHT (never mm):
+    // the mesh is sampled at one plane per layer, at mid-height, so a gap below half a layer is
+    // already invisible to the slicer. Being a ratio it adapts to adaptive layer height for free.
+    ((ConfigOptionFloat,    gravity_contact_gap_ratio))
     // NeotkoLIBRE — Assembled Boolean mode (per-object). true = stock boolean union of the
     // object's model parts; false = the parts are sliced WITHOUT boolean union, so overlapping
     // parts keep their own perimeters. Drives clip_multipart_objects per-object in slice_volumes.

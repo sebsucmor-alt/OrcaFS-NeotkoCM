@@ -158,6 +158,10 @@ set(lisbslic3r_sources
     Feature/NeoStitch/NeoStitch.hpp
     Feature/ZBump/ZBump.cpp
     Feature/ZBump/ZBump.hpp
+    Feature/Gravity/GravityFloor.cpp
+    Feature/Gravity/GravityFloor.hpp
+    InstanceContact.cpp
+    InstanceContact.hpp
     Feature/Interlocking/InterlockingGenerator.cpp
     Feature/Interlocking/InterlockingGenerator.hpp
     Feature/Interlocking/VoxelUtils.cpp

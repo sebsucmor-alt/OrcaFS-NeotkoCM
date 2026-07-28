@@ -18,6 +18,7 @@
 #include "Tesselate.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "Utils.hpp"
+#include "Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 — real floor / Fase 1 diagnostics
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
 #include "Format/STL.hpp"
@@ -442,6 +443,13 @@ void PrintObject::make_perimeters()
         BOOST_LOG_TRIVIAL(debug) << "Generating extra perimeters for region " << region_id << " in parallel - end";
     }
 
+    // NEOTKO_GRAVITY_TAG s226 — Fase 3: build the real floor ONCE (single-threaded), here, after
+    // every object on the plate is already sliced (Print::process Fase 0.3 ordering guarantees it).
+    // LayerRegion::make_perimeters() reads it per layer to widen lower_slices with the neighbour's
+    // top, so an overhang that actually rests on another piece stops being flagged as overhang.
+    // Empty vector unless Gravity is active → the reader falls back to stock lower_slices verbatim.
+    m_gravity_floor = Gravity::foreign_floor(*this);
+
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - start";
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_layers.size()),
@@ -480,6 +488,12 @@ void PrintObject::prepare_infill()
     // by the cummulative area of the previous $layerm->fill_surfaces.
     this->detect_surfaces_type();
     m_print->throw_if_canceled();
+
+    // NEOTKO_GRAVITY_TAG s226 — Fase 1: read-only diagnostic. Reports the two halves of the
+    // implicit-gravity bug (bridge that really rests on a neighbour / layer-0 solid that really
+    // hangs over air) against the freshly typed slices. Changes nothing; no-op unless
+    // ORCA_DEBUG_GRAVITY is set AND the Gravity toggle is on.
+    Gravity::diagnose(*this);
 
     // Decide what surfaces are to be filled.
     // Here the stTop / stBottomBridge / stBottom infill is turned to just stInternal if zero top / bottom infill layers are configured.
@@ -739,6 +753,11 @@ void PrintObject::generate_support_material()
             double duration{ std::chrono::duration_cast<second_>(clock_::now() - t0).count() };
             BOOST_LOG_TRIVIAL(info) << std::fixed << std::setprecision(0) << "is_support_necessary takes " << duration << " secs.";
 
+            // NEOTKO_CONTACT_TAG s224 C1.2 — the per-object suppression that briefly lived here was
+            // superseded by the per-island cross-object check inside the sharp-tail seed detection
+            // (TreeSupport::detect_overhangs, gated on check_support_necessity): islands resting on
+            // another object are no longer flagged at the source, while genuinely floating islands
+            // of the same object still surface the warning.
             if (sntype != NoNeedSupp) {
                 std::map<SupportNecessaryType, std::string> reasons = {
                     {SharpTail,L("floating regions")},
@@ -1081,6 +1100,15 @@ bool PrintObject::invalidate_state_by_config_options(
             // tool distribution, so force a re-slice prompt like other
             // layer-structure settings.
             steps.emplace_back(posSlice);
+        } else if (
+               // NEOTKO_GRAVITY_TAG s226 — the real floor feeds TWO steps: the bottom/bridge
+               // classification (posPrepareInfill / detect_surfaces_type, Fase 2) AND the support
+               // overhang detection (posSupportMaterial, Fase 4). Both must re-run when the toggle
+               // or the tolerance changes. Perimeters don't consume it yet (Fase 3).
+               opt_key == "neotko_true_objects"
+            || opt_key == "gravity_contact_gap_ratio") {
+            steps.emplace_back(posPrepareInfill);
+            steps.emplace_back(posSupportMaterial);
 		} else if (
                opt_key == "elefant_foot_compensation"
             || opt_key == "elefant_foot_compensation_layers"
@@ -1129,6 +1157,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_style"
             || opt_key == "support_object_xy_distance"
             || opt_key == "support_object_first_layer_gap"
+            || opt_key == "support_cross_object_avoidance" // NEOTKO_XOBJ_TAG s225
+
             || opt_key == "support_base_pattern_spacing"
             || opt_key == "support_expansion"
             //|| opt_key == "independent_support_layer_height" // BBS
@@ -1428,6 +1458,11 @@ void PrintObject::detect_surfaces_type()
     bool interface_shells = ! spiral_mode && m_config.interface_shells.value;
     size_t num_layers     = spiral_mode ? std::min(size_t(this->printing_region(0).config().bottom_shell_layers), m_layers.size()) : m_layers.size();
 
+    // NEOTKO_GRAVITY_TAG s226 — Fase 2: the object's real floor, built ONCE here (single-threaded)
+    // so the per-layer parallel_for below only reads it. Empty unless Gravity is active → the
+    // reclassification helper no-ops at zero cost and the classification stays byte-identical.
+    const std::vector<Polygons> gravity_floor = Gravity::foreign_floor(*this);
+
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         BOOST_LOG_TRIVIAL(debug) << "Detecting solid surfaces for region " << region_id << " in parallel - start";
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -1448,7 +1483,7 @@ void PrintObject::detect_surfaces_type()
             		((num_layers > 1) ? num_layers - 1 : num_layers) :
             		// In non-spiral vase mode, go over all layers.
             		m_layers.size()),
-            [this, region_id, interface_shells, &surfaces_new](const tbb::blocked_range<size_t>& range) {
+            [this, region_id, interface_shells, &surfaces_new, &gravity_floor](const tbb::blocked_range<size_t>& range) {
                 // If we have soluble support material, don't bridge. The overhang will be squished against a soluble layer separating
                 // the support from the print.
                 // BBS: the above logic only applys for normal(auto) support. Complete logic:
@@ -1538,6 +1573,13 @@ void PrintObject::detect_surfaces_type()
                         for (Surface &surface : bottom)
                             surface.surface_type = stBottom;
                     }
+
+                    // NEOTKO_GRAVITY_TAG s226 — Fase 2: split the just-built bottom surfaces by
+                    // the real floor. A face resting on another object becomes stBottom (contact
+                    // surface), the part over air stays stBottomBridge. Byte-identical unless
+                    // Gravity is active; reads only the pre-computed gravity_floor (thread-safe).
+                    Gravity::reclassify_bottom_surfaces(*this, idx_layer, lower_layer == nullptr,
+                                                        gravity_floor, bottom);
 
                     // NEOTKO_BOTTOM_TAG — Fase 0 (WIP) instrumentation. Record how each
                     // bottom-facing surface is CLASSIFIED before it becomes a role in Fill.cpp
@@ -4803,6 +4845,12 @@ void PrintObject::combine_infill()
 
 void PrintObject::_generate_support_material()
 {
+    // NEOTKO_GRAVITY_TAG s226 — Fase 3 (G5): refresh the real-floor cache at support entry too.
+    // make_perimeters() populates it, but on a cached-perimeter path it returns early and leaves
+    // it stale; remove_bridges_from_contacts() reads it here. Cheap (once, single-threaded; empty
+    // when Gravity is inactive) and guarantees freshness independent of perimeter caching.
+    m_gravity_floor = Gravity::foreign_floor(*this);
+
     // NEOTKO_WAVESUPPORT_TAG — Fase 7 instrumentation pulled forward for debug: log the dispatch
     // decision unconditionally (gated by channel, not by a hypothesis) so a "no support generated"
     // report can be diagnosed from the log alone, without guessing which branch ran.
@@ -4856,6 +4904,16 @@ void PrintObject::remove_bridges_from_contacts(
     Lines overhang_perimeters = to_lines(*overhang_regions);
     auto layer_regions = current_layer->regions();
     Polygons lower_layer_polygons = to_polygons(lower_layer->lslices);
+    // NEOTKO_GRAVITY_TAG s226 — Fase 3 (G5): a bridge perimeter that rests on ANOTHER object is
+    // self-supported, so widen the supporting surface with the foreign floor under this layer.
+    // Only feeds the diff_pl overhang test below; the stricter endpoint containment check keeps
+    // reading raw lslices, which errs toward generating support (safe). No-op unless Gravity is on.
+    if (Gravity::active(*current_layer->object())) {
+        const std::vector<Polygons> &floor = current_layer->object()->gravity_floor();
+        const size_t                 li    = current_layer->id();
+        if (li < floor.size() && ! floor[li].empty())
+            polygons_append(lower_layer_polygons, floor[li]);
+    }
     const PrintObjectConfig& object_config = current_layer->object()->config();
 
     Polygons all_bridges;

@@ -2467,7 +2467,10 @@ void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name
 
     new_object->instances[0]->set_offset(center ? to_3d(Vec2d(empty_cell(0), empty_cell(1)), -new_object->origin_translation.z()) : bb.center());
 
-    new_object->ensure_on_bed();
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was ungated → dropped a new generic mesh to the bed even
+    // in Gravity mode). Floating is the Gravity axis now.
+    if (!gravity_allow_free_z())
+        new_object->ensure_on_bed();
 
     //BBS init assmeble transformation
     Geometry::Transformation t = new_object->instances[0]->get_transformation();
@@ -3145,7 +3148,8 @@ void ObjectList::merge(bool to_multipart_object)
         // NeotkoLIBRE_START — s133: in LibreMode keep the assembled (merged) group at its Z instead
         // of snapping to bed. center_around_origin + translate_instances below preserve world XYZ;
         // only ensure_on_bed forces Z=0, so gating it alone keeps the floating position.
-        if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+        if (!gravity_allow_free_z())
             new_object->ensure_on_bed();
         // NeotkoLIBRE_END
         new_object->center_around_origin();
@@ -3303,7 +3307,8 @@ void ObjectList::boolean()
     // BBS: ensure on bed but no need to ensure locate in the center around origin
     // NeotkoLIBRE — Assembled Boolean of floating objects keeps the combined Z (the source
     // instance transforms are baked into the mesh by combine_mesh_fff); don't snap to bed.
-    if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+    if (!gravity_allow_free_z())
         new_object->ensure_on_bed();
     new_object->center_around_origin();
     new_object->translate_instances(-new_object->origin_translation);
@@ -4236,7 +4241,10 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
                     m_objects_model->UpdateWarningIcon(parent, get_warning_icon_name(obj->get_object_stl_stats()));
                 }
 #endif
-                wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
+                // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was ungated → deleting a part/modifier dropped
+                // the object to the bed even in Gravity mode). Floating is the Gravity axis now.
+                if (!gravity_allow_free_z())
+                    wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
             }
             else
                 m_objects_model->Delete(m_objects_model->GetItemByInstanceId(item->obj_idx, item->sub_obj_idx));
@@ -5762,7 +5770,8 @@ void ObjectList::fix_through_netfabb()
             return false;
         //wxGetApp().plater()->changed_mesh(obj_idx);
         // NeotkoLIBRE — keep floating Z when repairing the mesh of an existing object.
-        if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+        if (!gravity_allow_free_z())
             object(obj_idx)->ensure_on_bed();
         plater->changed_mesh(obj_idx);
 
@@ -6356,7 +6365,13 @@ void ObjectList::apply_object_instance_transfrom_to_all_volumes(ModelObject *mod
     }
     model_object->instances[0]->set_transformation(Geometry::Transformation());
 
-    model_object->ensure_on_bed();
+    // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 ⭐ the highest-priority ungated site: load_generic_subobject()
+    // (add support enforcer/blocker/modifier/part/negative volume) reaches here, and this ensure_on_bed
+    // dropped the whole object to the bed even in Gravity mode. Skipping it leaves world Z untouched:
+    // the translate/translate_instances pair below restores XY around the original center, so with the
+    // drop skipped the net world transform is unchanged. Floating is the Gravity axis now.
+    if (!gravity_allow_free_z())
+        model_object->ensure_on_bed();
     // keep new instance center the same as the original center
     model_object->translate(-original_instance_center);
     model_object->translate_instances(original_instance_center);

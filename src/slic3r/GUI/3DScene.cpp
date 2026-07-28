@@ -435,6 +435,19 @@ void GLVolume::render_with_outline(const GUI::Size& cnv_size)
         return;
     }
 
+    // NEOTKO_LIBREMODE_TAG s228: capture whatever framebuffer the caller had bound BEFORE this
+    // function hijacks it for its own depth-only 1st pass, and restore THAT (not a hardcoded 0)
+    // once done. Every existing call site happens to render straight to the default framebuffer
+    // (0), so this was invisible before — but GCodeViewer::render_volumes_lit()'s own multi-pass
+    // G-buffer pipeline (LibreMode Prepare-tab shading) binds ITS OWN offscreen FBO while drawing
+    // volumes; a selected volume hitting this function mid-pass got yanked onto the default
+    // framebuffer (screen) instead, leaking raw G-buffer/depth-visualization pixels onto the
+    // canvas and leaving every volume drawn afterward in that same loop pointed at framebuffer 0
+    // too (nothing here ever rebinds the caller's real target) — see render_volumes_lit's own
+    // caller_fbo comment for the mirror-image fix on that side.
+    GLint caller_fbo = 0;
+    glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
+
     // 1st. render pass, render the model into a separate render target that has only depth buffer
     GLuint depth_fbo = 0;
     GLuint depth_tex = 0;
@@ -478,9 +491,9 @@ void GLVolume::render_with_outline(const GUI::Size& cnv_size)
 
     // 2nd. render pass, just a normal render with the depth buffer passed as a texture
     if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Arb) {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
     } else if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Ext) {
-        glsafe(::glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0));
+        glsafe(::glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, caller_fbo));
     }
     shader->set_uniform("is_outline", true);
     shader->set_uniform("screen_size", Vec2f{cnv_size.get_width(), cnv_size.get_height()});
@@ -493,11 +506,11 @@ void GLVolume::render_with_outline(const GUI::Size& cnv_size)
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     shader->set_uniform("is_outline", false);
     if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Arb) {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
         if (depth_fbo != 0)
             glsafe(::glDeleteFramebuffers(1, &depth_fbo));
     } else if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Ext) {
-        glsafe(::glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0));
+        glsafe(::glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, caller_fbo));
         if (depth_fbo != 0)
             glsafe(::glDeleteFramebuffersEXT(1, &depth_fbo));
     }

@@ -9,6 +9,8 @@
 #include "WaveSupport.hpp"
 #include "SupportCommon.hpp"
 #include "Geometry.hpp"
+#include "../InstanceContact.hpp" // NEOTKO_XOBJ_TAG s225 A3 — cross-object occupancy
+#include "../Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 4 — real floor
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
 #include "NeoDebug.hpp" // NEOTKO_WAVESUPPORT_TAG — lightweight, no SurfaceColorMix.hpp dependency
@@ -394,6 +396,9 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
 void WaveSupport::generate(PrintObject &object)
 {
     BOOST_LOG_TRIVIAL(info) << "Support generator - Start";
+    // NEOTKO_XOBJ_TAG s225 A3 — cross-object occupancy (PerObject Support), same as the
+    // classic engine; empty when the toggle is off.
+    m_neighbor_occupancy = InstanceContact::neighbor_occupancy(object);
     // NEOTKO_WAVESUPPORT_TAG — Fase 7 instrumentation pulled forward for debug (see
     // PrintObject::_generate_support_material() for the dispatch-side log).
     WAVESUPPORT_LOG(WAVESUPPORT, "WaveSupport::generate() ENTER layer_count=" << object.layer_count()
@@ -2239,12 +2244,17 @@ SupportGeneratorLayersPtr WaveSupport::top_contact_layers(
         << " first_layer_floating=" << (first_layer_floating ? 1 : 0)
         << " first_layer_bottom_z=" << (object.layers().empty() ? -1.0 : object.layers().front()->bottom_z())
         << " layer_id_start=" << layer_id_start);
+    // NEOTKO_GRAVITY_TAG s226 — Fase 4: real floor for this object (twin of SupportMaterial.cpp).
+    const std::vector<Polygons> gravity_floor = Gravity::foreign_floor(object);
      // main part of overhang detection can be parallel
     tbb::parallel_for(tbb::blocked_range<size_t>(layer_id_start, num_layers),
         [&](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_id = range.begin(); layer_id < range.end(); layer_id++) {
                 const Layer& layer = *object.layers()[layer_id];
                 Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices);
+                // NEOTKO_GRAVITY_TAG s226 — Fase 4: neighbour top counts as supported ground.
+                if (layer_id < gravity_floor.size() && !gravity_floor[layer_id].empty())
+                    append(lower_layer_polygons, gravity_floor[layer_id]);
 
                 overhangs_per_layers[layer_id] = detect_overhangs(layer, layer_id, lower_layer_polygons, *m_print_config, *m_object_config, annotations, m_support_params.gap_xy
 #ifdef SLIC3R_DEBUG
@@ -3283,6 +3293,10 @@ void WaveSupport::trim_support_layers_by_object(
                                                    scale_(no_overlap_xy_gap);
                         polygons_append(polygons_trimming, offset({ expoly }, trimming_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));
                     }
+                    // NEOTKO_XOBJ_TAG s225 A3 — same cross-object trim as the classic engine
+                    // (WaveSupport is a copy). Empty when PerObject Support is off.
+                    if (i < m_neighbor_occupancy.size() && !m_neighbor_occupancy[i].empty())
+                        polygons_append(polygons_trimming, offset(m_neighbor_occupancy[i], gap_xy_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS));
                 }
                 if (! m_slicing_params.soluble_interface && m_object_config->thick_bridges) {
                     // Collect all bottom surfaces, which will be extruded with a bridging flow.

@@ -370,7 +370,10 @@ void CreateObjectJob::finalize(bool canceled, std::exception_ptr &eptr)
         // set transformation
         Slic3r::Geometry::Transformation tr(m_transformation);
         new_object->instances.front()->set_transformation(tr);
-        new_object->ensure_on_bed();
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was ungated → a new text/emboss object dropped to the
+        // bed even in Gravity mode). Floating is the Gravity axis now.
+        if (!gravity_allow_free_z())
+            new_object->ensure_on_bed();
 
         // Actualize right panel and set inside of selection
         app.obj_list()->paste_objects_into_list({model.objects.size() - 1});
@@ -1134,7 +1137,10 @@ void create_volume(TriangleMesh                    &&mesh,
 
     // update printable state on canvas
     if (type == ModelVolumeType::MODEL_PART) {
-        volume->get_object()->ensure_on_bed();
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3 (was ungated → editing surface-attached text dropped
+        // the object to the bed even in Gravity mode). Floating is the Gravity axis now.
+        if (!gravity_allow_free_z())
+            volume->get_object()->ensure_on_bed();
         canvas->update_instance_printable_state_for_object(object_idx);
     }
 

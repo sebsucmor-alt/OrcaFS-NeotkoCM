@@ -7694,6 +7694,7 @@ void TabPrint::build()
     page = add_options_page(L("Support"), "custom-gcode_support"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Support"), L"param_support");
     optgroup->append_single_option_line("enable_support", "support_settings_support");
+        optgroup->append_single_option_line("support_cross_object_avoidance"); // NEOTKO_XOBJ_TAG s225 — right under Enable support, it matters
         optgroup->append_single_option_line("support_type", "support_settings_support#type");
         optgroup->append_single_option_line("support_style", "support_settings_support#style");
         optgroup->append_single_option_line("support_threshold_angle", "support_settings_support#threshold-angle");
@@ -7972,6 +7973,27 @@ void TabPrint::toggle_options()
         auto def = print_config_def.get("support_style");
         std::vector<int> enum_set_normal = {smsDefault, smsGrid, smsSnug };
         std::vector<int> enum_set_tree   = { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic };
+        // NEOTKO_GRAVITY_TAG s226 — Organic tree is incompatible with PerObject Support: its
+        // TreeModelVolumes is rebuilt fresh per run and its first contact layer is fragile
+        // (it already misgenerated the first support layer over a neighbour, and gave trouble
+        // back in the s225 PerObject work). While PerObject Support is on (support_cross_object_avoidance)
+        // — which Gravity forces on — drop Organic from the tree choices so it can't be picked.
+        // NEOTKO_GRAVITY_TAG s226 — Organic is incompatible with PerObject Support (see below).
+        // ⚠️ The ints in enum_set_* are ARRAY INDICES into def->enum_values/enum_labels (push
+        // order: default,grid,snug,organic,tree_slim,tree_strong,tree_hybrid), NOT enum values —
+        // they do NOT match the SupportMaterialStyle enum ordering. So the ONLY safe way to drop
+        // Organic is to skip the entry whose def->enum_values string is "organic" (below), never
+        // by erasing an enum constant from the index list.
+        const bool perobject_on = m_config->opt_bool("support_cross_object_avoidance");
+        if (perobject_on && is_tree(support_type)
+            && m_config->opt_enum<SupportMaterialStyle>("support_style") == smsTreeOrganic) {
+            // Organic was the current selection: coerce it to Hybrid so neither the combo shows a
+            // phantom value nor the slicer runs Organic under PerObject Support.
+            DynamicPrintConfig new_conf = *m_config;
+            new_conf.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(smsTreeHybrid));
+            m_config_manipulation.apply(m_config, &new_conf);
+            wxTheApp->CallAfter([this]() { update(); });
+        }
         auto &           set             = is_tree(support_type) ? enum_set_tree : enum_set_normal;
         auto &           opt             = const_cast<ConfigOptionDef &>(field->m_opt);
         auto             cb              = dynamic_cast<ComboBox *>(choice->window);
@@ -7980,6 +8002,9 @@ void TabPrint::toggle_options()
         opt.enum_labels.clear();
         cb->Clear();
         for (auto i : set) {
+            // Drop Organic from the tree choices while PerObject Support is on (string-based, robust).
+            if (perobject_on && def->enum_values[i] == "organic")
+                continue;
             opt.enum_values.push_back(def->enum_values[i]);
             opt.enum_labels.push_back(def->enum_labels[i]);
             cb->Append(_(def->enum_labels[i]));

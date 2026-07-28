@@ -893,7 +893,7 @@ static std::vector<std::string> s_Preset_print_options {
     "infill_neoweave_enabled", "infill_neoweave_amplitude", "infill_neoweave_period", "infill_neoweave_max_z_speed",
     "max_volumetric_extrusion_rate_slope", "max_volumetric_extrusion_rate_slope_segment_length","extrusion_rate_smoothing_external_perimeter_only",
     "inner_wall_speed", "outer_wall_speed", "sparse_infill_speed", "internal_solid_infill_speed",
-    "top_surface_speed", "support_speed", "support_object_xy_distance", "support_object_first_layer_gap", "support_interface_speed",
+    "top_surface_speed", "support_speed", "support_object_xy_distance", "support_object_first_layer_gap", "support_cross_object_avoidance", "support_interface_speed",
     "bridge_speed", "internal_bridge_speed", "gap_infill_speed", "travel_speed", "travel_speed_z", "initial_layer_speed",
     "outer_wall_acceleration", "initial_layer_acceleration", "top_surface_acceleration", "default_acceleration", "skirt_type", "skirt_loops", "skirt_speed","min_skirt_length", "skirt_distance", "skirt_start_angle", "skirt_height","single_loop_draft_shield", "draft_shield",
     "brim_width", "brim_object_gap", "brim_type", "brim_ears_max_angle", "brim_ears_detection_length", "enable_support", "support_type", "support_threshold_angle", "support_threshold_overlap","enforce_support_layers",
@@ -952,7 +952,7 @@ static std::vector<std::string> s_Preset_print_options {
      // NEOTKO_NEOTOWER_TAG_END
      "multipass_prime_volume", // NEOTKO_MULTIPASS_PRIME_TAG — per-region sublayer prime volume
      // NEOTKO_SANDWICH_ENGINE_TAG_START — Sandwich engine per-region/object keys (Fase 2)
-     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_libre_mode", "neotko_assemble_boolean", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
+     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_libre_mode", "neotko_true_objects", "gravity_contact_gap_ratio", "neotko_assemble_boolean", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
      "interlayer_colormix_surface", "interlayer_colormix_tool_a", "interlayer_colormix_tool_b", "interlayer_colormix_tool_c", "interlayer_colormix_tool_d", "interlayer_colormix_min_length",
      "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate", "interlayer_colormix_mode", "interlayer_colormix_pct_a", "interlayer_colormix_pct_b", "interlayer_colormix_easing",
      "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines", "interlayer_colormix_overlap", "interlayer_colormix_invert", "interlayer_colormix_repetitions", "interlayer_colormix_penu_mode",

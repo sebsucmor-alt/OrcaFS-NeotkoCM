@@ -286,6 +286,7 @@ struct GuiCfg
         // advanced
         std::string use_surface;
         std::string per_glyph;
+        std::string font_kerning; // NeotkoCM Typographic Spacing
         std::string alignment;
         std::string char_gap;
         std::string line_gap;
@@ -2630,6 +2631,21 @@ bool GLGizmoEmboss::rev_slider(const std::string &name,
         undo_tooltip, undo_offset, draw_slider_float);
 }
 
+bool GLGizmoEmboss::font_has_kerning_table()
+{
+    const auto &ff = m_style_manager.get_font_file_with_cache();
+    if (!ff.has_value())
+        return false;
+    const void *font_ptr = static_cast<const void *>(ff.font_file.get());
+    if (font_ptr != m_kerning_probe_font) {
+        m_kerning_probe_font   = font_ptr;
+        // NOTE: fully qualified on purpose - this file has both Slic3r::Emboss and
+        // Slic3r::GUI::Emboss in scope (see the using directives at the top), and the GUI one wins.
+        m_kerning_probe_result = Slic3r::Emboss::has_kerning_table(*ff.font_file, m_style_manager.get_font_prop().collection_number.value_or(0));
+    }
+    return m_kerning_probe_result;
+}
+
 void GLGizmoEmboss::draw_advanced()
 {
     const auto &ff = m_style_manager.get_font_file_with_cache();
@@ -2701,7 +2717,48 @@ void GLGizmoEmboss::draw_advanced()
     } else if (!per_glyph && m_text_lines.is_init())
         m_text_lines.reset();
     m_imgui->disabled_end(); // !can_use_per_glyph
-        
+
+    /////
+    // NeotkoCM "Typographic Spacing": real kerning from the font file.
+    // Orca only ever had uniform tracking (Char gap), which is not kerning: kerning is a
+    // correction per PAIR of glyphs, designed by the type designer, that closes combinations like
+    // "AV" or "To". See docs/FUTURE/EMBOSS_TYPOGRAPHIC_SPACING_PLAN.md
+    /////
+    {
+        const bool has_kerning = font_has_kerning_table();
+        // A checkbox that silently does nothing is worse than no checkbox: when the font carries
+        // no kerning data at all, disable it and say so.
+        m_imgui->disabled_begin(!has_kerning);
+
+        bool use_kerning = font_prop.use_font_kerning.value_or(false);
+        std::optional<bool> stored_kerning = stored_style ? stored_style->prop.use_font_kerning : std::nullopt;
+        bool stored_kerning_value = stored_kerning.value_or(false);
+        const bool *def_use_kerning = stored_style ? &stored_kerning_value : nullptr;
+
+        if (rev_checkbox(tr.font_kerning, use_kerning, def_use_kerning,
+                         _u8L("Revert using of font kerning."))) {
+            // Keep it unset when off, so styles and projects stay byte identical to stock Orca
+            if (use_kerning)
+                font_prop.use_font_kerning = true;
+            else
+                font_prop.use_font_kerning.reset();
+            process();
+        } else if (ImGui::IsItemHovered()) {
+            m_imgui->tooltip(_u8L("Use the kerning pairs designed into the font, so pairs like "
+                                  "\"AV\" or \"To\" are spaced the way the type designer intended. "
+                                  "This is independent from \"Char gap\", which shifts every "
+                                  "character by the same amount."),
+                             m_gui_cfg->max_tooltip_width);
+        }
+        m_imgui->disabled_end(); // !has_kerning
+
+        if (!has_kerning) {
+            // Tooltip of a disabled item is not shown by ImGui, so state the reason inline.
+            ImGui::SameLine();
+            m_imgui->text_colored(ImGuiWrapper::COL_GREY_DARK, _u8L("Font has no kerning data"));
+        }
+    }
+
     auto draw_align = [&align = font_prop.align, input_offset = m_gui_cfg->advanced_input_offset, &icons = m_icons, &m_imgui = m_imgui, &m_gui_cfg = m_gui_cfg]() {
         bool is_change = false;
         ImGui::SameLine(input_offset);
@@ -3398,8 +3455,19 @@ bool load(Facenames &facenames) {
 
     facenames.hash = data.hash;
     facenames.faces.reserve(data.good.size());
-    for (const wxString &face : data.good)
+    // NEOTKO_TYPOSPACING_TAG - upstream Orca bug: this loop used to fill only `faces`, leaving
+    // `faces_names` empty. `faces_names` is what feeds the search box of the font combo
+    // (bbl_combo_with_filter), while the visible list is drawn from `faces`, so the effect was:
+    // the list shows up fine, and vanishes completely the moment you type a single letter,
+    // because the filter matched against an empty vector.
+    // It only reproduces from the second run onward - the very first run has no cache file, falls
+    // through to the OS enumeration below and fills both vectors, which is presumably why this was
+    // never noticed upstream.
+    facenames.faces_names.reserve(data.good.size());
+    for (const wxString &face : data.good) {
         facenames.faces.push_back({face});
+        facenames.faces_names.push_back(face.utf8_string());
+    }
     facenames.bad = data.bad;
     return true;
 }
@@ -3637,6 +3705,9 @@ GuiCfg create_gui_configuration()
     // for each character(glyph) in text separately
     tr.per_glyph = _u8L("Per glyph");
     // TRN - Input label. Be short as possible
+    // NeotkoCM Typographic Spacing: use the kerning pairs designed into the font file
+    tr.font_kerning = _u8L("Font kerning");
+    // TRN - Input label. Be short as possible
     // Align Top|Middle|Bottom and Left|Center|Right
     tr.alignment = _u8L("Alignment");
     // TRN - Input label. Be short as possible
@@ -3672,6 +3743,7 @@ GuiCfg create_gui_configuration()
     float max_advanced_text_width = std::max({
         ImGui::CalcTextSize(tr.use_surface.c_str()).x,
         ImGui::CalcTextSize(tr.per_glyph.c_str()).x,
+        ImGui::CalcTextSize(tr.font_kerning.c_str()).x,
         ImGui::CalcTextSize(tr.alignment.c_str()).x,
         ImGui::CalcTextSize(tr.char_gap.c_str()).x,
         ImGui::CalcTextSize(tr.line_gap.c_str()).x,

@@ -1277,7 +1277,11 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_neotko_libre_enabled = create_item_checkbox(
         _devL("Enable Neotko LibreMode (requires restart)"), page,
         _devL("Master switch for LibreMode: assembly printing, relaxed bed/boundary "
-              "restrictions and extended UX. When off, none of it is shown. Restart required."),
+              "restrictions and extended UX. Turning LibreMode on also activates True Objects "
+              "mode for support generation (each part is treated as a real independent body, "
+              "per object) — objects no longer auto-drop to the bed, and supports avoid other "
+              "parts even when they are not assembled. When off, none of it is shown. "
+              "Restart required."),
         50, "neotko_libre_enabled");
     // NeotkoLIBRE_END
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));

@@ -20,6 +20,7 @@
 #include "SurfaceColorMix.hpp"        // NEOTKO_LIBRE_TAG — SurfacePassStack::resolve()
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
+#include "Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 0.3 — slice-before-perimeters ordering
 #include "FilamentHotBedNozzleRules.hpp"
 #include "Model.hpp"
 #include "format.hpp"
@@ -863,6 +864,22 @@ bool Print::invalidate_step(PrintStep step)
     // Propagate to dependent steps.
     if (step != psGCodeExport)
         invalidated |= Inherited::invalidate_step(psGCodeExport);
+    return invalidated;
+}
+
+// NEOTKO — "Remove Slice Cache" (GUI). PrintObject::invalidate_all_steps() is private to PrintObject,
+// but Print is its friend, so this is the sanctioned public entry point for the GUI to wipe the whole
+// slice cache. Each object's invalidate_all_steps() already cascades to this Print's own steps; the
+// empty-plate case invalidates the Print directly so a stray G-code result is dropped too.
+bool Print::invalidate_all_object_steps()
+{
+    bool invalidated = false;
+    for (PrintObject *po : m_objects) {
+        invalidated |= po->invalidate_all_steps();
+        po->clear_tree_support_preview_cache();
+    }
+    if (m_objects.empty())
+        invalidated |= this->invalidate_all_steps();
     return invalidated;
 }
 
@@ -2480,6 +2497,15 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         //    return false;
         if (model_obj1->config.get() != model_obj2->config.get())
             return false;
+        // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance: the support of an
+        // opted-in object depends on WHERE its neighbors sit RELATIVE to it, and
+        // copy_layers_from_shared_object() copies m_support_layers wholesale — two
+        // geometrically identical objects at different plate positions would inherit a
+        // support that avoids the WRONG relative neighbors (seen with two stacks of
+        // identical cubes: the copied support ran inside the other stack). Opt-in only:
+        // plates without the toggle keep the full dedup.
+        if (object1->config().support_cross_object_avoidance.value || object2->config().support_cross_object_avoidance.value)
+            return false;
         return true;
     };
     int object_count = m_objects.size();
@@ -2535,6 +2561,20 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": total object counts %1% in current print, need to slice %2%")%m_objects.size()%need_slicing_objects.size();
     BOOST_LOG_TRIVIAL(info) << "Starting the slicing process." << log_memory_info();
     if (!use_cache) {
+        // NEOTKO_GRAVITY_TAG s226 — Fase 0.3: when Gravity is active, slice EVERY object before
+        // any object makes perimeters. make_perimeters() begins with this->slice(), so in stock
+        // order object 1 builds its walls/overhang before object 2 is even sliced — Gravity
+        // (Fase 3) reads a neighbour's lslices while classifying overhang and would see none.
+        // slice() is idempotent (set_started/set_done): this fixes ordering only, never re-slices,
+        // and the make_perimeters() call below finds posSlice already done. Gated so stock builds
+        // keep the original slice/perimeter interleaving (and its lower peak memory) byte-for-byte.
+        bool any_gravity = false;
+        for (PrintObject *obj : m_objects)
+            if (need_slicing_objects.count(obj) != 0 && Gravity::active(*obj)) { any_gravity = true; break; }
+        if (any_gravity)
+            for (PrintObject *obj : m_objects)
+                if (need_slicing_objects.count(obj) != 0)
+                    obj->slice();
         for (PrintObject *obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {
                 obj->make_perimeters();
@@ -2576,12 +2616,30 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
         }
 
+        // NEOTKO_XOBJ_TAG s225 A2 — support-vs-support: an opted-in object must see the
+        // ALREADY generated support of its neighbors (InstanceContact::neighbor_occupancy
+        // reads other->support_layers() once posSupportMaterial is done), so those objects
+        // cannot generate inside the parallel batch: they run serially AFTER it, in plate
+        // (m_objects) order — deterministic, and each one sees every parallel object plus
+        // every earlier serial one. Untoggled objects keep the full parallel path.
+        std::vector<PrintObject*> xobj_serial_support;
+        if (m_config.print_sequence == PrintSequence::ByLayer)
+            for (PrintObject *obj : m_objects)
+                if (need_slicing_objects.count(obj) != 0
+                    && obj->config().enable_support.value
+                    && obj->config().support_cross_object_avoidance.value)
+                    xobj_serial_support.emplace_back(obj);
+        auto is_xobj_serial = [&xobj_serial_support](const PrintObject *obj) {
+            return std::find(xobj_serial_support.begin(), xobj_serial_support.end(), obj) != xobj_serial_support.end();
+        };
+
         tbb::parallel_for(tbb::blocked_range<int>(0, int(m_objects.size())),
-            [this, need_slicing_objects](const tbb::blocked_range<int>& range) {
+            [this, need_slicing_objects, &is_xobj_serial](const tbb::blocked_range<int>& range) {
                 for (int i = range.begin(); i < range.end(); i++) {
                     PrintObject* obj = m_objects[i];
                     if (need_slicing_objects.count(obj) != 0) {
-                        obj->generate_support_material();
+                        if (!is_xobj_serial(obj)) // NEOTKO_XOBJ_TAG s225 A2 — generated serially below
+                            obj->generate_support_material();
                     }
                     else {
                         if (obj->set_started(posSupportMaterial))
@@ -2590,6 +2648,8 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 }
             }
         );
+        for (PrintObject *obj : xobj_serial_support)
+            obj->generate_support_material(); // NEOTKO_XOBJ_TAG s225 A2 — serial, plate order
 
         for (PrintObject* obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {

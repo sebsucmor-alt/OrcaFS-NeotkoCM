@@ -101,6 +101,10 @@ private:
 	SlicingParameters	     m_slicing_params;
 	// Various precomputed support parameters to be shared with external functions.
 	SupportParameters   	 m_support_params;
+	// NEOTKO_XOBJ_TAG s225 A3 — cross-object avoidance (PerObject Support); see the twin
+	// field in PrintObjectSupportMaterial. WaveSupport is a copy of the classic engine, so
+	// it carries and injects the neighbor occupancy the same way.
+	std::vector<Polygons>    m_neighbor_occupancy;
 };
 
 } // namespace Slic3r

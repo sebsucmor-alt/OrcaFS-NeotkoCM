@@ -4,6 +4,7 @@
 #include "SurfaceEffectProfile.hpp"      // NEOTKO_MIXEDFIL_SANDWICH_TAG
 #include "ColorSci/ColorPredict.hpp"     // NEOTKO_MIXEDFIL_SANDWICH_TAG
 #include "SurfaceColorMix.hpp"           // NEOTKO_TD_RECALC_DEBUG_TAG — NeoDebug + NEOTKO_LOG reuse (bug #3 instrumentation)
+#include "Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 — Gravity::active() for support invalidation
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
@@ -1779,6 +1780,12 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         PrintObjectPtrs print_objects_new;
         print_objects_new.reserve(std::max(m_objects.size(), m_model.objects.size()));
         bool new_objects = false;
+        // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance (A1): the support of an
+        // object depends on WHERE the other objects sit, an edge the step graph does not
+        // model. Track any plate-geometry change (instance moved/added/removed, object
+        // added/deleted) and, at the end, invalidate posSupportMaterial of every object
+        // that opted into the feature (conservative v1: no bbox filtering).
+        bool xobj_plate_changed = false;
         // Walk over all new model objects and check, whether there are matching PrintObjects.
         for (ModelObject *model_object : m_model.objects) {
             ModelObjectStatus &model_object_status = const_cast<ModelObjectStatus&>(model_object_status_db.reuse(*model_object));
@@ -1828,8 +1835,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 } else {
                     // The PrintObject already exists and the copies differ.
 					PrintBase::ApplyStatus status = (*it_old)->print_object->set_instances(std::move(new_instances.instances));
-                    if (status != PrintBase::APPLY_STATUS_UNCHANGED)
+                    if (status != PrintBase::APPLY_STATUS_UNCHANGED) {
 						update_apply_status(status == PrintBase::APPLY_STATUS_INVALIDATED);
+						xobj_plate_changed = true; // NEOTKO_XOBJ_TAG s225 — instance shifts changed
+					}
 					print_objects_new.emplace_back((*it_old)->print_object);
 					const_cast<PrintObjectStatus*>(*it_old)->status = PrintObjectStatus::Reused;
 				}
@@ -1838,6 +1847,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         if (m_objects != print_objects_new) {
             //BBS: add more logs
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: found print object changed.")%__LINE__;
+            xobj_plate_changed = true; // NEOTKO_XOBJ_TAG s225 — object added/deleted/reordered
             this->call_cancel_callback();
 			update_apply_status(this->invalidate_all_steps());
             m_objects = print_objects_new;
@@ -1856,6 +1866,62 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             print_regions_reshuffled = true;
         }
         print_object_status_db.clear();
+
+        // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance: any plate-geometry change
+        // invalidates the support of every opted-in object (its occupancy may now differ),
+        // including the moved object itself — without this edge the cached support keeps
+        // avoiding a neighbor that is no longer there (or misses one that arrived).
+        // NEOTKO_GRAVITY_TAG s226 — Gravity (Fase 4) makes support depend on the plate's other
+        // objects too (the real floor), even when PerObject Support is OFF, since the Fase 4
+        // avoidance gates on Gravity::active() not on support_cross_object_avoidance. So a
+        // Gravity-active object's support is equally stale when a neighbour moves. Without this
+        // its first contact layer "suddenly" vanishes on a later re-slice — the flaky bug.
+        if (xobj_plate_changed)
+            for (PrintObject *object : m_objects) {
+                const bool grav = Gravity::active(*object);
+                if ((object->config().support_cross_object_avoidance.value || grav)
+                    && object->config().enable_support.value) {
+                    update_apply_status(object->invalidate_step(posSupportMaterial));
+                    object->clear_tree_support_preview_cache();
+                }
+                // NEOTKO_GRAVITY_TAG s226 — Fase 2/3: a Gravity object's bottom/overhang
+                // classification reads its NEIGHBOURS' slices, so a plate change can stale its
+                // perimeters and infill, not only its support. invalidate_step(posPerimeters)
+                // cascades to posPrepareInfill/posInfill/posSupportMaterial — Fase 2's bottom
+                // reclassification runs in detect_surfaces_type at posPrepareInfill, Fase 3's
+                // overhang in make_perimeters at posPerimeters. Independent of enable_support.
+                // ⚠️ v1 is conservative: every Gravity-active object, no bbox/Z filter. The
+                // bbox-XY + Z-overlap refinement (invalidate only objects the moved one really
+                // contributes floor to) is the pending perf follow-up — GRAVITY_MASTER_PLAN §5.1.
+                if (grav)
+                    update_apply_status(object->invalidate_step(posPerimeters));
+            }
+
+        // NEOTKO_XOBJ_TAG s225 A2 — cohort coherence for support-vs-support: opted-in
+        // objects avoid each other's GENERATED support, so if any of them must regenerate
+        // (e.g. the user changed one object's support settings) the whole cohort must
+        // regenerate together — otherwise a survivor keeps avoiding the neighbor's OLD
+        // support. No-op when everything is still valid.
+        {
+            bool xobj_any_pending = false;
+            for (PrintObject *object : m_objects)
+                if (object->config().support_cross_object_avoidance.value && object->config().enable_support.value
+                    // UNGUARDED on purpose: Print::apply already holds the state mutex —
+                    // the guarded is_step_done() re-locks it and self-deadlocks (seen as a
+                    // hang on project load; lldb: __psynch_mutexwait at PrintApply:1889).
+                    // Same reason the invalidate_step() calls around here are safe: the
+                    // invalidate path takes a cancel callback, not the mutex.
+                    && !object->is_step_done_unguarded(posSupportMaterial)) {
+                    xobj_any_pending = true;
+                    break;
+                }
+            if (xobj_any_pending)
+                for (PrintObject *object : m_objects)
+                    if (object->config().support_cross_object_avoidance.value && object->config().enable_support.value) {
+                        update_apply_status(object->invalidate_step(posSupportMaterial));
+                        object->clear_tree_support_preview_cache();
+                    }
+        }
 
         // BBS
         for (PrintObject* object : m_objects) {

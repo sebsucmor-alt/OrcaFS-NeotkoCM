@@ -222,6 +222,28 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     if (this->layer()->lower_layer != nullptr)
         // Cummulative sum of polygons over all the regions.
         g.lower_slices = &this->layer()->lower_layer->lslices;
+    // NEOTKO_GRAVITY_TAG s226 — Fase 3: overhang is measured against the REAL floor, not just this
+    // object's own previous layer. Widen lower_slices with the foreign floor under this layer (top
+    // of any neighbour), so a wall resting on another piece is not flagged overhang; and at layer 0
+    // (lower_layer null) a non-empty floor gives PerimeterGenerator something to rest on — the part
+    // over air stays overhang, the part on the neighbour does not. The floor was built ONCE in
+    // PrintObject::make_perimeters(); this local must outlive process_arachne()/process_classic()
+    // below, same lifetime rule as painted_texture_bump_zones. Empty floor → stock pointer untouched
+    // (byte-identical when Gravity is off).
+    ExPolygons gravity_lower_slices;
+    {
+        const std::vector<Polygons> &floor = this->layer()->object()->gravity_floor();
+        const size_t                 li    = this->layer()->id();
+        if (li < floor.size() && ! floor[li].empty()) {
+            Polygons combined;
+            if (this->layer()->lower_layer != nullptr)
+                append(combined, to_polygons(this->layer()->lower_layer->lslices));
+            append(combined, floor[li]);
+            gravity_lower_slices = union_ex(combined);
+            g.lower_slices       = &gravity_lower_slices;
+            g.has_gravity_floor  = true;
+        }
+    }
     if (this->layer()->upper_layer != NULL)
         g.upper_slices = &this->layer()->upper_layer->lslices;
 

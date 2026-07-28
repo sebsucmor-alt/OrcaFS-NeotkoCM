@@ -446,6 +446,30 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(smsDefault));
             apply(config, &new_conf);
         }
+
+        // NEOTKO_WAVESUPPORT_TAG_UI s225 — NeoWave ships an opinionated, tested default set:
+        // a Hollow base capped by a Wave (NeoWave) roof. Coerce the base/interface patterns
+        // to that combo (the fields are also disabled in toggle_print_fff_options, so the
+        // now-irrelevant alternatives can't be picked and stop cluttering the panel).
+        if (support_type == stWaveSupport) {
+            DynamicPrintConfig new_conf = *config;
+            bool changed = false;
+            if (config->opt_enum<SupportMaterialPattern>("support_base_pattern") != smpNone) {
+                new_conf.set_key_value("support_base_pattern", new ConfigOptionEnum<SupportMaterialPattern>(smpNone));
+                changed = true;
+            }
+            if (config->opt_enum<SupportMaterialInterfacePattern>("support_interface_pattern") != smipWave) {
+                new_conf.set_key_value("support_interface_pattern", new ConfigOptionEnum<SupportMaterialInterfacePattern>(smipWave));
+                changed = true;
+            }
+            // Tested NeoWave default: 2 support wall loops (range [0,2]; stock default 0 = auto).
+            if (config->opt_int("tree_support_wall_count") != 2) {
+                new_conf.set_key_value("tree_support_wall_count", new ConfigOptionInt(2));
+                changed = true;
+            }
+            if (changed)
+                apply(config, &new_conf);
+        }
     }
 
     // BBS
@@ -782,6 +806,14 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("support_threshold_angle", have_support_material && is_auto(support_type));
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
     //toggle_field("support_closing_radius", have_support_material && support_style == smsSnug);
+
+    // NEOTKO_WAVESUPPORT_TAG_UI s225 — NeoWave locks its base/interface pattern to the tested
+    // Hollow + Wave combo (coerced in update_print_fff_config), so grey the two fields out to
+    // remove the now-irrelevant choices from the panel.
+    if (have_support_material && support_type == stWaveSupport) {
+        toggle_field("support_base_pattern", false);
+        toggle_field("support_interface_pattern", false);
+    }
 
     // NEOTKO_WAVESUPPORT_TAG_VARIANTS — Fase 4c: the Wave roof variant controls apply only to the
     // NeoWave roof (support type NeoWave + interface pattern Wave). smipWave itself is only selectable

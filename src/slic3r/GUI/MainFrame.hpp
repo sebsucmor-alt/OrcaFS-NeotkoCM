@@ -399,10 +399,9 @@ public:
     SideButton* m_slice_option_btn{ nullptr };
     SideButton* m_print_btn{ nullptr };
     SideButton* m_print_option_btn{ nullptr };
-    // NeotkoLIBRE_START — s133: top-bar LibreMode toggle + Refresh Part. Created only when
+    // NeotkoLIBRE_START — s133: top-bar LibreMode toggle. Created only when
     // the master gate (app_config "neotko_libre_enabled") is on; null otherwise.
-    SideButton* m_neotko_libre_btn{ nullptr };
-    SideButton* m_neotko_refresh_btn{ nullptr }; // NeotkoLIBRE — "Refresh Part" (Assembled Parts Full Options); wired s135
+    SideButton* m_neotko_libre_btn{ nullptr }; // s227 — unified LibreMode toggle, also drives "neotko_true_objects" (Gravity engine)
     // NeotkoLIBRE_END
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };

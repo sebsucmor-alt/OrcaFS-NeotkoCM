@@ -379,7 +379,8 @@ bool face_selected_volume_to_camera(const Camera &camera, GLCanvas3D &canvas, co
     if (volume.type() == ModelVolumeType::MODEL_PART) {
         object.invalidate_bounding_box();
         // NeotkoLIBRE — "Face the camera" rotation must keep the floating Z, not snap to bed.
-        if (!wxGetApp().app_config->get_bool("neotko_libre_mode"))
+        // NEOTKO_GRAVITY_TAG s226 — Fase 6.3: floating is the Gravity axis now, not LibreMode.
+        if (!gravity_allow_free_z())
             object.ensure_on_bed();
     }
 

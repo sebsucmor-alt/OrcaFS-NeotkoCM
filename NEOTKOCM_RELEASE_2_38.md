@@ -5,7 +5,7 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 ---
 
-# Neotko FullSpectrum 2.3.8 (draft, in progress) — on Snapmaker Orca 2.3.4 — Release Notes
+# Neotko FullSpectrum 2.3.8 — on Snapmaker Orca 2.3.4 — Release Notes
 
 > ⚠️ ** Review your generated G-code before long or production prints, especially if you
 > turn on anything marked **expert-only** below.

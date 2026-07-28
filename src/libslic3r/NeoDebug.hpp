@@ -21,8 +21,10 @@
 //   ORCA_DEBUG_WAVESUPPORT  — NEOTKO_WAVESUPPORT_TAG: WaveSupport zone/footprint generation (see docs/FUTURE/WAVESUPPORT_PLAN.md)
 //   ORCA_DEBUG_WAVEROOF     — NEOTKO_WAVESUPPORT_TAG: Wave-Huygens roof algorithm (wavefronts, convergence) (see docs/FUTURE/WAVESUPPORT_PLAN.md)
 //   ORCA_DEBUG_NEOSTITCH    — NEOTKO_NEOSTITCH_TAG: Z-Stitch Interlock notch/fill signal + junction walk (see docs/FUTURE/NEOSTITCH_PLAN.md)
+//   ORCA_DEBUG_XOBJ         — NEOTKO_XOBJ_TAG: cross-object support avoidance occupancy (see docs/FUTURE/CROSS_OBJECT_SUPPORT_PREPLAN.md)
+//   ORCA_DEBUG_GRAVITY      — NEOTKO_GRAVITY_TAG: real floor per object/layer + bridge reclassification diagnostics (see docs/FUTURE/GRAVITY_MASTER_PLAN.md)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
-// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump|zbump|wavesupport|waveroof|neostitch}.log
+// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump|zbump|wavesupport|waveroof|neostitch|contact}.log
 
 #include <string>
 
@@ -45,7 +47,10 @@ namespace NeoDebug {
         WAVESUPPORT = 12, // NEOTKO_WAVESUPPORT_TAG — WaveSupport zone/footprint generation (dedicated support branch)
         WAVEROOF    = 13, // NEOTKO_WAVESUPPORT_TAG — Wave-Huygens roof algorithm (wavefronts, points/wavefront, timing)
         NEOSTITCH   = 14, // NEOTKO_NEOSTITCH_TAG — Z-Stitch Interlock notch/fill signal + junction walk
-        CH_COUNT    = 15
+        CONTACT     = 15, // NEOTKO_CONTACT_TAG s224 — instance contact/floating detector (C1)
+        XOBJ        = 16, // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance (occupancy builder + injection)
+        GRAVITY     = 17, // NEOTKO_GRAVITY_TAG s226 — real floor / bridge reclassification (see docs/FUTURE/GRAVITY_MASTER_PLAN.md)
+        CH_COUNT    = 18
     };
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).

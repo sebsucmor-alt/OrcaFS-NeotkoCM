@@ -4,6 +4,8 @@
 #include "Layer.hpp"
 #include "Print.hpp"
 #include "SupportMaterial.hpp"
+#include "../InstanceContact.hpp" // NEOTKO_XOBJ_TAG s225 A3 — cross-object occupancy
+#include "../Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 4 — real floor
 #include "SupportCommon.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
@@ -374,6 +376,10 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
 void PrintObjectSupportMaterial::generate(PrintObject &object)
 {
     BOOST_LOG_TRIVIAL(info) << "Support generator - Start";
+
+    // NEOTKO_XOBJ_TAG s225 A3 — build the cross-object occupancy once (empty when the
+    // PerObject Support toggle is off), consumed in trim_support_layers_by_object.
+    m_neighbor_occupancy = InstanceContact::neighbor_occupancy(object);
 
     coordf_t max_object_layer_height = 0.;
     for (size_t i = 0; i < object.layer_count(); ++ i)
@@ -2137,12 +2143,23 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     const bool first_layer_floating = !object.layers().empty()
         && object.layers().front()->bottom_z() > EPSILON;
     size_t layer_id_start = (this->has_raft() || first_layer_floating) ? 0 : 1;
+    // NEOTKO_GRAVITY_TAG s226 — Fase 4: the real floor of this object (top of any OTHER object it
+    // rests on), object-local, per object-layer. Empty unless Gravity is active → zero cost.
+    // Computed once here (single-threaded) so the parallel_for only reads it. OR-ed into
+    // lower_layer_polygons below so a face resting on a neighbour is not flagged as an overhang
+    // needing support — the neighbour's top IS its ground, like the bed. Complements s225 A1
+    // (which stops support from being BUILT inside a neighbour); this stops it being REQUESTED.
+    const std::vector<Polygons> gravity_floor = Gravity::foreign_floor(object);
      // main part of overhang detection can be parallel
     tbb::parallel_for(tbb::blocked_range<size_t>(layer_id_start, num_layers),
         [&](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_id = range.begin(); layer_id < range.end(); layer_id++) {
                 const Layer& layer = *object.layers()[layer_id];
                 Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices);
+                // NEOTKO_GRAVITY_TAG s226 — Fase 4: add the foreign floor under THIS layer, so
+                // detect_overhangs treats it as supported ground (no-op if gravity_floor empty).
+                if (layer_id < gravity_floor.size() && !gravity_floor[layer_id].empty())
+                    append(lower_layer_polygons, gravity_floor[layer_id]);
 
                 overhangs_per_layers[layer_id] = detect_overhangs(layer, layer_id, lower_layer_polygons, *m_print_config, *m_object_config, annotations, m_support_params.gap_xy
 #ifdef SLIC3R_DEBUG
@@ -3177,6 +3194,11 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                                                    scale_(no_overlap_xy_gap);
                         polygons_append(polygons_trimming, offset({ expoly }, trimming_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));
                     }
+                    // NEOTKO_XOBJ_TAG s225 A3 — trim the classic/grid support by the OTHER
+                    // objects too (their body + already-generated support), mapped by the
+                    // same object-layer index i. Empty when PerObject Support is off.
+                    if (i < m_neighbor_occupancy.size() && !m_neighbor_occupancy[i].empty())
+                        polygons_append(polygons_trimming, offset(m_neighbor_occupancy[i], gap_xy_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS));
                 }
                 if (! m_slicing_params.soluble_interface && m_object_config->thick_bridges) {
                     // Collect all bottom surfaces, which will be extruded with a bridging flow.

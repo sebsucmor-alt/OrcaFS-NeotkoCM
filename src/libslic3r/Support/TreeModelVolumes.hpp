@@ -434,6 +434,10 @@ private:
      * \brief The index to access the outline corresponding with the currently processing mesh
      */
     size_t m_current_outline_idx;
+    // NEOTKO_XOBJ_TAG s225 — index of the injected cross-object neighbor group in
+    // m_layer_outlines (npos = none). The neighbor is collision-only: it must never
+    // contribute placable ("rest on model") areas — landing on a neighbor is Mitad B.
+    size_t m_neighbor_outline_idx = std::numeric_limits<size_t>::max();
     /*!
      * \brief The minimum required clearance between the model and the tree branches
      */

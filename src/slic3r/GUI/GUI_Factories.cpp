@@ -909,6 +909,34 @@ wxMenuItem* MenuFactory::append_menu_item_assemble_boolean(wxMenu* menu)
     return item;
 }
 
+// NEOTKO_SNAPDRAG_TAG s227 — "Snap & Drag" check item. Lives in the object context menu (not on
+// the True Objects toolbar button — a right-click-only sub-toggle on that button tested as
+// confusing/undiscoverable) and is only enabled while True Objects is on. GUI-only preference:
+// toggling it never touches PrintConfig and never reschedules a slice.
+// See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §5 (revised placement).
+wxMenuItem* MenuFactory::append_menu_item_snap_drag(wxMenu* menu)
+{
+    wxMenuItem* item = append_menu_check_item(menu, wxID_ANY, _L("Snap & Drag"),
+        _L("While dragging, rest this object on the top surface of whatever real part is "
+           "underneath it (never higher than where you drop it). Requires True Objects."),
+        [](wxCommandEvent&) {
+            auto* ac = wxGetApp().app_config;
+            if (ac == nullptr)
+                return;
+            ac->set_bool("neotko_snap_drag", !ac->get_bool("neotko_snap_drag"));
+            ac->save();
+        }, menu);
+
+    m_parent->Bind(wxEVT_UPDATE_UI, [](wxUpdateUIEvent& evt) {
+        auto* ac = wxGetApp().app_config;
+        const bool grav_on = ac != nullptr && ac->get_bool("neotko_true_objects");
+        evt.Enable(grav_on);
+        evt.Check(grav_on && ac->get_bool("neotko_snap_drag"));
+    }, item->GetId());
+
+    return item;
+}
+
 // NeotkoLIBRE — Copy/Paste Process Settings. "Copy Process Settings" submenu with one entry per
 // block (Speed / Quality / Strength) plus All, and a "Paste Process Settings" item. Appended once
 // (guarded) into the persistent object menu, only while LibreMode is active.
@@ -940,6 +968,22 @@ void MenuFactory::append_menu_items_process_clipboard(wxMenu* menu)
         _L("Apply the copied process settings to the selected object(s)"),
         [](wxCommandEvent&) { plater()->paste_process_settings(); }, "", menu,
         []() { return plater()->has_process_settings_clipboard(); }, m_parent);
+}
+
+// NEOTKO — "Remove Slice Cache": a high-level, always-available manual cache wipe. Replaces the old
+// "Refresh Part" side button with a clearer, more useful escape hatch — it discards every cached
+// slice result and forces a full re-slice from scratch. Appended once (guarded) into the persistent
+// object menu, so re-opening the menu never stacks duplicates.
+void MenuFactory::append_menu_item_remove_slice_cache(wxMenu* menu)
+{
+    if (menu->FindItem(_L("Remove Slice Cache")) != wxNOT_FOUND)
+        return; // already added to this persistent menu
+
+    append_menu_item(menu, wxID_ANY, _L("Remove Slice Cache"),
+        _L("Discard all cached slice results and re-slice from scratch. Use this if the incremental "
+           "slice cache looks stale or wrong."),
+        [](wxCommandEvent&) { plater()->remove_slice_cache(); }, "", menu,
+        []() { return !plater()->model().objects.empty(); }, m_parent);
 }
 
 void MenuFactory::append_menu_item_rename(wxMenu* menu)
@@ -1468,6 +1512,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_per_object_settings(&m_object_menu);
     // NeotkoLIBRE — Assembled Boolean mode (per-object, LibreMode only)
     append_menu_item_assemble_boolean(&m_object_menu);
+    // NEOTKO_SNAPDRAG_TAG s227 — Snap & Drag (only enabled while True Objects is on)
+    append_menu_item_snap_drag(&m_object_menu);
     m_object_menu.AppendSeparator();
     append_menu_item_reload_from_disk(&m_object_menu);
     append_menu_item_replace_with_stl(&m_object_menu);
@@ -1855,6 +1901,8 @@ wxMenu* MenuFactory::object_menu()
     append_menu_item_change_filament(&m_object_menu);
     // NeotkoLIBRE — Copy/Paste Process Settings (by block / All)
     append_menu_items_process_clipboard(&m_object_menu);
+    // NEOTKO — high-level manual cache wipe (replaces the old "Refresh Part" side button)
+    append_menu_item_remove_slice_cache(&m_object_menu);
     return &m_object_menu;
 }
 
@@ -1968,6 +2016,8 @@ wxMenu* MenuFactory::multi_selection_menu()
     }
     // NeotkoLIBRE — Copy/Paste Process Settings across the selected objects
     append_menu_items_process_clipboard(menu);
+    // NEOTKO — high-level manual cache wipe (replaces the old "Refresh Part" side button)
+    append_menu_item_remove_slice_cache(menu);
     return menu;
 }
 

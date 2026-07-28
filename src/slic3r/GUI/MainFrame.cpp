@@ -1647,46 +1647,62 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_btn = new SideButton(this, _L("Print plate"), "");
     m_print_option_btn = new SideButton(this, "", "sidebutton_dropdown", 0, 14);
 
-    // NeotkoLIBRE_START — s133: master-gated LibreMode toggle (the Tier B wall).
+    // NeotkoLIBRE_START — s133/s227: master-gated LibreMode toggle (the Tier B wall).
     // Created ONLY when the master switch (Preferences → Neotko → "Enable Neotko LibreMode")
     // is on. When off, the button is never built/added → Snapmaker sees no LibreMode at all,
     // which fixes the fork bug where the toggle stayed visible regardless of the setting.
+    //
+    // s227 — unified with the former separate "True Objects" button: two ON/OFF toggles that
+    // always moved together in practice were confusing daily-use UX. ONE button now drives both
+    // app_config keys: "neotko_libre_mode" (assembly/UX Tier B behaviour) and "neotko_true_objects"
+    // (per-object Gravity engine: no auto-drop-to-bed, honest bridge detection, cross-object
+    // support avoidance — docs/FUTURE/GRAVITY_MASTER_PLAN.md §6). They stay separate keys
+    // internally (engine code still reads "neotko_true_objects" directly, e.g. GUI_App.cpp,
+    // Plater.cpp, GUI_Factories.cpp Snap & Drag gate) — only the UI surface is merged.
     if (wxGetApp().app_config->get_bool("neotko_libre_enabled")) {
         const bool nlm_on = wxGetApp().app_config->get_bool("neotko_libre_mode");
-        m_neotko_libre_btn = new SideButton(this, nlm_on ? "Neotko LM: On" : "Neotko LM: Off", "");
+        m_neotko_libre_btn = new SideButton(this, nlm_on ? "LibreMode: On" : "LibreMode: Off", "");
+        m_neotko_libre_btn->SetToolTip(_L("Assembly printing, relaxed bed/boundary restrictions and "
+            "extended UX. Also enables True Objects: every part is treated as a real independent body "
+            "for supports (per-object) — objects no longer auto-drop to the bed, a face resting on "
+            "another part prints solid instead of as a false bridge, and supports avoid other parts "
+            "even when they are not assembled. The \"Snap & Drag\" option (right-click an object in "
+            "the scene) rests it on the part underneath while you drag it."));
         m_neotko_libre_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             const bool next = !wxGetApp().app_config->get_bool("neotko_libre_mode");
             wxGetApp().app_config->set_bool("neotko_libre_mode", next);
+            wxGetApp().app_config->set_bool("neotko_true_objects", next);
             wxGetApp().app_config->save();
             // NeotkoLIBRE — s133: update the slice-time cache BEFORE any reslice, then detach/redock
             // the Process panel. (No bridge-infill behaviour — only the floating/boundary relax.)
             if (m_plater) {
                 m_plater->set_neotko_libre_cached(next);
                 m_plater->float_params_panel(next);
+                // s227 — reschedule so the True Objects config diff (mirrored at
+                // Plater::update_background_process) fires the posPrepareInfill/posSupportMaterial
+                // invalidation, same as the old dedicated Gravity button used to do.
+                m_plater->schedule_background_process();
             }
-            m_neotko_libre_btn->SetLabel(next ? "Neotko LM: On" : "Neotko LM: Off");
+            m_neotko_libre_btn->SetLabel(next ? "LibreMode: On" : "LibreMode: Off");
             m_neotko_libre_btn->Refresh();
-            // NeotkoLIBRE — Assembled Parts Full Options: show/hide the "Refresh Part" button with LM.
-            if (m_neotko_refresh_btn)
-                m_neotko_refresh_btn->Show(next);
         });
-
-        // NeotkoLIBRE — "↺ Refresh Part": pushes the selected Part's ObjectConfig overrides to its
-        // parent Object, then reschedules slicing. Visible only in LibreMode; no-op if no Part tab.
-        m_neotko_refresh_btn = new SideButton(this, "↺ Refresh Part", "");
-        m_neotko_refresh_btn->SetToolTip(_L("Copies ObjectConfig overrides (e.g. XY compensation) from the "
-                                            "selected Part to its parent Object, then reschedules slicing."));
-        m_neotko_refresh_btn->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
-            auto* part_tab = dynamic_cast<TabPrintPart*>(wxGetApp().get_model_tab(true));
-            if (part_tab)
-                part_tab->refresh_part_object_config();
-        });
-        m_neotko_refresh_btn->Show(nlm_on);
     } else {
         // Master off → force the runtime active state off so any (future) behavior gates that
         // read "neotko_libre_mode" stay inert even if the key was left true from a prior session.
         if (wxGetApp().app_config->get_bool("neotko_libre_mode")) {
             wxGetApp().app_config->set_bool("neotko_libre_mode", false);
+            wxGetApp().app_config->save();
+        }
+        // NEOTKO_GRAVITY_TAG s226 — same for True Objects: master wall off → force the toggle off
+        // so its engine gate stays inert even if the key lingered true from a prior session.
+        if (wxGetApp().app_config->get_bool("neotko_true_objects")) {
+            wxGetApp().app_config->set_bool("neotko_true_objects", false);
+            wxGetApp().app_config->save();
+        }
+        // NEOTKO_SNAPDRAG_TAG s227 — same wall for the sub-option: master off must neutralise it
+        // too, even though its own gate already checks gravity_allow_free_z() first.
+        if (wxGetApp().app_config->get_bool("neotko_snap_drag")) {
+            wxGetApp().app_config->set_bool("neotko_snap_drag", false);
             wxGetApp().app_config->save();
         }
     }
@@ -1698,11 +1714,10 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_option_btn->Enable();
     // sizer->Add(m_publish_btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(1));
     // sizer->Add(FromDIP(15), 0, 0, 0, 0);
-    // NeotkoLIBRE_START — s133: add the toggle to the top bar only when it exists (master on).
+    // NeotkoLIBRE_START — s133/s227: add the unified LibreMode toggle to the top bar only when it
+    // exists (master on). The former separate "True Objects" button was merged into this one.
     if (m_neotko_libre_btn)
         sizer->Add(m_neotko_libre_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
-    if (m_neotko_refresh_btn)
-        sizer->Add(m_neotko_refresh_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
     // NeotkoLIBRE_END
     sizer->Add(m_slice_option_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     sizer->Add(m_slice_btn       , 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(15));

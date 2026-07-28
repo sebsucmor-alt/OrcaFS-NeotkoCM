@@ -11,6 +11,7 @@
 
 #include "../BuildVolume.hpp"
 #include "../ClipperUtils.hpp"
+#include "../InstanceContact.hpp" // NEOTKO_XOBJ_TAG s225 — cross-object occupancy (A1)
 #include "../Flow.hpp"
 #include "../Layer.hpp"
 #include "../Point.hpp"
@@ -114,6 +115,26 @@ TreeModelVolumes::TreeModelVolumes(
             for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx)
                 outlines[layer_idx] = polygons_simplify(to_polygons(print_object.get_layer(layer_idx - num_raft_layers)->lslices), mesh_settings.resolution, polygons_strictly_simple);
         });
+
+        // NEOTKO_XOBJ_TAG s225 — A1 cross-object avoidance: the other objects' instances
+        // enter as an extra outline group. calculateCollision already iterates every group
+        // applying its own support_xy_distance, so the neighbors get the standard
+        // support/object gap and every derived avoidance inherits the obstacle for free.
+        // The occupancy is already resampled to this object's layer grid (real Z ranges);
+        // mirror the raft prefix so both groups share indices.
+        if (std::vector<Polygons> neighbors = InstanceContact::neighbor_occupancy(print_object); !neighbors.empty()) {
+            TreeSupportMeshGroupSettings neighbor_settings = mesh_settings;
+            // Keep m_support_rests_on_model driven by the REAL object only — landing on the
+            // neighbor is Mitad B, explicitly not part of A1.
+            neighbor_settings.support_material_buildplate_only = true;
+            m_neighbor_outline_idx = m_layer_outlines.size();
+            m_layer_outlines.emplace_back(std::move(neighbor_settings), std::vector<Polygons>{});
+            std::vector<Polygons> &neighbor_outlines = m_layer_outlines.back().second;
+            neighbor_outlines.assign(num_layers, Polygons{});
+            for (size_t layer_idx = num_raft_layers; layer_idx < num_layers; ++ layer_idx)
+                if (size_t src = layer_idx - num_raft_layers; src < neighbors.size())
+                    neighbor_outlines[layer_idx] = std::move(neighbors[src]);
+        }
     }
 #endif
 
@@ -432,8 +453,20 @@ void TreeModelVolumes::calculateCollision(const coord_t radius, const LayerIndex
     if (calculate_placable)
         data_placeable.allocate(data.begin(), data.end());
 
+    // NEOTKO_XOBJ_TAG s225 — pre-existing bug fix: processing_last_mesh compared the
+    // outline INDEX against layer_outline_indices.size(), which is never true (the index
+    // is a value 0..n-1), so the last-mesh finalize (final union + simplify + merging
+    // m_anti_overhang, i.e. the support blockers, into the collision) never ran. Resolve
+    // the actually-last processed (non-empty) group up front instead.
+    size_t last_processed_outline_idx = std::numeric_limits<size_t>::max();
+    for (size_t outline_idx : layer_outline_indices)
+        if (! m_layer_outlines[outline_idx].second.empty())
+            last_processed_outline_idx = outline_idx;
+
     for (size_t outline_idx : layer_outline_indices)
         if (const std::vector<Polygons> &outlines = m_layer_outlines[outline_idx].second; ! outlines.empty()) {
+            // NEOTKO_XOBJ_TAG s225 — the injected cross-object group is collision-only.
+            const bool neighbor_group = outline_idx == m_neighbor_outline_idx;
             const TreeSupportMeshGroupSettings  &settings = m_layer_outlines[outline_idx].first;
             const coord_t       layer_height              = settings.layer_height;
             const int           z_distance_bottom_layers  = int(round(double(settings.support_bottom_distance) / double(layer_height)));
@@ -469,7 +502,7 @@ void TreeModelVolumes::calculateCollision(const coord_t radius, const LayerIndex
             });
 
             // 2) Sum over top / bottom ranges.
-            const bool processing_last_mesh = outline_idx == layer_outline_indices.size();
+            const bool processing_last_mesh = outline_idx == last_processed_outline_idx; // NEOTKO_XOBJ_TAG s225 — see fix note above
             tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
                 [&collision_areas_offsetted, &outlines, &machine_border = m_machine_border, &anti_overhang = m_anti_overhang, radius, 
                     xy_distance, z_distance_bottom_layers, z_distance_top_layers, min_resolution = m_min_resolution, &data, processing_last_mesh, &throw_on_cancel]
@@ -536,7 +569,7 @@ void TreeModelVolumes::calculateCollision(const coord_t radius, const LayerIndex
             if (calculate_placable) {
                 // Now calculate the placable areas.
                 tbb::parallel_for(tbb::blocked_range<LayerIndex>(std::max(z_distance_bottom_layers + 1, data.begin()), data.end()),
-                    [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, processing_last_mesh,
+                    [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, processing_last_mesh, neighbor_group,
                      min_resolution = m_min_resolution, z_distance_bottom_layers, xy_distance, &data_placeable, &throw_on_cancel]
                 (const tbb::blocked_range<LayerIndex>& range) {
                     for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
@@ -544,9 +577,12 @@ void TreeModelVolumes::calculateCollision(const coord_t radius, const LayerIndex
                         assert(layer_idx_below >= 0);
                         const Polygons &current = collision_areas_offsetted[layer_idx];
                         const Polygons &below   = outlines[layer_idx_below];
-                        Polygons placable = diff(
+                        // NEOTKO_XOBJ_TAG s225 — the cross-object group contributes NO
+                        // placable area (landing on a neighbor is Mitad B, not A1), but the
+                        // finalize path below must still run in case it is the last group.
+                        Polygons placable = neighbor_group ? Polygons{} : diff(
                             // Inflate the surface to sit on by the separation distance to increase chance of a support being placed on a sloped surface.
-                            offset(below, xy_distance), 
+                            offset(below, xy_distance),
                             layer_idx_below < int(anti_overhang.size()) ? union_(current, anti_overhang[layer_idx_below]) : current);
                         auto &dst     = data_placeable[layer_idx];
                         if (processing_last_mesh) {

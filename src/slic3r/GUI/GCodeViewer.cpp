@@ -804,6 +804,8 @@ GCodeViewer::~GCodeViewer()
     destroy_realcolor_fbos();
     // NEOTKO_REALCOLOR_TAG s166 (item 4): same idiom for the shells AO G-buffer.
     destroy_shells_ao_fbo();
+    // NEOTKO_SHADOW_TAG s229 (Fase 2): same idiom for the directional shadow map.
+    destroy_shadow_map_fbo();
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): same idiom for the procedural env textures.
     destroy_realcolor_env_textures();
     if (m_moves_slider) {
@@ -4208,6 +4210,35 @@ static constexpr float SHELLS_AO_RADIUS_PX = 6.0f;
 static constexpr float SHELLS_AO_STRENGTH = 0.35f;
 static const ColorRGBA SHELLS_SHADOW_COLOR = ColorRGBA(0.f, 0.f, 0.f, 0.25f);
 
+// NEOTKO_SHADOW_TAG s229 — realistic cast shadows, see
+// docs/FUTURE/SHADOWS_REALISTIC_CAST_RESEARCH.md. Constants in C++ first, same pattern as the AO
+// above; if they end up needing fine iteration the "RealColor Tuning" panel is the established
+// place for live sliders (with s165's lesson: plain-language labels, not graphics-engine jargon).
+//
+// Fase 1 — screen-space contact shadows (SSCS). Marched through the existing shells G-buffer, so
+// the range is deliberately short: this is the "part resting on part" term, not the long cast.
+static constexpr float SHELLS_SSCS_LENGTH_MM    = 6.0f;
+static constexpr float SHELLS_SSCS_THICKNESS_MM = 4.0f;
+static constexpr float SHELLS_SSCS_STRENGTH     = 0.5f;
+
+// Fase 2 — directional shadow map. The world-space key light direction is LIGHT_TOP_DIR, the same
+// constant every lighting shader in the project uses AND the same one shells_shadow.vs already
+// projects the bed contact shadow along — so the new object shadow agrees with the old bed shadow
+// instead of contradicting it (config C3 of the study §2: the Phong stays camera-attached, only the
+// shadow gets a fixed world light).
+static const Vec3d SHADOW_LIGHT_WORLD_DIR = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
+static constexpr int   SHADOW_MAP_RES = 2048;
+static constexpr float SHADOW_MAP_STRENGTH = 0.55f;
+// Slope-scaled depth bias, in normalized [0,1] depth units of the light's ortho frustum.
+static constexpr float SHADOW_BIAS_MIN = 0.0006f;
+static constexpr float SHADOW_BIAS_MAX = 0.0035f;
+// Normal-offset bias expressed in shadow-map texels (converted to world mm per frame, once the
+// ortho extent is known) — the robust half of the acne fix, see shells_lit.vs.
+static constexpr float SHADOW_MAP_NORMAL_OFFSET_TEXELS = 1.5f;
+// Padding added around the scene bbox when fitting the light frustum, so a caster sitting exactly
+// on the boundary doesn't get clipped out of the map.
+static constexpr double SHADOW_FIT_MARGIN_MM = 5.0;
+
 // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
 // procedural equirect environment texture sizes. Mirror stays sharp (used for the specular/rim
 // reflection); irradiance is deliberately tiny — every one of its texels is itself an average of
@@ -5706,6 +5737,213 @@ void GCodeViewer::destroy_shells_ao_fbo()
     m_shells_ao_cache = ShellsAOCache{};
 }
 
+// NEOTKO_SHADOW_TAG s229 (Fase 2): depth-only FBO for the directional shadow map. Structurally the
+// same as ensure_shells_ao_fbo above minus the color attachment — glDrawBuffer(GL_NONE) plus a
+// depth-only attachment is a complete framebuffer, and this codebase already proved (s166) that a
+// GL_DEPTH_COMPONENT24 *texture* attachment works on the legacy Mac profile.
+// GL_TEXTURE_COMPARE_MODE is left at its GL_NONE default on purpose: shells_lit.fs samples this as
+// an ordinary texture and compares by hand, so the 110 variant needs neither sampler2DShadow nor
+// ARB_shadow (see that shader's own note).
+bool GCodeViewer::ensure_shadow_map_fbo(int res)
+{
+    if (res <= 0)
+        return false;
+
+    if (m_shadow_map_cache.gl_objects_created() && m_shadow_map_cache.res == res)
+        return true;
+
+    destroy_shadow_map_fbo();
+
+    glsafe(::glGenFramebuffers(1, &m_shadow_map_cache.fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map_cache.fbo));
+
+    glsafe(::glGenTextures(1, &m_shadow_map_cache.depth_tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_cache.depth_tex));
+    // GL_NEAREST: the 3x3 PCF in shells_lit.fs does the softening. GL_LINEAR here would blend raw
+    // depth values, which is meaningless for a manual comparison.
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    // CLAMP_TO_EDGE + the explicit uv range check in the shader: a fragment outside the light
+    // frustum must read as LIT, never as shadowed.
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, res, res, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadow_map_cache.depth_tex, 0));
+
+    glsafe(::glDrawBuffer(GL_NONE));
+    glsafe(::glReadBuffer(GL_NONE));
+
+    const GLenum status = ::glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        BOOST_LOG_TRIVIAL(error) << "GCodeViewer::ensure_shadow_map_fbo: incomplete, status=0x" << std::hex << status << std::dec;
+        NeoDebug::write(NeoDebug::REALCOLOR, std::string("ensure_shadow_map_fbo(") + std::to_string(res) + "): INCOMPLETE status=" + std::to_string((int)status));
+        destroy_shadow_map_fbo();
+        return false;
+    }
+
+    m_shadow_map_cache.res = res;
+    NeoDebug::write(NeoDebug::REALCOLOR, std::string("ensure_shadow_map_fbo(") + std::to_string(res) + "): ok");
+    return true;
+}
+
+void GCodeViewer::destroy_shadow_map_fbo()
+{
+    if (m_shadow_map_cache.depth_tex) glsafe(::glDeleteTextures(1, &m_shadow_map_cache.depth_tex));
+    if (m_shadow_map_cache.fbo)       glsafe(::glDeleteFramebuffers(1, &m_shadow_map_cache.fbo));
+    m_shadow_map_cache = ShadowMapCache{};
+}
+
+// NEOTKO_SHADOW_TAG s229 (Fase 2): render the scene depth-only from the light, into the shadow map.
+//
+// Regenerated EVERY frame on purpose. Caching on "did the geometry move" would be a real win (the
+// map is camera-independent, so orbiting alone never invalidates it) but a stale shadow after a
+// missed invalidation is a far worse bug than one extra depth-only draw — and the user already
+// accepted the SSAO's cost. Noted as a future optimization in the study, not done here.
+bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
+                                    const std::function<bool(const GLVolume&)>& filter, bool partly_inside_enable)
+{
+    GLShaderProgram* depth_shader = wxGetApp().get_shader("shadow_depth");
+    if (depth_shader == nullptr)
+        return false;
+
+    // Capture the caller's framebuffer BEFORE ensure_shadow_map_fbo(), not after: on the frame that
+    // actually creates the FBO, ensure_*() leaves GL_FRAMEBUFFER bound to 0 (it does its own
+    // completeness check and unbinds), so reading the binding afterwards would restore 0 instead of
+    // whatever the caller had — exactly the class of bug s228 hit in render_volumes_lit.
+    GLint caller_fbo = 0;
+    glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
+
+    if (!ensure_shadow_map_fbo(SHADOW_MAP_RES))
+        return false;
+
+    // --- world bounding box of everything that could cast. Deliberately every volume in the
+    // collection, ignoring `filter`/`type`: a superset can only ever make the light frustum larger,
+    // never drop a caster. Same "never under-cover the occluders" reasoning as the G-buffer pass
+    // using ERenderType::All.
+    BoundingBoxf3 bbox;
+    for (const GLVolume* v : volumes.volumes) {
+        if (v == nullptr || v->is_modifier)
+            continue;
+        bbox.merge(v->transformed_bounding_box());
+    }
+    if (!bbox.defined || bbox.size().norm() < EPSILON)
+        return false;
+    bbox.offset(SHADOW_FIT_MARGIN_MM);
+
+    // --- light "camera": right-handed look-at mirroring Camera::look_at (Camera.cpp) so the depth
+    // convention matches the rest of the project. Because the projection is orthographic, the eye's
+    // distance along the light axis is irrelevant — near/far are derived from the transformed bbox
+    // below, so any position outside the scene works.
+    const Vec3d center = bbox.center();
+    const double radius = 0.5 * bbox.size().norm();
+    const Vec3d eye = center + SHADOW_LIGHT_WORLD_DIR * (2.0 * radius);
+    // LIGHT_TOP_DIR sits ~40 deg off world Z, so UnitZ is a safe up vector; the guard is only for
+    // the day someone re-aims the light straight down.
+    const Vec3d up = (std::abs(SHADOW_LIGHT_WORLD_DIR.dot(Vec3d::UnitZ())) > 0.99) ? Vec3d::UnitY() : Vec3d::UnitZ();
+
+    const Vec3d unit_z = (eye - center).normalized();
+    const Vec3d unit_x = up.cross(unit_z).normalized();
+    const Vec3d unit_y = unit_z.cross(unit_x).normalized();
+
+    Transform3d light_view = Transform3d::Identity();
+    light_view.matrix().row(0) << unit_x.x(), unit_x.y(), unit_x.z(), -unit_x.dot(eye);
+    light_view.matrix().row(1) << unit_y.x(), unit_y.y(), unit_y.z(), -unit_y.dot(eye);
+    light_view.matrix().row(2) << unit_z.x(), unit_z.y(), unit_z.z(), -unit_z.dot(eye);
+    light_view.matrix().row(3) << 0.0, 0.0, 0.0, 1.0;
+
+    // --- fit the ortho box to the bbox expressed in light-view space. Seeded from corner 0 rather
+    // than from numeric_limits so this file needs no extra <limits> include.
+    Vec3d lv_min = light_view * bbox.min;
+    Vec3d lv_max = lv_min;
+    for (int i = 1; i < 8; ++i) {
+        const Vec3d corner(((i & 1) ? bbox.max : bbox.min).x(),
+                           ((i & 2) ? bbox.max : bbox.min).y(),
+                           ((i & 4) ? bbox.max : bbox.min).z());
+        const Vec3d p = light_view * corner;
+        lv_min = lv_min.cwiseMin(p);
+        lv_max = lv_max.cwiseMax(p);
+    }
+
+    const double l = lv_min.x(), r = lv_max.x();
+    const double b = lv_min.y(), t = lv_max.y();
+    // Camera looks down -Z, so points in front have negative z: the closest corner is lv_max.z.
+    const double n = -lv_max.z() - SHADOW_FIT_MARGIN_MM;
+    const double f = -lv_min.z() + SHADOW_FIT_MARGIN_MM;
+    if (r - l < EPSILON || t - b < EPSILON || f - n < EPSILON)
+        return false;
+
+    Transform3d light_proj = Transform3d::Identity();
+    light_proj.matrix() << 2.0 / (r - l), 0.0,            0.0,            -(r + l) / (r - l),
+                           0.0,           2.0 / (t - b),  0.0,            -(t + b) / (t - b),
+                           0.0,           0.0,           -2.0 / (f - n),  -(f + n) / (f - n),
+                           0.0,           0.0,            0.0,             1.0;
+
+    // ⚠️ s227 lesson (the Align & Stack projection bug): NEVER build a projection*view product as
+    // `Transform3d * Transform3d` — Eigen takes the affine fast path and silently drops the
+    // projection's bottom row. Multiply the raw 4x4s instead (same pattern as GLGizmoMeasure.cpp).
+    // An orthographic projection IS affine, so the shortcut would happen to be correct here; doing
+    // it properly anyway means a future perspective/spot light can't reintroduce that bug.
+    m_shadow_light_proj_view = light_proj.matrix() * light_view.matrix();
+    // World size of one shadow texel — drives the normal-offset bias in shells_lit.vs. Uses the
+    // larger extent so the bias is sized for the coarsest direction.
+    m_shadow_texel_world_mm = (float)(std::max(r - l, t - b) / (double)SHADOW_MAP_RES);
+
+    // --- depth-only draw from the light.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map_cache.fbo));
+    glsafe(::glViewport(0, 0, m_shadow_map_cache.res, m_shadow_map_cache.res));
+    glsafe(::glClearDepth(1.0));
+    glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthFunc(GL_LESS));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glDisable(GL_BLEND));
+
+    // Two things render() does for the CAMERA pass that must not happen in a depth-only pass:
+    //
+    // 1. render_sinking_contours() draws with glDepthFunc(GL_ALWAYS) (3DScene.cpp:1019-1031), which
+    //    would stamp garbage depth into the map and produce phantom shadows.
+    // 2. A `selected` volume goes through GLVolume::render_with_outline() instead of render()
+    //    (3DScene.cpp:1005-1008). That function generates AND destroys a canvas-sized FBO + depth
+    //    texture on the spot, re-renders the mesh into it, and sets is_outline/depth_tex uniforms —
+    //    all of it pure waste here (we only need depth), and its scratch FBO is canvas-sized while
+    //    our viewport is SHADOW_MAP_RES², so it would also render at the wrong scale. Clearing the
+    //    `selected` bits for the duration routes every volume through the plain render() path.
+    //    Safe because the only other things `selected` affects inside render() are set_render_color()
+    //    (colour is irrelevant to a depth pass) and the Opaque draw ORDER (irrelevant too).
+    //
+    // Both are restored immediately after the draw.
+    const bool saved_sinking_contours = volumes.is_show_sinking_contours();
+    volumes.set_show_sinking_contours(false);
+    std::vector<unsigned char> saved_selected(volumes.volumes.size(), 0);
+    for (size_t i = 0; i < volumes.volumes.size(); ++i) {
+        GLVolume* v = volumes.volumes[i];
+        if (v == nullptr)
+            continue;
+        saved_selected[i] = v->selected ? 1 : 0;
+        v->selected = false;
+    }
+
+    depth_shader->start_using();
+    // The whole reason no engine change is needed: render() takes view/projection as parameters, so
+    // handing it the light's matrices makes every volume land in light clip space. ERenderType::All
+    // for the same superset reasoning as the bbox above — a caster must never be missing from the map
+    // just because it happens to be transparent in the camera pass.
+    volumes.render(GLVolumeCollection::ERenderType::All, false, light_view, light_proj,
+                   { m_shadow_map_cache.res, m_shadow_map_cache.res }, filter, partly_inside_enable);
+    depth_shader->stop_using();
+
+    volumes.set_show_sinking_contours(saved_sinking_contours);
+    for (size_t i = 0; i < volumes.volumes.size(); ++i) {
+        GLVolume* v = volumes.volumes[i];
+        if (v != nullptr)
+            v->selected = saved_selected[i] != 0;
+    }
+
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
+    return true;
+}
+
 void GCodeViewer::render_shells(int canvas_width, int canvas_height)
 {
     //BBS: add shell previewing logic
@@ -5715,12 +5953,13 @@ void GCodeViewer::render_shells(int canvas_width, int canvas_height)
 
     const Camera& camera = wxGetApp().plater()->get_camera();
 
-    // NEOTKO_REALCOLOR_TAG s166 (item 4): Phong+fresnel+SSAO(+shadow) path — gated behind the
-    // same debug channel as the RealColor Tuning panel (see 07_LIGHTING_SSAO_SHELLS_PLAN.md
-    // item 4.4: this function runs for EVERY EViewType, not just RealColor, so its default
-    // look must not change without the user confirming it visually first). Falls through to
-    // the original plain gouraud_light path below on any missing shader/FBO.
-    if (NeoDebug::enabled(NeoDebug::REALCOLOR) && render_shells_lit(canvas_width, canvas_height, camera))
+    // NEOTKO_REALCOLOR_TAG s166 (item 4), promoted to LibreMode s227: Phong+fresnel+SSAO(+shadow)
+    // path — see 07_LIGHTING_SSAO_SHELLS_PLAN.md item 4.4: this function runs for EVERY EViewType,
+    // not just RealColor, so its default look must not change without the user confirming it
+    // visually first. Gated on app_config "neotko_libre_mode" (real user feature, not a NeoDebug
+    // channel — see docs/LIBREMODE.md §5). Falls through to the original plain gouraud_light path
+    // below on any missing shader/FBO.
+    if (wxGetApp().app_config->get_bool("neotko_libre_mode") && render_shells_lit(canvas_width, canvas_height, camera))
         return;
 
     GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
@@ -5748,19 +5987,60 @@ void GCodeViewer::render_shells(int canvas_width, int canvas_height)
 // MRT-adjacent GL path.
 bool GCodeViewer::render_shells_lit(int canvas_width, int canvas_height, const Camera& camera)
 {
+    return render_volumes_lit(m_shells.volumes, GLVolumeCollection::ERenderType::Transparent, /*depth_mask*/false, /*with_shadow*/true,
+                               canvas_width, canvas_height, camera);
+}
+
+// NEOTKO_REALCOLOR_TAG s166 (item 4), promoted to LibreMode s228: Phong+fresnel+SSAO(+shadow)
+// pipeline generalized over an arbitrary GLVolumeCollection/ERenderType/filter — originally
+// hardcoded to m_shells.volumes+Transparent for the Preview shells path (render_shells_lit above
+// is now a thin wrapper over this), now also reused by GLCanvas3D::_render_objects() against the
+// Prepare tab's m_volumes. Passes over `volumes`: (0) NEOTKO_SHADOW_TAG s229 — a depth-only draw
+// from the light filling the directional shadow map (off-screen, never into the frame);
+// (1) an opaque normal+eye_z G-buffer into m_shells_ao_cache, used both for AO and for the
+// screen-space contact-shadow march; (2) the real lit draw into the caller's framebuffer, sampling
+// both of those per-fragment; (3) optionally the legacy flattened-to-bed contact shadow. Returns
+// false (caller falls back to its normal shader) if a shader failed to load or the FBO came back
+// incomplete — see ensure_shells_ao_fbo's own fallback note on the untested-in-the-wild
+// MRT-adjacent GL path. Pass 0 failing is NOT fatal: it only clears u_shadow_enabled, leaving the
+// AO + contact-shadow look intact.
+bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollection::ERenderType type, bool depth_mask, bool with_shadow,
+                                      int canvas_width, int canvas_height, const Camera& camera,
+                                      const std::function<bool(const GLVolume&)>& filter, bool partly_inside_enable)
+{
     GLShaderProgram* gbuf_shader = wxGetApp().get_shader("shells_gbuffer");
     GLShaderProgram* lit_shader  = wxGetApp().get_shader("shells_lit");
-    if (gbuf_shader == nullptr || lit_shader == nullptr)
+    if (gbuf_shader == nullptr || lit_shader == nullptr) {
+        NeoDebug::write(NeoDebug::REALCOLOR, std::string("render_volumes_lit: shader missing (gbuf=") + (gbuf_shader ? "ok" : "NULL") + " lit=" + (lit_shader ? "ok" : "NULL") + ") -> false");
         return false;
-    if (!ensure_shells_ao_fbo(canvas_width, canvas_height))
+    }
+    if (!ensure_shells_ao_fbo(canvas_width, canvas_height)) {
+        NeoDebug::write(NeoDebug::REALCOLOR, std::string("render_volumes_lit: ensure_shells_ao_fbo(") + std::to_string(canvas_width) + "x" + std::to_string(canvas_height) + ") failed -> false");
         return false;
+    }
+
+    // NEOTKO_LIBREMODE_TAG s228: capture whatever framebuffer the caller had bound BEFORE we
+    // hijack it for pass 1's off-screen G-buffer, and restore THAT (not a hardcoded 0) for pass
+    // 2/shadow. render_shells_lit's Preview caller happens to run against the default FB (0), but
+    // GLCanvas3D's Prepare-tab canvas composites into its own FBO (MSAA/selection overlay) — the
+    // previous hardcoded `glBindFramebuffer(GL_FRAMEBUFFER, 0)` painted pass 2 into the wrong
+    // target there, corrupting the rest of the frame (selection tint, top-face artifacts).
+    GLint caller_fbo = 0;
+    glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
+
+    // --- pass 0 (NEOTKO_SHADOW_TAG s229, Fase 2): real directional shadow map, rendered from the
+    // light. Runs for BOTH callers, unconditionally — unlike the planar `with_shadow` pass below it
+    // has no bed-ordering constraint, because it doesn't draw into the frame at all: it only fills an
+    // off-screen depth texture that pass 2 samples. A false return is not an error, just "no cast
+    // shadow this frame" (u_shadow_enabled=false); AO and SSCS still apply.
+    const bool shadow_map_ok = render_shadow_map(volumes, filter, partly_inside_enable);
 
     // --- pass 1: normal+eye_z G-buffer, single opaque z-tested pass, own depth buffer.
-    // ERenderType::All (not Transparent) — GLVolumeCollection::render() force-enables
+    // ERenderType::All (not `type`) — GLVolumeCollection::render() force-enables
     // GL_BLEND with GL_SRC_ALPHA for ERenderType::Transparent (see 3DScene.cpp), which would
     // corrupt this pass: out_gbuffer.a carries eye_z in real mm, not a [0,1] alpha, so hardware
     // blending against it would produce garbage. All also covers every volume the pass-2
-    // Transparent draw will actually show (superset, never under-covers occluders).
+    // draw will actually show (superset, never under-covers occluders).
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shells_ao_cache.fbo));
     glsafe(::glViewport(0, 0, canvas_width, canvas_height));
     glsafe(::glClearColor(0.5f, 0.5f, 0.5f, -1.0f)); // a=-1 sentinel "no geometry", see shells_gbuffer.fs
@@ -5772,52 +6052,118 @@ bool GCodeViewer::render_shells_lit(int canvas_width, int canvas_height, const C
     glsafe(::glDisable(GL_BLEND));
 
     gbuf_shader->start_using();
-    m_shells.volumes.render(GLVolumeCollection::ERenderType::All, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
+    volumes.render(GLVolumeCollection::ERenderType::All, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height}, filter, partly_inside_enable);
     gbuf_shader->stop_using();
 
-    // --- pass 2: lit shells into the real framebuffer, same ERenderType::Transparent + params
-    // as the original gouraud_light path (visual parity — this shouldn't newly show/hide
-    // anything relative to today, only change shading).
-    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    // --- pass 2: lit draw into the real framebuffer, same ERenderType/filter/params the caller's
+    // normal shader path would have used (visual parity — this shouldn't newly show/hide anything
+    // relative to today, only change shading). depth_mask is caller-controlled: Preview shells
+    // never write depth (they're a translucent overlay under the toolpath); Prepare-tab solid
+    // objects do, like the plain "gouraud" path they replace.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
     glsafe(::glViewport(0, 0, canvas_width, canvas_height));
     glsafe(::glEnable(GL_DEPTH_TEST));
     glsafe(::glDepthFunc(GL_LESS));
-    glsafe(::glDepthMask(GL_FALSE)); // matches original: shells never write depth
+    glsafe(::glDepthMask(depth_mask ? GL_TRUE : GL_FALSE));
 
     lit_shader->start_using();
     lit_shader->set_uniform("emission_factor", 0.1f);
-    glsafe(::glActiveTexture(GL_TEXTURE0));
+    // NEOTKO_LIBREMODE_TAG s228: GL_TEXTURE5, NOT GL_TEXTURE0 — GLVolume::render_with_outline()
+    // (selected-volume silhouette pass, 3DScene.cpp) and the environment-map reflection path both
+    // rebind unit 0 mid-loop inside volumes.render() below, per-volume, with no notion of our
+    // u_gbuffer texture. Sampling from a unit neither of them touches means the selected/env-map
+    // case no longer needs to be special-cased/skipped by the caller (see GLCanvas3D.cpp history).
+    glsafe(::glActiveTexture(GL_TEXTURE5));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_shells_ao_cache.gbuffer_tex));
-    lit_shader->set_uniform("u_gbuffer", 0);
+    lit_shader->set_uniform("u_gbuffer", 5);
     lit_shader->set_uniform("u_viewport", Vec2f((float)canvas_width, (float)canvas_height));
     lit_shader->set_uniform("u_ao_radius", SHELLS_AO_RADIUS_PX);
     lit_shader->set_uniform("u_ao_strength", SHELLS_AO_STRENGTH);
-    m_shells.volumes.render(GLVolumeCollection::ERenderType::Transparent, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
+
+    // NEOTKO_SHADOW_TAG s229 (Fase 1): screen-space contact shadows. No texture of their own — the
+    // march reuses the very G-buffer bound above on GL_TEXTURE5.
+    lit_shader->set_uniform("u_sscs_length_mm", SHELLS_SSCS_LENGTH_MM);
+    lit_shader->set_uniform("u_sscs_thickness_mm", SHELLS_SSCS_THICKNESS_MM);
+    lit_shader->set_uniform("u_sscs_strength", SHELLS_SSCS_STRENGTH);
+
+    // NEOTKO_SHADOW_TAG s229 (Fase 2): shadow map on GL_TEXTURE6 — like the G-buffer's unit 5, a unit
+    // neither render_with_outline() nor the environment-map path touches mid-loop (see the note on
+    // GL_TEXTURE5 above; that lesson from s228 applies identically here).
+    glsafe(::glActiveTexture(GL_TEXTURE6));
+    // Bind something valid even when the map failed: the shader guards every sample behind
+    // u_shadow_enabled, but leaving a sampler pointing at texture 0 is undefined behaviour territory
+    // on some drivers, so point it at the G-buffer (never read in that branch) instead.
+    glsafe(::glBindTexture(GL_TEXTURE_2D, shadow_map_ok ? m_shadow_map_cache.depth_tex : m_shells_ao_cache.gbuffer_tex));
+    lit_shader->set_uniform("u_shadow_map", 6);
+    lit_shader->set_uniform("u_shadow_enabled", shadow_map_ok);
+    if (shadow_map_ok) {
+        const float texel = 1.0f / (float)m_shadow_map_cache.res;
+        lit_shader->set_uniform("u_light_proj_view", m_shadow_light_proj_view);
+        lit_shader->set_uniform("u_shadow_texel", Vec2f(texel, texel));
+        lit_shader->set_uniform("u_shadow_bias_min", SHADOW_BIAS_MIN);
+        lit_shader->set_uniform("u_shadow_bias_max", SHADOW_BIAS_MAX);
+        lit_shader->set_uniform("u_shadow_strength", SHADOW_MAP_STRENGTH);
+        lit_shader->set_uniform("u_shadow_normal_offset_mm", m_shadow_texel_world_mm * SHADOW_MAP_NORMAL_OFFSET_TEXELS);
+    }
+    else {
+        // Keep the vertex stage's bias term at zero so v_shadow_coord stays well-defined even though
+        // nothing will read it.
+        lit_shader->set_uniform("u_shadow_normal_offset_mm", 0.0f);
+    }
+    glsafe(::glActiveTexture(GL_TEXTURE5));
+
+    volumes.render(type, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height}, filter, partly_inside_enable);
     lit_shader->set_uniform("emission_factor", 0.0f);
     lit_shader->stop_using();
+    glsafe(::glActiveTexture(GL_TEXTURE6));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    glsafe(::glActiveTexture(GL_TEXTURE5));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     glsafe(::glActiveTexture(GL_TEXTURE0));
 
-    // --- item 4.3: projected contact shadow — least-confidence sub-item of this whole plan,
-    // see shells_shadow.vs's own comment. Kept last/separate so it's trivial to comment out
-    // without touching the AO path above if it doesn't read well.
-    render_shells_shadow(canvas_width, canvas_height, camera);
+    // --- item 4.3: projected contact shadow — least-confidence sub-item of this whole plan.
+    // Kept last/optional so it's trivial to skip per-caller without touching the AO path above.
+    // IMPORTANT: this depth-TESTS against the bed (see render_volumes_shadow's own comment), so
+    // it must be drawn AFTER the bed is in the depth/color buffer, not bundled unconditionally
+    // into this same call — see render_volumes_shadow's caller-ordering note.
+    if (with_shadow)
+        render_volumes_shadow(volumes, type, canvas_width, canvas_height, camera, filter, partly_inside_enable);
 
     glsafe(::glDepthMask(GL_TRUE));
     return true;
 }
 
-// NEOTKO_REALCOLOR_TAG s166 (item 4.3): flattens shells onto the bed (world z=0) along
-// LIGHT_TOP_DIR and draws a translucent contact shadow, stencil-deduped so overlapping shell
-// silhouettes don't double-darken the same bed pixel. Depth-TESTED (not disabled) so the
-// shadow correctly hides behind any already depth-written geometry (bed/printer model) at that
-// pixel — see shells_shadow.vs for why it needs volume_world_matrix/u_view_matrix kept apart
-// instead of the pre-composed view_model_matrix every other shells shader uses.
-void GCodeViewer::render_shells_shadow(int canvas_width, int canvas_height, const Camera& camera)
+// NEOTKO_LIBREMODE_TAG s228: standalone contact-shadow pass, split out of render_volumes_lit so
+// callers whose bed is drawn AFTER their object pass (GLCanvas3D's Prepare tab: _render_objects
+// runs before _render_bed) can invoke it separately, later in the frame, once the bed is actually
+// in the depth/color buffer for this shadow to test against and blend onto — see the shadow's own
+// depth-TESTED (not disabled) comment below. render_shells_lit's Preview caller doesn't need this
+// split: GCodeViewer::render() already runs after _render_bed there, so it still gets the shadow
+// bundled inline via render_volumes_lit(..., with_shadow=true, ...) above.
+void GCodeViewer::render_volumes_shadow(GLVolumeCollection& volumes, GLVolumeCollection::ERenderType type,
+                                         int canvas_width, int canvas_height, const Camera& camera,
+                                         const std::function<bool(const GLVolume&)>& filter, bool partly_inside_enable)
 {
     GLShaderProgram* shadow_shader = wxGetApp().get_shader("shells_shadow");
     if (shadow_shader == nullptr)
         return;
 
+    // NEOTKO_SHADOW_TAG s229: this planar pass DELIBERATELY survives the Fase 2 shadow map. The map
+    // only darkens fragments drawn by shells_lit, and the printbed is not one of `volumes` — it is
+    // drawn separately with the "printbed" shader — so without this pass the bed would lose its
+    // shadow entirely. The two do not double-darken: this quad sits at world z=0.001 and is
+    // depth-tested, so it only survives where the bed itself is the nearest surface. Both now project
+    // along the same world LIGHT_TOP_DIR, so for the first time the bed shadow and the object shadow
+    // agree on where the light is. Making the bed a real shadow RECEIVER means touching printbed.fs —
+    // logged as the §6 follow-up in docs/FUTURE/SHADOWS_REALISTIC_CAST_RESEARCH.md, not done here.
+    //
+    // NEOTKO_REALCOLOR_TAG s166 (item 4.3): flattens volumes onto the bed (world z=0)
+    // along LIGHT_TOP_DIR and draws a translucent contact shadow, stencil-deduped so
+    // overlapping silhouettes don't double-darken the same bed pixel. Depth-TESTED (not
+    // disabled) so the shadow correctly hides behind any already depth-written geometry
+    // (bed/printer model) at that pixel — see shells_shadow.vs for why it needs
+    // volume_world_matrix/u_view_matrix kept apart instead of the pre-composed
+    // view_model_matrix every other shells shader uses.
     glsafe(::glEnable(GL_STENCIL_TEST));
     glsafe(::glClear(GL_STENCIL_BUFFER_BIT));
     glsafe(::glStencilFunc(GL_NOTEQUAL, 1, 0xFF));
@@ -5825,17 +6171,23 @@ void GCodeViewer::render_shells_shadow(int canvas_width, int canvas_height, cons
     glsafe(::glEnable(GL_DEPTH_TEST));
     glsafe(::glDepthFunc(GL_LESS));
     glsafe(::glDepthMask(GL_FALSE));
+    // Force blending explicitly instead of relying on `type` == Transparent to trigger
+    // render()'s internal auto-blend (3DScene.cpp) — for ERenderType::Opaque callers
+    // (e.g. the Prepare tab) that auto-enable never fires, and this shadow quad must
+    // always alpha-blend against the bed regardless of which volumes it's built from.
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
     shadow_shader->start_using();
     shadow_shader->set_uniform("u_view_matrix", camera.get_view_matrix());
     shadow_shader->set_uniform("u_shadow_color", SHELLS_SHADOW_COLOR);
-    // ERenderType::Transparent — same set of volumes as the lit pass, so the shadow matches
-    // exactly what's actually visible (render() also auto-enables GL_BLEND for this type,
-    // which is what we want here, unlike the G-buffer pass above).
-    m_shells.volumes.render(GLVolumeCollection::ERenderType::Transparent, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height});
+    // Same set of volumes as the lit pass, so the shadow matches exactly what's actually visible.
+    volumes.render(type, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height}, filter, partly_inside_enable);
     shadow_shader->stop_using();
 
+    glsafe(::glDisable(GL_BLEND));
     glsafe(::glDisable(GL_STENCIL_TEST));
+    glsafe(::glDepthMask(GL_TRUE));
 }
 
 //BBS
