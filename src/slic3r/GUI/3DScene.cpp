@@ -7,6 +7,7 @@
 #include "Plater.hpp"
 #include "BitmapCache.hpp"
 #include "Camera.hpp"
+#include "ColorMixPaintPreview.hpp"   // NEOTKO_PROFILE_TAG s233 — color por slot de la pintura ColorMix
 
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -21,12 +22,15 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Tesselate.hpp"
+#include "libslic3r/TriangleSelector.hpp"   // NEOTKO_PROFILE_TAG s233 — partir la malla pintada
 #include "libslic3r/PrintConfig.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <map>
+#include <memory>
 
 #include <boost/log/trivial.hpp>
 
@@ -227,6 +231,7 @@ GLVolume::GLVolume(float r, float g, float b, float a)
     color = {r, g, b, a};
     set_render_color(color);
     mmuseg_ts = 0;
+    cmpaint_ts = 0;   // NEOTKO_PROFILE_TAG s233
 }
 
 // BBS
@@ -518,6 +523,76 @@ void GLVolume::render_with_outline(const GUI::Size& cnv_size)
         glsafe(::glDeleteTextures(1, &depth_tex));
 }
 
+// NEOTKO_PROFILE_TAG_START — s233 F3: parte la malla pintada en los trozos que la vista
+// 3D normal sabe dibujar. Un trozo por ISLA con tejido (cada zona plana pintada tiene su
+// propio degradado, exactamente el criterio del painter) y un trozo por resto — las caras
+// de un slot sin tejido van juntas con el color plano de ese slot, y el índice 0 (sin
+// pintar) se dibuja con el color del volumen, así que la parte no pintada no cambia nada.
+//
+// Es CARO (deserializa el selector y hace union-find por isla), por eso el llamador sólo
+// entra aquí cuando cambia el timestamp de la pintura o la clave de contexto.
+void GLVolume::rebuild_cmpaint_parts(const ModelVolume& mv, const ModelObject& mo) const
+{
+    cmpaint_parts.clear();
+
+    TriangleSelector sel(mv.mesh());
+    sel.deserialize(mv.color_mix_paint_facets.get_data(), false,
+                    static_cast<EnforcerBlockerType>(ModelVolume::COLORMIX_SLOT_COUNT - 1));
+
+    const std::vector<ColorRGBA> slot_cols = GUI::ColorMixPaintPreview::slot_colors(&mv, &mo);
+
+    // Tejido por isla — la MISMA función que alimenta el preview del gizmo.
+    std::unordered_map<int, int>                            facet_weave;
+    std::vector<GUI::ColorMixPaintPreview::WeaveParams>     weaves;
+    GUI::ColorMixPaintPreview::weave_islands_for_volume(&mv, &sel, &mo, facet_weave, weaves);
+
+    auto emit = [this](const indexed_triangle_set& its, const ColorRGBA& col,
+                       const GUI::ColorMixPaintPreview::WeaveParams* w) {
+        if (its.indices.empty())
+            return;
+        auto part = std::make_unique<CMPaintPart>();
+        part->model.init_from(its);
+        part->color = col;
+        if (w) part->weave = *w;
+        cmpaint_parts.emplace_back(std::move(part));
+    };
+
+    // Índice 0 — lo que NO está pintado. Su color es el del volumen y ese cambia por
+    // frame (selección, fuera de plato…), así que no se congela aquí: se marca como base
+    // y el dibujo le pone el render_color del momento.
+    emit(sel.get_facets(EnforcerBlockerType::NONE), render_color, nullptr);
+    if (!cmpaint_parts.empty())
+        cmpaint_parts.back()->is_base = true;
+
+    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
+        std::vector<int> src;   // paralelo a its.indices → índice de faceta original
+        const indexed_triangle_set its = sel.get_facets(static_cast<EnforcerBlockerType>(s), src);
+        if (its.indices.empty())
+            continue;
+        const ColorRGBA flat = (s < (int)slot_cols.size())
+            ? adjust_color_for_rendering(slot_cols[s])
+            : ColorRGBA(0.6f, 0.6f, 0.6f, 1.f);
+
+        // Agrupar por índice de tejido (-1 = sin tejido → color plano del slot).
+        std::map<int, indexed_triangle_set> by_weave;
+        for (size_t k = 0; k < its.indices.size(); ++k) {
+            const auto  it = facet_weave.find(k < src.size() ? src[k] : -1);
+            const int   wi = (it == facet_weave.end()) ? -1 : it->second;
+            indexed_triangle_set& dst = by_weave[wi];
+            stl_triangle_vertex_indices tri;
+            for (int c = 0; c < 3; ++c) {
+                tri[c] = int(dst.vertices.size());
+                dst.vertices.emplace_back(its.vertices[its.indices[k][c]]);
+            }
+            dst.indices.emplace_back(tri);
+        }
+        for (auto& [wi, part_its] : by_weave)
+            emit(part_its, flat,
+                 (wi >= 0 && wi < (int)weaves.size()) ? &weaves[wi] : nullptr);
+    }
+}
+// NEOTKO_PROFILE_TAG_END
+
 // BBS add render for simple case
 void GLVolume::simple_render(GLShaderProgram*        shader,
                              ModelObjectPtrs&        model_objects,
@@ -556,14 +631,119 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
         }
     } while (0);
 
-    if (color_volume && !picking) {
+    // NEOTKO_PROFILE_TAG_START — s233: pintura ColorMix (ColorStitch / PathBlend / Solid)
+    // en la vista 3D normal, sin gizmo. Bloque gemelo del de MMU de arriba.
+    //
+    // s233b — las dos pinturas CONVIVEN en el mismo volumen: el sandwich se dibuja
+    // primero y el MMU encima (con polygon offset, ver el dibujo más abajo), así que
+    // cada uno se ve en SUS caras en vez de que el MMU se lleve el volumen entero. Es
+    // deliberadamente la misma precedencia que tendrá el motor cuando se implemente la
+    // coexistencia por zonas (docs/FUTURE/MMU_SANDWICH_COEXISTENCE_PLAN.md): donde hay
+    // MMU, manda MMU. Hoy el motor aún ignora el MMU en las caras del sandwich, así que
+    // esto ENSEÑA el conflicto en pantalla — que es justo para lo que se quiere.
+    //
+    // El color no sale de la lista de extrusores sino de ColorMixPaintPreview (el mismo
+    // cálculo que el painter), y su caché necesita una clave aparte: el timestamp de
+    // color_mix_paint_facets cubre la geometría pintada, no el color. El early-out por
+    // empty() va lo primero: el objeto sin pintar no paga nada.
+    bool cm_volume = false;
+    do {
+        if ((!printable) || object_idx() >= model_objects.size())
+            break;
+        model_object = model_objects[object_idx()];
+
+        if (volume_idx() >= model_object->volumes.size())
+            break;
+        model_volume = model_object->volumes[volume_idx()];
+        if (model_volume->color_mix_paint_facets.empty())
+            break;
+        if (!GUI::ColorMixPaintPreview::show_outside_gizmo())
+            break;
+
+        // La clave de contexto entra en la condición de reconstrucción, no sólo en el
+        // color: al cambiar un perfil puede cambiar el PARTIDO en islas (otro ángulo,
+        // otro tipo de efecto), no sólo el tono de cada trozo.
+        const uint64_t key = GUI::ColorMixPaintPreview::context_key(model_volume, model_object);
+        if (model_volume->color_mix_paint_facets.timestamp() != cmpaint_ts ||
+            key != cmpaint_color_key || cmpaint_parts.empty()) {
+            rebuild_cmpaint_parts(*model_volume, *model_object);
+            cmpaint_ts        = model_volume->color_mix_paint_facets.timestamp();
+            cmpaint_color_key = key;
+        }
+        // Red de seguridad: sin sub-mallas no habría NADA que dibujar y el objeto
+        // desaparecería. Mejor caer al camino de siempre (un solo color).
+        cm_volume = !cmpaint_parts.empty();
+    } while (0);
+    // NEOTKO_PROFILE_TAG_END
+
+    // NEOTKO_PROFILE_TAG s233b — los dos pintados pueden coincidir en un volumen; se
+    // dibujan los dos, sandwich primero (ver el bloque ColorMix más abajo).
+    const bool _draw_mmu = color_volume && !picking;
+    const bool _draw_cm  = cm_volume    && !picking;
+
+    // NEOTKO_PROFILE_TAG_START — s233: dibujo de la pintura ColorMix, ver la nota del
+    // bloque gemelo de arriba. Índice 0 = SIN pintar → el mismo render_color que se
+    // dibujaría hoy (así la parte no pintada del objeto no cambia ni un pixel);
+    // índice s ≥ 1 → el color compuesto de ese slot.
+    if (_draw_cm) {
+        // Empuja el tejido de este trozo a las uniforms u_weave_* (o lo apaga). Mismo
+        // patrón que TriangleSelectorPatch::render — y como allí, se llama SIEMPRE, para
+        // que el tejido de un trozo no se filtre al siguiente ni al siguiente volumen.
+        // En un shader sin estas uniforms (shells_gbuffer, thumbnail…) no hace nada:
+        // GLShaderProgram::set_uniform ignora los id < 0.
+        auto apply_weave = [&shader](const GUI::ColorMixPaintPreview::WeaveParams* w) {
+            const bool on = w && w->on && !w->cols.empty();
+            shader->set_uniform("u_weave_on", on);
+            if (!on) return;
+            const int n = std::min<int>(64, (int)w->cols.size());
+            shader->set_uniform("u_weave_n", n);
+            shader->set_uniform("u_weave_tile", w->tile);
+            shader->set_uniform("u_weave_angle", w->angle_rad);
+            shader->set_uniform("u_weave_pitch", w->pitch);
+            shader->set_uniform("u_weave_p0", w->p0);
+            for (int i = 0; i < n; ++i) {
+                char nm[24];
+                std::snprintf(nm, sizeof(nm), "u_weave_cols[%d]", i);
+                const ColorRGBA& c = w->cols[i];
+                shader->set_uniform(nm, Vec3f(c.r(), c.g(), c.b()));
+            }
+        };
+
+        for (const std::unique_ptr<CMPaintPart>& part : cmpaint_parts) {
+            if (!part || !part->model.is_initialized())
+                continue;
+
+            ColorRGBA col = part->is_base ? render_color : part->color;
+            // La alfa la manda el volumen (selección, force_transparent, vista en
+            // corte…), nunca el color del trozo.
+            col.a(render_color.a());
+            part->model.set_color(col);
+            if (shader) apply_weave(part->weave.on ? &part->weave : nullptr);
+
+            if (tverts_range == std::make_pair<size_t, size_t>(0, -1))
+                part->model.render();
+            else
+                part->model.render(this->tverts_range);
+        }
+        if (shader) shader->set_uniform("u_weave_on", false);
+    }
+    // NEOTKO_PROFILE_TAG_END
+    if (_draw_mmu) {
         // when force_transparent, we need to keep the alpha
         if (force_native_color && render_color.is_transparent()) {
             for (auto& extruder_color : extruder_colors)
                 extruder_color.a(render_color.a());
         }
 
-        for (int idx = 0; idx < mmuseg_models.size(); idx++) {
+        // s233b — con pintura ColorMix debajo, el MMU dibuja SÓLO sus caras pintadas:
+        // el índice 0 son todas las caras SIN pintar de MMU y taparía el sandwich entero.
+        // El polygon offset lo acerca un pelo a la cámara para que gane el depth test en
+        // las caras que ambos comparten (las dos mallas son coplanares) sin z-fighting.
+        if (_draw_cm) {
+            glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+            glsafe(::glPolygonOffset(-1.0f, -1.0f));
+        }
+        for (int idx = _draw_cm ? 1 : 0; idx < mmuseg_models.size(); idx++) {
             GUI::GLModel& m = mmuseg_models[idx];
             if (!m.is_initialized())
                 continue;
@@ -605,7 +785,10 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
             else
                 m.render(this->tverts_range);
         }
-    } else {
+        if (_draw_cm)
+            glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+    }
+    if (!_draw_mmu && !_draw_cm) {
         if (tverts_range == std::make_pair<size_t, size_t>(0, -1))
             model.render();
         else
@@ -708,7 +891,11 @@ int GLVolumeCollection::load_object_volume(const ModelObject* model_object,
 #if ENABLE_SMOOTH_NORMALS
     v.model.init_from(mesh, true);
 #else
-    v.model.init_from(*mesh);
+    // NEOTKO_SMOOTHNORMALS_TAG s229: routed through init_object_volume_model() so the
+    // "use_smooth_normals" preference decides between flat per-face normals and area-weighted,
+    // crease-aware per-corner ones. Only the shading changes - geometry and raycaster are
+    // untouched, so picking, painting and slicing see exactly the same mesh as before.
+    GUI::init_object_volume_model(v.model, mesh->its);
     if (need_raycaster) {
         v.mesh_raycaster = std::make_unique<GUI::MeshRaycaster>(mesh);
     }

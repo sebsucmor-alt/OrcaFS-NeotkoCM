@@ -12,6 +12,7 @@
 
 #include "OptionsGroup.hpp"
 #include "GLCanvas3D.hpp"
+#include "GravitySnap.hpp" // NEOTKO_SNAPDRAG_TAG s233 — bed_is_floor() default lives there
 #include "Selection.hpp"
 #include "format.hpp"
 //BBS: add partplate related logic
@@ -918,7 +919,9 @@ wxMenuItem* MenuFactory::append_menu_item_snap_drag(wxMenu* menu)
 {
     wxMenuItem* item = append_menu_check_item(menu, wxID_ANY, _L("Snap & Drag"),
         _L("While dragging, rest this object on the top surface of whatever real part is "
-           "underneath it (never higher than where you drop it). Requires True Objects."),
+           "underneath it (never higher than where you drop it). The object hovers just above "
+           "its landing spot while you drag, and the highlighted zone shows the exact surface "
+           "being read as the height. Requires True Objects."),
         [](wxCommandEvent&) {
             auto* ac = wxGetApp().app_config;
             if (ac == nullptr)
@@ -932,6 +935,39 @@ wxMenuItem* MenuFactory::append_menu_item_snap_drag(wxMenu* menu)
         const bool grav_on = ac != nullptr && ac->get_bool("neotko_true_objects");
         evt.Enable(grav_on);
         evt.Check(grav_on && ac->get_bool("neotko_snap_drag"));
+    }, item->GetId());
+
+    return item;
+}
+
+// NEOTKO_SNAPDRAG_TAG s233 — "Allow Bed": with Snap & Drag on, is the build plate a floor too?
+// ON (default) = an object dragged over nothing lands on the bed, like in a normal slicer.
+// OFF = the s227 behaviour, only other objects count and an object over nothing keeps floating,
+// which is what a user doing free assembly work under True Objects may well prefer.
+// Sits right below "Snap & Drag" and is enabled only while that is on — the state that has no
+// meaning ("allow the bed" with no snapping at all) is unreachable.
+// See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_V2_PLAN.md §1.
+wxMenuItem* MenuFactory::append_menu_item_snap_drag_bed(wxMenu* menu)
+{
+    wxMenuItem* item = append_menu_check_item(menu, wxID_ANY, _L("Snap & Drag: Allow Bed"),
+        _L("Count the build plate as a landing surface. On: an object dragged over empty space "
+           "drops to the plate. Off: it stays floating where you drop it, and only other objects "
+           "can catch it."),
+        [](wxCommandEvent&) {
+            auto* ac = wxGetApp().app_config;
+            if (ac == nullptr)
+                return;
+            // Read through GravitySnap so the "absent key means ON" default lives in exactly one
+            // place; the first toggle is what materialises the key in the ini.
+            ac->set_bool("neotko_snap_drag_bed", !GravitySnap::bed_is_floor());
+            ac->save();
+        }, menu);
+
+    m_parent->Bind(wxEVT_UPDATE_UI, [](wxUpdateUIEvent& evt) {
+        auto* ac = wxGetApp().app_config;
+        const bool snap_on = ac != nullptr && ac->get_bool("neotko_true_objects") && ac->get_bool("neotko_snap_drag");
+        evt.Enable(snap_on);
+        evt.Check(snap_on && GravitySnap::bed_is_floor());
     }, item->GetId());
 
     return item;
@@ -1514,6 +1550,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_assemble_boolean(&m_object_menu);
     // NEOTKO_SNAPDRAG_TAG s227 — Snap & Drag (only enabled while True Objects is on)
     append_menu_item_snap_drag(&m_object_menu);
+    // NEOTKO_SNAPDRAG_TAG s233 — ...and its own "Allow Bed" sub-option, right underneath.
+    append_menu_item_snap_drag_bed(&m_object_menu);
     m_object_menu.AppendSeparator();
     append_menu_item_reload_from_disk(&m_object_menu);
     append_menu_item_replace_with_stl(&m_object_menu);

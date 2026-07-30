@@ -57,8 +57,58 @@ varying float color_clip_plane_dot;
 varying vec2 intensity;
 
 varying vec4 world_pos;
+varying vec4 weave_model_pos;   // NEOTKO_PROFILE_TAG s233
 varying float world_normal_z;
 varying vec3 eye_normal;
+varying vec3 eye_pos;   // NEOTKO_SMOOTHNORMALS_TAG s229
+
+// NEOTKO_SMOOTHNORMALS_TAG s229 — diagnostic views, pushed by GLShaderProgram::start_using().
+//   0 = off (normal shading)
+//   1 = eye-space shading normal as RGB
+//   2 = deviation between the shading normal and the true geometric normal of the triangle
+//       (recovered from screen-space derivatives of the eye position), amplified. Green = the
+//       shading normal matches the facet, red = it has been smoothed away from it. On a badly
+//       tessellated flat face this lights up exactly along the sliver triangles.
+uniform int   shading_debug_view;
+uniform float shading_debug_amplify;
+
+
+
+// NEOTKO_PROFILE_TAG s233 — weave/degradado de la pintura ColorMix en la vista 3D
+// NORMAL (fuera del gizmo). Copia literal del bloque que mm_gouraud.fs ya usaba para
+// el preview del painter, para que dentro y fuera se vea EXACTAMENTE lo mismo.
+// Completamente inerte mientras u_weave_on sea false: GLVolume::simple_render lo pone a
+// false antes y después de cada trozo, y ningún otro camino de dibujo lo enciende, así
+// que todo lo que no sea pintura ColorMix se renderiza bit a bit como antes.
+uniform bool  u_weave_on;
+uniform bool  u_weave_tile;       // true = repetir el patrón al ancho de línea real
+uniform int   u_weave_n;          // bandas en la secuencia (<= 64)
+uniform float u_weave_angle;      // radianes — orientación de las bandas
+uniform float u_weave_pitch;      // mm — paso de banda
+uniform float u_weave_p0;         // mm — proyección del borde de la superficie
+uniform vec3  u_weave_cols[64];
+
+vec3 weave_color(vec3 base)
+{
+    if (!u_weave_on || u_weave_n <= 0)
+        return base;
+    float s = sin(u_weave_angle);
+    float c = cos(u_weave_angle);
+    float proj = -weave_model_pos.x * s + weave_model_pos.y * c;
+    float line = floor((proj - u_weave_p0) / max(u_weave_pitch, 0.0001));
+    int   idx;
+    if (u_weave_tile) {
+        float fn = float(u_weave_n);
+        idx = int(line - fn * floor(line / fn));
+    } else {
+        idx = int(line);
+        if (idx < 0)             idx = 0;
+        if (idx > u_weave_n - 1) idx = u_weave_n - 1;
+    }
+    for (int i = 0; i < 64; ++i)
+        if (i == idx) return u_weave_cols[i];
+    return base;
+}
 
 vec3 getBackfaceColor(vec3 fill) {
     float brightness = 0.2126 * fill.r + 0.7152 * fill.g + 0.0722 * fill.b;
@@ -138,6 +188,13 @@ void main()
     else
 	    color = uniform_color;
 
+    // NEOTKO_PROFILE_TAG s233 — pintura ColorMix tejida. Inerte (devuelve color.rgb tal
+    // cual) mientras u_weave_on sea false, que es TODO el resto del tiempo. Va después
+    // del clip-plane a propósito: ese modo pinta con sus propios colores de corte y no
+    // debe llevar tejido.
+    if (!use_color_clip_plane)
+        color.rgb = weave_color(color.rgb);
+
     if (slope.actived) {
          if(world_pos.z<0.1&&world_pos.z>-0.1)
          {
@@ -185,4 +242,18 @@ void main()
 #endif
     else
         gl_FragColor = vec4(vec3(intensity.y) + color.rgb * intensity.x, color.a);
+
+    // NEOTKO_SMOOTHNORMALS_TAG s229: diagnostic overrides, last word on the colour.
+    if (shading_debug_view != 0) {
+        vec3 n = normalize(eye_normal);
+        if (shading_debug_view == 1)
+            gl_FragColor = vec4(n * 0.5 + 0.5, 1.0);
+        else {
+            vec3 g = normalize(cross(dFdx(eye_pos), dFdy(eye_pos)));
+            if (dot(g, n) < 0.0)
+                g = -g;
+            float dev = clamp(length(n - g) * shading_debug_amplify, 0.0, 1.0);
+            gl_FragColor = vec4(dev, 1.0 - dev, 0.0, 1.0);
+        }
+    }
 }

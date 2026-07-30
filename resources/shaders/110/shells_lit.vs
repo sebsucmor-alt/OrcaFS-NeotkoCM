@@ -45,6 +45,7 @@ varying vec3 v_view_pos;
 varying float v_ambient;
 varying vec4  v_shadow_coord;
 varying float v_world_ndotl;
+varying vec4 weave_model_pos;   // NEOTKO_PROFILE_TAG s233 — posición local para el weave
 
 void main()
 {
@@ -67,6 +68,7 @@ void main()
     intensity.y += FRESNEL_STRENGTH * fres;
 
     // NEOTKO_SHADOW_TAG s229 (Fase 2): world-space shadow lookup + normal-offset bias.
+    weave_model_pos = vec4(v_position, 1.0);   // NEOTKO_PROFILE_TAG s233
     vec4 world_pos    = volume_world_matrix * vec4(v_position, 1.0);
     vec3 world_normal = normalize(slope.volume_world_normal_matrix * v_normal);
     v_world_ndotl     = max(dot(world_normal, LIGHT_TOP_DIR), 0.0);

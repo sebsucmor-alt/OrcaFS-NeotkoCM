@@ -1276,6 +1276,12 @@ bool PrintObject::invalidate_state_by_config_options(
                 is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))
                 steps.emplace_back(posPerimeters);
             steps.emplace_back(posPrepareInfill);
+        } else if (opt_key == "bridge_expansion_extra") {
+            // NEOTKO_BRIDGE_TAG — s230: se consume en LayerRegion::process_external_surfaces(),
+            // que corre dentro de posPrepareInfill (PrintObject.cpp:471-624). Cambia QUÉ área
+            // se clasifica como bridge, así que hay que rehacer la preparación del relleno.
+            // No toca perímetros (la expansión come de fill_surfaces, no de las paredes).
+            steps.emplace_back(posPrepareInfill);
         } else if (opt_key == "internal_solid_infill_line_width") {
             // This value is used for calculating perimeter - infill overlap, thus perimeters need to be recalculated.
             steps.emplace_back(posPerimeters);

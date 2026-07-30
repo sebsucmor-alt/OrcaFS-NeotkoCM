@@ -1518,6 +1518,25 @@ int TriangleSelector::num_facets(EnforcerBlockerType state) const
     return cnt;
 }
 
+// NEOTKO_PROFILE_TAG — s235 F5a, ver la nota del .hpp. Suma el área de cada hoja pintada
+// en la faceta original de la que desciende. En malla local del volumen (mm² sin la escala
+// de la instancia): sirve para COMPARAR dos pinturas, no como medida absoluta.
+void TriangleSelector::painted_area_per_source_facet(std::vector<float>& out) const
+{
+    out.assign(m_mesh.its.indices.size(), 0.f);
+    for (const Triangle& tr : m_triangles) {
+        if (!tr.valid() || tr.is_split() || tr.get_state() == EnforcerBlockerType::NONE)
+            continue;
+        const int src = tr.source_triangle;
+        if (src < 0 || src >= (int)out.size())
+            continue;
+        const Vec3f& a = m_vertices[tr.verts_idxs[0]].v;
+        const Vec3f& b = m_vertices[tr.verts_idxs[1]].v;
+        const Vec3f& c = m_vertices[tr.verts_idxs[2]].v;
+        out[src] += 0.5f * (b - a).cross(c - a).norm();
+    }
+}
+
 indexed_triangle_set TriangleSelector::get_facets(EnforcerBlockerType state) const
 {
     indexed_triangle_set out;

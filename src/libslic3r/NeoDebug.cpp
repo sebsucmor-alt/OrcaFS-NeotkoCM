@@ -34,6 +34,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_CONTACT",     "/tmp/neotko_contact.log"     }, // NEOTKO_CONTACT_TAG s224
         { "ORCA_DEBUG_XOBJ",        "/tmp/neotko_xobj.log"        }, // NEOTKO_XOBJ_TAG s225
         { "ORCA_DEBUG_GRAVITY",     "/tmp/neotko_gravity.log"     }, // NEOTKO_GRAVITY_TAG s226
+        { "ORCA_DEBUG_SHADING",     "/tmp/neotko_shading.log"     }, // NEOTKO_SMOOTHNORMALS_TAG s229
     };
 
     bool enabled(Channel c)
@@ -54,6 +55,19 @@ namespace NeoDebug {
             s_checked[idx] = true;
         }
         return s_active[idx];
+    }
+
+    // NEOTKO_SMOOTHNORMALS_TAG s229 — see the header. Only ORCA_DEBUG_RENDER opens the render
+    // tuning panels; ORCA_DEBUG_ALL is intentionally not consulted here.
+    bool render_panels_enabled()
+    {
+        static bool s_checked = false;
+        static bool s_active  = false;
+        if (!s_checked) {
+            s_active  = (std::getenv("ORCA_DEBUG_RENDER") != nullptr);
+            s_checked = true;
+        }
+        return s_active;
     }
 
     void write(Channel c, const std::string& msg)

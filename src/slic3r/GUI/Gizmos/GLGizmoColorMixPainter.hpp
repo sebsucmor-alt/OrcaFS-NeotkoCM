@@ -87,7 +87,12 @@ private:
     int slot_for_selected_profile(bool assign_if_missing);
 
     // Build per-volume ebt color palette from the slot→profile table + manager.
-    std::vector<ColorRGBA> build_ebt_colors_for_volume(const ModelVolume* mv) const;
+    // s231b — `owner`: objeto dueño del volumen. Por defecto (nullptr) es el objeto
+    // ACTIVO, que es lo que asumía todo este bloque; los selectores de preview de los
+    // objetos marcados NO activos necesitan pasar el suyo para que el fondo contra el
+    // que se compone el color sea el de SU objeto y no el del que esté activo.
+    std::vector<ColorRGBA> build_ebt_colors_for_volume(const ModelVolume* mv,
+                                                       const ModelObject* owner = nullptr) const;
 
     // NEOTKO_COLORSTITCH_TAG — per-slot weave preview data (parallel to the ebt
     // colours). For each slot whose profile carries a ColorStitch Top pass, builds
@@ -99,7 +104,8 @@ private:
     // object AABB — so the effect/pattern fits the selection. Null/empty ⇒ AABB fallback.
     std::vector<TriangleSelectorPatch::WeaveParams>
     build_ebt_weave_for_volume(const ModelVolume* mv,
-                               const TriangleSelectorPatch* sel = nullptr) const;
+                               const TriangleSelectorPatch* sel = nullptr,
+                               const ModelObject* owner = nullptr) const;
 
     // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave. Splits each painted slot into connected
     // components (islands = the flat top zones / stair steps, since painting is top-only)
@@ -109,7 +115,8 @@ private:
     void build_ebt_weave_islands_for_volume(const ModelVolume* mv,
                                             const TriangleSelectorPatch* sel,
                                             std::unordered_map<int,int>& facet_weave_idx,
-                                            std::vector<TriangleSelectorPatch::WeaveParams>& weave_list) const;
+                                            std::vector<TriangleSelectorPatch::WeaveParams>& weave_list,
+                                            const ModelObject* owner = nullptr) const;
     bool         m_weave_preview        = true;   // UI toggle "Preview weave"
     mutable bool m_weave_any_auto_angle = false;  // drives the pre-slice angle notice
 
@@ -124,8 +131,11 @@ private:
     // previews against what the object will actually print in instead of a
     // hardcoded black background. Returns false (bg untouched) when there's no
     // selected object or its extruder can't be resolved — callers keep black.
+    // s231b — `mo_override`: ver la nota de build_ebt_colors_for_volume (por defecto,
+    // el objeto activo).
     bool resolve_object_base_bg(const Slic3r::ColorSci::Material mats[4],
-                                float bg_rgb[3]) const;
+                                float bg_rgb[3],
+                                const ModelObject* mo_override = nullptr) const;
     // s169 F3 — ¿el objeto activo tiene "MixedFilament Object" en modo ON? Gate
     // compartido: on_render_input_window lo usa para deshabilitar+banner en
     // Paint/Palette/Pro, y on_set_state para auto-abrir el departamento Object.
@@ -145,6 +155,21 @@ private:
     // (movido desde Pro) + live recipe (pases resueltos por el último apply).
     void render_object_department();
     void render_group_selector();                    // s137b: fila full-width del selector de grupo
+    // s231 F6 — inventario "en uso en ESTE objeto": los slots son el recurso escaso y
+    // hasta ahora sólo se veían en el tooltip de un swatch o en el volcado del
+    // eyedropper AL LOG. Fila por slot ocupado: swatch · nombre · [Use] [Erase].
+    void render_slots_in_use();
+    // s231 F6 — el pincel es GLOBAL (se pinta con cualquier departamento abierto,
+    // ver nota en on_render_input_window) pero sus dos parámetros — ángulo de
+    // smart-fill y plano de corte — vivían SÓLO dentro de Palette. Extraídos aquí
+    // para dibujarlos una vez, fuera del switch de departamentos.
+    void render_brush_and_view(float sliders_left_width, float sliders_width,
+                               float drag_left_width, float slider_icon_width);
+    // s231 F1 — ¿el objeto activo tiene el pintado gobernado por MixedFilament? Gate
+    // compartido por la UI (banner + disabled) y por el CANVAS (on_mouse): sin el
+    // segundo, deshabilitar el panel sólo apagaba los botones y se seguía pintando en
+    // el 3D un objeto cuyo pintado el motor ignora.
+    bool painting_blocked() const;
     // s169 F0 — rejilla (TD) por filamento, extraída de render_pro_mode_panel para
     // que Create/Object (F1/F3) puedan reusarla bajo su propio wrapper (Collapsing
     // Header / card). Self-contained: lee fcolors/nfil por su cuenta.
@@ -180,6 +205,27 @@ private:
     // ¿Hay algún color de trabajo sin guardar? (gobierna la visibilidad del botón.)
     bool has_unsaved_palettes() const;
 
+    // s231 F4 — DUPLICAR. El Pro reescribe EN VIVO el perfil enlazado (s118), así que
+    // "cojo un color guardado y lo varío" destruía el original: no había forma de
+    // derivar sin romper. Estas dos crean una COPIA independiente y la dejan enlazada,
+    // de modo que la edición posterior en Pro cae sobre la copia.
+    //  · duplicate_profile: clona un perfil de la biblioteca (guardado, mismo grupo)
+    //    y devuelve el id nuevo (0 si no se pudo).
+    //  · duplicate_active_as_new: clona el COLOR ACTIVO (venga de donde venga: tira
+    //    generada, perfil guardado o edición Pro sin guardar) a un perfil guardado
+    //    nuevo, lo enlaza y salta a Pro.
+    int  duplicate_profile(int pid);
+    void duplicate_active_as_new();
+    // s231 F0 — punto ÚNICO de invalidación del estado de pintura. El estado activo
+    // vive repartido en 4 campos (recipe / profile_id / slot / resolved) que hasta
+    // ahora se sincronizaban a mano en 8 sitios, y cada uno olvidaba uno distinto —
+    // de ahí el bug s209 ("el swatch sigue activo pero el click no pinta"): la
+    // reconstrucción del selector reseteaba slot+id y dejaba `resolved` a true, así
+    // que ensure_active_slot salía por la puerta rápida devolviendo 0 = NONE.
+    // `keep_recipe` conserva la INTENCIÓN de color (lo que el usuario ve en el
+    // swatch) y sólo tira el enlace/slot, que se re-materializan al pintar.
+    void invalidate_active_binding(bool keep_recipe);
+
     std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_flat;
     std::vector<Slic3r::ColorSci::ColorRecipe> m_pal_gradient;
     // s171 — reemplaza a "Mixed (ColorStitch)" (nukeado: penu-dither+top-solid,
@@ -194,6 +240,12 @@ private:
     int  m_grad_tool_b = 1;
     int  m_cs_tool_a    = 0;        // A/B del ColorStitch Pattern Color (s171)
     int  m_cs_tool_b    = 1;
+    // s231 F5 — qué swatch de qué tira GENERADA está activo, para poder marcarlo
+    // (draw_palette_strip sólo conocía hover: elegir un color del Generator no dejaba
+    // ninguna marca en ninguna parte y el usuario perdía de vista qué estaba usando).
+    // kind: 0 = ninguno, 1 = Gradient ramp, 2 = Flat, 3 = ColorStitch Pattern.
+    int  m_active_pal_kind = 0;
+    int  m_active_pal_idx  = -1;
 
     // Color activo de pintura (capa "auto"). Sin slot hasta que se pinta.
     Slic3r::ColorSci::ColorRecipe m_active_recipe;
@@ -215,10 +267,15 @@ private:
     // profile changes (so editing one profile doesn't bleed into another).
     Slic3r::SurfacePassStack      m_pro_bottom;
     int                           m_pro_bottom_loaded_id = -1;
-    // NEOTKO_BOTTOM_TAG — Pro mode surface discriminator: 0 = Top (shows Top+Penu),
-    // 1 = Bottom (shows Bottom + supported control). VIEW toggle only — all three
-    // stacks persist regardless, so switching never discards authored work. Opens Top.
-    int                           m_pro_surface_mode = 0;
+    // s231 F3 — el write-back live del Pro agendaba un re-slice (y un rebuild completo
+    // del weave, con union-find sobre las facetas pintadas) CADA FRAME mientras se
+    // arrastraba una ratio-bar o un DragFloat: el json cambia en cada frame del drag.
+    // Mismo criterio que ya usaba el TD (IsItemDeactivatedAfterEdit): mientras haya un
+    // widget activo se acumula aquí y se dispara UNA vez al soltar.
+    bool                          m_pro_reslice_pending = false;
+    // NEOTKO_BOTTOM_TAG — s230: el discriminador de superficie Top/Bottom del panel Pro
+    // se retiró (las tres zonas se editan seguidas en un solo sitio), así que
+    // m_pro_surface_mode desapareció con él.
     // Refresh all triangle-selector palettes after profile/slot table changes.
     void refresh_selector_palettes();
 
@@ -232,12 +289,25 @@ private:
     // palette / Save tags the new profile with this group; the Profiles list filters
     // by it. Project-level navigation only — does NOT partition the per-volume slots.
     int  m_active_group       = 1;
+    // s231 F6 — un grupo se DERIVA del sufijo de los nombres (cs_parse_group), así que
+    // un grupo recién creado y todavía vacío no existía para el combo: "+ New group" y
+    // el grupo desaparecía al redibujar. Este hint mantiene vivo el techo durante la
+    // sesión (no persiste: un grupo vacío sigue sin guardarse en el proyecto, que es lo
+    // correcto — sólo deja de evaporarse mientras lo estás llenando).
+    int  m_max_group_hint     = 1;
 
     // s111 — Select mode: set multi-objeto pintable. NEOTKO_COLORSTITCH_TAG.
     bool             m_prev_on     = false;          // estado On previo (m_old_state es privado en la base)
     bool             m_select_mode = false;          // herramienta Select activa
     std::set<int>    m_marked_objects;               // object_idx marcados (set pintable)
-    void set_tool_mode(bool select, bool erase);     // mutuamente excluyentes
+    // s231 F6 — las 5 herramientas son mutuamente excluyentes, pero la exclusión se
+    // reconstruía A MANO en 5 sitios (cada botón apagaba los otros por su cuenta), lo
+    // que ya produjo el bug "Paint y Sticker encendidos a la vez". Un enum + un setter
+    // único: añadir una herramienta nueva ya no puede olvidarse de apagar otra.
+    enum Tool { TOOL_PAINT = 0, TOOL_SELECT, TOOL_ERASER, TOOL_PICK, TOOL_STICKER };
+    void set_tool(Tool t);
+    Tool current_tool() const;
+    void set_tool_mode(bool select, bool erase);     // wrapper legacy sobre set_tool
     void toggle_mark(int object_idx, bool unmark);   // marcar/activar (o desmarcar)
     void switch_active_object(int object_idx);       // activar objeto + RE-APLICAR el color
     void render_tool_row();                          // fila [Select][Paint][Eraser][Pick]
@@ -267,7 +337,12 @@ private:
     bool m_pick_mode = false;                         // herramienta eyedropper
     // picked_slot = slot real de la faceta bajo el cursor (0 si sin pintar) → se
     // enlaza ese perfil; si 0/ inválido, cae al primer slot pintado del objeto.
-    void pick_recipe_from_object(int object_idx, int picked_slot);
+    // s232 — `picked_mesh_id` (índice de volumen model_part del raycast, -1 = no se
+    // sabe): los slots son POR VOLUMEN, así que en un objeto multivolumen (lo que deja
+    // un Assemble) el número de slot solo no identifica un perfil — el slot 1 del
+    // volumen A y el del B son colores distintos. Sin este dato el eyedropper cogía el
+    // primer volumen que tuviera ese número.
+    void pick_recipe_from_object(int object_idx, int picked_slot, int picked_mesh_id = -1);
 
     // NEOTKO_STICKER_TAG — herramienta Sticker: coloca un SVG de 1 color como
     // pegatina plana sobre una cara (sin deformar el mesh), con una receta
@@ -327,6 +402,62 @@ private:
     bool             m_preview_dirty = true;         // rebuild lazy al cambiar marcas/pintura/activo
     void rebuild_preview_selectors_if_dirty();
     void render_marked_paint();                      // dibuja la pintura de los marcados no-activos
+
+    // ------------------------------------------------------------------
+    // s232 — REALCE EN VIEWPORT DEL SLOT ACTIVO (AID visual, mismo lenguaje
+    // que el de Align&Stack s227: geometría con el shader `flat` + chapas
+    // billboard en el ForegroundDrawList de ImGui; CERO cambios en el render
+    // del patch ni en los shaders — la lección de s229 es que tocar shaders
+    // aquí cuesta compilaciones enteras).
+    //
+    // Responde a "¿qué color estoy usando y DÓNDE está aplicado?": dibuja el
+    // CONTORNO de las caras del slot resaltado (borde de la región pintada,
+    // no su malla entera) + la caja AABB de cada isla + una chapa con el
+    // número de slot. El slot resaltado es el que esté bajo el cursor en el
+    // panel (hover de un swatch / de una fila del inventario) y, si no hay
+    // hover, el ACTIVO — así el realce es a la vez "dónde está esto" y
+    // "dónde estoy pintando".
+    // ------------------------------------------------------------------
+    struct SlotHighlightPart {
+        // Por puntero: GLModel libera sus VBOs en el destructor y no declara
+        // copia/movimiento propios, así que un realojo del vector duplicaría los
+        // ids y los liberaría dos veces.
+        // s232 — DOS modelos, no uno: el contorno se pinta con el color de su ZONA
+        // (verde arriba, naranja abajo — los mismos `cs_zone_*` que las chapas del
+        // panel Pro), y eso exige separar las aristas por orientación de la cara que
+        // las posee, porque el color es un uniform por render.
+        std::unique_ptr<GLModel>   edges_top;                         // contorno (caras hacia arriba), frame LOCAL
+        std::unique_ptr<GLModel>   edges_bottom;                      // contorno (caras hacia abajo)
+        Transform3d                trafo{Transform3d::Identity()};    // local → mundo
+        std::vector<BoundingBoxf3> islands;                           // AABB por isla, en MUNDO
+        std::vector<int>           island_facets;                     // paralelo a islands
+        // s232 — zona dominante de la isla: una receta con Top y Bottom pinta las dos
+        // caras, y sin distinguirlas el realce no dice que el color está aplicado
+        // ARRIBA y ABAJO (chapa por encima vs por debajo + marca).
+        std::vector<char>          island_bottom;                     // paralelo a islands
+    };
+    std::vector<SlotHighlightPart> m_hl_parts;
+    GLModel     m_hl_island_box;                   // cubo unitario reusado para las AABB
+    ColorRGBA   m_hl_color{1.f, 1.f, 1.f, 1.f};    // color compuesto del slot resaltado
+    bool        m_slot_highlight = true;           // toggle de UI (Brush & view)
+    bool        m_hl_dirty       = true;
+    int         m_hl_slot_built  = -1;             // slot con el que se construyó m_hl_parts
+    int         m_hl_facets      = 0;              // caras totales resaltadas
+    // Hover del panel: se acumula durante on_render_input_window (m_hover_slot_next)
+    // y se publica al final del mismo, porque el panel se dibuja DESPUÉS del gizmo
+    // en el frame — el realce entra en el frame siguiente (con set_as_dirty).
+    int         m_hover_slot      = 0;
+    int         m_hover_slot_next = 0;
+    // NEOTKO_MMU_COEXIST_TAG s235 F5a — solape con la pintura de MMU del objeto activo,
+    // cacheado: recalcularlo es un deserialize de las dos pinturas y el panel se dibuja cada
+    // frame. La clave son los timestamps de las dos pinturas (ColorMixPaintPreview::overlap_key).
+    ColorMixPaintPreview::CoexistOverlap m_coexist{};
+    uint64_t    m_coexist_key     = 0;
+    int         m_coexist_oid     = -2;
+    void hover_slot(int slot) { if (slot > 0) m_hover_slot_next = slot; }
+    int  highlight_slot() const;
+    void rebuild_slot_highlight_if_dirty();
+    void render_slot_highlight();
 
 public:
     // Consultas para el render del canvas (GLCanvas3D::_render_objects):

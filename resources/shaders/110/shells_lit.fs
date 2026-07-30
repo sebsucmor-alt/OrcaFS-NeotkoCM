@@ -14,6 +14,7 @@ uniform sampler2D u_gbuffer;
 uniform vec2 u_viewport;
 uniform float u_ao_radius;
 uniform float u_ao_strength;
+uniform float u_ao_bias_mm; // NEOTKO_SMOOTHNORMALS_TAG s229
 
 uniform mat4  projection_matrix;
 uniform float u_sscs_length_mm;
@@ -27,26 +28,60 @@ uniform float u_shadow_bias_min;
 uniform float u_shadow_bias_max;
 uniform float u_shadow_strength;
 
+// NEOTKO_SMOOTHNORMALS_TAG s229 — isolate one screen-space term to see what it contributes alone.
+// With LibreMode on this shader, not gouraud, is what draws the user's objects, so this is where
+// camera-dependent noise on flat faces has to be hunted.
+//   0 = off, 1 = AO only, 2 = contact shadows only, 3 = shadow map only, 4 = view normal as RGB
+uniform int u_shading_isolate;
+
+
 varying vec2 intensity;
 varying vec3 v_view_normal;
 varying vec3 v_view_pos;
 varying float v_ambient;
 varying vec4 v_shadow_coord;
 varying float v_world_ndotl;
+varying vec4 weave_model_pos;   // NEOTKO_PROFILE_TAG s233
 
 const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
 
 const float SHELLS_AO_MAX_DELTA_MM = 1.5;
 
-float ao_sample(vec2 center_uv, float center_z, vec3 center_n, vec2 dir)
+// NEOTKO_SMOOTHNORMALS_TAG s229 — tangent-plane rejection.
+//
+// The original test was `delta = center_z - sample_z; if (delta > 0) occlude`, i.e. any neighbour
+// nearer to the camera counted as an occluder. That is only correct when the surface faces the
+// camera. Tilt a large flat face and every sample on its far side is legitimately deeper while
+// lying in the very same plane, so the face permanently self-occludes; the amount is modulated by
+// the per-triangle normals in the G-buffer, which is why the streaks traced the tessellation and
+// crawled with the camera - and why they vanished in exact top view, where a flat face has
+// constant depth and every delta is 0.
+//
+// The fix is to compare against the depth the neighbour would have IF it were coplanar with the
+// centre, instead of against the centre's own depth. The screen-space derivatives of the view
+// depth give that tangent plane exactly, for free, with no matrix inverse: over a plane, view
+// depth is linear in screen space, so the expected depth at a pixel offset is just
+// centre + gradient . offset. A perfectly flat surface now self-occludes zero at any angle, while
+// a real crease or a neighbouring part still reads as an occluder.
+//
+// u_ao_bias_mm then absorbs what is left: G-buffer quantization and the residual curvature of the
+// linear approximation. It is slope-scaled (the same idea as a shadow map's slope-scaled bias),
+// because at grazing angles a one-pixel error in position is worth many millimetres of depth.
+float ao_sample(vec2 center_uv, float center_z, vec3 center_n, vec2 dir, vec2 depth_grad)
 {
-    vec2 s_uv = center_uv + dir * (u_ao_radius / u_viewport);
+    vec2 offset_px = dir * u_ao_radius;
+    vec2 s_uv = center_uv + offset_px / u_viewport;
     vec4 s = texture2D(u_gbuffer, s_uv);
     if (s.a <= 0.0)
         return 0.0;
-    float delta = center_z - s.a;
-    if (delta <= 0.0)
+
+    // Depth this sample would have if it sat on the centre's tangent plane.
+    float expected_z = center_z + dot(depth_grad, offset_px);
+    float bias = max(u_ao_bias_mm, 0.25 * length(depth_grad) * u_ao_radius);
+    float delta = expected_z - s.a;
+    if (delta <= bias)
         return 0.0;
+
     float range_falloff = clamp(1.0 - delta / SHELLS_AO_MAX_DELTA_MM, 0.0, 1.0);
     vec3 s_n = normalize(s.rgb * 2.0 - 1.0);
     float normal_agreement = max(dot(center_n, s_n), 0.0);
@@ -61,15 +96,21 @@ float compute_ao(vec2 uv)
     vec3 center_n = normalize(center.rgb * 2.0 - 1.0);
     float center_z = center.a;
 
+    // NEOTKO_SMOOTHNORMALS_TAG s229: screen-space gradient of this fragment's own view depth, in
+    // mm per pixel. v_view_pos is interpolated per fragment, so these derivatives describe the
+    // real tangent plane of the triangle being shaded - the G-buffer is never asked for it.
+    float vz = -v_view_pos.z;
+    vec2 depth_grad = vec2(dFdx(vz), dFdy(vz));
+
     float occlusion = 0.0;
-    occlusion += ao_sample(uv, center_z, center_n, vec2( 1.0,  0.0));
-    occlusion += ao_sample(uv, center_z, center_n, vec2(-1.0,  0.0));
-    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.0,  1.0));
-    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.0, -1.0));
-    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.7,  0.7));
-    occlusion += ao_sample(uv, center_z, center_n, vec2(-0.7,  0.7));
-    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.7, -0.7));
-    occlusion += ao_sample(uv, center_z, center_n, vec2(-0.7, -0.7));
+    occlusion += ao_sample(uv, center_z, center_n, vec2( 1.0,  0.0), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2(-1.0,  0.0), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.0,  1.0), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.0, -1.0), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.7,  0.7), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2(-0.7,  0.7), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2( 0.7, -0.7), depth_grad);
+    occlusion += ao_sample(uv, center_z, center_n, vec2(-0.7, -0.7), depth_grad);
     occlusion /= 8.0;
     return 1.0 - clamp(occlusion, 0.0, 1.0);
 }
@@ -141,6 +182,42 @@ float shadow_map_visibility()
     return s / 9.0;
 }
 
+
+// NEOTKO_PROFILE_TAG s233 — weave/degradado de la pintura ColorMix en la vista 3D
+// NORMAL (fuera del gizmo), aquí para el camino de LibreMode. Copia literal del bloque
+// que mm_gouraud.fs usa en el preview del painter, para que dentro y fuera se vea lo
+// mismo. Inerte mientras u_weave_on sea false — GLVolume::simple_render lo apaga antes
+// y después de cada trozo, y nadie más lo enciende.
+uniform bool  u_weave_on;
+uniform bool  u_weave_tile;
+uniform int   u_weave_n;
+uniform float u_weave_angle;
+uniform float u_weave_pitch;
+uniform float u_weave_p0;
+uniform vec3  u_weave_cols[64];
+
+vec3 weave_color(vec3 base)
+{
+    if (!u_weave_on || u_weave_n <= 0)
+        return base;
+    float s = sin(u_weave_angle);
+    float c = cos(u_weave_angle);
+    float proj = -weave_model_pos.x * s + weave_model_pos.y * c;
+    float line = floor((proj - u_weave_p0) / max(u_weave_pitch, 0.0001));
+    int   idx;
+    if (u_weave_tile) {
+        float fn = float(u_weave_n);
+        idx = int(line - fn * floor(line / fn));
+    } else {
+        idx = int(line);
+        if (idx < 0)             idx = 0;
+        if (idx > u_weave_n - 1) idx = u_weave_n - 1;
+    }
+    for (int i = 0; i < 64; ++i)
+        if (i == idx) return u_weave_cols[i];
+    return base;
+}
+
 void main()
 {
     vec2 uv = gl_FragCoord.xy / u_viewport;
@@ -151,8 +228,21 @@ void main()
         vis = mix(1.0, shadow_map_visibility(), u_shadow_strength);
     vis = min(vis, 1.0 - u_sscs_strength * sscs_occlusion());
 
-    vec3 lit = uniform_color.rgb * (v_ambient + emission_factor)
-             + (uniform_color.rgb * max(intensity.x - v_ambient, 0.0) + vec3(intensity.y)) * vis;
+    // NEOTKO_PROFILE_TAG s233 — el color base pasa por el weave (idéntico a uniform_color
+    // .rgb mientras u_weave_on sea false, o sea siempre salvo en pintura ColorMix).
+    vec3 weave_base = weave_color(uniform_color.rgb);
+    vec3 lit = weave_base * (v_ambient + emission_factor)
+             + (weave_base * max(intensity.x - v_ambient, 0.0) + vec3(intensity.y)) * vis;
     lit *= mix(1.0, ao, u_ao_strength);
     gl_FragColor = vec4(lit, uniform_color.a);
+
+    // NEOTKO_SMOOTHNORMALS_TAG s229: diagnostic isolation, last word on the colour.
+    if (u_shading_isolate == 1)
+        gl_FragColor = vec4(vec3(ao), 1.0);
+    else if (u_shading_isolate == 2)
+        gl_FragColor = vec4(vec3(1.0 - sscs_occlusion()), 1.0);
+    else if (u_shading_isolate == 3)
+        gl_FragColor = vec4(vec3(u_shadow_enabled ? shadow_map_visibility() : 1.0), 1.0);
+    else if (u_shading_isolate == 4)
+        gl_FragColor = vec4(normalize(v_view_normal) * 0.5 + 0.5, 1.0);
 }

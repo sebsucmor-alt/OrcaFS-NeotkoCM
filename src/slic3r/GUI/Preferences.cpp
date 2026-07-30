@@ -3,6 +3,7 @@
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "GLCanvas3D.hpp"  // NEOTKO_SMOOTHNORMALS_TAG s229: reset_volumes()/reload_scene() on toggle
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -769,6 +770,17 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         if (param == "allow_filament_temp_mixing" && wxGetApp().plater())
             wxGetApp().plater()->notify_filament_usage_changed();
 
+        // NEOTKO_SMOOTHNORMALS_TAG s229: normals are baked into the vertex buffers when a volume is
+        // uploaded, so flipping this only shows up after the volumes are rebuilt. reload_scene()
+        // alone reuses the existing GLVolumes, hence the reset_volumes() first - same path the
+        // canvas already takes when switching plates.
+        if (param == "use_smooth_normals" && wxGetApp().plater()) {
+            if (GLCanvas3D* canvas = wxGetApp().plater()->get_view3D_canvas3D()) {
+                canvas->reset_volumes();
+                canvas->reload_scene(true, true);
+            }
+        }
+
         if (param == PRIVACY_POLICY_FLAGS)
             {
             app_config->set("app", PRIVACY_POLICY_FLAGS, checkbox->GetValue());            
@@ -1242,6 +1254,8 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_use_free_camera_settings = create_item_checkbox(_L("Use free camera"), page, _L("If enabled, use free camera. If not enabled, use constrained camera."), 50, "use_free_camera");
     auto swap_pan_rotate = create_item_checkbox(_L("Swap pan and rotate mouse buttons"), page, _L("If enabled, swaps the left and right mouse buttons pan and rotate functions."), 50, "swap_mouse_buttons");
     auto reverse_mouse_zoom = create_item_checkbox(_L("Reverse mouse zoom"), page, _L("If enabled, reverses the direction of zoom with mouse wheel."), 50, "reverse_mouse_wheel_zoom");
+    // NEOTKO_SMOOTHNORMALS_TAG s229
+    auto smooth_normals = create_item_checkbox(_L("Smooth shading of imported meshes"), page, _L("If enabled, shading normals are averaged across each smooth surface instead of being taken from each individual triangle. This removes the streaks and jagged patterns that badly tessellated CAD meshes show on flat faces, and smooths the faceting on curved ones. Sharp edges are preserved. Affects the 3D view only - the sliced result is identical."), 50, "use_smooth_normals");
     auto allow_filament_temp_mixing = create_item_checkbox(_L("Allow high/low temperature filament mixing"), page, _L("If enabled, allows printing with both high-temperature and low-temperature filaments simultaneously."), 50, "allow_filament_temp_mixing",
         [this](bool new_val, bool old_val) -> bool {
             // Only confirm when turning ON; allow turning OFF without dialog.
@@ -1377,6 +1391,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_use_free_camera_settings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(swap_pan_rotate, 0, wxTOP, FromDIP(3));
     sizer_page->Add(reverse_mouse_zoom, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(smooth_normals, 0, wxTOP, FromDIP(3));  // NEOTKO_SMOOTHNORMALS_TAG s229
     sizer_page->Add(allow_filament_temp_mixing, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));

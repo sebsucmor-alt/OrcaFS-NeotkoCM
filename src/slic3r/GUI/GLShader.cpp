@@ -195,10 +195,36 @@ bool GLShaderProgram::init_from_texts(const std::string& name, const ShaderSourc
     return true;
 }
 
+// NEOTKO_SMOOTHNORMALS_TAG s229
+ShadingTuning& shading_tuning()
+{
+    static ShadingTuning s_tuning;
+    return s_tuning;
+}
+
 void GLShaderProgram::start_using() const
 {
     assert(m_id > 0);
     glsafe(::glUseProgram(m_id));
+
+    // NEOTKO_SMOOTHNORMALS_TAG s229: push the live shading uniforms on every bind. set_uniform()
+    // resolves the name and no-ops on -1, so shaders that never declared these (most of them)
+    // are untouched; and gouraud.vs ignores all of them unless shading_override is true, which
+    // only the debug panel ever sets. Cost is a handful of glUniform calls per shader bind,
+    // against the dozens this codebase already pushes per volume.
+    const ShadingTuning& t = shading_tuning();
+    set_uniform("shading_override", t.override_lighting);
+    set_uniform("shading_debug_view", t.debug_view);
+    if (t.override_lighting || t.debug_view != 0) {
+        set_uniform("shading_light_top_dir", t.light_top_dir);
+        set_uniform("shading_top_diffuse", t.top_diffuse);
+        set_uniform("shading_top_specular", t.top_specular);
+        set_uniform("shading_top_shininess", t.top_shininess);
+        set_uniform("shading_light_front_dir", t.light_front_dir);
+        set_uniform("shading_front_diffuse", t.front_diffuse);
+        set_uniform("shading_ambient", t.ambient);
+        set_uniform("shading_debug_amplify", t.debug_amplify);
+    }
 }
 
 void GLShaderProgram::stop_using() const

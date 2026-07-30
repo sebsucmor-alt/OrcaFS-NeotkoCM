@@ -50,8 +50,17 @@ namespace NeoDebug {
         CONTACT     = 15, // NEOTKO_CONTACT_TAG s224 — instance contact/floating detector (C1)
         XOBJ        = 16, // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance (occupancy builder + injection)
         GRAVITY     = 17, // NEOTKO_GRAVITY_TAG s226 — real floor / bridge reclassification (see docs/FUTURE/GRAVITY_MASTER_PLAN.md)
-        CH_COUNT    = 18
+        SHADING     = 18, // NEOTKO_SMOOTHNORMALS_TAG s229 — 3D view shading: live tuning panel + normal debug views
+        CH_COUNT    = 19
     };
+    // NEOTKO_SMOOTHNORMALS_TAG s229 — gate for the on-screen render tuning panels (RealColor and
+    // Shading), as opposed to log channels. Deliberately NOT covered by ORCA_DEBUG_ALL: that var
+    // exists to open every log firehose at once, and someone turning it on to capture a log should
+    // not suddenly get floating ImGui windows sitting on top of their model. One var for both
+    // panels, since they are the same job (poking at the renderer) from two different views.
+    //   ORCA_DEBUG_RENDER=1
+    bool render_panels_enabled();
+
     // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
     // Cheap after first call (static flag per channel).
     bool enabled(Channel c);

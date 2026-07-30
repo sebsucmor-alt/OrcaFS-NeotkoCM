@@ -4,6 +4,7 @@
 #include "GLGizmoBase.hpp"
 
 #include "slic3r/GUI/GLModel.hpp"
+#include "slic3r/GUI/ColorMixPaintPreview.hpp"   // s233 — WeaveParams compartido con la vista 3D normal
 
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -123,16 +124,11 @@ public:
     // WeaveParams has on=true, render() drives the mm_gouraud weave uniforms so
     // the painted patch shows the woven tool sequence instead of a flat colour.
     // Parallel-indexed to m_ebt_colors (slot s → m_ebt_weave[s]); empty = all flat.
-    struct WeaveParams {
-        bool                   on        = false;
-        bool                   tile      = false;      // NEOTKO_COLORSTITCH_TAG — true = repeat the
-                                                       // pattern at real line width (wrap); false =
-                                                       // span the surface once (gradients, clamp)
-        float                  angle_rad = 0.7853982f; // band orientation (along fill lines)
-        float                  pitch     = 0.45f;      // mm — stripe pitch (real line width when tile)
-        float                  p0        = 0.f;        // mm — projection of the surface edge
-        std::vector<ColorRGBA> cols;                   // per-line tool colours (one period when tile)
-    };
+    // s233 — la definición se mudó a slic3r/GUI/ColorMixPaintPreview.hpp: la vista 3D
+    // normal dibuja el mismo tejido sin gizmo, así que el tipo ya no puede vivir dentro
+    // de una clase del painter. El alias mantiene intacto `TriangleSelectorPatch::
+    // WeaveParams` para todo el código que ya lo usaba.
+    using WeaveParams = Slic3r::GUI::ColorMixPaintPreview::WeaveParams;
     void set_ebt_weave(const std::vector<WeaveParams> ebt_weave) { m_ebt_weave = ebt_weave; }
 
     // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave. `facet_weave_idx` maps a facet index
@@ -149,6 +145,13 @@ public:
     }
 
     void set_filter_state(bool is_filter_state);
+
+    // NEOTKO_PROFILE_TAG — s235 F5b: no dibujar el patch del estado 0 (lo NO pintado).
+    // Lo necesita el gizmo de MMU cuando debajo ya se ha dibujado el preview del sandwich:
+    // el patch 0 del MMU son TODAS las caras sin pintar de MMU y taparía el sandwich
+    // entero. Es exactamente el mismo truco que s233b hace en GLVolume::simple_render
+    // saltándose mmuseg_models[0]. No toca el rebuild de patches, sólo el bucle de dibujo.
+    void set_skip_base_patch(bool skip) { m_skip_base_patch = skip; }
 
     constexpr static float GapAreaMin = 0.f;
     constexpr static float GapAreaMax = 5.f;
@@ -208,6 +211,7 @@ protected:
     std::vector<WeaveParams>    m_weave_list;
 
     bool                        m_filter_state = false;
+    bool                        m_skip_base_patch = false;   // NEOTKO_PROFILE_TAG s235 F5b
 
 private:
     void update_render_data();

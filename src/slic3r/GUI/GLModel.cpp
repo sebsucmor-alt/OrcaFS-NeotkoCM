@@ -432,6 +432,119 @@ void GLModel::init_from(Geometry&& data)
     }
 }
 
+// NEOTKO_SMOOTHNORMALS_TAG s229
+// Area-weighted, crease-aware per-corner normals.
+//
+// Why this exists: init_from() below gives every triangle the normal of its own plane, computed
+// on the fly as a float32 cross product of its three vertices. That is exact for a well shaped
+// triangle and pure noise for a sliver: the angular error of the cross product scales like
+// (vertex quantization) / (triangle width), so a triangle a few microns wide and 80 mm long -
+// the kind CAD meshers happily emit when they fan-triangulate a flat face - gets a normal that
+// is off by ~1e-3 rad, in a different direction for each sliver. The specular term in gouraud.vs
+// raises N.L to the 20th power, which amplifies exactly that noise, and the flat face renders as
+// a field of streaks that follow the tessellation and crawl as the camera moves.
+//
+// The cure is to stop trusting any single triangle's plane:
+//   - Weight each contribution by triangle area. The raw (unnormalized) cross product already has
+//     magnitude 2*area, so simply summing the raw normals area-weights them for free - and a
+//     sliver, having ~zero area, contributes ~nothing no matter how wrong its direction is.
+//   - Only average across faces that actually belong to the same smooth surface, decided by a
+//     crease angle, so real edges (the rim of a part, embossed letters) stay sharp.
+//   - Never use a sliver's own normal as the reference for that crease test, or the noise decides
+//     who its neighbours are. Slivers get a reference borrowed from their reliable neighbours.
+//
+// Returns 3 normals per triangle (corner-indexed, size 3 * indices.size()), matching the vertex
+// layout init_from() writes: vertices are duplicated per face, so per-corner costs nothing extra.
+static std::vector<Vec3f> smooth_corner_normals(const indexed_triangle_set& its, float crease_angle_deg)
+{
+    const size_t nf = its.indices.size();
+    const size_t nv = its.vertices.size();
+    const float  crease_cos = std::cos(crease_angle_deg * float(M_PI) / 180.0f);
+
+    // Pass A: raw face normals (magnitude = 2 * area = the weight we want) plus a reliability
+    // verdict per face. "Reliable" means the triangle is fat enough that its cross product is
+    // dominated by geometry rather than by float32 noise: 2*area / longest_edge^2 is twice the
+    // triangle's aspect ratio, and below ~1e-3 the direction is not trustworthy.
+    std::vector<Vec3f> face_raw(nf, Vec3f::Zero());
+    std::vector<Vec3f> face_unit(nf, Vec3f::Zero());
+    std::vector<char>  reliable(nf, 0);
+    for (size_t i = 0; i < nf; ++i) {
+        const Vec3f& v0 = its.vertices[its.indices[i][0]];
+        const Vec3f& v1 = its.vertices[its.indices[i][1]];
+        const Vec3f& v2 = its.vertices[its.indices[i][2]];
+        const Vec3f  n  = (v1 - v0).cross(v2 - v0);
+        const float  len = n.norm();
+        face_raw[i] = n;
+        if (len > 0.0f) {
+            face_unit[i] = n / len;
+            const float e2 = std::max(std::max((v1 - v0).squaredNorm(), (v2 - v1).squaredNorm()),
+                                      (v0 - v2).squaredNorm());
+            reliable[i] = (e2 > 0.0f && len / e2 > 1.0e-3f) ? 1 : 0;
+        }
+    }
+
+    // Vertex -> incident faces, as a CSR array (counts, then prefix sum, then fill). Avoids one
+    // heap allocation per vertex on meshes that can reach millions of triangles.
+    std::vector<uint32_t> adj_start(nv + 1, 0);
+    for (size_t i = 0; i < nf; ++i)
+        for (size_t j = 0; j < 3; ++j)
+            ++adj_start[its.indices[i][j] + 1];
+    for (size_t v = 0; v < nv; ++v)
+        adj_start[v + 1] += adj_start[v];
+    std::vector<uint32_t> adj_faces(adj_start.back());
+    {
+        std::vector<uint32_t> cursor(adj_start.begin(), adj_start.end() - 1);
+        for (size_t i = 0; i < nf; ++i)
+            for (size_t j = 0; j < 3; ++j)
+                adj_faces[cursor[its.indices[i][j]]++] = uint32_t(i);
+    }
+
+    // Pass B: reference normal per face for the crease test. Fat faces vouch for themselves; a
+    // sliver borrows the area-weighted average of the reliable faces around it, which is the
+    // plane it was meant to lie in.
+    std::vector<Vec3f> face_ref(face_unit);
+    for (size_t i = 0; i < nf; ++i) {
+        if (reliable[i])
+            continue;
+        Vec3f acc = Vec3f::Zero();
+        for (size_t j = 0; j < 3; ++j) {
+            const uint32_t v = its.indices[i][j];
+            for (uint32_t k = adj_start[v]; k < adj_start[v + 1]; ++k) {
+                const uint32_t f = adj_faces[k];
+                if (reliable[f])
+                    acc += face_raw[f];
+            }
+        }
+        const float len = acc.norm();
+        if (len > 0.0f)
+            face_ref[i] = acc / len;
+    }
+
+    // Pass C: one normal per corner, averaging the reliable faces around that vertex that stay
+    // within the crease angle of this face's reference normal.
+    std::vector<Vec3f> corner_normals(3 * nf);
+    for (size_t i = 0; i < nf; ++i) {
+        const Vec3f& ref = face_ref[i];
+        for (size_t j = 0; j < 3; ++j) {
+            Vec3f acc = Vec3f::Zero();
+            if (!ref.isZero()) {
+                const uint32_t v = its.indices[i][j];
+                for (uint32_t k = adj_start[v]; k < adj_start[v + 1]; ++k) {
+                    const uint32_t f = adj_faces[k];
+                    if (reliable[f] && face_unit[f].dot(ref) >= crease_cos)
+                        acc += face_raw[f];
+                }
+            }
+            const float len = acc.norm();
+            // Fall back to the reference (and, for a fully degenerate mesh, to the raw face
+            // normal) so a corner always ends up with something renderable.
+            corner_normals[3 * i + j] = (len > 0.0f) ? Vec3f(acc / len) : (ref.isZero() ? face_unit[i] : ref);
+        }
+    }
+
+    return corner_normals;
+}
+
 void GLModel::init_from(const TriangleMesh& mesh)
 {
     init_from(mesh.its);
@@ -463,6 +576,47 @@ void GLModel::init_from(const indexed_triangle_set& its)
         const stl_vertex                  n = face_normal_normalized(vertex);
         for (size_t j = 0; j < 3; ++j) {
             data.add_vertex(vertex[j], n);
+        }
+        vertices_counter += 3;
+        data.add_triangle(vertices_counter - 3, vertices_counter - 2, vertices_counter - 1);
+    }
+
+    // update bounding box
+    for (size_t i = 0; i < vertices_count(); ++i) {
+        m_bounding_box.merge(data.extract_position_3(i).cast<double>());
+    }
+}
+
+// NEOTKO_SMOOTHNORMALS_TAG s229
+// Same geometry as init_from(its), but with per-corner smoothed normals instead of one flat
+// normal per triangle. See smooth_corner_normals() above for why. Called once when a volume is
+// uploaded to the GPU, never per frame.
+void GLModel::init_from_smooth(const indexed_triangle_set& its, float crease_angle_deg)
+{
+    if (is_initialized()) {
+        // call reset() if you want to reuse this model
+        assert(false);
+        return;
+    }
+
+    if (its.vertices.empty() || its.indices.empty()) {
+        assert(false);
+        return;
+    }
+
+    const std::vector<Vec3f> corner_normals = smooth_corner_normals(its, crease_angle_deg);
+
+    Geometry& data = m_render_data.geometry;
+    data.format = { Geometry::EPrimitiveType::Triangles, Geometry::EVertexLayout::P3N3 };
+    data.reserve_vertices(3 * its.indices.size());
+    data.reserve_indices(3 * its.indices.size());
+
+    // vertices + indices
+    unsigned int vertices_counter = 0;
+    for (uint32_t i = 0; i < its.indices.size(); ++i) {
+        const stl_triangle_vertex_indices face = its.indices[i];
+        for (size_t j = 0; j < 3; ++j) {
+            data.add_vertex(its.vertices[face[j]], corner_normals[3 * i + j]);
         }
         vertices_counter += 3;
         data.add_triangle(vertices_counter - 3, vertices_counter - 2, vertices_counter - 1);
@@ -845,6 +999,17 @@ bool contains(const BuildVolume& volume, const GLModel& model, bool ignore_botto
     default:
         return true;
     }
+}
+
+// NEOTKO_SMOOTHNORMALS_TAG s229
+void init_object_volume_model(GLModel& model, const indexed_triangle_set& its)
+{
+    // NEOTKO_SMOOTHNORMALS_TAG s229: crease angle comes from the live tuning state (seeded with
+    // SmoothNormalsCreaseAngle) so the debug panel can sweep it without a rebuild of the app.
+    if (wxGetApp().app_config->get_bool("use_smooth_normals"))
+        model.init_from_smooth(its, shading_tuning().crease_angle);
+    else
+        model.init_from(its);
 }
 
 GLModel::Geometry stilized_arrow(unsigned int resolution, float tip_radius, float tip_height, float stem_radius, float stem_height)

@@ -42,6 +42,49 @@ static SurfacePassStack penu_dither(int a, int b)
     return st;
 }
 
+// s230 — dither ColorStitch de UNA pasada para la zona BOTTOM.
+//
+// ⚠️ Familia de claves TOP a propósito, no penu: la zona Bottom se autora con
+// `penu=false` en todo el fork (draw_zone_editor .../*penu=*/false), así que
+// tanto el preview (StackFlatten::pass_pattern) como el motor (Fill.cpp) leen
+// `interlayer_colormix_pattern_top` / `interlayer_colormix_tool_a|b` para ella.
+// Escribir aquí las claves _penultimate dejaría el patrón invisible para ambos
+// (el pase caería a Solid y perderíamos la mezcla sin ningún error).
+// Ver BOTTOM_SURFACE.md §5.4.
+//
+// La distribución del patrón es el MISMO Bresenham de longitud 8 que usa
+// pro_cm_write() en el gizmo (GLGizmoColorMixPainter.cpp) — copiado a propósito
+// en vez de compartido, porque aquel vive en la GUI y esto es libslic3r. Si se
+// toca uno hay que tocar el otro: producen el kv que consume el mismo motor.
+static SurfacePassStack bottom_dither(int a, int b, int pct_b)
+{
+    constexpr int L = 8;
+    const int nb = std::clamp((int)std::lround(pct_b * L / 100.0), 0, L);
+    std::string pat;
+    pat.reserve(L);
+    int acc = 0;
+    for (int i = 0; i < L; ++i) {
+        acc += nb;
+        if (acc >= L) { acc -= L; pat += char('1' + b); }
+        else          {           pat += char('1' + a); }
+    }
+
+    SurfacePass p;
+    p.kind       = SurfacePassKind::ColorMix;
+    p.ratio      = 1.0;          // altura completa: NO subdivide el bridge
+    p.solid_tool = a;            // chip/desc fallback, igual que penu_dither
+    p.angle = -1; p.fan = -1; p.speed_pct = 100;
+    p.colormix.present = true;
+    p.colormix.kv["interlayer_colormix_pattern_top"] = pat;
+    p.colormix.kv["interlayer_colormix_tool_a"]      = std::to_string(a);
+    p.colormix.kv["interlayer_colormix_tool_b"]      = std::to_string(b);
+
+    SurfacePassStack st;
+    st.enabled = true;
+    st.passes.push_back(p);
+    return st;
+}
+
 static SurfacePassStack solid_top(int tool, double ratio)
 {
     SurfacePassStack st;
@@ -202,6 +245,42 @@ ColorRecipe suggest_mixed(const float target_rgb[3],
     return best;
 }
 
+SurfacePassStack suggest_dither_single(const float target_rgb[3],
+                                       const Material mats[4],
+                                       const PredictOptions& opt,
+                                       float* out_delta_e)
+{
+    const Lab tlab = rgb_to_lab(target_rgb);
+    SurfacePassStack best;
+    float best_de = 1e9f;
+
+    // Barrido: parejas ORDENADAS (a,b) × mix 0..100%. Ordenadas porque el
+    // patrón no es simétrico en el reparto (Bresenham arranca en A), y el orden
+    // decide además qué tool queda como solid_tool de fallback.
+    // El paso del mix sale de ratio_steps para respetar la granularidad que ya
+    // usa el resto del predictor; con 8 pasos son 12*9=108 candidatos, calderilla.
+    const int steps = std::max(2, opt.ratio_steps);
+    for (int a = 0; a < 4; ++a)
+        for (int b = 0; b < 4; ++b) {
+            if (a == b) continue;
+            for (int s = 0; s <= steps; ++s) {
+                const int pct_b = (int)std::lround(100.0 * (double)s / (double)steps);
+                SurfacePassStack cand = bottom_dither(a, b, pct_b);
+                // Color de UNA zona sobre el fondo: misma llamada que
+                // predict_recipe_colour pero con penu vacía (no hay nada debajo
+                // que aporte color en un bottom — lo de abajo es aire o soporte).
+                const SurfacePassStack no_penu;
+                float rgb[3] = {0.f, 0.f, 0.f};
+                sandwich_colour_stacked(cand, no_penu, mats, opt.bg_rgb, rgb);
+                const float de = delta_e2000(tlab, rgb_to_lab(rgb));
+                if (de < best_de) { best_de = de; best = std::move(cand); }
+            }
+        }
+
+    if (out_delta_e) *out_delta_e = best_de;
+    return best;
+}
+
 // --- Dispatcher (PR.1) -----------------------------------------------------
 
 std::vector<ColorRecipe> build_palette(PaletteKind kind,
@@ -277,6 +356,21 @@ ColorRecipe build_mixed_filament_recipe(const MixedFilament& mf,
     best.top.perimeter_override = true;
     // Top and penultimate must look identical for this mode.
     best.penu = best.top;
+
+    // s230 — zona BOTTOM: la MISMA pila de sólidos que top/penu.
+    //
+    // Este modo es solo-sólidos por diseño (decisión del usuario, no un detalle de
+    // implementación): el generador nunca debe emitir ColorStitch. Hubo un intento
+    // intermedio de resolver el bottom con un dither ColorStitch de una pasada,
+    // porque entonces Fill.cpp clampaba los bridges a 1 pasada y una pila de 3 se
+    // habría degradado a un color plano equivocado. Ese clamp ya no existe (ver
+    // Fill.cpp, s230), así que la pila completa vale también sobre un puente y la
+    // excepción dejó de tener justificación. Revertido.
+    //
+    // suggest_dither_single() se mantiene en ColorPredict — es correcto y puede
+    // hacer falta si algún día vuelve un límite de una sola pasada — pero NO se
+    // usa desde aquí.
+    best.bottom = best.top;
     return best;
 }
 

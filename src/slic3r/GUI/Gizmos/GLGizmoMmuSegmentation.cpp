@@ -1,6 +1,8 @@
 #include "GLGizmoMmuSegmentation.hpp"
 
 #include "slic3r/GUI/GLCanvas3D.hpp"
+#include "slic3r/GUI/GLShader.hpp"                // s235 F5b — mm_gouraud para el preview del sandwich
+#include "slic3r/GUI/ColorMixPaintPreview.hpp"    // s235 F5 — colores/tejido/solape compartidos
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -70,12 +72,22 @@ void GLGizmoMmuSegmentation::on_opening()
 {
     if (get_extruders_colors().size() > GLGizmoMmuSegmentation::EXTRUDERS_LIMIT)
         show_notification_extruders_limit_exceeded();
+    // NEOTKO_PROFILE_TAG s235 F5b — el toggle se relee al abrir (persiste en app_config) y
+    // se invalida el preview: el objeto o su pintura pueden haber cambiado con el gizmo
+    // cerrado, y las claves solas no cubren un cambio de plato entero.
+    m_sw_show      = ColorMixPaintPreview::show_in_mmu_gizmo();
+    m_sw_built_oid = -2;
+    m_coexist_oid  = -2;
 }
 
 void GLGizmoMmuSegmentation::on_shutdown()
 {
     m_parent.use_slope(false);
     m_parent.toggle_model_objects_visibility(true);
+    // NEOTKO_PROFILE_TAG s235 F5b — soltar las mallas del preview: son VBOs, y el gizmo
+    // cerrado no las necesita.
+    m_sw_preview_sel.clear();
+    m_sw_built_oid = -2;
 }
 
 std::string GLGizmoMmuSegmentation::on_get_name() const
@@ -252,7 +264,32 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glEnable(GL_DEPTH_TEST));
 
+    // NEOTKO_PROFILE_TAG_START — s235 F5b. El sandwich va PRIMERO y el MMU encima con
+    // polygon offset: es la MISMA precedencia que el motor desde s234 (donde hay MMU, manda
+    // MMU) y la misma que ya usa la vista 3D normal (s233b). El MMU se salta su patch base
+    // (el estado 0 = todo lo NO pintado de MMU), que si no taparía el preview entero; el
+    // hueco lo rellena el patch base del preview, al que se le da el MISMO color de
+    // extrusor que usaría el MMU, así que la zona sin pintar de nadie se ve igual que
+    // siempre. Reparto resultante en pantalla:
+    //   ni MMU ni sandwich → color de extrusor (base del preview)
+    //   sólo sandwich      → color del slot + tejido
+    //   sólo MMU / ambos   → color de MMU
+    const bool sw = render_sandwich_preview();
+    for (auto& s : m_triangle_selectors)
+        if (auto* p = dynamic_cast<TriangleSelectorPatch*>(s.get()))
+            p->set_skip_base_patch(sw);
+    if (sw) {
+        glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+        glsafe(::glPolygonOffset(-1.0f, -1.0f));
+    }
+
     render_triangles(selection);
+
+    if (sw) {
+        glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+        glsafe(::glPolygonOffset(0.0f, 0.0f));
+    }
+    // NEOTKO_PROFILE_TAG_END
 
     m_c->object_clipper()->render_cut();
     m_c->instances_hider()->render_cut();
@@ -260,6 +297,211 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
 
     glsafe(::glDisable(GL_BLEND));
 }
+
+// NEOTKO_PROFILE_TAG_START — s235 F5b, ver la nota del .hpp.
+//
+// Construye los selectores de preview del objeto activo leyendo su pintura de sandwich
+// guardada (color_mix_paint_facets), con los colores por slot y el tejido por isla que
+// calcula ColorMixPaintPreview — la misma unidad que alimenta al painter de sandwich y a
+// la vista 3D normal, así que los tres enseñan exactamente lo mismo.
+//
+// Es CARO (deserializa + union-find por isla), por eso sólo se reconstruye cuando cambia
+// el objeto, la pintura (overlap_key) o el contexto de color (context_key: TD, colores de
+// filamento, perfiles). Nada de eso pasa mientras se pinta MMU, así que en la práctica se
+// construye una vez al abrir el gizmo.
+void GLGizmoMmuSegmentation::rebuild_sandwich_preview_if_dirty()
+{
+    const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    const int oid = m_parent.get_selection().get_object_idx();
+    if (!mo) {
+        m_sw_preview_sel.clear();
+        m_sw_built_oid = -2;
+        return;
+    }
+
+    const uint64_t pk = ColorMixPaintPreview::overlap_key(mo);
+    uint64_t ck = 0;
+    for (const ModelVolume* mv : mo->volumes)
+        if (mv->is_model_part())
+            ck ^= ColorMixPaintPreview::context_key(mv, mo);
+
+    if (oid == m_sw_built_oid && pk == m_sw_paint_key && ck == m_sw_color_key)
+        return;
+    m_sw_built_oid = oid;
+    m_sw_paint_key = pk;
+    m_sw_color_key = ck;
+    m_sw_preview_sel.clear();
+
+    const auto max_ebt = static_cast<EnforcerBlockerType>(ModelVolume::COLORMIX_SLOT_COUNT - 1);
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv->is_model_part())
+            continue;
+        // El vector va PARALELO a m_triangle_selectors (mismo filtro is_model_part, mismo
+        // orden), así que se empuja un nullptr por los volúmenes sin pintar en vez de
+        // saltárselos: si no, los índices se desalinearían.
+        if (mv->color_mix_paint_facets.empty()) {
+            m_sw_preview_sel.emplace_back(nullptr);
+            continue;
+        }
+
+        std::vector<ColorRGBA> ebt = ColorMixPaintPreview::slot_colors(mv, mo);
+        // El índice 0 es "sin pintar". ColorMixPaintPreview lo deja en el gris neutro del
+        // painter de sandwich, pero aquí el usuario está pintando MMU y necesita ver el
+        // color de extrusor del objeto: mismo cálculo que init_model_triangle_selectors().
+        if (!m_extruders_colors.empty() && !ebt.empty()) {
+            int eidx = (mv->extruder_id() > 0) ? mv->extruder_id() - 1 : 0;
+            eidx = std::min(eidx, int(m_extruders_colors.size()) - 1);
+            ebt[0] = m_extruders_colors[size_t(eidx)];
+        }
+
+        // edge_limit por defecto: este selector NUNCA pinta, sólo deserializa y dibuja.
+        auto sel = std::make_unique<TriangleSelectorPatch>(mv->mesh(), ebt);
+        sel->deserialize(mv->color_mix_paint_facets.get_data(), false, max_ebt);
+        // DESPUÉS de deserialize: el tejido mide el área realmente pintada (get_facets).
+        // Mismo orden y misma razón que en GLGizmoColorMixPainter::rebuild_preview_selectors_if_dirty.
+        {
+            std::unordered_map<int, int>                            fwi;
+            std::vector<TriangleSelectorPatch::WeaveParams>          wl;
+            ColorMixPaintPreview::weave_islands_for_volume(mv, sel.get(), mo, fwi, wl);
+            sel->set_ebt_weave_islands(std::move(fwi), std::move(wl));
+        }
+        // El patch base del preview sustituye al del MMU, así que hereda su wireframe: sin
+        // esto, activar "show wireframe" dejaría de dibujarlo en la zona sin pintar.
+        sel->set_wireframe_needed(true);
+        sel->request_update_render_data();
+        m_sw_preview_sel.emplace_back(std::move(sel));
+    }
+}
+
+bool GLGizmoMmuSegmentation::render_sandwich_preview()
+{
+    if (!m_sw_show || !ColorMixPaintPreview::show_in_mmu_gizmo())
+        return false;
+
+    const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!mo)
+        return false;
+
+    rebuild_sandwich_preview_if_dirty();
+    // Ningún volumen pintado → no hay nada que dibujar Y, sobre todo, el MMU NO debe
+    // saltarse su patch base (el objeto desaparecería). De ahí el bool de retorno.
+    bool any = false;
+    for (const auto& s : m_sw_preview_sel) any = any || (s != nullptr);
+    if (!any)
+        return false;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("mm_gouraud");
+    if (shader == nullptr)
+        return false;
+
+    const Selection& selection = m_parent.get_selection();
+    const int inst_idx = selection.get_instance_idx();
+    if (inst_idx < 0 || inst_idx >= (int) mo->instances.size())
+        return false;
+
+    shader->start_using();
+    const ClippingPlaneDataWrapper clp = this->get_clipping_plane_data();
+    shader->set_uniform("clipping_plane", clp.clp_dataf);
+    shader->set_uniform("z_range", clp.z_range);
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    const Camera&      camera = wxGetApp().plater()->get_camera();
+    const Transform3d& view   = camera.get_view_matrix();
+
+    int mesh_id = -1;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv->is_model_part())
+            continue;
+        ++mesh_id;
+        if (mesh_id >= (int) m_sw_preview_sel.size() || !m_sw_preview_sel[mesh_id])
+            continue;
+
+        // Mismo trafo que render_triangles(), vista de ensamblado incluida: si no, el
+        // preview quedaría desplazado respecto a la malla del MMU en esa vista.
+        Transform3d trafo;
+        if (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView) {
+            trafo = mo->instances[inst_idx]->get_assemble_transformation().get_matrix() * mv->get_matrix();
+            trafo.translate(mv->get_transformation().get_offset() * (GLVolume::explosion_ratio - 1.0)
+                            + mo->instances[inst_idx]->get_offset_to_assembly() * (GLVolume::explosion_ratio - 1.0));
+        } else {
+            trafo = mo->instances[inst_idx]->get_transformation().get_matrix() * mv->get_matrix();
+        }
+
+        const bool is_left_handed = trafo.matrix().determinant() < 0.;
+        if (is_left_handed)
+            glsafe(::glFrontFace(GL_CW));
+
+        shader->set_uniform("view_model_matrix", view * trafo);
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+        const Matrix3d view_normal_matrix = view.matrix().block(0, 0, 3, 3)
+            * trafo.matrix().block(0, 0, 3, 3).inverse().transpose();
+        shader->set_uniform("view_normal_matrix", view_normal_matrix);
+        shader->set_uniform("volume_world_matrix", trafo);
+        shader->set_uniform("volume_mirrored", is_left_handed);
+        const Matrix3f normal_matrix = static_cast<Matrix3f>(
+            trafo.matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>());
+        shader->set_uniform("slope.actived", false);
+        shader->set_uniform("slope.volume_world_normal_matrix", normal_matrix);
+        shader->set_uniform("slope.normal_z", -1.0f);
+
+        m_sw_preview_sel[mesh_id]->render(m_imgui, trafo);
+
+        if (is_left_handed)
+            glsafe(::glFrontFace(GL_CCW));
+    }
+    shader->stop_using();
+    return true;
+}
+
+// s235 F5a — el aviso INVERSO al de s234. El de s234 vive en el painter de sandwich y avisa
+// de que Perimeter override se sale HACIA FUERA de lo pintado; éste avisa de lo contrario:
+// DENTRO de lo pintado de sandwich hay una zona que no llevará efecto, porque ahí manda el
+// MMU (precedencia del motor desde s234). Sin esto, el usuario se enteraba en el gcode.
+//
+// Se mide en PORCENTAJE del área pintada de sandwich, no en mm²: el área sale de la malla
+// local del volumen (sin la escala de la instancia) y además es una cota superior, así que
+// un mm² absoluto sería un número que invita a confiar en él más de lo que aguanta. El
+// porcentaje es invariante a la escala y es la pregunta real ("¿cuánto de mi efecto se
+// pierde?"). Ver la nota de ColorMixPaintPreview::CoexistOverlap.
+void GLGizmoMmuSegmentation::render_coexist_warning()
+{
+    const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!mo)
+        return;
+    bool has_sandwich = false;
+    for (const ModelVolume* mv : mo->volumes)
+        if (mv->is_model_part() && !mv->color_mix_paint_facets.empty()) { has_sandwich = true; break; }
+    if (!has_sandwich)
+        return;
+
+    ImGui::Separator();
+    if (m_imgui->bbl_checkbox(_L("Show Sandwich effects"), m_sw_show)) {
+        if (auto* ac = wxGetApp().app_config)
+            ac->set("neotko_mmu_show_sandwich", m_sw_show ? "1" : "0");
+        m_sw_built_oid = -2;   // fuerza reconstruir al reactivarlo
+        m_parent.set_as_dirty();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Draw this object's Sandwich paint inside the color painter, "
+                                     "so you can see what is already there while you paint. "
+                                     "Where both paints meet, MMU wins.").c_str());
+
+    const int oid = m_parent.get_selection().get_object_idx();
+    const uint64_t key = ColorMixPaintPreview::overlap_key(mo);
+    if (oid != m_coexist_oid || key != m_coexist_key) {
+        m_coexist_oid = oid;
+        m_coexist_key = key;
+        m_coexist     = ColorMixPaintPreview::mmu_sandwich_overlap(mo);
+    }
+    if (m_coexist.any() && m_coexist.sandwich_mm2 > 0.) {
+        const int pct = std::max(1, std::min(100,
+            (int) (100. * m_coexist.area_mm2 / m_coexist.sandwich_mm2 + 0.5)));
+        const std::string msg = into_u8(GUI::format(
+            _L("⚠ ~%1%%% of the Sandwich paint is under MMU paint — no effect there"), pct));
+        ImGui::TextColored(ImVec4(0.86f, 0.59f, 0.24f, 1.f), "%s", msg.c_str());
+    }
+}
+// NEOTKO_PROFILE_TAG_END
 
 void GLGizmoMmuSegmentation::data_changed(bool is_serializing)
 {
@@ -891,6 +1133,11 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
             m_vertical_only = false;
         }
     }
+
+    // NEOTKO_MMU_COEXIST_TAG s235 F5 — la sección de coexistencia con el sandwich. Sólo
+    // aparece si este objeto TIENE pintura de sandwich: en un objeto sin ella no habría nada
+    // que contar y sería un mando de más en un panel ya lleno.
+    render_coexist_warning();
 
     // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode. Ungated from LibreMode (s201): the feature set
     // (F1-F4) is low-risk enough to ship as a permanent part of this fork rather than behind the

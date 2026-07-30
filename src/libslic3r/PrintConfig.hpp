@@ -1175,6 +1175,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                bridge_angle))
     ((ConfigOptionFloat,                internal_bridge_angle)) // ORCA: Internal bridge angle override
     ((ConfigOptionFloat,                bridge_flow))
+    // NEOTKO_BRIDGE_TAG — s230: mm extra de expansión del bridge hacia el sólido vecino,
+    // SUMADOS a la expansión automática cableada de LayerRegion::process_external_surfaces.
+    ((ConfigOptionFloat,                bridge_expansion_extra))
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloat,                bridge_speed))
     ((ConfigOptionFloatOrPercent,       internal_bridge_speed))

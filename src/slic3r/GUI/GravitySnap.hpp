@@ -14,7 +14,10 @@
 #include <optional>
 #include <set>
 #include <utility>
+#include <vector>
 
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 
 namespace Slic3r {
@@ -28,6 +31,41 @@ namespace GravitySnap {
 // on. Single source of truth for every call site — see docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md
 // §1 rule 5 (double gate) and §5 (master wall forces the key off).
 bool enabled();
+
+// NEOTKO_SNAPDRAG_TAG s233 — "Allow Bed" sub-sub-option (app_config "neotko_snap_drag_bed",
+// DEFAULT ON, i.e. absent key reads as true — see the .cpp for why it is not seeded in
+// AppConfig::set_defaults). ON = the build plate is one more floor candidate at Z=0, so an object
+// dragged over nothing lands on the bed like in a normal slicer. OFF = the s227 behaviour: only
+// other objects count as floors and an object over nothing keeps floating.
+//
+// Only meaningful while enabled() is true; True Objects OFF or Snap & Drag OFF means this module
+// is inert regardless. See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_V2_PLAN.md §1.
+bool bed_is_floor();
+
+// NEOTKO_SNAPDRAG_TAG s233 — result of a floor query. Was a bare std::optional<double> in s227;
+// it now carries WHY/WHERE the answer came from, because three call sites need that and none of
+// them may recompute it: the drag hysteresis must distinguish "resting on an object" from
+// "resting on the bed" (a bed hit never fails, so treating it as engaged would pin the engage
+// ratio at its low value forever and kill the hysteresis), and the landing overlay draws the
+// actual contact zone and raycast hits rather than a decorative guess.
+struct FloorHit
+{
+    // Floor height in world mm — the Z the queried instance's bottom should sit at.
+    double z = 0.0;
+    // True when the winner is the build plate (z == 0.0), false when it is another instance.
+    bool is_bed = false;
+    // The winning candidate instance, or (-1, -1) for the bed.
+    int obj_idx  = -1;
+    int inst_idx = -1;
+    // Zone actually recognised as the floor, world XY, SCALED clipper units: the footprint
+    // intersection that won for an object floor, or the queried instance's own footprint for the
+    // bed. This is the shape to highlight — it is what the decision was made on.
+    ExPolygon contact;
+    // World-mm raycast hits inside `contact` that produced `z` (empty for the bed, and for the
+    // defensive flat-top fallback). Drawn as-is by the overlay: when a user cannot "aim" at a
+    // thin rim, seeing which sample points hit and which fell through the hole explains it.
+    std::vector<Vec3d> samples;
+};
 
 // Real floor Z (world, unscaled mm) under instance (object_idx, instance_idx), given every
 // GLVolume currently in the scene.
@@ -67,10 +105,36 @@ bool enabled();
 // DOWN onto a floor it actually detects. A caller that maps nullopt to Z=0 breaks free floating
 // entirely (every move with nothing underneath would slam to the bed) — revised after s227
 // user testing found exactly that regression.
-std::optional<double> floor_z_for_instance(const GLVolumeCollection &volumes,
-                                            int object_idx, int instance_idx,
-                                            const std::set<std::pair<int, int>> &moving,
-                                            double engage_ratio);
+//
+// NEOTKO_SNAPDRAG_TAG s233 — with bed_is_floor() ON that "nothing underneath" case DOES resolve
+// to the bed, but as a last-place CANDIDATE (FloorHit::is_bed), not as a nullopt→0 mapping: the
+// bed is a floor of height 0 and the aggregation below is "highest wins", so it can never
+// outrank a real object and no s227 case changes. nullopt still means "leave it floating", and
+// is what you get with Allow Bed off, or always with Snap & Drag off (this module inert).
+std::optional<FloorHit> floor_z_for_instance(const GLVolumeCollection &volumes,
+                                             int object_idx, int instance_idx,
+                                             const std::set<std::pair<int, int>> &moving,
+                                             double engage_ratio);
+
+// NEOTKO_SNAPDRAG_TAG s233 — which OTHER MEMBER OF THE SAME DRAG is instance (object_idx,
+// instance_idx) currently resting on, if any.
+//
+// A multi-object drag may not be resolved member by member: every member excludes the others as
+// floor candidates (a drag must never rest on itself), so the upper half of a dragged stack finds
+// nothing under it and drops to the bed — the stack flattens. But it must not be resolved as one
+// rigid block either, or two unrelated objects picked together stop falling independently. The
+// answer is this relation: members that are stacked on each other travel together, members that
+// have nothing of their own underneath fall on their own. See GLCanvas3D's use of it.
+//
+// Returns the HIGHEST group member that both overlaps my footprint by >= engage_ratio and has its
+// top within `max_gap` below my bottom — i.e. one I am actually standing on, not merely one that
+// happens to be somewhere below me. Uses the flat convex-hull top, NOT the raycast sampling
+// floor_z_for_instance does: this only answers "are these two stacked", where a millimetre of
+// slack is irrelevant and the exact surface is not the question.
+std::optional<std::pair<int, int>> support_in_group(const GLVolumeCollection &volumes,
+                                                    int object_idx, int instance_idx,
+                                                    const std::set<std::pair<int, int>> &group,
+                                                    double engage_ratio, double max_gap);
 
 // World-space 2D convex-hull footprint (scaled units) of instance (object_idx, instance_idx) —
 // the exact same shape floor_z_for_instance uses internally to test overlap. Exposed read-only

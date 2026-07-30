@@ -223,6 +223,11 @@ void AppConfig::set_defaults()
     if (get("reverse_mouse_wheel_zoom").empty())
         set_bool("reverse_mouse_wheel_zoom", false);
 
+    // NEOTKO_SMOOTHNORMALS_TAG s229: on by default - it removes the shading noise that badly
+    // tessellated CAD meshes produce on flat faces, and costs one pass over the mesh at load time.
+    if (get("use_smooth_normals").empty())
+        set_bool("use_smooth_normals", true);
+
     if (get("camera_orbit_mult").empty())
         set("camera_orbit_mult", "1.0");
 

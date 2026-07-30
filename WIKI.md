@@ -57,6 +57,8 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
    - 6e. [Profile persistence and 3MF round-trip](#6e-profile-persistence-and-3mf-round-trip)
    - 6f. [Weave preview on the painted surface](#6f-weave-preview-on-the-painted-surface)
    - 6g. [MixedFilament Object mode (Beta)](#6g-mixedfilament-object-mode-beta)
+   - 6h. [Highlight active colour — where is this colour applied? (2.4.0)](#6h-highlight-active-colour--where-is-this-colour-applied-240)
+   - 6i. [Painted colours stay visible outside the painter (2.4.0)](#6i-painted-colours-stay-visible-outside-the-painter-240)
 7. [Align & Stack — align and stack two objects](#7-align--stack--align-and-stack-two-objects)
 8. [NeoArachne — alternative wall generator](#8-neoarachne--alternative-wall-generator)
    - 8a. [Turning it on](#8a-turning-it-on)
@@ -87,8 +89,11 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 15. [Expert G-code Reprocessor (2.3.8) — layer-ranged, per-tool G-code post-processing](#15-expert-g-code-reprocessor-238--layer-ranged-per-tool-g-code-post-processing)
 16. [PerObject Support (2.3.9) — support that avoids the other objects on the plate](#16-perobject-support-239--support-that-avoids-the-other-objects-on-the-plate)
 17. [Gravity ("True Objects") — real floor, honest bridges](#17-gravity-true-objects--real-floor-honest-bridges)
-    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239)
+    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239-extended-240)
 18. [Typographic Spacing (2.3.9) — real kerning for embossed text](#18-typographic-spacing-239--real-kerning-for-embossed-text)
+19. [Bridging infill extra expansion (2.4.0) — anchor bridges before they cross](#19-bridging-infill-extra-expansion-240--anchor-bridges-before-they-cross)
+20. [RealColor View — see the colour you are actually going to print](#20-realcolor-view--see-the-colour-you-are-actually-going-to-print)
+21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
 
 ---
 
@@ -136,6 +141,15 @@ PathBlend is always a single full-height gradient — when you pick a PathBlend 
 
 A **ColorStitch** pass decides which filament prints each fill line. Open its **Edit gradient…** button to configure it — the same editor also opens from the **ColorStitch Painter**'s Pro tray (**`ADV…`** button), so whichever entry point you use, you get the identical dialog.
 
+> **Which infill patterns does ColorStitch work on? (2.4.0)** Since 2.4.0 it works on **Monotonic**,
+> **Monotonic Line**, **Rectilinear** and **Hilbert Curve** out of the box — the old "ColorStitch on
+> Monotonic (continuous)" setting is gone and its behaviour is always on. It also works on
+> **Concentric**, **Octogram** and **Archimedean**: the line distribution is not always uniform there,
+> so the dithering is less predictable, but the results can be worth having. Getting a clean dither on
+> Hilbert Curve in particular takes some tuning and does not always come out.
+
+![The redesigned ADV dialog — pick a Pattern style and only that style's controls are shown](docs/images/ColorStitch-newADVUX.png)
+
 **Pattern style** picks *where the pattern comes from*. Only one style is active at a time — they're mutually exclusive by design (a custom string, a MixedFilament recipe, a weave, a blend and a set of stripes can't all drive the same pass at once), and a one-line note under the selector always says what the active style does, shown in amber when it overrides everything else:
 
 | Style | What it produces |
@@ -146,6 +160,12 @@ A **ColorStitch** pass decides which filament prints each fill line. Open its **
 | **Smooth blend — 2 colours** | Two filaments distributed across the surface with a percentage split, dithered so the transition looks smooth. The most common choice. |
 | **Smooth blend — 3 colours** | Three filaments at configurable percentages; the middle colour concentrates in the centre. |
 | **Stripes — manual band sizes** | Explicit band counts: N lines of Colour 1, M of Colour 2, … repeating. |
+
+Two of those styles, with the live preview of how the surface will look:
+
+![Smooth blend, 3 colours — 32% / 37% with the third colour auto-filling the remaining 31%, 31% colour overlap and an Even transition shape. The preview shows both the line strip and a square sample drawn at the pass angle](docs/images/colotstitch-slowstart.png)
+
+![Stripes, manual band sizes — 10 lines of Colour 1 then 10 of Colour 2, repeating; a colour set to 0 lines is skipped](docs/images/colotstitch-stripes.png)
 
 **Colours used** — pick **Color 1–4** (each maps to a loaded filament). Only shown for the two blend styles and Stripes — Custom/MixedFilament/Weave patterns already carry their own colours in the digit string.
 
@@ -203,6 +223,8 @@ A **PathBlend** pass creates a **continuous gradient** across the surface: one f
 - the **high handle** — where the ramp finishes rising, and how high its top reaches.
 
 By default the ramp spans the full surface edge-to-edge (the classic behaviour). Drag the low handle right to add a flat "start zone" before the ramp begins climbing; drag the high handle left to add a flat "end zone" after it's done. This is the same editor, same model, in both the **Sandwich Editor**'s `ADV…`/Advanced button and the **ColorStitch Painter**'s Pro tray — whichever one you use, they write the same pass data.
+
+> **(2.4.0) Fixed — a flat PathBlend on some surfaces.** The staircase gives **one height per fill line**, which quietly assumed the surface pattern hands it **one line at a time**. `Monotonic line` does; plain `Monotonic` (and other patterns that chain their lines into a long zigzag) does **not** — the whole surface arrived as a single line, got a single height, and the gradient came out flat with no Z change at all. It was most visible on **bottom surfaces**, whose default pattern is `Monotonic`, while tops set to `Monotonic line` looked fine — but the same top would have broken with the same setting. PathBlend now asks for unchained lines itself, so **the gradient no longer depends on the surface pattern you chose**.
 
 The gradient runs across the build-plate **Y axis** — rotate the object to change direction. PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse. It shares the **Line distribution mode** (§1f) — if a gradient looks broken across holes, try **LaneQuant** or **DirCluster**. In the **ColorStitch Painter** specifically, PathBlend also exposes its own **fill angle** field (`-1 = auto`, or a fixed 0–359° override) next to the Mode button — the Sandwich Editor doesn't have a separate control for this and leaves it on auto.
 
@@ -416,21 +438,90 @@ The Painter lives in the **left-side gizmo toolbar** of the 3D view.
 
 | Tool | What it does |
 |------|--------------|
-| **Paint (smart fill)** | Click a flat face → flood-fills the coplanar top region with the active profile. |
+| **Select** | Click objects in the scene to choose which ones you can paint. Shift-click removes one. |
+| **Paint (smart fill)** | Click a flat face → flood-fills the coplanar region with the active profile. |
 | **Eraser** | Smart-fill removes paint under the cursor. |
-| **Pick** | Reads the recipe under the cursor and loads it as the active colour. |
+| **Pick** (eyedropper) | Reads the recipe under the cursor and loads it as the active colour. |
+| **Sticker** | Places the loaded SVG on a flat top face (§ Stickers, in Palette). |
 
-**Mouse rules** — left-click paints/erases/picks with the active tool; **right-click is camera only**; **Shift + left-click** is a one-shot erase. Left-clicking with nothing selected does nothing.
+**Mouse rules** — left-click paints/erases/picks with the active tool; **right-click is camera only**; **Shift + left-click** is a one-shot erase.
+
+*(2.4.0)* **You can paint several objects.** Open the Painter with nothing selected and it starts in **Select** so you can click the objects you want; open it with a selection and those objects are already picked. While painting, moving the cursor onto another chosen object switches to it automatically, and **clicking an object that isn't in the set adds it** (that first click adopts it — the one after paints).
+
+*(2.4.0)* **The active colour tells you its state.** Next to the swatch at the top of the panel you will see one of:
+
+| Badge | Meaning |
+|-------|---------|
+| **slot N** (green) | The colour already owns a paint slot on this object — painting applies it right away. |
+| **ready** (grey) | A colour is chosen; it takes a slot the first time you actually paint with it. |
+| **no colour** (amber) | Nothing is selected — clicking the model will not paint (and will not erase either). |
+
+This replaces a long-standing trap where the swatch kept showing a colour that had quietly stopped being paintable after a slice or a tab change, so clicks did nothing until you re-picked it from the palette.
 
 **The panel**
 
 1. **Palette strips** — collapsible **Gradient ramp** and **Flat color** sections, scrollable strips of swatches generated from your filaments + TD (same engine as the Studio, §1g). They regenerate when colours/TD change.
-2. **Pro mode** — a collapsible composer, and **the Pro panel IS the active colour**: build **Top / Penultimate** passes (Solid / ColorStitch / PathBlend Half|Full) with a per-pass Z box and a **Perimeter override** checkbox. If the active colour is linked to a saved profile, editing it here rewrites that profile in place.
-3. **Pin to palette** — promote the active recipe into the saved **Profiles** library.
-4. **Profiles** — saved palettes; click one to load and paint with it.
-5. **Smart fill angle** + section-view **clipping** controls, and **Erase all painting**.
+2. **Pro** — the composer, and **the Pro panel IS the active colour**: build **Top / Penultimate / Bottom** passes (Solid / ColorStitch / PathBlend Half|Full) with a per-pass Z box and a **Perimeter override** checkbox. If the active colour is linked to a saved profile, editing it here rewrites that profile in place.
+   *(2.4.0)* The three zones are edited one after another in a single panel, top to bottom in printing order — the old **Top Surface / Bottom Surface** switch is gone. The **Recipe | Result** preview sits at the top of the panel, and the **(TD)** grid has moved out to the **Object & TD** department.
+   *(2.4.0)* **Right-click any pass's preview bar** for **Duplicate pass**, **Move up / Move down** and **Delete pass** — the clone splits the original's thickness in half, so nothing else in the stack moves. Under each zone a **copy to:** row copies the whole zone onto another one (**Top → Penultimate / Bottom**, and back). The ColorStitch pattern is translated to the destination zone's keys on the way, and a stack landing on **Bottom** is normalised to the Bottom rules (max 2 Solid, max 1 ColorStitch, PathBlend forced to Full).
+3. **Save** — promote the active recipe into the saved **Profiles** library.
+4. **Duplicate** *(2.4.0)* — make an **independent copy** of the active colour and open it in Pro. Because editing in Pro rewrites the linked profile *in place* (everywhere it is already painted), this is how you make a variant without touching the original.
+5. **Profiles** — saved palettes; click one to load and paint with it. **Right-click a swatch** for **Duplicate / Save to palette / Delete**.
+6. **In use on this object** *(2.4.0)* — every paint slot this object is spending: its colour, its name, how many facets it covers, and two actions — **Use** (make it the active colour) and **Free** (erase that colour from this object and release the slot).
+7. **Brush & view** *(2.4.0)* — **Smart fill angle** and the section-view **clipping** slider. These live **outside** the department tabs now, because the brush keeps working whichever tab is open; before, you had to go back to Palette to adjust them.
+8. **Erase all painting** — the coral button in the tool row. It now **asks for confirmation** and tells you how many objects it will clear (it wipes every chosen object, not just the active one).
 
 **How to paint**: pick a swatch or compose one in Pro mode (it becomes the active colour) → click the surface to paint. Use **Pick** to grab a colour already on the model.
+
+> *(2.4.0)* **Fluidity.** Dragging a divider or a number in Pro used to re-schedule a slice on **every frame** of the drag. Now the heavy work is committed **once, when you let go** — the same rule the **(TD)** sliders already followed. The Recipe/Result previews still update live while you drag.
+
+**The four departments**
+
+![Palette — Smart fill angle, the collapsible (TD) section, palette groups with New group / Delete / Save all, the saved Profiles strip (hovering a swatch shows its recipe and name), the Stickers (SVG) section and the Section view slider](docs/images/sandwich-editor-gizmo01.png)
+
+![Generator — Gradient ramp and ColorStitch Pattern Color, each with a Start (A) and End (B) filament pair and the generated swatch row underneath, plus a scrollable Flat color strip](docs/images/sandwich-editor-gizmo02.png)
+
+![Pro — Recipe and Result previews at the top, then the three zones in printing order: Top (a ColorStitch pass over a Solid pass), Penultimate (empty, with its Add button) and Bottom (a ColorStitch pass), with the bridge warning and Perimeter override at the bottom](docs/images/sandwich-editor-gizmo03a.png)
+
+![Object &amp; TD — the per-filament (TD) grid, always visible here, plus the MixedFilament Object checkbox and its Live recipe readout](docs/images/sandwich-editor-gizmo04.png)
+
+**Walkthrough — painting a multi-pass Sandwich, step by step**
+
+> The panel chrome in these seven shots predates the 2.4.0 reorganisation (they still show the
+> **Top Surface / Bottom Surface** switch and **(TD)** inside Pro). The **workflow is unchanged** —
+> for the current layout see the four department shots just above.
+
+![Step 1 — the object is selected and the ColorStitch Painter is picked from the gizmo toolbar](docs/images/Como-Pintar-SandwichMultipass01.png)
+
+![Step 2 — Generator department: a Gradient ramp between a Start (A) and End (B) filament pair. Hovering a generated swatch shows the two tools it uses and their real thicknesses, here T3/T4 at A 0.09 / B 0.11 mm](docs/images/Como-Pintar-SandwichMultipass02.png)
+
+![Step 3 — a swatch is chosen and becomes the active colour, then painted onto the top face of the cube](docs/images/Como-Pintar-SandwichMultipass03.png)
+
+![Step 4 — Pro department: the recipe behind that colour, two Solid passes (T3 then T4). Recipe and Result at the bottom show the stack and the predicted colour](docs/images/Como-Pintar-SandwichMultipass04.png)
+
+![Step 5 — a third Solid pass has been added with + layer, and the painted face updates to the new predicted colour](docs/images/Como-Pintar-SandwichMultipass05.png)
+
+![Step 6 — changing a pass kind: each pass offers Solid, ColorStitch, PB Half or PB Full from its dropdown](docs/images/Como-Pintar-SandwichMultipass06.png)
+
+![Step 7 — pass #1 switched to ColorStitch: the top face now shows the two-tool per-line pattern instead of a flat colour, while passes #2 and #3 stay Solid underneath](docs/images/Como-Pintar-SandwichMultipass07.png)
+
+**Layout and pass rows** *(2.4.0)*. The tool row (Select · Paint · Eraser · Eyedropper · Sticker · **?** ·
+Erase all) sits on **its own line** under the active-colour header, instead of sharing it — the panel had
+grown too wide. Each zone is titled by a **coloured chip** (green Top, darker green Penultimate, orange
+Bottom — the same codes the 3D highlight uses, see §6h), because three plain labels did not read as three
+different things. In every pass row:
+
+- The **thickness bar** on the left is twice as wide, so its millimetre value no longer collides with the
+  pass number, and its **drag handles** between passes are easier to grab (they light up teal under the
+  cursor and stay clear of each other on thin bands).
+- **`^` `v` reorder** and **`x` remove** close the row on the **right**, with the `x` set apart: reordering
+  passes (raise the Solid, lower the ColorStitch, swap them) is a core move when composing a recipe and it
+  used to be hidden in a right-click menu, while the `x` sat next to the thickness control — one adjusts,
+  the other destroys.
+- A **`!CS`** or **`!PB`** button appears on a *Solid* pass that still carries a leftover ColorStitch or
+  PathBlend payload — a pass degraded by an older build. The engine slices it as Solid (the kind wins) but
+  the recipe looks like an effect, so the preview came out flat. Click it to restore the pass. New ones
+  cannot be created: switching a pass to Solid now clears its payload.
 
 ---
 
@@ -445,6 +536,21 @@ The Painter lives in the **left-side gizmo toolbar** of the 3D view.
 **Save all** — promotes **every unsaved working colour** into the active palette group at once, so a later *Erase all* leaves nothing dangling.
 
 Painting and the slot→profile mapping are recorded for **undo/redo** within the session.
+
+**Save keeps the Bottom zone** *(2.4.0, bug fix)*. A colour's recipe is carried as Top + Penultimate,
+and **Save** built the saved palette from those two only — a recipe with a **Bottom** zone was saved
+*without* it, silently, in the very gesture meant to preserve your work. The Bottom now travels with
+the colour, and it also counts when Save looks for an identical existing palette: two recipes that
+match on top and differ underneath are **different colours**, and collapsing them was how twin
+profiles appeared, one of them carrying the Bottom and the other not.
+
+**The list no longer reshuffles under the cursor** *(2.4.0, bug fix)*. Working colours are listed while
+they occupy a slot, and that was checked against the *active* object — which changes on simple
+**hover** in Paint/Eyedropper mode. The grid reordered itself as you moved the mouse across the plate,
+and with it whatever Save appeared to do. It now counts the active object **and every chosen one**, so
+the list stays put until you change your selection. And if Save promotes a colour that lives in another
+**group**, the view now **jumps to that group** instead of leaving you looking at an unchanged grid —
+the colour is filed where it belongs, not moved behind your back.
 
 ---
 
@@ -478,7 +584,13 @@ Painted top surfaces show the **ColorStitch weave directly on the model** — th
 
 > **Auto angle (`-1`).** With auto angle the slicer **alternates the fill direction every layer** (this is what gives a uniform finish), so a static preview cannot match the print. An amber **"auto angle"** tag appears next to **ADV** in that case — set a **fixed angle** (wheel over the bar) to lock the orientation.
 
-> **Remaining limitations (this version).** The stripe scale uses the painted-area projected extent, **not** the exact line count after perimeters/gap-fill are subtracted, so it can differ by a line or two. Islands wider than ~64 lines coarsen in the preview (64-entry shader LUT) — gradients just lower resolution; patterns still tile at real width. Painting is restricted to **upward-facing (top) faces**, matching where the effect actually prints.
+**The Bottom zone is previewed too** *(2.4.0)*. Until now every on-model preview read the **Top** recipe only, so a colour whose **Bottom** zone carried its own ColorStitch or PathBlend showed up flat — or worse, wearing the Top colour. Now each painted slot is previewed **per zone**: upward-facing facets show the Top recipe, downward-facing facets show the Bottom one, each with its own islands and its own scale. A Bottom made only of Solid passes has no weave to draw, so it gets its **own composed colour** instead of borrowing the Top's.
+
+**Where you can paint.** Painting follows the **zones the colour actually uses**: a recipe with Top/Penultimate content keeps **upward-facing** facets, one with Bottom content keeps **downward-facing** ones, and a recipe with both keeps both. Side walls are never painted — that is where the effect would not print anyway.
+
+**The preview no longer flickers when you change object** *(2.4.0)*. Chosen objects that are not the active one are drawn with their own weave now; previously they fell back to a flat composed colour, so sweeping the cursor across a plate made patterns blink in and out.
+
+> **Remaining limitations (this version).** The stripe scale uses the painted-area projected extent, **not** the exact line count after perimeters/gap-fill are subtracted, so it can differ by a line or two. Islands wider than ~64 lines coarsen in the preview (64-entry shader LUT) — gradients just lower resolution; patterns still tile at real width.
 
 ---
 
@@ -487,8 +599,12 @@ Painted top surfaces show the **ColorStitch weave directly on the model** — th
 A **MixedFilament** (Filament Settings → the *MixedFilament* rows built from two of your
 loaded filaments) can be assigned to a whole object as its extruder, the same way you'd
 assign any normal filament. **MixedFilament Object mode** is a one-click way to make that
-object's **top surface and penultimate layer** actually *look like* that MixedFilament's
-colour, instead of printing with whatever the default top/penu treatment would be.
+object's **top surface, penultimate layer and bottom surface** actually *look like* that
+MixedFilament's colour, instead of printing with whatever the default treatment would be.
+
+> **2.4.0** — the Bottom zone is new. Before, the mode replaced Top and Penultimate but left
+> Bottom resolving to whatever painted recipe was underneath, so an object could print under
+> two different recipes at once while the interface said it was fully governed. Fixed.
 
 **How to use it**: open the **ColorStitch Painter** gizmo (§6b) on an object whose extruder
 is a MixedFilament. A new checkbox — **"MixedFilament Object"** — appears above the palette
@@ -504,19 +620,147 @@ strips, with a small colour swatch next to it showing the approximated result.
   - **Locks out** manual painting/patterns for that object (the palette strips, zone
     editors and the Perimeter override checkbox grey out) — the object is either "painted
     by hand" or "driven by its MixedFilament," not both at once.
+    *(2.4.0)* The lock now covers the **brush in the 3D view** as well, not just the panel.
+    Before, the controls greyed out but clicking the model still painted: slots were spent
+    and re-slices scheduled for paint the engine then ignored — work lost with no warning.
+    Placing a **sticker** on such an object is blocked for the same reason. **Select** and
+    the **eyedropper** keep working: changing object or reading a recipe are still useful.
 - Turning it **off** restores whatever was painted before (nothing is lost).
 
 > **Beta.** This feature is functional and print-verified in principle, but still young —
-> report anything that looks off. Two known rough edges: the swatch shows the **colour**
-> only, not a preview of the pattern/passes that will actually print; and the checkbox
-> currently lives inside the **Pro mode** panel rather than as a top-level toggle (it may
-> move up in a future update, since it changes the whole object's behaviour).
+> report anything that looks off. One known rough edge: the swatch shows the **colour**
+> only, not a preview of the pattern/passes that will actually print.
+
+---
+
+### 6h. Highlight active colour — where is this colour applied? (2.4.0)
+
+The panel always knew which colour was active; the 3D view never said **where that colour is
+already applied**. With two similar colours on one plate that question had no answer other than
+squinting at the mesh. **Highlight active colour** (checkbox at the bottom of the painter, next to
+the brush and section-view controls) answers it.
+
+**What it draws.** The **outline of the painted region** for one slot — the boundary edges only, so
+it frames the area without covering the weave preview you are looking at — plus a faint **box around
+each painted island** for reading at a distance, and a **badge** carrying the slot number. The
+outline is drawn twice: solid on the surface, and as a **ghost through the object**, so a zone facing
+away from you still shows without orbiting blind. A slow pulse keeps it apart from the paint itself.
+
+**Zone colours, the same ones as the panel.** The zone chips in the Pro tray and the highlight share
+one palette: **green = Top** (the Penultimate is a darker green — it is the layer under the same top
+surface, not a separate thing), **orange = Bottom**. So a recipe that paints both zones is obvious at
+a glance: green outline above, orange below. Each badge shows the **slot number**, a disc in the
+**colour of the slot** (what colour it is), and a ring plus a wedge in the **zone colour** (where it is
+applied) — the wedge points up for a top island, down for a bottom one, and bottom badges sit *under*
+their island.
+
+**Which slot is highlighted.** The **active** colour by default, so while you paint you always see
+where that colour already is. **Hovering a swatch** in the palette grid, or a row of **In use on this
+object**, highlights *that* colour instead — "show me where this one is". Move the cursor off the
+panel and it returns to the active colour.
+
+**The counter next to the checkbox** reads `sN — 137` (slot and facet count) or `sN — not painted
+here`. That distinction matters: "the colour is active and I see nothing" has two very different
+causes — it is not painted on this object, or it is painted on a face pointing away from you.
+
+**It is an aid, not a preview of the result** — turn it off to check the clean weave preview.
+
+> **Notes.** On a multi-instance object only the first instance is highlighted. A bottom outline can
+> be hidden by the build plate, since the plate is drawn after the objects — that is what the badge
+> under the island is for.
+
+**Assembled objects now show their paint** *(2.4.0, bug fix)*. On an object made of several parts
+(what **Assemble** produces) painting a colour that already had a slot recorded the facets but not
+the colour itself on the other parts: the part sliced correctly while the painter showed it **grey**,
+the eyedropper read no recipe there, and the highlight had nothing to light up. Paint slots are
+**per part**, and the profile is what identifies a colour across parts — that is now respected
+everywhere (painting, eyedropper, highlight, preview). Objects already in this state are **repaired
+when the object is opened** in the painter: orphan paint recovers the colour from the sibling part
+that still had it.
+
+
+### 6i. Painted colours stay visible outside the painter (2.4.0)
+
+Until now a painted Sandwich only existed **while the ColorStitch Painter was open**. Close the
+gizmo and the object went back to one flat colour: nothing on the plate told you which parts were
+painted, with what, or how the effect would land — you had to reopen the painter, object by object,
+to find out. Plate thumbnails had the same blind spot.
+
+Painted objects are now **drawn painted in the normal 3D view**, gizmo closed, with the **full
+weave** — the same per-line stripes, dithers, hard bands and PathBlend gradients you see inside the
+painter, per island and at the real line width, composed against the object's actual base colour and
+its TD. It is the same code doing the drawing in both places, so there are no two versions of the
+truth to drift apart.
+
+**What is identical to the painter, and what is not.** The colours and the pattern are the same
+calculation. Two differences worth knowing:
+
+- **Lighting is not the same.** Inside the gizmo the model is drawn by the painter's own shader;
+  outside it is the normal one — or Libre Mode's realistic shading with its ambient occlusion and
+  shadows. Same bands, different light on top of them.
+- **Small leftover facets print flat here.** Inside the painter, faces too small to form an island
+  fall back to a whole-object weave. Outside they take the slot's **flat composed colour**. In
+  practice this is stray fragments between zones.
+- With the object **selected**, the unpainted part carries the selection tint and the painted zones
+  do not — the same behaviour MMU painting has always had.
+
+**Turning it off.** A checkbox, **Keep paint visible outside this gizmo**, sits with the other view
+aids at the bottom of the painter (next to *Highlight active colour*). It is on by default and
+applies to the whole project.
+
+**With MMU painting on the same object** *(2.4.0)*. Both are drawn, each on its own faces: the
+Sandwich first, the MMU on top of the faces it owns. That is now exactly what the slicer does —
+**where you painted MMU, MMU rules**; everywhere else the Sandwich applies. What you see is what
+prints.
+
+In the MMU area you get **no Sandwich effect**: that surface prints plain, in its own filament.
+Both painters tell you how much of your paint is affected, in amber, when it actually happens.
+
+---
+
+### Seeing your Sandwich effects while you paint MMU *(2.4.0)*
+
+The MMU painter draws your Sandwich painting too, with the full weave — the same way the normal 3D
+view does — so you can decide where MMU paint goes without working blind. Where both meet, MMU is
+drawn on top, matching the slicer.
+
+A checkbox, **Show Sandwich effects**, appears in the MMU panel on objects that carry Sandwich
+painting. On by default, project-wide.
+
+> **Known limitation.** Where a surface is split — by MMU paint, or anything else — each piece
+> restarts its gradient instead of continuing it. The line spacing stays continuous across the
+> boundary; the colours restart. Cross a ColorStitch or PathBlend zone with MMU paint and the
+> pattern begins again on the far side.
+
+---
+
+### Stickers (SVG) — ⚠️ rough, and deliberately tucked away
+
+Load an SVG in the Palette tab and the **Sticker** tool places it on a flat top face. It is not
+geometry: the shape becomes a **2D mask** carrying a Sandwich recipe, resolved at slice time. Stack
+several and the **topmost one wins** where they overlap — it occludes, it does not blend.
+
+It works and it slices. But it is the least finished part of the painter, and you should know what
+you are getting before you build anything around it:
+
+- **You cannot see a sticker anywhere.** Not in the normal 3D view, not inside the MMU painter, and
+  not even inside the Sandwich painter itself unless you are actively editing that sticker. You
+  place it, it disappears, and you find out what it did in the preview or the G-code.
+- **A sticker overrides everything under it, silently** — hand-painted zones *and* MMU paint. It is
+  applied last, over whatever survived, so it takes the surface back from both. Nothing warns you.
+- **Top surfaces only.** Bottom stickers were never implemented.
+- The wipe tower does not currently switch between a painted tower and a sticker one.
+
+All of this is being addressed together in a **Mask-Painting** section planned for a future release,
+where stickers and a drawing tool become one thing. Until then, treat stickers as experimental.
 
 ---
 
 ## 7. Align & Stack — align and stack two objects
 
 **Align & Stack** is a gizmo (left-side gizmo toolbar, **"Align & Stack"**) for placing one object against another — **#1**, the object clicked first, is the **anchor**; **#2** is the one that moves. Click two objects in the scene to set them (click a third to swap out #2 — the gizmo only ever relates two objects, so there's no chain to manage); click a chip or **Reset** to clear.
+
+![Align & Stack — with anchor #1 and object #2 picked, every possible landing spot is drawn as a translucent ghost in the viewport, each with a clickable cube icon at the seam](docs/images/AlignStack.gif)
 
 **Two modes:**
 
@@ -812,6 +1056,8 @@ violet shading to choose per zone.
 > Both the support engine and the contact layer are experimental; expect this section to expand in a
 > later release.
 
+![NeoWave Support — hollow supports, the Wave-Huygens roof (Andersons, Sanchez, Vaneker, Twente University), and the NeoWeaving low-contact oscillating contact layer](docs/images/NeoWave-ContactLayer.jpeg)
+
 **NeoWave** is a support type that replaces the interface/roof fill with a *wave-front* pattern —
 long, continuous paths that diffract around concavities (ported from a published wave-overhang
 algorithm), instead of straight parallel lines. It optionally hollows out the support body itself
@@ -881,9 +1127,13 @@ The stock brush paints by hand with a circle/sphere cursor, which is naturally i
 
 A **Precision** slider (1×–8×) in Pro Mode subdivides the mesh more finely right where you're painting, so the edge of a brush stroke follows the surface more closely instead of stair-stepping at low mesh resolution. Higher values cost more memory/CPU on dense meshes. Default `1×` = identical to a build without Pro Mode.
 
+![Precision x6 sharpening a painted edge instead of leaving it jagged](docs/images/Painter-Precision.png.webp)
+
 ### 13b. Paint perimeters only + Extra walls
 
 Two checkboxes/fields that change *where* a painted colour actually gets used, without touching the brush itself:
+
+![How the Extra walls option affects the painted zone's walls](docs/images/Painter-Walls.webp)
 
 | Control | What it does |
 |---------|--------------|
@@ -911,6 +1161,8 @@ Both tools only paint **front-facing** triangles — the side of the mesh actual
 
 Paint a design on the top (or bottom) of an object — a logo, a letter, a mark — and **Surface depth** extends it *into* the object as **solid infill of the painted color**, following the painted silhouette exactly, for as many layers as you choose (`0`–`20`, `0` = off).
 
+![Surface depth — the same painted design projected straight into two test cubes, seen in preview](docs/images/Paint-Depth.gif)
+
 - The painted shape projects **straight down** (or straight up from a bottom surface), layer after layer, keeping its size — only trimmed where the object's real geometry changes. It is not a cosmetic reclassification: those layers genuinely print as solid walls-to-walls material of the painted color, surrounded by whatever sparse infill the rest of the layer uses.
 - Depth is counted in **extra layers past the painted surface** (the painted surface itself is already solid). Where the projection overlaps areas that were already solid (your normal top shell layers, vertical shells, Sandwich internals), nothing double-counts — the projection only converts sparse infill, and never touches Sandwich's penultimate layers.
 - Works symmetrically for **bottom-painted** surfaces, projecting upward.
@@ -919,6 +1171,8 @@ Paint a design on the top (or bottom) of an object — a logo, a letter, a mark 
 ### 13e. Per color (2.3.8) — different Walls / Depth per painted color
 
 The **Per color** checkbox switches "Extra walls" and "Surface depth" from one global value to a **per-color table**: one row per filament, showing its color swatch plus a **Walls** (`0`–`8`) and a **Depth** (`0`–`20`) field. A value of `0` in the table means "use the global value" — so you can, say, give a silver logo 8 extra walls and 5 layers of depth while a red mark next to it gets 2 and 20, without touching each other.
+
+![Per color — the Pro Mode table assigning different Walls and Depth per painted color](docs/images/Paint-Depth-Basic.png)
 
 - Clicking a **color swatch** in the table also selects that color for painting — same colors, same selection highlight as the filament strip at the top of the panel.
 - With the checkbox off, the two global fields behave exactly as before.
@@ -934,6 +1188,8 @@ The **Per color** checkbox switches "Extra walls" and "Surface depth" from one g
 > below is confirmed working **in the 3D preview only**. Treat this section as a curiosity/early-look,
 > not a feature to rely on. One of its own controls (fill speed, see table below) is a **confirmed
 > no-op bug** — turning it doesn't currently change anything in the resulting G-code.
+
+![Z NeoStitch Interlayer Lock — alternating notch/fill segments on a cylinder wall: front view, and top view showing the phase flip between layers](docs/images/NeoStitch-InterlayerLock.jpeg)
 
 **NeoStitch** interlocks consecutive printed layers of a chosen wall **without ever moving Z**. Along
 the wall's own path, each layer alternates short **notch** segments (the wall deflects inward, leaving
@@ -983,6 +1239,8 @@ per-region, exactly like Fuzzy Skin).
 > fan/Z-offset rules active, and the exported G-code was checked afterward line-by-line.
 > **"Avoid Wipetower" is separately G-code-verified** (2.3.8): checked directly against an
 > exported file to confirm a rule with it enabled never touches wipe-tower purge G-code.
+
+![G-code Reprocessor — the GLOBAL/BY TOOL toggle, per-tool bars, and a Flow rule with Avoid Wipetower's gold glow active](docs/images/ReProcesor.png)
 
 **Where to find it**: G-code **Preview** → the view-type dropdown (the same one **RealColor**
 lives in) → **"Gcode Reprocessor"**, when **Libre Mode** is on. It renders inside the same legend
@@ -1142,12 +1400,14 @@ objects on the plate.
   by-object printing a neighbor object may not exist yet at a given height, so nothing is treated
   as floor there.
 
-### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9)
+### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0)
 
 With **True Objects** on, dragging an object in the viewport can rest it on whatever it is really
 above, instead of leaving it floating wherever you dropped it. Enable it per-session from the
 object's **right-click menu → Snap & Drag** (greyed out and unavailable while True Objects itself
 is off — it's a sub-behaviour of True Objects, not a separate axis).
+
+![Snap & Drag — dragging an object over another makes it rest on the real surface underneath instead of staying where the mouse was released](docs/images/SnapANDDrag.gif)
 
 **How it decides where to land.** Detection is by 2D footprint overlap, not a raycast under the
 cursor — a corner that only barely overlaps a pillar is not treated as resting on it (the overlap
@@ -1161,19 +1421,49 @@ real surface under it; if an object has more than one instance and they'd land o
 different heights, the whole object uses the **lowest** of those targets, so one instance landing
 on something tall never silently drags the others up with it.
 
-If nothing qualifies underneath, the object is left exactly where it is — Snap & Drag only ever
-pulls something *down* onto a floor it actually finds; it never invents a bed-drop the way stock
-placement does, since that would defeat True Objects' own "nothing auto-drops" promise.
+**Does the plate count? (2.4.0)** By default yes: **right-click → Snap & Drag: Allow Bed** is on,
+and an object dragged over empty space lands on the build plate, the way placement behaves in any
+ordinary slicer. Switch it off and only other objects can catch you — an object with nothing
+underneath keeps floating exactly where you dropped it, which is what you want while assembling
+something in mid-air. The plate never competes with a real object: it is simply a floor of height
+zero, and the highest surface under your footprint always wins. The option lives directly under
+**Snap & Drag** in the same menu and is greyed out unless Snap & Drag is on.
 
-**Landing indicator.** While a drag is engaged, a soft shadow (a few layered translucent rings,
-darker toward the centre) is projected onto the real landing surface under the object's footprint,
-with a short vertical marker through its centre so the spot stays visible even from angles where
-the shadow itself is hidden under the object. Purely visual — it plays no part in the landing
-calculation.
+With Allow Bed off and nothing qualifying underneath, the object is left exactly where it is —
+Snap & Drag then only ever pulls something *down* onto a floor it actually finds, in keeping with
+True Objects' own "nothing auto-drops" promise.
 
-**Limits (v1):** vertical (-Z) detection only — it does not help with side-by-side mating inside
-Assemble View, which has no single "down" direction. No chaining: moving the object something is
-resting on does not drag the resting object along with it.
+![Snap & Drag with Allow Bed: an object dragged over the plate lands on it, hovering above its
+landing spot while the drag is live, with the recognised zone and the sample points visible
+underneath](docs/images/SnapDrag-Bed.gif)
+
+**Landing indicator (2.4.0).** While a drag is engaged the object hovers a little above its landing
+spot rather than sitting flat on it, so what is underneath stays visible, and that gap is filled
+with the evidence behind the decision:
+
+- the **corner marks** of the box where the object will come to rest;
+- the **recognised zone** — the exact patch being read as the height — highlighted on the surface
+  it was found on;
+- a translucent **column** standing between that zone and the object's underside;
+- the **sample points** the height was actually taken from, as fat dots at their real hit heights;
+- **colour**: cyan when another object caught you, amber when the plate did.
+
+Underneath it all is the older soft contact shadow. None of this takes part in the calculation — but
+it is what makes aiming possible: when a large part refuses to catch a thin rim, the dots show you
+that the samples went through the opening instead of onto the rim.
+
+**Dragging several objects at once (2.4.0).** A multi-object selection is resolved by *stacks*.
+Anything standing on another member of the same selection travels with it and keeps its exact
+relative height; anything with nothing of its own underneath resolves its own floor and falls
+independently. Pick up a stack of three plus a loose box, move them together, and the stack lands
+intact while the loose box drops to the plate — in the same drag. Two objects count as stacked when
+one overlaps the other's footprint and sits within about a millimetre of its top, so hand-built
+stacks that were never seated perfectly still hold together.
+
+**Limits:** vertical (-Z) detection only — it does not help with side-by-side mating inside
+Assemble View, which has no single "down" direction. No chaining *outside* the selection: moving an
+object that something else is resting on does not drag that object along, only things picked up
+together move together.
 
 ---
 
@@ -1238,6 +1528,130 @@ per-*pair* value could not be expressed at any price. Text composition now happe
 
 ---
 
+## 19. Bridging infill extra expansion (2.4.0) — anchor bridges before they cross
+
+**Quality → Bridging → Bridging infill extra expansion** (mm, default **0**).
+
+Orca already grows each bridge region a little into the area around it, so the strand has somewhere to
+land instead of starting in mid-air. Two things are wrong with how it does that: the amount is
+hard-wired, and it is derived from your **wall count** — raise `wall_loops` for stiffness and you
+silently change the anchoring of every bridge in the part. This setting adds millimetres on top of the
+automatic amount and decouples the two.
+
+What it buys you: the bridge takes over the neighbouring region **of the same part**, so the nozzle is
+already extruding over solid, supported material before it reaches open air. A strand that starts
+anchored behaves very differently from one that starts unattached — each pass has something to grab,
+and the filament tensions across the gap instead of simply hanging.
+
+![Bridging infill extra expansion, off vs on, on a beam resting on two blocks. Off: the bridge stops where the supported area begins and that area prints as ordinary solid infill at its own angle, leaving a visible boundary between the two. On: the bridge has claimed the neighbouring supported region, so the whole span prints as one continuous bridge in a single direction](docs/images/Bridging%20Infill%20Extra%20Expansion.png)
+
+**There is no cap.** Turning it up until the bridge claims the entire surrounding region is a normal
+way to use this — it removes the seam artefact where the bridged area meets the supported one, and
+gives the layer a single continuous direction. Values in the hundreds are accepted.
+
+### Notes
+
+- **Additive.** At 0 the slicer behaves exactly as before, byte for byte.
+- Applies to **external bridges** only.
+- The custom **bridge angle** is honoured across the expanded region.
+- The expansion grows into solid infill, sparse infill, top surfaces and **supported bottom
+  surfaces**. That last one is the important case: a beam resting on two blocks ("dolmen") has its
+  bridge sitting right next to the supported area, and that supported area is the best possible
+  landing ground — solid, with material directly underneath.
+- Costs a little extra material and some bridge-speed travel over a region that was already solid.
+
+### Debugging
+
+`ORCA_DEBUG_BOTTOM=1` writes `BRIDGE_EXPAND` / `BRIDGE_EXPAND_DONE` lines to
+`/tmp/neotko_bottom.log`, one pair per layer that contains a bridge:
+
+- `extra_cfg` — the value that reached the engine. If this is 0 when you set something else, the
+  problem is config invalidation, not the expansion.
+- `exp_solid_mm` / `exp_sparse_mm` — how far the bridge may grow into each kind of neighbour.
+- `zone_solid_mm2` / `zone_sparse_mm2` / `zone_top_mm2` / `zone_bottom_mm2` — how much area of each
+  neighbour actually exists next to the bridge. All zeros means there is nowhere to grow, which is
+  the usual reason for "it does nothing". `zone_bottom_mm2` reads `-1` when the setting is 0, since
+  that zone is only created when you ask for extra expansion.
+- `delta_mm2` — how much bridge area was actually gained.
+
+---
+
+## 20. RealColor View — see the colour you are actually going to print
+
+**Where to find it**: G-code **Preview** → the view-type dropdown at the top of the legend panel →
+**RealColor**.
+
+Every slicer shows you multi-material G-code the same way: each extrusion drawn in its filament's raw
+colour. That tells you *which tool* prints *where*, which is the right answer for a tool-change
+preview and the wrong one for this pack. A Sandwich surface is not "some blue lines and some pink
+lines" — it is a **stack** whose colours mix optically as light passes through the upper passes and
+bounces back off the ones underneath. Read line by line, that surface looks like stripes. Printed, it
+is one blended colour.
+
+**RealColor** renders the second thing. It composites each surface the way the eye will resolve it,
+using each filament's **TD** (§1e) to decide how much of what is underneath shows through.
+
+![Filament view — the standard preview: every extrusion in its filament's raw colour, so the top surface reads as hard blue and pink stripes](docs/images/RealColor-OFF.png)
+
+![RealColor view — the same G-code composited optically: the stripes resolve into the blended tone the print will actually have, and the legend is replaced by a Filament Usage summary carrying the "approximated optical simulation" caveat](docs/images/RealColor-ON.png)
+
+Same G-code in both shots. Only the interpretation changes.
+
+### Notes
+
+- **TD is what makes it accurate.** RealColor is only as good as the transmission-distance values you
+  gave each filament. With TD roughly right the match to the printed part is genuinely close; with TD
+  left at defaults on filaments that differ a lot in opacity, expect the preview to drift. Tuning TD
+  (§1e, and the **Object &amp; TD** department of the painter, §6b) pays off here more than anywhere
+  else.
+- **It is a simulation, not a promise.** The panel says so itself: *"Approximated optical simulation —
+  not a guarantee of the final print colour."* Surface finish, lighting and the printer's own
+  colour-blending behaviour all move the result.
+- Changes **nothing** about the G-code. It is a rendering mode, and switching back to **Filament**
+  gives you the standard view instantly.
+- The RealColor legend shows **Filament Usage** and **Time Estimation** only — the per-tool tower/cost
+  breakdown and the Travel/Retract/Seams toggles belong to the Filament view.
+
+---
+
+## 21. Real prints — what this actually looks like off the bed
+
+Everything above is previews and dialogs. This section is the printed result, so you can judge for
+yourself how far the simulation is from the plastic.
+
+### Hilbert Curve × ColorStitch
+
+![G-code preview — three rows of test tiles, each row sweeping the mix ratio of one filament (cyan, red, yellow) against a dark blue, dithered along a Hilbert Curve infill. In G-code view the dither reads as scattered fragments](docs/images/REALPRINTS/RealPrint-01A.webp)
+
+![The same tiles printed. What looked like noise in G-code resolves into continuous tone, because the eye integrates the dither instead of resolving individual lines](docs/images/REALPRINTS/RealPrint-01B_web.png)
+
+This pair is the clearest argument for why the G-code view alone is misleading for this pack, and why
+**RealColor** (§20) exists.
+
+### The BIGTEST board
+
+![BIGTEST.3mf printed — a full board of tiles covering many filament pairs, mix ratios and pass structures at once](docs/images/REALPRINTS/RealPrint-02.webp)
+
+![Close-up of part of the same board: smooth blends sit next to tiles where the ColorStitch dither is deliberately coarse enough to read as texture](docs/images/REALPRINTS/RealPrint-03.webp)
+
+The `BIGTEST.3mf` project used for this board is in the fork's GitHub repository, so you can slice and
+print the same reference yourself.
+
+### MultiPass gradients
+
+![Two-colour gradient built from stacked Solid passes, with the mix percentage varying per tile](docs/images/REALPRINTS/RealPrint-04a.webp)
+
+![The same construction with a different filament pair — the achievable range depends heavily on the opacity of the two filaments involved](docs/images/REALPRINTS/RealPrint-04b.webp)
+
+### Print vs screen
+
+![A printed part next to the RealColor preview of the same G-code on screen](docs/images/REALPRINTS/realprint-realcolor.webp)
+
+With TD values set correctly for the filaments in use, the match is close. That is the whole point of
+tuning TD (§1e) rather than leaving it at defaults.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -1261,6 +1675,7 @@ per-*pair* value could not be expressed at any price. Text composition now happe
 | PerObject Support (§16) | Support → Enable support → **PerObject Support** checkbox, per object |
 | True Objects / Gravity (§17) | Toolbar side button **"True Objects: On/Off"** (independent from Libre Mode) |
 | Snap & Drag (§17a) | Right-click an object → **Snap & Drag** (requires True Objects on) |
+| Snap & Drag: Allow Bed (§17a) | Right-click an object → **Snap & Drag: Allow Bed** (requires Snap & Drag on) |
 | World-space import (WIP) | Import with Libre Mode active *(recommend assembled → split)* |
 | S3DFactory import | File → Import → Import 3D model → `.factory` *(loads assembled; split in Libre Mode)* |
 | Save / Manage profiles | Sandwich Editor → **Save as profile… / Manage Sandwich Profiles** |

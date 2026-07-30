@@ -1160,6 +1160,34 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    // NEOTKO_BRIDGE_TAG — s230: "Bridging infill extra expansion" (concepto tomado de
+    // Simplify3D). Orca YA expande las superficies de bridge hacia el sólido vecino para
+    // anclarlas (LayerRegion::process_external_surfaces, expansion_bottom_bridge =
+    // shell_width*sqrt(2)), pero esa cantidad está CABLEADA y atada al número de paredes:
+    // subir wall_loops por rigidez cambia de rebote el agarre de todos los puentes, que es
+    // un acoplamiento que nadie pide. Esta clave añade milímetros ENCIMA de lo que ya hace.
+    // Aditiva pura: 0 = comportamiento actual byte-idéntico.
+    def = this->add("bridge_expansion_extra", coFloat);
+    def->label = L("Bridging infill extra expansion");
+    def->category = L("Quality");
+    def->tooltip = L("Extra distance the bridging infill grows into the surrounding area of the "
+                     "same part, on top of the automatic expansion.\n\n"
+                     "The bridge then starts extruding over solid material before it reaches the "
+                     "gap, so the strand is already anchored when it begins to span. Raise this if "
+                     "bridges detach or curl at their ends.\n\n"
+                     "With a large value the bridge takes over the whole surrounding region and the "
+                     "entire layer prints as one continuous bridge — useful to remove the seam "
+                     "artefact where the bridged area meets the supported area. There is no cap: "
+                     "set it as high as you need.\n\n"
+                     "0 = automatic expansion only (unchanged behaviour). The automatic amount is "
+                     "derived from the wall count, so this setting also lets you decouple bridge "
+                     "anchoring from the number of walls.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 999;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("bridge_density", coPercent);
     def->label = L("External bridge density");
     def->category = L("Strength");
@@ -1648,8 +1676,14 @@ void PrintConfigDef::init_fff_params()
     def = this->add("thick_internal_bridges", coBool);
     def->label = L("Thick internal bridges");
     def->category = L("Quality");
+    // NEOTKO_BRIDGE_TAG — s230: la coletilla de LibreMode va aquí porque es el único tooltip
+    // por-clave disponible (Field no expone setter por-instancia). Se confunde con facilidad
+    // con "Thick external bridges", que está justo encima, se llama casi igual y NO se grisa.
     def->tooltip  = L("If enabled, thick internal bridges will be used. It's usually recommended to have this feature turned on. However, "
-                       "consider turning it off if you are using large nozzles.");
+                       "consider turning it off if you are using large nozzles.\n\n"
+                       "Greyed out in LibreMode: LibreMode removes internal bridges entirely, so every "
+                       "internal-bridge setting has no effect there. This does NOT affect \"Thick external "
+                       "bridges\" above, which stays editable in both modes.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
     
@@ -7049,7 +7083,10 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("On odd layers, shifts the Monotonic infill reference point by half a line spacing "
                      "perpendicular to the fill direction. Lines of layer N fall into the gaps of layer N-1, "
                      "creating XY mechanical interlock. Combine with Neoweaving Linear for XY+Z nesting.");
-    def->mode = comAdvanced;
+    // NEOTKO_COLORSTITCH_TAG — s230: oculto salvo modo Develop (decisión usuario). Es un
+    // knob de investigación mecánica, no una opción de uso diario; ensuciaba la página
+    // Quality junto a los otros dos gates Monotonic.
+    def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
 
     // NEOTKO_NEOWEAVING_TAG — angle-lock keys consumed by Fill (_infill_direction).
@@ -7256,7 +7293,9 @@ void PrintConfigDef::init_fff_params()
                      "per-side untaken-length budget");
     def->min = 0;
     def->max = 3;
-    def->mode = comAdvanced;
+    // NEOTKO_COLORSTITCH_TAG — s230: oculto salvo modo Develop (decisión usuario). Sigue
+    // siendo un gate de test entre 4 estrategias de anclaje, no una opción de usuario.
+    def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInt(0));
 
     // NEOTKO_COLORSTITCH_TAG — ColorStitch on the continuous Monotonic pattern.
@@ -7264,8 +7303,12 @@ void PrintConfigDef::init_fff_params()
     // connectors (unlike Monotonic Line, which keeps lines separate). When ON, ColorStitch splits
     // each fused path into per-colour runs so every visual line carries its assigned tool; the
     // connector arc at a colour boundary stays with the OUTGOING colour. Done entirely post-hoc in
-    // SurfaceColorMix — standard (non-ColorStitch) Monotonic infill is NOT affected. Default OFF
-    // preserves today's behaviour (ColorStitch effective only on Monotonic Line).
+    // SurfaceColorMix — standard (non-ColorStitch) Monotonic infill is NOT affected.
+    // s230 — DEJA DE SER OPCIÓN: siempre activa (default true, retirada de la UI del Tab y
+    // forzada a true en el motor, ver SurfaceColorMix.cpp). Con esto ColorStitch funciona de
+    // serie sobre Monotonic continuo, Rectilinear e Hilbert Curve, y también sobre Concentric /
+    // Octogram / Archimedean (ahí la distribución no siempre es uniforme, pero da efectos
+    // válidos). La key se conserva para no romper la lectura de 3mf antiguos.
     def = this->add("colorstitch_monotonic_split", coBool);
     def->label = L("ColorStitch on Monotonic (continuous)");
     def->category = L("Quality");
@@ -7275,8 +7318,8 @@ void PrintConfigDef::init_fff_params()
                      "the connector arc at a colour change is kept with the outgoing colour.\n\n"
                      "Only affects surfaces where a ColorStitch profile is active; ordinary Monotonic "
                      "infill is untouched.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("interlayer_colormix_tool_a", coInt);
     def->label = L("First tool (A)");

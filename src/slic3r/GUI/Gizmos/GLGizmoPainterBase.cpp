@@ -1673,6 +1673,11 @@ void TriangleSelectorPatch::render(ImGuiWrapper* imgui, const Transform3d& matri
                     continue;
                 color = m_ebt_colors[color_idx];
             }
+            // NEOTKO_PROFILE_TAG s235 F5b — ver set_skip_base_patch(). Se decide sobre el
+            // color_idx YA resuelto, no sobre patch.type: un fragmento hereda el estado del
+            // vecino, y saltarse un fragmento cuyo vecino sí está pintado dejaría agujeros.
+            if (m_skip_base_patch && color_idx == 0)
+                continue;
             //to make black not too hard too see
             ColorRGBA new_color = adjust_color_for_rendering(color);
             shader->set_uniform("uniform_color", new_color);

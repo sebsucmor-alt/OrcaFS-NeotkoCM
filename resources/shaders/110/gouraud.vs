@@ -18,6 +18,20 @@ const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
 
 const vec3 ZERO = vec3(0.0, 0.0, 0.0);
 
+// NEOTKO_SMOOTHNORMALS_TAG s229 — live shading tuning (see ShadingTuning in GLShader.hpp).
+// Pushed on every shader bind by GLShaderProgram::start_using(). While shading_override is
+// false these are ignored entirely and the constants above are used, so the default render is
+// bit-for-bit what it was before. Gated in the UI on ORCA_DEBUG_SHADING.
+uniform bool  shading_override;
+uniform vec3  shading_light_top_dir;
+uniform float shading_top_diffuse;
+uniform float shading_top_specular;
+uniform float shading_top_shininess;
+uniform vec3  shading_light_front_dir;
+uniform float shading_front_diffuse;
+uniform float shading_ambient;
+
+
 struct SlopeDetection
 {
     bool actived;
@@ -48,27 +62,40 @@ varying vec3 clipping_planes_dots;
 varying float color_clip_plane_dot;
 
 varying vec4 world_pos;
+varying vec4 weave_model_pos;   // NEOTKO_PROFILE_TAG s233 — posición local para el weave
 varying float world_normal_z;
 varying vec3 eye_normal;
+varying vec3 eye_pos;   // NEOTKO_SMOOTHNORMALS_TAG s229: for the geometric-normal debug view
 
 void main()
 {
 	// First transform the normal into camera space and normalize the result.
     eye_normal = normalize(view_normal_matrix * v_normal);
 
+    // NEOTKO_SMOOTHNORMALS_TAG s229: pick live values or the baked-in constants.
+    vec3  light_top_dir   = shading_override ? normalize(shading_light_top_dir)   : LIGHT_TOP_DIR;
+    vec3  light_front_dir = shading_override ? normalize(shading_light_front_dir) : LIGHT_FRONT_DIR;
+    float top_diffuse     = shading_override ? shading_top_diffuse    : float(LIGHT_TOP_DIFFUSE);
+    float top_specular    = shading_override ? shading_top_specular   : float(LIGHT_TOP_SPECULAR);
+    float top_shininess   = shading_override ? shading_top_shininess  : float(LIGHT_TOP_SHININESS);
+    float front_diffuse   = shading_override ? shading_front_diffuse  : float(LIGHT_FRONT_DIFFUSE);
+    float ambient         = shading_override ? shading_ambient        : float(INTENSITY_AMBIENT);
+
 	// Compute the cos of the angle between the normal and lights direction. The light is directional so the direction is constant for every vertex.
 	// Since these two are normalized the cosine is the dot product. We also need to clamp the result to the [0,1] range.
-	float NdotL = max(dot(eye_normal, LIGHT_TOP_DIR), 0.0);
+	float NdotL = max(dot(eye_normal, light_top_dir), 0.0);
 
-	intensity.x = INTENSITY_AMBIENT + NdotL * LIGHT_TOP_DIFFUSE;
+	intensity.x = ambient + NdotL * top_diffuse;
     vec4 position = view_model_matrix * vec4(v_position, 1.0);
-    intensity.y = LIGHT_TOP_SPECULAR * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, eye_normal)), 0.0), LIGHT_TOP_SHININESS);
+    eye_pos = position.xyz;
+    intensity.y = top_specular * pow(max(dot(-normalize(position.xyz), reflect(-light_top_dir, eye_normal)), 0.0), top_shininess);
 
 	// Perform the same lighting calculation for the 2nd light source (no specular applied).
-	NdotL = max(dot(eye_normal, LIGHT_FRONT_DIR), 0.0);
-	intensity.x += NdotL * LIGHT_FRONT_DIFFUSE;
+	NdotL = max(dot(eye_normal, light_front_dir), 0.0);
+	intensity.x += NdotL * front_diffuse;
 
     // Point in homogenous coordinates.
+    weave_model_pos = vec4(v_position, 1.0);   // NEOTKO_PROFILE_TAG s233
     world_pos = volume_world_matrix * vec4(v_position, 1.0);
 
     // z component of normal vector in world coordinate used for slope shading

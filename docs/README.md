@@ -140,6 +140,36 @@ El usuario aportó capturas de la app en `images/` y fotos de impresiones reales
 - **`#shotdim`**: rect a canvas completo (rgba(4,16,16,.92)) que atenúa el vídeo de atrás cuando entran las capturas; va justo ANTES de los grupos shot al final del SVG (gotcha #2, z-order = orden DOM).
 - **`RealPrint-01B_web.png`** es un downscale (1400px) generado del original de 22MB — usar siempre la versión `_web` en los HTML.
 - ⚠️ **Nombres intercambiados** (contenido real, verificado 2026-07-10): `sandwich-editor-gizmo04.png` = panel **Object/MixedFilament**; `sandwich-editor-TD-control.png` = panel **Pro con Perimeter Override ✓ + angle 45**. Ir por contenido, no por nombre.
+  - **Actualización 2026-07-29 (s230):** el `gizmo04` refrescado YA es el panel **Object & TD**, así que para ese fichero el cruce queda resuelto. `sandwich-editor-TD-control.png` sigue siendo un panel Pro (ahora además obsoleto) y **ya no se usa en ninguna parte** — sustituido por `gizmo04` en `WIKI.md`.
+  - ⚠️ **Caso nuevo del mismo tipo:** `colotstitch-slowstart.png` refrescada **ya no muestra un "Slow start"** — es **Smooth blend — 3 colours** con transición **Even**. El nombre miente; ir por contenido. `colotstitch-S-curve-3colorblend.png` NO se refrescó (sigue con el ADV compacto viejo) y quedó fuera de la wiki por redundante.
+
+## Estado de las imágenes (2026-07-29, s230)
+
+**`WIKI.md` ya consume estas imágenes**, no solo los HTML de vídeo. Antes tenía 3; ahora **28**, y es la
+fuente pensada para generar en el futuro los docs HTML interactivos (cada `##` numerado lleva su imagen
+justo después del párrafo de entrada → par título+visual reutilizable sin reescribir nada).
+
+**Refrescadas en s230** (originales del usuario en `CLAUDEDROP/docs/videos/images/`, copiadas al repo):
+`sandwich-editor-gizmo01/02/03a/04`, `colotstitch-slowstart`, `colotstitch-stripes`,
+`Como-Pintar-SandwichMultipass01..07`, `Bridging Infill Extra Expansion` (nueva).
+
+- `sandwich-editor-gizmo03b.png` es **byte a byte idéntica a `03a`** (verificado con `cmp`) — una de las
+  dos sobra.
+- La serie **`Como-Pintar-*` sigue mostrando el panel Pro PRE-2.4.0** (switch Top Surface / Bottom
+  Surface, `(TD)` dentro de Pro, departamento llamado "Object"). Se usa igualmente porque **el flujo de
+  trabajo no ha cambiado**; en `WIKI.md §6b` lleva una nota que lo advierte y remite a las cuatro
+  capturas de departamento actuales que van justo encima. Decisión del usuario, s230.
+
+### 🎞️ Galería de impresiones reales — pendiente, sin bloqueo
+
+`WIKI.md §21` monta la galería con las **8 fotos ya existentes** en `images/REALPRINTS/`
+(Hilbert×ColorStitch gcode-vs-print, board BIGTEST + closeup, gradientes MultiPass ×2, print-vs-pantalla).
+
+**No habrá fotos nuevas a corto plazo** — el usuario tiene una producción prioritaria durante las
+próximas semanas (s230). No es un bloqueo: la galería queda completa y publicable con lo disponible.
+Cuando vuelva a haber máquina libre, lo que más valor añadiría es material de lo shippeado en 2.4.0 y
+que hoy no tiene ninguna foto real: **bridges apilados** (bottom multi-pasada sobre puente) y
+**`bridge_expansion_extra`** impreso, que sigue siendo slice-verificado pero no print-verificado.
 - **Preview en vivo (gotcha #10)**: el sandbox bloquea `getcwd` (python http.server muere) y el proceso del preview no puede leer `~/Downloads` (TCC). Solución que funcionó: server node inline en `.claude/launch.json` (handler con rutas absolutas) sirviendo un **mirror rsync de docs/VIDEOS en el scratchpad de la sesión** — re-sincronizar tras cada edit. El mirror es per-sesión: en una sesión nueva hay que regenerarlo y actualizar la ruta del launch.json.
 
 ## Asset producido (vídeo 7) — tutorial Painter con capturas reales (2026-07-10)

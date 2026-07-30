@@ -165,6 +165,32 @@ private:
     // See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
     void render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width);
 
+    // NEOTKO_PROFILE_TAG_START — s235 F5b: el sandwich VISIBLE dentro del gizmo de MMU.
+    // docs/FUTURE/MMU_SANDWICH_COEXISTENCE_PLAN.md §3 F5b. El bloqueo que documentaba el plan
+    // (GLCanvas3D apaga el GLVolume con `is_active=false` cuando el gizmo es MmSegmentation,
+    // así que el preview de s233 que vive en GLVolume::render no se dibuja) NO se toca: en vez
+    // de reencender el volumen — que además reintroduciría la malla que el gizmo ya dibuja —
+    // el propio gizmo dibuja el preview, con el MISMO patrón que GLGizmoColorMixPainter::
+    // render_marked_paint(): TriangleSelectorPatch + mm_gouraud. Eso resuelve de paso el
+    // riesgo (1) del plan (¿qué shader dibuja?): mm_gouraud es donde nacieron las uniforms
+    // u_weave_*, así que el tejido se ve sin portar nada. El picking (riesgo 2) no se toca:
+    // esto sólo vive en el render.
+    void rebuild_sandwich_preview_if_dirty();
+    bool render_sandwich_preview();          // devuelve true si dibujó algo
+    std::vector<std::unique_ptr<TriangleSelectorPatch>> m_sw_preview_sel;
+    uint64_t m_sw_paint_key   = 0;           // ColorMixPaintPreview::overlap_key del objeto
+    uint64_t m_sw_color_key   = 0;           // ...::context_key (color/TD/perfiles)
+    int      m_sw_built_oid    = -2;         // objeto para el que se construyó (-2 = nada)
+    bool     m_sw_show         = true;       // toggle de UI (app_config neotko_mmu_show_sandwich)
+
+    // s235 F5a — el aviso inverso al de s234: DENTRO de lo pintado de sandwich hay una zona
+    // que no llevará efecto porque ahí manda el MMU.
+    void render_coexist_warning();
+    ColorMixPaintPreview::CoexistOverlap m_coexist{};
+    uint64_t m_coexist_key    = 0;
+    int      m_coexist_oid    = -2;
+    // NEOTKO_PROFILE_TAG_END
+
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
     std::map<std::string, wxString> m_desc;

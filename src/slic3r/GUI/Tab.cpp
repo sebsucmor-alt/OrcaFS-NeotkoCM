@@ -3947,7 +3947,13 @@ private:
         bool has_pb = false;
         for (const auto& p : ps) if (p.kind == Kind::PathBlend) has_pb = true;
         if (has_pb && n > 1)                       // PathBlend can't be multi-pass
-            for (auto& p : ps) p.kind = Kind::Solid;
+            // s232 — el payload TAMBIÉN se va. Degradar a Solid dejando dentro el blob
+            // PathBlend (o un ColorStitch) produce un pase `kind:Solid` con
+            // `present=true`: el motor lo slicea como Solid, pero cualquier lector que
+            // mire el payload (el preview del painter, los nombres de receta) cree que
+            // sigue habiendo efecto → "la receta dice PB/ColorStitch y sale plano".
+            // Visto en vivo en los perfiles 33 y 40 del proyecto del usuario (s232).
+            for (auto& p : ps) { p.kind = Kind::Solid; p.colormix = {}; p.pathblend = {}; }
 
         if ((int)ps.size() < n) {
             while ((int)ps.size() < n) {
@@ -7500,6 +7506,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("bridge_density", "quality_settings_bridging#bridge-density");
         optgroup->append_single_option_line("internal_bridge_density", "quality_settings_bridging#bridge-density");
         optgroup->append_single_option_line("thick_bridges", "quality_settings_bridging#thick-bridges");
+        // NEOTKO_BRIDGE_TAG — s230: expansión extra del bridge hacia el sólido vecino
+        // (anclaje), sumada a la automática. Ver PrintConfig.cpp / LayerRegion.cpp.
+        optgroup->append_single_option_line("bridge_expansion_extra");
         optgroup->append_single_option_line("thick_internal_bridges", "quality_settings_bridging#thick-bridges");
         optgroup->append_single_option_line("enable_extra_bridge_layer", "quality_settings_bridging#extra-bridge-layers");
         optgroup->append_single_option_line("dont_filter_internal_bridges", "quality_settings_bridging#filter-out-small-internal-bridges");
@@ -7535,13 +7544,11 @@ void TabPrint::build()
         // NEOTKO_COLORSTITCH_TAG — Line distribution mode moved out of the Sandwich editor
         // into the print settings, directly below Minimum line length (UX decision 2026-06-24).
         optgroup->append_single_option_line("surface_color_mix_lane_mode");
-        // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan gate (self-loop micro-accumulation fix).
+        // NEOTKO_COLORSTITCH_TAG — s230: "Monotonic Line Replan" y "Monotonic Interlayer Nesting"
+        // pasan a comDevelop (siguen aquí, pero solo se dibujan en modo Develop). "ColorStitch on
+        // Monotonic (continuous)" se RETIRA del todo: ya no es opción, va siempre ON en el motor.
         optgroup->append_single_option_line("colorstitch_monotonic_replan");
-        // NEOTKO_NEOWEAVING_TAG — Monotonic Interlayer Nesting toggle (config+engine already ported,
-        // UI lands here below Line distribution per UX 2026-06-30).
         optgroup->append_single_option_line("neotko_interlayer_nesting_enabled");
-        // NEOTKO_COLORSTITCH_TAG — ColorStitch on continuous Monotonic (split engine = Ultracode WIP).
-        optgroup->append_single_option_line("colorstitch_monotonic_split");
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");
@@ -8079,6 +8086,9 @@ void TabPrint::toggle_options()
         toggle_option("internal_bridge_speed", false);
         toggle_option("thick_internal_bridges", false);
         toggle_option("dont_filter_internal_bridges", false);
+        // NEOTKO_BRIDGE_TAG — s230: el porqué de estas 5 casillas grises vive en el tooltip
+        // ESTÁTICO de cada clave (PrintConfig.cpp), no aquí: Field no expone un setter de
+        // tooltip por-instancia (solo set_edit_tooltip, que es el del icono de edición).
     }
 
     // NeotkoLIBRE — s134: hide "NeoArachne" from the wall_generator combo unless LibreMode is

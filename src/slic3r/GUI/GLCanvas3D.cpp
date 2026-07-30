@@ -1019,18 +1019,100 @@ static Point snapdrag_scale_about(const Point& p, const Point& centroid, double 
     return Point::new_scale(r.x(), r.y());
 }
 
-// NEOTKO_SNAPDRAG_TAG s227 — see GLCanvas3D.hpp for the class purpose.
-void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, double landing_z)
+// NEOTKO_SNAPDRAG_TAG s233 — maps every member of a multi-object drag to the member at the bottom
+// of the stack it belongs to ("its root"): itself when nothing else in the drag is under it.
+//
+// This is what lets a multi-object drag do both things at once. Each root resolves its own floor
+// normally (with the whole drag excluded as candidates, so a drag still never rests on itself),
+// and everyone above a root simply inherits that root's Z shift — so a stack picked up as a whole
+// keeps its shape, while an unrelated object picked up in the same selection still falls on its
+// own. Resolving members independently flattens stacks; resolving the whole drag as one rigid
+// block stops independent objects from falling. Both were tried in s233, in that order.
+static std::map<std::pair<int, int>, std::pair<int, int>>
+snapdrag_group_roots(const GLVolumeCollection& volumes, const std::set<std::pair<int, int>>& group)
 {
+    // Direct supporter of each member, if any.
+    std::map<std::pair<int, int>, std::pair<int, int>> supporter;
+    for (const std::pair<int, int>& id : group) {
+        const std::optional<std::pair<int, int>> sup =
+            GravitySnap::support_in_group(volumes, id.first, id.second, group,
+                                          GLCanvas3D::SNAPDRAG_ENGAGE_RATIO, GLCanvas3D::SNAPDRAG_STACK_MAX_GAP);
+        if (sup.has_value())
+            supporter[id] = *sup;
+    }
+
+    // Walk each chain down to its root. The relation is built from "is below me", so it cannot
+    // contain a cycle — but a visited set makes that structural, not a promise: a cycle here would
+    // hang the UI thread mid-drag, and geometry that is 0.05 mm from ambiguous is not worth that.
+    std::map<std::pair<int, int>, std::pair<int, int>> roots;
+    for (const std::pair<int, int>& id : group) {
+        std::set<std::pair<int, int>> seen;
+        std::pair<int, int> cur = id;
+        seen.insert(cur);
+        for (;;) {
+            auto it = supporter.find(cur);
+            if (it == supporter.end())
+                break;
+            if (!seen.insert(it->second).second)
+                break; // cycle: stop at the last sane member
+            cur = it->second;
+        }
+        roots[id] = cur;
+    }
+    return roots;
+}
+
+// NEOTKO_SNAPDRAG_TAG s233 — fills `data` with the triangles of `ex` laid flat at `z`.
+static void snapdrag_add_flat_polygon(GLModel::Geometry& data, const ExPolygon& ex, double z)
+{
+    const std::vector<Vec3d> tris = triangulate_expolygon_3d(ex, z);
+    unsigned int counter = (unsigned int)data.vertices_count();
+    for (const Vec3d& v : tris) {
+        data.add_vertex((Vec3f)v.cast<float>());
+        ++counter;
+        if (counter % 3 == 0)
+            data.add_triangle(counter - 3, counter - 2, counter - 1);
+    }
+}
+
+// NEOTKO_SNAPDRAG_TAG s227 — see GLCanvas3D.hpp for the class purpose.
+void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, const GravitySnap::FloorHit& hit,
+                                        const BoundingBoxf3& ghost_box, double beam_top_z)
+{
+    const double landing_z = hit.z;
+
+    // s233 — nothing about the decision changed since last frame: keep the models we already have.
+    // The footprint centroid is part of the key, so this does NOT survive actual XY movement (the
+    // overlay has to follow the object) — it catches the drag events that fire while the pointer
+    // sits still, which are plentiful, and skips ~10 GLModel rebuilds each time.
+    const Point new_centroid = footprint_world.empty() ? Point(0, 0) : footprint_world.centroid();
+    if (m_key.valid && m_visible && m_key.z == landing_z && m_key.top_z == beam_top_z &&
+        m_key.obj == hit.obj_idx && m_key.inst == hit.inst_idx && m_key.bed == hit.is_bed &&
+        m_key.centroid.x() == new_centroid.x() && m_key.centroid.y() == new_centroid.y())
+        return;
+
     for (GLModel& ring : m_shadow_rings)
         ring.reset();
     m_fill.reset();
     m_outline.reset();
     m_beam.reset();
-    m_visible = false;
+    m_ghost_box.reset();
+    m_contact_fill.reset();
+    m_contact_outline.reset();
+    m_beam_prism.reset();
+    m_samples.reset();
+    m_visible   = false;
+    m_key.valid = false;
 
     if (footprint_world.empty())
         return;
+
+    // s233 — the one functional colour of the whole overlay: cyan = resting on another object,
+    // amber = resting on the bed. Readable at a glance without looking at any menu, and it is the
+    // only cue that tells the two Allow Bed modes apart mid-drag.
+    const ColorRGBA cue_base = hit.is_bed ? ColorRGBA(1.0f, 0.72f, 0.25f, 1.0f)
+                                          : ColorRGBA(0.3f, 0.9f, 1.0f, 1.0f);
+    auto cue = [&cue_base](float alpha) -> ColorRGBA { return { cue_base.r(), cue_base.g(), cue_base.b(), alpha }; };
 
     // Cheap "almost realistic" contact shadow: a few concentric rings grown/shrunk about the
     // footprint centroid, darker and smaller toward the middle. Rendered UNDER the functional
@@ -1079,7 +1161,7 @@ void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, double l
     // Shadow fill
     GLModel::Geometry fill_data;
     fill_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
-    fill_data.color  = { 0.3f, 0.9f, 1.0f, 0.35f };
+    fill_data.color  = cue(0.35f);
     const ExPolygon ex(footprint_world);
     const std::vector<Vec3d> triangulation = triangulate_expolygon_3d(ex, z);
     fill_data.reserve_vertices(triangulation.size());
@@ -1095,7 +1177,121 @@ void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, double l
 
     // Shadow outline
     m_outline.init_from(Polygons{ footprint_world }, float(z + 0.02));
-    m_outline.set_color({ 0.3f, 0.9f, 1.0f, 0.9f });
+    m_outline.set_color(cue(0.9f));
+
+    // s233 — the zone the ENGINE recognised as floor, drawn on the surface it was found on: the
+    // footprint intersection for an object floor, the whole footprint for the bed. This is the
+    // answer to "what is it reading as the height", not an approximation of it.
+    // Skipped for a bed hit: there the recognised zone IS the footprint, so it would just double
+    // the ink of the shadow above. The amber cue and the ghost box already say "you land on the
+    // plate"; the beam below still gets drawn, since the gap it shows is the useful part.
+    if (!hit.is_bed && !hit.contact.contour.points.empty()) {
+        GLModel::Geometry contact_data;
+        contact_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        contact_data.color  = cue(0.55f);
+        snapdrag_add_flat_polygon(contact_data, hit.contact, landing_z + 0.06);
+        if (contact_data.vertices_count() > 0)
+            m_contact_fill.init_from(std::move(contact_data));
+
+        Polygons contact_lines = { hit.contact.contour };
+        for (const Polygon& hole : hit.contact.holes)
+            contact_lines.push_back(hole);
+        m_contact_outline.init_from(contact_lines, float(landing_z + 0.08));
+        m_contact_outline.set_color(cue(1.0f));
+    }
+
+    // s233 — the "light beam": a translucent prism standing on the recognised zone and reaching
+    // the dragged object's underside. With the hover lift (§2) that gap is ~10 mm of visible
+    // volume, so the column of air being measured is a thing you can see and aim with, instead of
+    // a Z number you have to infer. Degenerate (zero-height) when the lift is off — harmless.
+    if (!hit.contact.contour.points.empty() && beam_top_z > landing_z + EPSILON) {
+        const double z_lo = landing_z + 0.06;
+        const double z_hi = beam_top_z;
+
+        GLModel::Geometry prism;
+        prism.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        prism.color  = cue(0.13f);
+
+        // Cap at the top only — the bottom cap is already the contact fill above.
+        snapdrag_add_flat_polygon(prism, hit.contact, z_hi);
+
+        // Side walls, contour and holes alike (a ring-shaped contact must stay a ring).
+        Polygons walls = { hit.contact.contour };
+        for (const Polygon& hole : hit.contact.holes)
+            walls.push_back(hole);
+        for (const Polygon& poly : walls) {
+            const size_t n = poly.points.size();
+            for (size_t i = 0; i < n; ++i) {
+                const Point& a = poly.points[i];
+                const Point& b = poly.points[(i + 1) % n];
+                const Vec3f a_lo(float(unscale_(a.x())), float(unscale_(a.y())), float(z_lo));
+                const Vec3f b_lo(float(unscale_(b.x())), float(unscale_(b.y())), float(z_lo));
+                const Vec3f a_hi(a_lo.x(), a_lo.y(), float(z_hi));
+                const Vec3f b_hi(b_lo.x(), b_lo.y(), float(z_hi));
+                const unsigned int base = (unsigned int)prism.vertices_count();
+                prism.add_vertex(a_lo);
+                prism.add_vertex(b_lo);
+                prism.add_vertex(b_hi);
+                prism.add_vertex(a_hi);
+                prism.add_triangle(base, base + 1, base + 2);
+                prism.add_triangle(base, base + 2, base + 3);
+            }
+        }
+        if (prism.vertices_count() > 0)
+            m_beam_prism.init_from(std::move(prism));
+    }
+
+    // s233 — the actual raycast hits behind the chosen Z. When a footprint straddles a thin rim
+    // and refuses to catch it, this is what shows why: the samples land in the hole, not on the
+    // rim. Empty for a bed hit (no raycasting involved there).
+    if (!hit.samples.empty()) {
+        GLModel::Geometry pts;
+        pts.format = { GLModel::Geometry::EPrimitiveType::Points, GLModel::Geometry::EVertexLayout::P3 };
+        pts.color  = cue(1.0f);
+        pts.reserve_vertices(hit.samples.size());
+        pts.reserve_indices(hit.samples.size());
+        unsigned int idx = 0;
+        for (const Vec3d& s : hit.samples) {
+            pts.add_vertex(Vec3f(float(s.x()), float(s.y()), float(s.z() + 0.10)));
+            pts.add_index(idx++);
+        }
+        m_samples.init_from(std::move(pts));
+    }
+
+    // s233 — ghost box: corner ticks of the dragged instance's AABB where it will come to rest.
+    // Corners only (not the full 12-edge cage) — same visual language as Align & Stack's AID, and
+    // it does not fence in the scene the way a closed wireframe does.
+    {
+        const Vec3d bmin = ghost_box.min;
+        const Vec3d bmax = ghost_box.max;
+        const Vec3d size = bmax - bmin;
+        if (size.x() > EPSILON && size.y() > EPSILON && size.z() > EPSILON) {
+            const Vec3d tick(std::min(size.x() * 0.15, 8.0), std::min(size.y() * 0.15, 8.0), std::min(size.z() * 0.15, 8.0));
+
+            GLModel::Geometry box;
+            box.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+            box.color  = cue(0.85f);
+            unsigned int idx = 0;
+            for (int cx = 0; cx < 2; ++cx)
+                for (int cy = 0; cy < 2; ++cy)
+                    for (int cz = 0; cz < 2; ++cz) {
+                        const Vec3d corner(cx == 0 ? bmin.x() : bmax.x(),
+                                           cy == 0 ? bmin.y() : bmax.y(),
+                                           cz == 0 ? bmin.z() : bmax.z());
+                        // One short segment along each axis, pointing back inside the box.
+                        const Vec3d dirs[3] = { Vec3d(cx == 0 ? tick.x() : -tick.x(), 0.0, 0.0),
+                                                Vec3d(0.0, cy == 0 ? tick.y() : -tick.y(), 0.0),
+                                                Vec3d(0.0, 0.0, cz == 0 ? tick.z() : -tick.z()) };
+                        for (const Vec3d& d : dirs) {
+                            box.add_vertex((Vec3f)corner.cast<float>());
+                            box.add_vertex((Vec3f)(corner + d).cast<float>());
+                            box.add_line(idx, idx + 1);
+                            idx += 2;
+                        }
+                    }
+            m_ghost_box.init_from(std::move(box));
+        }
+    }
 
     // Beam: short vertical tick through the landing point, at the footprint centroid. Fixed
     // height (not tied to the dragged object's own height) — it is a spotlight marking the
@@ -1105,7 +1301,7 @@ void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, double l
 
     GLModel::Geometry beam_data;
     beam_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
-    beam_data.color  = { 0.3f, 0.9f, 1.0f, 0.6f };
+    beam_data.color  = cue(0.6f);
     beam_data.reserve_vertices(2);
     beam_data.reserve_indices(2);
     const Vec3f tip = base + Vec3f(0.0f, 0.0f, float(BEAM_HEIGHT));
@@ -1115,6 +1311,9 @@ void GLCanvas3D::SnapDragIndicator::set(const Polygon& footprint_world, double l
     m_beam.init_from(std::move(beam_data));
 
     m_visible = true;
+
+    // s233 — remember what this build represents, so the next frames over the same surface are free.
+    m_key = Key{ landing_z, beam_top_z, hit.obj_idx, hit.inst_idx, hit.is_bed, new_centroid, true };
 }
 
 void GLCanvas3D::SnapDragIndicator::render()
@@ -1144,9 +1343,41 @@ void GLCanvas3D::SnapDragIndicator::render()
     m_fill.render();
     m_outline.render();
 
+    // s233 — the recognised zone sits ON a real surface, so it needs to win the depth test
+    // against it: offset it toward the camera instead of relying on the +0.06/+0.08 mm lift
+    // alone, which z-fights at grazing angles.
+    glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+    glsafe(::glPolygonOffset(-1.0f, -1.0f));
+    m_contact_fill.render();
+    glsafe(::glPolygonOffset(0.0f, 0.0f));
+    glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+
+    // The beam is a volume standing in mid-air: it must be occluded by real geometry (depth test
+    // ON) but must NOT occlude anything itself, or the object being dragged and the far faces of
+    // the beam start punching holes in each other depending on draw order — hence depth writes
+    // off for it. Same reason the sample points are drawn after it.
+    glsafe(::glDepthMask(GL_FALSE));
+    m_beam_prism.render();
+    glsafe(::glDepthMask(GL_TRUE));
+
+    glsafe(::glLineWidth(2.0f));
+    m_contact_outline.render();
+    m_ghost_box.render();
+
     glsafe(::glLineWidth(1.5f));
     m_beam.render();
 
+    // s233 — fat, round dots: these are the only part of the overlay that shows the raw evidence
+    // behind the chosen height, so they have to survive being seen from across the plate.
+    // GL_POINT_SMOOTH is legacy-GL only; harmless where it is unsupported, and macOS runs this
+    // context at GL 2.1 anyway.
+    glsafe(::glEnable(GL_POINT_SMOOTH));
+    glsafe(::glPointSize(12.0f));
+    m_samples.render();
+    glsafe(::glPointSize(1.0f));
+    glsafe(::glDisable(GL_POINT_SMOOTH));
+
+    glsafe(::glLineWidth(1.0f));
     glsafe(::glDisable(GL_BLEND));
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glDisable(GL_DEPTH_TEST));
@@ -4524,35 +4755,129 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                             continue;
                         moving.insert({ gv->object_idx(), gv->instance_idx() });
                     }
+                    // NEOTKO_SNAPDRAG_TAG s233 — a drag spanning more than one OBJECT is resolved
+                    // by STACKS, not member by member and not as one rigid block. Every member
+                    // excludes the rest of the drag as floor candidates (a drag never rests on
+                    // itself, plan v1 §1 rule 3), so resolving each member on its own leaves the
+                    // upper part of a dragged stack with nothing underneath: it falls back to the
+                    // bed and the stack flattens. Resolving the whole drag rigidly fixes that but
+                    // costs the other half — objects picked together that are NOT stacked stop
+                    // falling independently. So: whoever is standing on another member of the drag
+                    // rides with it; whoever is not resolves its own floor. Both halves at once,
+                    // which is what the feature promises. See snapdrag_group_roots().
+                    //
+                    // Single-object drags keep the s227 path untouched: there the per-instance
+                    // rules (and rule 2's "lowest of my own instances' pillars" in do_move) are an
+                    // explicit user decision, and they only concern instances of one object, which
+                    // by invariant differ in XY only and cannot be stacked on each other anyway.
+                    std::set<int> moving_objects;
+                    for (const std::pair<int, int>& id : moving)
+                        moving_objects.insert(id.first);
+                    const bool group_drag = moving_objects.size() > 1;
+
+                    const std::map<std::pair<int, int>, std::pair<int, int>> group_roots =
+                        group_drag ? snapdrag_group_roots(m_volumes, moving)
+                                   : std::map<std::pair<int, int>, std::pair<int, int>>();
+
+                    // Pass 1: resolve the roots, shift nobody yet.
+                    struct SnapRoot { GravitySnap::FloorHit hit; double dz; BoundingBoxf3 bbox; Polygon footprint; };
+                    std::map<std::pair<int, int>, SnapRoot> resolved_roots;
+                    BoundingBoxf3 group_bbox;
+                    bool          group_bbox_valid = false;
+
                     // NEOTKO_SNAPDRAG_TAG s227 — shows the landing shadow/beam for the first
                     // engaged instance found this frame; set false again below if none engage.
                     bool indicator_shown = false;
                     for (const std::pair<int, int>& id : moving) {
-                        const bool was_engaged = m_snapdrag_engaged[id];
-                        const double engage_ratio = was_engaged ? 0.08 : 0.20;
-                        const std::optional<double> found_z = GravitySnap::floor_z_for_instance(m_volumes, id.first, id.second, moving, engage_ratio);
-                        m_snapdrag_engaged[id] = found_z.has_value();
-                        // No floor detected -> leave this instance exactly where the drag put it
-                        // (free floating). Must NOT fall back to the bed here (s227 regression).
-                        if (!found_z.has_value())
-                            continue;
-                        const double target_z = *found_z;
+                        // s233 — in a group drag only the roots ask for a floor; everyone else
+                        // inherits their root's shift, so querying them would be wasted work whose
+                        // answer must be ignored anyway.
+                        bool is_root = true;
+                        if (group_drag) {
+                            const auto root_it = group_roots.find(id);
+                            is_root = root_it == group_roots.end() || root_it->second == id;
+                        }
 
-                        if (!indicator_shown) {
-                            const Polygon footprint = GravitySnap::instance_footprint(m_volumes, id.first, id.second);
-                            m_snapdrag_indicator.set(footprint, target_z);
-                            indicator_shown = m_snapdrag_indicator.is_visible();
+                        std::optional<GravitySnap::FloorHit> hit;
+                        if (is_root) {
+                            const bool was_engaged = m_snapdrag_engaged[id];
+                            const double engage_ratio = was_engaged ? 0.08 : SNAPDRAG_ENGAGE_RATIO;
+                            hit = GravitySnap::floor_z_for_instance(m_volumes, id.first, id.second, moving, engage_ratio);
+                            // s233 — "engaged" tracks an OBJECT floor only: the bed always answers,
+                            // so counting it would lock engage_ratio low for the rest of the drag.
+                            m_snapdrag_engaged[id] = hit.has_value() && !hit->is_bed;
                         }
 
                         double min_z = DBL_MAX;
+                        BoundingBoxf3 inst_bbox;
+                        bool has_bbox = false;
                         for (const GLVolume* gv : m_volumes.volumes) {
-                            if (gv->object_idx() == id.first && gv->instance_idx() == id.second && !gv->is_wipe_tower && !gv->is_modifier)
-                                min_z = std::min(min_z, gv->transformed_convex_hull_bounding_box().min.z());
+                            if (gv->object_idx() == id.first && gv->instance_idx() == id.second && !gv->is_wipe_tower && !gv->is_modifier) {
+                                const BoundingBoxf3 vb = gv->transformed_convex_hull_bounding_box();
+                                min_z = std::min(min_z, vb.min.z());
+                                if (has_bbox)
+                                    inst_bbox.merge(vb);
+                                else {
+                                    inst_bbox = vb;
+                                    has_bbox  = true;
+                                }
+                            }
                         }
                         if (min_z == DBL_MAX)
                             continue;
 
-                        const double dz = target_z - min_z;
+                        // s233 — the group needs the extent of the WHOLE selection (for the hover
+                        // lift) and its roots resolved, before anything moves. Collected ahead of
+                        // any early-out on "no floor": a member with no floor still travels with
+                        // its stack, it just does not decide where that stack lands.
+                        if (group_drag) {
+                            if (group_bbox_valid)
+                                group_bbox.merge(inst_bbox);
+                            else {
+                                group_bbox       = inst_bbox;
+                                group_bbox_valid = true;
+                            }
+                            if (is_root && hit.has_value())
+                                resolved_roots[id] = SnapRoot{ *hit, hit->z - min_z, inst_bbox,
+                                                               GravitySnap::instance_footprint(m_volumes, id.first, id.second) };
+                            continue;
+                        }
+
+                        // No floor detected -> leave this instance exactly where the drag put it
+                        // (free floating). Must NOT fall back to the bed here (s227 regression);
+                        // with Allow Bed on, the bed arrives as a real FloorHit instead (s233).
+                        if (!hit.has_value())
+                            continue;
+                        const double target_z = hit->z;
+
+                        // s233 — hover lift: hold the object above its landing spot WHILE dragging
+                        // so the landing overlay underneath stays visible and the gap being
+                        // measured is something you can see. Purely visual and purely temporary.
+                        //
+                        // ⚠️ It needs NO explicit undo, and adding one would be a bug: the
+                        // Selection::translate() call right above this block sets each instance's
+                        // offset to CACHED_START + displacement (absolute from the drag-start
+                        // cache, not a relative nudge), so every frame arrives with the lift
+                        // already gone. A frame that finds no floor therefore `continue`s on a raw
+                        // position, and mouse-up commits a raw position — the "object frozen 10 mm
+                        // in the air" case cannot happen. do_move then recomputes the floor and
+                        // seats the object exactly on it.
+                        // Scaled down for short parts, where a flat 10 mm reads as a mistake.
+                        const double lift = std::clamp((inst_bbox.max.z() - inst_bbox.min.z()) * 0.25,
+                                                       SNAPDRAG_HOVER_LIFT_MIN, SNAPDRAG_HOVER_LIFT_MAX);
+
+                        if (!indicator_shown) {
+                            const Polygon footprint = GravitySnap::instance_footprint(m_volumes, id.first, id.second);
+                            // Ghost box = this instance's AABB moved down onto the landing Z.
+                            BoundingBoxf3 ghost = inst_bbox;
+                            const Vec3d ghost_shift(0.0, 0.0, target_z - min_z);
+                            ghost.min += ghost_shift;
+                            ghost.max += ghost_shift;
+                            m_snapdrag_indicator.set(footprint, *hit, ghost, target_z + lift);
+                            indicator_shown = m_snapdrag_indicator.is_visible();
+                        }
+
+                        const double dz = (target_z + lift) - min_z;
                         if (std::abs(dz) > EPSILON) {
                             for (GLVolume* gv : m_volumes.volumes) {
                                 if (gv->object_idx() == id.first && gv->instance_idx() == id.second)
@@ -4560,6 +4885,53 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                             }
                         }
                     }
+
+                    // s233 — pass 2 of a group drag: each member moves by ITS ROOT's shift. Two
+                    // stacked boxes get one shift and stay stacked; a third object picked up with
+                    // them is its own root and falls on its own. A member whose root found no floor
+                    // does not move at all (free floating, as ever).
+                    if (group_drag && !resolved_roots.empty()) {
+                        const double group_height = group_bbox_valid ? (group_bbox.max.z() - group_bbox.min.z()) : 0.0;
+                        const double lift = std::clamp(group_height * 0.25, SNAPDRAG_HOVER_LIFT_MIN, SNAPDRAG_HOVER_LIFT_MAX);
+
+                        // The overlay follows the root that is being corrected the most — the one
+                        // whose floor is really deciding where the selection ends up.
+                        const std::pair<int, int>* shown_root = nullptr;
+                        for (const auto& kv : resolved_roots) {
+                            if (shown_root == nullptr || kv.second.dz > resolved_roots.at(*shown_root).dz)
+                                shown_root = &kv.first;
+                        }
+                        if (shown_root != nullptr) {
+                            const SnapRoot& r = resolved_roots.at(*shown_root);
+                            BoundingBoxf3 ghost = r.bbox;
+                            const Vec3d ghost_shift(0.0, 0.0, r.dz);
+                            ghost.min += ghost_shift;
+                            ghost.max += ghost_shift;
+                            m_snapdrag_indicator.set(r.footprint, r.hit, ghost, r.hit.z + lift);
+                            indicator_shown = m_snapdrag_indicator.is_visible();
+                        }
+
+                        for (const std::pair<int, int>& id : moving) {
+                            const auto root_it = group_roots.find(id);
+                            const std::pair<int, int> root = (root_it != group_roots.end()) ? root_it->second : id;
+                            const auto res_it = resolved_roots.find(root);
+                            if (res_it == resolved_roots.end())
+                                continue; // this stack found no floor — leave it floating
+                            const double dz = res_it->second.dz + lift;
+                            if (std::abs(dz) <= EPSILON)
+                                continue;
+                            for (GLVolume* gv : m_volumes.volumes) {
+                                // Modifiers are NOT skipped here (unlike when building `moving`):
+                                // they carry the same instance offset and must travel with it, or
+                                // they detach from their object. Same as the single-object path.
+                                if (gv->is_wipe_tower)
+                                    continue;
+                                if (gv->object_idx() == id.first && gv->instance_idx() == id.second)
+                                    gv->set_instance_offset(Z, gv->get_instance_offset(Z) + dz);
+                            }
+                        }
+                    }
+
                     if (!indicator_shown)
                         m_snapdrag_indicator.set_visible(false);
                 } else {
@@ -5023,17 +5395,66 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     // object cannot be half on the bed, half stacked. An object with NO instance resting on
     // anything gets NO entry here and is left untouched below: nullopt must never become "drop
     // to bed", or True Objects' whole "nothing auto-drops" promise breaks (s227 regression).
-    std::map<int, double> _snapdrag_target_z;
-    const bool _snapdrag_active = !_nlm_move && GravitySnap::enabled();
+    //
+    // 🐛 s233 — `done` is EVERY instance in the scene, not the moved ones: the loop above inserts
+    // into it for every GLVolume it walks. s227 passed `done` here as both the candidate-exclusion
+    // set and the list to resolve, which silently made this whole block inert (with every instance
+    // excluded, nothing could ever be a candidate) — the live drag in Fase C, which builds its set
+    // from the selection, was doing all the visible work. Adding the bed in s233 turned that dormant
+    // bug loud: the bed answers even with all objects excluded, so EVERY object in the scene
+    // resolved to Z=0 and the whole plate collapsed onto the bed after any move, while the dragged
+    // object lost the object floor it had found mid-drag. Only the DRAGGED instances may be
+    // resolved here, and they are the selection — same source Fase C uses.
+    std::set<std::pair<int, int>> _snapdrag_moving;
+    for (unsigned int idx : m_selection.get_volume_idxs()) {
+        if (idx >= m_volumes.volumes.size())
+            continue;
+        const GLVolume* gv = m_volumes.volumes[idx];
+        if (gv == nullptr || gv->is_wipe_tower || gv->is_modifier)
+            continue;
+        if (gv->object_idx() < 0 || gv->instance_idx() < 0)
+            continue;
+        _snapdrag_moving.insert({ gv->object_idx(), gv->instance_idx() });
+    }
+
+    // s233 — and, exactly as in the live drag (Fase C), a move spanning more than one OBJECT is
+    // committed by STACKS: each root resolves its own floor and everything standing on it inherits
+    // that shift. Without this here, the stack that held together all through the drag would
+    // collapse the moment the mouse is released.
+    std::set<int> _snapdrag_objects;
+    for (const std::pair<int, int>& i : _snapdrag_moving)
+        _snapdrag_objects.insert(i.first);
+    const bool _snapdrag_group = _snapdrag_objects.size() > 1;
+
+    const std::map<std::pair<int, int>, std::pair<int, int>> _snapdrag_roots =
+        _snapdrag_group ? snapdrag_group_roots(m_volumes, _snapdrag_moving)
+                        : std::map<std::pair<int, int>, std::pair<int, int>>();
+
+    std::map<int, double> _snapdrag_target_z;                       // single-object path (s227)
+    std::map<std::pair<int, int>, double> _snapdrag_root_dz;        // group path (s233)
+    const bool _snapdrag_active = !_nlm_move && GravitySnap::enabled() && !_snapdrag_moving.empty();
     if (_snapdrag_active) {
-        const std::set<std::pair<int, int>> moving(done.begin(), done.end());
-        for (const std::pair<int, int>& i : done) {
-            const std::optional<double> z = GravitySnap::floor_z_for_instance(m_volumes, i.first, i.second, moving, 0.20);
-            if (!z.has_value())
+        for (const std::pair<int, int>& i : _snapdrag_moving) {
+            if (_snapdrag_group) {
+                const auto root_it = _snapdrag_roots.find(i);
+                if (root_it != _snapdrag_roots.end() && root_it->second != i)
+                    continue; // not a root: it inherits, nothing to resolve
+            }
+            // NEOTKO_SNAPDRAG_TAG s233 — full hit, but only `.z` matters here: this is the commit
+            // path, the contact zone/samples exist for the drag overlay.
+            const std::optional<GravitySnap::FloorHit> hit = GravitySnap::floor_z_for_instance(m_volumes, i.first, i.second, _snapdrag_moving, SNAPDRAG_ENGAGE_RATIO);
+            if (!hit.has_value())
                 continue;
-            auto it = _snapdrag_target_z.find(i.first);
-            if (it == _snapdrag_target_z.end() || *z < it->second)
-                _snapdrag_target_z[i.first] = *z;
+            if (_snapdrag_group) {
+                // The model already carries the dropped position (the copy loop above ran), hover
+                // lift included — so this shift removes the lift on its way to the floor.
+                _snapdrag_root_dz[i] = hit->z - m_model->objects[i.first]->get_instance_min_z(i.second);
+            }
+            else {
+                auto it = _snapdrag_target_z.find(i.first);
+                if (it == _snapdrag_target_z.end() || hit->z < it->second)
+                    _snapdrag_target_z[i.first] = hit->z;
+            }
         }
     }
 
@@ -5050,7 +5471,24 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
         }
         // NEOTKO_SNAPDRAG_TAG s227 — Fase B: apply the resolved floor Z (see block above). No
         // entry for this object = nothing detected under it = leave it exactly where it is.
-        else if (_snapdrag_active && _snapdrag_target_z.count(i.first) != 0) {
+        // s233: an entry can only exist for an object that was actually dragged, which is what
+        // keeps this loop (it walks the WHOLE scene) from touching anything the user did not move.
+        // Every instance of a dragged object does follow the object's single target — by design,
+        // an object may not be half stacked and half on the bed (plan v1 §1 rule 2).
+        // s233 — group move: this instance travels by its stack root's shift, so the selection
+        // lands exactly as it looked mid-drag. A stack whose root found no floor keeps floating.
+        else if (_snapdrag_active && _snapdrag_group && _snapdrag_moving.count(i) != 0) {
+            const auto root_it = _snapdrag_roots.find(i);
+            const std::pair<int, int> root = (root_it != _snapdrag_roots.end()) ? root_it->second : i;
+            const auto dz_it = _snapdrag_root_dz.find(root);
+            if (dz_it != _snapdrag_root_dz.end() && std::fabs(dz_it->second) > EPSILON) {
+                const Vec3d shift(0.0, 0.0, dz_it->second);
+                m_selection.translate(i.first, i.second, shift);
+                m->translate_instance(i.second, shift);
+                m_selection.notify_instance_update(i.first, i.second);
+            }
+        }
+        else if (_snapdrag_active && !_snapdrag_group && _snapdrag_target_z.count(i.first) != 0) {
             const double target_z = _snapdrag_target_z.at(i.first);
             const double snap_shift_z = shift_z - target_z;
             // NOTE: SINKING_Z_THRESHOLD (-0.001) is a signed sink-detection threshold, not a
@@ -7963,6 +8401,7 @@ void GLCanvas3D::_render_overlays()
 
     _render_assemble_control();
     _render_assemble_info();
+    _render_shading_debug_panel();  // NEOTKO_SMOOTHNORMALS_TAG s229
 
     _render_separator_toolbar_right();
     _render_separator_toolbar_left();
@@ -9043,6 +9482,106 @@ void GLCanvas3D::_render_assemble_control()
         GLVolume::explosion_ratio = m_explosion_ratio;
     }
 }
+// NEOTKO_SMOOTHNORMALS_TAG s229 — live shading tuning panel for the 3D editor view.
+//
+// Same shape and gating idea as GCodeViewer::render_realcolor_debug_panel(): an ImGui window that
+// only exists when its NeoDebug channel is on (ORCA_DEBUG_SHADING=1), editing a plain struct that
+// the render path reads. Nothing here is persisted and nothing here is reachable by a normal user.
+//
+// The point is to stop paying a full rebuild per question. The lighting constants that used to be
+// #defines in gouraud.vs are uniforms now, so the specular exponent - the term that amplifies
+// normal noise, and the reason a flat face looks dirty everywhere except in exact top view - can
+// be swept live. The two debug views answer "what do the normals actually look like" directly,
+// without lighting in the way.
+void GLCanvas3D::_render_shading_debug_panel()
+{
+    // NEOTKO_SMOOTHNORMALS_TAG s229: ORCA_DEBUG_RENDER only - see NeoDebug::render_panels_enabled().
+    // The SHADING channel stays a plain log channel (NeoDebug::write below).
+    if (!NeoDebug::render_panels_enabled())
+        return;
+
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    ShadingTuning& t = shading_tuning();
+
+    ImGui::Begin("Shading Tuning (NEOTKO)");
+
+    // --- mesh normals ------------------------------------------------------------------------
+    ImGui::TextUnformatted("Mesh normals");
+    bool smooth = wxGetApp().app_config->get_bool("use_smooth_normals");
+    bool rebuild = false;
+    if (ImGui::Checkbox("Smooth normals (area-weighted, crease-aware)", &smooth)) {
+        wxGetApp().app_config->set_bool("use_smooth_normals", smooth);
+        rebuild = true;
+    }
+    // Normals are baked into the vertex buffers at upload time, so the crease angle only takes
+    // effect on the next rebuild - hence the explicit button rather than a live-applying slider.
+    imgui.slider_float("crease angle (deg)", &t.crease_angle, 0.0f, 90.0f, "%.1f");
+    ImGui::SameLine();
+    if (ImGui::Button("Rebuild"))
+        rebuild = true;
+
+    // --- lighting ----------------------------------------------------------------------------
+    ImGui::Separator();
+    ImGui::Checkbox("Override lighting constants", &t.override_lighting);
+    if (t.override_lighting) {
+        ImGui::TextUnformatted("(defaults below == the original gouraud.vs #defines)");
+        imgui.slider_float("ambient", &t.ambient, 0.0f, 1.0f, "%.3f");
+        imgui.slider_float("top diffuse", &t.top_diffuse, 0.0f, 2.0f, "%.3f");
+        imgui.slider_float("top specular", &t.top_specular, 0.0f, 1.0f, "%.3f");
+        // The prime suspect: at 20, a normal error of 1e-3 rad turns into a visible intensity
+        // step everywhere except at the stationary point of the lobe (exact top view).
+        imgui.slider_float("top shininess", &t.top_shininess, 1.0f, 64.0f, "%.1f");
+        imgui.slider_float("front diffuse", &t.front_diffuse, 0.0f, 2.0f, "%.3f");
+        ImGui::SliderFloat3("light top dir", t.light_top_dir.data(), -1.0f, 1.0f);
+        ImGui::SliderFloat3("light front dir", t.light_front_dir.data(), -1.0f, 1.0f);
+    }
+
+    // --- diagnostic views --------------------------------------------------------------------
+    ImGui::Separator();
+    const char* views[] = { "off", "normals as RGB", "deviation from facet" };
+    ImGui::Combo("debug view", &t.debug_view, views, IM_ARRAYSIZE(views));
+    if (t.debug_view == 2)
+        imgui.slider_float("deviation amplify", &t.debug_amplify, 1.0f, 200.0f, "%.0f");
+
+    // --- LibreMode (shells_lit) ----------------------------------------------------------------
+    // Everything above this line only bites when LibreMode is OFF, because with it on the objects
+    // never touch gouraud - render_volumes_lit()/shells_lit draws them instead.
+    ImGui::Separator();
+    const bool libre_on = wxGetApp().app_config->get_bool("neotko_libre_mode");
+    ImGui::Text("LibreMode: %s", libre_on ? "ON  -> shells_lit draws objects" : "off -> gouraud draws objects");
+    if (libre_on) {
+        ImGui::TextUnformatted("(the sliders above do nothing in this mode)");
+        ImGui::Checkbox("Override shells_lit constants", &t.override_libre);
+        if (t.override_libre) {
+            imgui.slider_float("AO strength", &t.ao_strength, 0.0f, 1.0f, "%.3f");
+            imgui.slider_float("AO radius (px)", &t.ao_radius_px, 0.0f, 32.0f, "%.1f");
+            // The knob that actually fixes flat-face self-occlusion; see ao_sample() in shells_lit.fs.
+            imgui.slider_float("AO bias (mm)", &t.ao_bias_mm, 0.0f, 1.0f, "%.4f");
+            imgui.slider_float("contact shadow strength", &t.sscs_strength, 0.0f, 1.0f, "%.3f");
+            imgui.slider_float("contact shadow length (mm)", &t.sscs_length_mm, 0.0f, 30.0f, "%.2f");
+            imgui.slider_float("contact shadow thickness (mm)", &t.sscs_thickness_mm, 0.0f, 20.0f, "%.2f");
+            imgui.slider_float("shadow map strength", &t.shadow_strength, 0.0f, 1.0f, "%.3f");
+            imgui.slider_float("shadow bias min", &t.shadow_bias_min, 0.0f, 0.02f, "%.5f");
+            imgui.slider_float("shadow bias max", &t.shadow_bias_max, 0.0f, 0.05f, "%.5f");
+        }
+        const char* iso[] = { "off", "AO only", "contact shadows only", "shadow map only", "normals as RGB" };
+        ImGui::Combo("isolate term", &t.libre_isolate, iso, IM_ARRAYSIZE(iso));
+    }
+
+    ImGui::End();
+
+    if (rebuild) {
+        // NEOTKO_LOG lives in SurfaceColorMix.hpp (a heavy engine header this file has no business
+        // pulling in), so log through NeoDebug directly - same channel, same file.
+        NeoDebug::write(NeoDebug::SHADING, "shading panel: rebuilding volumes (smooth=" +
+                            std::string(smooth ? "1" : "0") + ", crease=" + std::to_string(t.crease_angle) + ")");
+        // Same reset-then-reload as the Preferences checkbox: reload_scene() alone reuses the
+        // existing GLVolumes, and the normals live in their vertex buffers.
+        reset_volumes();
+        reload_scene(true, true);
+    }
+}
+
 void GLCanvas3D::_render_assemble_info() const
 {
     if (m_canvas_type != ECanvasType::CanvasAssembleView) {

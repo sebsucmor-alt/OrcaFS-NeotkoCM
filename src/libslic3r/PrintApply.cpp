@@ -2279,6 +2279,13 @@ void Print::resolve_mixed_filament_sandwich_profiles()
             profile.auto_generated = true;
             profile.stack_top_json  = recipe.top.to_json();
             profile.stack_penu_json = recipe.penu.to_json();
+            // s230 — la zona Bottom ya no se queda vacía: build_mixed_filament_recipe()
+            // la resuelve con un dither ColorStitch de UNA pasada (bridge-safe, ver el
+            // comentario allí). Sin esto, el modo MixedFilament Object gobernaba solo
+            // top+penu y el bottom caía al perfil PINTADO, dejando el objeto bajo dos
+            // recetas distintas a la vez pese a que la UI lo presenta como gobernado
+            // por completo (bug reportado s230, confirmado con BOTTOM_RESOLVE).
+            profile.stack_bottom_json = recipe.bottom.to_json();
             // Swatch hint for the gizmo's live preview (same packing as recipe_argb()
             // in GLGizmoColorMixPainter.cpp — no cross-TU dependency needed for this).
             profile.preview_argb = 0xFF000000u

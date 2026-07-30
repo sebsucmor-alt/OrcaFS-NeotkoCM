@@ -493,6 +493,12 @@ public:
     // originating triangle index (into m_triangles) for each emitted triangle, parallel to
     // the returned indices. Lets callers map connected components (islands) back to facets.
     indexed_triangle_set get_facets(EnforcerBlockerType state, std::vector<int>& src_facets) const;
+    // NEOTKO_PROFILE_TAG — s235 F5a: área pintada (cualquier estado != NONE) agrupada por
+    // FACETA ORIGINAL de la malla sin dividir. `out` se redimensiona al número de facetas
+    // originales. Es la única forma barata de comparar DOS selectores distintos (MMU y
+    // ColorMix) sobre la misma malla: sus índices de m_triangles NO son comparables entre
+    // sí porque cada uno subdivide donde le da la gana, pero `source_triangle` sí lo es.
+    void painted_area_per_source_facet(std::vector<float>& out) const;
     // Get facets at a given state. Triangulate T-joints.
     indexed_triangle_set get_facets_strict(EnforcerBlockerType state) const;
     // Get edges around the selected area by seed fill.

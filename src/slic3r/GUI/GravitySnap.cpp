@@ -96,11 +96,16 @@ std::vector<Vec2d> sample_points_mm(const ExPolygon &poly)
     const Vec2d   c(unscale_(c_scaled.x()), unscale_(c_scaled.y()));
     pts.push_back(c);
 
+    // NEOTKO_SNAPDRAG_TAG s233 — pulled in from 0.5 to 0.25 of the way to each vertex. The points
+    // are drawn on screen now (see SnapDragIndicator), and spread wide they read as four unrelated
+    // marks; clustered they read as one clear "this is the spot being measured" marker. Detection
+    // is unaffected in practice: `poly` here is an intersection of two convex hulls, so it is
+    // convex and hole-free, and any point between its centroid and a vertex is equally inside it.
     const Points &verts = poly.contour.points;
     const size_t  step  = std::max<size_t>(1, verts.size() / 4);
     for (size_t i = 0; i < verts.size() && pts.size() < 5; i += step) {
         const Vec2d v(unscale_(verts[i].x()), unscale_(verts[i].y()));
-        pts.push_back(c + 0.5 * (v - c));
+        pts.push_back(c + 0.25 * (v - c));
     }
     return pts;
 }
@@ -118,8 +123,14 @@ std::vector<Vec2d> sample_points_mm(const ExPolygon &poly)
 //   NOT be treated as a floor.
 // - Otherwise returns the HIGHEST real hit among all sample points and all of the instance's
 //   volumes (multi-part instances are the union of their parts).
+//
+// NEOTKO_SNAPDRAG_TAG s233 — `out_hits`, when non-null, collects every world-mm point that was
+// actually hit (one per sample point per volume). The landing overlay draws them so "why did it
+// not catch that thin rim" is answerable by looking at the screen. Purely informational: it never
+// affects the returned Z.
 std::optional<double> sample_real_top_z(const GLVolumeCollection &volumes, int object_idx, int instance_idx,
-                                         const std::vector<Vec2d> &pts_mm, double above_z, double flat_fallback)
+                                         const std::vector<Vec2d> &pts_mm, double above_z, double flat_fallback,
+                                         std::vector<Vec3d> *out_hits = nullptr)
 {
     bool   any_raycaster = false;
     bool   found_hit     = false;
@@ -145,7 +156,10 @@ std::optional<double> sample_real_top_z(const GLVolumeCollection &volumes, int o
             if (!hit.is_hit())
                 continue;
 
-            const double world_z = (world * hit.position()).z();
+            const Vec3d  world_hit = world * hit.position();
+            const double world_z   = world_hit.z();
+            if (out_hits != nullptr)
+                out_hits->push_back(world_hit);
             if (!found_hit || world_z > best) {
                 best      = world_z;
                 found_hit = true;
@@ -168,10 +182,23 @@ bool enabled()
     return ac != nullptr && ac->get_bool("neotko_snap_drag");
 }
 
-std::optional<double> floor_z_for_instance(const GLVolumeCollection &volumes,
-                                            int object_idx, int instance_idx,
-                                            const std::set<std::pair<int, int>> &moving,
-                                            double engage_ratio)
+// NEOTKO_SNAPDRAG_TAG s233 — see the header. DEFAULT ON via the has() guard rather than a seed in
+// AppConfig::set_defaults(): set_defaults() also runs on empty storage from the constructor,
+// BEFORE the ini is merged, so a seeded key there is indistinguishable from a user-written one
+// later (this is exactly the trap documented around the neotko_true_objects migration). Reading
+// "absent == true" right here needs no migration and cannot be raced by the load order.
+bool bed_is_floor()
+{
+    const AppConfig *ac = wxGetApp().app_config;
+    if (ac == nullptr)
+        return true;
+    return ac->has("neotko_snap_drag_bed") ? ac->get_bool("neotko_snap_drag_bed") : true;
+}
+
+std::optional<FloorHit> floor_z_for_instance(const GLVolumeCollection &volumes,
+                                             int object_idx, int instance_idx,
+                                             const std::set<std::pair<int, int>> &moving,
+                                             double engage_ratio)
 {
     const InstanceFootprint mine = compute_footprint(volumes, object_idx, instance_idx);
     if (!mine.valid)
@@ -182,8 +209,8 @@ std::optional<double> floor_z_for_instance(const GLVolumeCollection &volumes,
         return std::nullopt;
 
     std::set<std::pair<int, int>> seen;
-    bool   found  = false;
-    double best_z = 0.0;
+    bool     found = false;
+    FloorHit best;
 
     for (const GLVolume *v : volumes.volumes) {
         if (v == nullptr || v->is_wipe_tower || v->is_modifier)
@@ -230,8 +257,9 @@ std::optional<double> floor_z_for_instance(const GLVolumeCollection &volumes,
             }
         }
 
+        std::vector<Vec3d>          cand_hits;
         const std::optional<double> cand_top = (biggest_inter != nullptr)
-            ? sample_real_top_z(volumes, id.first, id.second, sample_points_mm(*biggest_inter), cand.max_z + 1.0, cand.max_z)
+            ? sample_real_top_z(volumes, id.first, id.second, sample_points_mm(*biggest_inter), cand.max_z + 1.0, cand.max_z, &cand_hits)
             : std::optional<double>(cand.max_z); // defensive: overlap_ratio passed, so `inter` can't be empty here
 
         if (!cand_top.has_value()) {
@@ -251,9 +279,14 @@ std::optional<double> floor_z_for_instance(const GLVolumeCollection &volumes,
         // do_move/GLCanvas3D, where the lowest of several PILLARS is deliberately used instead —
         // that one is about not over-lifting a whole object because one of its instances landed
         // on a taller pillar than the others (explicit user call).
-        if (!found || *cand_top > best_z) {
-            best_z = *cand_top;
-            found  = true;
+        if (!found || *cand_top > best.z) {
+            best.z        = *cand_top;
+            best.is_bed   = false;
+            best.obj_idx  = id.first;
+            best.inst_idx = id.second;
+            best.contact  = (biggest_inter != nullptr) ? *biggest_inter : ExPolygon(mine.hull);
+            best.samples  = std::move(cand_hits);
+            found         = true;
             if (NeoDebug::enabled(NeoDebug::GRAVITY))
                 NeoDebug::write(NeoDebug::GRAVITY,
                     "SNAPDRAG candidate obj=" + std::to_string(id.first) + " inst=" + std::to_string(id.second) +
@@ -262,15 +295,93 @@ std::optional<double> floor_z_for_instance(const GLVolumeCollection &volumes,
         }
     }
 
+    // NEOTKO_SNAPDRAG_TAG s233 — the bed as last-place candidate (only when Allow Bed is on).
+    // Deliberately evaluated AFTER the loop and never compared against the others: its Z is 0 and
+    // the aggregation above is "highest wins", so it could never outrank a real object anyway.
+    // Doing it this way keeps every s227 case byte-identical and makes the fallback one branch.
+    // The recognised zone is the instance's whole footprint — on the bed, all of it is supported.
+    //
+    // No plate-boundary test on purpose: an object dragged off the plate still lands on Z=0
+    // rather than floating, which is what anyone coming from a normal slicer expects, and
+    // out-of-plate is already flagged as unprintable through its own channel. See
+    // docs/FUTURE/GRAVITY_SNAP_AND_DRAG_V2_PLAN.md §1.1.
+    if (!found && bed_is_floor()) {
+        best.z        = 0.0;
+        best.is_bed   = true;
+        best.obj_idx  = -1;
+        best.inst_idx = -1;
+        best.contact  = ExPolygon(mine.hull);
+        best.samples.clear();
+        found = true;
+    }
+
     if (NeoDebug::enabled(NeoDebug::GRAVITY))
         NeoDebug::write(NeoDebug::GRAVITY,
             "SNAPDRAG result obj=" + std::to_string(object_idx) + " inst=" + std::to_string(instance_idx) +
             " my_min_z=" + std::to_string(mine.min_z) +
-            (found ? (" target_z=" + std::to_string(best_z)) : std::string(" (no candidate, leave floating)")));
+            (found ? (" target_z=" + std::to_string(best.z) +
+                      (best.is_bed ? " (BED)" : (" on obj=" + std::to_string(best.obj_idx) +
+                                                 " inst=" + std::to_string(best.inst_idx) +
+                                                 " ray_hits=" + std::to_string(best.samples.size()))))
+                   : std::string(" (no candidate, leave floating)")));
 
     if (!found)
         return std::nullopt;
-    return std::max(best_z, 0.0);
+    best.z = std::max(best.z, 0.0);
+    return best;
+}
+
+std::optional<std::pair<int, int>> support_in_group(const GLVolumeCollection &volumes,
+                                                    int object_idx, int instance_idx,
+                                                    const std::set<std::pair<int, int>> &group,
+                                                    double engage_ratio, double max_gap)
+{
+    const InstanceFootprint mine = compute_footprint(volumes, object_idx, instance_idx);
+    if (!mine.valid)
+        return std::nullopt;
+    const double mine_area = std::abs(mine.hull.area());
+    if (mine_area <= 0.0)
+        return std::nullopt;
+
+    std::optional<std::pair<int, int>> best;
+    double best_top = -std::numeric_limits<double>::infinity();
+
+    for (const std::pair<int, int> &id : group) {
+        if (id.first == object_idx && id.second == instance_idx)
+            continue;
+
+        const InstanceFootprint cand = compute_footprint(volumes, id.first, id.second);
+        if (!cand.valid)
+            continue;
+
+        // Must be UNDER me and close enough to count as contact. EPS_ABOVE tolerates the sub-micron
+        // overshoot a previous snap leaves behind; max_gap covers hand-placed stacks that were never
+        // perfectly seated.
+        constexpr double EPS_ABOVE = 0.05;
+        const double gap = mine.min_z - cand.max_z;
+        if (cand.max_z > mine.min_z + EPS_ABOVE || gap > max_gap)
+            continue;
+
+        const ExPolygons inter = intersection_ex(Polygons{ mine.hull }, Polygons{ cand.hull });
+        double inter_area = 0.0;
+        for (const ExPolygon &ep : inter)
+            inter_area += ep.area();
+        if (inter_area / mine_area < engage_ratio)
+            continue;
+
+        if (!best.has_value() || cand.max_z > best_top) {
+            best_top = cand.max_z;
+            best     = id;
+        }
+    }
+
+    if (best.has_value() && NeoDebug::enabled(NeoDebug::GRAVITY))
+        NeoDebug::write(NeoDebug::GRAVITY,
+            "SNAPDRAG group-support obj=" + std::to_string(object_idx) + " inst=" + std::to_string(instance_idx) +
+            " rests on obj=" + std::to_string(best->first) + " inst=" + std::to_string(best->second) +
+            " (top_z=" + std::to_string(best_top) + ")");
+
+    return best;
 }
 
 Polygon instance_footprint(const GLVolumeCollection &volumes, int object_idx, int instance_idx)

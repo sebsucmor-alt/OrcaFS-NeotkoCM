@@ -11,10 +11,12 @@
 #include "BoundingBox.hpp"
 #include "SVG.hpp"
 #include "Algorithm/RegionExpansion.hpp"
+#include "NeoDebug.hpp"   // NEOTKO_BRIDGE_TAG s230 — canal BOTTOM para la traza de expansión
 
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <sstream>   // NEOTKO_BRIDGE_TAG s230 — traza BRIDGE_EXPAND
 #include <map>
 
 #include <boost/log/trivial.hpp>
@@ -663,7 +665,14 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
     // Scaled expansions of the respective external surfaces.
     float                           expansion_top           = shell_width * sqrt(2.);
     float                           expansion_bottom        = expansion_top;
-    float                           expansion_bottom_bridge = expansion_top;
+    // NEOTKO_BRIDGE_TAG — s230: "Bridging infill extra expansion". La expansión automática
+    // de arriba nace de shell_width, o sea del NÚMERO DE PAREDES — subir wall_loops por
+    // rigidez cambiaba de rebote el anclaje de todos los puentes. Esta clave suma milímetros
+    // encima para desacoplar ambas cosas y permitir más agarre sin tocar las paredes.
+    // Solo afecta al bridge: top y bottom normales se quedan como estaban.
+    // Aditiva — con el default 0 la expresión es idéntica a la anterior.
+    float                           expansion_bottom_bridge = expansion_top
+        + scaled<float>(std::max(0., this->region().config().bridge_expansion_extra.value));
     // Expand by waves of expansion_step size (expansion_step is scaled), but with no more steps than max_nr_expansion_steps.
     const float                     expansion_step          = scaled<float>(0.1);
     // Don't take more than max_nr_steps for small expansion_step.
@@ -693,13 +702,95 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
         ExpansionZone{std::move(top_expolygons), expansion_params_into_solid_infill},
     };
 
+    // NEOTKO_BRIDGE_TAG s230 — 4ª zona: stBottom, SOLO para la expansión de bridges y SOLO
+    // cuando el usuario pidió expansión extra.
+    //
+    // Por qué hacía falta: las 3 zonas de arriba (sólido interno / disperso / top) no incluyen
+    // stBottom, así que en el caso clásico "viga apoyada en dos bloques" (dolmen) el bridge NO
+    // podía crecer sobre la zona apoyada de al lado — que es justo el mejor vecino posible,
+    // sólido y con material debajo. Diagnóstico s230 con la traza BRIDGE_EXPAND:
+    // zone_solid_mm2=0 en la capa del bridge pese a haber sólido a la vista → el vecino era
+    // stBottom, un tipo que no estaba en la lista. Es exactamente lo que hace el "Bridging
+    // Infill Extra Expansion" de Simplify3D: apropiarse del área contigua de la propia pieza,
+    // de modo que la capa entera pueda imprimirse como un único bridge continuo (el usuario
+    // lo usa así a propósito, con valores grandes, para eliminar el artefacto de la junta
+    // entre la zona puenteada y la apoyada).
+    //
+    // Se añade solo con extra > 0 para mantener la promesa de "aditivo puro": con el default 0
+    // la lista de zonas es la de siempre y el gcode es byte-idéntico.
+    //
+    // SIN TOPE, deliberadamente (S3D admite hasta 999 y ese es el uso real): el objetivo
+    // legítimo es forzar la capa completa a bridge.
+    //
+    // La contabilidad la hace expand_merge_surfaces por su cuenta: recorta cada zona con lo
+    // expandido (diff_ex(zone.expolygons, expanded)), así que el área que el bridge se lleve
+    // desaparece del remanente. Ese remanente se devuelve a fill_surfaces como stBottom más
+    // abajo — mismo patrón extraer→zona→devolver que el código ya usaba para stTop, así que
+    // NO puede quedar stBottom y stBottomBridge solapados en la misma capa.
+    const bool _bridge_extra_on = this->region().config().bridge_expansion_extra.value > 0.;
+    if (_bridge_extra_on) {
+        ExPolygons bottom_expolygons = union_ex(
+            fill_surfaces_extract_expolygons(this->fill_surfaces.surfaces, { stBottom }, layer_thickness));
+        expansion_zones.push_back(ExpansionZone{ std::move(bottom_expolygons), expansion_params_into_solid_infill });
+    }
+
     SurfaceCollection bridges;
     {
         BOOST_LOG_TRIVIAL(trace) << "Processing external surface, detecting bridges. layer" << this->layer()->print_z;
         const double custom_angle = this->region().config().bridge_angle.value;
+
+        // NEOTKO_BRIDGE_TAG s230 — traza de la expansión de bridges (canal BOTTOM,
+        // ORCA_DEBUG_BOTTOM=1 → /tmp/neotko_bottom.log). Responde, en este orden, a las tres
+        // preguntas que hay que hacerse cuando bridge_expansion_extra "no hace nada":
+        //   1) extra_cfg  → ¿llegó el valor de la clave hasta aquí? (si es 0, es invalidación
+        //                   o el preset, no el motor)
+        //   2) exp_solid vs exp_sparse → cuánto se expande a CADA zona vecina. exp_sparse usa
+        //                   expansion_min y NO lo toca la clave: si el puente solo linda con
+        //                   relleno disperso, la expansión no cambia por diseño.
+        //   3) zone_*_mm2 → cuánta área hay de cada vecino. Si solid=0, no hay a dónde crecer.
+        //   4) bridges_before/after + área → el efecto real sobre la superficie de bridge.
+        // NOTA: se usa NeoDebug::write directo, NO la macro NEOTKO_LOG — esa vive en
+        // SurfaceColorMix.hpp, una cabecera pesada que este fichero no incluye ni necesita.
+        int    _n_bridge_before = 0;
+        double _a_bridge_before = 0.;
+        const bool _dbg = NeoDebug::enabled(NeoDebug::BOTTOM);
+        if (_dbg) {
+            for (const Surface& s : this->fill_surfaces.surfaces)
+                if (s.surface_type == stBottomBridge) { ++_n_bridge_before; _a_bridge_before += s.area(); }
+            auto _mm2 = [](const ExPolygons& e) {
+                double a = 0.; for (const auto& x : e) a += x.area();
+                return unscale<double>(unscale<double>(a));
+            };
+            std::ostringstream _o;
+            _o << "BRIDGE_EXPAND z=" << this->layer()->print_z
+               << " extra_cfg=" << this->region().config().bridge_expansion_extra.value
+               << " exp_solid_mm=" << unscale<double>(expansion_bottom_bridge)
+               << " exp_sparse_mm=" << unscale<double>(expansion_min)
+               << " zone_solid_mm2=" << _mm2(expansion_zones[0].expolygons)
+               << " zone_sparse_mm2=" << _mm2(expansion_zones[1].expolygons)
+               << " zone_top_mm2=" << _mm2(expansion_zones[2].expolygons)
+               // s230 — 4ª zona (stBottom), solo presente con extra > 0. Es LA zona que importa
+               // en el caso dolmen: si sale >0 y delta_mm2 se mueve, la expansión funciona.
+               << " zone_bottom_mm2=" << (expansion_zones.size() > 3 ? _mm2(expansion_zones[3].expolygons) : -1.)
+               << " bridges_before=" << _n_bridge_before
+               << " area_before_mm2=" << unscale<double>(unscale<double>(_a_bridge_before));
+            NeoDebug::write(NeoDebug::BOTTOM, _o.str());
+        }
+
         bridges.surfaces = custom_angle > 0 ?
             expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, Geometry::deg2rad(custom_angle)) :
             expand_bridges_detect_orientations(this->fill_surfaces.surfaces, expansion_zones, closing_radius);
+
+        if (_dbg) {
+            double _a_after = 0.;
+            for (const Surface& s : bridges.surfaces) _a_after += s.area();
+            std::ostringstream _o;
+            _o << "BRIDGE_EXPAND_DONE z=" << this->layer()->print_z
+               << " bridges_after=" << bridges.surfaces.size()
+               << " area_after_mm2=" << unscale<double>(unscale<double>(_a_after))
+               << " delta_mm2=" << unscale<double>(unscale<double>(_a_after - _a_bridge_before));
+            NeoDebug::write(NeoDebug::BOTTOM, _o.str());
+        }
         BOOST_LOG_TRIVIAL(trace) << "Processing external surface, detecting bridges - done";
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
         {
@@ -707,6 +798,20 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
             bridges.export_to_svg(debug_out_path("bridges-after-grouping-%d.svg", iRun++).c_str(), true);
         }
 #endif
+    }
+
+    // NEOTKO_BRIDGE_TAG s230 — devolver PRIMERO el remanente de la zona stBottom (es la última
+    // que se apiló, así que sale antes que la de stTop). Ya viene recortada por
+    // expand_merge_surfaces con lo que el bridge se llevó, de modo que lo que se reinserta es
+    // exactamente el bottom que NO pasó a ser puente. Sin este bloque el área extraída se
+    // perdería (quedaría sin rellenar) — el mismo motivo por el que stTop tiene su bloque gemelo
+    // justo debajo. Solo existe cuando la 4ª zona se creó (extra > 0).
+    if (_bridge_extra_on) {
+        this->fill_surfaces.remove_types({ stBottom });
+        Surface bottom_templ(stBottom, {});
+        bottom_templ.thickness = layer_thickness;
+        this->fill_surfaces.append(std::move(expansion_zones.back().expolygons), bottom_templ);
+        expansion_zones.pop_back();
     }
 
     this->fill_surfaces.remove_types({stTop});

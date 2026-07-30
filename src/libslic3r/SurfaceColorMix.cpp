@@ -25,6 +25,8 @@
 #include <ctime>    // NEOTKO_DEBUG s79h: localtime + strftime for banner timestamp
 #include <sstream>  // NEOTKO_DEBUG s79h: banner formatting
 #include <numeric>  // NEOTKO_COLORMIX s58: std::iota for lane_mode sort indices
+#include <chrono>   // NEOTKO_MMU_COEXIST s235d: cronometrar la unión de triángulos
+#include <iterator> // NEOTKO_MMU_COEXIST s235d: make_move_iterator en la unión por lotes
 #include <nlohmann/json.hpp> // NEOTKO_PATHBLEND_TAG s69: miniblob JSON round-trip
 
 namespace Slic3r {
@@ -587,6 +589,50 @@ int SurfaceColorMix::dominant_painted_slot_in_z_range(const PrintObject* po,
     return best_slot;
 }
 
+// NEOTKO_MMU_COEXIST_TAG_START — s235d, CUELGUE del slice: la unión de la sopa de
+// triángulos.
+//
+// Las dos huellas (`painted_footprint_in_z_range` y `mmu_painted_footprint_in_z_range`)
+// terminan igual: un `union_ex()` sobre UN POLÍGONO POR TRIÁNGULO pintado. Con objetos
+// pequeños eso son cientos de triángulos y no se nota. Con el plato del usuario — 4 objetos
+// ensamblados y una línea MMU cruzándolos — son decenas de miles, y Clipper se atasca en
+// `ProcessEdgesAtTopOfScanbeam`: el `sample` del proceso colgado lo señaló con el dedo,
+// un único hilo TBB dentro de este union_ex.
+//
+// Clipper resuelve UNA pasada con todos los polígonos a la vez, y su coste crece con el
+// número de INTERSECCIONES, que en una sopa de triángulos adyacentes es enorme. Unir por
+// lotes y luego unir los resultados hace el mismo trabajo en trozos pequeños: cada
+// `Execute` ve pocos bordes, y tras la primera vuelta los triángulos contiguos ya se han
+// fundido en pocos polígonos grandes. La unión es asociativa, así que **el resultado es el
+// mismo**; sólo cambia el orden en que se agrupa.
+//
+// El guard de "sin progreso" evita el bucle infinito teórico: si una vuelta no reduce el
+// número de polígonos (posible cuando los agujeros vuelven como contornos sueltos), se
+// remata de una pasada y se sale.
+static ExPolygons _neotko_union_triangle_soup(Polygons&& tris)
+{
+    constexpr size_t kChunk = 512;
+    if (tris.size() <= kChunk)
+        return union_ex(tris);
+
+    Polygons level = std::move(tris);
+    while (level.size() > kChunk) {
+        Polygons next;
+        next.reserve(level.size() / 4 + 8);
+        for (size_t i = 0; i < level.size(); i += kChunk) {
+            const size_t j = std::min(level.size(), i + kChunk);
+            Polygons part(std::make_move_iterator(level.begin() + i),
+                          std::make_move_iterator(level.begin() + j));
+            append(next, to_polygons(union_ex(part)));
+        }
+        if (next.size() >= level.size())
+            return union_ex(next);      // sin progreso → una pasada y fuera
+        level = std::move(next);
+    }
+    return union_ex(level);
+}
+// NEOTKO_MMU_COEXIST_TAG_END
+
 // NEOTKO_PROFILE_TAG — Fase 6c: XY footprint of a slot's painted triangles in a
 // Z band. Mirrors dominant_painted_slot_in_z_range's scan/frame, but instead of
 // counting it projects each qualifying upward triangle to the XY plane (dropping
@@ -638,7 +684,17 @@ ExPolygons SurfaceColorMix::painted_footprint_in_z_range(const PrintObject* po, 
     }
     if (tris.empty()) return out;
     // Union the overlapping/adjacent triangle projections into clean regions.
-    out = union_ex(tris);
+    // NEOTKO_MMU_COEXIST_TAG s235d — por lotes; ver la nota de _neotko_union_triangle_soup.
+    const size_t _ntris = tris.size();
+    const auto   _t0    = std::chrono::steady_clock::now();
+    out = _neotko_union_triangle_soup(std::move(tris));
+    const double _ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - _t0).count();
+    if (_ms > 50.0)
+        NEOTKO_LOG(COLORMIX, "SLOW_UNION painted slot=" << slot
+            << " band=[" << z_min << "," << z_max << "]"
+            << " tris=" << _ntris << " pieces=" << out.size()
+            << " ms=" << int(_ms));
     return out;
 }
 
@@ -884,8 +940,17 @@ ExPolygons SurfaceColorMix::sticker_footprint_slice_frame(const ColorMixSticker&
 // and ignores lateral MMU. Trade-off: MMU paint on a sloped surface that
 // happens to graze the top band may be missed (acceptable — sandwich vs MMU
 // arbitration on slopes is a separate problem not in s91 scope).
+//
+// NEOTKO_MMU_COEXIST_TAG s234 F2a — `downward`. The upward-only filter above was
+// written for `mmu_governs_xy`, whose only question was ever about TOP surfaces.
+// The s234 coexistence needs the same answer for BOTTOM bands, and the s233b log
+// proved the gap: a cube with an MMU circle painted on its underside reported
+// `mmu=0mm2 dir=down` — not "no MMU here", but "I cannot see downward facets".
+// The mirror is the same one `painted_footprint_in_z_range` already uses: flip
+// the normal test and pick min_z instead of max_z. The default keeps every
+// pre-s234 caller byte-identical.
 ExPolygons SurfaceColorMix::mmu_painted_footprint_in_z_range(
-    const PrintObject* po, double z_min, double z_max)
+    const PrintObject* po, double z_min, double z_max, bool downward)
 {
     ExPolygons out;
     if (!po) return out;
@@ -906,9 +971,17 @@ ExPolygons SurfaceColorMix::mmu_painted_footprint_in_z_range(
         if (!mv || !mv->is_model_part()) continue;
         if (mv->mmu_segmentation_facets.empty()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
-        for (int slot = 1; slot < 16; ++slot) {
-            const indexed_triangle_set its = mv->mmu_segmentation_facets.get_facets(
-                *mv, static_cast<EnforcerBlockerType>(slot));
+        // NEOTKO_MMU_COEXIST_TAG — s235c, CUELGUE del slice. Esto era un bucle
+        // `for (slot = 1..15) get_facets(mv, slot)`: QUINCE deserializaciones completas
+        // del árbol del TriangleSelector por volumen, incluidas las de los 14 slots que
+        // normalmente no existen. Se paga entera en CADA llamada, y esta función se llama
+        // una vez por pieza de relleno y por capa (ver la nota del memo en Fill.cpp).
+        // La sobrecarga por lotes hace UNA sola pasada y devuelve un its por color, que es
+        // exactamente el mismo dato — la usa igual GLVolume::simple_render.
+        std::vector<indexed_triangle_set> its_per_slot;
+        mv->mmu_segmentation_facets.get_facets(*mv, its_per_slot);
+        for (size_t slot = 1; slot < its_per_slot.size(); ++slot) {
+            const indexed_triangle_set& its = its_per_slot[slot];
             if (its.indices.empty()) continue;
             for (const auto& tri : its.indices) {
                 const Vec3f& v0f = its.vertices[tri[0]];
@@ -918,16 +991,22 @@ ExPolygons SurfaceColorMix::mmu_painted_footprint_in_z_range(
                 const Vec3d  v1  = vt * Vec3d(v1f.x(), v1f.y(), v1f.z());
                 const Vec3d  v2  = vt * Vec3d(v2f.x(), v2f.y(), v2f.z());
                 // s91 v1.2: upward-facing only (drop lateral/bottom MMU).
+                // NEOTKO_MMU_COEXIST_TAG s234 F2a: mirrored downward on demand,
+                // exactly like painted_footprint_in_z_range's `downward` (§4.3).
                 const Vec3d e1 = v1 - v0, e2 = v2 - v0;
                 const Vec3d n  = e1.cross(e2);
-                if (n.z() <= 0.0) continue;
+                if (downward ? (n.z() >= 0.0) : (n.z() <= 0.0)) continue;
                 // s91 v1.2: max_z in band (top-edge facet lives here), not
                 // just overlap. A vertical facet spanning the cube has
                 // max_z at the cube top — but its n.z() is 0, so it's
                 // already rejected above. A roof facet has its max_z in
                 // the band where it physically prints.
-                const double max_z = std::max({v0.z(), v1.z(), v2.z()});
-                if (max_z < z_min - z_tol || max_z > z_max + z_tol) continue;
+                // Downward mirror: min_z, the height where the underside facet
+                // actually prints.
+                const double pick_z = downward
+                    ? std::min({v0.z(), v1.z(), v2.z()})
+                    : std::max({v0.z(), v1.z(), v2.z()});
+                if (pick_z < z_min - z_tol || pick_z > z_max + z_tol) continue;
                 Polygon p;
                 p.points = { Point(scale_(v0.x()), scale_(v0.y())),
                              Point(scale_(v1.x()), scale_(v1.y())),
@@ -939,8 +1018,115 @@ ExPolygons SurfaceColorMix::mmu_painted_footprint_in_z_range(
         }
     }
     if (tris.empty()) return out;
-    out = union_ex(tris);
+    // NEOTKO_MMU_COEXIST_TAG s235d — por lotes; ver la nota de _neotko_union_triangle_soup.
+    // Éste es EL sitio exacto donde el `sample` pilló el slice colgado.
+    const size_t _ntris = tris.size();
+    const auto   _t0    = std::chrono::steady_clock::now();
+    out = _neotko_union_triangle_soup(std::move(tris));
+    const double _ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - _t0).count();
+    if (_ms > 50.0)
+        NEOTKO_LOG(COLORMIX, "SLOW_UNION mmu"
+            << " band=[" << z_min << "," << z_max << "]"
+            << (downward ? " dir=down" : " dir=up")
+            << " tris=" << _ntris << " pieces=" << out.size()
+            << " ms=" << int(_ms));
     return out;
+}
+
+// NEOTKO_MMU_COEXIST_TAG s234 F1 — the two footprints of a band, one call.
+//
+// Both masks come out of the SAME band and the SAME frame on purpose: F2 and F3
+// will each do one subtraction with them, and if the two subtractions ever use
+// polygons that differ by an epsilon the dirt reappears exactly on the border,
+// which is the most visible place there is (plan §2). So the band/frame decision
+// lives here and nowhere else.
+//
+// `sandwich` is the union of EVERY painted slot present in the band — not only
+// the "useful" ones (a slot whose recipe has no stack for this role). F1 only
+// observes, and the wider union is the conservative reading for spotting a
+// conflict. F2 will pass the peel's own useful masks through this same struct.
+SurfaceColorMix::CoexistBandMasks SurfaceColorMix::coexist_masks_in_z_range(
+    const PrintObject* po, double z_min, double z_max, bool downward)
+{
+    CoexistBandMasks out;
+    if (!po) return out;
+
+    // Sandwich side: union of the painted slots living in this band.
+    {
+        Polygons acc;
+        const std::vector<int> slots =
+            enumerate_painted_slots_in_z_range(po, z_min, z_max, downward);
+        for (int slot : slots) {
+            const ExPolygons m = painted_footprint_in_z_range(po, slot, z_min, z_max, downward);
+            if (m.empty()) continue;
+            append(acc, to_polygons(m));
+        }
+        if (!acc.empty()) out.sandwich = union_ex(acc);
+    }
+
+    // MMU side: same helper the s91 predicate uses, now with the same facet
+    // direction as the sandwich side (s234 F2a) — top band reads upward facets,
+    // bottom band reads the underside. Before F2a this was upward-only and a
+    // bottom band always came back empty.
+    out.mmu = mmu_painted_footprint_in_z_range(po, z_min, z_max, downward);
+
+    if (!out.sandwich.empty() && !out.mmu.empty())
+        out.overlap = intersection_ex(out.sandwich, out.mmu);
+
+    const double s2 = SCALING_FACTOR * SCALING_FACTOR; // clipper² → mm²
+    for (const auto& e : out.sandwich) out.sandwich_area += std::abs(e.area()) * s2;
+    for (const auto& e : out.mmu)      out.mmu_area      += std::abs(e.area()) * s2;
+    for (const auto& e : out.overlap) {
+        out.overlap_area     += std::abs(e.area()) * s2;
+        out.overlap_segments += e.contour.points.size();
+        for (const auto& h : e.holes) out.overlap_segments += h.points.size();
+    }
+    out.has_conflict = out.overlap_area > 0.01; // mm² — same sanity floor as s91's trivial guard
+    return out;
+}
+
+// NEOTKO_MMU_COEXIST_TAG s234 F1 — instrumentation only, no behaviour.
+// Channel COLORMIX (`/tmp/neotko_colormix.log`), grep MMU_COEXIST.
+void SurfaceColorMix::log_coexist_band(const PrintObject* po, double z_min, double z_max,
+                                       bool downward, const char* tag)
+{
+    // 🚨 NEOTKO_MMU_COEXIST_TAG s235d — BUG DE PRODUCCIÓN, no sólo de debug.
+    //
+    // Esta función es instrumentación PURA: su único producto es una línea de log. Pero el
+    // `coexist_masks_in_z_range()` de abajo — que construye las DOS huellas completas, con
+    // sus uniones de decenas de miles de triángulos — se ejecutaba SIEMPRE, con el canal
+    // COLORMIX apagado incluido. O sea: desde s234 todo usuario con pintura de sandwich
+    // estaba pagando el coste entero de un diagnóstico que nunca se llegaba a escribir,
+    // porque el gate vivía dentro del NEOTKO_LOG del final.
+    //
+    // El `sample` del slice colgado terminaba exactamente aquí. Regla que nace de esto:
+    // **una función de log comprueba su canal en la PRIMERA línea**, antes de calcular nada.
+    if (!NeoDebug::enabled(NeoDebug::COLORMIX)) return;
+    if (!po) return;
+    const ModelObject* mo = po->model_object();
+    if (!mo) return;
+    bool any_mm = false, any_cm = false;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        if (!mv->mmu_segmentation_facets.empty()) any_mm = true;
+        if (!mv->color_mix_paint_facets.empty())  any_cm = true;
+    }
+    if (!any_mm && !any_cm) return; // nothing to say about a plain object
+
+    const CoexistBandMasks m = coexist_masks_in_z_range(po, z_min, z_max, downward);
+    // A conflicting band whose border has almost no segments means the clip
+    // degenerated into a sliver/box instead of following the painted outline.
+    const bool thin_border = m.has_conflict && m.overlap_segments < 8;
+    NEOTKO_LOG(COLORMIX, "MMU_COEXIST " << (tag ? tag : "?")
+        << " z=[" << z_min << "," << z_max << "]"
+        << (downward ? " dir=down" : " dir=up")
+        << " sandwich=" << m.sandwich.size() << "/" << m.sandwich_area << "mm2"
+        << " mmu=" << m.mmu.size() << "/" << m.mmu_area << "mm2"
+        << " overlap=" << m.overlap.size() << "/" << m.overlap_area << "mm2"
+        << " seg=" << m.overlap_segments
+        << (m.has_conflict ? " → CONFLICT" : " → disjoint")
+        << (thin_border ? " ⚠ THIN_BORDER" : ""));
 }
 
 // NEOTKO_PAINT_COEXIST_TAG s91 — single source of truth predicate.
@@ -1560,6 +1746,10 @@ int SurfaceColorMix::assign_and_group_tools(
             int    band_a, band_b, band_c, band_d;
             int    tool_a, tool_b, tool_c, tool_d;
             int    repetitions;  // NEOTKO_COLORMIX_TAG — s80: repeat the gradient N times
+            // NEOTKO_COLORMIX_TAG — s235b: ángulo AUTORADO del efecto en grados (-1 = auto).
+            // Lo consumen los modos de carril para fijar el eje del degradado en vez de
+            // medirlo de la geometría — ver la nota del eje en compute_slot_per_line.
+            int    angle;
         };
         GV gv;
         if (gv_is_top_role) {
@@ -1580,6 +1770,7 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_c    = config.interlayer_colormix_tool_c.value;
             gv.tool_d    = config.interlayer_colormix_tool_d.value;
             gv.repetitions = config.interlayer_colormix_repetitions.value;
+            gv.angle       = config.interlayer_colormix_angle.value;   // s235b
         } else {
             gv.cm_mode   = config.interlayer_colormix_penu_mode.value;
             gv.pct_a     = config.interlayer_colormix_penu_pct_a.value;
@@ -1598,6 +1789,10 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_c    = config.interlayer_colormix_penu_tool_c.value;
             gv.tool_d    = config.interlayer_colormix_penu_tool_d.value;
             gv.repetitions = config.interlayer_colormix_penu_repetitions.value;
+            // s235b — mismo criterio que Fill.cpp al resolver el ángulo del penúltimo:
+            // si la clave penu no trae ángulo propio (-1), hereda el del top.
+            gv.angle       = config.interlayer_colormix_penu_angle.value;
+            if (gv.angle < 0) gv.angle = config.interlayer_colormix_angle.value;
         }
 
         // NEOTKO_PROFILE_TAG — Fase D: painted-profile override.
@@ -1646,6 +1841,7 @@ int SurfaceColorMix::assign_and_group_tools(
             gv.tool_c    = get_int ("tool_c",            gv.tool_c);
             gv.tool_d    = get_int ("tool_d",            gv.tool_d);
             gv.repetitions = get_int ("repetitions",     gv.repetitions);
+            gv.angle       = get_int ("angle",           gv.angle);   // s235b — eje del degradado
             NEOTKO_LOG(PROFILE, "OVERRIDE layer=" << layer_idx
                 << " role=" << (gv_is_top_role ? "Top" : "Penu")
                 << " profile='" << eff_profile->name << "' (id=" << eff_profile->id << ")"
@@ -1740,7 +1936,10 @@ int SurfaceColorMix::assign_and_group_tools(
             // gets its own tool; the connector arc rides with its OUTGOING scanline (run.tail), kept
             // (never dropped) and re-appended at emission. run.scan (clean) drives lane/slot geometry.
             // Post-hoc only — FillMonotonic / connect_infill are untouched.
-            const bool split_monotonic = config.colorstitch_monotonic_split.value;
+            // s230 — el split dejó de ser opcional: SIEMPRE ON. La key sobrevive solo para
+            // leer 3mf antiguos sin romper; su valor ya no se consulta (un proyecto guardado
+            // con false regresionaría a "ColorStitch solo sobre Monotonic Line").
+            const bool split_monotonic = true;
             NEOTKO_LOG(COLORMIX, "MONOTONIC_MODE layer=" << layer_idx
                 << " n_paths=" << n_paths << " split=" << (split_monotonic ? 1 : 0));
 
@@ -1974,12 +2173,50 @@ int SurfaceColorMix::assign_and_group_tools(
         std::string lane_summary;
         std::vector<int> slot_per_line =
             compute_slot_per_line(raw_lines, n_slots, lane_mode,
-                                  NeoDebug::enabled(NeoDebug::COLORMIX) ? &lane_summary : nullptr);
+                                  NeoDebug::enabled(NeoDebug::COLORMIX) ? &lane_summary : nullptr,
+                                  // s235b — el eje lo manda el ángulo AUTORADO (el mismo que
+                                  // usa el preview del painter), no la geometría medida.
+                                  gv.angle);
 
         if (NeoDebug::enabled(NeoDebug::COLORMIX)) {
             NEOTKO_LOG(COLORMIX, "LANE_MODE mode=" << lane_mode
                 << " (" << lane_summary << ") layer=" << layer_idx
                 << " lines=" << raw_lines.size() << " slots=" << n_slots);
+
+            // NEOTKO_COLORMIX_TAG — s235, bug #14: la prueba del fix, para no gastar un
+            // build en comprobarlo. `slots` de arriba es la LONGITUD del patrón (== líneas,
+            // ver la nota de compute_slot_per_line); lo que importa es CUÁNTO del patrón se
+            // alcanza de verdad y qué tools sobreviven.
+            //   · cover=N/N y tail_dead=0  → el reparto es biyectivo (lo esperado tras s235)
+            //   · tail_dead>0              → el bug está vivo: los últimos índices del
+            //                                patrón no se usan y su color no se imprime
+            // Y `tools_out` debe coincidir en proporción con el DITHER_3COLOR de esta misma
+            // capa: si allí sale T0=58 T1=38 T2=20 y aquí falta T2, el degradado está roto.
+            int lo_used = n_slots, hi_used = -1;
+            std::set<int> used_slots;
+            std::map<int, int> tool_hist;
+            for (int i = 0; i < (int) slot_per_line.size(); ++i) {
+                const int s = slot_per_line[i];
+                used_slots.insert(s);
+                lo_used = std::min(lo_used, s);
+                hi_used = std::max(hi_used, s);
+                if (s >= 0 && s < (int) tools.size())
+                    tool_hist[tools[s]]++;
+            }
+            std::ostringstream _c;
+            _c << "  LANE_COVER layer=" << layer_idx
+               << " cover=" << used_slots.size() << "/" << n_slots
+               << " used=[" << lo_used << ".." << hi_used << "]"
+               << " tail_dead=" << (n_slots - 1 - hi_used)
+               << " tools_out=[";
+            bool _first = true;
+            for (const auto& kv : tool_hist) {
+                if (!_first) _c << ",";
+                _first = false;
+                _c << "T" << kv.first << "=" << kv.second;
+            }
+            _c << "]";
+            NeoDebug::write(NeoDebug::COLORMIX, _c.str());
         }
 
         // NEOTKO_COLORSTITCH_TAG — DEBUG-ONLY axis diagnostic (no behaviour change).

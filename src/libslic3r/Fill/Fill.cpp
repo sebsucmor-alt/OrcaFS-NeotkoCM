@@ -1256,6 +1256,44 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         }
     }
 
+    // NEOTKO_MMU_COEXIST_TAG_START — s235c, CUELGUE del slice al 35%.
+    //
+    // El reparto MMU×Sandwich de s234 pedía la huella MMU de la banda DENTRO del bucle de
+    // piezas de abajo, así que se reconstruía entera una vez POR PIEZA y POR CAPA. Con un
+    // objeto normal daba igual (`mmu_painted_footprint_in_z_range` sale por `any_mm` en la
+    // primera línea si no hay pintura MMU: coste cero, que es lo que se midió en s234).
+    //
+    // Al ensamblar 4 objetos y pintar una línea MMU que los cruza, esa salida rápida deja
+    // de aplicar y el coste real aparece de golpe: la capa tenía 23+12 piezas y la huella
+    // MMU medía 43885 segmentos (log MMU_COEXIST → CONFLICT). Reconstruirla ~35 veces por
+    // capa —cada una con su `union_ex` de decenas de miles de triángulos— es lo que dejó el
+    // slice clavado. No era un bucle infinito: era coste cuadrático.
+    //
+    // La banda (`_zlo/_zhi/_downward6c`) sale de la CAPA y del rol, no de la pieza, así que
+    // todas las piezas del mismo rol comparten máscara. Un memo de una entrada basta para
+    // colapsar las ~35 llamadas en 1 (las piezas del mismo rol llegan consecutivas). Es
+    // local a esta función: nada de `static`, que aquí se slicea con TBB en paralelo.
+    struct _MmuBandMemo {
+        bool      valid = false;
+        double    zlo = 0, zhi = 0;
+        bool      down = false;
+        ExPolygons mask;
+        bool hits(double a, double b, bool d) const {
+            return valid && down == d && a == zlo && b == zhi;
+        }
+    } _mmu_memo;
+    // Gemelo para el log de observación: log_coexist_band() recalcula las DOS huellas, así
+    // que sin esto el canal de debug encendido duplicaba el coste que estamos quitando.
+    struct _CoexistLogMemo {
+        bool   valid = false;
+        double zlo = 0, zhi = 0;
+        bool   down = false;
+        bool hits(double a, double b, bool d) const {
+            return valid && down == d && a == zlo && b == zhi;
+        }
+    } _coexist_logged;
+    // NEOTKO_MMU_COEXIST_TAG_END
+
     for (SurfaceFill &surface_fill : surface_fills) {
         // NEOTKO_BOTTOM_TAG — Fase 1 §5.2 OVERLAY model (s152 plan OVERLAY).
         // Gate ENABLED for the overlay-per-pass bottom sandwich. Unlike the s151
@@ -1432,6 +1470,22 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     : ((_role6c == erTopSolidInfill)
                         ? this->print_z + this->height
                         : this->print_z + 2.0 * this->height);
+                // NEOTKO_MMU_COEXIST_TAG s234 F1 — observación pura: con la banda
+                // ya decidida (_zlo/_zhi/_downward6c), pedir a la fuente única las
+                // DOS huellas y registrar áreas + intersección + segmentos del
+                // borde. No consume nada todavía; es el número que hay que mirar
+                // antes de tocar geometría en F2/F3 (plan §3 F1).
+                // NEOTKO_MMU_COEXIST_TAG s235c — una vez por BANDA, no por pieza: recalcula
+                // las dos huellas y con pintura MMU real eso costaba tanto como el reparto.
+                if (!_coexist_logged.hits(_zlo, _zhi, _downward6c)) {
+                    _coexist_logged.valid = true;
+                    _coexist_logged.zlo   = _zlo;
+                    _coexist_logged.zhi   = _zhi;
+                    _coexist_logged.down  = _downward6c;
+                    SurfaceColorMix::log_coexist_band(_po6c, _zlo, _zhi, _downward6c,
+                                                      (_role6c == erTopSolidInfill) ? "top"
+                                                      : (_is_bottom ? "bottom" : "penu"));
+                }
                 // Enumerate every painted slot present in the Z band, then keep
                 // only the ones whose profile has a non-empty stack for this role.
                 std::vector<int> _slots = SurfaceColorMix::enumerate_painted_slots_in_z_range(
@@ -1498,10 +1552,95 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     // `_remaining` removes nothing relevant to the next one.
                     ExPolygons _orig = std::move(surface_fill.expolygons);
                     surface_fill.expolygons.clear();
+
+                    // NEOTKO_MMU_COEXIST_TAG s234 F2c — the MMU peel, for real.
+                    //
+                    // The MMU footprint of this band comes from the SAME source F1
+                    // established, and is peeled with MAXIMUM priority: BEFORE every
+                    // sandwich slot. Where the user painted MMU, the sandwich simply
+                    // never sees the surface — precedence "donde hay MMU, manda MMU"
+                    // (plan §2), which is the opposite of the s136 default.
+                    //
+                    // s234 F2b measured this on real objects first: an MMU-painted
+                    // object arrives here ALREADY split by the MMU segmentation (one
+                    // surface_fill piece for the painted circle, one for the rest),
+                    // so on most pieces this peel takes nothing, and on the MMU piece
+                    // it takes everything. The general case (a footprint straddling
+                    // two pieces) is handled by the same code without a special case.
+                    //
+                    // What the MMU claims is NOT dropped — it is emitted as a natural
+                    // piece (tag 0): flat, its own extruder, no effect. The sandwich
+                    // losing that area is the whole point; the surface still prints.
+                    //
+                    // NOTE the s136 switch `_sandwich_always_governs` is untouched:
+                    // this reparto is geometric, so the three governance callsites
+                    // keep agreeing (and ToolOrdering reads the tools from the
+                    // sublayers Fill actually emits — plan == emisión by construction).
+                    // NEOTKO_MMU_COEXIST_TAG s235c — memo por BANDA (ver la nota grande
+                    // antes del bucle). Esta llamada era el cuello de botella que colgaba
+                    // el slice: se hacía una vez por PIEZA aunque la máscara sea la misma
+                    // para todas las piezas del mismo rol en la misma capa.
+                    if (!_mmu_memo.hits(_zlo, _zhi, _downward6c)) {
+                        _mmu_memo.valid = true;
+                        _mmu_memo.zlo   = _zlo;
+                        _mmu_memo.zhi   = _zhi;
+                        _mmu_memo.down  = _downward6c;
+                        _mmu_memo.mask  = SurfaceColorMix::mmu_painted_footprint_in_z_range(
+                            _po6c, _zlo, _zhi, _downward6c);
+                        NEOTKO_LOG(COLORMIX, "MMU_MASK_BUILD z=" << this->print_z
+                            << " band=[" << _zlo << "," << _zhi << "]"
+                            << (_downward6c ? " dir=down" : " dir=up")
+                            << " pieces=" << _mmu_memo.mask.size()
+                            << " (memo miss — 1 por banda; si esto sale una vez POR PIEZA,"
+                               " el memo no está funcionando)");
+                    }
+                    const ExPolygons& _mmu_mask = _mmu_memo.mask;
+                    // Clipper leaves float residue where a mask fully covers a piece
+                    // (F2b saw 5.19e-08 mm² left of an 84.6 mm² piece). Emitting that
+                    // as a piece would hand the filler a degenerate polygon, so any
+                    // crumb below a floor 20x smaller than a single extrusion dab is
+                    // dropped. Real geometry is never anywhere near this.
+                    const double _sliver_thr = scaled<double>(0.1) * scaled<double>(0.1); // 0.01 mm²
+                    auto _drop_slivers = [_sliver_thr](ExPolygons& v) {
+                        v.erase(std::remove_if(v.begin(), v.end(),
+                                    [_sliver_thr](const ExPolygon& e) {
+                                        return std::abs(e.area()) < _sliver_thr; }),
+                                v.end());
+                    };
+                    ExPolygons _mmu_part;              // area this piece cedes to MMU
+                    ExPolygons _sandwich_area = _orig; // what the sandwich slots may claim
+                    if (!_mmu_mask.empty()) {
+                        _mmu_part = intersection_ex(_orig, _mmu_mask);
+                        _drop_slivers(_mmu_part);
+                        if (!_mmu_part.empty()) {
+                            _sandwich_area = diff_ex(_orig, _mmu_mask);
+                            _drop_slivers(_sandwich_area);
+                        }
+                    }
+                    if (!_mmu_part.empty()) {
+                        const double _s2 = SCALING_FACTOR * SCALING_FACTOR;
+                        double _ma = 0.0, _sa = 0.0;
+                        for (const auto& e : _mmu_part)      _ma += std::abs(e.area()) * _s2;
+                        for (const auto& e : _sandwich_area) _sa += std::abs(e.area()) * _s2;
+                        NEOTKO_LOG(COLORMIX, "MMU_PEEL z=" << this->print_z
+                            << " role=" << (int)_role6c
+                            << (_downward6c ? " dir=down" : " dir=up")
+                            // The MMU's vertical reach (how many layers its colour is
+                            // forced solid into the object) next to the band the
+                            // sandwich works on. If these two ever stop overlapping,
+                            // the reparto goes out of sync — it shows here first.
+                            << " mmu_surface_depth="
+                            << _po6c->config().mmu_segmented_region_surface_depth.value
+                            << " band=[" << _zlo << "," << _zhi << "]"
+                            << " → mmu_keeps=" << _mmu_part.size() << "/" << _ma << "mm2"
+                            << " sandwich_left=" << _sandwich_area.size() << "/" << _sa << "mm2"
+                            << (_sandwich_area.empty() ? " (piece is fully MMU — no sandwich here)" : ""));
+                    }
+
                     std::ostringstream _clip_log;
                     _clip_log << "FOOTPRINT_CLIP z=" << this->print_z
                               << " role=" << (int)_role6c << " slots=[";
-                    ExPolygons _remaining = _orig;
+                    ExPolygons _remaining = _sandwich_area;
                     for (size_t oi = 0; oi < _peel_order.size(); ++oi) {
                         const size_t k = _peel_order[oi];
                         ExPolygons _painted = intersection_ex(_remaining, _useful_masks[k]);
@@ -1510,8 +1649,14 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // A higher-priority volume already claimed part of
                             // this slot's footprint iff what it actually got
                             // (against the shrunk `_remaining`) is smaller than
-                            // what it would have gotten alone (against `_orig`).
-                            ExPolygons _full = intersection_ex(_orig, _useful_masks[k]);
+                            // what it would have gotten alone.
+                            // NEOTKO_MMU_COEXIST_TAG s234 F2c — baseline is
+                            // `_sandwich_area`, NOT `_orig`: area ceded to the MMU
+                            // must not read as "another recipe overwrote yours",
+                            // which is a GUI warning about assembled parts colliding.
+                            // The user hears about the MMU reparto in the painter
+                            // (F5), not through a warning that names a wrong culprit.
+                            ExPolygons _full = intersection_ex(_sandwich_area, _useful_masks[k]);
                             double _full_area = 0.0;
                             for (const auto& e : _full) _full_area += e.area();
                             double _got_area = 0.0;
@@ -1543,7 +1688,17 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         surface_fill.expolygons.push_back(std::move(e));
                         _fp_tag.push_back(0);
                     }
-                    _clip_log << "] natural=" << _nn;
+                    // NEOTKO_MMU_COEXIST_TAG s234 F2c — the MMU's share, emitted
+                    // as natural (tag 0). Same tag as the remainder because the
+                    // outcome is the same downstream: no painted recipe applies,
+                    // the surface prints flat with whatever extruder the MMU
+                    // segmentation already assigned to this region.
+                    const size_t _nm = _mmu_part.size();
+                    for (auto& e : _mmu_part) {
+                        surface_fill.expolygons.push_back(std::move(e));
+                        _fp_tag.push_back(0);
+                    }
+                    _clip_log << "] natural=" << _nn << " mmu=" << _nm;
                     NEOTKO_LOG(PROFILE, _clip_log.str());
                 }
 
@@ -1796,19 +1951,27 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                                     _mp_role == erBridgeInfill);
 
                         // NEOTKO_MIXEDFIL_SANDWICH_TAG — object-wide mode: same profile
-                        // drives EVERY top/penu layer, no painted-slot resolution needed
-                        // (bottom role is untouched — this mode only replaces top+penu).
-                        // Resolved once, single-threaded, in
-                        // Print::resolve_mixed_filament_sandwich_profiles(); here we only
+                        // drives EVERY layer of the object. Resolved once, single-threaded,
+                        // in Print::resolve_mixed_filament_sandwich_profiles(); here we only
                         // ever READ the resulting profile id.
+                        // s230 — cayó el `&& !_mp_is_bottom`. El modo gobernaba solo top+penu
+                        // mientras la UI grisaba el painter entero prometiendo que gobernaba
+                        // el objeto: un bottom pintado se resolvía por su slot y el objeto
+                        // acababa bajo DOS recetas a la vez (confirmado con BOTTOM_RESOLVE
+                        // devolviendo el profile pintado en un role=10 mientras el role=7
+                        // usaba el MixedFilament). Ahora el gate del motor y el de la UI
+                        // dicen lo mismo. Requiere que el perfil auto traiga
+                        // stack_bottom_json — lo rellena build_mixed_filament_recipe().
                         const SurfaceEffectProfile* _mixed_p = nullptr;
-                        if (_mp_mixed_filament_mode && !_mp_is_bottom) {
+                        if (_mp_mixed_filament_mode) {
                             if (const int _mfpid = _po->print()->mixed_filament_sandwich_profile_id(_po); _mfpid)
                                 _mixed_p = SurfaceEffectProfileManager::get().find(_mfpid);
                         }
                         if (_mixed_p) {
-                            const std::string& _mfjs = (_mp_role == erTopSolidInfill)
-                                ? _mixed_p->stack_top_json : _mixed_p->stack_penu_json;
+                            const std::string& _mfjs = _mp_is_bottom
+                                ? _mixed_p->stack_bottom_json
+                                : ((_mp_role == erTopSolidInfill)
+                                       ? _mixed_p->stack_top_json : _mixed_p->stack_penu_json);
                             SurfacePassStack _mfst = SurfacePassStack::from_json(_mfjs);
                             if (_mfst.any_effect()) {
                                 mp_stack   = std::move(_mfst);
@@ -2032,7 +2195,68 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     //                  pass: distinct print_z, monotonic pass_idx) so
                     //                  NeoTower / ToolOrdering / the GCode handler
                     //                  schedule them with zero changes.
-                    //   PathBlend    → never reaches here (preset gate excludes it).
+                    //   PathBlend    → compilado a ramp(+cap) más abajo, SALVO sobre un
+                    //                  bridge real, donde se degrada a Solid (ver justo aquí).
+
+                    // NEOTKO_PATHBLEND_TAG — s230: PathBlend no sobrevive a un puente real
+                    // CUANDO el bridge se imprime con el modelo de hilo redondo. Su escalera
+                    // ramp/cap subdivide la altura de capa en hasta 32 bandas (kTargetK); con
+                    // thick_bridges=true el bridge es un hilo REDONDO (Flow::bridging_flow,
+                    // W==H), la corrección Beer-Lambert cae a su rama `else` y cada banda recibe
+                    // `mm3_per_mm *= ratio` → hilos de sección ridícula cruzando el vano.
+                    // Geometría malformada, no un acabado feo.
+                    //
+                    // ⚠️ El gate lleva thick_bridges A PROPÓSITO, no solo el rol. Con
+                    // thick_bridges=FALSE (default de Orca, y lo que usan de hecho los perfiles
+                    // en uso) el bridge es una LÁMINA normal: `flow(role).with_flow_ratio(...)`,
+                    // altura de capa corriente, y subdividirlo es geométricamente idéntico a
+                    // subdividir cualquier sólido. Ahí PathBlend funciona bien y degradarlo sería
+                    // quitarle al usuario una feature buena por un problema que no tiene.
+                    //
+                    // Cuando sí aplica, en vez de prohibirlo o de emitirlo roto, se DEGRADA a
+                    // MultiPass con los MISMOS colores: la rampa se sustituye por sus tools en
+                    // sólido, repartiendo el ratio del pase original. Full (2 tools) → 2 pasadas
+                    // Solid; Half (1 tool) → 1. El usuario obtiene los colores que pidió,
+                    // apilados en vez de mezclados en rampa.
+                    //
+                    // Solo erBridgeInfill: un bed bottom o una cara apoyada NO son puentes y
+                    // conservan PathBlend íntegro. Top/penu, intactos.
+                    const bool _pb_bridge_degrade =
+                        surface_fill.params.extrusion_role == erBridgeInfill
+                        && f->print_object_config != nullptr
+                        && f->print_object_config->thick_bridges.value;
+                    if (_pb_bridge_degrade) {
+                        std::vector<SurfacePass> _degraded;
+                        bool _did_degrade = false;
+                        for (const SurfacePass& _p : mp_stack.passes) {
+                            if (_p.kind != SurfacePassKind::PathBlend) { _degraded.push_back(_p); continue; }
+                            const std::string _blob = _p.pathblend.kv.count("blob")
+                                ? _p.pathblend.kv.at("blob") : std::string();
+                            const PathBlendPassConfig _pb = PathBlendPassConfig::from_blob_json(_blob);
+                            const bool _full = (_pb.mode == PathBlendPassConfig::Mode::Full)
+                                            && _pb.tool_top >= 0;
+                            const int  _nsub = _full ? 2 : 1;
+                            // Orden físico: [0] = abajo = tool_bottom (la rampa), [1] = arriba =
+                            // tool_top (el cap). Mismo orden que emite la escalera PathBlend.
+                            for (int _k = 0; _k < _nsub; ++_k) {
+                                SurfacePass _s = _p;               // hereda angle/fan/speed_pct
+                                _s.kind       = SurfacePassKind::Solid;
+                                _s.solid_tool = (_k == 0) ? std::max(0, _pb.tool_bottom)
+                                                          : std::max(0, _pb.tool_top);
+                                _s.ratio      = _p.ratio / double(_nsub);
+                                _s.pathblend  = {};                // sin payload PB residual
+                                _degraded.push_back(std::move(_s));
+                            }
+                            _did_degrade = true;
+                        }
+                        if (_did_degrade) {
+                            NEOTKO_LOG(MULTIPASS, "PB_BRIDGE_DEGRADE z=" << this->print_z
+                                << " passes_before=" << mp_stack.passes.size()
+                                << " passes_after=" << _degraded.size());
+                            mp_stack.passes = std::move(_degraded);
+                        }
+                    }
+
                     const int   _n_raw     = std::min<int>(3, (int)mp_stack.passes.size());
                     // NEOTKO_BOTTOM_TAG — Fase 1 §5.3 (s152 OVERLAY): bottom pass clamp.
                     // A bottom overlay is a SINGLE full-height pass (paint-only; a real
@@ -2041,10 +2265,31 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     const bool _is_bottom_overlay =
                         (surface_fill.params.extrusion_role == erBottomSurface ||
                          surface_fill.params.extrusion_role == erBridgeInfill);
-                    const bool _bottom_supported =
-                        _is_bottom_overlay && mp_stack.bottom_supported_control;
-                    const int   n          = (_is_bottom_overlay && !_bottom_supported)
-                                                 ? std::min(1, _n_raw) : _n_raw;
+                    // s230 — CLAMP RETIRADO. La zona Bottom usa la pila autorada COMPLETA,
+                    // sea cara apoyada o puente real. Decisión de producto explícita del
+                    // usuario: los puentes ya son terreno de calibración (velocidad,
+                    // temperatura, flow, tests dedicados) y quien los toca lo sabe; el
+                    // slicer no gana nada prohibiendo lo que el usuario ha pedido a mano.
+                    //
+                    // Historia, porque el gate ha cambiado dos veces en la misma sesión:
+                    //   original → clamp a 1 salvo checkbox bottom_supported_control ON
+                    //   intermedio → clamp a 1 solo en erBridgeInfill (checkbox retirado)
+                    //   ahora → sin clamp
+                    //
+                    // Lo que SIGUE protegido, y no es negociable: la pasada 0 conserva el rol
+                    // base (ver _band_role abajo), así que la lámina que cruza el aire mantiene
+                    // flow/velocidad/fan/ángulo de puente. Solo las pasadas ≥1, que van encima
+                    // de ella y ya no están sobre vacío, se emiten como sólido controlado.
+                    //
+                    // ⚠️ Riesgo conocido y aceptado, relevante SOLO con thick_bridges=true
+                    // (el perfil de la U1 lo trae ON): ahí el bridge es un hilo REDONDO
+                    // (Flow::bridging_flow, W==H) y la corrección Beer-Lambert de más abajo cae
+                    // a su rama `else` (`W > H` es falso) → cada pasada recibe `mm3_per_mm *=
+                    // ratio`. Repartir en 3 deja el hilo que cruza el vano a 1/3 de sección.
+                    // Con thick_bridges=false el bridge es una lámina normal y subdividirlo es
+                    // geométricamente idéntico a subdividir cualquier sólido, sin pega.
+                    const bool _bottom_supported = _is_bottom_overlay;
+                    const int   n                = _n_raw;
                     const float base_angle = surface_fill.params.angle;
                     // Beer-Lambert stadium model: A(W,H) = H*(W - H*(1-π/4)) [matches Flow.cpp]
                     constexpr double k_mp  = 1.0 - 0.25 * M_PI;
@@ -2112,6 +2357,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             f->angle = (pb.fill_angle >= 0)
                                 ? Geometry::deg2rad(static_cast<float>(pb.fill_angle))
                                 : base_angle;
+                            // s230 BUGFIX — a esta rama le faltaba el antídoto que la rama
+                            // Solid/ColorStitch sí tiene (ver _surf_for_fill más abajo):
+                            // _infill_direction() (FillBase.cpp:299) PISA f->angle con
+                            // surface->bridge_angle cuando la superficie es bridge, así que sobre
+                            // un puente el ángulo autorado de PathBlend nunca llegaba al slice.
+                            // El efecto seguía "medio funcionando" (la partición de la rampa es por
+                            // centroide Y, así que salían bandas y colores) pero sobre líneas
+                            // orientadas al ángulo del PUENTE, no al del usuario — de ahí el
+                            // síntoma "recoge los colores y hace las pasadas pero no sale el
+                            // degradado". Marcamos aquí el override; se aplica en la copia de la
+                            // superficie que usan las llamadas de relleno de esta rama.
+                            const bool _pb_overrides_bridge = (pb.fill_angle >= 0);
 
                             // NEOTKO_PATHBLEND_TAG_START — s87 B-bands gate.
                             // When ON, discretise the PB pass into K real
@@ -2232,11 +2489,43 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 if (pb.tool_bottom >= 0) {
                                     FillParams _ramp_params = params;
                                     _ramp_params.flow = _nominal_flow;
+                                    // NEOTKO_PATHBLEND_TAG — s231 BUGFIX (reportado por el usuario:
+                                    // "el PathBlend de bottom no hace cambio de Z en la primera
+                                    // pasada; el de top sí, misma receta").
+                                    //
+                                    // El staircase per-scanline de s88 asigna UN Z por PATH: cada
+                                    // ExtrusionPath aporta su centroide Y (_t_of) → su altura h_p.
+                                    // Eso da por supuesto que el relleno devuelve UNA polilínea POR
+                                    // LÍNEA de barrido, y ese supuesto depende del PATRÓN de relleno
+                                    // de la región, que PathBlend nunca controló:
+                                    //   · `monotonicline` (FillMonotonicLine) fuerza
+                                    //     anchor_length_max=0 → líneas SUELTAS → N paths → rampa real.
+                                    //   · `monotonic` (FillMonotonic) hereda anchor_length_max=1000
+                                    //     (solid ⇒ "don't limit anchor length", Fill.cpp:954) → las
+                                    //     líneas se CONECTAN en un zigzag → 1 path → 1 solo t → 1
+                                    //     sola altura → rampa PLANA, sin efecto.
+                                    // El caso del usuario: top_surface_pattern=monotonicline (bien) y
+                                    // bottom_surface_pattern=monotonic (plano). No es un problema del
+                                    // Bottom: con top_surface_pattern=monotonic el TOP se rompería
+                                    // igual. Latente desde s88, sólo que los defaults lo tapaban.
+                                    //
+                                    // Arreglo: para los rellenos de PathBlend pedimos explícitamente
+                                    // líneas sin conectar. `dont_connect()` es `anchor_length_max <
+                                    // 0.05`, y se propaga porque FillMonotonic COPIA los params y sólo
+                                    // fuerza `monotonic=true` (FillRectilinear.cpp:3081) — con esto se
+                                    // comporta igual que FillMonotonicLine. NO se toca la matemática
+                                    // del staircase (modelo canónico s88+s89 intacto): sólo se
+                                    // garantiza que le llegue una scanline por path, que es lo que
+                                    // siempre asumió.
+                                    _ramp_params.anchor_length     = 0.f;
+                                    _ramp_params.anchor_length_max = 0.f;
                                     f->spacing = _nominal_flow.spacing();
 
                                     ExtrusionEntityCollection _ramp_global;
                                     Surface _ms = surface_fill.surface;
                                     _ms.expolygon = _src_exp;
+                                    // s230 BUGFIX — ver _pb_overrides_bridge arriba.
+                                    if (_pb_overrides_bridge) _ms.bridge_angle = -1.0;
                                     f->fill_surface_extrusion(&_ms, _ramp_params, _ramp_global.entities);
 
                                     const double _H_d = double(this->height);
@@ -2324,11 +2613,22 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 if (!_cap_bands.empty() && pb.tool_top >= 0) {
                                     FillParams _cap_params = params;
                                     _cap_params.flow = _nominal_flow;
+                                    // NEOTKO_PATHBLEND_TAG — s231: MISMO motivo que la rampa (ver el
+                                    // comentario largo allí). La tapa reparte h_cap = H − rampa(t)
+                                    // path a path, así que con las líneas conectadas también
+                                    // colapsaría a un único grosor. Y sobre todo: rampa y tapa DEBEN
+                                    // partir de la misma descomposición en scanlines o la
+                                    // conservación de volumen per-Y (rampa(h)+tapa(H−h)=H) deja de
+                                    // cuadrar punto por punto.
+                                    _cap_params.anchor_length     = 0.f;
+                                    _cap_params.anchor_length_max = 0.f;
                                     f->spacing = _nominal_flow.spacing();
 
                                     ExtrusionEntityCollection _cap_global;
                                     Surface _ms = surface_fill.surface;
                                     _ms.expolygon = _src_exp;
+                                    // s230 BUGFIX — ver _pb_overrides_bridge arriba.
+                                    if (_pb_overrides_bridge) _ms.bridge_angle = -1.0;
                                     f->fill_surface_extrusion(&_ms, _cap_params, _cap_global.entities);
 
                                     const double _H_d = double(this->height);
@@ -2365,6 +2665,10 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     for (const ExtrusionEntity* e : _cap_global.entities) _walk_paths(e, _scale_and_collect);
 
                                     if (!_cap_collected.entities.empty()) {
+                                        // s231 — el log de abajo imprimía _sub.fills.entities.size()
+                                        // DESPUÉS del std::move, así que siempre decía paths=0 y hacía
+                                        // parecer que la tapa no generaba nada. Se captura antes.
+                                        const size_t _cap_paths = _cap_collected.entities.size();
                                         MultiPassSubLayer _sub;
                                         // Cap is always the LAST sublayer of the PB pass —
                                         // anchor at _pb_band_top_sched, ramp sublayers fall
@@ -2387,7 +2691,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                             << " tool=T" << pb.tool_top
                                             << " pass=" << (global_pass - 1)
                                             << " spacing=" << _nominal_flow.spacing()
-                                            << " paths=" << _sub.fills.entities.size());
+                                            << " paths=" << _cap_paths);
                                     }
                                 }
 
@@ -2453,7 +2757,22 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // scaling — apply_path derives flow from ramp_thickness/H,
                             // overriding the path's mm3_per_mm).
                             ExtrusionEntityCollection pb_src;
-                            f->fill_surface_extrusion(&surface_fill.surface, params, pb_src.entities);
+                            // s230 BUGFIX — ver _pb_overrides_bridge arriba. Camino LEGACY
+                            // (single-Fill ramp/cap, cuando compute_pb_bands no devuelve bandas):
+                            // se rellena desde una COPIA, mismo patrón que _surf_for_fill en la
+                            // rama Solid/ColorStitch, para no mutar surface_fill.surface.
+                            Surface _pb_surf_for_fill = surface_fill.surface;
+                            if (_pb_overrides_bridge) _pb_surf_for_fill.bridge_angle = -1.0;
+                            // NEOTKO_PATHBLEND_TAG — s231: idéntico al de la rampa de arriba. Este
+                            // camino legacy no escala aquí, pero apply_path (GCode.cpp) reparte el
+                            // grosor de rampa/tapa PATH A PATH exactamente igual, así que con las
+                            // líneas conectadas sale el mismo degradado plano. Copia local de los
+                            // params: `params` lo siguen usando otras ramas más abajo y no debe
+                            // salir mutado de aquí.
+                            FillParams _pb_legacy_params = params;
+                            _pb_legacy_params.anchor_length     = 0.f;
+                            _pb_legacy_params.anchor_length_max = 0.f;
+                            f->fill_surface_extrusion(&_pb_surf_for_fill, _pb_legacy_params, pb_src.entities);
                             if (pb_src.entities.empty()) continue;
 
                             auto _clone_into = [](const ExtrusionEntityCollection& s,
@@ -2548,6 +2867,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         // fraction of the layer, leaving a void above. Force ratio=1.0 so
                         // the single OFF pass is full height. No-op for native 1-pass
                         // profiles (their ratio is already 1.0) → byte-identical.
+                        // s230 — con el clamp retirado (_bottom_supported == _is_bottom_overlay)
+                        // esta condición es SIEMPRE falsa: toda zona bottom usa el ratio autorado
+                        // de cada pasada, igual que top/penu. Se deja la expresión en vez de
+                        // simplificarla a `pass.ratio` para que el forzado a 1.0 siga localizado
+                        // aquí si algún día vuelve a hacer falta (p.ej. un clamp condicionado a
+                        // thick_bridges).
                         const double ratio = (_is_bottom_overlay && !_bottom_supported)
                                                  ? 1.0 : pass.ratio;
 
@@ -2614,9 +2939,11 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         // planned bridge angle. The bed / fully-supported bottom (erBottomSurface,
                         // cat.1) is NOT a bridge, so its authored angle must apply regardless of
                         // the supported-control switch — else the painted ColorStitch/Solid angle
-                        // silently does nothing on the bed bottom. Top/penu: _bottom_is_bridge is
-                        // false (not erBridgeInfill) → byte-identical to before.
-                        const bool _bottom_is_bridge = (_sub_role == erBridgeInfill);
+                        // silently does nothing on the bed bottom.
+                        // s230 — la distinción bridge/no-bridge dejó de hacer falta AQUÍ: el
+                        // ángulo autorado se honra en las tres zonas y también sobre un puente,
+                        // así que `_bottom_is_bridge` se quedó sin usar y se retiró. El rol sigue
+                        // decidiendo el número de pasadas (ver el clamp arriba) y el flow/speed/fan.
                         if (is_cm) {
                             // NEOTKO_BOTTOM_TAG — Fase 1 §5.4 (s152 OVERLAY): the Bottom zone is
                             // authored with penu=false (draw_zone_editor .../*penu=*/false), so a
@@ -2632,8 +2959,16 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // angle, ignoring the authored cm_angle. ON (supported overlay, user's
                             // own risk) and top/penu honor it. Byte-identical for top/penu
                             // (_is_bottom_overlay=0 → _respect_cm_angle=1, same as before).
-                            const bool _respect_cm_angle = !(_bottom_is_bridge && !_bottom_supported);
-                            const bool _use_cm_angle = _respect_cm_angle && cm_angle >= 0;
+                            // s230 — el ángulo autorado se honra SIEMPRE, también en un puente
+                            // real. Cambiar el ángulo altera solo la DIRECCIÓN de las líneas; el
+                            // flow / velocidad / fan de puente los sigue mandando el rol
+                            // erBridgeInfill, que no se toca. La supresión anterior era política,
+                            // no física (la maquinaria _angle_overrides_bridge ya existía y
+                            // funcionaba — solo estaba apagada para bridges).
+                            // ⚠️ Riesgo asumido y avisado en el UI: Orca planea el ángulo del
+                            // puente para cruzar PERPENDICULAR a los anclajes; girarlo puede
+                            // dejar líneas sin apoyo en los extremos. Decisión del usuario.
+                            const bool _use_cm_angle = cm_angle >= 0;
                             f->angle = _use_cm_angle
                                 ? Geometry::deg2rad(static_cast<float>(cm_angle))
                                 : base_angle;
@@ -2661,8 +2996,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // ON (supported overlay, user's own risk) and top/penu honor the
                             // authored pass.angle (>=0); -1 keeps the default base_angle
                             // alternation. Byte-identical for top/penu (_is_bottom_overlay=0).
-                            const bool _respect_pass_angle = !(_bottom_is_bridge && !_bottom_supported);
-                            const bool _use_pass_angle = _respect_pass_angle && pass.angle >= 0;
+                            // s230 — igual que la rama ColorStitch de arriba: el ángulo autorado
+                            // se honra siempre, también sobre un puente. Ver comentario allí.
+                            const bool _use_pass_angle = pass.angle >= 0;
                             f->angle = _use_pass_angle
                                 ? Geometry::deg2rad(static_cast<float>(pass.angle))
                                 : base_angle + float(i % 2) * float(M_PI / 2);

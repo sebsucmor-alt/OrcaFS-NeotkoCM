@@ -71,6 +71,7 @@ out float v_ambient;
 // docs/FUTURE/SHADOWS_REALISTIC_CAST_RESEARCH.md §2 (config C3).
 out vec4  v_shadow_coord;
 out float v_world_ndotl;
+out vec4 weave_model_pos;   // NEOTKO_PROFILE_TAG s233 — posición local para el weave
 
 // NEOTKO_REALCOLOR_TAG s166 (item 4): drop-in replacement for gouraud_light.vs when rendering
 // shells in render_shells() — same view_model_matrix/projection_matrix/view_normal_matrix/
@@ -103,6 +104,7 @@ void main()
     // LIGHT_TOP_DIR as that world direction — which is exactly what shells_shadow.vs has always
     // done for the bed contact shadow, so the new object shadow and the old bed shadow finally
     // agree on where the light is.
+    weave_model_pos = vec4(v_position, 1.0);   // NEOTKO_PROFILE_TAG s233
     vec4 world_pos    = volume_world_matrix * vec4(v_position, 1.0);
     vec3 world_normal = normalize(slope.volume_world_normal_matrix * v_normal);
     v_world_ndotl     = max(dot(world_normal, LIGHT_TOP_DIR), 0.0);

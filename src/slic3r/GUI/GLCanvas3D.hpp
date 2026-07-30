@@ -19,6 +19,7 @@
 #include "GCodeViewer.hpp"
 #include "Camera.hpp"
 #include "SceneRaycaster.hpp"
+#include "GravitySnap.hpp" // NEOTKO_SNAPDRAG_TAG s233 — SnapDragIndicator draws a FloorHit
 #include "IMToolbar.hpp"
 #include "slic3r/GUI/3DBed.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -553,7 +554,27 @@ private:
     // instance_idx). true = last frame this instance was resting on another object (not the
     // bed) — kept with the low engage_ratio so it doesn't flicker off near a pillar's edge.
     // Cleared at the start of every new drag. See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §4.
+    //
+    // NEOTKO_SNAPDRAG_TAG s233 — "engaged" means resting on ANOTHER OBJECT, never on the bed.
+    // The bed always answers, so counting a bed hit as engaged would pin engage_ratio at its low
+    // 0.08 value for the rest of the drag and silently disable the hysteresis.
     std::map<std::pair<int, int>, bool> m_snapdrag_engaged;
+
+    // NEOTKO_SNAPDRAG_TAG s233 — the drag hover lift keeps NO state on purpose; see the comment
+    // at its application site in on_mouse() for why none is needed (Selection::translate rebuilds
+    // every frame from the drag-start cache, so the lift never accumulates or survives).
+    // See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_V2_PLAN.md §2.
+    static constexpr double SNAPDRAG_HOVER_LIFT_MIN = 3.0;  // mm
+    static constexpr double SNAPDRAG_HOVER_LIFT_MAX = 10.0; // mm
+
+public:
+    // NEOTKO_SNAPDRAG_TAG s233 — shared by the drag path and by snapdrag_group_roots().
+    // ENGAGE_RATIO is the same footprint-overlap fraction used to engage a floor; STACK_MAX_GAP is
+    // how much air is still "stacked on" when deciding whether two dragged objects travel together
+    // (hand-placed stacks are rarely seated to the micron).
+    static constexpr double SNAPDRAG_ENGAGE_RATIO   = 0.20;
+    static constexpr double SNAPDRAG_STACK_MAX_GAP  = 1.0; // mm
+private:
 
     RenderTimer m_render_timer;
 
@@ -682,6 +703,14 @@ public:
     // when the shadow itself is hidden under the dragged object from the current camera angle.
     // One indicator only (not per-instance): covers the common single-object drag; a
     // multi-object drag just shows the first engaged instance found that frame.
+    //
+    // NEOTKO_SNAPDRAG_TAG s233 — extended to answer "which surface is being recognised as the
+    // floor", the thing that made aiming at a thin rim guesswork: on top of the shadow it now
+    // draws the ghost box where the object will land, the actual contact zone the engine decided
+    // on, the raycast hits inside it, and a translucent prism filling the hover gap (§2) between
+    // that zone and the object's underside — the "light beam". Colour also encodes bed vs object
+    // floor. Everything here is drawn FROM GravitySnap::FloorHit; nothing is recomputed, and
+    // nothing here ever feeds back into the Z decision.
     class SnapDragIndicator
     {
         // Cheap "almost realistic" contact shadow: a few concentric, low-alpha dark rings
@@ -692,14 +721,29 @@ public:
         GLModel m_shadow_rings[SHADOW_RING_COUNT];
         GLModel m_fill;
         GLModel m_outline;
-        GLModel m_beam;
+        GLModel m_beam;            // vertical tick at the centroid (kept from s227)
+        GLModel m_ghost_box;       // s233 — corner ticks of the landing AABB
+        GLModel m_contact_fill;    // s233 — the recognised zone, on the surface it was found on
+        GLModel m_contact_outline;
+        GLModel m_beam_prism;      // s233 — hover gap volume above the recognised zone
+        GLModel m_samples;         // s233 — raycast hit points
         bool    m_visible{ false };
+
+        // s233 — rebuild guard. set() is called once per drag frame and rebuilds ~10 GLModels;
+        // while sliding over the same surface nothing about it changes, so skip the whole thing.
+        // Compared as exact doubles on purpose: any real change moves them by far more than an ulp.
+        struct Key { double z{0.0}; double top_z{0.0}; int obj{-2}; int inst{-2}; bool bed{false}; Point centroid; bool valid{false}; };
+        Key m_key;
 
     public:
         // `footprint_world` = convex-hull polygon (scaled units, world XY) of the dragged
-        // instance; `landing_z` = the real surface Z it is resting on, in mm.
-        void set(const Polygon& footprint_world, double landing_z);
-        void set_visible(bool visible) { m_visible = visible; }
+        // instance. `hit` = the engine's decision, including the zone it recognised.
+        // `ghost_box` = the dragged instance's AABB already translated down to its landing Z.
+        // `beam_top_z` = world mm of the dragged object's underside right now (landing Z + the
+        // hover lift), i.e. the top of the light beam.
+        void set(const Polygon& footprint_world, const GravitySnap::FloorHit& hit,
+                 const BoundingBoxf3& ghost_box, double beam_top_z);
+        void set_visible(bool visible) { m_visible = visible; if (!visible) m_key.valid = false; }
         bool is_visible() const { return m_visible; }
         void render();
 
@@ -1246,6 +1290,8 @@ private:
     float _show_assembly_tooltip_information(float caption_max, float x, float y) const;
     void _render_assemble_control();
     void _render_assemble_info() const;
+    // NEOTKO_SMOOTHNORMALS_TAG s229: live shading tuning panel, gated on ORCA_DEBUG_SHADING.
+    void _render_shading_debug_panel();
 #if ENABLE_SHOW_CAMERA_TARGET
     void _render_camera_target();
 #endif // ENABLE_SHOW_CAMERA_TARGET

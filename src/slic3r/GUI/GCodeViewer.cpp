@@ -21,6 +21,7 @@
 #include "GUI_Utils.hpp"
 #include "GUI.hpp"
 #include "GLCanvas3D.hpp"
+#include "GLShader.hpp" // NEOTKO_SMOOTHNORMALS_TAG s229 — shading_tuning() for the shells_lit overrides
 #include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
 #include "libslic3r/Print.hpp"
@@ -4208,6 +4209,9 @@ static constexpr float REALCOLOR_AO_STRENGTH = 0.35f;
 // ShellsAOCache). Debug-gated (NeoDebug::REALCOLOR) — see render_shells().
 static constexpr float SHELLS_AO_RADIUS_PX = 6.0f;
 static constexpr float SHELLS_AO_STRENGTH = 0.35f;
+// NEOTKO_SMOOTHNORMALS_TAG s229: tangent-plane tolerance for the AO self-occlusion test,
+// in mm of view depth. See ao_sample() in shells_lit.fs.
+static constexpr float SHELLS_AO_BIAS_MM = 0.05f;
 static const ColorRGBA SHELLS_SHADOW_COLOR = ColorRGBA(0.f, 0.f, 0.f, 0.25f);
 
 // NEOTKO_SHADOW_TAG s229 — realistic cast shadows, see
@@ -4516,7 +4520,11 @@ void GCodeViewer::destroy_realcolor_env_textures()
 // uses on resize) since the peel shader's uniforms only get re-pushed on the next recompute pass.
 void GCodeViewer::render_realcolor_debug_panel()
 {
-    if (!NeoDebug::enabled(NeoDebug::REALCOLOR))
+    // NEOTKO_SMOOTHNORMALS_TAG s229: moved off the REALCOLOR log channel onto the shared panel
+    // gate, so ORCA_DEBUG_RENDER=1 opens this and the Shading panel together and ORCA_DEBUG_ALL
+    // no longer drops floating windows on anyone capturing logs. ORCA_DEBUG_REALCOLOR keeps doing
+    // what it always did for the NEOTKO_LOG calls in this file.
+    if (!NeoDebug::render_panels_enabled())
         return;
 
     ImGuiWrapper& imgui = *wxGetApp().imgui();
@@ -6077,14 +6085,21 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_shells_ao_cache.gbuffer_tex));
     lit_shader->set_uniform("u_gbuffer", 5);
     lit_shader->set_uniform("u_viewport", Vec2f((float)canvas_width, (float)canvas_height));
-    lit_shader->set_uniform("u_ao_radius", SHELLS_AO_RADIUS_PX);
-    lit_shader->set_uniform("u_ao_strength", SHELLS_AO_STRENGTH);
+    // NEOTKO_SMOOTHNORMALS_TAG s229: every SHELLS_*/SHADOW_* constant below can be overridden live
+    // by the Shading Tuning panel (ORCA_DEBUG_SHADING), because with LibreMode on THIS is the
+    // shader that draws the user's objects - gouraud never runs. While override_libre is false the
+    // original constants are used and the render is unchanged.
+    const ShadingTuning& st = shading_tuning();
+    lit_shader->set_uniform("u_shading_isolate", st.libre_isolate);
+    lit_shader->set_uniform("u_ao_radius", st.override_libre ? st.ao_radius_px : SHELLS_AO_RADIUS_PX);
+    lit_shader->set_uniform("u_ao_strength", st.override_libre ? st.ao_strength : SHELLS_AO_STRENGTH);
+    lit_shader->set_uniform("u_ao_bias_mm", st.override_libre ? st.ao_bias_mm : SHELLS_AO_BIAS_MM);
 
     // NEOTKO_SHADOW_TAG s229 (Fase 1): screen-space contact shadows. No texture of their own — the
     // march reuses the very G-buffer bound above on GL_TEXTURE5.
-    lit_shader->set_uniform("u_sscs_length_mm", SHELLS_SSCS_LENGTH_MM);
-    lit_shader->set_uniform("u_sscs_thickness_mm", SHELLS_SSCS_THICKNESS_MM);
-    lit_shader->set_uniform("u_sscs_strength", SHELLS_SSCS_STRENGTH);
+    lit_shader->set_uniform("u_sscs_length_mm", st.override_libre ? st.sscs_length_mm : SHELLS_SSCS_LENGTH_MM);
+    lit_shader->set_uniform("u_sscs_thickness_mm", st.override_libre ? st.sscs_thickness_mm : SHELLS_SSCS_THICKNESS_MM);
+    lit_shader->set_uniform("u_sscs_strength", st.override_libre ? st.sscs_strength : SHELLS_SSCS_STRENGTH);
 
     // NEOTKO_SHADOW_TAG s229 (Fase 2): shadow map on GL_TEXTURE6 — like the G-buffer's unit 5, a unit
     // neither render_with_outline() nor the environment-map path touches mid-loop (see the note on
@@ -6100,9 +6115,9 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
         const float texel = 1.0f / (float)m_shadow_map_cache.res;
         lit_shader->set_uniform("u_light_proj_view", m_shadow_light_proj_view);
         lit_shader->set_uniform("u_shadow_texel", Vec2f(texel, texel));
-        lit_shader->set_uniform("u_shadow_bias_min", SHADOW_BIAS_MIN);
-        lit_shader->set_uniform("u_shadow_bias_max", SHADOW_BIAS_MAX);
-        lit_shader->set_uniform("u_shadow_strength", SHADOW_MAP_STRENGTH);
+        lit_shader->set_uniform("u_shadow_bias_min", st.override_libre ? st.shadow_bias_min : SHADOW_BIAS_MIN);
+        lit_shader->set_uniform("u_shadow_bias_max", st.override_libre ? st.shadow_bias_max : SHADOW_BIAS_MAX);
+        lit_shader->set_uniform("u_shadow_strength", st.override_libre ? st.shadow_strength : SHADOW_MAP_STRENGTH);
         lit_shader->set_uniform("u_shadow_normal_offset_mm", m_shadow_texel_world_mm * SHADOW_MAP_NORMAL_OFFSET_TEXELS);
     }
     else {

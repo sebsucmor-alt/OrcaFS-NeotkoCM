@@ -142,6 +142,8 @@ private:
     // NEOTKO_SNAPDRAG_TAG s227 — "Snap & Drag" check item (only enabled/checkable while
     // True Objects is on). See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §5 (revised placement).
     wxMenuItem* append_menu_item_snap_drag(wxMenu* menu);
+    // NEOTKO_SNAPDRAG_TAG s233 — "Allow Bed" sub-option of the item above.
+    wxMenuItem* append_menu_item_snap_drag_bed(wxMenu* menu);
     // NeotkoLIBRE — Copy (by block: Speed/Quality/Strength/All) + Paste Process Settings.
     void append_menu_items_process_clipboard(wxMenu* menu);
     // NEOTKO — "Remove Slice Cache": high-level manual full-reslice escape hatch.

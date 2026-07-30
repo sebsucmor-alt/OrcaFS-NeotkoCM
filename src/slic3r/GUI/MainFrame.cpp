@@ -1705,6 +1705,10 @@ wxBoxSizer* MainFrame::create_side_tools()
             wxGetApp().app_config->set_bool("neotko_snap_drag", false);
             wxGetApp().app_config->save();
         }
+        // NEOTKO_SNAPDRAG_TAG s233 — "Allow Bed" is NOT forced here on purpose: it is a stored
+        // preference of HOW Snap & Drag behaves, not a behaviour gate of its own, and forcing it
+        // false would silently flip its meaning (its default is ON) the next time the master wall
+        // comes back up. Snap & Drag being off above already makes it inert.
     }
     // NeotkoLIBRE_END
 

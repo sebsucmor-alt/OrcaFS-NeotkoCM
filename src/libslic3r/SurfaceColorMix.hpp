@@ -22,6 +22,7 @@
 #include <map>
 #include <string>
 #include <sstream>    // NEOTKO_DEBUG: NEOTKO_LOG macro uses std::ostringstream
+#include <iomanip>    // NEOTKO_COLORMIX s235: setprecision en el volcado del eje (axis_note)
 #include <functional> // NEOTKO_NEOWEAVING: std::function for point_to_gcode callback
 #include <algorithm>  // NEOTKO_COLORMIX s58: std::sort/min/max in lane mode helpers
 #include <cmath>      // NEOTKO_COLORMIX s58: std::atan2, std::sqrt, std::abs
@@ -233,8 +234,48 @@ public:
     // Unlike painted_footprint_in_z_range (which filters upward facets), this
     // includes ALL facet orientations so lateral MMU paint also occludes the
     // sandwich at the XY column it covers. Empty if no MMU paint in the band.
+    // NEOTKO_MMU_COEXIST_TAG s234 F2a — `downward` mirrors the underside, same
+    // convention as painted_footprint_in_z_range (normal test flipped, min_z
+    // instead of max_z). Needed for bottom-band coexistence: without it the
+    // bottom always reports "no MMU" whatever the user painted there. Default
+    // false = pre-s234 behaviour for mmu_governs_xy.
     static ExPolygons mmu_painted_footprint_in_z_range(
-        const PrintObject* po, double z_min, double z_max);
+        const PrintObject* po, double z_min, double z_max,
+        bool downward = false);
+
+    // NEOTKO_MMU_COEXIST_TAG s234 F1 — SINGLE ENTRY POINT for the two footprints
+    // (sandwich + MMU) of one Z band, both resolved in the SAME frame
+    // (trafo_centered — ⚠️ NUNCA trafo(), lección s161) and the SAME band.
+    //
+    // The plan's hard invariant (docs/FUTURE/MMU_SANDWICH_COEXISTENCE_PLAN.md §2)
+    // is that the two subtractions to come (F2: sandwich cedes the MMU zone;
+    // F3: MMU cedes the sandwich zone) MUST use the same polygon. Both will read
+    // it from here, so there is exactly one place where the band and the frame
+    // are decided. F1 only observes — nothing consumes the result yet.
+    struct CoexistBandMasks {
+        ExPolygons sandwich;   // union of every useful painted-slot footprint
+        ExPolygons mmu;        // MMU-painted footprint (upward facets, s91 v1.2)
+        ExPolygons overlap;    // sandwich ∩ mmu — the disputed zone
+        double     sandwich_area = 0.0;  // mm², unscaled
+        double     mmu_area      = 0.0;
+        double     overlap_area  = 0.0;
+        size_t     overlap_segments = 0; // total contour points of `overlap`
+        bool       has_conflict  = false; // overlap above the trivial floor
+    };
+    // Builds the two masks for [z_min, z_max]. `downward` mirrors BOTH scans to
+    // the underside (bottom surfaces) — since F2a the MMU side honours it too,
+    // so a bottom band reports the MMU paint that is really there instead of a
+    // structural zero.
+    static CoexistBandMasks coexist_masks_in_z_range(const PrintObject* po,
+                                                     double z_min, double z_max,
+                                                     bool downward = false);
+
+    // Emits one COLORMIX line per band with both areas, the intersection area
+    // and the segment count of the resulting border (a border with very few
+    // segments where there IS overlap = suspicious clip). `tag` identifies the
+    // callsite. No-op cost when the object has neither paint nor MMU.
+    static void log_coexist_band(const PrintObject* po, double z_min, double z_max,
+                                 bool downward, const char* tag);
 
     // `mmu_governs_xy`: returns true if `surface_xy` intersects the MMU paint
     // footprint at this layer's vertical slab. SINGLE source of truth consulted
@@ -937,12 +978,30 @@ inline size_t lane_pick_reference(const std::vector<RawLineT>& raw_lines) {
 
 // Compute slot_per_line[i] in [0, n_slots) for all lines, according to lane_mode.
 // debug_summary (optional) receives a short human-readable label for logs.
+//
+// ⚠️ NEOTKO_COLORMIX_TAG — s235, bug #14 "Relleno incompleto de zonas LaneQuant". LEER ANTES
+// DE TOCAR: `n_slots` NO es "cuántos colores tiene la receta". El llamador pasa
+// `tools.size()`, y `tools` es la secuencia de un tool POR LÍNEA que produce el dither
+// (build_dithered_tools_3color / build_custom_bands), así que en la práctica
+// **n_slots == número de líneas** y `slot` es un **índice en el patrón de degradado**.
+// De ahí que los dos primeros modos sean identidad/permutación:
+//   Default  slot = i % n     == i      (biyección)
+//   GeoSort  slot = rank % n  == rank   (biyección)
+// El contrato REAL de esta función es por tanto: **repartir los índices del patrón sobre
+// las líneas cubriendo [0, n_slots) por completo y una sola vez**. Cualquier modo que no
+// sea biyectivo se come parte del degradado en silencio — que es exactamente lo que hacían
+// LaneQuant y DirCluster antes de s235 (ver el comentario de cada uno).
 template <class RawLineT>
 inline std::vector<int> compute_slot_per_line(
     const std::vector<RawLineT>& raw_lines,
     int n_slots,
     int lane_mode,
-    std::string* debug_summary = nullptr)
+    std::string* debug_summary = nullptr,
+    // NEOTKO_COLORMIX_TAG — s235: ángulo AUTORADO del efecto en grados (el
+    // `interlayer_colormix_angle` que el usuario fija en el painter), o <0 = auto.
+    // Ver la nota grande del eje más abajo. Por defecto -1 para no tocar a los llamadores
+    // que no lo tengan a mano.
+    int authored_angle_deg = -1)
 {
     const int n = static_cast<int>(raw_lines.size());
     std::vector<int> slot_per_line(n, 0);
@@ -955,8 +1014,73 @@ inline std::vector<int> compute_slot_per_line(
     }
 
     const size_t ref = lane_pick_reference(raw_lines);
-    const LaneVec2 fill_dir = lane_direction(raw_lines[ref].pl);
-    const LaneVec2 perp{-fill_dir.y, fill_dir.x};
+    // NEOTKO_COLORMIX_TAG — s235, FIX "el degradado sale espejado en los modos 1 y 2".
+    // Antes esto era:
+    //     const LaneVec2 fill_dir = lane_direction(raw_lines[ref].pl);
+    //     const LaneVec2 perp{-fill_dir.y, fill_dir.x};
+    // y `lane_direction()` devuelve (último punto − primer punto): una dirección **con
+    // signo**. Si la línea de referencia (la más larga) está ALMACENADA al revés — cosa
+    // arbitraria: el relleno monotónico alterna sentido, y cuál acaba siendo la más larga
+    // depende de la geometría — `fill_dir` gira 180°, `perp` con ella, todas las
+    // proyecciones cambian de signo y el orden se invierte ⇒ **el degradado sale espejado**.
+    // El usuario lo vio como "el ángulo sale al revés" en el objeto grande y no en el
+    // pequeño, con el mismo perfil.
+    //
+    // Encaja con qué modos fallan y cuáles no: los ÚNICOS dos que usaban esta dirección
+    // signada son GeoSort y LaneQuant (los dos rotos). Default no usa `perp`, y DirCluster
+    // ya construía el suyo desde `lane_angle_mod_pi()` — normalizado a [0,π), sin signo — y
+    // por eso era inmune. O sea: el patrón correcto ya vivía en este mismo fichero.
+    //
+    // 🔑 Se normaliza al MISMO formato que usa el preview del painter, para que motor y
+    // preview no puedan discrepar: ColorMixPaintPreview proyecta con (-sin θ, cos θ) sobre
+    // el ángulo CONFIGURADO (`interlayer_colormix_angle`, ver colorstitch_weave_theta), que
+    // es absoluto y canónico. Aquí θ sale de la geometría, pero pasado por el mismo mod-π
+    // queda igual de canónico: dos objetos con el mismo perfil ya no pueden salir con el
+    // degradado invertido el uno respecto al otro.
+    //
+    // ⚠️ CORRECCIÓN s235b — la explicación de arriba NO era la causa del espejado que
+    // reportó el usuario. El log lo desmintió: `flip=0` en TODAS las superficies, o sea que
+    // ninguna línea de referencia venía almacenada al revés. Quitar el signo estaba bien
+    // como higiene, pero no arreglaba nada. La causa real es OTRA, y está debajo.
+    //
+    // 🔑 CAUSA REAL — el envoltorio 0/180. Medido en el plato del usuario, misma capa,
+    // mismo perfil:
+    //     objeto de 331 líneas → axis=2deg
+    //     objeto de 306 líneas → axis=2deg
+    //     objeto de 179 líneas → axis=178deg
+    // 2° y 178° son EL MISMO EJE (±2° de la horizontal), pero (-sin a, cos a) NO es continua
+    // al cruzar el envoltorio:
+    //     a=2°   → perp = (-0.03, +1.00)
+    //     a=178° → perp = (-0.03, -1.00)
+    // Perpendiculares OPUESTAS para superficies prácticamente paralelas ⇒ el degradado sale
+    // espejado de un objeto a otro con el mismo perfil. Es inherente a mapear un EJE (sin
+    // sentido, mod π) a una DIRECCIÓN, y lo tenía igual el código original.
+    //
+    // Se cierra por los dos lados:
+    //
+    // (1) Si el efecto trae ÁNGULO AUTORADO, se usa ÉSE y no uno medido de la geometría.
+    //     Es lo que hace el preview (ColorMixPaintPreview proyecta con (-sin θ, cos θ) sobre
+    //     `interlayer_colormix_angle`), así que motor y preview coinciden POR CONSTRUCCIÓN,
+    //     y todos los objetos del plato comparten eje porque comparten el valor autorado.
+    //     En el repro ese valor era 0 (ANGLE_MP: cm_angle=0 final_deg=0) mientras el motor
+    //     se inventaba 2° y 178° midiendo — de ahí la discrepancia con lo que se ve.
+    //
+    // (2) El eje se canoniza a un SEMIPLANO fijo, para que el envoltorio no pueda invertir
+    //     dos superficies casi paralelas. Cubre el caso auto (ángulo = -1), donde no hay
+    //     valor autorado del que tirar. Sigue habiendo una frontera (perp casi horizontal),
+    //     como en cualquier mapa eje→dirección, pero ya no cae donde caía el repro.
+    //
+    // ⚠️ La gemela compute_t_per_line() (más abajo, la que alimenta PathBlend) tenía el
+    // mismo defecto de eje. Se le aplica SÓLO (2) — la canonización del orden — por
+    // petición explícita del usuario ("mientras no cambies el CÓMO se construye, lo de cómo
+    // se ordenan las líneas aplícalo"): no se le toca ni la construcción ni el ángulo.
+    const double ref_ang = (authored_angle_deg >= 0)
+        ? std::fmod(static_cast<double>(authored_angle_deg) * M_PI / 180.0, M_PI)
+        : lane_angle_mod_pi(raw_lines[ref].pl);
+    LaneVec2 perp{-std::sin(ref_ang), std::cos(ref_ang)};
+    // (2) semiplano canónico: perp.y > 0, y con perp.y == 0 se desempata por perp.x > 0.
+    const bool perp_flipped = (perp.y < -1e-12) || (std::abs(perp.y) <= 1e-12 && perp.x < 0.0);
+    if (perp_flipped) { perp.x = -perp.x; perp.y = -perp.y; }
     const double width_mm = static_cast<double>(raw_lines[0].width);
     const double spacing_scaled = std::max(1.0, width_mm * 1e6);
 
@@ -965,6 +1089,28 @@ inline std::vector<int> compute_slot_per_line(
         return c.x * perp.x + c.y * perp.y;
     };
 
+    // Prueba del fix en UNA compilación. Lo que hay que mirar, comparando las superficies
+    // de UNA MISMA capa entre sí:
+    //   · src=cfg  → el eje viene del ángulo autorado (debe ser IDÉNTICO en todas)
+    //   · src=geo  → auto: medido de la geometría, ahí manda la canonización
+    //   · perp=(x,y) → el vector que decide el sentido del degradado. **Todas las
+    //     superficies de la capa deben tener el MISMO signo de perp.y.** Si dos objetos
+    //     salen con perp.y de signo opuesto, el espejado sigue vivo.
+    //   · cano=1   → el semiplano tuvo que dar la vuelta a este eje (era un caso 178°).
+    // `measured` se sigue imprimiendo aunque mande el autorado, para poder ver de un
+    // vistazo cuánto se estaba inventando el motor frente a lo que pintó el usuario.
+    std::string axis_note;
+    if (debug_summary) {
+        std::ostringstream a;
+        a << "axis=" << int(std::round(ref_ang * 180.0 / M_PI)) << "deg"
+          << " src=" << (authored_angle_deg >= 0 ? "cfg" : "geo")
+          << " measured=" << int(std::round(lane_angle_mod_pi(raw_lines[ref].pl) * 180.0 / M_PI)) << "deg"
+          << " perp=(" << std::fixed << std::setprecision(2) << perp.x << "," << perp.y << ")"
+          << std::defaultfloat
+          << " cano=" << (perp_flipped ? 1 : 0) << " ";
+        axis_note = a.str();
+    }
+
     if (lane_mode == kLaneMode_GeoSort) {
         std::vector<int> order(n);
         for (int i = 0; i < n; ++i) order[i] = i;
@@ -972,28 +1118,58 @@ inline std::vector<int> compute_slot_per_line(
                   [&](int a, int b) { return proj_of(a) < proj_of(b); });
         for (int rank = 0; rank < n; ++rank)
             slot_per_line[order[rank]] = rank % n_slots;
-        if (debug_summary) *debug_summary = "GeoSort";
+        if (debug_summary) *debug_summary = axis_note + "GeoSort";
         return slot_per_line;
     }
 
     if (lane_mode == kLaneMode_LaneQuant) {
         std::vector<int> lane(n, 0);
         int min_lane = std::numeric_limits<int>::max();
+        int max_lane = std::numeric_limits<int>::min();
         for (int i = 0; i < n; ++i) {
             lane[i] = static_cast<int>(std::llround(proj_of(i) / spacing_scaled));
             min_lane = std::min(min_lane, lane[i]);
+            max_lane = std::max(max_lane, lane[i]);
         }
+        // NEOTKO_COLORMIX_TAG — s235, FIX del bug #14. Antes esto era
+        //     slot = ((lane - min_lane) % n_slots + n_slots) % n_slots;
+        // o sea: indexar el patrón con el número de carril CRUDO. Nada garantiza que los
+        // carriles sean densos ni que sean tantos como entradas del patrón, así que:
+        //   · carriles < n_slots → la COLA del patrón es inalcanzable. Medido en el repro:
+        //     116 líneas cuantizadas en 63 carriles ⇒ índices 63..115 muertos ⇒ como en un
+        //     degradado el último color vive en la cola, **T2 no se emitía nunca** (el
+        //     síntoma exacto del bug: 58/38/20 salía como 88/28). Y al caer ~1.84 líneas
+        //     por carril, cada entrada alcanzable se duplicaba → el degradado dejaba de
+        //     ser un degradado.
+        //   · carriles > n_slots → el `%` da la vuelta y el degradado REEMPIEZA a mitad de
+        //     superficie (segundo defecto, latente, que este fix también cierra).
+        // Ahora el carril se normaliza contra el RANGO OBSERVADO, que es exactamente lo que
+        // ya hacía la hermana compute_t_per_line() más abajo desde que a PathBlend le salían
+        // huecos por lo mismo — este fix es retroportar aquí esa lección.
+        //
+        // Se conserva íntegra la intención de LaneQuant frente a GeoSort: el color sigue a
+        // la POSICIÓN FÍSICA (dos líneas del mismo carril comparten color, y un agujero en
+        // la superficie no comprime el degradado), en vez de al recuento de líneas.
+        //
+        // 🔑 Y es INVARIANTE al divisor: si `spacing_scaled` se queda corto o largo (usa el
+        // ancho de extrusión de raw_lines[0], que es la razón de que salgan 63 carriles y no
+        // 116), el error se cancela en el cociente. Por eso el fix es aquí y NO en el
+        // divisor: arreglar el divisor dejaría el modo igual de frágil ante cualquier
+        // superficie cuyos carriles no cuadren por casualidad con el patrón.
+        const double span = static_cast<double>(max_lane - min_lane);
         for (int i = 0; i < n; ++i) {
-            const int rel = lane[i] - min_lane;
-            slot_per_line[i] = ((rel % n_slots) + n_slots) % n_slots;
+            const double u = (span > 0.0)
+                ? static_cast<double>(lane[i] - min_lane) / span   // [0,1]
+                : 0.0;                                             // un solo carril
+            int s = static_cast<int>(std::llround(u * static_cast<double>(n_slots - 1)));
+            slot_per_line[i] = std::min(std::max(s, 0), n_slots - 1);
         }
         if (debug_summary) {
-            int max_lane = std::numeric_limits<int>::min();
-            for (int i = 0; i < n; ++i) max_lane = std::max(max_lane, lane[i]);
             std::ostringstream s;
             s << "LaneQuant lanes=" << (max_lane - min_lane + 1)
-              << " spacing_mm=" << width_mm;
-            *debug_summary = s.str();
+              << " spacing_mm=" << width_mm
+              << " span=" << span << " -> pattern[0.." << (n_slots - 1) << "]";
+            *debug_summary = axis_note + s.str();
         }
         return slot_per_line;
     }
@@ -1027,6 +1203,7 @@ inline std::vector<int> compute_slot_per_line(
         const int K = static_cast<int>(cluster_angles.size());
         std::vector<int> lane_per_line(n, 0);
         std::vector<int> min_lane_per_cluster(K, std::numeric_limits<int>::max());
+        std::vector<int> max_lane_per_cluster(K, std::numeric_limits<int>::min());
         for (int i = 0; i < n; ++i) {
             const double ang = cluster_angles[cluster_of[i]];
             const LaneVec2 cperp{-std::sin(ang), std::cos(ang)};
@@ -1036,10 +1213,24 @@ inline std::vector<int> compute_slot_per_line(
             lane_per_line[i] = lane;
             min_lane_per_cluster[cluster_of[i]] =
                 std::min(min_lane_per_cluster[cluster_of[i]], lane);
+            max_lane_per_cluster[cluster_of[i]] =
+                std::max(max_lane_per_cluster[cluster_of[i]], lane);
         }
+        // NEOTKO_COLORMIX_TAG — s235: MISMO bug #14 que LaneQuant (era `rel % n_slots`), y
+        // aquí era más grave porque el patrón se reiniciaba en 0 en CADA cluster. Misma
+        // normalización, pero contra el rango del cluster propio: eso es justo lo que
+        // DirCluster quiere decir — cada cluster de dirección recorre el degradado COMPLETO
+        // por su cuenta (así lo documenta también compute_t_per_line: "clusters are
+        // independent"), en vez de continuar donde lo dejó el cluster anterior.
         for (int i = 0; i < n; ++i) {
-            const int rel = lane_per_line[i] - min_lane_per_cluster[cluster_of[i]];
-            slot_per_line[i] = ((rel % n_slots) + n_slots) % n_slots;
+            const int    ci   = cluster_of[i];
+            const double span = static_cast<double>(max_lane_per_cluster[ci]
+                                                    - min_lane_per_cluster[ci]);
+            const double u = (span > 0.0)
+                ? static_cast<double>(lane_per_line[i] - min_lane_per_cluster[ci]) / span
+                : 0.0;
+            int s = static_cast<int>(std::llround(u * static_cast<double>(n_slots - 1)));
+            slot_per_line[i] = std::min(std::max(s, 0), n_slots - 1);
         }
         if (debug_summary) {
             std::ostringstream s;
@@ -1049,7 +1240,10 @@ inline std::vector<int> compute_slot_per_line(
                 s << int(std::round(cluster_angles[c] * 180.0 / M_PI)) << "deg";
             }
             s << "]";
-            *debug_summary = s.str();
+            // DirCluster no usaba el `perp` global (arma el suyo por cluster desde
+            // lane_angle_mod_pi, por eso era inmune al espejado), pero el axis_note se
+            // mantiene para poder comparar las 4 filas del log en la misma capa.
+            *debug_summary = axis_note + s.str();
         }
         return slot_per_line;
     }
@@ -1093,8 +1287,24 @@ inline std::vector<double> compute_t_per_line(
     }
 
     const size_t ref = lane_pick_reference(raw_lines);
-    const LaneVec2 fill_dir = lane_direction(raw_lines[ref].pl);
-    const LaneVec2 perp{-fill_dir.y, fill_dir.x};
+    // NEOTKO_PATHBLEND_TAG / NEOTKO_COLORMIX_TAG — s235b. Sólo el EJE (= en qué ORDEN se
+    // recorren las líneas), a petición explícita del usuario: "mientras no cambies el CÓMO
+    // se construye, lo de cómo se ordenan las líneas aplícalo". Aquí NO se toca nada de la
+    // construcción de PathBlend: ni bandas, ni t→flow, ni el barrido; sólo por qué extremo
+    // de la superficie empieza t=0.
+    //
+    // Mismo defecto que tenía la gemela compute_slot_per_line (ver allí la nota larga): el
+    // eje salía de `lane_direction()` y de un mod-π discontinuo en 0/180, así que dos
+    // superficies casi paralelas podían recibir perpendiculares OPUESTAS y recorrer el
+    // degradado en sentidos contrarios. Se canoniza `perp` a un semiplano fijo — el mismo
+    // criterio y el mismo código que en compute_slot_per_line, para que ColorMix y PathBlend
+    // ordenen igual.
+    const double t_ref_ang = lane_angle_mod_pi(raw_lines[ref].pl);   // [0, π), sin signo
+    LaneVec2 perp{-std::sin(t_ref_ang), std::cos(t_ref_ang)};
+    if ((perp.y < -1e-12) || (std::abs(perp.y) <= 1e-12 && perp.x < 0.0)) {
+        perp.x = -perp.x;
+        perp.y = -perp.y;
+    }
     const double width_mm = static_cast<double>(raw_lines[0].width);
     const double spacing_scaled = std::max(1.0, width_mm * 1e6);
 

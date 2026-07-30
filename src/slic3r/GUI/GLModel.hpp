@@ -169,6 +169,9 @@ namespace GUI {
         void init_from(Geometry&& data);
         void init_from(const TriangleMesh& mesh);
         void init_from(const indexed_triangle_set& its);
+        // NEOTKO_SMOOTHNORMALS_TAG s229: as init_from(its), but with area-weighted, crease-aware
+        // per-corner normals instead of one flat normal per triangle. See GLModel.cpp.
+        void init_from_smooth(const indexed_triangle_set& its, float crease_angle_deg);
         void init_from(const Polygons& polygons, float z);
         bool init_from_file(const std::string& filename);
 
@@ -189,6 +192,10 @@ namespace GUI {
         bool is_render_disabled() const { return m_render_disabled; }
         void enable_render() { m_render_disabled = false; }
         void disable_render() { m_render_disabled = true; }
+
+        // NEOTKO_SMOOTHNORMALS_TAG s229: faces closer than this many degrees are treated as one
+        // smooth surface; anything sharper stays a hard edge (part rims, embossed text, chamfers).
+        static constexpr float SmoothNormalsCreaseAngle = 30.0f;
 
         size_t cpu_memory_used() const {
             size_t ret = 0;
@@ -211,6 +218,11 @@ namespace GUI {
         bool send_to_gpu();
     };
     bool contains(const BuildVolume& volume, const GLModel& model, bool ignore_bottom = true);
+
+    // NEOTKO_SMOOTHNORMALS_TAG s229: upload an object's mesh to the GPU, picking flat or smoothed
+    // normals according to the "use_smooth_normals" preference. Every place that builds the render
+    // model of a user object should go through here so the preference reaches all of them.
+    void init_object_volume_model(GLModel& model, const indexed_triangle_set& its);
 
     // create an arrow with cylindrical stem and conical tip, with the given dimensions and resolution
     // the origin of the arrow is in the center of the stem cap

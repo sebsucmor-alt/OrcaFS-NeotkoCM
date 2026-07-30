@@ -37,6 +37,11 @@ namespace ColorSci {
 struct ColorRecipe {
     SurfacePassStack     top;
     SurfacePassStack     penu;          // vacío/disabled en recetas Flat puras
+    // s230 — zona Bottom. Vacía/disabled en TODAS las paletas browse y en las
+    // recetas del painter (que autoran su bottom a mano): hoy solo la rellena
+    // build_mixed_filament_recipe(). Aditivo — un stack vacío serializa a "" y
+    // el motor lo trata como "sin receta de bottom", igual que antes.
+    SurfacePassStack     bottom;
     std::array<float, 3> rgb { 0.5f, 0.5f, 0.5f };  // color predicho sRGB [0..1]
     float                delta_e = -1.f;
     std::string          desc;          // etiqueta corta human-readable
@@ -85,6 +90,29 @@ ColorRecipe suggest_flat(const float target_rgb[3],
 ColorRecipe suggest_mixed(const float target_rgb[3],
                           const Material mats[4],
                           const PredictOptions& opt);
+
+// s230 — Mejor dither ColorStitch de UNA SOLA PASADA (ratio 1.0) que minimiza
+// ΔE2000 al target. Devuelve el stack directamente, no un ColorRecipe.
+//
+// Por qué existe: suggest_flat/suggest_mixed construyen el color APILANDO en Z
+// (varias pasadas vistas a través del TD). Eso es imposible en un bridge real —
+// la capa que cruza el aire no se puede subdividir, así que Fill.cpp la clampa a
+// 1 pasada y de una pila de 3 solo sobrevive la de abajo (= un color plano que
+// NO es el pedido, y encima no parece un fallo). Un dither ColorStitch resuelve
+// el color en XY dentro de UNA capa: dos tools alternados línea a línea, sin
+// subdividir nada. Legal en un bridge por construcción.
+//
+// El gamut es menor que apilando (una capa lleva menos información de color que
+// tres), pero no es binario: la proporción de mezcla se controla por la
+// frecuencia de dígitos del patrón (ver pass_pattern/flatten_stack), así que se
+// barre el mix de 0 a 100% además de las parejas de tools.
+//
+// `out_delta_e` (opcional) devuelve el ΔE2000 conseguido — útil para avisar de
+// que el bottom no llega al color del top.
+SurfacePassStack suggest_dither_single(const float target_rgb[3],
+                                       const Material mats[4],
+                                       const PredictOptions& opt,
+                                       float* out_delta_e = nullptr);
 
 // --- Dispatcher (PR.1 — COLORSTITCH_PAINTER_REVAMP_PLAN.md) -----------------
 //

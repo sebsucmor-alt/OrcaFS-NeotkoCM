@@ -12,10 +12,12 @@
 #include "libslic3r/ObjectID.hpp"
 
 #include "GLModel.hpp"
+#include "ColorMixPaintPreview.hpp"   // NEOTKO_PROFILE_TAG s233 — WeaveParams de la pintura ColorMix
 #include "GLShader.hpp"
 #include "MeshUtils.hpp"
 
 #include <functional>
+#include <memory>
 #include <optional>
 
 #ifndef NDEBUG
@@ -214,6 +216,29 @@ public:
     // BBS
     mutable std::vector<GUI::GLModel> mmuseg_models;
     mutable ObjectBase::Timestamp       mmuseg_ts;
+
+    // NEOTKO_PROFILE_TAG_START — s233: pintura ColorMix (ColorStitch / PathBlend /
+    // Solid) en la vista 3D normal, que hasta ahora sólo existía dentro del gizmo.
+    // Mecanismo calcado del de MMU de arriba — la malla se parte y cada trozo se dibuja
+    // con lo suyo, por sub-malla y no por shader — pero con un trozo por ISLA pintada
+    // (F3), no por slot: el tejido/degradado es propio de cada zona, igual que en el
+    // painter. Ver docs/FUTURE/SANDWICH_VISIBLE_OUTSIDE_GIZMO_PLAN.md.
+    struct CMPaintPart {
+        GUI::GLModel                          model;
+        ColorRGBA                             color{0.6f, 0.6f, 0.6f, 1.f};
+        GUI::ColorMixPaintPreview::WeaveParams weave;   // .on=false ⇒ color plano
+        bool                                  is_base = false;  // trozo SIN pintar: su
+                                              // color es el render_color vivo del volumen
+    };
+    // unique_ptr: GLModel libera VBOs en su destructor y no declara copia/movimiento
+    // (lección s232), así que no puede viajar dentro de un vector que se redimensione.
+    mutable std::vector<std::unique_ptr<CMPaintPart>> cmpaint_parts;
+    mutable ObjectBase::Timestamp                     cmpaint_ts;
+    // El timestamp de arriba sólo cubre la GEOMETRÍA pintada: no cambia al tocar un TD,
+    // un filament_colour o el perfil apuntado por el slot. Esta clave cubre el resto.
+    mutable uint64_t                                  cmpaint_color_key = 0;
+    void rebuild_cmpaint_parts(const ModelVolume& mv, const ModelObject& mo) const;
+    // NEOTKO_PROFILE_TAG_END
 
     // Ranges of triangle and quad indices to be rendered.
     std::pair<size_t, size_t>   tverts_range;
