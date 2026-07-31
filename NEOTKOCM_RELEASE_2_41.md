@@ -168,6 +168,19 @@ does anything.
   penultimate layer — so a setting of 1 can still yield two painted penultimate passes under a domed
   top. Worse, those rings are usually so thin that the perimeters consume them entirely, meaning the
   "top" that spawned the extra penultimate is never printed as a top at all. Flat tops are unaffected.
+- **The tower over-extrudes where a painted pass meets its own layer.** When a painted pass sits just
+  below a layer's nominal height, the pass fills the space (0.1998 mm of a 0.2 mm layer) and the
+  object's own layer is left 0.0002 mm thick. The tower correctly shortens its visit for the pass,
+  but the visit for the layer that follows keeps its full nominal 0.2 mm and lays a complete purge
+  over the very footprint the pass just filled — the two overlap almost exactly, in a gap two microns
+  tall. The height correction knows how to chain deposited planes; it is simply not applied to
+  non-pass visits. In practice this needs an object thin enough that its layer is almost entirely
+  consumed by the pass, which is rare, but it is wrong and it is the opposite of the
+  over-sized-tower bugs fixed above: here the pass never asks for room of its own. **This
+  release ships the detector, not the fix**: a new tower invariant reports the overlap as an
+  error on every affected slice, and the tower's TCR dump now labels each colliding block with
+  the exact overlap. If you see `V21 Z-OVERFILL` in the log, that is this known issue and not a
+  new regression.
 - **Two spurious tower warnings.** The plan validator reports `V3: chain gap` between consecutive
   *real* tool-change events when a painted sublayer sits between them carrying the transition. The
   chain is intact; the check simply does not look at sublayers. Harmless, but it is the same shape as

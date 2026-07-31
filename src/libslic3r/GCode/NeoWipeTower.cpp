@@ -3084,15 +3084,52 @@ void NeoWipeTower::plan_tower()
     // side in Y: depth_real ≥ max(depth_synth in the preceding synthetic run) + 2·pw.
     // Runs BEFORE the propagation loop so the enlarged canonical depth propagates down.
     // No-op without synthetic entries (stock + non-sandwich NeoTower unchanged).
+    //
+    // NEOTKO_NEOTOWER_TAG s239 — Z-OVERLAP FIX. La regla de arriba es de CONTENCIÓN
+    // (`max`), y para una LÁMINA hace falta una regla ADITIVA (`suma`). Distinción:
+    //
+    //   · staircase (`is_synthetic && !is_same_plane`) → plano propio, en el hueco
+    //     entre dos capas reales. Puede compartir la MISMA franja de Y con la canónica
+    //     porque están a Z distintas: contener basta. Regla `max`, intacta.
+    //   · lámina (`is_synthetic && is_same_plane`) → MISMO plano físico que la
+    //     canónica. Comparte la banda de Z, así que sólo puede repartirse en Y, y para
+    //     eso la caja tiene que dar para la banda de la canónica MÁS la de la lámina.
+    //     Contener no basta: hay que SUMAR.
+    //
+    // Con `max` la canónica salía dimensionada para *envolver* la lámina y nada más
+    // (medido en Fairphone-Case: lámina 6.6 → canónica 7.6, cuando su propia banda de
+    // purga ya medía 7.2 y la ventana entera 7.1). `neo_plan_group_y_offsets` pedía
+    // sitio después de la banda, no había, y su `wrap` mudo replantaba la lámina en
+    // `win_lo` — encima de la canónica. Resultado: 0.1998 mm de material sobre
+    // material en z=2/2.2/2.4 (V21 Z-OVERFILL ×3).
+    //
+    // Mismo patrón que el bug de V17 en s238 y misma lección: **validar/reservar por
+    // elemento no cubre el conjunto**. Si varios elementos comparten un recurso —aquí
+    // la profundidad de la caja en un plano— hay que medir la SUMA contra el recurso.
+    //
+    // La cuenta es la de `neo_plan_group_y_offsets`, para que reserva ≡ emisión:
+    //     ventana útil = depth + pw − 2·pw = depth − pw
+    //     ocupación    = banda de la canónica + Σ(lámina.depth + pw)
+    //   ⇒ depth ≥ banda + Σ(lámina.depth + pw) + pw
+    // Sólo crece en planos que llevan lámina (= pass pintado). Inerte en stock, en
+    // NeoTower sin sandwich y en cualquier grupo puramente staircase.
     {
-        float synth_max_depth = -1.f;
+        float synth_max_depth = -1.f;   // staircase: contención (regla s103-bd)
+        float lamina_box_sum  =  0.f;   // lámina: reparto en Y sobre el mismo plano
         for (auto& layer : m_plan) {
             if (layer.is_synthetic) {
-                synth_max_depth = std::max(synth_max_depth, layer.planned_depth());
+                if (layer.is_same_plane)
+                    lamina_box_sum += layer.planned_depth() + m_perimeter_width;
+                else
+                    synth_max_depth = std::max(synth_max_depth, layer.planned_depth());
             } else {
                 if (synth_max_depth > 0.f)
                     layer.depth = std::max(layer.depth, synth_max_depth + 2.f * m_perimeter_width);
+                if (lamina_box_sum > 0.f)
+                    layer.depth = std::max(layer.depth,
+                                           layer.planned_depth() + lamina_box_sum + m_perimeter_width);
                 synth_max_depth = -1.f;
+                lamina_box_sum  =  0.f;
             }
         }
     }
@@ -3321,10 +3358,32 @@ void NeoWipeTower::neo_plan_group_y_offsets()
                 if ((pass == 0) != e.is_same_plane)
                     continue;
                 const float box_e = e.depth + pw;
-                if (box_e > (win_hi - win_lo) + 0.01f)
+                if (box_e > (win_hi - win_lo) + 0.01f) {
+                    // NEOTKO_NEOTOWER_TAG s239 — no cabe ni sola en la ventana.
+                    if (e.is_same_plane)
+                        BOOST_LOG_TRIVIAL(error)
+                            << "[NeoTower][VALIDATE] V22 LAMINA-NO-FIT z=" << e.z
+                            << " box=" << box_e << " > ventana=" << (win_hi - win_lo)
+                            << " → se queda con el centrado stock y pisará la canónica"
+                            << " (banda=[" << band_lo << ".." << band_hi << "])";
                     continue;               // cannot fit: keep stock centering
-                if (cursor + box_e > win_hi + 0.01f)
+                }
+                if (cursor + box_e > win_hi + 0.01f) {
+                    // NEOTKO_NEOTOWER_TAG s239 — el `wrap` es "apilado aceptado", y para
+                    // una staircase lo es (plano propio, otra Z). Para una LÁMINA no:
+                    // comparte banda de Z con la canónica, así que volver a `win_lo`
+                    // significa depositar sobre material ya depositado. Hasta s239 esto
+                    // pasaba en silencio y el bug sólo se veía releyendo el gcode.
+                    if (e.is_same_plane)
+                        BOOST_LOG_TRIVIAL(error)
+                            << "[NeoTower][VALIDATE] V22 LAMINA-WRAP z=" << e.z
+                            << " cursor=" << cursor << " box=" << box_e
+                            << " win=[" << win_lo << ".." << win_hi << "]"
+                            << " → wrap a win_lo sobre la banda canónica"
+                            << " (banda=[" << band_lo << ".." << band_hi << "])"
+                            << " — reserva de profundidad insuficiente (plan_tower s239)";
                     cursor = win_lo;        // wrap (accepted stacking)
+                }
                 const float p      = cursor;
                 const bool  flip_e = (k % 2 == 0);
                 const float s      = flip_e ? (D - p - box_e) : p;
@@ -3340,9 +3399,26 @@ void NeoWipeTower::neo_plan_group_y_offsets()
                                << " flip=" << flip_e
                                << " win=[" << win_lo << ".." << win_hi << "]"
                                << " canon_band=[" << band_lo << ".." << band_hi << "]"
+                               << (e.is_same_plane ? " [LAMINA]" : " [STAIRCASE]")
                                << "\n";
                         _t_log.flush();
                     }
+                    // NEOTKO_NEOTOWER_TAG s239 — V22 LAMINA-OVERLAP: la invariante de
+                    // verdad, medida sobre la posición FÍSICA final y no sobre el camino
+                    // que llevó a ella (los dos avisos de arriba cubren las dos causas
+                    // conocidas; éste cubre también las que no conocemos). Una lámina
+                    // comparte banda de Z con su canónica, así que su franja de Y tiene
+                    // que ser DISJUNTA. Las staircase están exentas por diseño: viven en
+                    // otra Z y solaparse en Y es legítimo.
+                    const float _lo = std::max(0.f, s), _hi = _lo + box_e;
+                    const float _ov = std::min(_hi, band_hi) - std::max(_lo, band_lo);
+                    if (e.is_same_plane && _ov > 0.01f)
+                        BOOST_LOG_TRIVIAL(error)
+                            << "[NeoTower][VALIDATE] V22 LAMINA-OVERLAP z=" << e.z
+                            << " lamina_Y=[" << _lo << ".." << _hi << "]"
+                            << " canonica_Y=[" << band_lo << ".." << band_hi << "]"
+                            << " solape=" << _ov << " mm en la MISMA banda de Z"
+                            << " → material sobre material (ver V21 Z-OVERFILL)";
                 }
             }
         }

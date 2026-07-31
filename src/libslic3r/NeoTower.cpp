@@ -20,6 +20,8 @@
 #include <set>
 #include <unordered_map>
 #include <cstdlib>
+#include <cstring>   // NEOTKO_NEOTOWER_TAG s238 — strstr en el parser de footprint de TCR
+#include <sstream>   // NEOTKO_NEOTOWER_TAG s238 — istringstream en el parser de footprint
 #include <fstream>   // NEOTKO_NEOTOWER_TAG s102-f — TCR gcode dump
 
 // NEOTKO_NEOTOWER_TAG_START — NeoDebug routing
@@ -44,6 +46,54 @@
 // NEOTKO_NEOTOWER_TAG_END
 
 namespace Slic3r {
+
+// ---------------------------------------------------------------------------
+// NEOTKO_NEOTOWER_TAG_START — s238: forensics de OCUPACIÓN FÍSICA de la torre.
+//
+// Motivo: el usuario detectó EN EL GCODE, no en los logs, que dos visitas a la torre
+// en el mismo z nominal (la lámina del pass pintado y la capa canónica) depositan cada
+// una una capa ENTERA en la misma banda de Z y sobre la misma franja de Y. Los logs
+// decían que todo estaba bien: V17 OK, DEPTH_ACCT 0% wasted, SHADOW 0 violations.
+//
+// Por qué no se veía: toda la instrumentación de la torre medía el PLAN (alturas por
+// evento, slots por capa, profundidad en XY) y ninguna medía lo único que importa
+// físicamente — cuánto material acaba dentro de un tramo de Z dado. Estos helpers leen
+// el gcode YA EMITIDO, que es la única fuente que no puede mentir sobre eso.
+struct NtTcrFootprint {
+    float height = 0.f;   // ;HEIGHT: declarado = lo que la máquina va a aplastar
+    float y_min  = 0.f;   // franja de profundidad REALMENTE extruida (no la reservada)
+    float y_max  = 0.f;
+    bool  has_h  = false;
+    bool  has_y  = false;
+};
+
+static NtTcrFootprint nt_tcr_footprint(const std::string& gcode)
+{
+    NtTcrFootprint fp;
+    float cur_y = 0.f;
+    bool  cur_y_set = false;
+    std::istringstream in(gcode);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!fp.has_h && line.rfind(";HEIGHT:", 0) == 0) {
+            fp.height = float(std::atof(line.c_str() + 8));
+            fp.has_h  = true;
+            continue;
+        }
+        if (line.rfind("G1", 0) != 0) continue;
+        if (const char* py = std::strstr(line.c_str(), " Y")) {
+            cur_y     = float(std::atof(py + 2));
+            cur_y_set = true;
+        }
+        // Sólo cuentan los movimientos que EXTRUYEN: un viaje no ocupa sitio.
+        if (!cur_y_set || std::strstr(line.c_str(), " E") == nullptr) continue;
+        if (!fp.has_y) { fp.y_min = fp.y_max = cur_y; fp.has_y = true; }
+        else           { fp.y_min = std::min(fp.y_min, cur_y);
+                         fp.y_max = std::max(fp.y_max, cur_y); }
+    }
+    return fp;
+}
+// NEOTKO_NEOTOWER_TAG_END
 
 // ---------------------------------------------------------------------------
 // Key encoding: quantize z to 1 µm, pack with tool IDs.
@@ -2207,6 +2257,26 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             NT_LOG("LH_FLOOR z=" << z << " nominal_h=" << nominal_h
                 << " → eff_h=" << eff
                 << " (por debajo de NOMINAL_LH_MIN; altura de entrada envenenada)");
+        // NEOTKO_NEOTOWER_TAG s238 — Z_BUDGET: la decisión de altura, SIEMPRE.
+        //
+        // Las dos trazas de arriba sólo hablan cuando CORRIGEN algo. El caso que se nos
+        // escapó es el contrario: el evento real que sigue a una lámina conserva su altura
+        // nominal porque el tracker no avanzó, así que la rama delta no entra y no se
+        // escribe una sola línea. Ese silencio se lee como "no hacía falta tocarlo" y es
+        // exactamente el error de lectura que quemó s236 (ver lecciones: la ausencia de un
+        // log no prueba nada). Un detector que sólo habla cuando actúa no sirve para
+        // descartar: aquí se registra el plano de apoyo, el hueco real y qué regla ganó,
+        // pase lo que pase. `rule=nominal-kept` con `delta` muy mayor que `eff_h` es la
+        // firma del bug de solape.
+        NT_LOG("Z_BUDGET z=" << z
+            << " nominal_h=" << nominal_h
+            << " eff_h=" << eff
+            << " support_plane=" << last_emitting_plane_z
+            << " delta=" << delta
+            << " rule=" << ((delta > NeoTowerZ::Z_EPS_PLAN && delta < nominal_h - NeoTowerZ::Z_EPS_PLAN)
+                                ? "delta"
+                                : (nominal_h < NeoTowerZ::NOMINAL_LH_MIN - NeoTowerZ::Z_EPS_PLAN
+                                       ? "floor" : "nominal-kept")));
         return eff;
     };
     bool grp_planned_any = false; // any plan_toolchange() issued for current z-group
@@ -2579,10 +2649,30 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 const NeoTowerEvent& ev = all_events[k];
                 const bool is_lamina = ev.is_sublayer && !ev.standalone_plane && // s114 standalone
                     (ev.z_nominal - ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF;
+                // NEOTKO_NEOTOWER_TAG s238 — LAMINA: esta clasificación decide si la torre
+                // sube de plano, y hasta ahora no dejaba rastro ninguno. Es el nudo del bug
+                // de solape: una lámina "no tiene plano propio" a efectos del tracker, pero
+                // su purga SÍ recibe altura completa hasta el plano estructural de abajo
+                // (ver Z_BUDGET). Con un offset de 0.0002 mm contra un umbral de 0.02, el
+                // pass del sandwich entra siempre por aquí como lámina y la capa canónica
+                // vuelve a rellenar la misma banda. Loguear `off` junto al umbral deja ver
+                // de un vistazo por cuánto se decide.
+                NT_LOG("LAMINA z_grp=" << z_grp
+                    << " ev_z_nom=" << ev.z_nominal << " ev_z_act=" << ev.z_actual
+                    << " off=" << (ev.z_nominal - ev.z_actual)
+                    << " thr=" << NeoTowerZ::SAME_PLANE_MAX_OFF
+                    << " is_sub=" << (ev.is_sublayer ? 1 : 0)
+                    << " standalone=" << (ev.standalone_plane ? 1 : 0)
+                    << " → " << (is_lamina ? "LAMINA (sin plano propio)" : "PLANO"));
                 if (!is_lamina) { grp_emits_plane = true; break; }
             }
             if (grp_planned_any && grp_emits_plane)
                 last_emitting_plane_z = z_grp;
+            NT_LOG("TRACKER z_grp=" << z_grp
+                << " planned_any=" << (grp_planned_any ? 1 : 0)
+                << " emits_plane=" << (grp_emits_plane ? 1 : 0)
+                << " → last_emitting_plane_z=" << last_emitting_plane_z
+                << (grp_planned_any && grp_emits_plane ? " (AVANZA)" : " (SE QUEDA)"));
         }
 
         ei = ei_end;
@@ -2648,15 +2738,36 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
         std::ofstream _tcr_dump("/tmp/neotko_wipetower_tcrs.txt", std::ios::trunc);
         if (_tcr_dump.is_open()) {
+            // NEOTKO_NEOTOWER_TAG s238 — cabecera con la OCUPACIÓN, no sólo la identidad.
+            // El volcado traía el gcode pero ningún agregado, así que para ver que dos TCRs
+            // se imprimen encima había que leerlos línea a línea (que es como lo encontró el
+            // usuario). Ahora cada cabecera lleva la banda de Z que rellena [z-h, z] y la
+            // franja de Y realmente extruida: dos cabeceras consecutivas con bandas Z que se
+            // pisan y solape en Y = colisión, a simple vista.
+            float _prev_top = -1e9f;
             for (size_t _li = 0; _li < raw_result.size(); ++_li)
                 for (size_t _si = 0; _si < raw_result[_li].size(); ++_si) {
                     const auto& _t = raw_result[_li][_si];
+                    const NtTcrFootprint _fp = nt_tcr_footprint(_t.gcode);
+                    const float _bottom = float(_t.print_z) - _fp.height;
+                    const bool  _clash  = _fp.has_h && _prev_top > -1e8f
+                                          && _bottom < _prev_top - NeoTowerZ::Z_EPS_PLAN;
                     _tcr_dump << "===== TCR [" << _li << "][" << _si << "]"
                               << " print_z=" << _t.print_z
                               << " initial=T" << _t.initial_tool
                               << " new=T" << _t.new_tool
-                              << " bytes=" << _t.gcode.size()
-                              << " =====\n" << _t.gcode << "\n";
+                              << " bytes=" << _t.gcode.size();
+                    if (_fp.has_h)
+                        _tcr_dump << " | h=" << _fp.height
+                                  << " rellena_Z=[" << _bottom << "," << _t.print_z << "]";
+                    if (_fp.has_y)
+                        _tcr_dump << " Y=[" << _fp.y_min << "," << _fp.y_max << "]";
+                    if (_clash)
+                        _tcr_dump << "  <<< COLISION Z: la torre ya estaba llena hasta "
+                                  << _prev_top << " (solape "
+                                  << (_prev_top - _bottom) << " mm)";
+                    _tcr_dump << " =====\n" << _t.gcode << "\n";
+                    if (_fp.has_h) _prev_top = std::max(_prev_top, float(_t.print_z));
                 }
             for (size_t _li = 0; _li < local_z_result.size(); ++_li)
                 for (size_t _si = 0; _si < local_z_result[_li].size(); ++_si) {
@@ -2670,6 +2781,63 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 }
         }
     }
+
+    // NEOTKO_NEOTOWER_TAG_START — s238: V21, invariante de OCUPACIÓN EN Z.
+    //
+    // El invariante que faltaba, en una frase: *la torre no puede depositar material dentro
+    // de un tramo de Z que ya había rellenado*. V17 valida la altura de CADA evento por
+    // separado y por eso dio OK mientras 0.1998 + 0.2 entraban en un hueco de 0.2: validar
+    // elemento a elemento no valida el conjunto cuando varios comparten un recurso.
+    //
+    // Se mide sobre `raw_result`, es decir sobre el gcode YA EMITIDO (`;HEIGHT:` es
+    // literalmente lo que la máquina va a aplastar), no sobre el plan. Si plan y emisión
+    // divergen, esto ve la emisión — que es la que imprime.
+    //
+    // Detalle deliberado: el detalle por TCR va al canal (puede haber muchos) y el resumen
+    // sale por BOOST_LOG_TRIVIAL(error), misma convención que V19/V20 — un detector mudo no
+    // es detector. Con el bug de lámina vigente esto salta en TODO print con pass pintado;
+    // es correcto que lo haga, y desaparecerá cuando la lámina comparta presupuesto con su
+    // capa canónica en vez de recibir capa entera propia.
+    {
+        struct _ZBand { float z, h; size_t li, si; };
+        std::vector<_ZBand> _bands;
+        for (size_t _li = 0; _li < raw_result.size(); ++_li)
+            for (size_t _si = 0; _si < raw_result[_li].size(); ++_si) {
+                const NtTcrFootprint _fp = nt_tcr_footprint(raw_result[_li][_si].gcode);
+                if (_fp.has_h && _fp.height > 0.f)
+                    _bands.push_back({ float(raw_result[_li][_si].print_z), _fp.height, _li, _si });
+            }
+        std::stable_sort(_bands.begin(), _bands.end(),
+                         [](const _ZBand& a, const _ZBand& b) { return a.z < b.z; });
+
+        int   _v21_hits  = 0;
+        float _v21_worst = 0.f;
+        float _filled_to = -1e9f;
+        for (const _ZBand& b : _bands) {
+            const float _bottom = b.z - b.h;
+            if (_filled_to > -1e8f && _bottom < _filled_to - NeoTowerZ::Z_EPS_PLAN) {
+                const float _ov = _filled_to - _bottom;
+                ++_v21_hits;
+                _v21_worst = std::max(_v21_worst, _ov);
+                NT_LOG("[VALIDATE] V21 Z-OVERFILL TCR[" << b.li << "][" << b.si << "]"
+                    << " z=" << b.z << " h=" << b.h
+                    << " rellena=[" << _bottom << "," << b.z << "]"
+                    << " pero la torre ya estaba llena hasta " << _filled_to
+                    << " → solape=" << _ov << " mm (material sobre material)");
+            }
+            _filled_to = std::max(_filled_to, b.z);
+        }
+        if (_v21_hits > 0)
+            BOOST_LOG_TRIVIAL(error)
+                << "[NeoTower][VALIDATE] V21 Z-OVERFILL: " << _v21_hits
+                << " TCR(s) depositan material donde la torre ya estaba llena (solape peor="
+                << _v21_worst << " mm). Sobreextrusion en la torre. "
+                << "Detalle por TCR en el canal WIPETOWER (ORCA_DEBUG_WIPETOWER=1).";
+        else
+            NT_LOG("[VALIDATE] V21 Z-occupancy OK (" << _bands.size()
+                << " TCRs, ninguna banda de Z se pisa)");
+    }
+    // NEOTKO_NEOTOWER_TAG_END
 
     // NEOTKO_NEOTOWER_TAG s205 (Fase 3) — V14 (frame) + V17 (delta-Z height) slice-time
     // invariants, extracted verbatim into validate_result_frame_and_height() for a single
