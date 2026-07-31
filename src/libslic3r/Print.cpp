@@ -3287,14 +3287,38 @@ static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
     return false;
 }
 
-// Number of unique virtual tool_ids across all MultiPass sublayers (post-slice; 0 pre-slice).
+// Number of unique tool_ids the print really uses (post-slice; 0 pre-slice): the tools of
+// the MultiPass sublayers UNION the tools the object body itself prints with.
+//
+// NEOTKO_NEOTOWER_TAG — s238: el union con el cuerpo es el arreglo. Antes esta función
+// contaba SÓLO los `sub.tool_id` de las sublayers, y eso mide lo que no es: lo que obliga a
+// purgar no es que haya varias herramientas ENTRE pasadas, sino que la pasada use una
+// herramienta DISTINTA a la del cuerpo. Caso real: cuerpo en T3 + una pasada Solid pintada
+// con `solid_tool=0` → las 3 sublayers son todas T0 → contaba 1 → `neotko_forces_tower`
+// falso → sin torre, y tres cambios T3→T0→T3 sin purga en ninguna parte (los
+// `MP_PRIME_CALL ... has_wt=no` del log). Con el union son 2 y la torre se planifica.
+//
+// Coherente con el consumidor: `neotko_forces_tower` pide `>= 2` = "hay cambio de
+// herramienta". Un sandwich cuya pasada usa la MISMA herramienta que el cuerpo sigue dando
+// 1 → sigue sin forzar torre, que es lo correcto (no hay nada que purgar).
 static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects)
 {
     std::set<int> tool_ids;
-    for (const PrintObject* obj : objects)
+    for (const PrintObject* obj : objects) {
+        if (obj == nullptr) continue;
         for (const auto& layer_sublayers : obj->multipass_sublayers())
             for (const MultiPassSubLayer& sub : layer_sublayers)
                 tool_ids.insert(sub.tool_id);
+        // Tools of the object body itself. Same source Print::object_extruders() uses, so
+        // the ids are 0-based exactly like `sub.tool_id`.
+        if (const Print* print = obj->print()) {
+            std::vector<unsigned int> body_extruders;
+            for (const PrintRegion& region : obj->all_regions())
+                region.collect_object_printing_extruders(*print, body_extruders);
+            for (unsigned int e : body_extruders)
+                tool_ids.insert(int(e));
+        }
+    }
     return tool_ids.size();
 }
 

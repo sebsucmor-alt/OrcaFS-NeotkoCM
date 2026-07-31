@@ -5613,7 +5613,11 @@ void GLGizmoColorMixPainter::render_slots_in_use()
         }
         if (m_active_slot == slot_to_free) m_active_slot = 0;
         update_model_object();
-        garbage_collect_auto_profiles();
+        // NEOTKO_PROFILE_TAG — s238: mismo caso que "Erase all" (ver el comentario
+        // largo allí). Acabamos de poner a 0 el puntero slot→perfil bajo un snapshot
+        // de undo; el gc aquí borraría el auto-profile que ese puntero acaba de
+        // soltar, y el undo devolvería el puntero pero no la receta. El gc de
+        // `on_shutdown` lo recogerá igual si de verdad ya no lo usa nadie.
         refresh_selector_palettes();
         m_parent.set_as_dirty();
     }
@@ -6096,7 +6100,24 @@ void GLGizmoColorMixPainter::on_render_input_window(float x, float y, float bott
         // queda pintura ni color de trabajo al que referirse).
         invalidate_active_binding(/*keep_recipe=*/false);
         m_preview_dirty       = true;
-        garbage_collect_auto_profiles();   // PR.3: slots vaciados → recoge autos
+        // NEOTKO_PROFILE_TAG — s238: AQUÍ NO SE RECOGE BASURA. Este bloque acaba de
+        // poner a cero `colormix_slot_to_profile_id` de todo lo borrado; llamar al gc
+        // justo después es preguntar "¿quién referencia algo?" un instante después de
+        // haber borrado la única respuesta posible. No es una carrera de hilos: es una
+        // carrera lógica que se cumple SIEMPRE, y se lleva por delante el auto-profile
+        // de la pintura recién borrada.
+        //
+        // Por qué eso rompe datos: el snapshot de undo de arriba restaura la PINTURA
+        // (facetas + tabla de slots, que son del ModelVolume), pero el
+        // SurfaceEffectProfileManager es un singleton global que NO está en el undo
+        // stack. Secuencia real del bug: pintar → "Erase" → Ctrl+Z → la pintura vuelve,
+        // la receta no → se guarda un 3mf con slots huérfanos que no rebana en ninguna
+        // máquina. Reproducido con el 3mf de un usuario (68 facetas en slot 1 → id 1,
+        // cero recetas en el fichero).
+        //
+        // Quitarlo no filtra nada: si al final el auto-profile sigue sin referencias,
+        // el gc de `on_shutdown` lo recoge igual al cerrar el gizmo — pero para
+        // entonces el undo ya ha tenido su oportunidad de devolver las referencias.
         update_model_object();
         refresh_selector_palettes();
         m_parent.set_as_dirty();

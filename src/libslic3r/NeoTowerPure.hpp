@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -98,12 +99,93 @@ inline float sublayer_slot_height(float min_layer_height, float nominal_layer_he
 // (minus plan epsilon). It never grows the height, so sparse-gap behaviour
 // (delta > nominal) is unchanged. The caller keeps the diagnostic NT_LOG.
 // ---------------------------------------------------------------------------
+// NEOTKO_NEOTOWER_TAG s237 — BUG B: el suelo NOMINAL_LH_MIN se aplicaba SÓLO en la
+// rama delta. La rama de retorno crudo dejaba pasar cualquier `nominal_h`, y con
+// adaptive layer height llega envenenado: la rama de capa real de 1a
+// (`NeoTower.cpp:595`) usa `lt.wipe_tower_layer_height`, que aguas arriba YA es un
+// delta al plano de torre anterior. Observado en BIGTEST-ADAPTIVE:
+// `real-layer event z=9.58902 lh=0.0133076` (= 9.58902 − 9.57571). Como
+// `delta < nominal_h` es falso cuando el propio nominal ES el delta, se devolvía
+// crudo y `DELTA_H` ni siquiera se logueaba → el TCR declaraba `;HEIGHT:0.0133076`
+// (13 µm) mientras extruía lo de una capa normal.
+//
+// El suelo es de la MISMA constante y el MISMO ancla en las dos ramas: ninguna capa
+// de torre puede declarar menos de lo que la máquina puede depositar. Es exactamente
+// lo que V17 ya daba por legal en su cota (`max(_gap, NOMINAL_LH_MIN)`), y lo que sus
+// hermanos del mismo plano ya recibían: en z=9.58902 los sublayers salían con
+// h=0.04/0.0434/0.05 (suelo aplicado) y sólo el evento real se iba a 0.0133.
+// No-op para toda capa sana (nominal ≥ 0.04). Ver docs/NEOTOWER.md §26.
 inline float eff_layer_height(float z, float nominal_h, float last_emitting_plane_z)
 {
     const float delta = z - last_emitting_plane_z;
     if (delta > NeoTowerZ::Z_EPS_PLAN && delta < nominal_h - NeoTowerZ::Z_EPS_PLAN)
         return std::max(delta, NeoTowerZ::NOMINAL_LH_MIN);
-    return nominal_h;
+    return std::max(nominal_h, NeoTowerZ::NOMINAL_LH_MIN);
+}
+
+// ---------------------------------------------------------------------------
+// mark_standalone_planes — NEOTKO_NEOTOWER_TAG s114, extracted + fixed in s236.
+//
+// A canonical layer whose z_nominal carries NO real (non-sublayer) event is
+// realised entirely by MultiPass sublayers (PathBlend / ColorMix / mixed / any
+// gradient shape) → it IS the layer, not a decoration of a real one. Its
+// band-top sublayer must be treated as a structural plane (keep wall+grid,
+// advance the emitting-plane tracker) instead of a frame-free same-plane
+// lámina. Without this, a run of fully-painted layers left the tower no
+// structural plane → frozen tracker → multi-layer gap → box-in-drawer Fase C
+// flow-boost wall (whiskers, s112-s113).
+//
+// s236 FIX — exactly ONE plane per parent-less z_nominal.
+//   The original filter marked every sublayer inside a SAME_PLANE_MAX_OFF
+//   (0.02 mm) window below z_nominal. MultiPass puts its sublayers 0.0002-0.0012
+//   below the nominal, so ALL of them fell inside the window and were marked
+//   (observed: `marked 4` on a two-sublayer plane). Each one then advanced
+//   last_emitting_plane_z, so the next sublayer 1 µm above it got
+//   eff_layer_height() = max(0.001, NOMINAL_LH_MIN) = 0.04 instead of its true
+//   height over the real plane below → the wipe needed ~5× the lines → tower
+//   depth 51.6 mm where the same scene with any real event at that z produced
+//   20.8 mm.
+//   The band-top is the SINGLE highest z_actual of the group; the sublayers
+//   under it stay láminas of the real plane below, which is what they physically
+//   are. Ties (several toolchanges on the same physical sub-plane) are all
+//   marked — they share one plane, not one each.
+//
+// Pure: reads and writes only `evts`. Tested in test_neotower.cpp.
+// ---------------------------------------------------------------------------
+inline size_t mark_standalone_planes(std::vector<NeoTowerEvent>& evts)
+{
+    auto zum = [](float z) -> uint64_t {
+        return static_cast<uint64_t>(std::llround(static_cast<double>(z) * 1000.0));
+    };
+
+    // Every z_nominal that carries at least one real (non-sublayer) event.
+    std::set<uint64_t> znom_with_real;
+    for (const NeoTowerEvent& ev : evts)
+        if (!ev.is_sublayer) znom_with_real.insert(zum(ev.z_nominal));
+
+    // Per parent-less z_nominal, the highest z_actual still inside the
+    // same-plane window. That single sub-plane is the canonical band-top.
+    std::map<uint64_t, uint64_t> band_top; // z_nominal(µm) → z_actual(µm)
+    for (const NeoTowerEvent& ev : evts) {
+        if (!ev.is_sublayer) continue;
+        const uint64_t zn = zum(ev.z_nominal);
+        if (znom_with_real.count(zn)) continue;
+        if (!(ev.z_nominal - ev.z_actual < NeoTowerZ::SAME_PLANE_MAX_OFF)) continue;
+        const uint64_t za = zum(ev.z_actual);
+        auto it = band_top.find(zn);
+        if (it == band_top.end() || za > it->second) band_top[zn] = za;
+    }
+
+    size_t marked = 0;
+    for (NeoTowerEvent& ev : evts) {
+        if (!ev.is_sublayer) continue;
+        auto it = band_top.find(zum(ev.z_nominal));
+        if (it != band_top.end() && zum(ev.z_actual) == it->second) {
+            ev.standalone_plane = true;
+            ++marked;
+        }
+    }
+    return marked;
 }
 
 // ---------------------------------------------------------------------------

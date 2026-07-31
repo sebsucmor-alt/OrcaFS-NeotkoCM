@@ -72,6 +72,11 @@ public:
 
     // Mutators — `add` assigns an id, returns it.
     int  add(SurfaceEffectProfile profile);
+    // NEOTKO_PROFILE_TAG — s238: inserta CONSERVANDO el id que trae el perfil (a
+    // diferencia de `add`, que asigna uno nuevo). Lo usa la recuperación de slots
+    // huérfanos al cargar un 3mf cuya pintura referencia ids sin receta. No pisa un
+    // id existente; devuelve false si ya estaba o si el id no es válido.
+    bool adopt(SurfaceEffectProfile profile);
     bool remove(int id);
     bool rename(int id, const std::string& new_name);
 

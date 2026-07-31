@@ -1103,13 +1103,52 @@ void NeoTower::collect_all_events(const Print& print)
                     NT_LOG("synthetic cross-product: " << n_synth << " events added");
             }
 
-            // Sort by z_nominal, then z_actual, then pass_idx
-            std::sort(surf_events.begin(), surf_events.end(),
-                [](const SurfaceEvent& a, const SurfaceEvent& b) {
-                    if (a.z_nominal != b.z_nominal) return a.z_nominal < b.z_nominal;
-                    if (a.z_actual  != b.z_actual)  return a.z_actual  < b.z_actual;
-                    return a.pass_idx < b.pass_idx;
-                });
+            // Sort by z_nominal, then z_actual, then pass_idx, then INSERTION ORDER.
+            //
+            // NEOTKO_NEOTOWER_TAG s237 — BUG A (SUB_PRIME_MISS en BIGTEST-ADAPTIVE).
+            // El desempate final NO es cosmético: es la ÚNICA cosa que fija el orden
+            // de herramientas del plan cuando un z_nominal tiene varios sublayers con
+            // (z_nominal, z_actual, pass_idx, chain_key) IDÉNTICOS — el caso normal de
+            // un objeto con 3 buckets ColorMix en el mismo plano (T2/p1, T1/p1, T0/p1
+            // @z15.8498). Ahí order_sublayers_by_tool no tiene ninguna decisión que
+            // tomar (una sola cadena, todo empatado) y devuelve el orden de ENTRADA
+            // tal cual → barajar la entrada = barajar el plan.
+            //
+            // std::sort NO es estable: con el comparador anterior (empate total en los
+            // tres campos) el introsort invertía esos tríos, y el plan salía
+            // 3→0, 0→1, 1→2 mientras 1a/emisión hacían 3→2, 2→1, 1→0. Resultado: el par
+            // real (3→2) no se sembraba en NINGÚN slot → get_tcr MISS → cambio de color
+            // SIN visita a la torre (z=15.8498 · 17.0498 · 18.4498, confirmado en visor).
+            // 14.4498 se salvaba sólo porque allí hay dos objetos (dos chain_key) y manda
+            // la lógica de cadena en vez del desempate.
+            //
+            // `seq` = índice de inserción, que para los eventos REALES es exactamente el
+            // orden de PrintObject::multipass_sublayers() — la MISMA fuente y el MISMO
+            // orden que usa mp_znom_keys (:334) en 1a y que GCode.cpp usa al emitir.
+            // Con él el comparador es un orden total y el espejo plan≡1a≡emisión deja de
+            // depender del algoritmo de ordenación. Lección s236: misma pregunta → misma
+            // constante y mismo ancla.
+            {
+                std::vector<size_t> seq(surf_events.size());
+                for (size_t i = 0; i < seq.size(); ++i)
+                    seq[i] = i;
+                // Ordenamos los índices y reconstruimos, para poder usar `seq` como
+                // último criterio sin tocar la struct SurfaceEvent.
+                std::sort(seq.begin(), seq.end(),
+                    [&surf_events](size_t ia, size_t ib) {
+                        const SurfaceEvent& a = surf_events[ia];
+                        const SurfaceEvent& b = surf_events[ib];
+                        if (a.z_nominal != b.z_nominal) return a.z_nominal < b.z_nominal;
+                        if (a.z_actual  != b.z_actual)  return a.z_actual  < b.z_actual;
+                        if (a.pass_idx  != b.pass_idx)  return a.pass_idx  < b.pass_idx;
+                        return ia < ib;   // orden canónico de multipass_sublayers()
+                    });
+                std::vector<SurfaceEvent> reordered;
+                reordered.reserve(surf_events.size());
+                for (size_t i : seq)
+                    reordered.push_back(surf_events[i]);
+                surf_events.swap(reordered);
+            }
 
             NT_LOG("sublayer scheduler: " << surf_events.size() << " SurfaceEvents built");
 
@@ -1206,6 +1245,38 @@ void NeoTower::collect_all_events(const Print& print)
                     // emission → real-TC pair mismatch + get_tcr MISSes.
                     std::vector<size_t> order =
                         MultiPassScheduler::order_sublayers_by_tool_windowed(items, (int)chain_cur, EPSILON);
+
+                    // NEOTKO_NEOTOWER_TAG s237 — V20: espejo 1a ≡ scheduler.
+                    //
+                    // 1a (mp_group_canon_order) y este scheduler responden a la MISMA
+                    // pregunta —"¿en qué orden de herramientas se emite este z_nominal?"—
+                    // con la misma función, pero alimentándola desde dos vectores
+                    // distintos. Durante toda s236 discreparon en silencio (BUG A: el par
+                    // real no se sembraba → cambio de color sin purga) porque NADIE
+                    // comparaba las dos respuestas. Esto es esa comparación: gratis, y
+                    // sale por `error` como V19 porque significa gcode sin purga.
+                    // No corrige nada — el fix es el desempate por orden de inserción
+                    // en el sort de surf_events. Si esto salta, el ancla se ha vuelto a
+                    // desincronizar. Ver docs/FUTURE/NEOTOWER_S236_BUG_PLAN.md §1.
+                    {
+                        const std::vector<MultiPassScheduler::SublayerKey> ref =
+                            mp_group_canon_order(z_nom, (int)chain_cur);
+                        bool mismatch = (ref.size() != order.size());
+                        for (size_t q = 0; !mismatch && q < order.size(); ++q)
+                            if (ref[q].tool_id != items[order[q]].tool_id)
+                                mismatch = true;
+                        if (mismatch) {
+                            std::ostringstream _v20;
+                            _v20 << "[VALIDATE] V20: canon order 1a != scheduler at z_nom="
+                                 << z_nom << " enter=T" << chain_cur << " 1a=[";
+                            for (const auto& k : ref) _v20 << "T" << k.tool_id << ",";
+                            _v20 << "] sched=[";
+                            for (size_t oi : order) _v20 << "T" << items[oi].tool_id << ",";
+                            _v20 << "] → un par real quedará sin slot (get_tcr MISS)";
+                            BOOST_LOG_TRIVIAL(error) << _v20.str();
+                            NT_LOG(_v20.str());
+                        }
+                    }
 
                     // Walk the canon order, emitting events with (old, new)
                     // chained from chain_cur. Consecutive items with the same
@@ -1924,27 +1995,19 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     // tracker) instead of frame-free same-plane decorations. Without this, a run
     // of fully-painted layers left the tower no structural plane → frozen tracker
     // → multi-layer gap → box-in-drawer Fase C flow-boost wall (whiskers, s112-s113).
+    // Mark ONLY the band-top sublayer (the single highest z_actual) of a
+    // parent-less layer — that is the one that represents the real canonical
+    // plane. The intermediate staircase sublayers (z_actual below the band-top)
+    // MUST stay synthetic+inset (they are the box-in-drawer shells, §17.3 Fase
+    // B); clearing synthetic on them would stack N full-drawer walls in one
+    // layer interval ("demasiadas capas de golpe"). The band-top alone becomes
+    // the canonical full-height wall.
+    // NEOTKO_NEOTOWER_TAG s205 (Fase 2) / s236 — the pure decision lives in
+    // NeoTowerPure::mark_standalone_planes (testable scope); see the s236 fix
+    // note there for why "inside the 0.02 window" was not the same as "the
+    // band-top" once MultiPass puts several sublayers 1 µm apart.
     {
-        auto _zum = [](float z) -> uint64_t {
-            return static_cast<uint64_t>(std::llround(static_cast<double>(z) * 1000.0));
-        };
-        std::set<uint64_t> _znom_with_real;
-        for (const NeoTowerEvent& _ev : all_events)
-            if (!_ev.is_sublayer) _znom_with_real.insert(_zum(_ev.z_nominal));
-        // Mark ONLY the band-top sublayer (z_actual ≈ z_nominal) of a parent-less
-        // layer — that is the one that represents the real canonical plane. The
-        // intermediate staircase sublayers (z_actual well below z_nominal) MUST
-        // stay synthetic+inset (they are the box-in-drawer shells, §17.3 Fase B);
-        // clearing synthetic on them would stack N full-drawer walls in one layer
-        // interval ("demasiadas capas de golpe"). The band-top alone becomes the
-        // canonical full-height wall.
-        size_t _marked = 0;
-        for (NeoTowerEvent& _ev : all_events)
-            if (_ev.is_sublayer && !_znom_with_real.count(_zum(_ev.z_nominal))
-                && (_ev.z_nominal - _ev.z_actual) < NeoTowerZ::SAME_PLANE_MAX_OFF) {
-                _ev.standalone_plane = true;
-                ++_marked;
-            }
+        const size_t _marked = NeoTowerPure::mark_standalone_planes(all_events);
         NT_LOG("STANDALONE_PLANE: marked " << _marked << " band-top sublayer events on "
             << "fully-painted canonical layers (no real-layer parent)");
     }
@@ -2065,7 +2128,28 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     // 1e-5f (0.00001mm): 0.0002mm gap > 1e-5 so sublayer/real stay separate z-groups.
     // True float duplicates differ by < 1e-6 < 1e-5 so identical Z values still merge.
     // NEOTKO_NEOTOWER_TAG — hardening P2: use central epsilon
-    constexpr float NT_WT_EPS = NeoTowerZ::Z_EPS_GROUP;
+    //
+    // NEOTKO_NEOTOWER_TAG s236 — MUST be the epsilon plan_toolchange() itself uses
+    // to decide "new layer or same layer" (WT_LAYER_Z_EPS = Z_EPS_PLAN), NOT the
+    // finer Z_EPS_GROUP. A z-group here IS one wt2 plan layer: wt2_li is
+    // incremented once per group and then used as an index into wt2's m_plan
+    // (set_tool_override) and into raw_result (TCR lookup). With two different
+    // epsilons the two layer counts silently diverge for any Δz in the window
+    //     Z_EPS_GROUP (1e-5)  <  Δz  <  Z_EPS_PLAN (1e-4)
+    // — NeoTower opens a new group, wt2 merges into the previous layer, and from
+    // that point on every wt2_li is one too high. Observed with the PathBlend
+    // per-scanline staircase (Δz = 3e-5 between the atomic chain's anchor and the
+    // rest of the plane): the last 6 toolchanges mapped to a plan layer that does
+    // not exist (tc_idx=-1), got no TCR, and GCode emitted the colour change with
+    // NO tower visit at all. Repro pair: lancuak3-A34.3mf (fails, PathBlend angle
+    // spreads Z) vs lancuak3-A40.3mf (passes, single Z). V19 below now asserts the
+    // two counts agree, so any future drift is loud instead of silent.
+    //
+    // s49 is preserved: a sublayer sits SUBLAYER_GAP (2e-4) below its real layer,
+    // and static_assert(SUBLAYER_GAP > Z_EPS_PLAN) guarantees 2e-4 > 1e-4, so the
+    // sublayer/real pair still lands in two groups — in wt2 as well, which is the
+    // point. Only sub-0.1 µm neighbours now merge, exactly as wt2 merges them.
+    constexpr float NT_WT_EPS = NeoTowerZ::Z_EPS_PLAN;
 
     std::vector<int> event_to_wt2_li(all_events.size(), -1);
     std::vector<int> event_to_wt2_tc_idx(all_events.size(), -1);
@@ -2113,6 +2197,16 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             NT_LOG("DELTA_H z=" << z << " nominal_h=" << nominal_h
                 << " → eff_h=" << eff
                 << " (support plane z=" << last_emitting_plane_z << ")");
+        // NEOTKO_NEOTOWER_TAG s237 — BUG B. Traza propia para el suelo sobre el nominal
+        // CRUDO: el caso de BUG B no pasaba por la rama delta, así que `DELTA_H` no se
+        // logueaba y la altura envenenada viajaba invisible hasta el `;HEIGHT` del TCR.
+        // Si esto aparece, alguien está alimentando alturas por debajo del mínimo físico
+        // (p.ej. `lt.wipe_tower_layer_height`, que ya es un delta) — el suelo lo corrige,
+        // pero el log dice dónde mirar.
+        else if (nominal_h < NeoTowerZ::NOMINAL_LH_MIN - NeoTowerZ::Z_EPS_PLAN)
+            NT_LOG("LH_FLOOR z=" << z << " nominal_h=" << nominal_h
+                << " → eff_h=" << eff
+                << " (por debajo de NOMINAL_LH_MIN; altura de entrada envenenada)");
         return eff;
     };
     bool grp_planned_any = false; // any plan_toolchange() issued for current z-group
@@ -2495,6 +2589,34 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     }
 
     // -----------------------------------------------------------------------
+    // NEOTKO_NEOTOWER_TAG s236 — V19: layer-count bijection (feed side).
+    //
+    // The whole wt2_li mechanism assumes "one z-group fed here == one plan layer
+    // created there". That assumption was never checked, and when it broke the
+    // only symptom was a colour change emitted with no tower visit — invisible in
+    // the log, visible only in the print. Check it while both numbers are still in
+    // scope, and announce unconditionally: a mismatch means TCRs are about to be
+    // dropped, which is a correctness failure, not a cosmetic warning.
+    // -----------------------------------------------------------------------
+    {
+        const size_t _fed_groups  = static_cast<size_t>(wt2_li + 1);
+        const size_t _plan_layers = wt2.plan_layer_zs().size();
+        if (_fed_groups != _plan_layers) {
+            std::ostringstream _s;
+            _s << "[NeoTower][VALIDATE] V19 LAYER COUNT DIVERGENCE: NeoTower fed "
+               << _fed_groups << " z-groups but WipeTower2 built " << _plan_layers
+               << " plan layers — every event past the divergence points at a"
+               << " non-existent layer and WILL lose its TCR (silent missing purge)."
+               << " Check NT_WT_EPS vs plan_toolchange's WT_LAYER_Z_EPS.";
+            BOOST_LOG_TRIVIAL(error) << _s.str();
+            NT_LOG(_s.str());
+        } else {
+            NT_LOG("[VALIDATE] V19 layer-count bijection OK (" << _fed_groups
+                << " z-groups == " << _plan_layers << " wt2 plan layers)");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 2: Generate proper rectangular-fill TCRs.
     //   T→T-only plan layers  → raw_result[li] = {finish_layer_tcr}  (1 element)
     //   Layers with N real TCs → raw_result[li] = N elements,
@@ -2504,6 +2626,7 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     std::vector<std::vector<WipeTower::ToolChangeResult>> local_z_result;
     wt2.generate(raw_result, local_z_result);
     m_used_filament = wt2.get_used_filament();
+    m_depth_by_li   = wt2.plan_layer_depths();       // s236 F1 — depth accounting
 
     // NEOTKO_DBG: dump all generated TCRs to confirm m_current_tool state per layer
     for (int _li = 0; _li < static_cast<int>(raw_result.size()); ++_li) {
@@ -2578,7 +2701,23 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
         const NeoTowerEvent& ev = all_events[ei];
         if (ev.old_tool == ev.new_tool) continue; // structural T→T: handled below
         const int li = event_to_wt2_li[ei];
-        if (li < 0 || li >= static_cast<int>(raw_result.size()) || raw_result[li].empty())
+        // NEOTKO_NEOTOWER_TAG s236 — V19 (emission side). Falling through here
+        // silently is how the s236 missing-purge bug stayed invisible: the event
+        // keeps tc_idx=-1, never registers a TCR, and at emission get_tcr() misses
+        // and GCode changes colour without visiting the tower. A real TC pointing
+        // outside raw_result is a correctness failure — say so out loud.
+        if (li >= static_cast<int>(raw_result.size())) {
+            std::ostringstream _s;
+            _s << "[NeoTower][VALIDATE] V19 ORPHAN EVENT: z=" << ev.z_actual
+               << " " << ev.old_tool << "→" << ev.new_tool
+               << " maps to plan layer li=" << li << " but only "
+               << raw_result.size() << " layers exist — this toolchange will get"
+               << " NO wipe tower visit.";
+            BOOST_LOG_TRIVIAL(error) << _s.str();
+            NT_LOG(_s.str());
+            continue;
+        }
+        if (li < 0 || raw_result[li].empty())
             continue;
 
         bool found = false;
@@ -2900,6 +3039,31 @@ NeoTower::get_tcr(float z_actual, size_t old_tool, size_t new_tool, bool sublaye
         return m_result[li][si];
     }
 
+    // NEOTKO_NEOTOWER_TAG s237 — BUG C. Una petición IDENTIDAD (old == new) que no
+    // resuelve aquí NO es un error: es la ruta de diseño.
+    //
+    // Las visitas identidad/estructurales no se indexan nunca en el canal de TCRs
+    // (m_tcr_index / m_tcr_index_sub) — viven en el canal finish (m_finish_layer_index,
+    // vía get_finish_layer) y, en el dispatch de capa real, las resuelve el slot
+    // planificado con su propia guarda de identidad en
+    // GCode/NeoTowerDispatch.cpp:84 ("if (identity_req) ... fb.initial_tool ==
+    // fb.new_tool"). Verificado en BIGTEST-ADAPTIVE: los 17 casos van seguidos de
+    // `WT_EMIT_TRACE ... plan_slot=T1->T1` y la torre se emite entera.
+    //
+    // El sufijo `← ERROR` estaba mal puesto y costó caro: durante s236 esos 17
+    // benignos ENMASCARARON los 3 MISS reales de BUG A (`grep MISS` daba 20 y el ruido
+    // escondía la señal). Se degrada a una etiqueta propia y greppable — cualquier
+    // `← ERROR` que quede en el log es, ahora sí, purga perdida de verdad.
+    // Comportamiento IDÉNTICO: sigue devolviendo nullopt, no se toca ninguna ruta de
+    // emisión. Ver docs/FUTURE/NEOTOWER_S236_BUG_PLAN.md §3.
+    if (old_tool == new_tool) {
+        NT_LOG("get_tcr() IDENTITY_NO_TCR z=" << z_actual
+            << " old=" << old_tool << " new=" << new_tool
+            << " ctx=" << pname
+            << " (esperado — se resuelve por canal finish / slot planificado)");
+        return std::nullopt;
+    }
+
     NT_LOG("get_tcr() MISS z=" << z_actual
         << " old=" << old_tool << " new=" << new_tool
         << " ctx=" << pname << " ← ERROR");
@@ -2965,6 +3129,102 @@ void NeoTower::finalize_shadow() const
     NT_LOG("[SHADOW] finalize: " << rep.emitted << " emissions vs "
         << m_emission_order.size() << " canonical entries — "
         << rep.violations.size() << " violation(s), " << rep.census.size() << " census");
+
+    report_depth_accounting();
+}
+
+// ---------------------------------------------------------------------------
+// report_depth_accounting() — NEOTKO_NEOTOWER_TAG s236, Fase F1.
+//
+// WHY: the tower's XY footprint is set by its deepest plan layer, and that depth
+// is the SUM of the depth reserved by every toolchange slot on that layer. The
+// planner reserves a slot for each (old,new) pair the plane MIGHT need, because
+// the same-colour grouping and the tetris stacking order are only resolved at
+// emission time (see NeoTowerEvent::speculative). Whatever the grouping does not
+// use is depth already committed — a band of tower that gets built, layer after
+// layer, and purged into by nobody.
+//
+// Until now the only trace of this was the Shadow census ("speculative spare
+// emitted 0×"), reported per entry with no notion of what it cost. This turns
+// that census into millimetres, per plane, so F2's pruning has a before/after
+// number instead of a hunch. Observed on lancuak3-A34.3mf: the governing plane
+// reserved 7 slots at ~16.8 mm each (117.35 mm total) with 4 of them logged as
+// never emitted.
+//
+// PURELY DIAGNOSTIC: const, log-only, reads what generate()/emission already
+// produced. It cannot change a single G1.
+// ---------------------------------------------------------------------------
+void NeoTower::report_depth_accounting() const
+{
+    if (m_emission_order.empty())
+        return;
+
+    // Which canonical entries were actually consumed at least once.
+    std::set<std::pair<size_t, size_t>> consumed;
+    for (const ShadowSlot& s : m_shadow_sequence)
+        consumed.insert({s.a, s.b});
+
+    // Accounted per PLAN LAYER (li), never by matching floats: TowerEvent already
+    // carries the li that generate() assigned, and m_depth_by_li is dense over the
+    // same index.
+    struct LayerAcct { size_t reserved = 0; size_t used = 0; size_t firm = 0; float z = 0.f; };
+    std::map<size_t, LayerAcct> by_li;
+
+    for (const TowerEvent& te : m_emission_order) {
+        LayerAcct& acct = by_li[te.li];
+        ++acct.reserved;
+        acct.z = te.z_actual;
+        // "firm" = not a speculative spare. F2's whole premise is that the
+        // emission grouping picks a path of the SAME LENGTH as the firm chain —
+        // a spare SUBSTITUTES for a firm entry, it never adds one on top. If that
+        // holds, reserving depth for the firm count alone is exactly right and
+        // the spares can reuse those boxes. If it is ever false, reserving less
+        // would overflow the purge box (mega-extrusions), so this counter is the
+        // gate: `used` must never exceed `firm`. Watch it across scenes before
+        // any depth is actually pruned.
+        if (!te.speculative) ++acct.firm;
+        if (consumed.count({te.li, te.si})) ++acct.used;
+    }
+
+    size_t total_reserved = 0, total_used = 0;
+    size_t worst_li = 0, worst_unused = 0;
+    float  worst_depth = 0.f, worst_waste = 0.f, worst_z = 0.f;
+
+    for (const auto& [li, a] : by_li) {
+        total_reserved += a.reserved;
+        total_used     += a.used;
+        if (a.reserved == 0) continue;
+        const size_t unused = a.reserved - a.used;
+        const float  depth  = li < m_depth_by_li.size() ? m_depth_by_li[li] : 0.f;
+        // Slots on one layer sit side by side across the tower's depth, so an
+        // even split is a good order-of-magnitude figure. F2 will swap this for
+        // the real per-slot required_depth when it needs to prune precisely.
+        const float  waste  = depth * (float(unused) / float(a.reserved));
+        if (unused > 0) {
+            NT_LOG("DEPTH_ACCT li=" << li << " z=" << a.z
+                << " reserved=" << a.reserved << " firm=" << a.firm
+                << " used=" << a.used
+                << " unused=" << unused
+                << " layer_depth=" << depth << "mm"
+                << " wasted≈" << waste << "mm"
+                << (a.used > a.firm ? "  *** F2_UNSAFE: used > firm ***" : ""));
+            // "Governing" = the layer whose own reservation is deepest AND has
+            // slack; that is the one actually setting the tower footprint.
+            if (depth > worst_depth) {
+                worst_depth = depth; worst_waste = waste;
+                worst_z = a.z; worst_li = li; worst_unused = unused;
+            }
+        }
+    }
+
+    NT_LOG("DEPTH_ACCT TOTAL: " << total_used << "/" << total_reserved
+        << " slots used across " << by_li.size() << " plan layers"
+        << " | tower depth=" << (m_depth_by_li.empty()
+              ? 0.f : *std::max_element(m_depth_by_li.begin(), m_depth_by_li.end())) << "mm"
+        << " | deepest layer WITH slack: li=" << worst_li << " z=" << worst_z
+        << " depth=" << worst_depth << "mm unused=" << worst_unused
+        << " wasted≈" << worst_waste << "mm"
+        << " (" << (worst_depth > 0.f ? 100.f * worst_waste / worst_depth : 0.f) << "%)");
 }
 
 // NEOTKO_NEOTOWER_TAG s205 (Fase 3) — V14 (frame) + V17 (delta-Z height) slice-time
@@ -3075,6 +3335,20 @@ void NeoTower::validate_result_frame_and_height(
                             << " li=" << _li << " si=" << _si
                             << " height=" << _h << " gap=" << _gap
                             << " (support plane z=" << _prev_z << ")");
+                        ++_v17_warnings;
+                    }
+                    // NEOTKO_NEOTOWER_TAG s237 — BUG B: V17 sólo miraba por ARRIBA.
+                    // Una altura declarada POR DEBAJO del mínimo físico no sobre-extruye,
+                    // pero miente: el `;HEIGHT` lo leen el visor, el estimador de tiempo y
+                    // el control de ventilación. `TCR [152][0] ;HEIGHT:0.0133076` (13 µm)
+                    // vivió sin detector toda s236 porque nadie validaba este lado.
+                    // Misma constante y mismo ancla que la cota de arriba.
+                    else if (_h < NeoTowerZ::NOMINAL_LH_MIN - 0.002f) {
+                        NT_INVARIANT_WARN("V17 UNDER-HEIGHT z=" << _tcr.print_z
+                            << " li=" << _li << " si=" << _si
+                            << " height=" << _h
+                            << " min=" << NeoTowerZ::NOMINAL_LH_MIN
+                            << " (altura declarada por debajo del mínimo físico)");
                         ++_v17_warnings;
                     }
                 }

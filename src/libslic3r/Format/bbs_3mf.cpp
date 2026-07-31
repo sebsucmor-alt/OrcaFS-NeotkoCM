@@ -752,6 +752,56 @@ bool bbs_is_valid_object_type(const std::string& type)
 
 namespace Slic3r {
 
+// NEOTKO_PROFILE_TAG — s238: ids de perfil que la PINTURA del modelo referencia.
+//
+// Asimetría de fondo que este helper existe para vigilar: la pintura vive en el
+// ModelVolume (`colormix_slot_to_profile_id` + `color_mix_paint_facets`), viaja en
+// el 3mf y ESTÁ en el undo stack; la RECETA vive en `SurfaceEffectProfileManager`,
+// un singleton global que NO está en el undo stack ni se serializa por volumen. Un
+// gc de auto-profiles seguido de un undo restaura la pintura pero no la receta, y
+// el proyecto queda con slots huérfanos. Los dos guardas (save/load) comparan una
+// cara contra la otra usando esta función.
+static std::vector<int> neotko_referenced_profile_ids(const Model& model)
+{
+    std::vector<int> out;
+    auto already = [&out](int v) {
+        for (int x : out)
+            if (x == v) return true;
+        return false;
+    };
+    for (const ModelObject* mo : model.objects) {
+        if (mo == nullptr) continue;
+        for (const ModelVolume* mv : mo->volumes) {
+            if (mv == nullptr || !mv->is_model_part()) continue;
+            for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
+                const int pid = mv->colormix_slot_to_profile_id[s];
+                if (pid != 0 && !already(pid)) out.push_back(pid);
+            }
+        }
+    }
+    return out;
+}
+
+// Ids referenciados por la pintura que el manager NO conoce = pintura muerta.
+static std::vector<int> neotko_orphan_profile_ids(const Model& model)
+{
+    std::vector<int> orphans;
+    const auto& mgr = SurfaceEffectProfileManager::get();
+    for (int pid : neotko_referenced_profile_ids(model))
+        if (mgr.find(pid) == nullptr) orphans.push_back(pid);
+    return orphans;
+}
+
+static std::string neotko_ids_to_string(const std::vector<int>& ids)
+{
+    std::string s;
+    for (int id : ids) {
+        if (!s.empty()) s += ", ";
+        s += std::to_string(id);
+    }
+    return s;
+}
+
 static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
 {
     for (const char* key : {"filament_colour", "filament_settings_id",
@@ -6844,6 +6894,24 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         << " profiles, json_bytes=" << profiles_json.size()
                         << " b64_bytes=" << metadata_item_map["colormix_profiles_b64"].size());
                 }
+
+                // NEOTKO_PROFILE_TAG — s238: AUDITORÍA DE INTEGRIDAD al guardar.
+                // El gate de arriba (`size() > 0`) era el único guardián y no sabe
+                // NADA de lo que la pintura referencia: si el manager perdió el
+                // perfil (gc de autos + undo), se guardaba pintura huérfana EN
+                // SILENCIO y el 3mf resultante no rebana la pasada en ninguna
+                // máquina. Caso real: 3mf de usuario con 68 facetas pintadas en el
+                // slot 1 → perfil id 1, y cero recetas en el fichero.
+                const std::vector<int> orphans = neotko_orphan_profile_ids(model);
+                if (!orphans.empty()) {
+                    const std::string ids = neotko_ids_to_string(orphans);
+                    BOOST_LOG_TRIVIAL(error)
+                        << "NEOTKO colormix: saving a 3mf with ORPHAN painted slots. Profile id(s) ["
+                        << ids << "] are referenced by the model's paint but missing from the "
+                        << "profile manager. That paint will NOT slice when this 3mf is reopened.";
+                    NEOTKO_LOG(PROFILE, "3MF save: ORPHAN_SLOTS ids=[" << ids
+                        << "] mgr_size=" << Slic3r::SurfaceEffectProfileManager::get().size());
+                }
             }
 
             // NEOTKO_TEXTUREBUMP_TAG — Fase 3: same treatment for the Texture Bump zone registry,
@@ -8842,6 +8910,39 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
             }
         } else {
             NEOTKO_LOG(PROFILE, "3MF load: no colormix_profiles metadata in 3mf");
+        }
+    }
+
+    // NEOTKO_PROFILE_TAG — s238: RED DE SEGURIDAD al cargar, simétrica al guard de
+    // save. Si la pintura del modelo referencia ids que el manager no conoce, esa
+    // pintura está muerta: el objeto se ve pintado en el 3D y sale liso, sin que
+    // nada se lo diga al usuario (así llegó el 3mf que abrió este bug).
+    //
+    // La receta original NO es recuperable — se perdió al guardar. Lo que sí
+    // podemos es materializar un perfil de recuperación por id huérfano, con los
+    // stacks VACÍOS: no produce ningún efecto de impresión, pero hace que el slot
+    // exista, sea visible en el Painter y se pueda REASIGNAR a una receta real,
+    // en vez de quedar invisible e inservible. `auto_generated=false` a propósito,
+    // para que el gc de auto-profiles no se lo lleve otra vez.
+    if (res && model) {
+        const std::vector<int> orphans = neotko_orphan_profile_ids(*model);
+        if (!orphans.empty()) {
+            auto& mgr = SurfaceEffectProfileManager::get();
+            for (int pid : orphans) {
+                SurfaceEffectProfile p;
+                p.id             = pid;
+                p.name           = "Recovered paint (id " + std::to_string(pid) + ")";
+                p.auto_generated = false;
+                mgr.adopt(std::move(p));
+            }
+            const std::string ids = neotko_ids_to_string(orphans);
+            BOOST_LOG_TRIVIAL(error)
+                << "NEOTKO colormix: this 3mf carries paint with NO recipe. Profile id(s) ["
+                << ids << "] are referenced by the paint but absent from the file. Placeholder "
+                << "profiles were created so the slots stay visible and re-assignable; the "
+                << "original recipes are lost and this paint will not slice until reassigned.";
+            NEOTKO_LOG(PROFILE, "3MF load: ORPHAN_SLOTS_RECOVERED ids=[" << ids
+                << "] mgr_size=" << mgr.size());
         }
     }
 

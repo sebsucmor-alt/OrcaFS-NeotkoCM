@@ -68,6 +68,33 @@ public:
 	void generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &result,
                   std::vector<std::vector<WipeTower::ToolChangeResult>> &local_z_result);
 
+    // NEOTKO_NEOTOWER_TAG s236 — the Z of every plan layer that plan_toolchange()
+    // ACTUALLY created, in order. NeoTower used to keep its own parallel layer
+    // counter (wt2_li) while feeding; whenever its z-grouping epsilon
+    // (Z_EPS_GROUP = 1e-5) split two events that plan_toolchange then merged
+    // (WT_LAYER_Z_EPS = Z_EPS_PLAN = 1e-4), the two counters drifted and every
+    // event past the drift pointed at a plan layer that does not exist —
+    // no TCR, no index entry, and a silent missing purge at emission
+    // (PathBlend staircase, repro lancuak3-A34.3mf). Exposing the real list lets
+    // NeoTower map onto what wt2 built instead of predicting it.
+    std::vector<float> plan_layer_zs() const {
+        std::vector<float> zs;
+        zs.reserve(m_plan.size());
+        for (const WipeTowerInfo& li : m_plan) zs.push_back(li.z);
+        return zs;
+    }
+
+    // NEOTKO_NEOTOWER_TAG s236 F1 — DENSE per-plan-layer depth, one entry per
+    // layer, indexed the same way as generate()'s result (li). Note this is NOT
+    // get_z_and_depth_pairs(): that one is the SPARSE tapered silhouette (a pair
+    // only where the depth steps down) and cannot be indexed by layer.
+    std::vector<float> plan_layer_depths() const {
+        std::vector<float> d;
+        d.reserve(m_plan.size());
+        for (const WipeTowerInfo& li : m_plan) d.push_back(li.depth);
+        return d;
+    }
+
     float get_depth() const { return m_wipe_tower_depth; }
 	std::vector<std::pair<float, float>> get_z_and_depth_pairs() const;
     std::vector<std::vector<WipeTower::box_coordinates>> get_local_z_reserve_boxes() const;

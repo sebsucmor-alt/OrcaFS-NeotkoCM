@@ -32,6 +32,21 @@ int SurfaceEffectProfileManager::add(SurfaceEffectProfile profile)
     return p.id;
 }
 
+// NEOTKO_PROFILE_TAG — s238: ver la declaración en el header. `add` no sirve para
+// esto porque reasigna el id, y el id es justo lo que la pintura ya guardó.
+bool SurfaceEffectProfileManager::adopt(SurfaceEffectProfile profile)
+{
+    if (profile.id <= 0) return false;
+    if (find(profile.id) != nullptr) return false;
+    if (profile.name.empty())
+        profile.name = "Profile " + std::to_string(profile.id);
+    m_next_id = std::max(m_next_id, profile.id + 1);
+    NEOTKO_LOG(PROFILE, "MGR adopt id=" << profile.id << " name='" << profile.name
+        << "' total=" << (m_profiles.size() + 1));
+    m_profiles.push_back(std::move(profile));
+    return true;
+}
+
 bool SurfaceEffectProfileManager::remove(int id)
 {
     for (auto it = m_profiles.begin(); it != m_profiles.end(); ++it)

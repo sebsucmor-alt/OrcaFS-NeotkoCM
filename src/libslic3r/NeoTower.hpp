@@ -340,6 +340,12 @@ public:
     // reads m_emission_order + the mutable m_shadow_sequence, logs only.
     void finalize_shadow() const;
 
+    // NEOTKO_NEOTOWER_TAG s236 F1 — reserved-vs-used tower depth per plane.
+    // Called from finalize_shadow() (the only point where consumption is known).
+    // Diagnostic only: const, log-only, changes no geometry. Feeds F2's pruning
+    // with a real before/after number. See the definition for the full rationale.
+    void report_depth_accounting() const;
+
     // NEOTKO_NEOTOWER_TAG s205-5b.2b — record a tower TCR emission that GCode.cpp
     // dispatches OUTSIDE get_tcr()/get_finish_layer() (the get_tcr-MISS → planned-slot
     // fallback, the realign find_if path, orphan-finish emission, and their BBL mirrors).
@@ -504,6 +510,19 @@ private:
     int                m_num_toolchanges = 0;
     std::vector<float> m_used_filament;
     float              m_brim_width      = 0.f;
+
+    // NEOTKO_NEOTOWER_TAG s236 F1 — depth accounting. The tower's footprint is
+    // set by the single deepest plan layer, and that depth is the SUM of every
+    // toolchange slot reserved on it. Slots are reserved for the speculative
+    // cross-product (every (old,new) pair a plane MIGHT need, because the
+    // grouping order is only resolved at emission time), so a plane can reserve
+    // several slots it never uses — and the depth was already committed.
+    // Captured here so finalize_shadow(), which is the one place that knows what
+    // was ACTUALLY consumed, can report reserved-vs-used per plane.
+    // Measurement only: nothing reads this to change geometry.
+    // Indexed by plan-layer index (li) — the same li TowerEvent carries, so the
+    // accounting never has to match floats.
+    std::vector<float> m_depth_by_li;
 
     // Geometry constants extracted from config at construction.
     float m_nozzle_diameter    = 0.4f;

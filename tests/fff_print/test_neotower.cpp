@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>   // s237 — std::pair en los tests de BUG A
 #include <vector>
 
 #include "libslic3r/MultiPassScheduler.hpp"
@@ -321,6 +322,142 @@ TEST_CASE("NeoTowerPure::resolve_wipe_volume: three branches (s158)", "[NeoTower
 }
 
 // ===========================================================================
+// s237 — BUG A: el ORDEN DE ENTRADA es carga estructural, no cosmética.
+//
+// Cuando un z_nominal tiene varios sublayers del MISMO objeto (el caso normal de
+// N buckets ColorMix: mismo chain_key, mismo pass_idx, misma z_actual), el
+// scheduler no tiene NINGUNA decisión que tomar: una sola cadena, todo empatado.
+// Devuelve el orden de entrada tal cual. Es decir: **quien fija el orden de
+// entrada fija el plan de la torre.**
+//
+// En s237 eso saltó porque el `std::sort` de `surf_events` (NeoTower.cpp:1107)
+// NO es estable y empataba en sus tres campos → barajaba esos tríos → el plan
+// encadenaba 3→0, 0→1, 1→2 mientras la emisión hacía 3→2, 2→1, 1→0 → el par real
+// no se sembraba en ningún slot → get_tcr MISS → **cambio de color SIN purga**
+// (contaminación de color, confirmada en visor en BIGTEST-ADAPTIVE).
+//
+// Estos tests fijan las dos mitades: que el orden de entrada manda (por eso hay
+// que anclarlo), y el escenario exacto que falló. Ver NEOTOWER.md §25.
+// ===========================================================================
+
+namespace {
+
+// Cadena de pares (old,new) que CANON_SCHED emitiría para un orden dado:
+// batches de tool consecutivo, y sólo los cambios REALES de herramienta.
+// Espejo de NeoTower.cpp:1220-1313.
+std::vector<std::pair<int, int>> chain_pairs(const std::vector<SublayerKey>& items,
+                                             const std::vector<size_t>&      order,
+                                             int                             initial_tool)
+{
+    std::vector<std::pair<int, int>> pairs;
+    int running = initial_tool;
+    for (size_t idx : order) {
+        const int tool = items[idx].tool_id;
+        if (tool == running) continue;      // batch del mismo tool → sin TC real
+        pairs.emplace_back(running, tool);
+        running = tool;
+    }
+    return pairs;
+}
+
+} // namespace
+
+TEST_CASE("MultiPassScheduler: fully tied items echo the INPUT order (s237 BUG A)",
+          "[NeoTower][MPScheduler]")
+{
+    // Un objeto, un plano, 3 buckets ColorMix: mismo chain_key, mismo pass_idx,
+    // misma z. Empate total → el scheduler no decide nada.
+    const uint64_t chain = 42;
+    std::vector<SublayerKey> items{
+        sk(chain, 1, 2, 15.8498),
+        sk(chain, 1, 1, 15.8498),
+        sk(chain, 1, 0, 15.8498),
+    };
+    const auto order = MultiPassScheduler::order_sublayers_by_tool_windowed(
+        items, /*initial_tool*/3, NeoTowerZ::Z_EPS_PLAN);
+
+    REQUIRE(is_permutation_of_indices(items, order));
+    // La propiedad que importa: sale lo que entró, en el mismo orden.
+    REQUIRE(order == std::vector<size_t>{0, 1, 2});
+
+    // Y con la entrada invertida sale invertido — o sea, el orden de entrada
+    // DECIDE. Por eso el sort de surf_events necesita un desempate explícito.
+    std::vector<SublayerKey> reversed{items[2], items[1], items[0]};
+    const auto order_rev = MultiPassScheduler::order_sublayers_by_tool_windowed(
+        reversed, /*initial_tool*/3, NeoTowerZ::Z_EPS_PLAN);
+    REQUIRE(reversed[order_rev[0]].tool_id == 0);
+    REQUIRE(reversed[order_rev[2]].tool_id == 2);
+}
+
+TEST_CASE("MultiPassScheduler: BIGTEST-ADAPTIVE z=15.85 plans the pair emission asks for (s237)",
+          "[NeoTower][MPScheduler]")
+{
+    // Escena real: T3 entra arrastrado del sub-plano inferior (z=15.8488, ventana
+    // propia), y el plano de arriba tiene los 3 buckets empatados. Entrando en T1.
+    const uint64_t chain = 37225600060465230ull;
+    const int      enter = 1;
+
+    // Orden CANÓNICO — el de PrintObject::multipass_sublayers(), que es el que usa
+    // la emisión (y el espejo 1a). Es el que el fix de s237 preserva.
+    std::vector<SublayerKey> canonical{
+        sk(chain, 0, 3, 15.8488),
+        sk(chain, 1, 2, 15.8498),
+        sk(chain, 1, 1, 15.8498),
+        sk(chain, 1, 0, 15.8498),
+    };
+    const auto order = MultiPassScheduler::order_sublayers_by_tool_windowed(
+        canonical, enter, NeoTowerZ::Z_EPS_PLAN);
+    const auto pairs = chain_pairs(canonical, order, enter);
+
+    // Exactamente lo que emite el gcode verificado: 1→3, 3→2, 2→1, 1→0.
+    REQUIRE(pairs == std::vector<std::pair<int, int>>{{1, 3}, {3, 2}, {2, 1}, {1, 0}});
+
+    // El par que la emisión pide y que se perdía. Éste es EL bug de s237.
+    REQUIRE(std::find(pairs.begin(), pairs.end(), std::make_pair(3, 2)) != pairs.end());
+
+    // Contraprueba: con los 3 empatados barajados (lo que hacía el std::sort
+    // inestable), `3→2` DESAPARECE del plan. Si este REQUIRE empieza a fallar es
+    // que alguien quitó el desempate y el bug ha vuelto.
+    std::vector<SublayerKey> shuffled{
+        canonical[0], canonical[3], canonical[2], canonical[1],
+    };
+    const auto order_s = MultiPassScheduler::order_sublayers_by_tool_windowed(
+        shuffled, enter, NeoTowerZ::Z_EPS_PLAN);
+    const auto pairs_s = chain_pairs(shuffled, order_s, enter);
+    REQUIRE(pairs_s != pairs);
+    REQUIRE(std::find(pairs_s.begin(), pairs_s.end(), std::make_pair(3, 2)) == pairs_s.end());
+}
+
+TEST_CASE("MultiPassScheduler: two chains are decided by chain logic, not by the tie-break (s237)",
+          "[NeoTower][MPScheduler]")
+{
+    // z=14.4498 era el plano que acertaba POR CASUALIDAD: al haber dos objetos
+    // (dos chain_key) manda el round-robin de cadenas y el desempate deja de ser
+    // decisivo. Fijado para que quede claro por qué ese plano no reproducía el bug.
+    // FIXTURE REDUCIDA a 4 entradas (el plano real tiene más): lo que se fija aquí
+    // es la propiedad —dos cadenas ⇒ el orden de entrada NO decide—, no la
+    // secuencia completa de ese plano.
+    const int enter = 1;
+    std::vector<SublayerKey> items{
+        sk(37244490869137479ull, 0, 3, 14.3929),
+        sk(37225600060465223ull, 0, 3, 14.4488),
+        sk(37244490869137479ull, 1, 1, 14.4498),
+        sk(37225600060465223ull, 1, 2, 14.4498),
+    };
+    const auto order = MultiPassScheduler::order_sublayers_by_tool_windowed(
+        items, enter, NeoTowerZ::Z_EPS_PLAN);
+
+    REQUIRE(is_permutation_of_indices(items, order));
+    REQUIRE(causal_order_respected(items, order));
+    // Con dos cadenas, invertir el orden de los items empatados NO cambia la
+    // secuencia de herramientas: la decide la lógica de cadena.
+    std::vector<SublayerKey> swapped{items[0], items[1], items[3], items[2]};
+    const auto order_sw = MultiPassScheduler::order_sublayers_by_tool_windowed(
+        swapped, enter, NeoTowerZ::Z_EPS_PLAN);
+    REQUIRE(chain_pairs(items, order, enter) == chain_pairs(swapped, order_sw, enter));
+}
+
+// ===========================================================================
 // NeoTowerPure::sublayer_slot_height — <=40% of nominal, floored at 0.04 mm.
 // ===========================================================================
 
@@ -358,6 +495,172 @@ TEST_CASE("NeoTowerPure::eff_layer_height: staircase shrinks, sparse gap unchang
         REQUIRE_THAT(NeoTowerPure::eff_layer_height(2.0f, 0.2f, 2.0f),
                      WithinAbs(0.2f, 1e-6));
     }
+    // NEOTKO_NEOTOWER_TAG s237 — BUG B. El suelo debe aplicarse TAMBIÉN en la rama de
+    // retorno crudo. Caso real de BIGTEST-ADAPTIVE: la rama de capa real de 1a alimenta
+    // `lt.wipe_tower_layer_height`, que YA es un delta (9.58902 − 9.57571 = 0.0133076).
+    // Con el nominal envenenado la condición `delta < nominal_h` NO se cumple, así que
+    // antes de s237 salía crudo → `;HEIGHT:0.0133076` en el gcode.
+    SECTION("a poisoned nominal below the floor is clamped up (s237, BUG B)") {
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(9.58902f, 0.0133076f,
+                                                    /*last_plane*/9.57571f),
+                     WithinAbs(NeoTowerZ::NOMINAL_LH_MIN, 1e-4));
+    }
+    SECTION("the floor also applies with no previous plane (s237)") {
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(0.2f, 0.01f, /*last_plane*/0.2f),
+                     WithinAbs(NeoTowerZ::NOMINAL_LH_MIN, 1e-4));
+    }
+    SECTION("a healthy nominal is untouched by the floor (s237 no-op check)") {
+        REQUIRE_THAT(NeoTowerPure::eff_layer_height(0.5f, 0.2f, 0.0f),
+                     WithinAbs(0.2f, 1e-6));
+    }
+}
+
+TEST_CASE("NeoTowerZ: the group epsilon must be wt2's merge epsilon (s236)",
+          "[NeoTower][NeoTowerZ]")
+{
+    // s236 missing-purge bug. NeoTower's z-grouping (NT_WT_EPS) decides how many
+    // plan layers it BELIEVES wt2 will build; plan_toolchange's WT_LAYER_Z_EPS
+    // decides how many it ACTUALLY builds. They must be the same value, or every
+    // Δz between them opens a group that wt2 merges away, and wt2_li drifts by one
+    // for the rest of the print — orphaning TCRs and emitting colour changes with
+    // no tower visit (repro lancuak3-A34.3mf, Δz = 3e-5).
+    //
+    // WT_LAYER_Z_EPS is defined as Z_EPS_PLAN in NeoWipeTower.cpp, so this pins
+    // the contract from the constants side. Any future attempt to make the
+    // grouping "finer" than the merge reopens the bug.
+    STATIC_REQUIRE(NeoTowerZ::Z_EPS_PLAN > NeoTowerZ::Z_EPS_GROUP);
+
+    // And the reason using the coarser epsilon is SAFE (preserves s49): a
+    // sublayer sits SUBLAYER_GAP below its real layer, which stays above the
+    // merge epsilon, so the sublayer/real pair still lands in two plan layers.
+    STATIC_REQUIRE(NeoTowerZ::SUBLAYER_GAP > NeoTowerZ::Z_EPS_PLAN);
+
+    // The window that was silently broken: 1e-5 < Δz < 1e-4.
+    const float pathblend_spread = 3e-5f;   // A34: 3.4498 - 3.44977
+    REQUIRE(pathblend_spread > NeoTowerZ::Z_EPS_GROUP);   // NeoTower split it
+    REQUIRE(pathblend_spread < NeoTowerZ::Z_EPS_PLAN);    // wt2 merged it
+}
+
+// ===========================================================================
+// NeoTowerPure::mark_standalone_planes — s114 band-top, s236 "exactly one".
+//
+// s236 bug: the marker accepted every sublayer inside the 0.02 mm same-plane
+// window instead of the single highest one. MultiPass puts its sublayers
+// 0.2-1.2 µm below the nominal, so a two-sublayer painted plane got BOTH marked
+// as structural planes; the first then advanced the emitting-plane tracker and
+// the second computed eff_layer_height() over a 1 µm delta → clamped to the
+// 0.04 mm floor → ~5× the purge lines → tower depth 51.6 mm instead of 20.8 mm.
+// Pre-fix, T1/T2/T3 below marked 4/3/4 respectively.
+// ===========================================================================
+
+namespace {
+// Sublayer/real event carrying BOTH Z levels (the ev() helper below is for the
+// dedup tests and leaves z_nominal at 0).
+NeoTowerEvent pev(float z_nominal, float z_actual, size_t old_t, size_t new_t, bool sub)
+{
+    NeoTowerEvent e;
+    e.z_nominal   = z_nominal;
+    e.z_actual    = z_actual;
+    e.old_tool    = old_t;
+    e.new_tool    = new_t;
+    e.is_sublayer = sub;
+    return e;
+}
+size_t count_marked(const std::vector<NeoTowerEvent>& evts)
+{
+    return static_cast<size_t>(
+        std::count_if(evts.begin(), evts.end(),
+                      [](const NeoTowerEvent& e) { return e.standalone_plane; }));
+}
+} // namespace
+
+TEST_CASE("mark_standalone_planes: two sublayers on a parent-less plane mark ONE plane (s236)",
+          "[NeoTower][Pure]")
+{
+    // The exact geometry of the reproducer scene: nominal 0.65 realised by two
+    // MultiPass sub-planes 1 µm apart, two toolchanges on each, and NO real
+    // event anywhere at 0.65.
+    std::vector<NeoTowerEvent> evts = {
+        pev(0.65f, 0.6488f, 0, 2, /*sub*/true),
+        pev(0.65f, 0.6488f, 2, 0, /*sub*/true),
+        pev(0.65f, 0.6498f, 0, 2, /*sub*/true),
+        pev(0.65f, 0.6498f, 2, 0, /*sub*/true),
+    };
+    const size_t marked = NeoTowerPure::mark_standalone_planes(evts);
+
+    // Both toolchanges of the band-top share ONE physical plane → both flagged.
+    // Pre-fix this returned 4: the lower sub-plane was flagged too, and it is
+    // the one that poisoned the tracker.
+    REQUIRE(marked == 2);
+    REQUIRE(evts[0].standalone_plane == false);   // 0.6488 stays a lámina
+    REQUIRE(evts[1].standalone_plane == false);
+    REQUIRE(evts[2].standalone_plane == true);    // 0.6498 is the band-top
+    REQUIRE(evts[3].standalone_plane == true);
+    REQUIRE(count_marked(evts) == marked);
+}
+
+TEST_CASE("mark_standalone_planes: three sub-planes still mark only the top one (s236)",
+          "[NeoTower][Pure]")
+{
+    // Generalization of T1 — nothing in the code caps the sublayer count, and a
+    // 3-pass gradient is a legitimate scene. Pre-fix: 3.
+    std::vector<NeoTowerEvent> evts = {
+        pev(0.65f, 0.6478f, 0, 2, /*sub*/true),
+        pev(0.65f, 0.6488f, 2, 1, /*sub*/true),
+        pev(0.65f, 0.6498f, 1, 0, /*sub*/true),
+    };
+    REQUIRE(NeoTowerPure::mark_standalone_planes(evts) == 1);
+    REQUIRE(evts[0].standalone_plane == false);
+    REQUIRE(evts[1].standalone_plane == false);
+    REQUIRE(evts[2].standalone_plane == true);
+}
+
+TEST_CASE("mark_standalone_planes: consecutive painted layers each keep a plane (s112-113)",
+          "[NeoTower][Pure]")
+{
+    // THE REGRESSION GUARD. s114 exists because a RUN of fully-painted layers
+    // left the tower with no structural plane at all → frozen tracker →
+    // multi-layer gap → flow-boost whiskers. The s236 fix narrows the marking,
+    // so it must still yield exactly one plane PER painted layer — never zero.
+    std::vector<NeoTowerEvent> evts = {
+        pev(0.65f, 0.6488f, 0, 2, /*sub*/true),
+        pev(0.65f, 0.6498f, 2, 0, /*sub*/true),
+        pev(0.85f, 0.8488f, 0, 2, /*sub*/true),
+        pev(0.85f, 0.8498f, 2, 0, /*sub*/true),
+    };
+    REQUIRE(NeoTowerPure::mark_standalone_planes(evts) == 2);
+    REQUIRE(evts[1].standalone_plane == true);    // band-top of layer 0.65
+    REQUIRE(evts[3].standalone_plane == true);    // band-top of layer 0.85
+    REQUIRE(evts[0].standalone_plane == false);
+    REQUIRE(evts[2].standalone_plane == false);
+}
+
+TEST_CASE("mark_standalone_planes: a real event on the plane suppresses marking (s114)",
+          "[NeoTower][Pure]")
+{
+    // The pink-cube / MMU-line scenarios: any real (non-sublayer) event at the
+    // same z_nominal means the layer is NOT parent-less, so every sublayer is a
+    // decoration of it. This behaviour is unchanged by s236 and is what made the
+    // bug invisible in every scene that had a second colour at that height.
+    std::vector<NeoTowerEvent> evts = {
+        pev(0.65f, 0.6488f, 0, 2, /*sub*/true),
+        pev(0.65f, 0.6498f, 2, 0, /*sub*/true),
+        pev(0.65f, 0.65f,   2, 3, /*sub*/false),   // the cube's real toolchange
+    };
+    REQUIRE(NeoTowerPure::mark_standalone_planes(evts) == 0);
+    REQUIRE(count_marked(evts) == 0);
+}
+
+TEST_CASE("mark_standalone_planes: a staircase shell outside the window is never a plane (s102-h)",
+          "[NeoTower][Pure]")
+{
+    // z_actual well below z_nominal = box-in-drawer staircase shell, not a
+    // band-top. It must stay synthetic+inset even when it is the ONLY sublayer
+    // of a parent-less layer; the 0.02 mm window semantics are untouched by s236.
+    std::vector<NeoTowerEvent> evts = {
+        pev(0.65f, 0.55f, 0, 2, /*sub*/true),
+    };
+    REQUIRE(NeoTowerPure::mark_standalone_planes(evts) == 0);
 }
 
 // ===========================================================================

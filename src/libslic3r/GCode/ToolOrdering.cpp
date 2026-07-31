@@ -1626,6 +1626,49 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     }
     // NEOTKO_NEOTOWER_TAG_END
 
+    // NEOTKO_NEOTOWER_TAG_START — s238: la torre tiene que existir DESDE LA CAPA 0.
+    //
+    // `ToolOrdering::has_wipe_tower()` (ToolOrdering.hpp) mira **sólo la primera capa**:
+    //     return !m_layer_tools.empty() && m_first_printing_extruder != -1
+    //            && m_layer_tools.front().has_wipe_tower;
+    // Es el supuesto de Orca de siempre: la torre arranca en la capa 1 porque en un print
+    // multifilamento normal el primer cambio de herramienta cae abajo. Un sandwich pintado
+    // rompe ese supuesto: el objeto es de un solo filamento hasta que aparece la pasada, que
+    // puede estar al 80% de altura. Caso real: cuerpo T3, pasada Solid T0 a z=2.0 → la capa 0
+    // no tiene partición → has_wipe_tower() false → `GCode.cpp` no construye `m_wipe_tower`
+    // NI enlaza `m_neo_tower` → todo el dispatch de NeoTower queda inerte y los cambios de
+    // herramienta salen sin purga.
+    //
+    // Promocionamos la primera capa cuando alguna capa POSTERIOR ya va a construir torre. No
+    // fabrica torres donde no hacía falta: si nadie más la pide, esto no hace nada. Y es
+    // coherente con el marco s115 (la torre es una columna bottom-up): una torre que sólo
+    // existiese arriba estaría flotando en el aire.
+    //
+    // Va ANTES del bloque s117 a propósito: así la invariante de continuidad de cajones
+    // calcula con la base ya puesta y rellena la columna desde abajo, en vez de arrancar su
+    // baseline a media altura.
+    //
+    // NO se toca `has_wipe_tower()`: tiene 6 lectores, dos de ellos del eje 1a de NeoTower
+    // (`NeoTower.cpp:408` y `:1531`). Cambiar su semántica de "capa 0" a "cualquier capa"
+    // movería ese eje; marcar el dato de entrada no.
+    {
+        const bool has_any_sublayer = std::any_of(
+            m_layer_tools.begin(), m_layer_tools.end(),
+            [](const LayerTools& lt) { return lt.is_mp_sublayer; });
+        if (has_any_sublayer && !m_layer_tools.empty() && !m_layer_tools.front().has_wipe_tower) {
+            const bool tower_later = std::any_of(
+                m_layer_tools.begin() + 1, m_layer_tools.end(),
+                [](const LayerTools& lt) { return lt.has_wipe_tower || lt.is_mp_sublayer; });
+            if (tower_later) {
+                m_layer_tools.front().has_wipe_tower = true;
+                NeoDebug::write(NeoDebug::WIPETOWER,
+                    "FIRST_LAYER_TOWER_SEED print_z=" + std::to_string(m_layer_tools.front().print_z)
+                    + " (promoted so ToolOrdering::has_wipe_tower() sees the tower)");
+            }
+        }
+    }
+    // NEOTKO_NEOTOWER_TAG_END
+
     // NEOTKO_NEOTOWER_TAG s117 — drawer-continuity invariant (FALLO 3, hueco 2.20).
     // The stock max-gap walk above seeds its baseline from the i+1 layer even when that layer
     // is has_wt=0 (a single-tool band-nominal layer left unpromoted because the entry below is
