@@ -32,7 +32,12 @@
 #include <functional>
 #include <sstream>
 // NEOTKO_GCODE_DEBUG_TAG — para identificar el tipo real de una excepcion desde dentro de catch(...)
+// cxxabi.h es de libstdc++/libc++ (mac/linux). MSVC no lo tiene: alli nos quedamos sin el nombre
+// del tipo, pero el what() de abajo si funciona en todas las plataformas.
+#if !defined(_MSC_VER)
 #include <cxxabi.h>
+#define NEOTKO_HAS_CXXABI 1
+#endif
 #include <typeinfo>
 #include <fstream> // NEOTKO_LIBRE_TAG — world-space import /tmp debug log
 #include <boost/algorithm/string.hpp>
@@ -8857,6 +8862,7 @@ void Sidebar::can_search()
 static std::string neotko_current_exception_desc()
 {
     std::string desc = "unknown";
+#if defined(NEOTKO_HAS_CXXABI)
     if (const std::type_info *ti = abi::__cxa_current_exception_type()) {
         int   status = 0;
         char *dem    = abi::__cxa_demangle(ti->name(), nullptr, nullptr, &status);
@@ -8864,6 +8870,7 @@ static std::string neotko_current_exception_desc()
         if (dem != nullptr)
             free(dem);
     }
+#endif
     // El mensaje solo lo llevan las que heredan de std::exception. Las demas se quedan en el tipo,
     // que ya es infinitamente mas de lo que decia wx.
     try {
