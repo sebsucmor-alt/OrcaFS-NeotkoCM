@@ -89,8 +89,13 @@ std::pair<bool, std::string> GLShadersManager::init()
         // the shaders above: if it fails to load, render_volumes_lit() just runs with
         // u_shadow_enabled=false and keeps the AO + SSCS path, it doesn't break shader init.
         const bool sdepth_ok = append_shader("shadow_depth", { prefix + "shadow_depth.vs", prefix + "shadow_depth.fs" });
+        // NEOTKO_PHOTOMODE_TAG s242: the cyclorama that replaces the bed in Photo Mode. Same
+        // not-gating-`valid` policy as its neighbours above: if it fails to load, _render_photo_stage()
+        // simply draws nothing and the user gets an empty backdrop instead of a dead app.
+        const bool stage_ok  = append_shader("photo_stage", { prefix + "photo_stage.vs", prefix + "photo_stage.fs" });
         NEOTKO_LOG(REALCOLOR, "GLShadersManager::init: prefix=\"" << prefix << "\" shells_gbuffer=" << gbuf_ok
-            << " shells_lit=" << lit_ok << " shells_shadow=" << shadow_ok << " shadow_depth=" << sdepth_ok);
+            << " shells_lit=" << lit_ok << " shells_shadow=" << shadow_ok << " shadow_depth=" << sdepth_ok
+            << " photo_stage=" << stage_ok);
     }
 
     // used to render objects in 3d editor

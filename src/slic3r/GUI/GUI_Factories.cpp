@@ -8,6 +8,7 @@
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "Plater.hpp"
+#include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242
 #include "ObjectDataViewModel.hpp"
 
 #include "OptionsGroup.hpp"
@@ -1456,6 +1457,20 @@ void MenuFactory::create_default_menu()
     append_menu_check_item(&m_default_menu, wxID_ANY, _L("Show Labels"), "",
         [](wxCommandEvent&) { plater()->show_view3D_labels(!plater()->are_view3D_labels_shown()); plater()->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, &m_default_menu,
         []() { return plater()->is_view3D_shown(); }, [this]() { return plater()->are_view3D_labels_shown(); }, m_parent);
+
+    // NEOTKO_PHOTOMODE_TAG s242 — second way into Photo Mode, next to the plate icon rather than
+    // instead of it. The icon lives on the plate itself, so it is unreachable whenever the plate
+    // is panned off-screen or the camera is inside the object; a right-click always works.
+    //
+    // This menu is built ONCE at startup, so the LibreMode check cannot live here the way it does
+    // in append_menu_items_process_clipboard() — a user enabling LibreMode mid-session would
+    // never see the item. It goes in the enable callback instead, which wx re-evaluates every
+    // time the menu opens.
+    append_menu_check_item(&m_default_menu, wxID_ANY, _L("Photo mode"),
+        _L("Studio-style presentation view for taking pictures of the design"),
+        [](wxCommandEvent&) { plater()->toggle_photo_mode(); }, &m_default_menu,
+        []() { return plater()->is_view3D_shown() && photo_mode_available(); },
+        []() { return photo_mode().active; }, m_parent);
 }
 
 void MenuFactory::create_common_object_menu(wxMenu* menu)

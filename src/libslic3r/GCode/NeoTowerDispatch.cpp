@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <string>
 #include <optional>
+#include <cstdlib>             // NEOTKO_NEOTOWER_TAG s240b — getenv del interruptor A/B
 #include <boost/log/trivial.hpp> // NEOTKO_NEOTOWER_TAG s205-5b.3b — structural/orphan warnings
 
 namespace Slic3r {
@@ -225,6 +226,110 @@ std::optional<std::string> WipeTowerIntegration::dispatch_neotower_structural_tc
 }
 
 // ---------------------------------------------------------------------------
+// emit_sublayer_plane_structural_finish — NEOTKO_NEOTOWER_TAG s240. FIX de la familia A.
+//
+// EL BUG (§29.7): un plano de sublayer sólo toca la torre a través de `_mp_toolchange`, que
+// abre con `if (!m_writer.need_toolchange(t)) return;`. Si el writer ya está en el tool del
+// plano no hay purga, luego no hay visita — y la rama de sublayer de process_layer termina en
+// su propio `return`, muy por delante de la llamada `tool_change(..., finish_layer=true)` que
+// emite el relleno estructural. La entrada que el plan SÍ reservó para esa z se queda sin
+// escribir y ahí queda aire. Medido: 84 planos con purga → 0 huecos; 6 sin purga → 5 huecos
+// (BT), y los 6 huecos de familia A de BT-A salen todos de planos sin purga.
+//
+// EL ARREGLO: pedir el finish estructural explícitamente en esos planos. NO se toca el atajo
+// de `_mp_toolchange` — ese atajo es CORRECTO (no hay que cambiar de herramienta); lo que
+// falta es otra cosa, y meter ahí un toolchange que hoy no existe sería cirugía mayor en la
+// zona más frágil del proyecto.
+//
+// 🚫 Esto NO es tapar un hueco con más flujo (§28): emite la pasada que el planificador ya
+// había reservado, a su altura real, con su propio TCR. Mismo caudal, ni un mm³ de más.
+//
+// Guardas:
+//  · `has_pending_structural()` es la única puerta — muda, y falsa cuando el slot ya se
+//    emitió por otra vía (purga del plano, o el REDIRECT de un vecino: así es como
+//    z=7.95857 no deja hueco en BT). Sin ella, doble emisión en los planos que sí purgaron.
+//  · NO se toca `m_tool_change_idx` ni `m_last_wipe_tower_print_z`: el finish estructural
+//    vive en su propio canal (indexado por z, no por cursor de slot) y esos dos gobiernan el
+//    camino de capa real. Dejarlos quietos mantiene ese camino byte-idéntico.
+// ---------------------------------------------------------------------------
+std::string WipeTowerIntegration::emit_sublayer_plane_structural_finish(
+    GCode& gcodegen, float plane_z, int tool)
+{
+    std::string gcode;
+    if (gcodegen.m_neo_tower == nullptr)
+        return gcode;                                  // Classic: inerte
+
+    // NEOTKO_NEOTOWER_TAG s240b — interruptor de A/B: `NEOTKO_NO_SUBPLANE_FINISH=1` apaga
+    // este fix sin recompilar.
+    //
+    // Existe porque en BT-A aparecieron 9 entradas fantasma en el canal de capa real y NO
+    // hay forma de saber si son mías o si ya estaban: nunca se capturó el `finalize` de
+    // BT-A antes del fix. Correlacioné proximidad (p=0.003) y me precipité — esa cuenta
+    // tenía un confusor: tanto mis emisiones como los fantasmas se concentran en las zonas
+    // con grupos MultiPass, y la tasa base la calculé sobre TODAS las entradas de plan,
+    // incluidos tramos largos sin nada de MP. Dos exports del mismo binario, uno con la
+    // variable y otro sin ella, lo zanjan sin discusión y sin otra compilación.
+    static const bool _off = (std::getenv("NEOTKO_NO_SUBPLANE_FINISH") != nullptr);
+    if (_off) {
+        NEOTKO_LOG(WIPETOWER, "SUBPLANE_FINISH z=" << plane_z
+            << " → APAGADO por NEOTKO_NO_SUBPLANE_FINISH (control A/B)");
+        return gcode;
+    }
+
+    if (!gcodegen.m_neo_tower->has_pending_structural(plane_z)) {
+        NEOTKO_LOG(WIPETOWER, "SUBPLANE_FINISH z=" << plane_z << " tool=T" << tool
+            << " → NADA pendiente (sin finish planificado, ya emitido, o su banda de Z ya"
+            << " tiene material) — sin tocar");
+        return gcode;
+    }
+
+    // NEOTKO_NEOTOWER_TAG s240b — el writer DEBE estar ya en la herramienta del TCR.
+    //
+    // Este camino existe para planos que NO han cambiado de herramienta, así que por
+    // construcción el writer está en la del plano, que es la del TCR estructural (identidad
+    // T→T). Si no lo está, este plano SÍ ha tocado la torre y emitir aquí dejaría al writer
+    // en un tool que el plan de la capa siguiente no espera — el fallo medido en BT-A
+    // (9 entradas fantasma en el canal real). Con la guarda de cobertura de arriba no
+    // debería ocurrir; si ocurre, quiero enterarme, no arreglarlo por lo bajo.
+    const int _writer_tool = gcodegen.writer().extruder()
+                             ? (int)gcodegen.writer().extruder()->id() : -1;
+
+    auto struct_tcr = gcodegen.m_neo_tower->get_finish_layer(plane_z);
+    if (!struct_tcr) {
+        // has_pending_structural ya comprobó que existe y está en rango, así que un fallo
+        // aquí significa que las dos consultas discrepan → decirlo alto, no seguir callando.
+        BOOST_LOG_TRIVIAL(error)
+            << "[NeoTower] SUBPLANE_FINISH: has_pending_structural(z=" << plane_z
+            << ") dijo SÍ pero get_finish_layer falló — los dos índices divergen";
+        return gcode;
+    }
+
+    if (_writer_tool >= 0 && (size_t)_writer_tool != struct_tcr->new_tool) {
+        NEOTKO_LOG(WIPETOWER, "SUBPLANE_FINISH z=" << plane_z
+            << " → ABORTA: writer en T" << _writer_tool
+            << " pero el TCR estructural es T" << struct_tcr->new_tool
+            << " — este plano YA tocó la torre; emitir aquí descuadraría la cadena"
+            << " de herramientas de la capa real siguiente");
+        return gcode;
+    }
+
+    NEOTKO_LOG(WIPETOWER, "SUBPLANE_FINISH z=" << plane_z << " tool=T" << tool
+        << " → EMITE relleno estructural (plano sin purga que si no dejaría aire)"
+        << " tcr_z=" << struct_tcr->print_z
+        << " initial=T" << struct_tcr->initial_tool
+        << " new=T" << struct_tcr->new_tool
+        << " bytes=" << struct_tcr->gcode.size());
+
+    // Se emite con la herramienta DEL TCR (== la del writer, comprobado arriba), no con la
+    // que le pasen: así append_tcr no puede dejar el writer apuntando a otra cosa.
+    const int _emit_tool = (int)struct_tcr->new_tool;
+    gcode += gcodegen.is_BBL_Printer()
+             ? append_tcr(gcodegen, *struct_tcr, _emit_tool, (double)plane_z)
+             : append_tcr2(gcodegen, *struct_tcr, _emit_tool, (double)plane_z);
+    return gcode;
+}
+
+// ---------------------------------------------------------------------------
 // dispatch_neotower_sublayer_prime — sublayer-prime toolchange dispatch (BBL + non-BBL).
 // Verbatim extraction of the NeoTower sublayer-prime block that used to live inline in the
 // emit_local_z_unplanned_toolchange lambda of tool_change(). This is the FRAGILE, keyed
@@ -296,11 +401,25 @@ std::string WipeTowerIntegration::emit_orphan_finish_layers_until_z(GCode& gcode
     const float lo = m_orphan_floor_z;
     const float hi = next_visited_z - EPS;
     int highest_emitted_idx = -1;
+    // NEOTKO_NEOTOWER_TAG s240 — traza INCONDICIONAL de la ventana y de los descartes.
+    //
+    // Hasta ahora esta función sólo escribía cuando emitía algo. En BIGTEST eso son CERO
+    // líneas en todo el slice, y con cero líneas no se puede distinguir "no me han llamado"
+    // de "me han llamado y he descartado todo" — que son bugs en ficheros distintos. Es la
+    // reincidencia exacta de la lección de s238: un log que sólo escribe cuando actúa no
+    // sirve para DESCARTAR. Ahora habla siempre, y dice por qué descarta cada slot.
+    //
+    // Dato clave que esta traza hace visible: la ventana es ABIERTA por abajo
+    // (`pz <= lo + EPS` descarta), así que un slot que caiga EXACTAMENTE sobre una z ya
+    // visitada no lo recoge nadie — ni este drenador ni el bucle de extrusores de
+    // process_layer si esa capa no tiene extrusores. Ese es el agujero por el que se
+    // escapan los finish estructurales de plano de sublayer (§28, familia A).
+    int n_below = 0, n_above = 0, n_empty = 0, n_emit = 0;
     for (int i = 0; i < (int)m_tool_changes.size(); ++i) {
-        if (m_tool_changes[i].empty()) continue;
+        if (m_tool_changes[i].empty()) { ++n_empty; continue; }
         const float pz = (float)m_tool_changes[i].front().print_z;
-        if (pz <= lo + EPS) continue;            // already past the floor
-        if (pz >= hi)       continue;            // current or future visited
+        if (pz <= lo + EPS) { ++n_below; continue; }   // already past the floor
+        if (pz >= hi)       { ++n_above; continue; }   // current or future visited
         const WipeTower::ToolChangeResult& tcr = m_tool_changes[i].front();
         NeoDebug::write(NeoDebug::WIPETOWER,
             std::string("ORPHAN_EMIT z=") + std::to_string(pz)
@@ -315,7 +434,17 @@ std::string WipeTowerIntegration::emit_orphan_finish_layers_until_z(GCode& gcode
         gcodegen.m_neo_tower->record_shadow_slot(false,
             /*from_finish=*/(tcr.initial_tool == tcr.new_tool), (size_t)i, 0);
         highest_emitted_idx = i;
+        ++n_emit;   // NEOTKO_NEOTOWER_TAG s240
     }
+    // NEOTKO_NEOTOWER_TAG s240 — el resumen de la ventana, se haya emitido o no.
+    NeoDebug::write(NeoDebug::WIPETOWER,
+        std::string("ORPHAN_WINDOW until_z=") + std::to_string(next_visited_z)
+        + " ventana=(" + std::to_string(lo) + ".." + std::to_string(hi) + ")"
+        + " emitidos=" + std::to_string(n_emit)
+        + " descartados_por_debajo=" + std::to_string(n_below)
+        + " descartados_por_arriba=" + std::to_string(n_above)
+        + " slots_vacios=" + std::to_string(n_empty));
+
     if (highest_emitted_idx >= 0) {
         m_layer_idx = highest_emitted_idx;
         m_tool_change_idx = 0;

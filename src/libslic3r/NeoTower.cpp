@@ -2276,7 +2276,23 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
             << " rule=" << ((delta > NeoTowerZ::Z_EPS_PLAN && delta < nominal_h - NeoTowerZ::Z_EPS_PLAN)
                                 ? "delta"
                                 : (nominal_h < NeoTowerZ::NOMINAL_LH_MIN - NeoTowerZ::Z_EPS_PLAN
-                                       ? "floor" : "nominal-kept")));
+                                       ? "floor" : "nominal-kept"))
+            // NEOTKO_NEOTOWER_TAG s240 — firma de la familia B, ya masticada.
+            //
+            // Cuando el salto hasta el plano de apoyo es MAYOR que la altura que se va a
+            // depositar, esta capa no llega abajo y deja aire: `delta - eff_h` milímetros.
+            // La regla es correcta a propósito — nunca se agranda una altura (§28: el techo
+            // es volumétrico, un hueco se tapa con más pasadas, jamás con más flujo) — pero
+            // entonces alguien tiene que planificar esas pasadas, y hoy no las planifica
+            // nadie. Medido en BIGTEST-ADAPTIVE: 4 casos con delta≈0.2557 y eff_h≈0.085,
+            // que son 0.591 mm de los 0.677 que le faltan a esa torre.
+            //
+            // Se marca aquí, en el sitio donde se toma la decisión, para no tener que
+            // deducirlo restando columnas a mano. V23 PLAN_GAP lo confirma por el otro lado.
+            << ((delta > eff + NeoTowerZ::Z_EPS_PLAN)
+                    ? ("  [NO_LLEGA_AL_APOYO: faltan " + std::to_string(delta - eff)
+                       + " mm — hacen falta pasadas intermedias, NO más flujo (§28)]")
+                    : std::string()));
         return eff;
     };
     bool grp_planned_any = false; // any plan_toolchange() issued for current z-group
@@ -2811,22 +2827,48 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                          [](const _ZBand& a, const _ZBand& b) { return a.z < b.z; });
 
         int   _v21_hits  = 0;
+        int   _v21_sib   = 0;   // hermanas si>0 — comparten banda de Z POR DISEÑO
         float _v21_worst = 0.f;
         float _filled_to = -1e9f;
         for (const _ZBand& b : _bands) {
             const float _bottom = b.z - b.h;
+            // NEOTKO_NEOTOWER_TAG s239b — FALSO POSITIVO estructural de V21, medido en BT/BT-A:
+            // 340 de 899 disparos eran `si>0`, es decir la 2ª/3ª purga de la MISMA capa de
+            // torre. Todas las TCR de una capa comparten print_z y height, así que rellenan la
+            // misma banda de Z por construcción — y se reparten en Y, que es justo el mecanismo
+            // correcto (verificado en el dump: z=0.25 → si=1 Y=[86.7,89.95], si=2 Y=[80.1,83.35],
+            // disjuntas). V21 sólo mira Z, así que no puede distinguirlas de un solape real y
+            // ahogaba la señal. Se cuentan aparte en vez de callarlas: un detector que descarta
+            // en silencio es tan malo como uno que no habla.
+            if (b.si > 0) { ++_v21_sib; _filled_to = std::max(_filled_to, b.z); continue; }
             if (_filled_to > -1e8f && _bottom < _filled_to - NeoTowerZ::Z_EPS_PLAN) {
                 const float _ov = _filled_to - _bottom;
                 ++_v21_hits;
                 _v21_worst = std::max(_v21_worst, _ov);
+                // NEOTKO_NEOTOWER_TAG s239b — clasificar el disparo, que hay tres formas y sólo
+                // una es un fallo. `MISMO-PLANO`: lo que ya estaba relleno acaba a menos de
+                // SAME_PLANE_MAX_OFF de esta z ⇒ es una lámina de este mismo plano físico. Tras
+                // el fix de s239 eso es lo ESPERADO (comparten banda de Z y se reparten en Y);
+                // quien juzga ese caso es V22, no V21. `SUELO-LH`: el plano de debajo es otro de
+                // verdad y el solape es la tasa de NOMINAL_LH_MIN sobre una microcapa adaptive,
+                // legal por la cota de V17.
+                const bool _same_plane = (b.z - _filled_to) < NeoTowerZ::SAME_PLANE_MAX_OFF;
                 NT_LOG("[VALIDATE] V21 Z-OVERFILL TCR[" << b.li << "][" << b.si << "]"
                     << " z=" << b.z << " h=" << b.h
                     << " rellena=[" << _bottom << "," << b.z << "]"
                     << " pero la torre ya estaba llena hasta " << _filled_to
-                    << " → solape=" << _ov << " mm (material sobre material)");
+                    << " → solape=" << _ov << " mm"
+                    << (_same_plane ? " [MISMO-PLANO: lamina abajo, lo juzga V22]"
+                                    : " [SUELO-LH: plano inferior real, tasa NOMINAL_LH_MIN]"));
             }
             _filled_to = std::max(_filled_to, b.z);
         }
+        // NEOTKO_NEOTOWER_TAG s239b — el censo va SIEMPRE al canal, dispare o no, y con las
+        // hermanas descontadas explícitamente. Antes sólo hablaba al fallar: eso obliga a leer
+        // el silencio, que es justo lo que ha fallado en s237, s238 y otra vez aquí.
+        NT_LOG("[VALIDATE] V21 censo: " << _bands.size() << " TCRs | hermanas si>0 omitidas="
+            << _v21_sib << " | disparos=" << _v21_hits << " | solape peor=" << _v21_worst
+            << " mm (clasificados MISMO-PLANO vs SUELO-LH arriba)");
         if (_v21_hits > 0)
             BOOST_LOG_TRIVIAL(error)
                 << "[NeoTower][VALIDATE] V21 Z-OVERFILL: " << _v21_hits
@@ -3272,6 +3314,50 @@ NeoTower::get_finish_layer(float z) const
 }
 
 // ---------------------------------------------------------------------------
+// has_pending_structural() — NEOTKO_NEOTOWER_TAG s240. Ver la cabecera para el porqué.
+// Const y MUDA: no toca m_shadow_sequence y no escribe `← ERROR` cuando no hay nada.
+// ---------------------------------------------------------------------------
+bool NeoTower::has_pending_structural(float z) const
+{
+    uint64_t key = static_cast<uint64_t>(std::llround(z * 1000.f));
+    auto it = m_finish_layer_index.find(key);
+    if (it == m_finish_layer_index.end()) {
+        auto redir = m_z_redirect_finish.find(key);
+        if (redir == m_z_redirect_finish.end())
+            return false;                       // no hay finish planificado aquí: normal
+        it = m_finish_layer_index.find(redir->second);
+        if (it == m_finish_layer_index.end())
+            return false;
+    }
+    const auto [li, si] = it->second;
+    if (li >= m_result.size() || si >= m_result[li].size())
+        return false;
+    // Ya emitido por otra vía (una purga del propio plano, o el REDIRECT/fusión de un plano
+    // vecino — así es como z=7.95857 se libra de dejar hueco en BT, §29.7).
+    for (const ShadowSlot& s : m_shadow_sequence)
+        if (s.from_finish && !s.merged && s.a == li && s.b == si)
+            return false;
+
+    // NEOTKO_NEOTOWER_TAG s240b — CALLEJÓN SIN SALIDA, documentado para no repetirlo.
+    //
+    // Aquí se probó una segunda guarda: emitir sólo si la banda [z−h, z] no estaba ya
+    // cubierta por material emitido, recorriendo m_shadow_sequence. La idea era buena —es la
+    // lógica de V23— pero **no puede funcionar en línea**: la cobertura de esos planos la
+    // aporta la canónica de su capa PADRE, que se emite DESPUÉS (medido en BT-A: siempre
+    // ~13 líneas de log más tarde, a una z ligeramente mayor). Una consulta en tiempo de
+    // emisión sólo ve el pasado, así que la guarda no filtró ni un caso de 28.
+    //
+    // Se retiró en vez de dejarla: no aportaba nada y, en una escena donde la canónica sí
+    // se emitiera antes, habría suprimido una emisión NECESARIA. "No filtra nada pero puede
+    // filtrar mal" es la peor combinación.
+    //
+    // La cobertura de Z es una propiedad del print ENTERO; quien la juzga es V23, al final.
+    // Si hay que reducir emisiones, el criterio tiene que salir del PLAN (que sí se conoce
+    // entero antes de emitir), no del registro de consumo a medias.
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // finalize_shadow() — NEOTKO_NEOTOWER_TAG s205-5b.2 — runtime consumption/order
 // shadow. Called once at end of gcode emission (WipeTowerIntegration::finalize).
 // Delegates the bijection tally to the pure helper; violations announce on the
@@ -3298,7 +3384,132 @@ void NeoTower::finalize_shadow() const
         << m_emission_order.size() << " canonical entries — "
         << rep.violations.size() << " violation(s), " << rep.census.size() << " census");
 
+    report_z_coverage();     // NEOTKO_NEOTOWER_TAG s240 — V23
     report_depth_accounting();
+}
+
+// ---------------------------------------------------------------------------
+// report_z_coverage() — NEOTKO_NEOTOWER_TAG s240, V23.
+//
+// EL detector que faltaba: cobertura del eje Z por lo que la torre EMITE de verdad.
+//
+// WHY: toda la instrumentación previa de la torre mide el PLAN — alturas por evento,
+// slots por capa, profundidad reservada. Y el plan casi siempre está bien. En BIGTEST el
+// plan cubre el eje Z sin un solo hueco, y aun así el gcode tiene 5 tramos sin material,
+// porque 5 entradas planificadas no llegan nunca a escribirse. Ningún invariante V1-V22
+// puede ver eso: todos miran el lado de antes.
+//
+// V23 recorre las bandas [z-altura, z] de los TCR REALMENTE EMITIDOS (m_shadow_sequence,
+// que es el registro de consumo en tiempo de emisión) y denuncia cualquier tramo de Z sin
+// material. Es literalmente el censo que en s239/s240 hubo que hacer a mano con python
+// sobre el gcode, y que habría cazado este bug solo desde s103.
+//
+// Emite DOS censos, y la diferencia entre ellos es el diagnóstico ya hecho:
+//   · PLAN_GAP — hueco que ya existe en el plan. Nadie planificó material ahí.
+//                (Familia B: `eff_layer_height` mantiene el nominal ante un salto grande.)
+//   · EMIT_GAP — el plan lo cubría pero la emisión no. La entrada existe, su TCR existe y
+//                tiene extrusión, y nadie lo despachó.  (Familia A.)
+// Un EMIT_GAP que no sea también PLAN_GAP apunta SIEMPRE al lado de emisión; al revés,
+// al planificador. Esa separación es la que costó media sesión de s240 hacer a mano.
+//
+// La altura sale de `nt_tcr_footprint()`, que lee el `;HEIGHT:` del gcode del propio TCR
+// — la altura DEPOSITADA, no la nominal del plan (§28.3: con `_bd_wall_mult` no coinciden).
+//
+// 🚫 Este detector NO autoriza a tapar huecos con más flujo. Ver §28: el límite es
+// volumétrico y la torre ya imprime pegada al techo. Un hueco se cierra con las pasadas
+// que falten, cada una a su altura real.
+//
+// PURAMENTE DIAGNÓSTICO: const, sólo escribe log, no puede cambiar un solo G1.
+// ---------------------------------------------------------------------------
+void NeoTower::report_z_coverage() const
+{
+    if (m_emission_order.empty())
+        return;
+
+    // Una banda de material: [z - height, z]. `li`/`si` sólo para poder señalar al
+    // culpable en el mensaje.
+    struct Band { float lo = 0.f; float hi = 0.f; size_t li = 0; size_t si = 0; bool emitted = false; };
+
+    // Altura DEPOSITADA de un slot, leída de su propio gcode. Devuelve 0 si el TCR no
+    // declara altura o no existe — un slot sin gcode no aporta banda, y eso es
+    // precisamente lo que debe salir como hueco, no como cobertura silenciosa.
+    auto band_of = [this](const TowerEvent& te, bool emitted) -> Band {
+        Band b;
+        b.li = te.li; b.si = te.si; b.emitted = emitted;
+        const std::string* gc = nullptr;
+        if (te.kind == LayerKind::BridgeMerged) {
+            if (te.li < m_merged_tcrs.size()) gc = &m_merged_tcrs[te.li].gcode;
+        } else if (te.li < m_result.size() && te.si < m_result[te.li].size()) {
+            gc = &m_result[te.li][te.si].gcode;
+        }
+        b.hi = te.z_actual;
+        b.lo = te.z_actual;
+        if (gc != nullptr) {
+            const NtTcrFootprint fp = nt_tcr_footprint(*gc);
+            if (fp.has_h && fp.height > 0.f)
+                b.lo = te.z_actual - fp.height;
+        }
+        return b;
+    };
+
+    // Qué entradas canónicas se consumieron al menos una vez (mismo criterio que
+    // report_depth_accounting: por slot {li,si}, nunca casando floats).
+    std::set<std::pair<size_t, size_t>> consumed;
+    for (const ShadowSlot& s : m_shadow_sequence)
+        consumed.insert({s.a, s.b});
+
+    std::vector<Band> plan_bands, emit_bands;
+    plan_bands.reserve(m_emission_order.size());
+    for (const TowerEvent& te : m_emission_order) {
+        const bool was_emitted = consumed.count({te.li, te.si}) > 0;
+        const Band b = band_of(te, was_emitted);
+        if (b.hi > b.lo) {
+            plan_bands.push_back(b);
+            if (was_emitted) emit_bands.push_back(b);
+        }
+    }
+
+    // Umbral: el plan trabaja en float y dos bandas contiguas pueden diferir en el último
+    // bit. 1 µm es la resolución a la que se cuantiza Z en toda la torre (make_key), así
+    // que por debajo de eso no hay hueco que discutir.
+    const float GAP_EPS = 1e-3f;
+
+    auto sweep = [&](std::vector<Band>& bands, const char* tag) -> std::pair<int, float> {
+        std::sort(bands.begin(), bands.end(),
+                  [](const Band& a, const Band& b) { return a.lo < b.lo; });
+        int   n_gaps = 0;
+        float total  = 0.f;
+        float top    = 0.f;
+        bool  first  = true;
+        for (const Band& b : bands) {
+            if (!first && b.lo - top > GAP_EPS) {
+                ++n_gaps;
+                total += b.lo - top;
+                NT_INVARIANT_WARN(std::string("V23 ") + tag + ": tramo de Z SIN material ["
+                    + std::to_string(top) + ".." + std::to_string(b.lo) + "] = "
+                    + std::to_string(b.lo - top) + " mm — la siguiente banda que deposita es"
+                    + " li=" + std::to_string(b.li) + " si=" + std::to_string(b.si)
+                    + " z=" + std::to_string(b.hi)
+                    + (b.emitted ? "" : " (y esa tampoco se emitió)"));
+            }
+            top   = first ? b.hi : std::max(top, b.hi);
+            first = false;
+        }
+        return {n_gaps, total};
+    };
+
+    const auto plan_res = sweep(plan_bands, "PLAN_GAP");
+    const auto emit_res = sweep(emit_bands, "EMIT_GAP");
+
+    NT_LOG("V23 COVERAGE: plan=" << plan_bands.size() << " bandas → "
+        << plan_res.first << " hueco(s) / " << plan_res.second << " mm"
+        << " | emitido=" << emit_bands.size() << " bandas → "
+        << emit_res.first << " hueco(s) / " << emit_res.second << " mm"
+        << " | " << (plan_bands.size() - emit_bands.size()) << " entrada(s) planificada(s)"
+        << " que nadie despachó"
+        << ((emit_res.first > plan_res.first)
+                ? "  ← el plan cubre más que la emisión: mirar el DESPACHO, no el planificador"
+                : ""));
 }
 
 // ---------------------------------------------------------------------------
@@ -3600,9 +3811,35 @@ void NeoTower::validate_plan() const
         prev_real = i;
     }
 
+    // NEOTKO_NEOTOWER_TAG s240 — V4/V5 sólo tienen sentido DESPUÉS de generate().
+    //
+    // validate_plan() se llama dos veces: al final de collect_and_plan() (línea ~224) y
+    // otra vez al final de generate() (línea ~3158). En la PRIMERA los índices
+    // (m_tcr_index, m_tcr_index_sub, m_finish_layer_index) están vacíos por construcción
+    // — se rellenan en la Fase 3 de generate(). Los invariantes que preguntan "¿tiene este
+    // evento su entrada en el índice?" contestan que NO para TODOS los eventos, siempre.
+    //
+    // Medido en BIGTEST (s240): 380 avisos V4 + 8 V5 en el pase pre-generate, y CERO en el
+    // post-generate. O sea el 100% del ruido histórico de V4/V5 era este pase. Ese ruido no
+    // es cosmético: es exactamente lo que hizo invisible el bug de los huecos de Z (§28),
+    // porque un detector que grita 380 veces contra 5 fallos reales no es un detector. Es
+    // la tercera reincidencia del mismo patrón (§25.2, s237 IDENTITY_NO_TCR).
+    //
+    // No se puede simplemente mover la llamada: el pase temprano SÍ valida lo que ya existe
+    // (V1/V2/V3/V7… sobre los eventos y el plan). Lo que se salta aquí es sólo lo que
+    // depende de los índices.
+    // (V9 y V10-V13 ya se auto-protegen con `!m_tcr_index.empty()` / `!m_result.empty()`;
+    // V4 y V5 eran los dos que no lo hacían.)
+    const bool _indices_ready = !m_result.empty();
+    if (!_indices_ready) {
+        NT_LOG("VALIDATE: pase pre-generate — V4/V5 omitidos"
+            << " (los índices se construyen en generate() Fase 3;"
+            << " evaluarlos aquí daría un falso positivo por evento)");
+    }
+
     // V4: non-identity events (m_events) have tcr index
     // NEOTKO_NEOTOWER_TAG s102 — check the event's own channel (dual-channel index).
-    for (size_t i = 0; i < m_events.size(); ++i) {
+    for (size_t i = 0; _indices_ready && i < m_events.size(); ++i) {
         const auto& ev = m_events[i];
         const uint64_t key = make_key(ev.z_actual, ev.old_tool, ev.new_tool);
         const auto& _chan = ev.is_sublayer ? m_tcr_index_sub : m_tcr_index;
@@ -3621,7 +3858,7 @@ void NeoTower::validate_plan() const
     // get_finish_layer() line ~1924), not by make_key(z, old, new).  Using the
     // wrong key here produced spurious V5 warnings on every identity event.
     // Also consult m_z_redirect_finish when the z is a fused alias.
-    for (size_t i = 0; i < m_growth_events.size(); ++i) {
+    for (size_t i = 0; _indices_ready && i < m_growth_events.size(); ++i) {
         const auto& ev = m_growth_events[i];
         const uint64_t z_key = static_cast<uint64_t>(
             std::llround(ev.z_actual * 1000.f));

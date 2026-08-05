@@ -1501,6 +1501,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // {z_lo_mm, z_hi_mm, tool_per_perimeter[]}), written per-object by the Precision ALH
     // gizmo when its opt-in toggle is on; consumed by GCode/ToolOrdering in Fase 5.4 only.
     ((ConfigOptionString,  neotko_slope_perimeter_recolor))
+    ((ConfigOptionBool,    neotko_alh_adapt_to_color))
+    ((ConfigOptionBool,    neotko_alh_slope_recolor))
     // NEOTKO_SANDWICH_ENGINE_TAG_END
     // NEOTKO_TEXTUREBUMP_TAG_START — Texture Bump Mapping: deterministic image-driven relief,
     // reuses the Fuzzy Skin apply point (post-Arachne, per ExtrusionLine junctions) but samples a

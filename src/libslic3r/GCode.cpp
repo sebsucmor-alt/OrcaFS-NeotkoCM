@@ -1606,6 +1606,19 @@ std::string WipeTowerIntegration::finalize(GCode& gcodegen)
         // consumption/order shadow (detector only, no gcode effect). This is the last
         // wipe-tower touch point, after process_layers() emitted every TCR.
         gcodegen.m_neo_tower->finalize_shadow();
+        // NEOTKO_NEOTOWER_TAG s240 — marca de fin de la EXPORTACIÓN.
+        //
+        // El log lleva un banner "SLICE #N collect_and_plan" al empezar a planificar, pero
+        // nada que marque dónde acaba de escribirse el gcode. En s240 eso costó una fase
+        // entera: dos ficheros de log se partieron por un sitio que no era, la mitad de
+        // emisión de un caso acabó en la carpeta del otro, y el síntoma que se apuntó
+        // ("el caso adaptive no emite WALL_COVERAGE") no existía — el detector funcionaba
+        // y el trozo del log simplemente no estaba. Con esta marca, cualquiera que corte
+        // un log sabe si tiene el lado de emisión entero o lo ha cortado por la mitad.
+        NeoDebug::write(NeoDebug::WIPETOWER,
+            "===== EXPORT_END — fin de la emisión de gcode."
+            " Todo lo de arriba (V23, SHADOW, DEPTH_ACCT) corresponde a ESTE export."
+            " Si cortas el log, córtalo por aquí. =====");
         return gcode;
     }
     if (!gcodegen.is_BBL_Printer()) {
@@ -5585,6 +5598,39 @@ LayerResult GCode::process_layer(const Print& print,
             m_mp_group.add_pass(static_cast<unsigned int>(_s.tool_id));
         }
         // NEOTKO_MULTIPASS_TAG_END
+
+        // NEOTKO_NEOTOWER_TAG s240 — FIX huecos de Z, familia A (§29.7).
+        //
+        // Este `return` de abajo es el final del camino para un plano de sublayer: nunca
+        // llega al bucle de extrusores ni a la llamada `tool_change(..., finish_layer=true)`
+        // que emite el relleno estructural de la torre. Si el plano ha necesitado purga ya
+        // la visitó por `_mp_toolchange`; si no, la torre se queda sin su pasada y deja aire.
+        //
+        // Se pide aquí, con la z del plano y la herramienta con la que se está imprimiendo
+        // (que es la del TCR estructural, por ser un evento identidad T→T). Idempotente: la
+        // llamada no hace nada si no hay finish pendiente, que es el caso de la inmensa
+        // mayoría de planos. Un plano = una llamada (§ el comentario de MP_EMIT_ORDER: una
+        // z_actual por invocación de process_layer).
+        if (m_wipe_tower && m_neo_tower) {
+            float _sub_plane_z = -1.f;
+            int   _sub_plane_tool = -1;
+            for (const LayerToPrint& _ltp : ltps_sorted) {
+                if (!_ltp.mp_sublayer) continue;
+                _sub_plane_z    = (float)_ltp.mp_sublayer->print_z;
+                _sub_plane_tool = (int)_ltp.mp_sublayer->tool_id;
+                break;
+            }
+            if (_sub_plane_z > 0.f) {
+                // La herramienta con la que emitir es la del writer si ya hay una montada:
+                // el TCR estructural es identidad, así que initial==new==writer, y usar el
+                // writer evita pedir un tool que no está puesto.
+                const int _emit_tool = m_writer.extruder()
+                                       ? (int)m_writer.extruder()->id() : _sub_plane_tool;
+                gcode += m_wipe_tower->emit_sublayer_plane_structural_finish(
+                    *this, _sub_plane_z, _emit_tool);
+            }
+        }
+
         result.gcode = std::move(gcode);
         return result;
     }
@@ -7359,6 +7405,29 @@ LayerResult GCode::process_layer(const Print& print,
     }
     (void)mp_layer_all_empty;  // classifier result consumed above; silence unused in Classic builds
     // NEOTKO_MULTIPASS_TAG_END
+
+    // NEOTKO_NEOTOWER_TAG s240 — LAYER_TOWER_STATE: estado de la torre en CADA capa.
+    //
+    // Sustituye a la sonda condicional `EMPTY_EXTRUDER_LOOP` de la primera tanda, que
+    // disparó CERO veces en BIGTEST y con eso descartó mi hipótesis: el bucle de extrusores
+    // NO está vacío en las capas que pierden material. Una sonda que sólo habla en el caso
+    // que uno espera no distingue "mi hipótesis es falsa" de "no he llegado hasta aquí"
+    // (misma lección que ORPHAN_WINDOW, s238). Ahora habla en todas.
+    //
+    // Lo que hay que poder responder con esta línea, para los 5 huecos de BT:
+    //   · z=4.70714 y 5.90714 → el plano MP se resuelve sin purga (init == tools del plano),
+    //     así que la ruta MultiPass nunca llama a la torre. Ver MP_EMIT_ORDER: los 40 planos
+    //     que SÍ cambian de color se emiten bien; los 2 que no, dejan aire.
+    //   · z=6.52429, 9.54143, 11.9414 → la capa se visita (sale su ORPHAN_WINDOW) pero NO
+    //     produce ni una línea, ni siquiera MP_EMIT_ORDER. Esta traza dice si llegó aquí,
+    //     con cuántos extrusores y si la torre estaba activa para ella.
+    //
+    // Cotejar siempre contra V23 EMIT_GAP (la verdad sobre el material) y contra
+    // SHADOW: STRUCTURAL_NEVER_EMITTED (la entrada de plan que se quedó sin despachar).
+    NEOTKO_LOG(WIPETOWER, "LAYER_TOWER_STATE z=" << print_z
+        << " has_wipe_tower=" << (has_wipe_tower ? 1 : 0)
+        << " n_extruders=" << layer_extruders.size()
+        << " mp_group_active=" << (m_mp_group.active() ? 1 : 0));
 
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_extruders) {

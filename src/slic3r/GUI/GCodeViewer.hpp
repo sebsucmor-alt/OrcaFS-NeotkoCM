@@ -697,6 +697,13 @@ public:
         };
 
         bool skip_invisible_moves{ false };
+        // NEOTKO: true SOLO cuando el usuario ha movido el tirador de inicio fuera de su posicion por
+        // defecto. Con el tirador al minimo esto es false y el rango inferior NO recorta nada — asi las
+        // capas de debajo se siguen dibujando (en gris) como en el modo de capas apiladas de siempre.
+        bool first_limited{ false };
+        // NEOTKO: true cuando el tirador que se manipula es el de INICIO del rango. Marca a que extremo
+        // siguen el toolhead virtual y la ventana de gcode textual.
+        bool track_first{ false };
         Endpoints endpoints;
         Endpoints current;
         Endpoints last_current;
@@ -821,7 +828,10 @@ public:
         float ambient_ground   = 0.35f; // realcolor_peel.vs two-tone ambient, see item 2
         float ambient_sky      = 0.45f;
         float fresnel_power    = 5.0f;  // realcolor_peel.vs rim term, see item 2
-        float fresnel_strength = 0.05f;
+        // s243d: 0.519, calibrado a ojo por el usuario contra su escena. El 0.05 anterior venía
+        // de s164, cuando el rim era el ÚNICO sitio donde vivía cualquier variación de material;
+        // con F4 repartiendo el acabado por la difusa, el rim puede pesar de verdad sin dominar.
+        float fresnel_strength = 0.519f;
         // NEOTKO_REALCOLOR_TAG: global multiplier applied to every m_realcolor_materials.td[t]
         // before it reaches realcolor_accum.fs — manual override + cheap visual TD calibration
         // (no real TD meter available), see render_realcolor_debug_panel().
@@ -843,6 +853,73 @@ public:
         float sss_strength     = 0.35f;
         float sss_radius_px    = 6.0f;
         float sss_reference_td = 1.0f;
+
+        // NEOTKO_REALCOLOR_TAG s243 (F1, "huecos"): desplazamiento de cada vértice del toolpath a
+        // lo largo de su normal, en mm de mundo — ver realcolor_peel.vs para el porqué físico (la
+        // extrusión real solapa con su vecina, la geometría del visor no). Ambos a 0 =
+        // comportamiento pre-s243.
+        //
+        // s243b — SEPARADOS por orientación de la cara, tras la prueba del usuario: a 0.1 uniforme
+        // mejoraban unas zonas y a 0.014 otras distintas, porque un solo escalar estaba haciendo
+        // dos trabajos opuestos. Sólo los FLANCOS cierran el hueco entre líneas contiguas; hinchar
+        // las caras horizontales no cierra nada y además funde capas entre sí (pared abombada, sin
+        // costura). Por eso el lateral puede ir alto y el vertical tiene que ir corto —
+        // adicionalmente, el bias de peel de realcolor_peel.fs se acota con la altura REAL del
+        // path, así que engordar mucho en Z le haría medir contra una altura que no existe.
+        // s243d: valores elegidos por el usuario. Los dos estaban en el tope de su slider, así
+        // que los topes se han subido (ver render_realcolor_debug_panel) — un default clavado en
+        // el máximo no deja explorar hacia arriba, y aún quedan huecos que cerrar.
+        // s243e: subidos al tope actual tras la prueba del usuario ("casi casi se ve sólido").
+        // Estos SÍ se quedan clavados en el máximo del slider a propósito: es donde el resultado
+        // convence, y ya se comprobó que subir más el vertical entra en conflicto con el bias del
+        // peel. Si algún día hace falta más recorrido, el que puede crecer es el lateral.
+        float swell_lateral_mm  = 0.500f; // flancos: los que cierran los huecos que se ven
+        float swell_vertical_mm = 0.050f; // caras arriba/abajo: sólo para sellar la costura
+
+        // NEOTKO_REALCOLOR_TAG s243 (F4 = A4+A5): interpolación global de los acabados por tipo de
+        // superficie hacia el neutro (gloss=1, roughness=0, que ≡ pre-s243). 0 = apagado del todo
+        // y bit-idéntico a antes, 1 = la tabla de realcolor_surface_finish() tal cual. Existe para
+        // poder A/B el efecto entero de un tirón en vez de tener que revertir código.
+        // s243d: 0.514 — el usuario prefiere el acabado a media fuerza. La tabla de
+        // realcolor_surface_finish() se calibró para que 1.0 fuese ya perceptible (s243c), así
+        // que la mitad es una elección estética, no una compensación de un efecto flojo.
+        float finish_strength = 0.514f;
+
+        // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): gradeo de presentación en realcolor_present.fs.
+        // Ambos a 1.0 = imagen idéntica a pre-s243.
+        //
+        // 🔑 s243e — LOS DEFAULTS SALIERON AL REVÉS DE LO QUE PREDECÍA EL PLAN, y merece la pena
+        // dejarlo escrito. A7 (docs/WIP/REALCOLOR_PSEUDOREALISTIC.md) sostenía que el look "de
+        // render de CAD" viene de color demasiado saturado y luz demasiado dura, y proponía
+        // comprimir rango y desaturar ~10% — que es de donde salió el 0.92/0.92 inicial. Calibrando
+        // contra la escena real, el usuario acabó en contraste 1.07 (ABRE el rango en vez de
+        // comprimirlo) y saturación 1.00 (sin desaturar nada).
+        //
+        // La explicación de por qué el plan falló: A7 se escribió como sustituto barato del resto
+        // de frentes, para tapar con gradeo lo que no se iba a arreglar de verdad. Pero F1 (huecos),
+        // F3 (eje de la luz) y F4 (acabado por superficie) SÍ se hicieron, y quitaron el look
+        // artificial en su origen. Aplanar encima ya sólo restaba vida a la imagen. Un
+        // apaño-para-no-arreglar deja de tener sentido cuando arreglas la causa.
+        float grade_contrast   = 1.07f;
+        float grade_saturation = 1.00f;
+
+        // NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): sella los huecos INTERIORES de la pieza
+        // (los que quedan tras F1 y que son huecos reales, no aliasing) sin tocar el contorno, que
+        // es donde la transparencia parcial ES el antialiasing de la silueta. Ver compute_interior()
+        // en realcolor_present.fs. 0 = apagado y bit-idéntico a pre-F6.
+        //
+        // ⚠️ s243e: DEFAULT 0 — este efecto es INERTE en la práctica y hay que saberlo antes de
+        // volver a tocarlo. Sólo sube el alfa de píxeles que YA tienen geometría (los de cobertura
+        // 0 hacen discard antes de llegar), y los huecos reales que quedan tras F1 son justamente
+        // de cobertura 0: agujeros de un píxel entero o más. Encima el radio de muestreo es de 1
+        // píxel de salida, así que en un hueco de 2-3 píxeles los propios vecinos caen dentro del
+        // hueco y tampoco cuenta como interior. Verificado por el usuario: 0 y 1 se ven igual.
+        //
+        // Se deja el código porque es correcto y barato de reactivar, pero a 0 no se cobran 8
+        // muestras por píxel por algo que no se ve. Para que sirviera de verdad habría que
+        // rellenar también los píxeles de cobertura 0, y eso obliga a inventar color Y profundidad
+        // — con el riesgo de tapar agujeros REALES del modelo. Esa decisión no está tomada.
+        float fill_interior = 0.0f;
     };
 
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
@@ -1056,6 +1133,32 @@ private:
     // perspective/spot light later.
     Matrix4d m_shadow_light_proj_view{ Matrix4d::Identity() };
     float m_shadow_texel_world_mm{ 0.0f };
+    // NEOTKO_PHOTOMODE_TAG s242: did render_shadow_map() succeed for the CURRENT frame? Needed
+    // because the Photo Mode cyclorama is drawn later in the frame, from GLCanvas3D, and has to
+    // know whether the map it is about to sample was actually filled. A stale `true` would make
+    // it sample last frame's depth texture (or an uninitialised one) and stripe the floor.
+    bool m_shadow_map_valid_this_frame{ false };
+
+    // NEOTKO_PHOTOMODE_TAG s242 (F5): the Photo Mode environment probe — two equirectangular
+    // textures baked on the CPU from the Photo Mode lights, sampled by shells_lit.fs for the
+    // ambient (irradiance) and the reflection (mirror).
+    //
+    // Deliberately NOT RealColor's m_realcolor_env, even though the baking technique is the same
+    // (s214): that one is baked from RealColorTuning and lives in a Y-up space, and it is edited
+    // from a different panel. Sharing it would mean the Preview's debug sliders silently changing
+    // how a customer photo looks. Same idea, separate probe.
+    struct PhotoEnvCache
+    {
+        unsigned int mirror_tex     = 0;
+        unsigned int irradiance_tex = 0;
+        // Fingerprint of the lights the current bake came from; a mismatch triggers a re-bake.
+        // Baking is a few thousand CPU samples, far too slow to redo every frame just because the
+        // camera moved, and far too stale to never redo when a light is dragged.
+        std::array<float, 20> key{};
+        bool valid = false;
+        bool gl_objects_created() const { return mirror_tex != 0 && irradiance_tex != 0; }
+    };
+    PhotoEnvCache m_photo_env;
     // NEOTKO_GCODE_REPROCESSOR — LibreMode-gated rule editor panel state, see
     // render_expert_gcode_reprocessor_panel().
     ExpertReprocessorPanelState m_expert_reprocessor;
@@ -1203,6 +1306,33 @@ public:
                                 const std::function<bool(const GLVolume&)>& filter = std::function<bool(const GLVolume&)>(),
                                 bool partly_inside_enable = true);
 
+    // NEOTKO_PHOTOMODE_TAG s242: everything an external shadow RECEIVER needs to sample the map
+    // this class owns. The Photo Mode cyclorama (GLCanvas3D::_render_photo_stage) is the only
+    // caller: it is drawn after render_volumes_lit() has already filled the map, but it is not a
+    // GLVolume, so it cannot be shaded by shells_lit and has to read the map itself.
+    //
+    // Handed over as one struct rather than five getters so a caller cannot pick up the matrix
+    // and forget the validity flag — sampling an unfilled depth texture is the failure mode here,
+    // and it looks like corruption rather than like a missing feature.
+    struct ShadowMapHandle
+    {
+        bool     valid = false;
+        unsigned int depth_tex = 0;
+        int      res = 0;
+        Matrix4d light_proj_view = Matrix4d::Identity();
+        float    texel_world_mm = 0.0f;
+    };
+    ShadowMapHandle get_shadow_map_handle() const
+    {
+        ShadowMapHandle h;
+        h.valid           = m_shadow_map_valid_this_frame && m_shadow_map_cache.gl_objects_created();
+        h.depth_tex       = m_shadow_map_cache.depth_tex;
+        h.res             = m_shadow_map_cache.res;
+        h.light_proj_view = m_shadow_light_proj_view;
+        h.texel_world_mm  = m_shadow_texel_world_mm;
+        return h;
+    }
+
 private:
     void load_toolpaths(const GCodeProcessorResult& gcode_result, const BuildVolume& build_volume, const std::vector<BoundingBoxf3>& exclude_bounding_box);
     //BBS: always load shell at preview
@@ -1220,6 +1350,12 @@ private:
     // re-bakes the pixel content even if the GL objects already exist (tuning changed).
     bool ensure_realcolor_env_textures(bool force_regen);
     void destroy_realcolor_env_textures();
+
+    // NEOTKO_PHOTOMODE_TAG s242 (F5). Returns false if the probe is unavailable, in which case
+    // render_volumes_lit() sends u_env_enabled=false and the shading falls back to the flat
+    // hemisphere ambient — a duller picture, never a broken one.
+    bool ensure_photo_env_textures();
+    void destroy_photo_env_textures();
     // NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning as live sliders,
     // gated by NeoDebug::enabled(NeoDebug::REALCOLOR) — no-op unless ORCA_DEBUG_REALCOLOR is set
     void render_realcolor_debug_panel();

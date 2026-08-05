@@ -4,14 +4,23 @@
 
 
 #define SLIC3R_APP_NAME "Snapmaker Orca"
+// SLIC3R_APP_KEY stays "Snapmaker_Orca": it also names the gettext catalogs
+// (resources/i18n/*/Snapmaker_Orca.mo), so renaming it would kill every translation.
 #define SLIC3R_APP_KEY "Snapmaker_Orca"
+// NEOTKO — the per-user data directory (%AppData%\<key> on Windows,
+// ~/Library/Application Support/<key> on macOS) must NOT be shared with the official
+// Snapmaker Orca: both apps would read and write the same config, presets and user
+// profiles and silently overwrite each other. See migrate_legacy_data_dir() in GUI_App.cpp,
+// which copies the old shared folder across on first run so nobody loses their presets.
+#define SLIC3R_APP_DATA_KEY "SnapMaker-NeotkoCM"
+#define SLIC3R_APP_LEGACY_DATA_KEY "Snapmaker_Orca"
 #define SLIC3R_VERSION "01.10.01.50"
-#define Snapmaker_VERSION "2.3.4"
+#define Snapmaker_VERSION "2.3.5"
 #define MIN_FIRM_VER "1.5.0"
 #ifndef GIT_COMMIT_HASH
 #define GIT_COMMIT_HASH "0000000" // 0000000 means uninitialized
 #endif
-#define SLIC3R_BUILD_ID "2.3.4"
+#define SLIC3R_BUILD_ID "2.3.5"
 // #define SLIC3R_RC_VERSION "01.10.01.50"
 #define BBL_RELEASE_TO_PUBLIC 1
 #define BBL_INTERNAL_TESTING 0

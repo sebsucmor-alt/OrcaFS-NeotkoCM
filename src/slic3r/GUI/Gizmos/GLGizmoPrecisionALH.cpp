@@ -96,6 +96,21 @@ void GLGizmoPrecisionALH::ensure_session()
 
     load_points_from_profile(mo->layer_height_profile.get());
 
+    // NEOTKO_ALHCOLOR_TAG s240 — los toggles viajan CON el objeto. Antes eran estado de
+    // sesión puro: reabrías un 3mf y las alturas volvían pero las opciones con las que se
+    // calcularon no, así que el mismo fichero podía slicear distinto según lo que hubieras
+    // tocado antes en esa sesión. Se leen aquí (al entrar en el objeto) y se escriben en
+    // commit(), dentro del mismo snapshot que el perfil.
+    {
+        auto opt_bool = [&](const char* key, bool dflt) -> bool {
+            if (!mo->config.has(key)) return dflt;
+            const auto* o = dynamic_cast<const ConfigOptionBool*>(mo->config.option(key));
+            return o != nullptr ? o->value : dflt;
+        };
+        m_adapt_to_color        = opt_bool("neotko_alh_adapt_to_color", false);
+        m_slope_recolor_enabled = opt_bool("neotko_alh_slope_recolor", false);
+    }
+
     // NEOTKO_ALHCOLOR_TAG — replanteo TD-vs-slope, Frente 1. Cached once per object switch —
     // the mesh can't change while this gizmo is the active tool, stricter than plan §6 R3's
     // "no slicing per frame" bar. band_depth_mm reflects the plan §5bis point 4 nuance: a pure
@@ -361,6 +376,13 @@ void GLGizmoPrecisionALH::commit(const std::string& snapshot_name)
     } else {
         mo->config.erase("neotko_slope_perimeter_recolor");
     }
+
+    // NEOTKO_ALHCOLOR_TAG s240 — los dos toggles, en el MISMO snapshot que el perfil (mismo
+    // criterio atómico que el blob de arriba). Se escriben siempre, también en false: un
+    // `erase` dejaría el objeto indistinguible de "nunca tocado" y al reabrir heredaría el
+    // default en vez de la decisión del usuario.
+    mo->config.set_key_value("neotko_alh_adapt_to_color", new ConfigOptionBool(m_adapt_to_color));
+    mo->config.set_key_value("neotko_alh_slope_recolor",  new ConfigOptionBool(m_slope_recolor_enabled));
 
     mo->layer_height_profile.set(build_profile_vector());
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -1108,8 +1130,14 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
     ImGui::Text("%s", (_u8L("Max layer height") + ": " + format((float)m_slicing_params.max_layer_height, 3) + " mm").c_str());
 
     ImGui::Separator();
-    if (ImGui::Checkbox(_u8L("Adapt to Color").c_str(), &m_adapt_to_color))
+    // NEOTKO_ALHCOLOR_TAG s240 — commit al togglear, igual que "Slope recolor": el toggle
+    // ya no es sólo visual (recorta el perfil emitido vía build_profile_vector), así que
+    // tiene que quedar guardado en el objeto y en el undo stack en la misma acción.
+    if (ImGui::Checkbox(_u8L("Adapt to Color").c_str(), &m_adapt_to_color)) {
         m_parent.set_as_dirty();
+        commit(m_adapt_to_color ? "Precision layer height - Adapt to color on"
+                                : "Precision layer height - Adapt to color off");
+    }
     // NEOTKO_ALHCOLOR_TAG — Fase 5.3 opt-in. Toggling commits immediately so the stored
     // blob appears/disappears in the same user action (and lands on the undo stack).
     // Inert until Fase 5.4 — the engine doesn't read the blob yet.

@@ -70,9 +70,9 @@ If you have an old project that prints plain despite looking painted, open it, c
 a slot named "Recovered paint", and assign it the colour you wanted. That is now a two-click repair
 instead of starting over.
 
-### The purge tower — four things it was getting wrong
+### The purge tower — five things it was getting wrong
 
-All four are correctness bugs found by auditing the tower against its own G-code. All are verified
+All five are correctness bugs found by auditing the tower against its own G-code. All are verified
 against the generated G-code, and one of them against a printed tower.
 
 **The tower was up to 2.45× taller than it needed to be — but only on simple plates.** On a plate
@@ -105,6 +105,20 @@ sane minimum applied that clamp on only one of its two return paths, so a poison
 straight through. The real scope was **50 layers**, not the three that were first visible. Clamped on
 both paths now, with a new check for under-height (the existing one only ever tested for
 over-height).
+
+**The tower purged twice into the same space where a painted pass met its own layer.** When a
+painted pass sits just below a layer's nominal height, the pass fills nearly all of it — 0.1998 mm
+of a 0.2 mm layer — and the object's own layer is left two microns thick. The tower has to visit
+twice at that height, once for the pass and once for the layer, and both visits were laying a full
+purge into the same two-micron gap **and over the same strip of the tower**, so the second one
+printed straight onto the first. The mechanism that spreads such visits across different strips was
+running correctly; it simply had nowhere to put the second one. The tower reserves its depth with a
+rule that made each layer's box big enough to *contain* the pass's box, which is right when the two
+sit at different heights, but these two share a height and can only sit side by side — so the
+reservation had to be the *sum* of the two, not the larger of them. It is now the sum. A new
+permanent check verifies that a pass and its layer never overlap, and reports it as an error if they
+ever do. **Expect a deeper tower on plates with painted passes**: that extra depth is space the tower
+was always using and never reserving, which is exactly why this bug existed.
 
 **Log noise cleaned up.** Benign "identity" visits to the tower were being tagged as errors, which
 masked the real ones. If you read the tower log, `← ERROR` now means an actually lost purge, and
@@ -168,19 +182,6 @@ does anything.
   penultimate layer — so a setting of 1 can still yield two painted penultimate passes under a domed
   top. Worse, those rings are usually so thin that the perimeters consume them entirely, meaning the
   "top" that spawned the extra penultimate is never printed as a top at all. Flat tops are unaffected.
-- **The tower over-extrudes where a painted pass meets its own layer.** When a painted pass sits just
-  below a layer's nominal height, the pass fills the space (0.1998 mm of a 0.2 mm layer) and the
-  object's own layer is left 0.0002 mm thick. The tower correctly shortens its visit for the pass,
-  but the visit for the layer that follows keeps its full nominal 0.2 mm and lays a complete purge
-  over the very footprint the pass just filled — the two overlap almost exactly, in a gap two microns
-  tall. The height correction knows how to chain deposited planes; it is simply not applied to
-  non-pass visits. In practice this needs an object thin enough that its layer is almost entirely
-  consumed by the pass, which is rare, but it is wrong and it is the opposite of the
-  over-sized-tower bugs fixed above: here the pass never asks for room of its own. **This
-  release ships the detector, not the fix**: a new tower invariant reports the overlap as an
-  error on every affected slice, and the tower's TCR dump now labels each colliding block with
-  the exact overlap. If you see `V21 Z-OVERFILL` in the log, that is this known issue and not a
-  new regression.
 - **Two spurious tower warnings.** The plan validator reports `V3: chain gap` between consecutive
   *real* tool-change events when a painted sublayer sits between them carrying the transition. The
   chain is intact; the check simply does not look at sublayers. Harmless, but it is the same shape as

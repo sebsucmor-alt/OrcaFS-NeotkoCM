@@ -1594,11 +1594,76 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
         // We should also check that the next wipe tower layer is no further than max_layer_height:
         unsigned int j = i+1;
         double last_wipe_tower_print_z = lt_next.print_z;
-        while (++j < m_layer_tools.size()-1 && !m_layer_tools[j].has_wipe_tower)
-            if (m_layer_tools[j+1].print_z - last_wipe_tower_print_z > max_layer_height + EPSILON) {
-                m_layer_tools[j].has_wipe_tower = true;
-                last_wipe_tower_print_z = m_layer_tools[j].print_z;
+        // NEOTKO_NEOTOWER_TAG s241 — bug N7 familia B: el paso de las visitas de la torre.
+        //
+        // El bucle stock de abajo espacia las visitas por `max_layer_height` porque en Slic3r
+        // la capa de torre ES tan gruesa como el hueco: `wipe_tower_layer_height` se calcula
+        // justo debajo (~:1718) como `print_z - último_print_z`, y la torre lo honra. Bajo
+        // NeoTower esa premisa ya NO se cumple: s86 dejó de honrar ese acumulado a propósito
+        // (sobre-extruía 3.4× y la torre crecía como una capa de 0.68 mm), así que la torre
+        // deposita `eff_layer_height`, que por §28 NUNCA agranda una altura.
+        //
+        // Presupuesto y depósito quedaron desparejados, y los dos valores conviven visibles
+        // en la misma traza (BT-A, z=20.3053):
+        //     s86/lh-trace  wt_lh=0.255695   lt_lh=0.0849837
+        // Se pasa 0.32 de presupuesto, se depositan 0.085 → 0.17 mm de aire por grupo. En
+        // BT-A eso son los 4 `V23 PLAN_GAP` / 0.590965 mm del tramo 20.05-20.98: simulando
+        // este bucle a mano con max_layer_height=0.32 salen EXACTAMENTE las cuatro z que
+        // promociona (20.3053 · 20.5588 · 20.81 · 20.9763).
+        //
+        // FIX: cuando manda NeoTower, el presupuesto pasa a ser la altura que la torre
+        // depositará DE VERDAD en la capa que tendría que cubrir el hueco. Mismo caudal, más
+        // pasadas — que es lo único que §28 permite (🚫 jamás tapar un hueco con más flujo:
+        // el p99 ya está clavado en el techo volumétrico de 20.00 mm³/s).
+        //
+        // Gated: `:1594` es código stock compartido con WipeTower2 clásico, que sigue
+        // ejecutando su rama verbatim y saliendo byte-idéntico.
+        // A/B sin recompilar: `NEOTKO_NO_ZPACE_FILL=1` fuerza la rama stock.
+        static const bool _zpace_off = (std::getenv("NEOTKO_NO_ZPACE_FILL") != nullptr);
+        const bool _zpace = !_zpace_off && NeoTower::is_enabled(config);
+        if (_zpace) {
+            while (++j < m_layer_tools.size()-1 && !m_layer_tools[j].has_wipe_tower) {
+                LayerTools& lt_j = m_layer_tools[j];
+                // Un sublayer ya construye torre en su plano: cuenta como visita (mismo
+                // criterio de "BUILT" que el bloque de continuidad de cajón, s117).
+                if (lt_j.is_mp_sublayer) { last_wipe_tower_print_z = lt_j.print_z; continue; }
+                const LayerTools& lt_cover = m_layer_tools[j+1];
+                // Presupuesto = lo que depositará la capa que tendría que cubrir el hueco si
+                // NO promocionamos ésta. `layer_height` sale de `layer->height` (:1043), o
+                // sea la altura real, adaptive incluido. Queda en 0 en las entradas
+                // sintéticas (raft, sublayers): ahí NO se aprieta el paso — un presupuesto 0
+                // promocionaría todas las capas del print.
+                double budget = max_layer_height;
+                if (lt_cover.layer_height >= 0.01 && lt_cover.layer_height < budget)
+                    budget = lt_cover.layer_height;
+                const double _zpace_gap = lt_cover.print_z - last_wipe_tower_print_z;
+                if (_zpace_gap > budget + EPSILON) {
+                    // Sin extrusores no hay a qué rotar. Son las gap layers del air-gap de
+                    // soportes (Bug 04), que tienen su propio camino en NeoTower (:1663) y
+                    // pertenecen a la familia A: no se abren aquí. No se avanza la baseline,
+                    // así que la siguiente candidata se sigue midiendo contra el mismo apoyo.
+                    if (lt_j.extruders.empty())
+                        continue;
+                    lt_j.has_wipe_tower = true;
+                    last_wipe_tower_print_z = lt_j.print_z;
+                    // Canal WIPETOWER a propósito: esta línea sólo sirve cotejada contra
+                    // Z_BUDGET / V23 / DRAWER_CONTINUITY, que viven en el mismo fichero.
+                    NEOTKO_LOG(WIPETOWER, "ZPACE_PROMOTE z=" << lt_j.print_z
+                        << " cover_z=" << lt_cover.print_z
+                        << " gap=" << _zpace_gap
+                        << " budget=" << budget
+                        << " max_lh=" << max_layer_height
+                        << " cover_lh=" << lt_cover.layer_height);
+                }
             }
+        } else {
+            // Rama STOCK — verbatim, sin tocar. Clásico sale byte-idéntico.
+            while (++j < m_layer_tools.size()-1 && !m_layer_tools[j].has_wipe_tower)
+                if (m_layer_tools[j+1].print_z - last_wipe_tower_print_z > max_layer_height + EPSILON) {
+                    m_layer_tools[j].has_wipe_tower = true;
+                    last_wipe_tower_print_z = m_layer_tools[j].print_z;
+                }
+        }
     }
 
     // NEOTKO_NEOTOWER_TAG_START — structural gap fill before MP sublayer blocks.

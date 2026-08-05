@@ -38,6 +38,7 @@
 #include <regex>
 #include <thread>
 #include <string_view>
+#include <set>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
@@ -361,7 +362,10 @@ bool is_associate_files(std::wstring extend)
     wchar_t app_path[MAX_PATH];
     ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
 
-    std::wstring prog_id             = L" Orca.Slicer.1";
+    // NEOTKO: our own ProgID. It used to be " Orca.Slicer.1", shared verbatim with the
+    // official Snapmaker Orca, so whichever app the user last ticked "associate .3mf" in
+    // hijacked the other's file associations.
+    std::wstring prog_id             = L" Neotko.FullSpectrum.1";
     std::wstring reg_base            = L"Software\\Classes";
     std::wstring reg_extension       = reg_base + L"\\." + extend;
 
@@ -2154,10 +2158,92 @@ void GUI_App::init_webview_runtime()
 }
 #endif
 
+// NEOTKO — one-time migration of the per-user data directory.
+//
+// Until 2.4.2 this build used the same data directory key as the official Snapmaker Orca
+// ("Snapmaker_Orca"), so both applications read and wrote the same config file, the same
+// user presets and the same filament profiles. Whichever one you closed last won. From
+// 2.4.3 we use our own folder; this copies the old one across the first time, so an
+// existing user opens the new build and finds everything exactly where they left it.
+//
+// Only runs when the new folder has no config yet. The old folder is left untouched, so
+// the official app keeps working and a rollback to an older Neotko build still finds its
+// data. Regenerable and potentially huge subfolders are skipped.
+static void migrate_legacy_data_dir(const boost::filesystem::path &new_dir)
+{
+    namespace fs = boost::filesystem;
+    boost::system::error_code ec;
+
+    static const char *k_conf = SLIC3R_APP_KEY ".conf";
+
+    // Already migrated, or a fresh install that has since been used: nothing to do.
+    if (fs::exists(new_dir / k_conf, ec))
+        return;
+
+    const fs::path legacy_dir = new_dir.parent_path() / SLIC3R_APP_LEGACY_DATA_KEY;
+    if (legacy_dir == new_dir || !fs::is_directory(legacy_dir, ec))
+        return;
+    // Only treat it as a data dir if it actually holds a config — don't copy a stray folder.
+    if (!fs::exists(legacy_dir / k_conf, ec))
+        return;
+
+    // Caches, logs and downloaded plugins are rebuilt on demand and can run to hundreds of
+    // megabytes. Copying them would make first launch look like a hang for no benefit.
+    static const std::set<std::string> skip = {"log", "cache", "plugins", "SVG", "tmp", "webview", "WebView"};
+
+    size_t copied = 0;
+    try {
+        for (fs::directory_iterator it(legacy_dir); it != fs::directory_iterator(); ++it) {
+            const fs::path src  = it->path();
+            const std::string name = src.filename().string();
+            if (fs::is_directory(src, ec) && skip.count(name))
+                continue;
+            const fs::path dst = new_dir / name;
+            if (fs::exists(dst, ec))
+                continue;
+            ec.clear();
+            if (fs::is_directory(src, ec)) {
+                // boost::filesystem has no recursive copy before 1.74 in all our toolchains,
+                // so walk it by hand.
+                std::vector<std::pair<fs::path, fs::path>> stack{{src, dst}};
+                while (!stack.empty()) {
+                    auto [from, to] = stack.back();
+                    stack.pop_back();
+                    fs::create_directories(to, ec);
+                    for (fs::directory_iterator jt(from); jt != fs::directory_iterator(); ++jt) {
+                        const fs::path child_from = jt->path();
+                        const fs::path child_to   = to / child_from.filename();
+                        if (fs::is_directory(child_from, ec))
+                            stack.emplace_back(child_from, child_to);
+                        else {
+                            fs::copy_file(child_from, child_to, fs::copy_option::fail_if_exists, ec);
+                            if (!ec) ++copied;
+                        }
+                    }
+                }
+            } else {
+                fs::copy_file(src, dst, fs::copy_option::fail_if_exists, ec);
+                if (!ec) ++copied;
+            }
+        }
+    } catch (const std::exception &e) {
+        // A partial copy is still better than none, and a fresh-looking profile list is far
+        // better than refusing to start. Never let migration abort startup.
+        BOOST_LOG_TRIVIAL(error) << "migrate_legacy_data_dir: " << e.what();
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "migrate_legacy_data_dir: copied " << copied << " file(s) from "
+                            << legacy_dir.string() << " to " << new_dir.string();
+}
+
 void GUI_App::init_app_config()
 {
 	// Profiles for the alpha are stored into the PrusaSlicer-alpha directory to not mix with the current release.
-    SetAppName(SLIC3R_APP_KEY);
+    // NEOTKO: SLIC3R_APP_DATA_KEY, not SLIC3R_APP_KEY. Sharing the key with the official
+    // Snapmaker Orca meant both apps used the same data directory and stomped on each
+    // other's config and presets. Translations still key off SLIC3R_APP_KEY (catalog names).
+    SetAppName(SLIC3R_APP_DATA_KEY);
 //	SetAppName(SLIC3R_APP_KEY "-alpha");
 //  SetAppName(SLIC3R_APP_KEY "-beta");
 //	SetAppDisplayName(SLIC3R_APP_NAME);
@@ -2202,6 +2288,9 @@ void GUI_App::init_app_config()
             if (!boost::filesystem::exists(data_dir_path)){
                 boost::filesystem::create_directory(data_dir_path);
             }
+            // NEOTKO: pull the user's presets and config over from the old shared folder
+            // the first time they run a build that no longer shares it. No-op afterwards.
+            migrate_legacy_data_dir(data_dir_path);
         }
 
         // Change current dirtory of application
@@ -7318,8 +7407,8 @@ void GUI_App::associate_files(std::wstring extend)
     ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
 
     std::wstring prog_path = L"\"" + std::wstring(app_path) + L"\"";
-    std::wstring prog_id = L" Orca.Slicer.1";
-    std::wstring prog_desc = L"Snapmaker_Orca";
+    std::wstring prog_id = L" Neotko.FullSpectrum.1"; // NEOTKO: was " Orca.Slicer.1", shared with the official app
+    std::wstring prog_desc = L"SnapMaker-NeotkoCM"; // NEOTKO: shown in the Windows "Open with" list — must not read the same as the official app
     std::wstring prog_command = prog_path + L" \"%1\"";
     std::wstring reg_base = L"Software\\Classes";
     std::wstring reg_extension = reg_base + L"\\." + extend;
@@ -7343,8 +7432,8 @@ void GUI_App::disassociate_files(std::wstring extend)
     ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
 
     std::wstring prog_path = L"\"" + std::wstring(app_path) + L"\"";
-    std::wstring prog_id = L" Orca.Slicer.1";
-    std::wstring prog_desc = L"Snapmaker_Orca";
+    std::wstring prog_id = L" Neotko.FullSpectrum.1"; // NEOTKO: was " Orca.Slicer.1", shared with the official app
+    std::wstring prog_desc = L"SnapMaker-NeotkoCM"; // NEOTKO: shown in the Windows "Open with" list — must not read the same as the official app
     std::wstring prog_command = prog_path + L" \"%1\"";
     std::wstring reg_base = L"Software\\Classes";
     std::wstring reg_extension = reg_base + L"\\." + extend;

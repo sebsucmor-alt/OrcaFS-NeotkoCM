@@ -353,6 +353,10 @@ void AppConfig::set_defaults()
         set_bool("auto_generate_gradients", false);
     }
 
+    if (get("color_mix_panel_expanded").empty()) {
+        set_bool("color_mix_panel_expanded", true);
+    }
+
     if (get("show_home_page").empty()) {
         set_bool("show_home_page", true);
     }

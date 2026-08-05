@@ -141,6 +141,7 @@ private:
     PickingModel m_plate_settings_icon;
     PickingModel m_plate_name_edit_icon;
     PickingModel m_move_front_icon;
+    PickingModel m_photo_icon;   // NEOTKO_PHOTOMODE_TAG s242
     GLModel m_plate_idx_icon;
     GLTexture m_texture;
 
@@ -198,7 +199,21 @@ private:
 
 public:
     static const unsigned int PLATE_NAME_HOVER_ID = 6;
-    static const unsigned int GRABBER_COUNT = 8;
+    // NEOTKO_PHOTOMODE_TAG s242: 8 -> 9 to make room for the Photo Mode icon (sub-id 8). This is
+    // the STRIDE of the plate picking-id space, not a count of icons: picking_id_component() is
+    // `plate_index * GRABBER_COUNT + sub_id`, so bumping it renumbers every plate's ids.
+    //
+    // Safe to change, and checked rather than assumed:
+    //  - all 11 call sites use it only via `/` and `%` (GUI_Factories.cpp:2366, GLCanvas3D.cpp:7654,
+    //    Plater.cpp:22518-22519, PartPlate.cpp:1345/4076-4077/4941-4942/4973-4974). None hardcodes 8.
+    //  - the id space stays within budget: SceneRaycaster::Volume (1000) must exceed
+    //    MAX_PLATES_COUNT * GRABBER_COUNT, and MAX_PLATE_COUNT is 36 -> 36 * 9 = 324.
+    // PLATE_NAME_HOVER_ID stays 6 — that is the name-edit icon and it did not move.
+    static const unsigned int GRABBER_COUNT = 9;
+    // Sub-id of the Photo Mode icon. Named because two different indexings coexist here and mixing
+    // them up is silent: this is the PICKING sub-id, while calc_vertex_for_icons() takes a LAYOUT
+    // index (0..6, the visual slot down the column) that does not match it.
+    static const unsigned int PHOTO_MODE_HOVER_ID = 8;
 
     static ColorRGBA SELECT_COLOR;
     static ColorRGBA UNSELECT_COLOR;
@@ -559,6 +574,9 @@ class PartPlateList : public ObjectBase
     GLTexture m_del_hovered_texture;
     GLTexture m_move_front_hovered_texture;
     GLTexture m_move_front_texture;
+    // NEOTKO_PHOTOMODE_TAG s242
+    GLTexture m_photo_hovered_texture;
+    GLTexture m_photo_texture;
     GLTexture m_arrange_texture;
     GLTexture m_arrange_hovered_texture;
     GLTexture m_orient_texture;
@@ -601,6 +619,22 @@ class PartPlateList : public ObjectBase
     friend class PartPlate;
 
 public:
+    // NEOTKO_REALCOLOR_TAG s243 (F2): suprime SÓLO el logo de la placa, dejando el resto del plato
+    // (fondo, rejilla, números, iconos) intacto — no es el `photo_hide` de Photo Mode, que vacía la
+    // escena entera. Lo pone GLCanvas3D cada frame antes de dibujar la lista de platos.
+    //
+    // EL PORQUÉ: RealColor compone por depth peeling y la transmitancia que le queda sin consumir
+    // deja pasar lo que haya detrás. Lo que hay detrás es un logo CON LETRAS, y el ojo lee letras
+    // a través de una pieza opaca al instante — de ahí la queja de "se distinguen letras del logo".
+    // Sobre un fondo liso, exactamente la misma fuga se lee como sombra interior y no molesta.
+    // Es la mitad barata del problema de los huecos; la otra mitad (la junta entre extrusiones que
+    // los causa de verdad) es F1, en realcolor_peel.vs.
+    //
+    // ⚠️ PÚBLICO a propósito, y separado de render_bedtype_logo/render_cali_logo aunque sean la
+    // misma familia de flags: aquellos son privados y sólo los toca PartPlate, que es `friend`.
+    // Este lo escribe GLCanvas3D desde fuera, así que vivir junto a ellos no compila.
+    bool render_logo_suppressed = false;
+
     class BedTextureInfo {
     public:
         class TexturePart {

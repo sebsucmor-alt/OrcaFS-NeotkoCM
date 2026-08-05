@@ -32,6 +32,48 @@ uniform mat4 view_model_matrix;
 uniform mat4 projection_matrix;
 uniform mat3 view_normal_matrix;
 
+// NEOTKO_REALCOLOR_TAG s243 (F1, "huecos" — versión barata de A1 en
+// docs/WIP/REALCOLOR_PSEUDOREALISTIC.md): desplazamiento del vértice a lo largo de su propia
+// normal, en MILÍMETROS de mundo (v_position ya es mundo, no hay matriz de modelo para los
+// toolpaths — ver v_world_pos abajo).
+//
+// EL PORQUÉ. La geometría del toolpath se genera con el `width` NOMINAL del path, cinta contra
+// cinta y sin solape. Una extrusión real se aplasta contra la de al lado y SOLAPA: en la pieza
+// impresa no hay junta entre líneas contiguas. En el render sí la hay, y por esa junta se ve el
+// fondo (la cama, con su logo) de arriba abajo — es la queja de "huecos" del usuario, y es
+// geometría real, no aliasing (el aliasing es el otro frente, ver el filtro de caja en
+// realcolor_present.fs). Hinchar cada tubo media junta hacia fuera las hace tocarse.
+//
+// Por qué aquí y no regenerando los buffers: los TBuffers de vértices los comparten TODAS las
+// vistas (Tool, FeatureType, Height...), así que ensanchar la sección de verdad obligaría a
+// regenerarlos al entrar y salir de RealColor. Esto es un uniform y cero buffers.
+//
+// ⚠️ Hincha también la silueta exterior y las paredes finas — por eso sale como knob
+// (RealColorTuning::swell_*_mm, panel de debug) y no como constante. A (0,0) el resultado es
+// bit-idéntico al de antes de s243.
+//
+// 🔑 s243b — ANISÓTROPO, y esto es lo importante: .x = flancos, .y = caras de arriba/abajo.
+// Un solo escalar estaba haciendo dos trabajos OPUESTOS, y de ahí que el usuario viera que 0.1
+// arreglaba unas zonas y 0.014 otras distintas.
+//
+// Un tubo de toolpath tiene dos familias de caras. El hueco entre dos líneas contiguas de la
+// MISMA capa está bordeado por los FLANCOS de cada tubo (normal horizontal): acercarlos es lo
+// único que cierra ese hueco, que es el que se ve al mirar una superficie desde arriba. La cara
+// de arriba no bordea ese hueco — hincharla no cierra nada, sólo hace la capa más alta, funde
+// cada capa con la de encima y borra la costura entre capas (la pared sale abombada y sin
+// definición: exactamente lo que se veía a swell=0.1 uniforme en la banda baja).
+//
+// Se separan por |n.z| porque las normales llegan en espacio MUNDO y este mundo es Z-arriba —
+// el mismo hecho que F3 acaba de dejar fijado en equirect_uv(). |n.z|≈1 es cara horizontal
+// (arriba/abajo), |n.z|≈0 es flanco.
+//
+// ⚠️ El componente vertical hay que dejarlo CORTO por una razón que no es estética: el bias de
+// peel de realcolor_peel.fs se acota con `u_thickness`, la altura REAL del path. Si se engorda
+// la geometría en Z mucho más que eso, la comparación de profundidad del peel empieza a medir
+// sobre una altura que ya no existe y se descartan capas que sí deberían componer. Por eso su
+// slider llega mucho más abajo que el de los flancos.
+uniform vec2 u_swell_mm;
+
 in vec3 v_position;
 in vec3 v_normal;
 
@@ -64,12 +106,24 @@ void main()
 {
     vec3 normal = normalize(view_normal_matrix * v_normal);
     v_view_normal = normal;
-    v_world_pos = v_position; // pass-through, already world space
+
+    // NEOTKO_REALCOLOR_TAG s243 (F1): el hinchado va sobre la normal SIN transformar (v_normal,
+    // espacio de mundo igual que v_position) — no sobre `normal`, que ya ha pasado por
+    // view_normal_matrix. Hoy esa matriz es la identidad (ver el set_uniform en
+    // render_toolpaths_realcolor), así que darían lo mismo; se escribe explícito para que el día
+    // que deje de serlo esto no empiece a desplazar vértices en la dirección equivocada en
+    // silencio. Todo lo que se deriva de la posición (mundo, eye_z, gl_Position) usa YA la
+    // posición hinchada, de modo que el orden del peel y el bias de realcolor_peel.fs siguen
+    // midiendo sobre la misma geometría que se rasteriza.
+    vec3 n_world = normalize(v_normal);
+    float facing_up = abs(n_world.z); // 1 = cara horizontal (arriba/abajo), 0 = flanco
+    vec3 swollen_pos = v_position + n_world * mix(u_swell_mm.x, u_swell_mm.y, facing_up);
+    v_world_pos = swollen_pos; // pass-through, already world space
 
     float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
     intensity.x = NdotL * LIGHT_TOP_DIFFUSE; // direct light only, ambient is env-sampled in .fs
 
-    vec4 position = view_model_matrix * vec4(v_position, 1.0);
+    vec4 position = view_model_matrix * vec4(swollen_pos, 1.0);
     intensity.y = LIGHT_TOP_SPECULAR * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
     v_eye_z = -position.z; // right-handed eye space, camera looks down -Z
 

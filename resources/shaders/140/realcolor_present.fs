@@ -26,6 +26,20 @@ uniform float u_sss_strength;      // 0 = off (bit-identical to pre-s214), 1 = f
 uniform float u_sss_radius_px;     // px, same supersampled texel space as u_ao_radius
 uniform float u_sss_reference_td;  // mm — a material at exactly this TD blurs at u_sss_radius_px
 
+// NEOTKO_REALCOLOR_TAG s243 (F5 = A7 de docs/WIP/REALCOLOR_PSEUDOREALISTIC.md, "el honesto y el
+// más barato"): buena parte de la sensación de "render de CAD" no viene de la geometría ni del
+// shading, viene de colores demasiado saturados y de un rango dinámico demasiado abierto. Una
+// foto real de una pieza impresa tiene los negros levantados y los colores un punto más apagados
+// que el hex del filamento.
+// u_grade_contrast = 1.0 y u_grade_saturation = 1.0 dejan la imagen EXACTAMENTE como antes de
+// s243 — el gradeo entero se apaga poniendo los dos a 1.
+uniform float u_grade_contrast;    // <1 comprime hacia el gris medio, >1 abre
+uniform float u_grade_saturation;  // <1 desatura hacia la luminancia
+
+// NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): 0 = apagado (≡ pre-F6), 1 = sella del todo los
+// huecos INTERIORES. Ver compute_interior() más abajo.
+uniform float u_fill_interior;
+
 in vec2 uv;
 out vec4 frag_color;
 
@@ -142,6 +156,47 @@ vec3 compute_sss(vec2 center_uv, vec3 sharp_lin)
     return mix(sharp_lin, accum_color / accum_weight, u_sss_strength);
 }
 
+// NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): ¿este píxel está DENTRO de la pieza o en su
+// contorno? Devuelve 0..1 = fracción de los 8 vecinos que tienen geometría.
+//
+// EL PROBLEMA QUE RESUELVE. Tras F1 (hinchado) quedan huecos que NO son aliasing: son huecos de
+// verdad, columnas de aire que atraviesan la pieza entre líneas de extrusión. Se comprobó con la
+// cuenta: a REALCOLOR_SUPERSAMPLE=2 hay exactamente 4 sub-téxeles por píxel, así que los 4 taps
+// del filtro de caja cubren la rejilla ENTERA — `coverage/4` no es una estimación con aliasing,
+// es el valor exacto. Un tap de 4 significa 25% de cobertura real. O sea que no hay nada que
+// medir mejor: la pregunta correcta no es "¿cuánta pieza hay aquí?" sino "¿QUÉ SE VE a través
+// de lo que falta?".
+//
+// Y la respuesta física es: el interior de la propia pieza. Mirando una pieza impresa real, por
+// las juntas entre líneas no se ve la mesa — se ve la masa de plástico de detrás, en sombra. Lo
+// que rompía la ilusión no era el hueco, era que detrás del hueco hubiera un logo con letras.
+//
+// EL CRITERIO. Un hueco rodeado de pieza por los 8 lados está DENTRO del contorno: sellarlo es
+// correcto. Un píxel con pieza a un lado y aire al otro ES el contorno: ahí la transparencia
+// parcial es el antialiasing de la silueta y hay que respetarla, o el objeto sale con el borde
+// dentado. La vecindad distingue las dos cosas sin necesidad de conocer la geometría.
+//
+// Reutiliza el mismo disco de 8 taps que compute_ao()/compute_sss(), a radio de ~1 píxel de
+// salida (2 téxeles a supersample 2) — ni una textura ni una pasada nuevas.
+float interior_tap(vec2 center_uv, vec2 dir)
+{
+    return step(0.5, texture(u_peel_meta0, center_uv + dir * u_texel_size * 2.0).a);
+}
+
+float compute_interior(vec2 center_uv)
+{
+    float n = 0.0;
+    n += interior_tap(center_uv, vec2( 1.0,  0.0));
+    n += interior_tap(center_uv, vec2(-1.0,  0.0));
+    n += interior_tap(center_uv, vec2( 0.0,  1.0));
+    n += interior_tap(center_uv, vec2( 0.0, -1.0));
+    n += interior_tap(center_uv, vec2( 0.7,  0.7));
+    n += interior_tap(center_uv, vec2(-0.7,  0.7));
+    n += interior_tap(center_uv, vec2( 0.7, -0.7));
+    n += interior_tap(center_uv, vec2(-0.7, -0.7));
+    return n / 8.0;
+}
+
 // NEOTKO_REALCOLOR_TAG: 2x2 box-filter downsample from the REALCOLOR_SUPERSAMPLE-resolution
 // peel/accum textures to the real canvas pixel — fixes thin ColorStitch/PathBlend geometry
 // vanishing at single-sample resolution (root cause: the default framebuffer gets 4x MSAA via
@@ -192,6 +247,23 @@ void main()
     float ao = compute_ao(uv);
     lin *= mix(1.0, ao, u_ao_strength);
 
+    // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): gradeo final, lo ÚLTIMO antes del gamma. Va aquí y no
+    // en el peel por dos razones: se aplica una vez por píxel de salida en vez de una vez por
+    // pasada de peel (hasta REALCOLOR_N_MAX veces), y sobre todo NO puede realimentar el
+    // composite Beer-Lambert — desaturar dentro del acumulador cambiaría la mezcla física de
+    // colores, que es justo lo que RealColor existe para calcular bien. Esto es presentación,
+    // no material.
+    //
+    // Pivote en 0.18 lineal (gris medio fotográfico estándar, el "18% grey card"): comprimir
+    // hacia ahí levanta los negros y baja los blancos sin desplazar la exposición media.
+    // Luminancia con los pesos Rec.709 — el espacio aquí es lineal (ver la cabecera del fichero),
+    // que es donde esos pesos son válidos; aplicarlos tras el gamma daría grises sucios.
+    const float REALCOLOR_MID_GRAY = 0.18;
+    const vec3 REALCOLOR_LUMA_709 = vec3(0.2126, 0.7152, 0.0722);
+    lin = REALCOLOR_MID_GRAY + (lin - REALCOLOR_MID_GRAY) * u_grade_contrast;
+    lin = mix(vec3(dot(max(lin, vec3(0.0)), REALCOLOR_LUMA_709)), lin, u_grade_saturation);
+    lin = max(lin, vec3(0.0)); // el pivote puede empujar un canal bajo cero; linear_to_srgb hace pow()
+
     // NEOTKO_REALCOLOR_TAG s166: curved instead of linear coverage->alpha. Linear (coverage/4.0)
     // let a SINGLE covered tap out of 4 (partial aliasing at thin edges/sparse top-infill
     // hatching) read at alpha=0.25 — 75% of whatever's behind bleeds through, which on the real
@@ -201,6 +273,24 @@ void main()
     // original intent (thin/faint geometry fades in instead of vanishing outright) without
     // letting genuinely-covered-but-aliased pixels read as mostly-transparent.
     float out_alpha = pow(coverage / 4.0, 0.4);
+
+    // NEOTKO_REALCOLOR_TAG s243 (F6): sella los huecos interiores, respeta el contorno.
+    //
+    // El smoothstep(0.70, 0.95) es donde vive la decisión: en el borde de silueta la vecindad
+    // ronda 0.5 (medio disco dentro, medio fuera) y no se sella nada; para llegar a 0.70 hacen
+    // falta ~6 de 8 vecinos con pieza, que sólo pasa dentro del contorno. El tramo entre los dos
+    // umbrales evita que la transición cante como un recorte duro.
+    //
+    // ⚠️ Sólo sube el ALFA. No inventa color ni profundidad, y por eso sólo actúa sobre píxeles
+    // que YA tienen geometría (los de cobertura 0 siguen haciendo discard arriba): esos tienen
+    // color y profundidad reales de sus propios taps cubiertos, así que subirles el alfa no
+    // fabrica información — sólo deja de dejar pasar el fondo por detrás de plástico que sí está
+    // ahí. Rellenar además los huecos de cobertura 0 exigiría inventar color Y profundidad
+    // interpolando, y taparía agujeros REALES del modelo (una perforación de 2px dejaría de
+    // verse). Esa línea no se cruza aquí.
+    float interior = smoothstep(0.70, 0.95, compute_interior(uv));
+    out_alpha = mix(out_alpha, 1.0, interior * u_fill_interior);
+
     frag_color = vec4(linear_to_srgb(lin.r), linear_to_srgb(lin.g), linear_to_srgb(lin.b), out_alpha);
     gl_FragDepth = min_depth;
 }

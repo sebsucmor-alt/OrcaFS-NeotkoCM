@@ -211,6 +211,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLSelectionRectangle.hpp
     GUI/GLShader.cpp
     GUI/GLShader.hpp
+    GUI/PhotoMode.cpp
+    GUI/PhotoMode.hpp
     GUI/GLShadersManager.cpp
     GUI/GLShadersManager.hpp
     GUI/GLTexture.cpp

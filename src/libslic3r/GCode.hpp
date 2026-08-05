@@ -149,6 +149,12 @@ public:
     // absent from layers_to_print, so the normal pipeline never dispatches their TCRs).
     // Defined out-of-line in GCode.cpp to access append_tcr2.
     std::string emit_orphan_finish_layers_until_z(GCode& gcodegen, float next_visited_z);
+
+    // NEOTKO_NEOTOWER_TAG s240 — fix de los huecos de Z (familia A, §29.7): emite el relleno
+    // estructural de un plano de sublayer que no ha necesitado purga y que por tanto no ha
+    // visitado la torre. Idempotente: no hace nada si no hay finish pendiente en esa z.
+    // Definición en NeoTowerDispatch.cpp (necesita append_tcr/append_tcr2).
+    std::string emit_sublayer_plane_structural_finish(GCode& gcodegen, float plane_z, int tool);
     // NEOTKO_NEOTOWER_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — hardening P4 (port s129).

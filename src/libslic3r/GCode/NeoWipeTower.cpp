@@ -2634,9 +2634,38 @@ WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
             const float _cov_wall_bot   = _cov_z - _cov_wall_h;
             const bool  _cov_synth_prev = (m_layer_info != m_plan.begin()
                                            && (m_layer_info - 1)->is_synthetic);
-            const float _cov_gap = (!_na_synth_any && _cov_last_real_top >= 0.f)
+            // NEOTKO_NEOTOWER_TAG s239d — el canario estaba CIEGO en el caso que importa.
+            // `GAP` se forzaba a 0 siempre que la entrada actual fuese sintética, sin mirar
+            // la geometría — y las entradas sintéticas de tipo STAIRCASE sí dibujan muro
+            // (ver el guard de dos niveles s102-h: sólo la lámina se salta el frame). Medido
+            // en BT: 52 de 52 casos con wall_bottom > prev_real_top salieron GAP=0, o sea
+            // el 100% de los huecos reales silenciados por la bandera. Es la misma bandera
+            // que apaga `_bd_wall_mult` arriba, así que apagaba el arreglo Y el detector a
+            // la vez. Ahora se mide SIEMPRE que haya referencia; quien no dibuja muro
+            // (lámina) se marca aparte en vez de falsear el número.
+            const float _cov_gap = (_cov_last_real_top >= 0.f)
                                    ? (_cov_wall_bot - _cov_last_real_top) : 0.f;
-            _wt_logc << "[NEOTOWER] WALL_COVERAGE"
+            // NEOTKO_NEOTOWER_TAG s240 — dos correcciones al canario, ninguna de gcode.
+            //
+            // (1) REFERENCIA. `GAP` se mide contra la última capa REAL, no contra la última
+            //     que DEPOSITÓ. Entre dos capas reales puede haber varias entradas
+            //     sintéticas que ya han rellenado el tramo, así que el hueco sale positivo
+            //     cuando no hay hueco ninguno. Medido en BIGTEST: los 33 AIR_GAP de tipo
+            //     STAIRCASE eran esto — 0 de ellos casaba con un hueco real del gcode.
+            //     `GAP_DEP` usa la referencia buena; `GAP` se mantiene para no romper los
+            //     greps viejos, pero el que hay que mirar es GAP_DEP.
+            //
+            // (2) ALCANCE. Esto corre dentro de generate(), o sea mide el PLAN. Y el plan
+            //     puede estar perfecto mientras el gcode deja aire: en BIGTEST el plan cubre
+            //     el eje Z sin un solo hueco y aun así faltan 0.257 mm de material, porque
+            //     5 entradas planificadas no se despachan nunca. Este canario NO PUEDE ver
+            //     eso por construcción. Quien juzga la cobertura real es V23, en
+            //     finalize_shadow(). Se deja dicho en la propia línea para que nadie vuelva
+            //     a concluir "el plan está bien, luego la torre está bien".
+            static float _cov_last_dep_top = -1.f;
+            const float _cov_gap_dep = (_cov_last_dep_top >= 0.f)
+                                       ? (_cov_wall_bot - _cov_last_dep_top) : 0.f;
+            _wt_logc << "[NEOTOWER] WALL_COVERAGE[PLAN]"
                      << " z=" << _cov_z
                      << " lh=" << m_layer_height
                      << " wall_mult=" << _bd_wall_mult
@@ -2645,16 +2674,35 @@ WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
                      << " brim_h=" << _cov_brim_h
                      << " wall_bottom=" << _cov_wall_bot
                      << " prev_real_top=" << _cov_last_real_top
+                     << " prev_dep_top=" << _cov_last_dep_top
                      << " GAP=" << _cov_gap
+                     << " GAP_DEP=" << _cov_gap_dep
                      << " synth_prev=" << (int) _cov_synth_prev
                      << " na_synth_any=" << (int) _na_synth_any
                      << " first_layer=" << (int) first_layer
                      << (std::fabs(_cov_wall_h - _cov_brim_h) > 1e-4f ? " [WALL!=BRIM]" : "")
-                     << (_cov_gap > 1e-3f ? " [AIR_GAP]" : "")
+                     // s239d — distinguir quién dibuja muro: una lámina no lo dibuja, así que
+                     // su "hueco" lo tapa la canónica del mismo plano y no es un fallo. La
+                     // staircase SÍ dibuja muro: si ahí queda aire, es un hueco de verdad.
+                     << (_na_skip_frame_synth_sub ? " [LAMINA:sin frame]"
+                                                  : (_na_synth_any ? " [STAIRCASE:con frame]"
+                                                                   : " [REAL]"))
+                     << (_cov_gap_dep > 1e-3f ? " [AIR_GAP]" : "")
+                     << (_cov_gap > 1e-3f && _cov_gap_dep <= 1e-3f
+                            ? " [ya-cubierto-por-una-sintetica: GAP viejo era falso positivo]" : "")
+                     << "  (mide el PLAN; la cobertura REAL la juzga V23)"
                      << "\n";
             _wt_logc.flush();
-            if (first_layer)      _cov_last_real_top = -1.f;     // reset per tower
+            if (first_layer) {                                   // reset per tower
+                _cov_last_real_top = -1.f;
+                _cov_last_dep_top  = -1.f;
+            }
             if (!_na_synth_any)   _cov_last_real_top = _cov_z;   // advance real top
+            // s240 — la lámina NO dibuja muro (guard de dos niveles s102-h), así que no
+            // deposita en su banda y no debe adelantar la referencia; la staircase y la
+            // capa real sí. Confundir estas dos es lo que producía los AIR_GAP fantasma.
+            if (!_na_skip_frame_synth_sub)
+                _cov_last_dep_top = std::max(_cov_last_dep_top, _cov_z);
         }
     }
 
@@ -3327,11 +3375,27 @@ void NeoWipeTower::neo_plan_group_y_offsets()
     static const bool _t_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
                             || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
 
+    // NEOTKO_NEOTOWER_TAG s239b — escritura INCONDICIONAL al canal para los invariantes de
+    // este fichero. V22 salía sólo por BOOST_LOG_TRIVIAL, que no llega a
+    // /tmp/neotko_wipetower.log: en el análisis de BT/BT-A "V22=0" no significaba "no hay
+    // solape" sino "nadie lo podía leer". Un invariante que no se puede grepear no existe.
+    auto _v22 = [](const std::string& msg) {
+        static std::ofstream _f("/tmp/neotko_wipetower.log", std::ios::app);
+        _f << "[NEOTOWER] " << msg << "\n"; _f.flush();
+        BOOST_LOG_TRIVIAL(error) << "[NeoTower]" << msg;
+    };
+
+    // Censo del asignador: cuántos grupos vio y qué hizo con cada lámina. Sin esto,
+    // `TETRIS-F2` a cero es ambiguo — no distingue "no había grupos que colocar" de "los
+    // había y ninguno cupo", que piden arreglos opuestos.
+    size_t _n_groups = 0, _n_lam_ok = 0, _n_lam_nofit = 0, _n_lam_wrap = 0, _n_lam_overlap = 0;
+
     size_t start = 0;
     for (size_t i = 0; i < m_plan.size(); ++i) {
         if (m_plan[i].is_synthetic)
             continue;                       // group continues until its canonical
         if (i > start) {                    // group with at least one synthetic
+            ++_n_groups;
             const WipeTowerInfo& canon = m_plan[i];
             // Physical window = the canonical's box, placed with the STOCK formula
             // generate() will use for it (centered when smaller than the tower, else
@@ -3360,12 +3424,14 @@ void NeoWipeTower::neo_plan_group_y_offsets()
                 const float box_e = e.depth + pw;
                 if (box_e > (win_hi - win_lo) + 0.01f) {
                     // NEOTKO_NEOTOWER_TAG s239 — no cabe ni sola en la ventana.
-                    if (e.is_same_plane)
-                        BOOST_LOG_TRIVIAL(error)
-                            << "[NeoTower][VALIDATE] V22 LAMINA-NO-FIT z=" << e.z
-                            << " box=" << box_e << " > ventana=" << (win_hi - win_lo)
-                            << " → se queda con el centrado stock y pisará la canónica"
-                            << " (banda=[" << band_lo << ".." << band_hi << "])";
+                    if (e.is_same_plane) {
+                        ++_n_lam_nofit;
+                        _v22("[VALIDATE] V22 LAMINA-NO-FIT z=" + std::to_string(e.z)
+                             + " box=" + std::to_string(box_e)
+                             + " > ventana=" + std::to_string(win_hi - win_lo)
+                             + " -> se queda con el centrado stock y pisara la canonica (banda=["
+                             + std::to_string(band_lo) + ".." + std::to_string(band_hi) + "])");
+                    }
                     continue;               // cannot fit: keep stock centering
                 }
                 if (cursor + box_e > win_hi + 0.01f) {
@@ -3374,14 +3440,16 @@ void NeoWipeTower::neo_plan_group_y_offsets()
                     // comparte banda de Z con la canónica, así que volver a `win_lo`
                     // significa depositar sobre material ya depositado. Hasta s239 esto
                     // pasaba en silencio y el bug sólo se veía releyendo el gcode.
-                    if (e.is_same_plane)
-                        BOOST_LOG_TRIVIAL(error)
-                            << "[NeoTower][VALIDATE] V22 LAMINA-WRAP z=" << e.z
-                            << " cursor=" << cursor << " box=" << box_e
-                            << " win=[" << win_lo << ".." << win_hi << "]"
-                            << " → wrap a win_lo sobre la banda canónica"
-                            << " (banda=[" << band_lo << ".." << band_hi << "])"
-                            << " — reserva de profundidad insuficiente (plan_tower s239)";
+                    if (e.is_same_plane) {
+                        ++_n_lam_wrap;
+                        _v22("[VALIDATE] V22 LAMINA-WRAP z=" + std::to_string(e.z)
+                             + " cursor=" + std::to_string(cursor)
+                             + " box=" + std::to_string(box_e)
+                             + " win=[" + std::to_string(win_lo) + ".." + std::to_string(win_hi)
+                             + "] -> wrap a win_lo sobre la banda canonica (banda=["
+                             + std::to_string(band_lo) + ".." + std::to_string(band_hi)
+                             + "]) - reserva de profundidad insuficiente (plan_tower s239)");
+                    }
                     cursor = win_lo;        // wrap (accepted stacking)
                 }
                 const float p      = cursor;
@@ -3410,20 +3478,45 @@ void NeoWipeTower::neo_plan_group_y_offsets()
                     // comparte banda de Z con su canónica, así que su franja de Y tiene
                     // que ser DISJUNTA. Las staircase están exentas por diseño: viven en
                     // otra Z y solaparse en Y es legítimo.
-                    const float _lo = std::max(0.f, s), _hi = _lo + box_e;
+                    // NEOTKO_NEOTOWER_TAG s239c — OJO con el espacio de coordenadas: hay DOS.
+                    // `p` (= cursor) es la posición FÍSICA, y es en la que están expresados
+                    // win_lo/win_hi y band_lo/band_hi. `s` es el shift que se guarda en
+                    // neo_y_shift_planned, ya convertido a la paridad de ESA entrada
+                    // (s = flip_e ? D-p-box_e : p) porque m_internal_rotation alterna 180° por
+                    // capa de plan. La primera versión de V22 comparaba `s` contra la banda
+                    // física y denunciaba 8 solapes falsos en BT-A — todos entradas con
+                    // flip_e=true colocadas correctamente en after_band o win_lo.
+                    const float _lo = p, _hi = p + box_e;
                     const float _ov = std::min(_hi, band_hi) - std::max(_lo, band_lo);
-                    if (e.is_same_plane && _ov > 0.01f)
-                        BOOST_LOG_TRIVIAL(error)
-                            << "[NeoTower][VALIDATE] V22 LAMINA-OVERLAP z=" << e.z
-                            << " lamina_Y=[" << _lo << ".." << _hi << "]"
-                            << " canonica_Y=[" << band_lo << ".." << band_hi << "]"
-                            << " solape=" << _ov << " mm en la MISMA banda de Z"
-                            << " → material sobre material (ver V21 Z-OVERFILL)";
+                    if (e.is_same_plane) {
+                        if (_ov > 0.01f) {
+                            ++_n_lam_overlap;
+                            _v22("[VALIDATE] V22 LAMINA-OVERLAP z=" + std::to_string(e.z)
+                                 + " lamina_Y=[" + std::to_string(_lo) + ".." + std::to_string(_hi)
+                                 + "] canonica_Y=[" + std::to_string(band_lo) + ".."
+                                 + std::to_string(band_hi) + "] solape=" + std::to_string(_ov)
+                                 + " mm en la MISMA banda de Z -> material sobre material");
+                        } else {
+                            ++_n_lam_ok;
+                        }
+                    }
                 }
             }
         }
         start = i + 1;
     }
+
+    // NEOTKO_NEOTOWER_TAG s239b — censo SIEMPRE, aunque no haya hecho nada. Con
+    // `grupos=0` el asignador no tenía nada que colocar (las láminas se separan por el
+    // flip de paridad + la caja más profunda de s239, que es un resultado válido); con
+    // `grupos>0` y `ok=0` sí hay un problema de sitio. Sin esta línea las dos situaciones
+    // se ven igual desde el log: en blanco.
+    _v22("[VALIDATE] V22 censo asignador Y: plan=" + std::to_string(m_plan.size())
+         + " grupos_con_sintetico=" + std::to_string(_n_groups)
+         + " | laminas OK=" + std::to_string(_n_lam_ok)
+         + " no_cabe=" + std::to_string(_n_lam_nofit)
+         + " wrap=" + std::to_string(_n_lam_wrap)
+         + " SOLAPE=" + std::to_string(_n_lam_overlap));
 }
 
 void NeoWipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& result,

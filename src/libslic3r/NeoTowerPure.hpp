@@ -373,12 +373,36 @@ inline ShadowReport validate_shadow_consumption(
             if (te.kind == LayerKind::Bridge)
                 rep.census.push_back("SHADOW: standalone Bridge emitted 0× (folded into merged) key="
                     + std::to_string(te.key));                       // expected — not a violation
+            // NEOTKO_NEOTOWER_TAG s240 — un STRUCTURAL a 0× NO es un repuesto especulativo.
+            //
+            // El resto de entradas especulativas son SUSTITUIBLES: una TC sintética del
+            // producto cruzado que no se usa significa que la agrupación eligió otra cadena
+            // que hace la MISMA transición, así que el material se deposita igual. Un
+            // finish estructural no tiene sustituto: es el único relleno de la torre en su
+            // banda de Z. Si no se emite, ahí queda aire — no hay otra entrada que lo tape.
+            //
+            // Marcarlo como `speculative` (NeoTower.cpp Fase 3, donde el flag se hereda de
+            // `ev.is_sublayer`) lo enterraba entre los repuestos benignos. Medido en BIGTEST
+            // (s240): las 5 líneas kind=2 de este censo eran los 5 huecos de Z reales de la
+            // torre, y las otras 33 eran ruido legítimo. El detector acertó desde el
+            // principio; lo que falló fue la clasificación. Es la misma enfermedad que
+            // `_na_synth_any` en §28.5: la bandera que apaga el arreglo apagaba el detector.
+            //
+            // No se promociona a `violations` aquí porque hay un caso legítimo (§27): una
+            // lámina y su canónica comparten banda de Z repartiéndose la Y, así que el
+            // finish de la lámina puede no emitirse sin dejar hueco. Quien juzga eso es V23,
+            // que mide la cobertura real de lo EMITIDO. Esta línea le da a V23 los
+            // sospechosos con nombre y apellidos, separados del ruido.
+            else if (te.speculative && te.kind == LayerKind::Structural)
+                rep.census.push_back("SHADOW: STRUCTURAL_NEVER_EMITTED — relleno estructural sin sustituto"
+                    " (candidato a hueco de Z; V23 dictamina) z=" + std::to_string(te.z_actual)
+                    + " li=" + std::to_string(te.li) + " key=" + std::to_string(te.key));
             else if (te.speculative)
                 // NEOTKO_NEOTOWER_TAG s205-5b.2c — speculative spare (synthetic cross-product
-                // TC, sublayer-plane structural finish, or folded BridgeMerged): the plan seeds
-                // it but the same-colour grouping decided at emission may legitimately pick a
-                // different entry chain → 0× is expected. Census, not a phantom violation. A
-                // NON-speculative entry at 0× is still a real violation (the safety net holds).
+                // TC, or folded BridgeMerged): the plan seeds it but the same-colour grouping
+                // decided at emission may legitimately pick a different entry chain → 0× is
+                // expected. Census, not a phantom violation. A NON-speculative entry at 0× is
+                // still a real violation (the safety net holds).
                 rep.census.push_back("SHADOW: speculative spare emitted 0× (grouping chose another path) kind="
                     + std::to_string(int(te.kind)) + " key=" + std::to_string(te.key));
             else if (key_consumed[{channel_of(te.kind), te.key}] > 0)

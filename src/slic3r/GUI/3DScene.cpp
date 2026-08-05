@@ -2,6 +2,7 @@
 
 #include "3DScene.hpp"
 #include "GLShader.hpp"
+#include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242 — per-slot material uniforms
 #include "GUI_App.hpp"
 #include "GUI_Colors.hpp"
 #include "Plater.hpp"
@@ -748,6 +749,21 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
             if (!m.is_initialized())
                 continue;
 
+            // NEOTKO_PHOTOMODE_TAG s242 (F3) — per-SEGMENT material.
+            //
+            // This loop is where an MMU-painted volume becomes several colours, and the slot each
+            // segment belongs to is already encoded in the colour lookup right below: segment 0
+            // takes the volume's own extruder, segment N takes extruder N. Reusing that same
+            // mapping is what makes the material follow the colour instead of the volume — without
+            // it, one painted object got a single material for all four of its colours, so
+            // changing any one slot appeared to change every one of them.
+            if (shader) {
+                const int seg_extruder = (idx == 0)
+                    ? std::max(model_volume->extruder_id(), 1)
+                    : idx;   // matches extruder_colors[idx - 1] below
+                photo_set_material_uniforms(shader, seg_extruder);
+            }
+
             if (shader) {
                 if (idx == 0) {
                     int extruder_id = model_volume->extruder_id();
@@ -1135,6 +1151,23 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
         if (!volume.first->model.is_initialized())
             shader->set_uniform("uniform_color", volume.first->render_color);
+
+        // NEOTKO_PHOTOMODE_TAG s242 (F3) — per-slot material, VOLUME-level default.
+        //
+        // ⚠️ This is only correct for volumes that are ONE colour. An MMU-painted volume renders
+        // several colours from a single GLVolume (GLVolume::simple_render walks mmuseg_models and
+        // recolours per segment), and it has exactly one extruder_id, so setting the material here
+        // and stopping would give every painted colour the SAME material — which is the bug the
+        // first build shipped: changing one slot appeared to change them all.
+        //
+        // simple_render() therefore overrides these three per segment. This call remains as the
+        // default for unpainted volumes and as the value the first segment inherits.
+        //
+        // set_uniform() resolves the name and no-ops on -1, so the shaders that never declared
+        // these (everything except shells_lit) are untouched — same contract start_using() already
+        // relies on for the ShadingTuning block.
+        photo_set_material_uniforms(shader, volume.first->extruder_id);
+
         shader->set_uniform("z_range", m_z_range);
         shader->set_uniform("clipping_plane", m_clipping_plane);
         shader->set_uniform("use_color_clip_plane", m_use_color_clip_plane);

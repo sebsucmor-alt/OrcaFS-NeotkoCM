@@ -7074,6 +7074,20 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Slope perimeter recolor plan");
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionString(""));
+
+    // NEOTKO_ALHCOLOR_TAG s240 — los dos toggles del gizmo Precision ALH eran estado de
+    // SESIÓN (miembros del gizmo), así que al reabrir un 3mf el objeto volvía con sus
+    // alturas pero sin las opciones con las que se generaron → repro inexacto. Se guardan
+    // por objeto, como el blob de arriba. Sin widget en Tab.cpp: las escribe el gizmo.
+    def = this->add("neotko_alh_adapt_to_color", coBool);
+    def->label = L("Precision ALH — adapt to color");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("neotko_alh_slope_recolor", coBool);
+    def->label = L("Precision ALH — slope recolor");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_SANDWICH_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — Neotko Neoweaving

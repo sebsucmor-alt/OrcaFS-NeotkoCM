@@ -22,6 +22,7 @@
 #include "GUI.hpp"
 #include "GLCanvas3D.hpp"
 #include "GLShader.hpp" // NEOTKO_SMOOTHNORMALS_TAG s229 — shading_tuning() for the shells_lit overrides
+#include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242 — photo_mode() aims the shells_lit key light
 #include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
 #include "libslic3r/Print.hpp"
@@ -726,8 +727,11 @@ void GCodeViewer::SequentialView::render(const bool has_render_path, float legen
     if (wxGetApp().is_editor())
         bottom -= wxGetApp().plater()->get_view_toolbar().get_height();
 #endif
-    if (has_render_path)
-        gcode_window.render(legend_height + 2, std::max(10.f, (float)canvas_height - 40), (float)canvas_width - (float)right_margin, static_cast<uint64_t>(gcode_ids[current.last]));
+    // NEOTKO: la ventana de gcode textual sigue al mismo extremo que el toolhead.
+    if (has_render_path) {
+        const size_t tracked = track_first ? current.first : current.last;
+        gcode_window.render(legend_height + 2, std::max(10.f, (float)canvas_height - 40), (float)canvas_width - (float)right_margin, static_cast<uint64_t>(gcode_ids[tracked]));
+    }
 }
 
 const std::vector<ColorRGBA> GCodeViewer::Extrusion_Role_Colors{ {
@@ -809,6 +813,7 @@ GCodeViewer::~GCodeViewer()
     destroy_shadow_map_fbo();
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): same idiom for the procedural env textures.
     destroy_realcolor_env_textures();
+    destroy_photo_env_textures();   // NEOTKO_PHOTOMODE_TAG s242
     if (m_moves_slider) {
         delete m_moves_slider;
         m_moves_slider = nullptr;
@@ -1399,7 +1404,10 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 
     //BBS fixed bottom_margin for space to render horiz slider
     int bottom_margin = SLIDER_BOTTOM_MARGIN * GCODE_VIEWER_SLIDER_SCALE;
-    m_sequential_view.m_show_marker = m_sequential_view.m_show_marker || (m_sequential_view.current.last != m_sequential_view.endpoints.last && !m_no_render_path);
+    // NEOTKO: el marcador tambien debe salir cuando lo acotado es el INICIO (last puede seguir al final).
+    m_sequential_view.m_show_marker = m_sequential_view.m_show_marker ||
+        ((m_sequential_view.current.last != m_sequential_view.endpoints.last ||
+          m_sequential_view.current.first != m_sequential_view.endpoints.first) && !m_no_render_path);
     // BBS fixed buttom margin. m_moves_slider.pos_y
     m_sequential_view.render(!m_no_render_path, legend_height, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_view_type);
 #if ENABLE_GCODE_VIEWER_STATISTICS
@@ -1837,6 +1845,15 @@ void GCodeViewer::update_sequential_view_current(unsigned int first, unsigned in
     m_sequential_view.current.first = new_first;
     m_sequential_view.current.last  = new_last;
     m_sequential_view.last_current  = m_sequential_view.current;
+    // NEOTKO: DUEÑO UNICO de "hay limite inferior" y "a que extremo sigue el toolhead". Se fija aqui,
+    // que es el unico punto por el que entra un cambio de rango, y lo leen refresh_render_paths(),
+    // SequentialView::render() y update_marker_curr_move(). Consultar el slider por separado en cada
+    // sitio se desincronizaria.
+    // ⚠️ Con el tirador de inicio EN SU MINIMO no se limita nada: es lo que mantiene visibles todas las
+    // capas inferiores (en gris) en el modo de capas apiladas. Solo al moverlo empieza a recortar.
+    const bool first_limited = (m_moves_slider != nullptr && m_moves_slider->GetLowerValue() > m_moves_slider->GetMinValue());
+    m_sequential_view.first_limited = first_limited;
+    m_sequential_view.track_first   = first_limited && (m_moves_slider->GetSelection() == ssLower);
 
     refresh_render_paths(true, true);
 
@@ -1869,14 +1886,25 @@ void GCodeViewer::update_moves_slider(bool set_to_max)
         ++count;
     }
 
-    bool keep_min = m_moves_slider->GetActiveValue() == m_moves_slider->GetMinValue();
+    // NEOTKO: antes esto era GetActiveValue(), que devuelve el valor del tirador SELECCIONADO. Con el
+    // slider de rango la seleccion puede estar en el tirador de inicio, y entonces la heuristica leia
+    // el numero equivocado. La pregunta que se quiere hacer es siempre sobre el tirador de FIN.
+    bool keep_min = m_moves_slider->GetHigherValue() == m_moves_slider->GetMinValue();
 
     m_moves_slider->SetSliderValues(values);
     m_moves_slider->SetSliderAlternateValues(alternate_values);
     m_moves_slider->SetMaxValue(view.endpoints.last - view.endpoints.first);
     m_moves_slider->SetSelectionSpan(view.current.first - view.endpoints.first, view.current.last - view.endpoints.first);
-    if (set_to_max)
+    if (set_to_max) {
+        // NEOTKO: al re-slicear se vuelve al rango COMPLETO, asi que el tirador de inicio tambien se
+        // resetea. Si no, un rango acotado de un slice anterior seguiria ocultando movimientos nuevos.
+        // Se baja first_limited a la vez: si no, quedaria en true hasta el siguiente
+        // update_sequential_view_current() y ese hueco basta para un frame de render recortado.
+        m_moves_slider->SetLowerValue(m_moves_slider->GetMinValue());
+        m_sequential_view.first_limited = false;
+        m_sequential_view.track_first   = false;
         m_moves_slider->SetHigherValue(keep_min ? m_moves_slider->GetMinValue() : m_moves_slider->GetMaxValue());
+    }
 }
 
 void GCodeViewer::update_layers_slider_mode()
@@ -1922,9 +1950,12 @@ void GCodeViewer::update_layers_slider_mode()
 
 void GCodeViewer::update_marker_curr_move() {
     if ((int)m_last_result_id != -1) {
-        auto it = std::find_if(m_gcode_result->moves.begin(), m_gcode_result->moves.end(), [this](auto move) {
-                if (m_sequential_view.current.last < m_sequential_view.gcode_ids.size() && m_sequential_view.current.last >= 0) {
-                    return move.gcode_id == static_cast<uint64_t>(m_sequential_view.gcode_ids[m_sequential_view.current.last]);
+        // NEOTKO: el marcador sigue al tirador que se esta manipulando (ver track_first, fijado en
+        // update_sequential_view_current). Arrastrando el de inicio interesa donde EMPIEZA la ventana.
+        const size_t tracked_id = m_sequential_view.track_first ? m_sequential_view.current.first : m_sequential_view.current.last;
+        auto it = std::find_if(m_gcode_result->moves.begin(), m_gcode_result->moves.end(), [this, tracked_id](auto move) {
+                if (tracked_id < m_sequential_view.gcode_ids.size()) {
+                    return move.gcode_id == static_cast<uint64_t>(m_sequential_view.gcode_ids[tracked_id]);
                 }
                 return false;
             });
@@ -3430,7 +3461,10 @@ void GCodeViewer::refresh_render_paths(bool keep_sequential_current_first, bool 
     SequentialView::Endpoints global_endpoints = { m_sequential_view.gcode_ids.size() , 0 };
     SequentialView::Endpoints top_layer_endpoints = global_endpoints;
     SequentialView* sequential_view = const_cast<SequentialView*>(&m_sequential_view);
-    if (top_layer_only || !keep_sequential_current_first) sequential_view->current.first = 0;
+    // NEOTKO: antes era `if (top_layer_only || !keep_sequential_current_first)`, y como top_layer_only
+    // esta hardcodeado a true (arriba), el limite INFERIOR del rango se machacaba SIEMPRE. Ese era el
+    // motivo de que el tirador de inicio no recortara nada. Ahora manda solo quien llama.
+    if (!keep_sequential_current_first) sequential_view->current.first = 0;
     //BBS
     if (!keep_sequential_current_last) sequential_view->current.last = m_sequential_view.gcode_ids.size();
 
@@ -3504,7 +3538,18 @@ void GCodeViewer::refresh_render_paths(bool keep_sequential_current_first, bool 
     }
 
     // update current sequential position
-    sequential_view->current.first = !top_layer_only && keep_sequential_current_first ? std::clamp(sequential_view->current.first, global_endpoints.first, global_endpoints.last) : global_endpoints.first;
+    // NEOTKO: el limite inferior SOLO recorta si el usuario ha movido el tirador de inicio
+    // (first_limited). Por defecto se deja en global_endpoints.first, que es lo que permite que el
+    // segundo pase siga recogiendo las capas de debajo y las pinte en gris (modo capas apiladas).
+    // Cuando SI hay limite se acota contra los endpoints DEFINITIVOS (los de la capa visible con
+    // top_layer_only, que es siempre) para que el bloque del toolhead de abajo ya vea el valor final.
+    // ⚠️ top_layer_endpoints nace invertido ({size, 0}) y solo lo arregla el primer pase; si no hubo
+    // paths en la capa sigue invertido y std::clamp con lo > hi es UB. De ahi la guarda.
+    const SequentialView::Endpoints& active_endpoints = top_layer_only ? top_layer_endpoints : global_endpoints;
+    const bool active_endpoints_valid = active_endpoints.first <= active_endpoints.last;
+    sequential_view->current.first = (keep_sequential_current_first && m_sequential_view.first_limited && active_endpoints_valid) ?
+        std::clamp(sequential_view->current.first, active_endpoints.first, active_endpoints.last) :
+        global_endpoints.first;
     if (global_endpoints.last == 0) {
 m_no_render_path = true;
         sequential_view->current.last = global_endpoints.last;
@@ -3514,12 +3559,15 @@ m_no_render_path = false;
     }
 
     // get the world position from the vertex buffer
+    // NEOTKO: el toolhead virtual sigue al tirador que se esta manipulando. Con el de inicio activo,
+    // lo que interesa ver es DONDE EMPIEZA la ventana, no donde acaba.
+    const size_t tracked_s_id = m_sequential_view.track_first ? m_sequential_view.current.first : m_sequential_view.current.last;
     bool found = false;
     for (const TBuffer& buffer : m_buffers) {
         if (buffer.render_primitive_type == TBuffer::ERenderPrimitiveType::InstancedModel ||
             buffer.render_primitive_type == TBuffer::ERenderPrimitiveType::BatchedModel) {
             for (size_t i = 0; i < buffer.model.instances.s_ids.size(); ++i) {
-                if (buffer.model.instances.s_ids[i] == m_sequential_view.current.last) {
+                if (buffer.model.instances.s_ids[i] == tracked_s_id) {
                     size_t offset = i * buffer.model.instances.instance_size_floats();
                     sequential_view->current_position.x() = buffer.model.instances.buffer[offset + 0];
                     sequential_view->current_position.y() = buffer.model.instances.buffer[offset + 1];
@@ -3533,14 +3581,14 @@ m_no_render_path = false;
         else {
             // searches the path containing the current position
             for (const Path& path : buffer.paths) {
-                if (path.contains(m_sequential_view.current.last)) {
-                    const int sub_path_id = path.get_id_of_sub_path_containing(m_sequential_view.current.last);
+                if (path.contains(tracked_s_id)) {
+                    const int sub_path_id = path.get_id_of_sub_path_containing(tracked_s_id);
                     if (sub_path_id != -1) {
                         const Path::Sub_Path& sub_path = path.sub_paths[sub_path_id];
-                        unsigned int offset = static_cast<unsigned int>(m_sequential_view.current.last - sub_path.first.s_id);
+                        unsigned int offset = static_cast<unsigned int>(tracked_s_id - sub_path.first.s_id);
                         if (offset > 0) {
                             if (buffer.render_primitive_type == TBuffer::ERenderPrimitiveType::Line) {
-                                for (size_t i = sub_path.first.s_id + 1; i < m_sequential_view.current.last + 1; i++) {
+                                for (size_t i = sub_path.first.s_id + 1; i < tracked_s_id + 1; i++) {
                                     size_t move_id = m_ssid_to_moveid_map[i];
                                     const GCodeProcessorResult::MoveVertex& curr = m_gcode_result->moves[move_id];
                                     if (curr.is_arc_move()) {
@@ -3552,7 +3600,7 @@ m_no_render_path = false;
                             else if (buffer.render_primitive_type == TBuffer::ERenderPrimitiveType::Triangle) {
                                 unsigned int indices_count = buffer.indices_per_segment();
                                 // BBS: modify to support moves which has internal point
-                                for (size_t i = sub_path.first.s_id + 1; i < m_sequential_view.current.last + 1; i++) {
+                                for (size_t i = sub_path.first.s_id + 1; i < tracked_s_id + 1; i++) {
                                     size_t move_id = m_ssid_to_moveid_map[i];
                                     const GCodeProcessorResult::MoveVertex& curr = m_gcode_result->moves[move_id];
                                     if (curr.is_arc_move()) {
@@ -3757,7 +3805,13 @@ m_no_render_path = false;
 
     // set sequential data to their final value
     sequential_view->endpoints = top_layer_only ? top_layer_endpoints : global_endpoints;
-    sequential_view->current.first = !top_layer_only && keep_sequential_current_first ? std::clamp(sequential_view->current.first, sequential_view->endpoints.first, sequential_view->endpoints.last) : sequential_view->endpoints.first;
+    // NEOTKO: mismo criterio que arriba — solo se respeta el limite inferior si el usuario lo ha movido.
+    // Sin limite se vuelve a endpoints.first, que es el comportamiento original (y deja el tirador de
+    // inicio del slider en su minimo, porque update_moves_slider() calcula el span restando esto).
+    sequential_view->current.first = (keep_sequential_current_first && m_sequential_view.first_limited &&
+                                      sequential_view->endpoints.first <= sequential_view->endpoints.last) ?
+        std::clamp(sequential_view->current.first, sequential_view->endpoints.first, sequential_view->endpoints.last) :
+        sequential_view->endpoints.first;
     sequential_view->global = global_endpoints;
 
     // updates sequential range caps
@@ -4231,6 +4285,99 @@ static constexpr float SHELLS_SSCS_STRENGTH     = 0.5f;
 // instead of contradicting it (config C3 of the study §2: the Phong stays camera-attached, only the
 // shadow gets a fixed world light).
 static const Vec3d SHADOW_LIGHT_WORLD_DIR = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
+
+// NEOTKO_PHOTOMODE_TAG s242: the light is no longer a constant everywhere — Photo Mode aims it.
+// Every consumer of the key light's WORLD direction goes through here so there is exactly one
+// place that decides, and so "Photo Mode off" provably returns the original constant.
+//
+// ⚠️ Note what this does NOT do: the shading in shells_lit.vs is camera-attached (config C3), so
+// the view-space direction the Phong uses is derived per frame from this vector rather than being
+// this vector. See photo_light_dir_view() below — mixing the two spaces up is the single easiest
+// way to break this feature, and the reason both are named for their space.
+static Vec3d photo_key_dir_world()
+{
+    const PhotoModeState& pm = photo_mode();
+    if (!pm.active || !pm.key.enabled)
+        return SHADOW_LIGHT_WORLD_DIR;
+    return pm.key.dir_world();
+}
+
+// World -> view for a DIRECTION. The view matrix is rigid (rotation + translation), so its linear
+// block is a pure rotation and doubles as the normal matrix; no inverse-transpose needed.
+static Vec3f photo_dir_to_view(const Camera& camera, const Vec3d& dir_world)
+{
+    return (camera.get_view_matrix().linear() * dir_world).normalized().cast<float>();
+}
+
+// Pushes every lighting uniform shells_lit.{vs,fs} now declares.
+//
+// With Photo Mode inactive this sends the ORIGINAL constants verbatim: LIGHT_TOP_DIR /
+// LIGHT_FRONT_DIR as VIEW-space vectors (that is what they always were in the .vs), the old
+// diffuse/specular/shininess numbers, a rim light with diffuse 0.0, and white tints. That is what
+// makes the off state bit-identical rather than merely similar.
+static void photo_set_light_uniforms(GLShaderProgram* shader, const Camera& camera)
+{
+    const PhotoModeState& pm = photo_mode();
+
+    // View-space aims. Off => the literal constants the shader used to hold.
+    Vec3f key_view   = Vec3f(LIGHT_TOP_DIR_DEFAULT[0],   LIGHT_TOP_DIR_DEFAULT[1],   LIGHT_TOP_DIR_DEFAULT[2]);
+    Vec3f fill_view  = Vec3f(LIGHT_FRONT_DIR_DEFAULT[0], LIGHT_FRONT_DIR_DEFAULT[1], LIGHT_FRONT_DIR_DEFAULT[2]);
+    Vec3f rim_view   = key_view;   // never read while rim diffuse is 0
+    Vec3f key_world  = Vec3f(LIGHT_TOP_DIR_DEFAULT[0],   LIGHT_TOP_DIR_DEFAULT[1],   LIGHT_TOP_DIR_DEFAULT[2]);
+
+    float key_diffuse  = LIGHT_TOP_DIFFUSE_DEFAULT;
+    float fill_diffuse = LIGHT_FRONT_DIFFUSE_DEFAULT;
+    float rim_diffuse  = 0.0f;
+    float key_spec     = LIGHT_TOP_SPECULAR_DEFAULT;
+    float amb_ground   = AMBIENT_GROUND_DEFAULT;
+    float amb_sky      = AMBIENT_SKY_DEFAULT;
+    float fres_pow     = FRESNEL_POWER_DEFAULT;
+    float fres_str     = FRESNEL_STRENGTH_DEFAULT;
+
+    Vec3f key_tint(1.0f, 1.0f, 1.0f), fill_tint(1.0f, 1.0f, 1.0f), rim_tint(1.0f, 1.0f, 1.0f);
+
+    if (pm.active) {
+        // Authored in WORLD space (drag the light, orbit the camera, the light stays put in the
+        // room) and converted here — the opposite of the inherited camera-pinned convention.
+        const Vec3d kw = pm.key.dir_world();
+        key_world = kw.normalized().cast<float>();
+        key_view  = photo_dir_to_view(camera, kw);
+        fill_view = photo_dir_to_view(camera, pm.fill.dir_world());
+        rim_view  = photo_dir_to_view(camera, pm.rim.dir_world());
+
+        key_diffuse  = pm.key.enabled  ? pm.key.intensity  : 0.0f;
+        fill_diffuse = pm.fill.enabled ? pm.fill.intensity : 0.0f;
+        rim_diffuse  = pm.rim.enabled  ? pm.rim.intensity  : 0.0f;
+        key_spec     = pm.key_specular;
+        amb_ground   = pm.ambient_ground;
+        amb_sky      = pm.ambient_sky;
+        fres_pow     = pm.fresnel_power;
+        fres_str     = pm.fresnel_strength;
+
+        key_tint  = Vec3f(pm.key.tint[0],  pm.key.tint[1],  pm.key.tint[2]);
+        fill_tint = Vec3f(pm.fill.tint[0], pm.fill.tint[1], pm.fill.tint[2]);
+        rim_tint  = Vec3f(pm.rim.tint[0],  pm.rim.tint[1],  pm.rim.tint[2]);
+    }
+
+    shader->set_uniform("u_light_key_dir_view",   key_view);
+    shader->set_uniform("u_light_key_dir_world",  key_world);
+    shader->set_uniform("u_light_key_diffuse",    key_diffuse);
+    shader->set_uniform("u_light_key_specular",   key_spec);
+    shader->set_uniform("u_light_key_tint",       key_tint);
+
+    shader->set_uniform("u_light_fill_dir_view",  fill_view);
+    shader->set_uniform("u_light_fill_diffuse",   fill_diffuse);
+    shader->set_uniform("u_light_fill_tint",      fill_tint);
+
+    shader->set_uniform("u_light_rim_dir_view",   rim_view);
+    shader->set_uniform("u_light_rim_diffuse",    rim_diffuse);
+    shader->set_uniform("u_light_rim_tint",       rim_tint);
+
+    shader->set_uniform("u_ambient_ground",       amb_ground);
+    shader->set_uniform("u_ambient_sky",          amb_sky);
+    shader->set_uniform("u_fresnel_power",        fres_pow);
+    shader->set_uniform("u_fresnel_strength",     fres_str);
+}
 static constexpr int   SHADOW_MAP_RES = 2048;
 static constexpr float SHADOW_MAP_STRENGTH = 0.55f;
 // Slope-scaled depth bias, in normalized [0,1] depth units of the light's ortho frustum.
@@ -4267,10 +4414,30 @@ static const RealColorStudioLight REALCOLOR_STUDIO_LIGHTS[3] = {
     { Vec3f( 0.05f,-0.35f,-0.85f).normalized(), std::cos(32.0f * float(M_PI) / 180.0f), 0.4f, Vec3f(0.90f, 0.90f, 0.95f) }, // subtle rim/under
 };
 
-// NEOTKO_REALCOLOR_TAG s214: same equirect direction<->uv convention as equirect_uv() in
-// realcolor_peel.fs (110+140) — v=0 is straight up (sky), v=1 is straight down (ground),
-// matching the existing normal.y-based sky_mix convention from PBR item 1b. Pure function, no
-// GL state — called both for the sharp mirror texture and (supersampled) for the irradiance one.
+// NEOTKO_REALCOLOR_TAG s214: equirect (u,v) -> color. v=0 is straight up (sky), v=1 straight
+// down (ground). Pure function, no GL state — called both for the sharp mirror texture and
+// (supersampled) for the irradiance one.
+//
+// 🚨 NEOTKO_REALCOLOR_TAG s243 (F3) — NO "ARREGLAR" EL EJE DE AQUÍ. Es la mitad de un par, y la
+// otra mitad ya se corrigió. Léelo entero antes de tocar un `.y`.
+//
+// El bug de s242 era que equirect_uv() (realcolor_peel.fs) mapeaba dirección -> (u,v) usando
+// dir.y como arriba, cuando los vectores le llegan en espacio MUNDO y este mundo es Z-arriba: el
+// entorno salía girado 90°. Se arregló ALLÍ, y sólo allí. Esta función NO trabaja con direcciones
+// de mundo: recibe (u,v) y decide de qué color es esa celda; el `dir` que construye abajo es
+// interno, sólo para evaluar REALCOLOR_STUDIO_LIGHTS contra la celda.
+//
+// La composición de los dos mapeos (shader Z-arriba, este Y-arriba) da exactamente:
+//     dir_interno = (D.x, D.z, D.y)   para una dirección de mundo D
+// es decir, un intercambio limpio de Y y Z. Lo que significa: la tabla de luces de abajo está
+// escrita en un modelo mental Y-arriba (que es como se escriben las tablas de luces de estudio de
+// toda la vida, y como se escribió en s214), y ese Y-arriba AHORA cae sobre el arriba real del
+// mundo. Una luz con +y grande en la tabla ilumina desde encima de la cama, que es lo que su
+// nombre dice. Está bien así.
+//
+// Si además se "corrigiera" esta función a Z-arriba, los dos cambios se cancelarían y el entorno
+// volvería a estar girado 90°, pero ya sin ninguna nota que lo explicara. Ver la nota larga en
+// 140/realcolor_peel.fs y docs/WIP/REALCOLOR_PSEUDOREALISTIC.md.
 // Returns unclamped linear RGB (see the Vec3f note above) — callers clamp to [0,1] only once,
 // at final byte-pack time.
 static Vec3f realcolor_env_sample(float u, float v, const GCodeViewer::RealColorTuning& tuning)
@@ -4296,6 +4463,85 @@ static Vec3f realcolor_env_sample(float u, float v, const GCodeViewer::RealColor
         color += (smooth_w * light.intensity) * light.tint;
     }
     return color;
+}
+
+// NEOTKO_REALCOLOR_TAG s243 (F4 = A4+A5 de docs/WIP/REALCOLOR_PSEUDOREALISTIC.md): acabado por
+// tipo de superficie. Devuelve (brillo, rugosidad) para el u_finish de realcolor_peel.fs.
+//
+// LA TESIS (A4): un stTop de sólido monotónico no refleja como un perímetro externo, y ninguno de
+// los dos como un bridge. El `role` ya viaja en el Path, o sea que esto no cuesta un solo dato
+// nuevo: es leer algo que ya está ahí y dejar de tirarlo. Sin esto la pieza entera parece un solo
+// material, que es la mitad de por qué un render "se ve render".
+//
+// A5 va incrustado aquí en vez de en su propia función: la primera capa sale aplastada contra el
+// bed y con acabado casi especular (o texturizada, si el bed lo es), y eso es un caso particular
+// de "acabado por superficie", no un sistema aparte. Se detecta por Z, no por role — no existe un
+// erFirstLayer.
+//
+// ⚠️ Estos números NO están medidos, son un punto de partida razonable para calibrar a ojo contra
+// una foto (que es exactamente el flujo que ya documenta td_scale). No los defiendo como física;
+// el orden relativo entre roles sí, los valores absolutos no. finish_strength=0 los apaga todos.
+static std::array<float, 2> realcolor_surface_finish(ExtrusionRole role, bool is_first_layer,
+                                                     const GCodeViewer::RealColorTuning& tuning)
+{
+    // (brillo, rugosidad). Neutro = (1.0, 0.0), que es literalmente el comportamiento pre-s243:
+    // brillo sin escalar y reflejo 100% del mapa nítido.
+    //
+    // 🔑 s243c — LOS VALORES SE SEPARARON tras la prueba del usuario. La tabla original ponía
+    // erExternalPerimeter en gloss 1.00 y erTopSolidInfill en 1.10, o sea PEGADOS al neutro (1.00).
+    // Como esos dos son justo lo que se ve de un objeto por fuera, mover el slider no cambiaba
+    // nada... salvo en la torre de purga, el único rol de la escena que estaba lejos del neutro
+    // (0.40). El usuario lo cazó exactamente así: "lo único que cambia es el wipetower". Es la
+    // lección de siempre en versión material: un parámetro que sólo se aparta del neutro en los
+    // casos que nadie mira es un parámetro que no existe.
+    //
+    // Ahora el recorrido de rugosidad entre los roles VISIBLES (top 0.15 / perímetro 0.40 /
+    // infill 0.65) es lo bastante ancho como para que se note, que es lo que hace falta para
+    // poder calibrarlo a ojo contra una foto.
+    float gloss = 0.85f;
+    float roughness = 0.50f;
+
+    switch (role) {
+    // Ironing pasa la boquilla caliente por encima aplanando: es la superficie más lisa que
+    // produce una FDM. El extremo liso de la escala.
+    case erIroning:                { gloss = 1.60f; roughness = 0.05f; break; }
+    // Tops sólidos: monotónico, líneas paralelas y bien empaquetadas. Lisos, y son la cara que
+    // más superficie ocupa mirando una pieza desde arriba — tienen que separarse del neutro.
+    case erTopSolidInfill:         { gloss = 1.35f; roughness = 0.15f; break; }
+    case erPenultimateInfill:      { gloss = 1.20f; roughness = 0.25f; break; }
+    // Perímetro externo: la pared que se ve, con su costura de capas. Ni pulido ni mate — pero
+    // NO puede valer exactamente el neutro, o el knob no hace nada sobre él (ese era el bug).
+    case erExternalPerimeter:      { gloss = 1.05f; roughness = 0.40f; break; }
+    case erPerimeter:              { gloss = 0.90f; roughness = 0.50f; break; }
+    case erSolidInfill:
+    case erBottomSurface:          { gloss = 0.85f; roughness = 0.45f; break; }
+    case erInternalInfill:         { gloss = 0.70f; roughness = 0.65f; break; }
+    // Bridges y overhangs: extrusión tendida en el aire, se descuelga y se enfría estirada.
+    // Rugosa y apagada — es la superficie que más obviamente NO brilla en una pieza real.
+    case erBridgeInfill:
+    case erInternalBridgeInfill:
+    case erOverhangPerimeter:      { gloss = 0.45f; roughness = 0.95f; break; }
+    case erGapFill:                { gloss = 0.60f; roughness = 0.75f; break; }
+    // Andamiaje: soporte, falda, borde, torre. Mal formado a propósito, mate del todo.
+    case erSupportMaterial:
+    case erSupportMaterialInterface:
+    case erSupportTransition:
+    case erSkirt:
+    case erBrim:
+    case erWipeTower:              { gloss = 0.40f; roughness = 0.90f; break; }
+    default:                       break;
+    }
+
+    // A5: la primera capa manda sobre el role. Aplastada contra una placa lisa sale casi
+    // especular, y es de las cosas que más sensación de "esto lo reconozco" producen.
+    if (is_first_layer) {
+        gloss = std::max(gloss, 1.35f);
+        roughness = std::min(roughness, 0.08f);
+    }
+
+    // Interpolación global hacia el neutro — ver RealColorTuning::finish_strength.
+    const float k = std::clamp(tuning.finish_strength, 0.0f, 1.0f);
+    return { 1.0f + (gloss - 1.0f) * k, roughness * k };
 }
 
 // NEOTKO_REALCOLOR_TAG: the accumulator's seed color (what shows through any transmittance
@@ -4506,6 +4752,137 @@ bool GCodeViewer::ensure_realcolor_env_textures(bool force_regen)
     return true;
 }
 
+// NEOTKO_PHOTOMODE_TAG s242 (F5) ---------------------------------------------------------------
+//
+// The Photo Mode environment probe. Same technique as RealColor's (s214) — bake a lat-long image
+// of the "room" on the CPU, upload it as two plain GL_RGBA8 textures, sample it in the shader —
+// but built from the USER'S three lights instead of three fixed studio softboxes, so dragging the
+// key light moves its reflection too. That coupling is the whole point: a metal is sold by what it
+// reflects, and a reflection that ignores where the light is reads as wrong immediately.
+//
+// Z is up here, matching the world (bed on XY). realcolor_env_sample() is Y-up because RealColor
+// feeds it vectors in its own space — see photo_env_uv() in shells_lit.fs.
+static constexpr int PHOTO_ENV_MIRROR_W = 128, PHOTO_ENV_MIRROR_H = 64;
+// The irradiance map is tiny ON PURPOSE: every texel is an average over many sub-samples, which
+// approximates a diffuse convolution without writing an actual blur pass. Making it bigger would
+// cost time and make it *worse* (sharper = less like irradiance).
+static constexpr int PHOTO_ENV_IRRADIANCE_W = 16, PHOTO_ENV_IRRADIANCE_H = 8;
+static constexpr int PHOTO_ENV_IRRADIANCE_SS = 16;
+
+// One sample of the virtual room, in the direction (u, v) of the equirect map.
+static Vec3f photo_env_sample(float u, float v, const PhotoModeState& pm)
+{
+    const float theta = (u - 0.5f) * 2.0f * float(M_PI);
+    const float phi   = (0.5f - v) * float(M_PI);
+    const float z = std::sin(phi);
+    const float r = std::cos(phi);
+    const Vec3f dir(r * std::cos(theta), r * std::sin(theta), z);
+
+    // Ground/sky gradient, the same hemisphere the direct shading uses, so probe and surface agree
+    // on where "up" is.
+    const float sky_mix = std::clamp(z * 0.5f + 0.5f, 0.0f, 1.0f);
+    const float amb = pm.ambient_ground + (pm.ambient_sky - pm.ambient_ground) * sky_mix;
+    Vec3f color(amb, amb, amb);
+
+    // One soft disc per enabled light. The angular radius is tied to intensity only loosely: what
+    // matters visually is that a brighter light also reads as a bigger source in the reflection.
+    const PhotoLight* lights[3] = { &pm.key, &pm.fill, &pm.rim };
+    for (const PhotoLight* l : lights) {
+        if (!l->enabled || l->intensity <= 0.0f)
+            continue;
+        const Vec3f ldir = l->dir_world().cast<float>();
+        const float cos_angle = dir.dot(ldir);
+        // ~14 deg core with a ~6 deg soft edge — a studio softbox, not a point light. A hard-edged
+        // disc reflects as a sticker and gives the whole thing away.
+        const float cos_r = std::cos(14.0f * float(M_PI) / 180.0f);
+        const float w = std::clamp((cos_angle - (cos_r - 0.05f)) / 0.05f, 0.0f, 1.0f);
+        const float smooth_w = w * w * (3.0f - 2.0f * w);
+        const float gain = smooth_w * l->intensity * 2.0f;
+        color += Vec3f(gain * l->tint[0], gain * l->tint[1], gain * l->tint[2]);
+    }
+    return color;
+}
+
+static void photo_bake_env_texture(unsigned int& tex, int w, int h, int supersample,
+                                   const PhotoModeState& pm, bool create_new)
+{
+    std::vector<unsigned char> pixels(static_cast<size_t>(w) * h * 4);
+    const float inv_ss2 = 1.0f / float(supersample * supersample);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            Vec3f acc = Vec3f::Zero();
+            for (int sy = 0; sy < supersample; ++sy) {
+                for (int sx = 0; sx < supersample; ++sx) {
+                    const float u = (float(x) + (float(sx) + 0.5f) / float(supersample)) / float(w);
+                    const float v = (float(y) + (float(sy) + 0.5f) / float(supersample)) / float(h);
+                    acc += photo_env_sample(u, v, pm);
+                }
+            }
+            acc *= inv_ss2;
+            unsigned char* p = pixels.data() + 4 * (static_cast<size_t>(y) * w + x);
+            for (int c = 0; c < 3; ++c)
+                p[c] = (unsigned char)(std::clamp(acc[c], 0.0f, 1.0f) * 255.0f + 0.5f);
+            p[3] = 255;
+        }
+    }
+
+    if (create_new)
+        glsafe(::glGenTextures(1, &tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+    if (create_new) {
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data()));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        // Longitude wraps, latitude does not — the poles must clamp or the sky bleeds into the
+        // ground across the seam.
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    }
+    else
+        glsafe(::glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data()));
+}
+
+bool GCodeViewer::ensure_photo_env_textures()
+{
+    const PhotoModeState& pm = photo_mode();
+
+    // Fingerprint: everything photo_env_sample() reads. Comparing this instead of setting a dirty
+    // flag from the UI means no code path can forget to invalidate — the bake simply cannot be
+    // stale with respect to its own inputs.
+    std::array<float, 20> key{};
+    int i = 0;
+    const PhotoLight* lights[3] = { &pm.key, &pm.fill, &pm.rim };
+    for (const PhotoLight* l : lights) {
+        key[i++] = l->enabled ? 1.0f : 0.0f;
+        key[i++] = l->azimuth_deg;
+        key[i++] = l->elevation_deg;
+        key[i++] = l->intensity;
+        key[i++] = l->tint[0] + 2.0f * l->tint[1] + 4.0f * l->tint[2];
+    }
+    key[i++] = pm.ambient_ground;
+    key[i++] = pm.ambient_sky;
+
+    const bool create_new = !m_photo_env.gl_objects_created();
+    if (!create_new && m_photo_env.valid && key == m_photo_env.key)
+        return true;
+
+    photo_bake_env_texture(m_photo_env.mirror_tex, PHOTO_ENV_MIRROR_W, PHOTO_ENV_MIRROR_H,
+                           1, pm, create_new);
+    photo_bake_env_texture(m_photo_env.irradiance_tex, PHOTO_ENV_IRRADIANCE_W, PHOTO_ENV_IRRADIANCE_H,
+                           PHOTO_ENV_IRRADIANCE_SS, pm, create_new);
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    m_photo_env.key = key;
+    m_photo_env.valid = true;
+    return m_photo_env.gl_objects_created();
+}
+
+void GCodeViewer::destroy_photo_env_textures()
+{
+    if (m_photo_env.mirror_tex)     glsafe(::glDeleteTextures(1, &m_photo_env.mirror_tex));
+    if (m_photo_env.irradiance_tex) glsafe(::glDeleteTextures(1, &m_photo_env.irradiance_tex));
+    m_photo_env = PhotoEnvCache{};
+}
+
 void GCodeViewer::destroy_realcolor_env_textures()
 {
     if (m_realcolor_env.mirror_tex)     glsafe(::glDeleteTextures(1, &m_realcolor_env.mirror_tex));
@@ -4554,6 +4931,31 @@ void GCodeViewer::render_realcolor_debug_panel()
     changed |= imgui.slider_float("SSS strength", &m_realcolor_tuning.sss_strength, 0.0f, 1.0f);
     changed |= imgui.slider_float("SSS radius (px)", &m_realcolor_tuning.sss_radius_px, 0.0f, 24.0f);
     changed |= imgui.slider_float("SSS reference TD (mm)", &m_realcolor_tuning.sss_reference_td, 0.05f, 5.0f);
+
+    // NEOTKO_REALCOLOR_TAG s243: los tres frentes de esta sesión, todos con un neutro explícito
+    // (0 / 0 / 1-1) que devuelve la imagen a pre-s243 sin recompilar — para poder A/B cada uno por
+    // separado contra una foto, que es como se calibró td_scale en su día.
+    ImGui::Separator();
+    ImGui::TextUnformatted("s243: huecos (F1), acabado (F4), grade (F5)");
+    // F1 (s243b): dos sliders, no uno. El lateral es el que cierra los huecos que se ven y llega
+    // hasta 0.25mm; el vertical NO cierra huecos (sólo funde capas) y por eso su tope es 10x más
+    // bajo — pasarse ahí borra la costura entre capas y descuadra el bias del peel, que se acota
+    // con la altura real del path. Ver realcolor_peel.vs.
+    // s243d: topes subidos (0.25→0.50 y 0.025→0.05) porque los defaults nuevos son justo los
+    // valores que el usuario eligió, y ambos estaban CLAVADOS en el tope anterior. Un slider cuyo
+    // default es su máximo no permite explorar hacia arriba, y todavía quedan huecos por cerrar.
+    // ⚠️ Regla para el vertical: mantenerlo por debajo de ~1/4 de la altura de capa más fina de la
+    // escena. Por encima de eso el engorde en Z se acerca al `bias_cap` del peel (que vale media
+    // altura REAL del path, realcolor_peel.fs) y la comparación de profundidad empieza a medir
+    // contra una geometría que no existe — el fallo que arregló s166.
+    changed |= imgui.slider_float("swell flancos (mm)", &m_realcolor_tuning.swell_lateral_mm, 0.0f, 0.50f, "%.3f");
+    changed |= imgui.slider_float("swell vertical (mm)", &m_realcolor_tuning.swell_vertical_mm, 0.0f, 0.05f, "%.3f");
+    changed |= imgui.slider_float("surface finish", &m_realcolor_tuning.finish_strength, 0.0f, 1.0f);
+    changed |= imgui.slider_float("grade contrast", &m_realcolor_tuning.grade_contrast, 0.5f, 1.5f, "%.2f");
+    changed |= imgui.slider_float("grade saturation", &m_realcolor_tuning.grade_saturation, 0.0f, 1.5f, "%.2f");
+    // F6: a 0 se ve exactamente el problema que resuelve (el fondo colándose por el cuerpo de la
+    // pieza), lo cual lo convierte en su propio A/B.
+    changed |= imgui.slider_float("silueta opaca", &m_realcolor_tuning.fill_interior, 0.0f, 1.0f, "%.2f");
     ImGui::End();
     if (changed) {
         m_realcolor_cache.valid = false;
@@ -5487,6 +5889,12 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             peel_shader->set_uniform("u_fresnel_power", m_realcolor_tuning.fresnel_power);
             peel_shader->set_uniform("u_fresnel_strength", m_realcolor_tuning.fresnel_strength);
             peel_shader->set_uniform("u_fresnel_tint", m_realcolor_tuning.fresnel_tint);
+            // NEOTKO_REALCOLOR_TAG s243 (F1): hinchado de la extrusión, ver realcolor_peel.vs.
+            // Constante para toda la escena, así que va aquí y no en el bucle de sub-draws.
+            // s243b: .x = flancos, .y = caras horizontales — son dos trabajos distintos y opuestos.
+            peel_shader->set_uniform("u_swell_mm", std::array<float, 2>{
+                std::max(m_realcolor_tuning.swell_lateral_mm, 0.0f),
+                std::max(m_realcolor_tuning.swell_vertical_mm, 0.0f) });
             // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): procedural env textures + world-space
             // camera position for the env-mirror reflection, see realcolor_peel.fs. Bound on
             // GL_TEXTURE1/2 — unit 0 is u_prev_meta below, only set from pass 1 onward, so no
@@ -5517,6 +5925,13 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
 
             const int tool_id_loc = peel_shader->get_uniform_location("u_tool_id");
             const int thickness_loc = peel_shader->get_uniform_location("u_thickness");
+            // NEOTKO_REALCOLOR_TAG s243 (F4): acabado por superficie, ver realcolor_surface_finish().
+            const int finish_loc = peel_shader->get_uniform_location("u_finish");
+            // A5: Z de la primera capa. m_layers.get_zs() está ordenado ascendente, así que el
+            // front() es la primera capa impresa. La tolerancia se toma de la propia altura del
+            // path, no de una constante: con ALH la primera capa puede ser bastante más gruesa que
+            // la nominal, y un epsilon fijo dejaría fuera justo los perfiles donde más se nota.
+            const float first_layer_z = m_layers.empty() ? -1.0f : (float)m_layers.get_zs().front();
             const int position_id = peel_shader->get_attrib_location("v_position");
             const int normal_id = peel_shader->get_attrib_location("v_normal");
 
@@ -5554,8 +5969,27 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
                         if (tool_id_loc != -1)
                             peel_shader->set_uniform(tool_id_loc, (int)buffer.paths[render_path.path_id].extruder_id);
                         for (size_t i = 0; i < render_path.sizes.size(); ++i) {
+                            const Path& sub_draw_path = buffer.paths[render_path.path_ids[i]];
                             if (thickness_loc != -1)
-                                peel_shader->set_uniform(thickness_loc, buffer.paths[render_path.path_ids[i]].height);
+                                peel_shader->set_uniform(thickness_loc, sub_draw_path.height);
+                            // NEOTKO_REALCOLOR_TAG s243 (F4): el acabado se manda POR SUB-DRAW, por
+                            // la misma razón exacta que la altura (ver el comentario de arriba): un
+                            // RenderPath agrupa por color y puede mezclar Paths de roles distintos
+                            // — un perímetro externo y un bridge del mismo extrusor caen en el mismo
+                            // lote. Leerlo una vez por RenderPath repetiría el bug que path_ids[]
+                            // vino a arreglar, sólo que con el material en vez de con el grosor.
+                            if (finish_loc != -1) {
+                                // La primera capa se detecta por Z contra la Z más baja del print,
+                                // con tolerancia de media altura del propio path: así una primera
+                                // capa gruesa de ALH sigue entrando y la segunda sigue quedando fuera.
+                                const float path_z = sub_draw_path.sub_paths.empty() ?
+                                    -1.0f : sub_draw_path.sub_paths.front().first.position.z();
+                                const bool is_first_layer = first_layer_z >= 0.0f && path_z >= 0.0f &&
+                                    std::abs(path_z - first_layer_z) <= std::max(sub_draw_path.height * 0.5f, 1e-3f);
+                                const std::array<float, 2> finish =
+                                    realcolor_surface_finish(sub_draw_path.role, is_first_layer, m_realcolor_tuning);
+                                peel_shader->set_uniform(finish_loc, finish);
+                            }
                             glsafe(::glDrawElements(GL_TRIANGLES, (GLsizei)render_path.sizes[i], GL_UNSIGNED_SHORT, (const void*)render_path.offsets[i]));
                         }
                     }
@@ -5672,6 +6106,12 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
     present_shader->set_uniform("u_sss_strength", m_realcolor_tuning.sss_strength);
     present_shader->set_uniform("u_sss_radius_px", m_realcolor_tuning.sss_radius_px);
     present_shader->set_uniform("u_sss_reference_td", m_realcolor_tuning.sss_reference_td);
+    // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): gradeo de presentación — ver realcolor_present.fs. Va
+    // en el present y no en el peel a propósito: no puede realimentar el composite Beer-Lambert.
+    present_shader->set_uniform("u_grade_contrast", m_realcolor_tuning.grade_contrast);
+    present_shader->set_uniform("u_grade_saturation", m_realcolor_tuning.grade_saturation);
+    // NEOTKO_REALCOLOR_TAG s243 (F6): silueta opaca — ver compute_interior() en realcolor_present.fs.
+    present_shader->set_uniform("u_fill_interior", m_realcolor_tuning.fill_interior);
 
     const int present_position_id = present_shader->get_attrib_location("v_position");
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_realcolor_cache.quad_vbo));
@@ -5822,7 +6262,9 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     GLint caller_fbo = 0;
     glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
 
-    if (!ensure_shadow_map_fbo(SHADOW_MAP_RES))
+    // NEOTKO_PHOTOMODE_TAG s242 (F2.5): photo_shadow_map_res() returns SHADOW_MAP_RES verbatim
+    // outside Photo Mode. ensure_shadow_map_fbo() already reallocates when the size changes.
+    if (!ensure_shadow_map_fbo(photo_shadow_map_res()))
         return false;
 
     // --- world bounding box of everything that could cast. Deliberately every volume in the
@@ -5839,16 +6281,58 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
         return false;
     bbox.offset(SHADOW_FIT_MARGIN_MM);
 
+    // NEOTKO_PHOTOMODE_TAG s242 — grow the frustum to cover where the shadow LANDS, not just where
+    // the casters are.
+    //
+    // The 5 mm margin above is sized for the objects themselves. That was fine while the only
+    // receiver was the bed, which is not a shadow receiver at all (it gets the separate planar
+    // pass instead) — nothing sampled the map outside the objects' own footprint. The cyclorama
+    // changes that: it is a real receiver spanning several times the bed, and a shadow whose
+    // ground contact falls outside the map does not fade out, it is CUT OFF mid-shadow, because
+    // photo_stage.fs returns "lit" for any uv outside [0,1].
+    //
+    // The needed reach is height / tan(elevation): a low key throws a long shadow. Deliberately
+    // NOT sized to the cyclorama (3x the bed) — the frustum is the map's denominator, so padding
+    // it to the whole floor would trade a clipped shadow for a blocky one. This grows it by what
+    // the geometry actually demands and no more, capped so a near-horizontal light cannot ask for
+    // a kilometre.
+    if (photo_mode_hides_bed()) {
+        const Vec3d ld = photo_key_dir_world();
+        const double height = std::max(bbox.max.z(), 0.0);
+        // tan(elev) via the horizontal/vertical split of the (unit) light vector.
+        const double horiz = std::hypot(ld.x(), ld.y());
+        const double vert  = std::max(ld.z(), 1e-3);
+        const double reach = std::clamp(height * horiz / vert, 0.0, 4.0 * bbox.size().norm() + 100.0);
+
+        // Extend along the shadow's ground direction only — that is where it goes — plus a little
+        // sideways for the penumbra of the PCF kernel.
+        const Vec3d ground_dir = (horiz > 1e-6) ? Vec3d(-ld.x() / horiz, -ld.y() / horiz, 0.0) : Vec3d::Zero();
+        BoundingBoxf3 shadow_bbox = bbox;
+        shadow_bbox.merge(Vec3d(bbox.min.x(), bbox.min.y(), 0.0) + ground_dir * reach);
+        shadow_bbox.merge(Vec3d(bbox.max.x(), bbox.max.y(), 0.0) + ground_dir * reach);
+        // The floor plane itself must be inside the frustum or the contact point clips away.
+        shadow_bbox.merge(Vec3d(bbox.min.x(), bbox.min.y(), 0.0));
+        shadow_bbox.merge(Vec3d(bbox.max.x(), bbox.max.y(), 0.0));
+        shadow_bbox.offset(SHADOW_FIT_MARGIN_MM);
+        bbox = shadow_bbox;
+    }
+
     // --- light "camera": right-handed look-at mirroring Camera::look_at (Camera.cpp) so the depth
     // convention matches the rest of the project. Because the projection is orthographic, the eye's
     // distance along the light axis is irrelevant — near/far are derived from the transformed bbox
     // below, so any position outside the scene works.
     const Vec3d center = bbox.center();
     const double radius = 0.5 * bbox.size().norm();
-    const Vec3d eye = center + SHADOW_LIGHT_WORLD_DIR * (2.0 * radius);
+    // NEOTKO_PHOTOMODE_TAG s242: photo_key_dir_world() returns SHADOW_LIGHT_WORLD_DIR verbatim
+    // while Photo Mode is off, so this is the same frustum it always was.
+    const Vec3d light_dir = photo_key_dir_world();
+    const Vec3d eye = center + light_dir * (2.0 * radius);
     // LIGHT_TOP_DIR sits ~40 deg off world Z, so UnitZ is a safe up vector; the guard is only for
     // the day someone re-aims the light straight down.
-    const Vec3d up = (std::abs(SHADOW_LIGHT_WORLD_DIR.dot(Vec3d::UnitZ())) > 0.99) ? Vec3d::UnitY() : Vec3d::UnitZ();
+    // NEOTKO_PHOTOMODE_TAG s242: "the day someone re-aims the light" is now every day — the
+    // Softbox Top preset alone sits at 78 deg elevation, and the sphere widget goes to 90. The
+    // guard stopped being theoretical, which is exactly why it was worth keeping.
+    const Vec3d up = (std::abs(light_dir.dot(Vec3d::UnitZ())) > 0.99) ? Vec3d::UnitY() : Vec3d::UnitZ();
 
     const Vec3d unit_z = (eye - center).normalized();
     const Vec3d unit_x = up.cross(unit_z).normalized();
@@ -5895,7 +6379,12 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     m_shadow_light_proj_view = light_proj.matrix() * light_view.matrix();
     // World size of one shadow texel — drives the normal-offset bias in shells_lit.vs. Uses the
     // larger extent so the bias is sized for the coarsest direction.
-    m_shadow_texel_world_mm = (float)(std::max(r - l, t - b) / (double)SHADOW_MAP_RES);
+    // NEOTKO_PHOTOMODE_TAG s242 (F2.5): the CACHE's res, not the SHADOW_MAP_RES constant. They
+    // were the same thing until the quality tier could raise the resolution; leaving the constant
+    // here would have kept sizing the bias for a 2048 texel while the map was 4096 or 8192, i.e.
+    // a bias 2-4x too large — which does not look like a bug, it looks like the shadow detaching
+    // from the object (peter-panning). Exactly the kind of thing that survives a review.
+    m_shadow_texel_world_mm = (float)(std::max(r - l, t - b) / (double)std::max(m_shadow_map_cache.res, 1));
 
     // --- depth-only draw from the light.
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map_cache.fbo));
@@ -6042,6 +6531,10 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
     // off-screen depth texture that pass 2 samples. A false return is not an error, just "no cast
     // shadow this frame" (u_shadow_enabled=false); AO and SSCS still apply.
     const bool shadow_map_ok = render_shadow_map(volumes, filter, partly_inside_enable);
+    // NEOTKO_PHOTOMODE_TAG s242: published for the cyclorama, which samples this same map later in
+    // the frame from GLCanvas3D — see get_shadow_map_handle(). Written on every path, including
+    // failure, so it can never report a stale success.
+    m_shadow_map_valid_this_frame = shadow_map_ok;
 
     // --- pass 1: normal+eye_z G-buffer, single opaque z-tested pass, own depth buffer.
     // ERenderType::All (not `type`) — GLVolumeCollection::render() force-enables
@@ -6076,6 +6569,40 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
 
     lit_shader->start_using();
     lit_shader->set_uniform("emission_factor", 0.1f);
+    // NEOTKO_PHOTOMODE_TAG s242: every lighting constant shells_lit.vs used to hold as a #define
+    // is now a uniform. Sent once per pass, not per volume — the lights are a property of the
+    // frame. With Photo Mode off this pushes the original values, which is the whole "off ==
+    // bit-identical" contract.
+    photo_set_light_uniforms(lit_shader, camera);
+
+    // NEOTKO_PHOTOMODE_TAG s242 (F5): environment probe. Baked lazily and only re-baked when the
+    // lights actually change (fingerprint compare inside), so orbiting the camera costs nothing.
+    // A failed bake is not an error — the shader falls back to the flat hemisphere ambient.
+    {
+        const PhotoModeState& pm = photo_mode();
+        const bool env_on = pm.active && pm.env_enabled && ensure_photo_env_textures();
+        lit_shader->set_uniform("u_env_enabled", env_on);
+        if (env_on) {
+            // GL_TEXTURE7/8 — above the units render_with_outline() and the env-map path touch,
+            // and above the G-buffer (5) and shadow map (6). Same reasoning as s228's move to
+            // unit 5: anything at 0 gets stomped mid-loop.
+            glsafe(::glActiveTexture(GL_TEXTURE7));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_photo_env.mirror_tex));
+            lit_shader->set_uniform("u_env_mirror", 7);
+            glsafe(::glActiveTexture(GL_TEXTURE8));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_photo_env.irradiance_tex));
+            lit_shader->set_uniform("u_env_irradiance", 8);
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            lit_shader->set_uniform("u_env_intensity", std::clamp(pm.env_intensity, 0.0f, 2.0f));
+            lit_shader->set_uniform("u_env_rotation", float(pm.env_rotation_deg * M_PI / 180.0));
+            // WORLD position of the eye, for the reflection vector. Verified, not assumed:
+            // v_world_pos/v_world_normal in shells_lit.vs come from volume_world_matrix, so both
+            // sides of `u_camera_pos_world - v_world_pos` really are in world space. Mixing an
+            // eye-space position in here is exactly what would make the reflection skate across
+            // the surface while orbiting.
+            lit_shader->set_uniform("u_camera_pos_world", Vec3f(camera.get_position().cast<float>()));
+        }
+    }
     // NEOTKO_LIBREMODE_TAG s228: GL_TEXTURE5, NOT GL_TEXTURE0 — GLVolume::render_with_outline()
     // (selected-volume silhouette pass, 3DScene.cpp) and the environment-map reflection path both
     // rebind unit 0 mid-loop inside volumes.render() below, per-volume, with no notion of our
@@ -6112,7 +6639,9 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
     lit_shader->set_uniform("u_shadow_map", 6);
     lit_shader->set_uniform("u_shadow_enabled", shadow_map_ok);
     if (shadow_map_ok) {
-        const float texel = 1.0f / (float)m_shadow_map_cache.res;
+        // NEOTKO_PHOTOMODE_TAG s242 (F2.5): the spread widens with the tier so that quadrupling
+        // the resolution buys less aliasing rather than a harder edge. 1.0 outside Photo Mode.
+        const float texel = photo_shadow_pcf_spread() / (float)m_shadow_map_cache.res;
         lit_shader->set_uniform("u_light_proj_view", m_shadow_light_proj_view);
         lit_shader->set_uniform("u_shadow_texel", Vec2f(texel, texel));
         lit_shader->set_uniform("u_shadow_bias_min", st.override_libre ? st.shadow_bias_min : SHADOW_BIAS_MIN);
@@ -6196,6 +6725,12 @@ void GCodeViewer::render_volumes_shadow(GLVolumeCollection& volumes, GLVolumeCol
     shadow_shader->start_using();
     shadow_shader->set_uniform("u_view_matrix", camera.get_view_matrix());
     shadow_shader->set_uniform("u_shadow_color", SHELLS_SHADOW_COLOR);
+    // NEOTKO_PHOTOMODE_TAG s242: same world aim the shadow map uses, so the two stay in agreement
+    // when the light moves — see the s229 note above about them finally agreeing at all.
+    // Vec3f(...) around the cast, not a bare .cast<float>(): Eigen returns a lazy CwiseUnaryOp
+    // expression, which is convertible to several of set_uniform's overloads at once and makes the
+    // call ambiguous. Forcing the concrete type picks the Vec3f overload.
+    shadow_shader->set_uniform("u_light_key_dir_world", Vec3f(photo_key_dir_world().cast<float>()));
     // Same set of volumes as the lit pass, so the shadow matches exactly what's actually visible.
     volumes.render(type, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height}, filter, partly_inside_enable);
     shadow_shader->stop_using();

@@ -33,6 +33,7 @@
 #include "2DBed.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242 — hides the plate furniture, adds the camera icon
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
 #include "GUI_ObjectList.hpp"
@@ -626,8 +627,11 @@ void PartPlate::calc_vertex_for_icons(int index, PickingModel &model)
     float gap_top  = PARTPLATE_ICON_GAP_TOP  * factor;
     p += Vec2d(gap_left,-1 * (index * (size + gap_y) + gap_top));
 
+    // NEOTKO_PHOTOMODE_TAG s242: bed_icon_count 6 -> 7, the Photo Mode icon. Upstream left the
+    // reminder below to keep this in sync; it only affects the vertical centring on circular beds,
+    // which is exactly the kind of thing that silently drifts.
     if (m_plater && m_plater->get_build_volume_type() == BuildVolume_Type::Circle)
-        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 6 /* bed_icon_count */) / 2);
+        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 7 /* bed_icon_count */) / 2);
 
     poly.contour.append({ scale_(p(0))       , scale_(p(1) - size) });
     poly.contour.append({ scale_(p(0) + size), scale_(p(1) - size) });
@@ -981,6 +985,32 @@ void PartPlate::render_icons(bool bottom, bool only_name, int hover_id)
 
         glsafe(::glEnable(GL_BLEND));
         glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+        // NEOTKO_PHOTOMODE_TAG s242: inside Photo Mode the whole plate column is furniture that
+        // must not appear in the shot — EXCEPT this one button. Hiding it too would strand the
+        // user in a mode whose only exits are Esc and the panel's close button; if the panel ever
+        // scrolls off or gets closed, there is no way back. So the icon column collapses to just
+        // the camera, which doubles as the exit.
+        const bool photo_active = photo_mode().active;
+        // NEOTKO_PHOTOMODE_TAG s242 (F2.5): during the screenshot countdown even the camera button
+        // is furniture. Esc still exits, so the mode stays escapable with nothing on screen.
+        const bool photo_hide_ui = photo_ui_hidden();
+        if (photo_mode_available() && !only_name && !photo_hide_ui) {
+            const bool hovered = (hover_id == (int)PHOTO_MODE_HOVER_ID);
+            render_icon_texture(m_photo_icon.model, hovered ? m_partplate_list->m_photo_hovered_texture
+                                                            : m_partplate_list->m_photo_texture);
+            if (hovered)
+                show_tooltip(photo_active ? _u8L("Exit photo mode") : _u8L("Photo mode"));
+        }
+        if (photo_active) {
+            // Same teardown as the normal exit at the bottom of this function — in particular the
+            // depth mask, which was disabled on entry. Returning without restoring it leaks a
+            // read-only depth buffer into every draw that follows this frame.
+            glsafe(::glDisable(GL_BLEND));
+            glsafe(::glDepthMask(GL_TRUE));
+            shader->stop_using();
+            return;
+        }
 
         if (!only_name) {
             if (hover_id == 1) {
@@ -1338,6 +1368,12 @@ void PartPlate::register_raycasters_for_picking(GLCanvas3D &canvas)
     canvas.remove_raycasters_for_picking(SceneRaycaster::EType::Bed, picking_id_component(6));
     register_model_for_picking(canvas, m_plate_name_edit_icon, picking_id_component(6));
     register_model_for_picking(canvas, m_move_front_icon, picking_id_component(7));
+    // NEOTKO_PHOTOMODE_TAG s242: Photo Mode rides entirely on the shells_lit pipeline, which only
+    // draws the Prepare objects while LibreMode is on — so outside LibreMode the button is not
+    // registered at all, rather than registered and inert. Same shape as the
+    // `if (render_plate_settings)` guard above.
+    if (photo_mode_available())
+        register_model_for_picking(canvas, m_photo_icon, picking_id_component(PHOTO_MODE_HOVER_ID));
 }
 
 int PartPlate::picking_id_component(int idx) const
@@ -2721,6 +2757,12 @@ bool PartPlate::set_shape(const Pointfs& shape, const Pointfs& exclude_areas, Ve
         calc_vertex_for_icons(3, m_lock_icon);
         calc_vertex_for_icons(4, m_plate_settings_icon);
         calc_vertex_for_icons(5, m_move_front_icon);
+        // NEOTKO_PHOTOMODE_TAG s242: layout slot 6 (picking sub-id 8 — the two indexings differ,
+        // see PHOTO_MODE_HOVER_ID). Laid out unconditionally, even when LibreMode is off: the
+        // geometry is cheap, and making the column's slot count depend on a runtime toggle would
+        // shift every other icon whenever the user flips LibreMode. Visibility and pickability are
+        // gated instead, in render_icons() and register_raycasters_for_picking().
+        calc_vertex_for_icons(6, m_photo_icon);
         // ORCA also change bed_icon_count number in calc_vertex_for_icons() after adding or removing icons for circular shaped beds that uses vertical alingment for icons
 
 		//calc_vertex_for_number(0, (m_plate_index < 9), m_plate_idx_icon);
@@ -2781,6 +2823,14 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
 {
     glsafe(::glEnable(GL_DEPTH_TEST));
 
+    // NEOTKO_PHOTOMODE_TAG s242: this function is the single choke point for every piece of plate
+    // furniture — background, exclude area, grid, height limit, logo, icons, numbers, name — so
+    // one flag here empties the scene for a photo instead of eight scattered guards.
+    //
+    // Note it gates on photo_mode_hides_bed(), not on `active`: the Bed stage deliberately keeps
+    // the real bed, for the case where the bed IS the context the client should see.
+    const bool photo_hide = photo_mode_hides_bed();
+
     GLShaderProgram *shader = wxGetApp().get_shader("flat");
     if (shader != nullptr) {
         shader->start_using();
@@ -2790,17 +2840,18 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         shader->set_uniform("view_model_matrix", view_matrix);
         shader->set_uniform("projection_matrix", projection_matrix);
 
-        if (!bottom) {
+        if (!bottom && !photo_hide) {
             // draw background
             render_background(force_background_color);
 
             render_exclude_area(force_background_color);
         }
 
-        if (show_grid)
+        if (show_grid && !photo_hide)
             render_grid(bottom);
 
-        render_height_limit(mode);
+        if (!photo_hide)
+            render_height_limit(mode);
 
         glsafe(::glDisable(GL_BLEND));
 
@@ -2811,15 +2862,25 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         shader->stop_using();
     }
 
-    if (!bottom && m_selected && !force_background_color) {
+    // NEOTKO_PHOTOMODE_TAG s242: the Snapmaker logo is the most obviously "this is a slicer
+    // screenshot" element in the frame, so it is the first thing to go.
+    // NEOTKO_REALCOLOR_TAG s243 (F2): el logo también se va en vista RealColor — ver
+    // PartPlateList::render_logo_suppressed para el porqué. Se comprueba aquí, en la misma guarda
+    // que ya usa Photo Mode, en vez de dentro de render_logo(): ese método tiene varias salidas y
+    // efectos secundarios de carga/reset de textura, y no quiero que la supresión dependa de por
+    // cuál de ellas se salga.
+    const bool logo_hide = photo_hide || (m_partplate_list && m_partplate_list->render_logo_suppressed);
+    if (!bottom && m_selected && !force_background_color && !logo_hide) {
         if (m_partplate_list)
             render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
         else
             render_logo(bottom);
     }
 
+    // Always called: render_icons() has its own Photo Mode branch, which collapses the column down
+    // to the camera button so the mode stays exitable. See the note there.
     render_icons(bottom, only_body, hover_id);
-    if (!force_background_color) {
+    if (!force_background_color && !photo_hide) {
         render_only_numbers(bottom);
     }
 
@@ -3391,6 +3452,23 @@ void PartPlateList::generate_icon_textures()
         }
     }
 
+    // NEOTKO_PHOTOMODE_TAG s242. Loaded unconditionally rather than behind photo_mode_available():
+    // this function only re-runs on a dark-mode flip, so gating it on a runtime toggle would leave
+    // the texture missing for anyone who enables LibreMode mid-session.
+    {
+        file_name = path + (m_is_dark ? "plate_photo_dark.svg" : "plate_photo.svg");
+        if (!m_photo_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
+        }
+    }
+
+    {
+        file_name = path + (m_is_dark ? "plate_photo_hover_dark.svg" : "plate_photo_hover.svg");
+        if (!m_photo_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
+        }
+    }
+
 	//if (m_arrange_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_arrange_dark.svg" : "plate_arrange.svg");
@@ -3531,6 +3609,9 @@ void PartPlateList::release_icon_textures()
 	m_del_hovered_texture.reset();
     m_move_front_hovered_texture.reset();
     m_move_front_texture.reset();
+    // NEOTKO_PHOTOMODE_TAG s242
+    m_photo_hovered_texture.reset();
+    m_photo_texture.reset();
 	m_arrange_texture.reset();
 	m_arrange_hovered_texture.reset();
 	m_orient_texture.reset();

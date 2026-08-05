@@ -94,6 +94,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 19. [Bridging infill extra expansion (2.4.0) — anchor bridges before they cross](#19-bridging-infill-extra-expansion-240--anchor-bridges-before-they-cross)
 20. [RealColor View — see the colour you are actually going to print](#20-realcolor-view--see-the-colour-you-are-actually-going-to-print)
 21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
+22. [Photo Mode (2.4.2) — a photo studio inside Prepare](#22-photo-mode-242--a-photo-studio-inside-prepare)
 
 ---
 
@@ -1591,11 +1592,12 @@ is one blended colour.
 **RealColor** renders the second thing. It composites each surface the way the eye will resolve it,
 using each filament's **TD** (§1e) to decide how much of what is underneath shows through.
 
-![Filament view — the standard preview: every extrusion in its filament's raw colour, so the top surface reads as hard blue and pink stripes](docs/images/RealColor-OFF.png)
+![Side by side on the same G-code: on the left the traditional preview, where every extrusion is drawn in its filament's raw colour and each surface reads as hard diagonal stripes of blue, pink and orange; on the right RealColor, where those stripes resolve into the single blended tone the print will actually have — the striped tiles become continuous salmon, sand and lilac, and only the genuinely single-colour tiles look the same in both](docs/images/RealColor.png)
 
-![RealColor view — the same G-code composited optically: the stripes resolve into the blended tone the print will actually have, and the legend is replaced by a Filament Usage summary carrying the "approximated optical simulation" caveat](docs/images/RealColor-ON.png)
-
-Same G-code in both shots. Only the interpretation changes.
+Same G-code in both halves. Only the interpretation changes. Look at any tile that reads as stripes on
+the left: on the right it has become the one colour your eye will see on the finished part. The tiles
+that were already a single filament barely move — which is the point, because that is exactly where
+the two ways of drawing agree.
 
 ### Notes
 
@@ -1652,11 +1654,145 @@ tuning TD (§1e) rather than leaving it at defaults.
 
 ---
 
+## 22. Photo Mode (2.4.2) — a photo studio inside Prepare
+
+**Where to find it**: **Prepare** → the **camera button** at the bottom of the plate's icon column
+(also in the right-click menu on empty space). **Requires Libre Mode** (§4).
+
+A client asks what the part looks like in a different colour. You change it — and now you need a
+picture. Opening a real renderer for that is a five-minute detour for a thirty-second question, so in
+practice you send a screenshot of the slicer: gantry, grid, Snapmaker logo, toolbars and all.
+
+Photo Mode turns the Prepare viewport into a small photo studio. Your object does not move and does
+not change; everything *around* it does.
+
+It changes **nothing** about the model, the settings or the G-code. Esc, the camera button, or
+switching to Preview leaves it.
+
+### 22a. The stage
+
+| Stage | What you get |
+|---|---|
+| **Print bed** | Everything as normal. For when the bed *is* the context you want to show. |
+| **Lightbox** | A **cyclorama**: a floor that sweeps up into a back wall through a rounded corner, with no visible seam. The white sweep a product photographer shoots against. |
+| **Backdrop** | The floor alone, no wall. For top-down shots. |
+
+On Lightbox and Backdrop the bed, grid, exclusion zones, plate numbers, the Snapmaker logo, the
+gizmos and the toolbars all disappear — the logo first, because it is the single most obvious "this
+is a screenshot of a slicer" element in the frame. The camera button stays, because it is also how
+you get out.
+
+Floor colour, size (as a multiple of your bed) and corner radius are adjustable.
+
+### 22b. Lights
+
+Three: **key**, **fill** and **rim**. Each has a **draggable ball** instead of three number boxes —
+drag toward where you want the light and the shadow follows. Azimuth and elevation are also shown in
+degrees, so a setup you liked can be written down and reproduced.
+
+The light lives **in the room, not on the camera**. Orbit around the object and the lighting stays
+put, the way it would in a real studio. (The normal viewport does the opposite: its light is pinned
+to your eye. That is why the object never has a dark side while you spin it.)
+
+Only the key light casts the shadow. Each light has an intensity and a colour tint.
+
+**Presets** sit at the top and do most of the work:
+
+| Preset | What it is for |
+|---|---|
+| **Neutral (as viewport)** | Identical to the normal 3D view. The default — entering Photo Mode changes the scene around the object, not the object. |
+| **Studio 3-point** | Key high to one side, fill opposite to open the shadows, rim behind to separate the object from the backdrop. |
+| **Softbox top** | One big overhead source, heavy ambient. The "product on white" look. |
+| **Rim / backlight** | Weak key, strong edge light from behind. Sells profile and surface finish. |
+| **Flat catalog** | Deliberately boring: almost no shadow, heavy ambient. What a shop listing wants, and what survives being cropped. |
+| **Dramatic** | Grazing key, almost no fill. Long shadows — sells geometry rather than colour. |
+
+### 22c. Materials, per filament slot
+
+Each slot gets its own finish, picked from a list that shows the slot's **real colour** beside it:
+
+| Material | Reads as |
+|---|---|
+| **Plastic** | The default — pixel-for-pixel the shading you already had. |
+| **Glossy / resin** | Small, hard highlight. Polished or resin-printed. |
+| **Matte PLA** | Broad, weak sheen. |
+| **Rubber / TPU** | Almost no highlight at all — which is exactly what makes TPU look like TPU. |
+| **Metal** | Highlight tinted by the object's own colour, no diffuse. |
+| **Silk** | Half-metallic: a coloured sheen over a coloured body. What silk PLA actually is. |
+
+On a **painted multi-colour object** the material follows the **colour**, not the part. One keyring
+body can be matte on the stripes and metal on the lettering, from a single mesh.
+
+> **Metal and Silk look much better with the Environment on** (§22d) — a metal is sold by what it
+> reflects. They work without it, reflecting your lights directly, but there is not much *in* the
+> reflection until you give them a room.
+
+### 22d. Environment
+
+Off by default. When on, it builds a **virtual room out of your own three lights**, which the objects
+then reflect: move the key light and its reflection moves with it. There is a **rotate room**
+control, which turns the reflections without moving the lighting — the fastest way to make a metal
+look right.
+
+It is off by default on purpose: with it on, Photo Mode no longer reproduces the normal viewport
+exactly, and that equivalence is worth keeping as the starting point.
+
+### 22e. Quality, and the floor reflection
+
+| Quality | Shadow map | Floor reflection |
+|---|---|---|
+| **Normal** | 2048 px | — |
+| **High** | 4096 px | available |
+| **Ultra** | 8192 px | available |
+
+The higher tiers also **widen the shadow's soft edge** to match the resolution. Raising the
+resolution alone would give you a thinner but equally hard edge — better measured, worse looking.
+
+**Floor reflection** mirrors the objects in the floor, stronger at grazing angles than face-on, with
+an adjustable strength. It is a genuine reflection of the scene rather than a screen-space
+approximation, so it does not fall apart at the object's outline — which is the part of a reflection
+anyone actually looks at.
+
+It draws the whole scene a second time, which is why it is gated above Normal. On an **M4 with a
+fairly complex model, Ultra with the reflection on runs at 10–15 fps** — fine for framing a still,
+not meant for modelling. Drop to High if you want to orbit comfortably.
+
+### 22f. Getting the picture out
+
+**Hide UI for screenshot** clears every control — including the Photo Mode panel itself — for an
+adjustable few seconds, so you can grab the frame with your system screenshot tool (⌘⇧4 on macOS).
+Esc cancels the countdown; a second Esc leaves the mode.
+
+> **Save PNG** and **Copy to clipboard** are **disabled in 2.4.2.** The off-screen render still
+> frames the shot wrongly, and a button that writes a broken file is worse than no button. The
+> screenshot route above is the supported way for now.
+
+### 22g. Presets
+
+**My presets** saves lights, materials, stage, environment and quality under a name you choose.
+
+They are stored **with the application, not in the 3MF**. A lighting setup is your preference as the
+person taking the picture — it should follow you across every project, rather than ride along inside
+a model file that gets shared and printed. Saving over an existing name replaces it.
+
+### Notes
+
+- **Libre Mode must be on.** Photo Mode is built on the Libre Mode object renderer (shadows, ambient
+  occlusion, contact shadows); with Libre Mode off the button does not appear at all, rather than
+  appearing and doing nothing.
+- **Transparent materials are deliberately not supported.** Showing a client a semi-transparent part
+  would be *dishonest* — that is not how it comes off the printer. If you want to see inside a part,
+  that is what **RealColor** (§20) is for, where the translucency is the whole point.
+- Switching to **Preview**, **Device** or **Project** leaves Photo Mode automatically.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
 |---------|---------------|
 | Sandwich Editor (pass stack, ColorStitch, PathBlend) | Quality → Surface ColorStitch → **Sandwich editor…** |
+| Photo Mode (§22) | Prepare → **camera button** on the plate icon column *(Libre Mode only)* |
 | ColorStitch pass pattern | Sandwich Editor → a pass set to **ColorStitch** → **Edit gradient…** |
 | ColorStitch Studio | Sandwich Editor → **ColorStitch Studio** panel (bottom) |
 | Colour match (inverse ΔE2000) | ColorStitch Studio → **Target + Match ▸** |

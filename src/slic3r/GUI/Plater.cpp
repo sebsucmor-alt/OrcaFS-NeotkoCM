@@ -6,6 +6,7 @@
 #include "MixedFilamentColorMapPanel.hpp"
 #include "MixedColorMatchHelpers.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/NeoDebug.hpp" // NEOTKO_ONLY_GCODE_TAG — canal PROFILE (ORCA_DEBUG_PROFILE=1)
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
@@ -30,6 +31,9 @@
 #include <future>
 #include <functional>
 #include <sstream>
+// NEOTKO_GCODE_DEBUG_TAG — para identificar el tipo real de una excepcion desde dentro de catch(...)
+#include <cxxabi.h>
+#include <typeinfo>
 #include <fstream> // NEOTKO_LIBRE_TAG — world-space import /tmp debug log
 #include <boost/algorithm/string.hpp>
 #include <boost/iterator/counting_iterator.hpp>
@@ -117,6 +121,7 @@
 #include "GUI_Preview.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
@@ -1018,6 +1023,7 @@ struct Sidebar::priv
     ScalableButton* m_color_mix_icon          = nullptr;
     ScalableButton* m_btn_add_color_mix       = nullptr;
     ScalableButton* m_btn_del_color_mix       = nullptr;
+    bool            m_color_mix_expanded      = true;
 
     wxStaticLine* m_staticline2;
     wxPanel* m_panel_project_title;
@@ -5826,6 +5832,10 @@ static std::vector<size_t> build_mixed_filament_ui_indices(const std::vector<Mix
 
 void Sidebar::init_color_mix_panel(wxWindow* parent, wxSizer* sizer)
 {
+    // Restore collapse/expand state from the previous session (default: expanded)
+    if (auto* app_config = wxGetApp().app_config)
+        p->m_color_mix_expanded = app_config->get_bool("color_mix_panel_expanded");
+
     // Title bar
     p->m_panel_color_mix_title = new StaticBox(parent, wxID_ANY, wxDefaultPosition,
                                                wxDefaultSize, wxTAB_TRAVERSAL | wxBORDER_NONE);
@@ -5872,6 +5882,30 @@ void Sidebar::init_color_mix_panel(wxWindow* parent, wxSizer* sizer)
 
     sizer->Add(p->m_panel_color_mix_title, 0, wxEXPAND, 0);
     sizer->Add(p->m_scrolled_color_mix, 0, wxEXPAND, 0);
+
+    // Bind collapse/expand event to title bar
+    p->m_panel_color_mix_title->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
+        // Exclude button areas from collapse/expand
+        int button_left = p->m_panel_color_mix_title->GetClientSize().x;
+        auto consider_button = [&button_left](wxWindow *button) {
+            if (button && button->IsShown())
+                button_left = std::min(button_left, button->GetPosition().x);
+        };
+        consider_button(p->m_btn_del_color_mix);
+        consider_button(p->m_btn_add_color_mix);
+        if (e.GetPosition().x > button_left - FromDIP(12))
+            return;
+
+        p->m_color_mix_expanded = !p->m_color_mix_expanded;
+        if (auto* app_config = wxGetApp().app_config)
+            app_config->set_bool("color_mix_panel_expanded", p->m_color_mix_expanded);
+        update_color_mix_panel();
+        // Panel is nested inside m_panel_filament_content: relayout the whole chain
+        p->m_panel_filament_content->Layout();
+        if (m_scrolled_sizer)
+            m_scrolled_sizer->Layout();
+        Layout();
+    });
 
     // Add button: open dialog to create new mix
     p->m_btn_add_color_mix->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
@@ -5948,7 +5982,7 @@ void Sidebar::update_color_mix_panel()
     const int n_physical = co ? static_cast<int>(co->values.size()) : 0;
     const bool show = (n_physical >= 2);
     p->m_panel_color_mix_title->Show(show);
-    p->m_scrolled_color_mix->Show(show);
+    p->m_scrolled_color_mix->Show(show && p->m_color_mix_expanded);
     if (!show) {
         return;
     }
@@ -6004,7 +6038,7 @@ void Sidebar::update_color_mix_panel()
         m_scrolled_sizer->Layout();
         return;
     }
-    p->m_scrolled_color_mix->Show();
+    p->m_scrolled_color_mix->Show(p->m_color_mix_expanded);
     p->m_btn_del_color_mix->Show();
     p->m_btn_add_color_mix->SetBitmap_("add_filament");
 
@@ -6357,9 +6391,11 @@ void Sidebar::update_color_mix_panel()
     // Dynamic height: grow with rows up to 3, only cap when > 3 rows
     const wxSize content_best = p->m_panel_color_mix_content->GetBestSize();
     const int row_count = (visible_idx + 1) / 2; // rows (2 columns)
-    const int desired_h = row_count > 3
-        ? (content_best.GetHeight() / row_count) * 3
-        : content_best.GetHeight();
+    const int desired_h = !p->m_color_mix_expanded
+        ? 0
+        : (row_count > 3
+            ? (content_best.GetHeight() / row_count) * 3
+            : content_best.GetHeight());
     p->m_scrolled_color_mix->SetMinSize({-1, desired_h});
     p->m_scrolled_color_mix->SetMaxSize({-1, desired_h});
     
@@ -8799,6 +8835,46 @@ void Sidebar::can_search()
     p->can_search();
 }
 
+// NEOTKO_GCODE_DEBUG_TAG — canal PROFILE (`export ORCA_DEBUG_PROFILE=1`), fichero
+// /tmp/neotko_profile.log. Log INCONDICIONAL dentro del canal: interesa ver tambien los pasos que
+// NO hacen nada, porque un log que solo escribe cuando actua no descarta nada.
+#define NEOGC_LOG(what)                                                              \
+    do {                                                                             \
+        if (NeoDebug::enabled(NeoDebug::PROFILE)) {                                  \
+            std::ostringstream _neo_o;                                               \
+            _neo_o << "GCODE " << what;                                              \
+            NeoDebug::write(NeoDebug::PROFILE, _neo_o.str());                        \
+        }                                                                            \
+    } while (0)
+
+// NEOTKO_GCODE_DEBUG_TAG — wx dice "Unhandled unknown exception" y se lleva la app por delante sin
+// contar QUE se lanzo: su catch-all solo sabe reconocer std::exception y las suyas. El runtime de
+// C++ si sabe el tipo real, aunque nosotros no tengamos su declaracion a mano, y aqui se lo
+// preguntamos.
+//
+// ⚠️ SOLO puede llamarse desde DENTRO de un bloque catch: el `throw;` de abajo re-lanza la
+// excepcion en vuelo para poder mirarle el what(), y fuera de un catch eso aborta el proceso.
+static std::string neotko_current_exception_desc()
+{
+    std::string desc = "unknown";
+    if (const std::type_info *ti = abi::__cxa_current_exception_type()) {
+        int   status = 0;
+        char *dem    = abi::__cxa_demangle(ti->name(), nullptr, nullptr, &status);
+        desc          = (status == 0 && dem != nullptr) ? dem : ti->name();
+        if (dem != nullptr)
+            free(dem);
+    }
+    // El mensaje solo lo llevan las que heredan de std::exception. Las demas se quedan en el tipo,
+    // que ya es infinitamente mas de lo que decia wx.
+    try {
+        throw;
+    } catch (const std::exception &e) {
+        desc += std::string(" | what: ") + e.what();
+    } catch (...) {
+    }
+    return desc;
+}
+
 class PlaterDropTarget : public wxFileDropTarget
 {
 public:
@@ -8911,6 +8987,25 @@ struct Plater::priv
     bool     m_neotko_libre_cached = false;
     void set_neotko_libre_cached(bool v) { m_neotko_libre_cached = v; }
     // NeotkoLIBRE_END
+    // NEOTKO_GCODE_REENTRY_TAG — "estoy dentro de Plater::load_gcode".
+    //
+    // GCodeViewer::load() enseña un ProgressDialog y llama a Update() dentro del bucle de vertices.
+    // wxProgressDialog::Update() BOMBEA el bucle de eventos de wx, asi que a media construccion de
+    // los buffers entran eventos pendientes — y uno de ellos acaba en reslice(), que llama a
+    // reset_gcode_toolpaths() y vacia el GCodeViewer MIENTRAS se esta llenando. El load sigue con
+    // los buffers ya borrados y muere con std::length_error al dimensionar un vector con basura
+    // (verificado en /tmp/neotko_profile.log: el RESET_TOOLPATHS cae ENTRE set_gcode_file_ready y
+    // el "final reload_print done", que nunca llega).
+    //
+    // Con ficheros grandes la re-entrada llega despues de terminar y solo deja el plato vacio; con
+    // pequeños llega en medio y revienta. De ahi el "a veces si, a veces no".
+    bool     m_loading_gcode = false;
+    bool     is_loading_gcode() const { return m_loading_gcode; }
+    // NEOTKO_CONFIG_MIRROR_TAG — DUEÑO UNICO del full_config que se le pasa a Print::apply().
+    // Ninguna llamada a apply() puede usar preset_bundle->full_config() en crudo: las claves espejo
+    // (neotko_libre_mode / neotko_true_objects / neotko_td_mirror) NO viven en ningun preset, asi
+    // que el config en crudo las trae con su DEFAULT y el diff contra el print las ve cambiadas.
+    DynamicPrintConfig neotko_full_config() const;
     wxPanel* current_panel{ nullptr };
     std::vector<wxPanel*> panels;
     Sidebar *sidebar;
@@ -9102,7 +9197,9 @@ struct Plater::priv
 
     void update_preview_bottom_toolbar();
 
-    void reset_gcode_toolpaths();
+    // NEOTKO_ONLY_GCODE_TAG — los defaults se evaluan en el CALL SITE, asi que el log dice quien
+    // borro los toolpaths y desde que linea. Es el unico embudo: todo el mundo pasa por aqui.
+    void reset_gcode_toolpaths(const char* _who = __builtin_FUNCTION(), int _line = __builtin_LINE());
 
     void reset_all_gizmos();
     void apply_free_camera_correction(bool apply = true);
@@ -9466,7 +9563,23 @@ bool PlaterDropTarget::OnDropFiles(wxCoord x, wxCoord y, const wxArrayString &fi
             return emboss_svg(m_plater, filename, mouse_position);
         }
     }
-    bool res = m_plater.load_files(filenames);
+    // NEOTKO_GCODE_DEBUG_TAG — sin este catch, cualquier excepcion que se escape de load_files()
+    // sube hasta el bucle de eventos de wx, que la considera "unhandled" y MATA la app (exit 255).
+    // Eso es lo que estaba pasando al soltar un gcode: no era un crash, era una excepcion sin
+    // dueño. Aqui se para, se apunta el tipo, y la app sigue viva para poder seguir mirando.
+    bool res = false;
+    NEOGC_LOG("drop: files=" << filenames.size()
+              << " first=" << (filenames.empty() ? "" : into_u8(filenames.Last())));
+    try {
+        res = m_plater.load_files(filenames);
+        NEOGC_LOG("drop: load_files returned " << res);
+    } catch (...) {
+        const std::string desc = neotko_current_exception_desc();
+        NEOGC_LOG("drop: EXCEPTION escaped load_files -> " << desc);
+        BOOST_LOG_TRIVIAL(error) << "PlaterDropTarget::OnDropFiles: exception: " << desc;
+        show_error(&m_plater, _L("Failed to load the dropped file.") + "\n\n" + from_u8(desc));
+        res = false;
+    }
     m_mainframe.update_title();
     return res;
 }
@@ -12485,6 +12598,46 @@ bool Plater::priv::can_current_plate_be_sliced() const
 }
 
 
+// NEOTKO_CONFIG_MIRROR_TAG — el full_config canonico para Print::apply().
+// Las tres claves espejo no salen de ningun preset: se calculan aqui a partir de app_config /
+// del estado cacheado. Si un sitio llama a apply() con el config en crudo, esas claves llegan con
+// su default, print_diff las ve distintas y — al no estar listadas en
+// Print::invalidate_state_by_config_options() — caen en el `else` legacy => invalidate_all_steps()
+// => APPLY_STATUS_INVALIDATED => reset_gcode_toolpaths(). Ese era el bug del gcode que aparecia un
+// frame y desaparecia: load_gcode() aplicaba en crudo y el siguiente update_background_process()
+// aplicaba con espejo, haciendo ping-pong (visible como TD_DIFF alternando en neotko_profile.log).
+DynamicPrintConfig Plater::priv::neotko_full_config() const
+{
+    DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config();
+    // s133: mirror the cached LibreMode active state into the print config so the slicer can relax
+    // bed/boundary checks (e.g. empty-first-layer for floating objects). Decoupled from
+    // bridge-infill: this only sets neotko_libre_mode, no other behaviour.
+    cfg.set_key_value("neotko_libre_mode", new ConfigOptionBool(m_neotko_libre_cached));
+    // NEOTKO_GRAVITY_TAG s226 — same pattern, own axis: Gravity is its own toggle, not a
+    // sub-state of LibreMode (docs/FUTURE/GRAVITY_MASTER_PLAN.md §6). Read here rather than
+    // cached because there is no Gravity SideButton yet (Fase 6); the read is a cheap
+    // app_config lookup on a path that already rebuilds the whole config.
+    cfg.set_key_value("neotko_true_objects",
+        new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_true_objects")));
+    // NEOTKO_MIXEDFIL_SANDWICH_TAG — mirror the per-tool TD scalars (app_config-only)
+    // so SurfaceColorMix.cpp (pure engine) can build ColorSci materials for the
+    // "MixedFilament Object" auto-sandwich without touching app_config.
+    {
+        std::vector<double> _td_mirror;
+        auto* _ac = wxGetApp().app_config;
+        for (int t = 0; t < 4; ++t) {
+            float td = 1.f;
+            if (_ac) {
+                const std::string v = _ac->get("neotko_td_" + std::to_string(t + 1));
+                try { if (!v.empty()) td = std::stof(v); } catch (...) {}
+            }
+            _td_mirror.push_back(std::max(0.01f, std::min(10.f, td)));
+        }
+        cfg.set_key_value("neotko_td_mirror", new ConfigOptionFloats(_td_mirror));
+    }
+    return cfg;
+}
+
 // Update background processing thread from the current config and Model.
 // Returns a bitmask of UpdateBackgroundProcessReturnState.
 unsigned int Plater::priv::update_background_process(bool force_validation, bool postpone_error_messages, bool switch_print)
@@ -12507,35 +12660,17 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         this->partplate_list.update_slice_context_to_current_plate(background_process);
         this->preview->update_gcode_result(partplate_list.get_current_slice_result());
     }
-    // NeotkoLIBRE_START — s133: mirror the cached LibreMode active state into the print config so
-    // the slicer can relax bed/boundary checks (e.g. empty-first-layer for floating objects).
-    // Decoupled from bridge-infill: this only sets neotko_libre_mode, no other behaviour.
-    DynamicPrintConfig _libre_full_cfg = wxGetApp().preset_bundle->full_config();
-    _libre_full_cfg.set_key_value("neotko_libre_mode", new ConfigOptionBool(m_neotko_libre_cached));
-    // NEOTKO_GRAVITY_TAG s226 — same pattern, own axis: Gravity is its own toggle, not a
-    // sub-state of LibreMode (docs/FUTURE/GRAVITY_MASTER_PLAN.md §6). Read here rather than
-    // cached because there is no Gravity SideButton yet (Fase 6); the read is a cheap
-    // app_config lookup on a path that already rebuilds the whole config.
-    _libre_full_cfg.set_key_value("neotko_true_objects",
-        new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_true_objects")));
-    // NEOTKO_MIXEDFIL_SANDWICH_TAG — mirror the per-tool TD scalars (app_config-only)
-    // so SurfaceColorMix.cpp (pure engine) can build ColorSci materials for the
-    // "MixedFilament Object" auto-sandwich without touching app_config.
-    {
-        std::vector<double> _td_mirror;
-        auto* _ac = wxGetApp().app_config;
-        for (int t = 0; t < 4; ++t) {
-            float td = 1.f;
-            if (_ac) {
-                const std::string v = _ac->get("neotko_td_" + std::to_string(t + 1));
-                try { if (!v.empty()) td = std::stof(v); } catch (...) {}
-            }
-            _td_mirror.push_back(std::max(0.01f, std::min(10.f, td)));
-        }
-        _libre_full_cfg.set_key_value("neotko_td_mirror", new ConfigOptionFloats(_td_mirror));
+    // NEOTKO_CONFIG_MIRROR_TAG — el config espejo se construye en neotko_full_config() (dueño unico).
+    Print::ApplyStatus invalidated = background_process.apply(this->model, this->neotko_full_config());
+    // NEOTKO_ONLY_GCODE_TAG — 0=UNCHANGED 1=CHANGED 2=INVALIDATED. INVALIDATED aqui borra los
+    // toolpaths y CHANGED/INVALIDATED apaga m_only_gcode: los dos matan un gcode recien abierto.
+    if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+        std::ostringstream oss;
+        oss << "UBP apply invalidated=" << (int)invalidated
+            << " only_gcode=" << q->only_gcode_mode()
+            << " objects=" << this->model.objects.size();
+        NeoDebug::write(NeoDebug::PROFILE, oss.str());
     }
-    Print::ApplyStatus invalidated = background_process.apply(this->model, _libre_full_cfg);
-    // NeotkoLIBRE_END
     notify_filament_compatibility_after_apply();
 
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
@@ -13505,6 +13640,16 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
 {
     if (std::find(panels.begin(), panels.end(), panel) == panels.end())
         return;
+
+    // NEOTKO_PHOTOMODE_TAG s242: leaving the 3D editor leaves Photo Mode.
+    //
+    // The mode hides the plate furniture through PartPlate::render(), which is shared by every
+    // canvas — so with the mode still armed, switching to Preview showed a bed with no logo and no
+    // grid. The alternative was to make that guard canvas-aware, but this is both simpler and what
+    // a user actually expects: Photo Mode is a thing you do to the 3D scene, and walking away from
+    // the 3D scene ends it. Coming back to a stripped bed you did not ask for would be worse.
+    if (panel != view3D && photo_mode().active)
+        q->set_photo_mode(false);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": current_panel %1%, new_panel %2%")%current_panel%panel;
 #ifdef __WXMAC__
@@ -15508,8 +15653,26 @@ void Plater::update_partplate()
 }
 #endif
 
-void Plater::priv::reset_gcode_toolpaths()
+void Plater::priv::reset_gcode_toolpaths(const char* _who, int _line)
 {
+    // NEOTKO_ONLY_GCODE_TAG — log INCONDICIONAL (dentro del canal): interesa saber que se llamo
+    // aunque no hubiera nada que borrar, si no un log que solo escribe cuando actua no descarta nada.
+    if (NeoDebug::enabled(NeoDebug::PROFILE)) {
+        std::ostringstream oss;
+        oss << "RESET_TOOLPATHS from=" << (_who ? _who : "?") << ":" << _line
+            << " only_gcode=" << q->only_gcode_mode()
+            << " objects=" << model.objects.size()
+            << " loading_gcode=" << m_loading_gcode;
+        NeoDebug::write(NeoDebug::PROFILE, oss.str());
+    }
+    // NEOTKO_GCODE_REENTRY_TAG — segunda linea de defensa, independiente de quien llame. Vaciar el
+    // GCodeViewer mientras GCodeViewer::load() lo esta llenando NUNCA es correcto: deja los buffers
+    // a medias y el load muere con std::length_error. reslice() es el camino conocido, pero el
+    // ProgressDialog puede colar cualquier otro evento y no quiero volver a jugar a adivinarlo.
+    if (m_loading_gcode) {
+        NEOGC_LOG("RESET_TOOLPATHS BLOCKED (reentrada durante load_gcode)");
+        return;
+    }
     preview->get_canvas3d()->reset_gcode_toolpaths();
 }
 
@@ -17912,18 +18075,38 @@ void Plater::load_gcode(const wxString& filename)
 {
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " entry and filename: " << filename;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__;
+    // NEOTKO_GCODE_DEBUG_TAG — traza paso a paso de toda la carga. Cada log lleva el dato con el
+    // que se decide el paso siguiente, para poder leer el fallo del log sin volver a compilar.
+    NEOGC_LOG("load_gcode: ENTRY file=" << into_u8(filename)
+              << " is_gcode=" << is_gcode_file(into_u8(filename))
+              << " only_gcode=" << m_only_gcode
+              << " same_as_last=" << (m_last_loaded_gcode == filename));
     if (! is_gcode_file(into_u8(filename))
         || (m_last_loaded_gcode == filename && m_only_gcode)
-        )
+        ) {
+        NEOGC_LOG("load_gcode: EARLY RETURN (not a gcode file, or already loaded)");
         return;
+    }
 
     m_last_loaded_gcode = filename;
 
     // BSS: create a new project when load_gcode, force close previous one
-    if (new_project(false, true) != wxID_YES)
+    const int _neo_np = new_project(false, true);
+    NEOGC_LOG("load_gcode: new_project returned " << _neo_np << " (wxID_YES=" << wxID_YES << ")");
+    if (_neo_np != wxID_YES) {
+        NEOGC_LOG("load_gcode: EARLY RETURN (new_project not confirmed)");
         return;
+    }
 
     m_only_gcode = true;
+
+    // NEOTKO_GCODE_REENTRY_TAG — a partir de aqui cualquier Update() de un ProgressDialog puede
+    // colar eventos. RAII para que la bandera se limpie tambien si sale una excepcion por el medio.
+    struct LoadingGcodeGuard {
+        Plater::priv *p;
+        explicit LoadingGcodeGuard(Plater::priv *p_) : p(p_) { p->m_loading_gcode = true; }
+        ~LoadingGcodeGuard() { p->m_loading_gcode = false; }
+    } _neo_loading_guard(p.get());
 
     // cleanup view before to start loading/processing
     //BBS: update gcode to current partplate's
@@ -17933,9 +18116,11 @@ void Plater::load_gcode(const wxString& filename)
     //current_result->reset();
     //p->gcode_result.reset();
     //reset_gcode_toolpaths();
+    NEOGC_LOG("load_gcode: pre-clean reload_print(only_gcode=1)");
     p->preview->reload_print(false, m_only_gcode);
     wxGetApp().mainframe->select_tab(MainFrame::tpPreview);
     p->set_current_panel(p->preview, true);
+    NEOGC_LOG("load_gcode: switched to Preview panel; only_gcode now=" << m_only_gcode);
     GLCanvas3D* canvas = p->get_current_canvas3D();
     if (canvas)
         canvas->render();
@@ -17948,15 +18133,31 @@ void Plater::load_gcode(const wxString& filename)
     try
     {
         GCodeProcessor::s_IsBBLPrinter = wxGetApp().preset_bundle->is_bbl_vendor();
+        NEOGC_LOG("load_gcode: process_file START (bbl_printer=" << GCodeProcessor::s_IsBBLPrinter << ")");
         processor.process_file(filename.ToUTF8().data());
+        NEOGC_LOG("load_gcode: process_file OK");
     }
+    // NEOTKO_GCODE_DEBUG_TAG — el catch original solo cogia std::exception. Todo lo que no herede
+    // de ella se escapaba de aqui hasta wx, que cerraba la app ("unknown exception").
     catch (const std::exception& ex)
     {
+        NEOGC_LOG("load_gcode: process_file THREW std::exception: " << ex.what());
         show_error(this, ex.what());
+        return;
+    }
+    catch (...)
+    {
+        const std::string desc = neotko_current_exception_desc();
+        NEOGC_LOG("load_gcode: process_file THREW non-std exception: " << desc);
+        show_error(this, _L("Error while processing the G-code file.") + "\n\n" + from_u8(desc));
         return;
     }
     *current_result = std::move(processor.extract_result());
     //current_result->filename = filename;
+    NEOGC_LOG("load_gcode: result moves=" << current_result->moves.size()
+              << " extruders_in_gcode=" << current_result->extruders_count
+              << " densities=" << current_result->filament_densities.size()
+              << " costs=" << current_result->filament_costs.size());
 
     BedType bed_type = current_result->bed_type;
     if (bed_type != BedType::btCount) {
@@ -17964,25 +18165,46 @@ void Plater::load_gcode(const wxString& filename)
         proj_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
         on_bed_type_change(bed_type);
     }
+    NEOGC_LOG("load_gcode: bed_type=" << (int)bed_type << " applied");
 
-    current_print.apply(this->model(), wxGetApp().preset_bundle->full_config());
+    // NEOTKO_CONFIG_MIRROR_TAG — con el config en crudo las claves espejo entraban con su default
+    // y el siguiente update_background_process() (que si las rellena) devolvia INVALIDATED, lo que
+    // disparaba reset_gcode_toolpaths(): el gcode se veia un frame y el plato quedaba vacio.
+    current_print.apply(this->model(), p->neotko_full_config());
 
     //BBS: add cost info when drag in gcode
     auto& ps = current_result->print_statistics;
     double total_cost = 0.0;
+    // NEOTKO_GCODE_DEBUG_TAG — `.at()` LANZA std::out_of_range si el gcode usa un extrusor que los
+    // vectores de densidad/coste no tienen (p.ej. gcode de 5 tools con un perfil de 4 cargado).
+    // Estaba FUERA de cualquier try, asi que la excepcion subia hasta wx y cerraba la app — y lo
+    // hacia despues de pintar y ANTES de set_gcode_file_ready()/reload_print, que es exactamente
+    // "el gcode aparece un microsegundo y se va". Se salta el extrusor desconocido y se apunta.
     for (auto volume : ps.total_volumes_per_extruder) {
         size_t extruder_id = volume.first;
-        double density = current_result->filament_densities.at(extruder_id);
-        double cost = current_result->filament_costs.at(extruder_id);
+        if (extruder_id >= current_result->filament_densities.size() ||
+            extruder_id >= current_result->filament_costs.size()) {
+            NEOGC_LOG("load_gcode: ⚠️ SKIP cost for extruder " << extruder_id
+                      << " (densities=" << current_result->filament_densities.size()
+                      << " costs=" << current_result->filament_costs.size() << ") — habria lanzado out_of_range");
+            continue;
+        }
+        double density = current_result->filament_densities[extruder_id];
+        double cost = current_result->filament_costs[extruder_id];
         double weight = volume.second * density * 0.001;
         total_cost += weight * cost * 0.001;
     }
     current_print.print_statistics().total_cost = total_cost;
+    NEOGC_LOG("load_gcode: total_cost=" << total_cost);
 
     current_print.set_gcode_file_ready();
+    NEOGC_LOG("load_gcode: set_gcode_file_ready done; slice_result_valid="
+              << p->partplate_list.get_curr_plate()->is_slice_result_valid());
 
     // show results
     p->preview->reload_print(false, m_only_gcode);
+    NEOGC_LOG("load_gcode: final reload_print done; layers_zs="
+              << p->preview->get_canvas3d()->get_gcode_layers_zs().size());
     //BBS: zoom to bed 0 for gcode preview
     //p->preview->get_canvas3d()->zoom_to_gcode();
     p->preview->get_canvas3d()->zoom_to_plate(0);
@@ -17999,6 +18221,8 @@ void Plater::load_gcode(const wxString& filename)
     if (m_only_gcode) {
         p->view3D->get_canvas3d()->remove_raycasters_for_picking(SceneRaycaster::EType::Bed);
     }
+    NEOGC_LOG("load_gcode: DONE ok; only_gcode=" << m_only_gcode
+              << " layers_zs=" << p->preview->get_canvas3d()->get_gcode_layers_zs().size());
 }
 
 void Plater::reload_gcode_from_disk()
@@ -20064,6 +20288,17 @@ void Plater::export_toolpaths_to_obj() const
 void Plater::reslice()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
+    // NEOTKO_GCODE_REENTRY_TAG — reslice() reentrado desde el bombeo de eventos del ProgressDialog
+    // de GCodeViewer::load(). No hay nada que re-slicear (un gcode abierto no tiene modelo) y lo
+    // unico que consigue es borrar los toolpaths a medio construir. Se corta aqui, en la puerta.
+    if (p->is_loading_gcode()) {
+        NEOGC_LOG("reslice: IGNORED (reentrada durante load_gcode)");
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": ignored, a G-code file is being loaded";
+        return;
+    }
+    // NEOTKO_ONLY_GCODE_TAG — se captura a la ENTRADA porque update_background_process(), unas
+    // lineas mas abajo, apaga m_only_gcode en cuanto un apply() devuelve CHANGED/INVALIDATED.
+    const bool _neo_only_gcode_at_entry = m_only_gcode;
     // There is "invalid data" button instead "slice now"
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
     {
@@ -20144,6 +20379,9 @@ void Plater::reslice()
     }
 
     bool clean_gcode_toolpaths = true;
+    // NEOTKO_ONLY_GCODE_TAG — se propaga al reload_print() del final para no apagar el modo
+    // solo-gcode del Preview. Solo lo enciende la rama idle; en las demas no hay gcode que conservar.
+    bool keep_only_gcode_preview = false;
     // BBS
     if (p->background_process.running())
     {
@@ -20161,7 +20399,30 @@ void Plater::reslice()
         //BBS: add reset logic for empty plate
         PartPlate * current_plate = p->background_process.get_current_plate();
 
-        if (!current_plate->has_printable_instances()) {
+        // NEOTKO_ONLY_GCODE_TAG — "plato sin instancias imprimibles" NO es lo mismo que "plato
+        // vacio". Un gcode abierto sin modelo (Plater::load_gcode) deja el plato exactamente asi:
+        // model().objects vacio, cero instancias, pero con slice result VALIDO
+        // (Print::set_gcode_file_ready). La heuristica de abajo lo leia como plato vacio y borraba
+        // los toolpaths recien cargados ademas de marcar el resultado como invalido.
+        //
+        // Este es el camino real del bug "el gcode aparece un frame y desaparece":
+        // load_gcode() pinta -> set_current_panel(preview) ve `only_has_gcode_need_preview` (la
+        // MISMA condicion de aqui, ver do_reslice()) y llama a reslice() -> el background process
+        // esta idle -> se llegaba aqui y se limpiaba todo.
+        //
+        // ⚠️ NO usar current_plate->is_slice_result_valid() aqui: vale 0 en este punto.
+        // Print::set_gcode_file_ready() marca el PRINT, no el PLATE — son dos banderas distintas, y
+        // atar el guard a la del plate lo dejaba muerto (verificado en el log: "set_gcode_file_ready
+        // done; slice_result_valid=0"). m_only_gcode si es fiable aqui: el UBP de unas lineas arriba
+        // devolvio UNCHANGED, asi que nadie lo ha apagado.
+        const bool only_gcode_preview = _neo_only_gcode_at_entry
+                                     && model().objects.empty()
+                                     && !current_plate->has_printable_instances();
+
+        if (only_gcode_preview) {
+            clean_gcode_toolpaths = false;
+        }
+        else if (!current_plate->has_printable_instances()) {
             clean_gcode_toolpaths = true;
             current_plate->update_slice_result_valid_state(false);
         }
@@ -20169,14 +20430,18 @@ void Plater::reslice()
             clean_gcode_toolpaths = false;
             current_plate->update_slice_result_valid_state(true);
         }
+        keep_only_gcode_preview = only_gcode_preview;
         p->main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, false);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": background process in idle state, use previous result, clean_gcode_toolpaths=%1%")%clean_gcode_toolpaths;
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": background process in idle state, use previous result, clean_gcode_toolpaths=%1%, only_gcode_preview=%2%")%clean_gcode_toolpaths %only_gcode_preview;
     }
 
     if (clean_gcode_toolpaths)
         reset_gcode_toolpaths();
 
-    p->preview->reload_print(!clean_gcode_toolpaths);
+    // NEOTKO_ONLY_GCODE_TAG — el segundo parametro es `only_gcode` y por defecto es false. Dejarlo
+    // al default apagaba el modo solo-gcode del Preview, y entonces load_print_as_fff() exige
+    // `is_slice_result_valid` para pintar: el segundo golpe que dejaba el plato vacio.
+    p->preview->reload_print(!clean_gcode_toolpaths, keep_only_gcode_preview);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": finished, started slicing for plate %1%") % p->partplate_list.get_curr_plate_index();
 
@@ -22147,7 +22412,7 @@ void Plater::apply_background_progress()
     int plate_index = p->partplate_list.get_curr_plate_index();
     bool result_valid = part_plate->is_slice_result_valid();
     //always apply the current plate's print
-    Print::ApplyStatus invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+    Print::ApplyStatus invalidated = p->background_process.apply(this->model(), p->neotko_full_config());
     p->notify_filament_compatibility_after_apply();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ") % __LINE__ % plate_index % invalidated % result_valid;
@@ -22190,7 +22455,7 @@ int Plater::select_plate(int plate_index, bool need_slice)
         part_plate->get_print(&print, &gcode_result, NULL);
 
         //always apply the current plate's print
-        invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+        invalidated = p->background_process.apply(this->model(), p->neotko_full_config());
         p->notify_filament_compatibility_after_apply();
         bool model_fits, validate_err;
 
@@ -22511,7 +22776,7 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
 
             part_plate->get_print(&print, &gcode_result, NULL);
             //always apply the current plate's print
-            invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+            invalidated = p->background_process.apply(this->model(), p->neotko_full_config());
             p->notify_filament_compatibility_after_apply();
             bool model_fits, validate_err;
             validate_current_plate(model_fits, validate_err);
@@ -22663,6 +22928,13 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
         p->partplate_list.update_plates();
         update();
         p->partplate_list.select_plate(0);
+    }
+    // NEOTKO_PHOTOMODE_TAG s242: the camera button. A pure view toggle — deliberately NOT wrapped
+    // in take_snapshot(): nothing about the model changes, and putting a presentation toggle on
+    // the undo stack means Ctrl+Z after a photo silently undoes the user's last real edit instead.
+    else if ((action == (int)PartPlate::PHOTO_MODE_HOVER_ID) && (!right_click)) {
+        toggle_photo_mode();
+        ret = 0;
     }
 
     else
@@ -22884,6 +23156,53 @@ void Plater::post_process_string_object_exception(StringObjectException &err)
     return;
 }
 
+// NEOTKO_PHOTOMODE_TAG s242 -----------------------------------------------------------------
+
+void Plater::set_photo_mode(bool on)
+{
+    PhotoModeState& pm = photo_mode();
+
+    // Refuse to enter where the mode cannot work. Photo Mode rides on the shells_lit pipeline,
+    // which only draws the Prepare objects while LibreMode is on; the icon and the menu item are
+    // both hidden in that case, but the keyboard shortcut and any future caller are not, and
+    // entering anyway would give a bedless scene lit by the old hardcoded light — worse than not
+    // entering at all. Leaving is always allowed, so a user who toggles LibreMode off while
+    // inside the mode is never trapped.
+    if (on && !photo_mode_available())
+        return;
+    if (pm.active == on)
+        return;
+
+    pm.active = on;
+
+    if (on) {
+        // The selection outline and the gizmo bars are the two things that most obviously say
+        // "screenshot of a CAD tool" — and a green-tinted selected object would misrepresent the
+        // filament colour, which is the entire point of the photo.
+        p->deselect_all();
+    }
+    else {
+        // Persist on the way out rather than on every slider drag: the panel writes to the state
+        // continuously, and touching AppConfig each frame would mark it dirty hundreds of times a
+        // second.
+        photo_mode_save_to_app_config();
+    }
+
+    // Picking stays ENABLED on purpose. The obvious move is to switch it off so a stray click
+    // cannot select an object and paint a selection outline into the shot — but the camera icon
+    // is itself a picked plate model, so killing picking would also kill the only on-screen way
+    // out of the mode. A stray outline is a nuisance; an unexitable mode is a bug.
+    if (GLCanvas3D* canvas = get_view3D_canvas3D()) {
+        canvas->set_as_dirty();
+        canvas->request_extra_frame();
+    }
+}
+
+void Plater::toggle_photo_mode()
+{
+    set_photo_mode(!photo_mode().active);
+}
+
 #if ENABLE_ENVIRONMENT_MAP
 void Plater::init_environment_texture()
 {
@@ -22930,11 +23249,12 @@ void Plater::update_preview_bottom_toolbar()
     p->update_preview_bottom_toolbar();
 }
 
-void Plater::reset_gcode_toolpaths()
+void Plater::reset_gcode_toolpaths(const char* _who, int _line)
 {
     //BBS: add some logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": reset the gcode viewer's toolpaths");
-    p->reset_gcode_toolpaths();
+    // NEOTKO_GCODE_DEBUG_TAG — se propaga el llamador REAL para no perderlo en este salto.
+    p->reset_gcode_toolpaths(_who, _line);
 }
 
 void Plater::post_slice_state_change_update()

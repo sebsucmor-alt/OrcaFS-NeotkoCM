@@ -479,7 +479,7 @@ void IMSlider::draw_background_and_groove(const ImRect& bg_rect, const ImRect& g
     ImGui::RenderFrame(groove.Min, groove.Max, groove_col, false, 0.5 * groove.GetWidth());
 }
 
-bool IMSlider::horizontal_slider(const char* str_id, int* value, int v_min, int v_max, const ImVec2& size, float scale)
+bool IMSlider::horizontal_slider(const char* str_id, int* higher_value, int* lower_value, int v_min, int v_max, const ImVec2& size, SelectedSlider& selection, float scale)
 {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems)
@@ -497,6 +497,8 @@ bool IMSlider::horizontal_slider(const char* str_id, int* value, int v_min, int 
 
     const float  handle_radius       = 12.0f * m_scale;
     const float  handle_border       = 2.0f * m_scale;
+    const float  line_width          = 1.0f * m_scale;
+    const float  line_length         = 12.0f * m_scale;
 
     const float  text_frame_rounding = 2.0f * scale * m_scale;
     const float  text_start_offset   = 8.0f * m_scale;
@@ -528,34 +530,98 @@ bool IMSlider::horizontal_slider(const char* str_id, int* value, int v_min, int 
     // set scrollable region
     const ImRect slideable_region = ImRect(bg_rect.Min + ImVec2(handle_radius, 0.0f), bg_rect.Max - ImVec2(handle_radius, 0.0f));
 
-    // initialize the handle
-    float  handle_pos = get_pos_from_value(v_min, v_max, *value, groove);
-    ImRect handle = ImRect(handle_pos - handle_radius, mid_y - handle_radius, handle_pos + handle_radius, mid_y + handle_radius);
+    // NEOTKO: los dos tiradores se posicionan sobre `slideable_region`, que es la MISMA region que usa
+    // slider_behavior() al arrastrar. Antes el tirador unico se dibujaba sobre `groove` (6px mas ancha
+    // por lado), asi que saltaba al empezar a arrastrar; con dos tiradores esa descuadre era visible.
+    float  higher_handle_pos = get_pos_from_value(v_min, v_max, *higher_value, slideable_region);
+    ImRect higher_handle = ImRect(higher_handle_pos - handle_radius, mid_y - handle_radius, higher_handle_pos + handle_radius, mid_y + handle_radius);
+
+    float  lower_handle_pos = get_pos_from_value(v_min, v_max, *lower_value, slideable_region);
+    ImRect lower_handle = ImRect(lower_handle_pos - handle_radius, mid_y - handle_radius, lower_handle_pos + handle_radius, mid_y + handle_radius);
+
+    // NEOTKO: seleccion de tirador. Por defecto el higher, para que un click en la barra siga moviendo
+    // el final (comportamiento de siempre). Se prueba primero el lower porque cuando los dos estan
+    // pegados el que interesa agarrar es el de inicio; el higher se recupera clicando la barra.
+    if (context.IO.MouseClicked[0]) {
+        if (ImGui::ItemHoverable(lower_handle, id))
+            selection = ssLower;
+        else if (ImGui::ItemHoverable(higher_handle, id))
+            selection = ssHigher;
+    }
+    if (selection != ssLower) selection = ssHigher;
+    const bool lower_selected = (selection == ssLower);
 
     // update handle position and value
-    bool   value_changed = slider_behavior(id, slideable_region, (const ImS32) v_min, (const ImS32) v_max, (ImS32 *) value, &handle);
-    ImVec2 handle_center = handle.GetCenter();
+    bool value_changed = false;
+    if (lower_selected)
+        value_changed = slider_behavior(id, slideable_region, (const ImS32) v_min, (const ImS32) v_max, (ImS32 *) lower_value, &lower_handle);
+    else
+        value_changed = slider_behavior(id, slideable_region, (const ImS32) v_min, (const ImS32) v_max, (ImS32 *) higher_value, &higher_handle);
 
-    // draw scroll line
-    ImRect scroll_line = ImRect(groove.Min, ImVec2(handle_center.x, groove.Max.y));
+    // NEOTKO: clamp, NO push. El tirador arrastrado se para contra el otro en vez de empujarlo, para no
+    // colapsar el rango sin querer. Se hace aqui y no en correct_lower/higher_value() porque esas dos
+    // las comparte el slider vertical de capas, donde el push (one-layer mode) si es lo deseado.
+    // Se mantiene una separacion minima de 1: pegados se solapan los dos circulos y no se distingue
+    // cual se esta agarrando. El `min_gap` decae a 0 si el rango entero no da para mas.
+    const int min_gap = (v_max - v_min >= 1) ? 1 : 0;
+    if (lower_selected) {
+        if (*lower_value > *higher_value - min_gap) *lower_value = std::max(v_min, *higher_value - min_gap);
+    } else {
+        if (*higher_value < *lower_value + min_gap) *higher_value = std::min(v_max, *lower_value + min_gap);
+    }
+
+    // recolocar los tiradores tras el clamp para que el dibujo coincida con el valor real
+    higher_handle_pos = get_pos_from_value(v_min, v_max, *higher_value, slideable_region);
+    higher_handle = ImRect(higher_handle_pos - handle_radius, mid_y - handle_radius, higher_handle_pos + handle_radius, mid_y + handle_radius);
+    lower_handle_pos = get_pos_from_value(v_min, v_max, *lower_value, slideable_region);
+    lower_handle = ImRect(lower_handle_pos - handle_radius, mid_y - handle_radius, lower_handle_pos + handle_radius, mid_y + handle_radius);
+
+    const ImVec2 higher_handle_center = higher_handle.GetCenter();
+    const ImVec2 lower_handle_center  = lower_handle.GetCenter();
+
+    // draw scroll line: NEOTKO, de tirador a tirador en vez de desde el origen de la barra
+    ImRect scroll_line = ImRect(ImVec2(lower_handle_center.x, groove.Min.y), ImVec2(higher_handle_center.x, groove.Max.y));
     window->DrawList->AddRectFilled(scroll_line.Min, scroll_line.Max, handle_clr, 0.5f * GROOVE_WIDTH * m_scale);
 
-    // draw handle
-    window->DrawList->AddCircleFilled(handle_center, handle_radius, handle_border_clr);
-    window->DrawList->AddCircleFilled(handle_center, handle_radius - handle_border, handle_clr);
+    // draw handles
+    window->DrawList->AddCircleFilled(lower_handle_center, handle_radius, handle_border_clr);
+    window->DrawList->AddCircleFilled(lower_handle_center, handle_radius - handle_border, handle_clr);
+    window->DrawList->AddCircleFilled(higher_handle_center, handle_radius, handle_border_clr);
+    window->DrawList->AddCircleFilled(higher_handle_center, handle_radius - handle_border, handle_clr);
 
-    // draw label
-    auto text_utf8 = into_u8(std::to_string(*value));
+    // marcar el tirador activo con una cruz, igual que hace el slider vertical
+    const ImVec2 active_center = lower_selected ? lower_handle_center : higher_handle_center;
+    window->DrawList->AddLine(active_center + ImVec2(-0.5f * line_length, 0.0f), active_center + ImVec2(0.5f * line_length, 0.0f), white_bg, line_width);
+    window->DrawList->AddLine(active_center + ImVec2(0.0f, -0.5f * line_length), active_center + ImVec2(0.0f, 0.5f * line_length), white_bg, line_width);
+
+    // draw higher label (a la derecha del tirador de fin, en el hueco reservado por text_right_dummy)
+    auto text_utf8 = into_u8(std::to_string(*higher_value));
     ImVec2 text_content_size = ImGui::CalcTextSize(text_utf8.c_str());
     ImVec2 text_size = text_content_size + text_padding * 2;
-    ImVec2 text_start = ImVec2(handle_center.x + handle_radius + text_start_offset, handle_center.y - 0.5 * text_size.y);
+    ImVec2 text_start = ImVec2(higher_handle_center.x + handle_radius + text_start_offset, higher_handle_center.y - 0.5 * text_size.y);
     ImRect text_rect(text_start, text_start + text_size);
     ImGui::RenderFrame(text_rect.Min, text_rect.Max, white_bg, false, text_frame_rounding);
     ImVec2 pos_1 = ImVec2(text_rect.Min.x, text_rect.GetCenter().y + triangle_offsets[0]);
     ImVec2 pos_2 = ImVec2(text_rect.Min.x, text_rect.GetCenter().y + triangle_offsets[1]);
     ImVec2 pos_3 = ImVec2(text_rect.Min.x + triangle_offsets[2], text_rect.GetCenter().y);
     window->DrawList->AddTriangleFilled(pos_1, pos_2, pos_3, white_bg);
-    ImGui::RenderText(text_start + text_padding, std::to_string(*value).c_str());
+    ImGui::RenderText(text_start + text_padding, std::to_string(*higher_value).c_str());
+
+    // NEOTKO: draw lower label, sólo cuando el inicio está acotado (si está al minimo no estorba).
+    // Va a la IZQUIERDA de su tirador, con el triangulo espejado, para no chocar con el label de fin.
+    if (*lower_value > v_min) {
+        auto   lower_utf8 = into_u8(std::to_string(*lower_value));
+        ImVec2 lower_content_size = ImGui::CalcTextSize(lower_utf8.c_str());
+        ImVec2 lower_size  = lower_content_size + text_padding * 2;
+        ImVec2 lower_start = ImVec2(lower_handle_center.x - handle_radius - text_start_offset - lower_size.x, lower_handle_center.y - 0.5 * lower_size.y);
+        ImRect lower_rect(lower_start, lower_start + lower_size);
+        ImGui::RenderFrame(lower_rect.Min, lower_rect.Max, white_bg, false, text_frame_rounding);
+        ImVec2 l_pos_1 = ImVec2(lower_rect.Max.x, lower_rect.GetCenter().y + triangle_offsets[0]);
+        ImVec2 l_pos_2 = ImVec2(lower_rect.Max.x, lower_rect.GetCenter().y + triangle_offsets[1]);
+        ImVec2 l_pos_3 = ImVec2(lower_rect.Max.x - triangle_offsets[2], lower_rect.GetCenter().y);
+        window->DrawList->AddTriangleFilled(l_pos_1, l_pos_2, l_pos_3, white_bg);
+        ImGui::RenderText(lower_start + text_padding, std::to_string(*lower_value).c_str());
+    }
 
     return value_changed;
 }
@@ -1102,10 +1168,19 @@ bool IMSlider::render(int canvas_width, int canvas_height)
         ImVec2 size  = ImVec2(canvas_width - 2 * std::max(LEFT_MARGIN * m_scale, 0.2f * canvas_width), HORIZONTAL_SLIDER_WINDOW_HEIGHT * m_scale);
         imgui.set_next_window_pos(0.5f * static_cast<float>(canvas_width), canvas_height, ImGuiCond_Always, 0.5f, 1.0f);
         imgui.begin(std::string("moves_slider"), windows_flag);
-        int value = GetHigherValue();
-        if (horizontal_slider("moves_slider", &value, GetMinValue(), GetMaxValue(), size, scale)) {
+        // NEOTKO: rango. Se aplica solo el valor que ha cambiado, y el higher ANTES que el lower:
+        // SetHigherValue()/SetLowerValue() reposicionan m_selection, asi que el ultimo en escribirse
+        // manda. El clamp ya lo ha hecho horizontal_slider(), de modo que correct_*_value() no empuja.
+        int higher_value = GetHigherValue();
+        int lower_value  = GetLowerValue();
+        const int temp_higher_value = higher_value;
+        const int temp_lower_value  = lower_value;
+        if (horizontal_slider("moves_slider", &higher_value, &lower_value, GetMinValue(), GetMaxValue(), size, m_selection, scale)) {
+            if (temp_higher_value != higher_value)
+                SetHigherValue(higher_value);
+            if (temp_lower_value != lower_value)
+                SetLowerValue(lower_value);
             result = true;
-            SetHigherValue(value);
         }
         imgui.end();
     } else {
@@ -1490,8 +1565,19 @@ void IMSlider::on_mouse_wheel(wxMouseEvent& evt) {
             evt.GetPosition().x < moves_slider_window->Pos.x + moves_slider_window->Size.x &&
             evt.GetPosition().y > moves_slider_window->Pos.y &&
             evt.GetPosition().y < moves_slider_window->Pos.y + moves_slider_window->Size.y){
-            const int new_pos = GetHigherValue() + wheel;
-            SetHigherValue(new_pos);
+            // NEOTKO: la rueda mueve el tirador activo, no siempre el de fin. Clamp contra el otro,
+            // igual que en horizontal_slider(), para no colapsar el rango.
+            // `wheel` es float (siempre +-1 o +-5): se pasa a int antes de comparar, porque std::min/max
+            // exigen los dos argumentos del mismo tipo.
+            const int step = static_cast<int>(wheel);
+            const int min_gap = (GetMaxValue() - GetMinValue() >= 1) ? 1 : 0;
+            if (m_selection == ssLower) {
+                const int new_pos = std::min(GetLowerValue() + step, std::max(GetMinValue(), GetHigherValue() - min_gap));
+                SetLowerValue(new_pos);
+            } else {
+                const int new_pos = std::max(GetHigherValue() + step, std::min(GetMaxValue(), GetLowerValue() + min_gap));
+                SetHigherValue(new_pos);
+            }
             set_as_dirty();
         }
     }

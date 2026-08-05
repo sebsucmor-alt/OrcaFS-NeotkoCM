@@ -721,6 +721,11 @@ public:
     unsigned int get_environment_texture_id() const;
 #endif // ENABLE_ENVIRONMENT_MAP
 
+    // NEOTKO_PHOTOMODE_TAG s242 — see PhotoMode.hpp. Entry/exit point for the presentation mode,
+    // shared by the plate icon and the scene context menu so both do the same housekeeping.
+    void toggle_photo_mode();
+    void set_photo_mode(bool on);
+
     const BuildVolume& build_volume() const;
 
     // BBS
@@ -738,7 +743,10 @@ public:
     void update_partplate();
 #endif
 
-    void reset_gcode_toolpaths();
+    // NEOTKO_GCODE_DEBUG_TAG — los defaults se evaluan en el CALL SITE, asi que el log dice quien
+    // borro los toolpaths de verdad y no este wrapper (que era un nivel ciego: los 7 llamadores
+    // aparecian todos como "reset_gcode_toolpaths:<linea del wrapper>").
+    void reset_gcode_toolpaths(const char* _who = __builtin_FUNCTION(), int _line = __builtin_LINE());
     void post_slice_state_change_update();
     void reset_last_loaded_gcode() { m_last_loaded_gcode = ""; }
 

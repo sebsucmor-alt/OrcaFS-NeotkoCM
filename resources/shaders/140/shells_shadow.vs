@@ -19,15 +19,26 @@ uniform mat4 projection_matrix;
 
 in vec3 v_position;
 
-const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
+// NEOTKO_PHOTOMODE_TAG s242: was a constant copy of LIGHT_TOP_DIR. It is the WORLD aim of the key
+// light — the same one the s229 shadow map is rendered along — so it must track it, or the
+// projected bed shadow and the real cast shadow point in different directions as soon as the user
+// drags the light. Fed from photo_key_dir_world() (GCodeViewer.cpp), which returns the original
+// constant whenever Photo Mode is off.
+uniform vec3 u_light_key_dir_world;
 
 void main()
 {
     vec4 world_pos = volume_world_matrix * vec4(v_position, 1.0);
-    // project along -LIGHT_TOP_DIR (from the light, through the vertex, down to the bed) until
-    // z reaches 0 — clamped to >=0 so points already at/below the bed don't project backwards.
-    float t = max(world_pos.z, 0.0) / LIGHT_TOP_DIR.z;
-    vec3 flat_pos = world_pos.xyz - t * LIGHT_TOP_DIR;
+    // project along -u_light_key_dir_world (from the light, through the vertex, down to the bed)
+    // until z reaches 0 — clamped to >=0 so points already at/below the bed don't project
+    // backwards.
+    // NEOTKO_PHOTOMODE_TAG s242: the denominator is now clamped. With a fixed 40-deg light .z was
+    // permanently ~0.76; a movable light can point at the horizon, where .z -> 0 sends this
+    // projection to infinity. The clamp caps the shadow's length rather than letting the geometry
+    // blow up across the screen.
+    float denom = max(u_light_key_dir_world.z, 0.05);
+    float t = max(world_pos.z, 0.0) / denom;
+    vec3 flat_pos = world_pos.xyz - t * u_light_key_dir_world;
     flat_pos.z = 0.001; // tiny epsilon above the bed, avoids z-fighting with the printbed mesh
     gl_Position = projection_matrix * u_view_matrix * vec4(flat_pos, 1.0);
 }

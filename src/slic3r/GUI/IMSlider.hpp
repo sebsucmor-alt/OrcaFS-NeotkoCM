@@ -138,7 +138,11 @@ protected:
     void do_go_to_layer(size_t layer_number); //menu
     void correct_lower_value();
     void correct_higher_value();
-    bool horizontal_slider(const char* str_id, int* v, int v_min, int v_max, const ImVec2& size, float scale = 1.0);
+    // NEOTKO: dos tiradores (rango) en vez de uno. `lower_value` acota el inicio de la ventana de
+    // movimientos, `higher_value` el final; `selection` dice cuál se está manipulando.
+    bool horizontal_slider(const char* str_id, int* higher_value, int* lower_value,
+        int v_min, int v_max, const ImVec2& size,
+        SelectedSlider& selection, float scale = 1.0);
     void render_go_to_layer_dialog(); //menu
     void render_input_custom_gcode(std::string custom_gcode = ""); //menu
     void render_menu();

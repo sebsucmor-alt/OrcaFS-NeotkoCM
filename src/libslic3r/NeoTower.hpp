@@ -330,6 +330,21 @@ public:
     // -----------------------------------------------------------------------
     std::optional<WipeTower::ToolChangeResult> get_finish_layer(float z) const;
 
+    // NEOTKO_NEOTOWER_TAG s240 — consulta MUDA: ¿hay un finish estructural planificado en
+    // esta z que todavía NO se haya emitido?
+    //
+    // `get_finish_layer()` no sirve para preguntar: registra el consumo en
+    // m_shadow_sequence y, si falla, escribe `← ERROR` — el marcador cuya ausencia es un
+    // invariante del proyecto. Usarlo como sonda contaminaría el censo de sombra y llenaría
+    // el log de errores falsos. Esta consulta no escribe nada y no consume nada: resuelve la
+    // clave (con redirect) y comprueba si ese slot ya está en el shadow.
+    //
+    // Existe para el fix de los huecos de Z de §29.7: un plano de sublayer sin cambio de
+    // herramienta no visita la torre, así que su relleno estructural hay que pedirlo
+    // explícitamente — pero SÓLO si de verdad hay uno pendiente, para no emitirlo dos veces
+    // en los planos que sí purgaron.
+    bool has_pending_structural(float z) const;
+
     // NEOTKO_NEOTOWER_TAG s205-5b.2 — runtime consumption/order shadow report.
     // Called once at end of gcode emission (WipeTowerIntegration::finalize). Checks
     // that every emitted TCR maps to exactly one canonical TowerEvent (runtime
@@ -345,6 +360,14 @@ public:
     // Diagnostic only: const, log-only, changes no geometry. Feeds F2's pruning
     // with a real before/after number. See the definition for the full rationale.
     void report_depth_accounting() const;
+
+    // NEOTKO_NEOTOWER_TAG s240 — V23: cobertura del eje Z por lo REALMENTE EMITIDO.
+    // Llamado desde finalize_shadow(), el único punto donde se sabe qué se consumió.
+    // Único invariante que mira el lado de la emisión: todos los V1-V22 miran el plan,
+    // y el plan puede estar perfecto mientras el gcode deja aire. Separa PLAN_GAP
+    // (nadie planificó material ahí) de EMIT_GAP (se planificó y nadie lo despachó).
+    // Diagnóstico puro: const, sólo log. Ver la definición para el porqué completo.
+    void report_z_coverage() const;
 
     // NEOTKO_NEOTOWER_TAG s205-5b.2b — record a tower TCR emission that GCode.cpp
     // dispatches OUTSIDE get_tcr()/get_finish_layer() (the get_tcr-MISS → planned-slot

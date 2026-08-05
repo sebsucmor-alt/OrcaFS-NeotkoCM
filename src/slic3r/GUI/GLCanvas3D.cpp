@@ -18,6 +18,7 @@
 #include "3DScene.hpp"
 #include "BackgroundSlicingProcess.hpp"
 #include "GLShader.hpp"
+#include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242
 #include "GUI.hpp"
 #include "Tab.hpp"
 #include "GUI_Preview.hpp"
@@ -54,6 +55,13 @@
 #include <wx/tooltip.h>
 #include <wx/debug.h>
 #include <wx/fontutil.h>
+// NEOTKO_PHOTOMODE_TAG s242 — export a photo to a file / to the clipboard.
+#include <wx/clipbrd.h>
+#include <wx/dataobj.h>
+#include <wx/filedlg.h>
+#include <miniz.h>
+#include <boost/nowide/cstdio.hpp>
+#include <ctime>
 // Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
@@ -99,6 +107,17 @@ void GLCanvas3D::load_render_colors()
 
 // Number of floats
 static constexpr const size_t MAX_VERTEX_BUFFER_SIZE     = 131072 * 6; // 3.15MB
+
+// NEOTKO_REALCOLOR_TAG s243 (F7): cuanto se sigue considerando "la camara se esta moviendo" tras un
+// salto instantaneo (rueda del raton, cubo de vistas, atajos de vista). Mientras dure, RealColor
+// dibuja plano y barato en vez de recomponer el peel entero — ver is_camera_moving() en
+// GLCanvas3D.hpp y la guarda al principio de GCodeViewer::render_toolpaths_realcolor().
+//
+// 250ms es el mismo valor que REALCOLOR_DEBOUNCE_MS (GCodeViewer.cpp), y esta duplicado a
+// proposito en vez de compartido: aquel es cada cuanto se pide un fotograma extra MIENTRAS se
+// arrastra, este es cuanto dura el plazo tras un evento suelto. Que hoy coincidan es casualidad;
+// atarlos obligaria a mover los dos juntos el dia que uno se quede corto.
+static constexpr int REALCOLOR_CAMERA_SETTLE_MS = 250;
 
 namespace Slic3r {
 namespace GUI {
@@ -2194,6 +2213,11 @@ void GLCanvas3D::zoom_to_plate(int plate_idx)
 void GLCanvas3D::select_view(const std::string& direction)
 {
     wxGetApp().plater()->get_camera().select_view(direction);
+    // NEOTKO_REALCOLOR_TAG s243 (F7): el cubo de vistas y los atajos 1..6 entran por aqui. El
+    // salto de camara es instantaneo, pero el Refresh() de abajo mas el repintado que arrastra
+    // dejaban a RealColor recalculando el composite entero varias veces seguidas — de ahi el
+    // "se queda pillado" al cambiar de vista con un modelo complejo.
+    notify_camera_moved(REALCOLOR_CAMERA_SETTLE_MS);
     if (m_canvas != nullptr)
         m_canvas->Refresh();
 }
@@ -2201,6 +2225,9 @@ void GLCanvas3D::select_view(const std::string& direction)
 void GLCanvas3D::select_plate()
 {
     wxGetApp().plater()->get_partplate_list().select_plate_view();
+    // NEOTKO_REALCOLOR_TAG s243 (F7): mismo caso que select_view() — la vista "plate" del cubo y
+    // el atajo que la invoca son otro salto de camara instantaneo.
+    notify_camera_moved(REALCOLOR_CAMERA_SETTLE_MS);
     if (m_canvas != nullptr)
         m_canvas->Refresh();
 }
@@ -2349,15 +2376,39 @@ void GLCanvas3D::render(bool only_init)
     else if (gizmo_type == GLGizmosManager::BrimEars && !camera.is_looking_downward())
         show_grid = false;
 
+    // NEOTKO_PHOTOMODE_TAG s242: the coordinate axes are furniture like everything else on the
+    // plate. Note this only suppresses them for the Lightbox/Backdrop stages — with the Bed stage
+    // the whole point is that the real bed is still there, axes included.
+    if (photo_mode_hides_bed())
+        show_axes = false;
+
     /* view3D render*/
     int hover_id = (m_hover_plate_idxs.size() > 0)?m_hover_plate_idxs.front():-1;
     if (m_canvas_type == ECanvasType::CanvasView3D) {
         //BBS: add outline logic
         _render_objects(GLVolumeCollection::ERenderType::Opaque, !m_gizmos.is_running());
         _render_sla_slices();
-        _render_selection();
-        if (!no_partplate)
+        // NEOTKO_PHOTOMODE_TAG s242: a selection tint would misrepresent the filament colour,
+        // which is the one thing the photo exists to communicate.
+        if (!photo_mode().active)
+            _render_selection();
+        // NEOTKO_PHOTOMODE_TAG s242: the cyclorama replaces the bed rather than joining it — it
+        // is drawn in the bed's slot so it lands after the objects have written depth, and before
+        // the contact-shadow pass below that needs a floor to blend against.
+        if (photo_mode_hides_bed()) {
+            // NEOTKO_PHOTOMODE_TAG s242 (F6a): mirrored scene FIRST, then the floor blended over
+            // it. Order matters and is explained in _render_photo_reflection().
+            if (photo_reflection_enabled())
+                _render_photo_reflection(camera);
+            _render_photo_stage(camera, /*shadow_catcher*/false);
+        }
+        else if (!no_partplate)
             _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
+        // NEOTKO_REALCOLOR_TAG s243 (F2): la otra mitad del flag. La lista de platos es compartida
+        // entre este canvas y el de Preview, y sólo se redibuja el canvas visible — si Preview lo
+        // dejó a true al salir en vista RealColor, nadie lo bajaría y Prepare se quedaría sin logo.
+        // Aquí es siempre false: RealColor no existe en este canvas.
+        wxGetApp().plater()->get_partplate_list().render_logo_suppressed = false;
         if (!no_partplate) //BBS: add outline logic
             _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid);
         // NEOTKO_LIBREMODE_TAG s228: the shells contact shadow depth-tests/blends against the bed,
@@ -2366,7 +2417,12 @@ void GLCanvas3D::render(bool only_init)
         // canvas' draw order, unlike Preview). shells_shadow.fs samples no texture, so it was never
         // affected by the render_with_outline() texture-unit conflict the lit pass had — no
         // selection special-case needed here (or there anymore, see render_volumes_lit's comment).
-        if (wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+        // NEOTKO_PHOTOMODE_TAG s242: skipped on the cyclorama. This planar pass exists because the
+        // printbed is not a shadow RECEIVER (it is drawn with the "printbed" shader, outside
+        // shells_lit, so the shadow map never touches it) — see the s229 note above. The cyclorama
+        // has no such limitation: photo_stage.fs samples the shadow map directly, so running this
+        // too would lay a second, flatter silhouette over the real one and double-darken it.
+        if (wxGetApp().app_config->get_bool("neotko_libre_mode") && !photo_mode_hides_bed()) {
             m_gcode_viewer.render_volumes_shadow(m_volumes, GLVolumeCollection::ERenderType::Opaque,
                 cnv_size.get_width(), cnv_size.get_height(), camera,
                 [this](const GLVolume& volume) { return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0); },
@@ -2380,6 +2436,17 @@ void GLCanvas3D::render(bool only_init)
         _render_sla_slices();
         _render_selection();
         _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
+        // NEOTKO_REALCOLOR_TAG s243 (F2): en vista RealColor el logo de la placa se apaga — lo que
+        // se cuela por la transmitancia residual del peel deja de ser texto legible y pasa a ser un
+        // fondo liso. Ver PartPlateList::render_logo_suppressed.
+        //
+        // Se escribe aquí, en la rama CanvasPreview, y NO en un sitio global: la lista de platos es
+        // compartida con el canvas 3D de Prepare, donde RealColor no pinta nada y el logo debe
+        // seguir. Se asigna incondicionalmente cada frame (no sólo cuando es true) para que al
+        // cambiar de vista o de pestaña el flag no se quede pegado — un flag global que sólo se
+        // enciende es un flag que tarde o temprano se queda encendido.
+        wxGetApp().plater()->get_partplate_list().render_logo_suppressed =
+            (m_gcode_viewer.get_view_type() == GCodeViewer::EViewType::RealColor);
         _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, true, hover_id);
         // BBS: GUI refactor: add canvas size as parameters
         _render_gcode(cnv_size.get_width(), cnv_size.get_height());
@@ -2414,8 +2481,12 @@ void GLCanvas3D::render(bool only_init)
 
     // sidebar hints need to be rendered before the gizmos because the depth buffer
     // could be invalidated by the following gizmo render methods
-    _render_selection_sidebar_hints();
-    _render_current_gizmo();
+    // NEOTKO_PHOTOMODE_TAG s242: both are in-scene decorations (drag arrows, gizmo grabbers) that
+    // would be baked into the photo, unlike the 2D overlays handled in _render_overlays().
+    if (!photo_mode().active) {
+        _render_selection_sidebar_hints();
+        _render_current_gizmo();
+    }
 
 #if ENABLE_RAYCAST_PICKING_DEBUG
     if (m_picking_enabled && !m_mouse.dragging && !m_gizmos.is_dragging() && !m_rectangle_selection.is_dragging())
@@ -3327,6 +3398,8 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, co
     m_gcode_viewer.init(wxGetApp().get_mode(), wxGetApp().preset_bundle);
     m_gcode_viewer.load(gcode_result, *this->fff_print(), wxGetApp().plater()->build_volume(), exclude_bounding_box,
         wxGetApp().get_mode(), only_gcode);
+    // NEOTKO: al cargar gcode nuevo, rango COMPLETO — el tirador de inicio tambien vuelve al minimo.
+    m_gcode_viewer.get_moves_slider()->SetLowerValue(m_gcode_viewer.get_moves_slider()->GetMinValue());
     m_gcode_viewer.get_moves_slider()->SetHigherValue(m_gcode_viewer.get_moves_slider()->GetMaxValue());
 
     if (wxGetApp().is_editor()) {
@@ -3539,6 +3612,31 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
     if (keyCode == WXK_ESCAPE
         && (_deactivate_arrange_menu() || _deactivate_orient_menu()))
         return;
+
+    // NEOTKO_PHOTOMODE_TAG s242: Esc leaves Photo Mode, and Ctrl/Cmd+C copies the shot.
+    //
+    // Placed BEFORE m_gizmos.on_char() and the Ctrl block below so that inside the mode these two
+    // keys mean what the panel says they mean. In particular Ctrl+C is normally "copy the selected
+    // objects": while taking a photo the selection is empty and the useful meaning of Ctrl+C is
+    // unambiguously "copy the picture" — that is the entire point of having it.
+    if (photo_mode().active) {
+        if (keyCode == WXK_ESCAPE) {
+            // First Esc cancels a running screenshot countdown rather than leaving the mode:
+            // if the UI has just vanished, "put it back" is what the user means, not "exit".
+            if (photo_ui_hidden())
+                photo_mode().screenshot_hide_until = 0.0;
+            else
+                wxGetApp().plater()->set_photo_mode(false);
+            return;
+        }
+        // NEOTKO_PHOTOMODE_TAG s242: Ctrl/Cmd+C parked along with the two export buttons — see the
+        // note in _render_photo_mode_panel(). Left as dead code rather than removed so the whole
+        // export path comes back with one edit once the viewport bug is found. Deliberately does
+        // NOT fall through to the normal "copy selected objects": inside Photo Mode the selection
+        // is empty, so it would be a confusing no-op either way.
+        if ((evt.GetModifiers() & ctrlMask) != 0 && (keyCode == 'C' || keyCode == 'c'))
+            return;
+    }
 
     if (m_gizmos.on_char(evt))
         return;
@@ -4256,6 +4354,13 @@ void GLCanvas3D::on_mouse_wheel(wxMouseEvent& evt)
         auto new_zoom = wxGetApp().plater()->get_camera().get_zoom();
         wxGetApp().plater()->get_camera().translate((-displacement) / (new_zoom / origin_zoom));
     }
+
+    // NEOTKO_REALCOLOR_TAG s243 (F7): la rueda mueve la camara pero NO es un arrastre, asi que
+    // nunca tocaba m_camera_movement y RealColor pagaba un recalculo entero por cada clic. Va al
+    // final y fuera del if/else a proposito: las dos ramas (zoom al centro y zoom al raton)
+    // mueven la camara, y ponerlo solo en una dejaria media funcionalidad sin cubrir segun el
+    // ajuste "zoom_to_mouse" del usuario.
+    notify_camera_moved(REALCOLOR_CAMERA_SETTLE_MS);
 }
 
 void GLCanvas3D::on_timer(wxTimerEvent& evt)
@@ -4283,6 +4388,24 @@ void GLCanvas3D::on_set_color_timer(wxTimerEvent& evt)
     m_timer_set_color.Stop();
 }
 
+
+// NEOTKO_REALCOLOR_TAG s243 (F7): ver la nota en is_camera_moving() (GLCanvas3D.hpp).
+//
+// El schedule_extra_frame() de aquí es lo que cierra el ciclo, y no es opcional: sin él, tras un
+// salto de cámara instantáneo el último fotograma se dibujaría barato y nadie volvería a pedir
+// otro, así que la vista se quedaría con el render plano hasta que el usuario tocara algo. Pidiendo
+// un fotograma justo después de que expire el plazo, ese fotograma ya encuentra is_camera_moving()
+// en false y hace el recálculo bueno.
+//
+// Se usa std::max sobre el plazo vigente en vez de asignar: si llegan dos eventos seguidos, el
+// segundo nunca debe ACORTAR lo que pidió el primero.
+void GLCanvas3D::notify_camera_moved(int miliseconds)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(miliseconds);
+    m_camera_motion_until = std::max(m_camera_motion_until, deadline);
+    m_dirty = true;
+    schedule_extra_frame(miliseconds + 16); // +1 fotograma de margen: que expire ANTES de dibujar
+}
 
 void GLCanvas3D::schedule_extra_frame(int miliseconds)
 {
@@ -8115,7 +8238,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     if (shader != nullptr) {
         shader->start_using();
 
-        const Size&   cvn_size = get_canvas_size();
+        // NEOTKO_PHOTOMODE_TAG s242: _effective_render_size(), not get_canvas_size() — during an
+        // off-screen photo export the viewport is the export size, and every screen-space effect
+        // below (G-buffer allocation, AO radius, SSCS march) has to be sized against THAT. See
+        // m_photo_render_size.
+        const Size    cvn_size = _effective_render_size();
         {
             const Camera& camera = wxGetApp().plater()->get_camera();
             shader->set_uniform("z_far", camera.get_far_z());
@@ -8396,6 +8523,30 @@ void GLCanvas3D::_check_and_update_toolbar_icon_scale()
 void GLCanvas3D::_render_overlays()
 {
     glsafe(::glDisable(GL_DEPTH_TEST));
+
+    // NEOTKO_PHOTOMODE_TAG s242: in Photo Mode the overlays ARE the thing being hidden — toolbars,
+    // labels, the assemble strip, the navigator cube. Every one of them would end up in the
+    // picture. Bailing out here is one guard instead of a dozen, and it fails safe: any overlay
+    // added later is hidden by default rather than quietly appearing in users' photos.
+    //
+    // The panel is drawn first so the mode remains controllable, and it is NOT gated on
+    // NeoDebug::render_panels_enabled() — this is a user feature, not a debug window.
+    if (photo_mode().active) {
+        // NEOTKO_PHOTOMODE_TAG s242 (F2.5): during the screenshot countdown even the panel goes.
+        // That is the actual point of the countdown — the panel is what was in the way of the OS
+        // screenshot tool, not the frame rate.
+        if (photo_ui_hidden()) {
+            // Keep the canvas repainting while the countdown runs. Without this the UI would only
+            // come back on the next mouse move: this canvas redraws on demand, and "a timer
+            // expired" is not an event it otherwise hears about — the user would be left staring
+            // at a stripped scene wondering if it had frozen.
+            set_as_dirty();
+            request_extra_frame();
+        }
+        else
+            _render_photo_mode_panel();
+        return;
+    }
 
     _check_and_update_toolbar_icon_scale();
 
@@ -9493,6 +9644,908 @@ void GLCanvas3D::_render_assemble_control()
 // normal noise, and the reason a flat face looks dirty everywhere except in exact top view - can
 // be swept live. The two debug views answer "what do the normals actually look like" directly,
 // without lighting in the way.
+// NEOTKO_PHOTOMODE_TAG s242 ---------------------------------------------------------------------
+//
+// The cyclorama: a floor plane that sweeps up into a vertical back wall through a quarter-round
+// fillet, so the floor/wall junction never reads as a line. It is the single most effective part
+// of this whole feature — a white surface with a soft corner is what makes a render look like a
+// product shot rather than a screenshot.
+//
+// Built in WORLD coordinates and drawn with an identity model matrix, because photo_stage.vs takes
+// v_position as world position directly (it has no volume_world_matrix to undo, unlike shells_lit).
+
+// Shadow constants for the cyclorama. Intentionally NOT shared with the SHADOW_* set in
+// GCodeViewer.cpp: those are tuned against object surfaces at object scale, whereas this is one
+// enormous, perfectly flat plane, where acne is far more visible and a heavier bias costs nothing
+// (a flat floor has no self-shadowing detail to lose). Keeping them separate means tuning one
+// cannot silently degrade the other.
+static constexpr float SHADOW_BIAS_MIN_PHOTO = 0.0012f;
+static constexpr float SHADOW_BIAS_MAX_PHOTO = 0.0050f;
+// Softer than the 0.55 used on objects: on white, a shadow at full strength reads as a hole
+// punched in the floor rather than as a shadow.
+static constexpr float SHADOW_STRENGTH_PHOTO = 0.42f;
+
+void GLCanvas3D::_update_photo_stage_model()
+{
+    const PhotoModeState& pm = photo_mode();
+    // The build volume, not extended_bounding_box(): the latter grows to include the printer's
+    // own STL model, which would size the cyclorama off a gantry the user cannot even see here.
+    const BoundingBoxf3& bed_bb = m_bed.build_volume().bounding_volume();
+    if (!bed_bb.defined)
+        return;
+
+    const float bed_sx = (float)bed_bb.size().x();
+    const float bed_sy = (float)bed_bb.size().y();
+
+    // Rebuild only when something that changes the geometry changed. The camera moving must not
+    // trigger this — it runs every frame.
+    const std::array<float, 5> key{ { bed_sx, bed_sy, pm.stage.extent_factor, pm.stage.wall_radius_mm,
+                                      (float)(int)pm.stage.kind } };
+    if (m_photo_stage_model.is_initialized() && key == m_photo_stage_key)
+        return;
+    m_photo_stage_key = key;
+    m_photo_stage_model.reset();
+
+    const Vec3d c = bed_bb.center();
+    const float cx = (float)c.x();
+    const float cy = (float)c.y();
+    const float half_x = 0.5f * bed_sx * pm.stage.extent_factor;
+    const float half_y = 0.5f * bed_sy * pm.stage.extent_factor;
+    const bool  with_wall = (pm.stage.kind == PhotoStage::Kind::Lightbox);
+    // Clamped to 90% of the half-depth so a large radius cannot eat the entire floor and leave the
+    // object standing on the curve. Zero for Backdrop, which has no wall to curve into — otherwise
+    // the floor would stop one radius short of its own edge and the shot would show its far edge.
+    const float radius = with_wall ? std::min(pm.stage.wall_radius_mm, half_y * 0.9f) : 0.0f;
+
+    // The wall goes at +Y — the far side from the default camera, which looks from -Y.
+    const float y_floor_end = cy + half_y - radius;
+    const float wall_h      = std::max(half_y, 1.5f * (float)bed_bb.size().z());
+
+    GLModel::Geometry geo;
+    geo.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    geo.color  = ColorRGBA(pm.stage.base_color[0], pm.stage.base_color[1], pm.stage.base_color[2], 1.0f);
+
+    // A cyclorama is a swept profile: walk the profile in the YZ plane and extrude it along X.
+    // Storing it as (y, z, normal_y, normal_z) keeps the fillet math in one place instead of
+    // scattering trigonometry through three separate quad emissions.
+    struct ProfilePt { float y, z, ny, nz; };
+    std::vector<ProfilePt> profile;
+    profile.push_back({ cy - half_y, 0.0f, 0.0f, 1.0f });   // front edge of the floor
+    profile.push_back({ y_floor_end, 0.0f, 0.0f, 1.0f });   // where the fillet starts
+
+    if (with_wall) {
+        // Quarter circle from floor-tangent to wall-tangent. 24 segments: below ~16 the highlight
+        // running along the curve visibly facets, and this mesh is generated once.
+        const int seg = 24;
+        for (int i = 1; i <= seg; ++i) {
+            const float t = (float)i / (float)seg * float(M_PI) * 0.5f;
+            const float s = std::sin(t), co = std::cos(t);
+            profile.push_back({ y_floor_end + radius * s, radius * (1.0f - co), -s, co });
+        }
+        profile.push_back({ cy + half_y, wall_h, -1.0f, 0.0f });   // top of the wall
+    }
+
+    const size_t n = profile.size();
+    geo.reserve_vertices(n * 2);
+    geo.reserve_indices((n - 1) * 6);
+
+    for (const ProfilePt& p : profile) {
+        const Vec3f nrm(0.0f, p.ny, p.nz);
+        geo.add_vertex(Vec3f(cx - half_x, p.y, p.z), nrm);
+        geo.add_vertex(Vec3f(cx + half_x, p.y, p.z), nrm);
+    }
+    for (unsigned int i = 0; i + 1 < (unsigned int)n; ++i) {
+        const unsigned int a = i * 2, b = a + 1, cc = a + 2, d = a + 3;
+        geo.add_triangle(a, b, cc);
+        geo.add_triangle(b, d, cc);
+    }
+
+    m_photo_stage_model.init_from(std::move(geo));
+}
+
+// NEOTKO_PHOTOMODE_TAG s242 (F6a) — the mirrored pass.
+//
+// Recipe, and the reason for each step (this is the standard stencil-masked planar reflection,
+// but the ordering constraints here are specific to this frame):
+//
+//   1. The real objects have ALREADY been drawn by the caller and are in the depth buffer. That
+//      is what makes the reflection get correctly occluded by the object standing on top of it.
+//   2. Stamp the floor into the STENCIL buffer only — no colour, no depth. This is the mask.
+//      Without it the mirrored geometry would be visible hanging in the void past the floor's
+//      edge, which is the classic giveaway.
+//   3. Draw the mirrored scene, stencil-tested to that mask. It lands below z=0 and writes depth,
+//      so the floor drawn afterwards sits in front of it.
+//   4. The caller then draws the floor blended, and the reflection shows through.
+//
+// The mirror lives in the VIEW matrix, not in the geometry: view * diag(1,1,-1). That keeps every
+// world-space quantity (shadow lookups, the light's own direction) referring to the REAL object,
+// which is what a reflection should show.
+void GLCanvas3D::_render_photo_reflection(const Camera& camera)
+{
+    GLShaderProgram* stage_shader = wxGetApp().get_shader("photo_stage");
+    if (stage_shader == nullptr || !m_photo_stage_model.is_initialized())
+        return;
+
+    // --- step 2: floor -> stencil only
+    glsafe(::glClear(GL_STENCIL_BUFFER_BIT));
+    glsafe(::glEnable(GL_STENCIL_TEST));
+    glsafe(::glStencilFunc(GL_ALWAYS, 1, 0xFF));
+    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE));
+    glsafe(::glStencilMask(0xFF));
+    glsafe(::glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE));
+    glsafe(::glDepthMask(GL_FALSE));
+    // Depth test still ON: the mask must not extend over floor the object already hides, or the
+    // reflection would be drawn (and then covered) for nothing.
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    stage_shader->start_using();
+    stage_shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    stage_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    stage_shader->set_uniform("view_normal_matrix", Matrix3d(camera.get_view_matrix().linear()));
+    stage_shader->set_uniform("uniform_color", m_photo_stage_model.get_color());
+    stage_shader->set_uniform("u_shadow_enabled", false);
+    stage_shader->set_uniform("u_shadow_catcher", false);
+    stage_shader->set_uniform("u_light_proj_view", Matrix4d(Matrix4d::Identity()));
+    stage_shader->set_uniform("u_shadow_normal_offset_mm", 0.0f);
+    const GLboolean cull_was_on = ::glIsEnabled(GL_CULL_FACE);
+    glsafe(::glDisable(GL_CULL_FACE));
+    m_photo_stage_model.render();
+    stage_shader->stop_using();
+
+    glsafe(::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
+    glsafe(::glDepthMask(GL_TRUE));
+
+    // --- step 3: mirrored scene, only inside the mask
+    glsafe(::glStencilFunc(GL_EQUAL, 1, 0xFF));
+    glsafe(::glStencilMask(0x00));   // the geometry pass must not edit the mask it is reading
+
+    // A copy, never the real camera: set_view_matrix() bypasses the target/rotation the class
+    // normally derives its matrix from, so it is only safe on something thrown away immediately.
+    Camera mirrored = camera;
+    Transform3d mirror = Transform3d::Identity();
+    mirror.matrix()(2, 2) = -1.0;    // reflect about world z = 0, the floor plane
+    mirrored.set_view_matrix(camera.get_view_matrix() * mirror);
+
+    // ⚠️ Mirroring flips the winding order — every front face becomes a back face. With culling
+    // left as-is the reflection would render inside-out (or vanish entirely). Culling is simply
+    // disabled for this pass rather than flipping glFrontFace, because the volume draw path below
+    // toggles face state on its own and fighting it is not worth the two triangles saved.
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    const Size cs = _effective_render_size();
+    m_gcode_viewer.render_volumes_lit(m_volumes, GLVolumeCollection::ERenderType::Opaque,
+        /*depth_mask*/true, /*with_shadow*/false,
+        cs.get_width(), cs.get_height(), mirrored,
+        [this](const GLVolume& volume) { return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0); },
+        /*partly_inside_enable*/true);
+
+    if (cull_was_on)
+        glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glStencilMask(0xFF));
+    glsafe(::glDisable(GL_STENCIL_TEST));
+}
+
+void GLCanvas3D::_render_photo_stage(const Camera& camera, bool shadow_catcher)
+{
+    GLShaderProgram* shader = wxGetApp().get_shader("photo_stage");
+    if (shader == nullptr)
+        return;   // no cyclorama rather than no app — see GLShadersManager's note
+
+    // Never on screen: an invisible floor there would just look like the stage failed to draw.
+    // See u_shadow_catcher in photo_stage.fs.
+    const bool catcher = shadow_catcher;
+
+    _update_photo_stage_model();
+    if (!m_photo_stage_model.is_initialized())
+        return;
+
+    const PhotoModeState& pm = photo_mode();
+    // Sampled, not owned: the map was filled during the object pass earlier this frame. `valid`
+    // covers the case where that pass failed or never ran (no objects on the plate).
+    const GCodeViewer::ShadowMapHandle sm = m_gcode_viewer.get_shadow_map_handle();
+
+    shader->start_using();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    // Identity model matrix, so the view matrix's rotation IS the normal matrix — and since the
+    // view matrix is rigid, its linear block needs no inverse-transpose.
+    shader->set_uniform("view_normal_matrix", Matrix3d(camera.get_view_matrix().linear()));
+    shader->set_uniform("uniform_color", m_photo_stage_model.get_color());
+
+    const Vec3d key_dir = pm.key.enabled ? pm.key.dir_world() : Vec3d(0.0, 0.0, 1.0);
+    // Vec3f(...) around the cast — a bare .cast<float>() is a lazy Eigen expression and makes the
+    // set_uniform overload set ambiguous.
+    shader->set_uniform("u_light_key_dir_world", Vec3f(key_dir.cast<float>()));
+    shader->set_uniform("u_light_key_diffuse", pm.key.enabled ? pm.key.intensity : 0.0f);
+    shader->set_uniform("u_light_key_tint", Vec3f(pm.key.tint[0], pm.key.tint[1], pm.key.tint[2]));
+    shader->set_uniform("u_ambient_ground", pm.ambient_ground);
+    shader->set_uniform("u_ambient_sky", pm.ambient_sky);
+
+    // GL_TEXTURE6, matching render_volumes_lit's choice of unit for the same texture — a unit
+    // neither render_with_outline() nor the env-map path rebinds. Reusing the same one here keeps
+    // the "which unit holds the shadow map" answer single-valued across the frame.
+    glsafe(::glActiveTexture(GL_TEXTURE6));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, sm.valid ? sm.depth_tex : 0));
+    shader->set_uniform("u_shadow_map", 6);
+    shader->set_uniform("u_shadow_enabled", sm.valid);
+    if (sm.valid) {
+        const float texel = 1.0f / (float)std::max(sm.res, 1);
+        shader->set_uniform("u_light_proj_view", sm.light_proj_view);
+        shader->set_uniform("u_shadow_texel", Vec2f(texel, texel));
+        shader->set_uniform("u_shadow_bias_min", SHADOW_BIAS_MIN_PHOTO);
+        shader->set_uniform("u_shadow_bias_max", SHADOW_BIAS_MAX_PHOTO);
+        shader->set_uniform("u_shadow_strength", SHADOW_STRENGTH_PHOTO);
+        shader->set_uniform("u_shadow_normal_offset_mm", sm.texel_world_mm * 1.5f);
+    }
+    else {
+        // Same reason as the Vec3f wrap above: Matrix4d::Identity() is a lazy CwiseNullaryOp, not
+        // a Matrix4d, so it would make the overload set ambiguous too.
+        shader->set_uniform("u_light_proj_view", Matrix4d(Matrix4d::Identity()));
+        shader->set_uniform("u_shadow_normal_offset_mm", 0.0f);
+    }
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+
+    shader->set_uniform("u_shadow_catcher", catcher);
+    // NEOTKO_PHOTOMODE_TAG s242 (F6a): 0 unless the mirrored pass actually ran — an alpha floor
+    // with nothing underneath it would just show the background through the "reflection".
+    const bool reflecting = photo_reflection_enabled() && !catcher;
+    shader->set_uniform("u_reflect_strength", reflecting ? photo_mode().reflection_strength : 0.0f);
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    if (reflecting) {
+        // Blend over the mirrored geometry, and keep writing depth so the real objects and the
+        // transparent pass still sort against the floor.
+        glsafe(::glDepthMask(GL_TRUE));
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    }
+    else if (catcher) {
+        // Blend the shadow onto transparency, and do NOT write depth: the catcher is a
+        // compositing layer, not geometry, and letting it occlude anything drawn afterwards
+        // (the transparent object pass) would punch holes in the shot.
+        glsafe(::glDepthMask(GL_FALSE));
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    }
+    else {
+        glsafe(::glDepthMask(GL_TRUE));
+        glsafe(::glDisable(GL_BLEND));
+    }
+    // Two-sided: the camera can legitimately end up behind the back wall while orbiting, and a
+    // culled backdrop that vanishes at certain angles looks like a rendering bug.
+    // Restored afterwards — the rest of the frame is drawn with culling on, and leaking this would
+    // change how every later pass renders.
+    const GLboolean cull_was_on = ::glIsEnabled(GL_CULL_FACE);
+    glsafe(::glDisable(GL_CULL_FACE));
+    m_photo_stage_model.render();
+    if (cull_was_on)
+        glsafe(::glEnable(GL_CULL_FACE));
+    if (catcher || reflecting) {
+        glsafe(::glDisable(GL_BLEND));
+        glsafe(::glDepthMask(GL_TRUE));
+    }
+    shader->stop_using();
+}
+
+// NEOTKO_PHOTOMODE_TAG s242 — a draggable lighting sphere.
+//
+// Three XYZ sliders are the obvious way to aim a light and they are unusable: the user has to
+// solve for a direction one component at a time while watching the scene. Every tool that aims
+// lights for a living (Keyshot, Rhino, Blender's HDRI widget) uses a ball you drag instead,
+// because the mapping from "where I want the highlight" to "where I drag" is direct.
+//
+// Returns true while being dragged, so the caller can react on the same frame.
+static bool photo_light_ball(const char* id, PhotoLight& light, float size_px)
+{
+    ImGui::PushID(id);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##ball", ImVec2(size_px, size_px));
+    const bool active = ImGui::IsItemActive();
+
+    const ImVec2 centre(origin.x + size_px * 0.5f, origin.y + size_px * 0.5f);
+    const float  r = size_px * 0.5f - 2.0f;
+
+    if (active) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        float dx = (m.x - centre.x) / r;
+        float dy = (m.y - centre.y) / r;
+        // Clamp to the disc rather than ignoring out-of-bounds drags: releasing control the
+        // instant the cursor leaves the ball makes the widget feel broken. Dragging past the edge
+        // now slides the light along the horizon, which is what the gesture implies.
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len > 1.0f) { dx /= len; dy /= len; }
+        // Screen disc -> azimuth/elevation. Centre = straight overhead (elevation 90), rim =
+        // horizon (elevation 0); the angle around the centre is the azimuth. Screen Y grows
+        // downward while world +Y goes away from the default camera, hence the negated dy.
+        const float rad = std::min(std::sqrt(dx * dx + dy * dy), 1.0f);
+        light.elevation_deg = (1.0f - rad) * 90.0f;
+        if (rad > 1e-3f)
+            light.azimuth_deg = std::atan2(-dy, dx) * 180.0f / float(M_PI);
+    }
+
+    // Paint it: disc, a couple of guide rings, and the handle where the light currently sits.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col_bg   = ImGui::GetColorU32(ImGuiCol_FrameBg);
+    const ImU32 col_ring = ImGui::GetColorU32(ImGuiCol_Border);
+    const ImU32 col_knob = light.enabled ? IM_COL32(255, 214, 92, 255) : IM_COL32(130, 130, 130, 255);
+    dl->AddCircleFilled(centre, r, col_bg, 48);
+    dl->AddCircle(centre, r, col_ring, 48);
+    dl->AddCircle(centre, r * 0.5f, col_ring, 32);
+    dl->AddLine(ImVec2(centre.x - r, centre.y), ImVec2(centre.x + r, centre.y), col_ring);
+    dl->AddLine(ImVec2(centre.x, centre.y - r), ImVec2(centre.x, centre.y + r), col_ring);
+
+    const float knob_rad = (1.0f - std::clamp(light.elevation_deg, 0.0f, 90.0f) / 90.0f) * r;
+    const float az = light.azimuth_deg * float(M_PI) / 180.0f;
+    const ImVec2 knob(centre.x + knob_rad * std::cos(az), centre.y - knob_rad * std::sin(az));
+    dl->AddLine(centre, knob, col_knob, 1.5f);
+    dl->AddCircleFilled(knob, 5.0f, col_knob, 16);
+
+    ImGui::PopID();
+    return active;
+}
+
+// One collapsible block per light. Returns true if anything changed this frame.
+static bool photo_light_controls(const char* label, PhotoLight& light, bool is_key)
+{
+    bool changed = false;
+    ImGui::PushID(label);
+    if (ImGui::CollapsingHeader(label)) {
+        changed |= ImGui::Checkbox("Enabled", &light.enabled);
+
+        ImGui::BeginGroup();
+        changed |= photo_light_ball(label, light, 96.0f);
+        ImGui::EndGroup();
+        ImGui::SameLine();
+
+        ImGui::BeginGroup();
+        ImGui::PushItemWidth(140.0f);
+        // The numeric readouts are not redundant with the ball: they are how a user reproduces a
+        // setup they liked, or describes one to someone else.
+        changed |= ImGui::SliderFloat("azimuth",   &light.azimuth_deg,   -180.0f, 180.0f, "%.0f deg");
+        changed |= ImGui::SliderFloat("elevation", &light.elevation_deg,    0.0f,  90.0f, "%.0f deg");
+        changed |= ImGui::SliderFloat("intensity", &light.intensity,        0.0f,   1.5f, "%.3f");
+        // ImGuiWrapper has no colour-picker wrapper, so ImGui is called directly here — same as
+        // GCodeViewer's RealColor tuning panel does.
+        changed |= ImGui::ColorEdit3("tint", light.tint.data(), ImGuiColorEditFlags_NoInputs);
+        ImGui::PopItemWidth();
+        ImGui::EndGroup();
+
+        if (is_key)
+            ImGui::TextDisabled("casts the shadow");
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+// NEOTKO_PHOTOMODE_TAG s242 — off-screen render of the Photo Mode scene at an arbitrary size.
+//
+// Draws the same passes the on-screen frame does, in the same order, minus every overlay: the
+// whole point is that the file matches what the user is looking at.
+bool GLCanvas3D::_render_photo_to_data(ThumbnailData& out, unsigned int w, unsigned int h)
+{
+    const PhotoModeState& pm = photo_mode();
+
+    // A 4K shot at 4x supersampling asks for 15360x8640, which no driver will allocate. Shrink to
+    // fit, preserving the aspect ratio, rather than failing: a slightly smaller photo beats an
+    // error dialog, and the user can see the result for themselves.
+    GLint max_rb = 0;
+    glsafe(::glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb));
+    if (max_rb > 0 && (w > (unsigned int)max_rb || h > (unsigned int)max_rb)) {
+        const double s = std::min((double)max_rb / (double)w, (double)max_rb / (double)h);
+        w = std::max(16u, (unsigned int)(w * s));
+        h = std::max(16u, (unsigned int)(h * s));
+    }
+
+    out.set(w, h);
+    if (!out.is_valid())
+        return false;
+
+    GLint caller_fbo = 0;
+    glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
+
+    // Single-sampled on purpose. MSAA would need a resolve blit, and it buys nothing here: the
+    // supersampling factor already runs at 2-4x and box-filters down, which antialiases the shadow
+    // map and the SSAO too — MSAA only ever touches geometric edges.
+    GLuint fbo = 0, tex = 0, depth = 0;
+    glsafe(::glGenFramebuffers(1, &fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fbo));
+
+    glsafe(::glGenTextures(1, &tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0));
+
+    glsafe(::glGenRenderbuffers(1, &depth));
+    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, depth));
+    // DEPTH24_STENCIL8, not DEPTH_COMPONENT: render_volumes_shadow()'s planar bed shadow uses the
+    // stencil buffer to stop overlapping silhouettes double-darkening. Attaching depth only would
+    // silently drop that dedup and darken the shot wherever two objects overlap.
+    glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
+    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth));
+
+    bool ok = false;
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        Camera& camera = wxGetApp().plater()->get_camera();
+        const std::array<int, 4> saved_viewport = camera.get_viewport();
+
+        // Tells _render_objects() to size the G-buffer and the screen-space effects against the
+        // export, not the window. Cleared before every return path below — a leaked non-zero value
+        // would make the next on-screen frame compute its AO at photo resolution.
+        m_photo_render_size = Size((int)w, (int)h);
+
+        camera.set_viewport(0, 0, w, h);
+        camera.apply_viewport();
+
+        // --- framing -------------------------------------------------------------------------
+        // Camera::apply_projection(box) derives the visible world extent as
+        //     half_extent = 0.5 * viewport_pixels * (1 / zoom)
+        // i.e. zoom is in PIXELS PER MM. Rendering into a 5120x2880 buffer therefore does NOT
+        // produce a higher-resolution version of the same shot: it shows ~3x more of the world at
+        // the same pixel density, so the object shrinks into a corner and neighbouring plates walk
+        // into frame. (First build did exactly that — the export came back with the model twice
+        // and a lot of empty floor.)
+        //
+        // The frustum is built explicitly rather than by scaling the zoom, because Camera::set_zoom
+        // clamps against min_zoom()/max_zoom() — and min_zoom() is itself derived from the scene
+        // box, so a large temporary zoom could be silently clamped and then not restore cleanly.
+        // apply_projection(box) is still called first: it is what computes the near/far pair for
+        // this scene, which is then reused verbatim.
+        camera.apply_projection(_max_bounding_box(true, true, true));
+
+        const Size   cs = get_canvas_size();
+        const double inv_zoom = camera.get_inv_zoom();
+        // What the user is actually looking at, in mm.
+        const double hw_view = 0.5 * (double)std::max(cs.get_width(), 1) * inv_zoom;
+        const double hh_view = 0.5 * (double)std::max(cs.get_height(), 1) * inv_zoom;
+
+        // Fit the export's aspect ratio around that, never inside it: whatever is visible on
+        // screen stays visible in the file, and a differing aspect ratio only ever ADDS margin on
+        // one axis. Cropping instead would silently cut off part of what the user framed.
+        const double ar_export = (double)w / (double)h;
+        double hw = std::max(hw_view, hh_view * ar_export);
+        double hh = hw / ar_export;
+
+        // Perspective needs the same near-plane rescale apply_projection(box) applies, or the
+        // frustum would be built at the wrong depth and the shot would come out at a different
+        // magnification than the viewport.
+        if (camera.get_type() == Camera::EType::Perspective) {
+            const double dist = camera.get_distance();
+            if (dist > EPSILON) {
+                const double scale = camera.get_near_z() / dist;
+                hw *= scale;
+                hh *= scale;
+            }
+        }
+        camera.apply_projection(-hw, hw, -hh, hh, camera.get_near_z(), camera.get_far_z());
+
+        if (pm.transparent_bg)
+            glsafe(::glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
+        else {
+            const auto& c = pm.stage.base_color;
+            glsafe(::glClearColor(c[0], c[1], c[2], 1.0f));
+        }
+        glsafe(::glClearDepth(1.0));
+        glsafe(::glClearStencil(0));
+        glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));
+
+        // Same order as the on-screen Prepare frame: objects (which fill the shadow map as their
+        // pass 0) -> stage -> transparent. See GLCanvas3D::render().
+        _render_objects(GLVolumeCollection::ERenderType::Opaque, false);
+        if (photo_mode_hides_bed())
+            _render_photo_stage(camera, /*shadow_catcher*/pm.transparent_bg);
+        else {
+            _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), false);
+            _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(),
+                              false, false, -1, true, false);
+            if (wxGetApp().app_config->get_bool("neotko_libre_mode")) {
+                m_gcode_viewer.render_volumes_shadow(m_volumes, GLVolumeCollection::ERenderType::Opaque,
+                    (int)w, (int)h, camera,
+                    [this](const GLVolume& volume) { return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0); },
+                    true);
+            }
+        }
+        _render_objects(GLVolumeCollection::ERenderType::Transparent, false);
+
+        glsafe(::glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, (void*)out.pixels.data()));
+        ok = true;
+
+        m_photo_render_size = Size();
+        camera.set_viewport(saved_viewport[0], saved_viewport[1],
+                            (unsigned int)saved_viewport[2], (unsigned int)saved_viewport[3]);
+        camera.apply_viewport();
+        // Rebuild the on-screen projection too, not just the viewport. This runs from inside the
+        // panel's ImGui pass, i.e. part-way through a live frame — leaving the export's frustum
+        // installed would misdraw whatever the rest of that frame still has to render.
+        camera.apply_projection(_max_bounding_box(true, true, true));
+    }
+    // Belt and braces: the FBO-incomplete branch above never sets it, but this function must not
+    // be able to leave the override armed under any path.
+    m_photo_render_size = Size();
+
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
+    glsafe(::glDeleteRenderbuffers(1, &depth));
+    glsafe(::glDeleteTextures(1, &tex));
+    glsafe(::glDeleteFramebuffers(1, &fbo));
+
+    // The next on-screen frame re-derives viewport and projection from the canvas size, but it
+    // has to be asked to happen — nothing else marks the canvas dirty after an export.
+    set_as_dirty();
+    request_extra_frame();
+    return ok;
+}
+
+// Box-filter an ss x ss block down to one pixel. Straight average, no gamma-correct downsample:
+// the buffer is already in the same space the screen shows, and "correcting" it here would make
+// the PNG diverge from the viewport, which is the one thing this feature must not do.
+static void photo_downsample(const ThumbnailData& src, ThumbnailData& dst, unsigned int ss)
+{
+    dst.set(src.width / ss, src.height / ss);
+    if (!dst.is_valid())
+        return;
+    const unsigned int n = ss * ss;
+    for (unsigned int y = 0; y < dst.height; ++y) {
+        for (unsigned int x = 0; x < dst.width; ++x) {
+            unsigned int acc[4] = { 0, 0, 0, 0 };
+            for (unsigned int j = 0; j < ss; ++j) {
+                const unsigned char* row = src.pixels.data() + 4 * ((y * ss + j) * src.width + x * ss);
+                for (unsigned int i = 0; i < ss; ++i)
+                    for (int k = 0; k < 4; ++k)
+                        acc[k] += row[4 * i + k];
+            }
+            unsigned char* o = dst.pixels.data() + 4 * (y * dst.width + x);
+            for (int k = 0; k < 4; ++k)
+                o[k] = (unsigned char)(acc[k] / n);
+        }
+    }
+}
+
+// Renders at export_ss x and filters down. Returns false if anything failed.
+static bool photo_grab(ThumbnailData& out,
+                       const std::function<bool(ThumbnailData&, unsigned int, unsigned int)>& render)
+{
+    const PhotoModeState& pm = photo_mode();
+    const unsigned int ss = (unsigned int)std::clamp(pm.export_ss, 1, 4);
+    ThumbnailData big;
+    if (!render(big, (unsigned int)pm.export_w * ss, (unsigned int)pm.export_h * ss))
+        return false;
+    if (ss == 1) {
+        out.load_from(big);
+        return true;
+    }
+    photo_downsample(big, out, ss);
+    return out.is_valid();
+}
+
+void GLCanvas3D::_photo_save_png()
+{
+    ThumbnailData data;
+    if (!photo_grab(data, [this](ThumbnailData& d, unsigned int w, unsigned int h) {
+            return _render_photo_to_data(d, w, h); }))
+        return;
+
+    // Default name = project + date, because these files pile up fast and "Untitled.png" twelve
+    // times over is what the user would otherwise get.
+    std::string base = wxGetApp().plater()->get_project_name().ToUTF8().data();
+    if (base.empty())
+        base = "photo";
+    const std::time_t t = std::time(nullptr);
+    char stamp[32] = { 0 };
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M", std::localtime(&t));
+
+    wxFileDialog dlg(this->get_wxglcanvas(), _L("Save photo"), from_u8(wxGetApp().app_config->get_last_output_dir("")),
+                     from_u8(base + "-" + stamp + ".png"), "PNG files (*.png)|*.png",
+                     wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    // flip=1 (last argument): glReadPixels hands back rows bottom-up, PNG wants them top-down.
+    // Same call write_thumbnail() uses in BackgroundSlicingProcess.cpp.
+    size_t png_size = 0;
+    void* png = tdefl_write_image_to_png_file_in_memory_ex((const void*)data.pixels.data(),
+                                                           data.width, data.height, 4,
+                                                           &png_size, MZ_DEFAULT_LEVEL, 1);
+    if (png == nullptr)
+        return;
+    const std::string path = dlg.GetPath().ToUTF8().data();
+    FILE* f = boost::nowide::fopen(path.c_str(), "wb");
+    if (f != nullptr) {
+        fwrite(png, 1, png_size, f);
+        fclose(f);
+    }
+    mz_free(png);
+}
+
+void GLCanvas3D::_photo_copy_to_clipboard()
+{
+    ThumbnailData data;
+    if (!photo_grab(data, [this](ThumbnailData& d, unsigned int w, unsigned int h) {
+            return _render_photo_to_data(d, w, h); }))
+        return;
+
+    // wxImage keeps RGB and alpha in two separate planes, and wants rows top-down — so this is
+    // where the vertical flip that miniz does for us in the PNG path has to be done by hand.
+    wxImage img((int)data.width, (int)data.height);
+    img.InitAlpha();
+    unsigned char* rgb = img.GetData();
+    unsigned char* a   = img.GetAlpha();
+    for (unsigned int y = 0; y < data.height; ++y) {
+        const unsigned char* src = data.pixels.data() + 4 * (data.height - 1 - y) * data.width;
+        unsigned char* drgb = rgb + 3 * y * data.width;
+        unsigned char* da   = a + y * data.width;
+        for (unsigned int x = 0; x < data.width; ++x) {
+            drgb[3 * x + 0] = src[4 * x + 0];
+            drgb[3 * x + 1] = src[4 * x + 1];
+            drgb[3 * x + 2] = src[4 * x + 2];
+            da[x]           = src[4 * x + 3];
+        }
+    }
+
+    if (wxTheClipboard->Open()) {
+        // wxBitmapDataObject is what mail clients and chat apps paste from. Note most of them drop
+        // the alpha channel on paste — that is their behaviour, not a bug here, and it is part of
+        // why Transparent background defaults to off.
+        wxTheClipboard->SetData(new wxBitmapDataObject(wxBitmap(img)));
+        wxTheClipboard->Close();
+    }
+}
+
+void GLCanvas3D::_render_photo_mode_panel()
+{
+    PhotoModeState& pm = photo_mode();
+
+    ImGui::SetNextWindowSize(ImVec2(330.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(20.0f, 80.0f), ImGuiCond_FirstUseEver);
+
+    bool open = true;
+    ImGui::Begin("Photo Mode", &open);
+    // The window's own X is a second exit alongside Esc and the plate icon. Closing the panel must
+    // leave the mode, not hide the controls while the scene stays stripped — that would look like
+    // the app had broken.
+    if (!open) {
+        ImGui::End();
+        wxGetApp().plater()->set_photo_mode(false);
+        return;
+    }
+
+    // --- lighting preset. First control in the window because it is the one that gets used.
+    {
+        int preset = (int)pm.last_preset;
+        std::vector<const char*> names;
+        for (int i = 0; i < (int)PhotoLightPreset::Count; ++i)
+            names.push_back(photo_light_preset_name((PhotoLightPreset)i));
+        if (ImGui::Combo("Lighting", &preset, names.data(), (int)names.size()))
+            pm.apply_light_preset((PhotoLightPreset)preset);
+    }
+
+    ImGui::Separator();
+    photo_light_controls("Key light",  pm.key,  true);
+    photo_light_controls("Fill light", pm.fill, false);
+    photo_light_controls("Rim light",  pm.rim,  false);
+
+    if (ImGui::CollapsingHeader("Ambient & sheen")) {
+        ImGui::PushItemWidth(160.0f);
+        ImGui::SliderFloat("ambient ground", &pm.ambient_ground,   0.0f,  1.0f, "%.3f");
+        ImGui::SliderFloat("ambient sky",    &pm.ambient_sky,      0.0f,  1.0f, "%.3f");
+        ImGui::SliderFloat("specular",       &pm.key_specular,     0.0f,  0.5f, "%.3f");
+        ImGui::SliderFloat("rim strength",   &pm.fresnel_strength, 0.0f,  0.5f, "%.3f");
+        ImGui::PopItemWidth();
+    }
+
+    // --- materials (F3) ----------------------------------------------------------------------
+    // One row per filament slot, each showing the slot's REAL colour, because "slot 3" means
+    // nothing to someone who thinks in "the pink one".
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Materials")) {
+        const std::vector<ColorRGBA> slot_colors = ::get_extruders_colors();
+        const int n_slots = std::max((int)slot_colors.size(), 1);
+        for (int s = 0; s < n_slots; ++s) {
+            ImGui::PushID(s);
+            PhotoMaterial& mat = pm.material(s);
+
+            if (s < (int)slot_colors.size()) {
+                const ColorRGBA& c = slot_colors[s];
+                ImGui::ColorButton("##slotcol", ImVec4(c.r(), c.g(), c.b(), 1.0f),
+                                   ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                                   ImVec2(18.0f, 18.0f));
+                ImGui::SameLine();
+            }
+            ImGui::Text("T%d", s);
+            ImGui::SameLine();
+
+            int mp = (int)mat.preset;
+            std::vector<const char*> mnames;
+            for (int k = 0; k < (int)PhotoMaterial::Preset::Count; ++k)
+                mnames.push_back(photo_material_preset_name((PhotoMaterial::Preset)k));
+            ImGui::PushItemWidth(150.0f);
+            if (ImGui::Combo("##mat", &mp, mnames.data(), (int)mnames.size()))
+                photo_material_apply_preset(mat, (PhotoMaterial::Preset)mp);
+            ImGui::PopItemWidth();
+            ImGui::PopID();
+        }
+        if (pm.env_enabled == false) {
+            // Metal and Silk WORK without the environment now — they reflect the lights directly
+            // (see the fallback in shells_lit.fs). What they lack is anything interesting IN the
+            // reflection: a smooth gradient instead of visible softboxes. So this is an invitation,
+            // not a warning, and it deliberately no longer says "need ... to look right" — the
+            // earlier wording undersold a real bug where metal rendered pure black.
+            for (const PhotoMaterial& m : pm.materials) {
+                if (m.metallic > 0.2f) {
+                    ImGui::TextDisabled("Tip: turn Environment on to give Metal/Silk something");
+                    ImGui::TextDisabled("richer to reflect.");
+                    break;
+                }
+            }
+        }
+    }
+
+    // --- environment (F5) --------------------------------------------------------------------
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Environment")) {
+        ImGui::Checkbox("Enabled", &pm.env_enabled);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A virtual room built from your three lights, for the objects to\n"
+                              "reflect. Off by default: with it on, Photo Mode no longer\n"
+                              "reproduces the viewport exactly.");
+        ImGui::PushItemWidth(160.0f);
+        ImGui::SliderFloat("strength", &pm.env_intensity, 0.0f, 2.0f, "%.2f");
+        // Turning the room without moving the lights: the knob that makes a metal look right,
+        // because a metal is sold by what it reflects.
+        ImGui::SliderFloat("rotate room", &pm.env_rotation_deg, -180.0f, 180.0f, "%.0f deg");
+        ImGui::PopItemWidth();
+    }
+
+    // --- stage
+    ImGui::Separator();
+    {
+        int kind = (int)pm.stage.kind;
+        const char* kinds[] = { "Print bed", "Lightbox (floor + wall)", "Backdrop (floor only)" };
+        if (ImGui::Combo("Stage", &kind, kinds, IM_ARRAYSIZE(kinds)))
+            pm.stage.kind = (PhotoStage::Kind)kind;
+
+        if (pm.stage.kind != PhotoStage::Kind::Bed) {
+            ImGui::ColorEdit3("floor colour", pm.stage.base_color.data(), ImGuiColorEditFlags_NoInputs);
+            ImGui::PushItemWidth(160.0f);
+            ImGui::SliderFloat("size", &pm.stage.extent_factor, 1.2f, 8.0f, "%.1fx bed");
+            if (pm.stage.kind == PhotoStage::Kind::Lightbox)
+                ImGui::SliderFloat("corner radius", &pm.stage.wall_radius_mm, 0.0f, 400.0f, "%.0f mm");
+            ImGui::PopItemWidth();
+        }
+    }
+
+    // --- quality & screenshot (F2.5) ---------------------------------------------------------
+    ImGui::Separator();
+    {
+        int q = (int)pm.quality;
+        std::vector<const char*> qn;
+        for (int i = 0; i < (int)PhotoModeState::Quality::Count; ++i)
+            qn.push_back(photo_quality_name((PhotoModeState::Quality)i));
+        if (ImGui::Combo("Quality", &q, qn.data(), (int)qn.size()))
+            pm.quality = (PhotoModeState::Quality)q;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Shadow map: 2048 / 4096 / 8192 px.\n"
+                              "Above Normal it also unlocks the floor reflection, which draws\n"
+                              "the whole scene a second time.");
+
+        if (pm.quality == PhotoModeState::Quality::Normal)
+            ImGui::TextDisabled("Reflection needs High or Ultra.");
+        else {
+            ImGui::Checkbox("Floor reflection", &pm.reflection_enabled);
+            if (pm.reflection_enabled) {
+                ImGui::PushItemWidth(160.0f);
+                ImGui::SliderFloat("reflectivity", &pm.reflection_strength, 0.0f, 1.0f, "%.2f");
+                ImGui::PopItemWidth();
+                if (pm.stage.kind == PhotoStage::Kind::Bed)
+                    ImGui::TextDisabled("(needs a Lightbox or Backdrop stage)");
+            }
+        }
+
+        ImGui::PushItemWidth(70.0f);
+        ImGui::SliderFloat("seconds", &pm.screenshot_seconds, 2.0f, 15.0f, "%.0f s");
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("Hide UI for screenshot"))
+            photo_begin_screenshot();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Hides every control, including this panel, so you can grab the\n"
+                              "frame with the system screenshot tool. Esc brings it back.");
+    }
+
+    // --- export
+    ImGui::Separator();
+    ImGui::PushItemWidth(90.0f);
+    ImGui::InputInt("width",  &pm.export_w, 0);
+    ImGui::SameLine();
+    ImGui::InputInt("height", &pm.export_h, 0);
+    ImGui::PopItemWidth();
+    pm.export_w = std::clamp(pm.export_w, 16, 16384);
+    pm.export_h = std::clamp(pm.export_h, 16, 16384);
+
+    ImGui::PushItemWidth(120.0f);
+    ImGui::SliderInt("supersampling", &pm.export_ss, 1, 4, "%dx");
+    ImGui::PopItemWidth();
+
+    // The export uses its own aspect ratio, so its framing is NOT the viewport's crop — a 16:9
+    // export from a tall window shows more sideways and less vertically. Saying so beats letting
+    // the user discover it by comparing two files.
+    {
+        const Size cs = get_canvas_size();
+        const float ar_export = (float)pm.export_w / (float)std::max(pm.export_h, 1);
+        const float ar_view   = (float)cs.get_width() / (float)std::max(cs.get_height(), 1);
+        if (std::abs(ar_export - ar_view) > 0.02f)
+            ImGui::TextDisabled("Export is %.2f:1, viewport is %.2f:1 - framing will differ.",
+                                ar_export, ar_view);
+    }
+    ImGui::Checkbox("Transparent background", &pm.transparent_bg);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("For crops and shop listings: the floor drops out and only the object\n"
+                          "and its shadow are exported.\n"
+                          "Needs a Lightbox or Backdrop stage - the print bed is opaque, so with\n"
+                          "the Bed stage there is nothing to make transparent.\n"
+                          "Most mail and chat clients discard alpha when you paste, which is why\n"
+                          "this is off by default.");
+    // Saying it once, plainly, beats a user discovering it from an all-white PNG.
+    if (pm.transparent_bg && pm.stage.kind == PhotoStage::Kind::Bed)
+        ImGui::TextDisabled("(no effect with the Print bed stage)");
+
+    // NEOTKO_PHOTOMODE_TAG s242 — export PARKED, deliberately, pending the viewport bug below.
+    //
+    // The off-screen path still renders into a sub-rectangle of the export buffer (content lands
+    // in the bottom-left corner, the rest stays at the clear colour), which survived the framing
+    // fix — so the cause is the VIEWPORT, not the projection, and it has not been found yet.
+    // Rather than ship a button that produces a broken file, the controls are disabled and say so.
+    //
+    // The code behind them is intentionally left in place and still compiled (_photo_save_png /
+    // _photo_copy_to_clipboard / _render_photo_to_data): deleting it would only mean rewriting it,
+    // and leaving it uncompiled would let it rot against the shader changes landing around it.
+    // (No ImGui::BeginDisabled here: this tree bundles ImGui 1.83 and that API arrived in 1.84.
+    // Greyed-out text instead of dead buttons — a button that does nothing is worse than no button.)
+    ImGui::TextDisabled("Export parked: Copy to clipboard / Save PNG");
+    ImGui::TextDisabled("(off-screen render still frames wrong - being fixed)");
+
+    // --- user presets -------------------------------------------------------------------------
+    // Saved in the app's own config, per user — NOT in the 3mf. A lighting setup is a
+    // photographer's preference, so it should follow the person across every project rather than
+    // ride along inside a model file that gets shared and printed.
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("My presets")) {
+        static char s_name[64] = "";
+        ImGui::PushItemWidth(170.0f);
+        ImGui::InputText("##pname", s_name, IM_ARRAYSIZE(s_name));
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("Save") && s_name[0] != '\0') {
+            photo_preset_save(s_name);
+            s_name[0] = '\0';
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Saves lights, materials, stage, environment and quality.\n"
+                              "Saving over an existing name replaces it.");
+
+        const std::vector<PhotoUserPreset>& ups = photo_presets();
+        if (ups.empty())
+            ImGui::TextDisabled("(none saved yet)");
+        for (size_t i = 0; i < ups.size(); ++i) {
+            ImGui::PushID((int)(1000 + i));
+            if (ImGui::Button("Load"))
+                photo_preset_apply(i);
+            ImGui::SameLine();
+            if (ImGui::Button("X"))
+                // Safe to delete inside the loop: photo_preset_delete() mutates the vector, and
+                // `ups` is a reference to it — so this must be the last thing the iteration does.
+                { photo_preset_delete(i); ImGui::PopID(); break; }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(ups[i].name.c_str());
+            ImGui::PopID();
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Esc, or the camera button on the plate, to exit.");
+    ImGui::End();
+}
+
 void GLCanvas3D::_render_shading_debug_panel()
 {
     // NEOTKO_SMOOTHNORMALS_TAG s229: ORCA_DEBUG_RENDER only - see NeoDebug::render_panels_enabled().

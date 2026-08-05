@@ -26,7 +26,21 @@ uniform float u_sss_strength;      // 0 = off (bit-identical to pre-s214), 1 = f
 uniform float u_sss_radius_px;     // px, same supersampled texel space as u_ao_radius
 uniform float u_sss_reference_td;  // mm — a material at exactly this TD blurs at u_sss_radius_px
 
+// NEOTKO_REALCOLOR_TAG s243 (F5 = A7): gradeo final — compresión de rango hacia el gris medio y
+// desaturación. Los dos a 1.0 = imagen idéntica a pre-s243. Ver 140/realcolor_present.fs.
+uniform float u_grade_contrast;
+uniform float u_grade_saturation;
+
+// NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): 0 = apagado (≡ pre-F6), 1 = sella los huecos
+// INTERIORES respetando el contorno. Ver compute_interior(). Detalle en 140/realcolor_present.fs.
+uniform float u_fill_interior;
+
 varying vec2 uv;
+
+// NEOTKO_REALCOLOR_TAG s243 (F5): pivote fotográfico del 18% y pesos de luminancia Rec.709.
+// Válidos en espacio LINEAR, que es donde trabaja todo esto hasta el gamma final.
+const float REALCOLOR_MID_GRAY = 0.18;
+const vec3 REALCOLOR_LUMA_709 = vec3(0.2126, 0.7152, 0.0722);
 
 float linear_to_srgb(float c) { c = clamp(c, 0.0, 1.0); return (c <= 0.0031308) ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
@@ -136,6 +150,34 @@ vec3 compute_sss(vec2 center_uv, vec3 sharp_lin)
 // this pixel's alpha, blended against whatever render_shells()/background is already in the
 // framebuffer (see glEnable(GL_BLEND) in render_toolpaths_realcolor's present-pass setup) so
 // thin/faint features fade in smoothly instead of disappearing outright.
+// NEOTKO_REALCOLOR_TAG s243 (F6): fraccion de los 8 vecinos con geometria. Un hueco rodeado de
+// pieza esta DENTRO del contorno y se puede sellar; un pixel con pieza a un lado y aire al otro
+// ES el contorno y su transparencia parcial es el antialiasing de la silueta. Mismo disco de 8
+// taps que compute_ao()/compute_sss(), radio ~1 pixel de salida. Ver 140/realcolor_present.fs.
+//
+// ⚠️ AMBITO GLOBAL, obligatorio: GLSL no admite funciones anidadas. Este fichero coloca el
+// comentario de s166 DENTRO de main(), al contrario que su gemelo 140/ — insertar por ese ancla
+// mete la definicion dentro de main() y el shader entero deja de compilar (realcolor_present=0 en
+// GLShadersManager::init, dialogo "Unable to load shaders" al arrancar).
+float interior_tap(vec2 center_uv, vec2 dir)
+{
+    return step(0.5, texture2D(u_peel_meta0, center_uv + dir * u_texel_size * 2.0).a);
+}
+
+float compute_interior(vec2 center_uv)
+{
+    float n = 0.0;
+    n += interior_tap(center_uv, vec2( 1.0,  0.0));
+    n += interior_tap(center_uv, vec2(-1.0,  0.0));
+    n += interior_tap(center_uv, vec2( 0.0,  1.0));
+    n += interior_tap(center_uv, vec2( 0.0, -1.0));
+    n += interior_tap(center_uv, vec2( 0.7,  0.7));
+    n += interior_tap(center_uv, vec2(-0.7,  0.7));
+    n += interior_tap(center_uv, vec2( 0.7, -0.7));
+    n += interior_tap(center_uv, vec2(-0.7, -0.7));
+    return n / 8.0;
+}
+
 void main()
 {
     vec2 o1 = vec2(-0.5, -0.5) * u_texel_size;
@@ -177,11 +219,23 @@ void main()
     float ao = compute_ao(uv);
     lin *= mix(1.0, ao, u_ao_strength);
 
+    // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): lo último antes del gamma, y deliberadamente fuera del
+    // acumulador — es presentación, no material (razonamiento completo en 140/realcolor_present.fs).
+    lin = REALCOLOR_MID_GRAY + (lin - REALCOLOR_MID_GRAY) * u_grade_contrast;
+    lin = mix(vec3(dot(max(lin, vec3(0.0)), REALCOLOR_LUMA_709)), lin, u_grade_saturation);
+    lin = max(lin, vec3(0.0));
+
     // NEOTKO_REALCOLOR_TAG s166: see 140/realcolor_present.fs for the full rationale — curved
     // coverage->alpha (pow 0.4) instead of linear, so partially-aliased-but-real geometry
     // (thin edges, sparse top-infill hatching) doesn't bleed 75% of the printbed (incl. its
     // printed text/logo) through at just 1/4 tap coverage.
     float out_alpha = pow(coverage / 4.0, 0.4);
+
+    // NEOTKO_REALCOLOR_TAG s243 (F6): sella los huecos interiores, respeta el contorno. Solo sube
+    // el ALFA sobre pixeles que YA tienen geometria — no inventa color ni profundidad, y por eso
+    // no tapa agujeros reales del modelo. Ver 140/realcolor_present.fs.
+    float interior = smoothstep(0.70, 0.95, compute_interior(uv));
+    out_alpha = mix(out_alpha, 1.0, interior * u_fill_interior);
     gl_FragColor = vec4(linear_to_srgb(lin.r), linear_to_srgb(lin.g), linear_to_srgb(lin.b), out_alpha);
     gl_FragDepth = min_depth;
 }

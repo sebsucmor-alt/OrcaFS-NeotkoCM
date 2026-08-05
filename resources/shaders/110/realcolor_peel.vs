@@ -32,6 +32,17 @@ uniform mat4 view_model_matrix;
 uniform mat4 projection_matrix;
 uniform mat3 view_normal_matrix;
 
+// NEOTKO_REALCOLOR_TAG s243 (F1): hinchado del vértice sobre su normal, en mm de mundo. El
+// razonamiento completo (por qué la junta entre extrusiones deja ver el fondo, y por qué esto va
+// en un uniform en vez de regenerar los TBuffers) está en 140/realcolor_peel.vs — este fichero es
+// su gemelo de perfil legacy y se mantienen sincronizados a mano.
+//
+// 🔑 s243b: ANISÓTROPO. .x = flancos (cierran el hueco entre líneas contiguas), .y = caras de
+// arriba/abajo (no cierran nada, sólo funden capas y borran la costura — mantener corto, además
+// el bias de peel se acota con la altura REAL del path). Separación por |n.z| porque las
+// normales llegan en mundo y el mundo es Z-arriba. Ver la nota larga en 140/.
+uniform vec2 u_swell_mm;
+
 attribute vec3 v_position;
 attribute vec3 v_normal;
 
@@ -64,12 +75,18 @@ void main()
 {
     vec3 normal = normalize(view_normal_matrix * v_normal);
     v_view_normal = normal;
-    v_world_pos = v_position; // pass-through, already world space
+
+    // NEOTKO_REALCOLOR_TAG s243 (F1): sobre v_normal (mundo), no sobre `normal` (ya transformada).
+    // Ver la nota larga en 140/realcolor_peel.vs.
+    vec3 n_world = normalize(v_normal);
+    float facing_up = abs(n_world.z); // 1 = cara horizontal (arriba/abajo), 0 = flanco
+    vec3 swollen_pos = v_position + n_world * mix(u_swell_mm.x, u_swell_mm.y, facing_up);
+    v_world_pos = swollen_pos; // pass-through, already world space
 
     float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
     intensity.x = NdotL * LIGHT_TOP_DIFFUSE; // direct light only, ambient is env-sampled in .fs
 
-    vec4 position = view_model_matrix * vec4(v_position, 1.0);
+    vec4 position = view_model_matrix * vec4(swollen_pos, 1.0);
     intensity.y = LIGHT_TOP_SPECULAR * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
     v_eye_z = -position.z; // right-handed eye space, camera looks down -Z
 

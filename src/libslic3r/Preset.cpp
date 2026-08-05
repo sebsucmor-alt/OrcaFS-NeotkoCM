@@ -974,6 +974,8 @@ static std::vector<std::string> s_Preset_print_options {
      "pathblend_layer_ratio_4", "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface", "pathblend_invert_gradient",
      "pathblend_fill_angle", "pathblend_top", "pathblend_penu", "neotko_surface_passes_top", "neotko_surface_passes_penu",
      "neotko_slope_perimeter_recolor",
+     "neotko_alh_adapt_to_color",
+     "neotko_alh_slope_recolor",
      // NEOTKO_SANDWICH_ENGINE_TAG_END
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth", "mmu_segmented_region_extra_walls", "mmu_segmented_region_surface_depth",

@@ -550,6 +550,27 @@ private:
     GLVolumeCollection m_volumes;
     GCodeViewer m_gcode_viewer;
 
+    // NEOTKO_PHOTOMODE_TAG s242: the cyclorama mesh, generated in WORLD coordinates (no model
+    // matrix — photo_stage.vs relies on that) and cached. m_photo_stage_key is the cheap
+    // fingerprint of what it was built from; when it changes the mesh is regenerated, which is
+    // what keeps a few thousand vertices from being rebuilt on every camera move.
+    GLModel m_photo_stage_model;
+    std::array<float, 5> m_photo_stage_key{ { 0.f, 0.f, 0.f, 0.f, 0.f } };
+    // NEOTKO_PHOTOMODE_TAG s242: non-zero only while rendering an export off-screen.
+    //
+    // Needed because _render_objects() sizes the shells G-buffer and the AO/SSCS uniforms from
+    // get_canvas_size(). During an export the viewport is the export size, not the canvas size, so
+    // without this the G-buffer would be allocated at window resolution while the geometry filled
+    // a 5120x2880 viewport — every screen-space lookup would land on the wrong texel and the AO
+    // and contact shadows would come out as noise. Silent, and only in the saved file, never on
+    // screen: exactly the kind of bug that ships.
+    Size m_photo_render_size;
+    // The size every screen-space effect should be sized against this frame.
+    Size _effective_render_size() const
+    {
+        return (m_photo_render_size.get_width() > 0) ? m_photo_render_size : get_canvas_size();
+    }
+
     // NEOTKO_SNAPDRAG_TAG s227 — Fase C: per-drag hysteresis state, keyed by (object_idx,
     // instance_idx). true = last frame this instance was resting on another object (not the
     // bed) — kept with the low engage_ratio so it doesn't flicker off near a pillar's edge.
@@ -601,7 +622,11 @@ private:
     bool m_multisample_allowed;
     bool m_moving;
     bool m_tab_down;
-    bool m_camera_movement;
+    bool m_camera_movement; // SÓLO arrastre (rotar/desplazar). Ver is_camera_moving().
+    // NEOTKO_REALCOLOR_TAG s243 (F7): plazo hasta el que se considera que la cámara sigue en
+    // movimiento tras un salto instantáneo (rueda, cubo de vistas, atajos de vista). Arranca en
+    // el pasado (valor por defecto de time_point = epoch), así que en reposo no afecta a nada.
+    std::chrono::steady_clock::time_point m_camera_motion_until;
     //BBS: add toolpath outside
     bool m_toolpath_outside{ false };
     ECursorType m_cursor_type;
@@ -1139,7 +1164,23 @@ public:
     void schedule_extra_frame(int miliseconds);
     // NEOTKO_REALCOLOR_TAG: lets GCodeViewer self-drive its idle-debounce without a new param
     // threaded through _render_gcode()
-    bool is_camera_moving() const { return m_camera_movement; }
+    //
+    // NEOTKO_REALCOLOR_TAG s243 (F7): ahora es "arrastrando O dentro del plazo de una sacudida
+    // instantánea". m_camera_movement sólo cubre el ARRASTRE (se enciende en las ramas de rotar y
+    // desplazar de on_mouse_move y se apaga en mouse_up_cleanup), así que la rueda del ratón y
+    // select_view() —el cubo de vistas y los atajos 1..6— movían la cámara sin que nadie se
+    // enterase, y RealColor se comía un recálculo completo de hasta n_max pasadas de peel por
+    // cada fotograma del movimiento. Un booleano no sirve para esos dos: no son arrastres, no
+    // tienen un "botón arriba" que lo apague. De ahí el plazo. Ver notify_camera_moved().
+    bool is_camera_moving() const {
+        return m_camera_movement || std::chrono::steady_clock::now() < m_camera_motion_until;
+    }
+
+    // NEOTKO_REALCOLOR_TAG s243 (F7): declara que la cámara acaba de saltar y que durante los
+    // próximos `miliseconds` conviene dibujar barato. Sacudidas seguidas (varios clics de rueda)
+    // empujan el plazo hacia adelante, así que el modo barato dura mientras dure el gesto y se
+    // recupera solo un poco después del último evento.
+    void notify_camera_moved(int miliseconds);
 
     int get_main_toolbar_item_id(const std::string& name) const { return m_main_toolbar.get_item_id(name); }
     void force_main_toolbar_left_action(int item_id) { m_main_toolbar.force_left_action(item_id, *this); }
@@ -1292,6 +1333,38 @@ private:
     void _render_assemble_info() const;
     // NEOTKO_SMOOTHNORMALS_TAG s229: live shading tuning panel, gated on ORCA_DEBUG_SHADING.
     void _render_shading_debug_panel();
+
+    // NEOTKO_PHOTOMODE_TAG s242 — see PhotoMode.hpp / docs/FUTURE/PHOTO_MODE_PLAN.md.
+    // The cyclorama ("lightbox") that replaces the bed, and the user-facing panel that drives the
+    // mode. The panel is NOT a debug window: unlike _render_shading_debug_panel above it is not
+    // gated on NeoDebug::render_panels_enabled().
+    // shadow_catcher: draw the floor as pure shadow-on-alpha instead of as a lit surface. Only
+    // ever true during a transparent export. Passed explicitly rather than inferred from
+    // m_photo_render_size — the caller knows, and inferring it made the on-screen and export paths
+    // depend on a member being set in the right order.
+    void _render_photo_stage(const Camera& camera, bool shadow_catcher);
+    // NEOTKO_PHOTOMODE_TAG s242 (F6a) — planar floor reflection.
+    //
+    // Draws the scene a SECOND time, mirrored through the floor plane (world z = 0), masked to
+    // where the floor actually is. Chosen over screen-space reflections deliberately: the floor is
+    // one flat horizontal plane, and for that case a planar reflection is both cheaper and better
+    // — SSR can only reflect what is already on screen, so it falls apart exactly at the object's
+    // silhouette, which is the part of the reflection anyone actually looks at.
+    void _render_photo_reflection(const Camera& camera);
+    void _render_photo_mode_panel();
+    // Renders the Photo Mode scene off-screen at an arbitrary size and reads it back.
+    //
+    // NOT built on render_thumbnail(): that path draws with the "thumbnail" shader, so its output
+    // has none of the lighting, AO or shadows the user just spent their time setting up — the
+    // exported PNG would look nothing like the viewport it came from. Only the FBO/MSAA/readback
+    // scaffolding is shared in spirit, not the drawing.
+    bool _render_photo_to_data(ThumbnailData& out, unsigned int w, unsigned int h);
+    void _photo_save_png();
+    void _photo_copy_to_clipboard();
+    // Rebuilds m_photo_stage_model when the bed or the stage settings changed. Kept separate so
+    // the per-frame path is a plain draw — this generates a few thousand vertices and must not run
+    // every frame just because the camera moved.
+    void _update_photo_stage_model();
 #if ENABLE_SHOW_CAMERA_TARGET
     void _render_camera_target();
 #endif // ENABLE_SHOW_CAMERA_TARGET

@@ -1,27 +1,50 @@
 #version 140
 
-#define INTENSITY_CORRECTION 0.6
+// NEOTKO_PHOTOMODE_TAG s242: what used to be the const/#define block below is now a set of
+// uniforms, so Photo Mode can move the light. The C++ side (render_volumes_lit, GCodeViewer.cpp)
+// sends the ORIGINAL values verbatim whenever Photo Mode is inactive, which is why nothing here
+// needs a branch and why "Photo Mode off" is bit-identical to the previous build.
+//
+// The old values, kept as documentation of what the defaults must reproduce:
+//   LIGHT_TOP_DIR        vec3(-0.4574957, 0.4574957, 0.7624929)  // (-0.6, 0.6, 1.0)/1.31
+//   LIGHT_TOP_DIFFUSE    0.8   * 0.6 = 0.48
+//   LIGHT_TOP_SPECULAR   0.125 * 0.6 = 0.075
+//   LIGHT_TOP_SHININESS  20.0
+//   LIGHT_FRONT_DIR      vec3(0.6985074, 0.1397015, 0.6985074)   // (1.0, 0.2, 1.0)/1.43
+//   LIGHT_FRONT_DIFFUSE  0.3   * 0.6 = 0.18
+//   AMBIENT_GROUND 0.18 / AMBIENT_SKY 0.32 / FRESNEL_POWER 5.0 / FRESNEL_STRENGTH 0.06
+// (the ambient/fresnel pair came from RealColor's peel shader, s165/s166 — see realcolor_peel.vs
+// for the original tuning rationale.)
+//
+// *** SPACE, and it is not the same for every consumer — read before touching ***
+// The direct lighting below is CAMERA-space: dotting a light vector against a VIEW-space normal
+// pins the light to the observer, the Slic3r/Orca convention this fork inherited. The shadow map
+// (v_world_ndotl / v_shadow_coord, bottom of main()) instead needs a WORLD direction, because it
+// is rendered from the light's own point of view. Until s242 both used the same constant, so the
+// contradiction was invisible. Now there are two uniforms and the C++ side is responsible for
+// keeping them consistent: with Photo Mode ON the light is authored in WORLD space and
+// u_light_key_dir_view is derived from it per frame (view_normal_matrix * dir_world); with it OFF
+// both simply carry the old constant, exactly as before.
+uniform vec3  u_light_key_dir_view;
+uniform vec3  u_light_key_dir_world;
+uniform float u_light_key_diffuse;
+uniform float u_light_key_specular;
+uniform vec3  u_light_key_tint;
 
-// normalized values for (-0.6/1.31, 0.6/1.31, 1./1.31)
-const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
-#define LIGHT_TOP_DIFFUSE    (0.8 * INTENSITY_CORRECTION)
-#define LIGHT_TOP_SPECULAR   (0.125 * INTENSITY_CORRECTION)
-#define LIGHT_TOP_SHININESS  20.0
+uniform vec3  u_light_fill_dir_view;
+uniform float u_light_fill_diffuse;
+uniform vec3  u_light_fill_tint;
 
-// normalized values for (1./1.43, 0.2/1.43, 1./1.43)
-const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
-#define LIGHT_FRONT_DIFFUSE  (0.3 * INTENSITY_CORRECTION)
+// NEOTKO_PHOTOMODE_TAG s242: third light, which has never existed in this shader. Its diffuse is
+// 0.0 unless a Photo Mode preset turns it on, so it contributes literally nothing by default.
+uniform vec3  u_light_rim_dir_view;
+uniform float u_light_rim_diffuse;
+uniform vec3  u_light_rim_tint;
 
-// NEOTKO_REALCOLOR_TAG s166 (item 4): same two-tone ambient + fresnel treatment already
-// shipped for RealColor's peel shader (item 2, s165) — reused here instead of inventing new
-// constants, see realcolor_peel.vs for the original rationale/tuning notes. Fixed #defines
-// (not live-tunable uniforms like RealColor's debug panel) since this shader is gated
-// separately and isn't part of the RealColor Tuning panel — see render_shells() in
-// GCodeViewer.cpp.
-#define AMBIENT_GROUND    0.18
-#define AMBIENT_SKY       0.32
-#define FRESNEL_POWER     5.0
-#define FRESNEL_STRENGTH  0.06
+uniform float u_ambient_ground;
+uniform float u_ambient_sky;
+uniform float u_fresnel_power;
+uniform float u_fresnel_strength;
 
 // NEOTKO_SHADOW_TAG s229 (Fase 2): struct mirrored verbatim from gouraud.vs purely to reach
 // `slope.volume_world_normal_matrix` — the WORLD-space inverse-transpose normal matrix, which
@@ -52,8 +75,30 @@ uniform float u_shadow_normal_offset_mm;
 in vec3 v_position;
 in vec3 v_normal;
 
-// x = tainted, y = specular; matches gouraud_light.vs
-out vec2 intensity;
+// NEOTKO_PHOTOMODE_TAG s242: was `out vec2 intensity` (x = ambient+diffuse, y = specular), the
+// scalar pair inherited from gouraud_light.vs. Split into two vec3s because a per-light tint
+// cannot survive a scalar — and kept SEPARATE from the ambient term, which the .fs must be able
+// to exclude from shadowing (see v_ambient below).
+//
+// With every tint white and the rim off, v_diffuse == max(old intensity.x - v_ambient, 0.0) and
+// v_specular == vec3(old intensity.y), so the .fs produces the same pixels it always did.
+out vec3 v_diffuse;    // direct diffuse only, ambient NOT included
+
+// NEOTKO_PHOTOMODE_TAG s242 (F3/F5): v_specular is GONE from the vertex stage.
+//
+// Specular used to be computed per-vertex, which was defensible at a fixed exponent of 20 (a very
+// broad lobe). Per-slot materials make the exponent go up to ~120 for Glossy, and a highlight that
+// tight interpolated across a large STL triangle breaks into visible facets. It is computed in the
+// fragment shader now, from v_view_normal / v_view_pos — both of which were ALREADY varyings for
+// the AO and SSCS, so this costs no extra interpolants.
+//
+// Precedent: s214 moved ambient+rim out of realcolor_peel.vs for exactly this reason.
+
+// WORLD space position and normal, for the environment reflection (F5). The vertex stage already
+// computed both for the shadow lookup below — they are simply forwarded now instead of being
+// thrown away.
+out vec3 v_world_pos;
+out vec3 v_world_normal;
 // NEOTKO_REALCOLOR_TAG s166: forwarded for the AO normal-agreement weight in shells_lit.fs —
 // same pattern as realcolor_peel.vs's v_view_normal.
 out vec3 v_view_normal;
@@ -82,20 +127,24 @@ void main()
     vec3 normal = normalize(view_normal_matrix * v_normal);
     v_view_normal = normal;
 
-    float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
-
     float sky_mix = normal.y * 0.5 + 0.5; // 0 = ground, 1 = sky
-    v_ambient = mix(AMBIENT_GROUND, AMBIENT_SKY, sky_mix);
-    intensity.x = v_ambient + NdotL * LIGHT_TOP_DIFFUSE;
+    v_ambient = mix(u_ambient_ground, u_ambient_sky, sky_mix);
+
     vec4 position = view_model_matrix * vec4(v_position, 1.0);
     v_view_pos = position.xyz;
-    intensity.y = LIGHT_TOP_SPECULAR * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
 
-    NdotL = max(dot(normal, LIGHT_FRONT_DIR), 0.0);
-    intensity.x += NdotL * LIGHT_FRONT_DIFFUSE;
+    // Key. Diffuse only here — the specular moved to the fragment stage, see v_specular's note.
+    float NdotL = max(dot(normal, u_light_key_dir_view), 0.0);
+    v_diffuse   = u_light_key_tint * (NdotL * u_light_key_diffuse);
 
-    float fres = pow(1.0 - max(dot(normalize(-position.xyz), normal), 0.0), FRESNEL_POWER);
-    intensity.y += FRESNEL_STRENGTH * fres;
+    // Fill — diffuse only, as it has always been.
+    NdotL       = max(dot(normal, u_light_fill_dir_view), 0.0);
+    v_diffuse  += u_light_fill_tint * (NdotL * u_light_fill_diffuse);
+
+    // NEOTKO_PHOTOMODE_TAG s242: rim. u_light_rim_diffuse is 0.0 outside Photo Mode, so this pair
+    // of instructions is a no-op there rather than a behaviour change.
+    NdotL       = max(dot(normal, u_light_rim_dir_view), 0.0);
+    v_diffuse  += u_light_rim_tint * (NdotL * u_light_rim_diffuse);
 
     // NEOTKO_SHADOW_TAG s229 (Fase 2): everything above is CAMERA-space lighting (LIGHT_TOP_DIR
     // dotted against a view-space normal = light pinned to the observer, the Slic3r/Orca
@@ -104,10 +153,18 @@ void main()
     // LIGHT_TOP_DIR as that world direction — which is exactly what shells_shadow.vs has always
     // done for the bed contact shadow, so the new object shadow and the old bed shadow finally
     // agree on where the light is.
+    //
+    // NEOTKO_PHOTOMODE_TAG s242: that world direction is now u_light_key_dir_world. Outside Photo
+    // Mode it still carries the same LIGHT_TOP_DIR constant, so C3 holds unchanged; inside it, it
+    // is the authored world aim and u_light_key_dir_view above is the one derived from it.
     weave_model_pos = vec4(v_position, 1.0);   // NEOTKO_PROFILE_TAG s233
     vec4 world_pos    = volume_world_matrix * vec4(v_position, 1.0);
     vec3 world_normal = normalize(slope.volume_world_normal_matrix * v_normal);
-    v_world_ndotl     = max(dot(world_normal, LIGHT_TOP_DIR), 0.0);
+    v_world_ndotl     = max(dot(world_normal, u_light_key_dir_world), 0.0);
+    // NEOTKO_PHOTOMODE_TAG s242 (F5): forwarded for the environment reflection. Free — both were
+    // already being computed here for the shadow lookup.
+    v_world_pos       = world_pos.xyz;
+    v_world_normal    = world_normal;
     // Normal-offset bias: nudge the lookup off the surface along its own normal, in world mm.
     // Far more robust than a pure depth bias — kills shadow acne on grazing faces without the
     // visible "floating" (peter-panning) a large constant depth bias produces.

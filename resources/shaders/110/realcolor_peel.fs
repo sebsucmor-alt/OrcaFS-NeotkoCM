@@ -31,6 +31,11 @@ uniform float u_fresnel_power;
 uniform float u_fresnel_strength;
 uniform vec3 u_fresnel_tint;
 
+// NEOTKO_REALCOLOR_TAG s243 (F4 = A4+A5): acabado por tipo de superficie, mandado por sub-draw.
+// .x = brillo, .y = rugosidad 0..1 (elige entre mapa nítido y pre-difuminado, no toca exponentes).
+// Neutro = (1.0, 0.0) ≡ comportamiento pre-s243. Ver 140/realcolor_peel.fs.
+uniform vec2 u_finish;
+
 // x = direct-light diffuse only, y = specular; matches realcolor_peel.vs
 varying vec2 intensity;
 varying float v_eye_z; // linear eye-space depth, matches realcolor_peel.vs
@@ -42,11 +47,16 @@ const float REALCOLOR_PI = 3.14159265359;
 // NEOTKO_REALCOLOR_TAG s214: same convention as the CPU-side generator (realcolor_env_sample()
 // in GCodeViewer.cpp) — v=0 is straight up (sky), v=1 is straight down (ground), matching the
 // dir.y-based sky_mix already established by PBR item 1b.
+// ✅ NEOTKO_REALCOLOR_TAG s243 (F3) — EJE ARRIBA, RESUELTO. Latitud desde dir.z (cielo en +Z
+// mundo, encima de la cama) y longitud girando alrededor de Z. El generador
+// (realcolor_env_sample) NO se toca: trabaja en (u,v) con el contrato "v=0 arriba", que era
+// correcto; lo que estaba mal era este mapeo dirección → (u,v). Razonamiento completo en
+// 140/realcolor_peel.fs.
 vec2 equirect_uv(vec3 dir)
 {
     dir = normalize(dir);
-    float u = atan(dir.z, dir.x) / (2.0 * REALCOLOR_PI) + 0.5;
-    float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / REALCOLOR_PI;
+    float u = atan(dir.y, dir.x) / (2.0 * REALCOLOR_PI) + 0.5;
+    float v = 0.5 - asin(clamp(dir.z, -1.0, 1.0)) / REALCOLOR_PI;
     return vec2(u, v);
 }
 
@@ -82,14 +92,28 @@ void main()
     vec3 view_dir = normalize(u_camera_pos_world - v_world_pos);
     vec3 R = reflect(-view_dir, N);
     float fres = pow(1.0 - max(dot(view_dir, N), 0.0), u_fresnel_power);
-    vec3 rim = u_fresnel_strength * fres * u_fresnel_tint * texture2D(u_env_mirror, equirect_uv(R)).rgb;
+
+    // NEOTKO_REALCOLOR_TAG s243 (F4): reflejo interpolado nítido↔difuminado por rugosidad. Hay que
+    // muestrear el irradiance por R (no reutilizar `ambient`, que va por N — otra dirección).
+    float roughness = clamp(u_finish.y, 0.0, 1.0);
+    vec3 refl = mix(texture2D(u_env_mirror, equirect_uv(R)).rgb,
+                    texture2D(u_env_irradiance, equirect_uv(R)).rgb,
+                    roughness);
+    vec3 rim = u_fresnel_strength * u_finish.x * fres * u_fresnel_tint * refl;
 
     vec3 base = u_material_rgb[u_tool_id];
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): diffuse = direct light (achromatic) + env-sampled
     // ambient; lit = env-sampled rim + achromatic specular highlight + base*diffuse. Supersedes
     // PBR item 1's flat-tint mix (see realcolor_peel.vs) — not a superset of it.
-    vec3 diffuse = vec3(intensity.x) + ambient;
-    vec3 lit = vec3(intensity.y) + rim + base * diffuse;
+    // NEOTKO_REALCOLOR_TAG s243c: la rugosidad entra en la DIFUSA, que es el término dominante
+    // (intensity.x llega a ~0.66, frente a 0.075 del especular y 0.05 del rim). Sin esto el
+    // acabado era invisible sobre el objeto — verificado por el usuario. Una superficie rugosa
+    // dispersa la direccional y gana peso el ambiente; una lisa conserva el modelado direccional.
+    // roughness=0 => ambos pesos a 1.0 => idéntico a pre-s243. Ver 140/realcolor_peel.fs.
+    float diffuse_directional = 1.0 - 0.60 * roughness;
+    float diffuse_ambient     = 1.0 + 0.25 * roughness;
+    vec3 diffuse = vec3(intensity.x * diffuse_directional) + ambient * diffuse_ambient;
+    vec3 lit = vec3(intensity.y) * u_finish.x + rim + base * diffuse; // s243 (F4): brillo por acabado
 
     gl_FragData[0] = vec4(lit, 1.0);
     gl_FragData[1] = vec4(float(u_tool_id), u_thickness, v_eye_z, 1.0); // a=1 marks "fragment written"

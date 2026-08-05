@@ -55,18 +55,73 @@ uniform float u_shadow_strength;
 uniform int u_shading_isolate;
   // 0 = no shadow map contribution, 1 = full
 
-in vec2 intensity;
+// NEOTKO_PHOTOMODE_TAG s242: `intensity` (vec2, x = ambient+diffuse, y = specular) split into two
+// vec3s so a per-light tint survives — see shells_lit.vs. v_diffuse excludes ambient, which is why
+// main() below no longer subtracts v_ambient back out of it.
+in vec3 v_diffuse;
 in vec3 v_view_normal;
+// NEOTKO_PHOTOMODE_TAG s242 (F5): world-space surface, for the environment reflection.
+in vec3 v_world_pos;
+in vec3 v_world_normal;
 in vec3 v_view_pos;
 in float v_ambient;
 in vec4 v_shadow_coord;
 in float v_world_ndotl;
 in vec4 weave_model_pos;   // NEOTKO_PROFILE_TAG s233
 
-// NEOTKO_SHADOW_TAG s229 (Fase 1): the key light in CAMERA space — same constant, same space, as
+// NEOTKO_SHADOW_TAG s229 (Fase 1): the key light in CAMERA space — same value, same space, as
 // the Phong in shells_lit.vs. The SSCS march is therefore fully coherent with the shading (config
 // C1 of the study); only the Fase 2 shadow map uses this vector as a world direction instead.
-const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
+//
+// NEOTKO_PHOTOMODE_TAG s242: promoted from `const vec3 LIGHT_TOP_DIR = vec3(-0.4574957,
+// 0.4574957, 0.7624929)` to a uniform fed from the same place the vertex stage gets its copy.
+// Coherence with the shading is the whole point of C1, so this vector MUST keep tracking
+// u_light_key_dir_view — leaving it frozen while the light moved would aim the contact shadows
+// one way and everything else another.
+uniform vec3 u_light_key_dir_view;
+
+// NEOTKO_PHOTOMODE_TAG s242 (F3) — the specular lobe, moved here from the vertex stage. Declared
+// in BOTH stages of the program deliberately: they are the same uniforms, set once, and the vertex
+// stage still needs the diffuse/tint pair.
+uniform float u_light_key_specular;
+uniform vec3  u_light_key_tint;
+uniform float u_fresnel_power;
+uniform float u_fresnel_strength;
+
+// Per-VOLUME material, set in GLVolumeCollection::render() (3DScene.cpp) — the only place in the
+// frame that knows which filament slot is being drawn.
+//
+// The defaults below are what an unset uniform would be, but they are never relied on: the C++
+// side sends metallic=0 / shininess=20 / spec_scale=1 whenever Photo Mode is off, which reproduces
+// the pre-s242 lobe exactly.
+uniform float u_mat_metallic;    // 0 = dielectric (white highlight), 1 = metal (tinted, no diffuse)
+uniform float u_mat_shininess;   // Phong exponent; 20.0 == the original constant
+uniform float u_mat_spec_scale;  // multiplies u_light_key_specular
+
+// NEOTKO_PHOTOMODE_TAG s242 (F5) — procedural environment. Two equirectangular textures baked on
+// the CPU from the Photo Mode lights: `mirror` is sharp (reflections), `irradiance` is tiny and
+// pre-averaged (ambient). u_env_enabled is false outside Photo Mode, so none of this runs there.
+uniform bool      u_env_enabled;
+uniform sampler2D u_env_mirror;
+uniform sampler2D u_env_irradiance;
+uniform float     u_env_intensity;
+uniform float     u_env_rotation;    // radians, around world Z
+uniform vec3      u_camera_pos_world;
+
+const float PHOTO_PI = 3.14159265358979;
+
+// Equirectangular lookup. NOTE the up axis is Z, not Y: this project's world has the bed on XY
+// with Z up, unlike realcolor_peel.fs's copy of this function, which is Y-up because RealColor
+// feeds it vectors in its own space. Getting this wrong does not error — it silently lies the
+// environment on its side — so the two are kept separate rather than shared.
+vec2 photo_env_uv(vec3 dir)
+{
+    dir = normalize(dir);
+    float ang = atan(dir.y, dir.x) + u_env_rotation;
+    float u = ang / (2.0 * PHOTO_PI) + 0.5;
+    float v = 0.5 - asin(clamp(dir.z, -1.0, 1.0)) / PHOTO_PI;   // v=0 up, v=1 down
+    return vec2(u, v);
+}
 
 // NEOTKO_REALCOLOR_TAG s166: same depth-diff + normal-agreement AO as
 // realcolor_present.fs's compute_ao() (see that file for the full rationale / Kajalin 2007
@@ -162,7 +217,7 @@ float sscs_occlusion()
     if (u_sscs_strength <= 0.0 || u_sscs_length_mm <= 0.0)
         return 0.0;
 
-    vec3 rd = normalize(LIGHT_TOP_DIR);
+    vec3 rd = normalize(u_light_key_dir_view);
     float step_mm = u_sscs_length_mm / float(SSCS_STEPS);
     // Per-pixel jitter of the first step: a fixed stride bands visibly on smooth surfaces.
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
@@ -285,9 +340,83 @@ void main()
     // so a disabled/failed shadow path looks exactly like it did before.
     // NEOTKO_PROFILE_TAG s233 — el color base pasa por el weave (idéntico a uniform_color
     // .rgb mientras u_weave_on sea false, o sea siempre salvo en pintura ColorMix).
+    // NEOTKO_PHOTOMODE_TAG s242 — the `max(intensity.x - v_ambient, 0.0)` that used to sit here
+    // was unpacking the direct-diffuse part out of the combined scalar; v_diffuse now carries it
+    // on its own, already tinted, so the term is read straight rather than reconstructed.
     vec3 weave_base = weave_color(uniform_color.rgb);
-    vec3 lit = weave_base * (v_ambient + emission_factor)
-             + (weave_base * max(intensity.x - v_ambient, 0.0) + vec3(intensity.y)) * vis;
+
+    // --- material split (F3) -----------------------------------------------------------------
+    // A metal has no diffuse and tints its highlight with its own colour; a dielectric has full
+    // diffuse and a white highlight. One mix() each covers both ends and everything between,
+    // which is what the Silk preset actually is.
+    // With u_mat_metallic = 0 this is diffuse = base and specular = white — the original.
+    float metal     = clamp(u_mat_metallic, 0.0, 1.0);
+    vec3  diff_col  = weave_base * (1.0 - metal);
+    vec3  spec_col  = mix(vec3(1.0), weave_base, metal);
+
+    // --- specular, per fragment (F3) ---------------------------------------------------------
+    vec3  N       = normalize(v_view_normal);
+    vec3  view_d  = -normalize(v_view_pos);
+    vec3  R_view  = reflect(-u_light_key_dir_view, N);
+    float spec    = u_light_key_specular * u_mat_spec_scale
+                  * pow(max(dot(view_d, R_view), 0.0), max(u_mat_shininess, 1.0));
+    // Fresnel sheen stays white and stays outside the material tint: it is the sky catching the
+    // silhouette, not the surface's own colour.
+    float fres    = pow(1.0 - max(dot(view_d, N), 0.0), u_fresnel_power);
+    vec3  specular = spec_col * (u_light_key_tint * spec) + vec3(u_fresnel_strength * fres);
+
+    // --- environment / reflected light (F5) ---------------------------------------------------
+    //
+    // *** The metal-is-black bug, s242 — read before touching the fallback below ***
+    // Setting metallic=1 zeroes diff_col, which kills BOTH the ambient and the diffuse terms. That
+    // is correct: a metal has no diffuse, it only reflects. But the thing that is supposed to
+    // replace them — the reflection — used to live entirely inside `if (u_env_enabled)`, and the
+    // environment is off by default. So a metal had literally nothing left but a pinpoint specular
+    // lobe and rendered BLACK, at every light angle and intensity, which is exactly what it looks
+    // like: not a lighting problem, an energy problem.
+    //
+    // A material must never depend on an unrelated toggle to be visible at all. So the reflection
+    // term always exists; only what it reflects changes.
+    vec3  ambient_rgb = vec3(v_ambient);
+    vec3  mirror_rgb;
+    float refl_w;
+
+    if (u_env_enabled) {
+        vec3 Nw = normalize(v_world_normal);
+        vec3 Vw = normalize(u_camera_pos_world - v_world_pos);
+        vec3 Rw = reflect(-Vw, Nw);
+        // Ambient comes from the pre-averaged probe, blended against the flat hemisphere so the
+        // slider is a dial and not a switch.
+        ambient_rgb = mix(ambient_rgb, texture(u_env_irradiance, photo_env_uv(Nw)).rgb, u_env_intensity);
+        mirror_rgb  = texture(u_env_mirror, photo_env_uv(Rw)).rgb * u_env_intensity;
+        // Fresnel-weighted for dielectrics (a plastic mirrors the room only at grazing angles),
+        // full strength for metals (they mirror it everywhere).
+        refl_w      = mix(fres, 1.0, metal);
+    }
+    else {
+        // No probe to sample, so stand in for it with the light the surface actually receives:
+        // the direct lights plus the hemisphere ambient. That is what the probe would have been
+        // baked FROM anyway (see photo_env_sample in GCodeViewer.cpp), so a metal lit this way
+        // still tracks the key light's direction, colour and intensity — it just reflects a smooth
+        // room instead of a room with visible softboxes in it.
+        mirror_rgb = v_diffuse + vec3(v_ambient);
+        // ⚠️ `metal`, NOT mix(fres, 1.0, metal). Two reasons, and the second one cost a bug:
+        //   1. it must be exactly 0 for a dielectric — before F5 this whole term did not exist,
+        //      and without that a plastic would silently gain a fresnel rim;
+        //   2. the metal factor must appear ONCE. The first version of this fix also scaled
+        //      mirror_rgb by `metal`, so Silk (0.45) got 0.45*0.45 = 0.20 of its reflection back
+        //      and came out ~22% darker than the plastic it was meant to look richer than.
+        refl_w = metal;
+    }
+
+    // Energy adds up rather than going missing: diff_col carries (1 - metal) and refl_w carries
+    // metal (plus the small fresnel share), so a metal is about as bright as the plastic it
+    // replaced — all of it routed through the tinted specular path instead of the diffuse one.
+    vec3 env_refl = spec_col * mirror_rgb * refl_w;
+
+    vec3 lit = diff_col * (ambient_rgb + emission_factor)
+             + (diff_col * v_diffuse + specular) * vis
+             + env_refl;
     lit *= mix(1.0, ao, u_ao_strength);
     gl_FragColor = vec4(lit, uniform_color.a);
 

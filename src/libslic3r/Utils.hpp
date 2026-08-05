@@ -223,7 +223,11 @@ extern bool is_json_file(const std::string& path);
 // Orca: custom protocal support utils
 inline bool is_orca_open(const std::string& url)
 {
-    return boost::starts_with(url, "Snapmaker_Orca://open") || boost::starts_with(url, "snapmaker-orca://open");
+    // NEOTKO: neotkocm:// is our own scheme, always registered by our installer. The two
+    // Snapmaker ones are shared with the official app and we only claim them when unowned,
+    // but we keep accepting them either way — an incoming link should always work.
+    return boost::starts_with(url, "Snapmaker_Orca://open") || boost::starts_with(url, "snapmaker-orca://open") ||
+           boost::starts_with(url, "neotkocm://open");
 }
 inline bool is_prusaslicer_open(const std::string& url) { return boost::starts_with(url, "prusaslicer://open"); }
 inline bool is_bambustudio_open(const std::string& url) { return boost::starts_with(url, "bambustudio://open") || boost::starts_with(url, "bambustudioopen://"); }

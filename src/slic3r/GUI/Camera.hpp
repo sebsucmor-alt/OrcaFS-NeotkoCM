@@ -164,6 +164,18 @@ public:
 
     void look_at(const Vec3d& position, const Vec3d& target, const Vec3d& up);
 
+    // NEOTKO_PHOTOMODE_TAG s242 (F6a) — override the view matrix directly.
+    //
+    // Added for the planar floor reflection, which needs view * mirror(plane). look_at() cannot
+    // express that: aiming it from the mirrored eye at the mirrored target rebuilds a RIGHT-handed
+    // basis, whereas a true reflection has determinant -1. The two differ by a horizontal flip,
+    // which is subtle enough to look "nearly right" and be wrong.
+    //
+    // ⚠️ Intended for a COPY of the camera, used for one pass and thrown away. The class normally
+    // derives m_view_matrix from m_target/m_view_rotation/m_zoom, so anything that recomputes
+    // those will discard whatever is set here. Do not use it to move the real camera.
+    void set_view_matrix(const Transform3d& m) { m_view_matrix = m; }
+
     double max_zoom() const { return 250.0; }
     double min_zoom() const { return 0.2 * calc_zoom_to_bounding_box_factor(m_scene_box); }
 
