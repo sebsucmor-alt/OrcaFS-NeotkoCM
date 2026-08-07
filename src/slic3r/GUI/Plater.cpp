@@ -127,6 +127,7 @@
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
 #include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242
+#include "GravitySnap.hpp" // NEOTKO_SNAPDRAG_TAG s249 — the magnet button owns the options panel
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
@@ -9765,6 +9766,30 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             e.Skip();
         });
 
+        // NeotkoLIBRE_START — s250: same treatment for the floated Process pane. Until now the
+        // docked width was only written to app_config inside float_params_panel()'s re-dock
+        // branch, i.e. ONLY when the user switched LibreMode off. Quitting with LibreMode ON —
+        // the normal flow — persisted nothing, so every session reopened at the stale/last
+        // written value. Track it continuously instead, exactly like the sidebar above.
+        q->Bind(wxEVT_IDLE, [this](wxIdleEvent& e) {
+            e.Skip();
+            if (!m_params_panel_floated)
+                return;
+            auto* pp = wxGetApp().params_panel();
+            if (!pp)
+                return;
+            auto& pane = m_aui_mgr.GetPane(pp);
+            if (!pane.IsOk() || !pane.IsShown() || pane.IsFloating())
+                return;
+            const int w = pane.rect.GetWidth();
+            if (w <= 0 || w == m_libre_panel_dock_width)
+                return;
+            m_libre_panel_dock_width = w;
+            pane.BestSize(w, pane.best_size.GetHeight());
+            wxGetApp().app_config->set("libre_panel_dock_width", std::to_string(w));
+        });
+        // NeotkoLIBRE_END
+
         // Hide sidebar initially, will re-show it after initialization when we got proper window size
         sidebar.Hide();
         m_aui_mgr.Update();
@@ -10423,6 +10448,41 @@ void Plater::priv::float_params_panel(bool do_float)
         m_aui_mgr.Update();
         scrolled_sizer->Layout();
         m_params_panel_floated = true;
+
+        // s250: BestSize alone does NOT get the docked pane the width we asked for. wxAUI only
+        // derives a dock's width from the pane best sizes when the dock is brand new
+        // (framemanager.cpp, "for newly created docks, set up their initial size": guarded by
+        // `dock.size == 0`), and that first layout happens while the frame is still being sized
+        // at startup — the dock gets squeezed down to its min (20 em = 200 px) and, since
+        // dock.size is no longer 0, nothing ever grows it back. Hence "always opens thin, and
+        // whatever I save makes no difference": bestw in app_config was already 450 while the
+        // dock stayed at 202.
+        //
+        // Fix: pump MinSize up to the wanted width for one layout pass (wxAUI raises dock.size
+        // to dock.min_size unconditionally), then put the real floor back. dock.size sticks at
+        // the pumped value and the user can still drag the sash smaller afterwards.
+        // Deferred: at startup this whole function already runs from a CallAfter, so a second
+        // one lands after the frame has settled its initial size.
+        q->CallAfter([this, min_w = 20 * em, dock_w]() {
+            if (!m_params_panel_floated)
+                return; // toggled back off before we got here
+            auto* pp2 = wxGetApp().params_panel();
+            if (!pp2)
+                return;
+            {
+                auto& pane = m_aui_mgr.GetPane(pp2);
+                if (!pane.IsOk() || pane.IsFloating() || dock_w <= min_w)
+                    return;
+                pane.MinSize(wxSize(dock_w, -1));
+            }
+            m_aui_mgr.Update();
+            {
+                auto& pane = m_aui_mgr.GetPane(pp2);
+                if (pane.IsOk())
+                    pane.MinSize(wxSize(min_w, -1));
+            }
+            m_aui_mgr.Update();
+        });
     } else {
         // Persist the pane's current size before docking it back, then return ownership to the
         // sidebar sizer. s211: capture the width in BOTH cases (docked-and-resized is the
@@ -12452,10 +12512,20 @@ void Plater::priv::process_validation_warning(StringObjectException const &warni
         //    };
         //}
 
+        // NEOTKO_VALIDATE_WARNING_STALE_TAG — s250: STOCK stacked stale warnings forever.
+        // Print::validate() ASSIGNS warning->string (it does not accumulate), so each pass emits at most
+        // one warning — the last offending object. But this branch only closed the old ValidateWarnings
+        // when the incoming string was EMPTY, and ValidateWarning is in m_multiple_types (compared by
+        // text), so a warning about a different object simply piled on top of the previous one. Move an
+        // object, switch plate, reslice: four permanent cards, three of them describing a plate state
+        // that no longer exists. Close everything that is not the current warning first — validate() is
+        // the single source of truth about what is wrong right now.
+        const std::string full_text = _u8L("WARNING:") + "\n" + text;
+        notification_manager->close_stale_validate_warnings(full_text);
         notification_manager->push_notification(
             NotificationType::ValidateWarning,
             NotificationManager::NotificationLevel::WarningNotificationLevel,
-            _u8L("WARNING:") + "\n" + text, hypertext, action_fn
+            full_text, hypertext, action_fn
         );
     }
 }
@@ -14538,9 +14608,14 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         if (exporting_status == ExportingStatus::EXPORTING_TO_REMOVABLE && !has_error) {
             //show_action_buttons(ready_to_slice);
             this->main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, ready_to_slice, true);
-            notification_manager->push_exporting_finished_notification(last_output_path, last_output_dir_path,
-                // Don't offer the "Eject" button on ChromeOS, the Linux side has no control over it.
-                platform_flavor() != PlatformFlavor::LinuxOnChromium);
+            // NEOTKO_EJECT_TAG — s250: the "Safely remove hardware" button is no longer offered on the
+            // export notification. It is PrusaSlicer heritage from the SD-card era; the U1 receives jobs
+            // over wifi, and any external disk used as an export target gets flagged as "removable",
+            // putting an eject button on a drive nobody wants ejected. The action itself is NOT removed:
+            // it lives in File > Export > "Eject SD card / Flash drive" (MainFrame::init_menubar_as_editor),
+            // enabled only while a removable drive is actually mounted.
+            // (Upstream also skipped the button on ChromeOS: platform_flavor() != PlatformFlavor::LinuxOnChromium.)
+            notification_manager->push_exporting_finished_notification(last_output_path, last_output_dir_path, false);
             wxGetApp().removable_drive_manager()->set_exporting_finished(true);
         }else
         if (exporting_status == ExportingStatus::EXPORTING_TO_LOCAL && !has_error)
@@ -22941,6 +23016,18 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
     // the undo stack means Ctrl+Z after a photo silently undoes the user's last real edit instead.
     else if ((action == (int)PartPlate::PHOTO_MODE_HOVER_ID) && (!right_click)) {
         toggle_photo_mode();
+        ret = 0;
+    }
+    // NEOTKO_SNAPDRAG_TAG s249: the magnet button. Opens/closes the Snap & Drag options panel —
+    // it does NOT toggle Snap & Drag itself, because the panel now owns three preferences and a
+    // button that both opens a panel and flips one of its checkboxes is a coin toss for the user.
+    // Like the camera above: no take_snapshot(), nothing about the model changes.
+    else if ((action == (int)PartPlate::SNAP_DRAG_HOVER_ID) && (!right_click)) {
+        GravitySnap::panel_open() = !GravitySnap::panel_open();
+        if (p->view3D != nullptr) {
+            p->view3D->get_canvas3d()->set_as_dirty();
+            p->view3D->get_canvas3d()->request_extra_frame();
+        }
         ret = 0;
     }
 

@@ -1081,6 +1081,120 @@ snapdrag_group_roots(const GLVolumeCollection& volumes, const std::set<std::pair
     return roots;
 }
 
+// NEOTKO_SNAPDRAG_TAG s249 — "Move selection as one block" (GravitySnap::move_as_group()): the
+// live-drag frame for RIGID mode, the alternative to the by-stacks resolution above.
+//
+// Rigid means exactly one thing: no member changes height relative to any other member. So there
+// is one shift for the whole selection, and it is the one that makes the selection land on the
+// FIRST floor it meets — the classic rigid-body drop, where contact by any single point stops the
+// whole body. That is `max` over each member's own required shift, NOT the min and not the shift
+// of some designated member:
+//   - dz_i = floor_z_i - my_bottom_z is negative when member i is floating above its floor and
+//     positive when it has sunk into it, so the largest dz_i is the constraint nobody may violate;
+//   - taking a smaller one would push some other member THROUGH its floor (a loose object dragged
+//     next to a tall assembled one would end up buried in the plate), which is the whole failure
+//     this mode exists to prevent.
+// Members that found no floor at all impose no constraint and simply ride along; if nobody found
+// one, the selection stays exactly where the mouse put it (free floating, as everywhere else here).
+//
+// Like the s233 paths this is GLVolume-only — purely visual, committed later in do_move().
+void GLCanvas3D::_snapdrag_rigid_frame(const std::set<std::pair<int, int>>& moving)
+{
+    struct Member {
+        std::pair<int, int>                    id;
+        double                                 min_z = 0.0;
+        BoundingBoxf3                          bbox;
+        std::optional<GravitySnap::FloorHit>   hit;
+    };
+    std::vector<Member> members;
+    members.reserve(moving.size());
+
+    BoundingBoxf3 group_bbox;
+    bool          group_bbox_valid = false;
+
+    for (const std::pair<int, int>& id : moving) {
+        double        min_z    = DBL_MAX;
+        BoundingBoxf3 inst_bbox;
+        bool          has_bbox = false;
+        for (const GLVolume* gv : m_volumes.volumes) {
+            if (gv->object_idx() == id.first && gv->instance_idx() == id.second && !gv->is_wipe_tower && !gv->is_modifier) {
+                const BoundingBoxf3 vb = gv->transformed_convex_hull_bounding_box();
+                min_z = std::min(min_z, vb.min.z());
+                if (has_bbox)
+                    inst_bbox.merge(vb);
+                else {
+                    inst_bbox = vb;
+                    has_bbox  = true;
+                }
+            }
+        }
+        if (min_z == DBL_MAX)
+            continue;
+
+        // Same per-member hysteresis as the s233 paths, and for the same reason: "engaged" tracks
+        // an OBJECT floor only, because the bed always answers and would pin the ratio low forever.
+        const bool   was_engaged  = m_snapdrag_engaged[id];
+        const double engage_ratio = was_engaged ? 0.08 : SNAPDRAG_ENGAGE_RATIO;
+        std::optional<GravitySnap::FloorHit> hit =
+            GravitySnap::floor_z_for_instance(m_volumes, id.first, id.second, moving, engage_ratio);
+        m_snapdrag_engaged[id] = hit.has_value() && !hit->is_bed;
+
+        if (group_bbox_valid)
+            group_bbox.merge(inst_bbox);
+        else {
+            group_bbox       = inst_bbox;
+            group_bbox_valid = true;
+        }
+        members.push_back(Member{ id, min_z, inst_bbox, hit });
+    }
+
+    // Whoever needs the largest shift is the one actually deciding where the block lands.
+    const Member* decider = nullptr;
+    double        dz      = 0.0;
+    for (const Member& m : members) {
+        if (!m.hit.has_value())
+            continue;
+        const double d = m.hit->z - m.min_z;
+        if (decider == nullptr || d > dz) {
+            dz      = d;
+            decider = &m;
+        }
+    }
+    if (decider == nullptr) {
+        m_snapdrag_indicator.set_visible(false);
+        return;
+    }
+
+    // Hover lift over the WHOLE selection's height, matching the s233 group path — the lift is a
+    // property of what is being carried, not of whichever member happens to decide the landing.
+    const double group_height = group_bbox_valid ? (group_bbox.max.z() - group_bbox.min.z()) : 0.0;
+    const double lift         = std::clamp(group_height * 0.25, SNAPDRAG_HOVER_LIFT_MIN, SNAPDRAG_HOVER_LIFT_MAX);
+
+    // The overlay shows the decider's contact zone: that is literally the surface the block is
+    // being stopped by, so it is the one worth pointing at.
+    BoundingBoxf3 ghost = decider->bbox;
+    const Vec3d   ghost_shift(0.0, 0.0, dz);
+    ghost.min += ghost_shift;
+    ghost.max += ghost_shift;
+    m_snapdrag_indicator.set(GravitySnap::instance_footprint(m_volumes, decider->id.first, decider->id.second),
+                             *decider->hit, ghost, decider->hit->z + lift);
+
+    const double total = dz + lift;
+    if (std::abs(total) <= EPSILON)
+        return;
+    // Applied over `moving`, not over `members`: an instance whose bbox could not be built still
+    // belongs to the block and must travel with it. Modifiers are deliberately NOT skipped — they
+    // share the instance offset and would detach from their object otherwise (same as s233).
+    for (const std::pair<int, int>& id : moving) {
+        for (GLVolume* gv : m_volumes.volumes) {
+            if (gv->is_wipe_tower)
+                continue;
+            if (gv->object_idx() == id.first && gv->instance_idx() == id.second)
+                gv->set_instance_offset(Z, gv->get_instance_offset(Z) + total);
+        }
+    }
+}
+
 // NEOTKO_SNAPDRAG_TAG s233 — fills `data` with the triangles of `ex` laid flat at `z`.
 static void snapdrag_add_flat_polygon(GLModel::Geometry& data, const ExPolygon& ex, double z)
 {
@@ -4893,6 +5007,21 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                     // rules (and rule 2's "lowest of my own instances' pillars" in do_move) are an
                     // explicit user decision, and they only concern instances of one object, which
                     // by invariant differ in XY only and cannot be stacked on each other anyway.
+                    // NEOTKO_SNAPDRAG_TAG s249 — "Move selection as one block" replaces BOTH s233
+                    // paths with a single rigid shift; see _snapdrag_rigid_frame(). It triggers on
+                    // instance count, not object count, because two instances of ONE object picked
+                    // together are just as much a block as two objects are — and because the case
+                    // that motivated the mode (a loose object dragged together with an assembled
+                    // one, the assembled one being a single multi-volume instance) is otherwise
+                    // indistinguishable from the case the by-stacks path handles correctly.
+                    //
+                    // ⚠️ The s233 arm below deliberately keeps its original indentation inside this
+                    // else — it is wrapped, not rewritten, and reindenting ~180 reviewed lines
+                    // would bury the real change in the diff.
+                    if (GravitySnap::move_as_group() && moving.size() > 1) {
+                        _snapdrag_rigid_frame(moving); // owns the indicator in this arm
+                    }
+                    else {
                     std::set<int> moving_objects;
                     for (const std::pair<int, int>& id : moving)
                         moving_objects.insert(id.first);
@@ -5057,6 +5186,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
                     if (!indicator_shown)
                         m_snapdrag_indicator.set_visible(false);
+                    } // NEOTKO_SNAPDRAG_TAG s249 — end of the by-stacks (s233) arm
                 } else {
                     m_snapdrag_indicator.set_visible(false);
                 }
@@ -5547,7 +5677,14 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     std::set<int> _snapdrag_objects;
     for (const std::pair<int, int>& i : _snapdrag_moving)
         _snapdrag_objects.insert(i.first);
-    const bool _snapdrag_group = _snapdrag_objects.size() > 1;
+
+    // NEOTKO_SNAPDRAG_TAG s249 — "Move selection as one block": one shift for everybody, the
+    // largest each member requires, so nobody is pushed through its own floor. Same rule and same
+    // trigger (instance count) as the live drag in _snapdrag_rigid_frame() — the two MUST agree or
+    // the selection would visibly jump on mouse-up. Rigid outranks the by-stacks path: with it on,
+    // stacks are a special case of "nothing moves relative to anything else" anyway.
+    const bool _snapdrag_rigid = GravitySnap::move_as_group() && _snapdrag_moving.size() > 1;
+    const bool _snapdrag_group = !_snapdrag_rigid && _snapdrag_objects.size() > 1;
 
     const std::map<std::pair<int, int>, std::pair<int, int>> _snapdrag_roots =
         _snapdrag_group ? snapdrag_group_roots(m_volumes, _snapdrag_moving)
@@ -5555,9 +5692,25 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
 
     std::map<int, double> _snapdrag_target_z;                       // single-object path (s227)
     std::map<std::pair<int, int>, double> _snapdrag_root_dz;        // group path (s233)
+    bool   _snapdrag_rigid_found = false;                           // rigid path (s249)
+    double _snapdrag_rigid_dz    = 0.0;
     const bool _snapdrag_active = !_nlm_move && GravitySnap::enabled() && !_snapdrag_moving.empty();
     if (_snapdrag_active) {
         for (const std::pair<int, int>& i : _snapdrag_moving) {
+            if (_snapdrag_rigid) {
+                const std::optional<GravitySnap::FloorHit> hit =
+                    GravitySnap::floor_z_for_instance(m_volumes, i.first, i.second, _snapdrag_moving, SNAPDRAG_ENGAGE_RATIO);
+                if (!hit.has_value())
+                    continue; // no floor of its own: rides along, constrains nothing
+                // The model already carries the dropped position (hover lift included), so this
+                // shift also removes the lift on its way down — exactly like the group path below.
+                const double dz = hit->z - m_model->objects[i.first]->get_instance_min_z(i.second);
+                if (!_snapdrag_rigid_found || dz > _snapdrag_rigid_dz) {
+                    _snapdrag_rigid_dz    = dz;
+                    _snapdrag_rigid_found = true;
+                }
+                continue;
+            }
             if (_snapdrag_group) {
                 const auto root_it = _snapdrag_roots.find(i);
                 if (root_it != _snapdrag_roots.end() && root_it->second != i)
@@ -5600,6 +5753,19 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
         // an object may not be half stacked and half on the bed (plan v1 §1 rule 2).
         // s233 — group move: this instance travels by its stack root's shift, so the selection
         // lands exactly as it looked mid-drag. A stack whose root found no floor keeps floating.
+        // NEOTKO_SNAPDRAG_TAG s249 — rigid mode: every dragged instance takes the SAME shift, so
+        // the selection commits looking exactly like it did mid-drag. Placed before the group arm
+        // because _snapdrag_group is already false whenever rigid is on; the order is what makes
+        // that non-load-bearing. If no member found a floor the block keeps floating (unchanged
+        // rule: nullopt never means "drop to bed").
+        else if (_snapdrag_active && _snapdrag_rigid && _snapdrag_moving.count(i) != 0) {
+            if (_snapdrag_rigid_found && std::fabs(_snapdrag_rigid_dz) > EPSILON) {
+                const Vec3d shift(0.0, 0.0, _snapdrag_rigid_dz);
+                m_selection.translate(i.first, i.second, shift);
+                m->translate_instance(i.second, shift);
+                m_selection.notify_instance_update(i.first, i.second);
+            }
+        }
         else if (_snapdrag_active && _snapdrag_group && _snapdrag_moving.count(i) != 0) {
             const auto root_it = _snapdrag_roots.find(i);
             const std::pair<int, int> root = (root_it != _snapdrag_roots.end()) ? root_it->second : i;
@@ -8548,6 +8714,14 @@ void GLCanvas3D::_render_overlays()
         return;
     }
 
+    // NEOTKO_SNAPDRAG_TAG s249 — the Snap & Drag options panel. Restricted to the Prepare canvas:
+    // _render_overlays() is shared by Preview and the Assemble view, and dragging objects onto each
+    // other is a Prepare-only activity, so anywhere else the panel would be a floating window with
+    // nothing to act on. (It is drawn after the Photo Mode early-return above, which is what keeps
+    // it out of photos.)
+    if (m_canvas_type == CanvasView3D && GravitySnap::panel_open())
+        _render_snapdrag_panel();
+
     _check_and_update_toolbar_icon_scale();
 
     _render_assemble_control();
@@ -10289,6 +10463,95 @@ void GLCanvas3D::_photo_copy_to_clipboard()
         wxTheClipboard->SetData(new wxBitmapDataObject(wxBitmap(img)));
         wxTheClipboard->Close();
     }
+}
+
+// NEOTKO_SNAPDRAG_TAG s249 — the Snap & Drag options panel, opened by the magnet icon in the plate
+// column. See the header for why it exists at all: these three preferences used to be check items
+// in `m_object_menu`, and any selection that produced a DIFFERENT context menu (multi-selection,
+// most obviously) simply had no way to reach them. Adding them to every menu is a losing race —
+// one home that does not depend on the selection ends it.
+void GLCanvas3D::_render_snapdrag_panel()
+{
+    AppConfig* ac = wxGetApp().app_config;
+    if (ac == nullptr)
+        return;
+
+    ImGui::SetNextWindowSize(ImVec2(300.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(20.0f, 80.0f), ImGuiCond_FirstUseEver);
+
+    bool open = true;
+    ImGui::Begin(_u8L("Snap & Drag").c_str(), &open);
+    if (!open) {
+        ImGui::End();
+        GravitySnap::panel_open() = false;
+        return;
+    }
+
+    // The panel is only reachable while True Objects is on (the magnet icon is not registered
+    // otherwise), but the user can turn True Objects off from the toolbar with the panel already
+    // open. Rather than closing it under them, say why nothing here does anything.
+    const bool true_objects = gravity_allow_free_z();
+    if (!true_objects) {
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), "%s",
+                           _u8L("Requires True Objects.").c_str());
+        ImGui::Separator();
+    }
+
+    // (No ImGui::BeginDisabled: this tree bundles ImGui 1.83, where that API does not exist yet —
+    // manual dim + a guard on the returned value, the same pattern as the ColorStitch gizmo.)
+    const float dim = ImGui::GetStyle().Alpha * 0.5f;
+
+    // --- master ------------------------------------------------------------------------------
+    bool snap_on = ac->get_bool("neotko_snap_drag");
+    if (!true_objects) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, dim);
+    if (ImGui::Checkbox(_u8L("Snap & Drag").c_str(), &snap_on) && true_objects) {
+        ac->set_bool("neotko_snap_drag", snap_on);
+        ac->save();
+    }
+    if (!true_objects) ImGui::PopStyleVar();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("While dragging, rest the object on the top surface of whatever "
+                                     "real part is underneath it. The object hovers just above its "
+                                     "landing spot and the highlighted zone shows the exact surface "
+                                     "being read as the height.").c_str());
+
+    // --- sub-options. Meaningless with the master off, so they dim with it. The dim is pushed and
+    // popped around each checkbox ALONE, never around its tooltip: ImGuiStyleVar_Alpha applies to
+    // the tooltip window too, and a half-transparent explanation of why a control is unavailable is
+    // exactly the text the user most needs to be able to read.
+    const bool subs_live = true_objects && snap_on;
+
+    ImGui::Separator();
+
+    bool bed_on = GravitySnap::bed_is_floor();
+    if (!subs_live) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, dim);
+    if (ImGui::Checkbox(_u8L("Snap to bed").c_str(), &bed_on) && subs_live) {
+        ac->set_bool("neotko_snap_drag_bed", bed_on);
+        ac->save();
+    }
+    if (!subs_live) ImGui::PopStyleVar();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Count the build plate as a landing surface. On: an object "
+                                     "dragged over empty space drops to the plate. Off: it stays "
+                                     "floating where you drop it, and only other objects can catch "
+                                     "it.").c_str());
+
+    bool group_on = GravitySnap::move_as_group();
+    if (!subs_live) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, dim);
+    if (ImGui::Checkbox(_u8L("Move selection as one block").c_str(), &group_on) && subs_live) {
+        ac->set_bool("neotko_snap_drag_group", group_on);
+        ac->save();
+    }
+    if (!subs_live) ImGui::PopStyleVar();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Off: every object in the selection falls on its own, so parts "
+                                     "picked up together can land at different heights (objects "
+                                     "stacked on each other still travel together). On: the whole "
+                                     "selection moves as one rigid block — nothing changes height "
+                                     "relative to anything else, and the block stops as soon as its "
+                                     "first part meets a surface.").c_str());
+
+    ImGui::End();
 }
 
 void GLCanvas3D::_render_photo_mode_panel()

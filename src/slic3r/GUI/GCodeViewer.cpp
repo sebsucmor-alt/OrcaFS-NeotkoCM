@@ -43,9 +43,18 @@
 #include <array>
 #include <algorithm>
 #include <chrono>
+#include <map>     // NEOTKO_REALCOLOR_TAG s251 — resumen por role del volcado de medida del eje
+#include <sstream> // NEOTKO_REALCOLOR_TAG s251 — idem
 
 namespace Slic3r {
 namespace GUI {
+
+// NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo): declaración adelantada. La definición
+// vive abajo, junto a realcolor_swell_mm() y realcolor_surface_finish(), porque los tres son la
+// misma familia (resolver por-path lo que el shader consume por sub-draw) y separarlos sólo para
+// contentar al orden de declaración haría el fichero peor de leer. Pero load_toolpaths() —muy por
+// encima de ellos— la necesita para el volcado de medida, de ahí este prototipo.
+static std::array<float, 3> realcolor_bead_axis(const Vec3f& acc);
 
 //BBS translation of EViewType
 //const std::string EViewType_Map[(int) GCodeViewer::EViewType::Count] = {
@@ -1269,17 +1278,98 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
 // once, at the source — every downstream consumer (accum shader's u_material_td[], and the
 // n_max peel-budget heuristic in render_toolpaths_realcolor which already compares td against
 // a mm-space min_layer_h) then works in consistent mm-space without further changes.
+// NEOTKO_REALCOLOR_TAG s251b (idea A de docs/FUTURE/REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md §5-bis):
+// ACABADO POR FILAMENTO. Tabla de presets → (gloss_mul, rough_offset, aniso_mul).
+//
+// 🔑 NO ES UNA ESCALA NUEVA: es la tabla de PHOTO_MODE_PLAN.md §8 (F3), que ya está shippeada en el
+// renderer de shells, traducida al par de RealColor. La traducción es mecánica y se deja escrita
+// para que nadie la "mejore" a ojo más adelante:
+//
+//   rough_offset = roughness_photomode − 0.45   (0.45 = el Plastic de aquella tabla, o sea el neutro)
+//   gloss_mul    = spec_level_photomode / 0.5   (0.5  = idem)
+//
+//   | Preset      | PhotoMode (rough, metallic, spec) | Aquí (gloss_mul, rough_offset, aniso_mul) |
+//   | Plastic     | 0.45  0.00  0.50                  | 1.00   0.00   1.00                        |
+//   | Glossy      | 0.12  0.00  0.60                  | 1.20  −0.33   1.30                        |
+//   | Matte PLA   | 0.80  0.00  0.25                  | 0.50  +0.35   0.25                        |
+//   | Rubber TPU  | 0.90  0.00  0.15                  | 0.30  +0.45   0.10                        |
+//   | Metal       | 0.25  1.00   —                    | 1.30  −0.20   2.00                        |
+//   | Silk        | 0.30  0.45  0.50                  | 1.00  −0.15   1.80                        |
+//
+// ⚠️ DOS COLUMNAS NO SALEN DE LA TRADUCCIÓN Y HAY QUE SABERLO:
+//
+// 1. **El aniso_mul es criterio, no conversión.** RealColor no tiene canal `metallic`; lo que en
+//    Photo Mode hacía que un silk pareciera medio metálico, aquí lo hace precisamente el brillo
+//    anisótropo — que es dispersión CON ESTRUCTURA, o sea el mecanismo físico real detrás del
+//    aspecto "silk". Por eso metallic se mapea sobre esta columna (silk 0.45 → 1.80, metal 1.0 →
+//    2.00) y los mates caen por debajo de 1. El ORDEN relativo lo defiendo; los absolutos son para
+//    calibrar contra una foto, igual que el resto de la tabla por role.
+// 2. **Metal no tiene spec_level en el original** (su especular va tintado con el color base, cosa
+//    que aquí no existe). El 1.30 está puesto a mano y a propósito, no traducido.
+static std::array<float, 3> realcolor_finish_preset_values(int preset)
+{
+    switch (static_cast<GCodeViewer::RealColorFinishPreset>(preset)) {
+    case GCodeViewer::RealColorFinishPreset::Glossy: return { 1.20f, -0.33f, 1.30f };
+    case GCodeViewer::RealColorFinishPreset::Matte:  return { 0.50f,  0.35f, 0.25f };
+    case GCodeViewer::RealColorFinishPreset::Rubber: return { 0.30f,  0.45f, 0.10f };
+    case GCodeViewer::RealColorFinishPreset::Metal:  return { 1.30f, -0.20f, 2.00f };
+    case GCodeViewer::RealColorFinishPreset::Silk:   return { 1.00f, -0.15f, 1.80f };
+    case GCodeViewer::RealColorFinishPreset::Plastic:
+    default:                                         return { 1.00f,  0.00f, 1.00f };
+    }
+}
+
+// NEOTKO_REALCOLOR_TAG s251b: nombres para el combo. Mismo orden que el enum y que la tabla de
+// Photo Mode — el orden relativo (de más mate a más brillante) es información, no decoración.
+static const char* realcolor_finish_preset_name(int preset)
+{
+    switch (static_cast<GCodeViewer::RealColorFinishPreset>(preset)) {
+    case GCodeViewer::RealColorFinishPreset::Glossy: return "Glossy / resin";
+    case GCodeViewer::RealColorFinishPreset::Matte:  return "Matte PLA";
+    case GCodeViewer::RealColorFinishPreset::Rubber: return "Rubber / TPU";
+    case GCodeViewer::RealColorFinishPreset::Metal:  return "Metal";
+    case GCodeViewer::RealColorFinishPreset::Silk:   return "Silk";
+    case GCodeViewer::RealColorFinishPreset::Custom: return "Custom";
+    case GCodeViewer::RealColorFinishPreset::Plastic:
+    default:                                         return "Plastic";
+    }
+}
+
+// NEOTKO_REALCOLOR_TAG s251b: ¿los tres valores coinciden con algún preset de la tabla? Devuelve el
+// preset, o Custom si el usuario los ha movido a mano. Se recalcula en vez de guardarse como fuente
+// de verdad: así un .conf editado a mano, o un preset que cambie de valores en una versión futura,
+// no dejan la etiqueta mintiendo sobre lo que realmente se está dibujando.
+static int realcolor_finish_match_preset(const std::array<float, 3>& v)
+{
+    for (int p = 0; p <= (int)GCodeViewer::RealColorFinishPreset::Silk; ++p) {
+        const std::array<float, 3> pv = realcolor_finish_preset_values(p);
+        if (std::abs(pv[0] - v[0]) < 1e-3f && std::abs(pv[1] - v[1]) < 1e-3f && std::abs(pv[2] - v[2]) < 1e-3f)
+            return p;
+    }
+    return (int)GCodeViewer::RealColorFinishPreset::Custom;
+}
+
+// NEOTKO_REALCOLOR_TAG s251e: la altura de capa nominal con la que se hornea el TD a mm. Extraído a
+// helper porque ahora lo necesitan DOS sitios: refresh_realcolor_materials() y la ventana de
+// materiales, que edita el TD en vivo. Tienen que usar exactamente el mismo número o el preview
+// mostraría un TD distinto del que se acaba de guardar.
+static double realcolor_nominal_layer_height()
+{
+    double h = 0.2;
+    if (wxGetApp().preset_bundle != nullptr) {
+        if (auto* o = wxGetApp().preset_bundle->prints.get_edited_preset()
+                          .config.option<ConfigOptionFloat>("layer_height"))
+            if (o->value > 0.001) h = o->value;
+    }
+    return h;
+}
+
 void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& str_tool_colors)
 {
     std::vector<std::string> hex = str_tool_colors;
     while (hex.size() < 4) hex.push_back("#808080");
 
-    double nominal_layer_height = 0.2;
-    if (wxGetApp().preset_bundle != nullptr) {
-        if (auto* o = wxGetApp().preset_bundle->prints.get_edited_preset()
-                          .config.option<ConfigOptionFloat>("layer_height"))
-            if (o->value > 0.001) nominal_layer_height = o->value;
-    }
+    const double nominal_layer_height = realcolor_nominal_layer_height();
 
     auto* ac = wxGetApp().app_config;
     for (int t = 0; t < 4; ++t) {
@@ -1292,7 +1382,50 @@ void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& st
             try { if (!v.empty()) td = std::stof(v); } catch (...) {}
         }
         td = std::max(0.01f, std::min(10.f, td));
+
+        // NEOTKO_REALCOLOR_TAG s251e: 🚨 UNA EDICIÓN DE TD SIN GUARDAR MANDA SOBRE app_config.
+        // Este refresh se dispara por cosas ajenas a la ventana (un reslice, un cambio de colores),
+        // y sin este guard le devolvería al usuario los valores del disco en mitad de una
+        // calibración a ojo — perdiendo el trabajo sin decir nada y, peor, dejando el slider
+        // marcando un número que ya no es el que se está dibujando.
+        if (m_realcolor_td_dirty)
+            td = std::max(0.01f, std::min(10.f, m_realcolor_td_edit[t]));
+        else
+            m_realcolor_td_edit[t] = td; // espejo limpio, listo para cuando se abra la ventana
+
         m_realcolor_materials.td[t] = td * (float)nominal_layer_height;
+
+        // NEOTKO_REALCOLOR_TAG s251b: acabado óptico del slot. Mismo sitio y misma forma que el TD
+        // de arriba (app_config, por slot, clave numerada) porque es la misma clase de dato: una
+        // propiedad del MATERIAL que la vista necesita y que no pertenece a ningún preset de
+        // impresión. Ausente = Plastic, que es el neutro exacto — o sea que una instalación que
+        // nunca abra la ventana se ve igual que antes de s251b.
+        std::array<float, 3> fin = realcolor_finish_preset_values((int)RealColorFinishPreset::Plastic);
+        if (ac) {
+            const std::string v = ac->get("neotko_finish_" + std::to_string(t + 1));
+            if (!v.empty()) {
+                // Formato "gloss,rough,aniso". Si está corrupto o a medias se cae al neutro entero
+                // en vez de a un híbrido a medio parsear.
+                std::array<float, 3> parsed{};
+                std::stringstream ss(v);
+                std::string tok;
+                int n = 0;
+                bool ok = true;
+                while (n < 3 && std::getline(ss, tok, ',')) {
+                    try { parsed[n] = std::stof(tok); } catch (...) { ok = false; break; }
+                    ++n;
+                }
+                if (ok && n == 3)
+                    fin = parsed;
+            }
+        }
+        // Acotados aquí y no sólo en la UI: app_config es un fichero de texto que el usuario puede
+        // editar, y un gloss negativo o un aniso enorme se comerían la imagen sin decir por qué.
+        fin[0] = std::max(0.0f, std::min(3.0f, fin[0]));
+        fin[1] = std::max(-1.0f, std::min(1.0f, fin[1]));
+        fin[2] = std::max(0.0f, std::min(3.0f, fin[2]));
+        m_realcolor_materials.finish[t] = fin;
+        m_realcolor_materials.finish_preset[t] = realcolor_finish_match_preset(fin);
     }
     m_realcolor_materials.valid = true;
 }
@@ -2367,6 +2500,40 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
                 const Vec3f up = right.cross(dir);
                 const float sq_length = (curr_position - prev_position).squaredNorm();
 
+                // NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo): acumula el EJE de este
+                // segmento en el Path que lo contiene. El porqué del ángulo duplicado y de la
+                // confianza está en la nota larga de Path::bead_axis_acc (GCodeViewer.hpp).
+                //
+                // 🚨 VA EN LA PASADA DE ÍNDICES, NO EN LA DE VÉRTICES, aunque add_vertices_as_solid
+                // calcule exactamente el mismo `dir` unas líneas más arriba en el fichero y parezca
+                // el sitio natural. Los Paths que se construyen durante la extracción de vértices se
+                // TIRAN enteros justo después ("paths may have been filled while extracting
+                // vertices, so reset them" — el buffer.paths.clear() de más abajo) y se vuelven a
+                // construir aquí. Acumular allí sería trabajo perfectamente correcto y
+                // perfectamente perdido, y el síntoma habría sido confianza 0 en todas partes: o
+                // sea el efecto simplemente apagado, sin ningún error a la vista.
+                //
+                // Se hace dentro del bucle de segmentos y no en una pasada aparte porque este es el
+                // único punto donde el segmento y su Path están juntos. Reconstruirlo después
+                // obligaría a mapear s_id → índice en gcode_result.moves, y ese mapeo NO es la
+                // identidad: los movimientos Seam se descuentan (ver `seams_count` al final de
+                // load_toolpaths). Un off-by-N silencioso esperando a pasar.
+                {
+                    const float dx = curr_position.x() - prev_position.x();
+                    const float dy = curr_position.y() - prev_position.y();
+                    const float len_xy = std::sqrt(dx * dx + dy * dy);
+                    if (len_xy > 1e-6f) {
+                        const float ux = dx / len_xy;
+                        const float uy = dy / len_xy;
+                        // (cos 2θ, sin 2θ) sin trigonometría, ponderado por la longitud XY del
+                        // segmento — así los micro-segmentos de una esquina redondeada no pesan
+                        // como una scanline entera, y un movimiento puramente vertical aporta 0.
+                        last_path.bead_axis_acc += Vec3f(len_xy * (ux * ux - uy * uy),
+                                                         len_xy * (2.0f * ux * uy),
+                                                         len_xy);
+                    }
+                }
+
                 if ((is_first_segment || vbuffer_size == 0) && i == 0) {
                     if (is_first_segment && i == 0)
                         // starting cap triangles
@@ -3166,6 +3333,52 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
 
     // dismiss indices data, no more needed
     std::vector<MultiIndexBuffer>().swap(indices);
+
+    // NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo): volcado de MEDIDA del eje de
+    // impresión, canal ORCA_DEBUG_REALCOLOR. Existe porque el plan pedía explícitamente medir antes
+    // de decidir, y hay dos cosas que sólo se pueden comprobar con un gcode real delante:
+    //
+    //  (a) ¿Cuántos segmentos tiene un Path de top? La predicción es POCOS — un Path nuevo arranca
+    //      cuando cambia el tipo de movimiento (ver `prev.type != curr.type` en add_vertices_as_solid)
+    //      y entre dos scanlines de un top hay un travel, así que cada scanline debería caer en su
+    //      propio Path. Si sale así, el eje de un top es prácticamente EXACTO, no un promedio.
+    //  (b) ¿Sale la confianza donde debe? Un top solid infill tiene que dar ~1.0 y un perímetro
+    //      externo ~0.0. Si el perímetro NO sale bajo, la protección automática no funciona y el
+    //      efecto se estaría aplicando donde no hay eje.
+    //
+    // Se resume POR ROLE, no por path: un gcode real tiene cientos de miles de paths y un log de
+    // esa longitud no se lee, se ignora. Todo el bloque va detrás de NeoDebug::enabled() para que
+    // en una sesión normal no cueste ni el recorrido.
+    if (NeoDebug::enabled(NeoDebug::REALCOLOR)) {
+        struct AxisStat { size_t paths = 0; double conf_sum = 0.0; size_t conf_high = 0; size_t verts = 0; };
+        std::map<int, AxisStat> by_role;
+        const TBuffer& ex_buffer = m_buffers[buffer_id(EMoveType::Extrude)];
+        for (const Path& p : ex_buffer.paths) {
+            const std::array<float, 3> axis = realcolor_bead_axis(p.bead_axis_acc);
+            AxisStat& st = by_role[(int)p.role];
+            ++st.paths;
+            st.conf_sum += axis[2];
+            if (axis[2] >= 0.9f) ++st.conf_high;
+            st.verts += p.vertices_count();
+        }
+        NeoDebug::write(NeoDebug::REALCOLOR, "=== s251 bead-axis measurement (aniso sheen, phase 0) ===");
+        NeoDebug::write(NeoDebug::REALCOLOR, "role | paths | avg_verts/path | avg_conf | %conf>=0.90");
+        for (const auto& kv : by_role) {
+            const AxisStat& st = kv.second;
+            if (st.paths == 0) continue;
+            std::ostringstream os;
+            os << ExtrusionEntity::role_to_string((ExtrusionRole)kv.first)
+               << " | " << st.paths
+               << " | " << ((double)st.verts / (double)st.paths)
+               << " | " << (st.conf_sum / (double)st.paths)
+               << " | " << (100.0 * (double)st.conf_high / (double)st.paths) << "%";
+            NeoDebug::write(NeoDebug::REALCOLOR, os.str());
+        }
+        NeoDebug::write(NeoDebug::REALCOLOR,
+            "EXPECTED: top/solid infill -> avg_verts/path low (~2 = una scanline por Path) y avg_conf ~1.0; "
+            "external perimeter -> avg_conf ~0.0 (bucle cerrado, sin eje dominante). Si el perimetro NO sale "
+            "bajo, el apagado automatico por confianza no esta funcionando.");
+    }
 
     // layers zs / roles / extruder ids -> extract from result
     size_t last_travel_s_id = 0;
@@ -4481,8 +4694,17 @@ static Vec3f realcolor_env_sample(float u, float v, const GCodeViewer::RealColor
 // ⚠️ Estos números NO están medidos, son un punto de partida razonable para calibrar a ojo contra
 // una foto (que es exactamente el flujo que ya documenta td_scale). No los defiendo como física;
 // el orden relativo entre roles sí, los valores absolutos no. finish_strength=0 los apaga todos.
+// NEOTKO_REALCOLOR_TAG s251b: `mat_finish` es el acabado del FILAMENTO de este path
+// (gloss_mul, rough_offset, aniso_mul), ver RealColorMaterials::finish. Se aplica al final, DESPUÉS
+// de la tabla por role y DESPUÉS de finish_strength, y por un motivo concreto: el material y el
+// role son dos preguntas independientes ("¿de qué está hecho?" y "¿cómo se depositó?") y el
+// resultado tiene que conservar las dos. Un bridge en PLA mate sigue siendo más rugoso que un top
+// en PLA mate; los dos son más rugosos que sus equivalentes en silk.
+//
+// El neutro (1.0, 0.0, 1.0) devuelve exactamente lo que devolvía antes de s251b.
 static std::array<float, 2> realcolor_surface_finish(ExtrusionRole role, bool is_first_layer,
-                                                     const GCodeViewer::RealColorTuning& tuning)
+                                                     const GCodeViewer::RealColorTuning& tuning,
+                                                     const std::array<float, 3>& mat_finish)
 {
     // (brillo, rugosidad). Neutro = (1.0, 0.0), que es literalmente el comportamiento pre-s243:
     // brillo sin escalar y reflejo 100% del mapa nítido.
@@ -4541,7 +4763,110 @@ static std::array<float, 2> realcolor_surface_finish(ExtrusionRole role, bool is
 
     // Interpolación global hacia el neutro — ver RealColorTuning::finish_strength.
     const float k = std::clamp(tuning.finish_strength, 0.0f, 1.0f);
-    return { 1.0f + (gloss - 1.0f) * k, roughness * k };
+    gloss     = 1.0f + (gloss - 1.0f) * k;
+    roughness = roughness * k;
+
+    // NEOTKO_REALCOLOR_TAG s251b: y ahora el MATERIAL, encima de todo lo anterior.
+    //
+    // ⚠️ VA DESPUÉS DE finish_strength A PROPÓSITO, y la diferencia importa. finish_strength es el
+    // A/B del sistema por role: a 0 todos los roles colapsan al neutro. Si el material se aplicase
+    // antes, finish_strength también lo apagaría — y entonces poner un filamento en Mate no haría
+    // nada en cuanto alguien bajase ese slider, sin ninguna relación evidente entre las dos cosas.
+    // Aplicado después, el material sigue mandando aunque la distinción por superficie esté a cero:
+    // son dos ejes independientes y se comportan como tales.
+    gloss = std::max(0.0f, gloss * mat_finish[0]);
+    // Suma, no multiplica — ver la nota de RealColorMaterials::finish sobre por qué multiplicar una
+    // magnitud acotada aplastaría las diferencias entre roles justo en los materiales mate.
+    roughness = std::clamp(roughness + mat_finish[1], 0.0f, 1.0f);
+
+    return { gloss, roughness };
+}
+
+// NEOTKO_REALCOLOR_TAG s249 (vías 1 y 2 de docs/FUTURE/REALCOLOR_SWELL_WITHOUT_EXPANSION_PLAN.md):
+// hinchado de la extrusión resuelto POR PATH. Devuelve (flancos, vertical) en mm de mundo para el
+// u_swell_mm de realcolor_peel.vs.
+//
+// LO QUE CAMBIA RESPECTO A s243: el swell era un único vec2 para toda la escena, puesto una vez
+// por pasada de peel. Ahora se resuelve aquí con el ancho, la altura y el role del path concreto
+// que se va a dibujar. La parte absoluta sigue existiendo y sigue mandando si las k están a 0 —
+// esto es aditivo, no un reemplazo.
+//
+// 🚨 POR SUB-DRAW, NO POR RenderPath. Un RenderPath agrupa SÓLO por color
+// (RenderPathPropertyEqual) y mezcla dentro del mismo lote paths de alturas, anchos y roles
+// distintos. Leer esto una vez por RenderPath daría un valor promediado y silenciosamente falso —
+// es exactamente el bug que path_ids[] vino a arreglar para u_thickness, y que u_finish ya evitó.
+//
+// ⚠️ NO se toca el shader (ni el gemelo 110/ ni el 140/): el uniform ya existía y ya llegaba, sólo
+// cambia QUIÉN calcula su valor y cada cuánto se manda. Es deliberado — los dos gemelos no tienen
+// el mismo reparto interno y en macOS sólo se carga el 110, así que todo lo que se pueda resolver
+// en C++ es una divergencia menos que no se puede validar.
+//
+// Toma los campos sueltos y no el Path porque GCodeViewer::Path es privado — mismo patrón que
+// realcolor_surface_finish(), que ya recibe el role suelto por lo mismo.
+static std::array<float, 2> realcolor_swell_mm(float path_width, float path_height, ExtrusionRole role,
+                                               const GCodeViewer::RealColorTuning& tuning)
+{
+    // Parte absoluta (s243) + parte proporcional (s249). Con width/height a 0 — que es lo que
+    // traen los movimientos sin extrusión — la proporcional aporta 0 y queda el valor de s243.
+    float lateral  = tuning.swell_lateral_mm  + tuning.swell_lateral_k  * path_width;
+    float vertical = tuning.swell_vertical_mm + tuning.swell_vertical_k * path_height;
+
+    // Vía 2: la silueta. El hinchado lateral existe para cerrar el hueco contra el cordón vecino;
+    // en el borde expuesto al aire no hay vecino ni hueco, y lo único que hace es mover el
+    // contorno de la pieza hacia fuera. El perímetro externo (y el de voladizo, que es el mismo
+    // perímetro externo tendido sobre aire) ES ese borde. Sólo afecta a los flancos: la cara de
+    // arriba de un perímetro externo sí tiene vecino, el propio perímetro de la capa siguiente.
+    if (role == erExternalPerimeter || role == erOverhangPerimeter)
+        lateral *= std::max(tuning.swell_external_scale, 0.0f);
+
+    return { std::max(lateral, 0.0f), std::max(vertical, 0.0f) };
+}
+
+// NEOTKO_REALCOLOR_TAG s251 (Fase 0 de docs/FUTURE/REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md):
+// resuelve el acumulador de eje de un Path (ver Path::bead_axis_acc en GCodeViewer.hpp) al eje
+// unitario que consume el u_bead_axis de realcolor_peel.vs. Devuelve (Tx, Ty, confianza) en XY de
+// MUNDO, con confianza 0..1. Con confianza 0 el eje devuelto es (0,0) y el shader se apaga solo.
+//
+// EL PASO CLAVE — deshacer el ángulo duplicado. El acumulador vive en 2θ (que es lo que permite
+// promediar ejes sin que un zigzag se cancele); aquí hay que volver a θ. El medio ángulo sale sin
+// trigonometría de las identidades de siempre:
+//     cos θ = sqrt((1 + cos 2θ) / 2)          sin θ = sin 2θ / (2 cos θ)
+// Se elige la raíz con cos θ ≥ 0 porque el signo de un EJE es arbitrario por definición (T y −T
+// son el mismo eje) y el lóbulo de Kajiya-Kay sólo usa (T·L) y (T·V) al cuadrado — o sea que el
+// signo no llega a la imagen. Cuando cos θ ≈ 0 (eje a 90°, cordones en Y) se toma el límite
+// directamente en vez de dividir por casi cero.
+//
+// ⚠️ Se resuelve por SUB-DRAW y por FRAME, así que tiene que ser O(1) — y lo es: una división, una
+// raíz y poco más, del mismo orden que realcolor_swell_mm(). Lo caro (recorrer los segmentos) ya
+// se pagó UNA vez durante la carga. Recorrer aquí los movimientos del Path sería el error clásico:
+// son 8-14 pasadas de peel × supersample 2, cada frame.
+//
+// Toma el acumulador suelto y no el Path porque GCodeViewer::Path es privado — mismo patrón que
+// realcolor_swell_mm() y realcolor_surface_finish().
+static std::array<float, 3> realcolor_bead_axis(const Vec3f& acc)
+{
+    const float w = acc.z();
+    if (w <= 1e-6f)
+        return { 0.0f, 0.0f, 0.0f }; // Path sin longitud en XY: no hay eje que dar
+
+    // Vector medio en el plano del ángulo duplicado. Su MÓDULO es la confianza: 1 = todos los
+    // segmentos comparten eje, 0 = repartidos por igual (un bucle cerrado).
+    const float c2 = acc.x() / w;
+    const float s2 = acc.y() / w;
+    const float conf = std::min(std::sqrt(c2 * c2 + s2 * s2), 1.0f);
+    if (conf <= 1e-4f)
+        return { 0.0f, 0.0f, 0.0f };
+
+    // Normalizado ANTES del medio ángulo: las identidades de arriba valen sobre el vector
+    // unitario, no sobre el promedio sin normalizar (si no, la confianza se colaría dentro del
+    // ángulo y torcería el eje además de atenuarlo).
+    const float c2n = c2 / conf;
+    const float s2n = s2 / conf;
+
+    const float cos_t = std::sqrt(std::max(0.5f * (1.0f + c2n), 0.0f));
+    const float sin_t = (cos_t > 1e-4f) ? (s2n / (2.0f * cos_t))
+                                        : 1.0f; // cos 2θ ≈ −1 ⇒ θ ≈ ±90°, eje a lo largo de Y
+    return { cos_t, sin_t, conf };
 }
 
 // NEOTKO_REALCOLOR_TAG: the accumulator's seed color (what shows through any transmittance
@@ -4564,6 +4889,9 @@ GCodeViewer::RealColorFingerprint GCodeViewer::compute_realcolor_fingerprint(int
     fp.canvas_h = canvas_height;
     fp.td = m_realcolor_materials.td;
     fp.rgb = m_realcolor_materials.rgb;
+    // NEOTKO_REALCOLOR_TAG s251b: sin esto la ventana de materiales parecería rota — ver el
+    // comentario del campo en RealColorFingerprint (GCodeViewer.hpp).
+    fp.finish = m_realcolor_materials.finish;
     fp.layers_z_range[0] = m_layers_z_range[0];
     fp.layers_z_range[1] = m_layers_z_range[1];
     fp.moves_first = static_cast<unsigned int>(m_sequential_view.current.first);
@@ -4895,6 +5223,190 @@ void GCodeViewer::destroy_realcolor_env_textures()
 // calls in this file, so it's zero surface for anyone not already running with that env var.
 // Forces a recompute on any change (same m_realcolor_cache.valid=false idiom ensure_realcolor_fbos
 // uses on resize) since the peel shader's uniforms only get re-pushed on the next recompute pass.
+// NEOTKO_REALCOLOR_TAG s251b (idea A de docs/FUTURE/REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md §5-bis):
+// VENTANA DE ACABADO POR FILAMENTO. Se abre desde el botón de la leyenda de la vista RealColor.
+//
+// 🚨 ESTO NO ES UN PANEL DE DEBUG. Es la primera ventana de RealColor abierta a todo el mundo, y
+// por eso NO lleva el gate de NeoDebug::render_panels_enabled() que sí lleva el panel de tuning de
+// abajo. La diferencia no es cosmética: el panel de tuning expone los mandos internos del modelo
+// óptico (que no están medidos y cuya escala puede cambiar de una sesión a otra), mientras que esto
+// expone una pregunta que el usuario sí sabe contestar mirando su bobina — "¿este filamento es
+// mate, brillante o silk?".
+//
+// 🚨 Y NO REBANA, NUNCA. El acabado es puramente visual: no llega al motor por ningún camino (sólo
+// alimenta u_finish/u_aniso en realcolor_peel.fs). Eso lo separa del TD, que vive al lado en
+// app_config pero SÍ entra al slicer vía neotko_td_mirror, y cuyo editor por eso llama a
+// schedule_background_process(). Copiar aquí ese patrón sería relanzar el proceso de fondo por
+// mover un slider de brillo. Lo que sí hay que invalidar es el composite de peel — de eso se
+// encarga el fingerprint (RealColorFingerprint::finish), no un reslice.
+void GCodeViewer::render_realcolor_materials_panel()
+{
+    if (!m_realcolor_materials_panel_open)
+        return;
+
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    bool open = true;
+    ImGui::Begin(_u8L("Filament finish").c_str(), &open);
+
+    imgui.text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+        _u8L("How each filament reflects light. Affects the RealColor preview only — it never changes the print."));
+
+    // NEOTKO_REALCOLOR_TAG s251e: DOS banderas, no una, y la distinción importa.
+    //   `changed`       → hay que recalcular el composite (lo dispara CUALQUIER edición).
+    //   `finish_changed`→ además hay que PERSISTIR el acabado en app_config.
+    // Con una sola bandera, arrastrar el slider de TD escribiría el acabado a disco en cada frame
+    // del arrastre (AppConfig::save() es una escritura de fichero real). El TD tiene su propio
+    // camino de guardado explícito más abajo, así que aquí no debe tocar disco.
+    bool changed = false;
+    bool finish_changed = false;
+    for (int t = 0; t < 4; ++t) {
+        ImGui::PushID(t);
+        ImGui::Separator();
+
+        // La pastilla de color real del slot: es lo que hace reconocible la fila de un vistazo,
+        // mucho antes que el número del extrusor.
+        const ColorRGB& c = m_realcolor_materials.rgb[t];
+        ImGui::ColorButton("##swatch", ImVec4(c.r(), c.g(), c.b(), 1.0f),
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(18, 18));
+        ImGui::SameLine();
+        imgui.text(_u8L("Filament") + " " + std::to_string(t + 1));
+
+        std::array<float, 3>& fin = m_realcolor_materials.finish[t];
+
+        // El combo de presets. `Custom` está en la lista para poder MOSTRARLO cuando los sliders no
+        // casan con ninguna fila, pero elegirlo a mano no significa nada — por eso seleccionarlo no
+        // toca los valores: no hay ningún "valor de Custom" que aplicar.
+        const int cur = m_realcolor_materials.finish_preset[t];
+        if (ImGui::BeginCombo("##preset", realcolor_finish_preset_name(cur))) {
+            for (int p = 0; p <= (int)RealColorFinishPreset::Silk; ++p) {
+                const bool sel = (p == cur);
+                if (ImGui::Selectable(realcolor_finish_preset_name(p), sel)) {
+                    fin = realcolor_finish_preset_values(p);
+                    finish_changed = true;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        // Los tres finos, para calibrar contra una foto una vez elegido el preset de partida.
+        finish_changed |= imgui.slider_float(_u8L("Gloss").c_str(),     &fin[0],  0.0f, 3.0f, "%.2f");
+        finish_changed |= imgui.slider_float(_u8L("Roughness").c_str(), &fin[1], -1.0f, 1.0f, "%.2f");
+        finish_changed |= imgui.slider_float(_u8L("Sheen").c_str(),     &fin[2],  0.0f, 3.0f, "%.2f");
+
+        // NEOTKO_REALCOLOR_TAG s251e: TD del slot, en la misma fila que su acabado. Están juntos
+        // porque son las DOS propiedades ópticas del material — el TD dice cuánta luz atraviesa el
+        // plástico y el acabado cómo se refleja en su superficie — y calibrarlas en ventanas
+        // distintas obliga a recordar de memoria lo que se acaba de ver.
+        //
+        // ⚠️ Pero NO se comporta igual, y la UI tiene que decirlo: esto es el único control de esta
+        // ventana que acaba tocando la pieza. Por eso va detrás del botón de guardar de abajo.
+        if (imgui.slider_float(_u8L("TD (unsaved)").c_str(), &m_realcolor_td_edit[t], 0.01f, 10.0f, "%.3f")) {
+            m_realcolor_td_edit[t] = std::max(0.01f, std::min(10.0f, m_realcolor_td_edit[t]));
+            // El preview sí se actualiza al instante — ese es el punto de poder calibrar en vivo.
+            // Y basta con tocar m_realcolor_materials.td[]: ya está dentro del fingerprint desde
+            // s163, así que el composite se recalcula solo.
+            m_realcolor_materials.td[t] = m_realcolor_td_edit[t] * (float)realcolor_nominal_layer_height();
+            m_realcolor_td_dirty = true;
+            changed = true;
+        }
+
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button(_u8L("Reset all to Plastic").c_str())) {
+        for (int t = 0; t < 4; ++t)
+            m_realcolor_materials.finish[t] = realcolor_finish_preset_values((int)RealColorFinishPreset::Plastic);
+        finish_changed = true;
+    }
+
+    // NEOTKO_REALCOLOR_TAG s251e: el bloque de guardar del TD. Sólo aparece cuando hay algo sin
+    // guardar — un botón permanentemente gris no informa de nada, y uno que aparece SÍ dice "tienes
+    // trabajo pendiente" sin tener que leer ningún texto.
+    //
+    // 🚨 LA ASIMETRÍA QUE ESTA VENTANA TIENE QUE COMUNICAR, y que es la razón de que el usuario
+    // pidiera el botón: el acabado (arriba) se guarda solo en cada movimiento porque no sale de la
+    // vista previa; el TD NO, porque al guardarlo entra al motor por app_config → neotko_td_mirror →
+    // PrintApply y **cambia lo que se imprime**. Guardarlo en cada pixel arrastrado dispararía un
+    // reslice por movimiento de ratón. Mientras no se pulse Save, lo que se ve es sólo preview.
+    ImGui::Separator();
+    if (m_realcolor_td_dirty) {
+        imgui.text_colored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+            _u8L("TD changed — preview only. Save to apply it to the print (this reslices)."));
+        if (ImGui::Button(_u8L("Save TD").c_str())) {
+            if (auto* ac = wxGetApp().app_config) {
+                char buf[32];
+                for (int t = 0; t < 4; ++t) {
+                    std::snprintf(buf, sizeof(buf), "%.3f", m_realcolor_td_edit[t]);
+                    ac->set("neotko_td_" + std::to_string(t + 1), buf);
+                }
+                ac->save(); // AppConfig::set() sólo ensucia el store en memoria, ver Tab.cpp
+            }
+            m_realcolor_td_dirty = false;
+            // AHORA sí: el TD es dato de motor, así que hay que reslicear. Es exactamente lo que el
+            // editor de TD del diálogo Sandwich hace al confirmar (Tab.cpp), y lo que la ventana de
+            // acabado NO hace ni debe hacer.
+            if (wxGetApp().plater() != nullptr)
+                wxGetApp().plater()->schedule_background_process();
+            NEOTKO_LOG(REALCOLOR, "render_realcolor_materials_panel: TD saved -> app_config + reslice");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(_u8L("Discard").c_str())) {
+            // Recarga SÓLO el TD desde app_config, que es la fuente de verdad. Deliberadamente no
+            // se llama a refresh_realcolor_materials(): esa función además re-deriva los colores
+            // desde la lista de filamentos, que aquí no tenemos a mano y que además no ha cambiado.
+            // Descartar una edición de TD tiene que revertir el TD y nada más.
+            const float h = (float)realcolor_nominal_layer_height();
+            auto* ac = wxGetApp().app_config;
+            for (int t = 0; t < 4; ++t) {
+                float td = 1.0f;
+                if (ac) {
+                    const std::string v = ac->get("neotko_td_" + std::to_string(t + 1));
+                    try { if (!v.empty()) td = std::stof(v); } catch (...) {}
+                }
+                td = std::max(0.01f, std::min(10.0f, td));
+                m_realcolor_td_edit[t] = td;
+                m_realcolor_materials.td[t] = td * h;
+            }
+            m_realcolor_td_dirty = false;
+            changed = true;
+            NEOTKO_LOG(REALCOLOR, "render_realcolor_materials_panel: TD edit discarded, reloaded from app_config");
+        }
+    }
+
+    ImGui::End();
+    if (!open)
+        m_realcolor_materials_panel_open = false;
+
+    if (finish_changed) {
+        // La etiqueta del combo se RECALCULA desde los valores, no se guarda: mover un slider a
+        // mano tiene que hacer que ponga "Custom" solo, sin que nadie lo escriba en ningún sitio.
+        // Ver realcolor_finish_match_preset().
+        if (auto* ac = wxGetApp().app_config) {
+            char buf[64];
+            for (int t = 0; t < 4; ++t) {
+                const std::array<float, 3>& f = m_realcolor_materials.finish[t];
+                std::snprintf(buf, sizeof(buf), "%.3f,%.3f,%.3f", f[0], f[1], f[2]);
+                ac->set("neotko_finish_" + std::to_string(t + 1), buf);
+            }
+            // AppConfig::set() sólo marca el store en memoria como sucio, nunca escribe a disco —
+            // misma razón por la que el editor de TD del diálogo Sandwich llama a save() al
+            // confirmar (ver Tab.cpp). Sin esto el ajuste sólo sobreviviría a un cierre limpio.
+            ac->save();
+        }
+        for (int t = 0; t < 4; ++t)
+            m_realcolor_materials.finish_preset[t] = realcolor_finish_match_preset(m_realcolor_materials.finish[t]);
+        NEOTKO_LOG(REALCOLOR, "render_realcolor_materials_panel: finish changed -> app_config");
+    }
+
+    // Invalidar el composite cacheado ante CUALQUIER edición (acabado o TD). El fingerprint ya lo
+    // detectaría por su cuenta —ambos campos están dentro—, pero hacerlo explícito evita depender de
+    // que alguien recuerde mantener ese struct al día al añadir el siguiente mando.
+    if (changed || finish_changed)
+        m_realcolor_cache.valid = false;
+}
+
 void GCodeViewer::render_realcolor_debug_panel()
 {
     // NEOTKO_SMOOTHNORMALS_TAG s229: moved off the REALCOLOR log channel onto the shared panel
@@ -4908,6 +5420,32 @@ void GCodeViewer::render_realcolor_debug_panel()
     ImGui::Begin("RealColor Tuning");
     bool changed = false;
     changed |= imgui.slider_float("accum seed gray", &m_realcolor_tuning.accum_seed_gray, 0.0f, 1.0f);
+    // NEOTKO_REALCOLOR_TAG s251c: LA LUZ DIRECTA. Hasta hoy vivía en #define y no se podía tocar —
+    // ver el diagnóstico en 140/realcolor_peel.vs. Va LO PRIMERO del panel a propósito: es el
+    // término dominante de la imagen (la difusa llega a 0.66 frente a 0.075 del especular), o sea
+    // lo primero que hay que mirar cuando algo "no se puede bajar".
+    //
+    // 🔑 "luz envolvente" es el mando que de verdad ataca la veta de los cordones. Los otros cuatro
+    // sólo cambian CUÁNTA luz hay; éste cambia CÓMO cae. Un cilindro con Lambert puro tiene la
+    // generatriz iluminada 3.14 veces más brillante que su propia media, y eso no se arregla
+    // bajando la intensidad — sólo oscureciendo la escena entera.
+    //
+    // Neutro exacto (imagen pre-s251c) = 0.48 · 0.18 · 0.075 · 20 · 0.00.
+    ImGui::Separator();
+    // ⚠️ s251d: RANGOS ENSANCHADOS Y CON NEGATIVOS a petición del usuario, para poder pasarse de
+    // frenada a propósito mientras se caza el residuo de luz. Un valor negativo aquí NO es física:
+    // es RESTAR el término, y sirve para ver qué desaparece. No calibrar en negativo.
+    changed |= imgui.slider_float("luz principal (difusa)", &m_realcolor_tuning.light_key, -2.0f, 3.0f, "%.3f");
+    changed |= imgui.slider_float("luz relleno (difusa)", &m_realcolor_tuning.light_fill, -2.0f, 3.0f, "%.3f");
+    changed |= imgui.slider_float("luz especular", &m_realcolor_tuning.light_spec, -1.0f, 1.0f, "%.3f");
+    changed |= imgui.slider_float("luz nitidez especular", &m_realcolor_tuning.light_shininess, 1.0f, 200.0f, "%.0f");
+    changed |= imgui.slider_float("luz envolvente (wrap)", &m_realcolor_tuning.light_wrap, 0.0f, 1.0f, "%.2f");
+    // NEOTKO_REALCOLOR_TAG s251d: EL AISLADOR. Esto es la herramienta de diagnóstico de verdad —
+    // los rangos negativos de arriba te dicen que algo baja, esto te dice QUÉ es.
+    //   0 normal · 1 difusa direccional · 2 ambiente · 3 especular · 4 rim · 5 aniso · 6 color base
+    //   7 NEGRO ← el más importante: si aún se ve algo, NO viene del peel.
+    changed |= ImGui::SliderInt("SOLO termino (0=off,7=negro)", &m_realcolor_tuning.light_solo, 0, 7);
+    ImGui::Separator();
     changed |= imgui.slider_float("ambient ground", &m_realcolor_tuning.ambient_ground, 0.0f, 1.0f);
     changed |= imgui.slider_float("ambient sky", &m_realcolor_tuning.ambient_sky, 0.0f, 1.0f);
     changed |= imgui.slider_float("fresnel power", &m_realcolor_tuning.fresnel_power, 0.5f, 10.0f);
@@ -4950,12 +5488,54 @@ void GCodeViewer::render_realcolor_debug_panel()
     // contra una geometría que no existe — el fallo que arregló s166.
     changed |= imgui.slider_float("swell flancos (mm)", &m_realcolor_tuning.swell_lateral_mm, 0.0f, 0.50f, "%.3f");
     changed |= imgui.slider_float("swell vertical (mm)", &m_realcolor_tuning.swell_vertical_mm, 0.0f, 0.05f, "%.3f");
+    // NEOTKO_REALCOLOR_TAG s249 (vías 1+2, docs/FUTURE/REALCOLOR_SWELL_WITHOUT_EXPANSION_PLAN.md):
+    // las tres perillas nuevas, todas con neutro explícito (k=0, k=0, silueta=1) que devuelve la
+    // imagen a la de s243 sin recompilar. Conviven con los dos sliders absolutos de arriba a
+    // propósito: el A/B es el punto, no sustituir el look que el usuario ya calibró.
+    //
+    // Equivalencias para calibrar sin ir a ciegas, sobre un cordón típico de 0.42 mm de ancho:
+    // el default absoluto de 0.500 mm equivale a k ≈ 1.19. O sea que para probar "lo mismo pero
+    // proporcional" hay que bajar el absoluto a 0 y subir la k hasta ~1.2; el criterio de éxito
+    // del plan es que a la MITAD de eso (k ≈ 0.6) los huecos sigan cerrados — si eso pasa, la
+    // expansión desaparece sola y no hace falta nada más.
+    //
+    // ⚠️ El tope del vertical es 0.25 A PROPÓSITO, no por estética: es la regla de s243 ("el
+    // hinchado en Z por debajo de ~1/4 de la altura de capa") convertida en el máximo del slider.
+    // Como aquí la fracción se aplica sobre la altura del PROPIO path, el slider ya no se puede
+    // llevar al terreno donde el bias del peel mide contra geometría inexistente (fallo de s166),
+    // ni siquiera en una escena con capas de alturas mezcladas por ALH.
+    changed |= imgui.slider_float("swell flancos x ancho (k)", &m_realcolor_tuning.swell_lateral_k, 0.0f, 1.5f, "%.3f");
+    changed |= imgui.slider_float("swell vertical x altura (k)", &m_realcolor_tuning.swell_vertical_k, 0.0f, 0.25f, "%.3f");
+    // Vía 2: 1.0 = la silueta se hincha como siempre, 0.0 = el perímetro externo (y el de voladizo)
+    // no se hincha nada de lado y el contorno de la pieza se queda exactamente donde dice el gcode.
+    changed |= imgui.slider_float("swell silueta (perim. ext.)", &m_realcolor_tuning.swell_external_scale, 0.0f, 1.0f, "%.2f");
     changed |= imgui.slider_float("surface finish", &m_realcolor_tuning.finish_strength, 0.0f, 1.0f);
     changed |= imgui.slider_float("grade contrast", &m_realcolor_tuning.grade_contrast, 0.5f, 1.5f, "%.2f");
     changed |= imgui.slider_float("grade saturation", &m_realcolor_tuning.grade_saturation, 0.0f, 1.5f, "%.2f");
     // F6: a 0 se ve exactamente el problema que resuelve (el fondo colándose por el cuerpo de la
     // pieza), lo cual lo convierte en su propio A/B.
     changed |= imgui.slider_float("silueta opaca", &m_realcolor_tuning.fill_interior, 0.0f, 1.0f, "%.2f");
+    // NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo). Cómo probarlo, en orden:
+    //
+    //  1) "aniso DEBUG" a 1 PRIMERO, antes de tocar el brillo. Es la MEDIDA, no el efecto. Sobre un
+    //     top planchado el color tiene que salir plano y uniforme (todas las scanlines comparten
+    //     eje) y cambiar de matiz si cambias el ángulo de relleno. Un perímetro externo tiene que
+    //     salir GRIS: es un bucle cerrado, no tiene eje dominante, confianza 0. Si eso no se
+    //     cumple, el dato está mal y no merece la pena mirar el brillo siquiera.
+    //  2) Luego DEBUG a 0 y subir "aniso fuerza". El sitio donde mirar es un top de cerca, con la
+    //     cámara orbitando: el brillo tiene que BARRER a lo ancho de los cordones, no seguir a la
+    //     cámara como una mancha redonda. En una pared vertical también se ve (ahí el eje sale de
+    //     la normal, sin depender del dato de arriba).
+    //  3) "aniso nitidez" alto = franja fina y metálica; bajo = satinado ancho.
+    //
+    // El tope de fuerza es 2.0 y no 1.0 a propósito: es un término nuevo, todavía no sabemos a qué
+    // escala vive, y la lección de s249 dice que un default clavado en el máximo de su slider no es
+    // un óptimo sino un mando mal parametrizado. Mejor que sobre recorrido y no que falte.
+    ImGui::Separator();
+    changed |= imgui.slider_float("aniso fuerza", &m_realcolor_tuning.aniso_strength, 0.0f, 2.0f, "%.3f");
+    changed |= imgui.slider_float("aniso nitidez", &m_realcolor_tuning.aniso_sharpness, 2.0f, 200.0f, "%.0f");
+    changed |= imgui.slider_float("aniso confianza min", &m_realcolor_tuning.aniso_min_conf, 0.0f, 1.0f, "%.2f");
+    changed |= imgui.slider_float("aniso DEBUG (eje)", &m_realcolor_tuning.aniso_debug, 0.0f, 1.0f, "%.2f");
     ImGui::End();
     if (changed) {
         m_realcolor_cache.valid = false;
@@ -5776,6 +6356,10 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
 void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height)
 {
     render_realcolor_debug_panel();
+    // NEOTKO_REALCOLOR_TAG s251b: ventana de usuario, no de debug. Se dibuja aquí, dentro del
+    // render de RealColor, para que desaparezca sola al cambiar de vista — no tiene sentido dejar
+    // abierto un editor de acabado óptico sobre la vista Feedrate.
+    render_realcolor_materials_panel();
 
     GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D();
 
@@ -5889,12 +6473,31 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             peel_shader->set_uniform("u_fresnel_power", m_realcolor_tuning.fresnel_power);
             peel_shader->set_uniform("u_fresnel_strength", m_realcolor_tuning.fresnel_strength);
             peel_shader->set_uniform("u_fresnel_tint", m_realcolor_tuning.fresnel_tint);
+            // NEOTKO_REALCOLOR_TAG s251c: luz directa. Constantes para toda la escena (una sola
+            // "sala de fotos"), así que aquí arriba y no en el bucle de sub-draws. Ver el
+            // diagnóstico largo en 140/realcolor_peel.vs.
+            peel_shader->set_uniform("u_light_key", m_realcolor_tuning.light_key);
+            peel_shader->set_uniform("u_light_fill", m_realcolor_tuning.light_fill);
+            peel_shader->set_uniform("u_light_spec", m_realcolor_tuning.light_spec);
+            peel_shader->set_uniform("u_light_shininess", m_realcolor_tuning.light_shininess);
+            peel_shader->set_uniform("u_light_wrap", m_realcolor_tuning.light_wrap);
+            // NEOTKO_REALCOLOR_TAG s251d: aislador de términos, ver 140/realcolor_peel.fs.
+            peel_shader->set_uniform("u_light_solo", m_realcolor_tuning.light_solo);
+            // NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo): .x=fuerza (0 = neutro,
+            // imagen bit-idéntica a s249b), .y=exponente del lóbulo, .z=confianza mínima del eje.
+            // ⚠️ s251b: u_aniso YA NO se manda aquí — dejó de ser constante para toda la escena al
+            // añadirle el multiplicador por FILAMENTO, y bajó al bucle de sub-draws junto a
+            // u_finish, por la misma razón exacta y con el mismo truco de s249b: el dato ya está
+            // delante en C++, así que el material se resuelve sin tocar un solo shader. Sólo
+            // u_aniso_debug sigue aquí: es una herramienta de diagnóstico global, no una propiedad
+            // del material.
+            peel_shader->set_uniform("u_aniso_debug", m_realcolor_tuning.aniso_debug);
             // NEOTKO_REALCOLOR_TAG s243 (F1): hinchado de la extrusión, ver realcolor_peel.vs.
-            // Constante para toda la escena, así que va aquí y no en el bucle de sub-draws.
             // s243b: .x = flancos, .y = caras horizontales — son dos trabajos distintos y opuestos.
-            peel_shader->set_uniform("u_swell_mm", std::array<float, 2>{
-                std::max(m_realcolor_tuning.swell_lateral_mm, 0.0f),
-                std::max(m_realcolor_tuning.swell_vertical_mm, 0.0f) });
+            // ⚠️ s249: YA NO se manda aquí. Dejó de ser constante para toda la escena al añadirle
+            // la parte proporcional al ancho/altura del cordón y la excepción de silueta — ahora
+            // se resuelve con realcolor_swell_mm() DENTRO del bucle de sub-draws, junto a
+            // u_thickness y u_finish y por la misma razón que ellos.
             // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): procedural env textures + world-space
             // camera position for the env-mirror reflection, see realcolor_peel.fs. Bound on
             // GL_TEXTURE1/2 — unit 0 is u_prev_meta below, only set from pass 1 onward, so no
@@ -5927,6 +6530,12 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             const int thickness_loc = peel_shader->get_uniform_location("u_thickness");
             // NEOTKO_REALCOLOR_TAG s243 (F4): acabado por superficie, ver realcolor_surface_finish().
             const int finish_loc = peel_shader->get_uniform_location("u_finish");
+            // NEOTKO_REALCOLOR_TAG s249: hinchado por path, ver realcolor_swell_mm().
+            const int swell_loc = peel_shader->get_uniform_location("u_swell_mm");
+            // NEOTKO_REALCOLOR_TAG s251: eje de impresión del path, ver realcolor_bead_axis().
+            const int bead_axis_loc = peel_shader->get_uniform_location("u_bead_axis");
+            // NEOTKO_REALCOLOR_TAG s251b: baja al bucle porque su .x lo escala el filamento.
+            const int aniso_loc = peel_shader->get_uniform_location("u_aniso");
             // A5: Z de la primera capa. m_layers.get_zs() está ordenado ascendente, así que el
             // front() es la primera capa impresa. La tolerancia se toma de la propia altura del
             // path, no de una constante: con ALH la primera capa puede ser bastante más gruesa que
@@ -5972,6 +6581,28 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
                             const Path& sub_draw_path = buffer.paths[render_path.path_ids[i]];
                             if (thickness_loc != -1)
                                 peel_shader->set_uniform(thickness_loc, sub_draw_path.height);
+                            // NEOTKO_REALCOLOR_TAG s249 (vías 1+2): el hinchado baja aquí desde el
+                            // preámbulo de la pasada. Depende del ancho, de la altura y del role de
+                            // ESTE path, o sea de los tres datos que un RenderPath mezcla dentro de
+                            // un mismo lote de color — mandarlo arriba volvería a promediar.
+                            if (swell_loc != -1)
+                                peel_shader->set_uniform(swell_loc,
+                                    realcolor_swell_mm(sub_draw_path.width, sub_draw_path.height,
+                                                       sub_draw_path.role, m_realcolor_tuning));
+                            // NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo): el eje de
+                            // impresión de ESTE path. Va por sub-draw por la misma razón que la
+                            // altura y el acabado, pero aquí el argumento es aún más fuerte: el eje
+                            // es LO ÚNICO que distingue una scanline de la de al lado dentro del
+                            // mismo top, y un RenderPath las agrupa a todas por color. Mandarlo
+                            // arriba no sería impreciso, sería exactamente lo contrario del efecto.
+                            //
+                            // 🔑 Y aquí está la guinda para sandwich: cada pasada del top va con su
+                            // extrusor y su ángulo de relleno, luego cae en un Path distinto, luego
+                            // lleva su propio eje. Las capas se diferencian por CÓMO se imprimieron,
+                            // no sólo por el color.
+                            if (bead_axis_loc != -1)
+                                peel_shader->set_uniform(bead_axis_loc,
+                                    realcolor_bead_axis(sub_draw_path.bead_axis_acc));
                             // NEOTKO_REALCOLOR_TAG s243 (F4): el acabado se manda POR SUB-DRAW, por
                             // la misma razón exacta que la altura (ver el comentario de arriba): un
                             // RenderPath agrupa por color y puede mezclar Paths de roles distintos
@@ -5986,9 +6617,29 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
                                     -1.0f : sub_draw_path.sub_paths.front().first.position.z();
                                 const bool is_first_layer = first_layer_z >= 0.0f && path_z >= 0.0f &&
                                     std::abs(path_z - first_layer_z) <= std::max(sub_draw_path.height * 0.5f, 1e-3f);
+                                // NEOTKO_REALCOLOR_TAG s251b: el acabado del FILAMENTO de este
+                                // sub-draw. extruder_id se lee del propio Path y no del RenderPath
+                                // porque, aunque hoy un RenderPath agrupe por color y todos sus
+                                // sub-draws compartan extrusor, leerlo del path es gratis y no
+                                // depende de que esa invariante siga siendo cierta mañana.
+                                const int mat_slot = std::min((int)sub_draw_path.extruder_id, 3);
                                 const std::array<float, 2> finish =
-                                    realcolor_surface_finish(sub_draw_path.role, is_first_layer, m_realcolor_tuning);
+                                    realcolor_surface_finish(sub_draw_path.role, is_first_layer, m_realcolor_tuning,
+                                                             m_realcolor_materials.finish[mat_slot]);
                                 peel_shader->set_uniform(finish_loc, finish);
+                            }
+                            // NEOTKO_REALCOLOR_TAG s251b: brillo anisótropo escalado por el material.
+                            // Un PLA mate casi lo apaga (aniso_mul 0.25) y un silk lo dispara (1.80),
+                            // que es exactamente la diferencia que se ve girando dos bobinas bajo la
+                            // misma lámpara. Los otros dos componentes (nitidez y confianza mínima)
+                            // son globales y se re-mandan sin cambios: el coste es un glUniform3fv
+                            // más por sub-draw, del mismo orden que los cuatro que ya había.
+                            if (aniso_loc != -1) {
+                                const int mat_slot = std::min((int)sub_draw_path.extruder_id, 3);
+                                peel_shader->set_uniform(aniso_loc, std::array<float, 3>{
+                                    m_realcolor_tuning.aniso_strength * m_realcolor_materials.finish[mat_slot][2],
+                                    m_realcolor_tuning.aniso_sharpness,
+                                    m_realcolor_tuning.aniso_min_conf });
                             }
                             glsafe(::glDrawElements(GL_TRIANGLES, (GLsizei)render_path.sizes[i], GL_UNSIGNED_SHORT, (const void*)render_path.offsets[i]));
                         }
@@ -7618,8 +8269,15 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
         append_headers({ {_u8L("Filament"), offsets[0]}, {_u8L("Usage"), offsets[1]} });
         // NEOTKO_REALCOLOR_TAG: M6 — set expectations, this is an approximate optical
         // simulation (depth-peeled Beer-Lambert), not a guarantee of the final print color.
-        if (m_view_type == EViewType::RealColor)
+        if (m_view_type == EViewType::RealColor) {
             imgui.text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), _u8L("Approximated optical simulation — not a guarantee of the final print color"));
+            // NEOTKO_REALCOLOR_TAG s251b: puerta de entrada a la ventana de acabado por filamento.
+            // Vive AQUÍ, en la leyenda de RealColor, por dos razones: sólo tiene sentido con esta
+            // vista puesta (es lo único que lo consume), y esta leyenda ya es la lista de filamentos
+            // de la escena — o sea que el usuario ya está mirando la tabla que la ventana edita.
+            if (ImGui::Button(_u8L("Filament finish...").c_str()))
+                m_realcolor_materials_panel_open = !m_realcolor_materials_panel_open;
+        }
         break;
     }
     case EViewType::ColorPrint:

@@ -94,6 +94,7 @@ public:
         AlignStack, // NEOTKO_ALIGNSTACK_TAG
         TextureBump, // NEOTKO_TEXTUREBUMP_TAG -- unified gizmo (All + Painter modes, docs/ATTRIBUTION_TEXTURE_BUMP.md §6)
         PrecisionALH, // NEOTKO_PRECISIONALH_TAG -- point-based layer height curve editor, LibreMode-gated
+        HeightAdaptiveEffects, // NEOTKO_HAE_TAG -- Z->value curve editor for pluggable effects, LibreMode-gated
         //SlaSupports,
         // BBS
         //FaceRecognition,

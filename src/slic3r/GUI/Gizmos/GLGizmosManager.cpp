@@ -31,6 +31,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoAssembly.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoTextureBump.hpp" // NEOTKO_TEXTUREBUMP_TAG -- unified gizmo (All + Painter modes)
 #include "slic3r/GUI/Gizmos/GLGizmoPrecisionALH.hpp" // NEOTKO_PRECISIONALH_TAG
+#include "slic3r/GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp" // NEOTKO_HAE_TAG
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -193,6 +194,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::PrecisionALH): // NEOTKO_PRECISIONALH_TAG
             gizmo->set_icon_filename(m_is_dark ? "toolbar_precision_alh_dark.svg" : "toolbar_precision_alh.svg");
             break;
+        case (EType::HeightAdaptiveEffects): // NEOTKO_HAE_TAG
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_height_adaptive_effects_dark.svg" : "toolbar_height_adaptive_effects.svg");
+            break;
         }
 
     }
@@ -243,6 +247,9 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoTextureBump(m_parent, m_is_dark ? "toolbar_texture_bump_editor_dark.svg" : "toolbar_texture_bump_editor.svg", EType::TextureBump));
     // NEOTKO_PRECISIONALH_TAG — point-based layer height curve editor (LibreMode-gated via on_is_activable).
     m_gizmos.emplace_back(new GLGizmoPrecisionALH(m_parent, m_is_dark ? "toolbar_precision_alh_dark.svg" : "toolbar_precision_alh.svg", EType::PrecisionALH));
+    // NEOTKO_HAE_TAG — Height Adaptive Effects curve editor (LibreMode-gated via on_is_activable).
+    // Order in this vector MUST match the order in EType — it goes right after PrecisionALH there.
+    m_gizmos.emplace_back(new GLGizmoHeightAdaptiveEffects(m_parent, m_is_dark ? "toolbar_height_adaptive_effects_dark.svg" : "toolbar_height_adaptive_effects.svg", EType::HeightAdaptiveEffects));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));

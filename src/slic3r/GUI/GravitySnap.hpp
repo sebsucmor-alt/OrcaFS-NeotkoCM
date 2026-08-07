@@ -42,6 +42,43 @@ bool enabled();
 // is inert regardless. See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_V2_PLAN.md §1.
 bool bed_is_floor();
 
+// NEOTKO_SNAPDRAG_TAG s249 — "Move selection as one block" (app_config "neotko_snap_drag_group",
+// DEFAULT OFF, i.e. absent key reads as false, so the shipped s233 behaviour is what a user gets
+// until they ask for something else).
+//
+// OFF (s233) = a multi-instance drag is resolved BY STACKS: whoever stands on another member of
+// the drag rides with it, everyone else finds their own floor. Two objects picked together land
+// at two different heights, which is correct and is what the feature's own gif shows.
+//
+// ON = the whole selection is ONE rigid body. Nobody changes height RELATIVE to anyone else; the
+// selection as a whole falls until the FIRST member touches its floor (the bed included, when
+// bed_is_floor() is on) and stops there. This is the "carry this assembly somewhere else without
+// it rearranging itself" mode — in particular it is what keeps a loose object dragged together
+// with an assembled one from being sent to the plate on its own.
+//
+// Only meaningful while enabled() is true, and only for drags of more than one instance: a single
+// instance is trivially its own rigid body and takes the untouched s227 path either way.
+bool move_as_group();
+
+// NEOTKO_SNAPDRAG_TAG s249 — is the Snap & Drag options panel showing? Mutable reference, exactly
+// like PhotoMode's photo_mode(): this is transient UI state (no ini key — the panel does not
+// survive a restart, only the preferences it edits do), and the two owners are far apart — the
+// magnet icon in PartPlate/Plater flips it, GLCanvas3D::_render_overlays reads it.
+bool& panel_open();
+
+// NEOTKO_SNAPDRAG_TAG s249 — should the magnet icon exist in the plate column at all?
+//
+// Gated on LibreMode, NOT on True Objects, even though True Objects is what Snap & Drag actually
+// needs. Two reasons, and the second is the load-bearing one:
+//  - LibreMode is the master wall above True Objects anyway (MainFrame forces both sub-keys off
+//    when it goes down), so nothing reachable is lost;
+//  - the plate's picking raycasters are registered when plates are (re)built, not on every
+//    app_config change. Keying the icon to a toggle the user flips from the toolbar mid-session
+//    would leave it registered-but-invisible or visible-but-dead until something else happened to
+//    rebuild the plate. This is the same gate Photo Mode's camera icon uses, for the same reason.
+// True Objects being off is instead handled INSIDE the panel, which says so and dims its controls.
+bool plate_icon_available();
+
 // NEOTKO_SNAPDRAG_TAG s233 — result of a floor query. Was a bare std::optional<double> in s227;
 // it now carries WHY/WHERE the answer came from, because three call sites need that and none of
 // them may recompute it: the drag hysteresis must distinguish "resting on an object" from

@@ -977,6 +977,12 @@ static std::vector<std::string> s_Preset_print_options {
      "neotko_alh_adapt_to_color",
      "neotko_alh_slope_recolor",
      // NEOTKO_SANDWICH_ENGINE_TAG_END
+     // NEOTKO_HAE_TAG s247 — Height Adaptive Effects curves (hidden, gizmo-written, no Tab widget).
+     "neotko_hae_xy_contour", "neotko_hae_xy_hole", "neotko_hae_infill_width", "neotko_hae_fuzzy_thickness",
+     // NEOTKO_HAE_TAG s248 — Adaptive Effector level 0, same contract.
+     "neotko_hae_outer_wall_width", "neotko_hae_inner_wall_width",
+     "neotko_hae_fuzzy_point_distance", "neotko_hae_fuzzy_scale",
+     "neotko_hae_fuzzy_octaves", "neotko_hae_fuzzy_persistence",
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth", "mmu_segmented_region_extra_walls", "mmu_segmented_region_surface_depth",
      "mmu_segmented_region_extra_walls_per_color", "mmu_segmented_region_surface_depth_per_color",

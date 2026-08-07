@@ -36,13 +36,31 @@ uniform vec3 u_fresnel_tint;
 // Neutro = (1.0, 0.0) ≡ comportamiento pre-s243. Ver 140/realcolor_peel.fs.
 uniform vec2 u_finish;
 
+// NEOTKO_REALCOLOR_TAG s251 (Fase 0, docs/FUTURE/REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md): brillo
+// anisótropo. .x = fuerza (0 = neutro exacto), .y = exponente del lóbulo, .z = confianza mínima
+// del eje. u_aniso_debug pinta el eje en vez de la escena (herramienta de medida, no efecto).
+// Ver 140/realcolor_peel.fs para el razonamiento completo.
+uniform vec3 u_aniso;
+uniform float u_aniso_debug;
+
+// NEOTKO_REALCOLOR_TAG s251d: AISLADOR DE TÉRMINOS. 0 = imagen normal. Ver 140/realcolor_peel.fs.
+uniform int u_light_solo;
+
 // x = direct-light diffuse only, y = specular; matches realcolor_peel.vs
 varying vec2 intensity;
 varying float v_eye_z; // linear eye-space depth, matches realcolor_peel.vs
 varying vec3 v_view_normal; // NEOTKO_REALCOLOR_TAG s166 (item 3): view-space normal, for SSAO in present
 varying vec3 v_world_pos; // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): world-space position, see realcolor_peel.vs
+varying vec4 v_bead_tangent; // NEOTKO_REALCOLOR_TAG s251: eje del cordón (xyz) + confianza (w)
 
 const float REALCOLOR_PI = 3.14159265359;
+
+// NEOTKO_REALCOLOR_TAG s251: MISMA dirección de luz que realcolor_peel.vs (LIGHT_TOP_DIR). Se
+// duplica la constante en vez de pasarla por varying porque es literalmente una constante de
+// compilación en los dos ficheros; si algún día se mueve a uniform, hay que tocar los dos.
+// ⚠️ Es válida en MUNDO porque view_normal_matrix se manda como IDENTIDAD desde
+// render_toolpaths_realcolor() — el nombre v_view_normal es herencia, el contenido es mundo.
+const vec3 ANISO_LIGHT_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
 
 // NEOTKO_REALCOLOR_TAG s214: same convention as the CPU-side generator (realcolor_env_sample()
 // in GCodeViewer.cpp) — v=0 is straight up (sky), v=1 is straight down (ground), matching the
@@ -58,6 +76,32 @@ vec2 equirect_uv(vec3 dir)
     float u = atan(dir.y, dir.x) / (2.0 * REALCOLOR_PI) + 0.5;
     float v = 0.5 - asin(clamp(dir.z, -1.0, 1.0)) / REALCOLOR_PI;
     return vec2(u, v);
+}
+
+// NEOTKO_REALCOLOR_TAG s251 (Fase 0): lóbulo especular anisótropo de Kajiya-Kay, el modelo
+// estándar de pelo/fibra. Para un haz de cilindros paralelos la normal no es única: hay un ANILLO
+// entero de normales alrededor del eje, así que el reflejo no es un punto sino una FRANJA
+// perpendicular al eje. Kajiya-Kay resuelve ese anillo en forma cerrada usando sólo el eje T, sin
+// necesidad de una normal por fibra — que es exactamente lo que aquí no tenemos.
+//
+// La expresión es el coseno del ángulo entre la dirección reflejada ideal y la vista, escrito con
+// senos y cosenos respecto de T: sin(T,L)·sin(T,V) − cos(T,L)·cos(T,V). Sólo entran los productos
+// escalares con T, y siempre en combinaciones simétricas, así que el SIGNO de T no llega al
+// resultado — que es la razón por la que basta con un EJE y no hace falta una dirección orientada.
+float realcolor_aniso_lobe(vec3 T, vec3 L, vec3 V, float exponent)
+{
+    float t_l = dot(T, L);
+    float t_v = dot(T, V);
+    float sin_l = sqrt(max(1.0 - t_l * t_l, 0.0));
+    float sin_v = sqrt(max(1.0 - t_v * t_v, 0.0));
+    return pow(max(sin_l * sin_v - t_l * t_v, 0.0), exponent);
+}
+
+// NEOTKO_REALCOLOR_TAG s251: matiz a partir de un ángulo, sólo para el visor de diagnóstico.
+vec3 realcolor_hue(float h)
+{
+    vec3 p = abs(fract(vec3(h) + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return clamp(p - 1.0, 0.0, 1.0);
 }
 
 void main()
@@ -114,6 +158,54 @@ void main()
     float diffuse_ambient     = 1.0 + 0.25 * roughness;
     vec3 diffuse = vec3(intensity.x * diffuse_directional) + ambient * diffuse_ambient;
     vec3 lit = vec3(intensity.y) * u_finish.x + rim + base * diffuse; // s243 (F4): brillo por acabado
+
+    // NEOTKO_REALCOLOR_TAG s251 (Fase 0): BRILLO ANISÓTROPO. Ver 140/realcolor_peel.fs para el
+    // razonamiento largo; el resumen es que se SUMA un lóbulo propio en vez de modular la difusa,
+    // porque la difusa se calcula por vértice (§2.2 del plan) y bajarla al fragment era la fase
+    // cara. Con u_aniso.x = 0 esto es exactamente cero y la imagen es bit-idéntica a s249b.
+    float bead_conf = v_bead_tangent.w;
+    float bead_len = length(v_bead_tangent.xyz);
+    vec3 T = (bead_len > 1e-4) ? (v_bead_tangent.xyz / bead_len) : vec3(0.0);
+    float aniso_term = 0.0; // s251d: guardado aparte para poder aislarlo
+
+    if (u_aniso.x > 0.0 && bead_conf > 0.0 && bead_len > 1e-4) {
+        // La confianza entra con un FUNDIDO, no con un salto: un umbral duro pondría un borde
+        // visible entre paths casi idénticos, y el efecto pasaría a delatar la estructura de datos
+        // en vez de la geometría. Los flancos llegan aquí con confianza 1 y no se enteran de esto.
+        float gate = smoothstep(u_aniso.z, u_aniso.z + 0.15, bead_conf);
+        float lobe = realcolor_aniso_lobe(T, ANISO_LIGHT_DIR, view_dir, max(u_aniso.y, 1.0));
+        // Lo escala el mismo brillo del acabado que ya escala especular y rim (u_finish.x): una
+        // primera capa aplastada y un soporte mal formado no pueden tener el mismo satinado.
+        // Una superficie rugosa además dispersa: pierde franja. Es el mismo reparto de s243c.
+        aniso_term = u_aniso.x * gate * lobe * u_finish.x * (1.0 - 0.75 * roughness);
+        lit += vec3(aniso_term);
+    }
+
+    // NEOTKO_REALCOLOR_TAG s251d: AISLADOR. Sustituye la imagen por UN SOLO término. Ver la nota
+    // larga en 140/realcolor_peel.fs — resumen: sirve para responder "¿de dónde sale esta luz?"
+    // con una medida en vez de con una hipótesis.
+    if (u_light_solo == 1)      lit = base * vec3(intensity.x * diffuse_directional);
+    else if (u_light_solo == 2) lit = base * ambient * diffuse_ambient;
+    else if (u_light_solo == 3) lit = vec3(intensity.y) * u_finish.x;
+    else if (u_light_solo == 4) lit = rim;
+    else if (u_light_solo == 5) lit = vec3(aniso_term);
+    else if (u_light_solo == 6) lit = base;
+    else if (u_light_solo == 7) lit = vec3(0.0);
+
+    // Visor de diagnóstico (u_aniso_debug). Matiz = ángulo del eje con periodo 180° (es un EJE:
+    // 0° y 180° son el mismo), saturación = confianza. Un top monotónico tiene que salir de un
+    // color plano y uniforme; un perímetro externo, GRIS.
+    //
+    // 🚨 VA FUERA DEL if DE ARRIBA A PROPÓSITO. El caso que más interesa comprobar es justo el de
+    // confianza 0 (el perímetro), y dejarlo dentro del guard lo pintaría con su color normal en vez
+    // de gris: el control de la medida se perdería justo donde hay que mirarlo.
+    // ⚠️ Lo que se ve es el composite de varias pasadas de peel, así que en zonas translúcidas el
+    // color se mezcla con el de detrás — para leerlo, mirar una cara opaca de cerca, no la silueta.
+    if (u_aniso_debug > 0.0) {
+        float ang = atan(T.y, T.x) / REALCOLOR_PI; // -1..1, periodo 180° tras el fract()
+        vec3 dbg = mix(vec3(0.5), realcolor_hue(fract(ang)), bead_conf);
+        lit = mix(lit, dbg, clamp(u_aniso_debug, 0.0, 1.0));
+    }
 
     gl_FragData[0] = vec4(lit, 1.0);
     gl_FragData[1] = vec4(float(u_tool_id), u_thickness, v_eye_z, 1.0); // a=1 marks "fragment written"

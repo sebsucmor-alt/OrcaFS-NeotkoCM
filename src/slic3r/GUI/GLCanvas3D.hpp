@@ -1309,6 +1309,14 @@ private:
     // NEOTKO_SNAPDRAG_TAG s227 — landing indicator (shadow + beam), see §"visual" follow-up in
     // docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md.
     void _render_snapdrag_indicator();
+    // NEOTKO_SNAPDRAG_TAG s249 — one live-drag frame in "Move selection as one block" mode; owns
+    // the landing indicator while it is the active arm. See the .cpp for the max-dz rule.
+    void _snapdrag_rigid_frame(const std::set<std::pair<int, int>>& moving);
+    // NEOTKO_SNAPDRAG_TAG s249 — the Snap & Drag options panel opened by the magnet icon in the
+    // plate column. Single home for every Snap & Drag preference: they used to live in the object
+    // context menu, which meant they simply vanished for any selection that produced a different
+    // menu (multi-selection being the one that bit).
+    void _render_snapdrag_panel();
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER

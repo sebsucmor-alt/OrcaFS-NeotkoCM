@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -22,6 +23,7 @@
 #include "ShortestPath.hpp"
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
 #include "libslic3r/Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 5 — elephant foot
+#include "libslic3r/Feature/HeightAdaptive/HeightCurve.hpp" // NEOTKO_HAE_EXPANSION_TAG s247 — per-layer XY compensation
 
 //! macro used to mark string used at localization, return same string
 #define L(s) Slic3r::I18N::translate(s)
@@ -178,6 +180,11 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     // BBS: don't do size compensation when slice volume.
     // Will handle contour and hole size compensation seperately later.
     //const auto   extra_offset  = is_mm_painted ? 0.f : std::max(0.f, float(print_object_config.xy_contour_compensation.value));
+    // ⚠️ NEOTKO_HAE_EXPANSION_TAG s247 — DO NOT re-enable the commented line above. The comment in
+    // make_slices that says "the positive scaling has already been applied during slicing" is legacy
+    // and false since BBS zeroed this: BOTH signs of the XY compensation are applied later, in
+    // make_slices, which is also where the Height Adaptive Effects curve is evaluated per layer.
+    // Reviving this offset would compensate the positive side twice, curve included.
     const auto   extra_offset = 0.f;
 
     for (const ModelVolume *model_volume : model_volumes)
@@ -5355,10 +5362,28 @@ void PrintObject::slice_volumes()
 
     BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - make_slices in parallel - begin";
     {
-        // Compensation value, scaled. Only applying the negative scaling here, as the positive scaling has already been applied during slicing.
+        // Compensation value, scaled. (⚠️ NEOTKO_HAE_EXPANSION_TAG s247: the rest of this legacy
+        // comment — "only applying the negative scaling here, as the positive scaling has already
+        // been applied during slicing" — is FALSE since BBS zeroed extra_offset at line ~181. Both
+        // signs are applied right here, which is why this is the single apply point for the curve.)
         const size_t num_extruders = print->config().filament_diameter.size();
-        const auto   xy_hole_scaled = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_hole_compensation.value);
-        const auto   xy_contour_scaled            = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_contour_compensation.value);
+        const bool   xy_compensation_suppressed = num_extruders > 1 && this->is_mm_painted();
+        const auto   xy_hole_scaled_base = xy_compensation_suppressed ? scaled<float>(0.f) : scaled<float>(m_config.xy_hole_compensation.value);
+        const auto   xy_contour_scaled_base       = xy_compensation_suppressed ? scaled<float>(0.f) : scaled<float>(m_config.xy_contour_compensation.value);
+        // NEOTKO_HAE_EXPANSION_TAG s247 — Height Adaptive Effects, effect A (plan §5.2).
+        // The per-layer scalar ALREADY travels here (elefant_foot_compensation computes a different
+        // value per layer a few lines below); the XY compensation was simply constant. Replace the
+        // constant by the curve evaluated at the layer's slice_z. Empty curves ⇒ at() returns the
+        // base value verbatim ⇒ byte-identical gcode.
+        //
+        // The MMU / fuzzy-skin suppression above wins over the curve on purpose: the curve inherits
+        // the same engine limitation (plan §9 conflicts #1 and #2), it does not work around it.
+        const HeightAdaptive::HeightCurve hae_contour = xy_compensation_suppressed ?
+            HeightAdaptive::HeightCurve(HeightAdaptive::Interp::Smooth) :
+            HeightAdaptive::HeightCurve::parse(m_config.neotko_hae_xy_contour.value, HeightAdaptive::Interp::Smooth);
+        const HeightAdaptive::HeightCurve hae_hole = xy_compensation_suppressed ?
+            HeightAdaptive::HeightCurve(HeightAdaptive::Interp::Smooth) :
+            HeightAdaptive::HeightCurve::parse(m_config.neotko_hae_xy_hole.value, HeightAdaptive::Interp::Smooth);
         // NEOTKO_GRAVITY_TAG s226 — Fase 5: elephant foot compensates the extra material that
         // squishes out against the BED on the first real layer. A face that rests on ANOTHER
         // piece has no such squish, so compensating there only shrinks the contact face (a
@@ -5373,13 +5398,37 @@ void PrintObject::slice_volumes()
         // Uncompensated slices for the layers in case the Elephant foot compensation is applied.
         std::vector<ExPolygons> lslices_elfoot_uncompensated;
         lslices_elfoot_uncompensated.resize(elephant_foot_compensation_scaled > 0 ? std::min(m_config.elefant_foot_compensation_layers.value, (int)m_layers.size()) : 0);
+        // NEOTKO_HAE_TAG s247 — "islands lost to XY compensation" detector (replaces the
+        // Expansion-specific 3D preview that phase F4 of the plan reserved a slot for; see
+        // plan §10, risks 1 and 2). The two failure modes there — a strong POSITIVE offset
+        // fusing two nearby details into one, a strong NEGATIVE one making small islands like
+        // letters vanish — are both invisible until you slice, and BOTH show up as the same
+        // measurable fact: this layer came out of the compensation with fewer islands than it
+        // went in with. So we do not guess on the mesh, we report what actually happened.
+        //
+        // Deliberately scoped to SINGLE-REGION layers: there, one region's surfaces ARE the
+        // islands, so before/after is an exact integer comparison that costs nothing. The
+        // multi-region branch would need a union per layer to get the same number, and its
+        // inter-region clipping changes the count for reasons that have nothing to do with the
+        // compensation — a noisy check is worse than no check.
+        //
+        // One slot per layer, each written by exactly one thread: no synchronization needed.
+        std::vector<int> islands_lost(m_layers.size(), 0);
         //BBS: this part has been changed a lot to support seperated contour and hole size compensation
 	    tbb::parallel_for(
 	        tbb::blocked_range<size_t>(0, m_layers.size()),
-			[this, xy_hole_scaled, xy_contour_scaled, elephant_foot_compensation_scaled, &lslices_elfoot_uncompensated](const tbb::blocked_range<size_t>& range) {
+			[this, xy_hole_scaled_base, xy_contour_scaled_base, &hae_contour, &hae_hole, elephant_foot_compensation_scaled, &lslices_elfoot_uncompensated, &islands_lost](const tbb::blocked_range<size_t>& range) {
 	            for (size_t layer_id = range.begin(); layer_id < range.end(); ++ layer_id) {
 	                m_print->throw_if_canceled();
 	                Layer *layer = m_layers[layer_id];
+                    // NEOTKO_HAE_EXPANSION_TAG — per-layer compensation. These shadow nothing: the
+                    // captured values are the *_base ones, so every use below (both the single-region
+                    // and the multi-region branch) reads the per-layer value without touching them.
+                    // HeightCurve::at() is const and re-entrant, safe inside the parallel_for.
+                    const float xy_contour_scaled = hae_contour.empty() ? xy_contour_scaled_base :
+                        scaled<float>(hae_contour.at(layer->slice_z, m_config.xy_contour_compensation.value));
+                    const float xy_hole_scaled = hae_hole.empty() ? xy_hole_scaled_base :
+                        scaled<float>(hae_hole.at(layer->slice_z, m_config.xy_hole_compensation.value));
 	                // Apply size compensation and perform clipping of multi-part objects.
 	                float elfoot = elephant_foot_compensation_scaled > 0 && layer_id < m_config.elefant_foot_compensation_layers.value ? 
                         elephant_foot_compensation_scaled - (elephant_foot_compensation_scaled / m_config.elefant_foot_compensation_layers.value) * layer_id : 
@@ -5388,6 +5437,14 @@ void PrintObject::slice_volumes()
 	                    // Optimized version for a single region layer.
 	                    // Single region, growing or shrinking.
 	                    LayerRegion *layerm = layer->m_regions.front();
+                        // NEOTKO_HAE_TAG s247 — island census, before. Free: just the surface count.
+                        // Layers where elephant foot is also acting are EXCLUDED: elfoot shrinks
+                        // too and its branch ends in a union_ex(), so a drop there cannot be
+                        // pinned on the XY compensation, and a notification that names the wrong
+                        // cause is worse than no notification. Elfoot only touches the first few
+                        // layers, so nothing meaningful is lost.
+                        const bool   census_on       = elfoot <= 0.f && (xy_contour_scaled != 0.f || xy_hole_scaled != 0.f);
+                        const size_t islands_before  = census_on ? layerm->slices.surfaces.size() : 0;
                         if (elfoot > 0) {
 		                    // Apply the elephant foot compensation and store the original layer slices without the Elephant foot compensation applied.
                             ExPolygons expolygons_to_compensate = to_expolygons(std::move(layerm->slices.surfaces));
@@ -5424,6 +5481,12 @@ void PrintObject::slice_volumes()
                                 layerm->slices.set(std::move(expolygons), stInternal);
                             }
 	                    }
+                        // NEOTKO_HAE_TAG s247 — island census, after. A drop means the
+                        // compensation merged details together or removed small islands
+                        // outright; which of the two it was is visible in the preview, and the
+                        // notification's job is only to send the user to look.
+                        if (census_on && layerm->slices.surfaces.size() < islands_before)
+                            islands_lost[layer_id] = int(islands_before - layerm->slices.surfaces.size());
 	                } else {
                         float max_growth = std::max(xy_hole_scaled, xy_contour_scaled);
                         float min_growth = std::min(xy_hole_scaled, xy_contour_scaled);
@@ -5482,6 +5545,36 @@ void PrintObject::slice_volumes()
 	                layer->make_slices();
 	            }
 	        });
+	    // NEOTKO_HAE_TAG s247 — one notification for the whole object, naming the lowest Z where
+	    // it happened so the user knows where to look in the preview. NON_CRITICAL on purpose:
+	    // this is legitimate behaviour of a setting the user asked for (S3D does exactly the
+	    // same), not an error. Information, not permission — same rule as the gizmo.
+	    {
+	        int    layers_affected = 0, islands_total = 0;
+	        double first_z = 0.;
+	        for (size_t i = 0; i < islands_lost.size(); ++ i)
+	            if (islands_lost[i] > 0) {
+	                if (layers_affected == 0)
+	                    first_z = m_layers[i]->print_z;
+	                ++ layers_affected;
+	                islands_total += islands_lost[i];
+	            }
+	        if (layers_affected > 0) {
+	            // Plain concatenation, like the two XY-compensation notices further up this file.
+	            // std::to_string on a double would print "1.700000"; snprintf keeps the Z readable.
+	            char z_buf[32];
+	            std::snprintf(z_buf, sizeof(z_buf), "%.2f", first_z);
+	            this->active_step_add_warning(
+	                PrintStateBase::WarningLevel::NON_CRITICAL,
+	                _u8L("XY size compensation merged or removed small islands.") + "\n"
+	                    + _u8L("Object name") + ": " + this->model_object()->name + "\n"
+	                    + std::to_string(islands_total) + " " + _u8L("island(s) lost across") + " "
+	                    + std::to_string(layers_affected) + " " + _u8L("layer(s), starting at Z") + " "
+	                    + z_buf + " mm.\n"
+	                    + _u8L("Check the preview if this object has small details or thin gaps."));
+	        }
+	    }
+
 	    if (elephant_foot_compensation_scaled > 0.f && ! m_layers.empty()) {
 	    	// The Elephant foot has been compensated, therefore the elefant_foot_compensation_layers layer's lslices are shrank with the Elephant foot compensation value.
 	    	// Store the uncompensated value there.

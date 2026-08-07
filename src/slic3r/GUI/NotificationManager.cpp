@@ -10,6 +10,7 @@
 #include "ParamsPanel.hpp"
 #include "MainFrame.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/AppConfig.hpp" // NEOTKO_NOTIF_DIGEST_TAG — s250: the digest band reads its preference from app_config
 #include "format.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -1846,6 +1847,14 @@ void NotificationManager::close_validate_warning_notification(const std::string&
     close_notification_of_type_and_text(NotificationType::ValidateWarning, _u8L("WARNING:") + "\n" + text);
 }
 
+// NEOTKO_VALIDATE_WARNING_STALE_TAG — s250
+void NotificationManager::close_stale_validate_warnings(const std::string& current_text)
+{
+    for (std::unique_ptr<PopNotification>& notification : m_pop_notifications)
+        if (notification->get_type() == NotificationType::ValidateWarning && !notification->compare_text(current_text))
+            notification->close();
+}
+
 void NotificationManager::push_slicing_error_notification(const std::string &text, std::vector<ModelObject const *> objs)
 {
     std::vector<ObjectID> ids;
@@ -2555,14 +2564,226 @@ void NotificationManager::stop_delayed_notifications_of_type(const NotificationT
 	}
 }
 
+// NEOTKO_NOTIF_DIGEST_TAG — s250 ---------------------------------------------------------------
+bool NotificationManager::digest_active() const
+{
+	// Default follows LibreMode: the band exists for the user who is stacking objects on purpose.
+	// Once the preference key is written it wins, so it can be forced on or off independently.
+	const AppConfig* cfg = wxGetApp().app_config;
+	if (cfg == nullptr)
+		return false;
+	if (cfg->has("neotko_notification_digest"))
+		return cfg->get_bool("neotko_notification_digest");
+	return cfg->get_bool("neotko_libre_mode");
+}
+
+bool NotificationManager::is_digestible(const PopNotification& notification) const
+{
+	// Anything alive and moving stays out of the band: progress bars must remain visible while they
+	// run, and the export notification carries its own actions ("Open Folder") and closes by itself.
+	switch (notification.get_type()) {
+	case NotificationType::SlicingProgress:
+	case NotificationType::ProgressBar:
+	case NotificationType::ProgressIndicator:
+	case NotificationType::PrintHostUpload:
+	case NotificationType::URLDownload:
+	case NotificationType::ExportFinished:
+	case NotificationType::ExportOngoing:
+	case NotificationType::ArrangeOngoing:
+	case NotificationType::DidYouKnowHint:
+		return false;
+	default:
+		break;
+	}
+	const NotificationLevel level = notification.get_data().level;
+	if (level == NotificationLevel::ProgressBarNotificationLevel || level == NotificationLevel::HintNotificationLevel)
+		return false;
+	return true;
+}
+
+size_t NotificationManager::digest_count(bool& has_error) const
+{
+	has_error = false;
+	size_t count = 0;
+	for (const std::unique_ptr<PopNotification>& notification : m_pop_notifications) {
+		const PopNotification::EState state = notification->get_state();
+		if (state == PopNotification::EState::Hidden || state == PopNotification::EState::ClosePending || state == PopNotification::EState::Finished)
+			continue;
+		if (!is_digestible(*notification))
+			continue;
+		++count;
+		const NotificationLevel level = notification->get_data().level;
+		if (level == NotificationLevel::ErrorNotificationLevel || level == NotificationLevel::SeriousWarningNotificationLevel)
+			has_error = true;
+	}
+	return count;
+}
+
+void NotificationManager::close_digested()
+{
+	for (std::unique_ptr<PopNotification>& notification : m_pop_notifications) {
+		const PopNotification::EState state = notification->get_state();
+		if (state == PopNotification::EState::ClosePending || state == PopNotification::EState::Finished)
+			continue;
+		if (is_digestible(*notification))
+			notification->close();
+	}
+}
+
+float NotificationManager::render_digest_bar(GLCanvas3D& canvas, float initial_y, bool move_from_overlay, float overlay_width, float right_margin, size_t count, bool has_error)
+{
+	ImGuiWrapper& imgui     = *wxGetApp().imgui();
+	const Size    cnv_size  = canvas.get_canvas_size();
+	const float   line_h    = ImGui::CalcTextSize("A").y;
+	// Same column and width as a regular notification (line_height * 25, see PopNotification::init),
+	// but only tall enough for one line: that is the whole point of the band.
+	const float   win_w     = line_h * 25.f;
+	const float   win_h     = line_h * 2.f;
+	// The icon glyphs (close cross, fold arrow) are atlas images, NOT text: they draw at a fixed
+	// intrinsic size, considerably larger than a line of text, and ImGui::Button CLIPS its label to the
+	// button rect. On a card four lines tall that is fine; on a one-line band it is not — sizing the
+	// button to the glyph made the band grow, and sizing it to the band clipped the glyph. So scale the
+	// glyph down instead (SetWindowFontScale below) and keep the band thin, which is the whole point.
+	// The * 1.25 is the same headroom PopNotification::render_close_button() applies, because Button
+	// clips the label to the rect shrunk by FramePadding.
+	std::wstring  icon_probe;
+	icon_probe = ImGui::CloseNotifButton;
+	const ImVec2  icon_pic   = ImGui::CalcTextSize(into_u8(icon_probe).c_str());
+	const float   icon_box   = win_h * 0.72f;
+	const float   icon_natural = std::max(std::max(icon_pic.x, icon_pic.y) * 1.25f, 1.f);
+	const float   icon_scale = std::min(1.f, icon_box / icon_natural);
+	const float   right_gap = right_margin + (move_from_overlay ? overlay_width + line_h * 5.f : 0.f);
+	const float   radius    = 4.0f * canvas.get_scale();
+
+	const ImVec4 bar_color = has_error ?
+		ImGuiWrapper::to_ImVec4(decode_color_to_float_array("#E14747")) :  // same red as an error card
+		ImGuiWrapper::to_ImVec4(decode_color_to_float_array("#F59B16"));   // same amber as a warning card
+
+	const float  top_y = initial_y + win_h;
+	const ImVec2 win_pos(1.0f * (float) cnv_size.get_width() - right_gap, 1.0f * (float) cnv_size.get_height() - top_y);
+	imgui.set_next_window_pos(win_pos.x, win_pos.y, ImGuiCond_Always, 1.0f, 0.0f);
+	imgui.set_next_window_size(win_w, win_h, ImGuiCond_Always);
+
+	if (m_digest_id == 0)
+		m_digest_id = m_id_provider.allocate_id();
+	const std::string name = "!!NtfctnDigest" + std::to_string(m_digest_id);
+
+	ImGuiStyle& style = ImGui::GetStyle();
+	const ImVec2 old_padding  = style.WindowPadding;
+	const float  old_rounding = style.WindowRounding;
+	style.WindowPadding  = ImVec2(0, 0);
+	style.WindowRounding = radius;
+
+	ImGui::PushStyleColor(ImGuiCol_WindowBg,     bar_color);
+	ImGui::PushStyleColor(ImGuiCol_Border,       bar_color);
+	ImGui::PushStyleColor(ImGuiCol_Text,         ImVec4(1.f, 1.f, 1.f, 1.f));
+	ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.f, 0.f, 0.f, 0.f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(1.f, 1.f, 1.f, .18f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.f, 1.f, 1.f, .28f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+
+	const int window_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+	                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+	if (imgui.begin(name, window_flags)) {
+		// Label: "3 WARNINGS" / "2 WARNINGS, 1 ERROR"-ish is overkill — the color already says "error",
+		// so one plain count keeps the band as small as it was asked to be.
+		const std::string label = std::to_string(count) + " " + (count == 1 ? into_u8(_L("WARNING")) : into_u8(_L("WARNINGS")));
+
+		// Icon boxes are square, icon_box wide (see above), vertically centered in the band, laid out
+		// from the right edge inwards: [ ...label... ] [ arrow ] [ cross ].
+		const float gap      = line_h * 0.35f;
+		const float btn_y    = (win_h - icon_box) * 0.5f;
+		const float close_x  = win_w - icon_box - gap;
+		const float arrow_x  = close_x - icon_box - gap;
+
+		// The whole left part of the band toggles the fold.
+		ImGui::SetCursorPos(ImVec2(0.f, 0.f));
+		if (imgui.button("##neotko_digest_toggle", arrow_x, win_h))
+			m_digest_expanded = !m_digest_expanded;
+		const bool toggle_hovered = ImGui::IsItemHovered();
+
+		ImGui::SetCursorPos(ImVec2(line_h * 0.8f, win_h / 2.f - line_h / 2.f));
+		imgui.text(label.c_str());
+
+		// From here on the icons are drawn shrunk to icon_box. The label above is already submitted, so
+		// it keeps its normal size; restored right after the two buttons.
+		ImGui::SetWindowFontScale(icon_scale);
+
+		// Fold / unfold arrow.
+		// std::wstring has no converting constructor from wchar_t, only operator=. Same idiom as
+		// render_close_button() / render_minimize_button() above.
+		std::wstring arrow_text;
+		arrow_text = m_digest_expanded ? ImGui::CollapseArrowIcon : ImGui::ExpandArrowIcon;
+		ImGui::SetCursorPos(ImVec2(arrow_x, btn_y));
+		if (imgui.button(arrow_text.c_str(), icon_box, icon_box))
+			m_digest_expanded = !m_digest_expanded;
+
+		// Close-them-all cross. Hover test in screen space: win_pos is the band's UPPER-RIGHT corner.
+		std::wstring close_text;
+		close_text = ImGui::CloseNotifButton;
+		const float close_left = win_pos.x - win_w + close_x;
+		if (ImGui::IsMouseHoveringRect(ImVec2(close_left, win_pos.y + btn_y), ImVec2(close_left + icon_box, win_pos.y + btn_y + icon_box), true))
+			close_text = ImGui::CloseNotifHoverButton;
+		ImGui::SetCursorPos(ImVec2(close_x, btn_y));
+		if (imgui.button(close_text.c_str(), icon_box, icon_box))
+			close_digested();
+
+		ImGui::SetWindowFontScale(1.f);
+
+		if (toggle_hovered)
+			imgui.tooltip(m_digest_expanded ? _L("Hide the messages") : _L("Show the messages"), ImGui::GetFontSize() * 20.0f);
+	}
+	imgui.end();
+
+	ImGui::PopStyleVar();
+	ImGui::PopStyleColor(6);
+	style.WindowPadding  = old_padding;
+	style.WindowRounding = old_rounding;
+
+	return top_y + GAP_WIDTH;
+}
+// NEOTKO_NOTIF_DIGEST_TAG — end ------------------------------------------------------------------
+
 void NotificationManager::render_notifications(GLCanvas3D &canvas, float overlay_width, float bottom_margin, float right_margin)
 {
 	sort_notifications();
 
 	float bottom_up_last_y = bottom_margin; // ORCA dont scale margins
 
+	// NEOTKO_NOTIF_DIGEST_TAG — s250: fold the noisy ones into the band at the bottom of the stack.
+	// The band does NOT reimplement any drawing: it only decides whether the loop below runs. When it
+	// is unfolded the cards are rendered exactly as they always were, just starting above the band.
+	bool   digest_on    = digest_active();
+	size_t digest_n     = 0;
+	bool   digest_error = false;
+	if (digest_on) {
+		if (!m_digest_state_loaded) {
+			const AppConfig* cfg = wxGetApp().app_config;
+			m_digest_expanded     = cfg != nullptr && cfg->get_bool("neotko_notification_digest_expanded");
+			m_digest_state_loaded = true;
+		}
+		digest_n = digest_count(digest_error);
+		if (digest_n == 0) {
+			digest_on = false;
+		} else {
+			// s250: errors fold in too, and nothing auto-unfolds. The band turning RED is the whole
+			// signal — it says "something in here actually matters" without eating the plate. Tried the
+			// auto-unfold first and it defeated the purpose: one error and the wall of cards was back.
+			const bool was_expanded = m_digest_expanded;
+			bottom_up_last_y = render_digest_bar(canvas, bottom_up_last_y, m_move_from_overlay && !m_in_preview, overlay_width * m_scale, right_margin, digest_n, digest_error);
+			if (was_expanded != m_digest_expanded && wxGetApp().app_config != nullptr)
+				wxGetApp().app_config->set_bool("neotko_notification_digest_expanded", m_digest_expanded);
+		}
+	}
+	const bool skip_digested = digest_on && !m_digest_expanded;
+
 	int i = 0;
 	for (const auto& notification : m_pop_notifications) {
+		if (skip_digested && is_digestible(*notification)) {
+			// Folded: not drawn, but a closed one still has to reach Finished so it gets erased.
+			notification->finish_close();
+			continue;
+		}
         if (notification->get_data().level == NotificationLevel::ErrorNotificationLevel || notification->get_data().level == NotificationLevel::SeriousWarningNotificationLevel) {
             notification->bbl_render_block_notification(canvas, bottom_up_last_y, m_move_from_overlay && !m_in_preview, overlay_width * m_scale, right_margin);  // ORCA dont scale margins
             if (notification->get_state() != PopNotification::EState::Finished) 

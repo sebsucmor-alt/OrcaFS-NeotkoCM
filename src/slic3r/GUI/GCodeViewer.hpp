@@ -227,6 +227,42 @@ class GCodeViewer
         unsigned char cp_color_id{ 0 };
         std::vector<Sub_Path> sub_paths;
 
+        // NEOTKO_REALCOLOR_TAG s251 (Fase 0 del brillo anisótropo, docs/FUTURE/
+        // REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md): acumulador del EJE de impresión de este Path.
+        //
+        // EL PORQUÉ, en una línea: una superficie FDM es un haz de cilindros paralelos y refleja
+        // como el pelo o el metal cepillado — la franja de brillo es perpendicular al cordón. Ese
+        // dato está en el toolpath y hoy se tira. En los FLANCOS se recupera gratis desde la normal
+        // (realcolor_peel.vs lo hace), pero en las caras de ARRIBA la normal es ±Z pura y no sabe
+        // nada de la dirección: ahí hace falta este dato. Y es justo la cara que importa para un
+        // top surface y para un sandwich.
+        //
+        // 🔑 SE ACUMULA EL EJE, NO LA DIRECCIÓN. Un cordón no tiene sentido: mira igual hacia
+        // delante que hacia atrás. Un top monotónico es un zigzag →,←,→,← cuyas DIRECCIONES se
+        // cancelan (media ≈ 0) mientras que sus EJES son todos el mismo. La forma estándar de
+        // promediar ejes es duplicar el ángulo: se acumula (cos 2θ, sin 2θ) en vez de (cos θ,
+        // sin θ), de modo que 0° y 180° caen en el mismo sitio. Es la MISMA simetría de orden 2
+        // que hace que el TD del cordón se ajuste como A + B·cos(2θ) — aquí usada para promediar
+        // en vez de para ajustar. Sin trigonometría: con d = (dx, dy) normalizado en XY,
+        //     cos 2θ = dx² − dy²   y   sin 2θ = 2·dx·dy.
+        //
+        // 🎁 Y sale gratis un indicador de CONFIANZA: el módulo del vector medio. Cerca de 1 =
+        // todas las líneas comparten eje (un top monotónico); cerca de 0 = no hay eje dominante
+        // (un perímetro externo, que es una vuelta completa y por tanto un Path que apunta a todas
+        // partes). O sea que el efecto se apaga SOLO donde no tiene sentido, sin una lista de roles
+        // escrita a mano — que es justo lo que pedía la lección del erExternalPerimeter (s243):
+        // un parámetro que sólo se aparta del neutro donde nadie mira es un parámetro que no existe.
+        //
+        // Formato: (Σ w·cos2θ, Σ w·sin2θ, Σ w), con w = longitud XY del segmento. Se rellena
+        // durante la generación de vértices (add_vertices_as_solid), que es donde `dir` ya está
+        // calculada — coste cero, no se recorre nada dos veces. Se resuelve a un eje unitario con
+        // realcolor_bead_axis() en GCodeViewer.cpp. Ponderar por longitud es lo correcto: los
+        // micro-segmentos de una esquina redondeada no deben pesar como una scanline entera.
+        //
+        // ⚠️ Ponderar por longitud XY y no 3D a propósito: un movimiento puramente vertical (Z
+        // hop extruido, raro pero existe) no tiene eje en el plano y debe aportar 0, no ruido.
+        Vec3f bead_axis_acc{ Vec3f::Zero() };
+
         bool matches(const GCodeProcessorResult::MoveVertex& move) const;
         size_t vertices_count() const {
             return sub_paths.empty() ? 0 : sub_paths.back().last.s_id - sub_paths.front().first.s_id + 1;
@@ -753,10 +789,50 @@ public:
     // ratio-units × nominal layer_height) in refresh_realcolor_materials() — RealColor's peel
     // composites against real physical mm thickness per pass, not a layer-height-relative
     // ratio, so it needs mm-space TD to stay consistent. See the UNIT FIX comment there.
+    // NEOTKO_REALCOLOR_TAG s251b: ACABADO POR FILAMENTO. Los presets vienen de PHOTO_MODE_PLAN.md
+    // §8 (F3), la tabla que ya está shippeada en el renderer de shells — se reusan sus nombres y su
+    // orden relativo en vez de inventar una escala nueva. `Custom` no es un preset elegible: es lo
+    // que se muestra cuando el usuario mueve un slider a mano y los valores dejan de coincidir con
+    // ninguna fila de la tabla.
+    enum class RealColorFinishPreset : int { Plastic = 0, Glossy, Matte, Rubber, Metal, Silk, Custom };
+
     struct RealColorMaterials
     {
         std::array<ColorRGB, 4> rgb{};
         std::array<float, 4>    td{};
+
+        // NEOTKO_REALCOLOR_TAG s251b: acabado óptico por SLOT (0-3), como el td de arriba y por el
+        // mismo motivo — es una propiedad del material, no de la geometría. Cada entrada es
+        // (gloss_mul, rough_offset, aniso_mul), y los tres son MODIFICADORES sobre la tabla por
+        // role de realcolor_surface_finish(), no sustitutos de ella:
+        //
+        //   gloss_mul    — multiplica. Neutro 1.0.
+        //   rough_offset — SUMA a la rugosidad del role. Neutro 0.0.
+        //   aniso_mul    — multiplica la fuerza del brillo anisótropo. Neutro 1.0.
+        //
+        // 🔑 POR QUÉ LA RUGOSIDAD SUMA Y LAS OTRAS DOS MULTIPLICAN, que no es un capricho: la
+        // rugosidad es una magnitud ACOTADA en 0..1, y multiplicarla aplastaría las diferencias
+        // entre roles justo en los materiales mate (un top a 0.15 y un bridge a 0.95, por 1.5,
+        // saturan los dos contra el techo y se vuelven indistinguibles). Sumando un desplazamiento,
+        // la distancia entre roles se conserva intacta y el material mueve la superficie ENTERA
+        // hacia lo rugoso o hacia lo liso — que es lo que hace un material de verdad. El brillo y
+        // la anisotropía no están acotados por arriba, así que ahí multiplicar es lo natural.
+        //
+        // ⚠️ Neutro global = (1.0, 0.0, 1.0) en los cuatro slots ≡ comportamiento pre-s251b exacto.
+        //
+        // 🚨 EL NEUTRO SE ESCRIBE AQUÍ EXPLÍCITO, no se deja en `{}`. Un `{}` value-inicializa a
+        // CEROS, y cero en gloss_mul no es "sin efecto": es brillo cero, o sea la escena apagada.
+        // Cualquier camino que dibujase antes de que refresh_realcolor_materials() rellenase esto
+        // (o con más de 4 extrusores, o un app_config a medio leer) daría una imagen negra en vez
+        // de la de siempre. El neutro de un modificador multiplicativo es 1, no 0.
+        std::array<std::array<float, 3>, 4> finish{ { { 1.0f, 0.0f, 1.0f },
+                                                      { 1.0f, 0.0f, 1.0f },
+                                                      { 1.0f, 0.0f, 1.0f },
+                                                      { 1.0f, 0.0f, 1.0f } } };
+        // Preset elegido por slot, sólo para que la UI sepa qué mostrar en el combo. El valor que
+        // manda SIEMPRE es `finish`; esto es una etiqueta, no una fuente de verdad.
+        std::array<int, 4> finish_preset{};
+
         bool                     valid = false;
     };
 
@@ -770,6 +846,12 @@ public:
         int canvas_w = -1, canvas_h = -1;
         std::array<float, 4> td{};
         std::array<ColorRGB, 4> rgb{};
+        // NEOTKO_REALCOLOR_TAG s251b: el acabado por filamento ENTRA en el fingerprint. Sin esto la
+        // ventana de materiales parecería no hacer nada: el composite de peel está cacheado y sólo
+        // se recalcula cuando este struct cambia, así que cambiar un material a Mate habría dejado
+        // en pantalla la imagen vieja hasta que el usuario moviese la cámara. Es el mismo motivo
+        // por el que ya estaban aquí td y rgb.
+        std::array<std::array<float, 3>, 4> finish{};
         unsigned int layers_z_range[2] = { 0, 0 };
         unsigned int moves_first = 0, moves_last = 0;
 
@@ -777,7 +859,8 @@ public:
             return canvas_w == other.canvas_w && canvas_h == other.canvas_h &&
                    layers_z_range[0] == other.layers_z_range[0] && layers_z_range[1] == other.layers_z_range[1] &&
                    moves_first == other.moves_first && moves_last == other.moves_last &&
-                   td == other.td && rgb == other.rgb && view == other.view && proj == other.proj;
+                   td == other.td && rgb == other.rgb && finish == other.finish &&
+                   view == other.view && proj == other.proj;
         }
         bool operator!=(const RealColorFingerprint& other) const { return !(*this == other); }
     };
@@ -824,14 +907,59 @@ public:
     // since post-fix convergence means it rarely shows except at genuinely thin edges.
     struct RealColorTuning
     {
-        float accum_seed_gray  = 0.0f;  // linear-space accumulator background, see item 1
-        float ambient_ground   = 0.35f; // realcolor_peel.vs two-tone ambient, see item 2
-        float ambient_sky      = 0.45f;
-        float fresnel_power    = 5.0f;  // realcolor_peel.vs rim term, see item 2
+        // NEOTKO_REALCOLOR_TAG s249: TODOS los defaults de este struct son ahora la calibración que
+        // el usuario cerró en s249, con las tres perillas nuevas de swell ya dentro de la ecuación.
+        // Los valores de s243/s243d/s166 que se citan en los comentarios de abajo se conservan como
+        // historia de POR QUÉ cada uno se movió — no son los vigentes.
+        float accum_seed_gray  = 0.013f; // linear-space accumulator background, see item 1
+
+        // NEOTKO_REALCOLOR_TAG s251c: LUZ DIRECTA, ahora con mandos. El diagnóstico completo (por
+        // qué la veta de los contornos no se podía apagar, y por qué era la DIFUSA y no el
+        // especular) está en 140/realcolor_peel.vs. Neutro ≡ pre-s251c = (0.48, 0.18, 0.075, 20, 0).
+        //
+        // 🔑 EL REPARTO DE ENERGÍA, QUE ES DE DONDE SALEN ESTOS NÚMEROS Y NO DE MI GUSTO.
+        // Sobre la sección de un cordón (un cilindro), la media de max(N·L, 0) vale 1/π ≈ 0.318 del
+        // pico. O sea que con Lambert puro la generatriz iluminada es **3.14 veces** más brillante
+        // que la media del propio cordón: ÉSE es el número que dibuja la veta, y no depende de la
+        // intensidad — sólo del modelo. Bajar la luz no lo cambia, la oscurece entera.
+        //
+        // Con difusa envolvente w, la media sube a (integrando (cosθ+w)/(1+w) sobre el arco no
+        // recortado): w=0.5 → 0.406 · w=0.7 → 0.441 · w=1.0 → 0.500. El contraste pico/media cae a
+        // 2.46 / 2.27 / 2.00 respectivamente. **Con w = 0.70 la veta pierde un 28% de contraste**,
+        // que es el efecto que se busca, y es un cambio de MODELO, no de exposición.
+        //
+        // Fijado eso, la intensidad se elige para conservar el nivel medio de la imagen y de paso
+        // pasar peso de la direccional al ambiente (que es lo que quita el look de "una sola luz
+        // dura"): media direccional de hoy = 0.66 × 0.318 = 0.210. El objetivo es ~0.155, así que
+        // key+fill = 0.155 / 0.441 = 0.351, repartido en la misma proporción 2.67:1 de siempre.
+        // Lo que la direccional deja de aportar lo recogen ambient_ground/sky, subidos abajo.
+        float light_key       = 0.384f;  // era 0.48 (0.8 × 0.6)
+        float light_fill      = 0.197f;  // era 0.18 (0.3 × 0.6)
+        // El especular no era el culpable (verificado por el usuario poniendo el Gloss del material
+        // a 0), pero un lóbulo BLANCO y ESTRECHO sobre un base saturado sigue siendo la señal
+        // visual de "metal". Se baja la amplitud y se ENSANCHA (20 → 6): la línea fina se convierte
+        // en un lustre ancho, que es lo que hace un plástico.
+        float light_spec      = 0.045f; // era 0.075 (0.125 × 0.6)
+        float light_shininess = 6.0f;   // era 20.0
+        float light_wrap      = 0.70f;  // era 0.0 (Lambert puro)
+
+        // NEOTKO_REALCOLOR_TAG s251d: AISLADOR DE TÉRMINOS, herramienta de diagnóstico. 0 = imagen
+        // normal. Los 7 modos y qué prueba cada uno están documentados en 140/realcolor_peel.fs
+        // (bloque de u_light_solo). No es un ajuste: no tiene sentido dejarlo distinto de 0.
+        int light_solo = 0;
+
+        // NEOTKO_REALCOLOR_TAG s251c: SUBIDOS (0.337→0.42, 0.420→0.52) como contrapartida de bajar
+        // la direccional. No es un retoque estético suelto: es la otra mitad del mismo reparto de
+        // arriba, y separarlos dejaría la imagen oscura. Total medio ≈ el de antes, pero repartido
+        // entre una luz que modela y un ambiente que rellena, en vez de casi todo en la direccional.
+        float ambient_ground   = 0.302f; // realcolor_peel.vs two-tone ambient, see item 2
+        float ambient_sky      = 0.466f;
+        float fresnel_power    = 5.489f; // realcolor_peel.vs rim term, see item 2
         // s243d: 0.519, calibrado a ojo por el usuario contra su escena. El 0.05 anterior venía
         // de s164, cuando el rim era el ÚNICO sitio donde vivía cualquier variación de material;
         // con F4 repartiendo el acabado por la difusa, el rim puede pesar de verdad sin dominar.
-        float fresnel_strength = 0.519f;
+        // s249: 0.479 — retoque fino al recalibrar la escena entera con el swell proporcional.
+        float fresnel_strength = 0.205f;
         // NEOTKO_REALCOLOR_TAG: global multiplier applied to every m_realcolor_materials.td[t]
         // before it reaches realcolor_accum.fs — manual override + cheap visual TD calibration
         // (no real TD meter available), see render_realcolor_debug_panel().
@@ -850,9 +978,13 @@ public:
         // NEOTKO_REALCOLOR_TAG s214 (PBR item 2): single-pass screen-space subsurface scattering
         // in realcolor_present.fs — see compute_sss() there. sss_strength=0 is bit-identical to
         // pre-s214 output.
-        float sss_strength     = 0.35f;
-        float sss_radius_px    = 6.0f;
-        float sss_reference_td = 1.0f;
+        // s249: subidos bastante al recalibrar (0.35→0.660, 6→14.720). Con el swell proporcional
+        // el cordón ya no se dibuja al doble de su ancho, así que hay menos plástico falso por el
+        // que "difundir" — el SSS tiene que trabajar más para dar la misma sensación de material
+        // translúcido. Los dos efectos se compensaban sin que se viera.
+        float sss_strength     = 0.660f;
+        float sss_radius_px    = 14.720f;
+        float sss_reference_td = 0.941f;
 
         // NEOTKO_REALCOLOR_TAG s243 (F1, "huecos"): desplazamiento de cada vértice del toolpath a
         // lo largo de su normal, en mm de mundo — ver realcolor_peel.vs para el porqué físico (la
@@ -873,8 +1005,118 @@ public:
         // Estos SÍ se quedan clavados en el máximo del slider a propósito: es donde el resultado
         // convence, y ya se comprobó que subir más el vertical entra en conflicto con el bias del
         // peel. Si algún día hace falta más recorrido, el que puede crecer es el lateral.
-        float swell_lateral_mm  = 0.500f; // flancos: los que cierran los huecos que se ven
-        float swell_vertical_mm = 0.050f; // caras arriba/abajo: sólo para sellar la costura
+        //
+        // 🔑 s249 — Y SE DESCLAVARON DEL TOPE, que era justo el objetivo del plan. Al añadir la
+        // parte proporcional (swell_lateral_k abajo) el usuario recalibró y bajó el absoluto de
+        // 0.500 a 0.212, o sea a MENOS DE LA MITAD. El criterio de éxito que el plan escribió a
+        // ciegas ("poder bajar a la mitad del efecto actual manteniendo los huecos cerrados") se
+        // cumplió casi clavado. Lo que quedaba clavado en el tope no era un óptimo: era el
+        // síntoma de que el mando estaba mal parametrizado.
+        // 🔑 s251 — Y VOLVIÓ A BAJAR, POR SEGUNDA VEZ Y POR LA MISMA CAUSA. Al calibrar la escena
+        // con el brillo anisótropo puesto, el usuario dejó el absoluto lateral en 0.114 (de 0.212,
+        // que ya venía de 0.500 en s243) y subió la k de 0.630 a 1.101. O sea: el hinchado falso
+        // pasó a ser CASI TODO proporcional, y su parte fija se ha reducido a menos de un cuarto
+        // de la original en dos sesiones.
+        //
+        // Y esto ya es un patrón, no una coincidencia: cada vez que RealColor gana un mecanismo que
+        // da sensación de material DE VERDAD, el usuario baja el que la falseaba. En s249 fue el
+        // swell proporcional el que permitió bajar el absoluto y a cambio subió mucho el SSS; aquí
+        // es el brillo anisótropo el que permite bajarlo otra vez. El swell engorda geometría para
+        // tapar un hueco; el brillo no engorda nada y sin embargo hace leer la superficie como
+        // plástico. Cuando el efecto honesto entra, el sucedáneo sobra — mismo razonamiento que
+        // hizo que el gradeo de A7 acabara en 1.07 en vez de comprimiendo (ver grade_contrast).
+        // s251c: recalibrado otra vez con la luz nueva (la envolvente cambia cuánto hueco se
+        // "ve", así que el swell se re-mide con ella puesta). El lateral proporcional baja de
+        // 1.101 a 0.860 y el vertical fijo sube de 0.028 a 0.048 — ver el aviso de abajo, que
+        // este último es el que tiene consecuencias.
+        // s251d: 0.200 — recalibrado con la luz ya controlable. Sube desde 0.114 porque con la
+        // difusa envolvente y el ambiente en su sitio los huecos entre cordones vuelven a leerse.
+        float swell_lateral_mm  = 0.205f; // flancos: los que cierran los huecos que se ven
+        float swell_vertical_mm = 0.024f; // caras arriba/abajo: sólo para sellar la costura
+
+        // NEOTKO_REALCOLOR_TAG s249 (vía 1 de docs/FUTURE/REALCOLOR_SWELL_WITHOUT_EXPANSION_PLAN.md):
+        // parte PROPORCIONAL del hinchado, sumada a la absoluta de arriba —
+        //     swell_flancos  = swell_lateral_mm  + swell_lateral_k  * ancho_del_path
+        //     swell_vertical = swell_vertical_mm + swell_vertical_k * altura_del_path
+        //
+        // EL PORQUÉ. El absoluto son mm iguales para todos los cordones, y el hueco que hay que
+        // cerrar NO es igual para todos: es proporcional al ancho. A 0.500 mm por lado sobre un
+        // cordón de ~0.42 mm el dibujo sale a más del doble de su anchura real, y cuanto más fino
+        // el cordón más desproporcionado — de ahí el efecto de "expansión" que el usuario ve al
+        // comparar RealColor contra la vista Filament (s246). Un factor relativo cierra el hueco
+        // igual de bien en toda la pieza sin engordar los finos.
+        //
+        // ⚠️ Ambos a 0 = comportamiento s243 EXACTO. Nacieron a 0 a propósito, conviviendo con el
+        // absoluto, para poder A/B sin perder el look calibrado del usuario. **Los valores de
+        // abajo son ya el reparto definitivo, fijado por el usuario en vivo en s249** — que era la
+        // condición que el plan ponía para tocarlos ("con el usuario delante, NO en silencio").
+        //
+        // Cuánto vale esto en la práctica, sobre el reparto elegido (0.212 + 0.630·ancho):
+        //   cordón de 0.42 mm → 0.477 mm  (era 0.500: el look típico se mantiene)
+        //   cordón de 0.20 mm → 0.338 mm  (era 0.500: **-32%**, la desproporción de los finos)
+        // Es exactamente el síntoma (a) del plan, corregido sin tocar el caso que ya gustaba.
+        //
+        // 🔑 El vertical proporcional es además MÁS SEGURO que el absoluto: la regla de s243 dice
+        // que el hinchado en Z tiene que quedarse por debajo de ~1/4 de la capa más fina, o la
+        // comparación de profundidad del peel (acotada con la altura REAL del path) mide contra
+        // geometría que no existe — el fallo que arregló s166. Con un factor sobre la altura del
+        // PROPIO path, un k ≤ 0.25 cumple esa regla por construcción y en TODAS las capas a la
+        // vez, cosa que un valor en mm no puede hacer cuando la escena mezcla alturas (ALH).
+        //
+        // ⚠️ s249, ojo con el vertical: la garantía "≤1/4 de la altura" la cumple la parte
+        // PROPORCIONAL (0.230 < 0.25), pero el absoluto de 0.015 mm se suma por encima y no
+        // escala. En una capa de 0.08 mm el total sale 0.033 mm = 0.41 de la altura, todavía por
+        // debajo del bias_cap del peel (media altura = 0.04) pero ya sin margen. Si algún día
+        // aparecen capas descartadas en un perfil MUY fino, lo que hay que bajar es
+        // swell_vertical_mm a 0, no la k.
+        // ✅ s251f — EL AVISO DEL bias_cap ESTÁ RESUELTO, y conviene dejar escrito el cálculo porque
+        // es el que hay que rehacer cada vez que se toque el vertical.
+        //
+        // El bias del peel se acota con bias_cap = altura_del_path / 2, y el hinchado vertical vale
+        // swell_vertical_mm + swell_vertical_k · altura. El cruce está donde se igualan:
+        //     0.024 + 0.130·h = 0.5·h   ⇒   h ≈ 0.065 mm
+        //
+        // Historia del número, que es la razón de vigilarlo: s251 lo tenía en h ≈ 0.089 mm y s251c
+        // lo metió en h ≈ 0.152 mm — o sea DENTRO del rango normal de capa, con un perfil de 0.12 mm
+        // cruzándolo. Al recalibrar con la luz ya controlable (s251f) el usuario bajó el fijo a la
+        // mitad y el cruce se fue a 0.065 mm, por debajo de cualquier perfil real. Riesgo cerrado.
+        //
+        // Qué pasaría si volviera a cruzarse: el hinchado en Z se sale del cap, el peel trata la capa
+        // que intenta detectar como "ya vista" y la descarta ENTERA del apilado de Beer-Lambert. Es
+        // el fallo que arregló s166, con síntoma característico — "la capa de debajo del top
+        // desaparece", **y depende del zoom** (bien de cerca, mal de lejos).
+        //
+        // La regla si vuelve: bajar swell_vertical_mm, la parte FIJA, que no escala con la capa y es
+        // la única culpable del cruce. NUNCA la k — a 0.130 cumple "≤1/4 de la altura" por
+        // construcción y en todas las capas a la vez, que es justo lo que un valor en mm no puede.
+        //
+        // ⚠️ Y ojo al reparto lateral, que ha dado un vuelco: la k baja de 0.860 a 0.145 mientras el
+        // absoluto se queda en 0.205. O sea que el hinchado vuelve a ser casi todo FIJO, al revés de
+        // la tendencia de s249-s251c. No lo racionalizo: se calibró a ojo con la luz nueva puesta y
+        // es la primera vez que el usuario reporta cero huecos, que era el criterio.
+        float swell_lateral_k  = 0.145f; // fracción del ANCHO del path
+        float swell_vertical_k = 0.130f; // fracción de la ALTURA del path (tope 0.25, ver arriba)
+
+        // NEOTKO_REALCOLOR_TAG s249 (vía 2 del mismo plan): multiplicador del hinchado LATERAL en
+        // los roles que forman la silueta (erExternalPerimeter + erOverhangPerimeter). 1.0 =
+        // neutro, o sea el comportamiento de siempre.
+        //
+        // EL PORQUÉ. El shader no sabe si un cordón tiene vecino al lado o aire. En los cordones
+        // interiores el hinchado cierra un hueco real; en el borde expuesto no hay nada que cerrar
+        // y lo único que hace es mover el contorno de la pieza hacia fuera — que es la parte de la
+        // "expansión" que más se lee a simple vista. El perímetro externo ES la silueta, así que
+        // bajar sólo ahí aproxima "hinchar únicamente hacia dentro" sin ningún dato nuevo.
+        //
+        // Se incluye erOverhangPerimeter a propósito: un overhang perimeter es el perímetro
+        // externo de la pieza sobre un voladizo. Dejarlo fuera haría que la silueta se hinchase a
+        // trozos, justo en las zonas donde más raro se vería.
+        //
+        // 🔑 s249: el usuario lo dejó en 0.42, o sea que la vía 2 SÍ hacía falta — la vía 1 sola
+        // no bastó. Y no lo puso a 0: la silueta se sigue hinchando un poco (0.42 · el lateral
+        // que toque), sólo que mucho menos que el interior. Tiene sentido físico: un perímetro
+        // externo real también se aplasta y se funde con el perímetro de al lado por su cara
+        // interior, no es un prisma flotando en el aire. Cero habría sido el otro extremo.
+        float swell_external_scale = 0.50f;
 
         // NEOTKO_REALCOLOR_TAG s243 (F4 = A4+A5): interpolación global de los acabados por tipo de
         // superficie hacia el neutro (gloss=1, roughness=0, que ≡ pre-s243). 0 = apagado del todo
@@ -883,7 +1125,10 @@ public:
         // s243d: 0.514 — el usuario prefiere el acabado a media fuerza. La tabla de
         // realcolor_surface_finish() se calibró para que 1.0 fuese ya perceptible (s243c), así
         // que la mitad es una elección estética, no una compensación de un efecto flojo.
-        float finish_strength = 0.514f;
+        // s249: 0.400 al recalibrar. Baja un poco porque el swell proporcional ya diferencia los
+        // roles por geometría (un perímetro externo y un infill ya no se dibujan al mismo grosor
+        // aparente), así que el acabado por material no tiene que cargar solo con esa distinción.
+        float finish_strength = 0.518f;
 
         // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): gradeo de presentación en realcolor_present.fs.
         // Ambos a 1.0 = imagen idéntica a pre-s243.
@@ -900,8 +1145,8 @@ public:
         // F3 (eje de la luz) y F4 (acabado por superficie) SÍ se hicieron, y quitaron el look
         // artificial en su origen. Aplanar encima ya sólo restaba vida a la imagen. Un
         // apaño-para-no-arreglar deja de tener sentido cuando arreglas la causa.
-        float grade_contrast   = 1.07f;
-        float grade_saturation = 1.00f;
+        float grade_contrast   = 1.08f;
+        float grade_saturation = 0.87f; // s249: un pelo desaturado, el contraste 1.07 se mantiene
 
         // NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): sella los huecos INTERIORES de la pieza
         // (los que quedan tras F1 y que son huecos reales, no aliasing) sin tocar el contorno, que
@@ -919,7 +1164,78 @@ public:
         // muestras por píxel por algo que no se ve. Para que sirviera de verdad habría que
         // rellenar también los píxeles de cobertura 0, y eso obliga a inventar color Y profundidad
         // — con el riesgo de tapar agujeros REALES del modelo. Esa decisión no está tomada.
-        float fill_interior = 0.0f;
+        //
+        // 🆕 s251f — EL DEFAULT YA NO ES 0 (0.07), pero el análisis de arriba NO se ha vuelto a
+        // verificar. El usuario lo dejó ahí en la tanda en la que por fin no le salen huecos. A 0.07
+        // el efecto es mínimo por construcción, así que lo honesto es escribir que **no está
+        // comprobado que este valor concreto haga nada**: pudo quedarse de rebote al mover otros
+        // mandos. Si alguien retoma F6, el punto de partida es el párrafo de arriba (sólo sube el
+        // alfa de píxeles que YA tienen geometría), no este default.
+        float fill_interior = 0.07f;
+
+        // NEOTKO_REALCOLOR_TAG s251 (Fase 0 de docs/FUTURE/REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md):
+        // BRILLO ANISÓTROPO del cordón. Neutro = aniso_strength 0 → imagen bit-idéntica a s249b.
+        //
+        // QUÉ ES. Una superficie FDM no refleja como una superficie lisa: es un haz de cilindros
+        // paralelos, y refleja como el pelo, la seda o el metal cepillado. El reflejo no es una
+        // mancha redonda, es una FRANJA perpendicular al cordón. Por eso una pieza cambia tanto de
+        // aspecto al girarla bajo una lámpara, y por eso un top planchado a 45° no brilla igual que
+        // el mismo top a 0°. El modelo es Kajiya-Kay (el estándar de pelo), que sólo necesita el eje
+        // del cordón (T) y ya lo tenemos: en los flancos derivado de la normal, en las caras
+        // horizontales desde Path::bead_axis_acc. Ver realcolor_peel.{vs,fs}.
+        //
+        // 🚨 POR QUÉ ES UN TÉRMINO ADITIVO NUEVO Y NO UNA MODIFICACIÓN DEL ESPECULAR EXISTENTE.
+        // §2.2 del plan avisaba de que la difusa de RealColor se calcula POR VÉRTICE
+        // (realcolor_peel.vs, intensity.x), o sea que cualquier efecto que dependa de la normal por
+        // fragmento sólo toca términos residuales — y la lección de s243c dice que un parámetro que
+        // sólo toca residuales no existe. La salida es NO tocar la difusa: este lóbulo trae su
+        // propia energía y su propio mando, así que puede hacerse ver sin bajar el sombreado al
+        // fragment (que era la fase cara y arriesgada, con los dos gemelos de shader por medio).
+        // Si la Fase 0 convence, ESA obra ya estará justificada; si no convence, nos la ahorramos.
+        //
+        // aniso_strength  — 0 = apagado (neutro). Multiplica el lóbulo entero.
+        // aniso_sharpness — exponente del lóbulo. Alto = franja fina y metálica, bajo = brillo
+        //                   ancho y satinado. NO es rugosidad: no toca el muestreo del entorno.
+        // aniso_min_conf  — confianza mínima del eje para que el efecto se aplique. Por debajo, el
+        //                   Path no tiene eje dominante (típicamente un perímetro externo, que es
+        //                   un bucle cerrado) y se apaga con un fundido, no con un salto.
+        //                   ⚠️ NO afecta a los flancos: ahí el eje es exacto por vértice, no promediado.
+        // 🏁 s251 — CALIBRADO POR EL USUARIO Y ACEPTADO ("lo veo muy bien"). Nacieron con fuerza 0
+        // (neutro) para poder A/B sin recompilar; estos son ya los valores definitivos. Tres cosas
+        // que estos números dicen y que conviene no perder:
+        //
+        // 1. **La Fase 0 pasó su propio criterio de éxito.** El plan decía que si el efecto no se
+        //    apreciaba, la Fase 2 (bajar difusa+especular al fragment, los dos gemelos de shader) NO
+        //    se hacía. Se aprecia, y encima sin tocar la difusa — o sea que la apuesta de meter el
+        //    lóbulo como término ADITIVO propio en vez de modular los residuales fue la correcta.
+        //    Ver docs/VIDEOS/images/"RealColor - Quality.png" (gcode contra RealColor, el ángulo de
+        //    extrusión cambiando el resultado) y RealColor-angleview.gif (la franja de brillo
+        //    barriendo con la cámara, que es LA firma de un reflejo anisótropo: si fuera isótropo,
+        //    el brillo seguiría a la cámara como una mancha en vez de barrer a lo ancho del cordón).
+        //
+        // 2. **aniso_min_conf = 0.84 es alto, y eso valida la métrica de confianza.** Sólo se
+        //    aplica el brillo donde el eje del path está MUY definido. Si la confianza fuese ruido,
+        //    un umbral tan alto habría apagado el efecto entero y el usuario habría acabado bajándolo
+        //    a 0. Que sirva de mando útil significa que separa de verdad "top monotónico" de "vuelta
+        //    de perímetro". ⚠️ Ojo: esto sólo filtra las TAPAS — los flancos llegan al shader con
+        //    confianza 1 por vértice (su eje es exacto, no promediado) y nunca ven este umbral.
+        //
+        // 3. ⚠️ **aniso_sharpness = 170 sobre un tope de slider de 200: queda poco recorrido hacia
+        //    arriba.** No está clavado en el máximo (la lección de s249 era sobre defaults PEGADOS al
+        //    tope), pero está cerca. Si en alguna escena hiciera falta una franja aún más fina, lo
+        //    que hay que subir es el tope del slider en render_realcolor_debug_panel(), no buscarle
+        //    la vuelta por otro parámetro.
+        float aniso_strength  = 0.196f;
+        float aniso_sharpness = 170.0f;
+        float aniso_min_conf  = 0.84f;
+
+        // NEOTKO_REALCOLOR_TAG s251: visor de diagnóstico del eje, NO un efecto. 0 = apagado.
+        // 1 = pinta el color por el eje recuperado (matiz = ángulo del eje, saturación =
+        // confianza), de modo que un top monotónico debe salir de un color plano y uniforme, y un
+        // perímetro externo debe salir GRIS (confianza 0). Existe porque el plan pedía MEDIR antes
+        // de decidir, y mirar la imagen es más barato y más honesto que leerse un log de miles de
+        // líneas: si esto no sale plano sobre un top, el dato está mal y el brillo sobraría.
+        float aniso_debug = 0.0f;
     };
 
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
@@ -1359,6 +1675,31 @@ private:
     // NEOTKO_REALCOLOR_TAG: debug-only ImGui panel exposing RealColorTuning as live sliders,
     // gated by NeoDebug::enabled(NeoDebug::REALCOLOR) — no-op unless ORCA_DEBUG_REALCOLOR is set
     void render_realcolor_debug_panel();
+    // NEOTKO_REALCOLOR_TAG s251b: ventana de ACABADO POR FILAMENTO. A diferencia de
+    // render_realcolor_debug_panel(), esto NO está detrás de NeoDebug::render_panels_enabled():
+    // es una función de usuario, y se abre con un botón en la leyenda de la vista RealColor.
+    //
+    // 🚨 Y NO REBANA. El acabado es puramente visual: no llega al motor por ningún camino (sólo
+    // alimenta el u_finish/u_aniso de realcolor_peel.fs). Eso lo separa del TD, que vive al lado en
+    // app_config pero SÍ entra al slicer vía neotko_td_mirror y por eso su editor llama a
+    // schedule_background_process(). Aquí eso sería un reslice gratis por mover un slider de brillo.
+    void render_realcolor_materials_panel();
+    bool m_realcolor_materials_panel_open = false;
+
+    // NEOTKO_REALCOLOR_TAG s251e: TD editable EN VIVO desde la ventana de materiales, para poder
+    // pseudo-calibrar mirando la pieza en vez de a ciegas. En unidades de RATIO (0.01-10), que es
+    // como vive en app_config — NO en mm; a mm se hornea multiplicando por la altura de capa
+    // nominal, igual que hace refresh_realcolor_materials().
+    //
+    // 🚨 POR QUÉ ESTO ES UN BUFFER APARTE Y NO SE ESCRIBE DIRECTO, al revés que el acabado. El
+    // acabado es puramente visual; **el TD SÍ entra al motor** (app_config → neotko_td_mirror →
+    // PrintApply), así que guardarlo en cada movimiento de slider dispararía un reslice por cada
+    // pixel arrastrado. De ahí el botón de guardar explícito: mientras no se pulse, lo que se ve es
+    // sólo el preview. Fue petición del usuario y es la decisión correcta — además hace VISIBLE la
+    // diferencia entre "ajuste de vista" y "ajuste que toca la pieza", que es justo la distinción
+    // que esta ventana tiene que enseñar.
+    std::array<float, 4> m_realcolor_td_edit{ { 1.0f, 1.0f, 1.0f, 1.0f } };
+    bool m_realcolor_td_dirty = false;
     // NEOTKO_GCODE_REPROCESSOR — PRO-only rule editor, gated on app_config "neotko_libre_mode"
     // (not a NeoDebug channel — this is a real user-facing feature). s216: renders inline inside
     // the already-open "Legend" ImGui window, called only when m_view_type ==

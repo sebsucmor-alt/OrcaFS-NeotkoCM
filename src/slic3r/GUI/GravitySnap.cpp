@@ -195,6 +195,30 @@ bool bed_is_floor()
     return ac->has("neotko_snap_drag_bed") ? ac->get_bool("neotko_snap_drag_bed") : true;
 }
 
+// NEOTKO_SNAPDRAG_TAG s249 — see the header. Default OFF, so a plain get_bool() (absent == false)
+// is already the right default and no has() guard is needed here, unlike bed_is_floor() above.
+bool move_as_group()
+{
+    const AppConfig *ac = wxGetApp().app_config;
+    return ac != nullptr && ac->get_bool("neotko_snap_drag_group");
+}
+
+// NEOTKO_SNAPDRAG_TAG s249 — see the header.
+bool& panel_open()
+{
+    static bool s_open = false;
+    return s_open;
+}
+
+// NEOTKO_SNAPDRAG_TAG s249 — see the header for why this is LibreMode and not True Objects.
+bool plate_icon_available()
+{
+    // app_config is null very early in startup and again during teardown, and the render paths
+    // that ask this run in both windows.
+    const AppConfig *ac = wxGetApp().app_config;
+    return ac != nullptr && ac->get_bool("neotko_libre_mode");
+}
+
 std::optional<FloorHit> floor_z_for_instance(const GLVolumeCollection &volumes,
                                              int object_idx, int instance_idx,
                                              const std::set<std::pair<int, int>> &moving,

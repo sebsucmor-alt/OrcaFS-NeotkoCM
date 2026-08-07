@@ -1,5 +1,6 @@
 #include "WebView.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/NeotkoFlutterDark.hpp" // NEOTKO_FLUTTERDARK_TAG s252
 #include "slic3r/Utils/MacDarkMode.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -243,6 +244,12 @@ public:
 
 wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
 {
+    // NEOTKO_FLUTTERDARK_TAG s252 — publish the theme for the HTTP server, which serves
+    // Snapmaker's Flutter pages from its own thread and so must not call dark_mode()
+    // itself (AppKit on macOS, app_config elsewhere). Done here because every webview,
+    // including the first Flutter one, is created from the GUI thread.
+    Slic3r::GUI::NeotkoFlutterDark::set_dark(Slic3r::GUI::wxGetApp().dark_mode());
+
 #if wxUSE_WEBVIEW_EDGE
     // Check if a fixed version of edge is present in
     // $executable_path/edge_fixed and use it
@@ -397,6 +404,9 @@ bool WebView::RunScript(wxWebView *webView, wxString const &javascript)
 void WebView::RecreateAll()
 {
     auto dark = Slic3r::GUI::wxGetApp().dark_mode();
+    // NEOTKO_FLUTTERDARK_TAG s252 — theme just changed; refresh the flag before the reloads
+    // below, so the reload already asks for the palette of the new theme.
+    Slic3r::GUI::NeotkoFlutterDark::set_dark(dark);
     for (auto webView : g_webviews) {
         webView->SetUserAgent(wxString::Format("SM-Slicer/v%s (%s) Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)", SLIC3R_VERSION,
                                                dark ? "dark" : "light"));

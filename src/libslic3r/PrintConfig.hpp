@@ -1159,6 +1159,51 @@ PRINT_CONFIG_CLASS_DEFINE(
     // perimeter_override forced on). Requires the object's extruder to resolve to
     // a MixedFilament (virtual filament id); no effect otherwise.
     ((ConfigOptionBool,     mixed_filament_sandwich_mode))
+    // NEOTKO_HAE_TAG s247 — Height Adaptive Effects: one serialized Z→value curve per effect
+    // ("z:value[:tension]|…", see Feature/HeightAdaptive/HeightCurve.hpp). Hidden keys with no
+    // widget in Tab.cpp: only the gizmo writes them. Empty = effect off, and an empty curve must
+    // leave the gcode byte-identical to stock.
+    //
+    // ⚠️ All three live in PrintObjectConfig ON PURPOSE, including the infill width one, whose
+    // underlying key (sparse_infill_line_width) is a REGION key: a PrintRegion is immutable per
+    // layer range, so the curve is declared per object and applied as an override at the point of
+    // consumption (LayerRegion::flow / PerimeterGenerator) instead of trying to vary the region.
+    // NEOTKO_HAE_EXPANSION_TAG — gated by ORCA_DEBUG_XYPROFILE, see plan §1/§3.
+    ((ConfigOptionString,   neotko_hae_xy_contour))
+    ((ConfigOptionString,   neotko_hae_xy_hole))
+    // NEOTKO_HAE_TAG — STEPPED by design (plan §6.2): sparse infill spacing is deliberately
+    // held constant across layers so the lines stack on each other; a smooth ramp would land
+    // every line on air.
+    ((ConfigOptionString,   neotko_hae_infill_width))
+    // NEOTKO_HAE_TAG s247 — effect C: fuzzy skin thickness by height ("fuzzy that fades away",
+    // plan §11). Scales fuzzy_skin_thickness (a REGION key) per layer from an object-scope curve,
+    // same override-at-the-point-of-consumption contract as the infill width one.
+    ((ConfigOptionString,   neotko_hae_fuzzy_thickness))
+
+    // NEOTKO_HAE_TAG s248 — Adaptive Effector LEVEL 0 (ADAPTIVE_EFFECTOR_PLAN.md §4). Nothing new
+    // in the engine: these ride the two hooks that effect B and effect C already installed.
+    //
+    // The four widths go through LayerRegion::flow(role, …), which resolves the width of EVERY
+    // role in one place — so this is the same override repeated, and by construction perimeters,
+    // solid infill and top surface can never disagree with each other about the width of a layer.
+    // ⚠️ Correction to the plan: it warned that outer_wall_line_width has a "second consumer" in
+    // PerimeterGenerator. It does NOT. PerimeterGenerator receives ext_perimeter_flow/perimeter_flow
+    // ALREADY BUILT by LayerRegion::flow() (LayerRegion.cpp:248/295), so the curve is inside them.
+    // The second consumer was specific to sparse infill, which PerimeterGenerator reads raw out of
+    // the region config to size gap fill — that one is hooked separately and stays hooked.
+    // ⚠️ Only the three widths that STACK are offered (project owner, s248): sparse infill, outer
+    // wall and inner wall. Internal solid infill and top surface were wired and then removed on
+    // purpose — a ramp over them varies the width of the very surfaces the eye reads as flat, and
+    // there is no print you want that for. LayerRegion::flow() still resolves all five roles, so
+    // re-adding one is a case in the switch plus a key; the absence is a decision, not a gap.
+    ((ConfigOptionString,   neotko_hae_outer_wall_width))
+    ((ConfigOptionString,   neotko_hae_inner_wall_width))
+    // The four extra fuzzy parameters travel in the SAME per-layer FuzzySkinConfig that already
+    // carries the curved thickness, so they cost one parse each and nothing else.
+    ((ConfigOptionString,   neotko_hae_fuzzy_point_distance))
+    ((ConfigOptionString,   neotko_hae_fuzzy_scale))
+    ((ConfigOptionString,   neotko_hae_fuzzy_octaves))
+    ((ConfigOptionString,   neotko_hae_fuzzy_persistence))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.

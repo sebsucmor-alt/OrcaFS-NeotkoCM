@@ -1,4 +1,6 @@
 #include <random>
+#include <algorithm> // NEOTKO_HAE_TAG s248 — std::clamp for the curved noise parameters
+#include <cmath>     // NEOTKO_HAE_TAG s248 — std::lround for the integer octaves curve
 
 #include "libslic3r/Algorithm/LineSplit.hpp"
 #include "libslic3r/Arachne/utils/ExtrusionJunction.hpp"
@@ -9,6 +11,7 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Feature/HeightAdaptive/HeightCurve.hpp" // NEOTKO_HAE_TAG s247 — thickness by height
 
 #include "FuzzySkin.hpp"
 
@@ -175,17 +178,82 @@ void group_region_by_fuzzify(PerimeterGenerator& g)
     g.has_fuzzy_skin = false;
     g.has_fuzzy_hole = false;
 
+    // NEOTKO_HAE_TAG s247 — Height Adaptive Effects, effect C: fuzzy skin thickness by height
+    // ("fuzzy that is born and dies with the height", plan §11).
+    //
+    // This is the right hook by the plan's own §0-bis viability test: group_region_by_fuzzify()
+    // runs once per layer (called at the top of both process_classic() and process_arachne()),
+    // and it is where the region's thickness is copied into the ephemeral FuzzySkinConfig that
+    // everything downstream reads. Parsed ONCE here, not once per region.
+    //
+    // Safe against the unordered_map below: the value is constant within a layer, so regions
+    // still group exactly as before, and std::hash<FuzzySkinConfig> already covers `thickness`.
+    // NEOTKO_HAE_TAG s248 — Adaptive Effector LEVEL 0 (ADAPTIVE_EFFECTOR_PLAN.md §4): the whole
+    // FuzzySkinConfig is built here, so the other four noise parameters ride the hook that already
+    // exists for thickness. One parse each, per layer, and only when the key is non-empty.
+    auto parse_curve = [&g](const std::string &blob) {
+        HeightAdaptive::HeightCurve c(HeightAdaptive::Interp::Smooth);
+        if (g.object_config != nullptr && ! blob.empty())
+            c = HeightAdaptive::HeightCurve::parse(blob, HeightAdaptive::Interp::Smooth);
+        return c;
+    };
+    static const std::string empty_blob;
+    const HeightAdaptive::HeightCurve hae_fuzzy =
+        parse_curve(g.object_config != nullptr ? g.object_config->neotko_hae_fuzzy_thickness.value : empty_blob);
+    const HeightAdaptive::HeightCurve hae_point_dist =
+        parse_curve(g.object_config != nullptr ? g.object_config->neotko_hae_fuzzy_point_distance.value : empty_blob);
+    const HeightAdaptive::HeightCurve hae_scale =
+        parse_curve(g.object_config != nullptr ? g.object_config->neotko_hae_fuzzy_scale.value : empty_blob);
+    const HeightAdaptive::HeightCurve hae_octaves =
+        parse_curve(g.object_config != nullptr ? g.object_config->neotko_hae_fuzzy_octaves.value : empty_blob);
+    const HeightAdaptive::HeightCurve hae_persistence =
+        parse_curve(g.object_config != nullptr ? g.object_config->neotko_hae_fuzzy_persistence.value : empty_blob);
+
     std::unordered_map<FuzzySkinConfig, SurfacesPtr> regions;
     for (auto region : *g.compatible_regions) {
         const auto&           region_config = region->region().config();
-        const FuzzySkinConfig cfg{region_config.fuzzy_skin,
-                                  scaled<coord_t>(region_config.fuzzy_skin_thickness.value),
-                                  scaled<coord_t>(region_config.fuzzy_skin_point_distance.value),
+
+        // NEOTKO_HAE_TAG — resolve type and thickness for THIS layer before building the key.
+        FuzzySkinType hae_type      = region_config.fuzzy_skin.value;
+        double        hae_thickness = region_config.fuzzy_skin_thickness.value;
+        if (! hae_fuzzy.empty()) {
+            hae_thickness = std::max(0., hae_fuzzy.at(g.slice_z, hae_thickness));
+            // 🔑 Thickness 0 does NOT make fuzzy skin disappear on its own: should_fuzzify()
+            // only looks at `type`, so a zero-amplitude fuzzy would still resample every
+            // perimeter into thousands of points spaced by fuzzy_skin_point_distance — a fatter
+            // gcode that prints exactly like no fuzzy at all. Turning the type off where the
+            // curve reaches zero is what makes the effect genuinely fade OUT.
+            if (hae_thickness < 0.005)
+                hae_type = FuzzySkinType::None;
+        }
+
+        // NEOTKO_HAE_TAG s248 — the other four noise parameters, resolved for THIS layer exactly
+        // like the thickness above. Each is clamped to the domain its own key already declares in
+        // PrintConfig.cpp, because a curve is drawn freehand and a negative point distance or a
+        // zero octave count is a division or a loop bound downstream, not a milder texture.
+        double point_dist  = region_config.fuzzy_skin_point_distance.value;
+        double noise_scale = region_config.fuzzy_skin_scale.value;
+        int    octaves     = region_config.fuzzy_skin_octaves.value;
+        double persistence = region_config.fuzzy_skin_persistence.value;
+        if (! hae_point_dist.empty())
+            point_dist = std::max(0.01, hae_point_dist.at(g.slice_z, point_dist));
+        if (! hae_scale.empty())
+            noise_scale = std::max(0.01, hae_scale.at(g.slice_z, noise_scale));
+        if (! hae_octaves.empty())
+            // Integer parameter: a curve over it is a staircase by definition (plan §4, level 2
+            // reasoning). Rounded, never truncated, so a curve sitting at 2.5 does not read as 2.
+            octaves = std::max(1, int(std::lround(hae_octaves.at(g.slice_z, double(octaves)))));
+        if (! hae_persistence.empty())
+            persistence = std::clamp(hae_persistence.at(g.slice_z, persistence), 0., 1.);
+
+        const FuzzySkinConfig cfg{hae_type,
+                                  scaled<coord_t>(hae_thickness),
+                                  scaled<coord_t>(point_dist),
                                   region_config.fuzzy_skin_first_layer,
                                   region_config.fuzzy_skin_noise_type,
-                                  region_config.fuzzy_skin_scale,
-                                  region_config.fuzzy_skin_octaves,
-                                  region_config.fuzzy_skin_persistence,
+                                  noise_scale,
+                                  octaves,
+                                  persistence,
                                   region_config.fuzzy_skin_mode};
         auto&                 surfaces = regions[cfg];
         for (const auto& surface : region->slices.surfaces) {

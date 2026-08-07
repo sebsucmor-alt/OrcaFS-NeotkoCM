@@ -13,7 +13,6 @@
 
 #include "OptionsGroup.hpp"
 #include "GLCanvas3D.hpp"
-#include "GravitySnap.hpp" // NEOTKO_SNAPDRAG_TAG s233 — bed_is_floor() default lives there
 #include "Selection.hpp"
 #include "format.hpp"
 //BBS: add partplate related logic
@@ -911,68 +910,11 @@ wxMenuItem* MenuFactory::append_menu_item_assemble_boolean(wxMenu* menu)
     return item;
 }
 
-// NEOTKO_SNAPDRAG_TAG s227 — "Snap & Drag" check item. Lives in the object context menu (not on
-// the True Objects toolbar button — a right-click-only sub-toggle on that button tested as
-// confusing/undiscoverable) and is only enabled while True Objects is on. GUI-only preference:
-// toggling it never touches PrintConfig and never reschedules a slice.
-// See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §5 (revised placement).
-wxMenuItem* MenuFactory::append_menu_item_snap_drag(wxMenu* menu)
-{
-    wxMenuItem* item = append_menu_check_item(menu, wxID_ANY, _L("Snap & Drag"),
-        _L("While dragging, rest this object on the top surface of whatever real part is "
-           "underneath it (never higher than where you drop it). The object hovers just above "
-           "its landing spot while you drag, and the highlighted zone shows the exact surface "
-           "being read as the height. Requires True Objects."),
-        [](wxCommandEvent&) {
-            auto* ac = wxGetApp().app_config;
-            if (ac == nullptr)
-                return;
-            ac->set_bool("neotko_snap_drag", !ac->get_bool("neotko_snap_drag"));
-            ac->save();
-        }, menu);
-
-    m_parent->Bind(wxEVT_UPDATE_UI, [](wxUpdateUIEvent& evt) {
-        auto* ac = wxGetApp().app_config;
-        const bool grav_on = ac != nullptr && ac->get_bool("neotko_true_objects");
-        evt.Enable(grav_on);
-        evt.Check(grav_on && ac->get_bool("neotko_snap_drag"));
-    }, item->GetId());
-
-    return item;
-}
-
-// NEOTKO_SNAPDRAG_TAG s233 — "Allow Bed": with Snap & Drag on, is the build plate a floor too?
-// ON (default) = an object dragged over nothing lands on the bed, like in a normal slicer.
-// OFF = the s227 behaviour, only other objects count and an object over nothing keeps floating,
-// which is what a user doing free assembly work under True Objects may well prefer.
-// Sits right below "Snap & Drag" and is enabled only while that is on — the state that has no
-// meaning ("allow the bed" with no snapping at all) is unreachable.
-// See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_V2_PLAN.md §1.
-wxMenuItem* MenuFactory::append_menu_item_snap_drag_bed(wxMenu* menu)
-{
-    wxMenuItem* item = append_menu_check_item(menu, wxID_ANY, _L("Snap & Drag: Allow Bed"),
-        _L("Count the build plate as a landing surface. On: an object dragged over empty space "
-           "drops to the plate. Off: it stays floating where you drop it, and only other objects "
-           "can catch it."),
-        [](wxCommandEvent&) {
-            auto* ac = wxGetApp().app_config;
-            if (ac == nullptr)
-                return;
-            // Read through GravitySnap so the "absent key means ON" default lives in exactly one
-            // place; the first toggle is what materialises the key in the ini.
-            ac->set_bool("neotko_snap_drag_bed", !GravitySnap::bed_is_floor());
-            ac->save();
-        }, menu);
-
-    m_parent->Bind(wxEVT_UPDATE_UI, [](wxUpdateUIEvent& evt) {
-        auto* ac = wxGetApp().app_config;
-        const bool snap_on = ac != nullptr && ac->get_bool("neotko_true_objects") && ac->get_bool("neotko_snap_drag");
-        evt.Enable(snap_on);
-        evt.Check(snap_on && GravitySnap::bed_is_floor());
-    }, item->GetId());
-
-    return item;
-}
+// NEOTKO_SNAPDRAG_TAG s249 — append_menu_item_snap_drag() and append_menu_item_snap_drag_bed()
+// were removed here. Their whole content (the two app_config keys, the True Objects gate, the
+// tooltips) moved to GLCanvas3D::_render_snapdrag_panel(), reached from the magnet icon in the
+// plate column, together with the new "Move selection as one block". See the note at their old
+// call site in create_object_menu() for why a context menu was the wrong home.
 
 // NeotkoLIBRE — Copy/Paste Process Settings. "Copy Process Settings" submenu with one entry per
 // block (Speed / Quality / Strength) plus All, and a "Paste Process Settings" item. Appended once
@@ -1563,10 +1505,14 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_per_object_settings(&m_object_menu);
     // NeotkoLIBRE — Assembled Boolean mode (per-object, LibreMode only)
     append_menu_item_assemble_boolean(&m_object_menu);
-    // NEOTKO_SNAPDRAG_TAG s227 — Snap & Drag (only enabled while True Objects is on)
-    append_menu_item_snap_drag(&m_object_menu);
-    // NEOTKO_SNAPDRAG_TAG s233 — ...and its own "Allow Bed" sub-option, right underneath.
-    append_menu_item_snap_drag_bed(&m_object_menu);
+    // NEOTKO_SNAPDRAG_TAG s249 — "Snap & Drag" and "Allow Bed" USED to be appended here (s227 /
+    // s233). They are gone from every context menu on purpose: this is `m_object_menu`, and a
+    // right-click that produces a different menu — multi-selection above all, which is exactly
+    // when Snap & Drag matters most — never showed them at all. Chasing that by appending the
+    // items to each of the object/volume/instance/multi-selection/assemble menus is a race that
+    // grows with every new menu. They now live in one place that does not depend on the selection:
+    // the magnet icon in the plate column (PartPlate::SNAP_DRAG_HOVER_ID → the panel in
+    // GLCanvas3D::_render_snapdrag_panel).
     m_object_menu.AppendSeparator();
     append_menu_item_reload_from_disk(&m_object_menu);
     append_menu_item_replace_with_stl(&m_object_menu);

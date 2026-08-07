@@ -142,6 +142,7 @@ private:
     PickingModel m_plate_name_edit_icon;
     PickingModel m_move_front_icon;
     PickingModel m_photo_icon;   // NEOTKO_PHOTOMODE_TAG s242
+    PickingModel m_snapdrag_icon; // NEOTKO_SNAPDRAG_TAG s249
     GLModel m_plate_idx_icon;
     GLTexture m_texture;
 
@@ -209,11 +210,17 @@ public:
     //  - the id space stays within budget: SceneRaycaster::Volume (1000) must exceed
     //    MAX_PLATES_COUNT * GRABBER_COUNT, and MAX_PLATE_COUNT is 36 -> 36 * 9 = 324.
     // PLATE_NAME_HOVER_ID stays 6 — that is the name-edit icon and it did not move.
-    static const unsigned int GRABBER_COUNT = 9;
+    //
+    // NEOTKO_SNAPDRAG_TAG s249: 9 -> 10 for the magnet icon (sub-id 9). Same reasoning, budget
+    // re-checked: 36 * 10 = 360, still well under the 1000 where SceneRaycaster::Volume ids start.
+    static const unsigned int GRABBER_COUNT = 10;
     // Sub-id of the Photo Mode icon. Named because two different indexings coexist here and mixing
     // them up is silent: this is the PICKING sub-id, while calc_vertex_for_icons() takes a LAYOUT
     // index (0..6, the visual slot down the column) that does not match it.
     static const unsigned int PHOTO_MODE_HOVER_ID = 8;
+    // NEOTKO_SNAPDRAG_TAG s249 — sub-id of the magnet (Snap & Drag options). Layout slot is 7;
+    // the two indexings differ, exactly as noted for the camera above.
+    static const unsigned int SNAP_DRAG_HOVER_ID = 9;
 
     static ColorRGBA SELECT_COLOR;
     static ColorRGBA UNSELECT_COLOR;
@@ -577,6 +584,9 @@ class PartPlateList : public ObjectBase
     // NEOTKO_PHOTOMODE_TAG s242
     GLTexture m_photo_hovered_texture;
     GLTexture m_photo_texture;
+    // NEOTKO_SNAPDRAG_TAG s249 — the magnet: Snap & Drag options
+    GLTexture m_snapdrag_hovered_texture;
+    GLTexture m_snapdrag_texture;
     GLTexture m_arrange_texture;
     GLTexture m_arrange_hovered_texture;
     GLTexture m_orient_texture;

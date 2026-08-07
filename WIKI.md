@@ -89,12 +89,17 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 15. [Expert G-code Reprocessor (2.3.8) — layer-ranged, per-tool G-code post-processing](#15-expert-g-code-reprocessor-238--layer-ranged-per-tool-g-code-post-processing)
 16. [PerObject Support (2.3.9) — support that avoids the other objects on the plate](#16-perobject-support-239--support-that-avoids-the-other-objects-on-the-plate)
 17. [Gravity ("True Objects") — real floor, honest bridges](#17-gravity-true-objects--real-floor-honest-bridges)
-    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239-extended-240)
+    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0 and 2.4.3)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239-extended-240-and-243)
 18. [Typographic Spacing (2.3.9) — real kerning for embossed text](#18-typographic-spacing-239--real-kerning-for-embossed-text)
 19. [Bridging infill extra expansion (2.4.0) — anchor bridges before they cross](#19-bridging-infill-extra-expansion-240--anchor-bridges-before-they-cross)
 20. [RealColor View — see the colour you are actually going to print](#20-realcolor-view--see-the-colour-you-are-actually-going-to-print)
 21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
 22. [Photo Mode (2.4.2) — a photo studio inside Prepare](#22-photo-mode-242--a-photo-studio-inside-prepare)
+23. [Height Adaptive Effects (2.4.3) — settings that change with height](#23-height-adaptive-effects-243--settings-that-change-with-height)
+    - 23a. [Building the list](#23a-building-the-list)
+    - 23b. [Drawing the curve](#23b-drawing-the-curve)
+    - 23c. [Steps or ramp — and the number that decides](#23c-steps-or-ramp--and-the-number-that-decides)
+    - 23d. [The effects](#23d-the-effects)
 
 ---
 
@@ -1401,12 +1406,21 @@ objects on the plate.
   by-object printing a neighbor object may not exist yet at a given height, so nothing is treated
   as floor there.
 
-### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0)
+### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0 and 2.4.3)
 
 With **True Objects** on, dragging an object in the viewport can rest it on whatever it is really
-above, instead of leaving it floating wherever you dropped it. Enable it per-session from the
-object's **right-click menu → Snap & Drag** (greyed out and unavailable while True Objects itself
-is off — it's a sub-behaviour of True Objects, not a separate axis).
+above, instead of leaving it floating wherever you dropped it.
+
+**Where the settings live (2.4.3).** Click the **magnet icon** in the plate's icon column — under
+the camera — and a small **Snap & Drag** panel opens with everything in one place: the master
+switch, **Snap to bed**, and **Move selection as one block**. It stays open while you work and
+closes with its own ✕ or by clicking the magnet again.
+
+Before 2.4.3 these lived in an object's right-click menu, which meant they were only reachable for
+the selection that produced *that particular* menu — select several objects and they simply weren't
+there, which is exactly when they matter most. The magnet doesn't depend on the selection, so the
+problem is gone rather than patched. (Snap & Drag is still a sub-behaviour of True Objects, not a
+separate axis: with True Objects off the panel says so and its controls are greyed out.)
 
 ![Snap & Drag — dragging an object over another makes it rest on the real surface underneath instead of staying where the mouse was released](docs/images/SnapANDDrag.gif)
 
@@ -1422,13 +1436,13 @@ real surface under it; if an object has more than one instance and they'd land o
 different heights, the whole object uses the **lowest** of those targets, so one instance landing
 on something tall never silently drags the others up with it.
 
-**Does the plate count? (2.4.0)** By default yes: **right-click → Snap & Drag: Allow Bed** is on,
-and an object dragged over empty space lands on the build plate, the way placement behaves in any
-ordinary slicer. Switch it off and only other objects can catch you — an object with nothing
-underneath keeps floating exactly where you dropped it, which is what you want while assembling
-something in mid-air. The plate never competes with a real object: it is simply a floor of height
-zero, and the highest surface under your footprint always wins. The option lives directly under
-**Snap & Drag** in the same menu and is greyed out unless Snap & Drag is on.
+**Does the plate count? (2.4.0, renamed 2.4.3)** By default yes: **Snap to bed** in the magnet
+panel is on, and an object dragged over empty space lands on the build plate, the way placement
+behaves in any ordinary slicer. Switch it off and only other objects can catch you — an object with
+nothing underneath keeps floating exactly where you dropped it, which is what you want while
+assembling something in mid-air. The plate never competes with a real object: it is simply a floor
+of height zero, and the highest surface under your footprint always wins. (This is the option that
+was called **Snap & Drag: Allow Bed** in 2.4.0–2.4.2; same setting, same default, new home.)
 
 With Allow Bed off and nothing qualifying underneath, the object is left exactly where it is —
 Snap & Drag then only ever pulls something *down* onto a floor it actually finds, in keeping with
@@ -1453,16 +1467,33 @@ Underneath it all is the older soft contact shadow. None of this takes part in t
 it is what makes aiming possible: when a large part refuses to catch a thin rim, the dots show you
 that the samples went through the opening instead of onto the rim.
 
-**Dragging several objects at once (2.4.0).** A multi-object selection is resolved by *stacks*.
-Anything standing on another member of the same selection travels with it and keeps its exact
-relative height; anything with nothing of its own underneath resolves its own floor and falls
+**Dragging several objects at once (2.4.0).** By default a multi-object selection is resolved by
+*stacks*. Anything standing on another member of the same selection travels with it and keeps its
+exact relative height; anything with nothing of its own underneath resolves its own floor and falls
 independently. Pick up a stack of three plus a loose box, move them together, and the stack lands
 intact while the loose box drops to the plate — in the same drag. Two objects count as stacked when
 one overlaps the other's footprint and sits within about a millimetre of its top, so hand-built
 stacks that were never seated perfectly still hold together.
 
+**Move selection as one block (2.4.3).** Sometimes that independence is the wrong answer: you are
+not placing parts, you are *carrying* an arrangement somewhere else and it must arrive unchanged.
+Tick **Move selection as one block** in the magnet panel and the whole selection becomes one rigid
+body — **nothing changes height relative to anything else**, and the block falls until its **first**
+part meets a surface, then stops. Nothing is ever pushed through its own floor to make some other
+part land.
+
+That last point is the practical difference. With the option off, a loose object dragged together
+with an assembled one is its own stack and finds its own floor, so it can drop to the plate while
+the assembled part stays high — correct behaviour when placing, surprising when moving a finished
+arrangement. With it on, they travel as they are.
+
+It's **off by default**: parts falling independently is what Snap & Drag is for most of the time,
+and it's the behaviour every earlier version had. The option only affects selections of more than
+one object or instance — a single object is a rigid body all by itself.
+
 **Limits:** vertical (-Z) detection only — it does not help with side-by-side mating inside
-Assemble View, which has no single "down" direction. No chaining *outside* the selection: moving an
+Assemble View, which has no single "down" direction. The magnet icon itself only appears in
+**LibreMode**, and only on the Prepare plate. No chaining *outside* the selection: moving an
 object that something else is resting on does not drag that object along, only things picked up
 together move together.
 
@@ -1787,6 +1818,97 @@ a model file that gets shared and printed. Saving over an existing name replaces
 
 ---
 
+## 23. Height Adaptive Effects (2.4.3) — settings that change with height
+
+**Where to find it**: left-side gizmo toolbar → **Height Adaptive Effects**. **Requires Libre
+Mode** (§4). Per object.
+
+Orca can already vary settings by height — that is what height range modifiers are. The problem is
+that you type a Z into a box and find out where the transition actually landed *after* slicing.
+
+This gizmo turns it around: you draw a curve **on top of the object's real layer bands**, adaptive
+layer height included. The horizontal lines in the graph are the layers you are going to get, so
+the layer you are affecting is visible while you affect it.
+
+Curves are stored **per object**, so they travel inside the 3MF and go through undo/redo like
+anything else. An object with no curve slices exactly as before.
+
+### 23a. Building the list
+
+The panel starts empty. Press **Add**, pick an effect from the list, and it joins *this object's*
+effects — so the panel only ever shows what you actually use, no matter how many effects exist.
+
+- **Trash button on a row** removes the effector completely, curve and all.
+- **Clear** (at the bottom) empties the curve but keeps the effect in the list.
+- Each row carries a **small preview of its own curve** and its point count, which is what keeps a
+  list of similarly-named effects readable at a glance.
+
+### 23b. Drawing the curve
+
+Inside the graph: **click** to add a point, **drag** to move it, **right-click** to delete it.
+Height runs up the left edge, the effect's value across the top.
+
+- Hovering anywhere in the graph gives a **live readout** of the Z you are on and what the curve is
+  worth there — you do not have to grab a point to read a number.
+- Dragging a point highlights the matching **band on the object itself**, in 3D.
+- **Open Z points** opens a numeric table, one row per point, with the layer number each Z lands
+  on — for when you want to type an exact value instead of dragging to it.
+- **Presets** seed a shape for the effects that have sensible ones.
+- **Refresh layers** re-reads the bands after you change the adaptive layer height profile (§11).
+
+> Z is measured from the **bottom of the object**, not from the bed. If you print with a raft, the
+> raft is not part of this axis.
+
+### 23c. Steps or ramp — and the number that decides
+
+**Steps** holds the value constant inside each band and changes it in one jump at a layer boundary;
+every point snaps to a real layer. **Ramp** varies it continuously.
+
+Steps is not just the cautious option. Sparse infill deliberately keeps its spacing constant across
+layers so the lines stack on the ones below — a width that drifts walks every line off its support.
+
+But what breaks the stacking is the drift **between consecutive layers**, which depends on how
+*steep* your curve is, not on it being a curve. A slow ramp moves each layer by a fraction of a
+micron. So instead of forbidding ramps, the panel measures yours:
+
+- **Line shift per layer** shows how far the infill of one layer lands from the one below, at the
+  far edge of the object, as a percentage of the line width. It turns amber above roughly 25%.
+- **Staircase** turns your ramp into that many layer-aligned bands, keeping the shape while giving
+  the lines back their constant spacing inside each band.
+
+A **shortest-band warning** also appears in steps mode: under about four layers, the jump costs
+more than it gives.
+
+### 23d. The effects
+
+| Effect | What it is for |
+|---|---|
+| **Sparse infill width** | Thin lines low down where the infill has to support the solid above it, thick lines deep inside where nothing rests on them. Same density, same material, less time. |
+| **Outer wall width** / **Inner wall width** | Wall thickness following the height. |
+| **Fuzzy skin thickness** | Texture that is born and dies with the height. |
+| **Fuzzy skin point distance / noise scale / octaves / persistence** | The texture's *character* changing with height, not only its depth. |
+
+Only the three line widths that **stack** are offered. Internal solid infill and top surface were
+wired up, looked at, and deliberately taken back out: a ramp there varies the width of the very
+surfaces the eye reads as flat, which is not something a print wants.
+
+Two things worth knowing:
+
+- **Fuzzy skin thickness reaching 0 switches the fuzzy skin off** for that layer, rather than
+  merely flattening it. A zero-amplitude fuzzy would otherwise still resample every perimeter into
+  thousands of points: same printed result, much fatter G-code.
+- The curves **scale** fuzzy skin, they do not turn it on. If fuzzy skin is off for the object, the
+  panel says so rather than letting you slice and find nothing changed.
+
+### Notes
+
+- A setting driven by a curve is **greyed out** in the object's settings panel, so the same value
+  is never being set from two places at once.
+- A curve needs **at least two points** to mean anything. One point is a constant, which is what a
+  plain per-object override is for.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -1810,8 +1932,9 @@ a model file that gets shared and printed. Saving over an existing name replaces
 | Remove Slice Cache (force a full re-slice) | Right-click object(s) → **Remove Slice Cache** (always available) |
 | PerObject Support (§16) | Support → Enable support → **PerObject Support** checkbox, per object |
 | True Objects / Gravity (§17) | Toolbar side button **"True Objects: On/Off"** (independent from Libre Mode) |
-| Snap & Drag (§17a) | Right-click an object → **Snap & Drag** (requires True Objects on) |
-| Snap & Drag: Allow Bed (§17a) | Right-click an object → **Snap & Drag: Allow Bed** (requires Snap & Drag on) |
+| Snap & Drag (§17a) | **Magnet icon** in the plate icon column → **Snap & Drag** (requires True Objects on) |
+| Snap to bed (§17a) | Magnet icon → **Snap to bed** (requires Snap & Drag on; was "Snap & Drag: Allow Bed" before 2.4.3) |
+| Move selection as one block (§17a) | Magnet icon → **Move selection as one block** (requires Snap & Drag on) |
 | World-space import (WIP) | Import with Libre Mode active *(recommend assembled → split)* |
 | S3DFactory import | File → Import → Import 3D model → `.factory` *(loads assembled; split in Libre Mode)* |
 | Save / Manage profiles | Sandwich Editor → **Save as profile… / Manage Sandwich Profiles** |
@@ -1828,6 +1951,7 @@ a model file that gets shared and printed. Saving over an existing name replaces
 | PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray or Sandwich Editor's Advanced button) |
 | Bump Mapping Editor (All / Painter / Top) | Left-side gizmo toolbar *(expert gate: Libre Mode active **+** `ORCA_DEBUG_TEXTUREBUMP` set, **+** `ORCA_DEBUG_ZBUMP` for Top/ZBump — see `NEOTKOCM_RELEASE_2_35.md`)* |
 | Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
+| Height Adaptive Effects (§23) | Left-side gizmo toolbar *(needs Libre Mode active)* |
 | NeoWave Support (enable) | Libre Mode → Support → **Support type → NeoWave** |
 | Wave roof (shape/order/reverse/hollow pillar) | Support → **Interface pattern → Wave** to reveal the controls (§12) |
 | NeoWave contact layer (WIP, print-pending) | Support → Advanced → **Support neoweave contact** toggle (§12a) |

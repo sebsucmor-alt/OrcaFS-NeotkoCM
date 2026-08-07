@@ -102,11 +102,17 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 15. [Expert G-code Reprocessor (2.3.8) — layer-ranged, per-tool G-code post-processing](#15-expert-g-code-reprocessor-238--layer-ranged-per-tool-g-code-post-processing)
 16. [PerObject Support (2.3.9) — support that avoids the other objects on the plate](#16-perobject-support-239--support-that-avoids-the-other-objects-on-the-plate)
 17. [Gravity ("True Objects") — real floor, honest bridges](#17-gravity-true-objects--real-floor-honest-bridges)
-    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239-extended-240)
+    - [17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0 and 2.4.3)](#17a-snap--drag--auto-rest-on-the-real-surface-below-239-extended-240-and-243)
 18. [Typographic Spacing (2.3.9) — real kerning for embossed text](#18-typographic-spacing-239--real-kerning-for-embossed-text)
 19. [Bridging infill extra expansion (2.4.0) — anchor bridges before they cross](#19-bridging-infill-extra-expansion-240--anchor-bridges-before-they-cross)
 20. [RealColor View — see the colour you are actually going to print](#20-realcolor-view--see-the-colour-you-are-actually-going-to-print)
 21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
+22. [Photo Mode (2.4.2) — a photo studio inside Prepare](#22-photo-mode-242--a-photo-studio-inside-prepare)
+23. [Height Adaptive Effects (2.4.3) — settings that change with height](#23-height-adaptive-effects-243--settings-that-change-with-height)
+    - 23a. [Building the list](#23a-building-the-list)
+    - 23b. [Drawing the curve](#23b-drawing-the-curve)
+    - 23c. [Steps or ramp — and the number that decides](#23c-steps-or-ramp--and-the-number-that-decides)
+    - 23d. [The effects](#23d-the-effects)
 
 ---
 
@@ -1413,12 +1419,21 @@ objects on the plate.
   by-object printing a neighbor object may not exist yet at a given height, so nothing is treated
   as floor there.
 
-### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0)
+### 17a. Snap & Drag — auto-rest on the real surface below (2.3.9, extended 2.4.0 and 2.4.3)
 
 With **True Objects** on, dragging an object in the viewport can rest it on whatever it is really
-above, instead of leaving it floating wherever you dropped it. Enable it per-session from the
-object's **right-click menu → Snap & Drag** (greyed out and unavailable while True Objects itself
-is off — it's a sub-behaviour of True Objects, not a separate axis).
+above, instead of leaving it floating wherever you dropped it.
+
+**Where the settings live (2.4.3).** Click the **magnet icon** in the plate's icon column — under
+the camera — and a small **Snap & Drag** panel opens with everything in one place: the master
+switch, **Snap to bed**, and **Move selection as one block**. It stays open while you work and
+closes with its own ✕ or by clicking the magnet again.
+
+Before 2.4.3 these lived in an object's right-click menu, which meant they were only reachable for
+the selection that produced *that particular* menu — select several objects and they simply weren't
+there, which is exactly when they matter most. The magnet doesn't depend on the selection, so the
+problem is gone rather than patched. (Snap & Drag is still a sub-behaviour of True Objects, not a
+separate axis: with True Objects off the panel says so and its controls are greyed out.)
 
 ![Snap & Drag — dragging an object over another makes it rest on the real surface underneath instead of staying where the mouse was released](docs/images/SnapANDDrag.gif)
 
@@ -1434,13 +1449,13 @@ real surface under it; if an object has more than one instance and they'd land o
 different heights, the whole object uses the **lowest** of those targets, so one instance landing
 on something tall never silently drags the others up with it.
 
-**Does the plate count? (2.4.0)** By default yes: **right-click → Snap & Drag: Allow Bed** is on,
-and an object dragged over empty space lands on the build plate, the way placement behaves in any
-ordinary slicer. Switch it off and only other objects can catch you — an object with nothing
-underneath keeps floating exactly where you dropped it, which is what you want while assembling
-something in mid-air. The plate never competes with a real object: it is simply a floor of height
-zero, and the highest surface under your footprint always wins. The option lives directly under
-**Snap & Drag** in the same menu and is greyed out unless Snap & Drag is on.
+**Does the plate count? (2.4.0, renamed 2.4.3)** By default yes: **Snap to bed** in the magnet
+panel is on, and an object dragged over empty space lands on the build plate, the way placement
+behaves in any ordinary slicer. Switch it off and only other objects can catch you — an object with
+nothing underneath keeps floating exactly where you dropped it, which is what you want while
+assembling something in mid-air. The plate never competes with a real object: it is simply a floor
+of height zero, and the highest surface under your footprint always wins. (This is the option that
+was called **Snap & Drag: Allow Bed** in 2.4.0–2.4.2; same setting, same default, new home.)
 
 With Allow Bed off and nothing qualifying underneath, the object is left exactly where it is —
 Snap & Drag then only ever pulls something *down* onto a floor it actually finds, in keeping with
@@ -1465,16 +1480,33 @@ Underneath it all is the older soft contact shadow. None of this takes part in t
 it is what makes aiming possible: when a large part refuses to catch a thin rim, the dots show you
 that the samples went through the opening instead of onto the rim.
 
-**Dragging several objects at once (2.4.0).** A multi-object selection is resolved by *stacks*.
-Anything standing on another member of the same selection travels with it and keeps its exact
-relative height; anything with nothing of its own underneath resolves its own floor and falls
+**Dragging several objects at once (2.4.0).** By default a multi-object selection is resolved by
+*stacks*. Anything standing on another member of the same selection travels with it and keeps its
+exact relative height; anything with nothing of its own underneath resolves its own floor and falls
 independently. Pick up a stack of three plus a loose box, move them together, and the stack lands
 intact while the loose box drops to the plate — in the same drag. Two objects count as stacked when
 one overlaps the other's footprint and sits within about a millimetre of its top, so hand-built
 stacks that were never seated perfectly still hold together.
 
+**Move selection as one block (2.4.3).** Sometimes that independence is the wrong answer: you are
+not placing parts, you are *carrying* an arrangement somewhere else and it must arrive unchanged.
+Tick **Move selection as one block** in the magnet panel and the whole selection becomes one rigid
+body — **nothing changes height relative to anything else**, and the block falls until its **first**
+part meets a surface, then stops. Nothing is ever pushed through its own floor to make some other
+part land.
+
+That last point is the practical difference. With the option off, a loose object dragged together
+with an assembled one is its own stack and finds its own floor, so it can drop to the plate while
+the assembled part stays high — correct behaviour when placing, surprising when moving a finished
+arrangement. With it on, they travel as they are.
+
+It's **off by default**: parts falling independently is what Snap & Drag is for most of the time,
+and it's the behaviour every earlier version had. The option only affects selections of more than
+one object or instance — a single object is a rigid body all by itself.
+
 **Limits:** vertical (-Z) detection only — it does not help with side-by-side mating inside
-Assemble View, which has no single "down" direction. No chaining *outside* the selection: moving an
+Assemble View, which has no single "down" direction. The magnet icon itself only appears in
+**LibreMode**, and only on the Prepare plate. No chaining *outside* the selection: moving an
 object that something else is resting on does not drag that object along, only things picked up
 together move together.
 
@@ -1604,11 +1636,12 @@ is one blended colour.
 **RealColor** renders the second thing. It composites each surface the way the eye will resolve it,
 using each filament's **TD** (§1e) to decide how much of what is underneath shows through.
 
-![Filament view — the standard preview: every extrusion in its filament's raw colour, so the top surface reads as hard blue and pink stripes](docs/images/RealColor-OFF.png)
+![Side by side on the same G-code: on the left the traditional preview, where every extrusion is drawn in its filament's raw colour and each surface reads as hard diagonal stripes of blue, pink and orange; on the right RealColor, where those stripes resolve into the single blended tone the print will actually have — the striped tiles become continuous salmon, sand and lilac, and only the genuinely single-colour tiles look the same in both](docs/images/RealColor.png)
 
-![RealColor view — the same G-code composited optically: the stripes resolve into the blended tone the print will actually have, and the legend is replaced by a Filament Usage summary carrying the "approximated optical simulation" caveat](docs/images/RealColor-ON.png)
-
-Same G-code in both shots. Only the interpretation changes.
+Same G-code in both halves. Only the interpretation changes. Look at any tile that reads as stripes on
+the left: on the right it has become the one colour your eye will see on the finished part. The tiles
+that were already a single filament barely move — which is the point, because that is exactly where
+the two ways of drawing agree.
 
 ### Notes
 
@@ -1665,11 +1698,236 @@ tuning TD (§1e) rather than leaving it at defaults.
 
 ---
 
+## 22. Photo Mode (2.4.2) — a photo studio inside Prepare
+
+**Where to find it**: **Prepare** → the **camera button** at the bottom of the plate's icon column
+(also in the right-click menu on empty space). **Requires Libre Mode** (§4).
+
+A client asks what the part looks like in a different colour. You change it — and now you need a
+picture. Opening a real renderer for that is a five-minute detour for a thirty-second question, so in
+practice you send a screenshot of the slicer: gantry, grid, Snapmaker logo, toolbars and all.
+
+Photo Mode turns the Prepare viewport into a small photo studio. Your object does not move and does
+not change; everything *around* it does.
+
+It changes **nothing** about the model, the settings or the G-code. Esc, the camera button, or
+switching to Preview leaves it.
+
+### 22a. The stage
+
+| Stage | What you get |
+|---|---|
+| **Print bed** | Everything as normal. For when the bed *is* the context you want to show. |
+| **Lightbox** | A **cyclorama**: a floor that sweeps up into a back wall through a rounded corner, with no visible seam. The white sweep a product photographer shoots against. |
+| **Backdrop** | The floor alone, no wall. For top-down shots. |
+
+On Lightbox and Backdrop the bed, grid, exclusion zones, plate numbers, the Snapmaker logo, the
+gizmos and the toolbars all disappear — the logo first, because it is the single most obvious "this
+is a screenshot of a slicer" element in the frame. The camera button stays, because it is also how
+you get out.
+
+Floor colour, size (as a multiple of your bed) and corner radius are adjustable.
+
+### 22b. Lights
+
+Three: **key**, **fill** and **rim**. Each has a **draggable ball** instead of three number boxes —
+drag toward where you want the light and the shadow follows. Azimuth and elevation are also shown in
+degrees, so a setup you liked can be written down and reproduced.
+
+The light lives **in the room, not on the camera**. Orbit around the object and the lighting stays
+put, the way it would in a real studio. (The normal viewport does the opposite: its light is pinned
+to your eye. That is why the object never has a dark side while you spin it.)
+
+Only the key light casts the shadow. Each light has an intensity and a colour tint.
+
+**Presets** sit at the top and do most of the work:
+
+| Preset | What it is for |
+|---|---|
+| **Neutral (as viewport)** | Identical to the normal 3D view. The default — entering Photo Mode changes the scene around the object, not the object. |
+| **Studio 3-point** | Key high to one side, fill opposite to open the shadows, rim behind to separate the object from the backdrop. |
+| **Softbox top** | One big overhead source, heavy ambient. The "product on white" look. |
+| **Rim / backlight** | Weak key, strong edge light from behind. Sells profile and surface finish. |
+| **Flat catalog** | Deliberately boring: almost no shadow, heavy ambient. What a shop listing wants, and what survives being cropped. |
+| **Dramatic** | Grazing key, almost no fill. Long shadows — sells geometry rather than colour. |
+
+### 22c. Materials, per filament slot
+
+Each slot gets its own finish, picked from a list that shows the slot's **real colour** beside it:
+
+| Material | Reads as |
+|---|---|
+| **Plastic** | The default — pixel-for-pixel the shading you already had. |
+| **Glossy / resin** | Small, hard highlight. Polished or resin-printed. |
+| **Matte PLA** | Broad, weak sheen. |
+| **Rubber / TPU** | Almost no highlight at all — which is exactly what makes TPU look like TPU. |
+| **Metal** | Highlight tinted by the object's own colour, no diffuse. |
+| **Silk** | Half-metallic: a coloured sheen over a coloured body. What silk PLA actually is. |
+
+On a **painted multi-colour object** the material follows the **colour**, not the part. One keyring
+body can be matte on the stripes and metal on the lettering, from a single mesh.
+
+> **Metal and Silk look much better with the Environment on** (§22d) — a metal is sold by what it
+> reflects. They work without it, reflecting your lights directly, but there is not much *in* the
+> reflection until you give them a room.
+
+### 22d. Environment
+
+Off by default. When on, it builds a **virtual room out of your own three lights**, which the objects
+then reflect: move the key light and its reflection moves with it. There is a **rotate room**
+control, which turns the reflections without moving the lighting — the fastest way to make a metal
+look right.
+
+It is off by default on purpose: with it on, Photo Mode no longer reproduces the normal viewport
+exactly, and that equivalence is worth keeping as the starting point.
+
+### 22e. Quality, and the floor reflection
+
+| Quality | Shadow map | Floor reflection |
+|---|---|---|
+| **Normal** | 2048 px | — |
+| **High** | 4096 px | available |
+| **Ultra** | 8192 px | available |
+
+The higher tiers also **widen the shadow's soft edge** to match the resolution. Raising the
+resolution alone would give you a thinner but equally hard edge — better measured, worse looking.
+
+**Floor reflection** mirrors the objects in the floor, stronger at grazing angles than face-on, with
+an adjustable strength. It is a genuine reflection of the scene rather than a screen-space
+approximation, so it does not fall apart at the object's outline — which is the part of a reflection
+anyone actually looks at.
+
+It draws the whole scene a second time, which is why it is gated above Normal. On an **M4 with a
+fairly complex model, Ultra with the reflection on runs at 10–15 fps** — fine for framing a still,
+not meant for modelling. Drop to High if you want to orbit comfortably.
+
+### 22f. Getting the picture out
+
+**Hide UI for screenshot** clears every control — including the Photo Mode panel itself — for an
+adjustable few seconds, so you can grab the frame with your system screenshot tool (⌘⇧4 on macOS).
+Esc cancels the countdown; a second Esc leaves the mode.
+
+> **Save PNG** and **Copy to clipboard** are **disabled in 2.4.2.** The off-screen render still
+> frames the shot wrongly, and a button that writes a broken file is worse than no button. The
+> screenshot route above is the supported way for now.
+
+### 22g. Presets
+
+**My presets** saves lights, materials, stage, environment and quality under a name you choose.
+
+They are stored **with the application, not in the 3MF**. A lighting setup is your preference as the
+person taking the picture — it should follow you across every project, rather than ride along inside
+a model file that gets shared and printed. Saving over an existing name replaces it.
+
+### Notes
+
+- **Libre Mode must be on.** Photo Mode is built on the Libre Mode object renderer (shadows, ambient
+  occlusion, contact shadows); with Libre Mode off the button does not appear at all, rather than
+  appearing and doing nothing.
+- **Transparent materials are deliberately not supported.** Showing a client a semi-transparent part
+  would be *dishonest* — that is not how it comes off the printer. If you want to see inside a part,
+  that is what **RealColor** (§20) is for, where the translucency is the whole point.
+- Switching to **Preview**, **Device** or **Project** leaves Photo Mode automatically.
+
+---
+
+## 23. Height Adaptive Effects (2.4.3) — settings that change with height
+
+**Where to find it**: left-side gizmo toolbar → **Height Adaptive Effects**. **Requires Libre
+Mode** (§4). Per object.
+
+Orca can already vary settings by height — that is what height range modifiers are. The problem is
+that you type a Z into a box and find out where the transition actually landed *after* slicing.
+
+This gizmo turns it around: you draw a curve **on top of the object's real layer bands**, adaptive
+layer height included. The horizontal lines in the graph are the layers you are going to get, so
+the layer you are affecting is visible while you affect it.
+
+Curves are stored **per object**, so they travel inside the 3MF and go through undo/redo like
+anything else. An object with no curve slices exactly as before.
+
+### 23a. Building the list
+
+The panel starts empty. Press **Add**, pick an effect from the list, and it joins *this object's*
+effects — so the panel only ever shows what you actually use, no matter how many effects exist.
+
+- **Trash button on a row** removes the effector completely, curve and all.
+- **Clear** (at the bottom) empties the curve but keeps the effect in the list.
+- Each row carries a **small preview of its own curve** and its point count, which is what keeps a
+  list of similarly-named effects readable at a glance.
+
+### 23b. Drawing the curve
+
+Inside the graph: **click** to add a point, **drag** to move it, **right-click** to delete it.
+Height runs up the left edge, the effect's value across the top.
+
+- Hovering anywhere in the graph gives a **live readout** of the Z you are on and what the curve is
+  worth there — you do not have to grab a point to read a number.
+- Dragging a point highlights the matching **band on the object itself**, in 3D.
+- **Open Z points** opens a numeric table, one row per point, with the layer number each Z lands
+  on — for when you want to type an exact value instead of dragging to it.
+- **Presets** seed a shape for the effects that have sensible ones.
+- **Refresh layers** re-reads the bands after you change the adaptive layer height profile (§11).
+
+> Z is measured from the **bottom of the object**, not from the bed. If you print with a raft, the
+> raft is not part of this axis.
+
+### 23c. Steps or ramp — and the number that decides
+
+**Steps** holds the value constant inside each band and changes it in one jump at a layer boundary;
+every point snaps to a real layer. **Ramp** varies it continuously.
+
+Steps is not just the cautious option. Sparse infill deliberately keeps its spacing constant across
+layers so the lines stack on the ones below — a width that drifts walks every line off its support.
+
+But what breaks the stacking is the drift **between consecutive layers**, which depends on how
+*steep* your curve is, not on it being a curve. A slow ramp moves each layer by a fraction of a
+micron. So instead of forbidding ramps, the panel measures yours:
+
+- **Line shift per layer** shows how far the infill of one layer lands from the one below, at the
+  far edge of the object, as a percentage of the line width. It turns amber above roughly 25%.
+- **Staircase** turns your ramp into that many layer-aligned bands, keeping the shape while giving
+  the lines back their constant spacing inside each band.
+
+A **shortest-band warning** also appears in steps mode: under about four layers, the jump costs
+more than it gives.
+
+### 23d. The effects
+
+| Effect | What it is for |
+|---|---|
+| **Sparse infill width** | Thin lines low down where the infill has to support the solid above it, thick lines deep inside where nothing rests on them. Same density, same material, less time. |
+| **Outer wall width** / **Inner wall width** | Wall thickness following the height. |
+| **Fuzzy skin thickness** | Texture that is born and dies with the height. |
+| **Fuzzy skin point distance / noise scale / octaves / persistence** | The texture's *character* changing with height, not only its depth. |
+
+Only the three line widths that **stack** are offered. Internal solid infill and top surface were
+wired up, looked at, and deliberately taken back out: a ramp there varies the width of the very
+surfaces the eye reads as flat, which is not something a print wants.
+
+Two things worth knowing:
+
+- **Fuzzy skin thickness reaching 0 switches the fuzzy skin off** for that layer, rather than
+  merely flattening it. A zero-amplitude fuzzy would otherwise still resample every perimeter into
+  thousands of points: same printed result, much fatter G-code.
+- The curves **scale** fuzzy skin, they do not turn it on. If fuzzy skin is off for the object, the
+  panel says so rather than letting you slice and find nothing changed.
+
+### Notes
+
+- A setting driven by a curve is **greyed out** in the object's settings panel, so the same value
+  is never being set from two places at once.
+- A curve needs **at least two points** to mean anything. One point is a constant, which is what a
+  plain per-object override is for.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
 |---------|---------------|
 | Sandwich Editor (pass stack, ColorStitch, PathBlend) | Quality → Surface ColorStitch → **Sandwich editor…** |
+| Photo Mode (§22) | Prepare → **camera button** on the plate icon column *(Libre Mode only)* |
 | ColorStitch pass pattern | Sandwich Editor → a pass set to **ColorStitch** → **Edit gradient…** |
 | ColorStitch Studio | Sandwich Editor → **ColorStitch Studio** panel (bottom) |
 | Colour match (inverse ΔE2000) | ColorStitch Studio → **Target + Match ▸** |
@@ -1687,8 +1945,9 @@ tuning TD (§1e) rather than leaving it at defaults.
 | Remove Slice Cache (force a full re-slice) | Right-click object(s) → **Remove Slice Cache** (always available) |
 | PerObject Support (§16) | Support → Enable support → **PerObject Support** checkbox, per object |
 | True Objects / Gravity (§17) | Toolbar side button **"True Objects: On/Off"** (independent from Libre Mode) |
-| Snap & Drag (§17a) | Right-click an object → **Snap & Drag** (requires True Objects on) |
-| Snap & Drag: Allow Bed (§17a) | Right-click an object → **Snap & Drag: Allow Bed** (requires Snap & Drag on) |
+| Snap & Drag (§17a) | **Magnet icon** in the plate icon column → **Snap & Drag** (requires True Objects on) |
+| Snap to bed (§17a) | Magnet icon → **Snap to bed** (requires Snap & Drag on; was "Snap & Drag: Allow Bed" before 2.4.3) |
+| Move selection as one block (§17a) | Magnet icon → **Move selection as one block** (requires Snap & Drag on) |
 | World-space import (WIP) | Import with Libre Mode active *(recommend assembled → split)* |
 | S3DFactory import | File → Import → Import 3D model → `.factory` *(loads assembled; split in Libre Mode)* |
 | Save / Manage profiles | Sandwich Editor → **Save as profile… / Manage Sandwich Profiles** |
@@ -1705,6 +1964,7 @@ tuning TD (§1e) rather than leaving it at defaults.
 | PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray or Sandwich Editor's Advanced button) |
 | Bump Mapping Editor (All / Painter / Top) | Left-side gizmo toolbar *(expert gate: Libre Mode active **+** `ORCA_DEBUG_TEXTUREBUMP` set, **+** `ORCA_DEBUG_ZBUMP` for Top/ZBump — see `NEOTKOCM_RELEASE_2_35.md`)* |
 | Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
+| Height Adaptive Effects (§23) | Left-side gizmo toolbar *(needs Libre Mode active)* |
 | NeoWave Support (enable) | Libre Mode → Support → **Support type → NeoWave** |
 | Wave roof (shape/order/reverse/hollow pillar) | Support → **Interface pattern → Wave** to reveal the controls (§12) |
 | NeoWave contact layer (WIP, print-pending) | Support → Advanced → **Support neoweave contact** toggle (§12a) |
@@ -1784,7 +2044,7 @@ All of this work is open and free. Fork it, improve it, credit it.
 
 -----
 
-Now all the info from the Original SnapMaker 2.3.4 Readme
+Now all the info from the Original SnapMaker 2.3.5 Readme
 
 -----
 

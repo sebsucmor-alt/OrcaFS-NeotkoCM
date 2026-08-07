@@ -1,4 +1,5 @@
 #include "PerimeterGenerator.hpp"
+#include "Feature/HeightAdaptive/HeightCurve.hpp" // NEOTKO_HAE_TAG s247 — sparse infill width by height
 #include "AABBTreeLines.hpp"
 #include "BridgeDetector.hpp"
 #include "ClipperUtils.hpp"
@@ -693,6 +694,21 @@ void PerimeterGenerator::split_top_surfaces(const ExPolygons &orig_polygons, ExP
     //set the clip to the external wall but go back inside by infill_extrusion_width/2 to be sure the extrusion won't go outside even with a 100% overlap.
     double infill_spacing_unscaled = this->config->sparse_infill_line_width.get_abs_value(nozzle_diameter);
     if (infill_spacing_unscaled == 0) infill_spacing_unscaled = Flow::auto_extrusion_width(frInfill, nozzle_diameter);
+    // NEOTKO_HAE_TAG s247 — Height Adaptive Effects, effect B, SECOND consumer (plan §6.3/§9 #8).
+    // This is the same sparse_infill_line_width that LayerRegion::flow now varies by height; it is
+    // used here to decide gap fill and thin walls. Hook both or neither — otherwise perimeters and
+    // infill disagree about the width of the very same layer. Empty curve ⇒ untouched. The
+    // Stepped argument is only the fallback mode: the stored curve carries its own (see
+    // HeightCurve::parse), so this site and LayerRegion::flow() always agree with each other.
+    if (this->object_config != nullptr && ! this->object_config->neotko_hae_infill_width.value.empty()) {
+        const auto hae_width = HeightAdaptive::HeightCurve::parse(
+            this->object_config->neotko_hae_infill_width.value, HeightAdaptive::Interp::Stepped);
+        if (! hae_width.empty()) {
+            const double w = hae_width.at(this->slice_z, infill_spacing_unscaled);
+            if (w > 0.)
+                infill_spacing_unscaled = w;
+        }
+    }
     fill_clip = offset_ex(orig_polygons, double(ext_perimeter_spacing / 2.) - scale_(infill_spacing_unscaled / 2.));
     // ExPolygons oldLast = last;
 

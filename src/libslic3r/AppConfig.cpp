@@ -177,6 +177,15 @@ void AppConfig::set_defaults()
         if (get("neotko_true_objects").empty() && !get("neotko_libre_mode").empty())
             set_bool("neotko_true_objects", get_bool("neotko_libre_mode"));
 
+        // NEOTKO_NOTIF_DIGEST_TAG s250 — the notification digest band defaults to LibreMode's state:
+        // it exists for the user who stacks and touches objects on purpose and does not want a wall of
+        // "too close to others" cards. Same one-shot seeding trap as neotko_true_objects above: gate on
+        // neotko_libre_mode being PRESENT so the constructor pass (empty storage) does not write a
+        // premature false. While the key is still absent, NotificationManager::digest_active() falls
+        // back to neotko_libre_mode, so a fresh install behaves right before this ever fires.
+        if (get("neotko_notification_digest").empty() && !get("neotko_libre_mode").empty())
+            set_bool("neotko_notification_digest", get_bool("neotko_libre_mode"));
+
 #ifdef SUPPORT_REMEMBER_OUTPUT_PATH
         if (get("remember_output_path").empty())
             set_bool("remember_output_path", true);

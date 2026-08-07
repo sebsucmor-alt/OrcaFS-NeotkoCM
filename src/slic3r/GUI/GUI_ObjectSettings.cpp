@@ -405,6 +405,53 @@ void ObjectSettings::update_config_values(ModelConfig* config)
 
     printer_technology == ptFFF  ?  config_manipulation.toggle_print_fff_options(&main_config) :
                                     config_manipulation.toggle_print_sla_options(&main_config) ;
+
+    // NEOTKO_HAE_TAG s247 — §13 of docs/FUTURE/HEIGHT_ADAPTIVE_EFFECTS_PLAN.md: when a Height
+    // Adaptive Effects curve is active on this object, the gizmo becomes the OWNER of that
+    // setting for that object, and the per-object row for it goes inert.
+    //
+    // 🚨 This is COMMUNICATION, NOT ENFORCEMENT (§13.4). A 3mf from another version, a script,
+    // or a height-range modifier can still put a value in that key. The guarantee lives at the
+    // point of consumption, where the curve already wins: LayerRegion::flow() overrides the
+    // region's sparse_infill_line_width, and PrintObject::make_slices() evaluates the curve
+    // instead of the object's xy_*_compensation. This greying-out only explains to the user
+    // why the number they would type has no effect — it is not what makes it have no effect.
+    // Implementation order matters and was respected: engine precedence first, lock second.
+    //
+    // Runs LAST on purpose: toggle_print_fff_options() above re-enables rows, so anything we
+    // disable has to come after it.
+    //
+    // ⚠️ This must stay OUT of the global Print Settings tab (§13.1): that tab belongs to the
+    // PRESET, shared by every object on the plate. Greying it there because object A has a
+    // curve would also grey it for B, C and D, which have none — a visual lie plus a broken
+    // legitimate edit. All three lock points of §13.1 (per-object settings, that object's
+    // height range modifiers, per-volume overrides) are per-object and all three come through
+    // this very function, so one pass covers them.
+    {
+        const int obj_idx = objects_model->GetObjectIdByItem(item);
+        const auto& model_objects = wxGetApp().model().objects;
+        if (obj_idx >= 0 && obj_idx < (int)model_objects.size()) {
+            const ModelObject* mo = model_objects[obj_idx];
+            auto curve_active = [mo](const char* curve_key) {
+                if (!mo->config.has(curve_key))
+                    return false;
+                const auto* opt = dynamic_cast<const ConfigOptionString*>(mo->config.option(curve_key));
+                return opt != nullptr && !opt->value.empty();
+            };
+            // curve key -> the setting it takes ownership of. Keep in sync with the effect
+            // registry in GLGizmoHeightAdaptiveEffects::effects().
+            static const struct { const char* curve; const char* owned; } kOwnership[] = {
+                { "neotko_hae_xy_contour",   "xy_contour_compensation" },
+                { "neotko_hae_xy_hole",      "xy_hole_compensation"    },
+                { "neotko_hae_infill_width", "sparse_infill_line_width" },
+            };
+            for (const auto& pair : kOwnership)
+                if (curve_active(pair.curve))
+                    // No-op when that row isn't in this panel (get_fieldc returns nullptr), so
+                    // this is safe for the object, volume and layer-range variants alike.
+                    toggle_field(pair.owned, false, 0);
+        }
+    }
 }
 
 void ObjectSettings::UpdateAndShow(const bool show)

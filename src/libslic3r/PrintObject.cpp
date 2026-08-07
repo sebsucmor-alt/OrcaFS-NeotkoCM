@@ -1032,8 +1032,23 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "seam_gap"
             || opt_key == "role_based_wipe_speed"
             || opt_key == "wipe_on_loops"
-            || opt_key == "wipe_speed") {
+            || opt_key == "wipe_speed"
+            // NEOTKO_HAE_TAG s247 — the sparse infill width curve has TWO consumers (plan §6.3):
+            // LayerRegion::flow (infill) and PerimeterGenerator's fill_clip / gap fill. Invalidating
+            // posPerimeters covers both, since posPrepareInfill re-runs after it anyway. Stock only
+            // invalidates posPrepareInfill for sparse_infill_line_width, which under-invalidates the
+            // perimeter side; we are not making that mistake with the curve.
+            || opt_key == "neotko_hae_infill_width") {
             steps.emplace_back(posPerimeters);
+        } else if (
+            // NEOTKO_HAE_TAG s248 — Adaptive Effector level 0: the two wall-width curves.
+            // Deliberately invalidated as a SUPERSET of what their base keys do individually
+            // (both → perimeters). Over-invalidating costs a re-slice; under-invalidating leaves a
+            // stale toolpath on screen, and the wall width feeds the perimeter-infill overlap too.
+               opt_key == "neotko_hae_outer_wall_width"
+            || opt_key == "neotko_hae_inner_wall_width") {
+            steps.emplace_back(posPerimeters);
+            steps.emplace_back(posPrepareInfill);
         } else if (
             opt_key == "small_area_infill_flow_compensation_model") {
             steps.emplace_back(posSlice);
@@ -1116,6 +1131,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_bottom_z_distance"
             || opt_key == "xy_hole_compensation"
             || opt_key == "xy_contour_compensation"
+            // NEOTKO_HAE_EXPANSION_TAG s247 — the Expansion curves are consumed in the same
+            // make_slices loop as the two keys above, so they invalidate exactly the same step.
+            || opt_key == "neotko_hae_xy_contour"
+            || opt_key == "neotko_hae_xy_hole"
             //BBS: [Arthur] the following params affect bottomBridge surface type detection
             || opt_key == "support_type"
             || opt_key == "bridge_no_support"
@@ -1291,6 +1310,13 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wall_filament"
             || opt_key == "fuzzy_skin"
             || opt_key == "fuzzy_skin_thickness"
+            // NEOTKO_HAE_TAG s247 — the curve that scales it, consumed in the same place.
+            || opt_key == "neotko_hae_fuzzy_thickness"
+            // NEOTKO_HAE_TAG s248 — level 0: the other four noise parameters, same hook, same step.
+            || opt_key == "neotko_hae_fuzzy_point_distance"
+            || opt_key == "neotko_hae_fuzzy_scale"
+            || opt_key == "neotko_hae_fuzzy_octaves"
+            || opt_key == "neotko_hae_fuzzy_persistence"
             || opt_key == "fuzzy_skin_point_distance"
             || opt_key == "fuzzy_skin_first_layer"
             || opt_key == "fuzzy_skin_mode"

@@ -160,6 +160,8 @@ set(lisbslic3r_sources
     Feature/ZBump/ZBump.hpp
     Feature/Gravity/GravityFloor.cpp
     Feature/Gravity/GravityFloor.hpp
+    Feature/HeightAdaptive/HeightCurve.cpp
+    Feature/HeightAdaptive/HeightCurve.hpp
     InstanceContact.cpp
     InstanceContact.hpp
     Feature/Interlocking/InterlockingGenerator.cpp

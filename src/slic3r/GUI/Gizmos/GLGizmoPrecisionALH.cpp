@@ -8,6 +8,7 @@
 #include "slic3r/GUI/GLShader.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "GizmoNeotkoStyle.hpp" // NEOTKO_GIZMOSTYLE_TAG s248 — shared palette with the HAE gizmo
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -23,6 +24,9 @@
 #include <GL/glew.h>
 
 #include <algorithm>
+#include <cstdio>   // NEOTKO_GIZMOSTYLE_TAG — snprintf for the new axis labels
+#include <string>
+#include <vector>
 #include <array>
 #include <cmath>
 #include <sstream>
@@ -940,13 +944,48 @@ void GLGizmoPrecisionALH::render_curve_editor(float width, float height)
         return !env.passthrough && (h < env.h_min - 1e-9 || h > env.h_max + 1e-9);
     };
 
-    dl->AddRectFilled(p0, ImVec2(p0.x + width, p0.y + height), IM_COL32(24, 28, 33, 255), 3.0f);
-    dl->AddRect(p0, ImVec2(p0.x + width, p0.y + height), IM_COL32(70, 78, 88, 255), 3.0f);
+    // NEOTKO_GIZMOSTYLE_TAG s248 — shared look with GLGizmoHeightAdaptiveEffects (GizmoNeotkoStyle.hpp).
+    // Purely cosmetic: not one meaning, threshold or interaction changed here, only which pixels
+    // get which colour. The two gizmos are near-twins — the HAE editor was cloned from this one —
+    // so they now read as a pair instead of two unrelated tools.
+    neo_draw_canvas(dl, p0, width, height);
 
-    constexpr ImU32 kForbidCol   = IM_COL32(200, 40, 40, 70);    // translucent red
-    constexpr ImU32 kOptCol      = IM_COL32(50, 210, 90, 220);   // green — optimal
-    constexpr ImU32 kConflictCol = IM_COL32(255, 140, 0, 230);  // orange — conflict override
-    constexpr ImU32 kSlopeCol    = IM_COL32(150, 80, 220, 45);   // translucent violet — slope exposure (informational)
+    const ImU32 kForbidCol   = neo_fade(NeoCol::Forbid,  0.20f); // band the envelope rules out
+    const ImU32 kOptCol      = neo_fade(NeoCol::Optimal, 0.85f); // the suggested-height line
+    const ImU32 kConflictCol = neo_col_u32(NeoCol::Warn);        // conflict override
+    const ImU32 kSlopeCol    = neo_fade(NeoCol::Slope,   0.18f); // slope exposure (informational)
+
+    // ---- grid and scales ----
+    // New in s248: this editor had NO gridlines and NO axis labels at all — the curve floated in a
+    // black rectangle and both numbers you actually care about (which height, at which Z) could
+    // only be read by grabbing a point. Height across the top, Z up the left, five ticks each.
+    for (int t = 0; t <= 4; ++ t) {
+        const float  fx = float(t) / 4.f;
+        const double h  = h_min + (h_max - h_min) * fx;
+        const float  xv = p0.x + fx * width;
+        dl->AddLine(ImVec2(xv, p0.y + 1.f), ImVec2(xv, p0.y + height - 1.f),
+                    (t == 0 || t == 4) ? neo_fade(NeoCol::GridMajor, 0.5f) : neo_col_u32(NeoCol::Grid), 1.0f);
+        char lbl[24];
+        std::snprintf(lbl, sizeof(lbl), "%.2f", h);
+        const ImVec2 tsz = ImGui::CalcTextSize(lbl);
+        float lx = (t == 0) ? p0.x + 3.f : (t == 4) ? p0.x + width - tsz.x - 3.f : xv - tsz.x * 0.5f;
+        lx = std::clamp(lx, p0.x + 3.f, p0.x + width - tsz.x - 3.f);
+        dl->AddRectFilled(ImVec2(lx - 2.f, p0.y + 1.f), ImVec2(lx + tsz.x + 2.f, p0.y + tsz.y + 3.f),
+                          neo_fade(NeoCol::Canvas, 0.8f), 3.f);
+        dl->AddText(ImVec2(lx, p0.y + 2.f), neo_fade(NeoCol::TextDim, 0.9f), lbl);
+    }
+    for (int t = 0; t <= 4; ++ t) {
+        const double z = z_max * double(t) / 4.;
+        const float  y = to_screen(z, h_min).y;
+        dl->AddLine(ImVec2(p0.x + 1.f, y), ImVec2(p0.x + width - 1.f, y), neo_col_u32(NeoCol::Grid), 1.0f);
+        char lbl[24];
+        std::snprintf(lbl, sizeof(lbl), "%.1f", z);
+        const ImVec2 tsz = ImGui::CalcTextSize(lbl);
+        const float  ly  = std::clamp(y - tsz.y * 0.5f, p0.y + tsz.y + 4.f, p0.y + height - tsz.y - 2.f);
+        dl->AddRectFilled(ImVec2(p0.x + 2.f, ly - 1.f), ImVec2(p0.x + 6.f + tsz.x, ly + tsz.y + 1.f),
+                          neo_fade(NeoCol::Canvas, 0.72f), 3.f);
+        dl->AddText(ImVec2(p0.x + 4.f, ly), neo_fade(NeoCol::TextDim, 0.75f), lbl);
+    }
 
     // Curve — per-segment sampled polyline, straight or blended (§blended_height).
     // NEOTKO_ALHCOLOR_TAG — replanteo TD-vs-slope: the forbidden-zone shading
@@ -1007,7 +1046,12 @@ void GLGizmoPrecisionALH::render_curve_editor(float width, float height)
 
             const double h = blended_height(i, t, tangents, env.passthrough ? nullptr : &env);
             const ImVec2 cur = to_screen(z, h);
-            dl->AddLine(prev, cur, IM_COL32(0, 150, 136, 255), 2.0f);
+            // Glow pass under the stroke, same as the HAE editor. Drawn per segment rather than as
+            // one polyline because this curve is sampled per point-pair with the envelope in the
+            // loop — restructuring that to collect points first would be a behaviour change, and
+            // this is a cosmetic pass.
+            dl->AddLine(prev, cur, neo_fade(NeoCol::AccentBright, 0.18f), 6.0f);
+            dl->AddLine(prev, cur, neo_col_u32(NeoCol::AccentBright), 2.2f);
             prev = cur;
             z_prev_sample = z;
         }
@@ -1020,19 +1064,23 @@ void GLGizmoPrecisionALH::render_curve_editor(float width, float height)
         const ImVec2 c = to_screen(m_points[i].z_mm, m_points[i].height_mm);
         const bool   locked = point_is_locked((int)i);
         const bool   is_top = (i + 1 == m_points.size());
-        const float  r = ((int)i == m_dragging_point) ? 6.5f : 5.0f;
+        const bool   dragged = ((int)i == m_dragging_point);
         if (!locked && hovered && std::hypot(io.MousePos.x - c.x, io.MousePos.y - c.y) <= 8.0f)
             hovered_point = (int)i;
-        ImU32 col = locked ? IM_COL32(150, 150, 150, 255)
-                           : (is_top ? IM_COL32(230, 180, 40, 255) : IM_COL32(38, 198, 182, 255));
+        const bool  lit = dragged || hovered_point == (int)i;
+        const float r   = dragged ? 6.5f : (lit ? 6.0f : 4.5f);
+        ImU32 col = locked ? neo_col_u32(NeoCol::Locked)
+                           : (is_top ? neo_col_u32(NeoCol::Endpoint) : neo_col_u32(NeoCol::AccentBright));
         // NEOTKO_ALHCOLOR_TAG — s222 soft-clamp revision: a point sitting outside its Z's
         // color envelope shows the conflict orange — commit will pull the emitted profile
         // back inside (build_profile_vector), this is the heads-up.
         if (!locked && outside_envelope(m_points[i].z_mm, m_points[i].height_mm))
-            col = IM_COL32(255, 140, 0, 255);
-        dl->AddCircleFilled(c, r, col);
-        dl->AddCircle(c, r, IM_COL32(20, 20, 20, 255), 16, 1.2f);
+            col = neo_col_u32(NeoCol::Warn);
+        neo_draw_node(dl, c, r, col, lit);
     }
+
+    // Border last, so it sits over the shading bands rather than under them.
+    dl->AddRect(p0, ImVec2(p0.x + width, p0.y + height), neo_col_u32(NeoCol::Surface), 6.0f, 0, 1.0f);
 
     m_hover_point = hovered ? hovered_point : -1;
 
@@ -1096,10 +1144,9 @@ void GLGizmoPrecisionALH::render_curve_editor(float width, float height)
         const std::string label = "Z " + format((float)m_points[shown_idx].z_mm, 2)
                                  + " mm   H " + format((float)m_points[shown_idx].height_mm, 3) + " mm";
         const ImVec2 tsz = ImGui::CalcTextSize(label.c_str());
-        const ImVec2 lp(std::clamp(c.x - tsz.x * 0.5f, p0.x, p0.x + width - tsz.x), c.y - tsz.y - 10.0f);
-        dl->AddRectFilled(ImVec2(lp.x - 4.0f, lp.y - 2.0f), ImVec2(lp.x + tsz.x + 4.0f, lp.y + tsz.y + 2.0f),
-                          IM_COL32(20, 20, 20, 220), 3.0f);
-        dl->AddText(lp, IM_COL32(255, 255, 255, 255), label.c_str());
+        const ImVec2 lp(std::clamp(c.x - tsz.x * 0.5f, p0.x + 8.f, p0.x + width - tsz.x - 8.f),
+                        c.y - tsz.y - 10.0f);
+        neo_draw_pill(dl, lp, label.c_str(), neo_col_u32(NeoCol::Accent));
     }
 }
 
@@ -1112,9 +1159,27 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
     GizmoImguiBegin(on_get_name(), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
     ImGui::SetWindowSize(ImVec2(win_w, 0.f), ImGuiCond_Always);
 
+    // NEOTKO_GIZMOSTYLE_TAG s248 — shared look (GizmoNeotkoStyle.hpp). Same pinned wrap column the
+    // HAE panel uses: with AlwaysAutoResize, "wrap at the window width" is circular, because the
+    // window width is whatever the widest item asks for. An absolute x breaks the loop, and it also
+    // makes the plain Text*/TextDisabled calls wrap, which they otherwise never do.
+    ImGui::PushTextWrapPos(win_w - 16.f);
+    neo_push_panel_style();
+
+    // 🚨 Every exit from here on MUST go through this. A PushStyleColor whose Pop is skipped by an
+    // early `return` leaks the gizmo's colours into every other ImGui window. This panel has one
+    // early exit today; if it grows more, move the body into its own function the way
+    // GLGizmoHeightAdaptiveEffects::render_panel_body() does.
+    // [this] because GizmoImguiEnd() is a member of GLGizmoBase, not a free function.
+    auto close_panel = [this] {
+        neo_pop_panel_style();
+        ImGui::PopTextWrapPos();
+        GizmoImguiEnd();
+    };
+
     if (!m_have_session) {
         ImGui::TextWrapped("%s", _u8L("Select a single object to edit its layer height curve.").c_str());
-        GizmoImguiEnd();
+        close_panel();
         return;
     }
 
@@ -1210,11 +1275,28 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
 
     if (m_points.size() > 2) {
         ImGui::Separator();
-        ImGui::TextWrapped("%s", _u8L("Tension per segment (0 = straight, 1 = smooth curve):").c_str());
+        ImGui::TextUnformatted(_u8L("Tension per segment").c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", _u8L("(0 = straight, 1 = smooth)").c_str());
+        // NEOTKO_GIZMOSTYLE_TAG s248 — same fix as the HAE panel: SliderFloat draws its label to
+        // the RIGHT of a slider already sized at a fraction of the window, so label + slider always
+        // overflowed — and in an AlwaysAutoResize window an overflowing item is what widens the
+        // panel. Range on the left as text in a MEASURED column, slider width set explicitly.
+        std::vector<std::string> range_lbl(m_points.size() - 1);
+        float range_w = 0.f;
+        for (size_t i = 0; i + 1 < m_points.size(); ++i) {
+            range_lbl[i] = format((float)m_points[i].z_mm, 1) + " - "
+                         + format((float)m_points[i + 1].z_mm, 1) + " mm";
+            range_w = std::max(range_w, ImGui::CalcTextSize(range_lbl[i].c_str()).x);
+        }
+        range_w += ImGui::GetStyle().ItemSpacing.x;
+        const float slider_w = win_w - 16.f - range_w - 2.f * ImGui::GetStyle().ItemSpacing.x;
         for (size_t i = 0; i + 1 < m_points.size(); ++i) {
             float             t     = (float)m_points[i].tension;
-            const std::string label = format((float)m_points[i].z_mm, 1) + " - "
-                                     + format((float)m_points[i + 1].z_mm, 1) + " mm##tension" + std::to_string(i);
+            ImGui::TextDisabled("%s", range_lbl[i].c_str());
+            ImGui::SameLine(range_w);
+            ImGui::SetNextItemWidth(slider_w);
+            const std::string label = "##tension" + std::to_string(i);
             if (ImGui::SliderFloat(label.c_str(), &t, 0.0f, 1.0f)) {
                 m_points[i].tension = std::clamp((double)t, 0.0, 1.0);
                 m_parent.set_as_dirty();
@@ -1230,7 +1312,7 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
         commit("Precision layer height - Reset");
     }
 
-    GizmoImguiEnd();
+    close_panel();
 }
 
 }} // namespace Slic3r::GUI

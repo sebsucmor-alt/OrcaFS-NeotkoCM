@@ -202,6 +202,10 @@ public:
 	void push_validate_error_notification(StringObjectException const & error);
     void close_validate_error_notification(const std::string& text);
     void close_validate_warning_notification(const std::string& text);
+	// NEOTKO_VALIDATE_WARNING_STALE_TAG — s250: closes every ValidateWarning whose text is NOT the one
+	// passed in, i.e. every warning left over from a previous validation pass. See the comment at the
+	// call site in Plater::priv::process_validation_warning().
+	void close_stale_validate_warnings(const std::string& current_text);
     // print host upload
 	void push_upload_job_notification(int id, float filesize, const std::string& filename, const std::string& host, float percentage = 0);
 	void set_upload_job_notification_percentage(int id, const std::string& filename, const std::string& host, float percentage);
@@ -411,6 +415,12 @@ private:
 		void                   append(const std::string& append_str);
 		bool                   is_finished() const { return m_state == EState::ClosePending || m_state == EState::Finished; }
         void                   reinit() { m_state = EState::Unknown; }
+		// NEOTKO_NOTIF_DIGEST_TAG — s250: render() is what turns ClosePending into Finished, and
+		// Finished is what update_notifications() erases. A notification folded inside the digest band
+		// is never rendered, so a closed one would sit in ClosePending forever — and next_render()
+		// returns 0 while finished, which would keep asking for frames: an endless redraw. Let the
+		// manager complete the close without drawing anything.
+		void                   finish_close() { if (m_state == EState::ClosePending) m_state = EState::Finished; }
 		// returns top after movement
 		float                  get_top() const { return m_top_y; }
 		// returns bottom after movement
@@ -859,6 +869,23 @@ private:
 	bool activate_existing(const NotificationManager::PopNotification* notification);
 	// Put the more important notifications to the bottom of the list.
 	void sort_notifications();
+
+	// NEOTKO_NOTIF_DIGEST_TAG — s250: "banda de avisos".
+	// Instead of stacking one card per warning up the right edge of the canvas (which in LibreMode is
+	// mostly noise: objects touching on purpose, assemblies, tight plates), fold them all into a single
+	// thin colored band that says how many there are. Click to unfold and read them exactly as before,
+	// click the cross to close them all at once. Amber for warnings, RED as soon as one error is in
+	// there, so "something that really matters" is still one glance away.
+	// The band never swallows progress bars nor the export notification (see is_digestible).
+	// Off unless the preference is on; the preference defaults to LibreMode's state.
+	bool   digest_active() const;
+	bool   is_digestible(const PopNotification& notification) const;
+	// Counts the folded notifications and reports whether any of them is an error / serious warning.
+	size_t digest_count(bool& has_error) const;
+	// Closes every notification the band is currently holding. Leaves the non-digestible ones alone.
+	void   close_digested();
+	// Draws the band and returns the new stacking baseline (top of the band + gap).
+	float  render_digest_bar(GLCanvas3D& canvas, float initial_y, bool move_from_overlay, float overlay_width, float right_margin, size_t count, bool has_error);
 	// If there is some error notification active, then the "Export G-code" notification after the slicing is finished is suppressed.
     bool has_slicing_error_notification();
 	size_t get_standard_duration(NotificationLevel level)
@@ -894,6 +921,12 @@ private:
 	int                          m_in_view{ 0 };
 	// True if the layer editing is enabled in Plater, so that the notifications are shifted left of it.
 	bool                         m_move_from_overlay { false };
+	// NEOTKO_NOTIF_DIGEST_TAG — s250: state of the "banda de avisos" (see digest_active()).
+	bool                         m_digest_expanded { false };
+	// Loaded from app_config on first render, so the fold state survives a restart.
+	bool                         m_digest_state_loaded { false };
+	// ImGui window id of the band, allocated once from m_id_provider.
+	int                          m_digest_id { 0 };
 	// Timestamp of last rendering
 	int64_t						 m_last_render { 0LL };
 	// Notification types that can be shown multiple types at once (compared by text)

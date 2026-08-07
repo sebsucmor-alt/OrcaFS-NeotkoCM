@@ -6871,6 +6871,45 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // NEOTKO_HAE_TAG s247 — Height Adaptive Effects curves (docs/FUTURE/HEIGHT_ADAPTIVE_EFFECTS_PLAN.md).
+    // Hidden blob keys, same contract as the Sandwich pass stacks and the ALH recolor plan: written
+    // per-object by the Height Adaptive Effects gizmo, never shown in any optgroup. Format
+    // "z:value[:tension]|…" (Feature/HeightAdaptive/HeightCurve.hpp). Empty = off.
+    // NEOTKO_HAE_EXPANSION_TAG — the two XY ones are the undocumented Expansion effect (plan §1).
+    def = this->add("neotko_hae_xy_contour", coString);
+    def->label = L("Height adaptive XY contour compensation curve");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("neotko_hae_xy_hole", coString);
+    def->label = L("Height adaptive XY hole compensation curve");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("neotko_hae_infill_width", coString);
+    def->label = L("Height adaptive sparse infill line width curve");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("neotko_hae_fuzzy_thickness", coString);
+    def->label = L("Height adaptive fuzzy skin thickness curve");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    // NEOTKO_HAE_TAG s248 — Adaptive Effector level 0 (ADAPTIVE_EFFECTOR_PLAN.md §4): the keys the
+    // two existing hooks already resolve per layer. Same hidden blob contract as the four above.
+    for (const char *k : { "neotko_hae_outer_wall_width",
+                           "neotko_hae_inner_wall_width",
+                           "neotko_hae_fuzzy_point_distance",
+                           "neotko_hae_fuzzy_scale",
+                           "neotko_hae_fuzzy_octaves",
+                           "neotko_hae_fuzzy_persistence" }) {
+        def = this->add(k, coString);
+        def->label = L("Height adaptive effect curve");
+        def->mode = comDevelop;
+        def->set_default_value(new ConfigOptionString(""));
+    }
+
     // NEOTKO_LIBRE_TAG_START — Feature 3: Bridge Infill Control
     def = this->add("multipass_path_gradient", coBool);
     def->label = L("Path Gradient Blend");

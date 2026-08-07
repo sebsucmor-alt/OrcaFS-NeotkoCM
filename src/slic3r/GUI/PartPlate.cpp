@@ -34,6 +34,7 @@
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
 #include "PhotoMode.hpp" // NEOTKO_PHOTOMODE_TAG s242 — hides the plate furniture, adds the camera icon
+#include "GravitySnap.hpp" // NEOTKO_SNAPDRAG_TAG s249 — the magnet icon's availability gate
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
 #include "GUI_ObjectList.hpp"
@@ -630,8 +631,9 @@ void PartPlate::calc_vertex_for_icons(int index, PickingModel &model)
     // NEOTKO_PHOTOMODE_TAG s242: bed_icon_count 6 -> 7, the Photo Mode icon. Upstream left the
     // reminder below to keep this in sync; it only affects the vertical centring on circular beds,
     // which is exactly the kind of thing that silently drifts.
+    // NEOTKO_SNAPDRAG_TAG s249: 7 -> 8, the magnet.
     if (m_plater && m_plater->get_build_volume_type() == BuildVolume_Type::Circle)
-        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 7 /* bed_icon_count */) / 2);
+        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 8 /* bed_icon_count */) / 2);
 
     poly.contour.append({ scale_(p(0))       , scale_(p(1) - size) });
     poly.contour.append({ scale_(p(0) + size), scale_(p(1) - size) });
@@ -1001,6 +1003,17 @@ void PartPlate::render_icons(bool bottom, bool only_name, int hover_id)
                                                             : m_partplate_list->m_photo_texture);
             if (hovered)
                 show_tooltip(photo_active ? _u8L("Exit photo mode") : _u8L("Photo mode"));
+        }
+        // NEOTKO_SNAPDRAG_TAG s249 — the magnet, sitting under the camera. Rendered BEFORE the
+        // photo_active early-out below, but gated on `!photo_active` inside the condition: inside
+        // Photo Mode the column collapses to the camera alone (it is the only exit), and a second
+        // button there would be furniture in the shot.
+        if (GravitySnap::plate_icon_available() && !only_name && !photo_active && !photo_hide_ui) {
+            const bool hovered = (hover_id == (int)SNAP_DRAG_HOVER_ID);
+            render_icon_texture(m_snapdrag_icon.model, hovered ? m_partplate_list->m_snapdrag_hovered_texture
+                                                               : m_partplate_list->m_snapdrag_texture);
+            if (hovered)
+                show_tooltip(_u8L("Snap & Drag options"));
         }
         if (photo_active) {
             // Same teardown as the normal exit at the bottom of this function — in particular the
@@ -1374,6 +1387,10 @@ void PartPlate::register_raycasters_for_picking(GLCanvas3D &canvas)
     // `if (render_plate_settings)` guard above.
     if (photo_mode_available())
         register_model_for_picking(canvas, m_photo_icon, picking_id_component(PHOTO_MODE_HOVER_ID));
+    // NEOTKO_SNAPDRAG_TAG s249 — the magnet. Same shape of guard, and see
+    // GravitySnap::plate_icon_available() for why the gate is LibreMode and not True Objects.
+    if (GravitySnap::plate_icon_available())
+        register_model_for_picking(canvas, m_snapdrag_icon, picking_id_component(SNAP_DRAG_HOVER_ID));
 }
 
 int PartPlate::picking_id_component(int idx) const
@@ -2763,6 +2780,10 @@ bool PartPlate::set_shape(const Pointfs& shape, const Pointfs& exclude_areas, Ve
         // shift every other icon whenever the user flips LibreMode. Visibility and pickability are
         // gated instead, in render_icons() and register_raycasters_for_picking().
         calc_vertex_for_icons(6, m_photo_icon);
+        // NEOTKO_SNAPDRAG_TAG s249: layout slot 7 (picking sub-id 9). Laid out unconditionally for
+        // the same reason as the camera above — the column's slot count must not depend on a
+        // runtime toggle, or every other icon shifts when the user flips it.
+        calc_vertex_for_icons(7, m_snapdrag_icon);
         // ORCA also change bed_icon_count number in calc_vertex_for_icons() after adding or removing icons for circular shaped beds that uses vertical alingment for icons
 
 		//calc_vertex_for_number(0, (m_plate_index < 9), m_plate_idx_icon);
@@ -3469,6 +3490,21 @@ void PartPlateList::generate_icon_textures()
         }
     }
 
+    // NEOTKO_SNAPDRAG_TAG s249 — the magnet. Unconditional for the same reason as the camera above.
+    {
+        file_name = path + (m_is_dark ? "plate_snapdrag_dark.svg" : "plate_snapdrag.svg");
+        if (!m_snapdrag_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
+        }
+    }
+
+    {
+        file_name = path + (m_is_dark ? "plate_snapdrag_hover_dark.svg" : "plate_snapdrag_hover.svg");
+        if (!m_snapdrag_hovered_texture.load_from_svg_file(file_name, true, false, false, icon_size)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
+        }
+    }
+
 	//if (m_arrange_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_arrange_dark.svg" : "plate_arrange.svg");
@@ -3612,6 +3648,9 @@ void PartPlateList::release_icon_textures()
     // NEOTKO_PHOTOMODE_TAG s242
     m_photo_hovered_texture.reset();
     m_photo_texture.reset();
+    // NEOTKO_SNAPDRAG_TAG s249
+    m_snapdrag_hovered_texture.reset();
+    m_snapdrag_texture.reset();
 	m_arrange_texture.reset();
 	m_arrange_hovered_texture.reset();
 	m_orient_texture.reset();

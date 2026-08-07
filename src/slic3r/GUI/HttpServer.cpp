@@ -2,6 +2,7 @@
 #include <boost/log/trivial.hpp>
 #include <condition_variable>
 #include "GUI_App.hpp"
+#include "NeotkoFlutterDark.hpp" // NEOTKO_FLUTTERDARK_TAG s252
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include  "sentry_wrapper/SentryWrapper.hpp"
@@ -844,8 +845,15 @@ void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
     // 读取文件内容并计算长度（关键：使用字节长度）
     std::ostringstream fileStream;
     fileStream << file.rdbuf();
-    std::string fileContent    = fileStream.str();
-    size_t      content_length = fileContent.size(); // 字节长度，非字符数
+    std::string fileContent = fileStream.str();
+
+    // NEOTKO_FLUTTERDARK_TAG s252 — provisional dark mode for Snapmaker's Flutter pages
+    // (Home/Device). Rewrites the palette constants of their compiled bundle on the way
+    // out; no-op in light mode, for every other file, and whenever the palette is not
+    // recognized. Must run before content_length, which has to match what we send.
+    NeotkoFlutterDark::maybe_patch(file_path, fileContent);
+
+    size_t content_length = fileContent.size(); // 字节长度，非字符数
 
     // 确定Content-Type（保持原有逻辑）
     std::string content_type = "application/octet-stream";

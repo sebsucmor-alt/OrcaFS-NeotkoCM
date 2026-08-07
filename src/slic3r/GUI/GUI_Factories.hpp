@@ -139,11 +139,9 @@ private:
     wxMenuItem* append_menu_item_printable(wxMenu* menu);
     // NeotkoLIBRE — "Assembled Mode (Boolean)" check item (per-object, LibreMode only).
     wxMenuItem* append_menu_item_assemble_boolean(wxMenu* menu);
-    // NEOTKO_SNAPDRAG_TAG s227 — "Snap & Drag" check item (only enabled/checkable while
-    // True Objects is on). See docs/FUTURE/GRAVITY_SNAP_AND_DRAG_PLAN.md §5 (revised placement).
-    wxMenuItem* append_menu_item_snap_drag(wxMenu* menu);
-    // NEOTKO_SNAPDRAG_TAG s233 — "Allow Bed" sub-option of the item above.
-    wxMenuItem* append_menu_item_snap_drag_bed(wxMenu* menu);
+    // NEOTKO_SNAPDRAG_TAG s249 — append_menu_item_snap_drag / _snap_drag_bed removed: every Snap &
+    // Drag preference now lives in the panel behind the magnet icon in the plate column, because a
+    // context menu is per-selection and these settings are not. See GLCanvas3D::_render_snapdrag_panel().
     // NeotkoLIBRE — Copy (by block: Speed/Quality/Strength/All) + Paste Process Settings.
     void append_menu_items_process_clipboard(wxMenu* menu);
     // NEOTKO — "Remove Slice Cache": high-level manual full-reslice escape hatch.

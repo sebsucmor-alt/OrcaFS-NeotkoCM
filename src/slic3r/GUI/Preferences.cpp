@@ -1298,6 +1298,14 @@ wxWindow* PreferencesDialog::create_general_page()
               "Restart required."),
         50, "neotko_libre_enabled");
     // NeotkoLIBRE_END
+    // NEOTKO_NOTIF_DIGEST_TAG — s250: fold the warning cards into a single colored band.
+    auto item_neotko_notif_digest = create_item_checkbox(
+        _devL("Fold notifications into a single band"), page,
+        _devL("Instead of stacking one card per message up the side of the plate, show a single thin "
+              "band with the number of pending messages: click it to unfold and read them, or close "
+              "them all at once. The band is amber for warnings and turns red as soon as one of them "
+              "is an error, and it never hides slicing progress or the export message."),
+        50, "neotko_notification_digest");
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
     auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset");
@@ -1403,6 +1411,7 @@ wxWindow* PreferencesDialog::create_general_page()
     // NeotkoLIBRE_START — s133: master availability gate
     sizer_page->Add(title_neotko, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_neotko_libre_enabled, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_neotko_notif_digest, 0, wxTOP, FromDIP(3)); // NEOTKO_NOTIF_DIGEST_TAG — s250
     // NeotkoLIBRE_END
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));

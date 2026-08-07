@@ -147,6 +147,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoAlignStack.hpp
     GUI/Gizmos/GLGizmoPrecisionALH.cpp
     GUI/Gizmos/GLGizmoPrecisionALH.hpp
+    GUI/Gizmos/GLGizmoHeightAdaptiveEffects.cpp
+    GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp
+    GUI/Gizmos/GizmoNeotkoStyle.hpp
     GUI/Gizmos/GLGizmoCut.cpp
     GUI/Gizmos/GLGizmoCut.hpp
     GUI/Gizmos/GLGizmoEmboss.cpp
@@ -255,6 +258,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
     GUI/HttpServer.hpp
+    GUI/NeotkoFlutterDark.cpp
+    GUI/NeotkoFlutterDark.hpp
     GUI/I18N.cpp
     GUI/I18N.hpp
     GUI/IconManager.cpp

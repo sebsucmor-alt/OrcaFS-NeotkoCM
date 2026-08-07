@@ -1,16 +1,17 @@
 #version 110
 
-#define INTENSITY_CORRECTION 0.6
-
 // normalized values for (-0.6/1.31, 0.6/1.31, 1./1.31)
 const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
-#define LIGHT_TOP_DIFFUSE    (0.8 * INTENSITY_CORRECTION)
-#define LIGHT_TOP_SPECULAR   (0.125 * INTENSITY_CORRECTION)
-#define LIGHT_TOP_SHININESS  20.0
-
 // normalized values for (1./1.43, 0.2/1.43, 1./1.43)
 const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
-#define LIGHT_FRONT_DIFFUSE  (0.3 * INTENSITY_CORRECTION)
+
+// NEOTKO_REALCOLOR_TAG s251c: LA LUZ DIRECTA, POR FIN CON MANDOS. Ver la nota larga en
+// 140/realcolor_peel.vs. Neutro exacto = (0.48, 0.18, 0.075, 20.0, 0.0).
+uniform float u_light_key;       // difusa de la luz principal   (era LIGHT_TOP_DIFFUSE   = 0.8*0.6)
+uniform float u_light_fill;      // difusa de la luz de relleno  (era LIGHT_FRONT_DIFFUSE = 0.3*0.6)
+uniform float u_light_spec;      // especular directo            (era LIGHT_TOP_SPECULAR  = 0.125*0.6)
+uniform float u_light_shininess; // exponente del especular      (era LIGHT_TOP_SHININESS = 20.0)
+uniform float u_light_wrap;      // 0 = Lambert puro (idéntico a antes), 1 = difusa envolvente
 
 // NEOTKO_REALCOLOR_TAG: two-tone sky/ground ambient replacing the old flat INTENSITY_AMBIENT
 // (0.3) — mixed by normal.y so faces pointing up read a touch brighter (open sky) and faces
@@ -43,6 +44,12 @@ uniform mat3 view_normal_matrix;
 // normales llegan en mundo y el mundo es Z-arriba. Ver la nota larga en 140/.
 uniform vec2 u_swell_mm;
 
+// NEOTKO_REALCOLOR_TAG s251 (Fase 0, docs/FUTURE/REALCOLOR_ANISOTROPIC_SHEEN_PLAN.md): eje de
+// impresión del path, en XY de MUNDO. .xy = eje unitario, .z = confianza 0..1. Lo calcula
+// realcolor_bead_axis() en GCodeViewer.cpp y se manda POR SUB-DRAW, como u_thickness/u_finish/
+// u_swell_mm. Ver la nota larga en 140/realcolor_peel.vs.
+uniform vec3 u_bead_axis;
+
 attribute vec3 v_position;
 attribute vec3 v_normal;
 
@@ -68,6 +75,10 @@ varying float v_eye_z;
 // computed below for the ambient/fresnel terms, just exposed instead of being dropped after use.
 varying vec3 v_view_normal;
 
+// NEOTKO_REALCOLOR_TAG s251 (Fase 0): eje del cordón resuelto POR VÉRTICE, en mundo.
+// .xyz = eje (T), .w = confianza 0..1. Ver la construcción y el razonamiento en 140/.
+varying vec4 v_bead_tangent;
+
 // NEOTKO_REALCOLOR_TAG: legacy/compat-profile counterpart of 140/realcolor_peel.vs (see
 // GLShadersManager.cpp comment for why both variants exist). Identical lighting math to
 // gouraud_light.vs, just attribute/varying instead of in/out.
@@ -83,15 +94,36 @@ void main()
     vec3 swollen_pos = v_position + n_world * mix(u_swell_mm.x, u_swell_mm.y, facing_up);
     v_world_pos = swollen_pos; // pass-through, already world space
 
-    float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
-    intensity.x = NdotL * LIGHT_TOP_DIFFUSE; // direct light only, ambient is env-sampled in .fs
+    // NEOTKO_REALCOLOR_TAG s251 (Fase 0): eje del cordón. Dos fuentes, elegidas por orientación de
+    // la cara — el razonamiento completo está en 140/realcolor_peel.vs, aquí sólo la mecánica.
+    vec3 t_flank = vec3(-n_world.y, n_world.x, 0.0);
+    float flank_len = length(t_flank);
+    vec4 bead;
+    if (facing_up > 0.5) {
+        bead = vec4(u_bead_axis.x, u_bead_axis.y, 0.0, u_bead_axis.z);
+    } else if (flank_len > 1e-4) {
+        bead = vec4(t_flank / flank_len, 1.0);
+    } else {
+        bead = vec4(0.0, 0.0, 0.0, 0.0);
+    }
+    // Gram-Schmidt: por construcción ya es perpendicular a la normal en los dos casos, pero en las
+    // uniones mitradas la normal interpolada se aparta un poco y sin esto el lóbulo se ensucia
+    // justo en las esquinas, que es donde más se mira.
+    bead.xyz = bead.xyz - n_world * dot(n_world, bead.xyz);
+    float bl = length(bead.xyz);
+    v_bead_tangent = (bl > 1e-4) ? vec4(bead.xyz / bl, bead.w) : vec4(0.0, 0.0, 0.0, 0.0);
+
+    // NEOTKO_REALCOLOR_TAG s251c: difusa envolvente. Ver 140/realcolor_peel.vs para el porqué.
+    float wrap_denom = 1.0 + max(u_light_wrap, 0.0);
+    float NdotL = max((dot(normal, LIGHT_TOP_DIR) + u_light_wrap) / wrap_denom, 0.0);
+    intensity.x = NdotL * u_light_key; // direct light only, ambient is env-sampled in .fs
 
     vec4 position = view_model_matrix * vec4(swollen_pos, 1.0);
-    intensity.y = LIGHT_TOP_SPECULAR * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
+    intensity.y = u_light_spec * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), max(u_light_shininess, 1.0));
     v_eye_z = -position.z; // right-handed eye space, camera looks down -Z
 
-    NdotL = max(dot(normal, LIGHT_FRONT_DIR), 0.0);
-    intensity.x += NdotL * LIGHT_FRONT_DIFFUSE;
+    NdotL = max((dot(normal, LIGHT_FRONT_DIR) + u_light_wrap) / wrap_denom, 0.0);
+    intensity.x += NdotL * u_light_fill;
 
     gl_Position = projection_matrix * position;
 }

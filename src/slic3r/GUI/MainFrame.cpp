@@ -34,7 +34,7 @@
 #include "wxExtensions.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Mouse3DController.hpp"
-//#include "RemovableDriveManager.hpp"
+#include "RemovableDriveManager.hpp" // NEOTKO_EJECT_TAG — s250: eject moved from the notification to the Export menu
 #include "InstanceCheck.hpp"
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
@@ -1709,6 +1709,9 @@ wxBoxSizer* MainFrame::create_side_tools()
         // preference of HOW Snap & Drag behaves, not a behaviour gate of its own, and forcing it
         // false would silently flip its meaning (its default is ON) the next time the master wall
         // comes back up. Snap & Drag being off above already makes it inert.
+        // NEOTKO_SNAPDRAG_TAG s249 — same for "Move selection as one block"
+        // ("neotko_snap_drag_group"): also a HOW, also left alone. Its default is OFF, so forcing
+        // it would be a no-op in the common case and a silent preference wipe in the other.
     }
     // NeotkoLIBRE_END
 
@@ -2595,6 +2598,17 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent &) { export_config(); },
             "menu_export_config", nullptr,
             []() { return true; }, this);
+
+        // NEOTKO_EJECT_TAG — s250: the "Safely remove hardware" button used to live on the green
+        // "Exported successfully" notification (PrusaSlicer heritage, SD-card era). It was removed from
+        // there because the U1 prints over wifi and any external work disk gets flagged as removable.
+        // The action survives here for the rare USB-stick workflow. Greyed out unless a removable drive
+        // was actually the export target (RemovableDriveManager::status().has_eject).
+        append_menu_item(
+            export_menu, wxID_ANY, _devL("Eject SD card / Flash drive"), _devL("Safely remove the removable drive the G-code was exported to"),
+            [this](wxCommandEvent &) { if (m_plater) m_plater->eject_drive(); },
+            "", nullptr,
+            []() { return wxGetApp().removable_drive_manager()->status().has_eject; }, this);
 
         append_submenu(fileMenu, export_menu, wxID_ANY, _L("Export"), "");
 

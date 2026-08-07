@@ -12,6 +12,7 @@
 #include "SVG.hpp"
 #include "Algorithm/RegionExpansion.hpp"
 #include "NeoDebug.hpp"   // NEOTKO_BRIDGE_TAG s230 — canal BOTTOM para la traza de expansión
+#include "Feature/HeightAdaptive/HeightCurve.hpp" // NEOTKO_HAE_TAG s247 — sparse infill width by height
 
 #include <algorithm>
 #include <cmath>
@@ -139,6 +140,60 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
         config_width = m_layer->object()->config().line_width;
 
     const auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(this->extruder(role) - 1));
+
+    // NEOTKO_HAE_TAG s247 — Height Adaptive Effects, effect B: sparse infill line width by height
+    // (docs/FUTURE/HEIGHT_ADAPTIVE_EFFECTS_PLAN.md §6). Hooking HERE and not in Fill.cpp is
+    // deliberate: this one function feeds BOTH sparse-infill consumers — params.flow and the
+    // deliberately layer-height-independent params.spacing of Fill.cpp:957 — so they can never
+    // disagree about the width of the same layer.
+    //
+    // Stepped is the DEFAULT, not a decree (s247 revision of plan §6.2). Sparse infill stands on
+    // itself — the spacing is held constant across layers on purpose — so a width that drifts
+    // walks every line off the one below it. But what breaks the stacking is the drift between
+    // CONSECUTIVE layers, which is proportional to how steep the curve is, not to it being a
+    // curve: a slow ramp moves each layer by a fraction of a micron. The curve therefore carries
+    // its own mode; the argument below is only the fallback for curves stored before the mode
+    // token existed, which is exactly how those were evaluated.
+    //
+    // The curve is a per-OBJECT key overriding a per-REGION value at the point of consumption; the
+    // PrintRegion itself stays immutable. Skipped when the initial-layer width is in force: layer 0
+    // has its own width for adhesion reasons that have nothing to do with the curve.
+    // NEOTKO_HAE_TAG s248 — Adaptive Effector LEVEL 0 (ADAPTIVE_EFFECTOR_PLAN.md §4). The block
+    // below was written for frInfill alone; it is now the same override for all FIVE roles,
+    // because this function is where every one of them is resolved. That is the whole finding of
+    // the plan: one hook, five line widths, and no way for two of them to disagree about a layer.
+    //
+    // 🔑 And this covers PerimeterGenerator for free: it does not read the wall widths out of the
+    // config, it is HANDED perimeter_flow / ext_perimeter_flow / solid_infill_flow built right
+    // here (LayerRegion.cpp:248 and :295-297). The plan's "outer_wall_line_width has a second
+    // consumer" warning was a mis-generalisation of the sparse-infill case, where
+    // PerimeterGenerator genuinely does read the region key raw to size gap fill.
+    const bool initial_layer_width_wins = use_initial_layer_width && print_config.initial_layer_line_width.value > 0;
+    if (! initial_layer_width_wins) {
+        const PrintObjectConfig &oc = m_layer->object()->config();
+        const std::string *curve_str = nullptr;
+        switch (role) {
+        case frInfill:            curve_str = &oc.neotko_hae_infill_width.value;       break;
+        case frPerimeter:         curve_str = &oc.neotko_hae_inner_wall_width.value;   break;
+        case frExternalPerimeter: curve_str = &oc.neotko_hae_outer_wall_width.value;   break;
+        default:                  break;
+        }
+        // Empty string is the overwhelmingly common case: cost is one length check, and the flow is
+        // then computed exactly as stock (golden rule of plan §3).
+        if (curve_str != nullptr && ! curve_str->empty()) {
+            const auto curve = HeightAdaptive::HeightCurve::parse(*curve_str, HeightAdaptive::Interp::Stepped);
+            if (! curve.empty()) {
+                double base_mm = config_width.get_abs_value(nozzle_diameter);
+                if (base_mm <= 0.)
+                    base_mm = Flow::auto_extrusion_width(role, nozzle_diameter);
+                // Curve values are absolute mm (the gizmo edits mm over the real layer bands).
+                const double w = curve.at(m_layer->slice_z, base_mm);
+                if (w > 0.)
+                    config_width = ConfigOptionFloatOrPercent(w, false);
+            }
+        }
+    }
+
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 
