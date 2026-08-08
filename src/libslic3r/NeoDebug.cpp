@@ -35,6 +35,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_XOBJ",        "/tmp/neotko_xobj.log"        }, // NEOTKO_XOBJ_TAG s225
         { "ORCA_DEBUG_GRAVITY",     "/tmp/neotko_gravity.log"     }, // NEOTKO_GRAVITY_TAG s226
         { "ORCA_DEBUG_SHADING",     "/tmp/neotko_shading.log"     }, // NEOTKO_SMOOTHNORMALS_TAG s229
+        { "ORCA_DEBUG_FLUTTERDARK", "/tmp/neotko_flutterdark.log" }, // NEOTKO_FLUTTERDARK_TAG s252
     };
 
     bool enabled(Channel c)

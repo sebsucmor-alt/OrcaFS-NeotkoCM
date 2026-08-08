@@ -51,7 +51,10 @@ namespace NeoDebug {
         XOBJ        = 16, // NEOTKO_XOBJ_TAG s225 — cross-object support avoidance (occupancy builder + injection)
         GRAVITY     = 17, // NEOTKO_GRAVITY_TAG s226 — real floor / bridge reclassification (see docs/FUTURE/GRAVITY_MASTER_PLAN.md)
         SHADING     = 18, // NEOTKO_SMOOTHNORMALS_TAG s229 — 3D view shading: live tuning panel + normal debug views
-        CH_COUNT    = 19
+        FLUTTERDARK = 19, // NEOTKO_FLUTTERDARK_TAG s252 — dark mode of Snapmaker's Flutter pages:
+                          // which palette class was detected in the bundle this user happens to
+                          // have, and whether it was patched or left light.
+        CH_COUNT    = 20
     };
     // NEOTKO_SMOOTHNORMALS_TAG s229 — gate for the on-screen render tuning panels (RealColor and
     // Shading), as opposed to log channels. Deliberately NOT covered by ORCA_DEBUG_ALL: that var
