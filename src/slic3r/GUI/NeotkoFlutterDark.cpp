@@ -16,6 +16,26 @@ namespace {
 // index.html, images, fonts, the assets folder) goes through untouched.
 const char* const kBundleName = "main.dart.js";
 
+// Their service worker, and the one we hand out in its place. Tested in the real page in s252:
+// the bundle asks for it, it installs, wipes Cache Storage, unregisters, and the page loads
+// once — no reload loop, because it never calls clients.claim().
+const char* const kServiceWorkerName = "flutter_service_worker.js";
+
+const char* const kTombstoneServiceWorker =
+    "// NEOTKO_FLUTTERDARK_TAG s252 - replaced by Neotko FullSpectrum.\n"
+    "// Snapmaker's service worker cached the app and answered from that cache, which kept\n"
+    "// serving the previous theme's colors. Nothing is offline here: the files are local.\n"
+    "self.addEventListener('install', function (e) { self.skipWaiting(); });\n"
+    "self.addEventListener('activate', function (e) {\n"
+    "  e.waitUntil((async function () {\n"
+    "    try {\n"
+    "      var keys = await caches.keys();\n"
+    "      await Promise.all(keys.map(function (k) { return caches.delete(k); }));\n"
+    "    } catch (err) {}\n"
+    "    try { await self.registration.unregister(); } catch (err) {}\n"
+    "  })());\n"
+    "});\n";
+
 // The palette literal, as dart2js emits it: B.<obfuscated>=new A.F(4294967295).
 // Matched by value, never by name — the identifiers are obfuscated and change on every
 // build of theirs, the integer for white does not.
@@ -162,6 +182,19 @@ bool        g_cache_usable    = false;
 void NeotkoFlutterDark::set_dark(bool dark) { g_dark.store(dark, std::memory_order_relaxed); }
 
 bool NeotkoFlutterDark::is_dark() { return g_dark.load(std::memory_order_relaxed); }
+
+bool NeotkoFlutterDark::must_not_be_cached(const std::string& file_path)
+{
+    return ends_with(file_path, kBundleName) || ends_with(file_path, kServiceWorkerName);
+}
+
+bool NeotkoFlutterDark::neutralize_service_worker(const std::string& file_path, std::string& content)
+{
+    if (!ends_with(file_path, kServiceWorkerName))
+        return false;
+    content = kTombstoneServiceWorker;
+    return true;
+}
 
 bool NeotkoFlutterDark::maybe_patch(const std::string& file_path, std::string& content)
 {

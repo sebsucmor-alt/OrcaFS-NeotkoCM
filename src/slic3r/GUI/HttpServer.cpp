@@ -850,8 +850,11 @@ void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
     // NEOTKO_FLUTTERDARK_TAG s252 — provisional dark mode for Snapmaker's Flutter pages
     // (Home/Device). Rewrites the palette constants of their compiled bundle on the way
     // out; no-op in light mode, for every other file, and whenever the palette is not
-    // recognized. Must run before content_length, which has to match what we send.
+    // recognized. The second call defuses their service worker, which would otherwise keep
+    // answering from its own copy of the app and hand back the previous theme. Both must run
+    // before content_length, which has to match what we send.
     NeotkoFlutterDark::maybe_patch(file_path, fileContent);
+    NeotkoFlutterDark::neutralize_service_worker(file_path, fileContent);
 
     size_t content_length = fileContent.size(); // 字节长度，非字符数
 
@@ -886,6 +889,14 @@ void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
     ssOut << "HTTP/1.1 200 OK\r\n";
     ssOut << "Content-Type: " << content_type << "\r\n";
     ssOut << "Content-Length: " << content_length << "\r\n"; // 必须与实际内容长度一致
+    // NEOTKO_FLUTTERDARK_TAG s252 — this file's bytes depend on the current theme, so a cached
+    // copy outlives the theme it was fetched for: switch theme, the webview reloads, and the
+    // previous palette comes back from cache instead of from here. Not gated on dark mode —
+    // the stale copy is just as likely to be the dark one being served after a switch to light.
+    // No cost worth counting: this response is read from disk on every request anyway, over a
+    // loopback socket.
+    if (NeotkoFlutterDark::must_not_be_cached(file_path))
+        ssOut << "Cache-Control: no-store, must-revalidate\r\n";
     ssOut << "Access-Control-Allow-Origin: *\r\n";           // CORS头
     ssOut << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
     ssOut << "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";

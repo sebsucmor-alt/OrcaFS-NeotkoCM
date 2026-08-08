@@ -42,6 +42,27 @@ public:
     static void set_dark(bool dark);
     static bool is_dark();
 
+    // True for the files the webview must never serve from its own cache. Deliberately
+    // independent of the theme and of whether the patch applied: the stale copy to guard
+    // against is just as likely to be the dark one being served after a switch back to light.
+    static bool must_not_be_cached(const std::string& file_path);
+
+    // Replaces Snapmaker's service worker with one that deletes every cache and unregisters
+    // itself. Their bundle registers a service worker, which keeps its own copy of the app in
+    // Cache Storage and answers from it — a layer HTTP cache headers have no say over, and one
+    // that would happily serve the previous theme's palette forever. On a desktop app reading
+    // files from the user's own disk that worker buys nothing: there is no network to be
+    // offline from.
+    //
+    // Serving a 404 instead would be worse than useless: it stops new registrations but leaves
+    // any existing one in place, still serving its cache. A worker that removes itself also
+    // cleans up the ones installed by earlier versions.
+    //
+    // Runs in light mode too, otherwise a cached dark bundle would outlive the switch back.
+    // Verified in s252 not to cause a reload loop: it never claims the page it is registered
+    // from, so each load re-registers it, it removes itself, and the page is served from here.
+    static bool neutralize_service_worker(const std::string& file_path, std::string& content);
+
     // Rewrites the palette of Snapmaker's Flutter bundle in `content`, in place.
     // No-op (returns false, `content` untouched) unless dark mode is on, the file is the
     // bundle, and the palette is recognized. Results are cached: the bundle is ~5 MB and is
