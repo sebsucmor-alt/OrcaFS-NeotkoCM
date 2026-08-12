@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The ColorStitch Painter — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Save Sandwiches as profiles and flood-fill them onto individual faces. Different steps of one object, each with its own recipe, with the weave drawn live on the model.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .slots2 { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 700px) { .slots2 { grid-template-columns: 1fr; } }
+
+  .faces {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px;
+    border: 1px solid var(--rule); border-radius: 7px; padding: 6px; background: var(--surface-2);
+  }
+  .faces button {
+    aspect-ratio: 1.25; border: 1px solid var(--rule); border-radius: 4px;
+    cursor: crosshair; padding: 0; position: relative; background: var(--surface);
+    box-shadow: inset 0 0 0 1px rgba(128,128,128,.18);
+  }
+  .faces button::after {
+    content: attr(data-slot);
+    position: absolute; inset: auto 3px 2px auto;
+    font-family: var(--mono); font-size: .56rem; opacity: .75;
+  }
+  .faces button[data-unpainted]::before {
+    content: ""; position: absolute; inset: 0; border-radius: 3px;
+    background: repeating-linear-gradient(45deg, transparent 0 4px, rgba(188,43,83,.22) 4px 8px);
+  }
+
+  .pal { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .pal button {
+    display: flex; align-items: center; gap: .35rem;
+    padding: .25rem .45rem .25rem .3rem; cursor: pointer;
+    border: 1.5px solid var(--rule); border-radius: 5px; background: var(--surface);
+    font: inherit; font-size: .74rem; font-family: var(--mono); color: var(--ink);
+  }
+  .pal button[aria-pressed="true"] { border-color: var(--ink); }
+  .pal i { width: 16px; height: 16px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.2); }
+
+  .slottab { width: 100%; font-size: .76rem; }
+  .slottab td { padding: .25rem .35rem; border-bottom: 1px solid var(--rule); }
+  .slottab i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px;
+               box-shadow: inset 0 0 0 1px rgba(0,0,0,.2); }
+  .slottab .n { font-family: var(--mono); color: var(--ink-faint); }
+  .slottab button { font: inherit; font-size: .68rem; padding: .05rem .3rem; cursor: pointer;
+                    border: 1px solid var(--rule); border-radius: 3px; background: var(--surface); color: var(--ink-soft); }
+  .slottab button:hover { border-color: var(--alert); color: var(--alert); }
+
+  .zonechip { display: inline-flex; align-items: center; gap: .3rem; font-size: .82rem; }
+  .zonechip i { width: 9px; height: 9px; border-radius: 2px; }
+
+  .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: .9rem; margin: 1.6rem 0; }
+  .steps figure { margin: 0; }
+  .steps figcaption { font-size: .8rem; padding: .5rem .6rem; }
+  .steps b { font-family: var(--mono); font-size: .66rem; letter-spacing: .08em;
+             text-transform: uppercase; color: var(--accent); display: block; margin-bottom: .2rem; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour" aria-current="page">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§6 — Colour</p>
+    <h1>The ColorStitch Painter</h1>
+    <p class="lede">
+      A Sandwich in the settings applies to the whole object. The Painter breaks that apart: save
+      recipes as profiles, then flood-fill them onto individual faces. Every step of a staircase
+      can carry a different one, and the weave is drawn on the model while you work.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--ver badge--plain">reworked in 2.4.0</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left-side gizmo toolbar</b><span class="sep">›</span><b>ColorStitch Painter</b>
+    </p>
+
+    <div class="note">
+      <span class="note__t">Not the same tool as Color Painting</span>
+      <p style="margin:0">
+        Orca has its own multi-material painter, the <b>Color Painting</b> gizmo, which assigns
+        raw filaments to triangles. This is a different icon in the same toolbar, and it paints
+        <em>Sandwich recipes</em> rather than filaments. Both can be used on the same object;
+        <a href="walls.html">Painter Pro Mode</a> is the set of precision add-ons
+        bolted onto the stock one.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">What breaks without it</h2>
+
+    <p>
+      The Sandwich Editor gives an object one recipe. Print a staircase and every tread gets the
+      same treatment, which is fine until you want the top step gold and the rest of them to fade
+      through a gradient. The only other way to do that is to cut the mesh into separate objects,
+      which changes how everything slices and creates seams you did not ask for.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Without it</h4>
+        <p>One recipe per object. Different effects means different objects, or a mesh split
+        into parts that then have to be reassembled.</p>
+      </div>
+      <div class="fold--after">
+        <h4>With the Painter</h4>
+        <p>Click a face, it fills with the active recipe. One mesh, as many recipes as you have
+        flat surfaces, all of it saved inside the 3MF.</p>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="tools" data-short="The tools">The tools</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Select</b></td><td>Click objects in the scene to choose which ones you can paint. Shift-click removes one.</td></tr>
+        <tr><td><b>Paint</b> (smart fill)</td><td>Click a flat face and the coplanar region floods with the active profile.</td></tr>
+        <tr><td><b>Eraser</b></td><td>Smart-fill removes paint under the cursor.</td></tr>
+        <tr><td><b>Pick</b> (eyedropper)</td><td>Reads the recipe under the cursor and makes it the active colour.</td></tr>
+        <tr><td><b>Sticker</b></td><td>Places a loaded SVG on a flat top face. <a href="#stickers">See the warning below.</a></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Left-click paints, erases or picks with whatever tool is active. <strong>Right-click is
+      camera only</strong>, so you never lose work by orbiting. <kbd>Shift</kbd> + left-click is a
+      one-shot erase whatever tool you are holding.
+    </p>
+
+    <h3 id="multi">Painting several objects <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+
+    <p>
+      Open the Painter with nothing selected and it starts in <b>Select</b> so you can click the
+      objects you want. Open it with a selection and those are already picked. While painting,
+      moving the cursor onto another chosen object switches to it, and clicking an object that is
+      not in the set adds it. That first click adopts the object; the one after paints it.
+    </p>
+
+    <h3 id="badges">The active colour tells you its state <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Badge</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><b style="color:var(--good)">slot N</b></td><td>The colour already owns a paint slot on this object. Painting applies it right away.</td></tr>
+        <tr><td><b class="muted">ready</b></td><td>A colour is chosen. It takes a slot the first time you actually paint with it.</td></tr>
+        <tr><td><b style="color:var(--warn)">no colour</b></td><td>Nothing is selected. Clicking the model will not paint, and will not erase either.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      This badge exists because of a long-standing trap: the swatch kept showing a colour that had
+      quietly stopped being paintable after a slice or a tab change, so clicks did nothing until
+      you re-picked it from the palette, with no way to tell why.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="departments" data-short="The four departments">The four departments</h2>
+
+    <figure>
+      <img src="../images/sandwich-editor-gizmo01.png" width="890" height="1040" alt="Palette department: smart fill angle, the collapsible TD section, palette groups with New group, Delete and Save all, the saved Profiles strip, the Stickers section and the Section view slider" loading="lazy">
+      <figcaption><b>Palette.</b> Smart fill angle, palette groups with <code>+ New group</code> / <code>Delete</code> / <code>Save all</code>, the saved Profiles strip (hover a swatch for its recipe and name), the Stickers section and the section-view slider.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/sandwich-editor-gizmo02.png" width="884" height="1082" alt="Generator department: Gradient ramp and ColorStitch Pattern Color, each with a Start A and End B filament pair and the generated swatch row underneath, plus a scrollable Flat color strip" loading="lazy">
+      <figcaption><b>Generator.</b> Gradient ramp and ColorStitch Pattern Color, each with a Start (A) / End (B) pair and the generated row underneath, plus a scrollable Flat colour strip. Same engine as <a href="optics.html#studio">the Studio</a>.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/sandwich-editor-gizmo03a.png" width="878" height="1392" alt="Pro department: Recipe and Result previews at the top, then the three zones in printing order: Top with a ColorStitch pass over a Solid pass, Penultimate empty with its Add button, and Bottom with a ColorStitch pass" loading="lazy">
+      <figcaption><b>Pro.</b> The composer, and <em>the Pro panel is the active colour</em>. Recipe and Result at the top, then the three zones top to bottom in printing order. Editing here rewrites the linked profile in place, everywhere it is already painted.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/sandwich-editor-gizmo04.png" width="886" height="864" alt="Object and TD department: the per-filament TD grid, the MixedFilament Object checkbox and its live recipe readout" loading="lazy">
+      <figcaption><b>Object &amp; TD.</b> The per-filament <a href="optics.html">TD</a> grid, always visible here, plus the <a href="#mixedfilament">MixedFilament Object</a> checkbox and its live recipe readout.</figcaption>
+    </figure>
+
+    <h3 id="prorows">Pass rows in Pro <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+
+    <p>
+      The three zones are edited one after another in a single panel, and each is titled by a
+      coloured chip:
+      <span class="zonechip"><i style="background:#3f9e6b"></i>Top</span>,
+      <span class="zonechip"><i style="background:#2b6b4a"></i>Penultimate</span>,
+      <span class="zonechip"><i style="background:#d98324"></i>Bottom</span>.
+      Three plain labels did not read as three different things, and these are the same codes the
+      3D highlight uses.
+    </p>
+
+    <ul>
+      <li>The <strong>thickness bar</strong> on the left is twice as wide as it used to be, so its
+        millimetre value stops colliding with the pass number, and the drag handles between passes
+        are easier to grab.</li>
+      <li><strong><code>^</code> <code>v</code> reorder</strong> and <strong><code>x</code>
+        remove</strong> close the row on the right, with the <code>x</code> set apart. Reordering
+        passes is a core move when composing a recipe and it used to be buried in a right-click
+        menu, while the destructive button sat next to the thickness control.</li>
+      <li>A <strong><code>!CS</code></strong> or <strong><code>!PB</code></strong> button appears on
+        a Solid pass still carrying a leftover ColorStitch or PathBlend payload from an older
+        build. The engine slices it as Solid (the kind wins) but the recipe looks like an effect,
+        so the preview came out flat. Click it to restore the pass. New ones cannot be created;
+        switching a pass to Solid now clears its payload.</li>
+      <li><strong>Right-click any pass's preview bar</strong> for Duplicate, Move up / down and
+        Delete. The clone splits the original's thickness in half so nothing else in the stack
+        moves.</li>
+      <li>A <strong><code>copy to:</code></strong> row under each zone copies the whole zone onto
+        another one. The ColorStitch pattern is translated to the destination zone's keys on the
+        way, and a stack landing on Bottom is normalised to the Bottom rules: max 2 Solid, max 1
+        ColorStitch, PathBlend forced to Full.</li>
+    </ul>
+
+    <div class="note note--good">
+      <span class="note__t">Dragging got quiet</span>
+      <p style="margin:0">
+        Dragging a divider or a number in Pro used to re-schedule a slice on <em>every frame</em>
+        of the drag. The heavy work is now committed once, when you let go, the same rule the TD
+        sliders already followed. The Recipe and Result previews still update live while you drag.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="walkthrough" data-short="Painting one, step by step">Painting one, step by step</h2>
+
+    <p class="small">
+      The panel chrome in these shots predates the 2.4.0 reorganisation, so they still show the
+      old Top Surface / Bottom Surface switch and the TD grid inside Pro. The workflow is the
+      same; for the current layout see the four department shots above.
+    </p>
+
+    <div class="steps">
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass01.png" width="529" height="583" alt="The object is selected and the ColorStitch Painter is picked from the gizmo toolbar" loading="lazy">
+        <figcaption><b>1</b>Select the object, open the Painter from the gizmo toolbar.</figcaption>
+      </figure>
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass02.png" width="729" height="535" alt="Generator department showing a gradient ramp between a Start A and End B filament pair, with a hovered swatch reporting T3 and T4 at 0.09 and 0.11 mm" loading="lazy">
+        <figcaption><b>2</b>Generator: a ramp between a Start (A) and End (B) pair. Hovering a swatch shows the two tools and their real thicknesses.</figcaption>
+      </figure>
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass03.png" width="726" height="530" alt="A swatch is chosen as the active colour and painted onto the top face of a cube" loading="lazy">
+        <figcaption><b>3</b>Pick a swatch, click the top face. That is the whole painting gesture.</figcaption>
+      </figure>
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass04.png" width="719" height="608" alt="Pro department showing the recipe behind that colour: two solid passes, T3 then T4, with Recipe and Result previews" loading="lazy">
+        <figcaption><b>4</b>Pro shows what is behind that colour: two Solid passes, T3 then T4.</figcaption>
+      </figure>
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass05.png" width="721" height="646" alt="A third solid pass has been added and the painted face updates to the new predicted colour" loading="lazy">
+        <figcaption><b>5</b>Add a third pass. The painted face updates to the new predicted colour immediately.</figcaption>
+      </figure>
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass06.png" width="723" height="638" alt="Changing a pass kind: the dropdown offers Solid, ColorStitch, PB Half and PB Full" loading="lazy">
+        <figcaption><b>6</b>Any pass can change kind: Solid, ColorStitch, PB Half, PB Full.</figcaption>
+      </figure>
+      <figure>
+        <img src="../images/Como-Pintar-SandwichMultipass07.png" width="715" height="672" alt="Pass one switched to ColorStitch: the top face now shows the two-tool per-line pattern while passes two and three stay solid underneath" loading="lazy">
+        <figcaption><b>7</b>Pass 1 switched to ColorStitch. The face shows the real per-line pattern, with the Solid passes still underneath.</figcaption>
+      </figure>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="slots" data-short="★ Slots &amp; all-or-nothing">Slots, and the all-or-nothing rule</h2>
+
+    <p>
+      Painting spends <strong>slots</strong>. Each object has up to 254 of them (slot 0 is
+      unpainted), and a slot holds the mapping from a painted region to a recipe. There is one
+      rule about them that catches everybody once, so it is worth seeing rather than reading.
+    </p>
+
+    <div class="demo bleed">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Paint some faces and watch the slot table</span>
+        <span class="demo__hint">leave one face unpainted</span>
+      </div>
+      <div class="demo__body" data-demo="slots">
+        <noscript><p class="noscript">This demo needs JavaScript. The table below states the rule it demonstrates.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the slot bookkeeping, not a port. The rule it shows, and the garbage
+        collection of unused colours, are real.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Situation</th><th>What applies</th></tr></thead>
+      <tbody>
+        <tr><td>Object with zero painted facets</td><td><b>Preset mode.</b> The Sandwich Editor values apply.</td></tr>
+        <tr><td>Painted object, painted area</td><td>The <b>painted profile</b> applies. The preset is ignored for that area.</td></tr>
+        <tr><td>Painted object, <b>unpainted</b> area</td><td><b>No effect at all.</b> The preset is suppressed for the whole object.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      That last row is the one. Paint one face of an object and every other surface loses the
+      preset Sandwich it would otherwise have had. It is deliberate, because mixing preset and
+      painted effects on the same object produces results nobody can predict, but it does mean
+      "paint the bit I care about and leave the rest" is not a thing you can do. Paint everything,
+      or paint nothing.
+    </p>
+
+    <h3 id="working">Working colours and saved palettes</h3>
+
+    <p>
+      Colours you paint with are <strong>working colours</strong>: created on demand, deduplicated,
+      and garbage-collected when no face uses them any more. They show an amber border while they
+      occupy a slot. Just browsing palettes does not consume anything.
+    </p>
+
+    <p>
+      <strong>Saved</strong> palettes are deliberate and named, they travel in the 3MF, and they
+      are organised into up to 10 global <strong>groups</strong>. <code>Save all</code> promotes
+      every unsaved working colour into the active group at once, which is the thing to do before
+      an <code>Erase all</code> so nothing is left dangling. Painting and the slot-to-profile
+      mapping are both recorded for undo and redo within the session.
+    </p>
+
+    <p>
+      Two bugs worth knowing about because they explain odd twins in old projects. <strong>Save
+      used to drop the Bottom zone</strong>: a recipe was carried as Top plus Penultimate, and Save
+      built the saved palette from those two, silently losing a Bottom in the very gesture meant to
+      preserve your work. Bottom now travels with the colour and counts when Save looks for an
+      identical existing palette, because two recipes that match on top and differ underneath are
+      different colours. And <strong>the list used to reshuffle under the cursor</strong>, because
+      "is this colour occupying a slot" was checked against the <em>active</em> object, which
+      changes on simple hover. It now counts every chosen object, so the grid stays put.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="preview" data-short="The weave on the model">The weave, drawn on the model</h2>
+
+    <p>
+      Painted top surfaces show the actual ColorStitch weave on the mesh, not a flat swatch. The
+      preview is built from <strong>the same per-line sequence the slicer produces</strong>, so
+      the filament colours, the density and the pattern match the G-code. The same builder drives
+      the little pass strip in the Pro tray and in the Sandwich Editor, so the strips and the 3D
+      view cannot drift apart.
+    </p>
+
+    <ul>
+      <li><strong>Scale is real.</strong> The stripe pitch comes from the resolved top line width,
+        and the gradient is scaled to the painted region's own extent, computed <em>per island</em>.
+        Each flat zone is detected as a connected component using edge adjacency, so zones that
+        only touch at a corner stay separate and each gets its own ramp, exactly like the slice.</li>
+      <li><strong>Orientation matches for a fixed angle.</strong> Set the angle by scrolling the
+        wheel over the pass preview bar and the bar, the model and the print all rotate together.
+        On auto angle the slicer alternates every layer, so no static preview can match; an amber
+        <b>auto angle</b> tag appears next to <code>ADV</code> to say so.</li>
+      <li><strong>Bottom is previewed too</strong> <em>(2.4.0)</em>. Upward-facing facets show the
+        Top recipe, downward-facing ones show the Bottom, each with its own islands and scale. A
+        Bottom made only of Solid passes has no weave to draw, so it gets its own composed colour
+        instead of borrowing the Top's.</li>
+      <li><strong>Where you can paint follows the recipe.</strong> A recipe with Top or Penultimate
+        content keeps upward-facing facets; one with Bottom content keeps downward-facing ones; one
+        with both keeps both. Side walls are never painted, because the effect would not print
+        there anyway.</li>
+    </ul>
+
+    <p class="small">
+      Two limits in this version: the stripe scale uses the painted area's projected extent rather
+      than the exact line count after perimeters and gap fill are subtracted, so it can be off by a
+      line or two. And islands wider than about 64 lines coarsen in the preview, because the shader
+      uses a 64-entry lookup. Gradients lose resolution; patterns still tile at real width.
+    </p>
+
+    <h3 id="outside">Paint stays visible with the gizmo closed <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+
+    <p>
+      Until 2.4.0 a painted Sandwich only existed while the Painter was open. Close it and the
+      object went back to one flat colour, so nothing on the plate told you which parts were
+      painted or with what. Plate thumbnails had the same blind spot.
+    </p>
+
+    <p>
+      Painted objects are now drawn painted in the normal 3D view, with the full weave, composed
+      against the object's real base colour and TD. It is the same code doing the drawing in both
+      places. Two differences worth knowing: the <strong>lighting is not the same</strong> (inside
+      the gizmo it is the painter's own shader, outside it is the normal one or Libre Mode's
+      realistic shading), and <strong>small leftover facets print flat here</strong>, taking the
+      slot's composed colour rather than falling back to a whole-object weave. A checkbox,
+      <b>Keep paint visible outside this gizmo</b>, turns it off; it is on by default and applies to
+      the whole project.
+    </p>
+
+    <p>
+      The MMU painter draws your Sandwich painting too, with the full weave, so you can decide
+      where MMU paint goes without working blind. Where the two meet, <strong>MMU is drawn on
+      top</strong>, which is exactly what the slicer does: where you painted MMU, MMU rules, and
+      that surface prints plain in its own filament with no Sandwich effect. Both painters tell you
+      in amber how much of your paint is affected when it actually happens.
+    </p>
+
+    <p class="small">
+      Known limitation: where a surface is split, by MMU paint or anything else, each piece
+      restarts its gradient instead of continuing it. The line spacing stays continuous across the
+      boundary; the colours restart.
+    </p>
+
+    <h3 id="highlight">Highlight active colour <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+
+    <p>
+      The panel always knew which colour was active. The 3D view never said <em>where that colour
+      already is</em>, and with two similar colours on one plate there was no answer to that beyond
+      squinting. The checkbox at the bottom of the painter draws the outline of the painted region
+      for one slot, boundary edges only so it frames the area without covering the weave, plus a
+      faint box around each island and a badge carrying the slot number. The outline is drawn twice,
+      solid on the surface and as a ghost through the object, so a zone facing away from you still
+      shows without orbiting blind.
+    </p>
+
+    <p>
+      Each badge shows the slot number, a disc in the <em>colour of the slot</em> and a ring plus a
+      wedge in the <em>zone colour</em>: the wedge points up for a top island and down for a bottom
+      one, and bottom badges sit under their island. The counter next to the checkbox reads
+      <code>sN — 137</code> or <code>sN — not painted here</code>, and that distinction matters,
+      because "the colour is active and I see nothing" has two very different causes.
+    </p>
+
+    <p class="small">
+      By default it highlights the active colour. Hovering a swatch in the palette grid, or a row of
+      <b>In use on this object</b>, highlights that one instead. On a multi-instance object only the
+      first instance is highlighted, and a bottom outline can be hidden by the build plate, which is
+      what the badge under the island is for.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="mixedfilament" data-short="MixedFilament Object">MixedFilament Object mode <span class="badge badge--wip" style="font-size:.62rem;vertical-align:middle">beta</span></h2>
+
+    <p>
+      A MixedFilament can be assigned to a whole object as its extruder, the same way you would
+      assign any normal filament. This mode is a one-click way to make that object's top surface,
+      penultimate layer and bottom surface actually <em>look like</em> that MixedFilament's colour.
+    </p>
+
+    <p>
+      Turning it on auto-generates a small sandwich of up to three solid passes that approximates
+      the MixedFilament's colour using your other loaded filaments and their TD values, with the
+      same colour-matching maths <a href="optics.html#studio">the Studio</a> uses. It also turns
+      <b>Perimeter override</b> on, so the walls get reprinted to match.
+    </p>
+
+    <p>
+      And it <strong>locks out manual painting</strong> for that object. The palette strips, zone
+      editors and the Perimeter override checkbox grey out, and since 2.4.0 the lock covers the
+      brush in the 3D view as well. Before that, the controls greyed out but clicking the model
+      still painted: slots were spent and re-slices scheduled for paint the engine then ignored,
+      which is work lost with no warning. Placing a sticker is blocked for the same reason. Select
+      and the eyedropper keep working. Turning the mode off restores whatever was painted before.
+    </p>
+
+    <p class="small">
+      If the object's extruder is not a MixedFilament the checkbox is greyed out with a tooltip
+      telling you to assign one. One known rough edge: the swatch shows the colour only, not a
+      preview of the passes that will print.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="profiles" data-short="Profiles &amp; the 3MF">Profiles and the 3MF</h2>
+
+    <p>
+      In the Sandwich Editor, <b>Save as profile…</b> captures the current pass stacks under a
+      name, and <b>Manage Sandwich Profiles</b> gives you Load into dialog, Update from current,
+      Rename and Delete. Deleting a profile that still has painted areas raises a non-critical
+      slicing warning; the slice continues and those areas simply get no effect until you re-paint
+      or re-create the profile.
+    </p>
+
+    <p>
+      Everything lives inside the 3MF: the profile library as project-level base64 JSON, the
+      per-volume slot tables mapping slot to profile id, and the per-triangle paint, mirroring how
+      MMU painting is stored. Opening a 3MF restores all three. There is <strong>no cross-project
+      library</strong>, so the way to reuse a set of profiles is to keep a template 3MF and start
+      from it.
+    </p>
+
+    <div class="note note--warn">
+      <span class="note__t">PathBlend is Top-only for now</span>
+      <p style="margin:0">
+        The penultimate <a href="pathblend.html">PathBlend</a> has a gradient-direction bug on
+        multi-stair objects, so the pass is restricted to the Top zone. The engine supports penu
+        PathBlend; it comes back when the bug is fixed.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="assembled" data-short="Assembled objects">Assembled objects</h2>
+
+    <p>
+      On an object made of several parts, painting a colour that already had a slot used to record
+      the facets but not the colour itself on the other parts. The part sliced correctly while the
+      painter showed it grey, the eyedropper read no recipe there, and the highlight had nothing to
+      light up. Paint slots are <strong>per part</strong>, and the profile is what identifies a
+      colour across parts. That is now respected everywhere, and objects already in this state are
+      repaired when the object is opened in the painter: orphan paint recovers its colour from the
+      sibling part that still had it.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="stickers" data-short="Stickers (rough)">Stickers <span class="badge badge--risk" style="font-size:.62rem;vertical-align:middle">experimental</span></h2>
+
+    <p>
+      Load an SVG in the Palette tab and the Sticker tool places it on a flat top face. It is not
+      geometry: the shape becomes a 2D mask carrying a Sandwich recipe, resolved at slice time.
+      Stack several and the topmost wins where they overlap; it occludes rather than blends.
+    </p>
+
+    <p>
+      It works and it slices. It is also the least finished part of the painter, and you should
+      know what you are getting:
+    </p>
+
+    <ul>
+      <li><strong>You cannot see a sticker anywhere.</strong> Not in the normal 3D view, not inside
+        the MMU painter, and not even inside the Sandwich painter unless you are actively editing
+        that sticker. You place it, it disappears, and you find out what it did in the preview or
+        the G-code.</li>
+      <li><strong>A sticker overrides everything under it, silently.</strong> Hand-painted zones
+        and MMU paint both. It is applied last, over whatever survived. Nothing warns you.</li>
+      <li><strong>Top surfaces only.</strong> Bottom stickers were never implemented.</li>
+      <li>The wipe tower does not currently switch between a painted tower and a sticker one.</li>
+    </ul>
+
+    <p>
+      All of this is being handled together in a planned <em>Mask-Painting</em> section, where
+      stickers and a drawing tool become one thing. Until then, treat them as a curiosity.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>All or nothing, per object.</strong> One painted facet suppresses the preset
+        Sandwich everywhere else on that object.</li>
+      <li><strong>Editing in Pro rewrites the profile in place</strong>, everywhere it is already
+        painted. That is usually what you want. When it is not, use <b>Duplicate</b> to get an
+        independent copy first.</li>
+      <li><strong>Profiles do not leave the project.</strong> No global library. Keep a template
+        3MF.</li>
+      <li><strong>Deleting a profile leaves painted areas orphaned.</strong> The slice warns and
+        carries on with no effect in those areas.</li>
+      <li><strong>Stickers are invisible until they print.</strong> See above.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="optics.html"><small>Back</small><b>TD &amp; the Studio</b></a>
+      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§6</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="map.html">Feature map</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * slots — the slot table, the garbage collector, and the all-or-nothing rule.
+ * ========================================================================= */
+Tour.demo('slots', function (host) {
+  var el = Tour.el;
+
+  var PALETTE = [
+    { name: 'ramp A',  hex: '#8f6fb0', recipe: 'T2 0.12 over T3 0.08' },
+    { name: 'gold',    hex: '#c99a3e', recipe: 'T4 0.14 over T1 0.06' },
+    { name: 'stitch',  hex: '#a2586e', recipe: 'ColorStitch T3/T4 60%' },
+    { name: 'deep',    hex: '#31527f', recipe: 'T2 0.20 solid' }
+  ];
+
+  var NFACES = 18;
+  var faces = new Array(NFACES).fill(-1);   // palette index per face, -1 unpainted
+  var active = 0;
+  var saved = [];                            // palette indexes promoted to "saved"
+
+  var wrap = el('div.slots2');
+  var left = el('div', { style: 'display:grid;gap:.7rem' });
+  var right = el('div', { style: 'display:grid;gap:.7rem' });
+
+  // palette ----------------------------------------------------------------
+  var pal = el('div.pal');
+  function buildPal() {
+    pal.textContent = '';
+    PALETTE.forEach(function (p, i) {
+      var b = el('button', { type: 'button', 'aria-pressed': active === i, title: p.recipe });
+      b.appendChild((function () { var s = el('i'); s.style.background = p.hex; return s; })());
+      b.appendChild(el('span', { text: p.name }));
+      if (saved.indexOf(i) >= 0) b.appendChild(el('span', { text: '★', style: 'color:var(--accent)' }));
+      b.addEventListener('click', function () { active = i; render(); });
+      pal.appendChild(b);
+    });
+  }
+
+  // the object -------------------------------------------------------------
+  var grid = el('div.faces');
+  function buildGrid() {
+    grid.textContent = '';
+    faces.forEach(function (f, i) {
+      var b = el('button', { type: 'button', 'aria-label': 'face ' + (i + 1) });
+      grid.appendChild(b);
+      b.addEventListener('click', function (ev) {
+        faces[i] = (ev.shiftKey || faces[i] === active) ? -1 : active;
+        render();
+      });
+    });
+  }
+
+  var tableWrap = el('div');
+  var status = el('p.small', { style: 'margin:0' });
+
+  left.appendChild(el('p.gt', { text: 'The active colour', style: 'margin:0;font-family:var(--mono);font-size:.63rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-faint)' }));
+  left.appendChild(pal);
+  left.appendChild(el('p.gt', { text: 'Click a face to paint · shift-click to erase', style: 'margin:.3rem 0 0;font-family:var(--mono);font-size:.63rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-faint)' }));
+  left.appendChild(grid);
+  left.appendChild(status);
+
+  right.appendChild(el('p.gt', { text: 'In use on this object', style: 'margin:0;font-family:var(--mono);font-size:.63rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-faint)' }));
+  right.appendChild(tableWrap);
+  right.appendChild(el('div', { style: 'display:flex;gap:.3rem;flex-wrap:wrap' }, [
+    el('button.btn.btn--sm', { type: 'button', text: 'Save all', onclick: function () {
+      usedList().forEach(function (i) { if (saved.indexOf(i) < 0) saved.push(i); });
+      render();
+    }}),
+    el('button.btn.btn--sm', { type: 'button', text: 'Erase all', onclick: function () {
+      faces = faces.map(function () { return -1; });
+      render();
+    }})
+  ]));
+
+  function usedList() {
+    var seen = [];
+    faces.forEach(function (f) { if (f >= 0 && seen.indexOf(f) < 0) seen.push(f); });
+    return seen.sort(function (a, b) { return a - b; });
+  }
+
+  function render() {
+    buildPal();
+
+    var used = usedList();
+    // Slot numbers are handed out in the order colours first get painted;
+    // a colour nobody uses any more is collected and gives its slot back.
+    var slotOf = {};
+    used.forEach(function (p, k) { slotOf[p] = k + 1; });
+
+    [].slice.call(grid.children).forEach(function (b, i) {
+      var f = faces[i];
+      if (f < 0) {
+        b.style.background = 'var(--surface)';
+        b.dataset.slot = '';
+        b.dataset.unpainted = '1';
+      } else {
+        b.style.background = PALETTE[f].hex;
+        b.dataset.slot = 's' + slotOf[f];
+        delete b.dataset.unpainted;
+      }
+    });
+
+    var tbl = el('table.slottab');
+    if (!used.length) {
+      tbl.appendChild(el('tr', null, [el('td', {
+        text: 'Nothing painted. The object is in preset mode: the Sandwich Editor settings apply to all of it.',
+        style: 'color:var(--ink-soft)'
+      })]));
+    } else {
+      used.forEach(function (p) {
+        var count = faces.filter(function (f) { return f === p; }).length;
+        var isSaved = saved.indexOf(p) >= 0;
+        var row = el('tr', null, [
+          el('td.n', { text: 's' + slotOf[p] }),
+          el('td', null, [
+            (function () { var s = el('i'); s.style.background = PALETTE[p].hex;
+              if (!isSaved) s.style.outline = '2px solid var(--warn)'; return s; })(),
+            el('span', { text: ' ' + PALETTE[p].name + (isSaved ? ' ★' : '') })
+          ]),
+          el('td.n', { text: count + ' faces' }),
+          el('td', null, [el('button', { type: 'button', text: 'Free', onclick: function () {
+            faces = faces.map(function (f) { return f === p ? -1 : f; });
+            render();
+          }})])
+        ]);
+        tbl.appendChild(row);
+      });
+    }
+    tableWrap.textContent = '';
+    tableWrap.appendChild(tbl);
+
+    var unpainted = faces.filter(function (f) { return f < 0; }).length;
+    if (!used.length) {
+      status.innerHTML = '<span class="muted">Preset mode. Every face gets the Sandwich from the settings.</span>';
+    } else if (unpainted > 0) {
+      status.innerHTML = '<span style="color:var(--alert)">' + unpainted + ' unpainted face' +
+        (unpainted === 1 ? '' : 's') + ' (hatched). They print with <b>no effect at all</b>: ' +
+        'the preset is suppressed for the whole object once anything is painted.</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--good)">Fully painted. Every face is governed by its own recipe.</span>';
+    }
+  }
+
+  wrap.appendChild(left);
+  wrap.appendChild(right);
+  host.appendChild(wrap);
+  host.appendChild(el('p.small', {
+    style: 'margin:.8rem 0 0',
+    html: 'An amber ring means the colour is a <b>working colour</b>: it exists because a face uses it, ' +
+          'and it is collected the moment none do. <b>Save all</b> promotes them (★) into the palette so ' +
+          'an Erase all leaves nothing dangling.'
+  }));
+
+  buildGrid();
+  render();
+});
+</script>
+
+</body>
+</html>

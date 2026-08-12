@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NeoTower — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A wipe tower planned after slicing, when every toolchange is known, including the sub-layer primes a Sandwich inserts inside a single layer.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .tw { display: grid; grid-template-columns: minmax(0,1fr) 220px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 660px) { .tw { grid-template-columns: 1fr; } }
+  .tw__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .tw__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .tw__read { font-family: var(--mono); font-size: .72rem; line-height: 1.6; color: var(--ink-faint); }
+  .tw__read b { color: var(--ink); font-weight: 500; }
+  .tw__read .bad { color: var(--alert); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output" aria-current="page">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§9 — Output</p>
+    <h1>NeoTower</h1>
+    <p class="lede">
+      The stock wipe tower decides its geometry up front, before the slice, from an estimate of how
+      many toolchanges there will be. That estimate is fine for ordinary multi-material printing
+      and completely wrong for a Sandwich, which inserts toolchanges <em>inside</em> a layer that
+      nobody counted.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">auto-promoted for any Sandwich</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--wip">variable layer height is experimental</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Quality</b><span class="sep">›</span><b>Prime tower</b><span class="sep">›</span><b>Tower type</b>
+    </p>
+
+    <div class="note note--good">
+      <span class="note__t">You usually do not have to choose</span>
+      <p style="margin:0">
+        Any scene that uses a Sandwich or a multi-pass stack <b>auto-promotes to NeoTower</b>,
+        whatever the setting says. NeoTower does need a prime tower to be active in the first
+        place.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">Planning before you know</h2>
+
+    <p>
+      A wipe tower has one job: give the nozzle somewhere to purge the old colour before it prints
+      the new one. To do that it needs a footprint big enough for the purge volume at every layer,
+      and a shape that stands up on its own.
+    </p>
+
+    <p>
+      The stock planner works that out from the model and the settings before slicing. Then a
+      Sandwich pass stack adds three toolchanges inside layer 40, four inside layer 41, and one
+      inside layer 42, at microscopic sub-layer heights nobody planned for. The tower has to
+      absorb all of it with a footprint that was decided before any of it existed.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Stock planner</h4>
+        <p>Geometry decided up front, from an estimate. Sub-layer primes arrive later and have to
+        fit into whatever was already built.</p>
+      </div>
+      <div class="fold--after">
+        <h4>NeoTower</h4>
+        <p>Runs <b>after slicing</b>, with the complete toolchange list in hand, including every
+        sub-layer prime. Fixed footprint, delta-Z aware, in sync with the real G-code because it
+        was built from it.</p>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="planner" data-short="★ The planner">Watch it plan</h2>
+
+    <p>
+      Add Sandwich passes and see what the tower has to swallow. The blue bars are ordinary
+      per-layer toolchanges; the amber ones are the sub-layer primes a pass stack inserts inside a
+      single layer, which is the part the stock planner never sees coming.
+    </p>
+
+    <div class="demo bleed" id="planner-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">The toolchange list, and the tower it needs</span>
+        <span class="demo__hint">add passes and watch the footprint</span>
+      </div>
+      <div class="demo__body" data-demo="tower">
+        <noscript><p class="noscript">This diagram needs JavaScript. The controls below are described in the tables.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the relationship, not the planner. The purge arithmetic is
+        illustrative; the structure of the problem, and what each control does to it, is real.
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="type" data-short="Tower type">Tower type</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><b>Classic</b> (default)</td><td>The standard WipeTower2 planner.</td></tr>
+        <tr><td><b>NeoTower</b></td><td>The post-slice planner: fixed footprint, delta-Z aware, with the options below.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="zigurat" data-short="Zigurat taper">Zigurat taper</h2>
+
+    <p>
+      <strong>Default: on.</strong> It limits how fast the footprint may shrink between consecutive
+      real layers, to one perimeter width per side, so every wall ring rests on the ring below it.
+      Wall on wall. Disable it to save material and time, at the cost of rings that are only
+      partially supported by the sparse interior grid.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="compaction" data-short="Purge compaction">Sandwich purge compaction</h2>
+
+    <p>
+      Sandwich and multi-pass purges happen at microscopic heights, and left alone they would
+      inflate the tower enormously: a purge that needs 10 mm³ at a sub-layer height of 0.03 mm
+      wants a lot of footprint. Purge compaction is a <strong>flow-boost cap</strong> that compacts
+      those thin purges into a narrower band, with the surplus hanging into the hollow interior.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Value</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>1.0</code></td><td>Off.</td></tr>
+        <tr><td><code>1.7</code></td><td>The default.</td></tr>
+        <tr><td><code>up to 5.0</code></td><td>More aggressive, smaller footprint, more surplus hanging inside. Confirm with a test print.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="reserve" data-short="Wipe reserve">Sandwich wipe reserve</h2>
+
+    <p>
+      The volume purged before each Sandwich sub-layer toolchange: Solid, ColorStitch or PathBlend,
+      Top and Penultimate. The config key is <code>multipass_prime_volume</code> and the label is
+      <b>Sandwich wipe reserve</b>.
+    </p>
+
+    <ul>
+      <li><strong>Default 10 mm³.</strong></li>
+      <li>Lower gives a thinner and shorter tower; higher gives a better purge.</li>
+      <li><code>0</code> disables it. Needs a wipe tower to be active.</li>
+    </ul>
+
+    <p class="small">
+      If your tower is using more purge than you expected, this and the compaction value are the two
+      numbers to look at first.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="varlayer" data-short="Variable layer height">Adaptive layers × multi-tool × Sandwich</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode + Tower type = NeoTower</li>
+      <li class="badge badge--wip">experimental</li>
+    </ul>
+
+    <p>
+      Because NeoTower plans from the real post-slice toolchange list and is delta-Z aware, it is
+      the mechanism that lets <strong>adaptive layer height, multiple tools and a Sandwich coexist
+      on one coherent tower</strong>. Stock Orca refuses to slice such scenes at all. NeoTower can
+      purge each toolchange at the real per-layer height.
+    </p>
+
+    <p>
+      The option <b>Variable layer height (Experimental)</b> sits under Tower type and is exposed
+      only with Tower type = NeoTower and Libre Mode active. It is visible but greyed out otherwise,
+      and it is <strong>off by default</strong>. When on, the slicer stops blocking:
+    </p>
+
+    <ul>
+      <li>scenes that mix objects with <strong>different layer heights</strong>, and</li>
+      <li><strong>adaptive layer height combined with more than one filament</strong>.</li>
+    </ul>
+
+    <p>
+      The wipe-tower issue that used to leave empty or short tower layers, including the
+      "empty first layer" abort, was fixed in 2.3.1: the tower stays coherent under variable layer
+      height now. The capability was proven on the older 2.2 line and is consistent on this 2.3.5
+      base too. It stays flagged experimental, so review the G-code before long multi-tool runs.
+    </p>
+
+    <p class="small">
+      This is also the answer to the most-asked question about the fork: yes, you can use adaptive
+      layer height with multiple tools and a Sandwich. Enable Libre Mode, set Tower type = NeoTower,
+      and turn this on.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>It runs after slicing.</strong> That is the whole idea, and it does mean the tower
+        cannot influence how the objects themselves were sliced.</li>
+      <li><strong>Compaction is a flow trick.</strong> Above the default it puts more surplus into
+        the hollow interior. It works, and it is worth a test print before you rely on it for a long
+        job.</li>
+      <li><strong>Variable layer height is experimental.</strong> Proven, consistent, and still
+        worth a G-code read before a long multi-tool run.</li>
+      <li><strong>A Sandwich is expensive at the tower.</strong> Nothing here changes that. What it
+        changes is whether the tower is the right size and shape for what actually got sliced.</li>
+      <li><strong>Wipe tower work is the most delicate part of the project.</strong> If something
+        looks wrong there, it is worth reporting rather than working around.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="index.html#output"><small>Back</small><b>Output</b></a>
+      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§9</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * tower — the toolchange list on the left, the tower it needs on the right.
+ * ========================================================================= */
+Tour.demo('tower', function (host) {
+  var el = Tour.el;
+
+  var S = {
+    layers: 26,
+    tools: 3,          // ordinary per-layer toolchanges come from this
+    passes: 2,         // Sandwich passes per surface layer
+    reserve: 10,       // mm3 per sub-layer toolchange
+    compaction: 1.7,
+    zigurat: true,
+    neo: true
+  };
+
+  /** Per layer: how many ordinary changes and how many sub-layer primes. */
+  function plan() {
+    var rows = [];
+    for (var i = 0; i < S.layers; i++) {
+      var ordinary = (S.tools > 1 && i % 3 === 0) ? 1 : 0;
+      // the top few layers of the part carry the Sandwich
+      var isSurface = i >= S.layers - 4;
+      var sub = isSurface ? Math.max(0, S.passes - 1) + (S.passes > 1 ? 1 : 0) : 0;
+      rows.push({ ordinary: ordinary, sub: sub });
+    }
+    return rows;
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Toolchanges per layer' }),
+    el('span', { 'data-tnote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var rows = plan();
+    var padL = 8, padR = 8, padT = 10, padB = 18;
+    var towerW = 92;
+    var listW = w - padL - padR - towerW - 16;
+    var rh = (h - padT - padB) / rows.length;
+
+    var accent = Tour.token('--accent');
+    var warn = Tour.token('--warn');
+    var faint = Tour.token('--ink-faint');
+    var maxCh = 5;
+
+    // the list
+    ctx.font = '9px ui-monospace, monospace';
+    for (var i = 0; i < rows.length; i++) {
+      var y = padT + (rows.length - 1 - i) * rh;
+      var x = padL + 22;
+      ctx.fillStyle = faint;
+      ctx.globalAlpha = .35;
+      ctx.fillRect(padL + 22, y + rh * .25, listW, Math.max(1, rh * .5));
+      ctx.globalAlpha = 1;
+
+      var n = 0;
+      for (var k = 0; k < rows[i].ordinary; k++, n++) {
+        ctx.fillStyle = accent;
+        ctx.fillRect(x + n * (listW / maxCh), y + rh * .2, listW / maxCh - 2, rh * .6);
+      }
+      for (var s = 0; s < rows[i].sub; s++, n++) {
+        ctx.fillStyle = warn;
+        ctx.fillRect(x + n * (listW / maxCh), y + rh * .2, listW / maxCh - 2, rh * .6);
+      }
+    }
+    ctx.fillStyle = faint;
+    ctx.textAlign = 'left';
+    ctx.fillText('layer 1', padL, padT + rows.length * rh - 2);
+    ctx.fillText('layer ' + rows.length, padL, padT + 8);
+
+    // the tower it needs
+    var tx = w - padR - towerW;
+    var cx = tx + towerW / 2;
+    var maxFoot = towerW - 8;
+
+    var prev = 0;
+    for (var j = 0; j < rows.length; j++) {
+      var vol = (rows[j].ordinary * 25) + (rows[j].sub * S.reserve / (S.neo ? S.compaction : 1));
+      var need = Math.min(maxFoot, 12 + vol * 1.5);
+      if (S.neo && S.zigurat && j > 0) need = Math.max(need, prev - 3);
+      if (!S.neo) need = maxFoot * 0.92;      // stock: one size, decided up front
+      prev = need;
+
+      var y2 = padT + (rows.length - 1 - j) * rh;
+      ctx.fillStyle = rows[j].sub ? warn : accent;
+      ctx.globalAlpha = rows[j].sub ? .55 : .38;
+      ctx.fillRect(cx - need / 2, y2, need, rh + 0.6);
+      ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = Tour.token('--rule-firm');
+    ctx.strokeRect(tx + .5, padT + .5, towerW - 1, rows.length * rh);
+    ctx.fillStyle = faint;
+    ctx.textAlign = 'center';
+    ctx.fillText(S.neo ? 'NeoTower' : 'Classic', cx, h - 5);
+  }, { height: 240 });
+
+  var read = el('p.tw__read', { style: 'margin:0' });
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.tw__grp', null, [
+    el('span.tw__gt', { text: 'Tower type' }),
+    Tour.segmented({ value: 'neo', options: [['classic','Classic'],['neo','NeoTower']],
+      onChange: function (v) { S.neo = v === 'neo'; upd(); } }),
+    Tour.toggle({ label: 'Zigurat taper', value: true, onChange: function (v) { S.zigurat = v; upd(); } })
+  ]));
+  side.appendChild(el('div.tw__grp', null, [
+    el('span.tw__gt', { text: 'The scene' }),
+    Tour.slider({ label: 'Sandwich passes', min: 1, max: 3, step: 1, value: S.passes,
+      format: function (v) { return v + (v === 1 ? ' pass' : ' passes'); },
+      onInput: function (v) { S.passes = v; upd(); } }),
+    Tour.slider({ label: 'Tools in the scene', min: 1, max: 4, step: 1, value: S.tools,
+      onInput: function (v) { S.tools = v; upd(); } })
+  ]));
+  side.appendChild(el('div.tw__grp', null, [
+    el('span.tw__gt', { text: 'Purge' }),
+    Tour.slider({ label: 'Wipe reserve', min: 0, max: 30, step: 1, value: S.reserve,
+      format: function (v) { return v + ' mm³'; }, onInput: function (v) { S.reserve = v; upd(); } }),
+    Tour.slider({ label: 'Compaction', min: 10, max: 50, step: 1, value: S.compaction * 10,
+      format: function (v) { return (v/10).toFixed(1) + (v === 10 ? ' (off)' : ''); },
+      onInput: function (v) { S.compaction = v / 10; upd(); } })
+  ]));
+  side.appendChild(el('div.tw__grp', null, [el('span.tw__gt', { text: 'Result' }), read]));
+
+  function upd() {
+    cv.render();
+    var rows = plan();
+    var sub = rows.reduce(function (a, r) { return a + r.sub; }, 0);
+    var ord = rows.reduce(function (a, r) { return a + r.ordinary; }, 0);
+    var purge = ord * 25 + sub * S.reserve / (S.neo ? S.compaction : 1);
+
+    read.innerHTML =
+      '<b>' + ord + '</b> ordinary toolchanges<br>' +
+      '<b>' + sub + '</b> sub-layer primes' + (sub ? ' <span style="color:var(--warn)">(the ones stock never planned for)</span>' : '') + '<br>' +
+      'purge ≈ <b>' + purge.toFixed(0) + ' mm³</b>' +
+      (S.neo ? '' : '<br><span class="bad">Classic sizes the footprint up front, so it is the same at every layer whether it needs to be or not.</span>');
+
+    var n = host.querySelector('[data-tnote]');
+    if (n) n.textContent = sub ? sub + ' sub-layer primes' : 'no Sandwich';
+  }
+
+  host.appendChild(el('div.tw', null, [box, side]));
+  upd();
+});
+</script>
+
+</body>
+</html>

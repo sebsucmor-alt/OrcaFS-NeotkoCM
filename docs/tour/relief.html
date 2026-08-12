@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bump mapping &amp; ZBump — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A PNG becomes physical relief: displacing wall centrelines around the object, per painted zone, or modulating the Z of the top-surface fill point by point into a real height field.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  /* Views across the top, controls in a row underneath. A tall side column
+     next to two short canvases just leaves a hole where the canvases end. */
+  .zb { display: grid; gap: .9rem; }
+  .zb__views { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr); gap: .8rem; }
+  @container demo (max-width: 620px) { .zb__views { grid-template-columns: 1fr; } }
+  .zb__side { display: grid; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); gap: .7rem; align-items: start; }
+  .zb__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; align-content: start; }
+  .zb__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .zb__read { font-family: var(--mono); font-size: .71rem; line-height: 1.6; color: var(--ink-faint); }
+  .zb__read b { color: var(--ink); font-weight: 500; }
+  .zb__read .warn { color: var(--alert); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure" aria-current="page">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§10 — Structure</p>
+    <h1>Bump mapping &amp; ZBump</h1>
+    <p class="lede">
+      One gizmo, three modes, one idea: a grayscale image becomes physical relief at slice time.
+      What changes between the modes is <em>where</em> the relief goes and how it is scoped.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--risk">Libre Mode + env var</li>
+      <li class="badge badge--wip">expert-only, on purpose</li>
+    </ul>
+
+    <div class="note note--alert">
+      <span class="note__t">Double-gated, and the gate is not a placeholder</span>
+      <p>
+        The gizmo only appears with <b>both</b> Libre Mode active <b>and</b> the debug environment
+        variable <code>ORCA_DEBUG_TEXTUREBUMP</code> set before launch. Top mode additionally needs
+        <code>ORCA_DEBUG_ZBUMP</code> (or <code>ORCA_DEBUG_ALL=1</code>) for ZBump to actually apply
+        when slicing.
+      </p>
+      <p style="margin:0">
+        Some option combinations here are genuinely capable of producing bad extrusion, which is
+        the whole reason for the gate. It is kept off unless you have deliberately opted in and are
+        prepared to read the resulting G-code. The per-OS activation steps live in
+        <code>NEOTKOCM_RELEASE_2_35.md</code>.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="all" data-short="All mode">All mode: wall texture</h2>
+
+    <p>
+      Applies one texture to every wall of the selected object, projected via <b>Planar</b>,
+      <b>Cylindrical</b>, <b>Spherical</b> or <b>Cubic</b>. Three on-canvas 3D handles adjust it
+      without leaving the viewport, and a live textured overlay shows the pattern on the object
+      before slicing so you can line it up by eye. The real object dims while the gizmo is open so
+      the projection is not hidden behind it.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Handle</th><th>Colour</th><th>Drag controls</th></tr></thead>
+      <tbody>
+        <tr><td><b>V</b></td><td>blue</td><td>Scale, the tile size in mm</td></tr>
+        <tr><td><b>U</b></td><td>orange</td><td>Repeat count</td></tr>
+        <tr><td><b>Yaw ring</b></td><td>purple</td><td>Rotation around the pivot</td></tr>
+        <tr><td><b>Pivot</b></td><td>pink</td><td>Pan, moving the tile origin</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note note--warn">
+      <span class="note__t">Arachne only, and this one is from a real print</span>
+      <p style="margin:0">
+        Wall-texture bump needs the <b>Arachne</b> wall generator. It is deliberately disabled on
+        <b>Classic</b>, because a real test print showed Classic silently over-extrudes when
+        adjacent walls carry different bump amounts, and the preview hides it while the G-code does
+        not. <b>NeoArachne is not wired up for it either.</b> Even on Arachne, adjacent walls with
+        very different bump amounts can still show a visible gap between them, because nothing
+        adjusts line <em>width</em> to compensate, only the centreline moves. That is a known open
+        limitation, not something the gate gets you past.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="painter" data-short="Painter mode">Painter mode: per zone</h2>
+
+    <p>
+      Paint zones on the model, with the same brush and erase interaction as the other painter
+      gizmos, and assign each zone its <strong>own</strong> texture, projection mode, scale and
+      thickness. Independent of the object's base All-mode settings and of every other zone. Each
+      zone gets its own overlay preview and a thumbnail in the zone list, so you can tell them apart
+      at a glance.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="zbump" data-short="Top mode: ZBump">Top mode: ZBump</h2>
+
+    <p>
+      A different feature entirely, sharing no engine code with the wall texture. It modulates the
+      <strong>Z height of the top-surface fill</strong> rather than wall XY. A grayscale image
+      becomes a literal height field: brighter pixels raise the top surface, sampled point by point
+      along every top-fill line for a real 2D relief rather than one flat Z per line.
+    </p>
+
+    <div class="demo bleed" id="zbump-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">An image becomes a height field</span>
+        <span class="demo__hint">change the pattern and the height</span>
+      </div>
+      <div class="demo__body" data-demo="zbump">
+        <noscript><p class="noscript">This demo needs JavaScript. The controls it shows are in the table below.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        The <b>sampling</b> is faithful: one height per point along each fill line, with the edge
+        ramp measured from the top-fill contour. The safe-height estimate is the engine's
+        (<code>0.8 × nozzle − layer height</code>).
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Height (mm)</b></td><td>Max Z displacement at full-white texture value. Shown in red past a safe-height estimate of <code>0.8 × nozzle − layer height</code>. That is a warning, not a hard cap: you can go past it and judge from the resulting G-code.</td></tr>
+        <tr><td><b>Reinforcement passes</b></td><td>Splits the total height across multiple stacked passes when it exceeds what one pass can safely reach on its own.</td></tr>
+        <tr><td><b>Scale / Repeat</b></td><td>Physical size of one image tile, and how many times it repeats.</td></tr>
+        <tr><td><b>Pan X / Y</b></td><td>Shifts the tiling phase. Drag the on-canvas green handle, or type exact values.</td></tr>
+        <tr><td><b>Edge ramp (mm)</b></td><td>Smoothstep margin from the top-fill's own contour, so the wall itself stays flat.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      The green pan handle rests at the object's own centre plus the current offset, and a live
+      textured overlay previews the pattern before slicing, cropped to roughly where top-fill
+      actually starts, inset from the outer edge by the perimeter walls. Drag the handle or type in
+      the numeric fields; both update the same preview live.
+    </p>
+
+    <div class="note">
+      <span class="note__t">Preview against slice</span>
+      <p style="margin:0">
+        The overlay is a GUI-only approximation. The perimeter inset is estimated rather than being
+        the engine's exact fill boundary, so it is a placement guide and not a pixel-perfect match.
+        It is cross-checked against the real slicing maths through a calibration log
+        (<code>ORCA_DEBUG_ZBUMP</code> writing to <code>/tmp/neotko_zbump.log</code>) that logs
+        identical probe points from both the GUI and the engine side for direct comparison.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>It is gated for a reason.</strong> Some combinations here can produce bad
+        extrusion. Read the G-code.</li>
+      <li><strong>Wall bump is Arachne only</strong>, disabled on Classic because a real print
+        showed silent over-extrusion, and not wired for NeoArachne.</li>
+      <li><strong>Adjacent walls with very different bump can gap.</strong> Only the centreline
+        moves; nothing adjusts line width to compensate. Known and open.</li>
+      <li><strong>The G-code preview does not draw the Z variation</strong> ZBump produces, the same
+        known limitation as Neoweave and the NeoWave contact layer. The G-code is right even when
+        the preview looks flat.</li>
+      <li><strong>The on-canvas handles can vanish</strong> in any mode of this gizmo when the print
+        bed renders behind them, depending on camera angle. Long-standing, not root-caused yet, and
+        the workaround is to orbit.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="height.html"><small>Back</small><b>Height</b></a>
+      <a class="is-next" href="extras.html"><small>Next</small><b>G-code &amp; finishing →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§10</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * zbump — a procedural grayscale becomes per-point Z on the top-fill lines.
+ * ========================================================================= */
+Tour.demo('zbump', function (host) {
+  var el = Tour.el;
+  var S = {
+    pattern: 'waves', height: 0.18, scale: 22, edge: 1.6,
+    nozzle: 0.4, layerH: 0.20, passes: 1, sizeMm: 60
+  };
+
+  /** The height field, 0..1, at a point in mm across the surface. */
+  function field(x, y) {
+    var u = x / S.scale, v = y / S.scale;
+    switch (S.pattern) {
+      case 'waves':  return 0.5 + 0.5 * Math.sin(u * 6.283) * Math.cos(v * 4.2);
+      case 'rings':  return 0.5 + 0.5 * Math.cos(Math.hypot(u - 1.4, v - 1.4) * 7);
+      case 'grid':   return (Math.abs(((u % 1) + 1) % 1 - 0.5) < 0.18 ||
+                             Math.abs(((v % 1) + 1) % 1 - 0.5) < 0.18) ? 1 : 0.05;
+      case 'noise': {
+        var n = Math.sin(u * 12.9898 + v * 78.233) * 43758.5453;
+        n = n - Math.floor(n);
+        var m = Math.sin((u + 3.1) * 4.1 + (v - 1.7) * 2.9);
+        return Math.min(1, Math.max(0, 0.45 * n + 0.55 * (0.5 + 0.5 * m)));
+      }
+      default: return 0.5;
+    }
+  }
+
+  /** The smoothstep margin from the top-fill contour. */
+  function edgeFade(x, y) {
+    var d = Math.min(x, S.sizeMm - x, y, S.sizeMm - y);
+    if (S.edge <= 0) return 1;
+    var t = Math.min(1, Math.max(0, d / S.edge));
+    return t * t * (3 - 2 * t);
+  }
+
+  var views = el('div.zb__views');
+
+  // the image ---------------------------------------------------------------
+  var imgBox = el('div.vbox');
+  imgBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'The height field' }), el('span', { 'data-znote': true })
+  ]));
+  var imgHost = el('div'); imgBox.appendChild(imgHost);
+  var img = Tour.canvas(imgHost, function (ctx, w, h) {
+    var STEP = 3;
+    for (var px = 0; px < w; px += STEP) {
+      for (var py = 0; py < h; py += STEP) {
+        var x = px / w * S.sizeMm, y = py / h * S.sizeMm;
+        var g = Math.round(field(x, y) * edgeFade(x, y) * 255);
+        ctx.fillStyle = 'rgb(' + g + ',' + g + ',' + g + ')';
+        ctx.fillRect(px, py, STEP, STEP);
+      }
+    }
+    // the fill lines the engine will sample along
+    ctx.strokeStyle = 'rgba(45,212,191,.5)';
+    ctx.lineWidth = 1;
+    for (var ly = 6; ly < h; ly += 12) {
+      ctx.beginPath(); ctx.moveTo(0, ly); ctx.lineTo(w, ly); ctx.stroke();
+    }
+  }, { height: 210 });
+
+  // the resulting relief ----------------------------------------------------
+  var relBox = el('div.vbox');
+  relBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'One fill line, in section' }), el('span', { 'data-rnote': true })
+  ]));
+  var relHost = el('div'); relBox.appendChild(relHost);
+  var rel = Tour.canvas(relHost, function (ctx, w, h) {
+    var accent = Tour.token('--accent');
+    var alert = Tour.token('--alert');
+    var pad = 16;
+    var maxMm = Math.max(0.3, S.height * 1.25);
+    var Y = function (mm) { return h - pad - (mm / maxMm) * (h - pad * 2); };
+    var y0 = S.sizeMm * 0.5;                       // the line we section
+
+    // the safe-height estimate
+    var safe = 0.8 * S.nozzle - S.layerH;
+    if (safe > 0 && safe < maxMm) {
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = alert; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, Y(safe)); ctx.lineTo(w, Y(safe)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = '9px ui-monospace, monospace';
+      ctx.fillStyle = alert; ctx.textAlign = 'right';
+      ctx.fillText('safe ' + safe.toFixed(2), w - 4, Y(safe) - 3);
+    }
+
+    // one point per sample along the line
+    var N = 110;
+    for (var i = 0; i < N; i++) {
+      var x = (i + 0.5) / N * S.sizeMm;
+      var z = field(x, y0) * edgeFade(x, y0) * S.height;
+      var px = i * w / N;
+      ctx.fillStyle = z > safe ? alert : accent;
+      ctx.globalAlpha = .85;
+      ctx.fillRect(px, Y(z), w / N + 0.8, Y(0) - Y(z));
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.strokeStyle = Tour.token('--rule-firm');
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, Y(0)); ctx.lineTo(w, Y(0)); ctx.stroke();
+  }, { height: 210 });
+
+  views.appendChild(imgBox);
+  views.appendChild(relBox);
+
+  var read = el('p.zb__read', { style: 'margin:0' });
+  var side = el('div.zb__side');
+
+  side.appendChild(el('div.zb__grp', null, [
+    el('span.zb__gt', { text: 'The image' }),
+    Tour.select({ label: 'Pattern', value: S.pattern,
+      options: [['waves','Waves'],['rings','Rings'],['grid','Grid'],['noise','Noise']],
+      onChange: function (v) { S.pattern = v; upd(); } }),
+    Tour.slider({ label: 'Scale', min: 6, max: 60, step: 1, value: S.scale,
+      format: function (v) { return v + ' mm per tile'; },
+      onInput: function (v) { S.scale = v; upd(); } })
+  ]));
+  side.appendChild(el('div.zb__grp', null, [
+    el('span.zb__gt', { text: 'The relief' }),
+    Tour.slider({ label: 'Height', min: 0.02, max: 0.6, step: 0.01, value: S.height,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) { S.height = v; upd(); } }),
+    Tour.slider({ label: 'Edge ramp', min: 0, max: 8, step: 0.2, value: S.edge,
+      format: function (v) { return v.toFixed(1) + ' mm'; },
+      onInput: function (v) { S.edge = v; upd(); } }),
+    Tour.slider({ label: 'Reinforcement passes', min: 1, max: 4, step: 1, value: S.passes,
+      onInput: function (v) { S.passes = v; upd(); } })
+  ]));
+  side.appendChild(el('div.zb__grp', null, [
+    el('span.zb__gt', { text: 'The printer' }),
+    Tour.slider({ label: 'Nozzle', min: 0.2, max: 0.8, step: 0.1, value: S.nozzle,
+      format: function (v) { return v.toFixed(1) + ' mm'; },
+      onInput: function (v) { S.nozzle = v; upd(); } }),
+    Tour.slider({ label: 'Layer height', min: 0.08, max: 0.32, step: 0.01, value: S.layerH,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) { S.layerH = v; upd(); } })
+  ]));
+  side.appendChild(el('div.zb__grp', null, [el('span.zb__gt', { text: 'Result' }), read]));
+
+  function upd() {
+    img.render(); rel.render();
+    var safe = 0.8 * S.nozzle - S.layerH;
+    var perPass = S.height / S.passes;
+    read.innerHTML =
+      'safe height <b>' + safe.toFixed(2) + ' mm</b> (0.8 × nozzle − layer)<br>' +
+      'asking for <b class="' + (perPass > safe ? 'warn' : '') + '">' + perPass.toFixed(2) + ' mm</b> per pass' +
+      (perPass > safe
+        ? '<br><span class="warn">past the estimate. Add a reinforcement pass, or read the G-code and decide for yourself.</span>'
+        : '<br>within the estimate.');
+    var zn = host.querySelector('[data-znote]');
+    if (zn) zn.textContent = S.sizeMm + ' mm surface';
+    var rn = host.querySelector('[data-rnote]');
+    if (rn) rn.textContent = S.height.toFixed(2) + ' mm max';
+  }
+
+  host.appendChild(el('div.zb', null, [views, side]));
+  upd();
+});
+</script>
+
+</body>
+</html>

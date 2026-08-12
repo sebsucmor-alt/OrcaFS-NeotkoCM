@@ -993,14 +993,48 @@ void PartPlate::render_icons(bool bottom, bool only_name, int hover_id)
         // user in a mode whose only exits are Esc and the panel's close button; if the panel ever
         // scrolls off or gets closed, there is no way back. So the icon column collapses to just
         // the camera, which doubles as the exit.
-        const bool photo_active = photo_mode().active;
+        // NEOTKO_PHOTOMODE_TAG s253: la columna del plato es mobiliario de la ESCENA 3D, así que
+        // sólo la toca el modo foto cuando es el 3D quien lo tiene puesto. El estado del modo es
+        // compartido entre pestañas (decisión s253), y sin esta condición encender el modo desde el
+        // visor de gcode dispararía la salida temprana de abajo también aquí — escondiendo, entre
+        // otras cosas, el nombre del plato en una pestaña que ni siquiera está en modo foto.
+        const bool photo_active = photo_mode().active && photo_mode().owner == PhotoOwner::View3D;
         // NEOTKO_PHOTOMODE_TAG s242 (F2.5): during the screenshot countdown even the camera button
         // is furniture. Esc still exits, so the mode stays escapable with nothing on screen.
         const bool photo_hide_ui = photo_ui_hidden();
         if (photo_mode_available() && !only_name && !photo_hide_ui) {
             const bool hovered = (hover_id == (int)PHOTO_MODE_HOVER_ID);
+
+            // NEOTKO_PHOTOMODE_TAG s253 — EL BOTÓN DE SALIDA TENÍA QUE ESTAR VISIBLE Y NO LO ESTABA.
+            //
+            // La intención de s242 (arriba) era correcta y el icono SÍ se dibujaba; lo que fallaba
+            // era que no se VEÍA, y el motivo es el orden del frame, no esta función:
+            //
+            //   objetos opacos → _render_photo_stage() → _render_platelist() → estos iconos
+            //
+            // El ciclorama se dibuja en el hueco de la cama, ANTES que la columna del plato, y
+            // escribe profundidad. El suelo del ciclorama está al nivel del plato (z ≈ 0), que es
+            // exactamente donde vive este icono. Con GL_DEPTH_TEST activo (lo enciende
+            // PartPlate::render justo antes de llamarnos) el suelo gana el test o entra en
+            // z-fighting, y el botón queda tapado por el escenario. Fuera de Photo Mode nadie se
+            // había topado con esto porque la cama se dibuja con su propio shader y su propio
+            // depth, y los iconos van encima.
+            //
+            // Fix: dentro del modo este icono se dibuja SIN test de profundidad, o sea siempre por
+            // encima de la escena. Es lo correcto conceptualmente además de lo práctico — no es
+            // decoración de la cama, es el control de "salir de aquí", y un control de salida que
+            // se puede esconder detrás del decorado no es un control de salida.
+            //
+            // El depth WRITE ya estaba desactivado en la entrada de la función, así que apagar el
+            // test no ensucia el buffer para el reflejo ni para nada que venga después; se
+            // restaura inmediatamente para no cambiar el resto de la columna (fuera del modo esta
+            // rama no se toca y todo sigue igual que siempre).
+            if (photo_active)
+                glsafe(::glDisable(GL_DEPTH_TEST));
             render_icon_texture(m_photo_icon.model, hovered ? m_partplate_list->m_photo_hovered_texture
                                                             : m_partplate_list->m_photo_texture);
+            if (photo_active)
+                glsafe(::glEnable(GL_DEPTH_TEST));
             if (hovered)
                 show_tooltip(photo_active ? _u8L("Exit photo mode") : _u8L("Photo mode"));
         }

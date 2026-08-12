@@ -1,8 +1,16 @@
-# Snapmaker Orca — Neotko FullSpectrum Feature Pack · User Guide
+# Snapmaker Orca — the Neotko feature pack · User Guide
 
 > Features conceived and designed by **[Neotko](https://github.com/sebsucmor-alt)** — inventor of *Neosanding*, now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura.
 
-This is the **Neotko FullSpectrum** feature pack ported on top of the official **Snapmaker Orca 2.3.4** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
+> **Prefer to play rather than read?** There is an
+> **[interactive tour](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/tour/)** covering everything
+> in this document, with live demos running the slicer's own colour and pattern code. This file
+> stays the written reference; every page over there carries its `§` number so the two match up.
+
+> **On the name.** *FullSpectrum* is **Radu/Radoux's** fork, the base this one grew out of. This
+> feature pack is Neotko's own work on top of it, and the two are separate projects.
+
+This is Neotko's feature pack, ported on top of the official **Snapmaker Orca 2.3.4** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
 
 > **About this build.** This is a feature pack meant for **pick & choose** — each block (ColorStitch, Penultimate, Libre Mode, NeoArachne, NeoTower, Align & Stack) can be adopted independently. Some surfaces are marked **(WIP)**: they are usable but still being refined, or not yet wired in this base. Review your G-code before long prints.
 
@@ -93,6 +101,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 18. [Typographic Spacing (2.3.9) — real kerning for embossed text](#18-typographic-spacing-239--real-kerning-for-embossed-text)
 19. [Bridging infill extra expansion (2.4.0) — anchor bridges before they cross](#19-bridging-infill-extra-expansion-240--anchor-bridges-before-they-cross)
 20. [RealColor View — see the colour you are actually going to print](#20-realcolor-view--see-the-colour-you-are-actually-going-to-print)
+    - 20a. [Photo Mode in the G-code viewer (2.4.4)](#20a-photo-mode-in-the-g-code-viewer-244)
 21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
 22. [Photo Mode (2.4.2) — a photo studio inside Prepare](#22-photo-mode-242--a-photo-studio-inside-prepare)
 23. [Height Adaptive Effects (2.4.3) — settings that change with height](#23-height-adaptive-effects-243--settings-that-change-with-height)
@@ -1632,6 +1641,33 @@ the two ways of drawing agree.
 
 ### Notes
 
+### 20a. Photo Mode in the G-code viewer (2.4.4)
+
+**Where**: the RealColor legend → **Photo mode…**
+
+RealColor got close enough to a photograph of a printed part that going back to the Prepare tab to
+light one stopped making sense. The lighting of the G-code view is no longer fixed: **key and fill
+can be aimed by dragging a ball**, and the part is lit in the room rather than by a lamp bolted to
+the camera — orbit and the light stays where you put it.
+
+**Raised lettering casts real shadows onto its own face.** Until 2.4.4 nothing in this view knew
+where the light came from, so embossed text read as *sunken* rather than as lit from a direction.
+The object's own mesh now casts a proper shadow onto the printed surface. Supports, brim and the
+wipe tower are not part of that mesh and do not cast.
+
+**Getting the picture out** — **Save PNG…** and **Copy image**, at 1080p, 1440p or 2160p:
+
+- **Pure white or fully transparent background**, your choice. No bed, no plate, no grid — just the
+  print.
+- **The cast shadow is preserved in the transparency.** Paste the PNG onto any colour and the part
+  still sits on a soft shadow instead of floating. It is what separates a cutout from a product shot.
+- Nothing about the print is changed: this is presentation, and it never touches the G-code.
+
+> Filament finish and TD live in their own window (**Filament finish…**, next to it in the legend) and
+> are shared with the normal view — there is deliberately no second copy of them inside Photo Mode.
+
+### 20b. Notes
+
 - **TD is what makes it accurate.** RealColor is only as good as the transmission-distance values you
   gave each filament. With TD roughly right the match to the printed part is genuinely close; with TD
   left at defaults on filaments that differ a lot in opacity, expect the preview to drift. Tuning TD
@@ -1794,9 +1830,13 @@ not meant for modelling. Drop to High if you want to orbit comfortably.
 adjustable few seconds, so you can grab the frame with your system screenshot tool (⌘⇧4 on macOS).
 Esc cancels the countdown; a second Esc leaves the mode.
 
-> **Save PNG** and **Copy to clipboard** are **disabled in 2.4.2.** The off-screen render still
-> frames the shot wrongly, and a button that writes a broken file is worse than no button. The
-> screenshot route above is the supported way for now.
+> **Save PNG** and **Copy to clipboard** are still **disabled here**, as of 2.4.4. The off-screen
+> render frames the shot wrongly and a button that writes a broken file is worse than no button.
+> The screenshot route above is the supported way in **Prepare**.
+>
+> **The G-code viewer's Photo Mode does export properly** (§20a) — same lights, plus PNG, clipboard
+> and shadows carried in the transparency. If what you want is a file rather than a screenshot,
+> that is the route that works today.
 
 ### 22g. Presets
 
@@ -2027,5 +2067,5 @@ It shouldn't — both tools only paint faces pointing toward the camera. Rotate 
 
 ---
 
-*Snapmaker Orca — Neotko FullSpectrum Feature Pack*
+*Snapmaker Orca — the Neotko feature pack*
 *Features designed by Neotko · Implementation by Claude (Anthropic)*

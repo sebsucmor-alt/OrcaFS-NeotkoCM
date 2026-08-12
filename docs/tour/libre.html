@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Libre Mode — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A two-key gate that unlocks the professional and experimental half of the fork: assemblies without a boolean union, per-volume compensation, full part settings, Simplify3D import, realistic shading.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .gate { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 0; align-items: stretch; }
+  @container demo (max-width: 640px) { .gate { grid-template-columns: 1fr; } }
+  .gate__step {
+    border: 1px solid var(--rule); background: var(--surface);
+    padding: .8rem .9rem; display: grid; gap: .35rem; align-content: start;
+  }
+  .gate__step + .gate__step { border-left: 0; }
+  @container demo (max-width: 640px) { .gate__step + .gate__step { border-left: 1px solid var(--rule); border-top: 0; } }
+  .gate__step:first-child { border-radius: 7px 0 0 7px; }
+  .gate__step:last-child  { border-radius: 0 7px 7px 0; }
+  .gate__n {
+    font-family: var(--mono); font-size: .62rem; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  .gate__t { font-weight: 650; font-size: .95rem; }
+  .gate__d { font-size: .84rem; color: var(--ink-soft); line-height: 1.5; margin: 0; }
+  .gate__step[data-on="1"] { background: var(--accent-wash); border-color: color-mix(in srgb, var(--accent) 30%, var(--rule)); }
+  .gate__step[data-on="1"] .gate__n { color: var(--accent); }
+
+  .unlocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px,1fr)); gap: .5rem; margin-top: .9rem; }
+  .unlock {
+    border: 1px solid var(--rule); border-radius: 6px; padding: .45rem .55rem;
+    background: var(--surface-2); font-size: .8rem; display: grid; gap: .15rem;
+    opacity: .35; transition: opacity .15s;
+  }
+  .unlock[data-on="1"] { opacity: 1; background: var(--surface); border-color: var(--rule-firm); }
+  .unlock b { font-size: .84rem; }
+  .unlock span { font-family: var(--mono); font-size: .63rem; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing" aria-current="page">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§4 · §5 — Placing</p>
+    <h1>Libre Mode</h1>
+    <p class="lede">
+      Roughly half of this fork is hidden behind one switch. It changes how the slicer behaves in
+      ways that would confuse somebody who just wants to print a benchy, and Snapmaker should be
+      able to hand this build to anyone and have it come up looking like a stock build. So it is
+      off until you go and turn it on.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--gate">the gate itself</li>
+      <li class="badge badge--ver badge--plain">off by default</li>
+      <li class="badge badge--wip">restart required</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="gate" data-short="The two-key gate">The two-key gate</h2>
+
+    <p>
+      Turning Libre Mode on takes two deliberate steps, and the first one needs a restart. That is
+      not friction for its own sake: the master switch decides whether the extra UI gets
+      <em>built</em> at start-up, so until it is on there is no Libre Mode anywhere in the
+      application to find.
+    </p>
+
+    <div class="demo bleed" id="gate-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">What each key opens</span>
+        <span class="demo__hint">click the steps</span>
+      </div>
+      <div class="demo__body" data-demo="gate">
+        <noscript><p class="noscript">This diagram needs JavaScript. The steps are listed below.</p></noscript>
+      </div>
+    </div>
+
+    <ol>
+      <li><strong>Master switch.</strong> <b>Preferences → Enable Neotko LibreMode (requires
+        restart)</b>. Off by default. Until this is on, no Libre Mode UI exists at all and
+        Snapmaker sees a stock build.</li>
+      <li><strong>Active toggle.</strong> Once the master switch is on and you have restarted, a
+        side button labelled <b>Neotko LM: Off / On</b> appears in the toolbar. Click it to toggle
+        the active state.</li>
+    </ol>
+
+    <p>
+      While active, Libre Mode also signals the slicer itself: an object with no first layer becomes
+      a <em>warning</em> instead of a hard error, and split and assemble operations are allowed
+      across Z = 0.
+    </p>
+
+    <div class="note note--warn">
+      <span class="note__t">Some panels only appear after the restart</span>
+      <p style="margin:0">
+        The parts settings tab in particular is built once at start-up, so toggling Libre Mode may
+        need a restart before the full option set shows up.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="assemblies" data-short="Assemblies">Assemblies that stay assemblies</h2>
+
+    <h3 id="boolean">Assembled Boolean mode</h3>
+
+    <p>
+      When you combine parts into an <b>Assembled</b> object, the stock slicer performs a boolean
+      union. Assembled Boolean mode (right-click an object to toggle it;
+      <code>neotko_assemble_boolean</code>, default <b>on</b>) lets you turn that off
+      <strong>per object</strong>. The parts are then sliced and merged <em>without</em> a union, so
+      overlapping multi-material geometry (inserts, interlocking colour regions) is kept as separate
+      co-existing meshes instead of being collapsed into one. This one is print-verified.
+    </p>
+
+    <h3 id="xy">Per-volume XY compensation</h3>
+
+    <p>
+      Normally XY contour and hole compensation is per object. With Libre Mode and an Assembled
+      object, each <strong>volume</strong> can have its own value, and the slicer applies the
+      <em>delta</em> between the part's value and the object's to that part before merging. The case
+      this exists for is a multi-material assembly whose materials shrink differently, like a PETG
+      insert in a PLA shell.
+    </p>
+
+    <h3 id="parts">Assembled parts get the full option set</h3>
+
+    <p>
+      In stock OrcaSlicer the parts inside an Assembled object expose only a limited subset of
+      settings. With Libre Mode active each part's settings tab exposes the full set: the combined
+      print-object and print-region keys.
+    </p>
+
+    <h3 id="copy">Copy / Paste Process Settings</h3>
+
+    <p>
+      Libre Mode adds <b>Copy Process Settings</b> (a submenu with Speed, Quality, Strength and All)
+      and <b>Paste Process Settings</b> to the object context menu. Copy one object's settings and
+      paste a chosen block onto another: <b>All</b> replaces the target's process settings, while a
+      single category merges into the target and leaves the others alone. It is how you propagate a
+      tuned block across many parts without flattening everything else they have.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="floating" data-short="Floating objects">Floating objects</h2>
+
+    <div class="note">
+      <span class="note__t">This moved</span>
+      <p style="margin:0">
+        Floating and anchoring is no longer part of Libre Mode. It is its own independent toggle,
+        <b>True Objects</b>, covered on <a href="place.html">the placing page</a>. Libre Mode still
+        opens the door to it, because the button only exists once the master switch is on, but
+        turning Libre Mode's own active state on or off no longer affects whether objects float.
+      </p>
+    </div>
+
+    <p>
+      With True Objects active, objects can sit at any Z height, floating above the bed or partly
+      below it, instead of being snapped to the plate. The floating Z is preserved across object
+      operations: copy and paste, Paste Process Settings, reload from disk, replace STL, boolean,
+      mesh simplify, move, rotate, scale, mirror and "face the camera" all leave a floating object
+      where it is. To drop one to the bed on purpose, use the sinking column in the object list.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="shading" data-short="Realistic shading">Realistic shading in Prepare</h2>
+
+    <ul class="badges"><li class="badge badge--ver badge--plain">2.3.9</li></ul>
+
+    <p>
+      With Libre Mode active, the Prepare tab's 3D objects render with the same Phong, fresnel,
+      screen-space ambient occlusion and projected contact shadow shading that
+      <a href="realcolor.html">RealColor</a> already used for shells in Preview. Turn Libre Mode off
+      and objects go back to the stock flat look.
+    </p>
+
+    <ul>
+      <li>It applies to the normal opaque object view only. The Assemble tab and the sinking or
+        transparent pass are untouched.</li>
+      <li>The contact shadow appears on the bed under each object, the same as it already did in
+        Preview.</li>
+      <li>There is no new toggle to learn: it is automatic once Libre Mode is on, and it falls back
+        silently to the stock shader if a shader or framebuffer is not available on your GPU.</li>
+    </ul>
+
+    <p>
+      It is also the foundation <a href="realcolor.html#prepare">Photo Mode</a> is built on, which
+      is why Photo Mode needs Libre Mode too.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="s3d" data-short="Simplify3D import">Simplify3D import</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>File</b><span class="sep">›</span><b>Import</b><span class="sep">›</span><b>Import 3D model</b><span class="sep">›</span><span>pick a <code>.factory</code></span>
+    </p>
+
+    <p>
+      This pack can open Simplify3D <code>.factory</code> project files: a complete project with
+      multiple objects, positions and extruder assignments. A <code>.factory</code> always loads as
+      a <strong>single Assembled object</strong>, because its parts share one world-space layout.
+    </p>
+
+    <div class="note note--good">
+      <span class="note__t">The reliable route</span>
+      <p style="margin:0">
+        After importing, <b>split in Libre Mode</b> to recover the individual parts in place. The
+        importer is functional that way. Some positioning fine-tuning is still unfinished, so the
+        assembled-then-split path is the one to use.
+      </p>
+    </div>
+
+    <p>
+      The same recommendation applies to <strong>world-space import</strong>, which is still marked
+      WIP. With Libre Mode active, objects can be imported at their source-file world coordinates
+      instead of being re-centred on the plate, preserving relative positions across an assembly.
+      Basic functionality works; importing as Assembled and splitting is the reliable route while
+      the world-space path is being finished.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="bridges" data-short="Internal bridges">A note on internal bridges</h2>
+
+    <p>
+      On floating objects and unusual geometries, internal-bridge detection can misfire and apply
+      bridging where it is not wanted. Worth knowing separately: the <strong>stock 2.3.5 default</strong>
+      for <code>internal_bridge_density</code> is 25%, so if a top surface looks unexpectedly filled
+      or unexpectedly empty, that stock setting is usually the cause and it has nothing to do with
+      Libre Mode.
+    </p>
+
+    <p class="small">
+      The older fork's automatic "disable internal bridges" behaviour is deliberately not carried
+      over as-is here. It caused a layer-count bug, and it will come back later as an explicit
+      opt-in.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="what" data-short="What it unlocks">Everything behind the switch</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Feature</th><th>Needs</th></tr></thead>
+      <tbody>
+        <tr><td><a href="place.html">True Objects / Gravity</a></td><td>Master switch on. Then it is its own independent toggle.</td></tr>
+        <tr><td><a href="place.html#snapdrag">Snap &amp; Drag</a>, the magnet panel</td><td>Libre Mode active, and True Objects on</td></tr>
+        <tr><td><a href="place.html#alignstack">Align &amp; Stack</a></td><td>Libre Mode active (icon visible, greyed out until then)</td></tr>
+        <tr><td><a href="walls.html">NeoArachne</a></td><td>Libre Mode active</td></tr>
+        <tr><td><a href="tower.html">NeoTower variable layer height</a></td><td>Libre Mode active, plus Tower type = NeoTower</td></tr>
+        <tr><td><a href="support.html">NeoWave support</a></td><td>Libre Mode active</td></tr>
+        <tr><td><a href="height.html">Precision Adaptive Layer Height</a></td><td>Libre Mode active</td></tr>
+        <tr><td><a href="height.html">Height Adaptive Effects</a></td><td>Libre Mode active</td></tr>
+        <tr><td><a href="extras.html">G-code Reprocessor</a></td><td>Libre Mode active</td></tr>
+        <tr><td><a href="realcolor.html#prepare">Photo Mode in Prepare</a></td><td>Libre Mode active</td></tr>
+        <tr><td>Realistic shading in Prepare</td><td>Libre Mode active</td></tr>
+        <tr><td><a href="relief.html">Bump Mapping Editor</a></td><td>Libre Mode active <b>plus</b> an environment variable</td></tr>
+        <tr><td>Assembled Boolean mode, per-volume XY, full part options, Copy/Paste process settings</td><td>Libre Mode active</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Everything <em>not</em> on that list works without any of this: the whole
+      <a href="sandwich.html">Sandwich</a> family, the <a href="painter.html">Painter</a>,
+      <a href="realcolor.html">RealColor</a>, <a href="walls.html">Painter Pro Mode</a>,
+      <a href="support.html">PerObject Support</a> and
+      <a href="extras.html">bridge expansion</a>.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>A restart, once.</strong> The master switch builds UI at start-up.</li>
+      <li><strong>Two switches to remember.</strong> "The button is missing" almost always means the
+        master switch is off; "the button is there and nothing happens" almost always means the
+        active toggle is off.</li>
+      <li><strong>It is a genuinely different slicer while it is on.</strong> Objects can float,
+        errors become warnings, and parts expose settings that can contradict each other. That is
+        the point, and it is also why it is not the default.</li>
+      <li><strong>Some of what it unlocks is experimental.</strong> Each of those pages says how far
+        along its own thing is.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="index.html#placing"><small>Back</small><b>Placing</b></a>
+      <a class="is-next" href="place.html"><small>Next</small><b>Align &amp; Stack, Gravity →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§4</b> and <b>§5</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * gate — click through the two keys and watch what becomes reachable.
+ * ========================================================================= */
+Tour.demo('gate', function (host) {
+  var el = Tour.el;
+  var master = false, active = false;
+
+  var UNLOCKS = [
+    ['True Objects button',      'appears',  'master'],
+    ['Realistic shading',        'automatic','active'],
+    ['Photo Mode in Prepare',    'camera icon','active'],
+    ['Align &amp; Stack',        'gizmo',    'active'],
+    ['NeoArachne',               'wall generator','active'],
+    ['NeoWave support',          'support type','active'],
+    ['Precision layer height',   'gizmo',    'active'],
+    ['Height Adaptive Effects',  'gizmo',    'active'],
+    ['G-code Reprocessor',       'preview',  'active'],
+    ['Assembled part options',   'settings tab','active'],
+    ['Bump Mapping Editor',      '+ env var','envvar']
+  ];
+
+  var steps = el('div.gate');
+  var grid  = el('div.unlocks');
+  var note  = el('p.small', { style: 'margin:.7rem 0 0' });
+
+  function step(n, title, desc, key) {
+    var s = el('div.gate__step', null, [
+      el('span.gate__n', { text: n }),
+      el('span.gate__t', { html: title }),
+      el('p.gate__d', { html: desc })
+    ]);
+    s.style.cursor = key ? 'pointer' : 'default';
+    if (key) s.addEventListener('click', function () {
+      if (key === 'master') { master = !master; if (!master) active = false; }
+      else if (key === 'active') { if (!master) { master = true; } active = !active; }
+      render();
+    });
+    return s;
+  }
+
+  function render() {
+    steps.textContent = '';
+    var a = step('key 1', 'Master switch',
+      'Preferences → <b>Enable Neotko LibreMode</b>. Needs a restart, because it decides whether the extra UI is built at all.',
+      'master');
+    a.dataset.on = master ? '1' : '0';
+
+    var b = step('restart', 'Relaunch',
+      master ? 'Done. The toolbar now has a <b>Neotko LM</b> side button.'
+             : 'Nothing to relaunch for yet.', null);
+    b.dataset.on = master ? '1' : '0';
+
+    var c = step('key 2', 'Active toggle',
+      'The <b>Neotko LM: Off / On</b> side button in the toolbar. This is the one you flip day to day.',
+      'active');
+    c.dataset.on = active ? '1' : '0';
+
+    steps.appendChild(a); steps.appendChild(b); steps.appendChild(c);
+
+    grid.textContent = '';
+    UNLOCKS.forEach(function (u) {
+      var on = u[2] === 'master' ? master
+             : u[2] === 'active' ? (master && active)
+             : false;                                   // env-var gated: never from here
+      var card = el('div.unlock', null, [
+        el('b', { html: u[0] }), el('span', { text: u[1] })
+      ]);
+      card.dataset.on = on ? '1' : '0';
+      grid.appendChild(card);
+    });
+
+    note.innerHTML = !master
+      ? 'Right now Snapmaker sees a stock build. None of this exists in the interface.'
+      : !active
+        ? 'The UI is built, so the <b>Neotko LM</b> button is there. Nothing is unlocked until you flip it.'
+        : 'Libre Mode active. The Bump Mapping Editor stays dark because it needs an environment ' +
+          'variable on top, which is not something a toggle can give you.';
+  }
+
+  host.appendChild(steps);
+  host.appendChild(grid);
+  host.appendChild(note);
+  render();
+});
+</script>
+
+</body>
+</html>

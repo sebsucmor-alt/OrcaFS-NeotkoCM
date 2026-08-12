@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RealColor &amp; Photo Mode — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Composite the G-code the way the eye will resolve it, light it like a product shot, and export a PNG whose shadow lives in the alpha. Plus the real prints, so you can judge the gap.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  /* a draggable before/after wipe */
+  .wipe { position: relative; user-select: none; touch-action: none; overflow: hidden;
+          border-radius: var(--radius); background: var(--surface-2); cursor: ew-resize; }
+  .wipe img { display: block; width: 100%; }
+  /* The overlay always covers the WHOLE box and is revealed with clip-path.
+     Sizing the wrapper to the divider instead would squeeze the image into
+     half its width rather than cutting it, which is a very convincing bug. */
+  .wipe__top { position: absolute; inset: 0; }
+  /* The two screenshots are the same frame but can differ by a few pixels.
+     `fill` stretches the overlay onto the base's exact box, which keeps the
+     two halves registered; `contain` would letterbox and shift the seam. */
+  .wipe__top img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+  .wipe__bar { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff;
+               box-shadow: 0 0 0 1px rgba(0,0,0,.35); pointer-events: none; }
+  .wipe__grip {
+    position: absolute; top: 50%; left: 50%; translate: -50% -50%;
+    width: 30px; height: 30px; border-radius: 50%; background: #fff;
+    box-shadow: 0 1px 6px rgba(0,0,0,.35); display: grid; place-items: center;
+    font-family: var(--mono); font-size: .7rem; color: #15181d;
+  }
+  .wipe__tag {
+    position: absolute; top: 8px; font-family: var(--mono); font-size: .64rem;
+    letter-spacing: .1em; text-transform: uppercase; padding: .15rem .4rem;
+    border-radius: 4px; background: rgba(0,0,0,.55); color: #fff; pointer-events: none;
+  }
+  .wipe__tag--l { left: 8px; }
+  .wipe__tag--r { right: 8px; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output" aria-current="page">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§20 · §21 · §22 — Output</p>
+    <h1>RealColor &amp; Photo Mode</h1>
+    <p class="lede">
+      Every slicer draws multi-material G-code the same way: each extrusion in its filament's raw
+      colour. For a toolchange preview that is the right answer. For a Sandwich it is the wrong
+      one, because a surface of blue and pink lines does not print as blue and pink lines.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate for RealColor</li>
+      <li class="badge badge--gate">Libre Mode for Prepare's Photo Mode</li>
+      <li class="badge badge--ver badge--plain">2.4.4</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Preview</b><span class="sep">›</span><span>the view-type dropdown</span><span class="sep">›</span><b>RealColor</b>
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">Read line by line, it looks like stripes</h2>
+
+    <p>
+      A Sandwich surface is a stack whose colours mix optically as light passes through the upper
+      passes and bounces off the ones underneath. Drawn extrusion by extrusion, it reads as hard
+      diagonal stripes. Printed, it is one blended colour. Those two pictures of the same G-code
+      are so far apart that using the standard preview to judge a Sandwich will send you back to
+      the editor to fix something that was never wrong.
+    </p>
+
+    <p>
+      RealColor renders the second picture. It composites each surface the way your eye will
+      resolve it, using each filament's <a href="optics.html">TD</a> to decide how much of what is
+      underneath shows through.
+    </p>
+
+    <div class="demo bleed" id="wipe-demo">
+      <div class="demo__head">
+        <span class="demo__tag">compare</span>
+        <span class="demo__title">The same G-code, two interpretations</span>
+        <span class="demo__hint">drag the divider</span>
+      </div>
+      <div class="demo__body" data-demo="wipe"
+           data-a="../images/RealColor-compare-filament.png"
+           data-b="../images/RealColor-compare-realcolor.png"
+           data-la="Filament view" data-lb="RealColor"
+           data-w="2074" data-h="1860">
+        <noscript>
+          <img src="../images/RealColor-compare-filament.png" width="2074" height="1860" alt="A printed ornamental wing in the standard filament view: one flat orange, with every extrusion path drawn as a line, so the relief reads only as a pattern of tool paths" loading="lazy">
+          <img src="../images/RealColor-compare-realcolor.png" width="2068" height="1854" alt="The same G-code at the same camera angle in RealColor: the wing reads as gold, with the scrollwork's relief lit from a direction and the sheen following the direction of each bead" loading="lazy">
+        </noscript>
+      </div>
+      <div class="demo__foot">
+        Same file, same camera, same layer. Only the interpretation changes: on the left every
+        extrusion in its raw filament colour, on the right the surface composited the way your eye
+        will resolve it, with the relief and the sheen along the bead that come with it.
+      </div>
+    </div>
+
+    <figure>
+      <img src="../images/RealColor.png" width="2178" height="1044" alt="Side by side on the same G-code: on the left the traditional preview where every extrusion is drawn in its filament's raw colour and each surface reads as hard diagonal stripes of blue, pink and orange; on the right RealColor, where those stripes resolve into a single blended tone" loading="lazy">
+      <figcaption>Look at any tile that reads as stripes on the left. On the right it has become the one colour your eye will see on the finished part. <b>The tiles that were already a single filament barely move</b>, which is the point: that is exactly where the two ways of drawing should agree.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="model" data-short="How it works">What it is actually doing</h2>
+
+    <p>
+      Each extrusion is a slab of material with a thickness and a filament. RealColor peels the
+      geometry apart layer by layer, front to back, and composites the slabs with the decadic
+      Beer–Lambert law: a slab of thickness <code>d</code> made of a filament with transmission
+      density <code>TD</code> lets through <code>10^(−d/TD)</code> of what is behind it.
+    </p>
+
+    <p>
+      That is the same formula, and the same code path, as the Result swatch in the Sandwich
+      Editor. The engine's reference version and the shader's version are different recurrences of
+      the same sum, and there is a test that runs both against synthetic stacks and asserts they
+      agree. The whole thing runs in linear RGB into a 16-bit float buffer, because round-tripping
+      through 8-bit sRGB across up to 128 peeled layers would bake in visible banding.
+    </p>
+
+    <p class="small">
+      If you want to play with the maths rather than read about it, that is what
+      <a href="play-mixer.html">the Colour Mixer</a> is for: same formula, your filaments, live.
+    </p>
+
+    <figure>
+      <img src="../images/RealColor-angleview.gif" width="500" height="503" alt="A printed part rendered in RealColor while the camera orbits around it, showing the sheen along the extrusion lines sweeping across the surface" loading="lazy">
+      <figcaption>Orbiting a part in RealColor. The sheen sweeps along the extrusion lines, because the shading knows which way each bead runs.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/RealColor-Quality.png" width="1776" height="974" alt="A RealColor render at high quality, showing the surface finish and the blended colour of a multi-pass print" loading="lazy">
+      <figcaption>What the view looks like once TD is roughly right for the filaments in use.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="photo" data-short="Photo Mode in the viewer">Photo Mode, in the G-code viewer <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.4</span></h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>RealColor legend</b><span class="sep">›</span><b>Photo mode…</b>
+    </p>
+
+    <p>
+      RealColor got close enough to a photograph of a printed part that going back to the Prepare
+      tab to light one stopped making sense. The lighting is no longer welded into the shader:
+      <strong>key and fill can be aimed by dragging a ball</strong>, and the part is lit in the
+      room rather than by a lamp bolted to the camera. Orbit and the light stays where you put it.
+    </p>
+
+    <figure>
+      <img src="../images/RealColor-Photo.gif" width="400" height="140" alt="The RealColor view of a printed hotel key tag while the key light swings around it: the lit and shaded sides of the raised lettering trade places, the sheen sweeps across the surface, and the shadows cast by the letters onto the face swing with the light" loading="lazy">
+      <figcaption>Swinging the key light around a printed key tag. <b>The raised lettering casts a real shadow onto its own face.</b> Until 2.4.4 nothing in this view knew where the light came from, so embossed text read as sunken rather than as lit from a direction.</figcaption>
+    </figure>
+
+    <p class="small">
+      Supports, brim and the wipe tower are not part of the mesh that casts, so they do not throw
+      shadows.
+    </p>
+
+    <h3 id="export">Getting the picture out</h3>
+
+    <p>
+      <strong>Save PNG…</strong> and <strong>Copy image</strong>, at 1080p, 1440p or 2160p, over a
+      pure white or a fully transparent background. No bed, no plate, no grid, just the print.
+    </p>
+
+    <div class="note note--good">
+      <span class="note__t">The shadow is carried in the transparency</span>
+      <p style="margin:0">
+        Paste the PNG onto any colour and the part still sits on a soft shadow instead of floating
+        on it. It is the same shadow that was already on your screen, so it costs nothing to use,
+        and it is the difference between a cutout and a product shot.
+      </p>
+    </div>
+
+    <p>
+      Two things about the export were found the hard way and are invisible until you compare
+      files side by side. The picture is rendered at twice the resolution and averaged down, which
+      is what stops the joints between extrusion lines showing as speckle on a white background;
+      the dark viewport had been hiding them all along. And the screen-space effects are rescaled
+      for the export, so the photo is not flatter than what you were looking at.
+    </p>
+
+    <p class="small">
+      Filament finish and TD live in their own window (<b>Filament finish…</b>, next to Photo mode
+      in the legend) and are shared with the normal view. There is deliberately no second copy of
+      them inside Photo Mode.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="prepare" data-short="Photo Mode in Prepare">Photo Mode, in Prepare</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--ver badge--plain">2.4.2</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Prepare</b><span class="sep">›</span><span>the camera button on the plate icon column</span>
+    </p>
+
+    <p>
+      A client asks what the part looks like in a different colour. You change it, and now you
+      need a picture. Opening a real renderer for that is a five-minute detour for a thirty-second
+      question, so in practice you send a screenshot of the slicer: gantry, grid, logo, toolbars
+      and all.
+    </p>
+
+    <p>
+      Photo Mode turns the Prepare viewport into a small photo studio. Your object does not move
+      and does not change; everything around it does. It changes nothing about the model, the
+      settings or the G-code, and <kbd>Esc</kbd> leaves it.
+    </p>
+
+    <h3 id="stage">The stage</h3>
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Stage</th><th>What you get</th></tr></thead>
+      <tbody>
+        <tr><td><b>Print bed</b></td><td>Everything as normal, for when the bed is the context you want to show.</td></tr>
+        <tr><td><b>Lightbox</b></td><td>A cyclorama: a floor that sweeps up into a back wall through a rounded corner, with no visible seam. The white sweep a product photographer shoots against.</td></tr>
+        <tr><td><b>Backdrop</b></td><td>The floor alone, no wall. For top-down shots.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      On Lightbox and Backdrop the bed, grid, exclusion zones, plate numbers, the Snapmaker logo,
+      the gizmos and the toolbars all disappear. The logo goes first, because it is the single most
+      obvious "this is a screenshot of a slicer" element in the frame. The camera button stays,
+      because it is also how you get out. Floor colour, size as a multiple of your bed, and corner
+      radius are all adjustable.
+    </p>
+
+    <h3 id="lights">Lights</h3>
+
+    <p>
+      Three of them: <strong>key</strong>, <strong>fill</strong> and <strong>rim</strong>. Each has
+      a draggable ball instead of three number boxes, so you drag toward where you want the light
+      and the shadow follows. Azimuth and elevation are also shown in degrees, so a setup you liked
+      can be written down and reproduced.
+    </p>
+
+    <p>
+      The light lives <strong>in the room, not on the camera</strong>. Orbit around the object and
+      the lighting stays put, the way it would in a real studio. The normal viewport does the
+      opposite, pinning its light to your eye, which is why an object never has a dark side while
+      you spin it. Only the key casts the shadow; each light has an intensity and a colour tint.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Preset</th><th>What it is for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Neutral (as viewport)</b></td><td>Identical to the normal 3D view. The default, so entering Photo Mode changes the scene around the object rather than the object.</td></tr>
+        <tr><td><b>Studio 3-point</b></td><td>Key high to one side, fill opposite to open the shadows, rim behind to separate the object from the backdrop.</td></tr>
+        <tr><td><b>Softbox top</b></td><td>One big overhead source, heavy ambient. The "product on white" look.</td></tr>
+        <tr><td><b>Rim / backlight</b></td><td>Weak key, strong edge light from behind. Sells profile and surface finish.</td></tr>
+        <tr><td><b>Flat catalog</b></td><td>Deliberately boring: almost no shadow, heavy ambient. What a shop listing wants, and what survives being cropped.</td></tr>
+        <tr><td><b>Dramatic</b></td><td>Grazing key, almost no fill. Long shadows, which sell geometry rather than colour.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="materials">Materials, per filament slot</h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Material</th><th>Reads as</th></tr></thead>
+      <tbody>
+        <tr><td><b>Plastic</b></td><td>The default, pixel for pixel the shading you already had.</td></tr>
+        <tr><td><b>Glossy / resin</b></td><td>Small, hard highlight. Polished or resin-printed.</td></tr>
+        <tr><td><b>Matte PLA</b></td><td>Broad, weak sheen.</td></tr>
+        <tr><td><b>Rubber / TPU</b></td><td>Almost no highlight, which is exactly what makes TPU look like TPU.</td></tr>
+        <tr><td><b>Metal</b></td><td>Highlight tinted by the object's own colour, no diffuse.</td></tr>
+        <tr><td><b>Silk</b></td><td>Half-metallic: a coloured sheen over a coloured body, which is what silk PLA actually is.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      On a painted multi-colour object the material follows <strong>the colour, not the part</strong>.
+      One keyring body can be matte on the stripes and metal on the lettering, from a single mesh.
+      Metal and Silk look much better with the <strong>Environment</strong> on, because a metal is
+      sold by what it reflects.
+    </p>
+
+    <h3 id="env">Environment, quality and the floor reflection</h3>
+
+    <p>
+      Environment is off by default. When on, it builds a virtual room out of your own three
+      lights, which the objects then reflect: move the key and its reflection moves with it. A
+      <em>rotate room</em> control turns the reflections without moving the lighting, which is the
+      fastest way to make a metal look right. It is off by default on purpose, because with it on
+      Photo Mode no longer reproduces the normal viewport exactly, and that equivalence is worth
+      keeping as the starting point.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Quality</th><th>Shadow map</th><th>Floor reflection</th></tr></thead>
+      <tbody>
+        <tr><td><b>Normal</b></td><td>2048 px</td><td>—</td></tr>
+        <tr><td><b>High</b></td><td>4096 px</td><td>available</td></tr>
+        <tr><td><b>Ultra</b></td><td>8192 px</td><td>available</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      The higher tiers also widen the shadow's soft edge to match the resolution. Raising the
+      resolution alone would give you a thinner but equally hard edge: better measured, worse
+      looking. The floor reflection mirrors the objects, stronger at grazing angles, and it is a
+      genuine reflection of the scene rather than a screen-space approximation, so it does not
+      fall apart at the object's outline. That is the part of a reflection anyone actually looks
+      at. It draws the whole scene a second time, which is why it is gated above Normal: on an M4
+      with a fairly complex model, <strong>Ultra with the reflection on runs at 10–15 fps</strong>.
+      Fine for framing a still, not meant for modelling.
+    </p>
+
+    <div class="note note--warn">
+      <span class="note__t">Export from Prepare is parked</span>
+      <p style="margin:0">
+        <b>Save PNG</b> and <b>Copy to clipboard</b> are disabled in Prepare's Photo Mode as of
+        2.4.4: the off-screen render frames the shot wrongly, and a button that writes a broken
+        file is worse than no button. Use <b>Hide UI for screenshot</b>, which clears every control
+        including the panel itself for an adjustable few seconds so you can grab the frame with
+        your system tool. Or use the G-code viewer's Photo Mode, which
+        <a href="#export">does export properly</a>.
+      </p>
+    </div>
+
+    <p class="small">
+      <b>My presets</b> saves lights, materials, stage, environment and quality under a name. They
+      are stored with the application rather than in the 3MF, because a lighting setup is your
+      preference as the person taking the picture; it should follow you across projects rather than
+      ride along inside a model file that gets shared and printed.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="prints" data-short="The real prints">The real prints</h2>
+
+    <p>
+      Everything above is previews and dialogs. This is the printed result, so you can judge for
+      yourself how far the simulation is from the plastic.
+    </p>
+
+    <figure>
+      <img src="../images/REALPRINTS/RealPrint-02.webp" width="460" height="613" alt="The BIGTEST board printed: a full board of tiles covering many filament pairs, mix ratios and pass structures at once" loading="lazy">
+      <figcaption>The <code>BIGTEST.3mf</code> board: many filament pairs, mix ratios and pass structures at once. The project file is in the fork's repository, so you can slice and print the same reference.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/REALPRINTS/RealPrint-03.webp" width="1193" height="613" alt="Close-up of part of the BIGTEST board, where smooth blends sit next to tiles whose ColorStitch dither is deliberately coarse enough to read as texture" loading="lazy">
+      <figcaption>Close up. Smooth blends sit next to tiles where the dither is deliberately coarse enough to read as texture, which is a legitimate thing to want.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/REALPRINTS/realprint-realcolor.webp" width="476" height="716" alt="A printed part held next to the RealColor preview of the same G-code on screen" loading="lazy">
+      <figcaption>A printed part next to the RealColor preview of the same G-code. With TD set correctly for the filaments in use the match is close. That is what tuning TD buys you.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>TD is what makes it accurate.</strong> With TD roughly right the match to the
+        printed part is genuinely close. With TD left at defaults on filaments that differ a lot in
+        opacity the preview drifts, and it drifts convincingly.</li>
+      <li><strong>It is a simulation, not a promise.</strong> The panel says so itself:
+        <em>"Approximated optical simulation, not a guarantee of the final print colour."</em>
+        Surface finish, lighting and the printer's own colour behaviour all move the result.</li>
+      <li><strong>TD is a grey absorber.</strong> One scalar broadcast to all three channels, so a
+        filament that absorbs green harder than blue is not modelled. The engine's data structure
+        already holds three values; the interface does not fill them in.</li>
+      <li><strong>It is not free to draw.</strong> Depth peeling costs a geometry pass per layer.
+        It recomputes when the camera stops moving, not while you orbit.</li>
+      <li><strong>The legend is reduced.</strong> RealColor shows Filament Usage and Time
+        Estimation only. The per-tool tower and cost breakdown, and the Travel / Retract / Seams
+        toggles, belong to the Filament view.</li>
+      <li><strong>Transparent materials are deliberately not supported in Photo Mode.</strong>
+        Showing a client a semi-transparent part would be dishonest, because that is not how it
+        comes off the printer. If you want to see inside a part, that is what RealColor is for,
+        where the translucency is the whole point.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="painter.html"><small>Back</small><b>The Painter</b></a>
+      <a class="is-next" href="play-mixer.html"><small>Play</small><b>The Colour Mixer →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§20</b>, <b>§21</b> and <b>§22</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * wipe — a draggable before/after over two images of the same thing.
+ * Generic: reads its images and labels from data- attributes.
+ * ========================================================================= */
+Tour.demo('wipe', function (host) {
+  var el = Tour.el;
+  var d = host.dataset;
+
+  var box = el('div.wipe');
+  var base = el('img', { src: d.a, alt: d.la || 'before', width: d.w, height: d.h });
+  var topWrap = el('div.wipe__top');
+  var over = el('img', { src: d.b, alt: d.lb || 'after', width: d.w, height: d.h });
+  var bar = el('div.wipe__bar');
+  var grip = el('div.wipe__grip', { text: '↔' });
+  bar.appendChild(grip);
+
+  topWrap.appendChild(over);
+  box.appendChild(base);
+  box.appendChild(topWrap);
+  box.appendChild(bar);
+  box.appendChild(el('span.wipe__tag.wipe__tag--l', { text: d.la || 'before' }));
+  box.appendChild(el('span.wipe__tag.wipe__tag--r', { text: d.lb || 'after' }));
+
+  // Keyboard access: the divider is the whole control, so make it focusable.
+  var slider = el('input', {
+    type: 'range', min: 0, max: 100, value: 50,
+    'aria-label': 'Reveal ' + (d.lb || 'after'),
+    style: 'width:100%;margin-top:.5rem'
+  });
+
+  function set(pct) {
+    pct = Math.max(0, Math.min(100, pct));
+    // Cut the overlay away to the LEFT of the divider, so the "after" image
+    // occupies the right-hand side and the two corner tags stay truthful.
+    topWrap.style.clipPath = 'inset(0 0 0 ' + pct + '%)';
+    bar.style.left = pct + '%';
+    slider.value = pct;
+  }
+
+  Tour.draggable(box, {
+    onDown: function (p) { set(p.x / box.getBoundingClientRect().width * 100); },
+    onMove: function (p) { set(p.x / box.getBoundingClientRect().width * 100); }
+  });
+  slider.addEventListener('input', function () { set(parseFloat(slider.value)); });
+
+  host.textContent = '';
+  host.appendChild(box);
+  host.appendChild(slider);
+  set(50);
+});
+</script>
+
+</body>
+</html>

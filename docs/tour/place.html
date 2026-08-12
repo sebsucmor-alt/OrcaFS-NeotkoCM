@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Align &amp; Stack · Gravity — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Place one object precisely against another, then make the slicer believe it: a face resting on another object prints as solid contact instead of a false bridge over thin air.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .gv { display: grid; grid-template-columns: minmax(0,1fr) 220px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 680px) { .gv { grid-template-columns: 1fr; } }
+  .gv__grp {
+    border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+    padding: .5rem .55rem; display: grid; gap: .45rem;
+  }
+  .gv__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .gv__read { font-family: var(--mono); font-size: .72rem; line-height: 1.55; color: var(--ink-faint); }
+  .gv__read b { color: var(--ink); font-weight: 500; }
+  .gv__read .hit { color: var(--accent); }
+  .gv__read .air { color: var(--alert); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing" aria-current="page">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§7 · §17 — Placing</p>
+    <h1>Align &amp; Stack, and Gravity</h1>
+    <p class="lede">
+      Stock slicing assumes a few things that are only true when an object sits alone on the bed:
+      that layer 0 is the bed, that below me is only my own previous layer, that support grows
+      from the plate. Put two separate objects one on top of the other and all three break at
+      once, quietly.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--gate">True Objects</li>
+      <li class="badge badge--gate">Libre Mode opens the door</li>
+      <li class="badge badge--ver badge--plain">2.3.9, extended 2.4.0 and 2.4.3</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">The false bridge</h2>
+
+    <p>
+      Put a beam on two blocks, as three separate objects. The underside of the beam is resting on
+      solid plastic, but the slicer only ever asks "is there anything of <em>mine</em> underneath
+      this?". The answer is no, so it classifies the whole face as a bridge: bridge speed, bridge
+      fan, bridge angle, and a surface finish chosen for spanning air over a face that is touching
+      material.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Stock</h4>
+        <p>Per-object. Below layer 0 is the bed or nothing. A face resting on a neighbour is a
+        bridge over thin air, and support gets requested under it.</p>
+      </div>
+      <div class="fold--after">
+        <h4>With True Objects</h4>
+        <p>The slicer measures what is really underneath every surface, <b>by area, not by
+        object</b>. The part resting on something solid prints as contact; the part genuinely over
+        air still prints as a real bridge, in the same layer.</p>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="gravity" data-short="★ Gravity">Gravity, live</h2>
+
+    <p>
+      Drag the block around. What the slicer measures is not a raycast under your cursor: it is a
+      2D footprint overlap against every candidate, then a handful of real raycasts against the
+      candidate's <em>actual mesh</em>. Notice what happens over the hollow box, and over the gap.
+    </p>
+
+    <div class="demo bleed" id="gravity-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">What is really underneath</span>
+        <span class="demo__hint">drag the block left and right</span>
+      </div>
+      <div class="demo__body" data-demo="gravity">
+        <noscript><p class="noscript">This demo needs JavaScript. The text around it describes the same rules.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the decision, in two dimensions. The real detector works on 3D
+        footprints and meshes, and the hysteresis, the sampling and the "highest surface wins" rule
+        are all faithful to it.
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="trueobjects" data-short="True Objects">Turning it on</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Toolbar side button</b><span class="sep">›</span><b>True Objects: On/Off</b>
+    </p>
+
+    <p>
+      The button appears once the <a href="libre.html">Libre Mode</a> master switch is
+      on, but it is its own independent axis: turning Libre Mode's active state on or off does not
+      turn True Objects on or off, and the reverse is also true. The way to hold it in your head is
+      that <em>Libre Mode opens the door to the fork's pro features; True Objects decides whether
+      things fall</em>.
+    </p>
+
+    <p class="small">
+      Upgrading from an older build that had Libre Mode's floating active? True Objects is seeded
+      to match it the first time, so existing floating and stacked projects keep working exactly as
+      they did.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Before (stock)</th><th>With True Objects</th></tr></thead>
+      <tbody>
+        <tr><td>A face resting on another object becomes a false bridge, with bridge speed, fan and the wrong angle</td><td>The same face prints as a normal solid contact surface at the correct fill angle</td></tr>
+        <tr><td>An object's own floating first layer is always solid, even over open air</td><td>The part genuinely over air becomes a real bridge</td></tr>
+        <tr><td>Perimeter overhang is measured only against this object's own layer below</td><td>Measured against the real floor, so a wall resting on a neighbour is not flagged as overhang</td></tr>
+        <tr><td>Support is requested under a face that is actually resting on another object</td><td>No support requested there; the neighbour's top counts as ground</td></tr>
+        <tr><td>Elephant-foot compensation applied to any first layer, even a stacked one</td><td>Never applied to a face that is not touching the bed, so stacked contact faces keep their true size</td></tr>
+        <tr><td><a href="support.html">PerObject Support</a> is opt-in per object</td><td>Forced on for every object while True Objects is active. Nothing is overwritten: turn it off and each object's own setting is as you left it</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      The clearest way to see it working is an object resting <strong>partly</strong> on another and
+      partly hanging over open air. That shows both in the same layer: solid where it is supported,
+      bridge where it truly is not.
+    </p>
+
+    <div class="note">
+      <span class="note__t">Assembled objects were never broken</span>
+      <p style="margin:0">
+        If your stacked pieces are already combined into one <b>Assembled</b> object, the slicer
+        already sees the whole stack as one body and always did. Gravity is specifically for pieces
+        that stay <em>separate</em> objects on the plate.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="detect" data-short="How it detects">How it measures the floor</h2>
+
+    <p>
+      The stock "is it floating?" warning used a blind heuristic: an empty first layer means the
+      object floats. That is wrong the moment an object rests on top of another one, which has an
+      empty first layer of its own and is not floating at all.
+    </p>
+
+    <p>
+      This build measures it instead. For an object whose lowest geometry starts above the bed,
+      each instance is checked against the bed <strong>and</strong> against the top surface of
+      every other object's instances: real Z gap, real XY footprint, per instance. An object
+      stacked on another no longer gets a bogus warning, and a genuinely floating island still
+      raises one, because the old blanket suppression that could hide real floaters is gone. The
+      tree-support sharp-tail seed uses the same check.
+    </p>
+
+    <p>
+      That detector is the shared foundation: <a href="support.html">PerObject
+      Support</a> and Gravity are the same geometry asking different questions.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="snapdrag" data-short="Snap &amp; Drag">Snap &amp; Drag</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>The magnet icon</b><span class="sep">›</span><span>in the plate's icon column, under the camera</span>
+    </p>
+
+    <p>
+      With True Objects on, dragging an object can rest it on whatever it is really above instead of
+      leaving it floating where you dropped it. Since 2.4.3 the settings live in a small panel
+      behind the magnet: the master switch, <b>Snap to bed</b>, and <b>Move selection as one
+      block</b>. It stays open while you work.
+    </p>
+
+    <p class="small">
+      Before 2.4.3 these lived in an object's right-click menu, which meant they were only reachable
+      for the selection that produced that particular menu. Select several objects and they simply
+      were not there, which is exactly when they matter most. The magnet does not depend on the
+      selection, so the problem is gone rather than patched.
+    </p>
+
+    <figure>
+      <img src="../images/SnapANDDrag.gif" width="800" height="420" alt="Dragging an object over another one makes it rest on the real surface underneath instead of staying where the mouse was released" loading="lazy">
+      <figcaption>Dragging an object over another. It comes to rest on the real surface underneath rather than where the mouse let go.</figcaption>
+    </figure>
+
+    <h3 id="landing">How it decides where to land</h3>
+
+    <p>
+      Detection is by <strong>2D footprint overlap</strong>, not a raycast under the cursor, so a
+      corner that only barely overlaps a pillar is not treated as resting on it. The overlap has to
+      clear a threshold before it engages, and a slightly lower one to stay engaged once it has.
+      That hysteresis is what stops the object flickering up and down as you drag near a pillar's
+      edge.
+    </p>
+
+    <p>
+      Once a candidate qualifies, its landing height is sampled with a handful of <strong>real
+      raycasts against the candidate's actual mesh</strong>, not its flat bounding-box top. A
+      hollow box with a tall rim and a low interior floor resolves correctly depending on where the
+      overlap lands, instead of always reporting rim height. If several candidates qualify, the
+      object rests on the <strong>highest</strong> real surface under it. If an object has more than
+      one instance and they would land on pillars of different heights, the whole object uses the
+      <strong>lowest</strong> of those targets, so one instance landing on something tall never
+      silently drags the others up with it.
+    </p>
+
+    <h3 id="indicator">The landing indicator <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+
+    <p>
+      While a drag is engaged the object hovers a little above its landing spot rather than sitting
+      flat on it, so what is underneath stays visible, and that gap is filled with the evidence
+      behind the decision:
+    </p>
+
+    <ul>
+      <li>the <strong>corner marks</strong> of the box where the object will come to rest;</li>
+      <li>the <strong>recognised zone</strong>, the exact patch being read as the height,
+        highlighted on the surface it was found on;</li>
+      <li>a translucent <strong>column</strong> between that zone and the object's underside;</li>
+      <li>the <strong>sample points</strong> the height was actually taken from, as fat dots at
+        their real hit heights;</li>
+      <li><strong>colour</strong>: cyan when another object caught you, amber when the plate did.</li>
+    </ul>
+
+    <p>
+      None of this takes part in the calculation. It is what makes aiming possible: when a large
+      part refuses to catch a thin rim, the dots show you that the samples went through the opening
+      instead of onto the rim.
+    </p>
+
+    <figure>
+      <img src="../images/SnapDrag-Bed.gif" width="720" height="414" alt="An object dragged over the plate lands on it, hovering above its landing spot while the drag is live, with the recognised zone and the sample points visible underneath" loading="lazy">
+      <figcaption>With <b>Snap to bed</b> on, an object dragged over empty space lands on the plate. The recognised zone and the sample points are visible under it while the drag is live.</figcaption>
+    </figure>
+
+    <h3 id="bed">Does the plate count?</h3>
+
+    <p>
+      By default yes. Switch <b>Snap to bed</b> off and only other objects can catch you: an object
+      with nothing underneath keeps floating exactly where you dropped it, which is what you want
+      while assembling something in mid-air. The plate never competes with a real object, because
+      it is simply a floor of height zero and the highest surface under your footprint always wins.
+    </p>
+
+    <p class="small">
+      This is the option that was called <b>Snap &amp; Drag: Allow Bed</b> in 2.4.0–2.4.2. Same
+      setting, same default, new home. With it off and nothing qualifying underneath, the object is
+      left exactly where it is, so Snap &amp; Drag only ever pulls something <em>down</em> onto a
+      floor it actually finds. That keeps True Objects' "nothing auto-drops" promise.
+    </p>
+
+    <h3 id="multi">Dragging several at once</h3>
+
+    <p>
+      By default a multi-object selection is resolved <strong>by stacks</strong>. Anything standing
+      on another member of the same selection travels with it and keeps its exact relative height;
+      anything with nothing of its own underneath resolves its own floor and falls independently.
+      Pick up a stack of three plus a loose box, move them together, and the stack lands intact
+      while the loose box drops to the plate, in the same drag. Two objects count as stacked when
+      one overlaps the other's footprint and sits within about a millimetre of its top, so
+      hand-built stacks that were never seated perfectly still hold together.
+    </p>
+
+    <p>
+      Sometimes that independence is the wrong answer: you are not placing parts, you are
+      <em>carrying</em> an arrangement somewhere else and it has to arrive unchanged. Tick
+      <strong>Move selection as one block</strong> and the whole selection becomes one rigid body.
+      Nothing changes height relative to anything else, and the block falls until its
+      <strong>first</strong> part meets a surface, then stops. Nothing is ever pushed through its
+      own floor to make some other part land.
+    </p>
+
+    <p class="small">
+      It is off by default, because parts falling independently is what Snap &amp; Drag is for most
+      of the time and it is what every earlier version did. The option only affects selections of
+      more than one object or instance; a single object is a rigid body all by itself.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="alignstack" data-short="Align &amp; Stack">Align &amp; Stack</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left-side gizmo toolbar</b><span class="sep">›</span><b>Align &amp; Stack</b>
+    </p>
+
+    <p>
+      Snap &amp; Drag is for placing by hand. Align &amp; Stack is for placing exactly. Click two
+      objects in the scene: <strong>#1</strong>, clicked first, is the anchor; <strong>#2</strong>
+      is the one that moves. Click a third to swap out #2, since the gizmo only ever relates two
+      objects and there is no chain to manage.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Mode</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Place against</b></td><td>#2 comes to rest touching the chosen face of #1. This is the stacking mode.</td></tr>
+        <tr><td><b>Align flush</b></td><td>#2's same-side face becomes coplanar with #1's, the way alignment works in a drawing program.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      A row of face and centre buttons picks which face or centre axis to work against, and the
+      tooltip changes with the mode. <b>Z gap (mm)</b> sets a controllable gap between stacked
+      objects, and <b>Drop to bed (Z = 0)</b> puts every ordered object back on the plate.
+    </p>
+
+    <figure>
+      <img src="../images/AlignStack.gif" width="800" height="420" alt="With anchor #1 and object #2 picked, every possible landing spot is drawn as a translucent ghost in the viewport, each with a clickable cube icon at the seam" loading="lazy">
+      <figcaption>With #1 and #2 picked, <b>every possible placement is previewed at once</b> as a translucent ghost of #2, each with a clickable mini-cube floating at the seam.</figcaption>
+    </figure>
+
+    <p>
+      That preview is the part worth knowing about. All five face operations and the three centring
+      ones are drawn live, at exactly the position they would land, computed with the same maths the
+      click would run, so the preview cannot lie. Hover a cube for a tooltip, click it to run that
+      placement immediately. No going back to the side panel to work out which abstract X− / X+
+      button means "behind".
+    </p>
+
+    <p class="small">
+      Ghosts only show for a #1 + #2 pair currently on screen. From a camera angle where a given
+      ghost is not really visible, its icon simply does not appear rather than showing up somewhere
+      meaningless.
+    </p>
+
+    <div class="note note--good">
+      <span class="note__t">These two are meant to be used together</span>
+      <p style="margin:0">
+        Align &amp; Stack places the pieces exactly. <b>Gravity</b> is what then makes the slicer
+        treat the touching face honestly instead of as a false bridge. Either one alone leaves half
+        the job undone.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>Support does not land on other objects yet.</strong> It still grows from the bed
+        or from the object's own body. Landing on the top of a neighbour is a future extension.</li>
+      <li><strong>Auto-arrange does not know about your stack.</strong> It can scatter a hand-placed
+        arrangement across the plate, because it has no concept of "these are meant to stay
+        stacked". Do not run it after stacking by hand.</li>
+      <li><strong>By-layer printing only.</strong> In sequential by-object printing a neighbour may
+        not exist yet at a given height, so nothing is treated as floor there.</li>
+      <li><strong>Snap &amp; Drag is vertical only.</strong> It detects downward, so it does not
+        help with side-by-side mating inside Assemble View, which has no single "down".</li>
+      <li><strong>No chaining outside the selection.</strong> Moving an object that something else
+        is resting on does not drag that object along. Only things picked up together move
+        together.</li>
+      <li>The magnet icon appears in <b>Libre Mode</b> only, and only on the Prepare plate.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="index.html#placing"><small>Back</small><b>Placing</b></a>
+      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§7</b> and <b>§17</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * gravity — a 2D section through a plate with three things on it.
+ *
+ * A diagram, but a faithful one: footprint overlap with hysteresis, sampling
+ * against the real profile rather than a bounding box, highest surface wins,
+ * and the resulting per-area split between contact and bridge.
+ * ========================================================================= */
+Tour.demo('gravity', function (host) {
+  var el = Tour.el;
+
+  var S = {
+    x: 0.5,              // block centre, 0..1 across the plate
+    w: 0.26,             // block width as a fraction of the plate
+    trueObjects: true,
+    snapBed: true,
+    engaged: false       // hysteresis state
+  };
+
+  // The scene, in plate fractions. Each candidate has a top profile so the
+  // hollow box can report its rim in some places and its floor in others.
+  var SCENE = [
+    { id: 'pillar', x0: 0.06, x1: 0.26, top: function () { return 0.42; } },
+    { id: 'hollow', x0: 0.44, x1: 0.86,
+      top: function (t) {
+        // tall rim at both edges, low floor in the middle
+        var rim = 0.10;
+        if (t < 0.44 + rim || t > 0.86 - rim) return 0.62;
+        return 0.20;
+      } }
+  ];
+
+  var ENGAGE = 0.30, HOLD = 0.18;   // overlap fractions, in and out
+
+  /** Overlap of the block's footprint with a candidate, 0..1 of the block. */
+  function overlapOf(c) {
+    var a0 = S.x - S.w / 2, a1 = S.x + S.w / 2;
+    var lo = Math.max(a0, c.x0), hi = Math.min(a1, c.x1);
+    return Math.max(0, hi - lo) / S.w;
+  }
+
+  /** Sample the candidate's real profile under the block. */
+  function sampleTop(c, n) {
+    var a0 = Math.max(S.x - S.w / 2, c.x0), a1 = Math.min(S.x + S.w / 2, c.x1);
+    var pts = [];
+    for (var i = 0; i < n; i++) {
+      var t = a0 + (a1 - a0) * (n === 1 ? 0.5 : i / (n - 1));
+      pts.push({ t: t, z: c.top(t) });
+    }
+    return pts;
+  }
+
+  /** The decision. Returns the resting height and the evidence behind it. */
+  function resolve() {
+    if (!S.trueObjects) {
+      return { z: 0, why: 'stock', samples: [], winner: null, overlap: 0, contact: 0 };
+    }
+    var best = null, bestZ = -1, bestSamples = [], bestOv = 0;
+    SCENE.forEach(function (c) {
+      var ov = overlapOf(c);
+      var need = S.engaged ? HOLD : ENGAGE;
+      if (ov < need) return;
+      var pts = sampleTop(c, 5);
+      var z = pts.reduce(function (a, p) { return Math.max(a, p.z); }, 0);
+      if (z > bestZ) { bestZ = z; best = c; bestSamples = pts; bestOv = ov; }
+    });
+
+    if (!best) {
+      S.engaged = false;
+      return S.snapBed
+        ? { z: 0, why: 'bed', samples: [], winner: 'bed', overlap: 0, contact: 1 }
+        : { z: null, why: 'floating', samples: [], winner: null, overlap: 0, contact: 0 };
+    }
+    S.engaged = true;
+
+    // How much of the block's underside is actually over that surface, at the
+    // height it settled at. The rest is genuinely over air.
+    var covered = 0, N = 40;
+    for (var i = 0; i < N; i++) {
+      var t = (S.x - S.w / 2) + S.w * (i + 0.5) / N;
+      var over = SCENE.some(function (c) {
+        return t >= c.x0 && t <= c.x1 && Math.abs(c.top(t) - bestZ) < 0.02;
+      });
+      if (over) covered++;
+    }
+    return { z: bestZ, why: 'object', samples: bestSamples, winner: best.id,
+             overlap: bestOv, contact: covered / N };
+  }
+
+  /* ---------------------------------------------------------------- draw */
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Section through the plate' }),
+    el('span', { 'data-gnote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var padB = 26, padT = 14;
+    var Y = function (z) { return h - padB - z * (h - padB - padT); };
+    var X = function (t) { return t * w; };
+
+    var r = resolve();
+    var rule = Tour.token('--rule');
+    var accent = Tour.token('--accent');
+    var alert = Tour.token('--alert');
+
+    // plate
+    ctx.fillStyle = Tour.token('--rule-firm');
+    ctx.fillRect(0, Y(0), w, 4);
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = Tour.token('--ink-faint');
+    ctx.textAlign = 'left';
+    ctx.fillText('build plate', 4, h - 8);
+
+    // the two objects on the plate
+    SCENE.forEach(function (c) {
+      ctx.fillStyle = Tour.token('--surface-2');
+      ctx.strokeStyle = rule;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(X(c.x0), Y(0));
+      var STEP = 60;
+      for (var i = 0; i <= STEP; i++) {
+        var t = c.x0 + (c.x1 - c.x0) * i / STEP;
+        ctx.lineTo(X(t), Y(c.top(t)));
+      }
+      ctx.lineTo(X(c.x1), Y(0));
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    });
+
+    // the dragged block
+    var bz = r.z == null ? 0.78 : r.z;                 // floating: park it high
+    var bx0 = X(S.x - S.w / 2), bx1 = X(S.x + S.w / 2);
+    var bh = 0.16 * (h - padB - padT);
+    var byTop = Y(bz) - bh;
+
+    // per-area split of the underside: contact vs real bridge
+    var contactW = (bx1 - bx0) * r.contact;
+    ctx.fillStyle = Tour.token('--surface');
+    ctx.strokeStyle = Tour.token('--ink-faint');
+    ctx.lineWidth = 1.4;
+    ctx.fillRect(bx0, byTop, bx1 - bx0, bh);
+    ctx.strokeRect(bx0 + .5, byTop + .5, bx1 - bx0 - 1, bh - 1);
+
+    if (S.trueObjects && r.z != null) {
+      ctx.fillStyle = accent;
+      ctx.fillRect(bx0, Y(bz) - 3, contactW, 3);
+      if (r.contact < 0.995) {
+        ctx.fillStyle = alert;
+        ctx.fillRect(bx0 + contactW, Y(bz) - 3, (bx1 - bx0) - contactW, 3);
+      }
+    } else if (!S.trueObjects) {
+      // stock: the whole underside is called a bridge
+      ctx.fillStyle = alert;
+      ctx.fillRect(bx0, Y(bz) - 3, bx1 - bx0, 3);
+    }
+
+    // the evidence
+    if (S.trueObjects && r.samples.length) {
+      ctx.strokeStyle = accent;
+      ctx.globalAlpha = .35;
+      ctx.fillStyle = accent;
+      ctx.fillRect(bx0, Y(r.z), bx1 - bx0, Math.max(1, Y(0) - Y(r.z)));
+      ctx.globalAlpha = 1;
+      r.samples.forEach(function (p) {
+        ctx.beginPath(); ctx.arc(X(p.t), Y(p.z), 3.4, 0, Math.PI * 2);
+        ctx.fillStyle = accent; ctx.fill();
+      });
+    }
+
+    // labels
+    ctx.textAlign = 'center';
+    ctx.fillStyle = Tour.token('--ink-faint');
+    ctx.fillText('pillar', X(0.16), h - 8);
+    ctx.fillText('hollow box', X(0.65), h - 8);
+  }, { height: 210, cursor: 'ew-resize' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: function (p) { S.x = Math.max(S.w / 2, Math.min(1 - S.w / 2, p.x / cv.width)); update(); },
+    onMove: function (p) { S.x = Math.max(S.w / 2, Math.min(1 - S.w / 2, p.x / cv.width)); update(); }
+  });
+
+  /* ------------------------------------------------------------ controls */
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  var read = el('p.gv__read', { style: 'margin:0' });
+
+  side.appendChild(el('div.gv__grp', null, [
+    el('span.gv__gt', { text: 'Toggles' }),
+    Tour.toggle({ label: 'True Objects', value: true, onChange: function (v) { S.trueObjects = v; update(); } }),
+    Tour.toggle({ label: 'Snap to bed', value: true, onChange: function (v) { S.snapBed = v; update(); } })
+  ]));
+  side.appendChild(el('div.gv__grp', null, [
+    el('span.gv__gt', { text: 'Block' }),
+    Tour.slider({ label: 'Width', min: 8, max: 60, step: 1, value: S.w * 100,
+      format: function (v) { return v + '% of the plate'; },
+      onInput: function (v) { S.w = v / 100; S.x = Math.max(S.w/2, Math.min(1-S.w/2, S.x)); update(); } })
+  ]));
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'What the slicer sees' }), read]));
+
+  function update() {
+    cv.render();
+    var r = resolve();
+    var n = host.querySelector('[data-gnote]');
+
+    if (!S.trueObjects) {
+      read.innerHTML = 'Stock behaviour.<br>The whole underside is called a <span class="air">bridge</span>, ' +
+        'because the slicer only looks at this object’s own layer below.';
+      if (n) n.textContent = 'stock';
+      return;
+    }
+    if (r.z == null) {
+      read.innerHTML = 'Nothing qualifies underneath and <b>Snap to bed</b> is off.<br>' +
+        'The block stays exactly where you dropped it.';
+      if (n) n.textContent = 'floating';
+      return;
+    }
+    var pct = Math.round(r.contact * 100);
+    read.innerHTML =
+      'footprint overlap <b>' + Math.round(r.overlap * 100) + '%</b> ' +
+      '(engages at ' + Math.round(ENGAGE * 100) + '%, holds to ' + Math.round(HOLD * 100) + '%)<br>' +
+      'rests on <b>' + (r.winner === 'bed' ? 'the build plate' : r.winner) + '</b> at z ' + r.z.toFixed(2) + '<br>' +
+      '<span class="hit">' + pct + '% contact</span>' +
+      (pct < 100 ? ' · <span class="air">' + (100 - pct) + '% real bridge</span>' : ' · no bridge');
+    if (n) n.textContent = r.winner === 'bed' ? 'landed on the plate' : 'landed on ' + r.winner;
+  }
+
+  host.appendChild(el('div.gv', null, [box, side]));
+  update();
+});
+</script>
+
+</body>
+</html>

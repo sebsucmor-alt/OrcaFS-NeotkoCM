@@ -1,9 +1,11 @@
 #version 110
 
-// normalized values for (-0.6/1.31, 0.6/1.31, 1./1.31)
-const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
-// normalized values for (1./1.43, 0.2/1.43, 1./1.43)
-const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
+// NEOTKO_PHOTOMODE_TAG s253 (P0): la dirección de las dos luces pasa a uniform, en espacio MUNDO
+// (aquí eso sale gratis: view_normal_matrix es la identidad para el peel). Defaults en C++ = las
+// dos constantes de siempre → bit-idéntico a s252. Ver la nota larga en 140/realcolor_peel.vs,
+// incluida la deuda preexistente del especular (ojo vs mundo) que este cambio NO toca.
+uniform vec3 u_rc_light_key_dir;   // MUNDO, unitario
+uniform vec3 u_rc_light_fill_dir;  // MUNDO, unitario
 
 // NEOTKO_REALCOLOR_TAG s251c: LA LUZ DIRECTA, POR FIN CON MANDOS. Ver la nota larga en
 // 140/realcolor_peel.vs. Neutro exacto = (0.48, 0.18, 0.075, 20.0, 0.0).
@@ -115,14 +117,14 @@ void main()
 
     // NEOTKO_REALCOLOR_TAG s251c: difusa envolvente. Ver 140/realcolor_peel.vs para el porqué.
     float wrap_denom = 1.0 + max(u_light_wrap, 0.0);
-    float NdotL = max((dot(normal, LIGHT_TOP_DIR) + u_light_wrap) / wrap_denom, 0.0);
+    float NdotL = max((dot(normal, u_rc_light_key_dir) + u_light_wrap) / wrap_denom, 0.0);
     intensity.x = NdotL * u_light_key; // direct light only, ambient is env-sampled in .fs
 
     vec4 position = view_model_matrix * vec4(swollen_pos, 1.0);
-    intensity.y = u_light_spec * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), max(u_light_shininess, 1.0));
+    intensity.y = u_light_spec * pow(max(dot(-normalize(position.xyz), reflect(-u_rc_light_key_dir, normal)), 0.0), max(u_light_shininess, 1.0));
     v_eye_z = -position.z; // right-handed eye space, camera looks down -Z
 
-    NdotL = max((dot(normal, LIGHT_FRONT_DIR) + u_light_wrap) / wrap_denom, 0.0);
+    NdotL = max((dot(normal, u_rc_light_fill_dir) + u_light_wrap) / wrap_denom, 0.0);
     intensity.x += NdotL * u_light_fill;
 
     gl_Position = projection_matrix * position;

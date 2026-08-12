@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PathBlend — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A gradient made out of geometry: one filament climbs as a physical ramp inside the layer, one print-height step per fill line, and a second caps the rest. Drag the ADV handles live.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .pb { display: grid; grid-template-columns: minmax(0,1fr) 220px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 700px) { .pb { grid-template-columns: 1fr; } }
+  .pb__views { display: grid; gap: .7rem; }
+  .pb__side { display: grid; gap: .6rem; }
+  .pb__grp {
+    border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+    padding: .5rem .55rem; display: grid; gap: .45rem;
+  }
+  .pb__gt {
+    font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  .pb__tools { display: flex; gap: .25rem; }
+  .pb__tools button {
+    width: 26px; height: 20px; padding: 0; cursor: pointer;
+    border: 1.5px solid transparent; border-radius: 3px;
+    font: inherit; font-size: .62rem; font-family: var(--mono);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.18);
+  }
+  .pb__tools button[aria-pressed="true"] { border-color: var(--ink); }
+  .pb__read {
+    font-family: var(--mono); font-size: .7rem; color: var(--ink-faint); line-height: 1.5;
+  }
+  .pb__read b { color: var(--ink); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour" aria-current="page">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§1c — Colour</p>
+    <h1>PathBlend</h1>
+    <p class="lede">
+      The other way to make a gradient. Instead of alternating lines of two filaments,
+      PathBlend builds a physical <strong>ramp</strong> inside the layer: the first filament gets
+      thicker as it crosses the surface, and the fade you see is light travelling through more
+      and more of it.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--wip">the most fragile part of the engine</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Sandwich editor</b><span class="sep">›</span><span>a pass set to</span><b>PathBlend Half</b>
+      <span class="sep">or</span><b>Full</b><span class="sep">›</span><b>ADV…</b>
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="Two ways to fade">Two ways to fade</h2>
+
+    <p>
+      <a href="colorstitch.html">ColorStitch</a> gets you from blue to yellow by giving more and
+      more of the fill lines to yellow. Every line is still one filament at full thickness, and
+      what changes across the surface is <em>how many</em> of them are yellow. Up close you can
+      count them.
+    </p>
+
+    <p>
+      PathBlend changes the thickness instead. Every line is printed with the same filament, and
+      what changes is how tall that line is: 0.04 mm at one edge, 0.18 mm at the other, with one
+      real print-height step per fill line in between. A translucent filament that is 0.04 mm
+      thick barely tints what is underneath. The same filament at 0.18 mm nearly hides it. Run
+      that across a surface and you get a continuous fade with no dithering anywhere in it.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>ColorStitch</h4>
+        <p>Ratio of lines. Works with opaque filament. Grainy on small surfaces because a
+        handful of lines cannot express a fine ratio.</p>
+      </div>
+      <div class="fold--after">
+        <h4>PathBlend</h4>
+        <p>Thickness of material. Needs some translucency to read at all. Smooth even on
+        modest surfaces, because each line carries its own height rather than a vote.</p>
+      </div>
+    </div>
+
+    <p>
+      That is also why <strong>TD matters more here than anywhere else</strong>. Give PathBlend
+      an opaque filament and the ramp is invisible: 0.04 mm of it already hides everything, so
+      the extra 0.14 mm changes nothing you can see. Have a look at
+      <a href="optics.html">the optics page</a> if you want the numbers.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="halffull" data-short="Half and Full">Half and Full</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Kind</th><th>What gets printed</th></tr></thead>
+      <tbody>
+        <tr><td><b>PathBlend Half</b></td><td>The ramp alone. It climbs from its floor and nothing fills the space above it, so the surface is genuinely thinner where the ramp is low.</td></tr>
+        <tr><td><b>PathBlend Full</b></td><td>The ramp <b>plus</b> a cap in a second filament, taking whatever height the ramp did not. The layer stays full height everywhere, and the two colours trade places across the surface.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Picking either one collapses the zone to a single pass. PathBlend is always one full-height
+      gradient; it does not stack with other passes inside the same zone.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="adv" data-short="★ The ADV editor">The ADV editor</h2>
+
+    <p>
+      This is the cross-section graph the <code>ADV…</code> button opens, and it is the same
+      editor in the Sandwich Editor and in the Painter's Pro tray. Horizontal is position across
+      the surface. Vertical is real height in millimetres. Two handles do all the work.
+    </p>
+
+    <div class="demo bleed" id="adv-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">The staircase, and what it looks like from above</span>
+        <span class="demo__hint">drag the two round handles</span>
+      </div>
+      <div class="demo__body" data-demo="pathblend">
+        <noscript><p class="noscript">This demo needs JavaScript. The controls it exposes are the ones described just below.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real optics
+        </span>
+        &nbsp;· the staircase geometry is the engine's model (one print-height step per fill line);
+        the colour on top of it comes from <code>ColorSci::blend_stacked</code>.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Handle / control</th><th>What it sets</th></tr></thead>
+      <tbody>
+        <tr><td><b>Low handle</b></td><td>Where the ramp starts to rise, and how low its floor sits. Drag it right and you get a flat <b>start zone</b> before the climb begins.</td></tr>
+        <tr><td><b>High handle</b></td><td>Where the ramp finishes rising, and how high its top reaches. Drag it left and you get a flat <b>end zone</b> after it is done.</td></tr>
+        <tr><td><b>floor</b></td><td>The ramp's starting height in mm, at the low edge.</td></tr>
+        <tr><td><b>ramp end</b></td><td>The ramp's top height in mm. In <b>Half</b> this is locked to the full layer height, since there is no cap to fill the rest.</td></tr>
+        <tr><td><b>Mode</b></td><td>Linear / Ease In / Ease Out / Ease In-Out. Only the older Sandwich-Editor-only engine path uses this; the per-scanline staircase that actually prints today ramps linearly in <code>t</code>, then applies the start and end zones on top.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Left at their defaults the handles sit at the two edges and the ramp spans the surface, which
+      is what PathBlend has always done. That is deliberate: the whole start/end zone extension was
+      built so that <strong>defaults produce exactly the G-code they produced before it existed</strong>.
+    </p>
+
+    <h3 id="techo">The "techo"</h3>
+
+    <p>
+      In <b>Full</b> mode you can drag <b>ramp end</b> all the way up to the layer height. The cap
+      then has zero height in that region, so none of its colour prints there at all. This is the
+      move for a translucent filament that needs proper opaque coverage instead of a thin sliver
+      of the wrong colour sitting on top of it. Try it in the demo: push the high handle to the
+      ceiling and watch the cap colour disappear from the right-hand end.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="aim" data-short="Aiming it">Aiming the gradient</h2>
+
+    <p>
+      The gradient runs across the build plate's <strong>Y axis</strong>. There is no direction
+      control in the Sandwich Editor; you rotate the object to aim it. In the
+      <a href="painter.html">ColorStitch Painter</a> a PathBlend pass does get its own
+      <b>fill angle</b> field next to the Mode button, with <code>-1</code> for auto or a fixed
+      0–359° override.
+    </p>
+
+    <p>
+      PathBlend also shares <a href="colorstitch.html#distribution">Line distribution mode</a> with
+      ColorStitch. If a gradient comes out broken across a hole, try <b>LaneQuant</b> or
+      <b>DirCluster</b> before assuming the pass is wrong.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="flat" data-short="When it comes out flat">When it used to come out flat</h2>
+
+    <p>
+      Worth knowing even though it is fixed, because it explains the shape of the thing. The
+      staircase produces <strong>one height per fill line</strong>, which quietly assumed that the
+      surface pattern hands the engine one line at a time. <code>Monotonic line</code> does. Plain
+      <code>Monotonic</code>, and every other pattern that chains its lines into one long zigzag,
+      does not: the whole surface arrived as a single line, got a single height, and the gradient
+      came out perfectly flat.
+    </p>
+
+    <p>
+      It showed up most on <strong>bottom surfaces</strong>, whose default pattern is
+      <code>Monotonic</code>, while tops set to <code>Monotonic line</code> looked fine. The same
+      top would have broken with the same setting. Since 2.4.0 PathBlend asks for unchained lines
+      itself, so the gradient no longer depends on which surface pattern you picked.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="fragile" data-short="Handle with care">Handle with care</h2>
+
+    <div class="note note--alert">
+      <span class="note__t">The most fragile part of the engine</span>
+      <p>
+        The per-scanline staircase model, one physical print-height step per fill line, each step
+        resting on the layer below and on its neighbours, is validated and must not be disturbed
+        by unrelated changes. If you are reading this as someone who might touch the code: the
+        model is written up in <code>docs/</code> and the floor / ramp-end / start-zone controls
+        are a deliberately safe extension of it.
+      </p>
+      <p style="margin:0">
+        A more ambitious idea, letting the ramp rise <em>and fall</em> inside one pass instead of
+        always climbing, was considered and set aside. The current staircase cannot do it without
+        risking unsupported overhangs at the print head. It would need a different, multi-pass
+        engine, closer to how the <a href="relief.html">Bump Mapping Editor</a> works.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>It needs lines to work with.</strong> One height per fill line means a surface
+        with twelve lines gives you a twelve-step gradient. On small surfaces the ramp is visibly
+        coarse.</li>
+      <li><strong>It needs translucency.</strong> With an opaque ramp filament the height changes
+        and the colour does not.</li>
+      <li><strong>Penultimate is off limits for now.</strong> PathBlend on the penu zone has a
+        gradient-direction bug on multi-stair objects, so it is restricted to the Top zone. The
+        engine supports it; it comes back when the bug goes.</li>
+      <li><strong>Half mode really does leave a thinner surface.</strong> Nothing fills the space
+        above the ramp. That is the point, and it is also a thing to check before you print
+        something that needs a flat top.</li>
+      <li><strong>The preview does not draw Z variation.</strong> Orca's G-code preview renders
+        every extrusion at nominal height, so the staircase looks flat there even when the G-code
+        is right. <a href="realcolor.html">RealColor</a> composites the colour
+        correctly; the geometry still reads flat.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="colorstitch.html"><small>Back</small><b>ColorStitch</b></a>
+      <a class="is-next" href="optics.html"><small>Next</small><b>TD &amp; the Studio →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§1c</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="map.html">Feature map</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * pathblend — the ADV cross-section, draggable, plus the surface it produces.
+ *
+ * The profile is piecewise: flat at `floor` until x0, linear up to `rampEnd`
+ * at x1, flat after that. Each fill line samples it once and gets ONE height,
+ * which is exactly the constraint the real engine works under.
+ * ========================================================================= */
+Tour.demo('pathblend', function (host) {
+  var el = Tour.el;
+
+  var S = {
+    mode: 'full',            // 'half' | 'full'
+    rampTool: 2,             // magenta, translucent enough for the ramp to read
+    capTool: 1,              // blue
+    layerH: 0.20,
+    floor: 0.04,
+    rampEnd: 0.20,
+    x0: 0.00,                // where the climb starts, 0..1 across the surface
+    x1: 1.00,                // where it finishes
+    surfaceMm: 60,
+    lineWidth: 0.42,
+    base: '#f2f0eb',
+    filaments: Optics.DEFAULT_FILAMENTS.map(function (f) { return { name: f.name, hex: f.hex, td: f.td }; })
+  };
+
+  function nLines() { return Stitch.estimateLines(S.surfaceMm, S.lineWidth, 0.15); }
+  function tdMm(i) { return Optics.tdToMm(S.filaments[i].td, S.layerH); }
+
+  /** The ramp height at position t across the surface. */
+  function heightAt(t) {
+    if (S.x1 - S.x0 < 1e-4) return t < S.x0 ? S.floor : S.rampEnd;
+    if (t <= S.x0) return S.floor;
+    if (t >= S.x1) return S.rampEnd;
+    var u = (t - S.x0) / (S.x1 - S.x0);
+    return S.floor + u * (S.rampEnd - S.floor);
+  }
+
+  /** The stack of material for every fill line. */
+  function columns() {
+    var n = nLines();
+    var cols = [];
+    for (var i = 0; i < n; i++) {
+      var t = n === 1 ? 0.5 : i / (n - 1);
+      var h = heightAt(t);
+      var stack = [{ colorHex: S.filaments[S.rampTool].hex, thickness: h, tdMm: tdMm(S.rampTool), tool: S.rampTool }];
+      if (S.mode === 'full' && S.layerH - h > 0.0005) {
+        stack.push({ colorHex: S.filaments[S.capTool].hex, thickness: S.layerH - h, tdMm: tdMm(S.capTool), tool: S.capTool });
+      }
+      cols.push(stack);
+    }
+    return { n: n, cols: cols };
+  }
+
+  /* --------------------------------------------------------- the section */
+
+  var views = el('div.pb__views');
+
+  var secBox = el('div.vbox');
+  secBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Cross-section · ADV' }),
+    el('span', { 'data-sec-note': true })
+  ]));
+  var secHost = el('div');
+  secBox.appendChild(secHost);
+
+  var PAD = { l: 40, r: 14, t: 14, b: 22 };
+
+  function geom(w, h) {
+    return {
+      pw: w - PAD.l - PAD.r,
+      ph: h - PAD.t - PAD.b,
+      X: function (t) { return PAD.l + t * (w - PAD.l - PAD.r); },
+      Y: function (mm) { return PAD.t + (h - PAD.t - PAD.b) * (1 - mm / S.layerH); },
+      tOf: function (px) { return (px - PAD.l) / (w - PAD.l - PAD.r); },
+      mmOf: function (py) { return (1 - (py - PAD.t) / (h - PAD.t - PAD.b)) * S.layerH; }
+    };
+  }
+
+  var hover = -1, drag = -1;
+
+  var section = Tour.canvas(secHost, function (ctx, w, h) {
+    var g = geom(w, h);
+    var data = columns();
+    var n = data.n;
+    var colW = g.pw / n;
+
+    var rule = Tour.token('--rule');
+    var faint = Tour.token('--ink-faint');
+    var accent = Tour.token('--accent');
+
+    // the layer envelope
+    ctx.fillStyle = Tour.token('--surface-2');
+    ctx.fillRect(g.X(0), g.Y(S.layerH), g.pw, g.Y(0) - g.Y(S.layerH));
+
+    // the staircase itself, one column per fill line
+    for (var i = 0; i < n; i++) {
+      var x = g.X(i / n);
+      var acc = 0;
+      for (var k = 0; k < data.cols[i].length; k++) {
+        var p = data.cols[i][k];
+        ctx.fillStyle = p.colorHex;
+        ctx.fillRect(x, g.Y(acc + p.thickness), colW + 0.7, g.Y(acc) - g.Y(acc + p.thickness));
+        acc += p.thickness;
+      }
+    }
+
+    // gridlines in mm
+    ctx.strokeStyle = rule;
+    ctx.lineWidth = 1;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = faint;
+    ctx.textAlign = 'right';
+    for (var m = 0; m <= S.layerH + 1e-6; m += 0.05) {
+      var y = g.Y(m);
+      ctx.globalAlpha = .5;
+      ctx.beginPath(); ctx.moveTo(g.X(0), y); ctx.lineTo(g.X(1), y); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillText(m.toFixed(2), PAD.l - 5, y + 3);
+    }
+
+    // the profile line, drawn over the staircase it generated
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    for (var s = 0; s <= 100; s++) {
+      var t = s / 100;
+      var px = g.X(t), py = g.Y(heightAt(t));
+      if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // the two handles
+    [[S.x0, S.floor, 0, 'low'], [S.x1, S.rampEnd, 1, 'high']].forEach(function (hd) {
+      var cx = g.X(hd[0]), cy = g.Y(hd[1]);
+      var on = (drag === hd[2] || (drag < 0 && hover === hd[2]));
+      ctx.beginPath();
+      ctx.arc(cx, cy, on ? 7.5 : 6, 0, Math.PI * 2);
+      ctx.fillStyle = on ? accent : Tour.token('--surface');
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = accent;
+      ctx.stroke();
+    });
+
+    // zone brackets
+    ctx.textAlign = 'center';
+    ctx.fillStyle = faint;
+    if (S.x0 > 0.02) ctx.fillText('start zone', g.X(S.x0 / 2), h - 7);
+    if (S.x1 < 0.98) ctx.fillText('end zone', g.X((S.x1 + 1) / 2), h - 7);
+    if (S.x1 - S.x0 > 0.14) ctx.fillText('ramp', g.X((S.x0 + S.x1) / 2), h - 7);
+
+    ctx.strokeStyle = rule;
+    ctx.strokeRect(g.X(0) + .5, PAD.t + .5, g.pw - 1, g.ph - 1);
+  }, { height: 210 });
+
+  function hitHandle(p, w, h) {
+    var g = geom(w, h);
+    var d0 = Math.hypot(p.x - g.X(S.x0), p.y - g.Y(S.floor));
+    var d1 = Math.hypot(p.x - g.X(S.x1), p.y - g.Y(S.rampEnd));
+    if (d0 < 13 && d0 <= d1) return 0;
+    if (d1 < 13) return 1;
+    return -1;
+  }
+
+  Tour.draggable(section.canvas, {
+    onDown: function (p) {
+      drag = hitHandle(p, section.width, section.height);
+      if (drag < 0) return false;
+      section.render();
+    },
+    onMove: function (p) {
+      if (drag < 0) return;
+      var g = geom(section.width, section.height);
+      var t = Math.max(0, Math.min(1, g.tOf(p.x)));
+      var mm = Math.max(0.02, Math.min(S.layerH, g.mmOf(p.y)));
+      mm = Math.round(mm * 1000) / 1000;
+      if (drag === 0) {
+        S.x0 = Math.min(t, S.x1);
+        S.floor = Math.min(mm, S.rampEnd);
+      } else {
+        S.x1 = Math.max(t, S.x0);
+        // Half has no cap, so its ramp end is pinned to the layer height.
+        S.rampEnd = S.mode === 'half' ? S.layerH : Math.max(mm, S.floor);
+      }
+      redraw();
+    },
+    onUp: function () { drag = -1; section.render(); },
+    onHover: function (p) {
+      var hnew = hitHandle(p, section.width, section.height);
+      section.canvas.style.cursor = hnew >= 0 ? 'grab' : 'default';
+      if (hnew !== hover) { hover = hnew; section.render(); }
+    },
+    onLeave: function () { if (hover !== -1) { hover = -1; section.render(); } }
+  });
+
+  /* ----------------------------------------------------------- from above */
+
+  var topBox = el('div.vbox');
+  topBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'The surface, from above' }),
+    el('span', { 'data-top-note': true })
+  ]));
+  var topHost = el('div');
+  topBox.appendChild(topHost);
+
+  var above = Tour.canvas(topHost, function (ctx, w, h) {
+    var data = columns();
+    var lw = w / data.n;
+    for (var i = 0; i < data.n; i++) {
+      ctx.fillStyle = Optics.linearToCss(Optics.blendStacked(data.cols[i], S.base));
+      ctx.fillRect(i * lw, 0, lw + 1, h);
+    }
+  }, { height: 86 });
+
+  var readout = el('p.pb__read', { style: 'margin:0' });
+
+  views.appendChild(secBox);
+  views.appendChild(topBox);
+  views.appendChild(readout);
+
+  /* ------------------------------------------------------------ controls */
+
+  var side = el('div.pb__side');
+
+  function grp(title, kids) {
+    return el('div.pb__grp', null, [el('span.pb__gt', { text: title })].concat(kids));
+  }
+
+  function toolRow(label, get, set) {
+    var row = el('div.pb__tools');
+    S.filaments.forEach(function (f, i) {
+      var b = el('button', { type: 'button', text: f.name, 'aria-pressed': get() === i, title: f.name + ' · TD ' + f.td });
+      b.style.background = f.hex;
+      b.style.color = Optics.inkOn(f.hex);
+      b.addEventListener('click', function () { set(i); rebuild(); });
+      row.appendChild(b);
+    });
+    return el('div', { style: 'display:grid;gap:.2rem' }, [el('span.pb__gt', { text: label }), row]);
+  }
+
+  var kindSeg = Tour.segmented({
+    value: S.mode,
+    options: [['half', 'Half'], ['full', 'Full']],
+    onChange: function (v) {
+      S.mode = v;
+      if (v === 'half') S.rampEnd = S.layerH;
+      rebuild();
+    }
+  });
+
+  var body = el('div', { style: 'display:grid;gap:.5rem' });
+
+  function controls() {
+    body.textContent = '';
+    body.appendChild(toolRow('Ramp filament', function () { return S.rampTool; }, function (v) { S.rampTool = v; }));
+    if (S.mode === 'full') {
+      body.appendChild(toolRow('Cap filament', function () { return S.capTool; }, function (v) { S.capTool = v; }));
+    }
+    body.appendChild(Tour.slider({
+      label: 'Ramp filament TD', min: 0.2, max: 8, step: 0.1, value: S.filaments[S.rampTool].td,
+      format: function (v) { return v.toFixed(1); },
+      onInput: function (v) { S.filaments[S.rampTool].td = v; redraw(); }
+    }));
+    if (S.mode === 'full') {
+      body.appendChild(el('button.btn.btn--sm', {
+        type: 'button', text: 'Push ramp end to the ceiling (techo)',
+        style: 'justify-self:start',
+        onclick: function () { S.rampEnd = S.layerH; S.x1 = Math.max(S.x1, 0.55); redraw(); }
+      }));
+    }
+    body.appendChild(el('button.btn.btn--sm', {
+      type: 'button', text: 'Reset the handles',
+      style: 'justify-self:start',
+      onclick: function () {
+        S.x0 = 0; S.x1 = 1; S.floor = 0.04;
+        S.rampEnd = S.mode === 'half' ? S.layerH : S.layerH;
+        redraw();
+      }
+    }));
+  }
+
+  side.appendChild(grp('Kind', [kindSeg, body]));
+  side.appendChild(grp('The surface', [
+    Tour.slider({
+      label: 'Layer height', min: 0.08, max: 0.32, step: 0.01, value: S.layerH,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) {
+        var k = v / S.layerH;
+        S.layerH = v;
+        S.floor = Math.min(v, Math.round(S.floor * k * 1000) / 1000);
+        S.rampEnd = Math.min(v, Math.round(S.rampEnd * k * 1000) / 1000);
+        if (S.mode === 'half') S.rampEnd = v;
+        redraw();
+      }
+    }),
+    Tour.slider({
+      label: 'Surface size', min: 6, max: 140, step: 2, value: S.surfaceMm,
+      format: function (v) { return v + ' mm'; },
+      onInput: function (v) { S.surfaceMm = v; redraw(); }
+    })
+  ]));
+
+  /* -------------------------------------------------------------- render */
+
+  function redraw() {
+    section.render();
+    above.render();
+
+    var n = nLines();
+    var stepMm = Math.abs(S.rampEnd - S.floor) / Math.max(1, n - 1);
+
+    readout.innerHTML =
+      'floor <b>' + S.floor.toFixed(2) + ' mm</b> · ramp end <b>' + S.rampEnd.toFixed(2) + ' mm</b>' +
+      ' · climb over <b>' + Math.round((S.x1 - S.x0) * 100) + '%</b> of the surface<br>' +
+      n + ' fill lines · one step every <b>' + (stepMm * 1000).toFixed(1) + ' µm</b>' +
+      (n < 24 ? ' &nbsp;<span style="color:var(--warn)">too few lines for a smooth ramp</span>' : '');
+
+    var sn = host.querySelector('[data-sec-note]');
+    if (sn) sn.textContent = S.mode === 'half' ? 'Half · no cap' : 'Full · ramp + cap';
+    var tn = host.querySelector('[data-top-note]');
+    if (tn) tn.textContent = n + ' lines';
+  }
+
+  function rebuild() { controls(); redraw(); }
+
+  host.appendChild(el('div.pb', null, [views, side]));
+  rebuild();
+});
+</script>
+
+</body>
+</html>

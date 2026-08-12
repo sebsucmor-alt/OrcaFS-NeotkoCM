@@ -41,6 +41,12 @@ class wxString;
 class ComboBox;
 class Button;
 
+// NEOTKO_PHOTOMODE_TAG s253: por PhotoOwner, que aparece como argumento por defecto de
+// set_photo_mode/toggle_photo_mode — un default necesita el tipo COMPLETO con sus enumeradores
+// visibles, así que una declaración adelantada no basta. La cabecera es minúscula (array, string,
+// vector, Point.hpp) y no incluye Plater.hpp, o sea que no hay ciclo.
+#include "PhotoMode.hpp"
+
 namespace Slic3r {
 
 class BuildVolume;
@@ -723,8 +729,11 @@ public:
 
     // NEOTKO_PHOTOMODE_TAG s242 — see PhotoMode.hpp. Entry/exit point for the presentation mode,
     // shared by the plate icon and the scene context menu so both do the same housekeeping.
-    void toggle_photo_mode();
-    void set_photo_mode(bool on);
+    // NEOTKO_PHOTOMODE_TAG s253: `owner` dice desde qué pestaña se enciende (ver PhotoOwner en
+    // PhotoMode.hpp). Default View3D para que las dos llamadas históricas —el icono del plato y el
+    // menú contextual— sigan compilando y significando lo mismo que antes.
+    void toggle_photo_mode(PhotoOwner owner = PhotoOwner::View3D);
+    void set_photo_mode(bool on, PhotoOwner owner = PhotoOwner::View3D);
 
     const BuildVolume& build_volume() const;
 

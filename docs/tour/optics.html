@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TD &amp; the Studio — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Why a stack of passes reads as one colour: Transmission Density, decadic Beer-Lambert, the gamut four filaments can actually reach, and an inverse ΔE2000 search for a colour you name.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .td2 { display: grid; grid-template-columns: minmax(0,1fr) 230px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 700px) { .td2 { grid-template-columns: 1fr; } }
+  .td2__out { display: grid; gap: .7rem; }
+  .grp {
+    border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+    padding: .5rem .55rem; display: grid; gap: .45rem;
+  }
+  .gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+        text-transform: uppercase; color: var(--ink-faint); }
+
+  .swatchrow { display: flex; gap: 2px; }
+  .swatchrow i { flex: 1; height: 46px; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(128,128,128,.22); }
+
+  .gamut { display: grid; grid-template-columns: repeat(auto-fill, minmax(30px, 1fr)); gap: 3px; }
+  .gamut i {
+    display: block; aspect-ratio: 1; border-radius: 3px; cursor: crosshair;
+    transition: transform .1s;
+    /* a hairline so a white recipe still reads as a swatch and not as a hole */
+    box-shadow: inset 0 0 0 1px rgba(128,128,128,.22);
+  }
+  .gamut i:hover { transform: scale(1.3); position: relative; z-index: 2; box-shadow: var(--shadow-md); }
+  .gamut i[data-picked] { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+  .recipe {
+    font-family: var(--mono); font-size: .73rem; line-height: 1.6; color: var(--ink-soft);
+    min-height: 3.2em;
+  }
+  .recipe b { color: var(--ink); font-weight: 500; }
+
+  .matchrow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .matchrow input[type="color"] {
+    width: 40px; height: 30px; padding: 0; border: 1px solid var(--rule-firm);
+    border-radius: 5px; background: none; cursor: pointer;
+  }
+  .de {
+    font-family: var(--mono); font-size: .78rem;
+    padding: .2rem .45rem; border-radius: 4px; border: 1px solid var(--rule);
+  }
+  .de--good { color: var(--good); background: var(--good-wash); border-color: color-mix(in srgb, var(--good) 30%, var(--rule)); }
+  .de--ok   { color: var(--warn); background: var(--warn-wash); border-color: color-mix(in srgb, var(--warn) 30%, var(--rule)); }
+  .de--bad  { color: var(--alert); background: var(--alert-wash); border-color: color-mix(in srgb, var(--alert) 30%, var(--rule)); }
+
+  .fila4 { display: grid; grid-template-columns: repeat(2, 1fr); gap: .4rem; }
+  .fila4 .one { display: grid; gap: .2rem; }
+  .fila4 .top { display: flex; align-items: center; gap: .3rem; }
+  .fila4 input[type="color"] {
+    width: 20px; height: 20px; padding: 0; border: 1px solid var(--rule-firm);
+    border-radius: 4px; background: none; cursor: pointer; flex: none;
+  }
+  .fila4 b { font-family: var(--mono); font-size: .72rem; }
+  .fila4 span { font-family: var(--mono); font-size: .6rem; color: var(--ink-faint); }
+  .fila4 input[type="range"] { height: 13px; }
+
+  .formula {
+    font-family: var(--mono); font-size: .84rem; line-height: 1.9;
+    background: var(--surface-2); border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm); padding: .8rem 1rem; margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+  .formula em { color: var(--ink-faint); font-style: normal; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour" aria-current="page">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§1e · §1g — Colour</p>
+    <h1>TD &amp; the Studio</h1>
+    <p class="lede">
+      Four numbers decide whether everything else on this site works. They describe how much
+      light gets through each of your filaments, and they are the reason a stack of thin passes
+      comes out as one colour instead of as stripes.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--ver badge--plain">per machine, not per profile</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Sandwich editor</b><span class="sep">›</span><b>Filament &amp; TD</b>
+      <span class="sep">and</span><b>ColorStitch Studio</b>
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="model" data-short="The model">Filament is a filter</h2>
+
+    <p>
+      Put a sheet of coloured plastic over something and two things happen at once: some light
+      bounces off the plastic, and some goes through it, hits what is underneath, and comes back
+      up through the plastic again. What your eye gets is a mixture, and how much of each depends
+      on how thick the plastic is.
+    </p>
+
+    <p>
+      That is a well-understood piece of physics with a well-understood equation. The fork uses
+      the ordinary <strong>decadic Beer–Lambert law</strong>, the same one used in
+      spectrophotometry, and defines <strong>TD</strong> as the thickness at which one decade of
+      light is absorbed. So a slab of thickness <code>d</code> lets through:
+    </p>
+
+    <div class="formula">
+      t(d) = 10<sup>−d / TD</sup> &nbsp;&nbsp;<em>the fraction of light that gets through</em><br>
+      acc<sub>k</sub> = c<sub>k</sub>·(1 − t<sub>k</sub>) + acc<sub>k−1</sub>·t<sub>k</sub> &nbsp;&nbsp;<em>each pass over the one below, bottom to top</em>
+    </div>
+
+    <p>
+      Two details in there matter and are easy to get wrong. The composite runs in
+      <strong>linear RGB</strong>, because absorption is a linear operation on light and sRGB is
+      a curve applied to it; converting once at each end and never in between is what keeps the
+      middle of a gradient from going muddy. And the order of the passes is not interchangeable:
+      the operator is associative but not commutative, so a translucent red over an opaque blue
+      is genuinely a different colour from an opaque blue over a translucent red.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="explorer" data-short="★ TD explorer">TD explorer</h2>
+
+    <p>
+      One filament, one base underneath, one thickness. Pull the TD slider around and watch what
+      changes. Low TD stops mattering almost immediately; high TD keeps changing the colour long
+      after a low-TD filament has gone completely opaque, and that region is where PathBlend and
+      the multi-pass glazes live.
+    </p>
+
+    <div class="demo bleed" id="td-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">One filament over a base</span>
+        <span class="demo__hint">try TD 0.4, then TD 5</span>
+      </div>
+      <div class="demo__body" data-demo="td-explorer">
+        <noscript><p class="noscript">This demo needs JavaScript. The table below gives the same bands in words.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real algorithm
+        </span>
+        &nbsp;· <code>ColorSci::blend_stacked</code>, and the same
+        <code>TD_mm = neotko_td_N × layer_height</code> conversion RealColor does at the source.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>TD</th><th>Type</th><th>What it means in practice</th></tr></thead>
+      <tbody>
+        <tr><td><code>0.1 – 0.5</code></td><td>Highly opaque</td><td>One or two passes cover whatever is below completely. Good as a base, useless as a glaze.</td></tr>
+        <tr><td><code>0.5 – 3.0</code></td><td>Opaque to translucent</td><td>Some of the layer below shows through. Most ordinary PLA sits here.</td></tr>
+        <tr><td><code>3.0 – 7.0</code></td><td>Translucent</td><td>Several passes needed to block. This is glaze territory.</td></tr>
+        <tr><td><code>7.0 – 10+</code></td><td>Highly translucent</td><td>The lower colour is almost always visible. Use it as a tint, not as a colour.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note note--key">
+      <span class="note__t">The units are layer heights, not millimetres</span>
+      <p style="margin:0">
+        <code>neotko_td_1..4</code> are stored as a multiple of one nominal layer height, because
+        every consumer except one divides an already-normalised ratio by them and the units
+        cancel. RealColor is the exception: it multiplies TD against a real millimetre thickness,
+        so it converts once at the source. Before that conversion existed every material read as
+        roughly five times more transmissive than intended at 0.2 mm.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="storage" data-short="Where TD lives">Why TD is saved per machine</h2>
+
+    <p>
+      Because it describes the filament on your shelf, not the part you are slicing. Move to a
+      different print profile and the spool has not changed. Buy a different brand of white and
+      it has, even though nothing in the profile did.
+    </p>
+
+    <p>
+      Four sliders, one per loaded filament, saved against the machine. They also show up in the
+      <a href="painter.html">Painter</a>'s <b>Object &amp; TD</b> department, which is
+      the same four numbers in a second place rather than a second set.
+    </p>
+
+    <figure>
+      <img src="../images/sandwich-editor-TD-control.png" width="457" height="644" alt="The Filament and TD panel: a slider per filament, the blended Top result, the Penultimate result, and the final on-print result with a transmit readout" loading="lazy">
+      <figcaption>The <b>Filament &amp; TD</b> panel. Top result, Penultimate result, and the final on-print colour with the penultimate showing through by opacity, plus the <code>transmit=</code> number.</figcaption>
+    </figure>
+
+    <h3 id="measuring">Measuring it, honestly</h3>
+
+    <p>
+      There is no built-in measurement tool yet. What people do is print a wedge, compare it
+      against the preview, and nudge the slider until the two agree. It is imprecise and it works
+      well enough that the difference between "tuned by eye" and "left at defaults" is much larger
+      than the difference between "tuned by eye" and "measured properly".
+    </p>
+
+    <p>
+      A real measurement procedure is an open piece of work, and the honest position today is
+      that TD is a fitted parameter rather than a measured one. Everything downstream inherits
+      that, <a href="realcolor.html">RealColor</a> included.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="studio" data-short="★ The Studio">The ColorStitch Studio</h2>
+
+    <p>
+      Once you know the TD of four filaments, you know exactly which colours they can and cannot
+      reach by stacking. The <strong>Studio</strong> at the bottom of the Sandwich Editor works
+      that out for you: it generates a strip of swatches, each one a complete pass recipe with
+      its predicted colour, and clicking one loads it straight into the editor.
+    </p>
+
+    <div class="demo bleed" id="studio-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">The reachable gamut, and an inverse search</span>
+        <span class="demo__hint">pick a target colour and press Match</span>
+      </div>
+      <div class="demo__body" data-demo="studio">
+        <noscript><p class="noscript">This demo needs JavaScript. The three Studio modes are described in the table below.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real algorithm
+        </span>
+        &nbsp;· recipes composited with <code>blend_stacked</code>, matched by minimising
+        <b>CIEDE2000</b>, which is the metric the Studio's own Target + Match uses.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Studio mode</th><th>What it generates</th></tr></thead>
+      <tbody>
+        <tr><td><b>Gradient ramp</b></td><td>A manual top-only ramp between two tools: <b>A</b> on the visible side, <b>B</b> as the contrast. You set <b>Steps</b> and the <b>Split</b>, thinnest to thickest top pass in mm, with a floor of 0.04.</td></tr>
+        <tr><td><b>Flat color (predict)</b></td><td>The gamut you can reach by stacking solid passes. Robust and predictable, and the mode to start from.</td></tr>
+        <tr><td><b>Mixed approximation (predict)</b></td><td>A wider gamut: a dithered ColorStitch base with a translucent solid on top. Colours no single filament can make, at the cost of being harder to predict.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      <strong>Target + Match ▸</strong> runs the search backwards. Pick a colour, press
+      <b>Match</b>, and the Studio hunts for the recipe whose predicted colour is closest to it,
+      minimising ΔE2000, then loads that recipe and tells you the ΔE it settled for. A ΔE under
+      about 2 is a difference most people will not notice side by side. Above 5 you are looking
+      at two different colours and the honest answer is that your filaments cannot get there.
+    </p>
+
+    <p>
+      <strong>Name + Export</strong> turns swatches into saved Surface Effect Profiles, which is
+      the bridge from here to <a href="painter.html">the Painter</a>. The strips react
+      live to the TD sliders, so changing a TD value re-plans every recipe in the strip.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>Wrong TD, wrong everything.</strong> The Studio, the painter's Result swatch,
+        RealColor and every demo on this site read the same four numbers. Get them wrong and they
+        are all wrong together, consistently and convincingly.</li>
+      <li><strong>TD is one number, not three.</strong> The engine's material struct holds a TD
+        per channel and the shader already indexes it that way, but the interface broadcasts a
+        single scalar to all three. So this is a grey absorber, not a coloured filter. A red
+        filament that absorbs green harder than it absorbs blue is not modelled.</li>
+      <li><strong>The gamut is smaller than it looks.</strong> Two opaque filaments stack to
+        roughly two colours. Most of the interesting range comes from having something
+        translucent in the set, and no amount of searching invents range that is not there.</li>
+      <li><strong>Predicted is not printed.</strong> Surface finish, the light you look at it
+        under, and the printer's own behaviour all move the result. The panel says as much
+        itself.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="pathblend.html"><small>Back</small><b>PathBlend</b></a>
+      <a class="is-next" href="painter.html"><small>Next</small><b>The Painter →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§1e</b> and <b>§1g</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="map.html">Feature map</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * td-explorer — one filament over a base.
+ * ========================================================================= */
+Tour.demo('td-explorer', function (host) {
+  var el = Tour.el;
+  var S = { hex: '#d61f5c', td: 2.6, thickness: 0.12, layerH: 0.20, base: '#f2f0eb' };
+
+  var out = el('div.td2__out');
+
+  // the big swatch --------------------------------------------------------
+  var patch = el('div', { style: 'height:82px;border-radius:6px;border:1px solid var(--rule-firm)' });
+  var read  = el('p.recipe', { style: 'margin:0' });
+  out.appendChild(patch);
+  out.appendChild(read);
+
+  // the ramp strip --------------------------------------------------------
+  out.appendChild(el('p.gt', { text: 'The same filament, 0.02 mm to 0.60 mm', style: 'margin:.2rem 0 0' }));
+  var ramp = el('div.swatchrow');
+  out.appendChild(ramp);
+
+  // the transmittance curve ------------------------------------------------
+  var curveBox = el('div.vbox', { style: 'margin-top:.3rem' });
+  curveBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Light getting through' }),
+    el('span', { 'data-curve-note': true })
+  ]));
+  var curveHost = el('div');
+  curveBox.appendChild(curveHost);
+  out.appendChild(curveBox);
+
+  var curve = Tour.canvas(curveHost, function (ctx, w, h) {
+    var padL = 34, padB = 20, padT = 10, padR = 10;
+    var maxD = 0.6;
+    var X = function (d) { return padL + (d / maxD) * (w - padL - padR); };
+    var Y = function (t) { return padT + (1 - t) * (h - padT - padB); };
+    var tdmm = Optics.tdToMm(S.td, S.layerH);
+
+    ctx.strokeStyle = Tour.token('--rule');
+    ctx.fillStyle = Tour.token('--ink-faint');
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.lineWidth = 1;
+    ctx.textAlign = 'right';
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (t) {
+      ctx.beginPath(); ctx.moveTo(padL, Y(t)); ctx.lineTo(w - padR, Y(t)); ctx.stroke();
+      ctx.fillText(Math.round(t * 100) + '%', padL - 5, Y(t) + 3);
+    });
+
+    ctx.strokeStyle = Tour.token('--accent');
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var i = 0; i <= 120; i++) {
+      var d = (i / 120) * maxD;
+      var px = X(d), py = Y(Optics.transmittance(d, tdmm));
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // where you are
+    var t0 = Optics.transmittance(S.thickness, tdmm);
+    ctx.beginPath();
+    ctx.arc(X(S.thickness), Y(t0), 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = Tour.token('--accent');
+    ctx.fill();
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = Tour.token('--ink-faint');
+    ctx.fillText('0', padL, h - 6);
+    ctx.fillText('0.30 mm', X(0.3), h - 6);
+    ctx.fillText('0.60 mm', X(0.6) - 12, h - 6);
+  }, { height: 132 });
+
+  /* controls */
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+
+  var colIn = el('input', { type: 'color', value: S.hex, 'aria-label': 'Filament colour' });
+  colIn.style.cssText = 'width:100%;height:28px;padding:0;border:1px solid var(--rule-firm);border-radius:5px;background:none;cursor:pointer';
+  colIn.addEventListener('input', function () { S.hex = colIn.value; redraw(); });
+
+  var baseSeg = Tour.segmented({
+    label: 'What is underneath', value: S.base,
+    options: [['#f2f0eb', 'White'], ['#8d9199', 'Grey'], ['#1a1c20', 'Black']],
+    onChange: function (v) { S.base = v; redraw(); }
+  });
+
+  side.appendChild(el('div.grp', null, [
+    el('span.gt', { text: 'The filament' }), colIn,
+    Tour.slider({
+      label: 'TD', min: 0.2, max: 10, step: 0.1, value: S.td,
+      format: function (v) { return v.toFixed(1); },
+      onInput: function (v) { S.td = v; redraw(); }
+    }),
+    el('p.gt', { 'data-band': true, style: 'margin:0' })
+  ]));
+  side.appendChild(el('div.grp', null, [
+    el('span.gt', { text: 'The stack' }),
+    Tour.slider({
+      label: 'Thickness', min: 0.02, max: 0.6, step: 0.01, value: S.thickness,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) { S.thickness = v; redraw(); }
+    }),
+    Tour.slider({
+      label: 'Layer height', min: 0.08, max: 0.32, step: 0.01, value: S.layerH,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) { S.layerH = v; redraw(); }
+    }),
+    baseSeg
+  ]));
+
+  function redraw() {
+    var tdmm = Optics.tdToMm(S.td, S.layerH);
+    var stack = [{ colorHex: S.hex, thickness: S.thickness, tdMm: tdmm }];
+    var rgb = Optics.blendStacked(stack, S.base);
+    var t = Optics.transmittance(S.thickness, tdmm);
+
+    patch.style.background = Optics.linearToCss(rgb);
+    read.innerHTML =
+      '<b>' + Optics.linearToHex(rgb) + '</b> at ' + S.thickness.toFixed(2) + ' mm<br>' +
+      'TD ' + S.td.toFixed(1) + ' = <b>' + tdmm.toFixed(3) + ' mm</b> of material per decade · ' +
+      '<b>' + (t * 100).toFixed(1) + '%</b> of the base still reaching your eye';
+
+    ramp.textContent = '';
+    for (var i = 0; i < 16; i++) {
+      var d = 0.02 + (i / 15) * 0.58;
+      var c = Optics.blendStacked([{ colorHex: S.hex, thickness: d, tdMm: tdmm }], S.base);
+      var sw = el('i', { title: d.toFixed(2) + ' mm' });
+      sw.style.background = Optics.linearToCss(c);
+      ramp.appendChild(sw);
+    }
+
+    var band = host.querySelector('[data-band]');
+    if (band) band.textContent = Optics.tdBand(S.td);
+    var note = host.querySelector('[data-curve-note]');
+    if (note) note.textContent = (t * 100).toFixed(1) + '%';
+
+    curve.render();
+  }
+
+  host.appendChild(el('div.td2', null, [out, side]));
+  redraw();
+});
+
+
+/* ===========================================================================
+ * studio — the reachable gamut, and the inverse ΔE2000 search.
+ * ========================================================================= */
+Tour.demo('studio', function (host) {
+  var el = Tour.el;
+
+  var S = {
+    mode: 'flat',
+    layerH: 0.20,
+    total: 0.36,
+    base: '#f2f0eb',
+    target: '#7a5ea8',
+    filaments: Optics.DEFAULT_FILAMENTS.map(function (f) { return { name: f.name, hex: f.hex, td: f.td }; })
+  };
+
+  function tdMm(i) { return Optics.tdToMm(S.filaments[i].td, S.layerH); }
+
+  /** A recipe is a list of {tool, thickness}. This turns it into a colour. */
+  function colourOf(rec) {
+    return Optics.blendStacked(rec.map(function (p) {
+      return { colorHex: S.filaments[p.tool].hex, thickness: p.t, tdMm: tdMm(p.tool) };
+    }), S.base);
+  }
+
+  function describe(rec) {
+    return rec.map(function (p) {
+      return S.filaments[p.tool].name + ' ' + p.t.toFixed(2) + ' mm';
+    }).join('  over  ');
+  }
+
+  /**
+   * Everything reachable by stacking solid passes. Two-pass stacks across all
+   * ordered tool pairs and a range of splits, which is the "Flat color
+   * (predict)" mode: robust, and every entry is a recipe you could type in.
+   */
+  function gamutFlat() {
+    var out = [];
+    var STEPS = 7;
+    for (var a = 0; a < 4; a++) {
+      for (var b = 0; b < 4; b++) {
+        if (a === b) { out.push([{ tool: a, t: S.total }]); continue; }
+        for (var s = 0; s < STEPS; s++) {
+          var f = 0.12 + (s / (STEPS - 1)) * 0.76;
+          out.push([{ tool: a, t: S.total * (1 - f) }, { tool: b, t: S.total * f }]);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** A manual top-only ramp between two tools, the "Gradient ramp" mode. */
+  function gamutRamp() {
+    var out = [];
+    var a = 1, b = 3;                       // A visible side, B contrast
+    for (var s = 0; s < 28; s++) {
+      var f = s / 27;
+      var top = 0.04 + f * (S.total - 0.08);
+      out.push([{ tool: b, t: S.total - top }, { tool: a, t: top }]);
+    }
+    return out;
+  }
+
+  /** Three stacked passes: the wider, less predictable gamut. */
+  function gamutMixed() {
+    var out = [];
+    for (var a = 0; a < 4; a++) {
+      for (var b = 0; b < 4; b++) {
+        for (var c = 0; c < 4; c++) {
+          if (a === b && b === c) continue;
+          out.push([
+            { tool: a, t: S.total * 0.45 },
+            { tool: b, t: S.total * 0.30 },
+            { tool: c, t: S.total * 0.25 }
+          ]);
+        }
+      }
+    }
+    return out;
+  }
+
+  function currentGamut() {
+    return S.mode === 'ramp' ? gamutRamp() : S.mode === 'mixed' ? gamutMixed() : gamutFlat();
+  }
+
+  /**
+   * The inverse search. Brute force over a finer grid than the displayed
+   * strip, scored by CIEDE2000 against the target — same objective the
+   * Studio's Target + Match minimises.
+   */
+  function match(targetHex) {
+    var tLab = Optics.linearToLab(Optics.hexToLinear(targetHex));
+    var best = null, bestD = Infinity;
+
+    function consider(rec) {
+      var d = Optics.deltaE2000(Optics.linearToLab(colourOf(rec)), tLab);
+      if (d < bestD) { bestD = d; best = rec; }
+    }
+
+    for (var a = 0; a < 4; a++) {
+      consider([{ tool: a, t: S.total }]);
+      for (var b = 0; b < 4; b++) {
+        for (var s = 1; s < 16; s++) {
+          var f = s / 16;
+          consider([{ tool: a, t: S.total * (1 - f) }, { tool: b, t: S.total * f }]);
+          for (var c = 0; c < 4; c++) {
+            for (var s2 = 1; s2 < 5; s2++) {
+              var g = s2 / 5;
+              var rest = S.total * (1 - f);
+              consider([
+                { tool: a, t: rest * (1 - g) },
+                { tool: c, t: rest * g },
+                { tool: b, t: S.total * f }
+              ]);
+            }
+          }
+        }
+      }
+    }
+    return { recipe: best, de: bestD };
+  }
+
+  /* ------------------------------------------------------------- layout */
+
+  var out = el('div.td2__out');
+  var grid = el('div.gamut');
+  var recipeLine = el('p.recipe', { style: 'margin:0' });
+
+  out.appendChild(grid);
+  out.appendChild(recipeLine);
+
+  var matchRow = el('div.matchrow');
+  var targetIn = el('input', { type: 'color', value: S.target, 'aria-label': 'Target colour' });
+  var deChip = el('span.de', { text: 'ΔE —' });
+  var matchPatch = el('span', { style: 'width:34px;height:30px;border-radius:5px;border:1px solid var(--rule-firm);display:inline-block' });
+  matchRow.appendChild(el('span.gt', { text: 'Target' }));
+  matchRow.appendChild(targetIn);
+  matchRow.appendChild(el('button.btn.btn--sm', {
+    type: 'button', text: 'Match ▸',
+    onclick: function () { runMatch(); }
+  }));
+  matchRow.appendChild(el('span.gt', { text: 'closest' }));
+  matchRow.appendChild(matchPatch);
+  matchRow.appendChild(deChip);
+  out.appendChild(matchRow);
+
+  var matchLine = el('p.recipe', { style: 'margin:0' });
+  out.appendChild(matchLine);
+
+  /* controls */
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+
+  var bank = el('div.fila4');
+  function buildBank() {
+    bank.textContent = '';
+    S.filaments.forEach(function (f) {
+      var c = el('input', { type: 'color', value: f.hex, 'aria-label': f.name });
+      var lab = el('span', { text: 'TD ' + f.td.toFixed(1) });
+      var r = el('input', { type: 'range', min: 0.2, max: 8, step: 0.1, value: f.td, 'aria-label': f.name + ' TD' });
+      c.addEventListener('input', function () { f.hex = c.value; redraw(); });
+      r.addEventListener('input', function () {
+        f.td = parseFloat(r.value); lab.textContent = 'TD ' + f.td.toFixed(1); redraw();
+      });
+      bank.appendChild(el('div.one', null, [
+        el('div.top', null, [c, el('b', { text: f.name })]), r, lab
+      ]));
+    });
+  }
+
+  side.appendChild(el('div.grp', null, [
+    el('span.gt', { text: 'Studio mode' }),
+    Tour.segmented({
+      value: S.mode,
+      options: [['ramp', 'Ramp'], ['flat', 'Flat'], ['mixed', 'Mixed']],
+      onChange: function (v) { S.mode = v; redraw(); }
+    }),
+    el('p', { 'data-mode-note': true, style: 'margin:0;font-size:.72rem;color:var(--ink-soft);line-height:1.4' })
+  ]));
+  side.appendChild(el('div.grp', null, [el('span.gt', { text: 'Your filaments' }), bank]));
+  side.appendChild(el('div.grp', null, [
+    el('span.gt', { text: 'The stack' }),
+    Tour.slider({
+      label: 'Total thickness', min: 0.12, max: 0.6, step: 0.02, value: S.total,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) { S.total = v; redraw(); }
+    })
+  ]));
+
+  var NOTES = {
+    ramp: 'A top-only ramp between two tools, thinnest to thickest. What the Gradient ramp generator produces.',
+    flat: 'Everything two stacked solid passes can reach. Predictable, and the mode to start from.',
+    mixed: 'Three stacked passes. Wider gamut, harder to predict, and slower to print.'
+  };
+
+  function runMatch() {
+    var r = match(S.target);
+    matchPatch.style.background = Optics.linearToCss(colourOf(r.recipe));
+    deChip.textContent = 'ΔE ' + r.de.toFixed(2);
+    deChip.className = 'de ' + (r.de < 2 ? 'de--good' : r.de < 5 ? 'de--ok' : 'de--bad');
+    matchLine.innerHTML =
+      '<b>' + describe(r.recipe) + '</b><br>' +
+      (r.de < 2 ? 'Close enough that most people will not see the difference side by side.'
+        : r.de < 5 ? 'Visibly different if you compare them directly, close if you do not.'
+        : 'These filaments cannot reach that colour. Try one with a higher TD in the set.');
+  }
+
+  function redraw() {
+    var recs = currentGamut();
+    grid.textContent = '';
+    recs.forEach(function (rec) {
+      var c = colourOf(rec);
+      var i = el('i', { title: describe(rec) });
+      i.style.background = Optics.linearToCss(c);
+      i.addEventListener('mouseenter', function () {
+        recipeLine.innerHTML = '<b>' + describe(rec) + '</b><br>' + Optics.linearToHex(c);
+      });
+      grid.appendChild(i);
+    });
+    recipeLine.innerHTML = '<span class="muted">' + recs.length +
+      ' recipes. Hover one to see what it is made of.</span>';
+
+    var n = host.querySelector('[data-mode-note]');
+    if (n) n.textContent = NOTES[S.mode];
+    runMatch();
+  }
+
+  targetIn.addEventListener('input', function () { S.target = targetIn.value; runMatch(); });
+
+  host.appendChild(el('div.td2', null, [out, side]));
+  buildBank();
+  redraw();
+});
+</script>
+
+</body>
+</html>

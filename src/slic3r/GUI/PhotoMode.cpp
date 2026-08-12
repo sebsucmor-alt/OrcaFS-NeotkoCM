@@ -4,6 +4,8 @@
 #include "PhotoMode.hpp"
 
 #include "GUI_App.hpp"
+#include "ImGuiWrapper.hpp"
+#include "imgui/imgui_internal.h"
 #include "GLShader.hpp"
 #include "libslic3r/AppConfig.hpp"
 
@@ -356,7 +358,25 @@ bool photo_mode_available()
 bool photo_mode_hides_bed()
 {
     const PhotoModeState& s = photo_mode();
-    return s.active && s.stage.kind != PhotoStage::Kind::Bed;
+    if (!s.active)
+        return false;
+
+    // NEOTKO_PHOTOMODE_TAG s253 — EN EL VISOR DE GCODE, DE MOMENTO, NO SE ESCONDE NADA.
+    //
+    // Esta función es lo que vacía el plato para la foto, y su contrapartida es el ciclorama, que
+    // se dibuja en el hueco que deja. En el visor de gcode ese ciclorama **todavía no está
+    // portado**: quitar la cama aquí dejaría el suelo vacío, sin nada debajo de la pieza.
+    //
+    // Y el fallo sería especialmente desagradable porque el estado del modo es COMPARTIDO entre las
+    // dos pestañas (decisión del usuario, s253): basta con haber dejado el escenario en Lightbox
+    // en Prepare para que entrar en el modo desde Preview hiciera desaparecer la cama sin haber
+    // tocado nada aquí. Un ajuste puesto en otra pantalla, días antes, rompiendo ésta.
+    //
+    // Se quita esta guarda cuando el ciclorama exista en Preview, no antes.
+    if (s.owner == PhotoOwner::Preview)
+        return false;
+
+    return s.stage.kind != PhotoStage::Kind::Bed;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -635,6 +655,63 @@ void photo_preset_delete(size_t index)
         return;
     ps.erase(ps.begin() + (long)index);
     photo_mode_save_to_app_config();
+}
+
+// NEOTKO_PHOTOMODE_TAG s242 — a draggable lighting sphere.
+//
+// Three XYZ sliders are the obvious way to aim a light and they are unusable: the user has to
+// solve for a direction one component at a time while watching the scene. Every tool that aims
+// lights for a living (Keyshot, Rhino, Blender's HDRI widget) uses a ball you drag instead,
+// because the mapping from "where I want the highlight" to "where I drag" is direct.
+//
+// Returns true while being dragged, so the caller can react on the same frame.
+bool photo_light_ball(const char* id, PhotoLight& light, float size_px)
+{
+    ImGui::PushID(id);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##ball", ImVec2(size_px, size_px));
+    const bool active = ImGui::IsItemActive();
+
+    const ImVec2 centre(origin.x + size_px * 0.5f, origin.y + size_px * 0.5f);
+    const float  r = size_px * 0.5f - 2.0f;
+
+    if (active) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        float dx = (m.x - centre.x) / r;
+        float dy = (m.y - centre.y) / r;
+        // Clamp to the disc rather than ignoring out-of-bounds drags: releasing control the
+        // instant the cursor leaves the ball makes the widget feel broken. Dragging past the edge
+        // now slides the light along the horizon, which is what the gesture implies.
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len > 1.0f) { dx /= len; dy /= len; }
+        // Screen disc -> azimuth/elevation. Centre = straight overhead (elevation 90), rim =
+        // horizon (elevation 0); the angle around the centre is the azimuth. Screen Y grows
+        // downward while world +Y goes away from the default camera, hence the negated dy.
+        const float rad = std::min(std::sqrt(dx * dx + dy * dy), 1.0f);
+        light.elevation_deg = (1.0f - rad) * 90.0f;
+        if (rad > 1e-3f)
+            light.azimuth_deg = std::atan2(-dy, dx) * 180.0f / float(M_PI);
+    }
+
+    // Paint it: disc, a couple of guide rings, and the handle where the light currently sits.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col_bg   = ImGui::GetColorU32(ImGuiCol_FrameBg);
+    const ImU32 col_ring = ImGui::GetColorU32(ImGuiCol_Border);
+    const ImU32 col_knob = light.enabled ? IM_COL32(255, 214, 92, 255) : IM_COL32(130, 130, 130, 255);
+    dl->AddCircleFilled(centre, r, col_bg, 48);
+    dl->AddCircle(centre, r, col_ring, 48);
+    dl->AddCircle(centre, r * 0.5f, col_ring, 32);
+    dl->AddLine(ImVec2(centre.x - r, centre.y), ImVec2(centre.x + r, centre.y), col_ring);
+    dl->AddLine(ImVec2(centre.x, centre.y - r), ImVec2(centre.x, centre.y + r), col_ring);
+
+    const float knob_rad = (1.0f - std::clamp(light.elevation_deg, 0.0f, 90.0f) / 90.0f) * r;
+    const float az = light.azimuth_deg * float(M_PI) / 180.0f;
+    const ImVec2 knob(centre.x + knob_rad * std::cos(az), centre.y - knob_rad * std::sin(az));
+    dl->AddLine(centre, knob, col_knob, 1.5f);
+    dl->AddCircleFilled(knob, 5.0f, col_knob, 16);
+
+    ImGui::PopID();
+    return active;
 }
 
 } // namespace Slic3r

@@ -859,6 +859,12 @@ public:
     void on_change_color_mode(bool is_dark, bool reinit = true);
     const bool get_dark_mode_status() { return m_is_dark; }
     void set_as_dirty();
+
+    // NEOTKO_PHOTOMODE_TAG s253: puertas públicas del export de foto. Existen porque quien tiene el
+    // botón es el panel del modo foto, que vive en GCodeViewer, y el FBO/cámara/encuadre viven
+    // aquí. Dos líneas de fachada en vez de hacer público medio camino de render.
+    void photo_export_save_png()      { _photo_save_png(); }
+    void photo_export_to_clipboard()  { _photo_copy_to_clipboard(); }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const;
@@ -1322,6 +1328,9 @@ private:
 #endif // ENABLE_RENDER_SELECTION_CENTER
     void _check_and_update_toolbar_icon_scale();
     void _render_overlays();
+    // NEOTKO_PHOTOMODE_TAG s253: sonda de diagnóstico del estado de entrada de ImGui. Escribe al
+    // canal REALCOLOR sólo cuando el estado cambia. Ver su definición para qué mide y por qué.
+    void _log_imgui_input_state();
     void _render_style_editor();
     void _render_volumes_for_picking(const Camera& camera) const;
     void _render_current_gizmo() const;
@@ -1367,6 +1376,9 @@ private:
     // exported PNG would look nothing like the viewport it came from. Only the FBO/MSAA/readback
     // scaffolding is shared in spirit, not the drawing.
     bool _render_photo_to_data(ThumbnailData& out, unsigned int w, unsigned int h);
+    // NEOTKO_PHOTOMODE_TAG s253: el hermano para la vista RealColor del visor de gcode. Ver su
+    // definición para qué hereda del de arriba y qué hace distinto.
+    bool _render_realcolor_photo_to_data(ThumbnailData& out, unsigned int w, unsigned int h);
     void _photo_save_png();
     void _photo_copy_to_clipboard();
     // Rebuilds m_photo_stage_model when the bed or the stage settings changed. Kept separate so

@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G-code &amp; finishing — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A layer-ranged, per-tool G-code post-processor you edit as a chart. Real font kerning for embossed text. And bridges that anchor on solid ground before they cross.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .rp { display: grid; grid-template-columns: minmax(0,1fr) 214px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 660px) { .rp { grid-template-columns: 1fr; } }
+  .rp__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .rp__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .rp__rules { font-family: var(--mono); font-size: .7rem; line-height: 1.7; }
+  .rp__rules span.k { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: .35rem; }
+  .rp__rules b { color: var(--ink); font-weight: 500; }
+
+  .kern { display: grid; gap: .6rem; }
+  .kernrow { display: flex; align-items: baseline; gap: 1.2rem; flex-wrap: wrap; }
+  .kernrow .lbl { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+                  text-transform: uppercase; color: var(--ink-faint); width: 5.5rem; flex: none; }
+  .kernrow .txt { font-family: var(--serif); font-size: 2.6rem; line-height: 1.1; }
+  .kernrow .txt i { font-style: normal; display: inline-block; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output" aria-current="page">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§15 · §18 · §19 — Output</p>
+    <h1>G-code &amp; finishing</h1>
+    <p class="lede">
+      Three unrelated things that did not deserve pages of their own: a G-code post-processor you
+      edit as a chart, real kerning for embossed text, and one number that decides whether a bridge
+      starts anchored or starts hanging.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="reprocessor" data-short="G-code Reprocessor">Expert G-code Reprocessor</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--risk">edits real G-code</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--ver badge--plain">2.3.8</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Preview</b><span class="sep">›</span><span>the view-type dropdown</span><span class="sep">›</span><b>Gcode Reprocessor</b>
+    </p>
+
+    <p>
+      It lives in the same dropdown as <a href="realcolor.html">RealColor</a> and renders inside the
+      same legend panel as every other view mode, with no separate floating window. A master
+      <b>Reprocessor enabled</b> checkbox gates the whole thing: with it off, none of your rules do
+      anything however many you have.
+    </p>
+
+    <figure>
+      <img src="../images/ReProcesor.png" width="744" height="570" alt="The G-code Reprocessor: the GLOBAL and BY TOOL toggle, per-tool bars, and a Flow rule with Avoid Wipetower's gold glow active" loading="lazy">
+      <figcaption>The <b>GLOBAL / BY TOOL</b> toggle, the per-tool columns, and a Flow rule wearing the gold glow that means <em>Avoid Wipetower</em> is on for it.</figcaption>
+    </figure>
+
+    <p>
+      A <b>GLOBAL / BY TOOL</b> toggle switches the chart between rules that apply everywhere and
+      rules scoped to one tool. Each tool gets its own column, <code>T0</code>, <code>T1</code>,
+      <code>T2</code> and so on, zero-based to match the real <code>T&lt;n&gt;</code> G-code command.
+    </p>
+
+    <div class="demo bleed" id="reproc-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">The chart is the editor</span>
+        <span class="demo__hint">drag a bar's ends</span>
+      </div>
+      <div class="demo__body" data-demo="reproc">
+        <noscript><p class="noscript">This diagram needs JavaScript. The rule types are listed below.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the interaction. The rule types, their ranges and the emitted commands
+        are the real ones.
+      </div>
+    </div>
+
+    <h3 id="rules">The rules</h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Rule</th><th>Emits</th><th>Range</th></tr></thead>
+      <tbody>
+        <tr><td><b>Speed override</b></td><td><code>M220 S&lt;n&gt;</code></td><td>1–300%</td></tr>
+        <tr><td><b>Flow override</b> <span class="badge badge--ver badge--plain" style="font-size:.6rem">2.3.8</span></td><td><code>M221 S&lt;n&gt;</code></td><td>20–200%</td></tr>
+        <tr><td><b>Fan override</b></td><td><code>M106 S&lt;n&gt;</code></td><td>0–255, raw PWM rather than percent</td></tr>
+        <tr><td><b>Z-offset</b> <span class="badge badge--ver badge--plain" style="font-size:.6rem">2.3.8</span></td><td><code>SET_GCODE_OFFSET Z=&lt;v&gt;</code></td><td>±0.3 mm in 0.01 steps</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      By-tool Z-offset rules restore right before a toolchange and re-apply right after, timed
+      around the physical tool swap on purpose. Global rules affect the whole ranged layers; by-tool
+      rules only affect that range while the picked tool is actually active, reverting automatically
+      when the print switches away and re-applying when it comes back, all without touching the wipe
+      tower's own toolchange G-code. Mode is per rule, so a global fan rule and a by-tool speed rule
+      can both be live at once. There is <strong>no Apply button</strong>: every edit saves
+      immediately.
+    </p>
+
+    <h3 id="charteditor">The chart is the only editor</h3>
+
+    <ul>
+      <li><strong>Right-click empty space</strong> in the chart to add a rule at that layer, and in
+        BY TOOL view at that tool. A small colour-coded menu offers the four types.</li>
+      <li><strong>Drag either endpoint</strong> of a rule's bar to change its layer range. Dragging
+        the top endpoint all the way up snaps it to "to the end of the file".</li>
+      <li><strong>Click a rule's coloured value badge</strong> in the text summary below the chart to
+        type its exact number: percent for speed and flow, raw PWM for fan, mm for Z-offset.</li>
+      <li><strong>Right-click an existing point</strong> for <b>Skip WT / Don't Skip WT</b> and
+        <b>Delete this rule</b>.</li>
+    </ul>
+
+    <p class="small">
+      A rule whose layer range no longer exists, because the object got shorter after the rule was
+      created, shows its dot pinned to the chart's edge in grey rather than disappearing off-screen.
+      Still fully draggable and deletable from there.
+    </p>
+
+    <h3 id="avoidwt">Avoid Wipetower</h3>
+
+    <p>
+      Any rule can independently opt out of applying inside wipe tower G-code, shown as a permanent
+      gold glow on its chart bar. On machines where the wipe tower fires between layers for drip
+      control rather than only at toolchanges, a rule's range can otherwise land inside that purge
+      G-code rather than only "real" printing. This excludes every wipe-tower segment from the rule's
+      active range, splitting the range around a purge that falls in the middle rather than skipping
+      the whole thing.
+    </p>
+
+    <div class="note note--good">
+      <span class="note__t">Verified, twice, against real files</span>
+      <p style="margin:0">
+        A real multi-tool print ran clean with by-tool speed, flow, fan and Z-offset rules active,
+        and the exported G-code was checked afterwards line by line. <b>Avoid Wipetower</b> was
+        separately verified against an exported file to confirm a rule with it enabled never touches
+        wipe-tower purge G-code.
+      </p>
+    </div>
+
+    <p class="small">
+      Fixed in 2.3.7 alongside the original version of this panel: Snapmaker U1 / Klipper toolchanges
+      were forcing <code>M220 S100</code> on every colour change, wiping any manual speed override,
+      and emitting <code>M220 B</code> and <code>M220 R</code>. Both were leftovers from older
+      Marlin-based Snapmaker machines and meaningless on the U1's Klipper firmware. Both are gone,
+      so toolchange G-code is simpler and no longer fights a manual speed setting.
+    </p>
+
+    <figure>
+      <img src="../images/gcode start-end.gif" width="700" height="188" alt="The start and end of a reprocessed G-code file, showing the injected commands" loading="lazy">
+      <figcaption>What lands in the file.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="kerning" data-short="Typographic Spacing">Typographic Spacing</h2>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">pure opt-in</li>
+      <li class="badge badge--ver badge--plain">2.3.9</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left gizmo toolbar</b><span class="sep">›</span><b>Text (Emboss)</b><span class="sep">›</span><b>Advanced</b><span class="sep">›</span><b>Font kerning</b>
+    </p>
+
+    <p>
+      Stock Orca does not compose text, it <strong>drops glyphs</strong>: every letter is placed at a
+      fixed advance and that is the whole of it. The <b>Char gap</b> control it offers is
+      <em>tracking</em>, one shift applied identically between every pair of characters. That is not
+      kerning.
+    </p>
+
+    <p>
+      <strong>Kerning</strong> is the correction the type designer built into the font for
+      <em>specific pairs</em>, so that <code>AV</code>, <code>To</code> or <code>Wa</code> close the
+      diagonal gap that plain advances leave gaping. Orca never read it.
+    </p>
+
+    <div class="demo bleed" id="kern-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Tracking is not kerning</span>
+        <span class="demo__hint">try the tracking slider on the top row</span>
+      </div>
+      <div class="demo__body" data-demo="kern">
+        <noscript><p class="noscript">This demo needs JavaScript. The text explains the difference.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        Your browser is doing the kerning here, which is exactly the point: this is ordinary
+        typesetting that a slicer had simply never done.
+      </div>
+    </div>
+
+    <p>
+      Tick <b>Font kerning</b> and the embossed text uses the kerning pairs stored in the font.
+      Char gap is unchanged and the two are independent: tracking shifts everything uniformly,
+      kerning fixes individual pairs. The setting is stored per style in the project. With it off,
+      embossed text is identical to what earlier versions produced.
+    </p>
+
+    <h3 id="greyed">When the checkbox is greyed out</h3>
+
+    <p>
+      Not every font ships kerning data. When the selected font carries none, the checkbox is
+      disabled and labelled <b>"Font has no kerning data"</b> rather than silently doing nothing.
+      Typical fonts without it: monospaced faces (Courier, Andale Mono, SF Mono), symbol and Braille
+      fonts, CJK fallbacks, and a number of display faces (Copperplate, Big Caslon, Bodoni 72).
+      Across a typical macOS library of about 900 styles, roughly three quarters do carry usable
+      kerning.
+    </p>
+
+    <h3 id="apple">A fix specific to this fork</h3>
+
+    <p>
+      The font library Orca is built on reads the Microsoft <code>kern</code> table and OpenType
+      GPOS, but silently ignores the <strong>Apple <code>kern</code> version 1.0</strong> table.
+      That is precisely the format the macOS system fonts use, Helvetica included. Without a fix,
+      Font kerning would appear to work for some fonts and do nothing at all for others, with no
+      explanation. This fork adds a reader for the Apple format, so both layouts work.
+    </p>
+
+    <p class="small">
+      A handful of fonts use Apple's state-machine kerning subtables, formats 2 and 3 (Geeza Pro,
+      Apple Chancery). Those are still reported as having no usable kerning data.
+    </p>
+
+    <h3 id="fontsearch">Font search actually filters now</h3>
+
+    <p>
+      Unrelated to kerning but in the same gizmo. Typing in the font selector used to make the entire
+      list <strong>disappear</strong> instead of narrowing it. The search was implemented correctly,
+      but the cached font list, which is what you get from your second launch onward, populated only
+      the names drawn on screen and left the list the search matches against empty. So any keystroke
+      matched zero fonts, and only a first launch on a clean profile ever worked. Fixed. The bug is
+      present in upstream Orca as well.
+    </p>
+
+    <p class="small">
+      Under the hood: the glyph advance used to be baked into the shape cache, which is keyed by
+      character alone, so a per-<em>pair</em> value could not be expressed at any price. Text
+      composition now happens in one place, <code>Emboss::layout_text()</code>, which future
+      typographic controls (manual pair kerning, baseline shift, per-range scaling) will hook into.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="bridging" data-short="Bridge expansion">Bridging infill extra expansion</h2>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">additive, zero at default</li>
+      <li class="badge badge--ver badge--plain">2.4.0</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Quality</b><span class="sep">›</span><b>Bridging</b><span class="sep">›</span><b>Bridging infill extra expansion</b>
+    </p>
+
+    <p>
+      Orca already grows each bridge region a little into the area around it, so the strand has
+      somewhere to land instead of starting in mid-air. Two things are wrong with how it does that:
+      the amount is hard-wired, and it is derived from your <strong>wall count</strong>. Raise
+      <code>wall_loops</code> for stiffness and you silently change the anchoring of every bridge in
+      the part. This setting adds millimetres on top of the automatic amount and decouples the two.
+    </p>
+
+    <p>
+      What it buys you: the bridge takes over the neighbouring region <em>of the same part</em>, so
+      the nozzle is already extruding over solid, supported material before it reaches open air. A
+      strand that starts anchored behaves very differently from one that starts unattached. Each pass
+      has something to grab, and the filament tensions across the gap instead of simply hanging.
+    </p>
+
+    <figure>
+      <img src="../images/Bridging Infill Extra Expansion.png" width="2044" height="978" alt="Bridging infill extra expansion off versus on, on a beam resting on two blocks. Off: the bridge stops where the supported area begins and that area prints as ordinary solid infill at its own angle, leaving a visible boundary. On: the bridge has claimed the neighbouring supported region, so the whole span prints as one continuous bridge in a single direction" loading="lazy">
+      <figcaption>Off and on, on a beam resting on two blocks. <b>Off:</b> the bridge stops where the supported area begins, that area prints as ordinary solid infill at its own angle, and there is a visible boundary between the two. <b>On:</b> the bridge has claimed the neighbouring supported region, so the whole span prints as one continuous bridge in one direction.</figcaption>
+    </figure>
+
+    <div class="note">
+      <span class="note__t">There is no cap</span>
+      <p style="margin:0">
+        Turning it up until the bridge claims the entire surrounding region is a normal way to use
+        this. It removes the seam artefact where the bridged area meets the supported one, and gives
+        the layer a single continuous direction. Values in the hundreds are accepted.
+      </p>
+    </div>
+
+    <ul>
+      <li><strong>Additive.</strong> At 0 the slicer behaves exactly as before.</li>
+      <li>Applies to <strong>external bridges</strong> only.</li>
+      <li>The custom <strong>bridge angle</strong> is honoured across the expanded region.</li>
+      <li>The expansion grows into solid infill, sparse infill, top surfaces and
+        <strong>supported bottom surfaces</strong>. That last one is the important case: a beam
+        resting on two blocks has its bridge sitting right next to the supported area, and that
+        supported area is the best possible landing ground.</li>
+      <li>It costs a little extra material, and some bridge-speed travel over a region that was
+        already solid.</li>
+    </ul>
+
+    <p class="small">
+      Debugging: <code>ORCA_DEBUG_BOTTOM=1</code> writes <code>BRIDGE_EXPAND</code> and
+      <code>BRIDGE_EXPAND_DONE</code> lines to <code>/tmp/neotko_bottom.log</code>, one pair per
+      layer containing a bridge. <code>extra_cfg</code> is the value that reached the engine, so if
+      that reads 0 when you set something else the problem is config invalidation rather than the
+      expansion. <code>zone_*_mm2</code> tells you how much of each kind of neighbour actually exists
+      next to the bridge; all zeros means there is nowhere to grow, which is the usual reason for
+      "it does nothing".
+    </p>
+
+    <nav class="pager">
+      <a href="relief.html"><small>Back</small><b>Bump mapping</b></a>
+      <a class="is-next" href="map.html"><small>Next</small><b>The map →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§15</b>, <b>§18</b> and <b>§19</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * reproc — the layer/tool chart, with draggable rule bars.
+ * ========================================================================= */
+Tour.demo('reproc', function (host) {
+  var el = Tour.el;
+
+  var TYPES = {
+    speed: { name: 'Speed', col: '#2f7d4f', cmd: 'M220 S', unit: '%',  def: 80 },
+    flow:  { name: 'Flow',  col: '#0d7d72', cmd: 'M221 S', unit: '%',  def: 95 },
+    fan:   { name: 'Fan',   col: '#1d4f8f', cmd: 'M106 S', unit: '',   def: 180 },
+    zoff:  { name: 'Z-off', col: '#a8620a', cmd: 'SET_GCODE_OFFSET Z=', unit: ' mm', def: 0.05 }
+  };
+
+  var S = {
+    layers: 120,
+    byTool: false,
+    tools: 3,
+    rules: [
+      { type: 'speed', from: 4,  to: 30,  tool: 0, val: 70,  skipWT: false },
+      { type: 'fan',   from: 26, to: 120, tool: 1, val: 255, skipWT: false },
+      { type: 'flow',  from: 55, to: 92,  tool: 2, val: 108, skipWT: true }
+    ]
+  };
+
+  var drag = null;
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Layers up · rules across' }), el('span', { 'data-rnote': true })
+  ]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  var PAD = { l: 36, r: 12, t: 12, b: 22 };
+  function geom(w, h) {
+    var cols = S.byTool ? S.tools : 1;
+    return {
+      cols: cols,
+      colW: (w - PAD.l - PAD.r) / cols,
+      Y: function (L) { return h - PAD.b - (L / S.layers) * (h - PAD.t - PAD.b); },
+      LOf: function (py) { return Math.round((h - PAD.b - py) / (h - PAD.t - PAD.b) * S.layers); },
+      X: function (c) { return PAD.l + c * ((w - PAD.l - PAD.r) / cols) + ((w - PAD.l - PAD.r) / cols) / 2; }
+    };
+  }
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var g = geom(w, h);
+    var faint = Tour.token('--ink-faint');
+
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.strokeStyle = Tour.token('--rule');
+    ctx.lineWidth = 1;
+    ctx.textAlign = 'right';
+    for (var L = 0; L <= S.layers; L += 20) {
+      ctx.beginPath(); ctx.moveTo(PAD.l, g.Y(L) + .5); ctx.lineTo(w - PAD.r, g.Y(L) + .5); ctx.stroke();
+      ctx.fillStyle = faint; ctx.fillText(L, PAD.l - 5, g.Y(L) + 3);
+    }
+
+    // tool columns
+    ctx.textAlign = 'center';
+    for (var c = 0; c < g.cols; c++) {
+      if (S.byTool) {
+        ctx.strokeStyle = Tour.token('--rule');
+        ctx.beginPath();
+        ctx.moveTo(PAD.l + c * g.colW + .5, PAD.t); ctx.lineTo(PAD.l + c * g.colW + .5, g.Y(0));
+        ctx.stroke();
+        ctx.fillStyle = faint; ctx.fillText('T' + c, g.X(c), h - 7);
+      } else {
+        ctx.fillStyle = faint; ctx.fillText('global', g.X(0), h - 7);
+      }
+    }
+
+    // the rules
+    S.rules.forEach(function (r, i) {
+      if (S.byTool && r.tool >= g.cols) return;
+      var t = TYPES[r.type];
+      var col = S.byTool ? r.tool : 0;
+      var lane = (i % 3) - 1;
+      var x = g.X(col) + lane * Math.min(26, g.colW / 4);
+      var y0 = g.Y(r.to), y1 = g.Y(r.from);
+
+      if (r.skipWT) {
+        ctx.strokeStyle = '#d4a537'; ctx.lineWidth = 5; ctx.globalAlpha = .45;
+        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = t.col; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+
+      [[y0, 'to'], [y1, 'from']].forEach(function (e) {
+        ctx.beginPath(); ctx.arc(x, e[0], 5, 0, Math.PI * 2);
+        ctx.fillStyle = (drag && drag.i === i && drag.end === e[1]) ? t.col : Tour.token('--surface');
+        ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = t.col; ctx.stroke();
+      });
+    });
+
+    ctx.strokeStyle = Tour.token('--rule');
+    ctx.lineWidth = 1;
+    ctx.strokeRect(PAD.l + .5, PAD.t + .5, w - PAD.l - PAD.r - 1, g.Y(0) - PAD.t - 1);
+  }, { height: 240, cursor: 'ns-resize' });
+
+  function hit(p) {
+    var g = geom(cv.width, cv.height);
+    for (var i = 0; i < S.rules.length; i++) {
+      var r = S.rules[i];
+      if (S.byTool && r.tool >= g.cols) continue;
+      var col = S.byTool ? r.tool : 0;
+      var lane = (i % 3) - 1;
+      var x = g.X(col) + lane * Math.min(26, g.colW / 4);
+      if (Math.abs(p.x - x) > 12) continue;
+      if (Math.abs(p.y - g.Y(r.to)) < 11) return { i: i, end: 'to' };
+      if (Math.abs(p.y - g.Y(r.from)) < 11) return { i: i, end: 'from' };
+    }
+    return null;
+  }
+
+  Tour.draggable(cv.canvas, {
+    onDown: function (p) { drag = hit(p); if (!drag) return false; cv.render(); },
+    onMove: function (p) {
+      if (!drag) return;
+      var g = geom(cv.width, cv.height);
+      var L = Math.max(1, Math.min(S.layers, g.LOf(p.y)));
+      var r = S.rules[drag.i];
+      if (drag.end === 'to') r.to = Math.max(r.from + 1, L);
+      else r.from = Math.min(r.to - 1, L);
+      upd();
+    },
+    onUp: function () { drag = null; upd(); },
+    onHover: function (p) { cv.canvas.style.cursor = hit(p) ? 'ns-resize' : 'default'; }
+  });
+
+  var list = el('div.rp__rules');
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+
+  side.appendChild(el('div.rp__grp', null, [
+    el('span.rp__gt', { text: 'View' }),
+    Tour.segmented({ value: 'global', options: [['global','Global'],['tool','By tool']],
+      onChange: function (v) { S.byTool = v === 'tool'; upd(); } })
+  ]));
+  side.appendChild(el('div.rp__grp', null, [el('span.rp__gt', { text: 'The rules' }), list]));
+
+  function upd() {
+    cv.render();
+    list.textContent = '';
+    S.rules.forEach(function (r) {
+      var t = TYPES[r.type];
+      var row = el('div');
+      var k = el('span.k'); k.style.background = t.col;
+      row.appendChild(k);
+      row.innerHTML += '<b>' + t.name + ' ' + r.val + t.unit + '</b> ' +
+        (S.byTool ? 'T' + r.tool + ' ' : '') +
+        'layers ' + r.from + '–' + (r.to >= S.layers ? 'end' : r.to) +
+        (r.skipWT ? ' <span style="color:#d4a537">·skip WT</span>' : '') +
+        '<br><span style="opacity:.7">' + t.cmd + r.val + '</span>';
+      list.appendChild(row);
+    });
+    var n = host.querySelector('[data-rnote]');
+    if (n) n.textContent = S.rules.length + ' rules · ' + (S.byTool ? 'by tool' : 'global');
+  }
+
+  host.appendChild(el('div.rp', null, [box, side]));
+  upd();
+});
+
+
+/* ===========================================================================
+ * kern — tracking against kerning, on the pairs that need it.
+ * ========================================================================= */
+Tour.demo('kern', function (host) {
+  var el = Tour.el;
+  var track = 0;
+  var WORD = 'AVATAR To Wave';
+
+  var wrap = el('div.kern');
+
+  function row(label, mode) {
+    var txt = el('div.txt');
+    if (mode === 'none') {
+      // one span per glyph defeats the browser's own kerning, which is
+      // exactly what "drop each glyph at its fixed advance" looks like
+      WORD.split('').forEach(function (ch) {
+        txt.appendChild(el('i', { text: ch === ' ' ? ' ' : ch }));
+      });
+    } else {
+      txt.textContent = WORD;
+      txt.style.fontKerning = 'normal';
+    }
+    var r = el('div.kernrow', null, [el('span.lbl', { text: label }), txt]);
+    r._txt = txt;
+    return r;
+  }
+
+  var rNone = row('no kerning', 'none');
+  var rKern = row('kerning on', 'kern');
+
+  wrap.appendChild(rNone);
+  wrap.appendChild(rKern);
+
+  var slider = Tour.slider({
+    label: 'Char gap (tracking) on the top row', min: -6, max: 14, step: 1, value: 0,
+    format: function (v) { return (v > 0 ? '+' : '') + v + ' px'; },
+    onInput: function (v) {
+      track = v;
+      [].slice.call(rNone._txt.children).forEach(function (n) { n.style.marginRight = track + 'px'; });
+    }
+  });
+
+  host.appendChild(wrap);
+  host.appendChild(el('div.ctrls', { style: 'margin-top:.9rem' }, [slider]));
+  host.appendChild(el('p.small', {
+    style: 'margin:.7rem 0 0',
+    html: 'Push the tracking either way and the <b>AV</b> and <b>Wa</b> pairs never come right: ' +
+          'tracking moves every gap by the same amount, so closing the diagonal ones jams the ' +
+          'straight ones together. Kerning is a per-pair correction the type designer already ' +
+          'measured, and reading it is all the feature does.'
+  }));
+});
+</script>
+
+</body>
+</html>

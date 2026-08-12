@@ -11,9 +11,9 @@
 
 uniform sampler2D u_prev_meta;  // previous pass's meta (tool_id, thickness, eye_z, written) — NOT a depth texture
 uniform bool  u_has_prev_depth; // false for peel pass 0 (nothing to peel behind yet)
-uniform int   u_tool_id;        // physical tool (0-3) for this draw, see RenderPath/Path::extruder_id
+uniform int   u_tool_id;        // physical tool (0..REALCOLOR_MAX_TOOLS-1) for this draw, see RenderPath/Path::extruder_id
 uniform float u_thickness;      // Path::height for this draw, mm
-uniform vec3  u_material_rgb[4];
+uniform vec3  u_material_rgb[16]; // NEOTKO_REALCOLOR_TAG s253: 16 = GCodeViewer::REALCOLOR_MAX_TOOLS (era 4; con mas de 4 filamentos esto se leia fuera de rango y salia negro)
 uniform vec2  u_viewport;
 
 // NEOTKO_REALCOLOR_TAG s214 (PBR item 3, docs/WIP/REALCOLOR_VIEW/09_HDR_ENVIRONMENT_PLAN.md):
@@ -107,13 +107,96 @@ uniform int u_light_solo;
 
 const float REALCOLOR_PI = 3.14159265359;
 
-// NEOTKO_REALCOLOR_TAG s251: MISMA dirección de luz que LIGHT_TOP_DIR en realcolor_peel.vs. Se
-// duplica la constante en vez de pasarla por varying porque en los dos ficheros es una constante de
-// compilación; si algún día pasa a uniform, hay que tocar los dos (y los dos gemelos).
+// NEOTKO_PHOTOMODE_TAG s253 (P0): ESE DÍA HA LLEGADO. La nota de s251 que había aquí decía "se
+// duplica la constante porque en los dos ficheros es constante de compilación; si algún día pasa a
+// uniform, hay que tocar los dos (y los dos gemelos)" — el port de Photo Mode necesita mover la
+// luz, así que son los cuatro ficheros y este es el tercero.
+//
+// Es LA MISMA dirección que u_rc_light_key_dir en realcolor_peel.vs, y se manda por uniform en vez
+// de por varying a propósito: es constante para todo el draw, no un dato por vértice, y un varying
+// más cuesta interpolante en el perfil legacy (ver R4 del plan).
 // ⚠️ Vale en MUNDO porque view_normal_matrix se manda como IDENTIDAD desde
 // render_toolpaths_realcolor() — el nombre v_view_normal es herencia histórica, el contenido es
 // espacio de mundo, igual que lo asume el muestreo del entorno de s243 (F3).
-const vec3 ANISO_LIGHT_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
+uniform vec3 u_rc_light_key_dir;
+
+// ---------------------------------------------------------------------------------------------
+// NEOTKO_PHOTOMODE_TAG s253 — MAPA DE SOMBRAS EN REALCOLOR.
+//
+// LO QUE ESTO RESUELVE Y LO QUE NO. El usuario pedía la sombra de un texto grabado sobre su propia
+// cara, como la que ya se ve en la pestaña de preparación. El primer intento fue una sombra de
+// CONTACTO en espacio de pantalla (realcolor_present.fs) y fracasó por una razón que ya conocíamos:
+// esta superficie es un campo de medios cilindros y la corrugación derrota a cualquier prueba que
+// compare un píxel con su vecino — es la segunda vez que el mismo obstáculo tumba la misma familia
+// de técnicas (la primera fue el SSS de pantalla, s251c). Esto es la respuesta buena: un mapa de
+// profundidad desde la luz, que no compara vecinos, no depende de que el ocluyente esté en pantalla,
+// y da la sombra LARGA y proyectada, que es la que se pedía.
+//
+// 🔑 DE DÓNDE SALE EL MAPA, QUE ES LO NO OBVIO: los toolpaths no son GLVolume y no se pueden meter
+// en la pasada de profundidad. Pero el OBJETO original sí sigue cargado (m_shells.volumes), y su
+// silueta —letras incluidas, que son geometría de la malla— es la que proyecta la sombra. Así que
+// el mapa se llena con las shells aunque estén invisibles, y quien lo RECIBE son los toolpaths.
+// Decisión del usuario (s253), con su contrapartida aceptada: la sombra ignora soportes, brim y
+// torre de purga, porque ésos no están en la malla del objeto.
+//
+// ⚠️ Y DE AHÍ SALE EL ÚNICO RIESGO SERIO: ocluyente y receptor son **superficies casi coincidentes**
+// (la malla ideal y los cordones que la aproximan), separadas por décimas de milímetro. Eso es
+// acné de auto-sombra garantizado si el sesgo es pequeño. Por eso u_shadow_normal_bias_mm se
+// dimensiona en C++ con el relieve del cordón dentro, no sólo con el tamaño del téxel.
+//
+// Y aquí está la diferencia con el intento fallido, que es la razón para esperar que esto sí salga:
+// allí el sesgo necesario (una décima) era del MISMO tamaño que el detalle buscado, así que subirlo
+// mataba el efecto. Aquí el detalle es una sombra de varios milímetros y el sesgo es de décimas —
+// hay dos órdenes de margen.
+uniform sampler2D u_shadow_map;
+uniform mat4  u_shadow_proj_view;      // mundo -> clip de la luz
+uniform bool  u_shadow_enabled;        // false => visibilidad 1.0 y bit-idéntico a s252
+uniform float u_shadow_strength;       // 0 = sin sombra, 1 = sombra plena
+uniform vec2  u_shadow_texel;          // 1 / resolución del mapa
+uniform float u_shadow_normal_bias_mm; // desplazamiento a lo largo de la normal, en mm de mundo
+
+float realcolor_shadow_tap(vec2 uv_s, float r)
+{
+    // 1.0 = iluminado, 0.0 = ocluido. Fuera del mapa se lee SIEMPRE como iluminado: inventar sombra
+    // fuera del frustum de la luz es cómo aparecen bordes rectos donde no hay nada.
+    return (r > texture(u_shadow_map, uv_s).r) ? 0.0 : 1.0;
+}
+
+float realcolor_shadow_visibility()
+{
+    if (!u_shadow_enabled || u_shadow_strength <= 0.0)
+        return 1.0;
+
+    // Desplazamiento por normal ANTES de proyectar: mueve el punto de muestreo fuera de su propia
+    // superficie, que es lo que evita el acné sin despegar la sombra del objeto (lo que sí haría un
+    // sesgo puro en profundidad). v_view_normal es de MUNDO aquí, igual que v_world_pos.
+    vec3 n = normalize(v_view_normal);
+    vec4 clip = u_shadow_proj_view * vec4(v_world_pos + n * u_shadow_normal_bias_mm, 1.0);
+    if (clip.w <= 0.0)
+        return 1.0;
+
+    vec3 proj = clip.xyz / clip.w;
+    vec2 uv_s = proj.xy * 0.5 + 0.5;
+    if (uv_s.x < 0.0 || uv_s.x > 1.0 || uv_s.y < 0.0 || uv_s.y > 1.0)
+        return 1.0;
+    float r = proj.z * 0.5 + 0.5;
+    if (r > 1.0)
+        return 1.0;
+
+    // PCF 3x3, desenrollado a mano igual que el kernel de AO de este proyecto y por el mismo motivo
+    // (el gemelo 110 no tiene constructores de array).
+    float s = 0.0;
+    s += realcolor_shadow_tap(uv_s + vec2(-1.0, -1.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s + vec2( 0.0, -1.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s + vec2( 1.0, -1.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s + vec2(-1.0,  0.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s,                                    r);
+    s += realcolor_shadow_tap(uv_s + vec2( 1.0,  0.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s + vec2(-1.0,  1.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s + vec2( 0.0,  1.0) * u_shadow_texel, r);
+    s += realcolor_shadow_tap(uv_s + vec2( 1.0,  1.0) * u_shadow_texel, r);
+    return mix(1.0, s / 9.0, u_shadow_strength);
+}
 
 // NEOTKO_REALCOLOR_TAG s214: same convention as the CPU-side generator (realcolor_env_sample()
 // in GCodeViewer.cpp) — v=0 is straight up (sky), v=1 is straight down (ground), matching the
@@ -233,7 +316,23 @@ void main()
                     roughness);
     vec3 rim = u_fresnel_strength * u_finish.x * fres * u_fresnel_tint * refl;
 
-    vec3 base = u_material_rgb[u_tool_id];
+// NEOTKO_REALCOLOR_TAG s253: el indice se ACOTA antes de indexar. Leer fuera de un array en
+// GLSL no es un error, es comportamiento indefinido — devuelve basura o ceros, y eso fue
+// exactamente el bug de "los filamentos 5+ salen negros". La tabla ya llega llena hasta
+// REALCOLOR_MAX_TOOLS, asi que esto no deberia dispararse nunca; existe para que el dia que
+// alguien cargue un gcode con mas tools de los previstos el fallo sea un color repetido y no
+// una pantalla negra sin explicacion.
+    // NEOTKO_REALCOLOR_TAG s253: acotado a mano con dos `if`, NO con clamp().
+    // 🚨 clamp()/min()/max() SOLO tienen version para FLOAT en GLSL 1.10 — las sobrecargas de
+    // enteros llegaron en la 1.30. Escribir clamp(int,int,int) compila en el gemelo 140 y
+    // REVIENTA en el 110, que es justo el que corre macOS. Costo un build: el dialogo decia
+    // "Unable to load shaders: realcolor_peel/accum/present", los tres exactamente donde
+    // estaba este clamp. Regla: en estos shaders, cualquier operacion sobre enteros se
+    // escribe a mano.
+    int tool_idx = u_tool_id;
+    if (tool_idx < 0)  tool_idx = 0;
+    if (tool_idx > 15) tool_idx = 15;
+    vec3 base = u_material_rgb[tool_idx];
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 3): diffuse = direct light (achromatic) + env-sampled
     // ambient; lit = env-sampled rim + achromatic specular highlight + base*diffuse. Supersedes
     // PBR item 1's flat-tint mix (see realcolor_peel.vs) — not a superset of it.
@@ -262,8 +361,16 @@ void main()
     // el knob finish_strength siga sirviendo de A/B limpio.
     float diffuse_directional = 1.0 - 0.60 * roughness;
     float diffuse_ambient     = 1.0 + 0.25 * roughness;
-    vec3 diffuse = vec3(intensity.x * diffuse_directional) + ambient * diffuse_ambient;
-    vec3 lit = vec3(intensity.y) * u_finish.x + rim + base * diffuse;
+
+    // NEOTKO_PHOTOMODE_TAG s253: la sombra multiplica SÓLO los términos DIRECTOS (difusa de las dos
+    // luces, especular y, más abajo, el lóbulo anisótropo). El ambiente y el rim vienen del entorno,
+    // que sigue llegando dentro de una sombra — una sombra que apaga también el ambiente sale negra
+    // como un agujero, no como una sombra. Es el mismo reparto que hace shells_lit.
+    // Con u_shadow_enabled = false esto vale 1.0 y las tres líneas de abajo son bit-idénticas.
+    float shadow_vis = realcolor_shadow_visibility();
+
+    vec3 diffuse = vec3(intensity.x * diffuse_directional * shadow_vis) + ambient * diffuse_ambient;
+    vec3 lit = vec3(intensity.y) * u_finish.x * shadow_vis + rim + base * diffuse;
 
     // NEOTKO_REALCOLOR_TAG s251 (Fase 0): BRILLO ANISÓTROPO. Ver el bloque del uniform u_aniso
     // arriba para el porqué de que sea aditivo. Con u_aniso.x = 0 esto suma exactamente cero y la
@@ -281,12 +388,15 @@ void main()
         // artefacto por el que RealColor ya pagó una vez (el bandeo del peel, s164/s166).
         // Los flancos llegan aquí con confianza 1 y no se enteran de este gate.
         float gate = smoothstep(u_aniso.z, u_aniso.z + 0.15, bead_conf);
-        float lobe = realcolor_aniso_lobe(T, ANISO_LIGHT_DIR, view_dir, max(u_aniso.y, 1.0));
+        float lobe = realcolor_aniso_lobe(T, u_rc_light_key_dir, view_dir, max(u_aniso.y, 1.0));
         // Lo escala el mismo brillo de acabado que ya escala especular y rim (u_finish.x), y lo
         // atenúa la rugosidad: una superficie rugosa dispersa y PIERDE la franja, que es justo la
         // diferencia entre un top planchado y un bridge. Mismo reparto que s243c, no una escala
         // nueva inventada aparte.
-        aniso_term = u_aniso.x * gate * lobe * u_finish.x * (1.0 - 0.75 * roughness);
+        // s253: el lóbulo anisótropo es un reflejo de la luz DIRECTA, así que también se apaga en
+        // sombra. Si no, la veta del cordón seguiría brillando dentro de la sombra de una letra y
+        // delataría el truco de inmediato.
+        aniso_term = u_aniso.x * gate * lobe * u_finish.x * (1.0 - 0.75 * roughness) * shadow_vis;
         lit += vec3(aniso_term);
     }
 

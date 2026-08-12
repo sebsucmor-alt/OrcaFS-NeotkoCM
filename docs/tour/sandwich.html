@@ -1,0 +1,997 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Sandwich — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Your top surface stops being one flat fill and becomes a stack of passes you compose yourself. Build one live, with the slicer's own optics.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  /* ---- the Sandwich builder ------------------------------------------- */
+  .sb {
+    display: grid;
+    grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+    gap: 1.2rem;
+    align-items: start;
+  }
+  @container demo (max-width: 840px) { .sb { grid-template-columns: 1fr; } }
+
+  .sb__stackcol { display: grid; gap: .8rem; }
+
+  .zone {
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+  .zone__hd {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .35rem .55rem;
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--ink-soft);
+  }
+  .zone__chip { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .zone__hd .btn { margin-left: auto; }
+  .zone__rows { padding: .4rem; display: grid; gap: .3rem; }
+
+  .prow {
+    display: grid;
+    grid-template-columns: 14px 1fr auto;
+    align-items: center;
+    gap: .4rem;
+    padding: .3rem .35rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    font-size: .76rem;
+  }
+  .prow__n { font-family: var(--mono); font-size: .68rem; color: var(--ink-faint); text-align: center; }
+  .prow__mid { display: grid; gap: .25rem; min-width: 0; }
+  .prow__line { display: flex; gap: .25rem; align-items: center; }
+  .prow select { font-size: .74rem; padding: .12rem .25rem; }
+  .prow__z { font-family: var(--mono); font-size: .7rem; color: var(--ink-soft); white-space: nowrap; }
+  .prow__acts { display: flex; flex-direction: column; gap: 2px; }
+  .prow__acts button {
+    font: inherit; font-size: .66rem; line-height: 1;
+    padding: .12rem .28rem; border: 1px solid var(--rule);
+    background: var(--surface); color: var(--ink-soft);
+    border-radius: 3px; cursor: pointer;
+  }
+  .prow__acts button:hover { border-color: var(--accent); color: var(--accent); }
+
+  .toolpick { display: flex; gap: 2px; }
+  .toolpick button {
+    width: 17px; height: 17px; padding: 0;
+    border: 1.5px solid transparent; border-radius: 3px; cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.18);
+  }
+  .toolpick button[aria-pressed="true"] { border-color: var(--ink); }
+
+  .sb__views { display: grid; gap: .8rem; }
+  .sb__pair { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+  @container demo (max-width: 560px) { .sb__pair { grid-template-columns: 1fr; } }
+
+
+  /* result strip: patch + readout + the magnifier, wrapping as one row */
+  .sb__result { display: flex; flex-wrap: wrap; gap: .8rem; align-items: stretch; }
+  .sb__result .result { flex: 1 1 300px; min-width: 0; }
+  .sb__result .switch { align-self: center; }
+
+  .fila { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; }
+  @container demo (max-width: 620px) { .fila { grid-template-columns: repeat(2, 1fr); } }
+  .fila__one {
+    border: 1px solid var(--rule); border-radius: 6px;
+    padding: .4rem .45rem; background: var(--surface-2);
+    display: grid; gap: .25rem;
+  }
+  .fila__top { display: flex; align-items: center; gap: .35rem; }
+  .fila__top input[type="color"] {
+    width: 22px; height: 22px; padding: 0; border: 1px solid var(--rule-firm);
+    border-radius: 4px; background: none; cursor: pointer; flex: none;
+  }
+  .fila__top b { font-family: var(--mono); font-size: .74rem; }
+  .fila__td { font-family: var(--mono); font-size: .64rem; color: var(--ink-faint); }
+  .fila input[type="range"] { height: 14px; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour" aria-current="page">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§1 · §3 — Colour</p>
+    <h1>The Sandwich</h1>
+    <p class="lede">
+      A normal slicer prints the top of your part once: one filament, one pattern, one pass.
+      Here that single layer becomes a small <strong>stack of passes</strong> you build yourself,
+      and the colours that come out are ones no single filament can make.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--ver badge--plain">since 2.3</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Quality</b><span class="sep">›</span><b>Surface ColorStitch</b><span class="sep">›</span><b>Sandwich editor…</b>
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">What breaks without it</h2>
+
+    <p>
+      Ask a stock slicer for a two-tone top surface and it gives you exactly one answer: paint
+      some triangles one colour and the rest another. Hard edges, flat fills, one filament per
+      region. There is no way to say <em>"print this face slightly blue, over slightly white,
+      with a yellow tint on top"</em>, because as far as the slicer is concerned the top surface
+      is one thing and it gets one tool.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Stock</h4>
+        <p>The top surface is one solid fill, one tool, one angle. Two colours means two
+        regions with a boundary between them. Whatever palette you loaded is the palette you
+        can print.</p>
+      </div>
+      <div class="fold--after">
+        <h4>With a Sandwich</h4>
+        <p>The same nominal layer becomes 1–3 thin passes with their own tools, angles and
+        heights. Light passes through the upper ones and bounces off the lower ones, so the
+        surface reads as a colour <em>between</em> your filaments.</p>
+      </div>
+    </div>
+
+    <p>
+      That is the whole idea, and everything else on the colour side follows from it. The
+      gradient pass, the per-line dither, the painter, the TD sliders, RealColor, even the wipe
+      tower planner: all of it exists because one layer stopped being one thing.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="passes" data-short="The pass stack">One layer, several passes</h2>
+
+    <p>
+      Each surface <strong>zone</strong> (the <em>Top</em> layer, and the <em>Penultimate</em>
+      layer beneath it) holds a stack of 1 to 3 <strong>passes</strong>. They print as thin
+      virtual sub-layers inside the same nominal layer height, so the part does not get taller;
+      you are subdividing height it already had. Drag the dividers between them to decide how the
+      millimetres are split.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Kind</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>None</b></td><td>An empty slot. No pass here.</td></tr>
+        <tr><td><b>Solid</b></td><td>An ordinary solid fill with its own tool, angle and share of the height. <b>Stack two or three</b> and you have the classic MultiPass effect: cross-hatch from two angles, a glaze over a base, or an optical blend.</td></tr>
+        <tr><td><b>ColorStitch</b></td><td>Decides the filament <b>line by line</b> across the surface: dithered blends, exact stripes, textile weaves, hand-typed patterns. <a href="colorstitch.html">Its own page →</a></td></tr>
+        <tr><td><b>PathBlend Half</b></td><td>A gradient pass with no complementary cap: the ramp climbs from its floor straight up, one tool only. <a href="pathblend.html">Its own page →</a></td></tr>
+        <tr><td><b>PathBlend Full</b></td><td>The ramp <b>plus</b> a cap in a second tool, filling the rest of the layer height.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note note--key">
+      <span class="note__t">Where did MultiPass go?</span>
+      <p style="margin:0">
+        Nowhere, it just stopped being a separate thing. There is no MultiPass button any more:
+        you add two or three <b>Solid</b> passes and split the height between them. Try to make
+        the shares add up to the full layer height, or the top of the stack will not be covered.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="build" data-short="★ Build one">Build one</h2>
+
+    <p>
+      This is the Sandwich Editor's model, live. Add passes, change their tools, drag the
+      dividers to move the millimetres around, and watch three things at once: the physical
+      cross-section of the layer, the surface as the printer will lay it down, and the single
+      colour your eye will resolve it into.
+    </p>
+
+    <div class="demo bleed" id="build-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">The Sandwich builder</span>
+        <span class="demo__hint">drag the dividers in the cross-section</span>
+      </div>
+      <div class="demo__body" data-demo="sandwich-builder">
+        <noscript><p class="noscript">This demo needs JavaScript. Everything it shows is described in the text around it.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real algorithm
+        </span>
+        &nbsp;· the colour comes from <code>ColorSci::blend_stacked</code> and the line assignment
+        from <code>build_dithered_tools_2color</code>, both ported straight across. Build a recipe
+        here and the app would give you the same swatch.
+        <br><a href="play-mixer.html">Open the full mixer in the Playground →</a>
+      </div>
+    </div>
+
+    <p>
+      Two things worth trying in there. <strong>Swap the order of two passes</strong> and watch
+      the result move: light gets absorbed on the way down and again on the way back up, so a
+      translucent red over an opaque blue comes out a different colour from an opaque blue over a
+      translucent red. <strong>Then shrink the surface</strong> until the dither only has a handful
+      of lines to work with. The blend falls apart into stripes, which is what happens on a small
+      part too.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="td" data-short="Why it blends">Why a stack reads as one colour</h2>
+
+    <p>
+      Because filament is not paint. Every material has a <strong>Transmission Density</strong>
+      (TD), the thickness at which it absorbs one decade of the light passing through it. Low TD
+      is opaque, high TD is translucent, and the fork models this with the ordinary decadic
+      Beer–Lambert law.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>TD (in layer heights)</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>0.1 – 0.5</code></td><td>Highly opaque. One or two passes cover the colour beneath completely.</td></tr>
+        <tr><td><code>0.5 – 3.0</code></td><td>Opaque to translucent. Some of the layer below shows through.</td></tr>
+        <tr><td><code>3.0 – 7.0</code></td><td>Translucent. Several passes are needed to block what is under it.</td></tr>
+        <tr><td><code>7.0 – 10+</code></td><td>Highly translucent. The lower colour is almost always visible.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      The four TD sliders are saved <strong>per machine</strong> rather than per print profile
+      (<code>neotko_td_1..4</code>), because they describe the filament sitting on your shelf. Of
+      everything on this page they are the setting that most decides whether the preview matches
+      the plastic. <a href="optics.html">The optics page</a> has the maths, the reachable gamut
+      and the inverse colour search.
+    </p>
+
+    <figure>
+      <img src="../images/sandwich-editor-TD-control.png" width="457" height="644" alt="The Filament &amp; TD panel at the bottom of the Sandwich Editor: a TD slider per filament, the blended Top result, the Penultimate result, and the final on-print result with a transmit readout" loading="lazy">
+      <figcaption>The <b>Filament &amp; TD</b> panel at the foot of the Sandwich Editor. It shows the blended Top result, the Penultimate result, and the final on-print colour with the penultimate showing through by opacity, plus the <code>transmit=</code> readout.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="penu" data-short="The Penultimate layer">The Penultimate layer</h2>
+
+    <p>
+      The layer just under the top surface normally behaves like any other solid infill. Turn it
+      into its own zone and it gets its own density and its own stack of passes, which gives the
+      Sandwich a second storey to work with.
+    </p>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Strength</b><span class="sep">›</span><b>Top/bottom shells</b><span class="sep">›</span><b>Penultimate top layers</b>
+    </p>
+
+    <ul>
+      <li><strong>Penultimate top layers</strong> — how many solid layers below the top count as
+        penultimate. <b>Default 0</b>, which means the feature is off; set 1 or 2 to enable it
+        (maximum 20). They print at reduced density for a smoother transition and less time.</li>
+      <li><strong>Penultimate solid infill density</strong> — the density of that layer, default
+        100%.</li>
+    </ul>
+
+    <p>
+      When you <a href="painter.html">paint</a> a recipe whose penultimate zone actually does
+      something, <em>penu autonomy</em> forces two penultimate layers onto that object for you,
+      so the effect has a surface to print on. You do not need to remember this setting exists
+      to use the painter.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="filters" data-short="Zone &amp; filament filters">Zone and filament filters</h2>
+
+    <p>
+      Both zones carry two filters, independently.
+    </p>
+
+    <h3 id="zone-filter">All surfaces vs. Topmost only</h3>
+    <p>
+      On most models "the top surface" is not one face. Every horizontal face in the model
+      qualifies, including the tread of every step and the shoulder of every recess.
+      <em>All surfaces</em> applies the effect to all of them; <em>Topmost only</em> restricts it
+      to the single highest horizontal surface. On a staircase that is the difference between
+      colouring every step and colouring just the landing.
+    </p>
+
+    <h3 id="fil-filter">Filament filter</h3>
+    <p>
+      Apply the effect only to regions assigned to one filament number, <code>0</code>–<code>16</code>,
+      where <code>0</code> means no filter. The usual case: a red body on filament 1 with a white
+      logo on filament 2. Set the filter to <code>1</code> and the logo is left alone.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="realprint" data-short="On the bed">What it looks like off the bed</h2>
+
+    <figure>
+      <img src="../images/REALPRINTS/RealPrint-04a.webp" width="1201" height="493" alt="A printed two-colour gradient built from stacked Solid passes, the mix percentage varying tile by tile across the board" loading="lazy">
+      <figcaption>A two-colour gradient built entirely from <b>stacked Solid passes</b>. No dithering, no gradient pass: the mix varies per tile purely by how the layer height gets split between the two.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/REALPRINTS/RealPrint-04b.webp" width="1201" height="518" alt="The same stacked-pass construction printed with a different filament pair, showing a much narrower achievable range" loading="lazy">
+      <figcaption>The same construction with a different filament pair. <b>The reachable range depends almost entirely on how opaque the two filaments are</b>, which is why TD is worth measuring rather than guessing.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="neoweave" data-short="Neoweaving (WIP)">Neoweaving <span class="badge badge--wip" style="font-size:.62rem;vertical-align:middle">not wired in this build</span></h2>
+
+    <p>
+      This one is documented but has not been ported to the Snapmaker 2.3.5 base yet, so it is
+      here for completeness rather than as something you can switch on.
+    </p>
+
+    <p>
+      <strong>Neoweaving</strong> alternates the Z height of successive fill lines within a layer:
+      odd lines at the nominal height, even lines raised slightly. The next layer inverts the
+      pattern, so the raised lines nestle into the recesses below and the layers interlock like
+      puzzle pieces. It improves inter-layer adhesion and vibration damping without changing the
+      part's external dimensions. It is a structural trick; there is nothing to see.
+    </p>
+    <p>
+      <strong>Monotonic Interlayer Nesting</strong> is what makes it controllable: it shifts the
+      monotonic fill reference by half the line spacing on alternate layers, so the lines of layer
+      N sit over the gaps of layer N−1. That precise registration is the thing that lets the
+      raised and recessed lines lock together, so the two ship together.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>Toolchanges.</strong> Every pass with a different tool is a toolchange inside a
+        single layer, and each one purges. Keeping that under control is what
+        <a href="tower.html">NeoTower</a> is for, and it is why any Sandwich scene promotes the
+        wipe tower to NeoTower on its own.</li>
+      <li><strong>Time.</strong> A three-pass Top plus a two-pass Penultimate prints the same
+        surface five times, at five different heights.</li>
+      <li><strong>The shares must add up.</strong> If the passes in a zone total less than the
+        layer height, the remainder is not covered. Nothing stops you doing it, and the preview
+        will show it.</li>
+      <li><strong>Preview honesty.</strong> The standard G-code view draws each extrusion in its
+        raw filament colour, so a Sandwich reads as stripes there and looks nothing like the print.
+        That is what <a href="realcolor.html">RealColor</a> is for.</li>
+      <li><strong>TD accuracy is on you.</strong> With the TD sliders left at defaults on filaments
+        that differ a lot in opacity, every prediction on this page drifts, the demo above
+        included.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="index.html"><small>Back</small><b>All features</b></a>
+      <a class="is-next" href="colorstitch.html"><small>Next</small><b>ColorStitch →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§1</b>, <b>§2</b> and <b>§3</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="map.html">Feature map</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * sandwich-builder
+ *
+ * One data model, three views. The model is deliberately the same shape the
+ * app uses: zones -> passes -> {kind, tool, z}. Everything drawn is derived
+ * from a single function, `columns()`, which answers the only question that
+ * matters: for fill line i, what is the stack of material above the fill?
+ * ========================================================================= */
+Tour.demo('sandwich-builder', function (host) {
+  var el = Tour.el;
+
+  /* ------------------------------------------------------------- state -- */
+  var S = {
+    layerH: 0.20,
+    surfaceMm: 60,
+    lineWidth: 0.42,
+    magnify: false,
+    filaments: Optics.DEFAULT_FILAMENTS.map(function (f) { return { name: f.name, hex: f.hex, td: f.td }; }),
+    base: '#8d9199',                       // the object's own solid infill under the Sandwich
+    zones: {
+      penu: {
+        on: false,
+        passes: [ { kind: 'solid', tool: 0, z: 0.20, pctA: 50, toolB: 1 } ]
+      },
+      top: {
+        on: true,
+        passes: [
+          { kind: 'solid',  tool: 1, z: 0.12, pctA: 50, toolB: 2 },
+          { kind: 'stitch', tool: 2, z: 0.08, pctA: 50, toolB: 3 }
+        ]
+      }
+    }
+  };
+
+  var KINDS = [
+    ['solid',  'Solid'],
+    ['stitch', 'ColorStitch'],
+    ['pbhalf', 'PathBlend Half'],
+    ['pbfull', 'PathBlend Full']
+  ];
+
+  function tdMm(i) { return Optics.tdToMm(S.filaments[i].td, S.layerH); }
+  function hexOf(i) { return S.filaments[i].hex; }
+
+  function nLines() {
+    return Math.max(4, Math.min(420, Math.round(S.surfaceMm / (S.lineWidth * 0.85))));
+  }
+
+  /* --------------------------------------------------------- the model -- */
+  /**
+   * For every fill line, the stack of material above the object's fill,
+   * bottom-most first. This is the one function every view reads.
+   * Returns { n, cols: [ [ {colorHex, thickness, tdMm, tool} ... ] ] }
+   */
+  function columns() {
+    var n = nLines();
+    var cols = [];
+    for (var i = 0; i < n; i++) cols.push([]);
+
+    // Zones in print order: penultimate first (it is underneath), then top.
+    ['penu', 'top'].forEach(function (zk) {
+      var zone = S.zones[zk];
+      if (!zone.on) return;
+
+      zone.passes.forEach(function (p) {
+        if (p.kind === 'stitch') {
+          // The real Bresenham sequence, over the real number of fill lines.
+          var seq = Stitch.build(n, {
+            style: 'blend2',
+            tools: [p.tool, p.toolB, 0, 0],
+            pctA: p.pctA,
+            easing: Stitch.EASING.LINEAR
+          });
+          for (var i = 0; i < n; i++) {
+            cols[i].push({ tool: seq[i], colorHex: hexOf(seq[i]), thickness: p.z, tdMm: tdMm(seq[i]) });
+          }
+        } else if (p.kind === 'pbhalf' || p.kind === 'pbfull') {
+          // One physical print-height step per fill line: the staircase.
+          var floor = 0.04;
+          for (var j = 0; j < n; j++) {
+            var t = n === 1 ? 0.5 : j / (n - 1);
+            var h = Math.min(p.z, floor + t * (p.z - floor));
+            cols[j].push({ tool: p.tool, colorHex: hexOf(p.tool), thickness: h, tdMm: tdMm(p.tool) });
+            if (p.kind === 'pbfull' && p.z - h > 0.001) {
+              cols[j].push({ tool: p.toolB, colorHex: hexOf(p.toolB), thickness: p.z - h, tdMm: tdMm(p.toolB) });
+            }
+          }
+        } else {
+          for (var k = 0; k < n; k++) {
+            cols[k].push({ tool: p.tool, colorHex: hexOf(p.tool), thickness: p.z, tdMm: tdMm(p.tool) });
+          }
+        }
+      });
+    });
+
+    return { n: n, cols: cols };
+  }
+
+  /**
+   * Both views draw the same window into the surface. Zoomed out that is the
+   * whole thing; "Look closely" takes 26 consecutive lines from the middle,
+   * which is where a dither is representative and a gradient is mid-climb.
+   */
+  function window26(n) {
+    if (!S.magnify) return { start: 0, count: n };
+    var count = Math.min(n, 26);
+    return { start: Math.max(0, Math.floor(n / 2) - Math.floor(count / 2)), count: count };
+  }
+
+  function zoneHeight(zk) {
+    var z = S.zones[zk];
+    if (!z.on) return 0;
+    return z.passes.reduce(function (a, p) { return a + p.z; }, 0);
+  }
+  function totalHeight() { return zoneHeight('penu') + zoneHeight('top'); }
+
+  /* ------------------------------------------------------------- views -- */
+
+  var views = el('div.sb__views');
+  var pair  = el('div.sb__pair');
+
+  // -- cross-section --------------------------------------------------------
+  var xsBox = el('div.vbox');
+  var xsHd  = el('div.vbox__hd', null, [el('span', { text: 'Cross-section' }), el('span', { 'data-xs-mm': true })]);
+  xsBox.appendChild(xsHd);
+  var xsHost = el('div');
+  xsBox.appendChild(xsHost);
+
+  var xs = Tour.canvas(xsHost, drawSection, { height: 190, cursor: 'ns-resize' });
+
+  function sectionGeom(w, h) {
+    var padL = 34, padR = 10, padT = 10, padB = 16;
+    // Show a slice of the object below the Sandwich, sized relative to the
+    // Sandwich itself so the passes always get most of the box.
+    var sw = Math.max(0.12, totalHeight());
+    var baseMm = sw * 0.30;
+    var totalMm = sw + baseMm;
+    return {
+      padL: padL, padR: padR, padT: padT, padB: padB, baseMm: baseMm, totalMm: totalMm,
+      pw: w - padL - padR,
+      ph: h - padT - padB,
+      yOf: function (mm) { return padT + (h - padT - padB) * (1 - mm / totalMm); },
+      mmOf: function (y) { return (1 - (y - padT) / (h - padT - padB)) * totalMm; }
+    };
+  }
+
+  function drawSection(ctx, w, h) {
+    var g = sectionGeom(w, h);
+    var data = columns();
+    var win = window26(data.n);
+    var colW = g.pw / win.count;
+
+    var inkFaint = Tour.token('--ink-faint');
+    var rule = Tour.token('--rule');
+
+    // object body
+    ctx.fillStyle = S.base;
+    ctx.fillRect(g.padL, g.yOf(g.baseMm), g.pw, g.yOf(0) - g.yOf(g.baseMm));
+    ctx.globalAlpha = .35;
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    for (var xg = g.padL + 6; xg < g.padL + g.pw; xg += 9) {
+      ctx.beginPath(); ctx.moveTo(xg, g.yOf(0)); ctx.lineTo(xg - 7, g.yOf(g.baseMm)); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // the stack, column by column
+    for (var i = 0; i < win.count; i++) {
+      var x = g.padL + i * colW;
+      var acc = g.baseMm;
+      var stack = data.cols[win.start + i];
+      for (var k = 0; k < stack.length; k++) {
+        var p = stack[k];
+        var y0 = g.yOf(acc + p.thickness), y1 = g.yOf(acc);
+        ctx.fillStyle = p.colorHex;
+        ctx.fillRect(x, y0, Math.ceil(colW) + .4, y1 - y0);
+        acc += p.thickness;
+      }
+      // With room to spare, outline each extrusion so the alternation reads.
+      if (colW > 4) {
+        ctx.globalAlpha = .18; ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x + .5, g.yOf(acc)); ctx.lineTo(x + .5, g.yOf(g.baseMm)); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // zone dividers + labels
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = inkFaint;
+    ctx.lineWidth = 1;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = inkFaint;
+    ctx.textAlign = 'right';
+
+    var marks = [{ mm: g.baseMm, t: 'fill' }];
+    if (S.zones.penu.on) marks.push({ mm: g.baseMm + zoneHeight('penu'), t: 'penu' });
+    marks.push({ mm: g.baseMm + totalHeight(), t: 'top' });
+
+    marks.forEach(function (m) {
+      var y = g.yOf(m.mm);
+      ctx.beginPath(); ctx.moveTo(g.padL, y); ctx.lineTo(g.padL + g.pw, y); ctx.stroke();
+      ctx.fillText(m.t, g.padL - 5, y + 3);
+    });
+    ctx.setLineDash([]);
+
+    // draggable pass dividers (inside the top zone only — the common gesture)
+    var tz = S.zones.top;
+    if (tz.on && tz.passes.length > 1) {
+      var accd = g.baseMm + zoneHeight('penu');
+      for (var d = 0; d < tz.passes.length - 1; d++) {
+        accd += tz.passes[d].z;
+        var yd = g.yOf(accd);
+        ctx.strokeStyle = (dragIdx === d) ? Tour.token('--accent') : '#ffffff';
+        ctx.lineWidth = (dragIdx === d) ? 2.5 : 1.5;
+        ctx.beginPath(); ctx.moveTo(g.padL, yd); ctx.lineTo(g.padL + g.pw, yd); ctx.stroke();
+        // grip
+        ctx.fillStyle = (dragIdx === d) ? Tour.token('--accent') : '#ffffff';
+        ctx.fillRect(g.padL + g.pw - 16, yd - 2.5, 13, 5);
+      }
+    }
+
+    // scale
+    ctx.textAlign = 'left';
+    ctx.fillStyle = inkFaint;
+    ctx.fillText(totalHeight().toFixed(2) + ' mm', g.padL, h - 4);
+    ctx.textAlign = 'right';
+    ctx.fillText(S.magnify
+      ? win.count + ' of ' + data.n + ' fill lines'
+      : S.surfaceMm + ' mm across  ·  ' + data.n + ' fill lines', g.padL + g.pw, h - 4);
+
+    ctx.strokeStyle = rule;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(g.padL + .5, g.padT + .5, g.pw - 1, g.ph - 1);
+  }
+
+  // dragging a divider between two Top passes
+  var dragIdx = -1;
+  function dividerHit(y, w, h) {
+    var tz = S.zones.top;
+    if (!tz.on || tz.passes.length < 2) return -1;
+    var g = sectionGeom(w, h);
+    var acc = g.baseMm + zoneHeight('penu');
+    for (var d = 0; d < tz.passes.length - 1; d++) {
+      acc += tz.passes[d].z;
+      if (Math.abs(y - g.yOf(acc)) < 7) return d;
+    }
+    return -1;
+  }
+
+  Tour.draggable(xs.canvas, {
+    onDown: function (p) {
+      dragIdx = dividerHit(p.y, xs.width, xs.height);
+      if (dragIdx < 0) return false;
+      xs.render();
+    },
+    onMove: function (p) {
+      if (dragIdx < 0) return;
+      var g = sectionGeom(xs.width, xs.height);
+      var tz = S.zones.top;
+      var below = g.baseMm + zoneHeight('penu');
+      for (var d = 0; d < dragIdx; d++) below += tz.passes[d].z;
+      var pairTotal = tz.passes[dragIdx].z + tz.passes[dragIdx + 1].z;
+      var want = g.mmOf(p.y) - below;
+      want = Math.max(0.02, Math.min(pairTotal - 0.02, want));
+      tz.passes[dragIdx].z = Math.round(want * 1000) / 1000;
+      tz.passes[dragIdx + 1].z = Math.round((pairTotal - want) * 1000) / 1000;
+      redraw();
+    },
+    onUp: function () { dragIdx = -1; xs.render(); },
+    onHover: function (p) {
+      xs.canvas.style.cursor = dividerHit(p.y, xs.width, xs.height) >= 0 ? 'ns-resize' : 'default';
+    }
+  });
+
+  // -- top-down -------------------------------------------------------------
+  var tdBox = el('div.vbox');
+  tdBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'From above' }),
+    el('span', { 'data-td-note': true })
+  ]));
+  var tdHost = el('div');
+  tdBox.appendChild(tdHost);
+  var td = Tour.canvas(tdHost, drawTopDown, { height: 190 });
+
+  function drawTopDown(ctx, w, h) {
+    var data = columns();
+    var win = window26(data.n);
+    var shown = win.count;
+    var lw = h / shown;
+
+    for (var i = 0; i < shown; i++) {
+      var rgb = Optics.blendStacked(data.cols[win.start + i], S.base);
+      ctx.fillStyle = Optics.linearToCss(rgb);
+      ctx.fillRect(0, i * lw, w, lw + 1);
+    }
+
+    if (S.magnify) {
+      // draw the seam between lines so the individual extrusions read
+      ctx.globalAlpha = .16;
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      for (var j = 1; j < shown; j++) {
+        ctx.beginPath(); ctx.moveTo(0, j * lw); ctx.lineTo(w, j * lw); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  pair.appendChild(xsBox);
+  pair.appendChild(tdBox);
+  views.appendChild(pair);
+
+  // -- result ---------------------------------------------------------------
+  var resultRow = el('div.sb__result');
+  var resPatch = el('div.result__patch');
+  var resMeta = el('div.result__meta');
+  var resultBox = el('div.result', null, [resPatch, resMeta]);
+  resultRow.appendChild(resultBox);
+
+  var magBtn = Tour.toggle({
+    label: 'Look closely (26 lines)', value: false,
+    onChange: function (v) { S.magnify = v; redraw(); }
+  });
+  resultRow.appendChild(magBtn);
+  views.appendChild(resultRow);
+
+  /* ------------------------------------------------------------ controls */
+
+  function toolPicker(get, set) {
+    var row = el('div.toolpick');
+    S.filaments.forEach(function (f, i) {
+      var b = el('button', {
+        type: 'button', title: f.name + ' — TD ' + f.td,
+        'aria-pressed': get() === i, 'aria-label': f.name
+      });
+      b.style.background = f.hex;
+      b.addEventListener('click', function () { set(i); rebuild(); });
+      row.appendChild(b);
+    });
+    return row;
+  }
+
+  function passRow(zk, idx) {
+    var zone = S.zones[zk];
+    var p = zone.passes[idx];
+
+    var kindSel = el('select', { 'aria-label': 'Pass kind' });
+    KINDS.forEach(function (k) {
+      kindSel.appendChild(el('option', { value: k[0], text: k[1], selected: k[0] === p.kind }));
+    });
+    kindSel.addEventListener('change', function () {
+      p.kind = kindSel.value;
+      // PathBlend is always a single full-height gradient: picking it
+      // collapses the zone to one pass, exactly as the editor does.
+      if (p.kind === 'pbhalf' || p.kind === 'pbfull') {
+        var total = zone.passes.reduce(function (a, q) { return a + q.z; }, 0);
+        p.z = total;
+        zone.passes = [p];
+      }
+      rebuild();
+    });
+
+    var line1 = el('div.prow__line', null, [kindSel]);
+
+    var line2 = el('div.prow__line');
+    line2.appendChild(toolPicker(
+      function () { return p.tool; },
+      function (v) { p.tool = v; }
+    ));
+    if (p.kind === 'stitch' || p.kind === 'pbfull') {
+      line2.appendChild(el('span', { text: '→', style: 'color:var(--ink-faint);font-size:.7rem' }));
+      line2.appendChild(toolPicker(
+        function () { return p.toolB; },
+        function (v) { p.toolB = v; }
+      ));
+    }
+    line2.appendChild(el('span.prow__z', { text: p.z.toFixed(2) + ' mm' }));
+
+    var extra = null;
+    if (p.kind === 'stitch') {
+      extra = el('div.prow__line', null, [
+        el('span', { text: 'mix', style: 'font-size:.68rem;color:var(--ink-faint)' }),
+        (function () {
+          var r = el('input', { type: 'range', min: 0, max: 100, step: 1, value: p.pctA, style: 'flex:1' });
+          var lab = el('span.prow__z', { text: p.pctA + '%' });
+          r.addEventListener('input', function () {
+            p.pctA = parseInt(r.value, 10);
+            lab.textContent = p.pctA + '%';
+            redraw();
+          });
+          var wrap = el('div', { style: 'display:flex;gap:.3rem;align-items:center;flex:1;min-width:0' }, [r, lab]);
+          return wrap;
+        })()
+      ]);
+    }
+
+    var acts = el('div.prow__acts');
+    if (idx < zone.passes.length - 1) {
+      acts.appendChild(el('button', {
+        type: 'button', text: '▲', title: 'Move up in the stack',
+        onclick: function () {
+          var t = zone.passes[idx + 1]; zone.passes[idx + 1] = zone.passes[idx]; zone.passes[idx] = t; rebuild();
+        }
+      }));
+    }
+    if (zone.passes.length > 1) {
+      acts.appendChild(el('button', {
+        type: 'button', text: '×', title: 'Remove this pass',
+        onclick: function () {
+          var freed = p.z;
+          zone.passes.splice(idx, 1);
+          zone.passes[Math.min(idx, zone.passes.length - 1)].z += freed;
+          rebuild();
+        }
+      }));
+    }
+
+    var mid = el('div.prow__mid', null, extra ? [line1, line2, extra] : [line1, line2]);
+    return el('div.prow', null, [el('span.prow__n', { text: String(idx + 1) }), mid, acts]);
+  }
+
+  function zoneBlock(zk, label, chipColor) {
+    var zone = S.zones[zk];
+    var hd = el('div.zone__hd', null, [
+      (function () { var c = el('span.zone__chip'); c.style.background = chipColor; return c; })(),
+      el('span', { text: label })
+    ]);
+
+    if (zk === 'penu') {
+      hd.appendChild(el('button.btn.btn--sm' + (zone.on ? '.btn--on' : ''), {
+        type: 'button', text: zone.on ? 'on' : 'off',
+        style: 'margin-left:auto',
+        onclick: function () { zone.on = !zone.on; rebuild(); }
+      }));
+    } else {
+      var canAdd = zone.passes.length < 3 &&
+        !zone.passes.some(function (p) { return p.kind === 'pbhalf' || p.kind === 'pbfull'; });
+      hd.appendChild(el('button.btn.btn--sm', {
+        type: 'button', text: '+ pass', style: 'margin-left:auto',
+        disabled: !canAdd,
+        onclick: function () {
+          if (!canAdd) return;
+          // A new pass takes half of the topmost one, so nothing else moves —
+          // the same rule the painter's "Duplicate pass" follows.
+          var last = zone.passes[zone.passes.length - 1];
+          var half = Math.round((last.z / 2) * 1000) / 1000;
+          last.z = last.z - half;
+          zone.passes.push({ kind: 'solid', tool: 3, z: half, pctA: 50, toolB: 0 });
+          rebuild();
+        }
+      }));
+    }
+
+    var rows = el('div.zone__rows');
+    if (zone.on) zone.passes.forEach(function (_, i) { rows.appendChild(passRow(zk, i)); });
+    else rows.appendChild(el('p.small.muted', { text: 'Off. The layer under the top prints as ordinary solid infill.', style: 'margin:.2rem .3rem' }));
+
+    return el('div.zone', null, [hd, rows]);
+  }
+
+  var stackCol = el('div.sb__stackcol');
+
+  function rebuildStackCol() {
+    stackCol.textContent = '';
+    // Printing order runs bottom to top, and so does this column.
+    stackCol.appendChild(zoneBlock('top', 'Top layer', '#3f9e6b'));
+    stackCol.appendChild(zoneBlock('penu', 'Penultimate', '#2b6b4a'));
+  }
+
+  /* ------------------------------------------------------ filament bank */
+
+  var bank = el('div.fila');
+  function buildBank() {
+    bank.textContent = '';
+    S.filaments.forEach(function (f, i) {
+      var swatch = el('input', { type: 'color', value: f.hex, 'aria-label': f.name + ' colour' });
+      var tdLab = el('span.fila__td', { text: 'TD ' + f.td.toFixed(1) + ' · ' + Optics.tdBand(f.td) });
+      var tdIn = el('input', { type: 'range', min: 0.2, max: 8, step: 0.1, value: f.td, 'aria-label': f.name + ' TD' });
+
+      swatch.addEventListener('input', function () { f.hex = swatch.value; rebuild(); });
+      tdIn.addEventListener('input', function () {
+        f.td = parseFloat(tdIn.value);
+        tdLab.textContent = 'TD ' + f.td.toFixed(1) + ' · ' + Optics.tdBand(f.td);
+        redraw();
+      });
+
+      bank.appendChild(el('div.fila__one', null, [
+        el('div.fila__top', null, [swatch, el('b', { text: f.name })]),
+        tdIn, tdLab
+      ]));
+    });
+  }
+
+  /* ---------------------------------------------------------- the scene */
+
+  var scene = el('div.ctrls', { style: 'margin-top:1rem' }, [
+    Tour.slider({
+      label: 'Layer height', min: 0.08, max: 0.32, step: 0.01, value: S.layerH,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) {
+        // Rescale the top zone so it keeps filling exactly one layer.
+        var old = S.zones.top.passes.reduce(function (a, p) { return a + p.z; }, 0);
+        var k = v / (old || v);
+        S.zones.top.passes.forEach(function (p) { p.z = Math.round(p.z * k * 1000) / 1000; });
+        S.zones.penu.passes.forEach(function (p) { p.z = v; });
+        S.layerH = v;
+        redraw();
+      }
+    }),
+    Tour.slider({
+      label: 'Surface size', min: 10, max: 140, step: 2, value: S.surfaceMm,
+      format: function (v) { return v + ' mm'; },
+      onInput: function (v) { S.surfaceMm = v; redraw(); }
+    })
+  ]);
+
+  /* ------------------------------------------------------------- render */
+
+  function redraw() {
+    xs.render();
+    td.render();
+
+    var data = columns();
+    var sum = [0, 0, 0];
+    for (var i = 0; i < data.n; i++) {
+      var c = Optics.blendStacked(data.cols[i], S.base);
+      sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+    }
+    var avg = [sum[0] / data.n, sum[1] / data.n, sum[2] / data.n];
+
+    // "transmit" — how much of the object's own fill still reaches the eye,
+    // averaged over the surface. This is the readout the TD panel shows.
+    var tsum = 0;
+    for (var j = 0; j < data.n; j++) tsum += Optics.stackTransmittance(data.cols[j]);
+    var transmit = tsum / data.n;
+
+    resPatch.style.background = Optics.linearToCss(avg);
+    resMeta.innerHTML =
+      '<b>' + Optics.linearToHex(avg) + '</b> &nbsp;what the eye resolves<br>' +
+      '<span class="muted">' + totalHeight().toFixed(2) + ' mm of Sandwich · transmit ' +
+      (transmit * 100).toFixed(1) + '% · ' + data.n + ' fill lines</span>';
+
+    var note = host.querySelector('[data-td-note]');
+    if (note) note.textContent = S.magnify ? 'magnified' : 'actual line density';
+    var mm = host.querySelector('[data-xs-mm]');
+    if (mm) mm.textContent = totalHeight().toFixed(2) + ' mm';
+  }
+
+  function rebuild() {
+    rebuildStackCol();
+    redraw();
+  }
+
+  /* ---------------------------------------------------------- assemble */
+
+  var grid = el('div.sb', null, [stackCol, views]);
+  host.appendChild(grid);
+  host.appendChild(el('hr', { style: 'margin:1.1rem 0 .9rem' }));
+  host.appendChild(el('p', {
+    style: 'font-size:.78rem;color:var(--ink-faint);margin:0 0 .5rem;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase',
+    text: 'Your filaments'
+  }));
+  host.appendChild(bank);
+  host.appendChild(scene);
+
+  buildBank();
+  rebuild();
+});
+</script>
+
+</body>
+</html>

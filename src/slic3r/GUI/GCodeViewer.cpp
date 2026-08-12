@@ -43,6 +43,9 @@
 #include <array>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>     // NEOTKO_REALCOLOR_TAG s253 — snprintf de los rótulos de los paneles
+#include <functional> // NEOTKO_REALCOLOR_TAG s253 — std::function del helper labelled() del panel
+#include <cmath>   // NEOTKO_PHOTOMODE_TAG s253 — atan2/asin/cos/sin de los sliders de dirección de luz
 #include <map>     // NEOTKO_REALCOLOR_TAG s251 — resumen por role del volcado de medida del eje
 #include <sstream> // NEOTKO_REALCOLOR_TAG s251 — idem
 
@@ -1367,12 +1370,18 @@ static double realcolor_nominal_layer_height()
 void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& str_tool_colors)
 {
     std::vector<std::string> hex = str_tool_colors;
-    while (hex.size() < 4) hex.push_back("#808080");
+    // NEOTKO_REALCOLOR_TAG s253: se rellena hasta REALCOLOR_MAX_TOOLS, no hasta 4. Los slots sin
+    // filamento real quedan en gris neutro y TD 1.0: nunca se dibujan (ningún path los referencia),
+    // pero el shader indexa la tabla con u_tool_id sin comprobar nada, así que TIENE que estar
+    // entera. Es justo el agujero que producía los negros del bug de s253.
+    // Cuántos hay de verdad, antes de rellenar: es lo que la ventana de materiales enseñará.
+    m_realcolor_tool_count = std::clamp((int)hex.size(), 1, REALCOLOR_MAX_TOOLS);
+    while ((int)hex.size() < REALCOLOR_MAX_TOOLS) hex.push_back("#808080");
 
     const double nominal_layer_height = realcolor_nominal_layer_height();
 
     auto* ac = wxGetApp().app_config;
-    for (int t = 0; t < 4; ++t) {
+    for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
         if (!decode_color(hex[t], m_realcolor_materials.rgb[t]))
             m_realcolor_materials.rgb[t] = ColorRGB(0.5f, 0.5f, 0.5f);
 
@@ -4471,6 +4480,51 @@ static constexpr int REALCOLOR_SUPERSAMPLE = 2;
 static constexpr float REALCOLOR_AO_RADIUS_PX = 4.0f;
 static constexpr float REALCOLOR_AO_STRENGTH = 0.35f;
 
+// NEOTKO_PHOTOMODE_TAG s253 — MAPA DE SOMBRAS DE REALCOLOR.
+//
+// Fuerza de la sombra: por debajo de la de shells (0.55) a propósito. Aquí el ocluyente es la malla
+// IDEAL y el receptor son los cordones reales, o sea que la sombra es una aproximación de otra
+// superficie; una sombra suave perdona los desajustes de esa aproximación, una dura los subraya.
+static constexpr float REALCOLOR_SHADOW_STRENGTH = 0.45f;
+// Sesgo por normal, en mm de mundo. Se suma al tamaño del téxel: el téxel cubre el error de
+// resolución del mapa, y este término cubre lo OTRO, que es lo específico de aquí — que ocluyente y
+// receptor son superficies distintas separadas por el relieve del cordón. Un cordón típico asoma
+// ~0.1-0.2 mm sobre su vecino; 0.30 deja margen sin despegar la sombra visiblemente.
+static constexpr float REALCOLOR_SHADOW_BEAD_BIAS_MM = 0.30f;
+
+// NEOTKO_PHOTOMODE_TAG s253: sombras de contacto de RealColor — el razonamiento completo está en
+// compute_contact_shadow() (realcolor_present.fs). Aquí sólo los números, junto a los del AO porque
+// son hermanos: los dos son post-proceso de pantalla sobre las mismas texturas de profundidad y
+// normal, y ninguno de los dos es un ajuste de usuario.
+//
+// El ALCANCE es corto a propósito y es el número que más importa. shells_lit usa 6 mm, que barre una
+// pieza entera vista de lejos; aquí lo que se busca es el escalón de un texto grabado o el borde de
+// un voladizo, que mide décimas de milímetro. Con un alcance largo sobre un campo de cordones la
+// marcha encuentra ocluyentes por todas partes y el resultado es ruido, no sombra.
+//
+// 🚫 APAGADA (fuerza 0) EN s253, POR DECISIÓN CONJUNTA CON EL USUARIO — Y EL PORQUÉ VALE MÁS QUE EL
+// CÓDIGO, ASÍ QUE NO SE BORRA:
+//
+// Se escribió para dar la sombra de un texto sobre su propia cara y no funcionó. Dos causas, una
+// mía (la inversa de la proyección, ver más abajo en el envío de u_inv_proj) y una del terreno:
+// **esta superficie es un campo de medios cilindros, y la corrugación derrota a cualquier técnica
+// de pantalla que compare un píxel con su vecino.** Al subir los filtros lo bastante para que el
+// cordón de al lado dejara de contar como ocluyente, dejaban de contar también las letras — porque
+// el sesgo necesario era del mismo orden que el detalle buscado. No hay ventana entre las dos.
+//
+// Es la SEGUNDA vez que esta misma propiedad tumba la misma familia de soluciones: la primera fue
+// el SSS de pantalla (s251c, ver la nota de u_light_wrap en realcolor_peel.vs). Ya no es mala
+// suerte, es una característica de RealColor que conviene dar por sabida antes de intentar la
+// tercera.
+//
+// El relevo lo coge el mapa de sombras (REALCOLOR_SHADOW_* aquí al lado), que no compara vecinos y
+// además da la sombra larga, que era lo que el usuario pedía en realidad. Se deja todo escrito y a
+// fuerza 0 —bit-idéntico a no tenerlo— en vez de borrarlo: el código es correcto y barato de
+// reencender si algún día se quiere el matiz de contacto CORTO encima del mapa.
+static constexpr float REALCOLOR_SSCS_LENGTH_MM    = 1.2f;
+static constexpr float REALCOLOR_SSCS_THICKNESS_MM = 1.0f;
+static constexpr float REALCOLOR_SSCS_STRENGTH     = 0.0f;
+
 // NEOTKO_REALCOLOR_TAG s166 (item 4): render_shells() Phong+SSAO path constants — mirrors the
 // pattern above, native-canvas-resolution radius (no supersampling for shells, see
 // ShellsAOCache). Debug-gated (NeoDebug::REALCOLOR) — see render_shells().
@@ -4875,6 +4929,60 @@ static std::array<float, 3> realcolor_bead_axis(const Vec3f& acc)
 // render_toolpaths_realcolor(). Linear-space RGB (this whole pipeline works in linear, see
 // srgb_to_linear/linear_to_srgb in realcolor_accum.fs/realcolor_present.fs).
 
+// NEOTKO_PHOTOMODE_TAG s253 (P0): ver la declaración en GCodeViewer.hpp para por qué esto es una
+// función y no dos lecturas sueltas de m_realcolor_tuning.
+//
+// Fuera del modo foto devuelve tal cual las dos constantes históricas ⇒ imagen bit-idéntica a s252.
+//
+// 🔑 EL ENGANCHE DE PHOTO MODE ESTÁ AQUÍ Y SÓLO AQUÍ, y va condicionado a que el modo sea **del
+// canvas de Preview**. Sin esa segunda condición, encender el modo foto en Prepare cambiaría en
+// silencio la iluminación del visor de gcode — el clásico flag global que se queda pegado, del que
+// el árbol ya tiene dos avisos escritos (PartPlateList::render_logo_suppressed).
+//
+// ⚠️ SÓLO SE TOMA LA DIRECCIÓN, NO LA INTENSIDAD, y esto es una decisión, no una fase a medias.
+// Las intensidades de RealColor (light_key = 0.384, light_fill = 0.197) no son un gusto: son el
+// reparto de energía que s251c calculó para que la simulación de color siga siendo creíble. Las de
+// PhotoLight son las viejas de shells_lit (0.48 / 0.18) y pisarlas al entrar en el modo cambiaría
+// el brillo de golpe sin que el usuario haya tocado nada — justo la frontera "cosmético vs verdad
+// del color" que el usuario marcó en s253. Girar la luz reordena las sombras propias; cambiar
+// cuánta hay altera lo que la vista promete predecir. Si más adelante se quiere exponer, que sea
+// un mando explícito del panel del modo y con su aviso, no un efecto lateral de entrar.
+void GCodeViewer::realcolor_light_dirs(Vec3f& key_dir_world, Vec3f& fill_dir_world) const
+{
+    const PhotoModeState& pm = photo_mode();
+    if (pm.active && pm.owner == PhotoOwner::Preview) {
+        // PhotoLight::enabled se ignora aquí, y es coherente con lo de arriba: apagar una luz es
+        // poner su intensidad a 0, y la intensidad no se está tomando. Si se respetase `enabled`
+        // sin poder tocar la intensidad, una luz "apagada" acabaría siendo una luz cenital con la
+        // misma fuerza — peor que no hacer nada. Entra cuando entre la intensidad.
+        key_dir_world  = pm.key.dir_world().cast<float>();
+        fill_dir_world = pm.fill.dir_world().cast<float>();
+        return;
+    }
+
+    const auto& k = m_realcolor_tuning.light_key_dir;
+    const auto& f = m_realcolor_tuning.light_fill_dir;
+    key_dir_world  = Vec3f(k[0], k[1], k[2]);
+    fill_dir_world = Vec3f(f[0], f[1], f[2]);
+
+    // 🔑 AQUÍ NO SE NORMALIZA, Y NO ES UN OLVIDO — es lo que hace que el neutro sea bit-idéntico.
+    //
+    // Lo natural sería normalizar (el shader no renormaliza el NdotL envolvente, así que "vector
+    // unitario" es el contrato). Pero la constante `fill` histórica NO ES UNITARIA: su comentario
+    // dice "normalized values for (1/1.43, 0.2/1.43, 1/1.43)" y la norma real de (1, 0.2, 1) es
+    // 1.42829, no 1.43. El vector mide 0.99767, un 0.23% corto, desde que se escribió. La `key` sí
+    // sale unitaria exacta.
+    //
+    // Ese 0.23% es luz de relleno real que lleva años en la imagen. Normalizar aquí la subiría, y
+    // el criterio de esta fase es que con nadie tocando nada el render no cambie NI UN BIT.
+    // Así que se respeta el vector tal cual y la normalización se hace donde toca: en el panel,
+    // cuando el usuario escribe un ángulo (ahí el vector nace unitario por construcción).
+    //
+    // Lo único que sí se guarda es el vector nulo: daría NaN en el dot y pintaría el modelo negro.
+    if (key_dir_world.squaredNorm()  < 1e-12f) key_dir_world  = Vec3f(0.0f, 0.0f, 1.0f);
+    if (fill_dir_world.squaredNorm() < 1e-12f) fill_dir_world = Vec3f(0.0f, 0.0f, 1.0f);
+}
+
 GCodeViewer::RealColorFingerprint GCodeViewer::compute_realcolor_fingerprint(int canvas_width, int canvas_height) const
 {
     RealColorFingerprint fp;
@@ -4892,6 +5000,16 @@ GCodeViewer::RealColorFingerprint GCodeViewer::compute_realcolor_fingerprint(int
     // NEOTKO_REALCOLOR_TAG s251b: sin esto la ventana de materiales parecería rota — ver el
     // comentario del campo en RealColorFingerprint (GCodeViewer.hpp).
     fp.finish = m_realcolor_materials.finish;
+    // NEOTKO_PHOTOMODE_TAG s253 (P0): idem para la dirección de las luces — ver el comentario del
+    // campo en RealColorFingerprint. Se lee de la MISMA función que alimenta los uniforms
+    // (realcolor_light_dirs) para que fingerprint y render no puedan discrepar: si se leyeran por
+    // separado de m_realcolor_tuning, el día que Photo Mode los sobreescriba el fingerprint
+    // seguiría mirando el valor viejo y la caché no se enteraría.
+    {
+        Vec3f key_dir, fill_dir;
+        realcolor_light_dirs(key_dir, fill_dir);
+        fp.light_dirs = { key_dir.x(), key_dir.y(), key_dir.z(), fill_dir.x(), fill_dir.y(), fill_dir.z() };
+    }
     fp.layers_z_range[0] = m_layers_z_range[0];
     fp.layers_z_range[1] = m_layers_z_range[1];
     fp.moves_first = static_cast<unsigned int>(m_sequential_view.current.first);
@@ -4912,8 +5030,8 @@ bool GCodeViewer::ensure_realcolor_fbos(int w, int h)
     // to the real canvas size, so `sw`/`sh` are used for every make_attachment() call below,
     // while m_realcolor_cache.tex_w/tex_h keep tracking the BASE canvas size (that's what the
     // cache-hit check above and the fingerprint compare against).
-    const int sw = w * REALCOLOR_SUPERSAMPLE;
-    const int sh = h * REALCOLOR_SUPERSAMPLE;
+    const int sw = w * realcolor_supersample();
+    const int sh = h * realcolor_supersample();
     NEOTKO_LOG(REALCOLOR, "ensure_realcolor_fbos: (re)creating at " << w << "x" << h << " (supersampled " << sw << "x" << sh << ")");
     destroy_realcolor_fbos();
 
@@ -5244,12 +5362,33 @@ void GCodeViewer::render_realcolor_materials_panel()
     if (!m_realcolor_materials_panel_open)
         return;
 
+    // NEOTKO_REALCOLOR_TAG s253 — PASADA DE PRESENTACIÓN (petición del usuario).
+    //
+    // El contenido no cambia: cambia cómo se presenta. Lo que había era una lista vertical de 4
+    // filamentos, cada uno con su combo y sus cuatro sliders uno debajo de otro, y una pastilla de
+    // color de 18 px. Con 4 filamentos ya era una columna larguísima; con 16 (s253) es inmanejable.
+    //
+    // Tres decisiones, todas del usuario:
+    //   · DOS COLUMNAS en vez de una fila por filamento — la mitad de alto y se comparan de un vistazo.
+    //   · La pastilla de color al DOBLE (36 px). Es lo que identifica la fila: el usuario dijo
+    //     explícitamente que el nombre del filamento le da igual porque el color ya se ve, así que
+    //     el color tiene que verse DE VERDAD.
+    //   · Tipografía y textos limpios: cabeceras de sección, etiquetas cortas y alineadas, y el
+    //     término técnico en el tooltip en vez de en la etiqueta.
     ImGuiWrapper& imgui = *wxGetApp().imgui();
     bool open = true;
+
+    // Ancho fijo, no "lo que salga". Dos tarjetas más los márgenes; la altura sí se deja crecer con
+    // el número de filamentos.
+    const float card_w = 300.0f;
+    ImGui::SetNextWindowSize(ImVec2(card_w * 2.0f + 46.0f, 0.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin(_u8L("Filament finish").c_str(), &open);
 
-    imgui.text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-        _u8L("How each filament reflects light. Affects the RealColor preview only — it never changes the print."));
+    imgui.text_colored(ImVec4(0.62f, 0.62f, 0.62f, 1.0f),
+        _u8L("How each filament reflects light and how much light passes through it."));
+    imgui.text_colored(ImVec4(0.62f, 0.62f, 0.62f, 1.0f),
+        _u8L("Affects the RealColor preview only — it never changes the print."));
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
     // NEOTKO_REALCOLOR_TAG s251e: DOS banderas, no una, y la distinción importa.
     //   `changed`       → hay que recalcular el composite (lo dispara CUALQUIER edición).
@@ -5259,49 +5398,93 @@ void GCodeViewer::render_realcolor_materials_panel()
     // camino de guardado explícito más abajo, así que aquí no debe tocar disco.
     bool changed = false;
     bool finish_changed = false;
-    for (int t = 0; t < 4; ++t) {
-        ImGui::PushID(t);
-        ImGui::Separator();
+    const int n_shown = std::clamp(m_realcolor_tool_count, 1, REALCOLOR_MAX_TOOLS);
 
-        // La pastilla de color real del slot: es lo que hace reconocible la fila de un vistazo,
-        // mucho antes que el número del extrusor.
+    // Etiqueta a la izquierda y control a la derecha, con la columna de etiquetas a un ancho fijo.
+    // Es lo que hace que las cuatro filas de una tarjeta se lean como una tabla y no como cuatro
+    // controles sueltos que empiezan cada uno donde le toca.
+    const float label_w = 78.0f;
+    auto labelled = [&](const char* text, const char* tip, const std::function<bool()>& widget) {
+        // Se guarda la X de ARRANQUE de la fila y el control se coloca en x0 + label_w. Alinear
+        // restando el ancho del texto (lo primero que se me ocurrió) deja la columna moviéndose con
+        // cada etiqueta, que es justo el desalineado que hace que un panel parezca de programador.
+        const float x0 = ImGui::GetCursorPosX();
+        imgui.text(text);
+        if (tip != nullptr && ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tip);
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(x0 + label_w);
+        return widget();
+    };
+
+    for (int t = 0; t < n_shown; ++t) {
+        ImGui::PushID(t);
+        // Dos por fila: la segunda se pega a la primera, y a partir de ahí se salta de línea sola.
+        if ((t % 2) == 1)
+            ImGui::SameLine();
+        ImGui::BeginGroup();
+
+        // --- cabecera de la tarjeta: la pastilla grande + el número de slot.
         const ColorRGB& c = m_realcolor_materials.rgb[t];
         ImGui::ColorButton("##swatch", ImVec4(c.r(), c.g(), c.b(), 1.0f),
-                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(18, 18));
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(36, 36));
         ImGui::SameLine();
+        ImGui::BeginGroup();
         imgui.text(_u8L("Filament") + " " + std::to_string(t + 1));
+        imgui.text_colored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           realcolor_finish_preset_name(m_realcolor_materials.finish_preset[t]));
+        ImGui::EndGroup();
 
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
         std::array<float, 3>& fin = m_realcolor_materials.finish[t];
+        ImGui::PushItemWidth(card_w - label_w - 24.0f);
 
         // El combo de presets. `Custom` está en la lista para poder MOSTRARLO cuando los sliders no
         // casan con ninguna fila, pero elegirlo a mano no significa nada — por eso seleccionarlo no
         // toca los valores: no hay ningún "valor de Custom" que aplicar.
         const int cur = m_realcolor_materials.finish_preset[t];
-        if (ImGui::BeginCombo("##preset", realcolor_finish_preset_name(cur))) {
-            for (int p = 0; p <= (int)RealColorFinishPreset::Silk; ++p) {
-                const bool sel = (p == cur);
-                if (ImGui::Selectable(realcolor_finish_preset_name(p), sel)) {
-                    fin = realcolor_finish_preset_values(p);
-                    finish_changed = true;
+        if (labelled(_u8L("Finish").c_str(), _u8L("Starting point. The three sliders below fine-tune it.").c_str(), [&] {
+            bool hit = false;
+            if (ImGui::BeginCombo("##preset", realcolor_finish_preset_name(cur))) {
+                for (int p = 0; p <= (int)RealColorFinishPreset::Silk; ++p) {
+                    const bool sel = (p == cur);
+                    if (ImGui::Selectable(realcolor_finish_preset_name(p), sel)) {
+                        fin = realcolor_finish_preset_values(p);
+                        hit = true;
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
                 }
-                if (sel) ImGui::SetItemDefaultFocus();
+                ImGui::EndCombo();
             }
-            ImGui::EndCombo();
+            return hit;
+        })) {
+            finish_changed = true;
         }
 
         // Los tres finos, para calibrar contra una foto una vez elegido el preset de partida.
-        finish_changed |= imgui.slider_float(_u8L("Gloss").c_str(),     &fin[0],  0.0f, 3.0f, "%.2f");
-        finish_changed |= imgui.slider_float(_u8L("Roughness").c_str(), &fin[1], -1.0f, 1.0f, "%.2f");
-        finish_changed |= imgui.slider_float(_u8L("Sheen").c_str(),     &fin[2],  0.0f, 3.0f, "%.2f");
+        finish_changed |= labelled(_u8L("Gloss").c_str(),
+            _u8L("Strength of the direct highlight.").c_str(),
+            [&] { return imgui.slider_float("##gloss", &fin[0], 0.0f, 3.0f, "%.2f"); });
+        finish_changed |= labelled(_u8L("Roughness").c_str(),
+            _u8L("Higher scatters the reflection; lower keeps it sharp.").c_str(),
+            [&] { return imgui.slider_float("##rough", &fin[1], -1.0f, 1.0f, "%.2f"); });
+        finish_changed |= labelled(_u8L("Sheen").c_str(),
+            _u8L("The silk-like band that runs across the extrusion lines.").c_str(),
+            [&] { return imgui.slider_float("##sheen", &fin[2], 0.0f, 3.0f, "%.2f"); });
 
-        // NEOTKO_REALCOLOR_TAG s251e: TD del slot, en la misma fila que su acabado. Están juntos
+        // NEOTKO_REALCOLOR_TAG s251e: TD del slot, en la misma tarjeta que su acabado. Están juntos
         // porque son las DOS propiedades ópticas del material — el TD dice cuánta luz atraviesa el
         // plástico y el acabado cómo se refleja en su superficie — y calibrarlas en ventanas
         // distintas obliga a recordar de memoria lo que se acaba de ver.
         //
         // ⚠️ Pero NO se comporta igual, y la UI tiene que decirlo: esto es el único control de esta
-        // ventana que acaba tocando la pieza. Por eso va detrás del botón de guardar de abajo.
-        if (imgui.slider_float(_u8L("TD (unsaved)").c_str(), &m_realcolor_td_edit[t], 0.01f, 10.0f, "%.3f")) {
+        // ventana que acaba tocando la pieza. Por eso el botón de guardar vive abajo y aparte.
+        // NEOTKO_REALCOLOR_TAG s253: la etiqueta vuelve a ser "TD" a secas — el usuario pidió el
+        // mismo nombre que en el resto del programa. Que esté sin guardar se dice UNA vez, en el
+        // botón de abajo, no repetido en cada una de las 16 filas.
+        if (labelled(_u8L("TD").c_str(),
+                _u8L("Transmission distance, in mm: how deep light travels into this filament.").c_str(),
+                [&] { return imgui.slider_float("##td", &m_realcolor_td_edit[t], 0.01f, 10.0f, "%.3f"); })) {
             m_realcolor_td_edit[t] = std::max(0.01f, std::min(10.0f, m_realcolor_td_edit[t]));
             // El preview sí se actualiza al instante — ese es el punto de poder calibrar en vivo.
             // Y basta con tocar m_realcolor_materials.td[]: ya está dentro del fingerprint desde
@@ -5311,12 +5494,16 @@ void GCodeViewer::render_realcolor_materials_panel()
             changed = true;
         }
 
+        ImGui::PopItemWidth();
+        ImGui::Dummy(ImVec2(card_w, 4.0f)); // fija el ancho de la tarjeta y deja aire entre filas
+        ImGui::EndGroup();
         ImGui::PopID();
     }
 
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
     ImGui::Separator();
     if (ImGui::Button(_u8L("Reset all to Plastic").c_str())) {
-        for (int t = 0; t < 4; ++t)
+        for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t)
             m_realcolor_materials.finish[t] = realcolor_finish_preset_values((int)RealColorFinishPreset::Plastic);
         finish_changed = true;
     }
@@ -5337,7 +5524,7 @@ void GCodeViewer::render_realcolor_materials_panel()
         if (ImGui::Button(_u8L("Save TD").c_str())) {
             if (auto* ac = wxGetApp().app_config) {
                 char buf[32];
-                for (int t = 0; t < 4; ++t) {
+                for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
                     std::snprintf(buf, sizeof(buf), "%.3f", m_realcolor_td_edit[t]);
                     ac->set("neotko_td_" + std::to_string(t + 1), buf);
                 }
@@ -5359,7 +5546,7 @@ void GCodeViewer::render_realcolor_materials_panel()
             // Descartar una edición de TD tiene que revertir el TD y nada más.
             const float h = (float)realcolor_nominal_layer_height();
             auto* ac = wxGetApp().app_config;
-            for (int t = 0; t < 4; ++t) {
+            for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
                 float td = 1.0f;
                 if (ac) {
                     const std::string v = ac->get("neotko_td_" + std::to_string(t + 1));
@@ -5385,7 +5572,7 @@ void GCodeViewer::render_realcolor_materials_panel()
         // Ver realcolor_finish_match_preset().
         if (auto* ac = wxGetApp().app_config) {
             char buf[64];
-            for (int t = 0; t < 4; ++t) {
+            for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
                 const std::array<float, 3>& f = m_realcolor_materials.finish[t];
                 std::snprintf(buf, sizeof(buf), "%.3f,%.3f,%.3f", f[0], f[1], f[2]);
                 ac->set("neotko_finish_" + std::to_string(t + 1), buf);
@@ -5395,7 +5582,7 @@ void GCodeViewer::render_realcolor_materials_panel()
             // confirmar (ver Tab.cpp). Sin esto el ajuste sólo sobreviviría a un cierre limpio.
             ac->save();
         }
-        for (int t = 0; t < 4; ++t)
+        for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t)
             m_realcolor_materials.finish_preset[t] = realcolor_finish_match_preset(m_realcolor_materials.finish[t]);
         NEOTKO_LOG(REALCOLOR, "render_realcolor_materials_panel: finish changed -> app_config");
     }
@@ -5404,6 +5591,259 @@ void GCodeViewer::render_realcolor_materials_panel()
     // detectaría por su cuenta —ambos campos están dentro—, pero hacerlo explícito evita depender de
     // que alguien recuerde mantener ese struct al día al añadir el siguiente mando.
     if (changed || finish_changed)
+        m_realcolor_cache.valid = false;
+}
+
+// NEOTKO_PHOTOMODE_TAG s253 — EL PANEL DEL MODO FOTO EN EL VISOR DE GCODE.
+//
+// Panel de USUARIO, no de debug: no lleva el gate de NeoDebug::render_panels_enabled(). Existe sólo
+// mientras el modo está encendido Y es de esta pestaña, así que no puede aparecer donde no toca.
+//
+// Vive aparte del "RealColor Tuning" por la razón que el usuario dio en s253 y que conviene no
+// perder: aquel panel es la **verdad del color** (valores calibrados y congelados para que la
+// predicción de color sea fiable), éste es el **aspecto**. Mezclarlos invita a descalibrar la
+// simulación mientras uno cree estar colocando una luz para una foto.
+//
+// De momento sólo la dirección de las dos luces. La intensidad NO está, a propósito — ver
+// realcolor_light_dirs() para el porqué (es la misma frontera).
+// NEOTKO_PHOTOMODE_TAG s253 — PRUEBA INSTRUMENTADA DEL CAMINO DE EXPORT.
+//
+// El usuario pidió explícitamente instrumentar este camino ANTES de escribirlo, porque el export de
+// Photo Mode ya se aparcó tras 4-5 intentos fallidos. Esta función es esa instrumentación, y se
+// dispara con un botón porque el canal REALCOLOR lleva mucho tráfico de render normal: sin un
+// disparador y un bloque delimitado, el dato útil se pierde entre el ruido.
+//
+// NO escribe ninguna imagen. Reserva a tamaño de fichero, mide, y lo deja todo como estaba. Los
+// tres modos de fallo de este camino se ven IDÉNTICOS una vez hay un PNG de por medio ("la foto
+// salió rara"), y aquí se distinguen antes de que exista el PNG.
+// NEOTKO_PHOTOMODE_TAG s253 — ver la declaración en el .hpp.
+void GCodeViewer::render_realcolor_for_export(int w, int h, int screen_ref_h)
+{
+    // RAII a mano: si render_toolpaths_realcolor() saliera por cualquiera de sus retornos tempranos
+    // (shaders ausentes, FBOs fallidos) la bandera tiene que bajar igual. Dejarla armada dejaría la
+    // PANTALLA renderizando sin paneles, sin supersampling y sin la guarda de cámara en movimiento
+    // — un modo fantasma imposible de diagnosticar porque nada lo anuncia.
+    struct Guard {
+        GCodeViewer* v;
+        ~Guard() { v->m_realcolor_export = false; v->m_realcolor_export_ref_h = 0; }
+    } guard{ this };
+
+    m_realcolor_export       = true;
+    m_realcolor_export_ref_h = screen_ref_h;
+
+    // 🔑 s253c: el supersampling se decide AQUÍ, una vez, y se guarda — ver realcolor_supersample().
+    // Se mantiene el ×2 siempre que quepa, porque es lo que difumina las juntas entre cordones; sin
+    // él la foto sale llena de puntitos del fondo. Sólo se cae a 1 cuando el tamaño interno no cabe.
+    //
+    // El presupuesto sale MEDIDO, no estimado: la pantalla del usuario ya sostiene 13.6 Mpx de
+    // buffers de peel. 16 Mpx deja margen y cubre 1080p y 1440p con ×2; 4K se queda en ×1, donde el
+    // píxel es tan pequeño que las juntas pesan mucho menos de todas formas.
+    const double internal_mpx = (double)w * 2.0 * (double)h * 2.0 / 1.0e6;
+    m_realcolor_export_ss = (internal_mpx <= 16.0) ? 2 : 1;
+    NEOTKO_LOG(REALCOLOR, "photo_export: ss_peel=" << m_realcolor_export_ss
+               << " (interno " << (w * m_realcolor_export_ss) << "x" << (h * m_realcolor_export_ss)
+               << " = " << (double)w * m_realcolor_export_ss * (double)h * m_realcolor_export_ss / 1.0e6
+               << " Mpx, presupuesto 16 Mpx)"
+               << (m_realcolor_export_ss == 1 ? "  <- SIN promediado: las juntas entre cordones saldran marcadas" : ""));
+
+    // El fingerprint lleva canvas_w/h dentro, así que este tamaño distinto ya fuerza el recompute
+    // por su cuenta. Se invalida igualmente y a propósito: depender de que un struct de 8 campos
+    // esté al día es justo lo que falló en s251b con `finish`.
+    m_realcolor_cache.valid = false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    render_toolpaths_realcolor(w, h);
+    const auto t1 = std::chrono::steady_clock::now();
+    NEOTKO_LOG(REALCOLOR, "photo_export: render " << w << "x" << h << " en "
+               << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << " ms");
+}
+
+void GCodeViewer::realcolor_export_probe(int req_w, int req_h)
+{
+    GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D();
+    const int screen_h = (canvas != nullptr) ? canvas->get_canvas_size().get_height() : 0;
+    const int screen_w = (canvas != nullptr) ? canvas->get_canvas_size().get_width()  : 0;
+
+    GLint max_tex = 0, max_rb = 0;
+    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex));
+    glsafe(::glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb));
+
+    NEOTKO_LOG(REALCOLOR, "================ photo_export PROBE ================");
+    NEOTKO_LOG(REALCOLOR, "photo_export: canvas=" << screen_w << "x" << screen_h
+               << "  pedido=" << req_w << "x" << req_h
+               << "  gl_max_tex=" << max_tex << " gl_max_rb=" << max_rb);
+
+    // --- 1. lo que costaría, ANTES de intentarlo -----------------------------------------------
+    //
+    // El límite de textura NO es la restricción que muerde: en Apple Silicon suele ser 16384, así
+    // que una petición imposible por memoria PASA la comprobación de tamaño y el fallo se traslada
+    // a la reserva, donde puede no dar error y simplemente irse a memoria del sistema (lentísimo).
+    // Por eso se estima el coste explícitamente y se registra.
+    const int    ss   = m_realcolor_export ? 1 : realcolor_supersample(); // el probe mide el caso export
+    const double px   = (double)req_w * ss * (double)req_h * ss;
+    // 2 slots de: color RGBA8(4) + meta RGBA32F(16) + normal RGBA32F(16) + depth 32F(4)
+    //           + accum color RGBA8(4) + accum transmit RGBA32F(16)  =  2 * 60 B/px
+    const double mb   = px * 2.0 * 60.0 / (1024.0 * 1024.0);
+    NEOTKO_LOG(REALCOLOR, "photo_export: ss_peel(export)=" << ss
+               << "  interno=" << (req_w * ss) << "x" << (req_h * ss)
+               << "  vram_estimada=" << (long)mb << "MB");
+    if (max_tex > 0 && (req_w * ss > max_tex || req_h * ss > max_tex))
+        NEOTKO_LOG(REALCOLOR, "photo_export: ⚠️ el tamaño interno SUPERA GL_MAX_TEXTURE_SIZE — habría que recortar");
+
+    // --- 2. ¿se puede reservar de verdad? ------------------------------------------------------
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool fbos_ok = ensure_realcolor_fbos(req_w, req_h);
+    const auto t1 = std::chrono::steady_clock::now();
+    NEOTKO_LOG(REALCOLOR, "photo_export: ensure_realcolor_fbos(" << req_w << "x" << req_h << ") -> "
+               << (fbos_ok ? "OK" : "FALLÓ")
+               << "  (" << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << " ms)"
+               << (fbos_ok ? "" : "  <- con esto, el export saldría por el camino PLANO"));
+
+    // --- 3. el estado que dispararía las otras dos trampas -------------------------------------
+    const bool moving = (canvas != nullptr) && canvas->is_camera_moving();
+    NEOTKO_LOG(REALCOLOR, "photo_export: camera_moving=" << (moving ? 1 : 0)
+               << (moving ? "  <- se IGNORA durante el export (si no, foto plana sin aviso)" : ""));
+
+    const float scale = (screen_h > 0) ? (float)req_h / (float)screen_h : 1.0f;
+    NEOTKO_LOG(REALCOLOR, "photo_export: escala_pantalla=" << scale
+               << "  ao_radius " << REALCOLOR_AO_RADIUS_PX << "->" << (REALCOLOR_AO_RADIUS_PX * scale)
+               << "  sss_radius " << m_realcolor_tuning.sss_radius_px
+               << "->" << (m_realcolor_tuning.sss_radius_px * scale));
+
+    NEOTKO_LOG(REALCOLOR, "photo_export: shells=" << m_shells.volumes.volumes.size()
+               << "  tools=" << m_realcolor_tool_count
+               << "  n_max_peel se recalcula por frame (ver 'peel budget' arriba)");
+
+    // --- 4. dejarlo TODO como estaba -----------------------------------------------------------
+    //
+    // Restaurar el tamaño de pantalla no es cortesía: ensure_realcolor_fbos destruye y recrea al
+    // cambiar de tamaño, así que salir de aquí con los FBOs a tamaño de fichero dejaría la pantalla
+    // renderizando a resolución de foto hasta el siguiente cambio de tamaño de ventana.
+    if (screen_w > 0 && screen_h > 0)
+        ensure_realcolor_fbos(screen_w, screen_h);
+    m_realcolor_cache.valid = false; // el composite cacheado es de otro tamaño: hay que rehacerlo
+    NEOTKO_LOG(REALCOLOR, "photo_export: restaurado a " << screen_w << "x" << screen_h);
+    NEOTKO_LOG(REALCOLOR, "================ fin PROBE ================");
+}
+
+void GCodeViewer::render_photo_panel_realcolor()
+{
+    PhotoModeState& pm = photo_mode();
+    if (!pm.active || pm.owner != PhotoOwner::Preview)
+        return;
+
+    // NEOTKO_REALCOLOR_TAG s253 — PASADA DE PRESENTACIÓN.
+    //
+    // Lo que había eran cuatro sliders de grados, que es exactamente la forma equivocada de apuntar
+    // una luz: obliga a resolver una dirección componente a componente mirando la escena. Ahora son
+    // dos BOLAS arrastrables, la misma que ya usa el modo foto de la pestaña de preparación —
+    // literalmente la misma función, no una copia (se mudó a PhotoMode.cpp en s253 para esto).
+    //
+    // Los grados siguen ahí, debajo y en gris: sirven para anotar un ajuste y reproducirlo, que es
+    // lo único que un número hace mejor que un gesto.
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    const float ball_px = 108.0f;
+    const float col_w   = ball_px + 16.0f;
+    ImGui::SetNextWindowSize(ImVec2(col_w * 2.0f + 32.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin(_u8L("Photo mode").c_str());
+
+    imgui.text_colored(ImVec4(0.62f, 0.62f, 0.62f, 1.0f),
+        _u8L("Drag a light to aim it. The centre is straight overhead, the rim is the horizon."));
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+    bool changed = false;
+
+    // Una columna por luz: título, bola, y los grados debajo. Las dos del mismo ancho para que la
+    // ventana se lea como un par y no como dos cosas apiladas por casualidad.
+    auto light_column = [&](const char* title, PhotoLight& light) {
+        ImGui::BeginGroup();
+        imgui.text(title);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        if (photo_light_ball(title, light, ball_px))
+            changed = true;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.0f\xc2\xb0 / %.0f\xc2\xb0", light.azimuth_deg, light.elevation_deg);
+        imgui.text_colored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), buf);
+        ImGui::Dummy(ImVec2(col_w, 0.0f));
+        ImGui::EndGroup();
+    };
+
+    light_column(_u8L("Key light").c_str(), pm.key);
+    ImGui::SameLine();
+    light_column(_u8L("Fill light").c_str(), pm.fill);
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    if (ImGui::Button(_u8L("Reset lights").c_str(), ImVec2(col_w - 8.0f, 0.0f))) {
+        // Vuelve a las direcciones calibradas de RealColor, no a las de PhotoLight: dentro de esta
+        // vista "lo normal" es lo que RealColor usa cuando el modo está apagado, no lo que usa
+        // Prepare. Un reset que te deja en un sitio distinto del que tenías antes de entrar sería
+        // un reset que no resetea.
+        //
+        // Leído del tuning a propósito, no de las constantes literales: si algún día se recalibra
+        // RealColor, el reset tiene que ir a la calibración vigente.
+        const auto& kt = m_realcolor_tuning.light_key_dir;
+        const auto& ft = m_realcolor_tuning.light_fill_dir;
+        pm.key.set_from_dir_world(Vec3d(kt[0], kt[1], kt[2]));
+        pm.fill.set_from_dir_world(Vec3d(ft[0], ft[1], ft[2]));
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(_u8L("Exit photo mode").c_str(), ImVec2(col_w - 8.0f, 0.0f)))
+        wxGetApp().plater()->set_photo_mode(false);
+
+    // --- export (en construcción) --------------------------------------------------------------
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    imgui.text_colored(ImVec4(0.62f, 0.62f, 0.62f, 1.0f), _u8L("Image export"));
+    ImGui::PushItemWidth(col_w);
+    ImGui::Combo("##res", &m_realcolor_export_res,
+                 "1920 x 1080\0" "2560 x 1440\0" "3840 x 2160\0\0");
+    ImGui::PopItemWidth();
+    ImGui::Checkbox(_u8L("Transparent background").c_str(), &pm.transparent_bg);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Off: pure white. On: the background stays transparent in the PNG.").c_str());
+
+    // La resolución elegida viaja a PhotoModeState, que es de donde la lee photo_grab().
+    {
+        static const int s_res[3][2] = { { 1920, 1080 }, { 2560, 1440 }, { 3840, 2160 } };
+        const int idx = std::clamp(m_realcolor_export_res, 0, 2);
+        pm.export_w = s_res[idx][0];
+        pm.export_h = s_res[idx][1];
+        // 🔑 SUPERSAMPLING DE FOTO A 1, SIEMPRE, en este camino. El del peel ya hace ese trabajo y
+        // apilarlos multiplica la memoria por 4 sobre unas texturas RGBA32F — son gigabytes. Ver
+        // §10.2 del plan. No es un mando que el usuario deba poder subir aquí.
+        pm.export_ss = 1;
+    }
+
+    if (ImGui::Button(_u8L("Save PNG...").c_str(), ImVec2(col_w - 8.0f, 0.0f))) {
+        static const int s_res[3][2] = { { 1920, 1080 }, { 2560, 1440 }, { 3840, 2160 } };
+        const int idx = std::clamp(m_realcolor_export_res, 0, 2);
+        // La medición se dispara SIEMPRE junto al guardado, no en un botón aparte: así el log de un
+        // export fallido está al lado del intento que falló, que es lo que el usuario pidió. Cuesta
+        // una reserva de FBO extra por foto y ahorra una compilación por hipótesis.
+        realcolor_export_probe(s_res[idx][0], s_res[idx][1]);
+        if (GLCanvas3D* cv = wxGetApp().plater()->get_preview_canvas3D())
+            cv->photo_export_save_png();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(_u8L("Copy image").c_str(), ImVec2(col_w - 8.0f, 0.0f))) {
+        if (GLCanvas3D* cv = wxGetApp().plater()->get_preview_canvas3D())
+            cv->photo_export_to_clipboard();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Copies the picture straight to the clipboard, ready to paste into an email.").c_str());
+
+    ImGui::End();
+
+    // Mismo motivo que en la ventana de materiales (s251b): el composite de RealColor está cacheado
+    // y sin esto la luz se movería en el panel pero no en pantalla hasta orbitar la cámara. El
+    // fingerprint ya lo detectaría por su cuenta —las direcciones están dentro desde s253— pero
+    // hacerlo explícito evita depender de que alguien mantenga ese struct al día.
+    if (changed)
         m_realcolor_cache.valid = false;
 }
 
@@ -5440,6 +5880,21 @@ void GCodeViewer::render_realcolor_debug_panel()
     changed |= imgui.slider_float("luz especular", &m_realcolor_tuning.light_spec, -1.0f, 1.0f, "%.3f");
     changed |= imgui.slider_float("luz nitidez especular", &m_realcolor_tuning.light_shininess, 1.0f, 200.0f, "%.0f");
     changed |= imgui.slider_float("luz envolvente (wrap)", &m_realcolor_tuning.light_wrap, 0.0f, 1.0f, "%.2f");
+
+    // NEOTKO_PHOTOMODE_TAG s253 — LA DIRECCIÓN DE LAS LUCES NO VIVE AQUÍ, Y ES A PROPÓSITO.
+    //
+    // Estuvo en este panel durante media sesión y el usuario lo cortó con un argumento que vale la
+    // pena dejar escrito, porque es una frontera de diseño y no una preferencia de sitio:
+    //
+    //   **este panel es la VERDAD DEL COLOR, no el aspecto.** Lo que hay aquí son valores
+    //   calibrados y luego congelados para que RealColor prediga bien el color impreso. Un mando
+    //   cosmético —mover la luz para que la foto quede bonita— metido entre ellos invita a
+    //   descalibrar la simulación sin querer, y encima el panel ya está desbordado.
+    //
+    // Así que la dirección de las luces vive en el panel del MODO FOTO
+    // (render_photo_panel_realcolor()), que es de usuario y no de debug, y sólo existe mientras el
+    // modo está encendido. Fuera del modo, RealColor usa sus direcciones calibradas de siempre y
+    // nadie puede moverlas por accidente.
     // NEOTKO_REALCOLOR_TAG s251d: EL AISLADOR. Esto es la herramienta de diagnóstico de verdad —
     // los rangos negativos de arriba te dicen que algo baja, esto te dice QUÉ es.
     //   0 normal · 1 difusa direccional · 2 ambiente · 3 especular · 4 rim · 5 aniso · 6 color base
@@ -6355,17 +6810,54 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
 
 void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height)
 {
-    render_realcolor_debug_panel();
+    // NEOTKO_PHOTOMODE_TAG s253: durante un export NO se emiten los paneles. Se dibujarían a mitad
+    // del frame vivo (el export se dispara desde el pase de ImGui de uno de ellos) y además
+    // acabarían dentro de la propia foto.
+    if (!m_realcolor_export)
+        render_realcolor_debug_panel();
     // NEOTKO_REALCOLOR_TAG s251b: ventana de usuario, no de debug. Se dibuja aquí, dentro del
     // render de RealColor, para que desaparezca sola al cambiar de vista — no tiene sentido dejar
     // abierto un editor de acabado óptico sobre la vista Feedrate.
-    render_realcolor_materials_panel();
+    if (!m_realcolor_export) {
+        render_realcolor_materials_panel();
+        // NEOTKO_PHOTOMODE_TAG s253: al lado de la ventana de materiales y por el mismo motivo — se
+        // dibuja dentro del render de RealColor para que desaparezca sola al cambiar de vista.
+        render_photo_panel_realcolor();
+    }
 
     GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D();
 
+    // 🚨 NEOTKO_PHOTOMODE_TAG s253 (BUG s253b) — EL FRAMEBUFFER DEL LLAMANTE SE CAPTURA **AQUÍ**,
+    // ARRIBA, ANTES DE QUE NADA LO TOQUE. Y ése es todo el asunto.
+    //
+    // En s253 cambié el `0` clavado del pase final por "el que tuviera el llamante"… leyendo el
+    // binding EN EL PROPIO PASE FINAL. Para entonces lo atado es el FBO de ACUMULACIÓN, no el del
+    // llamante. Resultado: el composite se pintaba dentro del acumulador y, como además quedaba
+    // atado, **todo lo que venía después en el frame (leyenda, paneles, ImGui entero) se iba
+    // también fuera de pantalla**.
+    //
+    // El síntoma no se parecía nada a la causa: la pantalla quedaba CONGELADA en el último frame
+    // bueno, así que los botones "no respondían" y el desplegable "no cambiaba a RealColor" —
+    // cuando en realidad todo funcionaba y se dibujaba en un sitio invisible. La sonda de ImGui
+    // decía que la interfaz estaba sana, y tenía razón: el problema no era la ENTRADA, era la
+    // SALIDA. La pista que lo destapó la dio el usuario: *"el texto de filament no cambia a real
+    // color"* — un rótulo que no cambia es una pantalla congelada, no un botón roto.
+    //
+    // 🔑 LECCIÓN: "restaurar lo que tenía el llamante" sólo significa algo si se captura EN LA
+    // FRONTERA DE ENTRADA de la función. Capturarlo a mitad no restaura nada: fotografía el estado
+    // que tú mismo acabas de montar. s228 lo hizo bien en render_volumes_lit() —captura en la
+    // primera línea—; yo copié la idea y no el sitio.
+    GLint rc_caller_fbo = 0;
+    glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &rc_caller_fbo));
+
     // camera actively moving: skip the FBO/cache pipeline entirely, same cheap flat render
     // every other view mode uses (extrusion_color() already treats RealColor like Tool, M1).
-    if (canvas != nullptr && canvas->is_camera_moving()) {
+    // 🚨 NEOTKO_PHOTOMODE_TAG s253: `!m_realcolor_export` delante. Esta salida temprana dibuja
+    // toolpaths PLANOS, sin RealColor. Si se dispara durante un export —y puede, porque el export
+    // sale del pase de ImGui y la bandera de cámara puede seguir puesta— **el fichero sale con el
+    // render plano y sin un solo aviso**. Es el candidato número uno a "el PNG no se parece a la
+    // pantalla" (§10.4.1 del plan).
+    if (!m_realcolor_export && canvas != nullptr && canvas->is_camera_moving()) {
         canvas->schedule_extra_frame(REALCOLOR_DEBOUNCE_MS);
         render_toolpaths();
         return;
@@ -6387,8 +6879,8 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         // NEOTKO_REALCOLOR_TAG: peel+accum passes render at supersampled resolution (matches
         // ensure_realcolor_fbos' sw/sh) — only the present pass below downsamples back to
         // canvas_width/canvas_height.
-        const int sw = canvas_width * REALCOLOR_SUPERSAMPLE;
-        const int sh = canvas_height * REALCOLOR_SUPERSAMPLE;
+        const int sw = canvas_width * realcolor_supersample();
+        const int sh = canvas_height * realcolor_supersample();
         GLShaderProgram* peel_shader = wxGetApp().get_shader("realcolor_peel");
         GLShaderProgram* accum_shader = wxGetApp().get_shader("realcolor_accum");
         if (peel_shader == nullptr || accum_shader == nullptr) {
@@ -6445,6 +6937,37 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         const int n_max = std::clamp((int)std::ceil((max_td / std::max(min_layer_h, 0.01f)) * 1.8f), 1, REALCOLOR_N_MAX);
         NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: peel budget n_max=" << n_max << " (max_td=" << max_td << " min_layer_h=" << min_layer_h << ")");
 
+        // NEOTKO_PHOTOMODE_TAG s253 — MAPA DE SOMBRAS, LLENADO CON LAS SHELLS.
+        //
+        // Va AQUÍ, antes del bucle de peel y una sola vez: el mapa no depende de la pasada. Los
+        // ocluyentes son m_shells.volumes (la malla del objeto), que siguen cargadas aunque el
+        // usuario tenga el check de "Shells" apagado — se usan sólo como geometría para la pasada
+        // de profundidad, no se dibujan. Ver la nota larga en realcolor_peel.fs.
+        //
+        // La dirección se pasa EXPLÍCITA desde realcolor_light_dirs(), la misma fuente que alimenta
+        // los uniforms del peel y el fingerprint. Es lo único que garantiza que la sombra y el
+        // sombreado miren al mismo sitio cuando el modo foto mueva la luz.
+        bool shadow_ok = false;
+        {
+            Vec3f key_dir_f, fill_dir_f;
+            realcolor_light_dirs(key_dir_f, fill_dir_f);
+            const Vec3d key_dir_w = key_dir_f.cast<double>();
+
+            const size_t n_shell_volumes = m_shells.volumes.volumes.size();
+            if (n_shell_volumes > 0)
+                shadow_ok = render_shadow_map(m_shells.volumes, nullptr, /*partly_inside_enable*/ true, &key_dir_w);
+
+            // Instrumentado desde el primer intento y no después de que falle: este camino puede
+            // fallar de tres maneras que se ven IGUAL en pantalla (sin sombra) —que no haya shells
+            // cargadas, que no haya shader/FBO, o que el bbox no sea utilizable— y distinguirlas a
+            // ojo cuesta una compilación por hipótesis.
+            NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: shadow map shells=" << n_shell_volumes
+                       << " ok=" << (shadow_ok ? 1 : 0)
+                       << " light=(" << key_dir_w.x() << "," << key_dir_w.y() << "," << key_dir_w.z() << ")"
+                       << " texel_mm=" << m_shadow_texel_world_mm
+                       << (n_shell_volumes == 0 ? "  <- SIN SHELLS: no hay ocluyente que proyectar" : ""));
+        }
+
         for (int pass = 0; pass < n_max; ++pass) {
             const int cur = pass % 2;
             const int prev = 1 - cur;
@@ -6473,6 +6996,20 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             peel_shader->set_uniform("u_fresnel_power", m_realcolor_tuning.fresnel_power);
             peel_shader->set_uniform("u_fresnel_strength", m_realcolor_tuning.fresnel_strength);
             peel_shader->set_uniform("u_fresnel_tint", m_realcolor_tuning.fresnel_tint);
+            // NEOTKO_PHOTOMODE_TAG s253 (P0): dirección MUNDO de las dos luces, la mitad que s251c
+            // dejó dentro del shader. Un solo set por pasada de peel: es constante para toda la
+            // escena, no por sub-draw como u_bead_axis / u_thickness / u_finish.
+            //
+            // ⚠️ u_rc_light_key_dir lo declaran el .vs Y el .fs del peel (el .fs lo usa para el
+            // lóbulo anisótropo de s251, que antes tenía su propia copia de la constante). Es el
+            // MISMO programa enlazado, así que este único set_uniform alimenta a los dos — pero si
+            // algún día se separan, hay que acordarse de que son dos declaraciones del mismo dato.
+            {
+                Vec3f key_dir, fill_dir;
+                realcolor_light_dirs(key_dir, fill_dir);
+                peel_shader->set_uniform("u_rc_light_key_dir", key_dir);
+                peel_shader->set_uniform("u_rc_light_fill_dir", fill_dir);
+            }
             // NEOTKO_REALCOLOR_TAG s251c: luz directa. Constantes para toda la escena (una sola
             // "sala de fotos"), así que aquí arriba y no en el bucle de sub-draws. Ver el
             // diagnóstico largo en 140/realcolor_peel.vs.
@@ -6510,7 +7047,26 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             peel_shader->set_uniform("u_env_mirror", 2);
             const Vec3f camera_pos_world = camera.get_position().cast<float>();
             peel_shader->set_uniform("u_camera_pos_world", camera_pos_world);
-            for (int t = 0; t < 4; ++t) {
+
+            // NEOTKO_PHOTOMODE_TAG s253: el mapa de sombras, en GL_TEXTURE3. Las unidades 0/1/2 ya
+            // están ocupadas aquí (u_prev_meta, u_env_irradiance, u_env_mirror), y el 3 es el
+            // primero libre en este shader.
+            peel_shader->set_uniform("u_shadow_enabled", shadow_ok);
+            if (shadow_ok) {
+                glsafe(::glActiveTexture(GL_TEXTURE3));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_cache.depth_tex));
+                peel_shader->set_uniform("u_shadow_map", 3);
+                peel_shader->set_uniform("u_shadow_proj_view", m_shadow_light_proj_view);
+                peel_shader->set_uniform("u_shadow_strength", REALCOLOR_SHADOW_STRENGTH);
+                const float res = (float)std::max(m_shadow_map_cache.res, 1);
+                peel_shader->set_uniform("u_shadow_texel", Vec2f(1.0f / res, 1.0f / res));
+                // Téxel + relieve del cordón: los dos errores son independientes y se suman. Ver la
+                // nota de REALCOLOR_SHADOW_BEAD_BIAS_MM.
+                peel_shader->set_uniform("u_shadow_normal_bias_mm",
+                                         m_shadow_texel_world_mm + REALCOLOR_SHADOW_BEAD_BIAS_MM);
+                glsafe(::glActiveTexture(GL_TEXTURE0));
+            }
+            for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
                 const ColorRGB& c = m_realcolor_materials.rgb[t];
                 peel_shader->set_uniform(("u_material_rgb[" + std::to_string(t) + "]").c_str(), std::array<float, 3>{ c.r(), c.g(), c.b() });
             }
@@ -6673,7 +7229,7 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             // as an artistic ± knob / cheap visual calibration: print a known part, nudge this
             // until the render matches the photo, read off the resulting scale as an
             // approximate TD correction for that specific filament (no real TD meter needed).
-            for (int t = 0; t < 4; ++t)
+            for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t)
                 accum_shader->set_uniform(("u_material_td[" + std::to_string(t) + "]").c_str(), m_realcolor_materials.td[t] * m_realcolor_tuning.td_scale);
 
             glsafe(::glActiveTexture(GL_TEXTURE0));
@@ -6720,7 +7276,16 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         return;
     }
 
-    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    // NEOTKO_PHOTOMODE_TAG s253 — aquí había un `0` clavado: el pase final pintaba SIEMPRE en la
+    // pantalla en vez de en el destino de quien llama. Mientras el único llamante fue el frame en
+    // pantalla daba igual; con un export a FBO propio el fichero saldría vacío y sin ningún error.
+    //
+    // `rc_caller_fbo` se captura en la PRIMERA parte de esta función — ver la nota larga allí, y
+    // sobre todo por qué capturarlo AQUÍ (mi primer intento) congelaba la pantalla entera.
+    //
+    // Encontrado LEYENDO, antes de escribir el export, y no depurándolo después. Es exactamente el
+    // tipo de fallo por el que el usuario pidió instrumentar este camino desde el principio.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, rc_caller_fbo));
     glsafe(::glViewport(0, 0, canvas_width, canvas_height));
     glsafe(::glEnable(GL_DEPTH_TEST));
     glsafe(::glDepthFunc(GL_LESS));
@@ -6746,23 +7311,113 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
     glsafe(::glActiveTexture(GL_TEXTURE3));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_cache.peel_normal_tex[0]));
     present_shader->set_uniform("u_peel_normal0", 3);
-    present_shader->set_uniform("u_ao_radius", REALCOLOR_AO_RADIUS_PX);
+    // 🚨 NEOTKO_PHOTOMODE_TAG s253 — LOS RADIOS DE PANTALLA SE ESCALAN CON LA RESOLUCIÓN.
+    //
+    // u_ao_radius y u_sss_radius_px están en PÍXELES del buffer supersampleado. El kernel muestrea
+    // a `dir * u_texel_size * u_ao_radius`, o sea a N TÉXELES: al exportar al doble de resolución,
+    // esos mismos N téxeles cubren LA MITAD DE MUNDO. La oclusión ambiental se estrecha y el
+    // sangrado de color casi desaparece — la foto sale más plana que la pantalla, sin ningún aviso
+    // y sin que se note salvo comparando.
+    //
+    // Es el hermano exacto del bug del G-buffer de s242 (§4.E del plan): *algo que se deriva del
+    // tamaño del canvas y cambia de significado al exportar*. La familia entera hay que revisarla
+    // una por una, y ésta es la que quedaba.
+    //
+    // ⚠️ Se escala por ALTO y no por área ni por ancho: son radios lineales, y el alto es el eje
+    // que no cambia con la relación de aspecto del encuadre de export.
+    // ⚠️ Lo que está en MILÍMETROS no se toca (REALCOLOR_AO_MAX_DELTA_MM, el sesgo del mapa de
+    // sombras, el alcance de la sombra de contacto): esos son mundo, no pantalla, y son inmunes.
+    // Que el reparto original ya separase unos de otros es buena señal de que estaba bien pensado.
+    const float screen_px_scale = (m_realcolor_export && m_realcolor_export_ref_h > 0)
+                                ? (float)canvas_height / (float)m_realcolor_export_ref_h
+                                : 1.0f;
+    present_shader->set_uniform("u_ao_radius", REALCOLOR_AO_RADIUS_PX * screen_px_scale);
     present_shader->set_uniform("u_ao_strength", REALCOLOR_AO_STRENGTH);
-    present_shader->set_uniform("u_texel_size", Vec2f(1.0f / (float)(canvas_width * REALCOLOR_SUPERSAMPLE), 1.0f / (float)(canvas_height * REALCOLOR_SUPERSAMPLE)));
+    present_shader->set_uniform("u_texel_size", Vec2f(1.0f / (float)(canvas_width * realcolor_supersample()), 1.0f / (float)(canvas_height * realcolor_supersample())));
     // NEOTKO_REALCOLOR_TAG s214 (PBR item 2, 08_PBR_IBL_SSS_PLAN.md): same TD array/scale
     // already fed to accum_shader above, reused here so compute_sss() can scale its blur radius
     // per-pixel by the material's own translucency.
-    for (int t = 0; t < 4; ++t)
+    for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t)
         present_shader->set_uniform(("u_material_td[" + std::to_string(t) + "]").c_str(), m_realcolor_materials.td[t] * m_realcolor_tuning.td_scale);
     present_shader->set_uniform("u_sss_strength", m_realcolor_tuning.sss_strength);
-    present_shader->set_uniform("u_sss_radius_px", m_realcolor_tuning.sss_radius_px);
+    present_shader->set_uniform("u_sss_radius_px", m_realcolor_tuning.sss_radius_px * screen_px_scale);
     present_shader->set_uniform("u_sss_reference_td", m_realcolor_tuning.sss_reference_td);
     // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): gradeo de presentación — ver realcolor_present.fs. Va
     // en el present y no en el peel a propósito: no puede realimentar el composite Beer-Lambert.
     present_shader->set_uniform("u_grade_contrast", m_realcolor_tuning.grade_contrast);
     present_shader->set_uniform("u_grade_saturation", m_realcolor_tuning.grade_saturation);
     // NEOTKO_REALCOLOR_TAG s243 (F6): silueta opaca — ver compute_interior() en realcolor_present.fs.
-    present_shader->set_uniform("u_fill_interior", m_realcolor_tuning.fill_interior);
+    // 🔑 NEOTKO_PHOTOMODE_TAG s253c — LA SEGUNDA MITAD DEL PROBLEMA DE LOS PUNTITOS.
+    //
+    // Aunque el ×2 vuelva a difuminar las juntas, sobre un fondo BLANCO PURO cualquier píxel que no
+    // quede del todo opaco deja pasar el fondo, y eso se lee como un punto blanco. En el visor no se
+    // veía porque el fondo es gris oscuro y esos mismos píxeles se confundían con el sombreado: el
+    // fondo claro no crea el defecto, lo DESTAPA.
+    //
+    // `u_fill_interior` existe exactamente para esto desde s243 ("silueta opaca": sella los huecos
+    // INTERIORES y respeta el contorno). En pantalla el usuario lo tiene bajo (0.07) y está bien
+    // así: ahí no molesta y mantener transmitancia residual es más honesto para juzgar color. En una
+    // foto sobre blanco sí molesta, y la foto es presentación, no medida.
+    //
+    // Se sube SÓLO durante el export y no se toca el ajuste del usuario. Que el contorno siga
+    // respetándose es lo que permite hacerlo sin miedo: no engorda la pieza ni cambia dimensiones —
+    // que es justo lo que el usuario descartó cuando se propuso subir el swell para tapar esto.
+    present_shader->set_uniform("u_fill_interior",
+                                m_realcolor_export ? std::max(m_realcolor_tuning.fill_interior, 1.0f)
+                                                   : m_realcolor_tuning.fill_interior);
+
+    // NEOTKO_PHOTOMODE_TAG s253: sombras de contacto — ver compute_contact_shadow() en
+    // realcolor_present.fs. Mismo reparto que el AO de dos líneas más arriba: los números viven
+    // aquí como constantes de fichero y viajan por uniform; no hay slider en ningún panel.
+    //
+    // 🔑 VA EN EL PRESENT, NO EN EL PEEL, y eso tiene una consecuencia buena que conviene saber: el
+    // present se ejecuta CADA frame aunque el composite esté cacheado (es quien lo pinta), así que
+    // la sombra de contacto sigue a la luz al instante sin invalidar la caché. La difusa del peel sí
+    // depende de la caché, y por eso la dirección está además en el fingerprint — son dos caminos
+    // distintos para el mismo dato y los dos hacen falta.
+    {
+        const Camera& cam = wxGetApp().plater()->get_camera();
+        const Transform3d& proj = cam.get_projection_matrix();
+        present_shader->set_uniform("u_proj", proj);
+
+        // 🚨 NEOTKO_PHOTOMODE_TAG s253 — LA INVERSA VA POR .matrix().inverse(), NUNCA POR
+        // proj.inverse(), Y ESTA LÍNEA YA COSTÓ UN BUILD.
+        //
+        // `Transform3d` es `Eigen::Transform<double, 3, Eigen::Affine>` (Point.hpp). Su método
+        // .inverse() usa por defecto el modo del propio tipo, o sea que calcula la inversa **afín**:
+        // invierte el bloque 3x3 y la traslación, y DA POR HECHO que la última fila es (0,0,0,1).
+        //
+        // Una matriz de proyección en PERSPECTIVA no cumple eso — su última fila es (0,0,-1,0), que
+        // es justo lo que produce la división por w. Guardarla en un Transform3d "cuela" porque es
+        // sólo un contenedor 4x4, pero pedirle la inversa devuelve una matriz que no es la inversa
+        // de nada. Resultado: la reconstrucción de posición del shader apuntaba a cualquier sitio y
+        // la sombra de contacto salía como una banda oscura recta que barría la pieza y giraba con
+        // la cámara. En ORTOGRÁFICA no se habría visto (ahí la proyección sí es afín), que es
+        // exactamente el tipo de fallo que aparece y desaparece según cómo mires.
+        //
+        // .matrix() saca la 4x4 cruda y .inverse() sobre ella es la inversa general de verdad.
+        const Matrix4d inv_proj = proj.matrix().inverse();
+        present_shader->set_uniform("u_inv_proj", inv_proj);
+
+        // La luz PRINCIPAL, pasada a espacio de VISTA: la marcha ocurre en el frustum, no en el
+        // mundo. La matriz de vista es rígida, así que su bloque lineal ya es la rotación y sirve
+        // de matriz de normales — no hace falta inversa-traspuesta (mismo argumento que
+        // photo_dir_to_view()).
+        Vec3f key_dir, fill_dir;
+        realcolor_light_dirs(key_dir, fill_dir);
+        const Vec3d key_world = key_dir.cast<double>().normalized();
+        const Vec3d key_view  = cam.get_view_matrix().linear() * key_world;
+        present_shader->set_uniform("u_sscs_light_dir_view",  Vec3f(key_view.normalized().cast<float>()));
+        // La MISMA luz, en mundo: la puerta por N·L del shader compara contra la normal guardada en
+        // peel_normal0, que es de MUNDO. Se mandan las dos en vez de convertir allí porque el shader
+        // no tiene la matriz de vista y añadirla sólo para esto sería un uniform más por un cálculo
+        // que aquí es una línea.
+        present_shader->set_uniform("u_sscs_light_dir_world", Vec3f(key_world.cast<float>()));
+
+        present_shader->set_uniform("u_sscs_strength", REALCOLOR_SSCS_STRENGTH);
+        present_shader->set_uniform("u_sscs_length_mm", REALCOLOR_SSCS_LENGTH_MM);
+        present_shader->set_uniform("u_sscs_thickness_mm", REALCOLOR_SSCS_THICKNESS_MM);
+    }
 
     const int present_position_id = present_shader->get_attrib_location("v_position");
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_realcolor_cache.quad_vbo));
@@ -6900,7 +7555,8 @@ void GCodeViewer::destroy_shadow_map_fbo()
 // missed invalidation is a far worse bug than one extra depth-only draw — and the user already
 // accepted the SSAO's cost. Noted as a future optimization in the study, not done here.
 bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
-                                    const std::function<bool(const GLVolume&)>& filter, bool partly_inside_enable)
+                                    const std::function<bool(const GLVolume&)>& filter, bool partly_inside_enable,
+                                    const Vec3d* light_dir_world_override)
 {
     GLShaderProgram* depth_shader = wxGetApp().get_shader("shadow_depth");
     if (depth_shader == nullptr)
@@ -6912,6 +7568,24 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     // whatever the caller had — exactly the class of bug s228 hit in render_volumes_lit.
     GLint caller_fbo = 0;
     glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
+    // 🚨 NEOTKO_PHOTOMODE_TAG s253e — Y EL VIEWPORT TAMBIÉN, QUE NO SE RESTAURABA.
+    //
+    // Esta función pone el viewport al tamaño del MAPA (2048², o 4096/8192 en modo foto) para
+    // dibujar la pasada de profundidad, y hasta hoy se iba sin devolverlo. No explotaba porque sus
+    // dos llamantes ponían el suyo en la línea siguiente — o sea que estaba tapado por casualidad,
+    // no por diseño.
+    //
+    // Con el export de Prepare eso deja de ser inocente: si algún camino dibuja después de esto sin
+    // fijar su propio viewport, lo hace dentro de un recuadro de 2048×2048 en la esquina inferior
+    // izquierda de un buffer de 5120×2880. Y "el contenido sale en una esquina y el resto se queda
+    // con el color de limpieza" es EXACTAMENTE el síntoma con el que se aparcó ese export en s242,
+    // cuya causa quedó sin encontrar.
+    //
+    // No afirmo que sea la causa —el camino tiene más sitios donde mirar y por eso va instrumentado—
+    // pero es un defecto real, encaja con el síntoma, y una función que cambia estado global tiene
+    // que devolverlo. Se arregla porque está mal, no porque sea la culpable.
+    GLint caller_viewport[4] = { 0, 0, 0, 0 };
+    glsafe(::glGetIntegerv(GL_VIEWPORT, caller_viewport));
 
     // NEOTKO_PHOTOMODE_TAG s242 (F2.5): photo_shadow_map_res() returns SHADOW_MAP_RES verbatim
     // outside Photo Mode. ensure_shadow_map_fbo() already reallocates when the size changes.
@@ -6932,6 +7606,24 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
         return false;
     bbox.offset(SHADOW_FIT_MARGIN_MM);
 
+    // NEOTKO_PHOTOMODE_TAG s242: photo_key_dir_world() returns SHADOW_LIGHT_WORLD_DIR verbatim
+    // while Photo Mode is off, so this is the same frustum it always was.
+// NEOTKO_PHOTOMODE_TAG s253d: SE RESUELVE AQUÍ ARRIBA, antes del ajuste del frustum, porque
+// ese ajuste necesita saber hacia dónde cae la sombra. Estaba declarada más abajo (sólo hacía
+// falta para la cámara de la luz) y al añadir la extensión para el export me la encontré sin
+// declarar. Un recordatorio barato: cuando dos cálculos dependen del mismo dato, el dato sube.
+    // NEOTKO_PHOTOMODE_TAG s253: el override manda cuando lo hay — ver la declaración en el .hpp.
+    //
+    // ⚠️ Con un `if` y no con un ternario: `.normalized()` de Eigen no devuelve un Vec3d, devuelve
+    // una expresión perezosa, y el otro brazo sí es un Vec3d con flags distintos (DontAlign). El
+    // ternario intenta unificar los dos tipos, puede convertir en ambas direcciones, y el
+    // compilador lo declara ambiguo. Es una trampa clásica de Eigen: cualquier ternario que mezcle
+    // una expresión de Eigen con un tipo concreto necesita construir el tipo a mano en los dos
+    // brazos, o directamente no ser un ternario.
+    Vec3d light_dir = photo_key_dir_world();
+    if (light_dir_world_override != nullptr)
+        light_dir = light_dir_world_override->normalized();
+
     // NEOTKO_PHOTOMODE_TAG s242 — grow the frustum to cover where the shadow LANDS, not just where
     // the casters are.
     //
@@ -6947,8 +7639,20 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     // it to the whole floor would trade a clipped shadow for a blocky one. This grows it by what
     // the geometry actually demands and no more, capped so a near-horizontal light cannot ask for
     // a kilometre.
-    if (photo_mode_hides_bed()) {
-        const Vec3d ld = photo_key_dir_world();
+    // NEOTKO_PHOTOMODE_TAG s253d: **y también al exportar desde RealColor**, por el mismo motivo
+    // exacto. El export dibuja un cazador de sombras (un suelo invisible que sólo recoge la sombra
+    // en el alfa), o sea que hay un RECEPTOR fuera de la silueta de la pieza — igual que el
+    // ciclorama. Sin extender el frustum, la sombra que cae al lado del objeto queda FUERA del mapa
+    // y photo_stage.fs devuelve "iluminado" para todo lo de fuera: la sombra no se degrada, se
+    // CORTA en seco a media mancha.
+    //
+    // Con la pieza de prueba del usuario no se habría notado (3.5 mm de alto y luz a 48° = 3.1 mm
+    // de alcance, dentro del margen fijo de 5 mm). Con una pieza alta o una luz rasante, sí.
+    if (photo_mode_hides_bed() || m_realcolor_export) {
+        // La MISMA dirección que se acaba de usar para orientar el frustum, no otra: si el
+        // alcance se calculara con una luz distinta de la que proyecta, la extensión iría hacia
+        // donde la sombra no va. `light_dir` ya tiene el override aplicado unas líneas más arriba.
+        const Vec3d ld = light_dir;
         const double height = std::max(bbox.max.z(), 0.0);
         // tan(elev) via the horizontal/vertical split of the (unit) light vector.
         const double horiz = std::hypot(ld.x(), ld.y());
@@ -6974,9 +7678,6 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     // below, so any position outside the scene works.
     const Vec3d center = bbox.center();
     const double radius = 0.5 * bbox.size().norm();
-    // NEOTKO_PHOTOMODE_TAG s242: photo_key_dir_world() returns SHADOW_LIGHT_WORLD_DIR verbatim
-    // while Photo Mode is off, so this is the same frustum it always was.
-    const Vec3d light_dir = photo_key_dir_world();
     const Vec3d eye = center + light_dir * (2.0 * radius);
     // LIGHT_TOP_DIR sits ~40 deg off world Z, so UnitZ is a safe up vector; the guard is only for
     // the day someone re-aims the light straight down.
@@ -7013,8 +7714,10 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     // Camera looks down -Z, so points in front have negative z: the closest corner is lv_max.z.
     const double n = -lv_max.z() - SHADOW_FIT_MARGIN_MM;
     const double f = -lv_min.z() + SHADOW_FIT_MARGIN_MM;
-    if (r - l < EPSILON || t - b < EPSILON || f - n < EPSILON)
+    if (r - l < EPSILON || t - b < EPSILON || f - n < EPSILON) {
+        glsafe(::glViewport(caller_viewport[0], caller_viewport[1], caller_viewport[2], caller_viewport[3]));
         return false;
+    }
 
     Transform3d light_proj = Transform3d::Identity();
     light_proj.matrix() << 2.0 / (r - l), 0.0,            0.0,            -(r + l) / (r - l),
@@ -7089,6 +7792,8 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     }
 
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
+    // s253e: y el viewport, ver arriba.
+    glsafe(::glViewport(caller_viewport[0], caller_viewport[1], caller_viewport[2], caller_viewport[3]));
     return true;
 }
 
@@ -8277,6 +8982,23 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             // de la escena — o sea que el usuario ya está mirando la tabla que la ventana edita.
             if (ImGui::Button(_u8L("Filament finish...").c_str()))
                 m_realcolor_materials_panel_open = !m_realcolor_materials_panel_open;
+            // NEOTKO_PHOTOMODE_TAG s253: puerta de entrada al MODO FOTO del visor de gcode.
+            //
+            // Va aquí, al lado del botón de acabado, por el mismo argumento que aquél: es la
+            // esquina de la pantalla donde el usuario ya está mirando cuando piensa en cómo se ve
+            // la pieza. Y a diferencia de Prepare, aquí NO hay columna de iconos de plato donde
+            // colgarlo — la que hay pertenece a la escena 3D.
+            //
+            // El mismo botón entra y sale, y mientras el modo esté encendido esta leyenda sigue
+            // dibujándose, así que **siempre hay una salida visible** además de Esc. Cuando llegue
+            // la limpieza de escena y la leyenda se esconda, la salida tendrá que mudarse al panel
+            // del modo (que ya tiene su botón "Exit photo mode") — anotado para no olvidarlo.
+            if (photo_mode_available()) {
+                ImGui::SameLine();
+                const bool in_photo = photo_mode().active && photo_mode().owner == PhotoOwner::Preview;
+                if (ImGui::Button((in_photo ? _u8L("Exit photo mode") : _u8L("Photo mode...")).c_str()))
+                    wxGetApp().plater()->set_photo_mode(!in_photo, PhotoOwner::Preview);
+            }
         }
         break;
     }

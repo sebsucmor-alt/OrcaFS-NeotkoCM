@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walls — Neotko for Snapmaker Orca</title>
+<meta name="description" content="NeoArachne lets you pick which engine prints the outer wall, the inner walls and the gap fill, separately. Painter Pro Mode adds precision brushing and masks. NeoStitch interlocks layers without ever moving Z.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .we { display: grid; grid-template-columns: minmax(0,1fr) 214px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 660px) { .we { grid-template-columns: 1fr; } }
+  .we__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .we__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .we__read { font-family: var(--mono); font-size: .71rem; line-height: 1.55; color: var(--ink-faint); }
+  .we__read b { color: var(--ink); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure" aria-current="page">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§8 · §13 · §14 — Structure</p>
+    <h1>Walls</h1>
+    <p class="lede">
+      Three separate things about the outside of a print: which engine generates the wall paths,
+      how precisely you can paint on them, and an experiment in interlocking layers without ever
+      moving Z.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="neoarachne" data-short="NeoArachne">NeoArachne</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--ver badge--plain">Neotko Hybrid v2 by default</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Quality</b><span class="sep">›</span><b>Wall generator</b><span class="sep">›</span><b>NeoArachne</b>
+    </p>
+
+    <p>
+      Slicers give you one wall generator for the whole part. Classic gives constant-width walls
+      with the cleanest visible surface and no width breathing, but it cannot adapt to thin
+      features without a separate gap-fill pass. Arachne gives variable-width beading with
+      integrated gap fill, which is what you want on the inside and not always what you want on the
+      outside.
+    </p>
+
+    <p>
+      NeoArachne stops making you choose once for everything. It sits beside Classic and Arachne in
+      the dropdown and lets you pick, <strong>per feature</strong>, which underlying engine prints
+      it.
+    </p>
+
+    <div class="demo bleed" id="engine-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">The same waisted cross-section, three ways</span>
+        <span class="demo__hint">drag the waist</span>
+      </div>
+      <div class="demo__body" data-demo="engines">
+        <noscript><p class="noscript">This diagram needs JavaScript. The table below describes each engine.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the difference in behaviour, not a port of either engine. What it shows
+        about constant versus variable width, and where each one struggles, is real.
+      </div>
+    </div>
+
+    <h3 id="sources">Per-feature engine choice</h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Options</th></tr></thead>
+      <tbody>
+        <tr><td><b>NA — outer wall source</b></td><td>Classic / Arachne (stock) / Arachne (NeotkoEdge)</td></tr>
+        <tr><td><b>NA — inner walls source</b></td><td>Classic / Arachne (stock) / Arachne (NeotkoEdge)</td></tr>
+        <tr><td><b>NA — gap-fill source</b></td><td>Off / Classic / Arachne (stock) / Arachne (NeotkoEdge)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <ul>
+      <li><strong>Classic</strong> — constant width, cleanest visible surface, no breathing. Cannot
+        adapt to thin features without a gap-fill pass.</li>
+      <li><strong>Arachne (stock)</strong> — variable-width beading with integrated gap fill. Best
+        for inner walls.</li>
+      <li><strong>Arachne (NeotkoEdge)</strong> — Arachne with the NeotkoEdge bead-count stabiliser.
+        Its extra tuning knobs from the older fork are not exposed in this build yet.</li>
+    </ul>
+
+    <p>
+      The default recipe, <strong>Neotko Hybrid v2</strong>, is outer Classic, inner Arachne (stock),
+      gap fill off. Leave the controls alone for a first slice and that is what you get: a clean
+      constant-width outer surface with Arachne handling the awkward interior.
+    </p>
+
+    <h3 id="edge">Edge Closure controls</h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>Range / default</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>NA — allowed perimeter overlap</b></td><td>0–100%, default <b>0%</b></td><td>How much the first inner Arachne bead may overlap the Classic outer. Raise to 5–15% only if you see a seam. High values blob.</td></tr>
+        <tr><td><b>Min Line Width</b></td><td>5–100% of nozzle, default <b>40%</b></td><td>Minimum bead width Arachne emits. Higher widens thin features, with a blob risk. 30–50% is the useful range.</td></tr>
+        <tr><td><b>Max Line Width</b></td><td>100–200% of nozzle, default <b>200%</b></td><td>Ceiling on bead width. Lower it to 130–150% for more, narrower beads.</td></tr>
+        <tr><td><b>Min Feature Threshold</b></td><td>1–100% of nozzle, default <b>10%</b></td><td>Geometry thinner than this is discarded. Keep it low, and it must stay at or below Min Line Width.</td></tr>
+        <tr><td><b>Preserve Thin Edges</b></td><td>default <b>on</b></td><td>Keeps short closure tails near the outer perimeter for cleaner seams.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="previewlab">Preview Lab</h3>
+
+    <p>
+      A panel inside the NeoArachne section that renders the planned wall paths <strong>before
+      slicing</strong>: outer and inner paths in distinct colours, the execution order, seam dots,
+      travel moves and a head animation. There is a layer slider, an animation speed, a ghost or
+      printed build mode, zoom, "use selection", and a <b>Dump</b> button that exports the whole
+      plan as JSON for off-line diagnosis.
+    </p>
+
+    <p class="small">
+      Known limitation: a small visual divergence against the real slice on the second-to-last inner
+      wall, in narrow waist regions of some geometries. If you hit it, <b>Dump</b> the JSON and share
+      it with the 3MF.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="promode" data-short="Painter Pro Mode">Painter Pro Mode</h2>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">always available</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left gizmo toolbar</b><span class="sep">›</span><b>Color Painting</b><span class="sep">›</span><b>Pro Mode</b>
+    </p>
+
+    <div class="note">
+      <span class="note__t">This is Orca's own painter, not the fork's</span>
+      <p style="margin:0">
+        <b>Color Painting</b> is the stock multi-material painter: it hand-assigns filaments to
+        triangles and needs two or more filaments configured. Pro Mode is a collapsible section
+        added to the bottom of its panel. It is a different tool from the fork's own
+        <a href="painter.html">ColorStitch Painter</a>, which paints Sandwich recipes rather than
+        raw filament.
+      </p>
+    </div>
+
+    <p>
+      The stock brush paints with a circle or sphere cursor, which is naturally imprecise on small
+      details: a click can bleed well past where you meant. Pro Mode attacks that from four
+      directions.
+    </p>
+
+    <h3 id="precision">Brush precision</h3>
+
+    <p>
+      A <strong>Precision</strong> slider, 1× to 8×, subdivides the mesh more finely right where you
+      are painting, so the edge of a stroke follows the surface instead of stair-stepping at low
+      mesh resolution. Higher values cost more memory and CPU on dense meshes. <code>1×</code> is
+      identical to a build without Pro Mode.
+    </p>
+
+    <figure>
+      <img src="../images/Painter-Precision.png.webp" width="1300" height="677" alt="Precision at 6x sharpening a painted edge instead of leaving it jagged" loading="lazy">
+      <figcaption>Precision <b>6×</b> sharpening a painted edge that would otherwise follow the mesh's own triangles.</figcaption>
+    </figure>
+
+    <h3 id="perimeters">Paint perimeters only, and Extra walls</h3>
+
+    <figure>
+      <img src="../images/Painter-Walls.webp" width="1416" height="324" alt="How the Extra walls option affects the walls of a painted zone" loading="lazy">
+      <figcaption>What <b>Extra walls</b> does to the walls of a painted zone.</figcaption>
+    </figure>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Paint perimeters only</b></td><td>Limits the painted colour to a ring near the painted region's contour, about wall-count × line-width wide, instead of filling the whole area solid. The interior reverts to the object's base colour, which saves filament and stops burying colour changes in solid infill where nobody will see them.</td></tr>
+        <tr><td><b>Extra walls</b></td><td>Adds this many extra perimeter walls to the painted region only, on top of the object's normal wall count. For a painted logo or trim that needs a bit more wall depth than the rest. <code>0</code> disables it.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Turning on Extra walls automatically widens the perimeters-only ring to make room for them,
+      and if you raise Extra walls later the ring re-widens to match.
+    </p>
+
+    <div class="note note--warn">
+      <span class="note__t">Extra walls does nothing where the colour matches</span>
+      <p style="margin:0">
+        By design. If you paint a region with the same colour the object already prints in, there is
+        no visible colour change there, so Extra Walls is skipped for that region rather than
+        silently doubling up walls in the same physical spot for no benefit. This only matters if
+        you are using the painter to add wall thickness rather than colour: paint with a genuinely
+        different colour to force it, or use a plain modifier mesh for pure geometry changes.
+      </p>
+    </div>
+
+    <h3 id="masks">Rectangle and Polygon masks</h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Tool</th><th>How to use it</th></tr></thead>
+      <tbody>
+        <tr><td><b>Rectangle mask</b></td><td>Enable the checkbox, then click-drag a box anywhere on screen. Release to paint everything under it.</td></tr>
+        <tr><td><b>Polygon mask</b></td><td>Enable the checkbox, then click to place vertices one at a time. Click near the first vertex again, with at least three placed, to close the shape and paint it. Click-drag an existing vertex to reposition it before closing. <b>Right-click cancels.</b></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Both tools only paint <strong>front-facing</strong> triangles, the side of the mesh actually
+      facing the camera, so a mask never bleeds through to the back the way a naive screen-space
+      fill would. The two checkboxes are mutually exclusive, and both work with either Classic or
+      Arachne.
+    </p>
+
+    <p class="small">
+      Escape does not cancel a polygon in progress. Right-click does. Worth remembering if you are
+      used to Escape backing out of in-progress tools elsewhere in Orca.
+    </p>
+
+    <h3 id="depth">Surface depth <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.3.8</span></h3>
+
+    <p>
+      Paint a design on the top or bottom of an object, a logo or a letter or a mark, and Surface
+      depth extends it <em>into</em> the object as <strong>solid infill of the painted colour</strong>,
+      following the painted silhouette exactly, for as many layers as you choose
+      (<code>0</code>–<code>20</code>, <code>0</code> = off).
+    </p>
+
+    <figure>
+      <img src="../images/Paint-Depth.gif" width="400" height="218" alt="The same painted design projected straight into two test cubes, seen in preview" loading="lazy">
+      <figcaption>The painted shape projects straight down, layer after layer, keeping its size. It only gets trimmed where the object's real geometry changes.</figcaption>
+    </figure>
+
+    <ul>
+      <li>It is not a cosmetic reclassification. Those layers genuinely print as solid
+        walls-to-walls material of the painted colour, surrounded by whatever sparse infill the rest
+        of the layer uses.</li>
+      <li>Depth is counted in <strong>extra layers past the painted surface</strong>, since the
+        painted surface is already solid.</li>
+      <li>Where the projection overlaps areas that were already solid (your top shell, vertical
+        shells, Sandwich internals) nothing double-counts. The projection only converts sparse
+        infill, and it never touches Sandwich's penultimate layers.</li>
+      <li>It works symmetrically for bottom-painted surfaces, projecting upward.</li>
+      <li>Deep projections can add toolchanges on layers that previously had none, the same as if
+        you had painted deeper by hand. The wipe tower handles it with its normal machinery.</li>
+    </ul>
+
+    <h3 id="percolor">Per color <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.3.8</span></h3>
+
+    <figure>
+      <img src="../images/Paint-Depth-Basic.png" width="1636" height="630" alt="The Pro Mode per-colour table assigning different Walls and Depth values per painted colour" loading="lazy">
+      <figcaption>The per-colour table. A silver logo can take 8 extra walls and 5 layers of depth while a red mark next to it gets 2 and 20, without touching each other.</figcaption>
+    </figure>
+
+    <p>
+      The <b>Per color</b> checkbox switches Extra walls and Surface depth from one global value to a
+      per-colour table: one row per filament with its swatch, a <b>Walls</b> field (0–8) and a
+      <b>Depth</b> field (0–20). A <code>0</code> in the table means "use the global value". Clicking
+      a colour swatch in the table also selects that colour for painting.
+    </p>
+
+    <p class="small">
+      Mixed-filament note: <b>Depth</b> distinguishes mixed slots individually, while <b>Extra
+      walls</b> for mixed slots falls back to the global value, because mixed paint resolves to its
+      physical components at wall-generation time. And a known edge case that is not a Surface depth
+      bug: a MixedFilament blend that <em>ends</em> in the same colour as the object's own filament
+      will not generate its lower blend layers either. The whole blend chain gets skipped, not just
+      the correctly-redundant top layer. Suspected stock-pipeline gap; the workaround is to not end
+      a blend on the object's base colour.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="neostitch" data-short="NeoStitch">NeoStitch Interlock <span class="badge badge--risk" style="font-size:.62rem;vertical-align:middle">untested</span></h2>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--risk">preview only, never printed</li>
+      <li class="badge badge--wip">one control is a confirmed no-op</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Strength</b><span class="sep">›</span><b>NeoStitch Interlock</b><span class="sep">·</span><span>per region, like Fuzzy Skin</span>
+    </p>
+
+    <div class="note note--alert">
+      <span class="note__t">Read this before anything else on this section</span>
+      <p style="margin:0">
+        Everything below is confirmed working <b>in the 3D preview only</b>. No real print has ever
+        been made with it. Treat it as an early look rather than a feature to rely on, and note that
+        one of its own controls (fill speed) is a confirmed no-op that does not currently change the
+        G-code at all.
+      </p>
+    </div>
+
+    <p>
+      NeoStitch interlocks consecutive printed layers of a chosen wall <strong>without ever moving
+      Z</strong>. Along the wall's own path, each layer alternates short <em>notch</em> segments,
+      where the wall deflects inward and leaves a gap at the nominal position, and <em>fill</em>
+      segments, where the wall over-extrudes instead to fill the gap left by the layer above or
+      below. The pattern's phase flips on alternating layers, so a fill segment always lands over
+      the notch of the layer beneath it: a vertical stitch between layers.
+    </p>
+
+    <p>
+      That makes it mechanically different from a Z brick-layer interlock. Z itself never moves; only
+      the XY position and the extrusion width change, which is what keeps it fully backward
+      compatible with normal slicing when it is off.
+    </p>
+
+    <figure>
+      <img src="../images/NeoStitch-InterlayerLock.jpeg" width="1403" height="900" alt="Alternating notch and fill segments on a cylinder wall: front view, and top view showing the phase flip between layers" loading="lazy">
+      <figcaption>Notch and fill segments on a cylinder wall. Front view, and a top view showing the phase flip from one layer to the next.</figcaption>
+    </figure>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>Default</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>NeoStitch Interlock</b></td><td><b>Disabled</b></td><td>Which wall gets the interlock: Outermost / Second / Third / Innermost.</td></tr>
+        <tr><td><b>Stitch depth</b></td><td>0 mm (auto)</td><td>How far the notch deflects inward. Auto means the wall's own line width; an explicit value overrides it.</td></tr>
+        <tr><td><b>Stitch length</b></td><td>3.0 mm</td><td>The flat plateau length of each notch or fill segment.</td></tr>
+        <tr><td><b>Ramp length</b></td><td>1.0 mm</td><td>The transition ramp in and out of each segment, which also smooths the pressure and flow change.</td></tr>
+        <tr><td><b>Stitch period</b></td><td>10.0 mm</td><td>Distance between successive notch/fill events along the wall.</td></tr>
+        <tr><td><b>Stitch flow</b></td><td>100%</td><td>Scales the fill segment's extra extrusion. 100% is automatic volume conservation for the notch depth being filled.</td></tr>
+        <tr><td><b>Skip bottom layers</b></td><td>3</td><td>Extra layers to skip above the first layer before the interlock starts.</td></tr>
+        <tr><td><b>Fill speed</b></td><td>75%</td><td>⚠️ <b>Known bug, does not work.</b> Intended to slow only the fill segments, because Klipper's pressure advance dislikes the non-constant flow at full speed. Confirmed by G-code inspection that the speed does not change. Root cause not found yet.</td></tr>
+        <tr><td><b>Fill margin</b></td><td>1.0 mm</td><td>Shrinks the fill segment shorter than its matching notch by this much per side, so the over-extrusion lands inside the gap rather than bridging across it. <b>Confirmed working.</b></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p class="small">
+      Other known limits: Arachne only in v1, since Classic walls are unaffected by the setting. It
+      interacts with Fuzzy Skin and Bump Mapping by <em>mutual exclusion</em> rather than
+      composition, so if either is active on the same wall NeoStitch skips that wall instead of
+      stacking effects. And a cascade to neighbouring walls, so an interior wall follows the
+      perturbed contour instead of keeping its original offset, is designed but not implemented.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>NeoArachne is Libre Mode only</strong> and its Preview Lab has a known divergence
+        on the second-to-last inner wall in narrow waists.</li>
+      <li><strong>Mixing engines has a seam to manage.</strong> That is what the allowed-overlap
+        control is for, and pushing it high blobs.</li>
+      <li><strong>Precision costs memory and CPU</strong> on dense meshes, proportionally.</li>
+      <li><strong>Surface depth adds toolchanges</strong> on layers that had none, which the wipe
+        tower then has to absorb.</li>
+      <li><strong>NeoStitch has never been printed</strong>, and one of its controls does nothing.
+        It is here because it is interesting, not because it is ready.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="index.html#structure"><small>Back</small><b>Structure</b></a>
+      <a class="is-next" href="height.html"><small>Next</small><b>Height →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§8</b>, <b>§13</b> and <b>§14</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * engines — a waisted cross-section, walled three ways.
+ * ========================================================================= */
+Tour.demo('engines', function (host) {
+  var el = Tour.el;
+  var S = { waist: 0.42, mode: 'hybrid', walls: 3, nozzle: 0.4 };
+
+  /** Half-width of the part at height v (0..1). A pinched waist in the middle. */
+  function halfW(v) {
+    var pinch = Math.exp(-Math.pow((v - 0.5) / 0.14, 2));
+    return 0.34 - pinch * (0.34 - S.waist * 0.34);
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Wall paths through the waist' }), el('span', { 'data-enote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var accent = Tour.token('--accent');
+    var warn = Tour.token('--warn');
+    var alert = Tour.token('--alert');
+    var faint = Tour.token('--ink-faint');
+    var cx = w / 2;
+    var lw = S.nozzle / 0.4 * 7;             // one wall, in px
+
+    // the solid section
+    ctx.fillStyle = Tour.token('--surface-2');
+    ctx.beginPath();
+    for (var i = 0; i <= 100; i++) { var v = i/100; ctx.lineTo(cx - halfW(v)*w, v*h); }
+    for (var j = 100; j >= 0; j--) { var v2 = j/100; ctx.lineTo(cx + halfW(v2)*w, v2*h); }
+    ctx.closePath(); ctx.fill();
+
+    var gaps = 0, blobs = 0;
+
+    for (var y = 3; y < h; y += 3) {
+      var v3 = y / h;
+      var half = halfW(v3) * w;
+      var avail = half * 2;
+
+      for (var side = -1; side <= 1; side += 2) {
+        var used = 0;
+        for (var n = 0; n < S.walls; n++) {
+          var isOuter = n === 0;
+          var engine = S.mode === 'classic' ? 'classic'
+                     : S.mode === 'arachne' ? 'arachne'
+                     : (isOuter ? 'classic' : 'arachne');
+
+          var wdt;
+          if (engine === 'classic') {
+            wdt = lw;                                     // constant, always
+          } else {
+            // Arachne breathes to fill what is left, within its limits
+            var left = avail / 2 - used;
+            var want = Math.min(lw * 2, Math.max(lw * 0.4, left / (S.walls - n)));
+            wdt = want;
+          }
+          if (used + wdt > avail / 2) {
+            // no room for this wall
+            if (engine === 'classic' && avail / 2 - used > lw * 0.25) gaps++;
+            break;
+          }
+          var x = cx + side * (used + wdt / 2);
+          ctx.fillStyle = isOuter ? accent : warn;
+          ctx.globalAlpha = .85;
+          ctx.fillRect(x - wdt / 2, y, wdt, 2.2);
+          ctx.globalAlpha = 1;
+          if (engine === 'arachne' && wdt > lw * 1.75) blobs++;
+          used += wdt;
+        }
+        // what Classic leaves behind in the waist
+        if (S.mode === 'classic' && avail / 2 - used > lw * 0.25) {
+          ctx.fillStyle = alert; ctx.globalAlpha = .5;
+          ctx.fillRect(cx + side * used, y, side * (avail / 2 - used), 2.2);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = faint; ctx.textAlign = 'left';
+    ctx.fillText('outer', 6, 12);
+    ctx.fillStyle = warn; ctx.fillText('inner', 44, 12);
+    if (S.mode === 'classic') { ctx.fillStyle = alert; ctx.fillText('unfilled', 88, 12); }
+
+    host._stats = { gaps: gaps, blobs: blobs };
+  }, { height: 210, cursor: 'ew-resize' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: function (p) { S.waist = Math.max(.06, Math.min(1, Math.abs(p.x - cv.width/2)/(cv.width*.34))); upd(); },
+    onMove: function (p) { S.waist = Math.max(.06, Math.min(1, Math.abs(p.x - cv.width/2)/(cv.width*.34))); upd(); }
+  });
+
+  var read = el('p.we__read', { style: 'margin:0' });
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+
+  side.appendChild(el('div.we__grp', null, [
+    el('span.we__gt', { text: 'Wall generator' }),
+    Tour.segmented({ value: 'hybrid',
+      options: [['classic','Classic'],['arachne','Arachne'],['hybrid','Hybrid v2']],
+      onChange: function (v) { S.mode = v; upd(); } }),
+    Tour.slider({ label: 'Wall loops', min: 1, max: 5, step: 1, value: S.walls,
+      onInput: function (v) { S.walls = v; upd(); } }),
+    Tour.slider({ label: 'Waist', min: 6, max: 100, step: 1, value: S.waist * 100,
+      format: function (v) { return v + '%'; }, onInput: function (v) { S.waist = v/100; upd(); } })
+  ]));
+  side.appendChild(el('div.we__grp', null, [el('span.we__gt', { text: 'What happens' }), read]));
+
+  var NOTE = {
+    classic: 'Every wall is the same width, so the visible surface is as clean as it gets. In the waist there is not room for a whole extra wall, and Classic leaves the leftover <b>unfilled</b> unless you add a gap-fill pass.',
+    arachne: 'Beads breathe to fill whatever space there is, so the waist closes. The cost is that the <b>outer</b> wall breathes too, and a width that changes along a visible surface is a width you can see.',
+    hybrid:  '<b>Neotko Hybrid v2.</b> Classic on the outside for a constant visible width, Arachne on the inside where breathing is free. The default, and the reason NeoArachne exists.'
+  };
+
+  function upd() {
+    cv.render();
+    read.innerHTML = NOTE[S.mode];
+    var n = host.querySelector('[data-enote]');
+    if (n) n.textContent = S.mode === 'hybrid' ? 'outer Classic · inner Arachne' : S.mode;
+  }
+
+  host.appendChild(el('div.we', null, [box, side]));
+  upd();
+});
+</script>
+
+</body>
+</html>

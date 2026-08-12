@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Height — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Draw layer height as an exact curve with control points and per-segment tension, then draw any setting as a curve over the object's real layer bands.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .hc { display: grid; grid-template-columns: minmax(0,1fr) 226px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 680px) { .hc { grid-template-columns: 1fr; } }
+  .hc__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .hc__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .hc__read { font-family: var(--mono); font-size: .71rem; line-height: 1.6; color: var(--ink-faint); }
+  .hc__read b { color: var(--ink); font-weight: 500; }
+  .hc__read .warn { color: var(--warn); }
+  .hc__pts { font-family: var(--mono); font-size: .68rem; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure" aria-current="page">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§11 · §23 — Structure</p>
+    <h1>Height</h1>
+    <p class="lede">
+      Two gizmos that share an idea. Instead of typing a number into a box and finding out after
+      slicing where the transition landed, you draw a curve on top of the object's real layer
+      bands, and the layer you are affecting is visible while you affect it.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--ver badge--plain">§11 since 2.3 · §23 since 2.4.3</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="alh" data-short="Precision layer height">Precision Adaptive Layer Height</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left gizmo toolbar</b><span class="sep">›</span><b>Precision Adaptive Layer Height</b>
+    </p>
+
+    <p>
+      The stock "Layers editing" brush is a paint tool: you click and drag over the object and it
+      pushes the layer height up or down. It is fast and it is imprecise, and there is no way to say
+      "I want exactly 0.28 mm at Z = 14.2 mm". This gizmo replaces it with an exact, point-based
+      curve editor.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>The stock brush</h4>
+        <p>Paint the height on. No numbers, no control points, no way to reproduce what you did on
+        the next version of the model.</p>
+      </div>
+      <div class="fold--after">
+        <h4>The curve editor</h4>
+        <p>Control points at an exact Z and an exact height, dragged or typed, with a
+        <b>tension</b> per segment for the shape in between. It reproduces.</p>
+      </div>
+    </div>
+
+    <p class="small">
+      The icon is always visible in the toolbar but stays greyed out until Libre Mode is active. It
+      never affects the stock Variable Layer Height dialog or brush, which remain untouched and
+      fully usable with Libre Mode off.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="editor" data-short="★ The curve editor">The curve editor</h2>
+
+    <p>
+      Click in the graph to add a point, drag to move one, right-click to delete it. The horizontal
+      lines are the layers you are going to get, recomputed from the curve as you drag, so the bands
+      you are looking at are the bands that will print.
+    </p>
+
+    <div class="demo bleed" id="curve-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Draw a height curve over real layer bands</span>
+        <span class="demo__hint">click to add · drag to move · right-click to delete</span>
+      </div>
+      <div class="demo__body" data-demo="curve">
+        <noscript><p class="noscript">This demo needs JavaScript. Both gizmos are described in full in the text around it.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        The layer bands are integrated from the curve the way the slicer walks up the object, so
+        they respond correctly. The <b>tension</b> is a monotone interpolation, which is what stops
+        a smooth segment overshooting past its own two points.
+      </div>
+    </div>
+
+    <h3 id="howto">How to use it</h3>
+
+    <ol>
+      <li>Enable Libre Mode, select a single object, open the gizmo.</li>
+      <li>The panel shows a graph: layer height across, Z up the object's height. The
+        <strong>bottom point</strong> (grey) is the object's fixed first layer and cannot be moved
+        or deleted. The <strong>top point</strong> (amber) can be dragged in height only.</li>
+      <li><strong>Click anywhere else</strong> to add a point, <strong>drag</strong> any non-bottom
+        point to move it, <strong>right-click</strong> a point to delete it.</li>
+      <li>With three or more points a <strong>tension</strong> slider appears per segment:
+        <code>0</code> is a straight line, identical to the engine's default linear interpolation,
+        and <code>1</code> is a smooth monotone curve through the segment. Monotone means it never
+        overshoots past the two points' heights, so it cannot spike outside your min and max layer
+        height.</li>
+      <li>While dragging or hovering a point, a translucent band lights up <strong>on the object
+        itself</strong>, showing exactly which Z slice you are affecting: teal on hover, amber while
+        dragging. A small label over the point shows the exact Z and layer height live.</li>
+      <li>Every discrete edit is a normal undo step and triggers a re-slice, the same as the stock
+        brush.</li>
+    </ol>
+
+    <p class="small">
+      Current limits: min and max layer height are read-only, taken from the printer and nozzle,
+      with no per-object override yet. Reopening the gizmo on an object that already has a very
+      dense profile, for instance one painted with the old stock brush, falls back to a flat
+      two-point start rather than importing hundreds of points. And there is no result preview from
+      the classic Adaptive and Smooth buttons: this is a separate, precise path rather than a
+      replacement for those.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="adapttocolor" data-short="Adapt to Color">Adapt to Color <span class="badge badge--wip" style="font-size:.62rem;vertical-align:middle">WIP</span></h2>
+
+    <p>
+      Layer height and colour are not independent. The height you slice at changes how the colour
+      reads on the part, and nothing in a stock slicer tells you that. Tick <b>Adapt to Color</b> and
+      the height editor shades the ranges where your colour setup actually works.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Shading</th><th>What it means</th></tr></thead>
+      <tbody>
+        <tr><td><b style="color:var(--alert)">Red on the right</b></td><td>Pattern-resolution ceiling. Above the mix band, following the "Dithering cadence" upper bound in your print settings, a cycle or gradient pattern gets too coarse to read as a blend. Applies object-wide to anything with a mixed pattern, paint or Sandwich.</td></tr>
+        <tr><td><b style="color:var(--alert)">Red on the left</b></td><td>Colour-fidelity floor, Sandwich zones only. Where the mesh has a plausible Sandwich top surface, the filaments' <a href="optics.html">TD</a> sets a minimum thickness: thinner than that and a translucent pass washes out over what is below. It never applies outside real Sandwich zones, so a plain Cycle object shows only the ceiling.</td></tr>
+        <tr><td><b style="color:var(--good)">Green line</b></td><td>The optimal height per Z, with a <b>Snap to optimal</b> button that rewrites every editable point of your curve to it in one click.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Dragging stays completely free within the nozzle limits. The guidance is visual, so a point
+      sitting in a red zone turns orange, and the emitted profile is hard-clamped to the safe range
+      only at commit. What reaches the slicer always respects the colour. The info panel shows the
+      colour-safe range for whichever point you hover or drag.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="sloperecolor" data-short="Slope Pattern Recolor">Slope Pattern Recolor <span class="badge badge--wip" style="font-size:.62rem;vertical-align:middle">experimental</span></h2>
+
+    <p>
+      A problem no stock slicer addresses. On a sloped surface each layer's contour steps inward,
+      and that staircase ledge exposes the <strong>interior perimeter rings</strong> to view. Those
+      rings print in whatever the layer's colour happens to be, so a clean MixedFilament banding
+      degrades into noise exactly where the model curves. The wider the step
+      (<code>d = layer height × tan(slope)</code>), the more rings show: at 0.2 mm on a steep slope
+      you are already looking at one or two.
+    </p>
+
+    <p>
+      With <b>Slope recolor</b> on, the gizmo scans the mesh for slope bands, computes at your
+      committed layer heights how many interior rings each band exposes, and stores a per-object
+      recolor plan in the 3MF, undoable, erased when you untick. At slice time:
+    </p>
+
+    <ul>
+      <li>the <strong>external perimeter is never touched</strong>, because its per-layer
+        alternation <em>is</em> the pattern's visible rhythm and it keeps printing exactly as your
+        recipe dictates;</li>
+      <li>the <strong>exposed interior rings</strong> print a side-by-side combination of the
+        recipe's own components, chosen by ΔE2000 colour distance so the ledge's blended appearance
+        matches the recipe's intended mix. The step fills with the mix instead of a random solid.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/Adaptive-Slope-MixedFilament.png" width="2040" height="996" alt="RealColor G-code preview of an adaptive slope with MixedFilament: default on the left, everything on plus Sandwich auto TD on the right" loading="lazy">
+      <figcaption>RealColor preview of the same slope. Default on the left; slope recolor and Sandwich auto TD on the right.</figcaption>
+    </figure>
+
+    <p>
+      The <strong>violet shading</strong> in the height editor shows which heights expose rings at
+      each Z. Drag the curve below the violet edge and thin layers cover the slope instead. The two
+      strategies are complementary: <em>fine layers</em> shrink the ledge until nothing extra shows
+      (slow, maximum quality), <em>slope recolor</em> accepts tall layers and colours what shows
+      (fast, good finish at 0.12–0.2 mm). Use the violet shading to choose per zone.
+    </p>
+
+    <p class="small">
+      Limits, and it does need broad print testing: it is best on surfaces with one dominant slope,
+      and two very different slopes sharing a height range currently share one plan with the steeper
+      one winning. The plan is per height band rather than per region, so on a model sloped on one
+      side and vertical on the other at the same Z, the vertical side's interior rings recolor too.
+      Invisible there, but it costs toolchanges. And a Sandwich-on-a-slope zone still prioritises the
+      thick-top Sandwich; the panel warns when you are in one.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="hae" data-short="Height Adaptive Effects">Height Adaptive Effects</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--free">per object, travels in the 3MF</li>
+      <li class="badge badge--ver badge--plain">2.4.3</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left gizmo toolbar</b><span class="sep">›</span><b>Height Adaptive Effects</b>
+    </p>
+
+    <p>
+      Orca can already vary settings by height: that is what height range modifiers are. The problem
+      is that you type a Z into a box and find out where the transition actually landed after
+      slicing. This gizmo turns it around, and it is the same idea as the layer height curve applied
+      to <em>any</em> setting.
+    </p>
+
+    <figure>
+      <img src="../images/Adaptive-Effects.gif" width="600" height="384" alt="The Height Adaptive Effects gizmo: drawing a curve over the object's real layer bands and watching the affected band highlight on the model" loading="lazy">
+      <figcaption>Drawing a curve over the object's real layer bands. The band you are affecting highlights on the model while you drag.</figcaption>
+    </figure>
+
+    <h3 id="haelist">Building the list</h3>
+
+    <p>
+      The panel starts empty. Press <b>Add</b>, pick an effect, and it joins <em>this object's</em>
+      effects, so the panel only ever shows what you actually use no matter how many effects exist.
+      The trash button on a row removes the effector completely, curve and all; <b>Clear</b> at the
+      bottom empties the curve but keeps the effect in the list. Each row carries a small preview of
+      its own curve and its point count, which is what keeps a list of similarly-named effects
+      readable.
+    </p>
+
+    <h3 id="haecurve">Drawing the curve</h3>
+
+    <p>
+      Click to add a point, drag to move, right-click to delete. Height runs up the left edge and the
+      effect's value across the top. Hovering anywhere gives a live readout of the Z you are on and
+      what the curve is worth there, so you do not have to grab a point to read a number. Dragging a
+      point highlights the matching band on the object in 3D. <b>Open Z points</b> opens a numeric
+      table, one row per point, with the layer number each Z lands on. <b>Presets</b> seed a shape
+      for the effects that have sensible ones, and <b>Refresh layers</b> re-reads the bands after you
+      change the adaptive layer height profile.
+    </p>
+
+    <p class="small">
+      Z is measured from the <strong>bottom of the object</strong>, not from the bed. If you print
+      with a raft, the raft is not part of this axis.
+    </p>
+
+    <h3 id="steps">Steps or ramp, and the number that decides</h3>
+
+    <p>
+      <strong>Steps</strong> holds the value constant inside each band and changes it in one jump at
+      a layer boundary, with every point snapping to a real layer. <strong>Ramp</strong> varies it
+      continuously.
+    </p>
+
+    <p>
+      Steps is not just the cautious option. Sparse infill deliberately keeps its spacing constant
+      across layers so the lines stack on the ones below; a width that drifts walks every line off
+      its support. But what breaks the stacking is the drift <em>between consecutive layers</em>,
+      which depends on how steep your curve is rather than on it being a curve at all. A slow ramp
+      moves each layer by a fraction of a micron. So instead of forbidding ramps, the panel measures
+      yours:
+    </p>
+
+    <ul>
+      <li><strong>Line shift per layer</strong> shows how far the infill of one layer lands from the
+        one below, at the far edge of the object, as a percentage of the line width. It turns amber
+        above roughly 25%.</li>
+      <li><strong>Staircase</strong> turns your ramp into that many layer-aligned bands, keeping the
+        shape while giving the lines back their constant spacing inside each band.</li>
+    </ul>
+
+    <p>
+      A <strong>shortest-band warning</strong> also appears in steps mode: under about four layers,
+      the jump costs more than it gives.
+    </p>
+
+    <h3 id="effects">The effects</h3>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Effect</th><th>What it is for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Sparse infill width</b></td><td>Thin lines low down where the infill has to support the solid above it, thick lines deep inside where nothing rests on them. Same density, same material, less time.</td></tr>
+        <tr><td><b>Outer wall width</b> / <b>Inner wall width</b></td><td>Wall thickness following the height.</td></tr>
+        <tr><td><b>Fuzzy skin thickness</b></td><td>Texture that is born and dies with the height.</td></tr>
+        <tr><td><b>Fuzzy skin point distance / noise scale / octaves / persistence</b></td><td>The texture's <em>character</em> changing with height, not only its depth.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Only the three line widths that <strong>stack</strong> are offered. Internal solid infill and
+      top surface were wired up, looked at, and deliberately taken back out: a ramp there varies the
+      width of the very surfaces the eye reads as flat, which is not something a print wants.
+    </p>
+
+    <ul>
+      <li><strong>Fuzzy skin thickness reaching 0 switches the fuzzy skin off</strong> for that
+        layer rather than merely flattening it. A zero-amplitude fuzzy would otherwise still resample
+        every perimeter into thousands of points: same printed result, much fatter G-code.</li>
+      <li>The curves <strong>scale</strong> fuzzy skin, they do not turn it on. If fuzzy skin is off
+        for the object, the panel says so rather than letting you slice and find nothing changed.</li>
+      <li>A setting driven by a curve is <strong>greyed out</strong> in the object's settings panel,
+        so the same value is never set from two places at once.</li>
+      <li>A curve needs <strong>at least two points</strong> to mean anything. One point is a
+        constant, which is what a plain per-object override is for.</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>Both are Libre Mode only.</strong></li>
+      <li><strong>Every edit is a re-slice.</strong> Same as the stock brush, and on a big model that
+        adds up while you are tuning.</li>
+      <li><strong>Min and max layer height are read-only</strong>, taken from the printer and nozzle.
+        No per-object override yet.</li>
+      <li><strong>A dense existing profile does not import.</strong> Reopening the gizmo on an object
+        painted with the old brush gives you a flat two-point start.</li>
+      <li><strong>Slope recolor costs toolchanges</strong> on regions where the recolor is invisible,
+        because the plan is per height band rather than per region.</li>
+      <li><strong>Adapt to Color and Slope recolor are both WIP</strong> and want broad print
+        testing.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="walls.html"><small>Back</small><b>Walls</b></a>
+      <a class="is-next" href="relief.html"><small>Next</small><b>Bump mapping →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§11</b> and <b>§23</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * curve — the point-based editor, with the layer bands integrated from the
+ * curve itself. Doubles for §11 (the value IS the layer height) and §23
+ * (the value is some other setting, over fixed bands).
+ * ========================================================================= */
+Tour.demo('curve', function (host) {
+  var el = Tour.el;
+
+  var S = {
+    mode: 'alh',              // 'alh' | 'hae'
+    objH: 30,                 // object height, mm
+    minH: 0.08, maxH: 0.32,   // nozzle limits
+    tension: 0,
+    steps: false,
+    staircase: 0,
+    // points are {z: 0..1 of object height, v: 0..1 of the value range}
+    pts: [{ z: 0, v: 0.5, fixed: true }, { z: 1, v: 0.5 }]
+  };
+
+  function valAt(zn) {
+    var p = S.pts;
+    if (zn <= p[0].z) return p[0].v;
+    if (zn >= p[p.length - 1].z) return p[p.length - 1].v;
+    for (var i = 0; i < p.length - 1; i++) {
+      if (zn >= p[i].z && zn <= p[i + 1].z) {
+        var span = p[i + 1].z - p[i].z;
+        var t = span < 1e-6 ? 0 : (zn - p[i].z) / span;
+        // tension 0 = linear, 1 = smoothstep. Monotone either way, so it can
+        // never overshoot past the two points it sits between.
+        var e = S.tension <= 0 ? t : t + (t * t * (3 - 2 * t) - t) * S.tension;
+        return p[i].v + (p[i + 1].v - p[i].v) * e;
+      }
+    }
+    return p[p.length - 1].v;
+  }
+
+  function mmOf(v) { return S.minH + v * (S.maxH - S.minH); }
+
+  /** Walk up the object the way the slicer does, one layer at a time. */
+  function bands() {
+    var out = [], z = 0, guard = 0;
+    while (z < S.objH && guard++ < 4000) {
+      var zn = z / S.objH;
+      var h = S.mode === 'alh' ? mmOf(valAt(zn)) : 0.2;
+      if (S.mode === 'alh' && S.steps) h = Math.round(h * 50) / 50;   // snap to 0.02
+      h = Math.max(0.04, h);
+      out.push({ z0: z, z1: Math.min(S.objH, z + h), h: h });
+      z += h;
+    }
+    return out;
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Z up · value across' }), el('span', { 'data-cnote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var PAD = { l: 44, r: 96, t: 12, b: 20 };
+  var hoverI = -1, dragI = -1;
+
+  function geom(w, h) {
+    return {
+      X: function (v) { return PAD.l + v * (w - PAD.l - PAD.r); },
+      Y: function (zn) { return h - PAD.b - zn * (h - PAD.t - PAD.b); },
+      vOf: function (px) { return (px - PAD.l) / (w - PAD.l - PAD.r); },
+      zOf: function (py) { return (h - PAD.b - py) / (h - PAD.t - PAD.b); }
+    };
+  }
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var g = geom(w, h);
+    var accent = Tour.token('--accent');
+    var faint = Tour.token('--ink-faint');
+    var rule = Tour.token('--rule');
+    var bs = bands();
+
+    // the object, drawn as its real layer bands, to the right of the graph
+    var ox0 = w - PAD.r + 16, ox1 = w - 8;
+    bs.forEach(function (b, i) {
+      var y0 = g.Y(b.z1 / S.objH), y1 = g.Y(b.z0 / S.objH);
+      ctx.fillStyle = i % 2 ? Tour.token('--surface-2') : Tour.token('--surface');
+      ctx.fillRect(ox0, y0, ox1 - ox0, y1 - y0);
+      ctx.strokeStyle = rule; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ox0, y0 + .5); ctx.lineTo(ox1, y0 + .5); ctx.stroke();
+    });
+    ctx.strokeStyle = Tour.token('--rule-firm');
+    ctx.strokeRect(ox0 + .5, PAD.t + .5, ox1 - ox0 - 1, g.Y(0) - PAD.t - 1);
+
+    // the same bands, faintly, across the graph
+    ctx.strokeStyle = rule;
+    ctx.globalAlpha = .8;
+    bs.forEach(function (b) {
+      var y = g.Y(b.z1 / S.objH);
+      ctx.beginPath(); ctx.moveTo(PAD.l, y + .5); ctx.lineTo(w - PAD.r, y + .5); ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
+
+    // axis labels
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = faint;
+    ctx.textAlign = 'right';
+    for (var k = 0; k <= 4; k++) {
+      var zn = k / 4;
+      ctx.fillText((zn * S.objH).toFixed(0) + ' mm', PAD.l - 5, g.Y(zn) + 3);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillText(S.mode === 'alh' ? S.minH.toFixed(2) : 'low', PAD.l, h - 6);
+    ctx.textAlign = 'right';
+    ctx.fillText(S.mode === 'alh' ? S.maxH.toFixed(2) + ' mm' : 'high', w - PAD.r, h - 6);
+
+    // the curve
+    ctx.strokeStyle = accent; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var i = 0; i <= 160; i++) {
+      var zn2 = i / 160;
+      var px = g.X(valAt(zn2)), py = g.Y(zn2);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // the points
+    S.pts.forEach(function (p, i) {
+      var on = (dragI === i) || (dragI < 0 && hoverI === i);
+      ctx.beginPath();
+      ctx.arc(g.X(p.v), g.Y(p.z), on ? 7 : 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = p.fixed ? faint : (on ? accent : Tour.token('--surface'));
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = p.fixed ? faint : accent;
+      ctx.stroke();
+    });
+
+    // the band you are pointing at, lit on the object
+    if (hoverI >= 0 || dragI >= 0) {
+      var p2 = S.pts[dragI >= 0 ? dragI : hoverI];
+      var zmm = p2.z * S.objH;
+      var band = bs.filter(function (b) { return zmm >= b.z0 && zmm <= b.z1; })[0];
+      if (band) {
+        ctx.fillStyle = dragI >= 0 ? Tour.token('--warn') : accent;
+        ctx.globalAlpha = .45;
+        ctx.fillRect(ox0, g.Y(band.z1 / S.objH), ox1 - ox0, g.Y(band.z0 / S.objH) - g.Y(band.z1 / S.objH));
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    ctx.strokeStyle = rule;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(PAD.l + .5, PAD.t + .5, w - PAD.l - PAD.r - 1, g.Y(0) - PAD.t - 1);
+  }, { height: 260 });
+
+  function hit(p) {
+    var g = geom(cv.width, cv.height);
+    for (var i = 0; i < S.pts.length; i++) {
+      if (Math.hypot(p.x - g.X(S.pts[i].v), p.y - g.Y(S.pts[i].z)) < 12) return i;
+    }
+    return -1;
+  }
+
+  cv.canvas.addEventListener('contextmenu', function (ev) {
+    ev.preventDefault();
+    var i = hit(Tour.localPoint(ev, cv.canvas));
+    if (i > 0 && i < S.pts.length && !S.pts[i].fixed && S.pts.length > 2) {
+      S.pts.splice(i, 1); upd();
+    }
+  });
+
+  Tour.draggable(cv.canvas, {
+    onDown: function (p, ev) {
+      if (ev.button === 2) return false;
+      var g = geom(cv.width, cv.height);
+      dragI = hit(p);
+      if (dragI < 0) {
+        // clicking empty space adds a point there
+        if (p.x < PAD.l || p.x > cv.width - PAD.r) return false;
+        var z = Math.max(0.02, Math.min(1, g.zOf(p.y)));
+        var v = Math.max(0, Math.min(1, g.vOf(p.x)));
+        S.pts.push({ z: z, v: v });
+        S.pts.sort(function (a, b) { return a.z - b.z; });
+        dragI = S.pts.findIndex(function (q) { return q.z === z && q.v === v; });
+      }
+      upd();
+    },
+    onMove: function (p) {
+      if (dragI < 0) return;
+      var g = geom(cv.width, cv.height);
+      var pt = S.pts[dragI];
+      pt.v = Math.max(0, Math.min(1, g.vOf(p.x)));
+      if (!pt.fixed && dragI !== S.pts.length - 1) {
+        pt.z = Math.max(0.01, Math.min(0.99, g.zOf(p.y)));
+        S.pts.sort(function (a, b) { return a.z - b.z; });
+        dragI = S.pts.indexOf(pt);
+      }
+      upd();
+    },
+    onUp: function () { dragI = -1; upd(); },
+    onHover: function (p) {
+      var i = hit(p);
+      cv.canvas.style.cursor = i >= 0 ? 'grab' : (p.x > PAD.l && p.x < cv.width - PAD.r ? 'crosshair' : 'default');
+      if (i !== hoverI) { hoverI = i; cv.render(); }
+    },
+    onLeave: function () { if (hoverI !== -1) { hoverI = -1; cv.render(); } }
+  });
+
+  /* ------------------------------------------------------------ controls */
+
+  var read = el('p.hc__read', { style: 'margin:0' });
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  var extra = el('div', { style: 'display:grid;gap:.45rem' });
+
+  side.appendChild(el('div.hc__grp', null, [
+    el('span.hc__gt', { text: 'Which gizmo' }),
+    Tour.segmented({ value: 'alh',
+      options: [['alh','Layer height'],['hae','Any setting']],
+      onChange: function (v) { S.mode = v; rebuild(); } }),
+    el('p', { 'data-modenote': true, style: 'margin:0;font-size:.72rem;color:var(--ink-soft);line-height:1.4' })
+  ]));
+  side.appendChild(el('div.hc__grp', null, [el('span.hc__gt', { text: 'Shape' }), extra]));
+  side.appendChild(el('div.hc__grp', null, [
+    el('span.hc__gt', { text: 'The object' }),
+    Tour.slider({ label: 'Height', min: 6, max: 80, step: 1, value: S.objH,
+      format: function (v) { return v + ' mm'; }, onInput: function (v) { S.objH = v; upd(); } })
+  ]));
+  side.appendChild(el('div.hc__grp', null, [el('span.hc__gt', { text: 'Result' }), read]));
+
+  function buildExtra() {
+    extra.textContent = '';
+    extra.appendChild(Tour.slider({
+      label: 'Tension', min: 0, max: 100, step: 1, value: S.tension * 100,
+      format: function (v) { return v === 0 ? 'straight' : (v/100).toFixed(2); },
+      onInput: function (v) { S.tension = v / 100; upd(); }
+    }));
+    if (S.mode === 'hae') {
+      extra.appendChild(Tour.toggle({ label: 'Steps instead of ramp', value: S.steps,
+        onChange: function (v) { S.steps = v; upd(); } }));
+      extra.appendChild(Tour.slider({ label: 'Staircase', min: 0, max: 12, step: 1, value: S.staircase,
+        format: function (v) { return v === 0 ? 'off' : v + ' bands'; },
+        onInput: function (v) { S.staircase = v; upd(); } }));
+    } else {
+      extra.appendChild(Tour.toggle({ label: 'Snap heights to 0.02 mm', value: S.steps,
+        onChange: function (v) { S.steps = v; upd(); } }));
+    }
+    extra.appendChild(el('button.btn.btn--sm', { type: 'button', text: 'Reset to two points',
+      style: 'justify-self:start',
+      onclick: function () { S.pts = [{ z: 0, v: 0.5, fixed: true }, { z: 1, v: 0.5 }]; upd(); } }));
+  }
+
+  function upd() {
+    cv.render();
+    var bs = bands();
+
+    if (S.mode === 'alh') {
+      var hs = bs.map(function (b) { return b.h; });
+      var lo = Math.min.apply(null, hs), hi = Math.max.apply(null, hs);
+      read.innerHTML =
+        '<b>' + bs.length + '</b> layers over ' + S.objH + ' mm<br>' +
+        'height ranges <b>' + lo.toFixed(2) + '</b> to <b>' + hi.toFixed(2) + ' mm</b><br>' +
+        '<b>' + S.pts.length + '</b> control points';
+    } else {
+      // line shift per layer: how far the value moves between consecutive
+      // layers, as a fraction of a nominal 0.42 mm line.
+      var worst = 0;
+      for (var i = 1; i < bs.length; i++) {
+        var a = valAt(bs[i - 1].z0 / S.objH), b = valAt(bs[i].z0 / S.objH);
+        worst = Math.max(worst, Math.abs(b - a));
+      }
+      var shift = worst * 0.42 / 0.42 * 100;             // value range is one line width
+      read.innerHTML =
+        '<b>' + bs.length + '</b> layers over ' + S.objH + ' mm<br>' +
+        'line shift per layer <b class="' + (shift > 25 ? 'warn' : '') + '">' + shift.toFixed(1) + '%</b>' +
+        (shift > 25 ? '<br><span class="warn">steep enough to walk the infill off its support</span>' : '') +
+        (S.staircase ? '<br>staircased into <b>' + S.staircase + '</b> bands' : '');
+    }
+
+    var mn = host.querySelector('[data-modenote]');
+    if (mn) mn.textContent = S.mode === 'alh'
+      ? 'The value IS the layer height, so the bands on the right are generated by the curve you are drawing.'
+      : 'The value is some other setting (wall width, fuzzy skin) over bands that stay put.';
+    var n = host.querySelector('[data-cnote]');
+    if (n) n.textContent = bands().length + ' layers';
+  }
+
+  function rebuild() { buildExtra(); upd(); }
+
+  host.appendChild(el('div.hc', null, [box, side]));
+  rebuild();
+});
+</script>
+
+</body>
+</html>

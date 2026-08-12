@@ -21,7 +21,7 @@ uniform float u_ao_strength;       // 0 = AO off, 1 = full strength
 // single-pass screen-space subsurface scattering — same material TD array realcolor_accum.fs
 // already indexes dynamically by tool_id (proven to work on this hardware since s163), reused
 // here to scale the blur radius per-pixel by how translucent the surface under it is.
-uniform float u_material_td[4];
+uniform float u_material_td[16];
 uniform float u_sss_strength;      // 0 = off (bit-identical to pre-s214), 1 = full blur
 uniform float u_sss_radius_px;     // px, same supersampled texel space as u_ao_radius
 uniform float u_sss_reference_td;  // mm — a material at exactly this TD blurs at u_sss_radius_px
@@ -34,6 +34,18 @@ uniform float u_grade_saturation;
 // NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): 0 = apagado (≡ pre-F6), 1 = sella los huecos
 // INTERIORES respetando el contorno. Ver compute_interior(). Detalle en 140/realcolor_present.fs.
 uniform float u_fill_interior;
+
+// NEOTKO_PHOTOMODE_TAG s253: sombras de contacto — ver compute_contact_shadow() más abajo.
+// u_proj/u_inv_proj son la proyección de la cámara y su inversa: este pase es un quad a pantalla
+// completa y no recibe posición de vista, así que hay que reconstruirla (y la cámara puede ser
+// ortográfica, de ahí el par completo en vez de la fórmula corta de perspectiva).
+uniform mat4  u_proj;
+uniform mat4  u_inv_proj;
+uniform vec3  u_sscs_light_dir_view;  // luz PRINCIPAL, en espacio de VISTA y unitaria (la marcha)
+uniform vec3  u_sscs_light_dir_world; // la MISMA luz en MUNDO (la puerta por N·L, ver abajo)
+uniform float u_sscs_strength;        // 0 = apagado y bit-idéntico a s252
+uniform float u_sscs_length_mm;       // cuánto se marcha hacia la luz, en mm de mundo
+uniform float u_sscs_thickness_mm;    // un ocluyente más grueso que esto es pared, no contacto
 
 varying vec2 uv;
 
@@ -63,6 +75,96 @@ float ao_sample(vec2 center_uv, float center_z, vec3 center_n, vec2 dir)
     vec3 s_n = normalize(texture2D(u_peel_normal0, s_uv).rgb * 2.0 - 1.0);
     float normal_agreement = max(dot(center_n, s_n), 0.0);
     return range_falloff * normal_agreement;
+}
+
+// ---------------------------------------------------------------------------------------------
+// NEOTKO_PHOTOMODE_TAG s253 — sombras de contacto (screen-space contact shadows). Gemelo de perfil
+// legacy: misma marcha hacia la luz reutilizando la profundidad lineal y las normales que el AO ya
+// muestrea. El razonamiento completo —por qué se puede hacer aquí barato, por qué es la sombra
+// CORTA y no la del suelo, y por qué se reconstruye la posición de vista con proyección+inversa en
+// vez de con la fórmula corta de perspectiva— está en 140/realcolor_present.fs.
+// ---------------------------------------------------------------------------------------------
+#define REALCOLOR_SSCS_STEPS 12
+
+// 🔑 EL SESGO PROPIO ES GRANDE A PROPÓSITO — ES "IGNORA EL CORDÓN DE AL LADO".
+//
+// En shells_lit este número vale 0.08 mm porque allí la superficie es una malla lisa y lo único que
+// hay que descartar es el propio píxel. Aquí la superficie es un CAMPO DE MEDIOS CILINDROS: cada
+// cordón sobresale unas décimas sobre su vecino. Con un sesgo pequeño, la marcha hacia una luz
+// rasante choca SIEMPRE con la cresta de al lado y la pieza entera se auto-sombrea — no una sombra,
+// una mancha con un borde recto que se mueve al girar la cámara.
+//
+// Es la misma propiedad de esta geometría que ya derrotó al SSS de pantalla en s251c (ver la nota
+// de u_light_wrap en realcolor_peel.vs): **la corrugación rechaza cualquier prueba que compare con
+// el vecino inmediato**. La respuesta aquí es la simétrica: sólo cuenta como ocluyente lo que
+// sobresale MÁS que un cordón. Una letra grabada (medio milímetro largo) pasa el filtro; la cresta
+// de la extrusión de al lado, no.
+const float REALCOLOR_SSCS_SELF_BIAS_MM = 0.25;
+
+// Y por debajo de este N·L no se marcha en absoluto. Con la luz casi paralela a la superficie el
+// rayo avanza casi sin ganar altura, así que cualquier microrrelieve entra en la ventana de sombra
+// y el resultado es ruido en toda la cara. Cortar ahí es más barato y más honesto que intentar
+// afinar el sesgo para que aguante el caso rasante.
+const float REALCOLOR_SSCS_MIN_NDL = 0.15;
+
+// Reconstruye la posición de VISTA de un píxel a partir de su uv y su profundidad lineal en mm.
+// Vale para perspectiva y para ortográfica: se toma el segmento del rayo que atraviesa el frustum
+// en ese uv y se busca el punto cuya eye_z es la pedida.
+vec3 realcolor_view_pos(vec2 uv_in, float eye_z)
+{
+    vec2 ndc = uv_in * 2.0 - 1.0;
+    vec4 a = u_inv_proj * vec4(ndc, -1.0, 1.0);
+    vec4 b = u_inv_proj * vec4(ndc,  1.0, 1.0);
+    vec3 pa = a.xyz / a.w;
+    vec3 pb = b.xyz / b.w;
+    vec3 d  = pb - pa;
+    // eye_z = -view_z (mano derecha, la cámara mira hacia -Z), igual que en realcolor_peel.vs.
+    if (abs(d.z) < 1e-9)
+        return vec3(pa.xy, -eye_z);
+    return pa + d * ((-eye_z - pa.z) / d.z);
+}
+
+float compute_contact_shadow(vec2 center_uv, float center_z)
+{
+    if (u_sscs_strength <= 0.0 || u_sscs_length_mm <= 0.0)
+        return 0.0;
+
+    // Puerta por orientación, en espacio de MUNDO: la normal que guarda el peel es de mundo (el
+    // nombre v_view_normal es herencia histórica, ver realcolor_peel.fs) y por eso la luz se recibe
+    // aquí también en mundo, además de en vista para la marcha. Mezclar los dos espacios en este
+    // producto escalar daría una puerta que se abre y se cierra al orbitar — un fallo que parece
+    // parpadeo de sombra y se diagnostica fatal.
+    vec3 n_world = normalize(texture2D(u_peel_normal0, center_uv).rgb * 2.0 - 1.0);
+    float ndl = dot(n_world, normalize(u_sscs_light_dir_world));
+    if (ndl < REALCOLOR_SSCS_MIN_NDL)
+        return 0.0;
+
+    vec3 ro = realcolor_view_pos(center_uv, center_z);
+    vec3 rd = normalize(u_sscs_light_dir_view);
+    float step_mm = u_sscs_length_mm / float(REALCOLOR_SSCS_STEPS);
+    // Jitter del primer paso por píxel: un paso fijo produce bandas visibles en superficies suaves.
+    float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    float t = step_mm * (0.5 + 0.5 * jitter);
+
+    for (int i = 0; i < REALCOLOR_SSCS_STEPS; ++i) {
+        vec3 p = ro + rd * t;
+        vec4 clip = u_proj * vec4(p, 1.0);
+        if (clip.w <= 0.0)
+            break; // detrás del ojo, no queda nada que muestrear
+        vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0)
+            break; // se salió de pantalla — ahí no hay información
+        vec4 s_meta = texture2D(u_peel_meta0, suv);
+        if (s_meta.a >= 0.5) {
+            float delta = (-p.z) - s_meta.b;
+            if (delta > REALCOLOR_SSCS_SELF_BIAS_MM && delta < u_sscs_thickness_mm)
+                // Cuanto más cerca el impacto, más oscuro: una sombra de contacto es más cerrada
+                // justo en el contacto.
+                return 1.0 - t / u_sscs_length_mm;
+        }
+        t += step_mm;
+    }
+    return 0.0;
 }
 
 float compute_ao(vec2 center_uv)
@@ -119,7 +221,12 @@ vec3 compute_sss(vec2 center_uv, vec3 sharp_lin)
         return sharp_lin;
 
     int tool = int(center_meta.r + 0.5);
-    float radius_px = u_sss_radius_px * clamp(u_material_td[tool] / max(u_sss_reference_td, 1e-4), 0.15, 4.0);
+    // s253: acotado a mano — clamp() de enteros no existe en GLSL 1.10. Ver realcolor_peel.fs.
+    // (El clamp EXTERIOR se queda: ese opera sobre floats y es legal en las dos versiones.)
+    int sss_idx = tool;
+    if (sss_idx < 0)  sss_idx = 0;
+    if (sss_idx > 15) sss_idx = 15;
+    float radius_px = u_sss_radius_px * clamp(u_material_td[sss_idx] / max(u_sss_reference_td, 1e-4), 0.15, 4.0);
     if (radius_px < 0.5)
         return sharp_lin;
 
@@ -218,6 +325,19 @@ void main()
     // into the Beer-Lambert composite.
     float ao = compute_ao(uv);
     lin *= mix(1.0, ao, u_ao_strength);
+
+    // NEOTKO_PHOTOMODE_TAG s253: sombra de contacto, JUSTO DESPUÉS del AO y por la misma lógica que
+    // el AO va después del SSS — cada uno modula el resultado del anterior, del material hacia la
+    // presentación. El orden importa poco numéricamente (son dos multiplicaciones) pero mucho
+    // conceptualmente: el AO dice "este píxel está en un rincón", la sombra dice "y además la luz
+    // no le llega", y lo segundo se evalúa sobre lo primero.
+    //
+    // Se lee la profundidad del centro otra vez en vez de reutilizar la de compute_ao(): ese valor
+    // es local a aquella función y sacarlo fuera obligaría a devolver dos cosas o a un out-param,
+    // que en el gemelo 110 es más ruido del que ahorra. Un tap de textura más por píxel.
+    vec4 sscs_center = texture2D(u_peel_meta0, uv);
+    if (sscs_center.a >= 0.5)
+        lin *= 1.0 - u_sscs_strength * compute_contact_shadow(uv, sscs_center.b);
 
     // NEOTKO_REALCOLOR_TAG s243 (F5 = A7): lo último antes del gamma, y deliberadamente fuera del
     // acumulador — es presentación, no material (razonamiento completo en 140/realcolor_present.fs).

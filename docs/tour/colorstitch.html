@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ColorStitch — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A pass that picks the filament for every single fill line: dithered blends, exact stripes, textile weaves, hand-typed patterns. With the real Bresenham dither running live.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  /* ---- pattern lab ----------------------------------------------------- */
+  .lab { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 720px) { .lab { grid-template-columns: 1fr; } }
+
+  .lab__out { display: grid; gap: .7rem; }
+  .lab__strip { border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .lab__two { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+  @container demo (max-width: 520px) { .lab__two { grid-template-columns: 1fr; } }
+
+  .lab__side { display: grid; gap: .55rem; }
+  .lab__side .ctrl__label { font-size: .74rem; }
+  .lab__group {
+    border: 1px solid var(--rule); border-radius: 6px;
+    background: var(--surface-2); padding: .5rem .55rem; display: grid; gap: .45rem;
+  }
+  .lab__gt {
+    font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+
+  .cpick { display: grid; grid-template-columns: repeat(4, 1fr); gap: .3rem; }
+  .cpick label { display: grid; gap: .15rem; font-family: var(--mono); font-size: .62rem; color: var(--ink-faint); }
+  .cpick input[type="color"] {
+    width: 100%; height: 20px; padding: 0; border: 1px solid var(--rule-firm);
+    border-radius: 4px; background: none; cursor: pointer;
+  }
+
+  .digits { display: flex; flex-wrap: wrap; gap: .25rem; }
+  .digits button {
+    width: 22px; height: 20px; padding: 0; cursor: pointer;
+    border: 1.5px solid transparent; border-radius: 3px;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.2);
+    font: inherit; font-size: .65rem; font-family: var(--mono);
+  }
+  .digits button[aria-pressed="true"] { border-color: var(--ink); }
+
+  .patstr {
+    font-family: var(--mono); font-size: .74rem; word-break: break-all;
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 4px; padding: .3rem .4rem; min-height: 1.9em; color: var(--ink);
+  }
+
+  .runs { font-family: var(--mono); font-size: .68rem; color: var(--ink-faint); }
+
+  /* ---- line distribution diagram --------------------------------------- */
+  .ld { display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; }
+  @container demo (max-width: 640px) { .ld { grid-template-columns: repeat(2, 1fr); } }
+  .ld figure { margin: 0; }
+  .ld figcaption { font-size: .74rem; padding: .4rem .5rem; }
+  .ld b { display: block; font-family: var(--mono); font-size: .68rem; letter-spacing: .06em;
+          text-transform: uppercase; color: var(--ink); margin-bottom: .15rem; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour" aria-current="page">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§1b · §1f — Colour</p>
+    <h1>ColorStitch</h1>
+    <p class="lede">
+      One of the pass kinds in a <a href="sandwich.html">Sandwich</a>. It does exactly one job:
+      for every fill line on the surface, it decides which filament prints that line. Everything
+      you can build with it comes out of that one decision.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--ver badge--plain">since 2.3</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Sandwich editor</b><span class="sep">›</span><span>a pass set to</span><b>ColorStitch</b><span class="sep">›</span><b>Edit gradient…</b>
+    </p>
+    <p class="small" style="margin-top:-.9rem">
+      The same dialog opens from the <a href="painter.html">ColorStitch Painter</a>'s
+      Pro tray via the <code>ADV…</code> button. Two doors, one room.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">What breaks without it</h2>
+
+    <p>
+      A solid fill gives you one colour per surface. If you want a blend you have three bad
+      options in a stock slicer: print two regions and live with the seam, buy a filament that
+      is already the colour you wanted, or give up. None of them let you say "60% of this
+      surface in blue, the rest in yellow, mixed finely enough that my eye stops resolving it".
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Stock</h4>
+        <p>One tool owns the whole top surface. Colour boundaries are geometry: you draw them,
+        the slicer obeys them, and every one of them is visible.</p>
+      </div>
+      <div class="fold--after">
+        <h4>With ColorStitch</h4>
+        <p>Every fill line gets its own tool. At 0.42 mm line width a 60 mm surface has around
+        170 of them, which is plenty for the eye to integrate a ratio instead of counting
+        stripes.</p>
+      </div>
+    </div>
+
+    <p>
+      It is worth being clear about what this <em>is not</em> doing. Nothing gets mixed. There
+      is no gradient in the material. There are just lines of one filament sitting next to lines
+      of another, in a sequence chosen so that any local window has roughly the ratio you asked
+      for. The blending happens in your eye, and it is the same trick a newspaper photograph
+      plays.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="styles" data-short="Pattern styles">Pattern styles</h2>
+
+    <p>
+      <strong>Pattern style</strong> picks where the sequence comes from. Only one is active at
+      a time, on purpose: a hand-typed string, a MixedFilament recipe, a weave, a blend and a set
+      of stripes cannot all drive the same pass. A line under the selector always tells you what
+      the active style is doing, and it turns amber when that style overrides everything else.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Style</th><th>What it produces</th></tr></thead>
+      <tbody>
+        <tr><td><b>Custom pattern</b></td><td>Click filament buttons to build a digit string by hand; the slicer loops it across the lines, so line 1 takes the first digit and it wraps. For exact repeating stripes you design yourself. <code>Clear</code>, <code>⌫ Undo digit</code> and <code>Invert</code> live here.</td></tr>
+        <tr><td><b>MixedFilament recipe</b></td><td>Pick one of your MixedFilament combinations (say <em>F1+F2 50/50</em>) and it becomes the whole pattern. Only shown when MixedFilament virtual digits are on. Switching to another style clears it.</td></tr>
+        <tr><td><b>Textile weave</b></td><td>Ready-made weave structures, generated for you. <a href="#weaves">Below</a>.</td></tr>
+        <tr><td><b>Smooth blend, 2 colours</b></td><td>Two filaments spread across the surface at a percentage split, dithered so the transition looks continuous. The one most people want.</td></tr>
+        <tr><td><b>Smooth blend, 3 colours</b></td><td>Three filaments at configurable percentages, with the middle colour concentrating around the centre.</td></tr>
+        <tr><td><b>Stripes, manual band sizes</b></td><td>Explicit band counts: N lines of Colour 1, M of Colour 2, repeating.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <figure>
+      <img src="../images/ColorStitch-newADVUX.png" width="698" height="576" alt="The redesigned ADV dialog: a Pattern style selector at the top, and below it only the controls belonging to the style you picked" loading="lazy">
+      <figcaption>The <code>ADV…</code> dialog. Pick a style and you only see that style's controls, which is why the panel stopped being a wall of fields that mostly did nothing.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="lab" data-short="★ Pattern lab">Pattern lab</h2>
+
+    <p>
+      Every style, with the real sequence builder underneath. The strip is what the slicer will
+      emit line by line; the square is that same sequence laid down at the pass angle; the swatch
+      is what the whole thing resolves to once you step back from the part.
+    </p>
+
+    <div class="demo bleed" id="lab-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Pattern lab</span>
+        <span class="demo__hint">try Slow start against Even at 50%</span>
+      </div>
+      <div class="demo__body" data-demo="pattern-lab">
+        <noscript><p class="noscript">This demo needs JavaScript. The tables above and below describe every control it exposes.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real algorithm
+        </span>
+        &nbsp;· <code>build_dithered_tools_2color</code>, <code>build_dithered_tools_3color</code>,
+        <code>build_custom_bands</code> and <code>colormix_easing_apply</code>, ported from
+        <code>SurfaceColorMix.cpp</code>. The strip is the sequence, not a picture of one.
+        <br><a href="play.html">More simulators in the Playground →</a>
+      </div>
+    </div>
+
+    <h3 id="bresenham">Why the dither looks the way it does</h3>
+
+    <p>
+      The two-colour blend is a Bresenham line algorithm with one integer accumulator. It walks
+      the sequence keeping a running count of how many B lines it has emitted, compares that
+      against how many it should have emitted by now, and picks B when it is behind. The result
+      has a property worth knowing: in any window of W lines, the fraction of B lands within
+      <code>1/W</code> of your target ratio. Locally correct everywhere, globally exact, and
+      identical on every slice because there is no randomness in it anywhere.
+    </p>
+
+    <p>
+      The three-colour version runs three of those trackers at once and gives each line to
+      whichever tool is furthest behind its own expected share. The share comes from a hat
+      function centred on each colour's anchor, and <strong>Color overlap</strong> is the width
+      of that hat. At overlap 0 the hats are triangles that barely touch, so you get three clean
+      bands. At overlap 1 every colour has a non-zero chance everywhere, and the three fade
+      through each other. The global percentages hold either way; only the local distribution
+      changes shape.
+    </p>
+
+    <h3 id="grouping">It does not print line, change, line, change</h3>
+
+    <p>
+      This is the thing people get wrong about ColorStitch, and it is worth being clear about,
+      because the wrong version makes the feature sound far more expensive than it is.
+    </p>
+
+    <p>
+      The sequence says which tool owns each fill line. It does <em>not</em> say what order the
+      lines are printed in. Before emitting anything the engine
+      <strong>groups the lines by unique tool</strong> and prints one block per tool, in
+      first-occurrence order, so the first tool in the pattern goes down first. All of T2's lines,
+      then all of T4's lines.
+    </p>
+
+    <p>
+      So a 50/50 dither across 170 fill lines costs <strong>one toolchange</strong>, not 169. The
+      cost of a ColorStitch pass is the number of <em>tools</em> it uses, and nothing else. Two
+      colours is one change, three is two. How finely they interleave across the surface is free.
+    </p>
+
+    <div class="note note--good">
+      <span class="note__t">Where this lives, if you want to check</span>
+      <p style="margin:0">
+        <code>SurfaceColorMix.cpp</code>, in the unique-tool block merge: <em>"Then group by UNIQUE
+        tool_id; unique_tool_order = first-occurrence order so the first tool in the pattern prints
+        first."</em> The same grouping is what keeps the slice, the fill and the wipe-tower planner
+        agreeing on the tool list.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="blend" data-short="Blend controls">The blend controls</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>How much Color 1 / Color 2</b></td><td>The percentage split. In the 3-colour blend, Color 3 automatically takes whatever is left.</td></tr>
+        <tr><td><b>Color overlap</b></td><td>Soft to hard zones. How far each colour bleeds into its neighbour's territory in a 3-colour blend.</td></tr>
+        <tr><td><b>Transition shape</b></td><td>Even, <b>Slow start</b> (what you get when you first pick a blend style), Slow end, S-curve, Custom shape with a <b>γ</b> value, or Hard step.</td></tr>
+        <tr><td><b>Skip tiny areas</b></td><td>Surfaces with fewer than N fill lines fall back to Color 1 alone. A four-line surface cannot express a ratio, and trying costs you toolchanges for nothing.</td></tr>
+        <tr><td><b>Invert direction ⇆</b></td><td>Reverses the per-line sequence. Blend and stripe styles have this; Custom and Weave have their own <code>Invert</code> button instead.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <figure>
+      <img src="../images/colotstitch-slowstart.png" width="1406" height="1148" alt="Smooth blend with three colours at 32% and 37%, the third auto-filling the remaining 31%, 31% overlap and an Even transition, with the line strip and a square sample drawn at the pass angle" loading="lazy">
+      <figcaption>A three-colour blend at <b>32% / 37%</b>, the third colour taking the remaining 31%, with 31% overlap and an Even transition. Both previews are live: the strip and the square sample drawn at the pass angle.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/colotstitch-stripes.png" width="1418" height="842" alt="Stripes with manual band sizes: ten lines of Colour 1 then ten of Colour 2, repeating" loading="lazy">
+      <figcaption>Manual stripes. Ten lines of Colour 1, then ten of Colour 2, repeating. A colour set to zero lines is skipped rather than silently falling back to tool 0.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="weaves" data-short="Textile weaves">Textile weaves</h2>
+
+    <p>
+      Weave structures borrowed from real fabric construction, generated as pattern strings from
+      two colours you pick.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Weave</th><th>Pattern</th><th>Look</th></tr></thead>
+      <tbody>
+        <tr><td><b>Plain (tafetán)</b></td><td><code>1212</code></td><td>Balanced 50/50, neither colour dominating.</td></tr>
+        <tr><td><b>Twill 2/2 (sarga)</b></td><td><code>1122</code></td><td>Diagonal weave. The real per-layer diagonal offset is not implemented, so today it prints as a static repeat. The dialog says so.</td></tr>
+        <tr><td><b>Twill 3/1</b></td><td><code>1112</code></td><td>One colour dominates, the other marks a diagonal. Same offset caveat.</td></tr>
+        <tr><td><b>Satin 5 (satén)</b></td><td><code>11112</code></td><td>One colour covers about 80%; the other lands as scattered accent points.</td></tr>
+        <tr><td><b>Houndstooth</b></td><td><code>1122</code> top<br><code>2211</code> penu</td><td>The classic pattern only appears where Top and Penultimate cross at 90°. The dialog writes the correct half for the surface you are editing and shows you the string for the other one.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Pick <strong>Colour A</strong> and <strong>Colour B</strong> to substitute into the weave.
+      Set both to the same filament and Colour B gets nudged to the next one, because a
+      one-colour weave is just a solid fill. <strong>Edit as custom pattern…</strong> copies the
+      generated string into the Custom style so you can pull it apart by hand.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="print" data-short="Print options">Print options</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Infill angle override</b></td><td><code>-1</code> is auto. Scroll the mouse wheel over the pass preview bar to rotate it live and the bar's stripes turn with it. A fixed angle of 0 or more is honoured <b>exactly</b> in the G-code: the per-layer fill rotation gets locked out for that pass, so the print keeps the angle you set. Leave it on auto and the slicer alternates per layer, which gives a more uniform finish but means no static preview can match the print.</td></tr>
+        <tr><td><b>Gradient repetitions</b></td><td><code>1</code> is a single pass across the surface; higher values repeat the pattern.</td></tr>
+        <tr><td><b>ColorStitch min. line length</b></td><td>Fill lines shorter than this (mm) keep the surrounding colour instead of getting their own tool. Default <b>0</b>, meaning skip nothing. Raise it when a surface has a lot of small slivers and you would rather not pay a toolchange for a 2 mm segment.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note note--warn">
+      <span class="note__t">Set your top surface pattern first</span>
+      <p style="margin:0">
+        ColorStitch works correctly on <b>Monotonic Line</b>, and that is the setting to use:
+        <b>Quality → Top surface pattern → Monotonic Line</b>. The slicer pre-splits the surface
+        into individual straight paths before it assigns tools, and Monotonic Line is the pattern
+        that hands them over one at a time. Plain Monotonic and Rectilinear look fine on a simple
+        convex shape and mis-sequence on anything complicated.
+      </p>
+    </div>
+
+    <p>
+      Since 2.4.0 it also works out of the box on <strong>Monotonic</strong>,
+      <strong>Rectilinear</strong> and <strong>Hilbert Curve</strong>, and the old
+      "ColorStitch on Monotonic (continuous)" switch is gone because that behaviour is always on
+      now. <strong>Concentric</strong>, <strong>Octogram</strong> and
+      <strong>Archimedean</strong> work too, with a caveat: their line distribution is not
+      uniform, so the dither is less predictable there. Getting a clean dither on Hilbert Curve
+      in particular takes tuning and does not always come out.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="distribution" data-short="Line distribution">Line distribution mode</h2>
+
+    <p>
+      This one has nothing to do with the pattern. It controls how the slicer maps colour slots
+      onto the <strong>physical fill lines</strong> of a surface, which matters the moment a
+      surface has a hole in it.
+    </p>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Quality</b><span class="sep">›</span><b>Surface ColorStitch</b><span class="sep">›</span><b>Line distribution mode</b>
+    </p>
+
+    <p>
+      Picture a rectangle with a hole in the middle. Physically, a fill line that crosses the
+      hole is two separate line segments. In raw print order those two halves are numbered
+      separately, so slot 40 might be the left half of one row and slot 41 the right half of a
+      completely different row. Feed a gradient through that numbering and it comes apart.
+    </p>
+
+    <div class="demo bleed">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">The four modes on a surface with a hole</span>
+        <span class="demo__hint">illustrative, not the engine</span>
+      </div>
+      <div class="demo__body" data-demo="line-dist">
+        <noscript><p class="noscript">This diagram needs JavaScript. The table below says the same thing in words.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        This one is a <b>diagram</b>, not a port. It shows what each mode is trying to achieve;
+        the real GeoSort, LaneQuant and DirCluster implementations live in the engine and do more
+        than this.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Mode</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Default</b></td><td>Raw print order. Simple rectangular surfaces, and Custom-text patterns where you want the digits to land in print order.</td></tr>
+        <tr><td><b>GeoSort</b></td><td>Print order is scrambled but the spatial direction is clean.</td></tr>
+        <tr><td><b>LaneQuant</b></td><td>Surfaces with holes, concavities or disconnected sub-regions. Fragmented stripes keep the same colour. The one to reach for on a complex top.</td></tr>
+        <tr><td><b>DirCluster</b></td><td>The fill engine rotated its direction per sub-region, and each region keeps its own coherent gradient.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p class="small">
+      Quick rule: if the gradient looks wrong, move one mode down the list and re-slice.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="realprint" data-short="On the bed">What it looks like off the bed</h2>
+
+    <p>
+      This pair is the best argument for why the G-code view alone will mislead you, and it is
+      the reason <a href="realcolor.html">RealColor</a> exists.
+    </p>
+
+    <figure>
+      <img src="../images/REALPRINTS/RealPrint-01A.webp" width="1052" height="527" alt="G-code preview of three rows of test tiles, each row sweeping the mix ratio of one filament against a dark blue, dithered along a Hilbert Curve infill. In G-code view the dither reads as scattered fragments" loading="lazy">
+      <figcaption>G-code view. Three rows of tiles, each sweeping one filament against a dark blue, dithered along a <b>Hilbert Curve</b> infill. On screen it reads as noise.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/REALPRINTS/RealPrint-01B_web.png" width="1400" height="1050" alt="The same tiles printed: what looked like noise in the G-code view resolves into continuous tone" loading="lazy">
+      <figcaption>The same tiles, printed. The noise resolves into continuous tone, because your eye integrates the dither instead of resolving the individual lines.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="What it costs you">What it costs you</h2>
+
+    <ul>
+      <li><strong>A toolchange per tool, per pass.</strong> Cheaper than people expect, and the
+        reason is <a href="#grouping">below</a>. What costs you is how many <em>tools</em> a pass
+        uses, not how finely they interleave.</li>
+      <li><strong>Small surfaces cannot hold a ratio.</strong> Twelve fill lines can express 1/12
+        steps and nothing finer. The dither is doing its job; there is just nothing to work
+        with. <b>Skip tiny areas</b> exists for exactly this.</li>
+      <li><strong>Auto angle and static previews disagree.</strong> On auto the fill direction
+        alternates every layer, so the on-model preview and the print will not line up. An amber
+        <b>auto angle</b> tag appears next to <code>ADV</code> to remind you. Set a fixed angle
+        if you care about orientation.</li>
+      <li><strong>Twills are not diagonal yet.</strong> Twill 2/2 and Twill 3/1 currently print
+        as a static repeat, because the per-layer offset that makes a twill a twill is not
+        implemented.</li>
+      <li><strong>Concentric and friends are a gamble.</strong> They work, the line distribution
+        is just not uniform, so what you get is harder to predict than on Monotonic Line.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="sandwich.html"><small>Back</small><b>The Sandwich</b></a>
+      <a class="is-next" href="pathblend.html"><small>Next</small><b>PathBlend →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§1b</b> and <b>§1f</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="map.html">Feature map</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * pattern-lab — the ADV dialog, with the engine's own sequence builders.
+ * ========================================================================= */
+Tour.demo('pattern-lab', function (host) {
+  var el = Tour.el;
+
+  var S = {
+    style: 'blend2',
+    tools: [1, 3, 2, 0],
+    pctA: 50, pctB: 33,
+    easing: Stitch.EASING.EASE_IN,   // "slow start", the app's default for a new blend
+    gamma: 1.6,
+    overlap: 0.3,
+    counts: [10, 10, 0, 0],
+    pattern: '1122',
+    weave: 'plain',
+    invert: false,
+    repeat: 1,
+    angle: 45,
+    thickness: 0.10,
+    layerH: 0.20,
+    surfaceMm: 60,
+    lineWidth: 0.42,
+    base: '#8d9199',
+    filaments: Optics.DEFAULT_FILAMENTS.map(function (f) { return { name: f.name, hex: f.hex, td: f.td }; })
+  };
+
+  function nLines() { return Stitch.estimateLines(S.surfaceMm, S.lineWidth, 0.15); }
+
+  function cfg() {
+    return {
+      style: S.style, tools: S.tools,
+      pctA: S.pctA, pctB: S.pctB,
+      easing: S.easing, gamma: S.gamma, overlap: S.overlap,
+      counts: S.counts, pattern: S.pattern, weave: S.weave,
+      invert: S.invert, repeat: S.repeat
+    };
+  }
+
+  /** The colour one fill line prints, once the pass sits over the object's fill. */
+  function lineColour(tool) {
+    var f = S.filaments[tool];
+    return Optics.blendStacked(
+      [{ colorHex: f.hex, thickness: S.thickness, tdMm: Optics.tdToMm(f.td, S.layerH) }],
+      S.base
+    );
+  }
+
+  /* ------------------------------------------------------------- outputs */
+
+  var out = el('div.lab__out');
+
+  // strip -------------------------------------------------------------------
+  var stripHost = el('div.lab__strip');
+  out.appendChild(el('div', null, [
+    el('p.lab__gt', { text: 'The sequence, line by line', style: 'margin:0 0 .3rem' }),
+    stripHost
+  ]));
+  var strip = Tour.canvas(stripHost, function (ctx, w, h) {
+    var seq = Stitch.build(nLines(), cfg());
+    var bw = w / seq.length;
+    for (var i = 0; i < seq.length; i++) {
+      ctx.fillStyle = Optics.linearToCss(lineColour(seq[i]));
+      ctx.fillRect(i * bw, 0, bw + 1, h);
+    }
+  }, { height: 34 });
+
+  // square + swatch ---------------------------------------------------------
+  var two = el('div.lab__two');
+
+  var sqBox = el('div.vbox');
+  sqBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'At the pass angle' }),
+    el('span', { 'data-sq-note': true })
+  ]));
+  var sqHost = el('div');
+  sqBox.appendChild(sqHost);
+
+  var square = Tour.canvas(sqHost, function (ctx, w, h) {
+    var cx = w / 2, cy = h / 2;
+    var diag = Math.ceil(Math.sqrt(w * w + h * h)) + 4;
+
+    var nSq = nLines();
+    var pitch = h / nSq;                      // real line pitch, scaled to the box
+    var nDiag = Math.ceil(diag / pitch) + 2;
+
+    var isBlend = (S.style === 'blend2' || S.style === 'blend3');
+    var seq;
+    if (isBlend) {
+      // A blend spans the surface once, so build it over the square's own
+      // extent and clamp in the corners the rotation drags into view.
+      var core = Stitch.build(nSq, cfg());
+      var pad = Math.floor((nDiag - nSq) / 2);
+      seq = [];
+      for (var i = 0; i < nDiag; i++) {
+        seq.push(core[Math.max(0, Math.min(nSq - 1, i - pad))]);
+      }
+    } else {
+      // Patterns tile at the real line width, so just build more of them.
+      seq = Stitch.build(nDiag, cfg());
+    }
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(S.angle * Math.PI / 180);
+    for (var j = 0; j < seq.length; j++) {
+      ctx.fillStyle = Optics.linearToCss(lineColour(seq[j]));
+      ctx.fillRect(-diag / 2, -diag / 2 + j * pitch, diag, pitch + 0.9);
+    }
+    ctx.restore();
+  }, { height: 168 });
+
+  var swBox = el('div.vbox');
+  swBox.appendChild(el('div.vbox__hd', null, [el('span', { text: 'Stand back' })]));
+  var swPatch = el('div', { style: 'height:130px' });
+  var swMeta = el('div', { style: 'padding:.45rem .55rem;font-size:.78rem;line-height:1.45;border-top:1px solid var(--rule)' });
+  swBox.appendChild(swPatch);
+  swBox.appendChild(swMeta);
+
+  two.appendChild(sqBox);
+  two.appendChild(swBox);
+  out.appendChild(two);
+
+  var runsLine = el('p.runs', { style: 'margin:0' });
+  out.appendChild(runsLine);
+
+  /* ------------------------------------------------------------ controls */
+
+  var side = el('div.lab__side');
+
+  function group(title, kids) {
+    return el('div.lab__group', null, [el('span.lab__gt', { text: title })].concat(kids));
+  }
+
+  // style selector ----------------------------------------------------------
+  var styleSel = Tour.select({
+    label: 'Pattern style', value: S.style,
+    options: [
+      ['blend2', 'Smooth blend, 2 colours'],
+      ['blend3', 'Smooth blend, 3 colours'],
+      ['stripes', 'Stripes, manual bands'],
+      ['custom', 'Custom pattern'],
+      ['weave', 'Textile weave']
+    ],
+    onChange: function (v) { S.style = v; rebuild(); }
+  });
+
+  // filament colours --------------------------------------------------------
+  var cpick = el('div.cpick');
+  S.filaments.forEach(function (f, i) {
+    var inp = el('input', { type: 'color', value: f.hex, 'aria-label': f.name });
+    inp.addEventListener('input', function () { f.hex = inp.value; rebuild(); });
+    cpick.appendChild(el('label', null, [el('span', { text: f.name }), inp]));
+  });
+
+  var body = el('div', { style: 'display:grid;gap:.55rem' });
+
+  function styleControls() {
+    body.textContent = '';
+
+    function toolRow(label, key, idx) {
+      var row = el('div.digits');
+      S.filaments.forEach(function (f, i) {
+        var b = el('button', {
+          type: 'button', text: f.name,
+          'aria-pressed': S.tools[idx] === i, title: f.name
+        });
+        b.style.background = f.hex;
+        b.style.color = Optics.inkOn(f.hex);
+        b.addEventListener('click', function () { S.tools[idx] = i; rebuild(); });
+        row.appendChild(b);
+      });
+      return el('div', { style: 'display:grid;gap:.2rem' }, [
+        el('span.lab__gt', { text: label }), row
+      ]);
+    }
+
+    if (S.style === 'blend2' || S.style === 'blend3') {
+      body.appendChild(toolRow('Colour 1', 'a', 0));
+      body.appendChild(toolRow('Colour 2', 'b', 1));
+      if (S.style === 'blend3') body.appendChild(toolRow('Colour 3', 'c', 2));
+
+      body.appendChild(Tour.slider({
+        label: 'How much Colour 1', min: 0, max: 100, step: 1, value: S.pctA,
+        format: function (v) { return v + '%'; },
+        onInput: function (v) { S.pctA = v; redraw(); }
+      }));
+      if (S.style === 'blend3') {
+        body.appendChild(Tour.slider({
+          label: 'How much Colour 2', min: 0, max: 100, step: 1, value: S.pctB,
+          format: function (v) { return v + '%'; },
+          onInput: function (v) { S.pctB = v; redraw(); }
+        }));
+        body.appendChild(Tour.slider({
+          label: 'Colour overlap', min: 0, max: 100, step: 1, value: S.overlap * 100,
+          format: function (v) { return v < 12 ? 'hard' : v > 80 ? 'soft' : v + '%'; },
+          onInput: function (v) { S.overlap = v / 100; redraw(); }
+        }));
+      }
+      body.appendChild(Tour.select({
+        label: 'Transition shape', value: String(S.easing),
+        options: Stitch.EASING_LABELS.map(function (l, i) { return [String(i), l]; }),
+        onChange: function (v) { S.easing = parseInt(v, 10); rebuild(); }
+      }));
+      if (S.easing === Stitch.EASING.GAMMA) {
+        body.appendChild(Tour.slider({
+          label: 'γ', min: 0.2, max: 5, step: 0.1, value: S.gamma,
+          format: function (v) { return v.toFixed(1); },
+          onInput: function (v) { S.gamma = v; redraw(); }
+        }));
+      }
+
+    } else if (S.style === 'stripes') {
+      S.counts.forEach(function (c, i) {
+        body.appendChild(Tour.slider({
+          label: S.filaments[S.tools[i]].name + ' band', min: 0, max: 30, step: 1, value: c,
+          format: function (v) { return v === 0 ? 'skipped' : v + ' lines'; },
+          onInput: function (v) { S.counts[i] = v; redraw(); }
+        }));
+      });
+
+    } else if (S.style === 'custom') {
+      var out2 = el('div.patstr', { text: S.pattern || '(empty)' });
+      var pad = el('div.digits');
+      S.filaments.forEach(function (f, i) {
+        var b = el('button', { type: 'button', text: String(i + 1), title: f.name });
+        b.style.background = f.hex;
+        b.style.color = Optics.inkOn(f.hex);
+        b.addEventListener('click', function () {
+          S.pattern += String(i + 1);
+          out2.textContent = S.pattern;
+          redraw();
+        });
+        pad.appendChild(b);
+      });
+      var acts = el('div', { style: 'display:flex;gap:.25rem;flex-wrap:wrap' }, [
+        el('button.btn.btn--sm', { type: 'button', text: '⌫ undo', onclick: function () {
+          S.pattern = S.pattern.slice(0, -1); out2.textContent = S.pattern || '(empty)'; redraw();
+        }}),
+        el('button.btn.btn--sm', { type: 'button', text: 'clear', onclick: function () {
+          S.pattern = ''; out2.textContent = '(empty)'; redraw();
+        }}),
+        el('button.btn.btn--sm', { type: 'button', text: 'invert', onclick: function () {
+          S.pattern = S.pattern.split('').reverse().join(''); out2.textContent = S.pattern; redraw();
+        }})
+      ]);
+      body.appendChild(pad);
+      body.appendChild(out2);
+      body.appendChild(acts);
+
+    } else if (S.style === 'weave') {
+      body.appendChild(Tour.select({
+        label: 'Weave', value: S.weave,
+        options: Stitch.WEAVES.map(function (w) { return [w.id, w.name]; }),
+        onChange: function (v) { S.weave = v; rebuild(); }
+      }));
+      body.appendChild(toolRow('Colour A', 'a', 0));
+      body.appendChild(toolRow('Colour B', 'b', 1));
+      var w = Stitch.WEAVES.find(function (x) { return x.id === S.weave; });
+      body.appendChild(el('p', {
+        style: 'margin:0;font-size:.72rem;color:var(--ink-soft);line-height:1.4',
+        html: '<code>' + Stitch.remapPattern(w.pattern, S.tools[0], S.tools[1]) + '</code>. ' + w.look +
+              (w.counterpart ? '<br>Penultimate half: <code>' +
+                Stitch.remapPattern(w.counterpart, S.tools[0], S.tools[1]) + '</code>' : '')
+      }));
+      if (w.note) {
+        body.appendChild(el('p', {
+          style: 'margin:0;font-size:.71rem;color:var(--warn);line-height:1.4', text: w.note
+        }));
+      }
+    }
+  }
+
+  var printGroup = group('Print options', [
+    Tour.slider({
+      label: 'Infill angle', min: 0, max: 179, step: 1, value: S.angle,
+      format: function (v) { return v + '°'; },
+      onInput: function (v) { S.angle = v; redraw(); }
+    }),
+    Tour.slider({
+      label: 'Gradient repetitions', min: 1, max: 6, step: 1, value: S.repeat,
+      format: function (v) { return v === 1 ? 'single' : '×' + v; },
+      onInput: function (v) { S.repeat = v; redraw(); }
+    }),
+    Tour.toggle({ label: 'Invert direction ⇆', value: S.invert,
+      onChange: function (v) { S.invert = v; redraw(); } })
+  ]);
+
+  var surfaceGroup = group('The surface', [
+    Tour.slider({
+      label: 'Surface size', min: 8, max: 140, step: 2, value: S.surfaceMm,
+      format: function (v) { return v + ' mm'; },
+      onInput: function (v) { S.surfaceMm = v; redraw(); }
+    }),
+    Tour.slider({
+      label: 'Pass thickness', min: 0.04, max: 0.3, step: 0.01, value: S.thickness,
+      format: function (v) { return v.toFixed(2) + ' mm'; },
+      onInput: function (v) { S.thickness = v; redraw(); }
+    })
+  ]);
+
+  side.appendChild(group('Style', [styleSel, cpick, body]));
+  side.appendChild(printGroup);
+  side.appendChild(surfaceGroup);
+
+  /* -------------------------------------------------------------- render */
+
+  function redraw() {
+    strip.render();
+    square.render();
+
+    var n = nLines();
+    var seq = Stitch.build(n, cfg());
+
+    var avg = [0, 0, 0], cache = {};
+    for (var i = 0; i < seq.length; i++) {
+      var c = cache[seq[i]] || (cache[seq[i]] = lineColour(seq[i]));
+      avg[0] += c[0]; avg[1] += c[1]; avg[2] += c[2];
+    }
+    avg = [avg[0] / seq.length, avg[1] / seq.length, avg[2] / seq.length];
+    swPatch.style.background = Optics.linearToCss(avg);
+
+    // how many lines each tool actually gets
+    var counts = {};
+    seq.forEach(function (t) { counts[t] = (counts[t] || 0) + 1; });
+    var share = Object.keys(counts).sort().map(function (k) {
+      return S.filaments[k].name + ' ' + Math.round(counts[k] / seq.length * 100) + '%';
+    }).join(' · ');
+
+    swMeta.innerHTML =
+      '<b style="font-family:var(--mono)">' + Optics.linearToHex(avg) + '</b><br>' +
+      '<span class="muted">' + share + '</span>';
+
+    // The engine groups the lines by unique tool and prints one block per
+    // tool (SurfaceColorMix.cpp:2169), so a dither costs one toolchange per
+    // tool used, however finely the colours interleave across the surface.
+    var rs = Stitch.runs(seq);
+    var longest = rs.reduce(function (a, r) { return Math.max(a, r.count); }, 0);
+    var finest = rs.reduce(function (a, r) { return Math.min(a, r.count); }, 1e9);
+    var used = Object.keys(counts).length;
+    runsLine.textContent =
+      n + ' fill lines on a ' + S.surfaceMm + ' mm surface at ' + S.lineWidth + ' mm · ' +
+      used + ' tool' + (used === 1 ? '' : 's') + ' used, so ' + Math.max(0, used - 1) +
+      ' toolchange' + (used === 2 ? '' : 's') + ' for this pass · ' +
+      'bands ' + (finest > 1e8 ? 0 : finest) + '–' + longest + ' lines wide';
+
+    var note = host.querySelector('[data-sq-note]');
+    if (note) note.textContent = (S.style === 'blend2' || S.style === 'blend3') ? 'spans once' : 'tiles';
+  }
+
+  function rebuild() { styleControls(); redraw(); }
+
+  host.appendChild(el('div.lab', null, [out, side]));
+  rebuild();
+});
+
+
+/* ===========================================================================
+ * line-dist — a diagram, clearly labelled as one.
+ *
+ * A rectangle with a hole. Each scanline that crosses the hole is two
+ * segments. The four panels show what each mode is trying to do with the
+ * numbering of those segments.
+ * ========================================================================= */
+Tour.demo('line-dist', function (host) {
+  var el = Tour.el;
+  var MODES = [
+    ['Default', 'Raw print order. The two halves of a split row get consecutive slots, so the pattern restarts inside the hole.'],
+    ['GeoSort', 'Reordered by position. The direction across the surface is clean again, but the halves are still separate.'],
+    ['LaneQuant', 'Segments are bucketed into spatial lanes. Both halves of a row land in the same lane and take the same colour.'],
+    ['DirCluster', 'Each connected sub-region gets its own coherent run, which is what you want when the fill engine rotated per region.']
+  ];
+
+  var wrap = el('div.ld');
+
+  MODES.forEach(function (m, mi) {
+    var box = el('figure.vbox');
+    var cvHost = el('div');
+    box.appendChild(cvHost);
+    box.appendChild(el('figcaption', null, [
+      el('b', { text: m[0] }),
+      el('span', { text: m[1] })
+    ]));
+
+    Tour.canvas(cvHost, function (ctx, w, h) {
+      var rows = 26;
+      var rh = h / rows;
+      var holeX0 = w * 0.34, holeX1 = w * 0.66;
+      var holeR0 = 7, holeR1 = 18;
+
+      // Two filaments, dithered 50/50 by the real Bresenham so the panels
+      // differ only in HOW the slots are numbered, never in the pattern.
+      var A = '#1d3f8f', B = '#f2b705';
+
+      for (var r = 0; r < rows; r++) {
+        var split = r >= holeR0 && r < holeR1;
+        var segs = split
+          ? [[0, holeX0], [holeX1, w]]
+          : [[0, w]];
+
+        segs.forEach(function (sg, si) {
+          var slot;
+          if (mi === 0) {
+            // Default: every segment is its own slot, counted in print order.
+            slot = split ? (r * 2 + si) : r * 2;
+          } else if (mi === 1) {
+            // GeoSort: sorted by position, still one slot per segment.
+            slot = split ? (r + si * rows) : r;
+          } else if (mi === 2) {
+            // LaneQuant: the lane is the row, whatever the segment.
+            slot = r;
+          } else {
+            // DirCluster: each side of the hole is its own region with its
+            // own run, restarted from that region's own first row.
+            slot = split ? (si === 0 ? r : r - holeR0) : r;
+          }
+          var seq = Stitch.dither2(rows * 2, 0, 1, 50, Stitch.EASING.LINEAR);
+          ctx.fillStyle = seq[slot % seq.length] === 0 ? A : B;
+          ctx.fillRect(sg[0], r * rh, sg[1] - sg[0], rh + 0.8);
+        });
+      }
+
+      // the hole
+      ctx.fillStyle = Tour.token('--surface');
+      ctx.fillRect(holeX0, holeR0 * rh, holeX1 - holeX0, (holeR1 - holeR0) * rh);
+      ctx.strokeStyle = Tour.token('--rule-firm');
+      ctx.lineWidth = 1;
+      ctx.strokeRect(holeX0 + .5, holeR0 * rh + .5, holeX1 - holeX0 - 1, (holeR1 - holeR0) * rh - 1);
+    }, { height: 128 });
+
+    wrap.appendChild(box);
+  });
+
+  host.appendChild(wrap);
+});
+</script>
+
+</body>
+</html>

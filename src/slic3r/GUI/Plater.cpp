@@ -13718,15 +13718,27 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
     if (std::find(panels.begin(), panels.end(), panel) == panels.end())
         return;
 
-    // NEOTKO_PHOTOMODE_TAG s242: leaving the 3D editor leaves Photo Mode.
+    // NEOTKO_PHOTOMODE_TAG s242: salir de la pestaña donde vive el modo foto lo apaga.
     //
-    // The mode hides the plate furniture through PartPlate::render(), which is shared by every
-    // canvas — so with the mode still armed, switching to Preview showed a bed with no logo and no
-    // grid. The alternative was to make that guard canvas-aware, but this is both simpler and what
-    // a user actually expects: Photo Mode is a thing you do to the 3D scene, and walking away from
-    // the 3D scene ends it. Coming back to a stripped bed you did not ask for would be worse.
-    if (panel != view3D && photo_mode().active)
-        q->set_photo_mode(false);
+    // El modo esconde el mobiliario del plato a través de PartPlate::render(), que es compartido
+    // por todos los canvas — así que con el modo aún armado, cambiar de pestaña mostraba una cama
+    // sin logo y sin rejilla. La alternativa era hacer esa guarda consciente del canvas, pero esto
+    // es más simple y es lo que un usuario espera: el modo foto es algo que le haces a UNA escena,
+    // y marcharte de esa escena lo termina.
+    //
+    // NEOTKO_PHOTOMODE_TAG s253: ya no basta con "¿me voy del 3D?" — el modo también puede vivir en
+    // el visor de gcode, así que la pregunta correcta es **"¿me voy de la pestaña que es dueña del
+    // modo?"**. Es la decisión del usuario de s253 (modo compartido, se apaga al cambiar de
+    // pestaña) traducida a una línea. Ojo: si esto se dejara como estaba, encender el modo en
+    // Preview lo apagaría inmediatamente el primer cambio de panel, y encenderlo en 3D sobreviviría
+    // a irse a Preview — o sea, exactamente al revés de lo que se quiere en los dos casos.
+    if (photo_mode().active) {
+        const wxPanel* owner_panel = (photo_mode().owner == PhotoOwner::Preview)
+                                   ? static_cast<const wxPanel*>(preview)
+                                   : static_cast<const wxPanel*>(view3D);
+        if (panel != owner_panel)
+            q->set_photo_mode(false);
+    }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": current_panel %1%, new_panel %2%")%current_panel%panel;
 #ifdef __WXMAC__
@@ -23252,7 +23264,7 @@ void Plater::post_process_string_object_exception(StringObjectException &err)
 
 // NEOTKO_PHOTOMODE_TAG s242 -----------------------------------------------------------------
 
-void Plater::set_photo_mode(bool on)
+void Plater::set_photo_mode(bool on, PhotoOwner owner)
 {
     PhotoModeState& pm = photo_mode();
 
@@ -23268,6 +23280,12 @@ void Plater::set_photo_mode(bool on)
         return;
 
     pm.active = on;
+    // NEOTKO_PHOTOMODE_TAG s253: el dueño se fija AL ENCENDER y no se toca al apagar. Apagar no
+    // necesita saber desde dónde se apaga —cualquiera puede hacerlo, y de hecho el cambio de
+    // pestaña lo hace "desde fuera"—, así que sobreescribirlo aquí sólo podría dejar un valor
+    // mentiroso en un campo que ya nadie va a leer.
+    if (on)
+        pm.owner = owner;
 
     if (on) {
         // The selection outline and the gizmo bars are the two things that most obviously say
@@ -23286,15 +23304,23 @@ void Plater::set_photo_mode(bool on)
     // cannot select an object and paint a selection outline into the shot — but the camera icon
     // is itself a picked plate model, so killing picking would also kill the only on-screen way
     // out of the mode. A stray outline is a nuisance; an unexitable mode is a bug.
-    if (GLCanvas3D* canvas = get_view3D_canvas3D()) {
+    //
+    // NEOTKO_PHOTOMODE_TAG s253: se repinta el canvas del DUEÑO, no siempre el de Prepare. Al
+    // apagar se usa `owner`, que sigue valiendo lo que valía (set_photo_mode no lo toca al apagar,
+    // ver arriba) — o sea que la salida repinta la misma pestaña que la entrada. Marcar el canvas
+    // equivocado no rompe nada visible enseguida, pero deja la pantalla sin refrescar hasta que
+    // algo más la toque, que es el tipo de fallo que luego se diagnostica como "a veces no hace
+    // nada al pulsar".
+    GLCanvas3D* canvas = (pm.owner == PhotoOwner::Preview) ? get_preview_canvas3D() : get_view3D_canvas3D();
+    if (canvas != nullptr) {
         canvas->set_as_dirty();
         canvas->request_extra_frame();
     }
 }
 
-void Plater::toggle_photo_mode()
+void Plater::toggle_photo_mode(PhotoOwner owner)
 {
-    set_photo_mode(!photo_mode().active);
+    set_photo_mode(!photo_mode().active, owner);
 }
 
 #if ENABLE_ENVIRONMENT_MAP

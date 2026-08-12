@@ -5,17 +5,35 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 # How does it work, what is this?
 
-> Check https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/ For a Basic tutorial and Introduction to the world of delicious Color Sandwiches!
+> ### 👉 **[Open the site](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/)**
+>
+> Two ways in, pick either:
+>
+> - **[The interactive tour](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/tour/)** — every feature,
+>   with demos you can pull apart. Build a Sandwich and watch the printed colour resolve, drag a
+>   gradient's ramp, draw a layer-height curve, see what the wipe tower has to swallow. The colour
+>   maths and the dither are the slicer's own code, ported to run in your browser, so a recipe you
+>   land on there is a recipe you can type into the app. 18 pages, 31 live demos, nothing to install.
+> - **[The video series](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/beginners.html)** — seven
+>   short animated walkthroughs, in order, from "why fork Orca at all" to painting a Sandwich click
+>   by click. The gentlest way in if you have never seen any of this.
+>
+> There is also **[the Playground](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/tour/play.html)**,
+> where the simulators live full size, and
+> **[the feature map](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/tour/map.html)**, which lists
+> every feature with the gate it needs, how finished it actually is, and where the control lives.
 
 # Download Last versión
 
 > Check **[Releases](https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/releases)**
 
-# Snapmaker Orca — Neotko FullSpectrum Feature Pack · User Guide
+# Snapmaker Orca — the Neotko feature pack · User Guide
 
 > Features conceived and designed by **[Neotko](https://github.com/sebsucmor-alt)** — inventor of *Neosanding*, now known as **Ironing** in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura.
 
-This is the **Neotko FullSpectrum** feature pack ported on top of the official **Snapmaker Orca 2.3.4** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
+> **On the name.** *FullSpectrum* is **Radu/Radoux's** fork, the base this one grew out of. This feature pack is Neotko's own work on top of it, and the two are separate projects.
+
+This is Neotko's feature pack, ported on top of the official **Snapmaker Orca 2.3.4** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
 
 > **About this build.** This is a feature pack meant for **pick & choose** — each block (ColorStitch, Penultimate, Libre Mode, NeoArachne, NeoTower, Align & Stack) can be adopted independently. Some surfaces are marked **(WIP)**: they are usable but still being refined, or not yet wired in this base. Review your G-code before long prints.
 

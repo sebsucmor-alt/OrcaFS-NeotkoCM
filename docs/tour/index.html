@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neotko for Snapmaker Orca — the interactive tour</title>
+<meta name="description" content="An interactive tour of Neotko's Snapmaker Orca fork: the Sandwich, ColorStitch, PathBlend, RealColor, Libre Mode, Gravity, NeoTower and the rest, with live demos that run the slicer's own math.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  /* hero — only used on this page */
+  .hero { padding: 3.6rem 0 2.6rem; }
+  .hero__grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: 3.2rem;
+    align-items: center;
+  }
+  .hero h1 { margin-bottom: 1rem; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero .lede { font-size: 1.24rem; max-width: 30rem; }
+  .hero__cta { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.6rem; }
+  .hero__cta .btn { padding: .5rem 1rem; font-size: .9rem; }
+  .hero__cta .btn--on { font-weight: 550; }
+  @media (max-width: 900px) { .hero__grid { grid-template-columns: 1fr; gap: 2.2rem; } }
+
+  .ribbon {
+    display: grid;
+    grid-template-columns: repeat(10, 1fr);
+    gap: 3px;
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .ribbon i {
+    display: block;
+    aspect-ratio: 1;
+    border-radius: 3px;
+    cursor: crosshair;
+    transition: transform .12s;
+    box-shadow: inset 0 0 0 1px rgba(128,128,128,.18);
+  }
+  .ribbon i:hover { transform: scale(1.22); z-index: 2; position: relative; box-shadow: var(--shadow-md); }
+  .ribbon__cap {
+    display: flex; justify-content: space-between; gap: 1rem;
+    margin-top: .7rem; font-size: .8rem; color: var(--ink-soft);
+    font-family: var(--mono); min-height: 2.6em;
+  }
+
+  .stat { display: flex; flex-wrap: wrap; gap: 0 2.6rem; margin: 2.6rem 0 0; padding: 0; list-style: none; }
+  .stat li { margin: 0; }
+  .stat b { display: block; font-family: var(--serif); font-size: 1.85rem; line-height: 1.1; font-weight: 600; }
+  .stat span { font-size: .8rem; color: var(--ink-soft); }
+
+  .group { margin: 4.2rem 0 0; }
+  .group__head { display: flex; align-items: baseline; gap: 1rem; border-bottom: 1px solid var(--rule); padding-bottom: .6rem; }
+  .group__head h2 { margin: 0; font-size: 1.5rem; }
+  .group__head p { margin: 0 0 0 auto; font-size: .87rem; color: var(--ink-soft); text-align: right; max-width: 26rem; }
+  @media (max-width: 700px) { .group__head { flex-direction: column; gap: .3rem; } .group__head p { margin: 0; text-align: left; } }
+
+  .wide { max-width: var(--shell); margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ---- taster bands: a small live piece of each idea, up front ---------- */
+  .band { border-top: 1px solid var(--rule); }
+  .band:nth-of-type(odd) { background: var(--paper-2); }
+  .band__in {
+    max-width: var(--shell); margin: 0 auto; padding: 1.5rem 1.5rem;
+    display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+    gap: 1.2rem 2.4rem; align-items: center;
+  }
+  @media (max-width: 820px) { .band__in { grid-template-columns: 1fr; } }
+  .band__t {
+    font-family: var(--serif); font-size: 1.22rem; font-weight: 600;
+    letter-spacing: -.012em; margin: 0 0 .35rem;
+  }
+  .band__d { margin: 0 0 .5rem; font-size: .9rem; line-height: 1.5; color: var(--ink-soft); }
+  .band__go { font-size: .82rem; font-family: var(--mono); }
+  .band__live { display: grid; gap: .5rem; min-width: 0; }
+
+  .tstrip { height: 54px; border-radius: 6px; overflow: hidden;
+            box-shadow: inset 0 0 0 1px rgba(128,128,128,.22); }
+  .trow { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap;
+          font-family: var(--mono); font-size: .74rem; color: var(--ink-faint); }
+  .trow b { color: var(--ink); font-weight: 500; }
+  .trow input[type="range"] { flex: 1 1 160px; min-width: 120px; }
+
+  .tpair { display: grid; grid-template-columns: 1fr auto 1fr; gap: .7rem; align-items: center; }
+  .tpair__one { border-radius: 6px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(128,128,128,.22); }
+  .tpair__sw { height: 62px; }
+  .tpair__lb { font-family: var(--mono); font-size: .66rem; color: var(--ink-faint);
+               padding: .25rem .4rem; background: var(--surface); text-align: center; }
+
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html">
+      <span class="brand__mark"></span>
+      Neotko
+      <span class="brand__sub">tour</span>
+    </a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="#colour">Colour</a>
+      <a href="#output">Output</a>
+      <a href="#placing">Placing</a>
+      <a href="#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ============================================================== hero -->
+<section class="hero wide">
+  <div class="hero__grid">
+    <div>
+      <p class="eyebrow">A Snapmaker Orca fork by Neotko</p>
+      <h1>Four filaments.<br><em>All of these colours.</em></h1>
+      <p class="lede">
+        A normal slicer prints the top of your part once, in one filament. Here it becomes a
+        stack of passes you build yourself. The same idea then spreads out into walls, layer
+        heights, supports, placement and the wipe tower.
+      </p>
+      <div class="hero__cta">
+        <a class="btn btn--on" href="sandwich.html">Start with the Sandwich →</a>
+        <a class="btn" href="play.html">Go and play →</a>
+      </div>
+      <ul class="stat">
+        <li><b>23</b><span>feature families</span></li>
+        <li><b>2.4.4</b><span>current version</span></li>
+        <li><b>0</b><span>changed at defaults</span></li>
+      </ul>
+    </div>
+
+    <div>
+      <div class="ribbon" data-demo="hero-ribbon" aria-hidden="true"></div>
+      <p class="ribbon__cap" data-ribbon-cap>
+        <span>Every square is a real recipe, composited with the fork's own optics.</span>
+      </p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ====================================================== taster bands -->
+<section class="band">
+  <div class="band__in">
+    <div>
+      <p class="eyebrow">ColorStitch</p>
+      <h2 class="band__t">Two filaments, any ratio</h2>
+      <p class="band__d">Every fill line gets its own tool, in a sequence chosen so that any small
+      window holds the ratio you asked for. The printer does not alternate to do it: it prints
+      every line of one tool, then every line of the other.</p>
+      <p class="band__go"><a href="colorstitch.html">The whole thing →</a></p>
+    </div>
+    <div class="band__live" data-demo="band-dither"></div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="band__in">
+    <div>
+      <p class="eyebrow">The Sandwich</p>
+      <h2 class="band__t">Order is not decorative</h2>
+      <p class="band__d">The same two passes, swapped. Light is absorbed going down and again
+      coming back up, so a translucent pass over an opaque one is a different colour from the
+      other way round.</p>
+      <p class="band__go"><a href="sandwich.html">The whole thing →</a></p>
+    </div>
+    <div class="band__live" data-demo="band-order"></div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="band__in">
+    <div>
+      <p class="eyebrow">TD</p>
+      <h2 class="band__t">Thickness is colour</h2>
+      <p class="band__d">One filament over one base, getting thicker left to right. How fast it
+      stops letting the base through is its Transmission Density, and it is the number everything
+      else rests on.</p>
+      <p class="band__go"><a href="optics.html">The whole thing →</a></p>
+    </div>
+    <div class="band__live" data-demo="band-td"></div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="band__in">
+    <div>
+      <p class="eyebrow">PathBlend</p>
+      <h2 class="band__t">A gradient made of geometry</h2>
+      <p class="band__d">One filament climbs as a real ramp inside the layer, one print-height
+      step per fill line, and a second caps the rest. Nothing is dithered and nothing is mixed.</p>
+      <p class="band__go"><a href="pathblend.html">The whole thing →</a></p>
+    </div>
+    <div class="band__live" data-demo="band-pb"></div>
+  </div>
+</section>
+
+<section class="band" style="border-bottom:1px solid var(--rule)">
+  <div class="band__in" style="grid-template-columns:1fr;text-align:center;padding-top:1.1rem;padding-bottom:1.1rem">
+    <p style="margin:0;font-size:.92rem;color:var(--ink-soft)">
+      All four run the slicer's own maths.
+      <a href="play.html">The Playground has the full-size versions →</a>
+    </p>
+  </div>
+</section>
+
+<div class="wide">
+
+<!-- ============================================================ premise -->
+<section style="margin-top:3rem;max-width:46rem">
+  <h2 style="margin-top:0">What this is</h2>
+  <p>
+    Snapmaker Orca with a lot of extra features, built by one person who designs in 3D and
+    reads code, rather than the other way round. Most of them started as "why can no slicer do
+    this?". There is no roadmap; things get built when they get interesting. Every page here
+    says how finished its feature actually is, and for a few of them the honest answer is
+    <em>never printed, look but don't trust</em>.
+  </p>
+  <p>
+    <strong>Everything is opt-in.</strong> Leave the new settings alone and the build slices
+    like stock Snapmaker Orca. Every release gets checked against that.
+  </p>
+
+  <div class="note note--key">
+    <span class="note__t">The demos are not mockups</span>
+    <p style="margin:0">
+      The colour swatches, dither patterns and blend curves here are computed by JavaScript
+      ports of the slicer's own functions: <code>ColorSci::blend_stacked</code> for the optics,
+      <code>build_dithered_tools_*</code> for the patterns. Build a recipe on this site and you
+      get the same number the app would give you. Where a demo is only a diagram, it says so on
+      the demo.
+    </p>
+  </div>
+
+  <p class="small">
+    New to all this? The <a href="../beginners.html">seven-part video series</a> is still the
+    gentlest way in. It walks through one Sandwich from nothing to a printed part. Come back
+    here afterwards for the reference.
+  </p>
+</section>
+
+<!-- ============================================================= colour -->
+<section class="group" id="colour">
+  <div class="group__head">
+    <h2>Colour</h2>
+    <p>The Sandwich, which is what most of this fork is about. Start at the top of the list.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="sandwich.html">
+      <span class="card__n">§1 · §3 — start here</span>
+      <span class="card__t">The Sandwich</span>
+      <p class="card__d">Your top surface becomes a stack of 1–3 passes, each with its own tool, angle and share of the layer height. Build one here and watch the printed colour come out.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">2.3</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="colorstitch.html">
+      <span class="card__n">§1b · §1d · §1f</span>
+      <span class="card__t">ColorStitch</span>
+      <p class="card__d">A pass that picks the filament for every single fill line: dithered blends, exact stripes, textile weaves, hand-typed patterns. The dither is Bresenham, so you get the same result every slice.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">2.3</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="pathblend.html">
+      <span class="card__n">§1c</span>
+      <span class="card__t">PathBlend</span>
+      <p class="card__d">A gradient made out of geometry. One filament climbs as a physical ramp inside the layer, one print-height step per fill line, and a second one caps the rest. The fade you see is optical.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--wip">fragile engine</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="optics.html">
+      <span class="card__n">§1e · §1g</span>
+      <span class="card__t">TD &amp; the Studio</span>
+      <p class="card__d">Why a stack of passes reads as one colour. Transmission Density, Beer–Lambert, the reachable gamut from your four filaments, and an inverse ΔE2000 search for a colour you name.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="painter.html">
+      <span class="card__n">§6</span>
+      <span class="card__t">The ColorStitch Painter</span>
+      <p class="card__d">Save Sandwiches as profiles and flood-fill them onto individual faces. Different steps of one object, each with its own recipe, and the weave drawn live on the model.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">2.4.0 rework</span>
+      </span>
+    </a></li>
+  </ul>
+</section>
+
+<!-- ============================================================= output -->
+<section class="group" id="output">
+  <div class="group__head">
+    <h2>Seeing it</h2>
+    <p>A striped G-code preview tells you very little about how a Sandwich will look. These pages close that gap.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="realcolor.html">
+      <span class="card__n">§20 · §21 · §22</span>
+      <span class="card__t">RealColor &amp; Photo Mode</span>
+      <p class="card__d">Composite the G-code the way the eye will resolve it, then light it like a product shot and export a PNG whose shadow lives in the alpha. Plus the real prints, so you can judge the gap yourself.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--gate">Libre for Prepare</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="tower.html">
+      <span class="card__n">§9</span>
+      <span class="card__t">NeoTower</span>
+      <p class="card__d">A wipe tower planned <em>after</em> slicing, when every toolchange is known, including the sub-layer primes a Sandwich inserts inside a single layer. It is what makes adaptive height × multi-tool × Sandwich work at all.</p>
+      <span class="card__f">
+        <span class="badge badge--free">auto for Sandwich</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="extras.html">
+      <span class="card__n">§15 · §18 · §19</span>
+      <span class="card__t">G-code &amp; finishing</span>
+      <p class="card__d">A layer-ranged, per-tool G-code post-processor you edit as a chart. Real font kerning for embossed text. And bridges that anchor on solid ground before they cross.</p>
+      <span class="card__f">
+        <span class="badge badge--gate">Libre (Reprocessor)</span>
+        <span class="badge badge--risk">edits real G-code</span>
+      </span>
+    </a></li>
+  </ul>
+</section>
+
+<!-- ============================================================ placing -->
+<section class="group" id="placing">
+  <div class="group__head">
+    <h2>Placing things</h2>
+    <p>What happens when two objects touch, which stock slicers quietly get wrong.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="libre.html">
+      <span class="card__n">§4 · §5</span>
+      <span class="card__t">Libre Mode</span>
+      <p class="card__d">A two-key gate that unlocks the professional and experimental half of the fork: assemblies without a boolean union, per-volume compensation, full part settings, Simplify3D import, realistic shading.</p>
+      <span class="card__f">
+        <span class="badge badge--gate">the gate itself</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="place.html">
+      <span class="card__n">§7 · §17</span>
+      <span class="card__t">Align &amp; Stack · Gravity</span>
+      <p class="card__d">Place one object precisely against another, then make the slicer <em>believe</em> it: a face resting on another object prints as solid contact instead of a false bridge over thin air. Drag and drop that lands on the real surface below.</p>
+      <span class="card__f">
+        <span class="badge badge--gate">True Objects</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="support.html">
+      <span class="card__n">§12 · §16</span>
+      <span class="card__t">Supports</span>
+      <p class="card__d">Support that routes around the <em>other</em> objects on the plate instead of growing through them, which nothing else in this slicer family does. Plus a wave-front roof that diffracts around concavities, over a hollow pillar.</p>
+      <span class="card__f">
+        <span class="badge badge--free">PerObject: no gate</span>
+        <span class="badge badge--wip">NeoWave: WIP</span>
+      </span>
+    </a></li>
+  </ul>
+</section>
+
+<!-- ========================================================== structure -->
+<section class="group" id="structure">
+  <div class="group__head">
+    <h2>Structure &amp; surface</h2>
+    <p>Below the colour: how the walls are generated, how tall each layer is, what the surface feels like.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="walls.html">
+      <span class="card__n">§8 · §13 · §14</span>
+      <span class="card__t">Walls</span>
+      <p class="card__d">NeoArachne lets you pick which engine prints the outer wall, the inner walls and the gap fill, separately. Painter Pro Mode adds precision brushing and screen-space masks. NeoStitch interlocks layers without ever moving Z.</p>
+      <span class="card__f">
+        <span class="badge badge--gate">Libre (NeoArachne)</span>
+        <span class="badge badge--risk">NeoStitch untested</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="height.html">
+      <span class="card__n">§11 · §23</span>
+      <span class="card__t">Height</span>
+      <p class="card__d">Draw layer height as an exact curve with control points and per-segment tension. Then draw <em>any</em> setting as a curve over the object's real layer bands: wall width, fuzzy skin, infill width, all changing with Z.</p>
+      <span class="card__f">
+        <span class="badge badge--gate">Libre Mode</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="relief.html">
+      <span class="card__n">§10</span>
+      <span class="card__t">Bump mapping &amp; ZBump</span>
+      <p class="card__d">A PNG becomes physical relief: displacing wall centrelines around the object, per painted zone, or modulating the Z of the top-surface fill point by point into a real height field.</p>
+      <span class="card__f">
+        <span class="badge badge--risk">Libre + env var</span>
+        <span class="badge badge--wip">expert only</span>
+      </span>
+    </a></li>
+  </ul>
+</section>
+
+<!-- ========================================================= playground -->
+<section class="group" id="playground">
+  <div class="group__head">
+    <h2>The Playground</h2>
+    <p>The same tools the feature pages use, with all the knobs left on. This is the fun part.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="play-mixer.html">
+      <span class="card__n">simulator</span>
+      <span class="card__t">The Colour Mixer</span>
+      <p class="card__d">A filament library with real TD values, both Sandwich zones, every pass kind, and the printed colour resolving live. Park two recipes side by side and read the ΔE between them.</p>
+      <span class="card__f"><span class="badge badge--free">real optics</span><span class="badge badge--free">real dither</span></span>
+    </a></li>
+    <li><a class="card" href="play.html">
+      <span class="card__n">all of them</span>
+      <span class="card__t">Every simulator</span>
+      <p class="card__d">The mixer, the gamut explorer and its ΔE2000 matcher, the pattern lab, the PathBlend staircase and the TD explorer, in one place.</p>
+      <span class="card__f"><span class="badge badge--free">nothing leaves your browser</span></span>
+    </a></li>
+  </ul>
+</section>
+
+<!-- ============================================================== close -->
+<section class="group" id="everything">
+  <div class="group__head">
+    <h2>All of it, on one page</h2>
+    <p>Which features need which gate, how finished each one is, and where the control lives.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="map.html">
+      <span class="card__n">reference</span>
+      <span class="card__t">The map</span>
+      <p class="card__d">The gate matrix, the maturity table, the version history, the whole "where do I find this" index and the FAQ, on one scrollable page.</p>
+    </a></li>
+    <li><a class="card" href="../beginners.html">
+      <span class="card__n">beginners</span>
+      <span class="card__t">The video series</span>
+      <p class="card__d">Seven short animated walkthroughs, from "why fork Orca at all" to painting a Sandwich click by click. Still exactly where it always was.</p>
+    </a></li>
+    <li><a class="card" href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/releases">
+      <span class="card__n">github</span>
+      <span class="card__t">Downloads &amp; release notes</span>
+      <p class="card__d">Builds for macOS, Windows and Linux, plus the notes for every release since 2.3.</p>
+    </a></li>
+  </ul>
+</section>
+
+</div><!-- /wide -->
+
+</main>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">
+        Features designed by <a href="https://github.com/sebsucmor-alt">Neotko</a>, who invented
+        Neosanding, the thing now called <em>Ironing</em> in OrcaSlicer, PrusaSlicer, Bambu Studio
+        and Cura. Sponsored by Snapmaker. It grew out of Radu's FullSpectrum work, which is a
+        separate fork.
+      </p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM">Source on GitHub</a></p>
+      <p><a href="map.html">Feature map</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ---------------------------------------------------------------------------
+ * hero-ribbon — 50 real recipes from the same four filaments.
+ *
+ * Each square is a two-pass Solid stack: tool A underneath at thickness dA,
+ * tool B on top at dB, over a white base. The pair walks the six ordered
+ * combinations of the four slots and the split walks across the row, so what
+ * you are looking at is literally the "Flat color (predict)" gamut the
+ * ColorStitch Studio generates — computed here by the same formula.
+ * ------------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------------
+ * Taster bands. Each one is a single idea with one control, running the same
+ * ports the full simulators use. Deliberately small: the job is to make
+ * somebody touch the thing in the first ten seconds.
+ * ------------------------------------------------------------------------- */
+(function () {
+  var el = Tour.el, F = Optics.DEFAULT_FILAMENTS, LAYER = 0.20, BASE = '#8d9199';
+
+  function passOf(tool, mm) {
+    return { colorHex: F[tool].hex, thickness: mm, tdMm: Optics.tdToMm(F[tool].td, LAYER) };
+  }
+
+  /* --- 1. the dither ---------------------------------------------------- */
+  Tour.demo('band-dither', function (host) {
+    var pct = 50, N = 168, A = 1, B = 3;
+    var stripHost = el('div.tstrip');
+    var out = el('span');
+    host.appendChild(stripHost);
+
+    var strip = Tour.canvas(stripHost, function (ctx, w, h) {
+      var seq = Stitch.build(N, { style: 'blend2', tools: [A, B], pctA: pct,
+                                  easing: Stitch.EASING.LINEAR });
+      var bw = w / N;
+      for (var i = 0; i < N; i++) {
+        ctx.fillStyle = Optics.linearToCss(Optics.blendStacked([passOf(seq[i], 0.10)], BASE));
+        ctx.fillRect(i * bw, 0, bw + 1, h);
+      }
+    }, { height: 54 });
+
+    var range = el('input', { type: 'range', min: 0, max: 100, value: pct, 'aria-label': 'Mix' });
+    host.appendChild(el('div.trow', null, [
+      el('span', { text: F[A].name }), range, el('span', { text: F[B].name }), out
+    ]));
+
+    function upd() {
+      strip.render();
+      var seq = Stitch.build(N, { style: 'blend2', tools: [A, B], pctA: pct,
+                                  easing: Stitch.EASING.LINEAR });
+      var cache = {}, s = [0, 0, 0];
+      for (var i = 0; i < N; i++) {
+        var c = cache[seq[i]] || (cache[seq[i]] = Optics.blendStacked([passOf(seq[i], 0.10)], BASE));
+        s[0] += c[0]; s[1] += c[1]; s[2] += c[2];
+      }
+      // The engine groups the lines by tool and prints one block per tool
+      // (SurfaceColorMix.cpp:2169), so the cost is the number of tools used,
+      // not the number of times the colours alternate across the surface.
+      var used = {};
+      seq.forEach(function (t) { used[t] = 1; });
+      var nTools = Object.keys(used).length;
+      out.innerHTML = '<b>' + pct + ' / ' + (100 - pct) + '</b> · ' +
+        Optics.linearToHex([s[0] / N, s[1] / N, s[2] / N]) +
+        ' · <b>' + nTools + '</b> tool' + (nTools === 1 ? '' : 's') +
+        ', <b>' + Math.max(0, nTools - 1) + '</b> toolchange' + (nTools === 2 ? '' : 's');
+    }
+    range.addEventListener('input', function () { pct = parseInt(range.value, 10); upd(); });
+    upd();
+  });
+
+  /* --- 2. order matters ------------------------------------------------- */
+  Tour.demo('band-order', function (host) {
+    var lo = 2, hi = 1, split = 0.55, TOTAL = 0.30;   // magenta / blue
+
+    function slot(label) {
+      var sw = el('div.tpair__sw');
+      var lb = el('div.tpair__lb', { text: label });
+      return { node: el('div.tpair__one', null, [sw, lb]), sw: sw, lb: lb };
+    }
+    var a = slot(''), b = slot('');
+    var de = el('span.de', { style: 'font-family:var(--mono);font-size:.72rem;padding:.15rem .4rem;border-radius:4px;border:1px solid var(--rule)' });
+
+    host.appendChild(el('div.tpair', null, [a.node, de, b.node]));
+
+    var range = el('input', { type: 'range', min: 15, max: 85, value: split * 100, 'aria-label': 'Split' });
+    host.appendChild(el('div.trow', null, [el('span', { text: 'split' }), range,
+      el('button.btn.btn--sm', { type: 'button', text: 'swap the pair', onclick: function () {
+        var t = lo; lo = hi; hi = t; upd();
+      }})]));
+
+    function upd() {
+      var d1 = TOTAL * split, d2 = TOTAL - d1;
+      var up   = Optics.blendStacked([passOf(lo, d1), passOf(hi, d2)], BASE);
+      var down = Optics.blendStacked([passOf(hi, d2), passOf(lo, d1)], BASE);
+      a.sw.style.background = Optics.linearToCss(up);
+      b.sw.style.background = Optics.linearToCss(down);
+      a.lb.textContent = F[lo].name + ' under ' + F[hi].name;
+      b.lb.textContent = F[hi].name + ' under ' + F[lo].name;
+      var d = Optics.colourDistance(up, down);
+      de.textContent = 'ΔE ' + d.toFixed(1);
+      de.style.color = d < 2 ? 'var(--ink-faint)' : d < 5 ? 'var(--warn)' : 'var(--alert)';
+    }
+    range.addEventListener('input', function () { split = parseInt(range.value, 10) / 100; upd(); });
+    upd();
+  });
+
+  /* --- 3. TD ------------------------------------------------------------ */
+  Tour.demo('band-td', function (host) {
+    var td = 2.6, hex = '#d61f5c';
+    var stripHost = el('div.tstrip');
+    var out = el('span');
+    host.appendChild(stripHost);
+
+    var strip = Tour.canvas(stripHost, function (ctx, w, h) {
+      var tdmm = Optics.tdToMm(td, LAYER), N = 40;
+      for (var i = 0; i < N; i++) {
+        var d = 0.02 + (i / (N - 1)) * 0.58;
+        ctx.fillStyle = Optics.linearToCss(
+          Optics.blendStacked([{ colorHex: hex, thickness: d, tdMm: tdmm }], '#f2f0eb'));
+        ctx.fillRect(i * w / N, 0, w / N + 1, h);
+      }
+    }, { height: 54 });
+
+    var range = el('input', { type: 'range', min: 2, max: 90, value: td * 10, 'aria-label': 'TD' });
+    host.appendChild(el('div.trow', null, [el('span', { text: 'TD' }), range, out]));
+
+    function upd() {
+      strip.render();
+      var tdmm = Optics.tdToMm(td, LAYER);
+      out.innerHTML = '<b>' + td.toFixed(1) + '</b> · ' + Optics.tdBand(td) +
+        ' · at 0.2 mm, <b>' + (Optics.transmittance(0.2, tdmm) * 100).toFixed(0) +
+        '%</b> of the base still shows';
+    }
+    range.addEventListener('input', function () { td = parseInt(range.value, 10) / 10; upd(); });
+    upd();
+  });
+
+  /* --- 4. PathBlend ----------------------------------------------------- */
+  Tour.demo('band-pb', function (host) {
+    var rampEnd = 0.20, LH = 0.20, N = 120, ramp = 2, cap = 1;
+
+    var secHost = el('div', { style: 'border-radius:6px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(128,128,128,.22)' });
+    var topHost = el('div', { style: 'border-radius:6px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(128,128,128,.22)' });
+    host.appendChild(secHost);
+    host.appendChild(topHost);
+
+    function hAt(t) { return Math.min(rampEnd, 0.04 + t * (rampEnd - 0.04)); }
+
+    var sec = Tour.canvas(secHost, function (ctx, w, h) {
+      for (var i = 0; i < N; i++) {
+        var t = i / (N - 1), hh = hAt(t);
+        var x = i * w / N, cw = w / N + 1;
+        ctx.fillStyle = F[cap].hex;  ctx.fillRect(x, 0, cw, h * (1 - hh / LH));
+        ctx.fillStyle = F[ramp].hex; ctx.fillRect(x, h * (1 - hh / LH), cw, h * (hh / LH));
+      }
+    }, { height: 56 });
+
+    var top = Tour.canvas(topHost, function (ctx, w, h) {
+      for (var i = 0; i < N; i++) {
+        var t = i / (N - 1), hh = hAt(t);
+        var st = [passOf(ramp, hh)];
+        if (LH - hh > 0.001) st.push(passOf(cap, LH - hh));
+        ctx.fillStyle = Optics.linearToCss(Optics.blendStacked(st, '#f2f0eb'));
+        ctx.fillRect(i * w / N, 0, w / N + 1, h);
+      }
+    }, { height: 40 });
+
+    var out = el('span');
+    var range = el('input', { type: 'range', min: 6, max: 20, value: rampEnd * 100, 'aria-label': 'Ramp end' });
+    host.appendChild(el('div.trow', null, [el('span', { text: 'ramp end' }), range, out]));
+
+    function upd() {
+      sec.render(); top.render();
+      out.innerHTML = '<b>' + rampEnd.toFixed(2) + ' mm</b> of ' + F[ramp].name +
+        (rampEnd >= LH - 0.001 ? ' · full "techo", no cap colour at that end' : ' · capped with ' + F[cap].name);
+    }
+    range.addEventListener('input', function () { rampEnd = parseInt(range.value, 10) / 100; upd(); });
+    upd();
+  });
+})();
+
+Tour.demo('hero-ribbon', function (host) {
+  var F = Optics.DEFAULT_FILAMENTS;
+  var LAYER = 0.2;                 // nominal layer height, mm
+  var TOTAL = 0.36;                // the Sandwich's total thickness, mm
+  var COLS = 10, ROWS = 5;
+
+  // Ordered pairs, chosen for spread. Note rows 2 and 4 are the SAME two
+  // filaments in the opposite order and do not produce the same colours —
+  // Beer-Lambert compositing is associative but not commutative, which is the
+  // whole reason the pass stack has an order at all.
+  var pairs = [[1,3],[2,1],[3,2],[1,2],[0,3]];
+  var cap = document.querySelector('[data-ribbon-cap]');
+  var cells = [];
+
+  for (var r = 0; r < ROWS; r++) {
+    var pair = pairs[r % pairs.length];
+    for (var c = 0; c < COLS; c++) {
+      // The split walks across the row. It never reaches either extreme: at
+      // both ends both tools are still contributing, which is where the
+      // interesting colours live.
+      var f = COLS === 1 ? 0.5 : c / (COLS - 1);
+      var dTop = TOTAL * (0.10 + f * 0.72);
+      var dBot = TOTAL - dTop;
+
+      var passes = [
+        { colorHex: F[pair[0]].hex, thickness: dBot, tdMm: Optics.tdToMm(F[pair[0]].td, LAYER) },
+        { colorHex: F[pair[1]].hex, thickness: dTop, tdMm: Optics.tdToMm(F[pair[1]].td, LAYER) }
+      ];
+      var rgb = Optics.blendStacked(passes, '#f2f0eb');
+
+      var i = document.createElement('i');
+      i.style.background = Optics.linearToCss(rgb);
+      i.dataset.desc =
+        F[pair[0]].name + ' ' + dBot.toFixed(2) + ' mm  ·  ' +
+        F[pair[1]].name + ' ' + dTop.toFixed(2) + ' mm';
+      i.dataset.hex = Optics.linearToHex(rgb);
+      host.appendChild(i);
+      cells.push(i);
+    }
+  }
+
+  var idle = 'Every square is a real recipe, composited with the fork’s own optics.';
+  function show(e) {
+    if (!cap) return;
+    cap.innerHTML = '<span>' + e.dataset.desc + '</span><span>' + e.dataset.hex + '</span>';
+  }
+  function clear() { if (cap) cap.innerHTML = '<span>' + idle + '</span>'; }
+
+  host.addEventListener('mouseover', function (ev) {
+    if (ev.target.tagName === 'I') show(ev.target);
+  });
+  host.addEventListener('mouseleave', clear);
+  clear();
+});
+</script>
+
+</body>
+</html>

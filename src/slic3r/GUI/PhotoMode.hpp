@@ -167,9 +167,27 @@ enum class PhotoLightPreset {
 };
 const char* photo_light_preset_name(PhotoLightPreset p);
 
+// NEOTKO_PHOTOMODE_TAG s253 — QUÉ CANVAS ES EL DUEÑO del modo mientras está encendido.
+//
+// Decisión del usuario (s253): **un solo modo foto compartido, que se apaga solo al cambiar de
+// pestaña**. Este enum es la mitad que faltaba para poder cumplirlo. Hasta s252 el modo sólo existía
+// en el editor 3D y Plater ya lo apagaba al salir de esa pestaña con un `panel != view3D`
+// hardcodeado; ahora que también vive en el visor de gcode, esa condición tiene que preguntar
+// "¿me estoy yendo de MI pestaña?" en vez de "¿me estoy yendo del 3D?".
+//
+// Deliberadamente NO se persiste en AppConfig: es estado de sesión, no una preferencia. Guardarlo
+// significaría poder arrancar el programa con el modo "propiedad de" una pestaña que todavía no se
+// ha abierto, y ese es justo el tipo de flag que se queda pegado.
+enum class PhotoOwner {
+    View3D = 0,  // Prepare — el dueño histórico y el default
+    Preview      // el visor de gcode (donde vive RealColor)
+};
+
 struct PhotoModeState
 {
     bool active = false;
+    // Sólo tiene sentido leerlo con active == true. Al encender se fija, al apagar se ignora.
+    PhotoOwner owner = PhotoOwner::View3D;
 
     PhotoLight key;    // the only one that casts the shadow map
     PhotoLight fill;
@@ -314,6 +332,17 @@ bool  photo_reflection_enabled();
 bool  photo_ui_hidden();
 // Starts the countdown. Call from the button.
 void  photo_begin_screenshot();
+
+// NEOTKO_PHOTOMODE_TAG s253 — LA BOLA DE LUZ, COMPARTIDA.
+//
+// Vivía como función `static` dentro de GLCanvas3D.cpp, o sea invisible para cualquier otro
+// fichero. Al llegar el modo foto al visor de gcode hacían falta las mismas bolas allí, y la
+// alternativa era duplicar el widget: dos copias del mismo gesto que se separarían al primer
+// retoque. Vive aquí, junto al PhotoLight que edita.
+//
+// Devuelve true mientras se arrastra, para que quien la dibuja pueda reaccionar en el mismo frame.
+// No expone nada de ImGui en la firma a propósito: esta cabecera la incluye Plater.hpp.
+bool photo_light_ball(const char* id, PhotoLight& light, float size_px);
 
 } // namespace Slic3r
 

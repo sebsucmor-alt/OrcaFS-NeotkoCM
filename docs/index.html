@@ -2,137 +2,255 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NeotkoCM Video Series</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neotko for Snapmaker Orca</title>
+<meta name="description" content="A Snapmaker Orca fork by Neotko. Colour Sandwiches, a wall generator, real gravity between objects, a photo studio and a lot more. Start with the seven-minute video series or go straight to the interactive tour.">
+<link rel="stylesheet" href="tour/assets/tour.css">
 <style>
-  :root{
-    --bg:#0d1626;
-    --grid:rgba(110,150,205,.09);
-    --grid2:rgba(110,150,205,.20);
-    --line:#e6fbf7;
-    --dim:rgba(230,251,247,.55);
-    --teal:#009688;
-    --pink:#ff15a5;
-    --yellow:#e3ff2a;
-    --blue:#2196f3;
-    --mono:'JetBrains Mono','IBM Plex Mono',Menlo,monospace;
-    --disp:'Avenir Next','Helvetica Neue',Futura,system-ui,sans-serif;
+  .frame { max-width: 66rem; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ---- hero ------------------------------------------------------------ */
+  .top { padding: 4.5rem 0 2.6rem; text-align: center; }
+  .top h1 {
+    font-size: clamp(2.6rem, 1.6rem + 3.6vw, 4.2rem);
+    letter-spacing: -.028em; margin: 0 0 .2rem;
   }
-  *{box-sizing:border-box}
-  html,body{margin:0;min-height:100%;background:var(--bg);color:var(--line);font-family:var(--mono)}
-  body{
-    background-image:
-      linear-gradient(var(--grid2) 1px,transparent 1px),
-      linear-gradient(90deg,var(--grid2) 1px,transparent 1px),
-      linear-gradient(var(--grid) 1px,transparent 1px),
-      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
-    background-size:120px 120px,120px 120px,24px 24px,24px 24px;
-    padding:56px 40px 60px;
+  .top h1 em { font-style: normal; color: var(--accent); }
+  .top .sub {
+    font-family: var(--mono); font-size: .78rem; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--ink-faint); margin: 0 0 1.6rem;
   }
-  body::after{content:'';position:fixed;inset:0;pointer-events:none;
-    background:radial-gradient(ellipse at center, transparent 55%, rgba(3,8,16,.5) 100%)}
+  .top .lede {
+    font-size: 1.22rem; line-height: 1.55; color: var(--ink-soft);
+    max-width: 36rem; margin: 0 auto;
+  }
 
-  header{max-width:1240px;margin:0 auto 44px;text-align:center;position:relative;z-index:1}
-  header .kicker{font-size:12px;letter-spacing:.34em;color:var(--teal);text-transform:uppercase;margin-bottom:14px}
-  header h1{font-family:var(--disp);font-weight:600;font-size:44px;letter-spacing:.04em;margin:0;color:var(--line)}
-  header h1 span{color:var(--teal)}
-  header .claim{margin:14px 0 0;font-size:16px;letter-spacing:.22em;text-transform:uppercase;color:var(--dim)}
-  header .claim em{color:var(--pink);font-style:normal}
-  header .byline{margin:20px 0 0;font-size:11px;letter-spacing:.12em;color:var(--dim)}
-  header .byline b{color:var(--line);font-weight:600}
+  /* the live strip under the title */
+  .swatchband {
+    display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px;
+    max-width: 44rem; margin: 2rem auto 0; border-radius: 8px; overflow: hidden;
+  }
+  .swatchband i {
+    display: block; height: 34px; border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgba(128,128,128,.18);
+  }
+  .swatchband__cap {
+    text-align: center; font-family: var(--mono); font-size: .72rem;
+    color: var(--ink-faint); margin: .6rem 0 0;
+  }
 
-  .grid{max-width:1240px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:22px;position:relative;z-index:1}
+  /* ---- the two doors --------------------------------------------------- */
+  .doors {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.2rem; margin: 3.4rem 0 0; padding: 0; list-style: none;
+  }
+  .door {
+    display: flex; flex-direction: column; gap: .7rem;
+    padding: 1.6rem 1.7rem 1.7rem;
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 14px; text-decoration: none; color: inherit;
+    transition: border-color .16s, box-shadow .16s, transform .16s;
+  }
+  .door:hover { border-color: var(--rule-firm); box-shadow: var(--shadow-lg); transform: translateY(-3px); }
+  .door--primary { border-color: color-mix(in srgb, var(--accent) 40%, var(--rule)); background: var(--accent-wash); }
+  .door--primary:hover { border-color: var(--accent); }
+  .door__k {
+    font-family: var(--mono); font-size: .66rem; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  .door--primary .door__k { color: var(--accent); }
+  .door__t {
+    font-family: var(--serif); font-size: 1.62rem; font-weight: 600;
+    letter-spacing: -.018em; line-height: 1.15;
+  }
+  .door__d { margin: 0; font-size: .95rem; line-height: 1.55; color: var(--ink-soft); flex: 1; }
+  .door__m {
+    display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .3rem;
+  }
+  .door__go {
+    font-family: var(--mono); font-size: .8rem; color: var(--accent); margin-top: .5rem;
+  }
 
-  a.card{display:block;text-decoration:none;color:var(--line);
-    background:rgba(10,20,36,.82);border:1px solid rgba(110,150,205,.28);border-radius:12px;
-    padding:22px 24px 18px;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}
-  a.card:hover{transform:translateY(-3px);border-color:var(--teal);box-shadow:0 14px 34px rgba(0,0,0,.5)}
-  .card .num{font-size:11px;letter-spacing:.3em;color:var(--teal)}
-  .card h2{font-family:var(--disp);font-weight:600;font-size:21px;margin:8px 0 6px;letter-spacing:.02em}
-  .card .what{font-size:12px;line-height:1.55;color:var(--dim);min-height:56px}
-  .card .fact{margin-top:12px;padding:9px 12px;border-left:2px solid var(--yellow);
-    font-size:11px;line-height:1.5;color:var(--line);background:rgba(227,255,42,.05)}
-  .card .fact b{color:var(--yellow);font-weight:600}
-  .card .meta{margin-top:14px;display:flex;justify-content:space-between;font-size:10px;letter-spacing:.18em;color:var(--dim);text-transform:uppercase}
-  .card .meta .go{color:var(--teal)}
+  /* ---- the rest -------------------------------------------------------- */
+  .about { max-width: 40rem; margin: 4.5rem auto 0; }
+  .about h2 { font-size: 1.5rem; margin: 0 0 .8rem; }
 
-  footer{max-width:1240px;margin:40px auto 0;text-align:center;font-size:11px;letter-spacing:.1em;color:var(--dim);position:relative;z-index:1}
-  footer kbd{border:1px solid var(--dim);padding:2px 6px;border-radius:3px;color:var(--line);margin:0 2px}
+  .facts { display: flex; flex-wrap: wrap; gap: 0 3rem; margin: 2rem 0 0; padding: 0; list-style: none; }
+  .facts li { margin: 0 0 .8rem; }
+  .facts b { display: block; font-family: var(--serif); font-size: 1.7rem; line-height: 1.1; font-weight: 600; }
+  .facts span { font-size: .8rem; color: var(--ink-soft); }
+
+  .links {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: .7rem; margin: 3rem 0 0; padding: 0; list-style: none;
+  }
+  .links a {
+    display: block; padding: .8rem .95rem; text-decoration: none; color: inherit;
+    border: 1px solid var(--rule); border-radius: 9px; background: var(--surface);
+  }
+  .links a:hover { border-color: var(--accent); }
+  .links b { display: block; font-size: .95rem; }
+  .links span { font-size: .82rem; color: var(--ink-soft); }
+
+  .closing { margin: 4rem 0 5rem; padding-top: 2rem; border-top: 1px solid var(--rule);
+             font-size: .88rem; color: var(--ink-soft); max-width: 40rem; }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="kicker">Snapmaker Orca · Neotko FullSpectrum · video series</div>
-  <h1>Neotko<span>CM</span> Fork for <span>SnapMaker</span></h1>
-  <p class="claim">your colors and <em>the full Sandwich</em>.</p>
-  <p class="byline">Features designed by <b>Neotko</b>, who invented Neosanding (now called "Ironing" in OrcaSlicer, PrusaSlicer, Bambu Studio and Cura).
-    Every feature is opt-in. At its defaults the build behaves like stock Snapmaker Orca.</p>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko</a>
+    <nav class="topnav" aria-label="Main">
+      <a href="tour/index.html">Interactive tour</a>
+      <a href="tour/play.html">Playground</a>
+      <a href="beginners.html">Video series</a>
+      <a href="tour/map.html">Feature map</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
 </header>
 
-<div class="grid">
+<main id="main" class="frame">
 
-  <a class="card" href="v1_sandwich_to_cube.html">
-    <div class="num">V1 · PITCH</div>
-    <h2>Why I forked Orca</h2>
-    <div class="what">The core idea of the pack. The Top and Penultimate layers stop being one flat fill. You build them as a small stack of passes yourself, choosing Solid, ColorStitch or PathBlend for each one.</div>
-    <div class="fact"><b>Where:</b> Quality → Surface ColorStitch → Sandwich editor… Drag the dividers to split the layer height between passes.</div>
-    <div class="meta"><span>5 steps</span><span class="go">watch →</span></div>
-  </a>
+  <section class="top">
+    <p class="sub">A Snapmaker Orca fork</p>
+    <h1>Neotko</h1>
+    <p class="lede">
+      Colour that comes out of a stack of passes rather than a spool. Walls you choose the engine
+      for. Objects that know what they are standing on. A photo studio inside the slicer. All of it
+      opt-in, and off by default.
+    </p>
 
-  <a class="card" href="v2_colorstitch_gradient.html">
-    <div class="num">V2 · COLORSTITCH</div>
-    <h2>Colour, chosen line by line</h2>
-    <div class="what">A ColorStitch pass picks the filament for every fill line. You can set smooth dithered blends of two or three colours, exact manual stripes, or a pattern you type by hand. It only touches the top surface.</div>
-    <div class="fact"><b>Must-know:</b> set Quality → Top surface pattern → <b>Monotonic Line</b>, or complex tops come out mis-sequenced. If stripes fragment across holes, switch Line distribution to LaneQuant.</div>
-    <div class="meta"><span>13 steps · real panels + real print</span><span class="go">watch →</span></div>
-  </a>
+    <div class="swatchband" data-demo="band" aria-hidden="true"></div>
+    <p class="swatchband__cap" data-band-cap>Four filaments, stacked. Every square is a real recipe.</p>
+  </section>
 
-  <a class="card" href="v3_pathblend_staircase.html">
-    <div class="num">V3 · PATHBLEND</div>
-    <h2>A ramp of real thickness</h2>
-    <div class="what">One filament climbs as a physical ramp inside the layer, and in Full mode a second one caps the rest. The gradient you see is optical. It comes from the ramp's changing thickness seen through the filament's TD, so no colour is ever mixed.</div>
-    <div class="fact"><b>Must-know:</b> the gradient runs along the build-plate <b>Y axis</b>, so rotate the object to aim it. The <b>ADV…</b> editor adds flat start and end zones, plus a full-opacity "techo".</div>
-    <div class="meta"><span>10 steps</span><span class="go">watch →</span></div>
-  </a>
+  <!-- ============================================================ doors -->
+  <ul class="doors">
+    <li><a class="door door--primary" href="tour/index.html">
+      <span class="door__k">Start here</span>
+      <span class="door__t">The interactive tour</span>
+      <p class="door__d">
+        Every feature, with demos you can pull apart. Build a Sandwich and watch the printed colour
+        resolve, drag a gradient's ramp, draw a layer-height curve, see what the wipe tower has to
+        swallow. The colour maths and the dither are the slicer's own, ported to run in your
+        browser.
+      </p>
+      <span class="door__m">
+        <span class="badge badge--free">18 pages</span>
+        <span class="badge badge--free">30 live demos</span>
+        <span class="badge badge--free">nothing to install</span>
+      </span>
+      <span class="door__go">Open the tour →</span>
+    </a></li>
 
-  <a class="card" href="v4_multipass_crosshatch.html">
-    <div class="num">V4 · MULTIPASS</div>
-    <h2>Stacking Solid passes for cross-hatch and glaze</h2>
-    <div class="what">There is no MultiPass button any more. Stack two or three Solid passes, give each one its own tool, angle and Z share, and you get cross-hatch, glazes and optical blends.</div>
-    <div class="fact"><b>Must-know:</b> the Z shares should add up to the full layer height. <b>Perimeter override</b> clones the walls into every Solid pass, so the rim matches each glaze.</div>
-    <div class="meta"><span>11 steps · real prints</span><span class="go">watch →</span></div>
-  </a>
+    <li><a class="door" href="beginners.html">
+      <span class="door__k">New to all this</span>
+      <span class="door__t">The video series</span>
+      <p class="door__d">
+        Seven short animated walkthroughs, in order, from "why fork Orca at all" to painting a
+        Sandwich click by click. The gentlest way in if you have never seen any of this before.
+        Come back to the tour afterwards for the reference.
+      </p>
+      <span class="door__m">
+        <span class="badge badge--free">7 chapters</span>
+        <span class="badge badge--free">start to finish</span>
+      </span>
+      <span class="door__go">Watch the series →</span>
+    </a></li>
+  </ul>
 
-  <a class="card" href="v5_painter_zones.html">
-    <div class="num">V5 · PAINTER</div>
-    <h2>Paint each top face on its own</h2>
-    <div class="what">Save Sandwiches as profiles, then flood-fill them onto individual top faces with the ColorStitch Painter. Different steps of one object can each hold a different recipe, and bottom faces work too.</div>
-    <div class="fact"><b>Must-know:</b> painted objects are <b>all-or-nothing</b>. Any area you leave unpainted prints with no effect at all, and the preset is ignored. Profiles and paint both save inside the 3MF.</div>
-    <div class="meta"><span>12 steps · real panels</span><span class="go">watch →</span></div>
-  </a>
+  <!-- ============================================================ about -->
+  <section class="about">
+    <h2>What this is</h2>
+    <p>
+      Snapmaker Orca with a lot of extra features, built by one person who designs in 3D and reads
+      code, rather than the other way round. Most of them started as "why can no slicer do this?".
+      There is no roadmap; things get built when they get interesting.
+    </p>
+    <p>
+      <strong>Everything is opt-in.</strong> Leave the new settings alone and the build slices like
+      stock Snapmaker Orca. Every release gets checked against that.
+    </p>
+    <p>
+      The tour is also honest about how finished each thing is. Some of it is print-verified, some
+      of it is shipped, and a few things have never been printed at all. Each page says which, and
+      so does <a href="tour/map.html">the feature map</a>.
+    </p>
 
-  <a class="card" href="v6_all_together.html">
-    <div class="num">V6 · FINALE</div>
-    <h2>Everything on one print</h2>
-    <div class="what">One staircase object carries ColorStitch, MultiPass and PathBlend on separate top faces. Repaint them live, preview the result with <b>RealColor</b>, then check it against the real prints.</div>
-    <div class="fact"><b>Must-know:</b> RealColor gives a TD-based optical preview of the final colour, so read it as a guide. Any Sandwich scene moves the wipe tower to <b>NeoTower</b> on its own, to keep the purges in sync.</div>
-    <div class="meta"><span>14 steps · RealColor + prints</span><span class="go">watch →</span></div>
-  </a>
+    <ul class="facts">
+      <li><b>23</b><span>feature families</span></li>
+      <li><b>2.4.4</b><span>current version</span></li>
+      <li><b>0</b><span>changed at defaults</span></li>
+    </ul>
+  </section>
 
-  <a class="card" href="v7_painter_howto.html">
-    <div class="num">V7 · TUTORIAL</div>
-    <h2>How to paint a Sandwich, step by step</h2>
-    <div class="what">Seven real clicks in the actual app: open the Painter, grab a Generator blend, click a top face, refine it in Pro, stack sub-passes, switch effects, and save the recipe.</div>
-    <div class="fact"><b>Must-know:</b> press <b>M</b> to open the Painter. On the TD scale, 0.1–0.5 is opaque and 3 or more is translucent. The Result swatch predicts the printed colour before you slice.</div>
-    <div class="meta"><span>9 steps · 100% screenshots</span><span class="go">watch →</span></div>
-  </a>
+  <!-- ============================================================ links -->
+  <ul class="links">
+    <li><a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/releases">
+      <b>Download</b><span>Builds for macOS, Windows and Linux</span></a></li>
+    <li><a href="tour/play.html">
+      <b>The Playground</b><span>The simulators, full size</span></a></li>
+    <li><a href="tour/map.html">
+      <b>Feature map</b><span>Gates, maturity, versions, where things live</span></a></li>
+    <li><a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">
+      <b>The written manual</b><span>Every setting, in text</span></a></li>
+    <li><a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM">
+      <b>Source</b><span>The repository, and the release notes</span></a></li>
+  </ul>
 
-</div>
+  <p class="closing">
+    Features designed by <a href="https://github.com/sebsucmor-alt">Neotko</a>, who invented
+    Neosanding, the thing now called <em>Ironing</em> in OrcaSlicer, PrusaSlicer, Bambu Studio and
+    Cura. Sponsored by Snapmaker, and developed alongside Radu/Radoux, whose FullSpectrum fork this
+    one grew out of.
+  </p>
 
-<footer>
-  Every video plays on its own. Click the on-screen controls, or use <kbd>→</kbd> next · <kbd>←</kbd> back · <kbd>Space</kbd> play/pause · <kbd>R</kbd> reset · <kbd>F</kbd> fullscreen · <kbd>H</kbd> clean view.<br>
-  Browsing a video by hand pauses it; <kbd>Esc</kbd> or the <b>‹ Menu</b> button brings you back here.
-</footer>
+</main>
+
+<script src="tour/assets/optics.js"></script>
+<script src="tour/assets/stitch.js"></script>
+<script src="tour/assets/tour.js"></script>
+<script>
+/* One live strip, so the front page is not a static poster. Same optics as
+   everything else on the site: real recipes, composited bottom to top. */
+Tour.demo('band', function (host) {
+  var F = Optics.DEFAULT_FILAMENTS, LAYER = 0.2, TOTAL = 0.34, N = 24;
+  var cap = document.querySelector('[data-band-cap]');
+  var idle = 'Four filaments, stacked. Every square is a real recipe.';
+
+  for (var i = 0; i < N; i++) {
+    var f = i / (N - 1);
+    // walk blue -> magenta -> yellow by moving the split, then the pair
+    var pair = f < 0.5 ? [1, 2] : [2, 3];
+    var g = f < 0.5 ? f * 2 : (f - 0.5) * 2;
+    var top = TOTAL * (0.12 + g * 0.72);
+    var rgb = Optics.blendStacked([
+      { colorHex: F[pair[0]].hex, thickness: TOTAL - top, tdMm: Optics.tdToMm(F[pair[0]].td, LAYER) },
+      { colorHex: F[pair[1]].hex, thickness: top,         tdMm: Optics.tdToMm(F[pair[1]].td, LAYER) }
+    ], '#f2f0eb');
+
+    var sw = document.createElement('i');
+    sw.style.background = Optics.linearToCss(rgb);
+    sw.dataset.d = F[pair[0]].name + ' ' + (TOTAL - top).toFixed(2) + ' mm under ' +
+                   F[pair[1]].name + ' ' + top.toFixed(2) + ' mm  ·  ' + Optics.linearToHex(rgb);
+    host.appendChild(sw);
+  }
+
+  host.addEventListener('mouseover', function (e) {
+    if (e.target.tagName === 'I' && cap) cap.textContent = e.target.dataset.d;
+  });
+  host.addEventListener('mouseleave', function () { if (cap) cap.textContent = idle; });
+});
+</script>
 
 </body>
 </html>

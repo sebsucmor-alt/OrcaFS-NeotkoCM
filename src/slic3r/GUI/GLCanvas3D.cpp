@@ -83,6 +83,12 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
 #include <imgui/imgui_internal.h>
+#include <sstream>   // NEOTKO_PHOTOMODE_TAG s253 — sonda de estado de entrada de ImGui
+// ⚠️ NEOTKO_PHOTOMODE_TAG s253: en ESTE fichero no existe la macro NEOTKO_LOG — vive en
+// libslic3r/SurfaceColorMix.hpp, que GCodeViewer.cpp incluye y este no. Aquí se escribe al log con
+// el patrón largo: if (NeoDebug::enabled(...)) { ostringstream; NeoDebug::write(...); }
+// Costó un build creerlo: el error que da es "invalid operands to binary expression", que suena a
+// un problema de tipos y en realidad es que el `<<` se está evaluando fuera de cualquier macro.
 
 #include <imguizmo/ImGuizmo.h>
 
@@ -2700,6 +2706,12 @@ void GLCanvas3D::render(bool only_init)
         wxGetApp().plater()->get_notification_manager()->render_notifications(*this, get_overlay_window_width(), bottom_margin, right_margin);
         wxGetApp().plater()->get_dailytips()->render();
     }
+
+    // NEOTKO_PHOTOMODE_TAG s253 — SONDA DE ENTRADA DE IMGUI. Ver _log_imgui_input_state().
+    // Va JUSTO ANTES de render(): en este punto del frame todas las ventanas ya se han enviado y
+    // ImGui ya ha decidido quién tiene el ratón, que es exactamente lo que hay que medir. Medirlo
+    // antes daría el estado del frame ANTERIOR y mandaría a investigar el sitio equivocado.
+    _log_imgui_input_state();
 
     wxGetApp().imgui()->render();
 
@@ -8686,6 +8698,100 @@ void GLCanvas3D::_check_and_update_toolbar_icon_scale()
         wxGetApp().set_auto_toolbar_icon_scale(new_scale);
 }
 
+// NEOTKO_PHOTOMODE_TAG s253 — SONDA DE ENTRADA DE IMGUI (diagnóstico, no funcionalidad).
+//
+// POR QUÉ EXISTE. El usuario reportó que en la vista RealColor los botones se ven pero no responden,
+// y —lo decisivo— que **el fallo sobrevive a salir del Preview**: al volver a Prepare tampoco se
+// pueden mover objetos, y hay que cerrar el programa. Eso descarta "una ventana mal dibujada" y
+// apunta a que ImGui queda en un estado del que no sale.
+//
+// Leer el código no bastó (dos pasadas, todo lo comprobable estaba correcto), así que en vez de
+// seguir probando arreglos a ciegas —cada uno una compilación del usuario— esto MIDE. Es el mismo
+// principio que el aislador de términos de s251d: cuando ya has fallado una hipótesis, hace falta
+// un dato que parta el problema, no otro intento.
+//
+// Las tres causas posibles y qué campo las delata:
+//
+//   1. COORDENADAS MAL — ImGui cree que el ratón está en otro sitio, o que la pantalla mide otra
+//      cosa. Los botones se dibujan donde los ves pero el impacto se prueba en otro lado.
+//      ⇒ mira `mouse` contra `display`. Si `mouse` sale fuera del rango de `display`, o `display`
+//        no coincide con `canvas`, es ésta.
+//
+//   2. WIDGET AGARRADO — algún control capturó el foco (ActiveId) y no lo soltó. Mientras eso pasa,
+//      ImGui ignora TODO lo demás por diseño, y no se recupera solo.
+//      ⇒ mira `active_id`. Si es distinto de 0 de forma permanente, y encima con el ratón sin
+//        pulsar, es ésta. `active_win` dice qué ventana lo tiene.
+//
+//   3. CAPTURA PEGADA — ImGui dice que quiere el ratón siempre, así que el canvas 3D nunca lo
+//      recibe y no se pueden mover objetos.
+//      ⇒ mira `want_mouse=1` con `hover_win=(none)`. Querer el ratón sin tener ninguna ventana
+//        debajo del cursor es contradictorio, y sería ésta.
+//
+// ⚠️ SÓLO ESCRIBE CUANDO ALGO CAMBIA, más un latido cada 300 frames. El canal REALCOLOR ya lleva
+// mucho tráfico (el usuario se encontró 690 líneas de "cached composite" seguidas) y una sonda que
+// escriba por frame haría el log ilegible, que es justo lo contrario de para lo que está.
+void GLCanvas3D::_log_imgui_input_state()
+{
+    if (!NeoDebug::enabled(NeoDebug::REALCOLOR))
+        return;
+    ImGuiContext* g = ImGui::GetCurrentContext();
+    if (g == nullptr)
+        return;
+
+    const ImGuiIO& io = g->IO;
+    const Size cs = get_canvas_size();
+
+    auto win_name = [](ImGuiWindow* w) -> const char* { return (w != nullptr && w->Name != nullptr) ? w->Name : "(none)"; };
+
+    std::ostringstream ss;
+    ss << "imgui_input: canvas=" << cs.get_width() << "x" << cs.get_height()
+       << " display=" << (int)io.DisplaySize.x << "x" << (int)io.DisplaySize.y
+       << " mouse=" << (int)io.MousePos.x << "," << (int)io.MousePos.y
+       << " down=" << (io.MouseDown[0] ? 1 : 0)
+       << " want_mouse=" << (io.WantCaptureMouse ? 1 : 0)
+       << " want_kb=" << (io.WantCaptureKeyboard ? 1 : 0)
+       << " active_id=" << g->ActiveId
+       << " active_win=" << win_name(g->ActiveIdWindow)
+       << " hovered_id=" << g->HoveredId
+       << " hover_win=" << win_name(g->HoveredWindow)
+       << " moving_win=" << win_name(g->MovingWindow)
+       << " nwin=" << g->Windows.Size;
+
+    // La comparación deja FUERA la posición del ratón: cambia en cuanto lo mueves, y si entrara
+    // aquí la sonda escribiría en cada frame y volveríamos al problema del log ilegible. Lo que
+    // interesa es cuándo cambia el ESTADO (quién captura, quién está agarrado), no dónde está el
+    // cursor. La posición se registra igual dentro de la línea, para poder leerla cuando el estado
+    // sí cambia.
+    std::ostringstream key;
+    key << (int)io.DisplaySize.x << "x" << (int)io.DisplaySize.y
+        << "|" << (io.WantCaptureMouse ? 1 : 0) << (io.WantCaptureKeyboard ? 1 : 0)
+        << "|" << g->ActiveId << "|" << win_name(g->ActiveIdWindow)
+        << "|" << win_name(g->HoveredWindow) << "|" << win_name(g->MovingWindow)
+        << "|" << g->Windows.Size;
+
+    static std::string s_last;
+    static int s_since = 0;
+    const std::string k = key.str();
+    if (k != s_last) {
+        NeoDebug::write(NeoDebug::REALCOLOR, "*** " + ss.str());   // *** = cambió el estado
+        s_last  = k;
+        s_since = 0;
+        // Cuando hay un widget agarrado, decir CUÁL en claro. Es el dato más caro de obtener a mano
+        // y el que cierra el diagnóstico de la causa 2.
+        // NEOTKO_PHOTOMODE_TAG s253: sólo avisa si sigue agarrado CON EL RATÓN SOLTADO. Un
+        // active_id != 0 mientras mantienes pulsado es lo NORMAL en ImGui, y avisar de eso llenaba
+        // el log de falsos positivos justo donde tiene que ser fiable.
+        if (g->ActiveId != 0 && !io.MouseDown[0])
+            NeoDebug::write(NeoDebug::REALCOLOR,
+                            "    ^ hay un widget AGARRADO (active_id != 0). Mientras siga así, ImGui "
+                            "ignora el resto de la interfaz y el canvas 3D no recibe el raton.");
+    }
+    else if (++s_since >= 300) {
+        NeoDebug::write(NeoDebug::REALCOLOR, "... " + ss.str());   // ... = latido, sin cambios
+        s_since = 0;
+    }
+}
+
 void GLCanvas3D::_render_overlays()
 {
     glsafe(::glDisable(GL_DEPTH_TEST));
@@ -8697,7 +8803,19 @@ void GLCanvas3D::_render_overlays()
     //
     // The panel is drawn first so the mode remains controllable, and it is NOT gated on
     // NeoDebug::render_panels_enabled() — this is a user feature, not a debug window.
-    if (photo_mode().active) {
+    //
+    // NEOTKO_PHOTOMODE_TAG s253: **y sólo cuando el modo es de ESTA pestaña.** `_render_overlays()`
+    // lo comparten los tres canvas, y el estado del modo es compartido entre pestañas (decisión
+    // s253), así que sin la condición de dueño encender el modo desde el visor de gcode hacía dos
+    // cosas indeseadas a la vez: dibujaba AQUÍ el panel de Photo Mode de Prepare —de ahí las "dos
+    // ventanas de photo mode" que reportó el usuario— y además se llevaba por delante los overlays
+    // del visor con el `return` de abajo.
+    //
+    // Y el panel de Prepare no es que estorbe: es que MIENTE. Sus mandos (ambient & sheen, rim
+    // light, environment, escenario) alimentan shells_lit, que en el visor de gcode no dibuja nada
+    // — RealColor tiene su propia tubería. Por eso el usuario los movía y no pasaba nada. Un mando
+    // que no hace nada es peor que un mando ausente: manda a depurar donde no hay avería.
+    if (photo_mode().active && photo_mode().owner == PhotoOwner::View3D) {
         // NEOTKO_PHOTOMODE_TAG s242 (F2.5): during the screenshot countdown even the panel goes.
         // That is the actual point of the countdown — the panel is what was in the way of the OS
         // screenshot tool, not the frame rate.
@@ -10101,62 +10219,8 @@ void GLCanvas3D::_render_photo_stage(const Camera& camera, bool shadow_catcher)
     shader->stop_using();
 }
 
-// NEOTKO_PHOTOMODE_TAG s242 — a draggable lighting sphere.
-//
-// Three XYZ sliders are the obvious way to aim a light and they are unusable: the user has to
-// solve for a direction one component at a time while watching the scene. Every tool that aims
-// lights for a living (Keyshot, Rhino, Blender's HDRI widget) uses a ball you drag instead,
-// because the mapping from "where I want the highlight" to "where I drag" is direct.
-//
-// Returns true while being dragged, so the caller can react on the same frame.
-static bool photo_light_ball(const char* id, PhotoLight& light, float size_px)
-{
-    ImGui::PushID(id);
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##ball", ImVec2(size_px, size_px));
-    const bool active = ImGui::IsItemActive();
-
-    const ImVec2 centre(origin.x + size_px * 0.5f, origin.y + size_px * 0.5f);
-    const float  r = size_px * 0.5f - 2.0f;
-
-    if (active) {
-        const ImVec2 m = ImGui::GetIO().MousePos;
-        float dx = (m.x - centre.x) / r;
-        float dy = (m.y - centre.y) / r;
-        // Clamp to the disc rather than ignoring out-of-bounds drags: releasing control the
-        // instant the cursor leaves the ball makes the widget feel broken. Dragging past the edge
-        // now slides the light along the horizon, which is what the gesture implies.
-        const float len = std::sqrt(dx * dx + dy * dy);
-        if (len > 1.0f) { dx /= len; dy /= len; }
-        // Screen disc -> azimuth/elevation. Centre = straight overhead (elevation 90), rim =
-        // horizon (elevation 0); the angle around the centre is the azimuth. Screen Y grows
-        // downward while world +Y goes away from the default camera, hence the negated dy.
-        const float rad = std::min(std::sqrt(dx * dx + dy * dy), 1.0f);
-        light.elevation_deg = (1.0f - rad) * 90.0f;
-        if (rad > 1e-3f)
-            light.azimuth_deg = std::atan2(-dy, dx) * 180.0f / float(M_PI);
-    }
-
-    // Paint it: disc, a couple of guide rings, and the handle where the light currently sits.
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 col_bg   = ImGui::GetColorU32(ImGuiCol_FrameBg);
-    const ImU32 col_ring = ImGui::GetColorU32(ImGuiCol_Border);
-    const ImU32 col_knob = light.enabled ? IM_COL32(255, 214, 92, 255) : IM_COL32(130, 130, 130, 255);
-    dl->AddCircleFilled(centre, r, col_bg, 48);
-    dl->AddCircle(centre, r, col_ring, 48);
-    dl->AddCircle(centre, r * 0.5f, col_ring, 32);
-    dl->AddLine(ImVec2(centre.x - r, centre.y), ImVec2(centre.x + r, centre.y), col_ring);
-    dl->AddLine(ImVec2(centre.x, centre.y - r), ImVec2(centre.x, centre.y + r), col_ring);
-
-    const float knob_rad = (1.0f - std::clamp(light.elevation_deg, 0.0f, 90.0f) / 90.0f) * r;
-    const float az = light.azimuth_deg * float(M_PI) / 180.0f;
-    const ImVec2 knob(centre.x + knob_rad * std::cos(az), centre.y - knob_rad * std::sin(az));
-    dl->AddLine(centre, knob, col_knob, 1.5f);
-    dl->AddCircleFilled(knob, 5.0f, col_knob, 16);
-
-    ImGui::PopID();
-    return active;
-}
+// NEOTKO_PHOTOMODE_TAG s253: photo_light_ball() se mudó a PhotoMode.cpp para que el modo foto
+// del visor de gcode use LA MISMA bola y no una copia. Declarada en PhotoMode.hpp.
 
 // One collapsible block per light. Returns true if anything changed this frame.
 static bool photo_light_controls(const char* label, PhotoLight& light, bool is_key)
@@ -10195,6 +10259,197 @@ static bool photo_light_controls(const char* label, PhotoLight& light, bool is_k
 //
 // Draws the same passes the on-screen frame does, in the same order, minus every overlay: the
 // whole point is that the file matches what the user is looking at.
+// NEOTKO_PHOTOMODE_TAG s253 — EXPORT DE LA VISTA REALCOLOR A IMAGEN.
+//
+// Hermano de _render_photo_to_data() (el de Prepare) y deliberadamente MÁS CORTO, porque aquí la
+// escena que va al fichero es una sola cosa: el gcode compuesto por RealColor. Sin cama, sin placa,
+// sin fondo de viewport y sin shells — decisión del usuario en s253.
+//
+// Se hereda de aquél todo lo que ya costó un build aprender (§4.E y §10 del plan):
+//   · frustum EXPLÍCITO, nunca tocando el zoom (Camera::set_zoom clampea y no restaura limpio)
+//   · restaurar viewport Y proyección, porque esto corre a mitad de un frame vivo
+//   · recorte contra los límites de GL antes de pedir nada
+//
+// Y lo específico de aquí:
+//   · el supersampling del peel baja a 1 (GCodeViewer::realcolor_supersample) — §10.2
+//   · los radios de AO/SSS se escalan con la resolución — §10.3
+//   · el `0` clavado del present ya está arreglado, o el fichero saldría vacío — §10 (s253)
+
+// NEOTKO_PHOTOMODE_TAG s253e — sonda de viewport para el export de Prepare.
+//
+// El export de Prepare lleva aparcado desde s242 con el síntoma "el contenido sale en una esquina
+// inferior izquierda y el resto se queda con el color de limpieza", y su causa quedó SIN ENCONTRAR.
+// Ese síntoma tiene una sola forma de producirse: dibujar con un viewport MÁS PEQUEÑO que el buffer
+// de destino. Así que en vez de volver a intentar arreglarlo a ojo, se mide después de cada etapa:
+// la primera línea cuyo viewport no sea el tamaño del fichero señala a la culpable.
+//
+// s253e ya arregló un candidato concreto (render_shadow_map dejaba el viewport a 2048² sin
+// devolverlo). Esto está aquí para confirmar si era ése o queda otro.
+static void photo_log_viewport(const char* stage, unsigned int want_w, unsigned int want_h)
+{
+    if (!NeoDebug::enabled(NeoDebug::REALCOLOR))
+        return;
+    GLint vp[4] = { 0, 0, 0, 0 };
+    glsafe(::glGetIntegerv(GL_VIEWPORT, vp));
+    const bool bad = (vp[0] != 0 || vp[1] != 0 || vp[2] != (GLint)want_w || vp[3] != (GLint)want_h);
+    std::ostringstream o;
+    o << "photo_export[prepare] " << stage << ": viewport=" << vp[0] << "," << vp[1]
+      << " " << vp[2] << "x" << vp[3] << "  esperado=0,0 " << want_w << "x" << want_h
+      << (bad ? "   <<<< AQUI ESTA EL FALLO: se dibuja en un recuadro mas pequeno que el fichero" : "  ok");
+    NeoDebug::write(NeoDebug::REALCOLOR, o.str());
+}
+
+bool GLCanvas3D::_render_realcolor_photo_to_data(ThumbnailData& out, unsigned int w, unsigned int h)
+{
+    const PhotoModeState& pm = photo_mode();
+
+    // ⚠️ Aquí manda GL_MAX_TEXTURE_SIZE y no sólo GL_MAX_RENDERBUFFER_SIZE: los buffers del peel son
+    // TEXTURAS, no renderbuffers. Comprobar sólo el segundo (que es lo que hace el export de
+    // Prepare) dejaría pasar una petición que luego revienta dentro de ensure_realcolor_fbos.
+    GLint max_tex = 0, max_rb = 0;
+    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex));
+    glsafe(::glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb));
+    const GLint lim = (max_tex > 0 && max_rb > 0) ? std::min(max_tex, max_rb) : std::max(max_tex, max_rb);
+    if (lim > 0 && ((GLint)w > lim || (GLint)h > lim)) {
+        const double sc = std::min((double)lim / (double)w, (double)lim / (double)h);
+        w = std::max(16u, (unsigned int)(w * sc));
+        h = std::max(16u, (unsigned int)(h * sc));
+        if (NeoDebug::enabled(NeoDebug::REALCOLOR)) {
+            std::ostringstream o;
+            o << "photo_export: recortado a " << w << "x" << h << " por limite GL " << lim;
+            NeoDebug::write(NeoDebug::REALCOLOR, o.str());
+        }
+    }
+
+    out.set(w, h);
+    if (!out.is_valid())
+        return false;
+
+    GLint caller_fbo = 0;
+    glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &caller_fbo));
+
+    GLuint fbo = 0, tex = 0, depth = 0;
+    glsafe(::glGenFramebuffers(1, &fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fbo));
+    glsafe(::glGenTextures(1, &tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0));
+    // Profundidad OBLIGATORIA: realcolor_present.fs escribe gl_FragDepth. Sin adjunto, la escritura
+    // se descarta y el FBO puede quedar incompleto en algunos drivers.
+    glsafe(::glGenRenderbuffers(1, &depth));
+    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, depth));
+    glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
+    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth));
+
+    bool ok = false;
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        Camera& camera = wxGetApp().plater()->get_camera();
+        const std::array<int, 4> saved_viewport = camera.get_viewport();
+        const Size cs = get_canvas_size();
+
+        camera.set_viewport(0, 0, w, h);
+        camera.apply_viewport();
+
+        // --- encuadre: idéntico razonamiento que en el export de Prepare, no lo repito entero.
+        // El zoom está en PÍXELES POR MM, así que renderizar más grande NO amplía, REENCUADRA.
+        camera.apply_projection(_max_bounding_box(true, true, true));
+        const double inv_zoom = camera.get_inv_zoom();
+        const double hw_view  = 0.5 * (double)std::max(cs.get_width(), 1)  * inv_zoom;
+        const double hh_view  = 0.5 * (double)std::max(cs.get_height(), 1) * inv_zoom;
+        const double ar       = (double)w / (double)h;
+        double hw = std::max(hw_view, hh_view * ar);
+        double hh = hw / ar;
+        if (camera.get_type() == Camera::EType::Perspective) {
+            const double dist = camera.get_distance();
+            if (dist > EPSILON) {
+                const double sc = camera.get_near_z() / dist;
+                hw *= sc; hh *= sc;
+            }
+        }
+        camera.apply_projection(-hw, hw, -hh, hh, camera.get_near_z(), camera.get_far_z());
+
+        // Fondo: transparente o BLANCO PURO. Nada más — el usuario descartó la cama explícitamente.
+        // Y aquí la transparencia sale de verdad y gratis, sin el apaño de "shadow catcher" que hizo
+        // falta en Prepare: realcolor_present.fs hace discard donde no hay toolpath, así que lo que
+        // no es pieza conserva alpha 0.
+        if (pm.transparent_bg)
+            glsafe(::glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
+        else
+            glsafe(::glClearColor(1.0f, 1.0f, 1.0f, 1.0f));
+        glsafe(::glClearDepth(1.0));
+        glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));
+
+        m_gcode_viewer.render_realcolor_for_export((int)w, (int)h, std::max(cs.get_height(), 1));
+
+        // NEOTKO_PHOTOMODE_TAG s253d — LA SOMBRA PROYECTADA, EN EL CANAL ALFA.
+        //
+        // Petición del usuario: *"que se exporten las sombras como transparencias en el png"*. Es lo
+        // que separa un recorte de una foto de producto — la pieza deja de estar pegada sobre el
+        // fondo y pasa a estar APOYADA en algo.
+        //
+        // No hay que inventar nada: `photo_stage.fs` ya tiene el modo cazador desde s242 (`if
+        // (u_shadow_catcher)` → color negro, **alfa = cuánta sombra hay**). Compuesto sobre
+        // cualquier fondo eso ES una sombra de contacto. Lo único que faltaba era llamarlo desde
+        // aquí.
+        //
+        // 🔑 VA DESPUÉS del render de RealColor, y las dos razones importan:
+        //   · el mapa de sombras se llena DURANTE ese render (con las shells como ocluyente), así
+        //     que antes no habría nada que muestrear;
+        //   · los toolpaths ya han escrito profundidad (realcolor_present.fs escribe gl_FragDepth),
+        //     así que el suelo queda correctamente TAPADO por la pieza y la sombra sólo asoma
+        //     alrededor. Dibujarlo antes lo pintaría por encima del modelo.
+        //
+        // Y se dibuja con las DOS opciones de fondo, no sólo con transparencia: sobre blanco el
+        // negro con alfa da una sombra gris suave, que es exactamente igual de deseable. El cazador
+        // no escribe profundidad (ver su bloque en _render_photo_stage) — es una capa de
+        // composición, no geometría.
+        _render_photo_stage(camera, /*shadow_catcher*/true);
+
+        glsafe(::glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, (void*)out.pixels.data()));
+
+        // s253g: sellado del alfa cuando el fondo es opaco — ver la nota larga en el export de
+        // Prepare. Aquí el efecto es más sutil (el composite de RealColor escribe alfa 1 sobre la
+        // pieza) pero el cazador de sombras y los bordes suavizados dejan valores intermedios, y
+        // sobre blanco eso se lee como una foto desvaída.
+        if (!pm.transparent_bg) {
+            unsigned char* px = out.pixels.data();
+            const size_t n = (size_t)w * (size_t)h;
+            for (size_t i = 0; i < n; ++i)
+                px[i * 4 + 3] = 255;
+        }
+        ok = true;
+
+        camera.set_viewport(saved_viewport[0], saved_viewport[1],
+                            (unsigned int)saved_viewport[2], (unsigned int)saved_viewport[3]);
+        camera.apply_viewport();
+        camera.apply_projection(_max_bounding_box(true, true, true));
+    }
+    else
+        if (NeoDebug::enabled(NeoDebug::REALCOLOR)) {
+            std::ostringstream o;
+            o << "photo_export: FBO de export INCOMPLETO a " << w << "x" << h;
+            NeoDebug::write(NeoDebug::REALCOLOR, o.str());
+        }
+
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
+    glsafe(::glDeleteRenderbuffers(1, &depth));
+    glsafe(::glDeleteTextures(1, &tex));
+    glsafe(::glDeleteFramebuffers(1, &fbo));
+
+    if (NeoDebug::enabled(NeoDebug::REALCOLOR)) {
+        std::ostringstream o;
+        o << "photo_export: resultado=" << (ok ? "OK" : "FALLO") << " " << w << "x" << h;
+        NeoDebug::write(NeoDebug::REALCOLOR, o.str());
+    }
+
+    set_as_dirty();
+    request_extra_frame();
+    return ok;
+}
+
 bool GLCanvas3D::_render_photo_to_data(ThumbnailData& out, unsigned int w, unsigned int h)
 {
     const PhotoModeState& pm = photo_mode();
@@ -10292,6 +10547,41 @@ bool GLCanvas3D::_render_photo_to_data(ThumbnailData& out, unsigned int w, unsig
                 hh *= scale;
             }
         }
+        // NEOTKO_PHOTOMODE_TAG s253f — MEDIDA DE LA PROYECCIÓN.
+        //
+        // El viewport ya quedó descartado (las cuatro sondas de photo_log_viewport dan el tamaño
+        // del fichero). Lo que queda entre "lo que se ve" y "lo que sale" es esto: el frustum que
+        // se construye a mano, y la escena que se le mete dentro.
+        //
+        // Se registran los tres grupos que pueden explicar un encuadre malo, y NO se registran
+        // conclusiones: la matriz de antes y la de después (para ver qué cambió realmente), los
+        // medio-extents en mm (para ver si el objeto cabe), y la caja de la escena (para ver si el
+        // objeto está donde el frustum lo busca). Si el centro de la caja no está cerca del eje de
+        // la cámara, el objeto sale descentrado por mucho que el frustum sea correcto — y ésa es la
+        // hipótesis que este volcado confirma o descarta de un vistazo.
+        if (NeoDebug::enabled(NeoDebug::REALCOLOR)) {
+            const BoundingBoxf3 sb = _max_bounding_box(true, true, true);
+            const Vec3d c = sb.center();
+            const Vec3d tgt = camera.get_target();
+            std::ostringstream o;
+            o << "photo_export[prepare] proyeccion:"
+              << "  canvas=" << cs.get_width() << "x" << cs.get_height()
+              << "  export=" << w << "x" << h
+              << "  ar_view=" << (double)cs.get_width() / (double)std::max(cs.get_height(), 1)
+              << "  ar_export=" << ar_export   // s253h: en esta funcion la variable se llama ar_export
+              << "\n    inv_zoom=" << inv_zoom
+              << "  medio-extent VISTA=" << hw_view << "x" << hh_view << " mm"
+              << "  medio-extent EXPORT=" << hw << "x" << hh << " mm"
+              << "\n    near=" << camera.get_near_z() << " far=" << camera.get_far_z()
+              << "  tipo=" << (camera.get_type() == Camera::EType::Perspective ? "perspectiva" : "ortografica")
+              << "  distancia=" << camera.get_distance()
+              << "\n    caja escena: centro=(" << c.x() << "," << c.y() << "," << c.z() << ")"
+              << " tam=(" << sb.size().x() << "," << sb.size().y() << "," << sb.size().z() << ")"
+              << "\n    camara target=(" << tgt.x() << "," << tgt.y() << "," << tgt.z() << ")"
+              << "   <- si target y centro de la caja NO coinciden, el objeto sale descentrado";
+            NeoDebug::write(NeoDebug::REALCOLOR, o.str());
+        }
+
         camera.apply_projection(-hw, hw, -hh, hh, camera.get_near_z(), camera.get_far_z());
 
         if (pm.transparent_bg)
@@ -10306,7 +10596,9 @@ bool GLCanvas3D::_render_photo_to_data(ThumbnailData& out, unsigned int w, unsig
 
         // Same order as the on-screen Prepare frame: objects (which fill the shadow map as their
         // pass 0) -> stage -> transparent. See GLCanvas3D::render().
+        photo_log_viewport("tras clear", w, h);
         _render_objects(GLVolumeCollection::ERenderType::Opaque, false);
+        photo_log_viewport("tras objetos opacos", w, h);
         if (photo_mode_hides_bed())
             _render_photo_stage(camera, /*shadow_catcher*/pm.transparent_bg);
         else {
@@ -10320,9 +10612,35 @@ bool GLCanvas3D::_render_photo_to_data(ThumbnailData& out, unsigned int w, unsig
                     true);
             }
         }
+        photo_log_viewport("tras escenario/cama", w, h);
         _render_objects(GLVolumeCollection::ERenderType::Transparent, false);
+        photo_log_viewport("tras transparentes (justo antes de leer)", w, h);
 
         glsafe(::glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, (void*)out.pixels.data()));
+
+        // 🚨 NEOTKO_PHOTOMODE_TAG s253g — LA FOTO SALÍA "LAVADA": ES EL CANAL ALFA.
+        //
+        // Con fondo opaco pedido, el PNG salía pálido y desaturado respecto a la pantalla. No es la
+        // iluminación ni el gradeo: es que el buffer se lee con alfa, y ese alfa NO es 255 en todas
+        // partes. El shader de los objetos mezcla con GL_SRC_ALPHA y va dejando valores por debajo
+        // de 1 donde hay bordes, mezclas o pasadas superpuestas.
+        //
+        // En pantalla eso da igual: el framebuffer de ventana es opaco y el alfa que quede ahí no
+        // lo compone nadie. En un PNG sí: cualquier visor compone sobre blanco, y un alfa de 0.8
+        // aclara el píxel un 20%. Toda la imagen "se lava" un poco, y el ojo lo lee como una foto
+        // desvaída en vez de como lo que es — transparencia parcial no pedida.
+        //
+        // 🔑 Es de la misma familia que los otros dos fallos de este camino: algo que en pantalla no
+        // tiene consecuencia y en un fichero sí. El framebuffer de ventana perdona el alfa, el
+        // viewport perdona los tamaños, y el fichero no perdona ninguno de los dos.
+        //
+        // Con fondo transparente NO se toca, evidentemente: ahí el alfa es el producto.
+        if (!pm.transparent_bg) {
+            unsigned char* px = out.pixels.data();
+            const size_t n = (size_t)w * (size_t)h;
+            for (size_t i = 0; i < n; ++i)
+                px[i * 4 + 3] = 255;
+        }
         ok = true;
 
         m_photo_render_size = Size();
@@ -10395,8 +10713,12 @@ static bool photo_grab(ThumbnailData& out,
 void GLCanvas3D::_photo_save_png()
 {
     ThumbnailData data;
+    // NEOTKO_PHOTOMODE_TAG s253: el mismo botón sirve a las dos pestañas, y cada una tiene su
+    // renderizador. Se decide por el DUEÑO del modo y no por m_canvas_type: el estado del modo es
+    // compartido, y es su dueño quien dice qué escena es la que se está fotografiando.
     if (!photo_grab(data, [this](ThumbnailData& d, unsigned int w, unsigned int h) {
-            return _render_photo_to_data(d, w, h); }))
+            return (photo_mode().owner == PhotoOwner::Preview) ? _render_realcolor_photo_to_data(d, w, h)
+                                                               : _render_photo_to_data(d, w, h); }))
         return;
 
     // Default name = project + date, because these files pile up fast and "Untitled.png" twelve
@@ -10435,7 +10757,8 @@ void GLCanvas3D::_photo_copy_to_clipboard()
 {
     ThumbnailData data;
     if (!photo_grab(data, [this](ThumbnailData& d, unsigned int w, unsigned int h) {
-            return _render_photo_to_data(d, w, h); }))
+            return (photo_mode().owner == PhotoOwner::Preview) ? _render_realcolor_photo_to_data(d, w, h)
+                                                               : _render_photo_to_data(d, w, h); }))
         return;
 
     // wxImage keeps RGB and alpha in two separate planes, and wants rows top-down — so this is
@@ -10752,20 +11075,62 @@ void GLCanvas3D::_render_photo_mode_panel()
     if (pm.transparent_bg && pm.stage.kind == PhotoStage::Kind::Bed)
         ImGui::TextDisabled("(no effect with the Print bed stage)");
 
-    // NEOTKO_PHOTOMODE_TAG s242 — export PARKED, deliberately, pending the viewport bug below.
+    // NEOTKO_PHOTOMODE_TAG s253e — EXPORT REACTIVADO, tras dos sesiones aparcado.
     //
-    // The off-screen path still renders into a sub-rectangle of the export buffer (content lands
-    // in the bottom-left corner, the rest stays at the clear colour), which survived the framing
-    // fix — so the cause is the VIEWPORT, not the projection, and it has not been found yet.
-    // Rather than ship a button that produces a broken file, the controls are disabled and say so.
+    // Estuvo desactivado desde s242 con el síntoma "el contenido sale en una esquina inferior
+    // izquierda", causa sin encontrar. Vuelve por tres motivos, en orden de peso:
     //
-    // The code behind them is intentionally left in place and still compiled (_photo_save_png /
-    // _photo_copy_to_clipboard / _render_photo_to_data): deleting it would only mean rewriting it,
-    // and leaving it uncompiled would let it rot against the shader changes landing around it.
-    // (No ImGui::BeginDisabled here: this tree bundles ImGui 1.83 and that API arrived in 1.84.
-    // Greyed-out text instead of dead buttons — a button that does nothing is worse than no button.)
+    //  1. El export de la vista RealColor (s253) usa EL MISMO encuadre —frustum explícito, nunca
+    //     tocando el zoom— y sale perfecto. O sea que la parte de proyección, que era la sospechosa
+    //     original, está bien.
+    //  2. s253e arregló un defecto real que encaja con el síntoma: render_shadow_map() ponía el
+    //     viewport al tamaño del mapa (2048²) y no lo devolvía. Dibujar después de eso, sin fijar
+    //     viewport propio, mete el resultado en un recuadro de 2048² en la esquina inferior
+    //     izquierda de un buffer de 5120×2880. Es literalmente el síntoma.
+    //  3. Si aún queda algo, el camino está instrumentado: photo_log_viewport() mide después de
+    //     cada etapa y la primera que no cuadre señala a la culpable. Un export fallido dice ahora
+    //     por qué falló, en vez de costar una compilación por hipótesis.
+    //
+    // Si vuelve a enmarcar mal, el arreglo es de una línea en el sitio que diga el log — y este
+    // botón se puede volver a desactivar en dos segundos.
+    // NEOTKO_PHOTOMODE_TAG s253h — EXPORT DE PREPARE: DESACTIVADO OTRA VEZ, POR DECISIÓN CONJUNTA.
+    //
+    // Se reactivó en s253e y sigue enmarcando mal: el contenido queda confinado a un rectángulo del
+    // tamaño del CANVAS anclado abajo a la izquierda del buffer de export, con el objeto ~5x más
+    // pequeño de lo que debería, y la imagen sale desvaída.
+    //
+    // 🔑 LO QUE ESTA SESIÓN SÍ DEJA CERRADO — para que quien lo retome no repita el camino:
+    //
+    //   ✗ NO es el VIEWPORT. Medido con photo_log_viewport() en las cuatro etapas del export: da
+    //     5120x2880 en todas. La nota de s242 decía "la causa es el viewport" y era una suposición;
+    //     ahora está descartado con dato.
+    //   ✗ NO es el SCISSOR. ImGuiWrapper salva la caja (last_scissor_box) Y el estado de activación
+    //     (glPushAttrib(GL_ENABLE_BIT)), y restaura los dos. Comprobado leyendo.
+    //   ✗ NO es la PROYECCIÓN ASIMÉTRICA. Camera::apply_projection(box) construye el frustum
+    //     simétrico (-w,w,-h,h) y no hay desplazamiento por barra lateral ni márgenes.
+    //   ✗ NO era el mapa de sombras dejando el viewport a 2048² — ese defecto EXISTÍA y se arregló
+    //     en s253e (render_shadow_map ahora restaura el viewport), pero no era la causa de esto.
+    //
+    //   ✓ LA PISTA QUE QUEDA VIVA, y es fuerte: 2214/5120 = 0.432 y 1866/2880 = 0.648, que son
+    //     EXACTAMENTE las fracciones del rectángulo dibujado dentro del buffer. O sea que algo está
+    //     tratando el destino como si midiera lo que mide el canvas. Con el viewport y el scissor
+    //     descartados, el siguiente sitio a mirar es la PROYECCIÓN: el objeto sale además ~5x
+    //     pequeño, y eso no lo hace un recorte, lo hace un frustum que abarca mucho más mundo del
+    //     que se le pidió. Sospecha concreta: que algo entre el _render_objects y el final vuelva a
+    //     llamar a apply_projection(box), que reconstruye el frustum desde m_viewport y se lleva por
+    //     delante el que se montó a mano.
+    //
+    //   🛠️ LA MEDIDA YA ESTÁ PUESTA Y EN LA FUNCIÓN CORRECTA (s253h): el bloque "MEDIDA DE LA
+    //     PROYECCIÓN" de _render_photo_to_data() vuelca extents, zoom, tipo de cámara y el centro de
+    //     la escena contra el objetivo de la cámara. En s253f se coló por error en
+    //     _render_realcolor_photo_to_data() —las dos funciones tienen la misma línea de
+    //     apply_projection y la edición pilló la primera—, y por eso dos intentos de diagnóstico
+    //     salieron sin datos. Ya está donde toca: quien lo retome sólo tiene que compilar y leer.
+    //
+    // El export de la vista REALCOLOR (s253) sí funciona y no comparte este camino.
+    // (No ImGui::BeginDisabled: este árbol trae ImGui 1.83 y esa API llegó en la 1.84.)
     ImGui::TextDisabled("Export parked: Copy to clipboard / Save PNG");
-    ImGui::TextDisabled("(off-screen render still frames wrong - being fixed)");
+    ImGui::TextDisabled("(still frames wrong - see the note in the source)");
 
     // --- user presets -------------------------------------------------------------------------
     // Saved in the app's own config, per user — NOT in the 3mf. A lighting setup is a

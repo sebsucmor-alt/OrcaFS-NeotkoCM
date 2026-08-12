@@ -1,9 +1,31 @@
 #version 140
 
-// normalized values for (-0.6/1.31, 0.6/1.31, 1./1.31)
-const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
-// normalized values for (1./1.43, 0.2/1.43, 1./1.43)
-const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
+// NEOTKO_PHOTOMODE_TAG s253 (P0 del port de Photo Mode al visor de gcode, ver
+// docs/WIP/PHOTO_MODE_PORT_TO_REALCOLOR_PLAN.md §5) — LA DIRECCIÓN DE LA LUZ, TAMBIÉN CON MANDO.
+//
+// s251c sacó a uniform la INTENSIDAD de la luz directa (u_light_key/fill/spec/...) pero dejó
+// dentro la DIRECCIÓN, que es justo lo que un modo foto necesita mover. Estos dos uniforms son
+// esa mitad que faltaba. Defaults en C++ = las dos constantes de siempre, ya normalizadas:
+//   key  = (-0.4574957, 0.4574957, 0.7624929)   normalizado de (-0.6, 0.6, 1.0)/1.31
+//   fill = ( 0.6985074, 0.1397015, 0.6985074)   normalizado de ( 1.0, 0.2, 1.0)/1.43
+// Con esos valores la imagen es bit-idéntica a s252.
+//
+// 🔑 ESTÁN EN ESPACIO MUNDO, Y ESO AQUÍ SALE GRATIS — es la diferencia importante con el F0 que
+// Photo Mode tuvo que hacer en shells_lit. Allí `normal` era de VISTA, así que mover la luz obligó
+// a mandar dir_world Y dir_view y a tener cuidado con cuál se usaba en cada término. Aquí
+// `view_normal_matrix` es la IDENTIDAD para el peel (se manda así desde
+// render_toolpaths_realcolor), de modo que la `normal` de abajo ya es de MUNDO y estas constantes
+// siempre fueron, de hecho, vectores de mundo. Consecuencia práctica: la luz de RealColor ya era
+// independiente de la cámara, y moverla no necesita ninguna conversión de espacios.
+//
+// ⚠️ DEUDA PREEXISTENTE QUE NO SE TOCA AQUÍ (y conviene que quede escrita antes de que alguien la
+// "arregle" de pasada): el especular de abajo compara una dirección de vista de espacio OJO
+// (-normalize(position.xyz)) contra un reflect() calculado con la normal de MUNDO. Eso es
+// geométricamente incoherente y lo era ya antes de este cambio. Se deja exactamente como estaba
+// porque el criterio de esta fase es bit-identidad en el neutro; arreglarlo cambia la imagen y por
+// tanto es una decisión de producto, no un efecto colateral. Anotado en el plan §4/R6.
+uniform vec3 u_rc_light_key_dir;   // MUNDO, unitario
+uniform vec3 u_rc_light_fill_dir;  // MUNDO, unitario
 
 // NEOTKO_REALCOLOR_TAG s251c — LA LUZ DIRECTA, POR FIN CON MANDOS.
 //
@@ -229,17 +251,17 @@ void main()
     // solo mando. El max() exterior sigue haciendo falta: con w < 1 las caras muy a contraluz
     // todavía dan negativo.
     float wrap_denom = 1.0 + max(u_light_wrap, 0.0);
-    float NdotL = max((dot(normal, LIGHT_TOP_DIR) + u_light_wrap) / wrap_denom, 0.0);
+    float NdotL = max((dot(normal, u_rc_light_key_dir) + u_light_wrap) / wrap_denom, 0.0);
     intensity.x = NdotL * u_light_key; // direct light only, ambient is env-sampled in .fs
 
     vec4 position = view_model_matrix * vec4(swollen_pos, 1.0);
     // El wrap NO toca el especular a propósito: es un modelo de difusa (aproxima que la luz entra,
     // se dispersa bajo la superficie y sale por donde no le tocaba). Un reflejo especular es
     // superficial y no hace nada de eso.
-    intensity.y = u_light_spec * pow(max(dot(-normalize(position.xyz), reflect(-LIGHT_TOP_DIR, normal)), 0.0), max(u_light_shininess, 1.0));
+    intensity.y = u_light_spec * pow(max(dot(-normalize(position.xyz), reflect(-u_rc_light_key_dir, normal)), 0.0), max(u_light_shininess, 1.0));
     v_eye_z = -position.z; // right-handed eye space, camera looks down -Z
 
-    NdotL = max((dot(normal, LIGHT_FRONT_DIR) + u_light_wrap) / wrap_denom, 0.0);
+    NdotL = max((dot(normal, u_rc_light_fill_dir) + u_light_wrap) / wrap_denom, 0.0);
     intensity.x += NdotL * u_light_fill;
 
     gl_Position = projection_matrix * position;

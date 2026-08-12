@@ -13,7 +13,7 @@ uniform sampler2D u_peel_color;
 uniform sampler2D u_peel_meta;
 uniform sampler2D u_prev_accum_color;
 uniform sampler2D u_prev_accum_transmit;
-uniform float u_material_td[4];      // scalar TD per tool, broadcast per RGB channel
+uniform float u_material_td[16];      // scalar TD per tool, broadcast per RGB channel
 uniform bool  u_beer_lambert;        // false = M3 flat-alpha debug mode (peel-order validation)
 uniform float u_flat_alpha;          // only used when u_beer_lambert == false
 
@@ -44,7 +44,11 @@ void main()
     if (u_beer_lambert) {
         // ColorSci.cpp::blend_stacked: t = pow(0.1, thickness/td), linear RGB. TD is scalar
         // per tool (see refresh_realcolor_materials), broadcast to all 3 channels here.
-        float td = u_material_td[tool];
+        // s253: acotado a mano — clamp() de enteros no existe en GLSL 1.10. Ver realcolor_peel.fs.
+        int td_idx = tool;
+        if (td_idx < 0)  td_idx = 0;
+        if (td_idx > 15) td_idx = 15;
+        float td = u_material_td[td_idx];
         float tt = (td < 1e-6) ? 0.0 : pow(0.1, thickness / max(td, 1e-6));
         vec3 t = vec3(tt);
         vec3 layer_lin = vec3(srgb_to_linear(layer_srgb.r), srgb_to_linear(layer_srgb.g), srgb_to_linear(layer_srgb.b));

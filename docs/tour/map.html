@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The map — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Every feature on one page: which gate it needs, how finished it actually is, which version it landed in, and where the control lives.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .maptbl { font-size: .87rem; }
+  .maptbl td, .maptbl th { padding: .5rem .6rem; vertical-align: top; }
+  .maptbl td:first-child { white-space: nowrap; }
+  .maptbl .badge { font-size: .63rem; padding: .1rem .34rem; }
+  .maptbl tbody tr[data-hide="1"] { display: none; }
+
+  .filters {
+    position: sticky; top: 3.6rem; z-index: 20;
+    display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+    padding: .6rem .75rem; margin: 1.4rem 0;
+    background: color-mix(in srgb, var(--paper) 92%, transparent);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--rule); border-radius: var(--radius);
+  }
+  .filters__lbl { font-family: var(--mono); font-size: .64rem; letter-spacing: .11em;
+                  text-transform: uppercase; color: var(--ink-faint); margin-right: .2rem; }
+  .filters input[type="search"] {
+    font: inherit; font-size: .85rem; padding: .28rem .5rem; flex: 1 1 150px; min-width: 120px;
+    border: 1px solid var(--rule-firm); border-radius: var(--radius-sm);
+    background: var(--surface); color: var(--ink);
+  }
+  .filters__count { font-family: var(--mono); font-size: .72rem; color: var(--ink-faint); margin-left: auto; }
+
+  .timeline { list-style: none; padding: 0; margin: 1.4rem 0; }
+  .timeline li {
+    display: grid; grid-template-columns: 4.2rem 1fr; gap: 1rem;
+    padding: .6rem 0; border-top: 1px solid var(--rule); margin: 0;
+  }
+  .timeline b { font-family: var(--mono); font-size: .8rem; color: var(--accent); }
+  .timeline span { font-size: .9rem; line-height: 1.5; }
+
+  .legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px,1fr)); gap: .6rem; margin: 1.2rem 0; }
+  .legend div { border: 1px solid var(--rule); border-radius: 6px; padding: .5rem .6rem; background: var(--surface); }
+  .legend p { margin: .3rem 0 0; font-size: .82rem; color: var(--ink-soft); line-height: 1.45; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html" aria-current="page">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">Reference</p>
+    <h1>The map</h1>
+    <p class="lede">
+      Everything in one place: which gate a feature needs, how finished it actually is, which
+      version it landed in, and where the control lives. The maturity column is the one worth
+      reading, because it is the thing the marketing version of a page like this would leave out.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="table" data-short="Every feature">Every feature</h2>
+
+    <div class="filters" data-demo="mapfilter">
+      <span class="filters__lbl">Filter</span>
+      <noscript><span class="small">Search and filtering need JavaScript. The full table is below.</span></noscript>
+    </div>
+
+    <div class="tbl-wrap bleed">
+    <table class="maptbl" id="feature-table">
+      <thead>
+        <tr><th>Feature</th><th>Gate</th><th>Maturity</th><th>Since</th><th>Where</th></tr>
+      </thead>
+      <tbody>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="sandwich.html">Sandwich editor</a> <span class="muted">§1</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Quality › Surface ColorStitch › Sandwich editor…</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="colorstitch.html">ColorStitch pass</a> <span class="muted">§1b</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>A pass set to ColorStitch › Edit gradient…</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="pathblend.html">PathBlend pass</a> <span class="muted">§1c</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>A pass set to PathBlend Half or Full › ADV…</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="colorstitch.html#distribution">Line distribution mode</a> <span class="muted">§1f</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Quality › Surface ColorStitch › Line distribution mode</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="optics.html">Filament &amp; TD</a> <span class="muted">§1e</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Sandwich Editor › Filament &amp; TD, and the painter's Object &amp; TD</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="optics.html#studio">ColorStitch Studio</a> <span class="muted">§1g</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Sandwich Editor › ColorStitch Studio, and Target + Match ▸</td>
+        </tr>
+        <tr data-gate="none" data-mat="wip">
+          <td>Neoweaving <span class="muted">§2</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--wip">not wired in this base</span></td>
+          <td>—</td>
+          <td>Documented, not present</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="sandwich.html#penu">Penultimate top layers</a> <span class="muted">§3</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Strength › Top/bottom shells</td>
+        </tr>
+        <tr data-gate="libre" data-mat="print">
+          <td><a href="libre.html">Libre Mode</a> <span class="muted">§4</span></td>
+          <td><span class="badge badge--gate">the gate</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Preferences › Enable Neotko LibreMode, then the toolbar side button</td>
+        </tr>
+        <tr data-gate="libre" data-mat="print">
+          <td><a href="libre.html#boolean">Assembled Boolean mode</a> <span class="muted">§4c</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Right-click an object</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="libre.html#xy">Per-volume XY compensation</a> <span class="muted">§4d</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.3</td>
+          <td>Part settings inside an Assembled object</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="libre.html#copy">Copy / Paste Process Settings</a> <span class="muted">§4e</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.3</td>
+          <td>Right-click an object</td>
+        </tr>
+        <tr data-gate="libre" data-mat="wip">
+          <td><a href="libre.html#s3d">World-space import</a> <span class="muted">§4g</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--wip">WIP, use assembled+split</span></td>
+          <td>2.3</td>
+          <td>Import with Libre Mode active</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="libre.html#shading">Realistic shading in Prepare</a> <span class="muted">§4i</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.3.9</td>
+          <td>Automatic once Libre Mode is on</td>
+        </tr>
+        <tr data-gate="libre" data-mat="wip">
+          <td><a href="libre.html#s3d">S3DFactory import</a> <span class="muted">§5</span></td>
+          <td><span class="badge badge--gate">Libre for the split</span></td>
+          <td><span class="badge badge--wip">functional, positioning WIP</span></td>
+          <td>2.3</td>
+          <td>File › Import › Import 3D model › <code>.factory</code></td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="painter.html">ColorStitch Painter</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3, reworked 2.4.0</td>
+          <td>Left gizmo toolbar</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="painter.html#mixedfilament">MixedFilament Object mode</a> <span class="muted">§6g</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--wip">beta</span></td>
+          <td>2.3.7</td>
+          <td>Painter › Object &amp; TD › MixedFilament Object</td>
+        </tr>
+        <tr data-gate="none" data-mat="risk">
+          <td><a href="painter.html#stickers">Stickers (SVG)</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--risk">experimental, invisible until it prints</span></td>
+          <td>2.3.8</td>
+          <td>Painter › Palette › Stickers</td>
+        </tr>
+        <tr data-gate="libre" data-mat="print">
+          <td><a href="place.html#alignstack">Align &amp; Stack</a> <span class="muted">§7</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3.4</td>
+          <td>Left gizmo toolbar › Align &amp; Stack</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="walls.html#neoarachne">NeoArachne</a> <span class="muted">§8</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.3</td>
+          <td>Quality › Wall generator › NeoArachne</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="tower.html">NeoTower</a> <span class="muted">§9</span></td>
+          <td><span class="badge badge--free">auto for Sandwich</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Quality › Prime tower › Tower type</td>
+        </tr>
+        <tr data-gate="libre" data-mat="wip">
+          <td><a href="tower.html#varlayer">Variable layer height on the tower</a> <span class="muted">§9e</span></td>
+          <td><span class="badge badge--gate">Libre + NeoTower</span></td>
+          <td><span class="badge badge--wip">experimental</span></td>
+          <td>2.3.1</td>
+          <td>Quality › Prime tower › Tower type</td>
+        </tr>
+        <tr data-gate="envvar" data-mat="risk">
+          <td><a href="relief.html">Bump Mapping Editor</a> <span class="muted">§10</span></td>
+          <td><span class="badge badge--risk">Libre + env var</span></td>
+          <td><span class="badge badge--risk">expert-only</span></td>
+          <td>2.3.5</td>
+          <td>Left gizmo toolbar, once both gates are open</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="height.html#alh">Precision Adaptive Layer Height</a> <span class="muted">§11</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.3.6</td>
+          <td>Left gizmo toolbar</td>
+        </tr>
+        <tr data-gate="libre" data-mat="wip">
+          <td><a href="height.html#adapttocolor">Adapt to Color</a> <span class="muted">§11a</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--wip">WIP</span></td>
+          <td>2.3.8</td>
+          <td>Precision ALH gizmo › Adapt to Color</td>
+        </tr>
+        <tr data-gate="libre" data-mat="wip">
+          <td><a href="height.html#sloperecolor">Slope Pattern Recolor</a> <span class="muted">§11b</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--wip">experimental</span></td>
+          <td>2.3.8</td>
+          <td>Precision ALH gizmo › Slope recolor</td>
+        </tr>
+        <tr data-gate="libre" data-mat="print">
+          <td><a href="support.html#neowave">NeoWave roof + hollow pillar</a> <span class="muted">§12</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">print-validated</span></td>
+          <td>2.3.7</td>
+          <td>Support › Support type › NeoWave</td>
+        </tr>
+        <tr data-gate="libre" data-mat="risk">
+          <td><a href="support.html#contact">NeoWave contact layer</a> <span class="muted">§12a</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--risk">slice-verified, never printed</span></td>
+          <td>2.3.9</td>
+          <td>Support › Advanced › Support neoweave contact</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="walls.html#promode">Painter Pro Mode</a> <span class="muted">§13</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3</td>
+          <td>Left gizmo toolbar › Color Painting › Pro Mode</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="walls.html#depth">Surface depth</a> <span class="muted">§13d</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3.8</td>
+          <td>Color Painting › Pro Mode › Surface depth</td>
+        </tr>
+        <tr data-gate="none" data-mat="risk">
+          <td><a href="walls.html#neostitch">NeoStitch Interlock</a> <span class="muted">§14</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--risk">preview only, never printed</span></td>
+          <td>2.3.9</td>
+          <td>Strength › NeoStitch Interlock</td>
+        </tr>
+        <tr data-gate="libre" data-mat="print">
+          <td><a href="extras.html#reprocessor">G-code Reprocessor</a> <span class="muted">§15</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3.7, extended 2.3.8</td>
+          <td>Preview › view-type dropdown › Gcode Reprocessor</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="support.html#perobject">PerObject Support</a> <span class="muted">§16</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3.9</td>
+          <td>Support › Enable support › PerObject Support</td>
+        </tr>
+        <tr data-gate="trueobj" data-mat="print">
+          <td><a href="place.html">True Objects / Gravity</a> <span class="muted">§17</span></td>
+          <td><span class="badge badge--gate">True Objects</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3.9</td>
+          <td>Toolbar side button › True Objects: On/Off</td>
+        </tr>
+        <tr data-gate="trueobj" data-mat="print">
+          <td><a href="place.html#snapdrag">Snap &amp; Drag</a> <span class="muted">§17a</span></td>
+          <td><span class="badge badge--gate">True Objects</span></td>
+          <td><span class="badge badge--free">print-verified</span></td>
+          <td>2.3.9, extended 2.4.0 / 2.4.3</td>
+          <td>Magnet icon in the plate icon column</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="extras.html#kerning">Typographic Spacing</a> <span class="muted">§18</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.3.9</td>
+          <td>Text (Emboss) › Advanced › Font kerning</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="extras.html#bridging">Bridging infill extra expansion</a> <span class="muted">§19</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.0</td>
+          <td>Quality › Bridging › Bridging infill extra expansion</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="realcolor.html">RealColor View</a> <span class="muted">§20</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.0</td>
+          <td>Preview › view-type dropdown › RealColor</td>
+        </tr>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="realcolor.html#photo">Photo Mode in the G-code viewer</a> <span class="muted">§20a</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped, exports properly</span></td>
+          <td>2.4.4</td>
+          <td>RealColor legend › Photo mode…</td>
+        </tr>
+        <tr data-gate="libre" data-mat="wip">
+          <td><a href="realcolor.html#prepare">Photo Mode in Prepare</a> <span class="muted">§22</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--wip">export parked, screenshot works</span></td>
+          <td>2.4.2</td>
+          <td>Prepare › camera button on the plate icon column</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="height.html#hae">Height Adaptive Effects</a> <span class="muted">§23</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.3</td>
+          <td>Left gizmo toolbar › Height Adaptive Effects</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="legend" data-short="What the words mean">What the maturity words mean</h2>
+
+    <div class="legend">
+      <div>
+        <span class="badge badge--free">print-verified</span>
+        <p>Somebody printed something with it and looked at the result. The strongest claim on this
+        site.</p>
+      </div>
+      <div>
+        <span class="badge badge--free">shipped</span>
+        <p>Finished, in use, and behaving. Not necessarily print-tested in every combination.</p>
+      </div>
+      <div>
+        <span class="badge badge--wip">beta / WIP</span>
+        <p>Usable and still being refined. Expect rough edges, and expect the page to name them.</p>
+      </div>
+      <div>
+        <span class="badge badge--risk">slice-verified</span>
+        <p>The G-code is right when you read it. Nobody has printed it yet.</p>
+      </div>
+      <div>
+        <span class="badge badge--risk">preview only</span>
+        <p>Confirmed in the 3D preview and nowhere else. Look, do not rely.</p>
+      </div>
+      <div>
+        <span class="badge badge--risk">expert-only</span>
+        <p>Gated behind an environment variable because some combinations can produce bad
+        extrusion.</p>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="gates" data-short="The gates">The four gates</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Gate</th><th>How to open it</th><th>Why it exists</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge--free">none</span></td>
+          <td>Nothing to do.</td>
+          <td>Most of the colour side needs no gate at all.</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge--gate">Libre Mode</span></td>
+          <td>Preferences › Enable Neotko LibreMode, restart, then the toolbar side button. <a href="libre.html">Full details</a>.</td>
+          <td>Changes how the slicer behaves in ways that would confuse someone who just wants to print a benchy.</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge--gate">True Objects</span></td>
+          <td>A separate toolbar side button, which appears once the Libre Mode master switch is on. Independent of Libre Mode's own active state.</td>
+          <td>Decides whether objects fall, and whether a face resting on a neighbour counts as ground.</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge--risk">Libre + env var</span></td>
+          <td>Libre Mode active <em>and</em> <code>ORCA_DEBUG_TEXTUREBUMP</code> set before launch, plus <code>ORCA_DEBUG_ZBUMP</code> for Top mode.</td>
+          <td>Some option combinations can genuinely produce bad extrusion. The gate means you opted in deliberately.</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="history" data-short="Version history">How it got here</h2>
+
+    <p>
+      There is no roadmap and there never was. Things get built when they get interesting, which is
+      why this list reads the way it does.
+    </p>
+
+    <ul class="timeline">
+      <li><b>2.3</b><span>The Sandwich lands: pass stacks, ColorStitch, PathBlend, the Studio, the Painter, Libre Mode, NeoArachne, NeoTower, Align &amp; Stack.</span></li>
+      <li><b>2.3.1</b><span>The wipe tower stays coherent under variable layer height. Adaptive layers × multi-tool × Sandwich becomes possible.</span></li>
+      <li><b>2.3.5</b><span>The Bump Mapping Editor, behind its double gate.</span></li>
+      <li><b>2.3.6</b><span>Precision Adaptive Layer Height: the point-based curve editor.</span></li>
+      <li><b>2.3.7</b><span>NeoWave support. MixedFilament Object mode. The first G-code Reprocessor, and the U1 toolchange cleanup.</span></li>
+      <li><b>2.3.8</b><span>Surface depth and Per color in Pro Mode. Flow, Z-offset and Avoid Wipetower in the Reprocessor. Adapt to Color and Slope Recolor.</span></li>
+      <li><b>2.3.9</b><span>PerObject Support. True Objects and Snap &amp; Drag. Typographic Spacing. Realistic shading in Prepare. NeoStitch, and the NeoWave contact layer.</span></li>
+      <li><b>2.4.0</b><span>The Painter rework: departments, zone chips, Bottom everywhere, highlight active colour, paint visible outside the gizmo, MMU coexistence. RealColor. Bridging expansion.</span></li>
+      <li><b>2.4.2</b><span>Photo Mode in Prepare.</span></li>
+      <li><b>2.4.3</b><span>Height Adaptive Effects. The Snap &amp; Drag magnet panel, and Move selection as one block.</span></li>
+      <li><b>2.4.4</b><span>Photo Mode inside the G-code viewer, with movable lights, cast shadows on the part's own face, and PNG export with the shadow in the alpha.</span></li>
+    </ul>
+
+    <p class="small">
+      Every version has its own written notes in the repository, from 2.3 onward.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="faq" data-short="FAQ">Questions that come up</h2>
+
+    <h3>ColorStitch does not apply on some layers</h3>
+    <p>
+      Confirm the top surface fill pattern is <b>Monotonic Line</b>. Then check
+      <b>ColorStitch min. line length</b>, since short lines are skipped, and the <b>Zone</b>
+      setting, since <em>Topmost only</em> applies to just the very top of the object.
+    </p>
+
+    <h3>Where did MultiPass go?</h3>
+    <p>
+      It became ordinary. Add two or three <b>Solid</b> passes to a zone and split the layer height
+      between them with the dividers. That is the cross-hatch, glaze and optical-blend effect the
+      old MultiPass produced. <a href="sandwich.html#passes">More</a>.
+    </p>
+
+    <h3>My stripes look fragmented across holes</h3>
+    <p>
+      Change <a href="colorstitch.html#distribution">Line distribution mode</a> to <b>LaneQuant</b>
+      or <b>DirCluster</b>.
+    </p>
+
+    <h3>I do not see the Libre Mode button</h3>
+    <p>
+      Enable the master switch in Preferences and restart. <a href="libre.html#gate">The two-key
+      gate</a>.
+    </p>
+
+    <h3>Do I need Libre Mode to print normally?</h3>
+    <p>
+      No. It is off by default and the build behaves like stock. It only unlocks the workflows on
+      <a href="libre.html#what">this list</a>.
+    </p>
+
+    <h3>Can I use adaptive layer height with multiple tools and a Sandwich?</h3>
+    <p>
+      Yes. Enable Libre Mode, set <b>Tower type = NeoTower</b>, and turn on <b>Variable layer height
+      (Experimental)</b>. <a href="tower.html#varlayer">More</a>. Still worth reading the G-code
+      before a long run.
+    </p>
+
+    <h3>My wipe tower uses more purge than expected</h3>
+    <p>
+      Check <b>Sandwich wipe reserve</b> (default 10 mm³) and <b>Sandwich purge compaction</b>
+      (default 1.7) under Quality › Prime tower. <a href="tower.html#reserve">More</a>.
+    </p>
+
+    <h3>Why do picked colours not show in the Profiles list?</h3>
+    <p>
+      By design. Colours you paint with are <em>working colours</em>, created on demand and cleaned
+      up when unused. Only palettes you deliberately save appear in the list; <b>Save all</b>
+      promotes every unsaved one at once. <a href="painter.html#working">More</a>.
+    </p>
+
+    <h3>The MixedFilament Object checkbox is greyed out</h3>
+    <p>
+      The object's extruder is not a MixedFilament. Assign one as the object's extruder, then reopen
+      the Painter.
+    </p>
+
+    <h3>Is Color Painting's Pro Mode the same as the ColorStitch Painter?</h3>
+    <p>
+      No, different tools. <a href="walls.html#promode">Color Painting</a> is Orca's own
+      multi-material painter and Pro Mode adds precision brushing and masks to it. The
+      <a href="painter.html">ColorStitch Painter</a> is this fork's own gizmo for painting Sandwich
+      recipes. Both live in the left toolbar as separate icons.
+    </p>
+
+    <h3>I turned on Extra walls and the painted area does not have more walls</h3>
+    <p>
+      Check whether the colour you painted with is the same as the object's own filament. Extra
+      walls is skipped there by design, since it would not be visible anyway.
+      <a href="walls.html#perimeters">More</a>.
+    </p>
+
+    <h3>My Rectangle or Polygon mask painted the far side too</h3>
+    <p>
+      It should not: both tools only paint faces pointing toward the camera. Rotate the view to
+      confirm what you are seeing is the front-facing paint rather than a leak through the back.
+    </p>
+
+    <nav class="pager">
+      <a href="index.html"><small>Back</small><b>All features</b></a>
+      <a class="is-next" href="play.html"><small>Go and play</small><b>The Playground →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">
+        Features designed by <a href="https://github.com/sebsucmor-alt">Neotko</a>, who invented
+        Neosanding, the thing now called <em>Ironing</em> in OrcaSlicer, PrusaSlicer, Bambu Studio
+        and Cura. Sponsored by Snapmaker. It grew out of Radu's FullSpectrum work, which is a
+        separate fork.
+      </p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM">Source on GitHub</a></p>
+      <p><a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/releases">Downloads</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * mapfilter — search and gate/maturity filters over the feature table.
+ * Progressive: with JS off the table is simply all there.
+ * ========================================================================= */
+Tour.demo('mapfilter', function (host) {
+  var el = Tour.el;
+  var table = document.getElementById('feature-table');
+  var rows = Array.prototype.slice.call(table.querySelectorAll('tbody tr'));
+
+  var q = '', gate = 'all', mat = 'all';
+
+  var search = el('input', { type: 'search', placeholder: 'Search features, settings, §…', 'aria-label': 'Search features' });
+  var count = el('span.filters__count');
+
+  var gateSeg = Tour.segmented({
+    value: 'all',
+    options: [['all','All'],['none','No gate'],['libre','Libre'],['trueobj','True Obj'],['envvar','Env var']],
+    onChange: function (v) { gate = v; apply(); }
+  });
+  var matSeg = Tour.segmented({
+    value: 'all',
+    options: [['all','Any'],['print','Printed'],['beta','Shipped'],['wip','WIP'],['risk','Risky']],
+    onChange: function (v) { mat = v; apply(); }
+  });
+
+  search.addEventListener('input', function () { q = search.value.toLowerCase(); apply(); });
+
+  function apply() {
+    var n = 0;
+    rows.forEach(function (r) {
+      var okGate = gate === 'all' || r.dataset.gate === gate;
+      var okMat = mat === 'all' || r.dataset.mat === mat;
+      var okQ = !q || r.textContent.toLowerCase().indexOf(q) >= 0;
+      var show = okGate && okMat && okQ;
+      r.dataset.hide = show ? '0' : '1';
+      if (show) n++;
+    });
+    count.textContent = n + ' of ' + rows.length;
+  }
+
+  host.appendChild(search);
+  host.appendChild(gateSeg);
+  host.appendChild(matSeg);
+  host.appendChild(count);
+  apply();
+});
+</script>
+
+</body>
+</html>
