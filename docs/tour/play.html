@@ -144,6 +144,17 @@
       </span>
     </a></li>
 
+    <li><a class="simcard" href="effects.html#effects-demo">
+      <span class="simcard__art" data-demo="art-effects"></span>
+      <span class="simcard__b">
+        <span class="simcard__t">Settings that follow the height</span>
+        <p class="simcard__d">Draw a curve on the sparse infill width and watch the grid open and
+        close at constant density, or put it on fuzzy skin and give the wall a rough band with a
+        smooth base and a smooth top.</p>
+        <span class="simcard__f"><span class="badge badge--free">real spacing maths</span></span>
+      </span>
+    </a></li>
+
   </ul>
 
   <section style="max-width:46rem;margin:3.5rem 0 5rem">
@@ -271,6 +282,34 @@
       pts.forEach(function(p){
         ctx.beginPath(); ctx.arc(w*0.06+p[0]*w*0.48, h*(1-p[1]), 3.5, 0, Math.PI*2);
         ctx.fillStyle=Tour.token('--accent'); ctx.fill();
+      });
+    }, { height: 96 });
+  });
+
+  Tour.demo('art-effects', function (host) {
+    Tour.canvas(host, function (ctx, w, h) {
+      // three tiles of the same grid at three widths, which is the whole idea
+      var acc = Tour.token('--accent');
+      var pad = 6, n = 3;
+      var side = Math.min((w - pad * (n + 1)) / n, h - pad * 2);
+      var y = (h - side) / 2;
+      [0.44, 0.80, 0.40].forEach(function (wm, i) {
+        var x = pad + i * (side + pad);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x, y, side, side); ctx.clip();
+        ctx.fillStyle = Tour.token('--surface-2');
+        ctx.fillRect(x, y, side, side);
+        var sp = (wm - 0.2 * (1 - Math.PI / 4)) / 0.25;      // spacing, mm
+        var px = side / 24;                                   // 24 mm across
+        ctx.strokeStyle = acc;
+        ctx.lineWidth = Math.max(0.8, wm * px);
+        for (var d = -side; d < side * 2; d += sp * px * Math.SQRT2) {
+          ctx.beginPath();
+          ctx.moveTo(x + d, y); ctx.lineTo(x + d + side, y + side);
+          ctx.moveTo(x + d, y + side); ctx.lineTo(x + d + side, y);
+          ctx.stroke();
+        }
+        ctx.restore();
       });
     }, { height: 96 });
   });

@@ -398,7 +398,7 @@
 
     <nav class="pager">
       <a href="index.html"><small>Back</small><b>All features</b></a>
-      <a class="is-next" href="colorstitch.html"><small>Next</small><b>ColorStitch →</b></a>
+      <a class="is-next" href="stack3d.html"><small>Next</small><b>The stack, in section →</b></a>
     </nav>
 
   </main>
@@ -990,6 +990,23 @@ Tour.demo('sandwich-builder', function (host) {
 
   buildBank();
   rebuild();
+
+  // The divider between the two Top passes slides on its own. Dragging that
+  // divider is the gesture the whole editor is built around, and a still
+  // cross-section never suggests it.
+  Tour.attract({
+    host: host, period: 9000,
+    hint: 'playing · drag a divider to take over',
+    idleHint: 'drag the dividers · add and reorder passes',
+    onFrame: function (k) {
+      var ps = S.zones.top.passes;
+      if (ps.length < 2) return;
+      var total = ps[0].z + ps[1].z;
+      ps[0].z = Math.round((total * (0.18 + k * 0.64)) * 1000) / 1000;
+      ps[1].z = Math.round((total - ps[0].z) * 1000) / 1000;
+    },
+    render: redraw
+  });
 });
 </script>
 

@@ -270,6 +270,16 @@
       </span>
     </a></li>
 
+    <li><a class="card" href="stack3d.html">
+      <span class="card__n">§1 · §1e — in section</span>
+      <span class="card__t">The stack, in section</span>
+      <p class="card__d">The same Sandwich as a block you can turn round, cut open, with the composited colour on its top face. Then the question everyone gets to second: what the filament underneath does to every recipe you saved.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">reference</span>
+      </span>
+    </a></li>
+
     <li><a class="card" href="colorstitch.html">
       <span class="card__n">§1b · §1d · §1f</span>
       <span class="card__t">ColorStitch</span>
@@ -404,11 +414,21 @@
     </a></li>
 
     <li><a class="card" href="height.html">
-      <span class="card__n">§11 · §23</span>
-      <span class="card__t">Height</span>
-      <p class="card__d">Draw layer height as an exact curve with control points and per-segment tension. Then draw <em>any</em> setting as a curve over the object's real layer bands: wall width, fuzzy skin, infill width, all changing with Z.</p>
+      <span class="card__n">§11</span>
+      <span class="card__t">Precision layer height</span>
+      <p class="card__d">Draw layer height as an exact curve with control points and per-segment tension, over the object's real layer bands. Colour-aware guidance shades the heights your filaments can actually hold.</p>
       <span class="card__f">
         <span class="badge badge--gate">Libre Mode</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="effects.html">
+      <span class="card__n">§23</span>
+      <span class="card__t">Height Adaptive Effects</span>
+      <p class="card__d">The same curve pointed at <em>any</em> setting. The infill cell opens where nothing rests on it and closes under the top surface, at the same density and the same grams. Fuzzy skin is born, lives for a band, and dies again. No other slicer has it.</p>
+      <span class="card__f">
+        <span class="badge badge--gate">Libre Mode</span>
+        <span class="badge badge--free">structural or cosmetic</span>
       </span>
     </a></li>
 
@@ -564,6 +584,8 @@
     }
     range.addEventListener('input', function () { pct = parseInt(range.value, 10); upd(); });
     upd();
+    Tour.attract({ host: host, period: 7000, render: upd,
+      onFrame: function (k) { pct = Math.round(6 + k * 88); range.value = pct; } });
   });
 
   /* --- 2. order matters ------------------------------------------------- */
@@ -600,6 +622,8 @@
     }
     range.addEventListener('input', function () { split = parseInt(range.value, 10) / 100; upd(); });
     upd();
+    Tour.attract({ host: host, period: 8200, render: upd,
+      onFrame: function (k) { split = 0.18 + k * 0.64; range.value = Math.round(split * 100); } });
   });
 
   /* --- 3. TD ------------------------------------------------------------ */
@@ -631,6 +655,8 @@
     }
     range.addEventListener('input', function () { td = parseInt(range.value, 10) / 10; upd(); });
     upd();
+    Tour.attract({ host: host, period: 7600, render: upd,
+      onFrame: function (k) { td = 0.3 + k * 8.4; range.value = Math.round(td * 10); } });
   });
 
   /* --- 4. PathBlend ----------------------------------------------------- */
@@ -674,6 +700,8 @@
     }
     range.addEventListener('input', function () { rampEnd = parseInt(range.value, 10) / 100; upd(); });
     upd();
+    Tour.attract({ host: host, period: 6600, render: upd,
+      onFrame: function (k) { rampEnd = (6 + Math.round(k * 14)) / 100; range.value = rampEnd * 100; } });
   });
 })();
 

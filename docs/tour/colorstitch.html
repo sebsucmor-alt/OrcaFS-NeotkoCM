@@ -149,6 +149,19 @@
       plays.
     </p>
 
+    <div class="note note--key">
+      <span class="note__t">The setting that decides whether it works</span>
+      <p style="margin:0">
+        The blend can only ever be as fine as the fill lines it is built from, so the
+        <b>top surface line width</b> is the lever. Not the object-wide one: the top surface has its
+        own. On a 0.4 mm nozzle the default lands around 0.42 mm and you can still count the lines on
+        a finished part; coming down to about <b>0.30 mm</b> is where two colours stop reading as
+        stripes and the surface still prints cleanly. Lower does get finer, and the overlap between
+        neighbouring lines stops being controllable, which costs you the finish. Reported from real
+        prints rather than calculated.
+      </p>
+    </div>
+
     <!-- ================================================================= -->
     <h2 id="styles" data-short="Pattern styles">Pattern styles</h2>
 
@@ -442,7 +455,7 @@
     </ul>
 
     <nav class="pager">
-      <a href="sandwich.html"><small>Back</small><b>The Sandwich</b></a>
+      <a href="stack3d.html"><small>Back</small><b>The stack, in section</b></a>
       <a class="is-next" href="pathblend.html"><small>Next</small><b>PathBlend →</b></a>
     </nav>
 
@@ -474,6 +487,7 @@
 Tour.demo('pattern-lab', function (host) {
   var el = Tour.el;
 
+  var pctSlider = null;            // reassigned every time the style panel rebuilds
   var S = {
     style: 'blend2',
     tools: [1, 3, 2, 0],
@@ -650,11 +664,12 @@ Tour.demo('pattern-lab', function (host) {
       body.appendChild(toolRow('Colour 2', 'b', 1));
       if (S.style === 'blend3') body.appendChild(toolRow('Colour 3', 'c', 2));
 
-      body.appendChild(Tour.slider({
+      pctSlider = Tour.slider({
         label: 'How much Colour 1', min: 0, max: 100, step: 1, value: S.pctA,
         format: function (v) { return v + '%'; },
         onInput: function (v) { S.pctA = v; redraw(); }
-      }));
+      });
+      body.appendChild(pctSlider);
       if (S.style === 'blend3') {
         body.appendChild(Tour.slider({
           label: 'How much Colour 2', min: 0, max: 100, step: 1, value: S.pctB,
@@ -822,6 +837,16 @@ Tour.demo('pattern-lab', function (host) {
 
   host.appendChild(el('div.lab', null, [out, side]));
   rebuild();
+
+  Tour.attract({
+    host: host, period: 8000,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.pctA = Math.round(4 + k * 92);
+      if (pctSlider) pctSlider.set(S.pctA);
+    },
+    render: redraw
+  });
 });
 
 

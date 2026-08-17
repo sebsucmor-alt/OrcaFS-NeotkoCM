@@ -347,6 +347,11 @@
 Tour.demo('td-explorer', function (host) {
   var el = Tour.el;
   var S = { hex: '#d61f5c', td: 2.6, thickness: 0.12, layerH: 0.20, base: '#f2f0eb' };
+  var thickSlider = Tour.slider({
+    label: 'Thickness', min: 0.02, max: 0.6, step: 0.01, value: S.thickness,
+    format: function (v) { return v.toFixed(2) + ' mm'; },
+    onInput: function (v) { S.thickness = v; redraw(); }
+  });
 
   var out = el('div.td2__out');
 
@@ -436,11 +441,7 @@ Tour.demo('td-explorer', function (host) {
   ]));
   side.appendChild(el('div.grp', null, [
     el('span.gt', { text: 'The stack' }),
-    Tour.slider({
-      label: 'Thickness', min: 0.02, max: 0.6, step: 0.01, value: S.thickness,
-      format: function (v) { return v.toFixed(2) + ' mm'; },
-      onInput: function (v) { S.thickness = v; redraw(); }
-    }),
+    thickSlider,
     Tour.slider({
       label: 'Layer height', min: 0.08, max: 0.32, step: 0.01, value: S.layerH,
       format: function (v) { return v.toFixed(2) + ' mm'; },
@@ -480,6 +481,16 @@ Tour.demo('td-explorer', function (host) {
 
   host.appendChild(el('div.td2', null, [out, side]));
   redraw();
+
+  Tour.attract({
+    host: host, period: 7000,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.thickness = Math.round((0.02 + k * 0.30) * 100) / 100;
+      thickSlider.set(S.thickness);
+    },
+    render: redraw
+  });
 });
 
 

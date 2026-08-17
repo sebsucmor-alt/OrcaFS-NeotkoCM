@@ -226,29 +226,44 @@ Tour.demo('band', function (host) {
   var F = Optics.DEFAULT_FILAMENTS, LAYER = 0.2, TOTAL = 0.34, N = 24;
   var cap = document.querySelector('[data-band-cap]');
   var idle = 'Four filaments, stacked. Every square is a real recipe.';
+  var sws = [];
 
   for (var i = 0; i < N; i++) {
-    var f = i / (N - 1);
-    // walk blue -> magenta -> yellow by moving the split, then the pair
-    var pair = f < 0.5 ? [1, 2] : [2, 3];
-    var g = f < 0.5 ? f * 2 : (f - 0.5) * 2;
-    var top = TOTAL * (0.12 + g * 0.72);
-    var rgb = Optics.blendStacked([
-      { colorHex: F[pair[0]].hex, thickness: TOTAL - top, tdMm: Optics.tdToMm(F[pair[0]].td, LAYER) },
-      { colorHex: F[pair[1]].hex, thickness: top,         tdMm: Optics.tdToMm(F[pair[1]].td, LAYER) }
-    ], '#f2f0eb');
-
     var sw = document.createElement('i');
-    sw.style.background = Optics.linearToCss(rgb);
-    sw.dataset.d = F[pair[0]].name + ' ' + (TOTAL - top).toFixed(2) + ' mm under ' +
-                   F[pair[1]].name + ' ' + top.toFixed(2) + ' mm  ·  ' + Optics.linearToHex(rgb);
     host.appendChild(sw);
+    sws.push(sw);
   }
+
+  /** Paint the strip with the walk shifted along by `shift` (0..1, wraps). */
+  function paint(shift) {
+    for (var i = 0; i < N; i++) {
+      var f = (i / (N - 1) + shift) % 1;
+      // walk blue -> magenta -> yellow by moving the split, then the pair
+      var pair = f < 0.5 ? [1, 2] : [2, 3];
+      var g = f < 0.5 ? f * 2 : (f - 0.5) * 2;
+      var top = TOTAL * (0.12 + g * 0.72);
+      var rgb = Optics.blendStacked([
+        { colorHex: F[pair[0]].hex, thickness: TOTAL - top, tdMm: Optics.tdToMm(F[pair[0]].td, LAYER) },
+        { colorHex: F[pair[1]].hex, thickness: top,         tdMm: Optics.tdToMm(F[pair[1]].td, LAYER) }
+      ], '#f2f0eb');
+      sws[i].style.background = Optics.linearToCss(rgb);
+      sws[i].dataset.d = F[pair[0]].name + ' ' + (TOTAL - top).toFixed(2) + ' mm under ' +
+                         F[pair[1]].name + ' ' + top.toFixed(2) + ' mm  ·  ' + Optics.linearToHex(rgb);
+    }
+  }
+  paint(0);
 
   host.addEventListener('mouseover', function (e) {
     if (e.target.tagName === 'I' && cap) cap.textContent = e.target.dataset.d;
   });
   host.addEventListener('mouseleave', function () { if (cap) cap.textContent = idle; });
+
+  // The front door's strip drifts through the walk instead of sitting there.
+  // `phase` rather than the eased 0-1-0, so it scrolls one way and wraps.
+  Tour.attract({
+    host: host, period: 22000, fps: 20,
+    onFrame: function (k, phase) { paint(phase); }
+  });
 });
 </script>
 

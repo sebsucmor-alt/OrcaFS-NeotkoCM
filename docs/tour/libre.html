@@ -424,6 +424,21 @@ Tour.demo('gate', function (host) {
   host.appendChild(grid);
   host.appendChild(note);
   render();
+
+  // The gate turns its own two keys, in order, and the grid lights up behind
+  // them. Stepped rather than swept: this one is a state machine, and a
+  // continuous parameter would be a lie about how it behaves.
+  Tour.attract({
+    host: host, period: 12000, fps: 4,
+    hint: 'playing · click the keys to take over',
+    idleHint: 'click the two keys',
+    onFrame: function (k, phase) {
+      var want = phase < 0.30 ? 0 : phase < 0.62 ? 1 : 2;   // off · master · both
+      master = want >= 1;
+      active = want >= 2;
+    },
+    render: render
+  });
 });
 </script>
 

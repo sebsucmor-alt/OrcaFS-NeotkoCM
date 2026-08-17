@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Height — Neotko for Snapmaker Orca</title>
-<meta name="description" content="Draw layer height as an exact curve with control points and per-segment tension, then draw any setting as a curve over the object's real layer bands.">
+<title>Precision layer height — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Draw layer height as an exact curve with control points and per-segment tension, over the object's real layer bands, with colour-aware guidance and slope pattern recolor.">
 <link rel="stylesheet" href="assets/tour.css">
 <style>
   .hc { display: grid; grid-template-columns: minmax(0,1fr) 226px; gap: 1.1rem; align-items: start; }
@@ -53,17 +53,19 @@
 
   <main class="article" id="main">
 
-    <p class="eyebrow">§11 · §23 — Structure</p>
-    <h1>Height</h1>
+    <p class="eyebrow">§11 — Structure</p>
+    <h1>Precision layer height</h1>
     <p class="lede">
-      Two gizmos that share an idea. Instead of typing a number into a box and finding out after
-      slicing where the transition landed, you draw a curve on top of the object's real layer
-      bands, and the layer you are affecting is visible while you affect it.
+      Instead of typing a number into a box and finding out after slicing where the transition
+      landed, you draw a curve on top of the object's real layer bands, and the layer you are
+      affecting is visible while you affect it. Here the curve <em>is</em> the layer height. For the
+      same idea pointed at any other setting, see
+      <a href="effects.html">Height Adaptive Effects</a>.
     </p>
 
     <ul class="badges">
       <li class="badge badge--gate">Libre Mode</li>
-      <li class="badge badge--ver badge--plain">§11 since 2.3 · §23 since 2.4.3</li>
+      <li class="badge badge--ver badge--plain">since 2.3</li>
     </ul>
 
     <!-- ================================================================= -->
@@ -232,126 +234,21 @@
     </p>
 
     <!-- ================================================================= -->
-    <h2 id="hae" data-short="Height Adaptive Effects">Height Adaptive Effects</h2>
-
-    <ul class="badges">
-      <li class="badge badge--gate">Libre Mode</li>
-      <li class="badge badge--free">per object, travels in the 3MF</li>
-      <li class="badge badge--ver badge--plain">2.4.3</li>
-    </ul>
-
-    <p class="where">
-      <span class="where__label">Where</span>
-      <b>Left gizmo toolbar</b><span class="sep">›</span><b>Height Adaptive Effects</b>
-    </p>
+    <h2 id="anysetting" data-short="Any other setting">The same idea, pointed anywhere else</h2>
 
     <p>
-      Orca can already vary settings by height: that is what height range modifiers are. The problem
-      is that you type a Z into a box and find out where the transition actually landed after
-      slicing. This gizmo turns it around, and it is the same idea as the layer height curve applied
-      to <em>any</em> setting.
+      Layer height is one setting. <a href="effects.html">Height Adaptive Effects</a> takes the same
+      curve editor and points it at any other one: sparse infill width, wall widths, fuzzy skin and
+      its whole character. The infill cell opens where nothing rests on it and closes under the top
+      surface, fuzzy skin is born and dies with the height, and none of it is about colour. It has
+      its own page because it is the piece of the fork with the widest reach.
     </p>
-
-    <figure>
-      <img src="../images/Adaptive-Effects.gif" width="600" height="384" alt="The Height Adaptive Effects gizmo: drawing a curve over the object's real layer bands and watching the affected band highlight on the model" loading="lazy">
-      <figcaption>Drawing a curve over the object's real layer bands. The band you are affecting highlights on the model while you drag.</figcaption>
-    </figure>
-
-    <h3 id="haelist">Building the list</h3>
-
-    <p>
-      The panel starts empty. Press <b>Add</b>, pick an effect, and it joins <em>this object's</em>
-      effects, so the panel only ever shows what you actually use no matter how many effects exist.
-      The trash button on a row removes the effector completely, curve and all; <b>Clear</b> at the
-      bottom empties the curve but keeps the effect in the list. Each row carries a small preview of
-      its own curve and its point count, which is what keeps a list of similarly-named effects
-      readable.
-    </p>
-
-    <h3 id="haecurve">Drawing the curve</h3>
-
-    <p>
-      Click to add a point, drag to move, right-click to delete. Height runs up the left edge and the
-      effect's value across the top. Hovering anywhere gives a live readout of the Z you are on and
-      what the curve is worth there, so you do not have to grab a point to read a number. Dragging a
-      point highlights the matching band on the object in 3D. <b>Open Z points</b> opens a numeric
-      table, one row per point, with the layer number each Z lands on. <b>Presets</b> seed a shape
-      for the effects that have sensible ones, and <b>Refresh layers</b> re-reads the bands after you
-      change the adaptive layer height profile.
-    </p>
-
-    <p class="small">
-      Z is measured from the <strong>bottom of the object</strong>, not from the bed. If you print
-      with a raft, the raft is not part of this axis.
-    </p>
-
-    <h3 id="steps">Steps or ramp, and the number that decides</h3>
-
-    <p>
-      <strong>Steps</strong> holds the value constant inside each band and changes it in one jump at
-      a layer boundary, with every point snapping to a real layer. <strong>Ramp</strong> varies it
-      continuously.
-    </p>
-
-    <p>
-      Steps is not just the cautious option. Sparse infill deliberately keeps its spacing constant
-      across layers so the lines stack on the ones below; a width that drifts walks every line off
-      its support. But what breaks the stacking is the drift <em>between consecutive layers</em>,
-      which depends on how steep your curve is rather than on it being a curve at all. A slow ramp
-      moves each layer by a fraction of a micron. So instead of forbidding ramps, the panel measures
-      yours:
-    </p>
-
-    <ul>
-      <li><strong>Line shift per layer</strong> shows how far the infill of one layer lands from the
-        one below, at the far edge of the object, as a percentage of the line width. It turns amber
-        above roughly 25%.</li>
-      <li><strong>Staircase</strong> turns your ramp into that many layer-aligned bands, keeping the
-        shape while giving the lines back their constant spacing inside each band.</li>
-    </ul>
-
-    <p>
-      A <strong>shortest-band warning</strong> also appears in steps mode: under about four layers,
-      the jump costs more than it gives.
-    </p>
-
-    <h3 id="effects">The effects</h3>
-
-    <div class="tbl-wrap">
-    <table>
-      <thead><tr><th>Effect</th><th>What it is for</th></tr></thead>
-      <tbody>
-        <tr><td><b>Sparse infill width</b></td><td>Thin lines low down where the infill has to support the solid above it, thick lines deep inside where nothing rests on them. Same density, same material, less time.</td></tr>
-        <tr><td><b>Outer wall width</b> / <b>Inner wall width</b></td><td>Wall thickness following the height.</td></tr>
-        <tr><td><b>Fuzzy skin thickness</b></td><td>Texture that is born and dies with the height.</td></tr>
-        <tr><td><b>Fuzzy skin point distance / noise scale / octaves / persistence</b></td><td>The texture's <em>character</em> changing with height, not only its depth.</td></tr>
-      </tbody>
-    </table>
-    </div>
-
-    <p>
-      Only the three line widths that <strong>stack</strong> are offered. Internal solid infill and
-      top surface were wired up, looked at, and deliberately taken back out: a ramp there varies the
-      width of the very surfaces the eye reads as flat, which is not something a print wants.
-    </p>
-
-    <ul>
-      <li><strong>Fuzzy skin thickness reaching 0 switches the fuzzy skin off</strong> for that
-        layer rather than merely flattening it. A zero-amplitude fuzzy would otherwise still resample
-        every perimeter into thousands of points: same printed result, much fatter G-code.</li>
-      <li>The curves <strong>scale</strong> fuzzy skin, they do not turn it on. If fuzzy skin is off
-        for the object, the panel says so rather than letting you slice and find nothing changed.</li>
-      <li>A setting driven by a curve is <strong>greyed out</strong> in the object's settings panel,
-        so the same value is never set from two places at once.</li>
-      <li>A curve needs <strong>at least two points</strong> to mean anything. One point is a
-        constant, which is what a plain per-object override is for.</li>
-    </ul>
 
     <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
 
     <ul>
-      <li><strong>Both are Libre Mode only.</strong></li>
+      <li><strong>Libre Mode only.</strong></li>
       <li><strong>Every edit is a re-slice.</strong> Same as the stock brush, and on a big model that
         adds up while you are tuning.</li>
       <li><strong>Min and max layer height are read-only</strong>, taken from the printer and nozzle.
@@ -366,7 +263,7 @@
 
     <nav class="pager">
       <a href="walls.html"><small>Back</small><b>Walls</b></a>
-      <a class="is-next" href="relief.html"><small>Next</small><b>Bump mapping →</b></a>
+      <a class="is-next" href="effects.html"><small>Next</small><b>Height Adaptive Effects →</b></a>
     </nav>
 
   </main>
@@ -377,7 +274,7 @@
   <div class="foot__in">
     <div>
       <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
-      <p class="small">This page covers <b>§11</b> and <b>§23</b> of the
+      <p class="small">This page covers <b>§11</b> of the
         <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
     </div>
     <div class="small">
@@ -393,19 +290,19 @@
 <script>
 /* ===========================================================================
  * curve — the point-based editor, with the layer bands integrated from the
- * curve itself. Doubles for §11 (the value IS the layer height) and §23
- * (the value is some other setting, over fixed bands).
+ * curve itself: the value IS the layer height, so the bands on the right are
+ * generated by the curve you are drawing. The same editor pointed at any other
+ * setting lives on effects.html, as its own demo rather than as a mode of this
+ * one, so the two cannot drift into each other.
  * ========================================================================= */
 Tour.demo('curve', function (host) {
   var el = Tour.el;
 
   var S = {
-    mode: 'alh',              // 'alh' | 'hae'
     objH: 30,                 // object height, mm
     minH: 0.08, maxH: 0.32,   // nozzle limits
     tension: 0,
     steps: false,
-    staircase: 0,
     // points are {z: 0..1 of object height, v: 0..1 of the value range}
     pts: [{ z: 0, v: 0.5, fixed: true }, { z: 1, v: 0.5 }]
   };
@@ -434,8 +331,8 @@ Tour.demo('curve', function (host) {
     var out = [], z = 0, guard = 0;
     while (z < S.objH && guard++ < 4000) {
       var zn = z / S.objH;
-      var h = S.mode === 'alh' ? mmOf(valAt(zn)) : 0.2;
-      if (S.mode === 'alh' && S.steps) h = Math.round(h * 50) / 50;   // snap to 0.02
+      var h = mmOf(valAt(zn));
+      if (S.steps) h = Math.round(h * 50) / 50;                       // snap to 0.02
       h = Math.max(0.04, h);
       out.push({ z0: z, z1: Math.min(S.objH, z + h), h: h });
       z += h;
@@ -499,9 +396,9 @@ Tour.demo('curve', function (host) {
       ctx.fillText((zn * S.objH).toFixed(0) + ' mm', PAD.l - 5, g.Y(zn) + 3);
     }
     ctx.textAlign = 'left';
-    ctx.fillText(S.mode === 'alh' ? S.minH.toFixed(2) : 'low', PAD.l, h - 6);
+    ctx.fillText(S.minH.toFixed(2), PAD.l, h - 6);
     ctx.textAlign = 'right';
-    ctx.fillText(S.mode === 'alh' ? S.maxH.toFixed(2) + ' mm' : 'high', w - PAD.r, h - 6);
+    ctx.fillText(S.maxH.toFixed(2) + ' mm', w - PAD.r, h - 6);
 
     // the curve
     ctx.strokeStyle = accent; ctx.lineWidth = 2;
@@ -602,13 +499,6 @@ Tour.demo('curve', function (host) {
   var side = el('div', { style: 'display:grid;gap:.6rem' });
   var extra = el('div', { style: 'display:grid;gap:.45rem' });
 
-  side.appendChild(el('div.hc__grp', null, [
-    el('span.hc__gt', { text: 'Which gizmo' }),
-    Tour.segmented({ value: 'alh',
-      options: [['alh','Layer height'],['hae','Any setting']],
-      onChange: function (v) { S.mode = v; rebuild(); } }),
-    el('p', { 'data-modenote': true, style: 'margin:0;font-size:.72rem;color:var(--ink-soft);line-height:1.4' })
-  ]));
   side.appendChild(el('div.hc__grp', null, [el('span.hc__gt', { text: 'Shape' }), extra]));
   side.appendChild(el('div.hc__grp', null, [
     el('span.hc__gt', { text: 'The object' }),
@@ -624,16 +514,8 @@ Tour.demo('curve', function (host) {
       format: function (v) { return v === 0 ? 'straight' : (v/100).toFixed(2); },
       onInput: function (v) { S.tension = v / 100; upd(); }
     }));
-    if (S.mode === 'hae') {
-      extra.appendChild(Tour.toggle({ label: 'Steps instead of ramp', value: S.steps,
-        onChange: function (v) { S.steps = v; upd(); } }));
-      extra.appendChild(Tour.slider({ label: 'Staircase', min: 0, max: 12, step: 1, value: S.staircase,
-        format: function (v) { return v === 0 ? 'off' : v + ' bands'; },
-        onInput: function (v) { S.staircase = v; upd(); } }));
-    } else {
-      extra.appendChild(Tour.toggle({ label: 'Snap heights to 0.02 mm', value: S.steps,
-        onChange: function (v) { S.steps = v; upd(); } }));
-    }
+    extra.appendChild(Tour.toggle({ label: 'Snap heights to 0.02 mm', value: S.steps,
+      onChange: function (v) { S.steps = v; upd(); } }));
     extra.appendChild(el('button.btn.btn--sm', { type: 'button', text: 'Reset to two points',
       style: 'justify-self:start',
       onclick: function () { S.pts = [{ z: 0, v: 0.5, fixed: true }, { z: 1, v: 0.5 }]; upd(); } }));
@@ -643,33 +525,13 @@ Tour.demo('curve', function (host) {
     cv.render();
     var bs = bands();
 
-    if (S.mode === 'alh') {
-      var hs = bs.map(function (b) { return b.h; });
-      var lo = Math.min.apply(null, hs), hi = Math.max.apply(null, hs);
-      read.innerHTML =
-        '<b>' + bs.length + '</b> layers over ' + S.objH + ' mm<br>' +
-        'height ranges <b>' + lo.toFixed(2) + '</b> to <b>' + hi.toFixed(2) + ' mm</b><br>' +
-        '<b>' + S.pts.length + '</b> control points';
-    } else {
-      // line shift per layer: how far the value moves between consecutive
-      // layers, as a fraction of a nominal 0.42 mm line.
-      var worst = 0;
-      for (var i = 1; i < bs.length; i++) {
-        var a = valAt(bs[i - 1].z0 / S.objH), b = valAt(bs[i].z0 / S.objH);
-        worst = Math.max(worst, Math.abs(b - a));
-      }
-      var shift = worst * 0.42 / 0.42 * 100;             // value range is one line width
-      read.innerHTML =
-        '<b>' + bs.length + '</b> layers over ' + S.objH + ' mm<br>' +
-        'line shift per layer <b class="' + (shift > 25 ? 'warn' : '') + '">' + shift.toFixed(1) + '%</b>' +
-        (shift > 25 ? '<br><span class="warn">steep enough to walk the infill off its support</span>' : '') +
-        (S.staircase ? '<br>staircased into <b>' + S.staircase + '</b> bands' : '');
-    }
+    var hs = bs.map(function (b) { return b.h; });
+    var lo = Math.min.apply(null, hs), hi = Math.max.apply(null, hs);
+    read.innerHTML =
+      '<b>' + bs.length + '</b> layers over ' + S.objH + ' mm<br>' +
+      'height ranges <b>' + lo.toFixed(2) + '</b> to <b>' + hi.toFixed(2) + ' mm</b><br>' +
+      '<b>' + S.pts.length + '</b> control points';
 
-    var mn = host.querySelector('[data-modenote]');
-    if (mn) mn.textContent = S.mode === 'alh'
-      ? 'The value IS the layer height, so the bands on the right are generated by the curve you are drawing.'
-      : 'The value is some other setting (wall width, fuzzy skin) over bands that stay put.';
     var n = host.querySelector('[data-cnote]');
     if (n) n.textContent = bands().length + ' layers';
   }
@@ -678,6 +540,17 @@ Tour.demo('curve', function (host) {
 
   host.appendChild(el('div.hc', null, [box, side]));
   rebuild();
+
+  // The top point rides up and down its own range, so the bands on the right
+  // get visibly thicker and thinner. It is the fastest way to say "these are
+  // the layers you will actually get" without a word of text.
+  Tour.attract({
+    host: host, period: 7200,
+    hint: 'playing · touch anything to take over',
+    idleHint: 'click to add · drag to move · right-click to delete',
+    onFrame: function (k) { S.pts[S.pts.length - 1].v = 0.06 + k * 0.88; },
+    render: upd
+  });
 });
 </script>
 

@@ -131,6 +131,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
     - 23b. [Drawing the curve](#23b-drawing-the-curve)
     - 23c. [Steps or ramp — and the number that decides](#23c-steps-or-ramp--and-the-number-that-decides)
     - 23d. [The effects](#23d-the-effects)
+    - 23e. [What it does to a real print, measured](#23e-what-it-does-to-a-real-print-measured)
 
 ---
 
@@ -1930,6 +1931,32 @@ Two things worth knowing:
   thousands of points: same printed result, much fatter G-code.
 - The curves **scale** fuzzy skin, they do not turn it on. If fuzzy skin is off for the object, the
   panel says so rather than letting you slice and find nothing changed.
+
+### 23e. What it does to a real print, measured
+
+A 26.6 mm cube, 0.2 mm layers, 25% crosszag infill, one curve on **sparse infill width**. Reading
+the numbers back out of the G-code layer by layer:
+
+| | near the bottom | through the middle | up near the top |
+|---|---|---|---|
+| line width | 0.43 mm | 0.66 mm | 0.39 mm |
+| line spacing | 1.53 mm | 2.47 mm | 1.40 mm |
+| lines in the layer | 45 | 27 | 50 |
+| **density** | **25.0%** | **25.0%** | **25.0%** |
+
+The density does not move on any of the 135 layers. What moves is the width, and the spacing
+follows it, because `line_spacing = flow spacing / density`. So the widest band prints 27 lines
+where the top prints 50, out of the same grams, and its cell is a little over **three times the
+area**.
+
+That last part makes it a structural control as much as a speed one. A cell three times the area
+built from struts nearly twice as thick is a different lattice at the same weight. Put the open
+band where you want the part to give and the fine band where you want it stiff and you have a
+damper, a clip, a bumper or a foot, out of one object with no modifiers and no boolean surgery.
+
+> **Density itself is not on the list.** The width moves and the density holds, which is what keeps
+> the grams constant. If you want a genuine density change with height, that is still a height
+> range modifier.
 
 ### Notes
 

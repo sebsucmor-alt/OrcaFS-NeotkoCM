@@ -304,6 +304,11 @@
 Tour.demo('wave', function (host) {
   var el = Tour.el;
   var S = { notch: 0.5, depth: 0.42, mode: 'wave' };
+  var depthSlider = Tour.slider({
+    label: 'Bite depth', min: 10, max: 80, step: 1, value: S.depth * 100,
+    format: function (v) { return v + '%'; },
+    onInput: function (v) { S.depth = v / 100; upd(); }
+  });
 
   /** The roof region: a rectangle with a bite taken out of the top edge. */
   function inside(u, v) {                       // u,v in 0..1
@@ -381,8 +386,7 @@ Tour.demo('wave', function (host) {
     el('span.wv__gt', { text: 'Interface pattern' }),
     Tour.segmented({ value: 'wave', options: [['lines','Straight'],['wave','Wave']],
       onChange: function (v) { S.mode = v; upd(); } }),
-    Tour.slider({ label: 'Bite depth', min: 10, max: 80, step: 1, value: S.depth * 100,
-      format: function (v) { return v + '%'; }, onInput: function (v) { S.depth = v / 100; upd(); } })
+    depthSlider
   ]));
   var read = el('p.small', { style: 'margin:0' });
   side.appendChild(el('div.wv__grp', null, [el('span.wv__gt', { text: 'Why' }), read]));
@@ -398,6 +402,16 @@ Tour.demo('wave', function (host) {
 
   host.appendChild(el('div.wv', null, [box, side]));
   upd();
+
+  Tour.attract({
+    host: host, period: 9000,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.depth = Math.round(12 + k * 64) / 100;
+      depthSlider.set(Math.round(S.depth * 100));
+    },
+    render: upd
+  });
 });
 </script>
 

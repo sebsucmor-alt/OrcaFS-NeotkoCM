@@ -430,6 +430,11 @@
 Tour.demo('engines', function (host) {
   var el = Tour.el;
   var S = { waist: 0.42, mode: 'hybrid', walls: 3, nozzle: 0.4 };
+  var waistSlider = Tour.slider({
+    label: 'Waist', min: 6, max: 100, step: 1, value: S.waist * 100,
+    format: function (v) { return v + '%'; },
+    onInput: function (v) { S.waist = v / 100; upd(); }
+  });
 
   /** Half-width of the part at height v (0..1). A pinched waist in the middle. */
   function halfW(v) {
@@ -529,8 +534,7 @@ Tour.demo('engines', function (host) {
       onChange: function (v) { S.mode = v; upd(); } }),
     Tour.slider({ label: 'Wall loops', min: 1, max: 5, step: 1, value: S.walls,
       onInput: function (v) { S.walls = v; upd(); } }),
-    Tour.slider({ label: 'Waist', min: 6, max: 100, step: 1, value: S.waist * 100,
-      format: function (v) { return v + '%'; }, onInput: function (v) { S.waist = v/100; upd(); } })
+    waistSlider
   ]));
   side.appendChild(el('div.we__grp', null, [el('span.we__gt', { text: 'What happens' }), read]));
 
@@ -549,6 +553,16 @@ Tour.demo('engines', function (host) {
 
   host.appendChild(el('div.we', null, [box, side]));
   upd();
+
+  Tour.attract({
+    host: host, period: 7800,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.waist = Math.round(10 + k * 78) / 100;
+      waistSlider.set(Math.round(S.waist * 100));
+    },
+    render: upd
+  });
 });
 </script>
 

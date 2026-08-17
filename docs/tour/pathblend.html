@@ -634,6 +634,14 @@ Tour.demo('pathblend', function (host) {
 
   host.appendChild(el('div.pb', null, [views, side]));
   rebuild();
+
+  Tour.attract({
+    host: host, period: 8400,
+    hint: 'playing · drag the handles to take over',
+    idleHint: 'drag the two handles',
+    onFrame: function (k) { S.floor = 0.005 + k * 0.135; },
+    render: redraw
+  });
 });
 </script>
 

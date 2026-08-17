@@ -349,7 +349,21 @@
     const val = el('b', { text: o.format ? o.format(o.value) : String(o.value) });
     const input = el('input', {
       type: 'range',
-      min: o.min, max: o.max, step: o.step == null ? 1 : o.step, value: o.value
+      min: o.min, max: o.max, step: o.step == null ? 1 : o.step, value: o.value,
+      // Without this the browser restores the previous session's slider
+      // positions on reload, by document order, into whatever inputs happen to
+      // be there. The demo's own state stays at the value it was built with, so
+      // the handle, the readout and the drawing all disagree and nothing you
+      // can see explains why. Attribute + property, because form restoration
+      // sets the dirty-value flag and the attribute then stops controlling it.
+      autocomplete: 'off'
+    });
+    input.value = o.value;
+    // ...and again once the browser has finished whatever it was going to do.
+    // Restoration can land after a demo rebuilds its controls, not only at
+    // load, and by then the attribute no longer controls the property.
+    requestAnimationFrame(() => {
+      if (parseFloat(input.value) !== parseFloat(o.value)) input.value = o.value;
     });
     const wrap = el('label.ctrl', null, [
       el('span.ctrl__label', null, [el('span', { text: o.label }), val]),
@@ -418,6 +432,97 @@
     return wrap;
   }
 
+  /* --------------------------------------------------------------- attract */
+
+  /**
+   * The attract loop. A demo that sits perfectly still looks like a picture,
+   * and nobody drags a picture. So a demo opens playing: one parameter rides
+   * up and down, the drawing moves, and the reader learns both what the knob
+   * does and that there is a knob, without touching anything.
+   *
+   * The first interaction anywhere inside the demo hands over and it never
+   * starts again. That is caught here, once, with capture-phase listeners on
+   * the host, so adopting this in a demo does not mean threading a stop() call
+   * through every control's callback.
+   *
+   *   Tour.attract({
+   *     host: host,                       // the demo body
+   *     period: 7000,                     // ms for a full there-and-back
+   *     onFrame(k, phase) { ... },        // k eases 0 -> 1 -> 0
+   *     render: () => cv.render(),
+   *     // and in onFrame, `someSlider.set(v)` for any control that shows the
+   *     // swept value, or it goes stale and the drawing jumps when grabbed
+   *     hint: 'playing · touch anything to take over'
+   *   });
+   *
+   * Three things keep it a hook rather than a nuisance: `prefers-reduced-
+   * motion` means it never starts, an IntersectionObserver stops the frames
+   * while the demo is off screen (which is most of the time on a long page),
+   * and it runs at 30fps because none of these drawings read better at 60.
+   */
+  function attract(opts) {
+    const o = opts || {};
+    const host = o.host;
+    if (!host || typeof o.onFrame !== 'function') return { stop() {}, playing: () => false };
+
+    const period = o.period || 7000;
+    const minMs = 1000 / (o.fps || 30);
+    const reduced = window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    const block = host.closest ? host.closest('.demo') : null;
+    const hintEl = block && block.querySelector('.demo__hint');
+    const idleHint = o.idleHint || (hintEl ? hintEl.textContent : '');
+
+    let playing = false, raf = 0, t0 = 0, last = 0, seen = false;
+
+    function frame(now) {
+      if (!playing) return;
+      raf = requestAnimationFrame(frame);
+      if (!seen || now - last < minMs) return;
+      last = now;
+      const phase = ((now - t0) % period) / period;
+      o.onFrame(0.5 - 0.5 * Math.cos(phase * Math.PI * 2), phase);
+      if (o.render) o.render();
+    }
+
+    // Any event inside the demo stops it, with no cleverness about which
+    // ones are real. The loop drives sliders with `.set()`, which writes the
+    // value and the readout without dispatching anything, so it can never
+    // interrupt itself and this rule stays simple enough to test.
+    function stop() {
+      if (!playing) return;
+      playing = false;
+      cancelAnimationFrame(raf);
+      if (hintEl && idleHint) hintEl.textContent = idleHint;
+      if (o.onStop) o.onStop();
+    }
+
+    function start() {
+      if (reduced || playing) return;
+      playing = true;
+      t0 = performance.now();
+      last = 0;
+      raf = requestAnimationFrame(frame);
+      if (hintEl && o.hint) hintEl.textContent = o.hint;
+    }
+
+    ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'input', 'change', 'contextmenu']
+      .forEach(ev => host.addEventListener(ev, stop, true));
+
+    if (window.IntersectionObserver) {
+      new IntersectionObserver(es => { seen = es[0].isIntersecting; },
+        { threshold: o.threshold == null ? 0.15 : o.threshold }).observe(host);
+    } else seen = true;
+
+    // Reduced motion still gets the pose the loop would have paused at, so the
+    // demo does not open on whatever the shipped default happened to be.
+    if (reduced) { o.onFrame(o.still == null ? 0.5 : o.still, 0.25); if (o.render) o.render(); }
+
+    start();
+    return { stop, playing: () => playing };
+  }
+
   /* ------------------------------------------------------------------ init */
 
   function init() {
@@ -435,6 +540,6 @@
   global.Tour = {
     $, $$, el, token, isDark,
     demo, canvas, draggable, localPoint,
-    slider, select, segmented, toggle
+    slider, select, segmented, toggle, attract
   };
 })(window);

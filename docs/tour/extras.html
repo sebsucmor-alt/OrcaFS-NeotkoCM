@@ -538,6 +538,18 @@ Tour.demo('reproc', function (host) {
 
   host.appendChild(el('div.rp', null, [box, side]));
   upd();
+
+  Tour.attract({
+    host: host, period: 8600,
+    hint: 'playing · drag a bar to take over',
+    idleHint: 'drag a bar by its ends',
+    onFrame: function (k) {
+      var span = S.rules[1].to - S.rules[1].from;
+      S.rules[1].from = Math.round(6 + k * (S.layers - span - 12));
+      S.rules[1].to = S.rules[1].from + span;
+    },
+    render: upd
+  });
 });
 
 
@@ -574,17 +586,27 @@ Tour.demo('kern', function (host) {
   wrap.appendChild(rNone);
   wrap.appendChild(rKern);
 
+  function applyTrack(v) {
+    track = v;
+    [].slice.call(rNone._txt.children).forEach(function (n) { n.style.marginRight = track + 'px'; });
+  }
   var slider = Tour.slider({
     label: 'Char gap (tracking) on the top row', min: -6, max: 14, step: 1, value: 0,
     format: function (v) { return (v > 0 ? '+' : '') + v + ' px'; },
-    onInput: function (v) {
-      track = v;
-      [].slice.call(rNone._txt.children).forEach(function (n) { n.style.marginRight = track + 'px'; });
-    }
+    onInput: applyTrack
   });
 
   host.appendChild(wrap);
   host.appendChild(el('div.ctrls', { style: 'margin-top:.9rem' }, [slider]));
+
+  Tour.attract({
+    host: host, period: 7000, fps: 20,
+    onFrame: function (k) {
+      var v = Math.round(-6 + k * 20);
+      applyTrack(v);
+      slider.set(v);
+    }
+  });
   host.appendChild(el('p.small', {
     style: 'margin:.7rem 0 0',
     html: 'Push the tracking either way and the <b>AV</b> and <b>Wa</b> pairs never come right: ' +

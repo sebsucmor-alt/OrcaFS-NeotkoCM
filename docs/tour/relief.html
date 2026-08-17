@@ -207,7 +207,7 @@
     </ul>
 
     <nav class="pager">
-      <a href="height.html"><small>Back</small><b>Height</b></a>
+      <a href="effects.html"><small>Back</small><b>Height Adaptive Effects</b></a>
       <a class="is-next" href="extras.html"><small>Next</small><b>G-code &amp; finishing →</b></a>
     </nav>
 
@@ -242,6 +242,11 @@ Tour.demo('zbump', function (host) {
     pattern: 'waves', height: 0.18, scale: 22, edge: 1.6,
     nozzle: 0.4, layerH: 0.20, passes: 1, sizeMm: 60
   };
+  var heightSlider = Tour.slider({
+    label: 'Height', min: 0.02, max: 0.6, step: 0.01, value: S.height,
+    format: function (v) { return v.toFixed(2) + ' mm'; },
+    onInput: function (v) { S.height = v; upd(); }
+  });
 
   /** The height field, 0..1, at a point in mm across the surface. */
   function field(x, y) {
@@ -355,9 +360,7 @@ Tour.demo('zbump', function (host) {
   ]));
   side.appendChild(el('div.zb__grp', null, [
     el('span.zb__gt', { text: 'The relief' }),
-    Tour.slider({ label: 'Height', min: 0.02, max: 0.6, step: 0.01, value: S.height,
-      format: function (v) { return v.toFixed(2) + ' mm'; },
-      onInput: function (v) { S.height = v; upd(); } }),
+    heightSlider,
     Tour.slider({ label: 'Edge ramp', min: 0, max: 8, step: 0.2, value: S.edge,
       format: function (v) { return v.toFixed(1) + ' mm'; },
       onInput: function (v) { S.edge = v; upd(); } }),
@@ -393,6 +396,16 @@ Tour.demo('zbump', function (host) {
 
   host.appendChild(el('div.zb', null, [views, side]));
   upd();
+
+  Tour.attract({
+    host: host, period: 7400,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.height = Math.round((0.02 + k * 0.30) * 100) / 100;
+      heightSlider.set(S.height);
+    },
+    render: upd
+  });
 });
 </script>
 

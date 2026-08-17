@@ -496,6 +496,15 @@ Tour.demo('wipe', function (host) {
   host.appendChild(box);
   host.appendChild(slider);
   set(50);
+
+  // The divider sweeps on its own until someone grabs it. A before/after that
+  // sits still is two thirds of a photograph and nobody thinks to drag it.
+  Tour.attract({
+    host: host, period: 9000, fps: 40,
+    hint: 'playing · grab the divider',
+    idleHint: 'drag the divider',
+    onFrame: function (k) { set(12 + k * 76); }
+  });
 });
 </script>
 

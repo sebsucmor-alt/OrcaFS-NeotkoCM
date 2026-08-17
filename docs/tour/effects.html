@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Height Adaptive Effects — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Draw any print setting as a curve over the object's real layer bands: infill width that opens the cell where nothing rests on it, fuzzy skin that is born and dies with the height.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .fx { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 1rem; }
+  .fx__ctrls { margin-top: .9rem; display: grid; gap: .7rem;
+               grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: start; }
+  @container demo (max-width: 840px) { .fx { grid-template-columns: 1fr; } }
+  .fx__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .fx__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .fx__read { font-family: var(--mono); font-size: .72rem; line-height: 1.65; color: var(--ink-faint);
+              margin: 0; }
+  .fx__read b { color: var(--ink); font-weight: 500; }
+  .fx__read .warn { color: var(--warn); }
+  .fx__read .good { color: var(--good); }
+  .fx__pre { display: flex; flex-wrap: wrap; gap: .35rem; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure" aria-current="page">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§23 — Structure</p>
+    <h1>Height Adaptive Effects</h1>
+    <p class="lede">
+      Pick a setting, draw a curve up the object, and the setting follows the height. The infill cell
+      opens where nothing rests on it and closes under the top surface. Fuzzy skin is born, lives for
+      a band, and dies again. One object, no modifiers, no boolean surgery.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--free">per object, travels in the 3MF</li>
+      <li class="badge badge--ver badge--plain">since 2.4.3</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left gizmo toolbar</b><span class="sep">›</span><b>Height Adaptive Effects</b>
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="What breaks without it">What breaks without it</h2>
+
+    <p>
+      Orca can already vary settings by height. That is what height range modifiers are. You type a Z
+      into a box, slice, and find out afterwards where the transition actually landed, because the
+      layer boundary near your Z is not at your Z. Change the layer height and every number you typed
+      means something slightly different.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Height range modifiers</h4>
+        <p>Type a Z range, type a value, slice, look. Discrete bands only, and the band edges land
+        where the layers happen to fall.</p>
+      </div>
+      <div class="fold--after">
+        <h4>A curve over the real bands</h4>
+        <p>The graph is drawn on the object's own layer bands. Points snap to real layers, the band
+        you are dragging lights up on the model, and a ramp is allowed.</p>
+      </div>
+    </div>
+
+    <p>
+      It is the same idea as the <a href="height.html#editor">layer height curve</a> next door,
+      pointed at any setting instead of at Z itself. No other slicer has it, and it is the piece of
+      the fork with the widest reach, because it has nothing to do with colour.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="infill" data-short="The cell that opens">The one to try first: the infill cell</h2>
+
+    <p>
+      Sparse infill exists to hold up the solid surfaces above it. Near a top surface that job is
+      real, and you want thin lines close together. Ten millimetres lower down, nothing rests on that
+      infill at all and thin lines are just slow.
+    </p>
+
+    <p>
+      Draw a curve on <b>sparse infill width</b> and the grid opens and closes as you go up. The
+      part below is a real print: a 26.6 mm cube, 0.2 mm layers, 25% crosszag, one curve. The line
+      spacing runs from 1.40 mm under the top surface to 2.47 mm through the middle, so the cell
+      through the middle has a little over three times the area. The density never moves off 25.0%
+      on any of the 135 layers, because density is what fixes the plastic.
+    </p>
+
+    <div class="note note--key">
+      <p class="note__t">The rule underneath all of it</p>
+      <p><code>line_spacing = flow spacing / density</code>. Widen the line and the gap widens with
+      it. Same grams, fewer and fatter struts, a bigger cell. That one line is the whole feature,
+      and it is also the whole catch.</p>
+    </div>
+
+    <p>
+      Which makes it a structural tool as much as a speed one. A cell three times the area built from
+      struts nearly twice as thick is a different lattice at the same weight. Put the open band where
+      you want the part to give and the fine band where you want it stiff and you have a damper, a
+      clip, a bumper, a foot.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="toy" data-short="★ Draw a curve">Draw a curve and watch it print</h2>
+
+    <p>
+      Drag the points on the left. The right-hand view is what comes out: three sampled layers of the
+      infill grid, or the wall in elevation with fuzzy skin on it. The numbers under the graph are
+      the ones the panel shows you in the app.
+    </p>
+
+    <div class="demo bleed" id="effects-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">A setting that follows the height</span>
+        <span class="demo__hint">drag the points, then try Staircase</span>
+      </div>
+      <div class="demo__body" data-demo="effects">
+        <noscript><p class="noscript">This demo needs JavaScript. It draws a curve over an object's layer bands and shows the resulting infill grid or fuzzy wall, which the text around it describes.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        The spacing comes from <code>line_spacing = flow spacing / density</code> with
+        <code>flow spacing = width − layer × (1 − π/4)</code>, which is
+        <code>FillRectilinear.cpp:2792</code>. <b>Line shift per layer</b> is measured on the same
+        line index in both layers, the way the panel does it. The block is a stack of translucent
+        slices, and it quantises your curve into bands to draw it, because replicas at a changing
+        pitch land off each other and turn to moiré; with <b>Staircase</b> on those are your real
+        bands. The fuzzy wall is a drawing of the displacement, not a port of the noise.
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="fuzzy" data-short="Fuzzy that fades">Fuzzy skin that fades in and out</h2>
+
+    <p>
+      The other one everybody tries first. A curve on <b>fuzzy skin thickness</b> gives you a smooth
+      base, a textured band, and a smooth top, on one object. Grip where a hand goes and a clean
+      surface where a lid seats.
+    </p>
+
+    <ul>
+      <li><strong>Thickness reaching 0 switches the fuzzy skin off</strong> for that layer rather
+        than flattening it. A zero-amplitude fuzzy would otherwise still resample every perimeter
+        into thousands of points: the same printed wall, a much fatter file.</li>
+      <li>The curves <strong>scale</strong> fuzzy skin, they do not turn it on. If fuzzy skin is off
+        for the object, the panel says so rather than letting you slice and find nothing changed.</li>
+      <li>The character controls go further than the depth. <b>Point distance</b>, <b>noise
+        scale</b>, <b>octaves</b> and <b>persistence</b> can each take their own curve, so the
+        texture can get coarser or finer with height as well as deeper.</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="panel" data-short="The panel">Building the list, drawing the curve</h2>
+
+    <figure>
+      <img src="../images/Adaptive-Effects.gif" width="600" height="384" alt="The Height Adaptive Effects gizmo: drawing a curve over the object's real layer bands and watching the affected band highlight on the model" loading="lazy">
+      <figcaption>The gizmo itself. The band you are affecting highlights on the model while you drag.</figcaption>
+    </figure>
+
+    <p>
+      The panel starts empty. Press <b>Add</b>, pick an effect, and it joins <em>this object's</em>
+      effects, so the panel only ever shows what you actually use no matter how many effects exist.
+      The trash button on a row removes the effector completely, curve and all; <b>Clear</b> at the
+      bottom empties the curve but keeps the effect in the list. Each row carries a small preview of
+      its own curve and its point count, which is what keeps a list of similarly-named effects
+      readable.
+    </p>
+
+    <p>
+      Click to add a point, drag to move, right-click to delete. Height runs up the left edge and the
+      effect's value across the top. Hovering anywhere gives a live readout of the Z you are on and
+      what the curve is worth there, so you do not have to grab a point to read a number. Dragging a
+      point highlights the matching band on the object in 3D. <b>Open Z points</b> opens a numeric
+      table, one row per point, with the layer number each Z lands on. <b>Presets</b> seed a shape
+      for the effects that have sensible ones, and <b>Refresh layers</b> re-reads the bands after you
+      change the adaptive layer height profile.
+    </p>
+
+    <p class="small">
+      Z is measured from the <strong>bottom of the object</strong>, not from the bed. If you print
+      with a raft, the raft is not part of this axis.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="steps" data-short="Steps or ramp">Steps or ramp, and the number that decides</h2>
+
+    <p>
+      <strong>Steps</strong> holds the value constant inside each band and changes it in one jump at
+      a layer boundary, with every point snapping to a real layer. <strong>Ramp</strong> varies it
+      continuously.
+    </p>
+
+    <p>
+      Steps is more than the cautious option, and the reason is worth spelling out because it is easy
+      to get backwards. Sparse infill holds itself up: each line wants to land on the line of the
+      layer below it. The engine works hard to protect that, and pins the layer height it uses to
+      compute the infill spacing to the object's nominal one, precisely so that adaptive layer height
+      on its own cannot walk the lines out of alignment.
+    </p>
+
+    <p>
+      What it cannot pin is the width, because that is a setting. Widen the line and the gap widens
+      with it, every line shifts sideways, and the further you are from where the fill starts the
+      more that shift has piled up.
+    </p>
+
+    <p>
+      What breaks the stacking is the drift <em>between consecutive layers</em>, which depends on how
+      steep your curve is rather than on it being a curve at all. A slow ramp moves each layer by a
+      fraction of a micron. So instead of forbidding ramps, the panel measures yours:
+    </p>
+
+    <ul>
+      <li><strong>Line shift per layer</strong> shows how far the infill of one layer lands from the
+        one below, at the far edge of the object, as a percentage of the line width. It turns amber
+        above roughly 25%.</li>
+      <li><strong>Staircase</strong> turns your ramp into that many layer-aligned bands, keeping the
+        shape while giving the lines back their constant spacing inside each band.</li>
+    </ul>
+
+    <p>
+      A <strong>shortest-band warning</strong> also appears in steps mode: under about four layers,
+      the jump costs more than it gives.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="effects" data-short="The effects">The effects</h2>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Effect</th><th>What it is for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Sparse infill width</b></td><td>Thin lines low down where the infill has to support the solid above it, thick lines deep inside where nothing rests on them. Same density, same material, less time, and a lattice that can be soft in one band and stiff in another.</td></tr>
+        <tr><td><b>Outer wall width</b> / <b>Inner wall width</b></td><td>Wall thickness following the height. Thicker where the part is gripped or loaded, thinner where it is only skin.</td></tr>
+        <tr><td><b>Fuzzy skin thickness</b></td><td>Texture that is born and dies with the height.</td></tr>
+        <tr><td><b>Fuzzy skin point distance / noise scale / octaves / persistence</b></td><td>The texture's <em>character</em> changing with height, not only its depth.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      Only the three line widths that <strong>stack</strong> are offered. Internal solid infill and
+      top surface were wired up, looked at, and deliberately taken back out: a ramp there varies the
+      width of the very surfaces the eye reads as flat, which is not something a print wants.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="The catch">The catch</h2>
+
+    <ul>
+      <li><strong>Libre Mode only.</strong> The gizmo does not exist until the master switch is on.</li>
+      <li><strong>A curve needs at least two points</strong> to mean anything. One point is a
+        constant, which is what a plain per-object override is for.</li>
+      <li><strong>A setting driven by a curve is greyed out</strong> in the object's settings panel,
+        so the same value is never set from two places at once.</li>
+      <li><strong>Every edit is a re-slice</strong>, and on a big model that adds up while you are
+        tuning.</li>
+      <li><strong>Density is not on the list.</strong> The width moves and the density holds, which
+        is what keeps the grams constant. If you want a genuine density change with height, that is
+        still a height range modifier.</li>
+      <li><strong>A steep infill width ramp walks the lines off their support.</strong> Watch the
+        line shift readout, and reach for Staircase rather than for a flatter curve.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="height.html"><small>Back</small><b>Height</b></a>
+      <a class="is-next" href="relief.html"><small>Next</small><b>Bump mapping →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p class="small">This page covers <b>§23</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/iso.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===========================================================================
+ * effects — the toy for §23.
+ *
+ * Left: a curve over the object's layer bands, which stay put (this gizmo does
+ * not move Z, that is the other one). Right: what the curve prints.
+ *
+ * The infill view is the one that matters. It draws three sampled layers of
+ * the real grid at the real spacing, because a printer recognises a crosshatch
+ * on sight and does not recognise a graph.
+ * ========================================================================= */
+Tour.demo('effects', function (host) {
+  var el = Tour.el;
+
+  /* the two effects this toy can draw. lo/hi are the panel's own range. */
+  var FX = {
+    infill: { label: 'Sparse infill width', lo: 0.30, hi: 0.90, unit: 'mm' },
+    fuzzy:  { label: 'Fuzzy skin thickness', lo: 0,    hi: 0.80, unit: 'mm' }
+  };
+
+  var S = {
+    fx: 'infill',
+    objH: 27,                  // mm
+    layer: 0.2,                // HAE never moves Z: the bands stay put
+    size: 26.6,                // the part, across
+    density: 0.25,
+    steps: false,
+    staircase: 0,
+    // {z: 0..1 of the height, v: 0..1 of the effect's range}
+    // Three points on purpose: the middle one is what the attract loop rides
+    // up and down the object, and a single travelling peak is the clearest
+    // possible "this band, here" you can draw with one degree of freedom.
+    pts: [{ z: 0, v: 0.10, fixed: true }, { z: 0.5, v: 1 }, { z: 1, v: 0.10 }]
+  };
+
+  function nLayers() { return Math.max(4, Math.round(S.objH / S.layer)); }
+
+  /** the raw curve, before steps and staircase */
+  function rawAt(zn) {
+    var p = S.pts;
+    if (zn <= p[0].z) return p[0].v;
+    if (zn >= p[p.length - 1].z) return p[p.length - 1].v;
+    for (var i = 0; i < p.length - 1; i++) {
+      if (zn >= p[i].z && zn <= p[i + 1].z) {
+        var span = p[i + 1].z - p[i].z;
+        var t = span < 1e-6 ? 0 : (zn - p[i].z) / span;
+        return p[i].v + (p[i + 1].v - p[i].v) * t;
+      }
+    }
+    return p[p.length - 1].v;
+  }
+
+  /** the curve as it is actually applied: staircase first, then steps */
+  function valAt(zn) {
+    if (S.staircase > 0) {
+      var b = Math.min(S.staircase - 1, Math.floor(zn * S.staircase));
+      return rawAt((b + 0.5) / S.staircase);
+    }
+    if (S.steps) {
+      var L = Math.floor(zn * nLayers());
+      return rawAt((L + 0.5) / nLayers());
+    }
+    return rawAt(zn);
+  }
+
+  function mmAt(zn) {
+    var f = FX[S.fx];
+    return f.lo + valAt(zn) * (f.hi - f.lo);
+  }
+
+  /* --- the one piece of engine arithmetic, ported ------------------------ */
+  // Flow spacing for a rounded-rectangle bead, then FillRectilinear.cpp:2792.
+  function flowSpacing(w) { return w - S.layer * (1 - Math.PI / 4); }
+  function spacingOf(w) { return flowSpacing(w) / S.density; }
+
+  /**
+   * Line shift per layer, as the panel measures it.
+   *
+   * Measured on the SAME line index in both layers. Comparing "the outermost
+   * line" instead catches the moment a line stops fitting and disappears,
+   * which is a whole spacing and has nothing to do with drift.
+   */
+  function shiftStats() {
+    var n = nLayers(), wall = 0.85, span = S.size - 2 * wall;
+    var worst = 0, atW = 0, stacked = 0, joins = 0;
+    for (var i = 1; i < n; i++) {
+      var w0 = mmAt((i - 1) / n), w1 = mmAt(i / n);
+      var s0 = spacingOf(w0), s1 = spacingOf(w1);
+      var k = Math.floor(Math.min((span - w0) / s0, (span - w1) / s1));
+      if (k < 0) continue;
+      var d = Math.abs((w1 / 2 + k * s1) - (w0 / 2 + k * s0));
+      joins++;
+      if (d < 0.002) stacked++;
+      if (d > worst) { worst = d; atW = w1; }
+    }
+    return { pct: atW > 0 ? 100 * worst / atW : 0, stacked: stacked, joins: joins };
+  }
+
+  /* ====================================================== the curve view */
+
+  var gBox = el('div.vbox');
+  gBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'the curve, over the layer bands' }),
+    el('span', { 'data-gnote': true })
+  ]));
+  var gHost = el('div');
+  gBox.appendChild(gHost);
+
+  var PAD = { l: 46, r: 78, t: 12, b: 26 };
+  var hoverI = -1, dragI = -1;
+
+  function geom(w, h) {
+    return {
+      X: function (v) { return PAD.l + v * (w - PAD.l - PAD.r); },
+      Y: function (zn) { return h - PAD.b - zn * (h - PAD.t - PAD.b); },
+      vOf: function (px) { return (px - PAD.l) / (w - PAD.l - PAD.r); },
+      zOf: function (py) { return (h - PAD.b - py) / (h - PAD.t - PAD.b); }
+    };
+  }
+
+  var gCv = Tour.canvas(gHost, function (ctx, w, h) {
+    var g = geom(w, h);
+    var accent = Tour.token('--accent');
+    var faint = Tour.token('--ink-faint');
+    var rule = Tour.token('--rule');
+    var n = nLayers();
+
+    // the object, as its own layer bands, on the right
+    var ox0 = w - PAD.r + 14, ox1 = w - 8;
+    var show = Math.min(n, 90);
+    for (var i = 0; i < show; i++) {
+      var y0 = g.Y((i + 1) / show), y1 = g.Y(i / show);
+      ctx.fillStyle = i % 2 ? Tour.token('--surface-2') : Tour.token('--surface');
+      ctx.fillRect(ox0, y0, ox1 - ox0, y1 - y0);
+    }
+    ctx.strokeStyle = Tour.token('--rule-firm');
+    ctx.strokeRect(ox0 + .5, PAD.t + .5, ox1 - ox0 - 1, g.Y(0) - PAD.t - 1);
+
+    // the staircase bands, when there are any
+    if (S.staircase > 0) {
+      ctx.strokeStyle = accent; ctx.globalAlpha = .5;
+      ctx.setLineDash([4, 3]);
+      for (var b = 1; b < S.staircase; b++) {
+        var yb = g.Y(b / S.staircase);
+        ctx.beginPath(); ctx.moveTo(PAD.l, yb + .5); ctx.lineTo(ox1, yb + .5); ctx.stroke();
+      }
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
+
+    // axes
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = faint;
+    ctx.textAlign = 'right';
+    for (var k = 0; k <= 4; k++) {
+      ctx.fillText((k / 4 * S.objH).toFixed(0) + ' mm', PAD.l - 5, g.Y(k / 4) + 3);
+    }
+    var f = FX[S.fx];
+    ctx.textAlign = 'left';
+    ctx.fillText(f.lo.toFixed(2), PAD.l, h - 8);
+    ctx.textAlign = 'right';
+    ctx.fillText(f.hi.toFixed(2) + ' ' + f.unit, w - PAD.r, h - 8);
+    ctx.textAlign = 'center';
+    ctx.fillText(f.label.toLowerCase(), (PAD.l + w - PAD.r) / 2, h - 8);
+
+    // the applied curve, drawn per layer so steps and staircase are visible
+    ctx.strokeStyle = accent; ctx.lineWidth = 2;
+    ctx.beginPath();
+    var steps = Math.min(n, 300);
+    for (var q = 0; q <= steps; q++) {
+      var zn = q / steps;
+      var px = g.X(valAt(zn)), py = g.Y(zn);
+      if (q === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // the raw curve underneath, when the applied one differs from it
+    if (S.staircase > 0 || S.steps) {
+      ctx.strokeStyle = accent; ctx.globalAlpha = .3; ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      for (var r = 0; r <= 120; r++) {
+        var zr = r / 120;
+        var xr = g.X(rawAt(zr)), yr = g.Y(zr);
+        if (r === 0) ctx.moveTo(xr, yr); else ctx.lineTo(xr, yr);
+      }
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+
+    // the points
+    S.pts.forEach(function (p, i) {
+      var on = (dragI === i) || (dragI < 0 && hoverI === i);
+      ctx.beginPath();
+      ctx.arc(g.X(p.v), g.Y(p.z), on ? 7 : 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = p.fixed ? faint : (on ? accent : Tour.token('--surface'));
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = p.fixed ? faint : accent;
+      ctx.stroke();
+    });
+
+    // the band you are pointing at, lit on the object
+    if (hoverI >= 0 || dragI >= 0) {
+      var p2 = S.pts[dragI >= 0 ? dragI : hoverI];
+      var bi = Math.min(show - 1, Math.floor(p2.z * show));
+      ctx.fillStyle = dragI >= 0 ? Tour.token('--warn') : accent;
+      ctx.globalAlpha = .45;
+      ctx.fillRect(ox0, g.Y((bi + 1) / show), ox1 - ox0,
+        g.Y(bi / show) - g.Y((bi + 1) / show));
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.strokeStyle = rule; ctx.lineWidth = 1;
+    ctx.strokeRect(PAD.l + .5, PAD.t + .5, w - PAD.l - PAD.r - 1, g.Y(0) - PAD.t - 1);
+  }, { height: 300 });
+
+  function hit(p) {
+    var g = geom(gCv.width, gCv.height);
+    for (var i = 0; i < S.pts.length; i++) {
+      if (Math.hypot(p.x - g.X(S.pts[i].v), p.y - g.Y(S.pts[i].z)) < 12) return i;
+    }
+    return -1;
+  }
+
+  gCv.canvas.addEventListener('contextmenu', function (ev) {
+    ev.preventDefault();
+    var i = hit(Tour.localPoint(ev, gCv.canvas));
+    if (i > 0 && i < S.pts.length && !S.pts[i].fixed && S.pts.length > 2) {
+      S.pts.splice(i, 1); upd();
+    }
+  });
+
+  Tour.draggable(gCv.canvas, {
+    onDown: function (p, ev) {
+      if (ev.button === 2) return false;
+        var g = geom(gCv.width, gCv.height);
+      dragI = hit(p);
+      if (dragI < 0) {
+        if (p.x < PAD.l || p.x > gCv.width - PAD.r) return false;
+        var z = Math.max(0.02, Math.min(1, g.zOf(p.y)));
+        var v = Math.max(0, Math.min(1, g.vOf(p.x)));
+        S.pts.push({ z: z, v: v });
+        S.pts.sort(function (a, b) { return a.z - b.z; });
+        dragI = S.pts.findIndex(function (q) { return q.z === z && q.v === v; });
+      }
+      upd();
+    },
+    onMove: function (p) {
+      if (dragI < 0) return;
+      var g = geom(gCv.width, gCv.height);
+      var pt = S.pts[dragI];
+      pt.v = Math.max(0, Math.min(1, g.vOf(p.x)));
+      if (!pt.fixed && dragI !== S.pts.length - 1) {
+        pt.z = Math.max(0.01, Math.min(0.99, g.zOf(p.y)));
+        S.pts.sort(function (a, b) { return a.z - b.z; });
+        dragI = S.pts.indexOf(pt);
+      }
+      upd();
+    },
+    onUp: function () { dragI = -1; upd(); },
+    onHover: function (p) {
+      var i = hit(p);
+      gCv.canvas.style.cursor = i >= 0 ? 'grab'
+        : (p.x > PAD.l && p.x < gCv.width - PAD.r ? 'crosshair' : 'default');
+      if (i !== hoverI) { hoverI = i; gCv.render(); }
+    },
+    onLeave: function () { if (hoverI !== -1) { hoverI = -1; gCv.render(); } }
+  });
+
+  /* ===================================================== the result view */
+
+  var rBox = el('div.vbox');
+  rBox.appendChild(el('div.vbox__hd', null, [
+    el('span', { 'data-rtitle': true, text: 'what prints' }),
+    el('span', { 'data-rnote': true })
+  ]));
+  var rHost = el('div');
+  rBox.appendChild(rHost);
+
+  /**
+   * The object, drawn as a translucent stack.
+   *
+   * Three flat layers side by side make the reader assemble the object in
+   * their head. Instead each band's grid is replicated up its own slice of the
+   * height at low alpha: where struts of one band line up they accumulate into
+   * a solid column, where they do not you see through. That is enough of a
+   * fiction of volume to read as one printed cube with zones in it.
+   *
+   * The pitch has to be CONSTANT inside a band or the replicas land off each
+   * other and the columns turn to moiré, so the curve is quantised into bands
+   * for the drawing. When Staircase is on those are the real bands; otherwise
+   * it is six, and the demo foot says so.
+   */
+  function drawInfill(ctx, w, h) {
+    Iso.syncInk(Tour.token);
+    var accent = Tour.token('--accent');
+    var faint = Tour.token('--ink-faint');
+    var ink = Tour.token('--ink');
+    var SIZE = S.size, PH = S.objH, WALLW = 0.85;
+
+    var K = S.staircase > 0 ? S.staircase : 6;
+    var reps = Math.max(3, Math.round(54 / K));
+
+    // Split the vertical budget: the footprint diamond gets about 40% and the
+    // height the rest. Sizing off the width instead makes the diamond eat the
+    // canvas and the cube comes out squat, which reads as a tile again.
+    var budget = h - 54;
+    var sxy = Math.min(budget * 0.42 / SIZE, (w * 0.42) / (SIZE * 2 * 0.8660));
+    var sz = Math.max((budget - SIZE * sxy) / PH, 2);
+    var V = Iso.view({
+      ox: 26 + SIZE * 0.8660 * sxy,
+      oy: 26 + PH * sz,
+      sxy: sxy, sz: sz
+    });
+
+    function clipParam(px, py, dx, dy, x0, y0, x1, y1) {
+      var t0 = -1e9, t1 = 1e9;
+      function edge(p, q) {
+        if (Math.abs(p) < 1e-12) return q >= 0;
+        var r = q / p;
+        if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+        else { if (r < t0) return false; if (r < t1) t1 = r; }
+        return true;
+      }
+      return (edge(-dx, px - x0) && edge(dx, x1 - px) &&
+              edge(-dy, py - y0) && edge(dy, y1 - py)) ? [t0, t1] : null;
+    }
+
+    function slice(z, wmm, sp, ang) {
+      var e = wmm / 2, i0 = WALLW, i1 = SIZE - WALLW;
+      [[0, 0, SIZE, WALLW], [0, SIZE - WALLW, SIZE, WALLW],
+       [0, WALLW, WALLW, SIZE - 2 * WALLW],
+       [SIZE - WALLW, WALLW, WALLW, SIZE - 2 * WALLW]].forEach(function (r) {
+        Iso.poly(ctx, V, [
+          [r[0], r[1], z], [r[0] + r[2], r[1], z],
+          [r[0] + r[2], r[1] + r[3], z], [r[0], r[1] + r[3], z]
+        ], accent, null, 0);
+      });
+      var a = ang * Math.PI / 180;
+      var dx = Math.cos(a), dy = Math.sin(a), nx = -dy, ny = dx;
+      var c = SIZE / 2;
+      for (var t = -SIZE; t <= SIZE; t += sp) {
+        var px = c + nx * t, py = c + ny * t;
+        var r2 = clipParam(px, py, dx, dy, i0, i0, i1, i1);
+        if (!r2 || r2[1] - r2[0] < 1.2) continue;
+        var ax = px + dx * r2[0], ay = py + dy * r2[0];
+        var bx = px + dx * r2[1], by = py + dy * r2[1];
+        Iso.poly(ctx, V, [
+          [ax - nx * e, ay - ny * e, z], [bx - nx * e, by - ny * e, z],
+          [bx + nx * e, by + ny * e, z], [ax + nx * e, ay + ny * e, z]
+        ], accent, null, 0);
+      }
+    }
+
+    /* ---- which band the eye should land on --------------------------
+     * Drawing every band at the same alpha gives one even haze, and an even
+     * haze has no subject: you see "infill" rather than "here is where it
+     * changes". So the band with the widest cell is drawn solid and the
+     * tightest one is faded back, which puts the eye on the zone that is
+     * departing from ordinary infill. The tightest band is the baseline
+     * because tight lines close together is what an object does when nobody
+     * has touched it. A flat curve weighs everything the same, which is the
+     * right answer for a flat curve.
+     * --------------------------------------------------------------- */
+    var vals = [], b, k;
+    for (b = 0; b < K; b++) vals.push(mmAt((b + 0.5) / K));
+    var wLo = Math.min.apply(null, vals), wHi = Math.max.apply(null, vals);
+    function weightOf(v) {
+      return wHi - wLo < 1e-6 ? 1 : 0.34 + 0.66 * (v - wLo) / (wHi - wLo);
+    }
+
+    // bottom to top, so the near-top slices end up over the ones below
+    ctx.save();
+    var flip = 0;
+    for (b = 0; b < K; b++) {
+      var sp = spacingOf(vals[b]);
+      ctx.globalAlpha = (0.9 / reps) * weightOf(vals[b]);
+      for (k = 0; k < reps; k++) {
+        var z = PH * (b + (k + 0.5) / reps) / K;
+        slice(z, vals[b], sp, (flip++ % 2) ? 135 : 45);
+      }
+    }
+    ctx.restore();
+
+    // the silhouette, so the fiction reads as an object and not as a haze
+    var EDGE = Tour.token('--rule-firm');
+    // A wash on the top face. Near the far corner of the diamond only the two
+    // or three topmost slices overlap, so that corner comes out almost empty
+    // and the cube loses its lid. The wash gives it one.
+    ctx.save();
+    ctx.globalAlpha = 0.13;
+    Iso.poly(ctx, V, [[0, 0, PH], [SIZE, 0, PH], [SIZE, SIZE, PH], [0, SIZE, PH]],
+      accent, null, 0);
+    ctx.restore();
+    Iso.poly(ctx, V, [[0, 0, PH], [SIZE, 0, PH], [SIZE, SIZE, PH], [0, SIZE, PH]],
+      null, EDGE, 1.2);
+    [[0, SIZE], [SIZE, SIZE], [SIZE, 0]].forEach(function (c2) {
+      var p0 = V.p(c2[0], c2[1], 0), p1 = V.p(c2[0], c2[1], PH);
+      ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
+      ctx.strokeStyle = EDGE; ctx.lineWidth = 1.2; ctx.stroke();
+    });
+    // The band rings are only drawn when Staircase is on, because only then
+    // are they a real thing in the print rather than a drawing device.
+    if (S.staircase > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      for (b = 1; b < K; b++) {
+        Iso.poly(ctx, V, [[0, 0, PH * b / K], [SIZE, 0, PH * b / K],
+                          [SIZE, SIZE, PH * b / K], [0, SIZE, PH * b / K]],
+          null, accent, 1);
+      }
+      ctx.restore();
+    }
+
+    /* ---- the three heights, read off the same curve ------------------- */
+    var lx = Math.min(w - 190, 26 + SIZE * 2 * 0.8660 * sxy + 22);
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    [[0.88, 'up near the top'], [0.5, 'through the middle'], [0.12, 'near the bottom']]
+      .forEach(function (r, i) {
+        var wmm = mmAt(r[0]), sp = spacingOf(wmm);
+        var y = 40 + i * 74;
+        var p = V.p(SIZE, 0, PH * r[0]);
+        ctx.strokeStyle = Tour.token('--rule-firm');
+        ctx.setLineDash([3, 4]);
+        ctx.beginPath(); ctx.moveTo(p.x + 4, p.y); ctx.lineTo(lx - 8, y - 4); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(p.x + 4, p.y, 2.6, 0, Math.PI * 2);
+        ctx.fillStyle = accent; ctx.fill();
+
+        var lead = weightOf(wmm) > 0.9;
+        ctx.fillStyle = lead ? accent : ink;
+        ctx.font = '600 11px system-ui, sans-serif';
+        ctx.fillText(r[1], lx, y);
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillStyle = faint;
+        ctx.fillText('z ' + (r[0] * PH).toFixed(1) + ' mm', lx, y + 16);
+        ctx.fillStyle = ink;
+        ctx.fillText(wmm.toFixed(2) + ' mm lines', lx, y + 32);
+        ctx.fillStyle = accent;
+        ctx.fillText('every ' + sp.toFixed(2) + ' mm', lx, y + 48);
+      });
+
+    ctx.fillStyle = faint;
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText('density ' + (S.density * 100).toFixed(0) + '% everywhere, so the same grams',
+      lx, 40 + 3 * 74 - 8);
+    ctx.fillText(K + ' bands drawn, ' + (K * reps) + ' slices', lx, 40 + 3 * 74 + 8);
+    ctx.fillText('the wider the cell, the more solid the band', lx, 40 + 3 * 74 + 24);
+  }
+
+  /** the wall in elevation, one row per layer, both edges displaced */
+  function drawFuzzy(ctx, w, h) {
+    var accent = Tour.token('--accent');
+    var faint = Tour.token('--ink-faint');
+    var ink = Tour.token('--ink');
+
+    var n = nLayers();
+    var top = 26, bot = h - 34;
+    var rowH = (bot - top) / n;
+    var cx = w / 2;
+    var halfW = Math.min(w * 0.26, 150);
+    var MAG = 24;                                  // px per mm of displacement
+
+    function rnd(a, b) {
+      var s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    }
+
+    for (var i = 0; i < n; i++) {
+      var zn = 1 - (i + 0.5) / n;                  // top row is the top of the part
+      var amp = mmAt(zn);
+      var dl = amp === 0 ? 0 : (rnd(i, 1) - 0.5) * amp;
+      var dr = amp === 0 ? 0 : (rnd(i, 7) - 0.5) * amp;
+      var y = top + i * rowH;
+      // One colour for the whole wall. Tinting the fuzzy band differently
+      // reads as a second material, which is the one thing it is not.
+      // Opaque, because rows overlap by a fraction of a pixel and a
+      // translucent fill turns that overlap into horizontal banding that
+      // looks like a printing artefact the demo is not talking about.
+      ctx.fillStyle = accent;
+      ctx.fillRect(cx - halfW - dl * MAG, y, 2 * halfW + (dl + dr) * MAG, rowH + 1);
+    }
+
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = faint;
+    var partPx = halfW / (S.size / 2);            // px per mm across the part
+    ctx.fillText('the wall from the side, one row per layer, displacement × ' +
+      Math.max(1, Math.round(MAG / partPx)), w / 2, h - 16);
+    ctx.fillStyle = ink;
+    ctx.textAlign = 'left';
+    ctx.fillText(S.objH.toFixed(0) + ' mm, ' + n + ' layers', 10, 16);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = faint;
+    ctx.fillText('peak ' + mmAt(0.5).toFixed(2) + ' mm', w - 10, 16);
+  }
+
+  var rCv = Tour.canvas(rHost, function (ctx, w, h) {
+    if (S.fx === 'infill') drawInfill(ctx, w, h); else drawFuzzy(ctx, w, h);
+  }, { height: 430 });
+
+  /* ========================================================== the controls */
+
+  var read = el('p.fx__read');
+  var ctrls = el('div.fx__ctrls');
+
+  function preset(label, fx, pts, note) {
+    return el('button.btn.btn--sm', {
+      type: 'button', text: label, title: note,
+      onclick: function () {
+            S.fx = fx;
+        S.pts = pts.map(function (p, i) {
+          return i === 0 ? { z: p[0], v: p[1], fixed: true } : { z: p[0], v: p[1] };
+        });
+        rebuild();
+      }
+    });
+  }
+
+  function buildCtrls() {
+    ctrls.textContent = '';
+
+    ctrls.appendChild(el('div.fx__grp', null, [
+      el('span.fx__gt', { text: 'The effect' }),
+      Tour.segmented({
+        value: S.fx,
+        options: [['infill', 'Infill width'], ['fuzzy', 'Fuzzy skin']],
+        onChange: function (v) { S.fx = v; rebuild(); }
+      }),
+      el('div.fx__pre', null, [
+        preset('Damper', 'infill',
+          [[0, 0.15], [0.3, 1], [0.7, 1], [1, 0.15]],
+          'open through the middle, fine at both ends'),
+        preset('Save time up high', 'infill',
+          [[0, 0.1], [1, 0.9]], 'thin where it supports, fat where it does not'),
+        preset('Fuzzy band', 'fuzzy',
+          [[0, 0], [0.25, 0], [0.4, 1], [0.6, 1], [0.75, 0], [1, 0]],
+          'smooth, rough, smooth')
+      ])
+    ]));
+
+    ctrls.appendChild(el('div.fx__grp', null, [
+      el('span.fx__gt', { text: 'How it is applied' }),
+      Tour.toggle({ label: 'Steps instead of ramp', value: S.steps,
+        onChange: function (v) { S.steps = v; upd(); } }),
+      Tour.slider({ label: 'Staircase', min: 0, max: 12, step: 1, value: S.staircase,
+        format: function (v) { return v === 0 ? 'off' : v + ' bands'; },
+        onInput: function (v) { S.staircase = v; upd(); } })
+    ]));
+
+    var objGrp = [
+      el('span.fx__gt', { text: 'The object' }),
+      Tour.slider({ label: 'Height', min: 6, max: 60, step: 1, value: S.objH,
+        format: function (v) { return v + ' mm'; },
+        onInput: function (v) { S.objH = v; upd(); } })
+    ];
+    if (S.fx === 'infill') {
+      objGrp.push(Tour.slider({ label: 'Density', min: 8, max: 45, step: 1,
+        value: S.density * 100, format: function (v) { return v + ' %'; },
+        onInput: function (v) { S.density = v / 100; upd(); } }));
+    }
+    ctrls.appendChild(el('div.fx__grp', null, objGrp));
+
+    ctrls.appendChild(el('div.fx__grp', null, [
+      el('span.fx__gt', { text: 'What the panel would say' }), read
+    ]));
+  }
+
+  function upd() {
+    gCv.render();
+    rCv.render();
+
+    var n = nLayers();
+    var rt = host.querySelector('[data-rtitle]');
+    if (rt) rt.textContent = S.fx === 'infill' ? 'the object, cut into bands' : 'the wall, in elevation';
+    var rn = host.querySelector('[data-rnote]');
+    if (rn) rn.textContent = S.fx === 'infill'
+      ? S.size.toFixed(1) + ' mm across, ' + S.objH + ' mm tall'
+      : 'displacement, exaggerated';
+    var gn = host.querySelector('[data-gnote]');
+    if (gn) gn.textContent = n + ' layers of ' + S.layer + ' mm';
+
+    if (S.fx === 'infill') {
+      var st = shiftStats();
+      var lo = spacingOf(mmAt(0)), hi = spacingOf(mmAt(0.5)), tp = spacingOf(mmAt(1));
+      var cell = Math.max(lo, hi, tp) / Math.min(lo, hi, tp);
+      var head =
+        'spacing <b>' + Math.min(lo, hi, tp).toFixed(2) + '</b> to <b>' +
+          Math.max(lo, hi, tp).toFixed(2) + ' mm</b><br>' +
+        'biggest cell <b>' + (cell * cell).toFixed(1) + '×</b> the smallest<br>';
+      if (S.staircase > 0) {
+        // Inside a band nothing moves, so the honest number is how many layer
+        // joins stack. The worst shift still exists, it just all happens at
+        // the handful of band changes rather than on every layer.
+        read.innerHTML = head +
+          'lines stack on <b class="good">' + st.stacked + '</b> of ' + st.joins +
+          ' layer joins<br>' +
+          '<span class="good">the other ' + (st.joins - st.stacked) +
+          ' are the band changes</span>';
+      } else {
+        read.innerHTML = head +
+          'line shift per layer <b class="' + (st.pct > 25 ? 'warn' : 'good') + '">' +
+            st.pct.toFixed(1) + '%</b>' +
+          (st.pct > 25
+            ? '<br><span class="warn">steep enough to walk the infill off its support. Reach for Staircase.</span>'
+            : '');
+      }
+    } else {
+      var offL = 0, peak = 0, i;
+      for (i = 0; i < n; i++) {
+        var t = mmAt(i / n);
+        if (t <= 0.001) offL++;
+        if (t > peak) peak = t;
+      }
+      read.innerHTML =
+        'peak thickness <b>' + peak.toFixed(2) + ' mm</b><br>' +
+        (offL > 0
+          ? '<b class="good">' + offL + '</b> of ' + n + ' layers have fuzzy off<br>' +
+            '<span class="good">no resampling on those, so no extra G-code</span>'
+          : 'the curve never reaches 0, so<br>every layer gets resampled');
+    }
+  }
+
+  function rebuild() { buildCtrls(); upd(); }
+
+  host.appendChild(el('div.fx', null, [gBox, rBox]));
+  host.appendChild(ctrls);
+  rebuild();
+
+  // The demo opens playing: the middle point rides up and down the object, so
+  // the band with the open cell sweeps through it and the idea lands before
+  // anyone has touched a control.
+  Tour.attract({
+    host: host, period: 7600,
+    hint: 'playing · touch anything to take over',
+    idleHint: 'drag to move · click to add · then try Staircase',
+    onFrame: function (k) { S.pts[1].z = 0.12 + k * 0.76; },
+    render: upd
+  });
+});
+</script>
+
+</body>
+</html>

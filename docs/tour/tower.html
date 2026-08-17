@@ -288,6 +288,7 @@
 Tour.demo('tower', function (host) {
   var el = Tour.el;
 
+  var passSlider = null, toolSlider = null;
   var S = {
     layers: 26,
     tools: 3,          // ordinary per-layer toolchanges come from this
@@ -393,10 +394,10 @@ Tour.demo('tower', function (host) {
   ]));
   side.appendChild(el('div.tw__grp', null, [
     el('span.tw__gt', { text: 'The scene' }),
-    Tour.slider({ label: 'Sandwich passes', min: 1, max: 3, step: 1, value: S.passes,
+    passSlider = Tour.slider({ label: 'Sandwich passes', min: 1, max: 3, step: 1, value: S.passes,
       format: function (v) { return v + (v === 1 ? ' pass' : ' passes'); },
       onInput: function (v) { S.passes = v; upd(); } }),
-    Tour.slider({ label: 'Tools in the scene', min: 1, max: 4, step: 1, value: S.tools,
+    toolSlider = Tour.slider({ label: 'Tools in the scene', min: 1, max: 4, step: 1, value: S.tools,
       onInput: function (v) { S.tools = v; upd(); } })
   ]));
   side.appendChild(el('div.tw__grp', null, [
@@ -428,6 +429,18 @@ Tour.demo('tower', function (host) {
 
   host.appendChild(el('div.tw', null, [box, side]));
   upd();
+
+  Tour.attract({
+    host: host, period: 9600, fps: 12,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.tools = 2 + Math.round(k * 2);
+      S.passes = 1 + Math.round(k * 2);
+      if (toolSlider) toolSlider.set(S.tools);
+      if (passSlider) passSlider.set(S.passes);
+    },
+    render: upd
+  });
 });
 </script>
 

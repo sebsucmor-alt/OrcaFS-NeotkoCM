@@ -650,6 +650,13 @@ Tour.demo('gravity', function (host) {
   }
 
   host.appendChild(el('div.gv', null, [box, side]));
+  Tour.attract({
+    host: host, period: 9200,
+    hint: 'playing · drag the block to take over',
+    idleHint: 'drag the block',
+    onFrame: function (k) { S.x = Math.max(S.w / 2, Math.min(1 - S.w / 2, 0.16 + k * 0.68)); },
+    render: update
+  });
   update();
 });
 </script>
