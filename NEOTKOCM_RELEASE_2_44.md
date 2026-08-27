@@ -7,8 +7,8 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 # Neotko 2.4.4 — on Snapmaker Orca 2.3.5 — Release Notes
 
-> ⚠️ **Review your generated G-code before long or production prints, especially if you
-> turn on anything marked **expert-only** below.**
+> ⚠️ **Review your generated Gcode before long or production prints, especially if you
+> turn on anything marked **expertonly** below.**
 
 **2.4.4 is an incremental release on top of 2.4.3** (see `NEOTKOCM_RELEASE_2_43.md` and earlier
 notes for the full feature set). Everything remains **opt-in**: at defaults the build behaves like
@@ -18,16 +18,16 @@ stock Snapmaker Orca.
 
 ## What's new in 2.4.4
 
-### Photo Studio comes to the G-code viewer
+### Photo Studio comes to the Gcode viewer
 
-**Where**: G-code **Preview** → the view-type dropdown → **RealColor** → **Photo mode…** in the legend.
+**Where**: Gcode **Preview** → the viewtype dropdown → **RealColor** → **Photo mode…** in the legend.
 
 RealColor already got close enough to a real photograph of a printed part that the obvious next
 question was why you still had to go back to the Prepare tab to light one. Now you don't. The
-lighting of the G-code view is no longer welded into the shader: the key and fill lights can be
+lighting of the Gcode view is no longer welded into the shader: the key and fill lights can be
 aimed, and the part is lit in the room rather than by a fixed lamp bolted to the camera.
 
-![The RealColor G-code view of a printed hotel key tag while the key light is swung around it: the lit and shaded sides of the raised lettering trade places, the sheen along the extrusion lines sweeps across the surface, and the shadows cast by the letters onto the face swing with the light](docs/images/RealColor-Photo.gif)
+![The RealColor Gcode view of a printed hotel key tag while the key light is swung around it: the lit and shaded sides of the raised lettering trade places, the sheen along the extrusion lines sweeps across the surface, and the shadows cast by the letters onto the face swing with the light](docs/images/RealColor-Photo.gif)
 
 **The lettering casts shadows onto its own face.** Until now nothing in RealColor knew where the
 light was coming from — raised text read as *sunken* rather than as lit from a direction, because
@@ -50,37 +50,37 @@ product shot, and it costs nothing to use: it is the same shadow already on scre
 Two things about the export are worth knowing, because both were found the hard way and both are
 invisible until you compare files side by side. The picture is rendered at twice the resolution and
 averaged down, which is what keeps the joints between extrusion lines from showing as speckle on a
-white background — the dark viewport was hiding them all along. And the screen-space effects are
+white background — the dark viewport was hiding them all along. And the screenspace effects are
 rescaled for the export, so the photo is not flatter than what you were looking at.
 
 > Export from the **Prepare** tab's Photo Mode is still parked: it frames the shot wrongly and a
 > button that writes a broken file is worse than no button. Use *Hide UI for screenshot* there, or
-> the G-code viewer's Photo Mode, which does export properly.
+> the Gcode viewer's Photo Mode, which does export properly.
 
 ### RealColor works past four filaments
 
-**Where**: G-code **Preview** → **RealColor**.
+**Where**: Gcode **Preview** → **RealColor**.
 
 Loading more than four filaments made tools 5 and up render in arbitrary colours, or simply black.
 Every colour and TD table in this view was sized for four — the tool count of the machine it was
 written for — and the shader read straight past the end of them.
 
 The limit is now sixteen. This matters for two things the view is genuinely good at and could not
-do before: **previewing someone else's G-code**, which can arrive with any number of tools, and
+do before: **previewing someone else's Gcode**, which can arrive with any number of tools, and
 **designing with more colours than you intend to print**, keeping the spare tools around until you
 decide which ones survive.
 
 ### The bed now heats for the hottest filament on the plate
 
-**Where**: nothing to switch on. It applies to any multi-material print.
+**Where**: nothing to switch on. It applies to any multimaterial print.
 
-The first-layer bed temperature used to be taken from whichever filament happened to print first.
+The firstlayer bed temperature used to be taken from whichever filament happened to print first.
 Put PLA at 65 °C and TPU at 35 °C on the same plate, start with the TPU, and the whole first layer
 was laid down on a 35 °C bed, PLA included. The bed temperature is now the **highest** among the
 filaments actually used on the plate, and the same rule applies at the transition to the second
 layer.
 
-> ⚠️ This changes the `M140` and `M190` your G-code emits on any multi-material plate whose
+> ⚠️ This changes the `M140` and `M190` your Gcode emits on any multimaterial plate whose
 > filaments ask for different bed temperatures. It goes in the safe direction, but it is a real
 > change to the first layer: worth reading the top of one file before a long print.
 
@@ -99,8 +99,8 @@ throw the rest away.
 **Where**: nothing to switch on. It applies to any painted Sandwich zone.
 
 On a plate with variable layer height, a painted zone could simply not be there in the sliced
-G-code, while the Prepare view kept showing it. It was deterministic: the same zones failed on every
-re-slice, and a fixed layer height never showed it at all.
+Gcode, while the Prepare view kept showing it. It was deterministic: the same zones failed on every
+reslice, and a fixed layer height never showed it at all.
 
 Up top, where variable layer height makes the layers thinnest, a gradient's thinner pass could come
 out under the minimum height the printer can lay down. That pass was dropped, and the pass below it
@@ -119,10 +119,10 @@ which ones:
 
 The slot numbers are the ones the Sandwich colour picker shows, so you can go straight to the zones
 concerned. Raising the layer height, narrowing the adaptive range, or rebalancing the recipe's pass
-ratios will all bring the full recipe back. Whether it is worth doing is your call: a single-colour
+ratios will all bring the full recipe back. Whether it is worth doing is your call: a singlecolour
 zone with a solid layer under it is a good part, just not the one you painted.
 
-> Prepare still draws the full recipe on those zones. The warning is what tells you the G-code
+> Prepare still draws the full recipe on those zones. The warning is what tells you the Gcode
 > differs, so it is worth reading when it appears.
 
 This was present in 2.4.3 and earlier, and it was not caused by anything in this release.
@@ -131,22 +131,22 @@ This was present in 2.4.3 and earlier, and it was not caused by anything in this
 
 Several of these come from Snapmaker's own 2.3.7 line and are folded in here.
 
-- **Opening a G-code file that has moved or been deleted** used to walk into the parser and die on a
+- **Opening a Gcode file that has moved or been deleted** used to walk into the parser and die on a
   null file handle. It now says the file does not exist, which is what you needed to know.
-- **Dropping the same G-code file twice** would flash you into an empty 3D editor. It stays on the
+- **Dropping the same Gcode file twice** would flash you into an empty 3D editor. It stays on the
   preview you were already looking at.
 - **Restoring a project could hand a plate somebody else's print job** when two plates competed for
   the same internal slot, leaking memory on the way. Each plate now gets a free slot or the load
   reports an error instead of silently mixing them up.
 - **A crash while ordering tools** on plates where a tool index ran past the flush table.
 - **A crash while slicing a painted model**, in the grid that walks polygon edges.
-- Two divide-by-zero crashes in the tips panel, and a preview that could scramble the legend.
+- Two dividebyzero crashes in the tips panel, and a preview that could scramble the legend.
 
 ### Every mixed recipe is reachable in the ColorStitch dialog
 
 **Where**: **ColorStitch** dialog → *Pattern style* → **MixedFilament recipe**.
 
-The recipe list stopped at five. That limit belongs to hand-typed patterns, where a recipe has to
+The recipe list stopped at five. That limit belongs to handtyped patterns, where a recipe has to
 fit in a single digit, and it never applied to the buttons: picking a recipe stores the recipe
 already expanded into physical filaments. So the sixth recipe onward was hidden for no reason.
 
@@ -155,7 +155,7 @@ opens the complete list, so the dialog cannot grow off the screen the way it onc
 
 ### Deleting a mixed filament no longer shifts the others
 
-Deleting the last custom row from the sidebar's Color Mix panel left it half-deleted: hidden from
+Deleting the last custom row from the sidebar's Color Mix panel left it halfdeleted: hidden from
 the list, still counted by the renumbering. Every virtual filament above it shifted by one, and a
 saved Sandwich recipe kept pointing at the old number, so it printed the wrong colour without
 warning. The three places that decide whether a row still counts now share one answer.
@@ -163,7 +163,7 @@ warning. The three places that decide whether a row still counts now share one a
 ### Patterns are snapshots
 
 A ColorStitch pattern is a record of what you chose, and it no longer changes meaning when the
-Mixed Filament list does. A hand-typed digit referring to a virtual filament used to be resolved
+Mixed Filament list does. A handtyped digit referring to a virtual filament used to be resolved
 again on every slice; it is now frozen into physical filaments when you save the pattern, the same
 way the recipe buttons have always worked. If you want a pattern to follow a changed recipe, repaint
 it.
@@ -201,7 +201,7 @@ The angle also covers a full turn now instead of half of one. 0 and 180 print th
 the fade runs in opposite directions, so you can flip a gradient end for end without touching
 anything else in the profile.
 
-> ⚠️ This changes the G-code of any PathBlend pass whose angle is not 0, and the default angle is 45.
+> ⚠️ This changes the Gcode of any PathBlend pass whose angle is not 0, and the default angle is 45.
 > If you have printed PathBlend parts you were happy with, they will come out different. That is the
 > point of the fix, but it is still a change, so run a test print before a long job.
 
@@ -220,12 +220,12 @@ two passes except **which part they belonged to**, so the ramps of different let
 one, and a letter's cap ended up buried inside another letter's ramp. Once a cap is no longer the
 last thing in its own sequence, nothing is left holding it after its ramp.
 
-Each part now keeps its own sequence. On the five-letter test the layer went from three broken
+Each part now keeps its own sequence. On the fiveletter test the layer went from three broken
 sequences to five complete ones, the prime tower came back to a normal size, and the toolpaths are
 clean. There is also a new check that says so out loud if a sequence ever comes out incomplete
 again, because this one stayed invisible for a long time.
 
-Assembled and split-to-parts now give you the same thing. You no longer need to split, and
+Assembled and split to parts now give you the same thing. You no longer need to split, and
 `ORCA_PB_ISLAND_CHAINS=0` is no longer a workaround anyone has to reach for.
 
 ### The painter tells you which zones have no angle set
@@ -346,10 +346,10 @@ that the outline, the solid and the highlight are all derived from, and the shap
 rather than triangle by triangle. On a dense mesh — a torus — this was invisible. On a box it was the
 whole effect.
 
-**This has been printed.** A part held up by leaning pillars came off the bed exactly as the G-code
+**This has been printed.** A part held up by leaning pillars came off the bed exactly as the Gcode
 described it, and a torus with a 0.2 mm gap came out clean.
 
-**Two support-zone bugs worth naming, because both were silent.** Applying an edit used to hand you
+**Two support zone bugs worth naming, because both were silent.** Applying an edit used to hand you
 a broken pillar while the preview showed the right one: the scene matches its copies of a volume by
 id and reuses the old triangles when the id has not changed, so the new mesh never arrived. And
 giving a zone its own roof filament used to schedule that tool on **every** layer of the zone, so the
@@ -406,7 +406,7 @@ exactly as it did.
 
 ---
 
-## Try it yourself
+## Try / Tests
 
 Three projects ship in the repository root:
 
@@ -418,7 +418,7 @@ Three projects ship in the repository root:
   it and switch the preview to **RealColor** to see the gradients turn. Before this release the 90
   degree block came out flat.
 
-![PathBlend Angle Test: the printed plate photographed against the light, next to the same plate in the RealColor G-code view. Callouts mark the thinnest steps, where the extrusion starts to fail](docs/images/PathBlend-Angle-Extrusion.png)
+![PathBlend Angle Test: the printed plate photographed against the light, next to the same plate in the RealColor Gcode view. Callouts mark the thinnest steps, where the extrusion starts to fail](docs/images/PathBlend-Angle-Extrusion.png)
 
 **That plate is also a minimum extrusion test.** The steps run from **0.03 mm up to 0.2 mm**, so
 somewhere along the row your printer stops laying a continuous line and starts skipping. Print it,
@@ -436,22 +436,22 @@ the UI: `ORCA_PB_MIN_H=0.045` before launching Orca. Leave it alone and you get 
 
 ## Notes
 
-- Photo mode and the G-code viewer's lighting are **opt-in**: with the mode closed, RealColor renders
+- Photo mode and the Gcode viewer's lighting are **opt in**: with the mode closed, RealColor renders
   exactly as it did in 2.4.3.
 - The lighting knobs live in Photo Mode's own window, **not** in RealColor's tuning panel. That panel
   holds values calibrated for colour accuracy and then frozen; mixing a "make it look nicer" control
   in among them is how a colour simulation quietly stops being one.
-- Shadows in the G-code viewer are cast by the **object mesh**, so they follow the shape you designed
+- Shadows in the Gcode viewer are cast by the **object mesh**, so they follow the shape you designed
   rather than the toolpath. Supports, brim and the wipe tower do not cast.
-- **Support zones are opt-in and per object.** A plate with no zones slices exactly as it did before.
+- **Support zones are opt in and per object.** A plate with no zones slices exactly as it did before.
   Creating the first zone on an object does write support settings onto **that object** — the values
   these pillars were tested with, only where you had not chosen your own, and all of them visible and
   removable from the object list. If the object was on tree supports it is switched to normal there
   too, keeping automatic or manual as you had it.
-- Two changes here alter G-code you did not ask to change: the **bed temperature** on multi-material
+- Two changes here alter Gcode you did not ask to change: the **bed temperature** on multimaterial
   plates, and the **Sandwich collapse** on plates with variable layer height, where affected zones
   now print solid in one colour instead of hollow in two. Both go in the safe direction and the
-  second one announces itself in the slice. Everything else is either opt-in or a fix for something
+  second one announces itself in the slice. Everything else is either opt in or a fix for something
   that was already wrong.
 
 ---
@@ -467,7 +467,7 @@ what people were running into.
 There are still cases where the number shown and the printed result disagree, and that is being
 tracked for a later version.
 
-**Until it is fixed, slice and look at the G-code preview in RealColor.** RealColor draws the effect
+**Until it is fixed, slice and look at the Gcode preview in RealColor.** RealColor draws the effect
 from the toolpaths that were actually generated, so for anything to do with angles and gradients it
-is the view to trust. The painter preview is a pre-slice approximation and cannot know everything
+is the view to trust. The painter preview is a pre slice approximation and cannot know everything
 the slicer will do.
