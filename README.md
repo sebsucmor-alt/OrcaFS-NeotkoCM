@@ -13,7 +13,7 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 >   with demos you can pull apart. Build a Sandwich and watch the printed colour resolve, drag a
 >   gradient's ramp, draw a layer-height curve, see what the wipe tower has to swallow. The colour
 >   maths and the dither are the slicer's own code, ported to run in your browser, so a recipe you
->   land on there is a recipe you can type into the app. 18 pages, 31 live demos, nothing to install.
+>   land on there is a recipe you can type into the app. 22 pages, 40 live demos, nothing to install.
 > - **[The video series](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/beginners.html)** — seven
 >   short animated walkthroughs, in order, from "why fork Orca at all" to painting a Sandwich click
 >   by click. The gentlest way in if you have never seen any of this.
@@ -36,10 +36,11 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 > in this document, with live demos running the slicer's own colour and pattern code. This file
 > stays the written reference; every page over there carries its `§` number so the two match up.
 
-> **On the name.** *FullSpectrum* is **Radu/Radoux's** fork, the base this one grew out of. This
-> feature pack is Neotko's own work on top of it, and the two are separate projects.
+> **On the name.** The fork is **Neotko**. *FullSpectrum* is **Radu/Radoux's** fork, which this
+> one grew out of. Radu joined the Snapmaker team and that work went into the official Snapmaker
+> Orca base, which is what this pack now sits on. The two are separate projects.
 
-This is Neotko's feature pack, ported on top of the official **Snapmaker Orca 2.3.4** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
+This is Neotko's feature pack, ported on top of the official **Snapmaker Orca 2.3.5** base. It adds a set of surface-quality, colour-blending, wall-generation and workflow features. Everything here is **opt-in** — with the new options left at their defaults, Snapmaker Orca behaves like the stock build. This guide explains what each feature does and how to use it; no programming knowledge required.
 
 > **About this build.** This is a feature pack meant for **pick & choose** — each block (ColorStitch, Penultimate, Libre Mode, NeoArachne, NeoTower, Align & Stack) can be adopted independently. Some surfaces are marked **(WIP)**: they are usable but still being refined, or not yet wired in this base. Review your G-code before long prints.
 
@@ -338,7 +339,7 @@ The **Studio** (bottom of the Sandwich Editor) generates a strip of colour swatc
 
 ## 2. Neoweaving + Monotonic Interlayer Nesting (WIP)
 
-> **(WIP — not wired in this build.)** Neoweaving and its companion, Monotonic Interlayer Nesting, are not yet ported to this Snapmaker 2.3.4 base and will arrive in a later release. The description below documents the intended behaviour.
+> **(WIP — not wired in this build.)** Neoweaving and its companion, Monotonic Interlayer Nesting, are not yet ported to this Snapmaker 2.3.5 base and will arrive in a later release. The description below documents the intended behaviour.
 
 **Neoweaving** alternates the Z height of successive fill lines on each layer: odd lines at the nominal height, even lines slightly higher (by an *amplitude*). The next layer inverts the pattern, so the elevated lines nestle into the recesses below — **mechanical interlocking** between layers, like puzzle pieces. It improves inter-layer adhesion and vibration damping without changing external dimensions. This is a structural technique, not a visual one.
 
@@ -906,7 +907,7 @@ A new option **Variable layer height (Experimental)** sits under **Tower type** 
 - scenes that **mix objects with different layer heights**, and
 - **adaptive / variable layer height combined with more than one filament**.
 
-> **(Experimental.)** The wipe-tower issue that previously left **empty/short tower layers** (missing "drawers" on real layers, including the *"empty first layer"* abort) is **fixed in 2.3.1** — the tower now stays coherent under variable layer height. The capability is proven and was solid on the **2.2 line (older FS099 fork)**, and is now consistent on this 2.3.4 base too. It is still flagged Experimental: review G-code before long multi-tool runs. The option only takes effect with Tower type = NeoTower.
+> **(Experimental.)** The wipe-tower issue that previously left **empty/short tower layers** (missing "drawers" on real layers, including the *"empty first layer"* abort) is **fixed in 2.3.1** — the tower now stays coherent under variable layer height. The capability is proven and was solid on the **2.2 line (older FS099 fork)**, and is now consistent on this 2.3.5 base too. It is still flagged Experimental: review G-code before long multi-tool runs. The option only takes effect with Tower type = NeoTower.
 
 ---
 

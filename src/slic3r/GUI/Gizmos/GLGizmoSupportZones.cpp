@@ -954,11 +954,14 @@ bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
 // con su borde; el contorno 2D es la SILUETA de ese parche, y el sólido son sus anillos. El porqué
 // de cada pieza vive con la declaración de `PatchGeom` en la cabecera.
 
+// 🚨 Nada de `M_PI`: no es estándar y en MSVC hace falta `_USE_MATH_DEFINES` antes de <cmath>.
+// Es una de las trampas que ya costó una sesión en este árbol.
+// 🚨 Y va a nivel de fichero, NO dentro de la función: MSVC exige capturar una constante local
+// dentro de una lambda sin captura por defecto (C3493), mientras que clang/gcc la dejan pasar.
+static constexpr double PI_D = 3.14159265358979323846;
+
 ExPolygons GLGizmoSupportZones::crop_shape(const Vec2d &centre_xy) const
 {
-    // 🚨 Nada de `M_PI`: no es estándar y en MSVC hace falta `_USE_MATH_DEFINES` antes de <cmath>.
-    // Es una de las trampas que ya costó una sesión en este árbol.
-    constexpr double PI_D = 3.14159265358979323846;
     ExPolygons out;
     auto disc = [](const Vec2d &c, double r) {
         Points pts;
