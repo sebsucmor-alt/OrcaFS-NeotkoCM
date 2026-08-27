@@ -27,8 +27,8 @@
 
 using namespace Slic3r;
 
-// Local mirror of SurfaceColorMix.hpp's NEOTKO_LOG macro (same pattern NeoTower.cpp uses as
-// NT_LOG) so this file doesn't need to pull in the unrelated, heavy SurfaceColorMix.hpp just for
+// Local mirror of ColorStitch.hpp's NEOTKO_LOG macro (same pattern NeoTower.cpp uses as
+// NT_LOG) so this file doesn't need to pull in the unrelated, heavy ColorStitch.hpp just for
 // one logging macro.
 #define TEXTUREBUMP_LOG(body) do { if (Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::TEXTUREBUMP)) { \
     std::ostringstream _tbdbg_; _tbdbg_ << body;                                                   \
@@ -443,7 +443,7 @@ void build_tables_for_configs(TextureBumpTableMap& tables, const std::vector<Tex
 // ---------------------------------------------------------------------------------------------
 // NEOTKO_TEXTUREBUMP_TAG — Fase 3: painted-zone spatial resolution, own canvas
 // (ModelVolume::texture_bump_paint_facets), per-LAYER resolution (not a wide top/penu band like
-// SurfaceColorMix::painted_footprint_in_z_range). Mirrors that function's scan/frame (must use
+// ColorStitch::painted_footprint_in_z_range). Mirrors that function's scan/frame (must use
 // po->trafo_centered(), never po->trafo() -- s161 lesson, see lessons_key.md) but does not filter
 // by triangle normal: Texture Bump paints walls, not horizontal top/bottom surfaces, so any
 // painted triangle whose Z range intersects this layer's slab counts regardless of facing.
@@ -521,7 +521,7 @@ std::vector<PaintedTextureBumpZone> painted_texture_bump_zones_in_layer(const Pr
 
     const double z_min = slice_z - layer_height / 2.0;
     const double z_max = slice_z + layer_height / 2.0;
-    const double z_tol = 0.02; // same fp slack SurfaceColorMix uses for its own Z-band scans
+    const double z_tol = 0.02; // same fp slack ColorStitch uses for its own Z-band scans
 
     const Transform3d trafo = po->trafo_centered(); // NEVER po->trafo() -- see lessons_key (s161)
 
@@ -533,7 +533,7 @@ std::vector<PaintedTextureBumpZone> painted_texture_bump_zones_in_layer(const Pr
         if (!mv || !mv->is_model_part())
             continue;
         const Transform3d vt = trafo * mv->get_matrix();
-        for (int slot = 1; slot < ModelVolume::COLORMIX_SLOT_COUNT; ++slot) {
+        for (int slot = 1; slot < ModelVolume::COLORSTITCH_SLOT_COUNT; ++slot) {
             const int zone_id = mv->texture_bump_slot_to_zone_id[slot];
             if (zone_id == 0)
                 continue; // unpainted
@@ -575,7 +575,7 @@ std::vector<PaintedTextureBumpZone> painted_texture_bump_zones_in_layer(const Pr
                 // -- Clipper silently drops zero-area geometry, so every wall triangle vanished
                 // from the mask everywhere except where the mesh happened to have real XY area
                 // (e.g. the top cap, whose triangles are horizontal). Unlike
-                // SurfaceColorMix::painted_footprint_in_z_range (top/bottom surfaces only, where a
+                // ColorStitch::painted_footprint_in_z_range (top/bottom surfaces only, where a
                 // straight projection IS the real footprint), a wall's meaningful footprint at a
                 // given layer is "where along the loop, in XY, does painted geometry exist at this
                 // Z" -- not a projected area. Fix: treat the (possibly degenerate) 3 projected
@@ -671,7 +671,7 @@ std::vector<TextureBumpConfig> collect_painted_texture_bump_configs(const PrintO
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part())
             continue;
-        for (int slot = 1; slot < ModelVolume::COLORMIX_SLOT_COUNT; ++slot) {
+        for (int slot = 1; slot < ModelVolume::COLORSTITCH_SLOT_COUNT; ++slot) {
             const int zone_id = mv->texture_bump_slot_to_zone_id[slot];
             if (zone_id == 0)
                 continue;

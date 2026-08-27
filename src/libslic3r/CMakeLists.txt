@@ -160,6 +160,8 @@ set(lisbslic3r_sources
     Feature/ZBump/ZBump.hpp
     Feature/Gravity/GravityFloor.cpp
     Feature/Gravity/GravityFloor.hpp
+    Feature/SupportZones/SupportZoneProbe.cpp
+    Feature/SupportZones/SupportZoneProbe.hpp
     Feature/HeightAdaptive/HeightCurve.cpp
     Feature/HeightAdaptive/HeightCurve.hpp
     InstanceContact.cpp
@@ -354,7 +356,7 @@ set(lisbslic3r_sources
     MutablePolygon.cpp
     MutablePolygon.hpp
     MutablePriorityQueue.hpp
-    # NEOTKO_DEBUG_TAG_START — centralised debug channels (extracted from SurfaceColorMix)
+    # NEOTKO_DEBUG_TAG_START — centralised debug channels (extracted from ColorStitch)
     NeoDebug.cpp
     NeoDebug.hpp
     # NEOTKO_DEBUG_TAG_END
@@ -374,10 +376,10 @@ set(lisbslic3r_sources
     NeoTowerZ.hpp
     # NEOTKO_NEOTOWER_TAG_END
     # NEOTKO_SANDWICH_TAG_START — Sandwich engine (Fase 2, increment 3): ColorSci
-    # color-science library + SurfaceColorMix engine + SurfaceEffectProfile manager.
+    # color-science library + ColorStitch engine + SurfaceEffectProfile manager.
     # Compiled as dead-code (no caller yet — hooks land in increment 4). Neoweaving /
     # MicroStitch dropped (Tier B). NeoDebug / PathBlendRuntime impls live in their
-    # own extracted .cpp (removed from SurfaceColorMix.cpp to avoid ODR clash).
+    # own extracted .cpp (removed from ColorStitch.cpp to avoid ODR clash).
     ColorSci/ColorSci.cpp
     ColorSci/ColorSci.hpp
     ColorSci/ColorPredict.cpp
@@ -394,8 +396,8 @@ set(lisbslic3r_sources
     ColorSci/StackFlatten.hpp
     ColorSci/WeaveLibrary.cpp
     ColorSci/WeaveLibrary.hpp
-    SurfaceColorMix.cpp
-    SurfaceColorMix.hpp
+    ColorStitch.cpp
+    ColorStitch.hpp
     SurfaceEffectProfile.cpp
     SurfaceEffectProfile.hpp
     # NEOTKO_SANDWICH_TAG_END

@@ -165,9 +165,12 @@ void DailyTipsDataRenderer::render_text(const ImVec2& start_pos, const ImVec2& s
     imgui.text(title_line);
     
     bool is_zh = false;
-    for (int i = 0; i < content_lines.size() - 1; i += 2) {
-        if ((content_lines[i] & 0x80) && (content_lines[i + 1] & 0x80))
-            is_zh = true;
+    // Upstream Snapmaker #750 (c7f426abf): content_lines.size() - 1 underflows on an empty string.
+    if (!content_lines.empty()) {
+        for (int i = 0; i < content_lines.size() - 1; i += 2) {
+            if ((content_lines[i] & 0x80) && (content_lines[i + 1] & 0x80))
+                is_zh = true;
+        }
     }
     if (!is_zh) {
         // problem in Chinese with spaces

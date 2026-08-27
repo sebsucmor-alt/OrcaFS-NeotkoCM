@@ -1,6 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Platform.hpp"
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_REALCOLOR_TAG — NeoDebug REALCOLOR channel (NEOTKO_LOG macro)
+#include "libslic3r/ColorStitch.hpp" // NEOTKO_REALCOLOR_TAG — NeoDebug REALCOLOR channel (NEOTKO_LOG macro)
 #include "GLShadersManager.hpp"
 #include "3DScene.hpp"
 #include "GUI_App.hpp"

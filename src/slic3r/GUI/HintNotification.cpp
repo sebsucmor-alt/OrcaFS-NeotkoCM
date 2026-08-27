@@ -317,6 +317,12 @@ void HintDatabase::init()
 }
 void HintDatabase::init_random_hint_id()
 {
+	// Upstream Snapmaker #750 (c7f426abf): rand() % 0 is a division by zero when hints.ini is
+	// missing or empty.
+	if (m_loaded_hints.empty()) {
+		m_hint_id = 0;
+		return;
+	}
 	srand(time(NULL));
 	m_hint_id = rand() % m_loaded_hints.size();
 }

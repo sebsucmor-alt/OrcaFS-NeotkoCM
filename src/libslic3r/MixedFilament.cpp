@@ -2558,7 +2558,7 @@ int MixedFilamentManager::mixed_index_from_filament_id(unsigned int filament_id,
     const size_t enabled_virtual_idx = size_t(filament_id - num_physical - 1);
     size_t enabled_seen = 0;
     for (size_t i = 0; i < m_mixed.size(); ++i) {
-        if (!m_mixed[i].enabled || m_mixed[i].deleted)
+        if (!m_mixed[i].is_live())
             continue;
         if (enabled_seen == enabled_virtual_idx)
             return int(i);
@@ -2580,7 +2580,7 @@ std::vector<size_t> MixedFilamentManager::mixed_filaments_using_physical(unsigne
     
     for (size_t j = 0; j < m_mixed.size(); ++j) {
         const MixedFilament& mf = m_mixed[j];
-        if (mf.deleted || !mf.enabled) continue;
+        if (!mf.is_live()) continue;
         
         bool depends_on_physical = false;
 
@@ -2763,7 +2763,7 @@ size_t MixedFilamentManager::enabled_count() const
 {
     size_t count = 0;
     for (const auto &mf : m_mixed)
-        if (mf.enabled && !mf.deleted)
+        if (mf.is_live())
             ++count;
     return count;
 }
@@ -2772,7 +2772,7 @@ std::vector<std::string> MixedFilamentManager::display_colors() const
 {
     std::vector<std::string> colors;
     for (const auto &mf : m_mixed)
-        if (mf.enabled && !mf.deleted)
+        if (mf.is_live())
             colors.push_back(mf.display_color);
     return colors;
 }

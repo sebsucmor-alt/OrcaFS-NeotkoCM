@@ -105,6 +105,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
 22. [Photo Mode (2.4.2) — a photo studio inside Prepare](#22-photo-mode-242--a-photo-studio-inside-prepare)
 23. [Height Adaptive Effects (2.4.3) — settings that change with height](#23-height-adaptive-effects-243--settings-that-change-with-height)
+24. [Support Zones (2.4.4) — supports you aim](#24-support-zones-244--supports-you-aim)
     - 23a. [Building the list](#23a-building-the-list)
     - 23b. [Drawing the curve](#23b-drawing-the-curve)
     - 23c. [Steps or ramp — and the number that decides](#23c-steps-or-ramp--and-the-number-that-decides)
@@ -1976,6 +1977,192 @@ damper, a clip, a bumper or a foot, out of one object with no modifiers and no b
 
 ---
 
+## 24. Support Zones (2.4.4) — supports you aim
+
+> **Requires Libre Mode** (§4). The engine has been printed, not only previewed.
+
+A support enforcer block has always been a box that says *what* to support. Everything about it below
+the object was thrown away, so the column fell straight down from the overhang no matter where you
+put the box.
+
+A support zone says *what* to hold up **and where the column may come down**.
+
+### The gesture
+
+You point at the surface you want held up, then you point at where it should land. That is the whole
+thing. Only surfaces facing downward can be picked, so the top of the part is never taken by mistake,
+and when several stacked surfaces sit under the cursor you cycle through them with the wheel.
+
+The pillar that appears follows the surface you picked rather than a bounding box. Its roof **is** the
+real patch, curve included, so it sits flush against a rounded underside instead of leaving a gap.
+
+### The panel draws what you are going to get
+
+The middle of the panel is a **section drawing of your pillar at true scale**. Forty five degrees on
+the slider is forty five degrees on screen. It shows the patch you took, the lean, the knee, the drop,
+the plate, and behind all of it a ghost wedge: everything the slicer can actually follow. A landing
+outside that wedge is one the slicer will not reach, and you see that as a shape rather than reading
+it as a number.
+
+Every zone on the object is a card with a small drawing of its own pillar, the colour of its roof
+filament on the cap, and a meter of what it catches. A zone that catches nothing is drawn hollow and
+dashed, in amber.
+
+### The lean has a ceiling, and the slicer sets it
+
+A support column can only step so far sideways from one layer to the next. That means there is a
+steepest angle it can actually follow, and asking for more produces a staircase in mid air.
+
+So the angle is what you set, and everything else follows from it. The pillar leans at that angle,
+reaches a **knee**, and drops straight down from there. Because the angle is the input rather than
+the outcome, a link the slicer cannot follow is not something you get warned about: it is something
+you cannot draw.
+
+### Two maps, and they answer opposite questions
+
+**Green** marks surface facing downward that a zone has already caught. This is the one that kills a
+quiet, common failure: a block that swallows solid material looks completely full on screen and
+produces nothing at all. Now it lights up nowhere and says so.
+
+**Red** marks surface that leans past your threshold and sits inside no zone at all. Simplify3D fills
+everything with support and lets you carve it back. This does the opposite: it shows you the gap and
+leaves the decision to you. The detail of both maps is adjustable, and it is a viewing preference,
+not a print setting.
+
+Both are drawn through the part, so a gap hiding behind the model is still a gap you can see. The
+part itself is ghosted while the tool is open, and how ghosted is up to you.
+
+Red on the skirt where the model meets the plate is expected. That surface really does lean past the
+threshold and really is inside no zone; it simply does not need support, because each layer there
+grows outward only a little from the one below. Deciding that properly is the slicer's own overhang
+test, not this map's job, so the map tells you the truth and leaves it to you.
+
+### Shaping the pillar
+
+**The footprint** is one of four: the whole patch, a round or square shape around the point you
+picked, or **painted** by hand. You start in square, because that is the one that teaches you the
+rest.
+
+**Cut or cover.** A shape can work two ways, and the difference is worth understanding because it is
+what decides how big a zone can get.
+
+- **Cut** trims the shape to the surface you picked, so it can never be bigger than the patch. The
+  roof is the surface itself.
+- **Cover** makes the shape *be* the section of the pillar. It can be bigger than the patch and grow
+  as far as you want, up to 200 mm. The roof still follows the real surface wherever there is one, so
+  a big circle over a curved underside still sits flush; where there is nothing under it, the roof
+  stays flat. It holds more area than it strictly needs, and that is the trade.
+
+Growing the outline of a patch always runs out eventually, because the shape folds through itself.
+Replacing the outline with a shape has no such ceiling. That is the whole reason **cover** exists.
+
+**Painting.** Pick the brush and drag on the surface to mark the area you want held up. The brush is
+the size of the slider, so a small brush draws a narrow strip and a big one fills a region in one
+sweep. Shift and drag rubs it out. Marks left in one stroke are joined into a continuous band rather
+than a row of dots.
+
+While the brush is chosen, the surface you *can* paint on is lit faintly: everything connected to
+where you are that faces downward. That canvas is deliberately much larger than the patch a single
+click would take — on a curve, one click gives you a tiny coplanar patch, and painting is exactly
+the tool for going past it. Painting does not cross onto a surface that faces up or sideways, because
+those need no support.
+
+Keep painting as long as you like; the tool does not jump to step 2 by itself the way a click does.
+While the brush is armed, the ordinary object drag is switched off, so a stroke that starts on the
+part paints instead of moving it.
+
+**The edge** — labelled **head** and **foot** — is adjustable at the roof and at the foot
+**separately**, in both directions. Set them differently and the pillar tapers: wide where it holds,
+narrow where it stands. Less material and less to break off. Grow it instead and it catches the edges
+of an eave. Pushing inward and growing outward have **different limits**, and both come from the
+shape itself: a convex footprint has no growing limit at all, while pushing inward always runs out
+somewhere.
+
+**Zones that touch and share their settings print as one column.** Two pillars meeting under the
+same overhang used to split the shared band, and the loser came out thinner all the way to the
+plate.
+
+### A soluble roof, and an ordinary body
+
+Each zone can take **its own filament for the roof**, chosen from a strip of colour chips rather than
+a menu. The roof is the part that touches your model, so a soluble roof gives you a clean underside
+while the body of the support stays whatever is cheap.
+
+The body deliberately stays on "same as the object", and that is not a shortcut. A support body set
+to follow the object is where the slicer dumps its purge; pinning a tool to it gives that up and
+grows the wipe tower instead, in exchange for controlling the part of the support that cares least
+about material.
+
+Two zones that touch and want different filaments do not merge, because they are no longer the same
+column.
+
+### It sets up the object for you
+
+Creating your first pillar on an object writes a set of support settings onto **that object**: normal
+supports, a 0.1 mm top gap, one support wall, three interface layers, solid rectilinear interface.
+They are the values these pillars were tested and printed with, and they are per object settings you
+can see, undo, or remove from the object list.
+
+Two rules keep that honest. It only writes a setting you have not already set yourself. And if the
+object was on **tree** supports it is switched to normal, keeping whether it was automatic or manual,
+because the tree generator does not know about the corridor: with tree supports the lean and the knee
+you draw here would not come out.
+
+Support style is set to Snug the moment you open the tool, for the same reason. With any other style
+the support grid re-aligns itself to every layer, so a column that should slide comes out in steps.
+
+### Zones you can reopen
+
+A pillar built with this tool remembers the two clicks that made it. Pick the **pencil** on its card
+and the whole gesture comes back into the panel: the patch, the landing, the footprint, the edges and
+the angle. Change what you want and press **Apply changes**. Nothing is written until you apply, and
+one edit is one undo.
+
+That memory only holds while the zone is **locked**, which is what the padlock on the card means. Move,
+rotate or scale the zone with the ordinary gizmos and the link between the gesture and the geometry
+is broken, so the lock is gone and the zone becomes an ordinary support block. It still prints exactly
+as it is; it just cannot be reopened. You can also unlock it deliberately. Either way it is a one way
+door, and making another zone is two clicks, which is what makes that trade fair.
+
+Duplicating a zone gives you an ordinary block too, for the same reason: the copy sits somewhere else,
+so the gesture that made the original does not describe it any more.
+
+While you are editing, the two picks and the landing stay put. Editing is for the dials; the clicks
+are for making a new one.
+
+### Why this instead of tree supports
+
+A drawn pillar is one column that goes where you put it. The toolhead prints it in one place and moves
+on.
+
+Tree supports branch, and every branch is another island on the layer, which is another travel and
+another retraction. Fewer retractions is not only faster: it is much kinder to the materials that
+hate being pulled back, and those are exactly the flexible and moisture sensitive filaments where
+stringing and grinding show up first.
+
+You also decide where the foot lands, so it can stay off a delicate surface instead of finding one on
+its way down.
+
+### What it will not do
+
+- **A zone only makes support where it finds surface that needs it.** That is deliberate and it is
+  what stops it fabricating support nobody asked for, but it does limit what shapes are possible.
+- **The whole patch mode follows the flat surface it starts on.** On a large flat ceiling that means
+  the whole ceiling, which is what the round and square cuts are there for. That mode is also the one
+  that cannot be expanded, because there is no shape to put in the outline's place — which is why the
+  tool does not start there.
+- **The edge slider runs out on the way in.** Push the edge inward far enough and the shape would
+  fold through itself, so the limit shrinks as you go. That is the shape telling you it has no more
+  room. Growing outward usually has no such limit; if you need much more than the patch allows, that
+  is what **cover** is for.
+- **A patch that folds over itself in plan view is flagged, not fixed.** A band that wraps past the
+  vertical projects onto itself from above, so the foot of the pillar would overlap itself. The panel
+  says so and leaves the fix to you: crop it smaller, or pick a flatter part of the surface.
+- **Painting costs CPU.** Every mark is real geometry being clipped against the surface, and a long
+  stroke is a lot of it.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
@@ -2024,6 +2211,9 @@ damper, a clip, a bumper or a foot, out of one object with no modifiers and no b
 | NeoWave contact layer (WIP, print-pending) | Support → Advanced → **Support neoweave contact** toggle (§12a) |
 | Painter Pro Mode (Precision / Paint perimeters only / Extra walls / Rectangle & Polygon masks) | Left-side gizmo toolbar → **Color Painting** → **Pro Mode** section *(always available, no Libre Mode needed)* |
 | NeoStitch Interlock (WIP, ⚠️ untested) | Strength → **NeoStitch Interlock** (§14) |
+| Support Zones (§24) | Left-side gizmo toolbar *(needs Libre Mode active)* |
+| Support Zones · edit a zone (§24) | Its card in the panel → **pencil** *(only while the padlock is on)* |
+| Support Zones · roof filament (§24) | Select the zone in the panel → **Roof filament** chips |
 | Font kerning / Typographic Spacing (§18) | Left-side gizmo toolbar → **Text** → Advanced → **Font kerning** |
 
 ---

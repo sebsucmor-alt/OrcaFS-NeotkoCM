@@ -12,7 +12,7 @@
 
 // NEOTKO_ZBUMP_TAG — Top Surface Z relief: deterministic image-driven height modulation of the
 // top-fill. Independent of Texture Bump (Feature/TextureBump/, wall/XY domain) and of
-// PathBlend/Sandwich (Fill.cpp/SurfaceColorMix.cpp) — no shared code. Point-to-point relief
+// PathBlend/Sandwich (Fill.cpp/ColorStitch.cpp) — no shared code. Point-to-point relief
 // (§7.3/§7.5 of the plan) writes per-vertex offsets directly onto ExtrusionPath::zbump_z_offset;
 // no MultiPassSubLayer/dispatcher involvement at all. See docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md.
 // Single config per object (no painted zones), gated to a "true top" (no layers above).

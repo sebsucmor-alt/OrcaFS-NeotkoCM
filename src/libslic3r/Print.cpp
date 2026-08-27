@@ -17,7 +17,7 @@
 #include "GCode/WipeTower2.hpp"
 #include "NeoTower.hpp"  // NEOTKO_NEOTOWER_TAG
 #include "SurfaceEffectProfile.hpp"  // NEOTKO_LIBRE_TAG — profile-aware wipe-tower gate
-#include "SurfaceColorMix.hpp"        // NEOTKO_LIBRE_TAG — SurfacePassStack::resolve()
+#include "ColorStitch.hpp"        // NEOTKO_LIBRE_TAG — SurfacePassStack::resolve()
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
 #include "Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 0.3 — slice-before-perimeters ordering
@@ -957,6 +957,33 @@ std::vector<unsigned int> Print::support_material_extruders() const
             	unsigned int i = (unsigned int)object->config().support_interface_filament - 1;
                 extruders.emplace_back((i >= num_extruders) ? 0 : i);
             }
+
+            // NEOTKO_SUPPORTZONES_TAG s286c F4 — los materiales POR ZONA también son extrusores
+            // usados, y esto es lo que faltaba.
+            //
+            // 🚨 Sin esta vuelta, `Print::extruders()` no ve el filamento de una zona, el
+            // GCodeWriter nunca construye ese `Extruder`, y en cuanto el planificador programa el
+            // cambio de herramienta, `set_extruder()` cae sobre un objeto que no existe:
+            // EXC_BAD_ACCESS dentro de retract_for_toolchange, con la config del extrusor en una
+            // dirección basura. El crash no estaba en el reparto: estaba en no declarar a tiempo
+            // qué herramientas hacen falta.
+            //
+            // Se lee del MODELO y no del soporte ya generado, a propósito: esta función se llama
+            // antes de laminar, cuando todavía no hay `support_family_areas` que consultar.
+            if (const ModelObject *mo = object->model_object(); mo != nullptr)
+                for (const ModelVolume *v : mo->volumes) {
+                    if (v == nullptr || ! v->is_support_enforcer())
+                        continue;
+                    for (const char *key : { "support_filament", "support_interface_filament" }) {
+                        if (! v->config.has(key))
+                            continue;
+                        const int f = v->config.opt_int(key);
+                        if (f <= 0)
+                            continue;   // 0 = como el objeto, y ése ya está contado arriba
+                        const unsigned int i = (unsigned int)f - 1;
+                        extruders.emplace_back((i >= num_extruders) ? 0 : i);
+                    }
+                }
         }
     }
 
@@ -1605,7 +1632,7 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         && (neotko_any_multi_tool_active(m_print_regions) || neotko_any_profile_with_mp_active(m_objects))
         && neotko_estimated_virtual_tool_count(m_print_regions) >= 2
         && !NeoTower::is_enabled(m_config)) {
-        return {L("Surface Sandwich / MultiPass / ColorMix require the NeoTower tower type: "
+        return {L("Surface Sandwich / MultiPass / ColorStitch require the NeoTower tower type: "
                   "their sub-layer purges use variable layer heights that the Classic wipe tower "
                   "cannot handle.\nSet Prime tower → Tower type to \"NeoTower\"."),
                 nullptr, "neotko_tower_type"};
@@ -2463,24 +2490,24 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 return false;
             if (!model_volume1.fuzzy_skin_facets.equals(model_volume2.fuzzy_skin_facets))
                 return false;
-            // NEOTKO_PROFILE_TAG — re-slice when the ColorMix Painter paint
+            // NEOTKO_PROFILE_TAG — re-slice when the ColorStitch Painter paint
             // changes or the slot→profile mapping is edited. Without this,
             // Print::apply() considers the volume identical to its previous
             // snapshot and skips re-slicing (the user reports first-slice
             // does nothing; only save+reload triggers reprocessing).
-            if (!model_volume1.color_mix_paint_facets.equals(model_volume2.color_mix_paint_facets))
+            if (!model_volume1.colorstitch_paint_facets.equals(model_volume2.colorstitch_paint_facets))
                 return false;
             for (int s = 0; s < 16; ++s)
-                if (model_volume1.colormix_slot_to_profile_id[s]
-                    != model_volume2.colormix_slot_to_profile_id[s])
+                if (model_volume1.colorstitch_slot_to_profile_id[s]
+                    != model_volume2.colorstitch_slot_to_profile_id[s])
                     return false;
             // NEOTKO_COLORSTITCH_TAG — el CONTENIDO del perfil (stacks/tools) vive en
             // SurfaceEffectProfileManager, fuera del modelo. El painter baja una huella
-            // de ese contenido al volumen (colormix_profiles_fingerprint); compararla
+            // de ese contenido al volumen (colorstitch_profiles_fingerprint); compararla
             // aquí hace que editar un color/tool de un perfil ya pintado dispare re-slice
             // sin tener que "mover algo más". Aditivo: a lo sumo re-slicea de más.
-            if (model_volume1.colormix_profiles_fingerprint
-                != model_volume2.colormix_profiles_fingerprint)
+            if (model_volume1.colorstitch_profiles_fingerprint
+                != model_volume2.colorstitch_profiles_fingerprint)
                 return false;
             if (model_volume1.config.get() != model_volume2.config.get())
                 return false;
@@ -2488,10 +2515,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         // NEOTKO_STICKER_TAG — objects with different sticker piles must not share
         // slicing results (same reason as painted facets above: the sticker mask
         // splits the top surfaces differently per object).
-        if (model_obj1->colormix_stickers.size() != model_obj2->colormix_stickers.size())
+        if (model_obj1->colorstitch_stickers.size() != model_obj2->colorstitch_stickers.size())
             return false;
-        for (size_t si = 0; si < model_obj1->colormix_stickers.size(); ++si)
-            if (model_obj1->colormix_stickers[si] != model_obj2->colormix_stickers[si])
+        for (size_t si = 0; si < model_obj1->colorstitch_stickers.size(); ++si)
+            if (model_obj1->colorstitch_stickers[si] != model_obj2->colorstitch_stickers[si])
                 return false;
         //if (!object1->config().equals(object2->config()))
         //    return false;
@@ -3266,12 +3293,12 @@ static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
         for (const ModelVolume* mv : mo->volumes) {
             if (mv == nullptr || !mv->is_model_part()) continue;
             for (int slot = 1; slot < 16; ++slot) {
-                const int pid = mv->colormix_slot_to_profile_id[slot];
+                const int pid = mv->colorstitch_slot_to_profile_id[slot];
                 if (pid <= 0) continue;
                 const SurfaceEffectProfile* p =
                     SurfaceEffectProfileManager::get().find(pid);
                 if (p == nullptr) continue;
-                if (p->colormix.present || p->multipass.present || p->pathblend.present)
+                if (p->colorstitch.present || p->multipass.present || p->pathblend.present)
                     return true;
                 auto _stack_nonempty = [](const std::string& js) {
                     if (js.empty()) return false;
@@ -3344,7 +3371,7 @@ static size_t neotko_estimated_virtual_tool_count(const PrintRegionPtrs& print_r
 
 bool Print::has_wipe_tower() const
 {
-    // NEOTKO_LIBRE_TAG_START — MultiPass/ColorMix/PathBlend need the prime tower even with
+    // NEOTKO_LIBRE_TAG_START — MultiPass/ColorStitch/PathBlend need the prime tower even with
     // 1 physical filament and even if enable_prime_tower is off — sublayer priming has no
     // other purge path. Must be OUTSIDE the enable_prime_tower guard.
     if (!m_config.spiral_mode.value &&
@@ -3430,7 +3457,7 @@ void Print::_make_wipe_tower()
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2 ? true : false);
 
     // NEOTKO_LIBRE_TAG_START — ToolOrdering::has_wipe_tower() returns false when only 1
-    // physical extruder is seen, even if Neotko virtual tools (MultiPass/ColorMix passes)
+    // physical extruder is seen, even if Neotko virtual tools (MultiPass/ColorStitch passes)
     // are active and require purging. Force the tower when virtual tools ≥ 2 (post-slice
     // real count, or pre-slice config estimate).
     const size_t neotko_vtool  = neotko_virtual_tool_count(m_objects);
@@ -3445,7 +3472,7 @@ void Print::_make_wipe_tower()
 
     // NEOTKO_NEOTOWER_TAG_START — increment #4 wiring. NeoTower activates when explicitly
     // enabled (neotko_tower_type != Classic) OR when neotko_forces_tower (single-filament
-    // MultiPass/ColorMix/PathBlend requires purging WipeTower2 cannot plan). The latter is
+    // MultiPass/ColorStitch/PathBlend requires purging WipeTower2 cannot plan). The latter is
     // an AUTO-PROMOTE safety net: Classic was selected but post-slice virtual tools need
     // NeoTower purging. NeoTower drives its own internal WipeTower2 and produces the whole
     // tool_changes plan; GCode dispatches via get_tcr()/get_finish_layer().
@@ -3464,7 +3491,7 @@ void Print::_make_wipe_tower()
             m_wipe_tower_data.tool_ordering.first_extruder());
 
         // Pre-TC structural layers: when only one physical filament is used
-        // (single-filament MultiPass / PathBlend / ColorMix), ToolOrdering never sets
+        // (single-filament MultiPass / PathBlend / ColorStitch), ToolOrdering never sets
         // has_wipe_tower=true for layers before the first real toolchange. Without it,
         // GCode won't call the tower there and the tower base floats. Force
         // has_wipe_tower=true on all non-sublayer layers preceding the first real-TC

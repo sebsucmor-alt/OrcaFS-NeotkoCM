@@ -4,7 +4,7 @@
 #include "GLGizmoBase.hpp"
 
 #include "slic3r/GUI/GLModel.hpp"
-#include "slic3r/GUI/ColorMixPaintPreview.hpp"   // s233 — WeaveParams compartido con la vista 3D normal
+#include "slic3r/GUI/ColorStitchPaintPreview.hpp"   // s233 — WeaveParams compartido con la vista 3D normal
 
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -124,11 +124,11 @@ public:
     // WeaveParams has on=true, render() drives the mm_gouraud weave uniforms so
     // the painted patch shows the woven tool sequence instead of a flat colour.
     // Parallel-indexed to m_ebt_colors (slot s → m_ebt_weave[s]); empty = all flat.
-    // s233 — la definición se mudó a slic3r/GUI/ColorMixPaintPreview.hpp: la vista 3D
+    // s233 — la definición se mudó a slic3r/GUI/ColorStitchPaintPreview.hpp: la vista 3D
     // normal dibuja el mismo tejido sin gizmo, así que el tipo ya no puede vivir dentro
     // de una clase del painter. El alias mantiene intacto `TriangleSelectorPatch::
     // WeaveParams` para todo el código que ya lo usaba.
-    using WeaveParams = Slic3r::GUI::ColorMixPaintPreview::WeaveParams;
+    using WeaveParams = Slic3r::GUI::ColorStitchPaintPreview::WeaveParams;
     void set_ebt_weave(const std::vector<WeaveParams> ebt_weave) { m_ebt_weave = ebt_weave; }
 
     // NEOTKO_COLORSTITCH_TAG — per-ISLAND weave. `facet_weave_idx` maps a facet index
@@ -438,7 +438,7 @@ private:
     mutable RaycastResult m_rr = {Vec2d::Zero(), -1, Vec3f::Zero(), 0};
 
 protected:
-    // NEOTKO_COLORSTITCH_TAG — s130 port: raycast-cache accessors used by GLGizmoColorMixPainter.
+    // NEOTKO_COLORSTITCH_TAG — s130 port: raycast-cache accessors used by GLGizmoColorStitchPainter.
     int          rr_mesh_id() const { return m_rr.mesh_id; }
     const Vec3f& rr_hit()     const { return m_rr.hit; }
     int          rr_facet()   const { return (int)m_rr.facet; }

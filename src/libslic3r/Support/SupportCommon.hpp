@@ -77,7 +77,11 @@ void generate_support_toolpaths(
     const SupportGeneratorLayersPtr   	&top_contacts,
     const SupportGeneratorLayersPtr   	&intermediate_layers,
 	const SupportGeneratorLayersPtr   	&interface_layers,
-    const SupportGeneratorLayersPtr   	&base_interface_layers);
+    const SupportGeneratorLayersPtr   	&base_interface_layers,
+    // NEOTKO_SUPPORTZONES_TAG s286c F4 — opcional y por defecto nulo: sólo lo pasa el generador
+    // clásico, y sólo hace algo cuando hay más de una familia de zonas (materiales distintos). Los
+    // demás llamantes, WaveSupport incluido, no se enteran de que existe.
+    const PrintObject                   *object_for_families = nullptr);
 
 // NEOTKO_WAVESUPPORT_TAG_TOOLPATHS — forked copy of generate_support_toolpaths() dedicated to
 // SupportType::stWaveSupport (WAVESUPPORT_PLAN.md Fase 2b). Literal copy as of the fork date; the

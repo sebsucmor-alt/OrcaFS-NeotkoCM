@@ -11,7 +11,7 @@
 #include "libslic3r/PresetBundle.hpp"
 //BBS: add convex hull logic for toolpath check
 #include "libslic3r/Geometry/ConvexHull.hpp"
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_REALCOLOR_TAG — NeoDebug REALCOLOR channel (NEOTKO_LOG macro)
+#include "libslic3r/ColorStitch.hpp" // NEOTKO_REALCOLOR_TAG — NeoDebug REALCOLOR channel (NEOTKO_LOG macro)
 
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
@@ -1259,15 +1259,15 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
     log_memory_used("Refreshed G-code extrusion paths, ");
 }
 
-// NEOTKO_REALCOLOR_TAG: same TD read idiom as GLGizmoColorMixPainter::gizmo_materials()
-// (GLGizmoColorMixPainter.cpp) and SandwichDialog — app_config keys neotko_td_1..4, scalar,
+// NEOTKO_REALCOLOR_TAG: same TD read idiom as GLGizmoColorStitchPainter::gizmo_materials()
+// (GLGizmoColorStitchPainter.cpp) and SandwichDialog — app_config keys neotko_td_1..4, scalar,
 // clamped [0.01,10.0]. rgb comes from the raw filament hex (str_tool_colors), NOT the
 // gamma/shell-adjusted m_tools.m_tool_colors, so M4's Beer-Lambert math matches the
 // Sandwich Editor/Painter preview exactly.
 //
 // UNIT FIX (s166): neotko_td_N is defined everywhere ELSE in ratio-units — a fraction of
 // ONE nominal layer height, per ColorSci.hpp's own doc comment and confirmed by every other
-// consumer (SandwichDialog::blend_preview_zone, GLGizmoColorMixPainter::gizmo_materials):
+// consumer (SandwichDialog::blend_preview_zone, GLGizmoColorStitchPainter::gizmo_materials):
 // they always divide a `ratio` that is itself layer-height-relative (SurfacePass::ratio,
 // Slice::ratio) by this same td, never a physical mm length. RealColor is the one place that
 // composites against a REAL mm thickness per peel (`u_thickness` = render_path's physical
@@ -1277,7 +1277,7 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
 // material ~1/layer_height times MORE transmissive than the gizmo/painter previews (at a
 // typical 0.2mm layer height, ~5x too translucent), so multi-pass tops never converged to
 // solid within any sane peel budget and rendered washed/gray. Bake the same nominal layer
-// height the gizmo uses (GLGizmoColorMixPainter_layer_height's exact idiom) into td here,
+// height the gizmo uses (GLGizmoColorStitchPainter_layer_height's exact idiom) into td here,
 // once, at the source — every downstream consumer (accum shader's u_material_td[], and the
 // n_max peel-budget heuristic in render_toolpaths_realcolor which already compares td against
 // a mm-space min_layer_h) then works in consistent mm-space without further changes.
@@ -8535,7 +8535,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 ImGui::SameLine(checkbox_pos);
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0, 0.0)); // ensure no padding active
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0, 0.0)); // ensure no item spacing active
-                ImGui::Text(into_u8(visible ? ImGui::VisibleIcon : ImGui::HiddenIcon).c_str(), ImVec2(16 * m_scale, 16 * m_scale));
+                ImGui::Text("%s", into_u8(visible ? ImGui::VisibleIcon : ImGui::HiddenIcon).c_str());
                 ImGui::PopStyleVar(2);
             }
         }

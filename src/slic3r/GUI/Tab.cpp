@@ -52,7 +52,7 @@
 #include "MarkdownTip.hpp"
 #include "Search.hpp"
 #include "BedShapeDialog.hpp"
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_COLORMIX_TAG — s130 UI port
+#include "libslic3r/ColorStitch.hpp" // NEOTKO_COLORSTITCH_TAG — s130 UI port
 #include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — s130
 #include "libslic3r/SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — s130
 #include "libslic3r/ColorSci/GradientRamp.hpp" // NEOTKO_COLORSCI_TAG — s130
@@ -73,13 +73,13 @@
 namespace Slic3r {
 namespace GUI {
 
-// NEOTKO_COLORMIX_TAG_START - ColorMix Pattern Dialog (no separate file needed)
+// NEOTKO_COLORSTITCH_TAG_START - ColorStitch Pattern Dialog (no separate file needed)
 // Two-band dialog: Top surface + Penultimate surface, each with checkbox toggle
 // and direct pattern editing. Checkboxes control interlayer_colormix_surface.
 // Surface values: 0=Both, 1=Top only, 2=Penultimate only.
 namespace {
 
-// NEOTKO_COLORMIX_TAG — s60: GradientStripPanel
+// NEOTKO_COLORSTITCH_TAG — s60: GradientStripPanel
 // Paints a horizontal strip showing the actual colours produced by the current
 // gradient settings. Each line in the dither sequence becomes one 1-px-wide
 // vertical stripe coloured with the chosen filament. This gives the user the
@@ -219,7 +219,7 @@ private:
 };
 
 // NEOTKO_MULTIPASS_TAG — ColorSwatch (forward-moved from below to be visible
-// from ColorMixPatternDialog::build_slots_box). Small coloured panel
+// from ColorStitchPatternDialog::build_slots_box). Small coloured panel
 // used in the gradient slot pickers.
 class ColorSwatch : public wxPanel {
     wxColour m_col;
@@ -242,14 +242,14 @@ public:
     }
 };
 
-class ColorMixPatternDialog : public wxDialog
+class ColorStitchPatternDialog : public wxDialog
 {
 public:
     // Single pattern — surface (Top/Penu/Both) is controlled by the SurfaceColorMixer combos.
     // use_virtual: when true, virtual Mixed Filament buttons are shown and pattern digits
     // 5-9 are accepted (requires interlayer_colormix_use_virtual=true in config, C0 gate).
-    ColorMixPatternDialog(wxWindow*                                       parent,
-                          const std::vector<Slic3r::ColorMixOption>&      options,
+    ColorStitchPatternDialog(wxWindow*                                       parent,
+                          const std::vector<Slic3r::ColorStitchOption>&      options,
                           const std::vector<std::string>&                 filament_colours,
                           const std::string&                              cur_pattern,
                           bool                                            use_virtual = false,
@@ -273,6 +273,11 @@ public:
             if (opt.filament_id >= 1 && opt.filament_id <= 9) {
                 char digit = static_cast<char>('0' + opt.filament_id);
                 m_digit_colors[digit] = hex_to_colour(opt.display_color);
+                // NEOTKO_COLORSTITCH_TAG (s275) — remember how to expand a virtual digit into
+                // physical digits, so get_pattern() can freeze it on the way out. See the
+                // comment there for the why.
+                if (!opt.is_physical && !opt.pattern.empty())
+                    m_virtual_expansion[digit] = opt.pattern;
             }
         }
         // Pull current gradient config values from m_cfg (read-only here;
@@ -281,13 +286,24 @@ public:
         build_ui(options);
     }
 
-    std::string get_pattern() const { return m_pattern; }
+    // NEOTKO_COLORSTITCH_TAG (s275) — a stored pattern is a SNAPSHOT, never a live reference.
+    // Digits '1'-'4' already are: they name a physical filament and mean whatever sits in that
+    // slot. Recipes picked with a button already are too, because the button stores the recipe
+    // pre-expanded into physical digits. The one exception was a hand-typed virtual digit
+    // ('5'-'9'), which used to be re-resolved against the live MixedFilament list on every
+    // slice — so reordering or disabling a virtual silently changed what an old pattern meant.
+    // Freezing it here, at the single point where the dialog hands its result to the config,
+    // makes every stored pattern behave the same way.
+    // A virtual digit we cannot expand (its row is gone) is left untouched on purpose: the
+    // engine's fallback then just stops applying ColorStitch, which is recoverable, whereas
+    // dropping the digit would destroy the user's work for good.
+    std::string get_pattern() const { return freeze_virtual_digits(m_pattern); }
     // Compatibility aliases — both surfaces share the same pattern now.
-    std::string get_top()     const { return m_pattern; }
-    std::string get_penu()    const { return m_pattern; }
+    std::string get_top()     const { return freeze_virtual_digits(m_pattern); }
+    std::string get_penu()    const { return freeze_virtual_digits(m_pattern); }
     int         get_surface() const { return 0; }
 
-    // NEOTKO_COLORMIX_TAG — s60: gradient getters consumed by open_edit_for()
+    // NEOTKO_COLORSTITCH_TAG — s60: gradient getters consumed by open_edit_for()
     // after the dialog closes with OK. Each returns the value as edited in the
     // dialog widgets; the caller writes them back to DynamicPrintConfig.
     // s195: the UI selector now carries CATEGORIES (custom/Mixed/weave/blends/
@@ -317,8 +333,8 @@ public:
     int    get_tool_c()          const { return m_choice_tool_c     ? m_choice_tool_c->GetSelection()    : m_tool_c; }
     int    get_tool_d()          const { return m_choice_tool_d     ? m_choice_tool_d->GetSelection()    : m_tool_d; }
     int    get_grad_angle()      const { return m_sc_angle           ? m_sc_angle->GetValue()              : m_grad_angle; }
-    int    get_grad_repetitions() const { return m_sc_repetitions     ? m_sc_repetitions->GetValue()        : m_grad_repetitions; } // NEOTKO_COLORMIX_TAG — s80
-    // NEOTKO_COLORMIX_TAG — s90: ported from the legacy SurfaceColorMixerDialog.
+    int    get_grad_repetitions() const { return m_sc_repetitions     ? m_sc_repetitions->GetValue()        : m_grad_repetitions; } // NEOTKO_COLORSTITCH_TAG — s80
+    // NEOTKO_COLORSTITCH_TAG — s90: ported from the legacy SurfaceColorMixerDialog.
     // Global (single key, no penu mirror) — both Top/Penu Advanced dialogs read
     // and write the SAME value; last-write-wins is the intended behavior.
     double get_grad_min_length() const { return m_sc_min_length      ? m_sc_min_length->GetValue()        : m_grad_min_length; }
@@ -331,6 +347,24 @@ private:
     int                          m_surface_id  = 0; // 0 = Top, 1 = Penultimate
     wxPanel*                     m_disp = nullptr;
     std::map<char, wxColour>     m_digit_colors; // digit '1'-'9' → display color
+    // digit '5'-'9' → that recipe already expanded into physical digits (see get_pattern()).
+    std::map<char, std::string>  m_virtual_expansion;
+
+    std::string freeze_virtual_digits(const std::string& pattern) const
+    {
+        if (m_virtual_expansion.empty())
+            return pattern;
+        std::string out;
+        out.reserve(pattern.size());
+        for (char c : pattern) {
+            auto it = m_virtual_expansion.find(c);
+            if (it != m_virtual_expansion.end())
+                out += it->second;
+            else
+                out += c;
+        }
+        return out;
+    }
 
     // ── Gradient state (mirrors config; populated by load_grad_from_config) ──
     int    m_grad_mode      = 0;
@@ -350,8 +384,8 @@ private:
     int    m_tool_c         = 2;
     int    m_tool_d         = 3;
     int    m_grad_angle     = -1; // -1 = Auto (use OrcaSlicer defaults)
-    int    m_grad_repetitions = 1; // NEOTKO_COLORMIX_TAG — s80: gradient repeats
-    double m_grad_min_length  = 0.0; // NEOTKO_COLORMIX_TAG — s90: global "ColorMix min. line length" (mm); default 0 = colour every line
+    int    m_grad_repetitions = 1; // NEOTKO_COLORSTITCH_TAG — s80: gradient repeats
+    double m_grad_min_length  = 0.0; // NEOTKO_COLORSTITCH_TAG — s90: global "ColorMix min. line length" (mm); default 0 = colour every line
 
     // Widget pointers (created in build_ui when m_cfg != nullptr).
     wxChoice*         m_choice_tool_a    = nullptr;
@@ -384,8 +418,8 @@ private:
     wxCheckBox*       m_chk_invert       = nullptr; // s60: invert gradient direction
     wxButton*         m_btn_invert       = nullptr; // button to invert/reverse custom pattern string
     wxSpinCtrl*       m_sc_angle         = nullptr; // infill angle override spin control
-    wxSpinCtrl*       m_sc_repetitions   = nullptr; // NEOTKO_COLORMIX_TAG — s80: gradient repetitions
-    wxSpinCtrlDouble* m_sc_min_length    = nullptr; // NEOTKO_COLORMIX_TAG — s90: global min line length (mm)
+    wxSpinCtrl*       m_sc_repetitions   = nullptr; // NEOTKO_COLORSTITCH_TAG — s80: gradient repetitions
+    wxSpinCtrlDouble* m_sc_min_length    = nullptr; // NEOTKO_COLORSTITCH_TAG — s90: global min line length (mm)
     bool                         m_mixed_filament_selected = false;
 
     // ── NEOTKO_COLORSTITCH_TAG — s195 ADV revamp: category machinery ──
@@ -416,7 +450,7 @@ private:
     wxArrayString          m_tool_labels;        // "T0".."T3" for the slot pickers
     std::vector<wxColour>  m_tool_cols;
 
-    // NEOTKO_COLORMIX_TAG — s61: role-aware config key prefix.
+    // NEOTKO_COLORSTITCH_TAG — s61: role-aware config key prefix.
     // m_surface_id 0 = Top → reads/writes the original (top-role) keys.
     // m_surface_id 1 = Penultimate → reads/writes the `_penu_` mirror keys.
     // Returns the full config key string for a given base name. Pattern keys
@@ -461,7 +495,7 @@ private:
         // value as "user hasn't configured this slot yet" and default it to a
         // sensible physical index in the dialog (2, 3) so the slot picker
         // shows a real tool. On save, the chosen tool index is written back —
-        // never -1 — so the s60 SurfaceColorMix path always sees a real slot.
+        // never -1 — so the s60 ColorStitch path always sees a real slot.
         m_tool_a         = gi(grad_key("tool_a"), 0);
         if (m_tool_a < 0) m_tool_a = 0;
         m_tool_b         = gi(grad_key("tool_b"), 1);
@@ -471,8 +505,8 @@ private:
         m_tool_d         = gi(grad_key("tool_d"), 3);
         if (m_tool_d < 0) m_tool_d = 3;
         m_grad_angle     = gi(grad_key("angle"), -1);
-        m_grad_repetitions = gi(grad_key("repetitions"), 1); // NEOTKO_COLORMIX_TAG — s80
-        // NEOTKO_COLORMIX_TAG — s90: global key (NO grad_key() prefix). Both
+        m_grad_repetitions = gi(grad_key("repetitions"), 1); // NEOTKO_COLORSTITCH_TAG — s80
+        // NEOTKO_COLORSTITCH_TAG — s90: global key (NO grad_key() prefix). Both
         // Top and Penu Advanced dialogs read/write this single value.
         m_grad_min_length  = gf("interlayer_colormix_min_length", 0.0);
     }
@@ -550,7 +584,7 @@ private:
     // Config mapping unchanged: Custom/Mixed/Weave → mode 0 (pattern string),
     // Blend2 → 1, Blend3 → 2, Stripes → 3. No config key is renamed.
     // ────────────────────────────────────────────────────────────────────────
-    void build_ui(const std::vector<Slic3r::ColorMixOption>& options)
+    void build_ui(const std::vector<Slic3r::ColorStitchOption>& options)
     {
         detect_mixed_selected(options);
         build_tool_tables(options);
@@ -646,7 +680,7 @@ private:
         m_category = CAT_CUSTOM;
     }
 
-    void detect_mixed_selected(const std::vector<Slic3r::ColorMixOption>& options)
+    void detect_mixed_selected(const std::vector<Slic3r::ColorStitchOption>& options)
     {
         m_mixed_filament_selected = false;
         if (m_pattern.empty()) return;
@@ -707,7 +741,7 @@ private:
     }
 
     // Tool label/colour tables shared by the slot pickers ("Colours used").
-    void build_tool_tables(const std::vector<Slic3r::ColorMixOption>& options)
+    void build_tool_tables(const std::vector<Slic3r::ColorStitchOption>& options)
     {
         m_tool_labels.Clear();
         m_tool_cols.clear();
@@ -735,7 +769,7 @@ private:
     }
 
     // ── Source panel: Custom pattern ─────────────────────────────────────
-    void build_custom_panel(wxBoxSizer* vs, const std::vector<Slic3r::ColorMixOption>& options, int PAD)
+    void build_custom_panel(wxBoxSizer* vs, const std::vector<Slic3r::ColorStitchOption>& options, int PAD)
     {
         m_panel_custom = new wxPanel(this);
         auto* pv = new wxBoxSizer(wxVERTICAL);
@@ -807,7 +841,7 @@ private:
     }
 
     // ── Source panel: MixedFilament recipes ──────────────────────────────
-    void build_mixed_panel(wxBoxSizer* vs, const std::vector<Slic3r::ColorMixOption>& options, int PAD)
+    void build_mixed_panel(wxBoxSizer* vs, const std::vector<Slic3r::ColorStitchOption>& options, int PAD)
     {
         m_panel_mixed = new wxPanel(this);
         auto* pv = new wxBoxSizer(wxVERTICAL);
@@ -822,31 +856,104 @@ private:
         btn_grid->AddGrowableCol(0, 1);
         btn_grid->AddGrowableCol(1, 1);
         wxString active_lbl;
+
+        // NEOTKO_COLORSTITCH_TAG (s275) — collect EVERY live recipe, with no upper bound.
+        // The old filter cut the list at `filament_id > 9`, i.e. at the 5th virtual. That
+        // bound belongs to the custom-digit pattern alphabet ('5'-'9'), and it does NOT
+        // apply here: picking a recipe stores opt.pattern, which mixed_filament_to_pattern()
+        // already expanded into PHYSICAL digits. So the recipe a button writes is immune to
+        // virtual renumbering, and there is no reason to hide recipes past the fifth.
+        // ⚠️ FUTURE: when virtual slots stop being "a blend of two filaments" and become
+        // generic effect/settings carriers (foam/TPU), this list must filter on "actually
+        // has a recipe" rather than on "is not physical".
+        // Copies, not pointers: `options` is a reference parameter and the "show all"
+        // browser is opened long after this function returns.
+        std::vector<Slic3r::ColorStitchOption> recipes;
         for (const auto& opt : options) {
-            if (opt.is_physical || opt.filament_id < 1 || opt.filament_id > 9) continue;
+            if (opt.is_physical || opt.filament_id < 1) continue;
+            if (opt.pattern.empty()) continue;   // no recipe → nothing to apply
+            recipes.push_back(opt);
+        }
+
+        // Shared by the inline grid and the "show all" browser.
+        auto apply_recipe = [this](const std::string& recipe, const wxString& lbl) {
+            m_pattern = recipe;
+            m_mixed_filament_selected = true;
+            if (m_lbl_mixed_active)
+                m_lbl_mixed_active->SetLabel(_L("Active recipe:") + " " + lbl);
+            if (m_disp) m_disp->Refresh();
+            refresh_grad_preview();
+            Layout();
+        };
+
+        auto decorate = [](wxButton* b, const Slic3r::ColorStitchOption& opt, const wxString& lbl) {
+            b->SetBackgroundColour(hex_to_colour(opt.display_color));
+            // Only the first five virtuals are nameable by a single digit in a hand-written
+            // pattern; say so instead of printing a digit that cannot be typed.
+            if (opt.filament_id <= 9)
+                b->SetToolTip(lbl + wxString::Format(" [digit %d]", opt.filament_id));
+            else
+                b->SetToolTip(lbl + " " + _L("(pick it here — it has no single-digit name)"));
+        };
+
+        // Keep the dialog compact: only the first few go inline, the rest live behind a button.
+        const size_t kInlineRecipes = 6;
+        const size_t inline_count   = std::min(recipes.size(), kInlineRecipes);
+        for (size_t i = 0; i < inline_count; ++i) {
+            const Slic3r::ColorStitchOption& opt = recipes[i];
             const wxString lbl = wxString::FromUTF8(opt.label);
             auto* b = new wxButton(m_panel_mixed, wxID_ANY, lbl);
-            b->SetBackgroundColour(hex_to_colour(opt.display_color));
-            b->SetToolTip(lbl + wxString::Format(" [digit %d]", opt.filament_id));
+            decorate(b, opt, lbl);
             std::string recipe = opt.pattern;
-            b->Bind(wxEVT_BUTTON, [this, recipe, lbl](wxCommandEvent&) {
-                m_pattern = recipe;
-                m_mixed_filament_selected = true;
-                if (m_lbl_mixed_active)
-                    m_lbl_mixed_active->SetLabel(_L("Active recipe:") + " " + lbl);
-                if (m_disp) m_disp->Refresh();
-                refresh_grad_preview();
-                Layout();
-            });
+            b->Bind(wxEVT_BUTTON, [apply_recipe, recipe, lbl](wxCommandEvent&) { apply_recipe(recipe, lbl); });
             btn_grid->Add(b, 1, wxEXPAND);
+        }
+        for (const Slic3r::ColorStitchOption& opt : recipes) {
             if (m_mixed_filament_selected && active_lbl.IsEmpty()) {
                 std::string rev = opt.pattern;
                 std::reverse(rev.begin(), rev.end());
                 if (opt.pattern == m_pattern || rev == m_pattern)
-                    active_lbl = lbl;
+                    active_lbl = wxString::FromUTF8(opt.label);
             }
         }
         pv->Add(btn_grid, 0, wxEXPAND | wxBOTTOM, 4);
+
+        if (recipes.size() > inline_count) {
+            auto* ball = new wxButton(m_panel_mixed, wxID_ANY,
+                wxString::Format(_L("Show all %d recipes…"), int(recipes.size())));
+            ball->SetToolTip(_L("Every Mixed Filament recipe, including the ones that do not fit "
+                                "in the list above."));
+            ball->Bind(wxEVT_BUTTON, [this, recipes, apply_recipe, decorate](wxCommandEvent&) {
+                wxDialog dlg(this, wxID_ANY, _L("All MixedFilament recipes"),
+                             wxDefaultPosition, wxSize(560, 460),
+                             wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+                auto* outer = new wxBoxSizer(wxVERTICAL);
+                auto* scroll = new wxScrolledWindow(&dlg, wxID_ANY);
+                scroll->SetScrollRate(0, 12);
+                auto* grid = new wxFlexGridSizer(0, 2, 4, 4);
+                grid->AddGrowableCol(0, 1);
+                grid->AddGrowableCol(1, 1);
+                for (const Slic3r::ColorStitchOption& opt : recipes) {
+                    const wxString lbl = wxString::FromUTF8(opt.label);
+                    auto* b = new wxButton(scroll, wxID_ANY, lbl);
+                    decorate(b, opt, lbl);
+                    std::string recipe = opt.pattern;
+                    // Pick and close: the browser is a picker, not a second editor.
+                    b->Bind(wxEVT_BUTTON, [&dlg, apply_recipe, recipe, lbl](wxCommandEvent&) {
+                        apply_recipe(recipe, lbl);
+                        dlg.EndModal(wxID_OK);
+                    });
+                    grid->Add(b, 1, wxEXPAND);
+                }
+                scroll->SetSizer(grid);
+                scroll->FitInside();
+                outer->Add(scroll, 1, wxEXPAND | wxALL, 8);
+                outer->Add(dlg.CreateButtonSizer(wxCANCEL), 0, wxEXPAND | wxALL, 8);
+                dlg.SetSizer(outer);
+                dlg.ShowModal();
+            });
+            pv->Add(ball, 0, wxEXPAND | wxBOTTOM, 4);
+        }
 
         auto* status_row = new wxBoxSizer(wxHORIZONTAL);
         m_lbl_mixed_active = new wxStaticText(m_panel_mixed, wxID_ANY,
@@ -1261,7 +1368,7 @@ private:
             lbl->SetForegroundColour(wxColour(120, 120, 120));
             grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
         }
-        // NEOTKO_COLORMIX_TAG — s90: global min line length, shared by ALL
+        // NEOTKO_COLORSTITCH_TAG — s90: global min line length, shared by ALL
         // ColorStitch passes (Top and Penu). Moved out of the blend panel so
         // it's visible for every category — it applies to all of them.
         grid->Add(new wxStaticText(this, wxID_ANY, _L("ColorStitch min. line length:")),
@@ -1277,7 +1384,7 @@ private:
                "Higher values = fewer tool changes but more uncoloured gaps near edges.\n"
                "0 = colour every line regardless of length.\n"
                "Tip: if you see empty zones, lower this value.\n"
-               "(Global setting — applies to all ColorMix passes, both Top and Penu.)"));
+               "(Global setting — applies to all ColorStitch passes, both Top and Penu.)"));
         grid->Add(m_sc_min_length, 0, wxALIGN_CENTER_VERTICAL);
         {
             auto* lbl = new wxStaticText(this, wxID_ANY, _L("mm"));
@@ -1433,7 +1540,7 @@ private:
         std::vector<int>      seq;
         std::vector<wxColour> colors;
         const int N = 240; // strip resolution
-        // NEOTKO_COLORMIX_TAG — s80: mirror the engine's repetitions tiling so
+        // NEOTKO_COLORSTITCH_TAG — s80: mirror the engine's repetitions tiling so
         // the preview shows the repeated gradients. Build over N/reps, tile to N.
         const int reps    = m_sc_repetitions ? std::max(1, m_sc_repetitions->GetValue())
                                              : std::max(1, m_grad_repetitions);
@@ -1441,11 +1548,11 @@ private:
         const bool generated = (cat == CAT_BLEND2 || cat == CAT_BLEND3 || cat == CAT_STRIPES);
         if (cat == CAT_BLEND2) {
             colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
-            seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(
+            seq = Slic3r::ColorStitch::build_dithered_tools_2color(
                 build_N, 0, 1, pct_a, easing, gamma);
         } else if (cat == CAT_BLEND3) {
             colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
-            seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(
+            seq = Slic3r::ColorStitch::build_dithered_tools_3color(
                 build_N, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
         } else if (cat == CAT_STRIPES) {
             colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
@@ -1455,7 +1562,7 @@ private:
             const int cb = m_sc_band_b ? m_sc_band_b->GetValue() : 0;
             const int cc = m_sc_band_c ? m_sc_band_c->GetValue() : 0;
             const int cd = m_sc_band_d ? m_sc_band_d->GetValue() : 0;
-            seq = Slic3r::SurfaceColorMix::build_custom_bands(
+            seq = Slic3r::ColorStitch::build_custom_bands(
                 build_N, 0, ca, 1, cb, 2, cc, 3, cd);
         } else {
             // String sources: digit d → colour of filament/recipe digit d
@@ -1505,7 +1612,7 @@ private:
             double lw = 0.4;
             if (auto* o = m_cfg->option<ConfigOptionFloatOrPercent>("top_surface_line_width"))
                 if (!o->percent) lw = std::max(0.05, o->value);
-            const int est = Slic3r::SurfaceColorMix::estimate_surface_line_count(
+            const int est = Slic3r::ColorStitch::estimate_surface_line_count(
                 60.0 * 60.0, lw, 0.0, 1.0);
             m_lbl_lines_est->SetLabel(wxString::Format(
                 _L("On a 60×60 mm surface — about %d lines  (filament width %.2f mm)"),
@@ -1526,8 +1633,8 @@ private:
 // blob is empty — so writing "" here restores legacy behaviour.
 //
 // A zone (Top, and an independent Penultimate) is a stack of 1..3 passes; each
-// pass has a Z-ratio and a kind (None/Solid/ColorMix/PathBlend). Slot rule:
-//   1 slot    → ColorMix or PathBlend only
+// pass has a Z-ratio and a kind (None/Solid/ColorStitch/PathBlend). Slot rule:
+//   1 slot    → ColorStitch or PathBlend only
 //   2-3 slots → any kind
 // PathBlend collapses the zone to a single full-height pass (legacy engine).
 // ===========================================================================
@@ -1555,7 +1662,7 @@ public:
         // so last-session toggles take effect immediately. Runtimes are split:
         //   • PathBlendDispatcherRuntime → chain_continuous, chain_max_xy_mm
         //   • PathBlendSchedulerRuntime  → chain_atomic
-        // Both live in SurfaceColorMix.hpp (PathBlend ingredient section).
+        // Both live in ColorStitch.hpp (PathBlend ingredient section).
         if (auto* ac = wxGetApp().app_config) {
             Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
             Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
@@ -1648,7 +1755,7 @@ private:
         std::vector<wxStaticText*>     angle_lbl;   // Solid only
         std::vector<wxTextCtrl*>       angle_txt;   // Solid only
         std::vector<wxPanel*>          preview;
-        std::vector<wxButton*>         adv_btn;     // ColorMix / PathBlend
+        std::vector<wxButton*>         adv_btn;     // ColorStitch / PathBlend
         // NEOTKO_PATHBLEND_TAG — s88. "Advanced ⚙" button shown next to the
         // adv_btn ONLY for PathBlend rows. Opens the PB Advanced toggles modal
         // (chain_continuous, chain_max_xy_mm, chain_atomic).
@@ -1703,7 +1810,7 @@ private:
     wxRadioButton* m_bs_rb_joint      = nullptr;
     wxPanel*       m_bs_swatch        = nullptr;
     wxStaticText*  m_bs_lbl_score     = nullptr;
-    std::vector<Slic3r::ColorMixOption> m_bs_mix_opts;
+    std::vector<Slic3r::ColorStitchOption> m_bs_mix_opts;
 
     // NEOTKO_COLORSCI_TAG GD1+GD2+GD3 — Gradient Designer embebido (columna
     // derecha, bajo el panel TD). Engine puro en libslic3r/ColorSci/ — aquí
@@ -1769,7 +1876,7 @@ private:
         switch (k) {
             case Kind::None:      return _L("None");
             case Kind::Solid:     return _L("Solid");
-            case Kind::ColorMix:  return _L("ColorStitch"); // NEOTKO_COLORSTITCH_TAG
+            case Kind::ColorStitch:  return _L("ColorStitch"); // NEOTKO_COLORSTITCH_TAG
             case Kind::PathBlend: return _L("PathBlend");
         }
         return wxEmptyString;
@@ -1779,7 +1886,7 @@ private:
         switch (k) {
             case Kind::None:      return "NONE";
             case Kind::Solid:     return "SOLID";
-            case Kind::ColorMix:  return "COLORMIX";
+            case Kind::ColorStitch:  return "COLORSTITCH";
             case Kind::PathBlend: return "PATHBLEND";
         }
         return wxEmptyString;
@@ -1789,7 +1896,7 @@ private:
         switch (k) {
             case Kind::None:      return wxColour(110, 110, 110);
             case Kind::Solid:     return wxColour(214, 124, 48);
-            case Kind::ColorMix:  return wxColour(72, 110, 200);
+            case Kind::ColorStitch:  return wxColour(72, 110, 200);
             case Kind::PathBlend: return wxColour(150, 88, 178);
         }
         return wxColour(110, 110, 110);
@@ -1820,7 +1927,7 @@ private:
         if (n > 1) {
             out.push_back({ Kind::Solid,     -1, _L("Solid") });
         }
-        out.push_back({ Kind::ColorMix,  -1,                _L("ColorStitch") }); // NEOTKO_COLORSTITCH_TAG
+        out.push_back({ Kind::ColorStitch,  -1,                _L("ColorStitch") }); // NEOTKO_COLORSTITCH_TAG
         // NEOTKO_BOTTOM_TAG — §5.5: PathBlend on the bottom is ALWAYS Full. A PB Half
         // on the bottom would leave an empty layer and destabilize how the print is
         // built up, so the Half entry is not offered for the Bottom zone.
@@ -1830,14 +1937,14 @@ private:
         return out;
     }
 
-    // NEOTKO_SANDWICH_TAG — read a ColorMix gradient int key for a given pass:
-    // the pass's per-lámina override (pass.colormix.kv) first, region config as
+    // NEOTKO_SANDWICH_TAG — read a ColorStitch gradient int key for a given pass:
+    // the pass's per-lámina override (pass.colorstitch.kv) first, region config as
     // fallback. `full_key` is the full region-key name (e.g. interlayer_colormix_tool_a).
     int cm_pass_int(const Slic3r::SurfacePass* p, const std::string& full_key, int dflt) const
     {
-        if (p && p->colormix.present) {
-            auto it = p->colormix.kv.find(full_key);
-            if (it != p->colormix.kv.end()) {
+        if (p && p->colorstitch.present) {
+            auto it = p->colorstitch.kv.find(full_key);
+            if (it != p->colorstitch.kv.end()) {
                 try { return std::stoi(it->second); } catch (...) {}
             }
         }
@@ -1846,9 +1953,9 @@ private:
     }
     double cm_pass_dbl(const Slic3r::SurfacePass* p, const std::string& full_key, double dflt) const
     {
-        if (p && p->colormix.present) {
-            auto it = p->colormix.kv.find(full_key);
-            if (it != p->colormix.kv.end()) {
+        if (p && p->colorstitch.present) {
+            auto it = p->colorstitch.kv.find(full_key);
+            if (it != p->colorstitch.kv.end()) {
                 try { return std::stod(it->second); } catch (...) {}
             }
         }
@@ -1858,19 +1965,19 @@ private:
     std::string cm_pass_str(const Slic3r::SurfacePass* p, const std::string& full_key,
                             const std::string& dflt) const
     {
-        if (p && p->colormix.present) {
-            auto it = p->colormix.kv.find(full_key);
-            if (it != p->colormix.kv.end()) return it->second;
+        if (p && p->colorstitch.present) {
+            auto it = p->colorstitch.kv.find(full_key);
+            if (it != p->colorstitch.kv.end()) return it->second;
         }
         if (auto* o = m_config->option<ConfigOptionString>(full_key)) return o->value;
         return dflt;
     }
 
-    // NEOTKO_SANDWICH_TAG — s80: build the REAL per-line ColorMix tool sequence
-    // for a pass preview. Mirrors SurfaceColorMix::assign_and_group_tools dither
+    // NEOTKO_SANDWICH_TAG — s80: build the REAL per-line ColorStitch tool sequence
+    // for a pass preview. Mirrors ColorStitch::assign_and_group_tools dither
     // + repetitions + invert, reading the pass's per-lámina override (region
     // fallback). Returns physical tool indices; -1 = unknown (mixed digit 5-9).
-    std::vector<int> colormix_preview_seq(int z, const Slic3r::SurfacePass& p, int N) const
+    std::vector<int> colorstitch_preview_seq(int z, const Slic3r::SurfacePass& p, int N) const
     {
         const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
                                          : "interlayer_colormix_";
@@ -1888,13 +1995,13 @@ private:
         const int    build_N = (reps > 1) ? std::max(2, N / reps) : N;
         std::vector<int> seq;
         if (mode == 1) {
-            seq = Slic3r::SurfaceColorMix::build_dithered_tools_2color(
+            seq = Slic3r::ColorStitch::build_dithered_tools_2color(
                 build_N, ta, tb, pct_a, easing, gamma);
         } else if (mode == 2) {
-            seq = Slic3r::SurfaceColorMix::build_dithered_tools_3color(
+            seq = Slic3r::ColorStitch::build_dithered_tools_3color(
                 build_N, ta, tb, tc, pct_a, pct_b, easing, gamma, overlap);
         } else if (mode == 3) {
-            seq = Slic3r::SurfaceColorMix::build_custom_bands(
+            seq = Slic3r::ColorStitch::build_custom_bands(
                 build_N, ta, cm_pass_int(&p, pre + "band_count_a", 0),
                          tb, cm_pass_int(&p, pre + "band_count_b", 0),
                          tc, cm_pass_int(&p, pre + "band_count_c", 0),
@@ -1921,9 +2028,9 @@ private:
         return seq;
     }
 
-    // Read the ColorMix gradient tools for chip previews. When `p` carries a
+    // Read the ColorStitch gradient tools for chip previews. When `p` carries a
     // per-lámina override the tools come from it; otherwise the shared region config.
-    std::vector<int> colormix_tools(int z, const Slic3r::SurfacePass* p = nullptr) const
+    std::vector<int> colorstitch_tools(int z, const Slic3r::SurfacePass* p = nullptr) const
     {
         const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
                                          : "interlayer_colormix_";
@@ -1970,11 +2077,11 @@ private:
         // Empty zone (explicit passthrough loaded from a [None] blob). Keep it as a
         // DISABLED zone with its single None pass so commit()'s to_json() writes the
         // explicit [None] blob (not ""→synthesize, which is what captures the zone).
-        // Do NOT promote it to ColorMix — Empty is the Enabled-checkbox-off state.
+        // Do NOT promote it to ColorStitch — Empty is the Enabled-checkbox-off state.
         if (st.passes.size() == 1 && st.passes[0].kind == Kind::None) {
             st.enabled = false;
         } else if (st.passes.size() == 1 && st.passes[0].kind == Kind::Solid) {
-            st.passes[0].kind = Kind::ColorMix;   // lone Solid is meaningless
+            st.passes[0].kind = Kind::ColorStitch;   // lone Solid is meaningless
         }
         if (st.passes.empty())
             st.enabled = false;                   // nothing to show
@@ -2035,7 +2142,7 @@ private:
                 mixed_defs = o->value;
         }
         if (!mixed_defs.empty()) {
-            for (auto& opt : Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors))
+            for (auto& opt : Slic3r::ColorStitch::get_mix_options(mixed_defs, m_fcolors))
                 if (!opt.is_physical)
                     m_bs_mix_opts.push_back(opt);
         }
@@ -2062,7 +2169,7 @@ private:
     // NEOTKO_SANDWICH_TAG — Fase 7 (s84): SandwichDialog-native Beer-Lambert
     // blend preview. Walks m_stack[z].passes (authoritative) instead of the
     // legacy keys the old SurfaceColorMixerDialog reads. Solid → 1 tool at
-    // pass.ratio; ColorMix → histogram of pattern digits (kv override or
+    // pass.ratio; ColorStitch → histogram of pattern digits (kv override or
     // region-config fallback); PathBlend → 50/50 cap+ramp from blob.
     // Single-channel TD (same maths as the old dialog) — Color Science N1.3
     // (TD por canal) entrará cuando se ataque la roadmap futura.
@@ -2083,7 +2190,7 @@ private:
         for (int t = 0; t < 4; ++t)
             mats[t] = Slic3r::ColorSci::material_from_hex(
                 t < (int)m_fcolors.size() ? m_fcolors[t] : std::string(), m_td[t]);
-        // fallback de patrón para passes ColorMix sin kv (config viva del diálogo)
+        // fallback de patrón para passes ColorStitch sin kv (config viva del diálogo)
         std::string fallback;
         const char* k = (z == 1) ? "interlayer_colormix_pattern_penultimate"
                                  : "interlayer_colormix_pattern_top";
@@ -2214,7 +2321,7 @@ private:
             sb->Add(row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
         }
 
-        // use_virtual (Mixed Filament digits 5-9 in ColorMix pattern editor).
+        // use_virtual (Mixed Filament digits 5-9 in ColorStitch pattern editor).
         {
             bool cur_uv = true;
             if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
@@ -2630,7 +2737,7 @@ private:
         bg[2] = mats[idx].rgb[2];
     }
 
-    // Mismo patrón de resolución que GLGizmoColorMixPainter::resolve_object_base_bg
+    // Mismo patrón de resolución que GLGizmoColorStitchPainter::resolve_object_base_bg
     // (physical tool directo / MixedFilament virtual vía blend_parallel), pero
     // partiendo de Plater::get_selection() en vez de m_c->selection_info() — este
     // diálogo no es un gizmo, no tiene CommonGizmosDataObjectsPool. false cuando
@@ -3189,15 +3296,15 @@ private:
             if (on) {
                 // NEOTKO_SANDWICH_TAG s119 (EMPTY model): enabling a zone means "I
                 // want an effect here". An empty stack or a lone None (Empty) zone
-                // becomes a real ColorMix pass — the per-row selector no longer
+                // becomes a real ColorStitch pass — the per-row selector no longer
                 // offers None, so a None row would otherwise show no kind.
                 if (m_stack[z].passes.empty()) {
                     Slic3r::SurfacePass p;
-                    p.kind = Kind::ColorMix; p.ratio = 1.0;
+                    p.kind = Kind::ColorStitch; p.ratio = 1.0;
                     m_stack[z].passes.push_back(p);
                 } else if (m_stack[z].passes.size() == 1 &&
                            m_stack[z].passes[0].kind == Kind::None) {
-                    m_stack[z].passes[0].kind  = Kind::ColorMix;
+                    m_stack[z].passes[0].kind  = Kind::ColorStitch;
                     m_stack[z].passes[0].ratio = 1.0;
                 }
             }
@@ -3373,7 +3480,7 @@ private:
 
     // Per-row sync that does NOT touch the kind choice items, so it is safe to
     // call from inside the choice's own event handler. Updates badge, the
-    // angle field (Solid only) and the advanced button (ColorMix / PathBlend).
+    // angle field (Solid only) and the advanced button (ColorStitch / PathBlend).
     void sync_row_widgets(int z, int idx)
     {
         ZoneUI& u = m_ui[z];
@@ -3407,8 +3514,8 @@ private:
         const bool is_solid = (p.kind == Kind::Solid);
         const bool is_pb    = (p.kind == Kind::PathBlend);
         // NEOTKO_COLORSTITCH_TAG — ColorStitch now exposes its fill angle inline too
-        // (wheel over the preview rotates it; persisted in the pass colormix kv).
-        const bool is_cm    = (p.kind == Kind::ColorMix);
+        // (wheel over the preview rotates it; persisted in the pass colorstitch kv).
+        const bool is_cm    = (p.kind == Kind::ColorStitch);
 
         // Angle/Mid field is visible for Solid, PathBlend and ColorStitch.
         u.angle_lbl[idx]->Show(is_solid || is_pb || is_cm);
@@ -3424,8 +3531,8 @@ private:
             const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
                                               : "interlayer_colormix_angle";
             int a = -1;
-            const auto it = p.colormix.kv.find(akey);
-            if (it != p.colormix.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
+            const auto it = p.colorstitch.kv.find(akey);
+            if (it != p.colorstitch.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
             u.angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
         } else if (is_pb) {
             u.angle_lbl[idx]->SetLabel(_L("ramp end:"));
@@ -3442,10 +3549,10 @@ private:
             u.angle_lbl[idx]->Enable(!half);
         }
 
-        // adv_btn: "Edit gradient..." for ColorMix; ease-mode cycler for PB;
+        // adv_btn: "Edit gradient..." for ColorStitch; ease-mode cycler for PB;
         // hidden for Solid/None.
         wxButton* adv = u.adv_btn[idx];
-        if (p.kind == Kind::ColorMix) {
+        if (p.kind == Kind::ColorStitch) {
             adv->SetLabel(_L("Edit gradient…")); adv->Show(true);
         } else if (is_pb) {
             static const wxString ease_names[4] = {
@@ -3471,7 +3578,12 @@ private:
                 const auto& d = Slic3r::PathBlendDispatcherRuntime::get();
                 const auto& s = Slic3r::PathBlendSchedulerRuntime::get();
                 const bool all_default = d.chain_continuous && s.chain_atomic
-                    && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6;
+                    // NEOTKO_PATHBLEND_TAG s282 — read the default off the struct
+                    // instead of repeating the literal, which went stale when the
+                    // default moved 1.0 -> 2.0 and made the button read "*" on a
+                    // pristine profile.
+                    && std::abs(d.chain_max_xy_mm
+                                - Slic3r::PathBlendDispatcherRuntime{}.chain_max_xy_mm) < 1e-6;
                 u.pb_advanced_btn[idx]->SetLabel(
                     all_default ? _L("Advanced \xE2\x9A\x99")
                                 : _L("Advanced \xE2\x9A\x99 *"));
@@ -3485,7 +3597,7 @@ private:
         // in build_row and instead use the tooltip + spinner range to disambiguate.
         // For PB, the spinner value shows floor_mm directly (refresh_rows handles).
 
-        // min-layer warning: only meaningful for Solid/ColorMix sub-bands. PB
+        // min-layer warning: only meaningful for Solid/ColorStitch sub-bands. PB
         // doesn't go through the sublayer MinLayer gate (its floor can be 0.01).
         const double mm = p.ratio * layer_height_mm();
         const bool thin = (!is_pb) && (mm < kMinPassMM - 1e-9);
@@ -3610,15 +3722,15 @@ private:
             [this, z, idx](wxMouseEvent& e) { on_angle_wheel(z, idx, e); });
         rv->Add(prev, 0, wxEXPAND | wxLEFT | wxRIGHT, 3);
 
-        // adv_btn: ColorMix -> open gradient dialog. PathBlend -> cycle ease_mode.
+        // adv_btn: ColorStitch -> open gradient dialog. PathBlend -> cycle ease_mode.
         // (Fase 5 s73: PB popup deleted; ease cycles inline on this button.)
         auto* adv = new wxButton(row, wxID_ANY, _L("Edit…"),
                                  wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
         adv->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
             if (idx >= (int)m_stack[z].passes.size()) return;
             const Kind k = m_stack[z].passes[idx].kind;
-            if (k == Kind::ColorMix) {
-                open_colormix_for(z, idx);
+            if (k == Kind::ColorStitch) {
+                open_colorstitch_for(z, idx);
             } else if (k == Kind::PathBlend) {
                 cycle_pathblend_ease(z, idx);
             }
@@ -3629,7 +3741,7 @@ private:
         // (sync_row_widgets toggles visibility). Opens the PB Advanced
         // modal with the runtime toggles (chain_continuous, chain_max_xy_mm,
         // chain_atomic). The modal reads/writes the singletons in
-        // SurfaceColorMix.hpp (PathBlend ingredient section) and persists
+        // ColorStitch.hpp (PathBlend ingredient section) and persists
         // to app_config so choices survive across sessions.
         auto* pb_adv = new wxButton(row, wxID_ANY,
             _L("Advanced \xE2\x9A\x99"),
@@ -3668,7 +3780,7 @@ private:
             // NEOTKO_PATHBLEND_TAG — s191: cross-section canvas (X = surface zone
             // 0..1, Y = height 0..H mm) with two draggable 2D handles:
             //   low (blue)  = (in_t, floor), high (orange) = (out_t, ramp end).
-            // Same model/math as GLGizmoColorMixPainter's pro_pb_profile_editor.
+            // Same model/math as GLGizmoColorStitchPainter's pro_pb_profile_editor.
             auto prof = std::make_shared<Slic3r::PathBlendPassConfig>(read_pb_blob(z));
             const double Hh = layer_height_mm();
             const bool is_half = (prof->mode == Slic3r::PathBlendPassConfig::Mode::Half);
@@ -3887,7 +3999,8 @@ private:
                 write_pb_blob(z, idx, *prof);
                 const bool prof_lin  = (prof->in_t <= 0.001f && prof->out_t >= 0.999f);
                 const bool chain_def = (d.chain_continuous && s.chain_atomic
-                    && std::abs(d.chain_max_xy_mm - 1.0) < 1e-6);
+                    && std::abs(d.chain_max_xy_mm
+                                - Slic3r::PathBlendDispatcherRuntime{}.chain_max_xy_mm) < 1e-6);
                 pb_adv->SetLabel((prof_lin && chain_def)
                     ? _L("Advanced \xE2\x9A\x99") : _L("Advanced \xE2\x9A\x99 *"));
             }
@@ -3924,7 +4037,7 @@ private:
     }
 
     // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): reorder helper. Passes carry all
-    // their state (kind, colormix.kv, pathblend.kv, ratio, angle) so a swap
+    // their state (kind, colorstitch.kv, pathblend.kv, ratio, angle) so a swap
     // is non-destructive — no gradients/PB blobs are lost.
     void move_pass(int z, int i, int j)
     {
@@ -3953,7 +4066,7 @@ private:
             // mire el payload (el preview del painter, los nombres de receta) cree que
             // sigue habiendo efecto → "la receta dice PB/ColorStitch y sale plano".
             // Visto en vivo en los perfiles 33 y 40 del proyecto del usuario (s232).
-            for (auto& p : ps) { p.kind = Kind::Solid; p.colormix = {}; p.pathblend = {}; }
+            for (auto& p : ps) { p.kind = Kind::Solid; p.colorstitch = {}; p.pathblend = {}; }
 
         if ((int)ps.size() < n) {
             while ((int)ps.size() < n) {
@@ -3965,9 +4078,9 @@ private:
                     int ns = 0, nc = 0;
                     for (const auto& q : ps) {
                         if (q.kind == Kind::Solid)         ++ns;
-                        else if (q.kind == Kind::ColorMix) ++nc;
+                        else if (q.kind == Kind::ColorStitch) ++nc;
                     }
-                    if (ns >= 2 && nc < 1) p.kind = Kind::ColorMix;
+                    if (ns >= 2 && nc < 1) p.kind = Kind::ColorStitch;
                 }
                 ps.push_back(p);
             }
@@ -3975,7 +4088,7 @@ private:
             ps.resize(n);
         }
         if (n == 1 && (ps[0].kind == Kind::Solid || ps[0].kind == Kind::None))
-            ps[0].kind = Kind::ColorMix;            // lone Solid/None is meaningless
+            ps[0].kind = Kind::ColorStitch;            // lone Solid/None is meaningless
 
         const double even = 1.0 / n;
         for (auto& p : ps) p.ratio = even;
@@ -4025,13 +4138,13 @@ private:
         // exceed max 2 Solid / max 1 ColorStitch. Non-destructive: the stack is left
         // unchanged and refresh_rows re-selects the dropdown from it (snaps back).
         // (PB Full-only is handled by kind_entries_for_slots dropping the Half entry.)
-        if (z == 2 && (e.kind == Kind::Solid || e.kind == Kind::ColorMix)) {
+        if (z == 2 && (e.kind == Kind::Solid || e.kind == Kind::ColorStitch)) {
             int ns = 0, nc = 0;
             for (int j = 0; j < (int)m_stack[z].passes.size(); ++j) if (j != idx) {
                 if (m_stack[z].passes[j].kind == Kind::Solid)         ++ns;
-                else if (m_stack[z].passes[j].kind == Kind::ColorMix) ++nc;
+                else if (m_stack[z].passes[j].kind == Kind::ColorStitch) ++nc;
             }
-            if ((e.kind == Kind::Solid && ns >= 2) || (e.kind == Kind::ColorMix && nc >= 1)) {
+            if ((e.kind == Kind::Solid && ns >= 2) || (e.kind == Kind::ColorStitch && nc >= 1)) {
                 CallAfter([this, z]() { refresh_rows(z); });   // revert the choice
                 return;
             }
@@ -4156,16 +4269,16 @@ private:
             on_pathblend_mid_edit(z, idx);
             return;
         }
-        if (p.kind == Kind::ColorMix) {
-            // NEOTKO_COLORSTITCH_TAG — typed angle persists into the pass colormix kv.
+        if (p.kind == Kind::ColorStitch) {
+            // NEOTKO_COLORSTITCH_TAG — typed angle persists into the pass colorstitch kv.
             long v = -1;
             if (!m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false).ToLong(&v))
                 v = -1;
             if (v < 0) v = -1; else if (v > 359) v = 359;
             const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
                                               : "interlayer_colormix_angle";
-            p.colormix.present = true;
-            p.colormix.kv[akey] = std::to_string((int)v);
+            p.colorstitch.present = true;
+            p.colorstitch.kv[akey] = std::to_string((int)v);
             m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", (int)v));
             m_ui[z].preview[idx]->Refresh();
             return;
@@ -4195,19 +4308,19 @@ private:
             write_pb_blob(z, idx, pbc);
             return;
         }
-        if (p.kind == Kind::ColorMix) {
+        if (p.kind == Kind::ColorStitch) {
             // NEOTKO_COLORSTITCH_TAG — rotate the ColorStitch fill angle in the pass kv
-            // (same key the engine reads via painted_colormix_angle_for_slot).
+            // (same key the engine reads via painted_colorstitch_angle_for_slot).
             const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
                                               : "interlayer_colormix_angle";
             int a = -1;
-            const auto it = p.colormix.kv.find(akey);
-            if (it != p.colormix.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
+            const auto it = p.colorstitch.kv.find(akey);
+            if (it != p.colorstitch.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
             const int step = (e.GetWheelRotation() > 0) ? 5 : -5;
             if (a < 0) a = (step > 0) ? 0 : -1;
             else { a += step; if (a < 0) a = -1; else a %= 360; }
-            p.colormix.present = true;
-            p.colormix.kv[akey] = std::to_string(a);
+            p.colorstitch.present = true;
+            p.colorstitch.kv[akey] = std::to_string(a);
             if (m_ui[z].angle_txt[idx]) m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
             if (m_ui[z].preview[idx])   m_ui[z].preview[idx]->Refresh();
             return;
@@ -4337,16 +4450,16 @@ private:
         write_pb_blob(z, idx, pbc);
     }
 
-    // NEOTKO_SANDWICH_TAG — per-lámina ColorMix gradient editor.
-    // Each ColorMix pass owns its gradient via pass.colormix.kv (colormix_keys
+    // NEOTKO_SANDWICH_TAG — per-lámina ColorStitch gradient editor.
+    // Each ColorStitch pass owns its gradient via pass.colorstitch.kv (colorstitch_keys
     // of the role + angle, full region-key names). The shared region keys
     // (interlayer_colormix_*) are NEVER mutated here — they remain the legacy /
-    // synthesize_from_legacy fallback. The ColorMixPatternDialog reads/writes the
+    // synthesize_from_legacy fallback. The ColorStitchPatternDialog reads/writes the
     // DynamicPrintConfig, so we transiently load the pass override into m_config
     // to drive the dialog, snapshot the result back into the pass, then restore
     // the shared config untouched. Engine side: Fill.cpp FASE 2 applies the same
     // kv over a copy of the region config (single source → wipe-tower stays in sync).
-    void open_colormix_for(int z, int idx)
+    void open_colorstitch_for(int z, int idx)
     {
         if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
         Slic3r::SurfacePass& pass = m_stack[z].passes[idx];
@@ -4356,7 +4469,7 @@ private:
                                        : "interlayer_colormix_pattern_top";
         const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
                                         : std::string("interlayer_colormix_");
-        // Role gradient keys this editor owns (colormix_keys of the role + angle).
+        // Role gradient keys this editor owns (colorstitch_keys of the role + angle).
         std::vector<std::string> role_keys;
         role_keys.push_back(pat_key);
         for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
@@ -4371,18 +4484,18 @@ private:
         // load this pass's override (no-op when the pass has none → the dialog
         // shows the shared fallback, exactly what the engine would use).
         Slic3r::SurfaceEffectPayload saved = SEPM::snapshot_keys(*m_config, role_keys);
-        SEPM::restore_keys(*m_config, pass.colormix);
+        SEPM::restore_keys(*m_config, pass.colorstitch);
 
         std::string mixed_defs;
         if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
             mixed_defs = o->value;
         const auto options =
-            Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, m_fcolors);
+            Slic3r::ColorStitch::get_mix_options(mixed_defs, m_fcolors);
         const std::string cur_pat = m_config->opt_string(pat_key);
         bool use_virtual = false;
         if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
             use_virtual = o->value;
-        ColorMixPatternDialog dlg(this, options, m_fcolors, cur_pat,
+        ColorStitchPatternDialog dlg(this, options, m_fcolors, cur_pat,
                                   use_virtual, m_config, z);
         if (dlg.ShowModal() != wxID_OK) {
             SEPM::restore_keys(*m_config, saved);   // undo the transient load
@@ -4418,14 +4531,14 @@ private:
         si(gp + "tool_d",       dlg.get_tool_d());
         si(gp + "angle",        dlg.get_grad_angle());
         si(gp + "repetitions",  dlg.get_grad_repetitions());
-        // NEOTKO_COLORMIX_TAG — s90: global key (no prefix). NOT included in
+        // NEOTKO_COLORSTITCH_TAG — s90: global key (no prefix). NOT included in
         // role_keys/snapshot — it's intentionally outside the per-pass override
         // because there's a single value shared by all CM passes.
         sf("interlayer_colormix_min_length", dlg.get_grad_min_length());
 
         // Snapshot the edited keys into this pass's override, then restore shared.
-        pass.colormix = SEPM::snapshot_keys(*m_config, role_keys);
-        pass.colormix.present = true;
+        pass.colorstitch = SEPM::snapshot_keys(*m_config, role_keys);
+        pass.colorstitch.present = true;
         SEPM::restore_keys(*m_config, saved);
 
         if (idx >= 0 && idx < (int)m_ui[z].chips.size()) {
@@ -4484,7 +4597,7 @@ private:
 
         std::vector<int> tools;
         if      (p.kind == Kind::Solid)     tools = { p.solid_tool };
-        else if (p.kind == Kind::ColorMix)  tools = colormix_tools(z, &p);
+        else if (p.kind == Kind::ColorStitch)  tools = colorstitch_tools(z, &p);
         if (tools.empty()) return;
 
         const int cw = std::min(20, sz.x / (int)tools.size());
@@ -4532,12 +4645,12 @@ private:
                 dc.DrawLine((int)(ox - dx * R), (int)(oy - dy * R),
                             (int)(ox + dx * R), (int)(oy + dy * R));
             }
-        } else if (p.kind == Kind::ColorMix) {
+        } else if (p.kind == Kind::ColorStitch) {
             // NEOTKO_SANDWICH_TAG — s80: render the REAL per-line tool sequence
             // the engine will produce (mode-aware dither + repetitions + invert),
             // reading this pass's per-lámina override. Each sequence slot is one
-            // vertical stripe — same representation as the ColorMix dialog strip.
-            const std::vector<int> seq = colormix_preview_seq(z, p, std::max(2, sz.x));
+            // vertical stripe — same representation as the ColorStitch dialog strip.
+            const std::vector<int> seq = colorstitch_preview_seq(z, p, std::max(2, sz.x));
             const int NS = (int)seq.size();
             if (NS <= 0) {
                 dc.SetBrush(wxBrush(wxColour(90, 90, 90)));
@@ -4550,8 +4663,8 @@ private:
                 const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
                                                   : "interlayer_colormix_angle";
                 int adeg = -1;
-                const auto it = p.colormix.kv.find(akey);
-                if (it != p.colormix.kv.end()) { try { adeg = std::stoi(it->second); } catch (...) {} }
+                const auto it = p.colorstitch.kv.find(akey);
+                if (it != p.colorstitch.kv.end()) { try { adeg = std::stoi(it->second); } catch (...) {} }
                 const double PI  = 3.14159265358979323846;
                 const double rad = ((adeg < 0) ? 45.0 : (double)adeg) * PI / 180.0;  // = cm_angle
                 const double dx = std::cos(rad), dy = -std::sin(rad);   // stripe dir
@@ -4668,7 +4781,7 @@ private:
     {
         const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
         if (p.kind == Kind::Solid)     return tool_colour(p.solid_tool);
-        if (p.kind == Kind::ColorMix)  return tool_colour(colormix_tools(z, &p).front());
+        if (p.kind == Kind::ColorStitch)  return tool_colour(colorstitch_tools(z, &p).front());
         if (p.kind == Kind::PathBlend) return tool_colour(pathblend_tools(z).front());
         return wxColour(90, 90, 90);                       // None
     }
@@ -4778,15 +4891,15 @@ private:
         m_drag_zone = -1; m_drag_bound = -1;
     }
 
-    // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: snapshot the role-prefixed ColorMix
+    // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: snapshot the role-prefixed ColorStitch
     // gradient keys of zone z from the live config (same key set the per-pass
-    // gradient editor `open_colormix_for` owns). Used to bake a self-contained
-    // gradient into a ColorMix pass that has no per-pass override.
-    Slic3r::SurfaceEffectPayload zone_colormix_snapshot(int z) const
+    // gradient editor `open_colorstitch_for` owns). Used to bake a self-contained
+    // gradient into a ColorStitch pass that has no per-pass override.
+    Slic3r::SurfaceEffectPayload zone_colorstitch_snapshot(int z) const
     {
         // NEOTKO_BOTTOM_TAG — the Bottom zone (z==2) reads the "top" key family, same
         // as the painter/engine for bottom (s155: a painted bottom carries the top
-        // ColorMix keys, not the penu ones). Only Penu (z==1) uses the penu family.
+        // ColorStitch keys, not the penu ones). Only Penu (z==1) uses the penu family.
         const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
                                        : "interlayer_colormix_pattern_top";
         const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
@@ -4837,17 +4950,17 @@ private:
         else if (!st.passes.empty())
             for (auto& p : st.passes) p.ratio = 1.0 / st.passes.size();
 
-        // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: a ColorMix pass with no per-pass
+        // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: a ColorStitch pass with no per-pass
         // gradient (the user never opened "Edit gradient…") serializes with an
         // empty kv. In PAINTER mode the engine would then fall back to the
         // SLICED OBJECT's preset (default T0/T1), not this profile — so the saved
         // sandwich is not self-contained and the colors come out wrong. Bake the
         // current zone gradient snapshot into those passes. Passes that DO carry
-        // a per-pass gradient (kv non-empty, set by open_colormix_for) are left
+        // a per-pass gradient (kv non-empty, set by open_colorstitch_for) are left
         // untouched, so an explicit gradient always wins.
         for (auto& p : st.passes)
-            if (p.kind == Kind::ColorMix && p.colormix.kv.empty())
-                p.colormix = zone_colormix_snapshot(z);
+            if (p.kind == Kind::ColorStitch && p.colorstitch.kv.empty())
+                p.colorstitch = zone_colorstitch_snapshot(z);
 
         return st.to_json();   // "" when disabled/empty
     }
@@ -4886,7 +4999,7 @@ private:
             if (!s.empty()) s += "+";
             switch (p.kind) {
                 case Kind::Solid:     s += wxString::Format("T%d", p.solid_tool + 1); break;
-                case Kind::ColorMix:  s += "CM"; break;
+                case Kind::ColorStitch:  s += "CM"; break;
                 case Kind::PathBlend: s += "PB"; break;
                 default:              s += "·"; break;
             }
@@ -5035,7 +5148,7 @@ private:
         }
 
         // Sync the legacy enable gates the engine still needs:
-        //  - a ColorMix pass needs interlayer_colormix_enabled (bucketing gate)
+        //  - a ColorStitch pass needs interlayer_colormix_enabled (bucketing gate)
         //  - a PathBlend pass routes through the legacy GCode engine
         // Disabled zones also clear their MultiPass enable so a stale legacy key
         // can't resurrect the zone via synthesize_from_legacy().
@@ -5045,7 +5158,7 @@ private:
                 if (p.kind == k) return true;
             return false;
         };
-        const bool cm_t = has(0, Kind::ColorMix),  cm_p = has(1, Kind::ColorMix);
+        const bool cm_t = has(0, Kind::ColorStitch),  cm_p = has(1, Kind::ColorStitch);
         const bool pb_t = has(0, Kind::PathBlend), pb_p = has(1, Kind::PathBlend);
         auto wb = [&](const char* k, bool v) {
             if (auto* o = m_config->option<ConfigOptionBool>(k)) o->value = v;
@@ -5103,7 +5216,7 @@ private:
 // NEOTKO_SANDWICH_TAG_END
 
 } // anonymous namespace
-// NEOTKO_COLORMIX_TAG_END — s130 UI port (ColorMixPatternDialog)
+// NEOTKO_COLORSTITCH_TAG_END — s130 UI port (ColorStitchPatternDialog)
 
 // NEOTKO_COLORSTITCH_TAG — puente publico (decl. en ColorStitchPatternLauncher.hpp)
 bool open_colorstitch_pattern_dialog(
@@ -5118,14 +5231,14 @@ bool open_colorstitch_pattern_dialog(
     if (!base_cfg) return false;
 
     // Trabajar sobre una COPIA — el preset vivo NUNCA se ensucia (mismo motivo por
-    // el que open_colormix_for hace save/restore: el diálogo lee/escribe el cfg).
+    // el que open_colorstitch_for hace save/restore: el diálogo lee/escribe el cfg).
     DynamicPrintConfig cfg = *base_cfg;
 
     const char* pat_key = penu ? "interlayer_colormix_pattern_penultimate"
                                : "interlayer_colormix_pattern_top";
     const std::string gp = penu ? std::string("interlayer_colormix_penu_")
                                 : std::string("interlayer_colormix_");
-    // role_keys = idéntico a open_colormix_for (pattern + knobs del gradiente role).
+    // role_keys = idéntico a open_colorstitch_for (pattern + knobs del gradiente role).
     std::vector<std::string> role_keys;
     role_keys.push_back(pat_key);
     for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
@@ -5144,18 +5257,18 @@ bool open_colorstitch_pattern_dialog(
     std::string mixed_defs;
     if (auto* o = cfg.option<ConfigOptionString>("mixed_filament_definitions"))
         mixed_defs = o->value;
-    const auto options = Slic3r::SurfaceColorMix::get_mix_options(mixed_defs, fcolors);
+    const auto options = Slic3r::ColorStitch::get_mix_options(mixed_defs, fcolors);
     const std::string cur_pat = cfg.opt_string(pat_key);
     bool use_virtual = false;
     if (auto* o = cfg.option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
         use_virtual = o->value;
 
-    ColorMixPatternDialog dlg(parent, options, fcolors, cur_pat,
+    ColorStitchPatternDialog dlg(parent, options, fcolors, cur_pat,
                               use_virtual, &cfg, penu ? 1 : 0);
     if (dlg.ShowModal() != wxID_OK)
         return false;
 
-    // Volcar TODOS los getters al cfg copia (mismo orden que open_colormix_for).
+    // Volcar TODOS los getters al cfg copia (mismo orden que open_colorstitch_for).
     auto si = [&](const std::string& k, int v) {
         if (auto* o = cfg.option<ConfigOptionInt>(k)) o->value = v; };
     auto sf = [&](const std::string& k, double v) {
@@ -5180,7 +5293,7 @@ bool open_colorstitch_pattern_dialog(
     si(gp + "angle",        dlg.get_grad_angle());
     si(gp + "repetitions",  dlg.get_grad_repetitions());
     // min_length es GLOBAL (no role-prefijado) → fuera del per-pase, igual que
-    // open_colormix_for lo deja fuera de role_keys.
+    // open_colorstitch_for lo deja fuera de role_keys.
 
     // Snapshot del payload completo del pase (string + todos los knobs).
     Slic3r::SurfaceEffectPayload snap = SEPM::snapshot_keys(cfg, role_keys);
@@ -7570,13 +7683,13 @@ void TabPrint::build()
         optgroup->append_single_option_line("top_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
         optgroup->append_single_option_line("top_shell_layers");
         optgroup->append_single_option_line("top_shell_thickness");
-        // NEOTKO_COLORMIX_TAG_START — Penultimate surface controls (port s129). Keys exist in
+        // NEOTKO_COLORSTITCH_TAG_START — Penultimate surface controls (port s129). Keys exist in
         // PrintConfig (s124) but had no UI in the 2.3.4 port → penultimate never generated.
         // penultimate_infill_speed stays hidden (fork: speed not correct yet, uses top_surface_speed).
         optgroup->append_single_option_line("penultimate_top_layers");
         optgroup->append_single_option_line("penultimate_solid_infill_pattern");
         optgroup->append_single_option_line("penultimate_solid_infill_density");
-        // NEOTKO_COLORMIX_TAG_END
+        // NEOTKO_COLORSTITCH_TAG_END
         optgroup->append_single_option_line("bottom_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
         optgroup->append_single_option_line("bottom_shell_layers");
         optgroup->append_single_option_line("bottom_shell_thickness");

@@ -3450,17 +3450,18 @@ unsigned GUI_App::get_colour_approx_luma(const wxColour &colour)
 bool GUI_App::dark_mode()
 {
 #ifdef SUPPORT_DARK_MODE
-#if __APPLE__
-    // The check for dark mode returns false positive on 10.12 and 10.13,
-    // which allowed setting dark menu bar and dock area, which is
-    // is detected as dark mode. We must run on at least 10.14 where the
-    // proper dark mode was first introduced.
-    return wxPlatformInfo::Get().CheckOSVersion(10, 14) && mac_dark_mode();
-#else
+    // s290 — UNA SOLA VERDAD, y es `dark_color_mode`.
+    //
+    // macOS tenia aqui su propia rama, que preguntaba a mac_dark_mode() (la clave cruda
+    // AppleInterfaceStyle de NSUserDefaults) y NO miraba app_config. Como el resto de la app SI
+    // lee app_config, en cuanto las dos discrepaban Orca se partia en dos mitades: lo que pasa por
+    // esta funcion (init_label_colours, StateColor::SetDarkMode, el user agent de las webviews)
+    // en un tema, y todo lo demas en el otro. Eso era el "todo mezclado".
+    //
+    // 🚨 app_config lo sincroniza wxSystemSettings::GetAppearance() al arrancar (ver ~l.2762) y en
+    // cada cambio de apariencia (update_dark_config, GUI_Utils.cpp). Si algun dia hay que volver a
+    // preguntarle al sistema, se arregla ESE sincronizador, no se abre una segunda fuente aqui.
     return wxGetApp().app_config->get("dark_color_mode") == "1" ? true : check_dark_mode();
-    //const unsigned luma = get_colour_approx_luma(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-    //return luma < 128;
-#endif
 #else
     //BBS disable DarkUI mode
     return false;

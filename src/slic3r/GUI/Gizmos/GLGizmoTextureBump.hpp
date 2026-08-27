@@ -48,8 +48,8 @@ public:
     void render_painter_gizmo() override;
 
     // Max slots per painted volume -- slot 0 is "unpainted", 1..MAX_SLOTS-1 are zone slots. Must
-    // match ModelVolume::COLORMIX_SLOT_COUNT (static_assert in .cpp) -- same FacetsAnnotation
-    // encoding capacity ColorMix reuses, own canvas (texture_bump_paint_facets).
+    // match ModelVolume::COLORSTITCH_SLOT_COUNT (static_assert in .cpp) -- same FacetsAnnotation
+    // encoding capacity ColorStitch reuses, own canvas (texture_bump_paint_facets).
     static constexpr int MAX_SLOTS = 255;
 
     // NEOTKO_TEXTUREBUMP_TAG -- which section of the panel is showing. All = the object-wide
@@ -82,7 +82,7 @@ protected:
 
     // Painter state encoding: slot index 1..MAX_SLOTS-1 maps directly to EnforcerBlockerType(N).
     EnforcerBlockerType get_left_button_state_type()  const override;
-    // Right button never paints/erases here (same sentinel ColorMixPainter uses so it falls
+    // Right button never paints/erases here (same sentinel ColorStitchPainter uses so it falls
     // through to camera pan instead of being treated as an erase stroke by the base).
     EnforcerBlockerType get_right_button_state_type() const override { return EnforcerBlockerType(-1); }
 
@@ -216,7 +216,7 @@ private:
     int slot_for_selected_zone(bool assign_if_missing);
 
     // Build per-volume EBT color palette from the slot->zone table + manager (index 0 = neutral
-    // base, same layout GLGizmoColorMixPainter::build_ebt_colors_for_volume uses).
+    // base, same layout GLGizmoColorStitchPainter::build_ebt_colors_for_volume uses).
     std::vector<ColorRGBA> build_ebt_colors_for_volume(const ModelVolume* mv) const;
     // NEOTKO_TEXTUREBUMP_TAG -- bug fix (reported: freshly painted/newly-assigned slots show gray
     // until the gizmo is closed and reopened): each TriangleSelectorPatch's EBT color array is a

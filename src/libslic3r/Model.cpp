@@ -1130,8 +1130,8 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
-    this->colormix_stickers           = rhs.colormix_stickers; // NEOTKO_STICKER_TAG
-    this->colormix_sticker_profiles_fingerprint = rhs.colormix_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
+    this->colorstitch_stickers           = rhs.colorstitch_stickers; // NEOTKO_STICKER_TAG
+    this->colorstitch_sticker_profiles_fingerprint = rhs.colorstitch_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
     this->texture_bump_plane_transform = rhs.texture_bump_plane_transform; // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
     this->cut_id.copy(rhs.cut_id);
     this->copy_transformation_caches(rhs);
@@ -1173,8 +1173,8 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
-    this->colormix_stickers           = std::move(rhs.colormix_stickers); // NEOTKO_STICKER_TAG
-    this->colormix_sticker_profiles_fingerprint = rhs.colormix_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
+    this->colorstitch_stickers           = std::move(rhs.colorstitch_stickers); // NEOTKO_STICKER_TAG
+    this->colorstitch_sticker_profiles_fingerprint = rhs.colorstitch_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
     this->texture_bump_plane_transform = std::move(rhs.texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
     this->copy_transformation_caches(rhs);
 
@@ -1844,10 +1844,10 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
             vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
             vol->fuzzy_skin_facets.assign(volume->fuzzy_skin_facets);
             // NEOTKO_PROFILE_TAG
-            vol->color_mix_paint_facets.assign(volume->color_mix_paint_facets);
-            std::copy(std::begin(volume->colormix_slot_to_profile_id),
-                      std::end  (volume->colormix_slot_to_profile_id),
-                      std::begin(vol->colormix_slot_to_profile_id));
+            vol->colorstitch_paint_facets.assign(volume->colorstitch_paint_facets);
+            std::copy(std::begin(volume->colorstitch_slot_to_profile_id),
+                      std::end  (volume->colorstitch_slot_to_profile_id),
+                      std::begin(vol->colorstitch_slot_to_profile_id));
 
             // Perform conversion only if the target "imperial" state is different from the current one.
             // This check supports conversion of "mixed" set of volumes, each with different "imperial" state.
@@ -1961,9 +1961,9 @@ void ModelVolume::reset_extra_facets()
     this->mmu_segmentation_facets.reset();
     this->fuzzy_skin_facets.reset();
     // NEOTKO_PROFILE_TAG
-    this->color_mix_paint_facets.reset();
-    std::fill(std::begin(this->colormix_slot_to_profile_id),
-              std::end  (this->colormix_slot_to_profile_id), 0);
+    this->colorstitch_paint_facets.reset();
+    std::fill(std::begin(this->colorstitch_slot_to_profile_id),
+              std::end  (this->colorstitch_slot_to_profile_id), 0);
 }
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
@@ -1995,12 +1995,12 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         _ndbg_ << "SPLIT_BASELINE obj='" << this->name << "' volumes=" << this->volumes.size()
                << " src_config_has_flag=" << (src_en != nullptr)
                << " src_flag_value=" << (src_en ? src_en->value : false)
-               << " src_stickers=" << this->colormix_stickers.size();
+               << " src_stickers=" << this->colorstitch_stickers.size();
         NeoDebug::write(NeoDebug::PROFILE, _ndbg_.str());
     }
 
     // NEOTKO_STICKER_TAG (s212, bug #9/split) — Sandwich Stickers live on the OBJECT
-    // (colormix_stickers, no per-volume ownership field), so splitting a multi-volume
+    // (colorstitch_stickers, no per-volume ownership field), so splitting a multi-volume
     // object into one new object per volume otherwise drops every sticker silently —
     // none of the resulting objects has any claim to them. Resolve ownership here,
     // BEFORE volume meshes are moved out below (`std::move(volume->mesh())`), by
@@ -2010,15 +2010,15 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
     // which is the case this bug was reported for (disjoint bodies merged/imported
     // into one object) and the common case for "Split to Objects" in general.
     std::map<int, std::vector<size_t>> volume_idx_to_sticker_indices;
-    if (is_multi_volume_object && !this->colormix_stickers.empty()) {
+    if (is_multi_volume_object && !this->colorstitch_stickers.empty()) {
         std::vector<std::pair<int, BoundingBoxf3>> volume_bboxes;
         for (int vi = 0; vi < (int)this->volumes.size(); ++vi) {
             const ModelVolume* v = this->volumes[vi];
             if (v->type() != ModelVolumeType::MODEL_PART || v->mesh().empty()) continue;
             volume_bboxes.emplace_back(vi, v->mesh().transformed_bounding_box(v->get_matrix()));
         }
-        for (size_t si = 0; si < this->colormix_stickers.size(); ++si) {
-            const ColorMixSticker& st = this->colormix_stickers[si];
+        for (size_t si = 0; si < this->colorstitch_stickers.size(); ++si) {
+            const ColorStitchSticker& st = this->colorstitch_stickers[si];
             const Vec3d anchor = st.transform * Vec3d::Zero();
             int best_vi = -1;
             double best_z_gap = std::numeric_limits<double>::max();
@@ -2129,23 +2129,23 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                     new_vol->mmu_segmentation_facets.reset(); // BBS: let next assign take effect
                 new_vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
                 // NEOTKO_PROFILE_TAG — mirror color_mix paint facets + slot table
-                if (new_vol->color_mix_paint_facets.timestamp() == volume->color_mix_paint_facets.timestamp())
-                    new_vol->color_mix_paint_facets.reset();
-                new_vol->color_mix_paint_facets.assign(volume->color_mix_paint_facets);
-                std::copy(std::begin(volume->colormix_slot_to_profile_id),
-                          std::end  (volume->colormix_slot_to_profile_id),
-                          std::begin(new_vol->colormix_slot_to_profile_id));
+                if (new_vol->colorstitch_paint_facets.timestamp() == volume->colorstitch_paint_facets.timestamp())
+                    new_vol->colorstitch_paint_facets.reset();
+                new_vol->colorstitch_paint_facets.assign(volume->colorstitch_paint_facets);
+                std::copy(std::begin(volume->colorstitch_slot_to_profile_id),
+                          std::end  (volume->colorstitch_slot_to_profile_id),
+                          std::begin(new_vol->colorstitch_slot_to_profile_id));
 
                 // NEOTKO_PROFILE_TAG (s212 bug-hunt) — did the per-volume paint data
                 // (facets + slot table) actually land on new_vol?
                 if (NeoDebug::enabled(NeoDebug::PROFILE)) {
                     int nonzero_slots = 0;
                     for (int _s = 0; _s < 255; ++_s)
-                        if (new_vol->colormix_slot_to_profile_id[_s] != 0) ++nonzero_slots;
+                        if (new_vol->colorstitch_slot_to_profile_id[_s] != 0) ++nonzero_slots;
                     std::ostringstream _ndbg_;
                     _ndbg_ << "SPLIT_VOL_COPY new_obj='" << new_object->name
-                           << "' src_facets_empty=" << volume->color_mix_paint_facets.empty()
-                           << " new_facets_empty=" << new_vol->color_mix_paint_facets.empty()
+                           << "' src_facets_empty=" << volume->colorstitch_paint_facets.empty()
+                           << " new_facets_empty=" << new_vol->colorstitch_paint_facets.empty()
                            << " new_nonzero_slots=" << nonzero_slots;
                     NeoDebug::write(NeoDebug::PROFILE, _ndbg_.str());
                 }
@@ -2186,9 +2186,9 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                     Transform3d frame_shift = Transform3d::Identity();
                     frame_shift.translation() = -new_vol->get_offset();
                     for (size_t si : it_stk->second) {
-                        ColorMixSticker new_sticker = this->colormix_stickers[si];
+                        ColorStitchSticker new_sticker = this->colorstitch_stickers[si];
                         new_sticker.transform = frame_shift * new_sticker.transform;
-                        new_object->colormix_stickers.emplace_back(std::move(new_sticker));
+                        new_object->colorstitch_stickers.emplace_back(std::move(new_sticker));
                     }
                 }
             }
@@ -2845,7 +2845,7 @@ size_t ModelVolume::split(unsigned int max_extruders)
             this->supported_facets.reset();
             this->seam_facets.reset();
             this->fuzzy_skin_facets.reset();
-            this->color_mix_paint_facets.reset(); // NEOTKO_PROFILE_TAG
+            this->colorstitch_paint_facets.reset(); // NEOTKO_PROFILE_TAG
         }
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
@@ -2907,7 +2907,7 @@ void ModelVolume::assign_new_unique_ids_recursive()
     seam_facets.set_new_unique_id();
     mmu_segmentation_facets.set_new_unique_id();
     fuzzy_skin_facets.set_new_unique_id();
-    color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG
+    colorstitch_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG
 }
 
 void ModelVolume::rotate(double angle, Axis axis)
@@ -3767,6 +3767,22 @@ bool model_custom_supports_data_changed(const ModelObject& mo, const ModelObject
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.supported_facets.timestamp_matches(mv_new.supported_facets); });
 }
 
+// NEOTKO_SUPPORTZONES_TAG s286 F3 — T3: the recipe of a support zone reaching the backend.
+// docs/FUTURE/SUPPORT_ZONES_PLAN.md §5 T3.
+//
+// supports_differ compares volume ids, types, transformation matrices and their order, and the
+// comment at PrintApply.cpp says outright that the configuration is NOT checked. So editing a
+// zone's recipe used to change nothing and not even re-slice. This is the missing comparator; it
+// rides the same gate as the custom-supports one, which already invalidates just posSupportMaterial.
+//
+// Enforcers only. A blocker has no recipe: it subtracts, it does not print.
+bool model_support_volume_config_changed(const ModelObject &mo, const ModelObject &mo_new)
+{
+    return model_property_changed(mo, mo_new,
+        [](const ModelVolumeType t) { return t == ModelVolumeType::SUPPORT_ENFORCER; },
+        [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.config.timestamp_matches(mv_new.config); });
+}
+
 bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo_new)
 {
     return model_property_changed(mo, mo_new,
@@ -3788,21 +3804,21 @@ bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.fuzzy_skin_facets.timestamp_matches(mv_new.fuzzy_skin_facets); });
 }
 
-// NEOTKO_PROFILE_TAG — change detector for the ColorMix Painter so paint or
+// NEOTKO_PROFILE_TAG — change detector for the ColorStitch Painter so paint or
 // slot-table edits force a re-slice instead of hitting the apply() cache.
 // NEOTKO_COLORSTITCH_TAG — huella del CONTENIDO de los perfiles que referencian los
 // slots pintados de un volumen. El contenido (stacks/tools) vive en el manager global
 // (SurfaceEffectProfileManager), FUERA del modelo, así que editar un tool/color NO
 // cambiaba ni las facetas ni el mapeo de slots → la puerta de invalidación de apply
-// (model_colormix_paint_data_changed) no detectaba el cambio y no re-sliceaba (ni el
+// (model_colorstitch_paint_data_changed) no detectaba el cambio y no re-sliceaba (ni el
 // botón de refresh). Calculamos esta huella EN apply desde el manager → es
 // independiente de QUIÉN editó el perfil (painter, ADV, Sandwich Editor).
-static uint64_t colormix_profiles_fingerprint_of(const ModelVolume& mv)
+static uint64_t colorstitch_profiles_fingerprint_of(const ModelVolume& mv)
 {
     auto& mgr = SurfaceEffectProfileManager::get();
     std::string acc;
-    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
-        const int pid = mv.colormix_slot_to_profile_id[s];
+    for (int s = 1; s < ModelVolume::COLORSTITCH_SLOT_COUNT; ++s) {
+        const int pid = mv.colorstitch_slot_to_profile_id[s];
         if (pid == 0) continue;
         acc += std::to_string(s) + ":";
         if (const SurfaceEffectProfile* p = mgr.find(pid)) {
@@ -3821,35 +3837,35 @@ static uint64_t colormix_profiles_fingerprint_of(const ModelVolume& mv)
     return (uint64_t)std::hash<std::string>{}(acc);
 }
 
-bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+bool model_colorstitch_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new)
 {
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
         [](const ModelVolume &mv_old, const ModelVolume &mv_new) {
-            if (!mv_old.color_mix_paint_facets.timestamp_matches(mv_new.color_mix_paint_facets))
+            if (!mv_old.colorstitch_paint_facets.timestamp_matches(mv_new.colorstitch_paint_facets))
                 return false;
             for (int s = 0; s < 16; ++s)
-                if (mv_old.colormix_slot_to_profile_id[s] != mv_new.colormix_slot_to_profile_id[s])
+                if (mv_old.colorstitch_slot_to_profile_id[s] != mv_new.colorstitch_slot_to_profile_id[s])
                     return false;
             // Recalcular la huella de contenido AHORA y bajarla al volumen NUEVO (cache
             // derivada) para que el snapshot del Print la conserve. mv_old lleva la del
             // apply anterior; si difieren, el contenido del perfil cambió → re-slice.
-            const uint64_t fp_new = colormix_profiles_fingerprint_of(mv_new);
-            const_cast<ModelVolume&>(mv_new).colormix_profiles_fingerprint = fp_new;
-            if (mv_old.colormix_profiles_fingerprint != fp_new)
+            const uint64_t fp_new = colorstitch_profiles_fingerprint_of(mv_new);
+            const_cast<ModelVolume&>(mv_new).colorstitch_profiles_fingerprint = fp_new;
+            if (mv_old.colorstitch_profiles_fingerprint != fp_new)
                 return false;
             return true;
         });
 }
 
-// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same role as colormix_profiles_fingerprint_of above, own zone
+// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same role as colorstitch_profiles_fingerprint_of above, own zone
 // registry (TextureBumpZoneManager, not SurfaceEffectProfileManager) -- a painted zone's content
 // (image/scale/thickness/...) lives outside the model, so editing it without repainting wouldn't
 // otherwise change facets/slot-map and Print::apply would skip re-slicing.
 static uint64_t texture_bump_zones_fingerprint_of(const ModelVolume& mv)
 {
     std::vector<int> ids;
-    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s) {
+    for (int s = 1; s < ModelVolume::COLORSTITCH_SLOT_COUNT; ++s) {
         const int zid = mv.texture_bump_slot_to_zone_id[s];
         if (zid != 0)
             ids.push_back(zid);
@@ -3864,11 +3880,11 @@ bool model_texture_bump_paint_data_changed(const ModelObject& mo, const ModelObj
         [](const ModelVolume &mv_old, const ModelVolume &mv_new) {
             if (!mv_old.texture_bump_paint_facets.timestamp_matches(mv_new.texture_bump_paint_facets))
                 return false;
-            for (int s = 0; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
+            for (int s = 0; s < ModelVolume::COLORSTITCH_SLOT_COUNT; ++s)
                 if (mv_old.texture_bump_slot_to_zone_id[s] != mv_new.texture_bump_slot_to_zone_id[s])
                     return false;
             // Recompute the content fingerprint now and cache it onto the NEW volume (mirrors
-            // model_colormix_paint_data_changed above) so the next Print::apply() snapshot carries
+            // model_colorstitch_paint_data_changed above) so the next Print::apply() snapshot carries
             // it forward; mv_old carries the one from the previous apply.
             const uint64_t fp_new = texture_bump_zones_fingerprint_of(mv_new);
             const_cast<ModelVolume&>(mv_new).texture_bump_zones_fingerprint = fp_new;
@@ -3884,11 +3900,11 @@ bool model_texture_bump_paint_data_changed(const ModelObject& mo, const ModelObj
 // referenced profiles, via the same fingerprint mechanism the painted slots use
 // (stacks live in SurfaceEffectProfileManager, outside the model, so editing a
 // tool/colour would otherwise not be seen by apply()).
-static uint64_t colormix_sticker_profiles_fingerprint_of(const ModelObject& mo)
+static uint64_t colorstitch_sticker_profiles_fingerprint_of(const ModelObject& mo)
 {
     auto& mgr = SurfaceEffectProfileManager::get();
     std::string acc;
-    for (const ColorMixSticker& st : mo.colormix_stickers) {
+    for (const ColorStitchSticker& st : mo.colorstitch_stickers) {
         if (st.profile_id == 0) continue;
         acc += std::to_string(st.profile_id) + ":";
         if (const SurfaceEffectProfile* p = mgr.find(st.profile_id)) {
@@ -3902,19 +3918,19 @@ static uint64_t colormix_sticker_profiles_fingerprint_of(const ModelObject& mo)
     return (uint64_t)std::hash<std::string>{}(acc);
 }
 
-bool model_colormix_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+bool model_colorstitch_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new)
 {
-    if (mo.colormix_stickers.size() != mo_new.colormix_stickers.size())
+    if (mo.colorstitch_stickers.size() != mo_new.colorstitch_stickers.size())
         return true;
-    for (size_t i = 0; i < mo.colormix_stickers.size(); ++i)
-        if (mo.colormix_stickers[i] != mo_new.colormix_stickers[i])
+    for (size_t i = 0; i < mo.colorstitch_stickers.size(); ++i)
+        if (mo.colorstitch_stickers[i] != mo_new.colorstitch_stickers[i])
             return true;
     // Recalcular la huella de contenido AHORA y bajarla al objeto NUEVO (cache
     // derivada) para que el snapshot del Print la conserve — mismo patrón que
     // el fingerprint per-volume del painter (ver arriba).
-    const uint64_t fp_new = colormix_sticker_profiles_fingerprint_of(mo_new);
-    const_cast<ModelObject&>(mo_new).colormix_sticker_profiles_fingerprint = fp_new;
-    return mo.colormix_sticker_profiles_fingerprint != fp_new;
+    const uint64_t fp_new = colorstitch_sticker_profiles_fingerprint_of(mo_new);
+    const_cast<ModelObject&>(mo_new).colorstitch_sticker_profiles_fingerprint = fp_new;
+    return mo.colorstitch_sticker_profiles_fingerprint != fp_new;
 }
 
 // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: the base (non-painted) projection-plane transform lives

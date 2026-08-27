@@ -29,14 +29,30 @@
 
 namespace Slic3r {
 
-// NEOTKO_COLORMIX_TAG — ColorMix surface target (which role(s) the effect applies to).
+// NEOTKO_COLORSTITCH_TAG — ángulo de relleno por defecto de una banda ColorStitch.
+// DUEÑO ÚNICO del valor. Lo leen: el default de `interlayer_colormix_angle`
+// (PrintConfig.cpp), el fallback del panel del gizmo (GLGizmoColorStitchPainter.cpp)
+// y el fallback del weave preview (ColorStitchPaintPreview.cpp). Antes eran tres -1
+// hardcodeados e independientes, y ESA fue la causa del bug del ángulo: con -1 el
+// motor deja `is_using_template_angle` a false y FillBase.cpp suma +90° en las capas
+// impares (45/135), mientras el preview dibujaba 45 fijo → Prepare no casaba con el
+// gcode justo en la mitad de las bandas.
+// COLORSTITCH_ANGLE_AUTO (-1) SIGUE siendo válido y se comporta igual que siempre
+// (el relleno alterna por capa). Deja de ser el default porque no se puede
+// previsualizar: el ángulo real cambia DENTRO de la propia banda, así que ningún
+// valor único es cierto. El preview marca esas bandas parpadeando entre las dos
+// direcciones en vez de mentir con una.
+static constexpr int COLORSTITCH_DEFAULT_ANGLE_DEG = 45;
+static constexpr int COLORSTITCH_ANGLE_AUTO        = -1;
+
+// NEOTKO_COLORSTITCH_TAG — ColorStitch surface target (which role(s) the effect applies to).
 //   0 = Both, 1 = Top only, 2 = Penultimate only.
 static constexpr int kColormixSurface_Both        = 0;
 static constexpr int kColormixSurface_Top         = 1;
 static constexpr int kColormixSurface_Penultimate = 2;
 
-// NEOTKO_COLORMIX_TAG — s58 lane distribution mode (Sandwich engine, Fase 2).
-// Controls how SurfaceColorMix (and PathBlend) maps pattern slots to extrusion lines.
+// NEOTKO_COLORSTITCH_TAG — s58 lane distribution mode (Sandwich engine, Fase 2).
+// Controls how ColorStitch (and PathBlend) maps pattern slots to extrusion lines.
 // Consumed via the `surface_color_mix_lane_mode` per-region config key.
 //   0 = Default     — slot = path_idx % n_slots  (legacy behaviour)
 //   1 = GeoSort     — sort lines by perpendicular projection, slot = ord % n_slots
@@ -46,7 +62,7 @@ static constexpr int kLaneMode_Default    = 0;
 static constexpr int kLaneMode_GeoSort    = 1;
 static constexpr int kLaneMode_LaneQuant  = 2;
 static constexpr int kLaneMode_DirCluster = 3;
-// NEOTKO_COLORMIX_TAG_END
+// NEOTKO_COLORSTITCH_TAG_END
 
 // NEOTKO_NEOWEAVING_TAG_START — Neoweaving enums (interlayer Z-zigzag / angle lock)
 enum class NeoweaveMode {
@@ -60,7 +76,7 @@ enum class NeoweaveFilter {
 };
 
 // NEOTKO_NEOWEAVING_PORT_TAG — per-object infill override (ported from FULLSPECTRUM095
-// SurfaceColorMix.hpp, WAVESUPPORT_PLAN.md Fase 1). Tristate so an object can force infill
+// ColorStitch.hpp, WAVESUPPORT_PLAN.md Fase 1). Tristate so an object can force infill
 // neoweaving on/off regardless of the global interlayer_neoweave_enabled preset value.
 enum class InfillNeoweaveOverride {
     Inherit,  // use global interlayer_neoweave_enabled
@@ -1386,12 +1402,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // Sandwich sublayer toolchange (read per-region by NeoTower). 0 = disabled.
     ((ConfigOptionFloat,                multipass_prime_volume))
     // ===================================================================
-    // NEOTKO SANDWICH ENGINE (Fase 2 port) — ColorMix + MultiPass + PathBlend
+    // NEOTKO SANDWICH ENGINE (Fase 2 port) — ColorStitch + MultiPass + PathBlend
     // + Penultimate + Interlayer nesting. Neoweaving/MicroStitch keys NOT ported
     // (Tier B). multipass_prime_volume already lives above (increment #3).
     // ===================================================================
     // NEOTKO_NEOWEAVING_TAG — Monotonic Interlayer Nesting toggle (kept per D1;
-    // re-verify no neoweaving-code dependency when SurfaceColorMix.cpp lands).
+    // re-verify no neoweaving-code dependency when ColorStitch.cpp lands).
     ((ConfigOptionBool,                   neotko_interlayer_nesting_enabled))
     // NEOTKO_NEOWEAVING_TAG — angle-lock keys consumed by Fill (_infill_direction).
     ((ConfigOptionBool,                   interlayer_neoweave_enabled))
@@ -1399,7 +1415,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionEnum<NeoweaveFilter>,   neoweave_filter))
     // NEOTKO_NEOWEAVING_PORT_TAG — WAVESUPPORT_PLAN.md Fase 1: numeric + infill-override keys
     // ported from FULLSPECTRUM095 (legacy) alongside NeoweaveEngine itself — the engine's
-    // apply_path()/needs_weave() read these directly (SurfaceColorMix.cpp).
+    // apply_path()/needs_weave() read these directly (ColorStitch.cpp).
     ((ConfigOptionFloat,                  interlayer_neoweave_amplitude))
     ((ConfigOptionFloat,                  interlayer_neoweave_period))
     ((ConfigOptionFloat,                  interlayer_neoweave_max_z_speed))
@@ -1410,7 +1426,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,                  infill_neoweave_amplitude))
     ((ConfigOptionFloat,                  infill_neoweave_period))
     ((ConfigOptionFloat,                  infill_neoweave_max_z_speed))
-    // NEOTKO_COLORMIX_TAG_START — Surface ColorMix
+    // NEOTKO_COLORSTITCH_TAG_START — Surface ColorStitch
     ((ConfigOptionBool,    interlayer_colormix_enabled))
     ((ConfigOptionInt,     interlayer_colormix_surface))
     ((ConfigOptionInt,     interlayer_colormix_tool_a))
@@ -1460,9 +1476,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan strategy for the contour connector
     // self-loop (cp_start==cp_end) micro-accumulation at acute corners (FillBase.cpp take_limited).
     ((ConfigOptionInt,     colorstitch_monotonic_replan))
-    // NEOTKO_COLORSTITCH_TAG — ColorStitch on continuous Monotonic (post-hoc split in SurfaceColorMix).
+    // NEOTKO_COLORSTITCH_TAG — ColorStitch on continuous Monotonic (post-hoc split in ColorStitch).
     ((ConfigOptionBool,    colorstitch_monotonic_split))
-    // NEOTKO_COLORMIX_TAG_END
+    // NEOTKO_COLORSTITCH_TAG_END
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend (multipass_prime_volume already above)
     ((ConfigOptionBool,    multipass_enabled))
     ((ConfigOptionInt,     multipass_surface))
@@ -1540,6 +1556,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,  pathblend_top))
     ((ConfigOptionString,  pathblend_penu))
     // NEOTKO_SANDWICH_TAG — Sandwich pass-stack blob (1 coString JSON per zone).
+    ((ConfigOptionString,  neotko_support_zone_gesture))   // NEOTKO_SUPPORTZONES_TAG s288
     ((ConfigOptionString,  neotko_surface_passes_top))
     ((ConfigOptionString,  neotko_surface_passes_penu))
     // NEOTKO_ALHCOLOR_TAG — Fase 5.3: slope-perimeter recolor blob (JSON array of
@@ -1940,7 +1957,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // NEOTKO_MIXEDFIL_SANDWICH_TAG — slice-time mirror of the TD-per-tool scalars
     // (app_config "neotko_td_1".."neotko_td_4", GUI-only). Injected by the GUI at
     // Plater::update_background_process (same site/pattern as neotko_libre_mode)
-    // so SurfaceColorMix.cpp (pure engine, no wxWidgets) can build ColorSci
+    // so ColorStitch.cpp (pure engine, no wxWidgets) can build ColorSci
     // Material[4] for the "MixedFilament Object" auto-sandwich without reaching
     // into app_config. 4 values, default 1.0 (opaque) each.
     ((ConfigOptionFloats,             neotko_td_mirror))

@@ -127,7 +127,7 @@ inline float eff_layer_height(float z, float nominal_h, float last_emitting_plan
 // mark_standalone_planes — NEOTKO_NEOTOWER_TAG s114, extracted + fixed in s236.
 //
 // A canonical layer whose z_nominal carries NO real (non-sublayer) event is
-// realised entirely by MultiPass sublayers (PathBlend / ColorMix / mixed / any
+// realised entirely by MultiPass sublayers (PathBlend / ColorStitch / mixed / any
 // gradient shape) → it IS the layer, not a decoration of a real one. Its
 // band-top sublayer must be treated as a structural plane (keep wall+grid,
 // advance the emitting-plane tracker) instead of a frame-free same-plane

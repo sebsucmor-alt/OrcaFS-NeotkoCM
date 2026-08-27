@@ -26,7 +26,7 @@
 #include "Time.hpp"
 #include "GCode/ExtrusionProcessor.hpp"
 #include "MultiPassScheduler.hpp" // NEOTKO_MPSCHEDULER_TAG s79 — canonical grouped-by-tool order
-#include "SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG — NeoDebug + NEOTKO_LOG + PathBlendEngine
+#include "ColorStitch.hpp"  // NEOTKO_COLORSTITCH_TAG — NeoDebug + NEOTKO_LOG + PathBlendEngine
 #include "SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — painter-mode PB gate
 #include <algorithm>
 #include <cmath>
@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <iostream>
+#include <map>      // NEOTKO_SUPPORTZONES_TAG s289 — roles por familia y por capa
 #include <numeric>
 #include <math.h>
 #include <stdlib.h>
@@ -728,7 +729,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // NEOTKO_SANDWICH_TAG s119 (port s127) — width/role tag desync fix. The prime-tower
     // TCR is spliced as raw gcode (its own ;WIDTH:0.5 / ;TYPE:Prime tower text) and does
     // NOT update m_last_processor_extrusion_role. When the object resumes at the SAME path
-    // width as before the tower (sandwich ColorMix buckets share width across passes),
+    // width as before the tower (sandwich ColorStitch buckets share width across passes),
     // _extrude sees role unchanged + width unchanged → SKIPS re-emitting ;WIDTH/;HEIGHT →
     // the viewer renders the resumed path at the tower's 0.5 width (looks massively
     // over-extruded; flow E is actually identical). Mark the role erWipeTower so
@@ -909,7 +910,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // NEOTKO_SANDWICH_TAG s119 (port s127) — width/role tag desync fix. The prime-tower
     // TCR is spliced as raw gcode (its own ;WIDTH:0.5 / ;TYPE:Prime tower text) and does
     // NOT update m_last_processor_extrusion_role. When the object resumes at the SAME path
-    // width as before the tower (sandwich ColorMix buckets share width across passes),
+    // width as before the tower (sandwich ColorStitch buckets share width across passes),
     // _extrude sees role unchanged + width unchanged → SKIPS re-emitting ;WIDTH/;HEIGHT →
     // the viewer renders the resumed path at the tower's 0.5 width (looks massively
     // over-extruded; flow E is actually identical). Mark the role erWipeTower so
@@ -2716,7 +2717,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 file.write(full_config);
 
             // SoftFever: write compatiple image
-            int first_layer_bed_temperature = get_bed_temperature(0, true, print.config().curr_bed_type);
+            int first_layer_bed_temperature = get_bed_temperature_max(print, true);
             file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
             file.write_format("; first_layer_temperature = %d\n", print.config().nozzle_temperature_initial_layer.get_at(0));
             file.write("; CONFIG_BLOCK_END\n\n");
@@ -3067,8 +3068,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->placeholder_parser().set("bbl_bed_temperature_gcode", new ConfigOptionBool(false));
         this->placeholder_parser().set("bed_temperature_initial_layer", new ConfigOptionInts(*first_bed_temp_opt));
         this->placeholder_parser().set("bed_temperature", new ConfigOptionInts(*bed_temp_opt));
-        this->placeholder_parser().set("bed_temperature_initial_layer_single",
-                                       new ConfigOptionInt(first_bed_temp_opt->get_at(initial_extruder_id)));
+        // Upstream Snapmaker #699 (2144e1f41): the single bed temperature value accommodates the
+        // highest-temperature filament of the print (max over all used extruders instead of the
+        // initial extruder only).
+        int bed_temp_single = 0;
+        for (const unsigned int extruder_id : print.extruders())
+            bed_temp_single = std::max(bed_temp_single, first_bed_temp_opt->get_at(extruder_id));
+        this->placeholder_parser().set("bed_temperature_initial_layer_single", new ConfigOptionInt(bed_temp_single));
         this->placeholder_parser().set("bed_temperature_initial_layer_vector", new ConfigOptionString());
         this->placeholder_parser().set("chamber_temperature", new ConfigOptionInts(m_config.chamber_temperature));
         this->placeholder_parser().set("overall_chamber_temperature", new ConfigOptionInt(max_chamber_temp));
@@ -3140,7 +3146,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                                        initial_extruder_id);
     if (print.config().gcode_flavor != gcfKlipper) {
         // Set bed temperature if the start G-code does not contain any bed temp control G-codes.
-        this->_print_first_layer_bed_temperature(file, print, machine_start_gcode, initial_extruder_id, true);
+        this->_print_first_layer_bed_temperature(file, print, machine_start_gcode, true);
         // Set extruder(s) temperature before and after start G-code.
         this->_print_first_layer_extruder_temperatures(file, print, machine_start_gcode, initial_extruder_id, false);
     }
@@ -3315,7 +3321,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                                                             print.config().printing_by_object_gcode.value,
                                                                                             initial_extruder_id);
                     // Set first layer bed and extruder temperatures, don't wait for it to reach the temperature.
-                    this->_print_first_layer_bed_temperature(file, print, printing_by_object_gcode, initial_extruder_id, false);
+                    this->_print_first_layer_bed_temperature(file, print, printing_by_object_gcode, false);
                     this->_print_first_layer_extruder_temperatures(file, print, printing_by_object_gcode, initial_extruder_id, false);
                     file.writeln(printing_by_object_gcode);
                 }
@@ -3501,7 +3507,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             file.write(full_config);
 
         // SoftFever: write compatiple info
-        int first_layer_bed_temperature = get_bed_temperature(0, true, print.config().curr_bed_type);
+        int first_layer_bed_temperature = get_bed_temperature_max(print, true);
         file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
         file.write_format("; bed_shape = %s\n", print.full_print_config().opt_serialize("printable_area").c_str());
         file.write_format("; first_layer_temperature = %d\n", print.config().nozzle_temperature_initial_layer.get_at(0));
@@ -3955,9 +3961,26 @@ void GCode::print_machine_envelope(GCodeOutputStream& file, Print& print)
 // BBS
 int GCode::get_bed_temperature(const int extruder_id, const bool is_first_layer, const BedType bed_type) const
 {
-    std::string             bed_temp_key = is_first_layer ? get_bed_temp_1st_layer_key(bed_type) : get_bed_temp_key(bed_type);
+    // Upstream Snapmaker #699 (2144e1f41): fall back to PEI temps for bed types without dedicated
+    // temp options (e.g. btDefault), mirroring the placeholder setup in _do_export.
+    std::string bed_temp_key = is_first_layer ? get_bed_temp_1st_layer_key(bed_type) : get_bed_temp_key(bed_type);
+    if (bed_temp_key.empty())
+        bed_temp_key = is_first_layer ? get_bed_temp_1st_layer_key(btPEI) : get_bed_temp_key(btPEI);
     const ConfigOptionInts* bed_temp_opt = m_config.option<ConfigOptionInts>(bed_temp_key);
     return bed_temp_opt->get_at(extruder_id);
+}
+
+// BBS
+// Max bed temperature over all used extruders (object/support/wipe tower/brim-introduced extruders),
+// so a compatible mixed print (e.g. PLA 65C + TPU 35C) always runs the highest bed temperature.
+// A value of 0 means the filament does not support the current bed type, and is naturally skipped by max().
+int GCode::get_bed_temperature_max(const Print& print, const bool is_first_layer) const
+{
+    int max_bed_temp = 0;
+    for (const unsigned int extruder_id : print.extruders())
+        max_bed_temp = std::max(
+            max_bed_temp, get_bed_temperature(extruder_id, is_first_layer, print.config().curr_bed_type));
+    return max_bed_temp;
 }
 
 // Write 1st layer bed temperatures into the G-code.
@@ -3965,21 +3988,15 @@ int GCode::get_bed_temperature(const int extruder_id, const bool is_first_layer,
 // M140 - Set Extruder Temperature
 // M190 - Set Extruder Temperature and Wait
 void GCode::_print_first_layer_bed_temperature(
-    GCodeOutputStream& file, Print& print, const std::string& gcode, unsigned int first_printing_extruder_id, bool wait)
+    GCodeOutputStream& file, Print& print, const std::string& gcode, bool wait)
 {
-    // Initial bed temperature based on the first extruder.
-    // BBS
-    std::vector<int> temps_per_bed;
-    int              bed_temp = get_bed_temperature(first_printing_extruder_id, true, print.config().curr_bed_type);
+    // Upstream Snapmaker #699 (2144e1f41): bed temperature accommodates the highest-temperature
+    // filament of the print (max over all used extruders instead of the first printing extruder).
+    int bed_temp = get_bed_temperature_max(print, true);
 
     // Is the bed temperature set by the provided custom G-code?
     int  temp_by_gcode     = -1;
     bool temp_set_by_gcode = custom_gcode_sets_temperature(gcode, 140, 190, false, temp_by_gcode);
-    // BBS
-#if 0
-    if (temp_set_by_gcode && temp_by_gcode >= 0 && temp_by_gcode < 1000)
-        temp = temp_by_gcode;
-#endif
 
     // Always call m_writer.set_bed_temperature() so it will set the internal "current" state of the bed temp as if
     // the custom start G-code emited these.
@@ -5224,16 +5241,18 @@ LayerResult GCode::process_layer(const Print& print,
         std::vector<LayerToPrint> ltps_sorted(layers.begin(), layers.end());
         {
             // Build SublayerKey items for the mp entries (preserving their index in
-            // ltps_sorted so we can rebuild the permutation). chain_key identically
-            // computed to NeoTower: (uintptr_t)mp_object * 1000003 + mp_layer_id.
+            // ltps_sorted so we can rebuild the permutation). chain_key comes from
+            // MultiPassScheduler::make_chain_key — the single owner, shared with both
+            // NeoTower sites (s282b; it used to be duplicated arithmetic here).
             std::vector<size_t>                         mp_pos;   // index into ltps_sorted
             std::vector<MultiPassScheduler::SublayerKey> items;
             for (size_t i = 0; i < ltps_sorted.size(); ++i) {
                 const LayerToPrint& ltp = ltps_sorted[i];
                 if (!ltp.mp_sublayer) continue;
                 MultiPassScheduler::SublayerKey k;
-                k.chain_key    = (uint64_t)(uintptr_t)ltp.mp_object * 1000003ull
-                                 + (uint64_t)ltp.mp_layer_id;
+                k.chain_key    = MultiPassScheduler::make_chain_key(
+                                     ltp.mp_object, ltp.mp_layer_id,
+                                     ltp.mp_sublayer->island_key);
                 k.pass_idx     = ltp.mp_sublayer->pass_idx;
                 k.tool_id      = ltp.mp_sublayer->tool_id;
                 k.z_actual     = ltp.mp_sublayer->print_z;
@@ -5258,6 +5277,72 @@ LayerResult GCode::process_layer(const Print& print,
                 // entering writer, chained across calls. Dumps tool+pass_idx+chain_key
                 // per item (input order) and the resulting tool order + exit tool, so we
                 // can see WHY windowed (whole-group) diverges from this per-plane chain.
+                // NEOTKO_MPSCHEDULER_TAG s282b — one-line verdict. The verbose dump
+                // below is unreadable at 223 items, and the number that matters is how
+                // many chains the key produced and how many tool blocks came out.
+                // Assemble repro at z=1.45: chains=1 blocks=132 before, and it should
+                // read chains=5 blocks=~3 after (ORCA_PB_ISLAND_CHAINS=0 restores the
+                // old behaviour in the same build).
+                if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+                    std::vector<uint64_t> _ck;
+                    for (const auto& _k : items)
+                        if (std::find(_ck.begin(), _ck.end(), _k.chain_key) == _ck.end())
+                            _ck.push_back(_k.chain_key);
+                    int _blocks = 0, _prev = -12345;
+                    for (size_t _oi : order) {
+                        if ((int)items[_oi].tool_id != _prev) { ++_blocks; _prev = (int)items[_oi].tool_id; }
+                    }
+                    // NEOTKO_MPSCHEDULER_TAG s282b — chain_switches is the TRAVEL proxy,
+                    // the other half of the trade tool_blocks measures. Every switch is
+                    // the nozzle leaving one island for another, so it costs a retract
+                    // and a long move. Grouping by tool buys cheap purges by paying in
+                    // these. The s88 atomic drain is supposed to keep it near the number
+                    // of islands (one visit each per tool phase); if it instead lands
+                    // near `items`, the drain is not firing and PathBlend is being
+                    // emitted scanline-interleaved across islands, which is the quality
+                    // problem Orca's "batch what shares a tool" instinct causes here.
+                    int _cswitch = 0; uint64_t _pck = 0; bool _first = true;
+                    for (size_t _oi : order) {
+                        if (_first || items[_oi].chain_key != _pck) { ++_cswitch; _pck = items[_oi].chain_key; _first = false; }
+                    }
+                    std::ostringstream _s;
+                    _s << "MP_CHAINS plane_z=" << items.front().z_actual
+                       << " items=" << items.size()
+                       << " chains=" << _ck.size()
+                       << " tool_blocks=" << _blocks
+                       << " chain_switches=" << _cswitch
+                       << " atomic=" << (PathBlendSchedulerRuntime::get().chain_atomic ? "ON" : "OFF")
+                       << " island_chains=" << (MultiPassScheduler::island_chains_enabled() ? "ON" : "OFF");
+                    NeoDebug::write(NeoDebug::WIPETOWER, _s.str());
+
+                    // NEOTKO_MPSCHEDULER_TAG s283 — GUARD. Una cadena de PathBlend
+                    // Full contiene su rampa Y su tapa, o sea DOS herramientas. Una
+                    // cadena con una sola herramienta significa que la tapa se ha ido
+                    // a otra cadena: se pierde la última posición, que es la única
+                    // dependencia que fuerza rampa→tapa, y la tapa puede imprimirse
+                    // antes que su propia rampa. Este bug estuvo invisible hasta que
+                    // en s283 se desglosó el orden a mano — por eso el aviso vive
+                    // aquí y no en un comentario.
+                    for (uint64_t _c : _ck) {
+                        int _t0 = -1; bool _multi = false; int _n = 0;
+                        for (const auto& _k : items) {
+                            if (_k.chain_key != _c) continue;
+                            ++_n;
+                            if (_t0 < 0) _t0 = (int)_k.tool_id;
+                            else if ((int)_k.tool_id != _t0) { _multi = true; break; }
+                        }
+                        if (!_multi && _n > 1) {
+                            std::ostringstream _g;
+                            _g << "MP_CHAIN_GUARD ← ERROR cadena de UNA sola herramienta"
+                               << " plane_z=" << items.front().z_actual
+                               << " chain=" << _c
+                               << " tool=T" << _t0
+                               << " items=" << _n
+                               << " (falta la tapa: rampa y tapa han caído en cadenas distintas)";
+                            NeoDebug::write(NeoDebug::WIPETOWER, _g.str());
+                        }
+                    }
+                }
                 if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
                     std::ostringstream _me;
                     _me << "MP_EMIT_ORDER plane_z=" << items.front().z_actual << " init=T" << init_tool
@@ -5322,7 +5407,7 @@ LayerResult GCode::process_layer(const Print& print,
             // config with potentially different vector sizes or invalidated pointers.
             m_config.apply(ltp.mp_object->config(), true);
 
-            // NEOTKO_SANDWICH_TAG_START — each sublayer is single-tool. A ColorMix
+            // NEOTKO_SANDWICH_TAG_START — each sublayer is single-tool. A ColorStitch
             // lámina is emitted upstream (Fill.cpp FASE 2) as N separate bucket
             // sublayers, each at its own print_z, so the handler emits exactly one
             // (tool_id, fills) — identical in shape to a classic MultiPass pass.
@@ -5441,7 +5526,7 @@ LayerResult GCode::process_layer(const Print& print,
                 // yields a true smooth gradient, not a stuttering staircase.
                 // Beyond the threshold (disconnected islands) the normal lift
                 // logic kicks in. Toggles live in PathBlendDispatcherRuntime
-                // (SurfaceColorMix.hpp — PathBlend ingredient section). UI
+                // (ColorStitch.hpp — PathBlend ingredient section). UI
                 // dialog (Tab.cpp Advanced button) writes; this code reads.
                 const PathBlendDispatcherRuntime& _pbrt = PathBlendDispatcherRuntime::get();
                 bool _pb_chain = false;
@@ -5561,7 +5646,7 @@ LayerResult GCode::process_layer(const Print& print,
             // sublayer's paths, capture (tool, XY-of-last-emitted-point) so the
             // next sublayer can decide whether to continue the chain. Reset
             // when the current sublayer is NOT PathBlend (any non-PB sublayer
-            // — perimeters, ColorMix bucket, gcode_end — interrupts the chain).
+            // — perimeters, ColorStitch bucket, gcode_end — interrupts the chain).
             if (sub.effect == SurfacePassKind::PathBlend) {
                 m_pb_chain_prev_tool = int(sub.tool_id);
                 m_pb_chain_prev_xy   = Vec2d(m_writer.get_position().x(),
@@ -5590,7 +5675,7 @@ LayerResult GCode::process_layer(const Print& print,
             m_mp_group.begin(z_nominal_group);
         }
         // Register the tool of every sublayer in this z-entry.
-        // NEOTKO_SANDWICH_TAG — each sublayer is single-tool (ColorMix buckets
+        // NEOTKO_SANDWICH_TAG — each sublayer is single-tool (ColorStitch buckets
         // are separate sublayers — see Fill.cpp FASE 2).
         for (const LayerToPrint& _ltp : ltps_sorted) {
             if (!_ltp.mp_sublayer) continue;
@@ -5893,8 +5978,9 @@ LayerResult GCode::process_layer(const Print& print,
                 gcode += m_writer.set_temperature(temperature, false, extruder.id());
         }
 
-        // BBS
-        int bed_temp = get_bed_temperature(first_extruder_id, false, print.config().curr_bed_type);
+        // Upstream Snapmaker #699 (2144e1f41): bed temperature accommodates the highest-temperature
+        // filament of the print (max over all used extruders instead of this layer's first extruder).
+        int bed_temp = get_bed_temperature_max(print, false);
         gcode += m_writer.set_bed_temperature(bed_temp);
         // Mark the temperature transition from 1st to 2nd layer to be finished.
         m_second_layer_things_done = true;
@@ -6323,6 +6409,85 @@ LayerResult GCode::process_layer(const Print& print,
                 // Both the support and the support interface are printed with the same extruder, therefore
                 // the interface may be interleaved with the support base.
                 bool single_extruder = !has_support || support_extruder == interface_extruder;
+
+                // NEOTKO_SUPPORTZONES_TAG s286c F4 — el reparto por FAMILIA, que es el mismo patrón
+                // que la línea de abajo ya usa para separar base de interfaz: un cubo por extrusor
+                // sobre el MISMO `support_fills`, cada uno emitiendo sólo lo suyo. Aquí la condición
+                // es la familia en vez del rol.
+                //
+                // Sólo entra cuando el reparto dejó etiquetas, o sea cuando hay materiales distintos
+                // entre zonas. Sin eso se cae al camino de siempre, intacto.
+                const std::vector<int> &fams = support_layer.support_fills_family;
+                if (! fams.empty()) {
+                    const auto &families = object.support_family_areas().families;
+                    // Mismo acotado que en ToolOrdering, y por el mismo motivo: los dos lados tienen
+                    // que estar de acuerdo sobre qué herramientas existen, o uno programa un cambio
+                    // que el otro no puede emitir.
+                    const int n_fil = int(m_config.nozzle_diameter.size());
+                    // 🚨 s289 — POR FAMILIA **Y POR ROL**, y este segundo la mitad era el bug de la
+                    // purga en todas las capas que él vio: al ponerle material de techo a una zona,
+                    // la herramienta del techo se emitía en TODA la altura de la zona y la torre
+                    // pagaba una purga en cada capa, con el techo existiendo en cuatro capas.
+                    //
+                    // `has_support`/`has_interface` son de la CAPA ENTERA (salen del rol agregado de
+                    // `support_fills`, línea ~6336). Usarlos aquí dentro le atribuye a CADA familia
+                    // los roles que hay en cualquier parte de la capa. La familia con techo hacía
+                    // que todas parecieran tener techo, y la que sólo tenía masa arrastraba a su
+                    // filamento de techo capa tras capa.
+                    //
+                    // El dato bueno ya estaba delante: `fams[i]` es paralelo a
+                    // `support_fills.entities[i]`, y cada entidad sabe su rol. Se mira, no se supone.
+                    //
+                    // ⚠️ Y tiene que quedar EXACTAMENTE igual que el mismo cálculo en
+                    // `ToolOrdering::collect_extruders`. Si un lado programa un cambio que el otro no
+                    // emite —o al revés— la torre lo detecta y aborta con "Wipe tower generation
+                    // failed, possibly due to empty first layer", que habla de la primera capa pero
+                    // es la discrepancia entre lo planificado y lo emitido.
+                    struct FamRoles { bool body { false }; bool intf { false }; };
+                    std::map<int, FamRoles> present;
+                    {
+                        const auto  &ents  = support_layer.support_fills.entities;
+                        const size_t n_tag = std::min(ents.size(), fams.size());
+                        for (size_t i = 0; i < n_tag; ++ i) {
+                            const int fi = fams[i];
+                            if (fi < 0 || fi >= int(families.size()) || ents[i] == nullptr)
+                                continue;
+                            const ExtrusionRole r = ents[i]->role();
+                            FamRoles &fr = present[fi];
+                            if (r == erSupportMaterialInterface)
+                                fr.intf = true;
+                            else if (r == erSupportMaterial || r == erSupportTransition)
+                                fr.body = true;
+                            else if (r == erMixed)
+                                fr.body = fr.intf = true;
+                        }
+                    }
+                    for (const auto &kv : present) {
+                        const int fi = kv.first;
+                        const int bf = (families[fi].body_filament      > 0 && families[fi].body_filament      <= n_fil) ? families[fi].body_filament      : 0;
+                        const int rf = (families[fi].interface_filament > 0 && families[fi].interface_filament <= n_fil) ? families[fi].interface_filament : 0;
+                        // 0 = "como el objeto": esa familia se emite con el extrusor de siempre.
+                        const int body = bf > 0 ? bf - 1 : int(support_extruder);
+                        const int intf = rf > 0 ? rf - 1 : int(interface_extruder);
+                        // La masa de esta familia va al cubo de SU extrusor, y el techo al del suyo.
+                        // Pueden ser el mismo cubo, y el cubo puede llevar ya familias de antes: por
+                        // eso se ACUMULAN en dos listas en vez de fijar un rol que el siguiente pisa.
+                        if (kv.second.body) {
+                            ObjectByExtruder &ob = object_by_extruder(by_extruder, unsigned(body), layer_to_print_idx, layers.size());
+                            ob.support                = &support_layer.support_fills;
+                            ob.support_extrusion_role = erMixed;   // el rol real lo deciden las listas
+                            ob.support_families       = &fams;
+                            ob.support_family_base.push_back(fi);
+                        }
+                        if (kv.second.intf) {
+                            ObjectByExtruder &oi = object_by_extruder(by_extruder, unsigned(intf), layer_to_print_idx, layers.size());
+                            oi.support                = &support_layer.support_fills;
+                            oi.support_extrusion_role = erMixed;
+                            oi.support_families       = &fams;
+                            oi.support_family_intf.push_back(fi);
+                        }
+                    }
+                } else {
                 // Assign an extruder to the base.
                 ObjectByExtruder& obj      = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder,
                                                                 layer_to_print_idx, layers.size());
@@ -6332,6 +6497,7 @@ LayerResult GCode::process_layer(const Print& print,
                     ObjectByExtruder& obj_interface = object_by_extruder(by_extruder, interface_extruder, layer_to_print_idx, layers.size());
                     obj_interface.support           = &support_layer.support_fills;
                     obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                }
                 }
             }
         }
@@ -7664,6 +7830,20 @@ LayerResult GCode::process_layer(const Print& print,
                     bool          is_overridden          = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden :
                                                                                                                   support_overridden;
                     if (is_overridden == (print_wipe_extrusions != 0)) {
+                        const std::vector<int> *fams = instance_to_print.object_by_extruder.support_families;
+                        if (fams != nullptr) {
+                            // Camino por familia: DOS emisiones filtradas, una por rol, cada una con
+                            // las familias que este cubo emite en ese rol. Es lo que sustituye al rol
+                            // único que dos familias podían pisarse.
+                            const auto &base_f = instance_to_print.object_by_extruder.support_family_base;
+                            const auto &intf_f = instance_to_print.object_by_extruder.support_family_intf;
+                            if (! base_f.empty())
+                                gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erSupportMaterial, fams, &base_f);
+                            if (! intf_f.empty()) {
+                                gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erSupportMaterialInterface, fams, &intf_f);
+                                gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning, fams, &intf_f);
+                            }
+                        } else {
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for
                             // all extrusion paths.
@@ -7672,6 +7852,7 @@ LayerResult GCode::process_layer(const Print& print,
                         // Make sure ironing is the last
                         if (support_extrusion_role == erMixed || support_extrusion_role == erSupportMaterialInterface) {
                             gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                        }
                         }
                     }
 
@@ -8449,7 +8630,8 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
     return gcode;
 }
 
-std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role)
+std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role,
+                                   const std::vector<int> *families, const std::vector<int> *want_families)
 {
     static constexpr const char* support_label            = "support material";
     static constexpr const char* support_interface_label  = "support material interface";
@@ -8460,7 +8642,15 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
     if (!support_fills.entities.empty()) {
         ExtrusionEntitiesPtr extrusions;
         extrusions.reserve(support_fills.entities.size());
-        for (ExtrusionEntity* ee : support_fills.entities) {
+        for (size_t i = 0; i < support_fills.entities.size(); ++ i) {
+            ExtrusionEntity *ee = support_fills.entities[i];
+            // s286c F4: una condición más sobre el filtro que ya existía. Con `want_family` a -1 —el
+            // caso de siempre— esto no puede cambiar nada.
+            if (want_families != nullptr && ! want_families->empty() && families != nullptr) {
+                if (i >= families->size() ||
+                    std::find(want_families->begin(), want_families->end(), (*families)[i]) == want_families->end())
+                    continue;
+            }
             const auto role = ee->role();
             if ((role == support_extrusion_role) || (support_extrusion_role == erMixed && role != erIroning)) {
                 extrusions.emplace_back(ee);
@@ -8495,6 +8685,8 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
             } else if (loop) {
                 gcode += this->extrude_loop(*loop, label, speed);
             } else if (collection) {
+                // La etiqueta de familia es de PRIMER NIVEL: dentro de una colección ya se decidió
+                // a quién pertenece, así que no se vuelve a filtrar.
                 gcode += extrude_support(*collection, support_extrusion_role);
             } else {
                 throw Slic3r::InvalidArgument("Unknown extrusion type");
@@ -9165,7 +9357,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             }
             // NEOTKO_NEOWEAVING_PORT_TAG_START — WAVESUPPORT_PLAN.md Fase 1: force G1 branch when
             // neoweaving (arc moves can't carry per-line Z offsets). Ported from FULLSPECTRUM095
-            // GCode.cpp:9490-9518 alongside NeoweaveEngine itself (SurfaceColorMix.cpp).
+            // GCode.cpp:9490-9518 alongside NeoweaveEngine itself (ColorStitch.cpp).
             // NEOTKO_NEOWEAVE_CONTACT_TAG — WAVESUPPORT_PLAN.md Fase 5 (Mecanismo 2), option C (role
             // gate): when the Support-section toggle is on, wave the object's bottom-bridge surfaces
             // (erBridgeInfill = a bottom over a support gap). The colour/pattern is untouched — only
@@ -9188,7 +9380,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             // NEOTKO_PATHBLEND_TAG_START — Fase 5 s77: PathBlend runs ONLY as a sublayer
             // (Fill.cpp FASE 2 compiles it into ramp/cap single-tool sublayers). The trigger
             // is the sublayer context set by process_layer's sublayer dispatch (m_pb_sub_*),
-            // NOT a real-layer config gate. m_pb_sub_pass == -1 for everything else (ColorMix,
+            // NOT a real-layer config gate. m_pb_sub_pass == -1 for everything else (ColorStitch,
             // normal extrusion) → this branch never fires there → zero impact. Forces the G1
             // path (variable-Z gradient is incompatible with arc fitting).
             const bool any_pathblend = !any_neoweave

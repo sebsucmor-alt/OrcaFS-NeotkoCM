@@ -280,6 +280,11 @@ public:
     ExPolygons                  support_islands;
     // Extrusion paths for the support base and for the support interface and contacts.
     ExtrusionEntityCollection   support_fills;
+    // NEOTKO_SUPPORTZONES_TAG s286c F4 — familia de cada entidad de PRIMER NIVEL de `support_fills`,
+    // en el mismo orden. Vacío = una sola familia, que es el caso normal y el que deja el gcode
+    // idéntico al de hoy. Es lo que permite que dos zonas con materiales distintos se emitan con
+    // herramientas distintas sin regenerar el soporte.
+    std::vector<int>            support_fills_family;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports

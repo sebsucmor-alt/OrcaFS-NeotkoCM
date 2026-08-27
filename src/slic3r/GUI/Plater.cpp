@@ -94,7 +94,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
+#include "libslic3r/ColorStitch.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
 #include "libslic3r/SLA/Hollowing.hpp"
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
@@ -5962,7 +5962,12 @@ void Sidebar::init_color_mix_panel(wxWindow* parent, wxSizer* sizer)
         auto& mfs = mgr.mixed_filaments();
         for (int i = static_cast<int>(mfs.size()) - 1; i >= 0; --i) {
             if (mfs[i].custom && !mfs[i].deleted) {
+                // NEOTKO_COLORSTITCH_TAG (A-bis §5) — every other delete path clears `enabled`
+                // too. Leaving it set made this row still count as a live virtual in
+                // build_filament_id_remap() (called two lines below via on_filaments_change),
+                // desyncing it from the engine.
                 mfs[i].deleted = true;
+                mfs[i].enabled = false;
                 break;
             }
         }
@@ -7481,7 +7486,7 @@ std::vector<unsigned int> Sidebar::get_ui_ordered_filament_ids() const
     std::vector<unsigned int> actual_filament_id_by_mixed_idx(mixed.size(), 0);
     unsigned int              next_filament_id = unsigned(num_physical + 1);
     for (size_t mixed_idx = 0; mixed_idx < mixed.size(); ++mixed_idx) {
-        if (!mixed[mixed_idx].enabled || mixed[mixed_idx].deleted)
+        if (!mixed[mixed_idx].is_live())
             continue;
         actual_filament_id_by_mixed_idx[mixed_idx] = next_filament_id++;
     }
@@ -8252,7 +8257,7 @@ void Sidebar::show_sync_filament_dialog()
     int enabledMixedIdx = 0;
     for (size_t i = 0; i < mixedFilaments.size(); ++i) {
         const auto& mf = mixedFilaments[i];
-        if (mf.deleted || !mf.enabled)
+        if (!mf.is_live())
             continue;
 
         MixedFilamentPreviewInfo info;
@@ -8320,7 +8325,7 @@ void Sidebar::show_sync_filament_dialog()
         if (dlg.shouldDeleteMixedFilaments()) {
             auto& mixedList = preset_bundle->mixed_filaments.mixed_filaments();
             for (auto& mf : mixedList) {
-                if (mf.enabled && !mf.deleted) {
+                if (mf.is_live()) {
                     mf.deleted = true;
                     mf.enabled = false;
                 }
@@ -9553,9 +9558,16 @@ bool PlaterDropTarget::OnDropFiles(wxCoord x, wxCoord y, const wxArrayString &fi
 #endif // WIN32
 
     m_mainframe.Raise();
-    m_mainframe.select_tab(size_t(MainFrame::tp3DEditor));
-    if (wxGetApp().is_editor())
-        m_plater.select_view_3D("3D");
+    // Upstream Snapmaker #732 (73d5b2a17): do not force the 3D editor before we even know what was
+    // dropped. When a G-code is already loaded (only-gcode mode) the user is on the Preview tab:
+    // load_gcode()'s same-file guard switches straight back to Preview on a repeat drop, and the
+    // other load paths select their own final view, so switching here would only flash the (empty)
+    // 3D editor.
+    if (!m_plater.only_gcode_mode()) {
+        m_mainframe.select_tab(size_t(MainFrame::tp3DEditor));
+        if (wxGetApp().is_editor())
+            m_plater.select_view_3D("3D");
+    }
 
     // When only one .svg file is dropped on scene
     if (filenames.size() == 1) {
@@ -12388,8 +12400,8 @@ void Plater::priv::split_object()
     // lost. Only warn for the single-volume case; warning on a safe multi-volume split
     // would be a false positive.
     const bool is_single_volume_multi_island = current_model_object->volumes.size() == 1;
-    const bool had_paint    = is_single_volume_multi_island && SurfaceColorMix::object_has_any_colormix_paint(current_model_object);
-    const bool had_stickers = is_single_volume_multi_island && SurfaceColorMix::object_has_any_colormix_stickers(current_model_object);
+    const bool had_paint    = is_single_volume_multi_island && ColorStitch::object_has_any_colorstitch_paint(current_model_object);
+    const bool had_stickers = is_single_volume_multi_island && ColorStitch::object_has_any_colorstitch_stickers(current_model_object);
     const bool had_sandwich_paint = had_paint || had_stickers;
     NEOTKO_LOG(PROFILE, "SPLIT_OBJECTS_WARN_CHECK obj='" << current_model_object->name
         << "' volumes=" << current_model_object->volumes.size()
@@ -12621,7 +12633,7 @@ bool Plater::priv::has_incompatible_mixed_filament_in_use() const
     // we can skip the per-object scan entirely.
     bool any_incompatible = false;
     for (const auto &mf : mgr.mixed_filaments()) {
-        if (mf.enabled && !mf.deleted && !is_filament_compatible(mf)) {
+        if (mf.is_live() && !is_filament_compatible(mf)) {
             any_incompatible = true;
             break;
         }
@@ -12697,7 +12709,7 @@ DynamicPrintConfig Plater::priv::neotko_full_config() const
     cfg.set_key_value("neotko_true_objects",
         new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_true_objects")));
     // NEOTKO_MIXEDFIL_SANDWICH_TAG — mirror the per-tool TD scalars (app_config-only)
-    // so SurfaceColorMix.cpp (pure engine) can build ColorSci materials for the
+    // so ColorStitch.cpp (pure engine) can build ColorSci materials for the
     // "MixedFilament Object" auto-sandwich without touching app_config.
     {
         std::vector<double> _td_mirror;
@@ -18175,10 +18187,36 @@ void Plater::load_gcode(const wxString& filename)
               << " is_gcode=" << is_gcode_file(into_u8(filename))
               << " only_gcode=" << m_only_gcode
               << " same_as_last=" << (m_last_loaded_gcode == filename));
-    if (! is_gcode_file(into_u8(filename))
-        || (m_last_loaded_gcode == filename && m_only_gcode)
-        ) {
-        NEOGC_LOG("load_gcode: EARLY RETURN (not a gcode file, or already loaded)");
+    if (! is_gcode_file(into_u8(filename))) {
+        NEOGC_LOG("load_gcode: EARLY RETURN (not a gcode file)");
+        return;
+    }
+
+    // Upstream Snapmaker #732 (73d5b2a17): the same G-code is already loaded, so reloading would
+    // be a no-op — just make sure the user is looking at its preview, because callers may have
+    // left the UI on another view (e.g. the 3D editor after a drag & drop).
+    if (m_last_loaded_gcode == filename && m_only_gcode) {
+        NEOGC_LOG("load_gcode: EARLY RETURN (same gcode already loaded) → back to Preview");
+        wxGetApp().mainframe->select_tab(MainFrame::tpPreview);
+        p->set_current_panel(p->preview, true);
+        GLCanvas3D* canvas = p->get_current_canvas3D();
+        if (canvas)
+            canvas->render();
+        return;
+    }
+
+    // Upstream Snapmaker #648 (24593a3b7): reject a missing / inaccessible file up front. Without
+    // this check the code below would walk through process_file -> parse_file_raw_internal, which
+    // used to crash on a NULL FILE* (now it just returns false), and would otherwise surface the
+    // misleading "does not contain valid G-code" message even when the real problem is that the
+    // file doesn't exist at all.
+    if (!wxFileExists(filename)) {
+        NEOGC_LOG("load_gcode: EARLY RETURN (file does not exist on disk)");
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": file does not exist: " << filename;
+        MessageDialog(this,
+            _L("The selected file") + ":\n" + filename + "\n" + _L("does not exist."),
+            wxString(GCODEVIEWER_APP_NAME) + " - " + _L("Error occurs while loading G-code file"),
+            wxCLOSE | wxICON_WARNING | wxCENTRE).ShowModal();
         return;
     }
 

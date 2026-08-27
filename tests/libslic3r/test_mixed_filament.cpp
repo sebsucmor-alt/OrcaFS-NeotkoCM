@@ -42,7 +42,7 @@ static unsigned int virtual_id_for_stable_id(const std::vector<MixedFilament> &m
 {
     unsigned int next_virtual_id = unsigned(num_physical + 1);
     for (const MixedFilament &mf : mixed) {
-        if (!mf.enabled || mf.deleted)
+        if (!mf.is_live())
             continue;
         if (mf.stable_id == stable_id)
             return next_virtual_id;

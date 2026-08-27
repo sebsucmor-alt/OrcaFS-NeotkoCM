@@ -4,7 +4,7 @@
 #include "Layer.hpp"
 #include "ClipperUtils.hpp"
 #include "ParameterUtils.hpp"
-#include "../SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG — NeoDebug + NEOTKO_LOG
+#include "../ColorStitch.hpp"  // NEOTKO_COLORSTITCH_TAG — NeoDebug + NEOTKO_LOG
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — painter mode
 
 // #define SLIC3R_DEBUG
@@ -20,7 +20,10 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
-#include <set>      // NEOTKO_COLORMIX_TAG — parse_colormix_pattern_1based
+#include <map>      // NEOTKO_SUPPORTZONES_TAG s289 — roles por familia y por capa
+#include <set>      // NEOTKO_COLORSTITCH_TAG — parse_colorstitch_pattern_1based
+#include <cstdlib>
+#include <sstream>
 
 #include <libslic3r.h>
 
@@ -215,6 +218,21 @@ void remove_duplicates_preserve_order(std::vector<unsigned int> &values)
 // Shortest hamilton path problem
 static std::vector<unsigned int> solve_extruder_order(const std::vector<std::vector<float>>& wipe_volumes, std::vector<unsigned int> all_extruders, std::optional<unsigned int> start_extruder_id) 
 {
+    // Upstream Snapmaker #754 (236f0d350, Sentry #7256025247): wipe_volumes only has
+    // number_of_extruders (physical) rows, so any id above that bound turns the
+    // wipe_volumes[id][id2] reads below into an out-of-bounds access. Bail out with the
+    // input order untouched instead of crashing.
+    // s276 — la sonda temporal NEOTKO_754_PROBE (env var NEOTKO_NO_754 + traza
+    // SOLVE_ORDER_BAILOUT) se retiró al cerrar el bug de las zonas de Sandwich que no se
+    // generaban con altura de capa variable: no escribió NI UNA línea en todo el plato, así que
+    // estas guardas nunca disparan en uso normal y #754 quedó exonerado.
+    // ⚠️ La comprobación de `start_extruder_id` es AMPLIACIÓN NUESTRA, no viene de upstream.
+    for (auto id : all_extruders)
+        if (id >= wipe_volumes.size())
+            return all_extruders;
+    if (start_extruder_id && *start_extruder_id >= wipe_volumes.size())
+        return all_extruders;
+
     bool add_start_extruder_flag = false;
 
     if (start_extruder_id) {
@@ -583,15 +601,15 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         // comes from the painted profile's MP payload, not from the preset
         // region config (which is suppressed by painter_mode_obj).
         const bool _po_painter_mode =
-            SurfaceColorMix::object_has_any_colormix_paint(src.model_object())
-            || SurfaceColorMix::object_has_any_colormix_stickers(src.model_object()); // NEOTKO_STICKER_TAG
+            ColorStitch::object_has_any_colorstitch_paint(src.model_object())
+            || ColorStitch::object_has_any_colorstitch_stickers(src.model_object()); // NEOTKO_STICKER_TAG
         int li = 0;
         for (const Layer* lyr : src.layers()) {
             if (li < (int)src.multipass_sublayers().size() &&
                 !src.multipass_sublayers()[li].empty()) {
                 bool perim_ov = false;
                 if (_po_painter_mode) {
-                    perim_ov = SurfaceColorMix::any_painted_profile_has_perim_override(
+                    perim_ov = ColorStitch::any_painted_profile_has_perim_override(
                         &src, lyr->print_z, lyr->height);
                 } else {
                     for (const LayerRegion* lr : lyr->regions())
@@ -862,9 +880,9 @@ void ToolOrdering::initialize_layers(std::vector<coordf_t> &zs)
     }
 }
 
-// NEOTKO_COLORMIX_TAG_START
+// NEOTKO_COLORSTITCH_TAG_START
 // Extract full physical tool list from a MixedFilament recipe — 1-based version.
-// Mirrors extract_recipe_tools() in SurfaceColorMix.cpp (0-based).
+// Mirrors extract_recipe_tools() in ColorStitch.cpp (0-based).
 // Priority: manual_pattern > gradient_component_ids > component_a/b only.
 static std::vector<unsigned int> extract_recipe_tools_1based(
     const MixedFilament& mf, size_t num_physical)
@@ -895,15 +913,15 @@ static std::vector<unsigned int> extract_recipe_tools_1based(
     return tools;
 }
 
-// Parse a colormix pattern string into unique 1-based PHYSICAL tool IDs for layer_tools.extruders.
+// Parse a colorstitch pattern string into unique 1-based PHYSICAL tool IDs for layer_tools.extruders.
 // Physical digits '1'–'4' → 1-based physical tool IDs.
 // Virtual digits '5'–'9' → RECIPE EXPANSION via extract_recipe_tools_1based():
 //   The full recipe (manual_pattern / gradient_component_ids / component_a+b) of the
 //   named MixedFilament is expanded to all unique physical tool IDs.
-//   This mirrors SurfaceColorMix::build_tool_list_from_pattern() so the wipe tower
-//   sees every tool ColorMix will actually switch between.
+//   This mirrors ColorStitch::build_tool_list_from_pattern() so the wipe tower
+//   sees every tool ColorStitch will actually switch between.
 // Falls back to legacy tool_a/b/c/d slots when fewer than 2 distinct tools result.
-static std::vector<unsigned int> parse_colormix_pattern_1based(
+static std::vector<unsigned int> parse_colorstitch_pattern_1based(
     const std::string& pattern,
     int tool_a, int tool_b, int tool_c, int tool_d,
     const LayerTools* lt = nullptr)
@@ -943,7 +961,7 @@ static std::vector<unsigned int> parse_colormix_pattern_1based(
     if (tools.size() >= 2)
         return tools;
     // Fewer than 2 distinct physical tools — fall back to legacy A/B/C/D slots.
-    // Mirrors PATTERN_FALLBACK in SurfaceColorMix::build_tool_list_from_pattern().
+    // Mirrors PATTERN_FALLBACK in ColorStitch::build_tool_list_from_pattern().
     tools.clear(); seen.clear();
     auto add = [&](int v) {
         if (v >= 0) {
@@ -954,7 +972,7 @@ static std::vector<unsigned int> parse_colormix_pattern_1based(
     add(tool_a); add(tool_b); add(tool_c); add(tool_d);
     return tools;
 }
-// NEOTKO_COLORMIX_TAG_END
+// NEOTKO_COLORSTITCH_TAG_END
 
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches, float global_mp_prime_vol)
@@ -1018,6 +1036,92 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
             layer_tools.extruders.push_back(extruder_interface);
+
+        // NEOTKO_SUPPORTZONES_TAG s286c F4 — una capa puede necesitar MÁS de un extrusor de soporte.
+        //
+        // 🚨 Todo lo de arriba resuelve UNO por capa desde `object.config()`, y esa suposición es lo
+        // que impide el material por zona: aunque el gcode luego emitiera dos herramientas, el
+        // planificador no habría programado el cambio y la torre no tendría su purga. El cambio no
+        // se improvisa en la emisión — se decide aquí.
+        //
+        // Sólo entra cuando el reparto por familia dejó etiquetas, o sea cuando hay materiales
+        // distintos entre zonas. Sin eso, `support_fills_family` está vacío y no se toca nada.
+        if (! support_layer->support_fills_family.empty()) {
+            const auto &fam  = object.support_family_areas().families;
+            const auto &ents = support_layer->support_fills.entities;
+            // 🚨 s289 — EL BUG DE LA PURGA EN TODAS LAS CAPAS, y la culpa era de este bloque.
+            //
+            // Síntoma que él vio: al ponerle material de TECHO a una zona, la herramienta del techo
+            // se programaba en TODAS las capas de la zona y la torre pagaba una purga en cada una,
+            // aunque el techo existiera en cuatro capas contadas.
+            //
+            // Causa: esto recorría `support_fills_family` —que es "qué familias aparecen en esta
+            // capa"— y por cada una empujaba SUS DOS filamentos, el del cuerpo y el del techo, sin
+            // preguntar si esa familia estaba extruyendo techo en ESTA capa. Como la familia está
+            // presente en toda la altura de la zona, el filamento del techo entraba en toda la
+            // altura de la zona.
+            //
+            // 🔑 El dato que faltaba ya estaba delante: `support_fills_family[i]` es paralelo a
+            // `support_fills.entities[i]`, y cada entidad sabe su ROL. Así que en vez de suponer
+            // los dos roles se miran los que hay, familia por familia.
+            //
+            // ⚠️ Sólo entra cuando el reparto por familia dejó etiquetas, o sea cuando hay
+            // materiales distintos entre zonas. Sin eso `support_fills_family` está vacío y aquí no
+            // se toca nada, que es el caso normal y el que deja el gcode idéntico al de siempre.
+            struct FamRoles { bool body { false }; bool interface_ { false }; };
+            std::map<int, FamRoles> present;
+            const size_t n_tag = std::min(ents.size(), support_layer->support_fills_family.size());
+            for (size_t i = 0; i < n_tag; ++ i) {
+                const int fi = support_layer->support_fills_family[i];
+                if (fi < 0 || fi >= int(fam.size()) || ents[i] == nullptr)
+                    continue;
+                const ExtrusionRole r = ents[i]->role();
+                FamRoles &fr = present[fi];
+                if (r == erSupportMaterialInterface)
+                    fr.interface_ = true;
+                else if (r == erSupportMaterial || r == erSupportTransition)
+                    fr.body = true;
+                else if (r == erMixed) {
+                    // No debería llegar (split_support_fills_by_family sólo emite ExtrusionPath con
+                    // rol concreto), pero si llega, lo honrado es programar los dos y no adivinar.
+                    fr.body = fr.interface_ = true;
+                }
+            }
+            // 0 = "como el objeto": ese caso ya lo cubren extruder_support/extruder_interface.
+            // 🚨 s286c: acotado al número de extrusores que existen de verdad. Un slot guardado
+            // en un 3mf de otra impresora, o una config vieja, programaría un cambio a una
+            // herramienta que el GCodeWriter nunca construyó — y eso no es un gcode raro, es un
+            // EXC_BAD_ACCESS dentro de retract_for_toolchange. Ya pasó una vez.
+            const int n_fil = int(m_num_physical);
+            for (const auto &kv : present) {
+                const auto &f = fam[kv.first];
+                // 🚨 1-BASED. `lt.extruders` vive en base 1 durante todo collect_extruders y sólo
+                // pasa a base 0 al final de reorder_extruders() ("Reindex the extruders, so they are
+                // zero based, not 1 based"). Empujar aquí en base 0 tenía dos efectos y los dos se
+                // vieron: el 0 es el extrusor "me da igual" y reorder_extruders lo BORRA, así que la
+                // capa se quedaba sin partición y la torre no existía donde sólo hay soporte —
+                // llegaba justo hasta donde el objeto aportaba sus propios cambios; y lo que
+                // sobrevivía salía desplazado una posición. Ojo: en GCode.cpp la base ES 0
+                // (`support_filament - 1`), así que los dos sitios NO se escriben igual.
+                if (kv.second.body && f.body_filament > 0 && f.body_filament <= n_fil)
+                    layer_tools.extruders.push_back(unsigned(f.body_filament));
+                if (kv.second.interface_ && f.interface_filament > 0 && f.interface_filament <= n_fil)
+                    layer_tools.extruders.push_back(unsigned(f.interface_filament));
+            }
+            if (NeoDebug::enabled(NeoDebug::TOOLORDER)) {
+                std::ostringstream _s;
+                _s << "TOOLORDER_ZONE_FAMILIES z=" << support_layer->print_z
+                   << " tagged_entities=" << n_tag << " families_here=" << present.size();
+                for (const auto &kv : present)
+                    _s << "  [fam " << kv.first
+                       << " body=" << (kv.second.body ? "yes" : "no")
+                       << "/fil" << fam[kv.first].body_filament
+                       << " roof=" << (kv.second.interface_ ? "yes" : "no")
+                       << "/fil" << fam[kv.first].interface_filament << "]";
+                NeoDebug::write(NeoDebug::TOOLORDER, _s.str());
+            }
+        }
+
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);
@@ -1201,7 +1305,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             // can inject it into m_all_printing_extruders. GCodeWriter::set_extruders() is called
             // with all_extruders(), so without this the Extruder object for this tool_id is never
             // initialized → crash in Extruder::travel_slope() / retraction_length() etc.
-            // NEOTKO_SANDWICH_TAG — each sublayer is single-tool. A ColorMix
+            // NEOTKO_SANDWICH_TAG — each sublayer is single-tool. A ColorStitch
             // lámina is emitted as N separate bucket sublayers (Fill.cpp FASE 2),
             // each at its own print_z → its own LayerTools entry, registered and
             // scheduled exactly like a MultiPass pass. No multi-tool sublayers.
@@ -1486,10 +1590,11 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // Activate with ORCA_DEBUG_WIPETOWER=1 (or ORCA_DEBUG_ALL). Cross-reference with NeoTower's
     // 1a_READ to spot has_wt mutations/instance divergence on the structural bands.
     {
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbg = NeoDebug::enabled(NeoDebug::WIPETOWER);
         if (_wt_dbg) {
-            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
+            std::ofstream _wt_log(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
             _wt_log << "\n=== fill_wipe_tower_partitions() [" << (call_context ? call_context : "unknown")
                     << "] this=" << static_cast<const void*>(this)
                     << " — " << m_layer_tools.size() << " layers ===\n";
@@ -1750,8 +1855,9 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             [](const LayerTools& lt) { return lt.is_mp_sublayer; });
         if (_dc_has_sublayer) {
             constexpr double same_plane_off = 0.02; // == NeoTowerZ::SAME_PLANE_MAX_OFF
-            static const bool _dc_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                     || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+            // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+            // meant the console could neither pause nor switch this site. Two atomics.
+            const bool _dc_dbg = NeoDebug::enabled(NeoDebug::WIPETOWER);
             double last_built_z = -1.0;
             for (size_t i = 0; i + 1 < m_layer_tools.size(); ++i) {
                 LayerTools& lt = m_layer_tools[i];
@@ -1761,7 +1867,7 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
                     const bool promoted = (lt.print_z - last_built_z > same_plane_off);
                     if (promoted) lt.has_wipe_tower = true;     // real layer needs its own drawer
                     if (_dc_dbg) {
-                        static std::ofstream _wt_logd("/tmp/neotko_wipetower.log", std::ios::app);
+                        std::ofstream _wt_logd(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
                         _wt_logd << "[NEOTOWER] DRAWER_CONTINUITY z=" << lt.print_z
                                  << (promoted ? " PROMOTE" : " same-plane(advance)")
                                  << " next=" << m_layer_tools[i + 1].print_z

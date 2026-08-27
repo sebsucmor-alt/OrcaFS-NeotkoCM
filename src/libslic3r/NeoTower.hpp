@@ -87,7 +87,7 @@ struct NeoTowerEvent {
     // NEOTKO_NEOTOWER_TAG s114 — standalone painted-layer plane. True for a
     // sublayer event whose z_nominal carries NO real (non-sublayer) event: the
     // canonical layer is realised ENTIRELY by MultiPass sublayers (PathBlend /
-    // ColorMix / mixed / any gradient shape) → it IS the layer, not a decoration
+    // ColorStitch / mixed / any gradient shape) → it IS the layer, not a decoration
     // of a real one. The s102-h lámina test (z_nominal-z_actual < SAME_PLANE_MAX_OFF)
     // assumes a real parent builds the frame; for a fully-painted layer there is
     // none, so it must be treated as a structural plane (keep wall+grid, advance

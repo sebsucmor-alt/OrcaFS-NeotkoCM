@@ -16,7 +16,7 @@
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/NeoDebug.hpp"
-#include "libslic3r/SurfaceColorMix.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
+#include "libslic3r/ColorStitch.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
 #include <sstream>
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
@@ -2774,8 +2774,8 @@ void ObjectList::split()
     // volume->split() renumbers triangles into new volumes, invalidating the old
     // per-facet paint indices. Warn up front rather than fix every code path.
     ModelObject* model_object_pre_split = (*m_objects)[obj_idx];
-    const bool had_paint    = SurfaceColorMix::object_has_any_colormix_paint(model_object_pre_split);
-    const bool had_stickers = SurfaceColorMix::object_has_any_colormix_stickers(model_object_pre_split);
+    const bool had_paint    = ColorStitch::object_has_any_colorstitch_paint(model_object_pre_split);
+    const bool had_stickers = ColorStitch::object_has_any_colorstitch_stickers(model_object_pre_split);
     const bool had_sandwich_paint = had_paint || had_stickers;
     NEOTKO_LOG(PROFILE, "SPLIT_PARTS_WARN_CHECK obj='" << model_object_pre_split->name
         << "' volumes=" << model_object_pre_split->volumes.size()
@@ -2941,18 +2941,18 @@ void ObjectList::merge(bool to_multipart_object)
         // shrinks a user's authored depth) + a heads-up notification once all sources are known.
         std::vector<int> penu_values_seen;
 
-        // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — Sandwich ColorMix "slot" numbers
-        // (colormix_slot_to_profile_id) are per-source-object: each object numbers
+        // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — Sandwich ColorStitch "slot" numbers
+        // (colorstitch_slot_to_profile_id) are per-source-object: each object numbers
         // its own painted zones 1..N independently. If two merged objects both used
         // slot N for a DIFFERENT recipe, every consumer that resolves "profile for
         // slot N on this PrintObject" collapses to one recipe for BOTH — the wrong
         // one for whichever object isn't picked. Renumbering here, BEFORE volumes are
         // merged, makes slot numbers unique across the whole merged object, so the
-        // collision cannot occur downstream (Fill.cpp / SurfaceColorMix.cpp) by
-        // construction. 254 usable slots (COLORMIX_SLOT_COUNT=255, index 0=unpainted)
+        // collision cannot occur downstream (Fill.cpp / ColorStitch.cpp) by
+        // construction. 254 usable slots (COLORSTITCH_SLOT_COUNT=255, index 0=unpainted)
         // — plenty of headroom for realistic paint jobs. Cero cambio de comportamiento
         // si los objetos fusionados no repiten número de slot entre sí (caso común).
-        std::set<int> used_colormix_slots;
+        std::set<int> used_colorstitch_slots;
 
         for (int obj_idx : obj_idxs) {
             ModelObject* object = (*m_objects)[obj_idx];
@@ -2964,27 +2964,27 @@ void ObjectList::merge(bool to_multipart_object)
                 penu_values_seen.push_back(penu_val);
             }
 
-            // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — collect this object's OWN colormix
+            // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — collect this object's OWN colorstitch
             // slots (union across its volumes; a single source object's volumes already
             // share one consistent numbering, see profile_id_for_slot's comment) and, if
             // any collide with a slot number an EARLIER merged object already claimed,
             // build a remap that moves this object's WHOLE slot set to a fresh
             // contiguous block. Applied to each of this object's volumes just below, in
             // the existing "merge volumes" loop.
-            std::map<int,int> colormix_slot_remap;   // old slot → new slot, this object only
+            std::map<int,int> colorstitch_slot_remap;   // old slot → new slot, this object only
             {
                 std::set<int> this_obj_slots;
                 for (const ModelVolume* volume : object->volumes)
-                    for (int s = 1; s < ModelVolume::COLORMIX_SLOT_COUNT; ++s)
-                        if (volume->colormix_slot_to_profile_id[s] != 0)
+                    for (int s = 1; s < ModelVolume::COLORSTITCH_SLOT_COUNT; ++s)
+                        if (volume->colorstitch_slot_to_profile_id[s] != 0)
                             this_obj_slots.insert(s);
                 bool collides = std::any_of(this_obj_slots.begin(), this_obj_slots.end(),
-                    [&used_colormix_slots](int s) { return used_colormix_slots.count(s) != 0; });
+                    [&used_colorstitch_slots](int s) { return used_colorstitch_slots.count(s) != 0; });
                 if (collides && !this_obj_slots.empty()) {
-                    int next_free = used_colormix_slots.empty() ? 1 : (*used_colormix_slots.rbegin() + 1);
-                    if (next_free + (int)this_obj_slots.size() - 1 < ModelVolume::COLORMIX_SLOT_COUNT) {
+                    int next_free = used_colorstitch_slots.empty() ? 1 : (*used_colorstitch_slots.rbegin() + 1);
+                    if (next_free + (int)this_obj_slots.size() - 1 < ModelVolume::COLORSTITCH_SLOT_COUNT) {
                         for (int old_slot : this_obj_slots)
-                            colormix_slot_remap[old_slot] = next_free++;
+                            colorstitch_slot_remap[old_slot] = next_free++;
                     }
                     // else: would overflow the 254-slot range — extremely unlikely in
                     // practice (would need 254+ distinct recipes across the merge).
@@ -2992,7 +2992,7 @@ void ObjectList::merge(bool to_multipart_object)
                     // back to the legacy first-object-wins resolution for this object.
                 }
                 for (int s : this_obj_slots)
-                    used_colormix_slots.insert(colormix_slot_remap.count(s) ? colormix_slot_remap.at(s) : s);
+                    used_colorstitch_slots.insert(colorstitch_slot_remap.count(s) ? colorstitch_slot_remap.at(s) : s);
             }
 
             const Geometry::Transformation& transformation = object->instances[0]->get_transformation();
@@ -3048,26 +3048,26 @@ void ObjectList::merge(bool to_multipart_object)
 
                 new_volume->mmu_segmentation_facets.assign(std::move(volume->mmu_segmentation_facets));
 
-                // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — apply this object's colormix
+                // NEOTKO_XVOL_CLIP_TAG (s212, bug #4) — apply this object's colorstitch
                 // slot remap (computed above, before this loop): re-tag every painted
                 // triangle AND move the slot→profile table entries in lockstep, so the
                 // table and the per-triangle tags stay consistent.
-                if (!colormix_slot_remap.empty()) {
+                if (!colorstitch_slot_remap.empty()) {
                     EnforcerBlockerStateMap state_map;
                     for (size_t i = 0; i < state_map.size(); ++i)
                         state_map[i] = EnforcerBlockerType(i);   // identity by default
-                    for (const auto& [old_slot, new_slot] : colormix_slot_remap)
+                    for (const auto& [old_slot, new_slot] : colorstitch_slot_remap)
                         state_map[old_slot] = EnforcerBlockerType(new_slot);
-                    new_volume->color_mix_paint_facets.remap_enforcer_block_types(
+                    new_volume->colorstitch_paint_facets.remap_enforcer_block_types(
                         *new_volume, EnforcerBlockerType::ExtruderMax, state_map);
 
-                    int old_table[ModelVolume::COLORMIX_SLOT_COUNT];
-                    std::copy(std::begin(new_volume->colormix_slot_to_profile_id),
-                              std::end(new_volume->colormix_slot_to_profile_id), old_table);
-                    std::fill(std::begin(new_volume->colormix_slot_to_profile_id),
-                              std::end(new_volume->colormix_slot_to_profile_id), 0);
-                    for (const auto& [old_slot, new_slot] : colormix_slot_remap)
-                        new_volume->colormix_slot_to_profile_id[new_slot] = old_table[old_slot];
+                    int old_table[ModelVolume::COLORSTITCH_SLOT_COUNT];
+                    std::copy(std::begin(new_volume->colorstitch_slot_to_profile_id),
+                              std::end(new_volume->colorstitch_slot_to_profile_id), old_table);
+                    std::fill(std::begin(new_volume->colorstitch_slot_to_profile_id),
+                              std::end(new_volume->colorstitch_slot_to_profile_id), 0);
+                    for (const auto& [old_slot, new_slot] : colorstitch_slot_remap)
+                        new_volume->colorstitch_slot_to_profile_id[new_slot] = old_table[old_slot];
                 }
             }
             new_object->sort_volumes(true);
@@ -3077,8 +3077,8 @@ void ObjectList::merge(bool to_multipart_object)
             // to land correctly in the merged object's single-instance frame. profile_id is left as-is:
             // SurfaceEffectProfileManager is a global singleton, not per-object, so ids are already
             // valid across the merge.
-            for (const ColorMixSticker& sticker : object->colormix_stickers) {
-                ColorMixSticker new_sticker = sticker;
+            for (const ColorStitchSticker& sticker : object->colorstitch_stickers) {
+                ColorStitchSticker new_sticker = sticker;
                 new_sticker.transform = transformation_matrix * sticker.transform;
                 // NEOTKO_STICKER_TAG (s212, debug — bug: stickers "disappear" on Assemble)
                 // — unconditional (no !out.empty() gate like enumerate_stickers_in_z_range),
@@ -3096,7 +3096,7 @@ void ObjectList::merge(bool to_multipart_object)
                           << " new_anchor=[" << new_anchor.x() << "," << new_anchor.y() << "," << new_anchor.z() << "]";
                     NeoDebug::write(NeoDebug::PROFILE, _sdbg.str());
                 }
-                new_object->colormix_stickers.emplace_back(std::move(new_sticker));
+                new_object->colorstitch_stickers.emplace_back(std::move(new_sticker));
             }
 
             // merge settings
@@ -3157,7 +3157,7 @@ void ObjectList::merge(bool to_multipart_object)
         // center_around_origin() just above shifts every ModelVolume's local offset
         // by `shift` (== new_object->origin_translation at this exact point) and the
         // translate_instances() call below compensates by moving the instance the
-        // opposite way — but neither call touches colormix_stickers. A sticker's
+        // opposite way — but neither call touches colorstitch_stickers. A sticker's
         // transform, still expressed in the PRE-shift object-local frame, silently
         // drifts by `shift` relative to the now-recentred mesh: for a merged object
         // whose combined bounding box isn't centred on Z=0 (the common case), this
@@ -3168,7 +3168,7 @@ void ObjectList::merge(bool to_multipart_object)
         // whose top is Z=12.8 — floating above the print, out of every query band.
         // Applying the SAME shift here keeps each sticker glued to the same physical
         // point on the mesh, exactly like the volumes/instance above.
-        for (ColorMixSticker& st : new_object->colormix_stickers)
+        for (ColorStitchSticker& st : new_object->colorstitch_stickers)
             st.transform = Eigen::Translation3d(new_object->origin_translation) * st.transform;
         new_object->translate_instances(-new_object->origin_translation);
         new_object->origin_translation = Vec3d::Zero();

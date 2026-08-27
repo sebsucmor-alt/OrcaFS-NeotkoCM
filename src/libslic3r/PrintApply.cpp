@@ -3,7 +3,7 @@
 #include "Print.hpp"
 #include "SurfaceEffectProfile.hpp"      // NEOTKO_MIXEDFIL_SANDWICH_TAG
 #include "ColorSci/ColorPredict.hpp"     // NEOTKO_MIXEDFIL_SANDWICH_TAG
-#include "SurfaceColorMix.hpp"           // NEOTKO_TD_RECALC_DEBUG_TAG — NeoDebug + NEOTKO_LOG reuse (bug #3 instrumentation)
+#include "ColorStitch.hpp"           // NEOTKO_TD_RECALC_DEBUG_TAG — NeoDebug + NEOTKO_LOG reuse (bug #3 instrumentation)
 #include "Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 — Gravity::active() for support invalidation
 
 #include <boost/log/trivial.hpp>
@@ -1664,8 +1664,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                                           model_mmu_segmentation_data_changed(model_object, model_object_new) ||
                                           (model_object_new.is_mm_painted() && num_extruders_changed) ||
                                           model_fuzzy_skin_data_changed(model_object, model_object_new) ||
-                                          model_colormix_paint_data_changed(model_object, model_object_new) || // NEOTKO_PROFILE_TAG
-                                          model_colormix_sticker_data_changed(model_object, model_object_new) || // NEOTKO_STICKER_TAG — sticker edits re-slice via the same gate; assign_copy below syncs the pile
+                                          model_colorstitch_paint_data_changed(model_object, model_object_new) || // NEOTKO_PROFILE_TAG
+                                          model_colorstitch_sticker_data_changed(model_object, model_object_new) || // NEOTKO_STICKER_TAG — sticker edits re-slice via the same gate; assign_copy below syncs the pile
                                           model_texture_bump_paint_data_changed(model_object, model_object_new) || // NEOTKO_TEXTUREBUMP_TAG — Fase 3: painted-zone edits re-slice via the same gate
                                           model_texture_bump_transform_changed(model_object, model_object_new); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: base projection-plane transform edits re-slice via the same gate
         bool supports_differ            = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_BLOCKER) ||
@@ -1703,7 +1703,12 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             model_object.assign_copy(model_object_new);
         } else {
             model_object_status.print_object_regions_status = ModelObjectStatus::PrintObjectRegionsStatus::Valid;
-            if (supports_differ || model_custom_supports_data_changed(model_object, model_object_new)) {
+            // NEOTKO_SUPPORTZONES_TAG s286 F3 — T3 (§5 T3): a zone's recipe changing has to land
+            // here too. Short-circuited behind supports_differ on purpose:
+            // model_support_volume_config_changed() asserts the volume list is unchanged, and
+            // supports_differ IS that check.
+            if (supports_differ || model_custom_supports_data_changed(model_object, model_object_new) ||
+                model_support_volume_config_changed(model_object, model_object_new)) {
                 // First stop background processing before shuffling or deleting the ModelVolumes in the ModelObject's list.
                 if (supports_differ) {
                     this->call_cancel_callback();
@@ -1743,6 +1748,12 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             //FIXME What to do with m_material_id?
 			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::MODEL_PART);
 			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PARAMETER_MODIFIER);
+            // NEOTKO_SUPPORTZONES_TAG s286 F3 — T3 (§5 T3). Without this line the config of a
+            // SUPPORT_ENFORCER never even reaches the Print's own copy of the model, so nothing
+            // downstream could read a per-zone recipe however hard it tried. The zone identity of
+            // F2 arrives at the support generator carrying the ModelVolume it came from
+            // (SupportZoneSlices::model_volume); this is what makes that pointer worth following.
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::SUPPORT_ENFORCER);
             layer_height_ranges_copy_configs(model_object.layer_config_ranges /* dst */, model_object_new.layer_config_ranges /* src */);
             // Copy the ModelObject name, input_file and instances. The instances will be compared against PrintObject instances in the next step.
             model_object.name       = model_object_new.name;
@@ -2192,7 +2203,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 // NEOTKO_MIXEDFIL_SANDWICH_TAG — resolve/create the auto-generated sandwich
 // profile for each object with "MixedFilament Object" mode enabled. See
 // Print::mixed_filament_sandwich_profile_id() (Print.hpp) for the read side,
-// consumed from SurfaceColorMix::assign_and_group_tools(). Single-threaded
+// consumed from ColorStitch::assign_and_group_tools(). Single-threaded
 // (called once from the end of apply(), before any parallel Fill/slice work
 // reads SurfaceEffectProfileManager) — mirrors the existing invariant that the
 // profile manager is only ever written from single-threaded code.
@@ -2269,8 +2280,8 @@ void Print::resolve_mixed_filament_sandwich_profiles()
                 ? object->config().layer_height.value : 0.2;
             const CS::ColorRecipe recipe = CS::build_mixed_filament_recipe(*mf, num_physical, mats, opt);
 
-            // NOTE: payload_from_stacks() only lifts ColorMix/PathBlend passes into
-            // profile.colormix/pathblend — Solid passes (our whole recipe) are NOT
+            // NOTE: payload_from_stacks() only lifts ColorStitch/PathBlend passes into
+            // profile.colorstitch/pathblend — Solid passes (our whole recipe) are NOT
             // lifted there. The engine's actual solid-stack consumption path (Fill.cpp,
             // painter-mode branch) reads stack_top_json/stack_penu_json directly, so
             // that's the field that must carry the recipe.
@@ -2287,7 +2298,7 @@ void Print::resolve_mixed_filament_sandwich_profiles()
             // por completo (bug reportado s230, confirmado con BOTTOM_RESOLVE).
             profile.stack_bottom_json = recipe.bottom.to_json();
             // Swatch hint for the gizmo's live preview (same packing as recipe_argb()
-            // in GLGizmoColorMixPainter.cpp — no cross-TU dependency needed for this).
+            // in GLGizmoColorStitchPainter.cpp — no cross-TU dependency needed for this).
             profile.preview_argb = 0xFF000000u
                 | ((uint32_t)std::min(255.f, recipe.rgb[0] * 255.f) << 16)
                 | ((uint32_t)std::min(255.f, recipe.rgb[1] * 255.f) <<  8)

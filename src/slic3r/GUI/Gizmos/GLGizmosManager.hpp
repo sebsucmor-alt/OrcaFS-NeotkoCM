@@ -84,7 +84,7 @@ public:
         Seam,
         FuzzySkin,
         MmSegmentation,
-        ColorMixPainter, // NEOTKO_PROFILE_TAG — s130 port
+        ColorStitchPainter, // NEOTKO_PROFILE_TAG — s130 port
         Emboss,
         Svg,
         Measure,
@@ -95,6 +95,7 @@ public:
         TextureBump, // NEOTKO_TEXTUREBUMP_TAG -- unified gizmo (All + Painter modes, docs/ATTRIBUTION_TEXTURE_BUMP.md §6)
         PrecisionALH, // NEOTKO_PRECISIONALH_TAG -- point-based layer height curve editor, LibreMode-gated
         HeightAdaptiveEffects, // NEOTKO_HAE_TAG -- Z->value curve editor for pluggable effects, LibreMode-gated
+        SupportZones, // NEOTKO_SUPPORTZONES_TAG -- s286 F2.5, the aimed-corridor author, LibreMode-gated
         //SlaSupports,
         // BBS
         //FaceRecognition,

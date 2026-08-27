@@ -8,7 +8,7 @@
 #include "Layer.hpp"
 #include "MutablePolygon.hpp"
 #include "PrintConfig.hpp"
-#include "SurfaceColorMix.hpp"  // NEOTKO_COLORMIX_TAG (port s129) — NeoDebug + NEOTKO_LOG + object_painter_wants_penu
+#include "ColorStitch.hpp"  // NEOTKO_COLORSTITCH_TAG (port s129) — NeoDebug + NEOTKO_LOG + object_painter_wants_penu
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
 #include "Support/TreeSupport.hpp"
@@ -638,32 +638,73 @@ void PrintObject::infill()
         // NEOTKO_MULTIPASS_TAG_START — pre-size sublayer slots before parallel fill loop
         m_multipass_sublayers.assign(m_layers.size(), {});
         // NEOTKO_MULTIPASS_TAG_END
-        // NEOTKO_COLORMIX_TAG_START
-        // Collect ColorMix unsplittable flag across all layers (parallel).
+        // NEOTKO_MULTIPASS_MINLAYER_TAG — s276: recolector por capa de los slots cuya receta de
+        // Sandwich hubo que colapsar por altura de banda (ver Fill.cpp). Mismo indexado que
+        // m_multipass_sublayers, así que cada hilo escribe SOLO su capa: sin carrera, sin mutex.
+        m_minlayer_collapsed_slots.assign(m_layers.size(), {});
+        // NEOTKO_COLORSTITCH_TAG_START
+        // Collect ColorStitch unsplittable flag across all layers (parallel).
         // make_fills() returns true if any region had a monotonic fill that
-        // couldn't be split into individual lines for ColorMix assignment.
-        std::atomic<bool> colormix_unsplittable{false};
+        // couldn't be split into individual lines for ColorStitch assignment.
+        std::atomic<bool> colorstitch_unsplittable{false};
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, m_layers.size()),
-            [this, &adaptive_fill_octree = adaptive_fill_octree, &support_fill_octree = support_fill_octree, &colormix_unsplittable](const tbb::blocked_range<size_t>& range) {
+            [this, &adaptive_fill_octree = adaptive_fill_octree, &support_fill_octree = support_fill_octree, &colorstitch_unsplittable](const tbb::blocked_range<size_t>& range) {
                 for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
                     m_print->throw_if_canceled();
                     if (m_layers[layer_idx]->make_fills(adaptive_fill_octree.get(), support_fill_octree.get(), this->m_lightning_generator.get()))
-                        colormix_unsplittable.store(true, std::memory_order_relaxed);
+                        colorstitch_unsplittable.store(true, std::memory_order_relaxed);
                 }
             }
         );
         m_print->throw_if_canceled();
-        if (colormix_unsplittable.load()) {
+        if (colorstitch_unsplittable.load()) {
             this->active_step_add_warning(
                 PrintStateBase::WarningLevel::NON_CRITICAL,
-                L("Surface ColorMix: some surface fill lines are too short or unsplittable. "
+                L("Surface ColorStitch: some surface fill lines are too short or unsplittable. "
                   "Use Monoline fill pattern for best results, or lower the "
-                  "'Minimum line length' ColorMix setting."),
+                  "'Minimum line length' ColorStitch setting."),
                 PrintStateBase::SlicingDefaultNotification
             );
         }
-        // NEOTKO_COLORMIX_TAG_END
+        // NEOTKO_COLORSTITCH_TAG_END
+        // NEOTKO_MULTIPASS_MINLAYER_TAG_START — s276: UN solo aviso agregado con los slots cuya
+        // receta de Sandwich se colapsó porque alguna banda no llegaba a la altura mínima
+        // imprimible. Se emite aquí, fuera del parallel_for, uniendo los vectores por capa.
+        // El colapso ya garantiza que la capa se llena entera (no quedan zonas huecas); lo que
+        // el aviso comunica es que esas zonas salen a un solo color en vez de a la receta
+        // completa, para que el usuario decida si le vale o toca la altura de capa.
+        {
+            std::vector<int> collapsed_slots;
+            size_t           collapsed_layers = 0;
+            for (const auto& per_layer : m_minlayer_collapsed_slots) {
+                if (per_layer.empty()) continue;
+                ++collapsed_layers;
+                collapsed_slots.insert(collapsed_slots.end(), per_layer.begin(), per_layer.end());
+            }
+            if (!collapsed_slots.empty()) {
+                std::sort(collapsed_slots.begin(), collapsed_slots.end());
+                collapsed_slots.erase(std::unique(collapsed_slots.begin(), collapsed_slots.end()),
+                                      collapsed_slots.end());
+                std::string slot_list;
+                for (int s : collapsed_slots) {
+                    if (!slot_list.empty()) slot_list += ", ";
+                    slot_list += std::to_string(s);
+                }
+                this->active_step_add_warning(
+                    PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(
+                        L("Sandwich: the layer height is too thin to fit every pass of the recipe "
+                          "in slots %1% (%2% layers affected). Those zones print with a single "
+                          "colour, the dominant one, instead of the full recipe. Raise the layer "
+                          "height, narrow the adaptive layer height range, or adjust the pass "
+                          "ratios of the recipe."),
+                        slot_list, collapsed_layers),
+                    PrintStateBase::SlicingDefaultNotification
+                );
+            }
+        }
+        // NEOTKO_MULTIPASS_MINLAYER_TAG_END
         BOOST_LOG_TRIVIAL(debug) << "Filling layers in parallel - end";
         /*  we could free memory now, but this would make this step not idempotent
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
@@ -993,6 +1034,18 @@ bool PrintObject::invalidate_state_by_config_options(
     std::vector<PrintObjectStep> steps;
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
+        // NEOTKO_SUPPORTZONES_TAG s288 — la ÚNICA clave que no invalida nada, y va la primera para
+        // que se vea que es deliberado.
+        //
+        // 🚨 El `else` del final de esta función dice, textual, "for legacy, if we can't handle
+        // this option let's invalidate all steps". O sea que una clave sin rama relamina el objeto
+        // ENTERO. `neotko_support_zone_gesture` guarda el gesto con el que se dibujó una zona de
+        // soporte: es descriptiva, el motor no la lee, y lo que sí cambia la impresión —la malla
+        // del volumen— se invalida solo por su cuenta. Sin este `continue`, editar una zona
+        // costaría dos relaminados completos en vez de uno.
+        if (opt_key == "neotko_support_zone_gesture")
+            continue;
+
         if (   opt_key == "brim_width"
             || opt_key == "brim_object_gap"
             || opt_key == "brim_type"
@@ -1956,7 +2009,7 @@ void PrintObject::discover_vertical_shells()
         << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
         << "' mo=" << (const void*)this->model_object()
         << " penultimate_top_layers=" << this->config().penultimate_top_layers.value
-        << " wants_penu=" << (SurfaceColorMix::object_painter_wants_penu(this->model_object()) ? 1 : 0));
+        << " wants_penu=" << (ColorStitch::object_painter_wants_penu(this->model_object()) ? 1 : 0));
 
     struct DiscoverVerticalShellsCacheEntry
     {
@@ -2403,7 +2456,7 @@ void PrintObject::discover_vertical_shells()
                         // activity, force-classify 2 penu layers so the painter override has surfaces.
                         int penultimate_layers = this->config().penultimate_top_layers.value;
                         if (penultimate_layers == 0 &&
-                            SurfaceColorMix::object_painter_wants_penu(this->model_object())) {
+                            ColorStitch::object_painter_wants_penu(this->model_object())) {
                             penultimate_layers = 2;
                             NEOTKO_LOG(PROFILE, "PENU_AUTONOMY object='"
                                 << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))
@@ -4233,7 +4286,17 @@ bool PrintObject::update_layer_height_profile(const ModelObject          &model_
             std::abs(layer_height_profile[layer_height_profile.size() - 2] - slicing_parameters.object_print_z_uncompensated_max + slicing_parameters.object_print_z_min) > 1e-3))
         layer_height_profile.clear();
 
-    if (layer_height_profile.empty() || layer_height_profile[1] != slicing_parameters.first_object_layer_height || has_dithering_ranges) {
+    // Upstream Snapmaker #757 (b826bb225): a differing first layer height must NOT force
+    // regeneration: doing so discards a valid variable layer height profile (e.g. loaded from a
+    // 3MF) and replaces it with a fixed-height profile. The first layer height is applied
+    // separately in generate_object_layers(), which hard-codes the first layer, so the profile's
+    // first segment does not need to match it here.
+    // s276 — la sonda temporal NEOTKO_757_PROBE (interruptor A/B por env var NEOTKO_NO_757 +
+    // trazas LH_PROFILE) se retiró al cerrar el bug de las zonas de Sandwich que no se generaban
+    // con altura de capa variable. Midió que #757 estaba EXONERADO: `pre757_would_regenerate=0`
+    // en todos los objetos y en las dos pasadas. La causa real estaba en Fill.cpp (banda por
+    // debajo de la altura mínima imprimible, ver NEOTKO_MULTIPASS_MINLAYER_TAG).
+    if (layer_height_profile.empty() || has_dithering_ranges) {
         //layer_height_profile = layer_height_profile_adaptive(slicing_parameters, model_object.layer_config_ranges, model_object.volumes);
         layer_height_profile = layer_height_profile_from_ranges(slicing_parameters, *ranges_to_use);
         // The layer height profile is already compressed.
@@ -4376,7 +4439,7 @@ void PrintObject::discover_horizontal_shells()
     // without penu are byte-unchanged. See EVST_GATE / discover_vertical_shells (PrintObject.cpp).
     int penultimate_layers = this->config().penultimate_top_layers.value;
     if (penultimate_layers == 0 &&
-        SurfaceColorMix::object_painter_wants_penu(this->model_object())) {
+        ColorStitch::object_painter_wants_penu(this->model_object())) {
         penultimate_layers = 2;
         NEOTKO_LOG(PROFILE, "PENU_AUTONOMY(horizontal) object='"
             << (this->model_object() ? this->model_object()->name : std::string("<unknown>"))

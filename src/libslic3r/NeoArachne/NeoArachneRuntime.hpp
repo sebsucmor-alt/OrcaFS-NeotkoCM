@@ -1,6 +1,6 @@
 // NEOTKO_NEOARACHNE_TAG fase0
 // Singleton runtime for NeoArachne UI toggles (pattern mirrors
-// PathBlendSchedulerRuntime in SurfaceColorMix.hpp). Lives at libslic3r
+// PathBlendSchedulerRuntime in ColorStitch.hpp). Lives at libslic3r
 // level so both backend and GUI can read/write without pulling GUI
 // headers into libslic3r. Real UI wiring lands in Fase 2/6.
 #ifndef slic3r_NeoArachneRuntime_hpp_

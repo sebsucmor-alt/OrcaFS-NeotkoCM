@@ -973,6 +973,7 @@ static std::vector<std::string> s_Preset_print_options {
      "pathblend_tool_2", "pathblend_tool_3", "pathblend_tool_4", "pathblend_layer_ratio_1", "pathblend_layer_ratio_2", "pathblend_layer_ratio_3",
      "pathblend_layer_ratio_4", "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface", "pathblend_invert_gradient",
      "pathblend_fill_angle", "pathblend_top", "pathblend_penu", "neotko_surface_passes_top", "neotko_surface_passes_penu",
+     "neotko_support_zone_gesture", // NEOTKO_SUPPORTZONES_TAG s288 — sin esta línea el gesto no viaja al 3mf
      "neotko_slope_perimeter_recolor",
      "neotko_alh_adapt_to_color",
      "neotko_alh_slope_recolor",

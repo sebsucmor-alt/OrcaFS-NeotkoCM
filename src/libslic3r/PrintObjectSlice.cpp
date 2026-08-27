@@ -1105,7 +1105,7 @@ static bool apply_mixed_component_surface_offsets(PrintObject &print_object, std
     const MixedFilamentManager &mixed_mgr = print->mixed_filament_manager();
     bool has_component_offsets = false;
     for (const MixedFilament &mf : mixed_mgr.mixed_filaments()) {
-        if (!mf.enabled || mf.deleted)
+        if (!mf.is_live())
             continue;
         if (std::abs(mf.component_a_surface_offset) > EPSILON || std::abs(mf.component_b_surface_offset) > EPSILON) {
             has_component_offsets = true;
@@ -2551,7 +2551,7 @@ static bool apply_mixed_region_surface_offsets(PrintObject &print_object)
     const MixedFilamentManager &mixed_mgr = print->mixed_filament_manager();
     bool has_component_offsets = false;
     for (const MixedFilament &mf : mixed_mgr.mixed_filaments()) {
-        if (!mf.enabled || mf.deleted)
+        if (!mf.is_live())
             continue;
         if (std::abs(mf.component_a_surface_offset) > EPSILON || std::abs(mf.component_b_surface_offset) > EPSILON) {
             has_component_offsets = true;
@@ -5803,6 +5803,76 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
         }
     }
     return slices;
+}
+
+// NEOTKO_SUPPORTZONES_TAG s286 F2 — T2: the same slicing, one stream per volume.
+// docs/FUTURE/SUPPORT_ZONES_PLAN.md §5 T2.
+//
+// Deliberately a sibling of slice_support_volumes() rather than a refactor of it: that function is
+// shared with the blockers and with tree support, and a zone is only a thing for the enforcers.
+// The two share the early out — no volume of the type, empty vector, and every caller downstream
+// keeps behaving exactly as it does today (§4.3).
+// NEOTKO_SUPPORTZONES_TAG s286c F4 — las áreas por familia en la capa de objeto que corresponde a
+// este print_z de SOPORTE. Las capas de soporte NO están sincronizadas con las del objeto (pueden
+// fundirse y recortarse en generate_base_layers), así que la búsqueda vive aquí y no en el llamante:
+// si cada consumidor la reimplementara, tarde o temprano dos de ellos elegirían capas distintas.
+const std::vector<Polygons>* PrintObject::support_family_areas_at(float print_z) const
+{
+    const SupportFamilyAreas &fa = m_support_family_areas;
+    if (fa.trivial() || fa.areas.empty() || fa.layer_print_z.size() != fa.areas.size())
+        return nullptr;
+    // La capa de objeto cuyo print_z es el primero >= al pedido, con tolerancia: el soporte se
+    // imprime justo por debajo de la superficie del objeto que sujeta.
+    auto it = std::lower_bound(fa.layer_print_z.begin(), fa.layer_print_z.end(), print_z - float(EPSILON));
+    if (it == fa.layer_print_z.end())
+        it = std::prev(fa.layer_print_z.end());
+    const size_t idx = size_t(it - fa.layer_print_z.begin());
+    return &fa.areas[idx];
+}
+
+std::vector<SupportZoneSlices> PrintObject::slice_support_enforcers_per_zone() const
+{
+    std::vector<SupportZoneSlices> zones;
+    const ModelObject *mo = this->model_object();
+    if (mo == nullptr)
+        return zones;
+
+    // Same early out as slice_support_volumes(): nothing of the type, nothing to do, no slicing.
+    size_t n_enforcers = 0;
+    for (const ModelVolume *v : mo->volumes)
+        if (v->type() == ModelVolumeType::SUPPORT_ENFORCER)
+            ++ n_enforcers;
+    if (n_enforcers == 0)
+        return zones;
+
+    // ✅ Same Z ladder as slice_support_volumes(), so the result stays indexed BY OBJECT LAYER and
+    // the descent loop of bottom_contact_layers_and_layer_support_areas() can index it directly.
+    std::vector<float> zs = zs_from_layers(this->layers());
+    const Print       *print = this->print();
+    auto               throw_on_cancel_callback = std::function<void()>([print](){ print->throw_if_canceled(); });
+    MeshSlicingParamsEx params;
+    params.trafo = this->trafo_centered();
+
+    zones.reserve(n_enforcers);
+    size_t priority = 0;
+    for (const ModelVolume *v : mo->volumes) {
+        if (v->type() != ModelVolumeType::SUPPORT_ENFORCER)
+            continue;
+        std::vector<ExPolygons> slices2 = slice_volume(*v, zs, params, throw_on_cancel_callback);
+        SupportZoneSlices zone;
+        zone.priority     = priority ++;
+        zone.model_volume = v;
+        zone.slices.reserve(slices2.size());
+        for (ExPolygons &src : slices2)
+            zone.slices.emplace_back(to_polygons(std::move(src)));
+        // A single volume can still slice into several islands on one layer, but they come out of
+        // slice_volume() already as ExPolygons, so no union_() is needed here. The union in
+        // slice_support_volumes() exists only to merge DIFFERENT volumes, which is precisely what
+        // this function must not do.
+        zone.slices.resize(zs.size(), Polygons());
+        zones.emplace_back(std::move(zone));
+    }
+    return zones;
 }
 
 } // namespace Slic3r

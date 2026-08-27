@@ -45,7 +45,7 @@ namespace { struct Item; }
 struct PrintInstance;
 class ConstPrintObjectPtrsAdaptor;
 struct MultiPassSubLayer; // NEOTKO_MULTIPASS_TAG — defined in Print.hpp
-struct PathBlendPassConfig; // NEOTKO_PATHBLEND_TAG — defined in SurfaceColorMix.hpp (pointer member only)
+struct PathBlendPassConfig; // NEOTKO_PATHBLEND_TAG — defined in ColorStitch.hpp (pointer member only)
 
 class OozePrevention {
 public:
@@ -533,6 +533,23 @@ private:
         const ExtrusionEntityCollection  *support;
         // erSupportMaterial / erSupportMaterialInterface / erSupportTransition or erMixed.
         ExtrusionRole                     support_extrusion_role;
+        // NEOTKO_SUPPORTZONES_TAG s286c F4 — qué familias de zonas emite este cubo. Vacío = todas,
+        // que es el caso de siempre y el que deja el gcode idéntico. Cuando dos zonas llevan
+        // materiales distintos, el mismo `support_fills` se reparte en varios cubos y cada uno emite
+        // sólo lo suyo, igual que ya se hace con el rol base/interfaz.
+        //
+        // 🚨 Son DOS listas y no un número, y el motivo costó un bug: los cubos se indexan por
+        // EXTRUSOR. Dos familias distintas comparten el extrusor del cuerpo —ahora SIEMPRE, porque
+        // el cuerpo es el del objeto— y caen en el mismo cubo. Con un solo rol por cubo, la segunda
+        // familia PISABA el rol de la primera, y ese cubo pasaba a emitir lo que dijera la última
+        // que pasó por él: techos saliendo con la herramienta del vecino.
+        //
+        // Separadas por rol, cada cubo sabe qué familias emite como masa y cuáles como techo, y ya
+        // no hay un único valor que dos escritores puedan pisarse.
+        std::vector<int>                  support_family_base;   // familias que este cubo emite como masa
+        std::vector<int>                  support_family_intf;   // ...y como techo
+        // Etiquetas por entidad de primer nivel (SupportLayer::support_fills_family), o nullptr.
+        const std::vector<int>           *support_families { nullptr };
 
         struct Island
         {
@@ -591,7 +608,8 @@ private:
 
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
-    std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
+    std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role,
+                                    const std::vector<int> *families = nullptr, const std::vector<int> *want_families = nullptr);
 
     // BBS
     LiftType to_lift_type(ZHopType z_hop_types);
@@ -806,7 +824,7 @@ private:
     // objects placed anywhere on the build plate get the full [0..1] gradient range.
     BoundingBox m_pathblend_surface_bbox;
 
-    // NEOTKO_COLORMIX_TAG — s58 per-path pre-computed surface_t for PathBlend.
+    // NEOTKO_COLORSTITCH_TAG — s58 per-path pre-computed surface_t for PathBlend.
     // Populated by extrude_infill() before iterating an EEC when
     // surface_color_mix_lane_mode != Default.  Each PathBlend-eligible path gets
     // a t in [0..1] computed according to the chosen lane mode.
@@ -851,11 +869,14 @@ private:
     std::set<unsigned int>                  m_initial_layer_extruders;
     // BBS
     int get_bed_temperature(const int extruder_id, const bool is_first_layer, const BedType bed_type) const;
+    // BBS: max bed temperature over all used extruders, so that the bed temperature always
+    // accommodates the highest-temperature filament of a compatible mixed print (e.g. PLA + TPU).
+    int get_bed_temperature_max(const Print& print, const bool is_first_layer) const;
 
     std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
     void print_machine_envelope(GCodeOutputStream &file, Print &print);
-    void _print_first_layer_bed_temperature(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);
+    void _print_first_layer_bed_temperature(GCodeOutputStream &file, Print &print, const std::string &gcode, bool wait);
     void _print_first_layer_extruder_temperatures(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);
     // On the first printing layer. This flag triggers first layer speeds.
     //BBS

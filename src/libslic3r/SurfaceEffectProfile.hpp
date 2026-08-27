@@ -1,6 +1,6 @@
 // NEOTKO_PROFILE_TAG_START
 // SurfaceEffectProfile — snapshot de un Surface Color Mixer configurado.
-// Fase A (Opción 4 — 3D Painter): solo se rellena el payload ColorMix.
+// Fase A (Opción 4 — 3D Painter): solo se rellena el payload ColorStitch.
 // La estructura ya reserva slots para PathBlend (Fase G) y MultiPass (Fase F)
 // para que el manager / serializer / gizmo no se reescriban más tarde.
 #ifndef slic3r_SurfaceEffectProfile_hpp_
@@ -14,10 +14,10 @@
 namespace Slic3r {
 
 class DynamicPrintConfig;
-struct SurfacePassStack;   // NEOTKO_PROFILE_TAG — payload_from_stacks (SurfaceColorMix.hpp)
+struct SurfacePassStack;   // NEOTKO_PROFILE_TAG — payload_from_stacks (ColorStitch.hpp)
 
 enum class SurfaceEffectKind : uint8_t {
-    ColorMix  = 1,
+    ColorStitch  = 1,
     PathBlend = 2,
     MultiPass = 3,
 };
@@ -44,7 +44,7 @@ struct SurfaceEffectProfile {
     // false → legacy/loaded profiles are treated as saved (never GC'd).
     bool                 auto_generated = false;
 
-    SurfaceEffectPayload colormix;          // Fase A: lo único que se rellena
+    SurfaceEffectPayload colorstitch;          // Fase A: lo único que se rellena
     SurfaceEffectPayload pathblend;         // Fase G — placeholder
     SurfaceEffectPayload multipass;         // Fase F — placeholder
 
@@ -87,20 +87,20 @@ public:
     size_t                                    size() const { return m_profiles.size(); }
     void                                      clear();
 
-    // Snapshot helpers — Fase A only fills ColorMix; the others stay `present=false`.
+    // Snapshot helpers — Fase A only fills ColorStitch; the others stay `present=false`.
     // The caller picks which keys to snapshot (so we keep the manager engine-agnostic).
     static SurfaceEffectPayload snapshot_keys(const DynamicPrintConfig& cfg,
                                               const std::vector<std::string>& keys);
 
     // NEOTKO_COLORSTITCH_TAG — s112 fix (PAINTER_SLICE_PAYLOAD_GAP.md). Derive the
     // engine-readable PROFILE payload from a resolved sandwich (top/penu stacks)
-    // by LIFTING each ColorMix/PathBlend pass's already-canonical `kv` up to the
+    // by LIFTING each ColorStitch/PathBlend pass's already-canonical `kv` up to the
     // profile level. The painter's auto profiles only stored the visual stacks
-    // (stack_*_json); the slicer's painter-mode gate (SurfaceColorMix.cpp:1094)
-    // requires `colormix.present`. This bridges them — mirror of what Tab.cpp's
+    // (stack_*_json); the slicer's painter-mode gate (ColorStitch.cpp:1094)
+    // requires `colorstitch.present`. This bridges them — mirror of what Tab.cpp's
     // "Save profile" does, but sourced from the stacks instead of the live config.
     // Solid passes are intentionally ignored (they ride the stack_json/MultiPass
-    // path in Fill.cpp, not the colormix payload). Sets `interlayer_colormix_*`
+    // path in Fill.cpp, not the colorstitch payload). Sets `interlayer_colormix_*`
     // enable + surface (0=Both/1=Top/2=Penu) / `multipass_path_gradient` +
     // `pathblend_surface` based on which zones carry each effect.
     static void payload_from_stacks(const SurfacePassStack& top,
@@ -109,9 +109,9 @@ public:
     static void                  restore_keys (DynamicPrintConfig& cfg,
                                               const SurfaceEffectPayload& payload);
 
-    // Canonical ColorMix key list (top + _penu_ variants + global flags).
+    // Canonical ColorStitch key list (top + _penu_ variants + global flags).
     // Used by Tab.cpp "Save as profile" and future 3mf serializer.
-    static const std::vector<std::string>& colormix_keys();
+    static const std::vector<std::string>& colorstitch_keys();
 
     // NEOTKO_PROFILE_TAG — Fase F: canonical MultiPass key list (top +
     // penultimate_ mirror). Excludes `multipass_prime_volume` (print-wide,

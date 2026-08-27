@@ -2,7 +2,7 @@
 #include "SurfaceEffectProfile.hpp"
 #include "Config.hpp"
 #include "PrintConfig.hpp"
-#include "SurfaceColorMix.hpp" // NEOTKO_PROFILE_TAG — NeoDebug PROFILE channel
+#include "ColorStitch.hpp" // NEOTKO_PROFILE_TAG — NeoDebug PROFILE channel
 #include <nlohmann/json.hpp>
 #include <boost/log/trivial.hpp>
 
@@ -22,10 +22,10 @@ int SurfaceEffectProfileManager::add(SurfaceEffectProfile profile)
     m_profiles.push_back(std::move(profile));
     const auto& p = m_profiles.back();
     NEOTKO_LOG(PROFILE, "MGR add id=" << p.id << " name='" << p.name << "'"
-        << " colormix=" << (p.colormix.present  ? "yes" : "no")
+        << " colormix=" << (p.colorstitch.present  ? "yes" : "no")
         << " pathblend=" << (p.pathblend.present ? "yes" : "no")
         << " multipass=" << (p.multipass.present ? "yes" : "no")
-        << " cm_kv=" << p.colormix.kv.size()
+        << " cm_kv=" << p.colorstitch.kv.size()
         << " mp_kv=" << p.multipass.kv.size()
         << " pb_kv=" << p.pathblend.kv.size()
         << " total=" << m_profiles.size());
@@ -106,9 +106,9 @@ SurfaceEffectProfileManager::snapshot_keys(const DynamicPrintConfig& cfg,
     return out;
 }
 
-// NEOTKO_COLORSTITCH_TAG — s112 fix. Lift ColorMix/PathBlend pass payloads from
+// NEOTKO_COLORSTITCH_TAG — s112 fix. Lift ColorStitch/PathBlend pass payloads from
 // the resolved stacks to the profile level so the slicer's painter-mode gate
-// (which reads p.colormix.present, not the visual stack_*_json) fires.
+// (which reads p.colorstitch.present, not the visual stack_*_json) fires.
 void SurfaceEffectProfileManager::payload_from_stacks(const SurfacePassStack& top,
                                                       const SurfacePassStack& penu,
                                                       SurfaceEffectProfile& p)
@@ -119,11 +119,11 @@ void SurfaceEffectProfileManager::payload_from_stacks(const SurfacePassStack& to
     auto lift = [](const SurfacePassStack& st, bool penu_zone,
                    SurfaceEffectProfile& prof, bool& cm_hit, bool& pb_hit) {
         for (const SurfacePass& pass : st.passes) {
-            if (pass.kind == SurfacePassKind::ColorMix && pass.colormix.present) {
+            if (pass.kind == SurfacePassKind::ColorStitch && pass.colorstitch.present) {
                 // kv keys are already role-prefixed (interlayer_colormix_ for top,
                 // interlayer_colormix_penu_ for penu) — straight merge.
-                for (const auto& [k, v] : pass.colormix.kv)
-                    prof.colormix.kv[k] = v;
+                for (const auto& [k, v] : pass.colorstitch.kv)
+                    prof.colorstitch.kv[k] = v;
                 cm_hit = true;
             } else if (pass.kind == SurfacePassKind::PathBlend && pass.pathblend.present) {
                 for (const auto& [k, v] : pass.pathblend.kv)
@@ -145,9 +145,9 @@ void SurfaceEffectProfileManager::payload_from_stacks(const SurfacePassStack& to
     };
 
     if (cm_top || cm_penu) {
-        p.colormix.present = true;
-        p.colormix.kv["interlayer_colormix_enabled"] = "1";
-        p.colormix.kv["interlayer_colormix_surface"] = surface_enum(cm_top, cm_penu);
+        p.colorstitch.present = true;
+        p.colorstitch.kv["interlayer_colormix_enabled"] = "1";
+        p.colorstitch.kv["interlayer_colormix_surface"] = surface_enum(cm_top, cm_penu);
     }
     if (pb_top || pb_penu) {
         p.pathblend.present = true;
@@ -156,7 +156,7 @@ void SurfaceEffectProfileManager::payload_from_stacks(const SurfacePassStack& to
     }
     NEOTKO_LOG(PROFILE, "payload_from_stacks cm=[" << cm_top << "," << cm_penu
         << "] pb=[" << pb_top << "," << pb_penu << "]"
-        << " cm_kv=" << p.colormix.kv.size() << " pb_kv=" << p.pathblend.kv.size());
+        << " cm_kv=" << p.colorstitch.kv.size() << " pb_kv=" << p.pathblend.kv.size());
 }
 
 void SurfaceEffectProfileManager::restore_keys(DynamicPrintConfig& cfg,
@@ -169,7 +169,7 @@ void SurfaceEffectProfileManager::restore_keys(DynamicPrintConfig& cfg,
     }
 }
 
-const std::vector<std::string>& SurfaceEffectProfileManager::colormix_keys()
+const std::vector<std::string>& SurfaceEffectProfileManager::colorstitch_keys()
 {
     // Canonical list — must stay in sync with PrintConfig.hpp interlayer_colormix_*.
     static const std::vector<std::string> k = {
@@ -367,7 +367,7 @@ std::string SurfaceEffectProfileManager::to_json() const
         e["id"]              = p.id;
         e["name"]            = p.name;
         e["preview_argb"]    = p.preview_argb;
-        e["colormix"]        = payload_to_json(p.colormix);
+        e["colormix"]        = payload_to_json(p.colorstitch);
         e["pathblend"]       = payload_to_json(p.pathblend);
         e["multipass"]       = payload_to_json(p.multipass);
         e["stack_top_json"]  = p.stack_top_json;
@@ -401,7 +401,7 @@ bool SurfaceEffectProfileManager::from_json(const std::string& text)
         if (e.contains("id")           && e["id"].is_number_integer())   p.id           = e["id"].get<int>();
         if (e.contains("name")         && e["name"].is_string())         p.name         = e["name"].get<std::string>();
         if (e.contains("preview_argb") && e["preview_argb"].is_number()) p.preview_argb = e["preview_argb"].get<uint32_t>();
-        if (e.contains("colormix"))  p.colormix  = payload_from_json(e["colormix"]);
+        if (e.contains("colormix"))  p.colorstitch  = payload_from_json(e["colormix"]);
         if (e.contains("pathblend")) p.pathblend = payload_from_json(e["pathblend"]);
         if (e.contains("multipass")) p.multipass = payload_from_json(e["multipass"]);
         // NEOTKO_PROFILE_TAG — Fase 6 (v2): preview stacks. Absent in v1 → "".
@@ -419,13 +419,13 @@ bool SurfaceEffectProfileManager::from_json(const std::string& text)
         // BEFORE the fix (auto profiles only carried the visual stacks). Without
         // a payload the slicer's painter-mode gate skips them → painted .3mf
         // loaded as all-T0. Derive it from the stacks here so old files slice.
-        if (!p.colormix.present && !p.pathblend.present &&
+        if (!p.colorstitch.present && !p.pathblend.present &&
             (!p.stack_top_json.empty() || !p.stack_penu_json.empty())) {
             const SurfacePassStack st_top  = SurfacePassStack::from_json(p.stack_top_json);
             const SurfacePassStack st_penu = SurfacePassStack::from_json(p.stack_penu_json);
             payload_from_stacks(st_top, st_penu, p);
             NEOTKO_LOG(PROFILE, "from_json backfill id=" << p.id << " name='" << p.name
-                << "' → cm=" << (p.colormix.present ? "yes" : "no")
+                << "' → cm=" << (p.colorstitch.present ? "yes" : "no")
                 << " pb=" << (p.pathblend.present ? "yes" : "no"));
         }
         if (p.id <= 0) p.id = m_next_id;

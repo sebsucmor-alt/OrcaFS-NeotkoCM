@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Supports — Neotko for Snapmaker Orca</title>
-<meta name="description" content="Support that routes around the other objects on the plate instead of growing through them, and a wave-front roof that diffracts around concavities over a hollow pillar.">
+<meta name="description" content="Support zones you aim: point at the surface, point at the landing, and the pillar is built between the two. Plus support that routes around the other objects on the plate, and a wave-front roof that diffracts around concavities.">
 <link rel="stylesheet" href="assets/tour.css">
 <style>
   .wv { display: grid; grid-template-columns: minmax(0,1fr) 210px; gap: 1.1rem; align-items: start; }
@@ -13,6 +13,23 @@
              padding: .5rem .55rem; display: grid; gap: .45rem; }
   .wv__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
             text-transform: uppercase; color: var(--ink-faint); }
+
+  /* Support Zones demos: a tall view with its controls beside it, and a row of
+     readouts underneath that spans the whole demo. */
+  .sz { display: grid; grid-template-columns: minmax(0,1fr) 236px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 720px) { .sz { grid-template-columns: 1fr; } }
+  .sz__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .sz__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .sz__tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr));
+               gap: .5rem; margin-top: .9rem; }
+  .sz__tile { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+              padding: .4rem .55rem; }
+  .sz__tk { display: block; font-family: var(--mono); font-size: .58rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); margin-bottom: .12rem; }
+  .sz__tv { font-family: var(--mono); font-size: .88rem; color: var(--ink); }
+  .sz__tv.is-bad { color: var(--alert); }
 </style>
 </head>
 <body>
@@ -49,12 +66,314 @@
 
   <main class="article" id="main">
 
-    <p class="eyebrow">§12 · §16 — Placing</p>
+    <p class="eyebrow">§12 · §16 · §24 — Placing</p>
     <h1>Supports</h1>
     <p class="lede">
-      Two unrelated things live here. One is a first for this family of slicers: support that knows
-      about the other objects on the plate. The other is an experiment: a support roof built out of
+      Three unrelated things live here. The big one is <b>Support Zones</b>: you point at the
+      surface you want held up, then at where the column should land, and the pillar is built
+      between the two. The second is support that knows about the other objects on the plate, which
+      is a first for this family of slicers. The third is an experiment, a support roof built out of
       wave fronts instead of straight lines, sitting on a hollow pillar.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="zones" data-short="Support Zones">Support Zones</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--free">engine print-verified</li>
+      <li class="badge badge--wip">brush and cover: build-verified, print-pending</li>
+      <li class="badge badge--ver badge--plain">2.4.4</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Left-side gizmo toolbar</b><span class="sep">›</span><b>Support Zones</b>
+      <span class="sep">·</span><span>needs Libre Mode</span>
+    </p>
+
+    <p>
+      A support enforcer block has always been a box that says <em>what</em> to support. Everything
+      about it below the object was thrown away, so the column fell straight down from the overhang
+      wherever you put the box. A support zone says what to hold up <strong>and where the column may
+      come down</strong>.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Stock enforcer block</h4>
+        <p>You draw a box. It marks a region as needing support. The generator then routes the
+        column its own way, straight down, and the only way to find out what you got is to slice
+        and look.</p>
+      </div>
+      <div class="fold--after">
+        <h4>With a support zone</h4>
+        <p>You point at the surface, then at the landing. The pillar is built between the two, its
+        roof is the real patch with its curve on it, and the panel draws the section at true scale
+        before you commit to anything.</p>
+      </div>
+    </div>
+
+    <h3 id="gesture">Two clicks</h3>
+
+    <p>
+      Point at the surface you want held up, then point at where it should land. Only surfaces
+      facing downward can be picked, so the top of the part is never taken by mistake, and when
+      several stacked surfaces sit under the cursor the wheel cycles through them.
+    </p>
+
+    <p>
+      That filter is deliberately <strong>not</strong> the support threshold angle. A long shallow
+      overhang that sags without quite passing the threshold is exactly the case a hand-placed zone
+      exists for, so it stays pickable.
+    </p>
+
+    <p>
+      The pillar follows the surface rather than a bounding box. Its roof <em>is</em> the patch you
+      took, curve included, so it sits flush against a rounded underside instead of leaving a gap
+      under it.
+    </p>
+
+    <h3 id="knee">The lean has a ceiling, and the slicer sets it</h3>
+
+    <p>
+      A support column can only step so far sideways from one layer to the next. That gives a
+      steepest angle it can actually follow, and asking for more produces a staircase in mid air.
+      So the angle is the input and everything else follows from it: the pillar leans at the angle
+      you set, reaches a <strong>knee</strong>, and drops straight down from there.
+    </p>
+
+    <p>
+      Because the angle is the input rather than the outcome, a link the slicer cannot follow is
+      not something you get warned about afterwards. It is something you cannot draw.
+    </p>
+
+    <div class="demo bleed" id="knee-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">The section the panel draws, at true scale</span>
+        <span class="demo__hint">drag the lean and the foot</span>
+      </div>
+      <div class="demo__body" data-demo="zone-knee">
+        <noscript><p class="noscript">This demo needs JavaScript. It draws a pillar in section: the patch at the top, the lean, the knee, the drop to the plate, and behind it the wedge of everything the slicer can follow.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real numbers
+        </span>
+        &nbsp;· the ceiling is <code>corridor_max_angle_deg</code> and the reach is
+        <code>reach_radius_mm</code>, both from <code>SupportZoneProbe.hpp</code>; the drawing is the
+        panel's own elevation from <code>GLGizmoSupportZones.cpp</code>. The patch here is a plain
+        10 mm shelf so the geometry stays readable.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Term</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td><b>Lean</b></td><td>The angle you choose, measured off vertical. The whole sideways move happens on this stretch.</td></tr>
+        <tr><td><b>Ceiling</b></td><td><code>atan(0.75 × support line width ÷ layer height)</code>. The slicer clamps a column to three quarters of a line width per layer, so a thicker layer means a shallower ceiling. Under adaptive layer height the <b>thickest</b> layer is the one that counts.</td></tr>
+        <tr><td><b>Reach</b></td><td>How far sideways the foot can sit, which is the height under the patch times the tangent of the lean. Land outside it and the knee comes out below the plate.</td></tr>
+        <tr><td><b>Knee</b></td><td>Where the lean stops and the drop begins. No sideways offset means no knee, and the pillar is a straight column.</td></tr>
+        <tr><td><b>The wedge</b></td><td>Everything the corridor can follow, drawn behind the pillar. A landing outside it is one the slicer will not reach, and you see that as a shape.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="footprint">The footprint, and why cover exists</h3>
+
+    <p>
+      The footprint is one of four: the whole patch, a round or a square shape around the point you
+      picked, or painted by hand. It starts in <strong>square</strong>, because whole patch is the
+      one mode that cannot be expanded.
+    </p>
+
+    <p>
+      A shape can work two ways, and the difference decides how big a zone can get. <strong>Cut</strong>
+      trims the shape to the surface you picked, so it can never be bigger than the patch, and the
+      roof is the surface itself. <strong>Cover</strong> makes the shape <em>be</em> the section of
+      the pillar. It can grow past the patch, up to 200 mm. The roof still follows the real surface
+      wherever there is one, so a big circle over a curved underside still sits flush; where there
+      is nothing above it, the roof stays flat.
+    </p>
+
+    <div class="demo bleed" id="cover-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Cut against cover, seen from above</span>
+        <span class="demo__hint">drag the shape, then push the edge inward</span>
+      </div>
+      <div class="demo__body" data-demo="zone-cover">
+        <noscript><p class="noscript">This demo needs JavaScript. It shows a patch outline with a round or square shape over it, cut to the patch or covering it, and an edge you can push inward until the outline runs out of room.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        Plan view, and the same two decisions the tool makes there: cut intersects the shape with
+        the patch, cover replaces the outline. The edge is offset on a sampled distance field rather
+        than the engine's mitred offset, so treat the exact millimetre where it runs out as
+        indicative. The 3D solid, its rings and its tangent-plane correction are not drawn here.
+      </div>
+    </div>
+
+    <p>
+      Growing the outline of a patch always runs out eventually, because the shape folds through
+      itself. Replacing the outline with a shape has no such ceiling, and that is the whole reason
+      cover is there.
+    </p>
+
+    <h3 id="edge">Head, foot, and painting</h3>
+
+    <p>
+      The edge is two sliders, <b>head</b> and <b>foot</b>, adjustable at the roof and at the foot
+      separately and in both directions, interpolated by height in between. Set them differently and
+      the pillar tapers: wide where it holds, narrow where it stands. Less material, and less to
+      break off. Grow it instead and it catches the edges of an eave. Pushing inward and growing
+      outward have <strong>different limits</strong>, and both come from the shape itself. A convex
+      footprint has no outward limit at all, while pushing inward always runs out somewhere.
+    </p>
+
+    <p>
+      <strong>Painting</strong> is the fourth footprint. Pick the brush and drag on the surface to
+      mark the area you want held up; the brush is the size of the slider, shift and drag rubs it
+      out, and marks left in one stroke are joined into a continuous band rather than a row of dots.
+      While the brush is chosen the surface you <em>can</em> paint on is lit faintly: everything
+      connected to where you are that faces downward. That canvas is deliberately much larger than
+      the patch a single click would take, because on a curve one click gives you a tiny coplanar
+      patch and painting is the tool for going past it. Painting never crosses onto a surface facing
+      up or sideways.
+    </p>
+
+    <div class="note note--key">
+      <span class="note__t">Object dragging is off while the brush is armed</span>
+      <p style="margin:0">
+        A stroke that starts on the part paints instead of moving it. The tool also does not jump to
+        step 2 by itself the way a click does, so you can keep painting as long as you like.
+      </p>
+    </div>
+
+    <h3 id="maps">Two maps, and they answer opposite questions</h3>
+
+    <p>
+      <strong>Green</strong> marks surface facing downward that a zone has already caught. This is
+      the one that kills a quiet, common failure: a block that swallows solid material looks
+      completely full on screen and produces nothing at all. Now it lights up nowhere and says so.
+    </p>
+
+    <p>
+      <strong>Red</strong> marks surface that leans past your threshold and sits inside no zone at
+      all. Simplify3D fills everything with support and lets you carve it back. This does the
+      opposite: it shows you the gap and leaves the decision to you. Both maps are drawn through the
+      part, so a gap hiding behind the model is still a gap you can see, and how ghosted the part
+      gets while the tool is open is up to you.
+    </p>
+
+    <div class="demo bleed" id="maps-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">What a zone catches, and what nobody caught</span>
+        <span class="demo__hint">drag the zone across the part</span>
+      </div>
+      <div class="demo__body" data-demo="zone-maps">
+        <noscript><p class="noscript">This diagram needs JavaScript. It probes a section of a part on a grid, marking downward-facing surface caught by a zone in green and downward-facing surface that no zone caught in red.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b>. The idea is the real one, a grid of vertical rays against the surface and a
+        second ray against the block, but here it runs on a 2D section instead of the object's mesh.
+        The real probe is <code>probe_object_coverage</code> in
+        <code>SupportZoneProbe.cpp</code>, and its grid step is the
+        <b>support base pattern spacing</b> you already have, so what you see and what gets printed
+        share one number.
+      </div>
+    </div>
+
+    <div class="note note--warn">
+      <span class="note__t">What the red map is, and what it is not</span>
+      <p style="margin:0">
+        Red says <b>might need support</b>. It chooses a destination for a zone you are placing; it
+        never decides that support is needed. What needs support stays the slicer's own overhang
+        test, layer against layer. Red on the skirt where the model meets the plate is expected for
+        the same reason: that surface really does lean past the threshold and really is inside no
+        zone, and it also does not need support, because each layer there grows outward only a
+        little from the one below. The map tells you the truth and leaves that call to you.
+      </p>
+    </div>
+
+    <p class="small">
+      The detail of both maps is adjustable and it is a viewing preference, not a print setting.
+    </p>
+
+    <h3 id="roof">A soluble roof, and an ordinary body</h3>
+
+    <p>
+      Each zone can take <strong>its own filament for the roof</strong>, chosen from a strip of
+      colour chips rather than a menu. The roof is the part that touches your model, so a soluble
+      roof buys you a clean underside while the body of the support stays whatever is cheap.
+    </p>
+
+    <p>
+      The body deliberately stays on "same as the object", and that is not a shortcut. A support
+      body set to follow the object is where the slicer dumps its purge. Pinning a tool to it gives
+      that up and grows the wipe tower instead, in exchange for controlling the part of the support
+      that cares least about material.
+    </p>
+
+    <p>
+      Zones that touch and share their settings print as <strong>one column</strong>. Two pillars
+      meeting under the same overhang used to split the shared band, and the loser came out thinner
+      all the way to the plate. Zones with different settings, or different roof filaments, still
+      get out of each other's way, which is what that rule was for in the first place.
+    </p>
+
+    <h3 id="setup">It sets the object up for you</h3>
+
+    <p>
+      Creating the first pillar on an object writes the support settings these pillars were tested
+      and printed with onto <em>that object</em>: normal supports, a 0.1 mm top gap, one support
+      wall, three interface layers, solid rectilinear interface. Two rules keep that honest. It only
+      writes a setting you have not already chosen yourself, and everything it writes is a per
+      object setting you can see, undo, or remove from the object list.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>It changes</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Tree supports become normal, keeping auto or manual</td><td>The tree generator does not know about the corridor, so the lean and the knee you draw would not come out.</td></tr>
+        <tr><td>Support style becomes <b>Snug</b>, on opening the tool</td><td>With any other style the support grid re-aligns itself to every layer, so a column that should slide comes out in steps.</td></tr>
+        <tr><td>Top gap 0.1 mm, one wall, three interface layers, solid rectilinear interface</td><td>The values the printed parts were made with. Only the ones you have not set yourself.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="reopen">Zones you can reopen, once</h3>
+
+    <p>
+      A pillar built with this tool remembers the two clicks that made it. Pick the <b>pencil</b> on
+      its card and the whole gesture comes back into the panel: the patch, the landing, the
+      footprint, the edges and the angle. Change what you want and press <b>Apply changes</b>.
+      Nothing is written until you apply, and one edit is one undo.
+    </p>
+
+    <p>
+      That memory only holds while the zone is <strong>locked</strong>, which is what the padlock on
+      the card means. Move, rotate or scale it with the ordinary gizmos and the link between the
+      gesture and the geometry is broken, so the lock goes and the zone becomes an ordinary support
+      block. It still prints exactly as it is, it just cannot be reopened. Duplicating a zone gives
+      you an ordinary block too, because the copy sits somewhere else and the gesture that made the
+      original does not describe it any more. Either way it is a one way door, and another zone is
+      two clicks.
+    </p>
+
+    <h3 id="vstree">Why this instead of tree supports</h3>
+
+    <p>
+      A drawn pillar is one column that goes where you put it. The toolhead prints it in one place
+      and moves on. Tree supports branch, and every branch is another island on the layer, which is
+      another travel and another retraction. Fewer retractions is not only faster, it is much kinder
+      to the materials that hate being pulled back, and those are exactly the flexible and moisture
+      sensitive filaments where stringing and grinding show up first. You also decide where the foot
+      lands, so it can stay off a delicate surface instead of finding one on its way down.
     </p>
 
     <!-- ================================================================= -->
@@ -259,6 +578,27 @@
     <h2 id="costs" data-short="The catch">The catch</h2>
 
     <ul>
+      <li><strong>A support zone only makes support where it finds surface that needs it.</strong>
+        That is what stops it fabricating support nobody asked for, and it does limit what shapes
+        are possible.</li>
+      <li><strong>Whole patch follows the flat surface it starts on</strong>, so on a large flat
+        ceiling that means the whole ceiling. It is also the one footprint that cannot be expanded,
+        because there is no shape to put in the outline's place, which is why the tool does not
+        start there.</li>
+      <li><strong>The edge slider runs out on the way in.</strong> Push it inward far enough and the
+        shape would fold through itself, so the limit shrinks as you go. Growing outward usually has
+        no such limit; if you need much more than the patch allows, that is what cover is for.</li>
+      <li><strong>A patch that folds over itself in plan view is flagged, not fixed.</strong> A band
+        that wraps past the vertical projects onto itself from above, so the foot would overlap
+        itself. The panel says so and leaves the fix to you: crop it smaller, or pick a flatter part
+        of the surface.</li>
+      <li><strong>The landing stays put while you edit a zone.</strong> Editing is for the dials.
+        Moving the foot means a new zone, which is two clicks.</li>
+      <li><strong>Painting costs CPU.</strong> Every mark is real geometry being clipped against the
+        surface, and a long stroke is a lot of it.</li>
+      <li><strong>The geometry rewrite, the brush and cover mode are build-verified, not yet
+        printed.</strong> The engine underneath them has been: a part held up by leaning pillars,
+        and a torus with a 0.2 mm gap.</li>
       <li><strong>PerObject Support gives up first-layer grip.</strong> The wide base is dropped so
         bases cannot spill across objects. On a tall thin support that is a real trade.</li>
       <li><strong>By-layer printing only.</strong> Sequential by-object printing makes avoidance
@@ -284,7 +624,7 @@
   <div class="foot__in">
     <div>
       <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
-      <p class="small">This page covers <b>§12</b> and <b>§16</b> of the
+      <p class="small">This page covers <b>§12</b>, <b>§16</b> and <b>§24</b> of the
         <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
     </div>
     <div class="small">
@@ -298,6 +638,718 @@
 <script src="assets/stitch.js"></script>
 <script src="assets/tour.js"></script>
 <script>
+/* ===========================================================================
+ * zone-knee — the panel's own elevation, at true scale.
+ *
+ * Ported numbers, all of them:
+ *   ceiling = atan(0.75 * support_line_width / layer_height)   SupportZoneProbe.hpp
+ *   reach   = (z_patch - z_landing) * tan(lean)                reach_radius_mm()
+ *   z_knee  = z_patch - offset / tan(lean)                     GLGizmoSupportZones.cpp
+ * One scale for both axes, because the panel promises that forty five degrees
+ * on the slider is forty five degrees on screen.
+ * ========================================================================= */
+Tour.demo('zone-knee', function (host) {
+  var el = Tour.el, D2R = Math.PI / 180;
+  var K = 0.75, LINE_W = 0.42;              // SUPPORT_CORRIDOR_K, a stock support line width
+  var Z_TOP = 30, PATCH = 5, FOOT = 4;      // mm: patch height, half widths
+
+  var S = { lean: 45, off: 12, lh: 0.20 };
+
+  function ceiling() { return Math.atan(K * LINE_W / S.lh) / D2R; }
+  function reach()   { return Z_TOP * Math.tan(S.lean * D2R); }
+  function kneeZ()   { return S.off < 1e-6 ? 0 : Z_TOP - S.off / Math.tan(S.lean * D2R); }
+  function bad()     { return S.off > reach() + 1e-6; }
+
+  var leanS = Tour.slider({
+    label: 'Lean', min: 5, max: 70, step: 1, value: S.lean,
+    format: function (v) { return v + '°'; },
+    onInput: function (v) { setLean(v); upd(); }
+  });
+  var offS = Tour.slider({
+    label: 'Foot offset', min: 0, max: 34, step: 0.5, value: S.off,
+    format: function (v) { return v.toFixed(1) + ' mm'; },
+    onInput: function (v) { S.off = v; upd(); }
+  });
+
+  /** The tool clamps the angle to the ceiling instead of drawing what it cannot follow. */
+  function setLean(v) {
+    var c = ceiling();
+    S.lean = Math.min(v, c);
+    if (S.lean !== v) leanS.set(Math.round(S.lean * 10) / 10);
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Section through the pillar' }),
+    el('span', { 'data-scale': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var accent = Tour.token('--accent'), alert = Tour.token('--alert');
+    var good = Tour.token('--good'), rule = Tour.token('--rule');
+    var faint = Tour.token('--ink-faint'), ink = Tour.token('--ink');
+    var wrong = bad();
+    var cLine = wrong ? alert : accent;
+
+    var off = S.off, zk = kneeZ();
+    var xMin = Math.min(-PATCH, off - FOOT, -0.5);
+    var xMax = Math.max(PATCH, off + FOOT, 0.5, off);
+    var zHi = Z_TOP + 7, zLo = Math.min(0, zk);
+    var padX = 26, padT = 14, padB = 40;
+    var spanX = Math.max(0.001, (xMax - xMin) * 1.10);
+    var spanZ = Math.max(0.001, (zHi - zLo) * 1.06);
+    var s = Math.min((w - 2 * padX) / spanX, (h - padT - padB) / spanZ);
+    var xMid = 0.5 * (xMin + xMax), zMid = 0.5 * (zHi + zLo);
+    var cx = w * 0.5, cy = padT + (h - padT - padB) * 0.5;
+    function X(x) { return cx + (x - xMid) * s; }
+    function Y(z) { return cy - (z - zMid) * s; }
+
+    // the wedge: everything the corridor can follow, at least as wide as what is drawn
+    var angW = Math.max(S.lean, ceiling()) * D2R;
+    var rLo = (Z_TOP - zLo) * Math.tan(angW);
+    ctx.fillStyle = Tour.token('--accent-wash');
+    ctx.globalAlpha = .6;
+    ctx.beginPath();
+    ctx.moveTo(X(0), Y(Z_TOP)); ctx.lineTo(X(-rLo), Y(zLo)); ctx.lineTo(X(rLo), Y(zLo));
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = accent; ctx.globalAlpha = .5; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(X(-rLo), Y(zLo)); ctx.lineTo(X(0), Y(Z_TOP)); ctx.lineTo(X(rLo), Y(zLo));
+    ctx.stroke();
+    ctx.globalAlpha = 1; ctx.setLineDash([]);
+
+    // the plate
+    var yb = Y(0);
+    ctx.strokeStyle = Tour.token('--rule-firm'); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(6, yb); ctx.lineTo(w - 6, yb); ctx.stroke();
+    ctx.lineWidth = 1; ctx.globalAlpha = .8;
+    for (var t = 12; t < w - 6; t += 9) {
+      ctx.beginPath(); ctx.moveTo(t, yb + 2); ctx.lineTo(t - 5, yb + 8); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // The part: a shelf reaching in from the left, so the patch reads as the piece
+    // of its underside you took rather than as a floating box.
+    var yLow = Y(Z_TOP), yTop = 0;
+    var px0 = -20, px1 = X(PATCH);
+    ctx.fillStyle = Tour.token('--surface-2');
+    ctx.fillRect(px0, yTop, px1 - px0, yLow - yTop);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(px0, yTop, px1 - px0, yLow - yTop); ctx.clip();
+    ctx.strokeStyle = rule; ctx.lineWidth = 1; ctx.globalAlpha = .75;
+    for (var d = -80; d < w + 80; d += 7) {
+      ctx.beginPath(); ctx.moveTo(px0 + d, yLow); ctx.lineTo(px0 + d + 80, yLow - 80); ctx.stroke();
+    }
+    ctx.restore(); ctx.globalAlpha = 1;
+    ctx.strokeStyle = rule; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(px1, yTop); ctx.lineTo(px1, yLow); ctx.lineTo(px0, yLow);
+    ctx.stroke();
+
+    // the pillar: leaning stretch to the knee, then straight down
+    var kz = Math.max(zk, zLo);
+    ctx.fillStyle = wrong ? Tour.token('--alert-wash') : Tour.token('--accent-wash');
+    ctx.beginPath();
+    ctx.moveTo(X(-PATCH), Y(Z_TOP)); ctx.lineTo(X(PATCH), Y(Z_TOP));
+    ctx.lineTo(X(off + FOOT), Y(kz)); ctx.lineTo(X(off - FOOT), Y(kz));
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = cLine; ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(X(-PATCH), Y(Z_TOP)); ctx.lineTo(X(off - FOOT), Y(kz));
+    ctx.moveTo(X(PATCH), Y(Z_TOP)); ctx.lineTo(X(off + FOOT), Y(kz));
+    ctx.stroke();
+
+    if (zk > 0.05) {
+      ctx.fillStyle = wrong ? Tour.token('--alert-wash') : Tour.token('--accent-wash');
+      ctx.fillRect(X(off - FOOT), Y(zk), X(off + FOOT) - X(off - FOOT), Y(0) - Y(zk));
+      ctx.strokeStyle = cLine;
+      ctx.beginPath();
+      ctx.moveTo(X(off - FOOT), Y(zk)); ctx.lineTo(X(off - FOOT), Y(0));
+      ctx.lineTo(X(off + FOOT), Y(0)); ctx.lineTo(X(off + FOOT), Y(zk));
+      ctx.stroke();
+      // the knee, marked only where there is one
+      ctx.fillStyle = cLine;
+      ctx.beginPath(); ctx.arc(X(off), Y(zk), 3.6, 0, 6.284); ctx.fill();
+      ctx.fillStyle = Tour.token('--paper');
+      ctx.beginPath(); ctx.arc(X(off), Y(zk), 1.5, 0, 6.284); ctx.fill();
+    } else {
+      ctx.strokeStyle = cLine;
+      ctx.beginPath(); ctx.moveTo(X(off - FOOT), Y(kz)); ctx.lineTo(X(off + FOOT), Y(kz)); ctx.stroke();
+    }
+
+    // the patch, drawn over the pillar: the same green as "this one is caught" in 3D
+    ctx.strokeStyle = good; ctx.lineWidth = 2.8;
+    ctx.beginPath(); ctx.moveTo(X(-PATCH), yLow); ctx.lineTo(X(PATCH), yLow); ctx.stroke();
+
+    // the angle, written where it is being measured
+    if (off > 0.4) {
+      var lab = Math.round(S.lean) + '°';
+      var mx = (X(PATCH) + X(off + FOOT)) * 0.5 + 10;
+      var my = (Y(Z_TOP) + Y(kz)) * 0.5 - 6;
+      ctx.font = '600 11px ' + Tour.token('--mono');
+      var tw = ctx.measureText(lab).width;
+      ctx.fillStyle = Tour.token('--paper');
+      ctx.strokeStyle = cLine; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.rect(mx - 5, my - 9, tw + 10, 16); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = cLine; ctx.fillText(lab, mx, my + 3);
+
+      // the offset, at the bottom, because it is the number that decides reachability
+      var ydim = h - 9;
+      ctx.strokeStyle = faint; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(X(0), ydim - 4); ctx.lineTo(X(0), ydim + 4);
+      ctx.moveTo(X(off), ydim - 4); ctx.lineTo(X(off), ydim + 4);
+      ctx.moveTo(X(0), ydim); ctx.lineTo(X(off), ydim);
+      ctx.stroke();
+      var dl = off.toFixed(1) + ' mm';
+      ctx.font = '11px ' + Tour.token('--mono');
+      ctx.fillStyle = faint;
+      ctx.fillText(dl, (X(0) + X(off)) * 0.5 - ctx.measureText(dl).width / 2, ydim - 7);
+    }
+
+    ctx.font = '10px ' + Tour.token('--mono');
+    ctx.fillStyle = faint;
+    ctx.fillText('what the corridor can follow', 10, h - 24);
+    if (wrong) {
+      ctx.font = '600 11px ' + Tour.token('--sans');
+      ctx.fillStyle = alert;
+      ctx.fillText('the knee would come out below the bed', 10, 16);
+    }
+    ctx.strokeStyle = rule; ctx.lineWidth = 1;
+    ctx.strokeRect(.5, .5, w - 1, h - 1);
+    void ink;
+  }, { height: 300, cursor: 'crosshair' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: grab, onMove: grab
+  });
+  function grab(p) {
+    // dragging sets the foot: the same gesture as picking a landing
+    var frac = (p.x / cv.width - 0.5) * 2;
+    S.off = Math.max(0, Math.min(34, Math.abs(frac) * 34));
+    offS.set(Math.round(S.off * 2) / 2);
+    upd();
+  }
+
+  var tiles = el('div.sz__tiles');
+  function tile(k) {
+    var v = el('span.sz__tv', { text: '·' });
+    tiles.appendChild(el('div.sz__tile', null, [el('span.sz__tk', { text: k }), v]));
+    return v;
+  }
+  var tLean = tile('lean'), tCeil = tile('ceiling'), tReach = tile('reach'), tKnee = tile('knee');
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.sz__grp', null, [
+    el('span.sz__gt', { text: 'Layer height' }),
+    Tour.segmented({
+      value: '0.20',
+      options: [['0.12', '0.12'], ['0.20', '0.20'], ['0.28', '0.28']],
+      onChange: function (v) { S.lh = parseFloat(v); setLean(S.lean); upd(); }
+    }),
+    leanS, offS
+  ]));
+  var read = el('p.small', { style: 'margin:0' });
+  side.appendChild(el('div.sz__grp', null, [el('span.sz__gt', { text: 'What it means' }), read]));
+
+  function upd() {
+    cv.render();
+    var c = ceiling(), r = reach(), zk = kneeZ();
+    tLean.textContent = S.lean.toFixed(0) + '°';
+    tCeil.textContent = c.toFixed(1) + '°';
+    tReach.textContent = r.toFixed(1) + ' mm';
+    tKnee.textContent = S.off < 1e-6 ? 'none' : (zk < 0 ? 'below the bed' : 'z ' + zk.toFixed(1));
+    tKnee.className = 'sz__tv' + (zk < -1e-6 && S.off > 1e-6 ? ' is-bad' : '');
+    tReach.className = 'sz__tv' + (bad() ? ' is-bad' : '');
+
+    var stuck = S.lean >= c - 0.05;
+    read.innerHTML = bad()
+      ? 'The foot is <b>' + S.off.toFixed(1) + ' mm</b> out and this lean only reaches <b>' +
+        r.toFixed(1) + ' mm</b>, so the knee lands under the plate. Steepen the lean, or bring the foot in.'
+      : (stuck
+        ? 'At <b>' + S.lh.toFixed(2) + ' mm</b> layers the corridor allows <b>' + c.toFixed(1) +
+          '°</b> and the slider stops there. A column may step 0.75 of a line width per layer, so a thicker layer buys a shallower ceiling.'
+        : 'The pillar leans to a knee at <b>z ' + zk.toFixed(1) + '</b> and drops <b>' +
+          zk.toFixed(1) + ' mm</b> straight down. Everything shaded behind it is what the corridor can follow.');
+    var sc = host.querySelector('[data-scale]');
+    if (sc) sc.textContent = 'true scale, no exaggeration';
+  }
+
+  host.appendChild(el('div.sz', null, [box, side]));
+  host.appendChild(tiles);
+  upd();
+
+  Tour.attract({
+    host: host, period: 9200,
+    hint: 'playing · touch anything to take over',
+    idleHint: 'drag the lean and the foot',
+    onFrame: function (k) {
+      S.off = Math.round((1 + k * 33) * 2) / 2;
+      offS.set(S.off);
+    },
+    render: upd
+  });
+});
+
+/* ===========================================================================
+ * zone-cover — cut against cover, in plan view.
+ *
+ * The two decisions are the real ones: cut intersects the shape with the patch,
+ * cover replaces the outline with the shape. The edge is an offset of whatever
+ * came out of that, done on a sampled distance field so that pushing inward
+ * can run out of room the way the real outline does.
+ * ========================================================================= */
+Tour.demo('zone-cover', function (host) {
+  var el = Tour.el;
+  var MM = 4;                                     // px per mm, recomputed to fit the canvas
+  var S = { mode: 'cut', shape: 'round', size: 22, edge: 0, cx: 0, cy: 0 };
+
+  /** The patch: a lobed outline, the sort of thing one click on a curved underside gives you. */
+  var PATCH = (function () {
+    var pts = [];
+    for (var i = 0; i < 128; i++) {
+      var a = i / 128 * Math.PI * 2;
+      var r = 20 + 5.5 * Math.sin(3 * a + 0.6) + 3.2 * Math.cos(2 * a) + 1.6 * Math.sin(5 * a);
+      pts.push([Math.cos(a) * r * 1.28, Math.sin(a) * r]);
+    }
+    return pts;
+  })();
+
+  function inPatch(x, y) {
+    var inside = false;
+    for (var i = 0, j = PATCH.length - 1; i < PATCH.length; j = i++) {
+      var a = PATCH[i], b = PATCH[j];
+      if ((a[1] > y) !== (b[1] > y) &&
+          x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside;
+    }
+    return inside;
+  }
+  function inShape(x, y) {
+    var dx = x - S.cx, dy = y - S.cy, r = S.size / 2;
+    return S.shape === 'round' ? (dx * dx + dy * dy <= r * r)
+                               : (Math.abs(dx) <= r && Math.abs(dy) <= r);
+  }
+
+  var sizeS = Tour.slider({
+    label: 'Shape size', min: 6, max: 62, step: 1, value: S.size,
+    format: function (v) { return v + ' mm'; },
+    onInput: function (v) { S.size = v; upd(); }
+  });
+  var edgeS = Tour.slider({
+    label: 'Edge', min: -7, max: 10, step: 0.5, value: 0,
+    format: function (v) { return (v > 0 ? '+' : '') + v.toFixed(1) + ' mm'; },
+    onInput: function (v) { S.edge = v; upd(); }
+  });
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'The footprint, from above' }), el('span', { 'data-cnote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var last = { area: 0, patchArea: 0, empty: false, flat: 0, mm: 4 };
+  var mask = { key: '', m: null, area: 0 };
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var accent = Tour.token('--accent'), rule = Tour.token('--rule');
+    var warn = Tour.token('--warn'), faint = Tour.token('--ink-faint');
+    MM = Math.min(w / 95, h / 58);                 // the patch fills a bit over half the view
+    last.mm = MM;
+    var ox = w / 2, oy = h / 2;
+    function P(x, y) { return [ox + x * MM, oy + y * MM]; }
+
+    var step = 2;                                  // sampling step, css px
+    var gw = Math.ceil(w / step), gh = Math.ceil(h / step);
+    var n = gw * gh;
+    var i, gx, gy, mx, my;
+
+    // The patch mask only depends on the grid, and point-in-polygon over a hundred
+    // and twenty eight edges per cell is the expensive part. Sample it once.
+    var key = gw + 'x' + gh + '@' + MM.toFixed(3);
+    if (mask.key !== key) {
+      var m = new Uint8Array(n), pa = 0;
+      for (gy = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++) {
+        mx = (gx * step + step / 2 - ox) / MM;
+        my = (gy * step + step / 2 - oy) / MM;
+        if (inPatch(mx, my)) { m[gy * gw + gx] = 1; pa++; }
+      }
+      mask = { key: key, m: m, area: pa };
+    }
+    var pm = mask.m, patchArea = mask.area;
+
+    var base = new Uint8Array(n);
+    for (gy = 0; gy < gh; gy++) {
+      for (gx = 0; gx < gw; gx++) {
+        i = gy * gw + gx;
+        mx = (gx * step + step / 2 - ox) / MM;
+        my = (gy * step + step / 2 - oy) / MM;
+        base[i] = (S.mode === 'cut' ? (pm[i] && inShape(mx, my)) : inShape(mx, my)) ? 1 : 0;
+      }
+    }
+
+    // Signed distance to the boundary, two-pass chamfer, in grid cells.
+    var BIG = 1e6, dIn = new Float32Array(n), dOut = new Float32Array(n);
+    for (i = 0; i < n; i++) { dIn[i] = base[i] ? BIG : 0; dOut[i] = base[i] ? 0 : BIG; }
+    function chamfer(d) {
+      var a = 1, b = 1.4142;
+      for (gy = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++) {
+        i = gy * gw + gx; var v = d[i];
+        if (gx > 0) v = Math.min(v, d[i - 1] + a);
+        if (gy > 0) v = Math.min(v, d[i - gw] + a);
+        if (gx > 0 && gy > 0) v = Math.min(v, d[i - gw - 1] + b);
+        if (gx < gw - 1 && gy > 0) v = Math.min(v, d[i - gw + 1] + b);
+        d[i] = v;
+      }
+      for (gy = gh - 1; gy >= 0; gy--) for (gx = gw - 1; gx >= 0; gx--) {
+        i = gy * gw + gx; var u = d[i];
+        if (gx < gw - 1) u = Math.min(u, d[i + 1] + a);
+        if (gy < gh - 1) u = Math.min(u, d[i + gw] + a);
+        if (gx < gw - 1 && gy < gh - 1) u = Math.min(u, d[i + gw + 1] + b);
+        if (gx > 0 && gy < gh - 1) u = Math.min(u, d[i + gw - 1] + b);
+        d[i] = u;
+      }
+    }
+    chamfer(dIn); chamfer(dOut);
+
+    var cellMm = step / MM;
+    var lim = S.edge / cellMm;                     // the offset, in cells
+    var area = 0, flat = 0;
+
+    ctx.fillStyle = Tour.token('--accent-wash');
+    var fillPx = [];
+    for (gy = 0; gy < gh; gy++) {
+      for (gx = 0; gx < gw; gx++) {
+        i = gy * gw + gx;
+        var sd = dOut[i] - dIn[i];                 // negative inside
+        if (sd <= lim) {
+          area++;
+          fillPx.push(gx, gy);
+          if (S.mode === 'cover' && !pm[i]) flat++;
+        }
+      }
+    }
+    for (i = 0; i < fillPx.length; i += 2)
+      ctx.fillRect(fillPx[i] * step, fillPx[i + 1] * step, step, step);
+
+    // where cover reaches past the patch the roof has nothing to follow, so it stays flat
+    if (S.mode === 'cover' && flat) {
+      ctx.save();
+      ctx.beginPath();
+      for (i = 0; i < fillPx.length; i += 2) {
+        if (pm[fillPx[i + 1] * gw + fillPx[i]]) continue;
+        ctx.rect(fillPx[i] * step, fillPx[i + 1] * step, step, step);
+      }
+      ctx.clip();
+      ctx.strokeStyle = warn; ctx.globalAlpha = .55; ctx.lineWidth = 1;
+      for (var d2 = -h; d2 < w; d2 += 7) {
+        ctx.beginPath(); ctx.moveTo(d2, 0); ctx.lineTo(d2 + h, h); ctx.stroke();
+      }
+      ctx.restore(); ctx.globalAlpha = 1;
+    }
+
+    // the boundary of the result
+    ctx.fillStyle = accent;
+    for (gy = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++) {
+      i = gy * gw + gx;
+      var s2 = dOut[i] - dIn[i];
+      if (s2 <= lim && s2 > lim - 1.05) ctx.fillRect(gx * step, gy * step, step, step);
+    }
+
+    // the patch outline, always visible, because it is the thing being cut against
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = Tour.token('--good'); ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    PATCH.forEach(function (p, k) { var q = P(p[0], p[1]); k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+
+    // the shape you are dragging
+    ctx.strokeStyle = faint; ctx.lineWidth = 1.2; ctx.globalAlpha = .85;
+    var c = P(S.cx, S.cy), r = S.size / 2 * MM;
+    ctx.beginPath();
+    if (S.shape === 'round') ctx.arc(c[0], c[1], r, 0, 6.284);
+    else ctx.rect(c[0] - r, c[1] - r, r * 2, r * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = faint;
+    ctx.beginPath(); ctx.arc(c[0], c[1], 2.6, 0, 6.284); ctx.fill();
+
+    ctx.strokeStyle = rule; ctx.lineWidth = 1;
+    ctx.strokeRect(.5, .5, w - 1, h - 1);
+
+    var cellArea = cellMm * cellMm;
+    last.area = area * cellArea;
+    last.patchArea = patchArea * cellArea;
+    last.flat = flat * cellArea;
+    last.empty = area === 0;
+  }, { height: 300, cursor: 'move' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: move, onMove: move
+  });
+  function move(p) {
+    S.cx = (p.x - cv.width / 2) / last.mm;
+    S.cy = (p.y - cv.height / 2) / last.mm;
+    upd();
+  }
+
+  var tiles = el('div.sz__tiles');
+  function tile(k) {
+    var v = el('span.sz__tv', { text: '·' });
+    tiles.appendChild(el('div.sz__tile', null, [el('span.sz__tk', { text: k }), v]));
+    return v;
+  }
+  var tArea = tile('footprint'), tPatch = tile('patch'), tRoof = tile('roof'), tCap = tile('ceiling');
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.sz__grp', null, [
+    el('span.sz__gt', { text: 'Shape' }),
+    Tour.segmented({ value: 'round', options: [['round', 'Round'], ['square', 'Square']],
+      onChange: function (v) { S.shape = v; upd(); } }),
+    Tour.segmented({ value: 'cut', options: [['cut', 'Cut'], ['cover', 'Cover']],
+      onChange: function (v) { S.mode = v; upd(); } }),
+    sizeS, edgeS
+  ]));
+  var read = el('p.small', { style: 'margin:0' });
+  side.appendChild(el('div.sz__grp', null, [el('span.sz__gt', { text: 'What it means' }), read]));
+
+  function upd() {
+    cv.render();
+    requestAnimationFrame(function () {
+      tArea.textContent = last.area.toFixed(0) + ' mm²';
+      tPatch.textContent = last.patchArea.toFixed(0) + ' mm²';
+      tRoof.textContent = S.mode === 'cut' ? 'the surface'
+        : (last.flat > 1 ? 'surface + flat' : 'the surface');
+      tCap.textContent = S.mode === 'cut' ? 'the patch' : '200 mm';
+      tArea.className = 'sz__tv' + (last.empty ? ' is-bad' : '');
+      read.innerHTML = last.empty
+        ? 'Nothing is left. The outline folded through itself on the way in, which is the shape saying it has no more room. That limit is why <b>cover</b> exists.'
+        : (S.mode === 'cut'
+          ? 'Cut keeps the intersection, so this footprint can never be larger than the <b>' +
+            last.patchArea.toFixed(0) + ' mm²</b> of patch, whatever you do to the shape. The roof is the surface itself.'
+          : 'Cover makes the shape the section, so it grows past the patch. The hatched part has no surface above it, so the roof there stays flat; everywhere else it still follows the real surface.');
+      var nt = host.querySelector('[data-cnote]');
+      if (nt) nt.textContent = S.mode === 'cut' ? 'cut to the patch' : 'covering';
+    });
+  }
+
+  host.appendChild(el('div.sz', null, [box, side]));
+  host.appendChild(tiles);
+  upd();
+
+  Tour.attract({
+    host: host, period: 9800,
+    hint: 'playing · touch anything to take over',
+    idleHint: 'drag the shape, then push the edge inward',
+    onFrame: function (k) {
+      S.size = Math.round(8 + k * 52);
+      sizeS.set(S.size);
+    },
+    render: upd
+  });
+});
+
+/* ===========================================================================
+ * zone-maps — green for caught, red for nobody caught it.
+ *
+ * A diagram: the question is the real one, and so is the technique (a grid of
+ * vertical rays, a hit counted where the surface faces downward, a second test
+ * for whether that hit falls inside a zone), but it runs on a 2D section here
+ * instead of the object's mesh.
+ * ========================================================================= */
+Tour.demo('zone-maps', function (host) {
+  var el = Tour.el, D2R = Math.PI / 180;
+  var S = { step: 1.4, thr: 30, zx: 34, zw: 26, showRed: true, showGreen: true };
+  var ZH = 40;                                     // the zone is a block 40 mm tall on the plate
+
+  // A section with several different undersides: two flat ceilings, a shallow
+  // lean, a steep one, and a solid leg that has no underside at all.
+  var PART = [
+    [4, 0], [4, 46], [96, 46], [96, 0],
+    [86, 0], [86, 30], [70, 30],
+    [62, 22], [62, 12], [52, 12],
+    [52, 34], [34, 34],
+    [26, 26], [26, 0]
+  ];
+
+  var stepS = Tour.slider({
+    label: 'Detail', min: 0.6, max: 3.2, step: 0.2, value: S.step,
+    format: function (v) { return v.toFixed(1) + ' mm'; },
+    onInput: function (v) { S.step = v; upd(); }
+  });
+  var thrS = Tour.slider({
+    label: 'Threshold', min: 10, max: 60, step: 1, value: S.thr,
+    format: function (v) { return v + '°'; },
+    onInput: function (v) { S.thr = v; upd(); }
+  });
+  var widthS = Tour.slider({
+    label: 'Zone width', min: 8, max: 54, step: 1, value: S.zw,
+    format: function (v) { return v + ' mm'; },
+    onInput: function (v) { S.zw = v; upd(); }
+  });
+
+  // Winding decided once, so the outward normal is right whichever way PART is listed.
+  var CCW = (function () {
+    var a = 0;
+    for (var i = 0, j = PART.length - 1; i < PART.length; j = i++)
+      a += PART[j][0] * PART[i][1] - PART[i][0] * PART[j][1];
+    return a > 0;
+  })();
+
+  /**
+   * One vertical ray. Returns every crossing with a downward-facing edge,
+   * which is the thing that predicts whether support comes out.
+   */
+  function rayHits(x) {
+    var out = [];
+    for (var i = 0, j = PART.length - 1; i < PART.length; j = i++) {
+      var a = PART[j], b = PART[i];
+      if ((a[0] > x) === (b[0] > x)) continue;
+      var t = (x - a[0]) / (b[0] - a[0]);
+      var y = a[1] + t * (b[1] - a[1]);
+      var dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
+      var nx = (CCW ? dy : -dy) / L, ny = (CCW ? -dx : dx) / L;
+      // The contact with the plate is downward-facing too, and it is the "red on the
+      // skirt" case the page explains in prose. Left out here so the drawing stays
+      // about the undersides.
+      if (ny < -1e-6 && y > 0.5) out.push({ y: y, ny: ny, tx: dx / L, ty: -dy / L });
+    }
+    return out;
+  }
+
+  var last = { green: 0, red: 0, cells: 0 };
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'A section, probed on a grid' }), el('span', { 'data-mnote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var rule = Tour.token('--rule'), good = Tour.token('--good');
+    var alert = Tour.token('--alert'), accent = Tour.token('--accent');
+    var sc = Math.min((w - 40) / 100, (h - 34) / 52);
+    var ox = (w - 100 * sc) / 2, oy = h - 22;
+    function X(x) { return ox + x * sc; }
+    function Y(y) { return oy - y * sc; }
+
+    // the plate
+    ctx.strokeStyle = rule; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.moveTo(8, Y(0)); ctx.lineTo(w - 8, Y(0)); ctx.stroke();
+
+    // the part, ghosted the way it is while the tool is open
+    ctx.beginPath();
+    PART.forEach(function (p, k) { k ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])); });
+    ctx.closePath();
+    ctx.fillStyle = Tour.token('--surface-2'); ctx.fill();
+    ctx.save(); ctx.clip();
+    ctx.strokeStyle = rule; ctx.lineWidth = 1; ctx.globalAlpha = .7;
+    for (var dd = -h; dd < w; dd += 7) { ctx.beginPath(); ctx.moveTo(dd, 0); ctx.lineTo(dd + h, h); ctx.stroke(); }
+    ctx.restore(); ctx.globalAlpha = 1;
+    ctx.strokeStyle = Tour.token('--rule-firm'); ctx.lineWidth = 1.5; ctx.stroke();
+
+    // the zone: a block 30 mm tall standing on the plate
+    var z0 = S.zx, z1 = S.zx + S.zw;
+    ctx.fillStyle = Tour.token('--accent-wash');
+    ctx.fillRect(X(z0), Y(ZH), X(z1) - X(z0), Y(0) - Y(ZH));
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = accent; ctx.lineWidth = 1.4;
+    ctx.strokeRect(X(z0), Y(ZH), X(z1) - X(z0), Y(0) - Y(ZH));
+    ctx.setLineDash([]);
+
+    // the probe
+    var cut = -Math.sin(S.thr * D2R);        // max_normal_z, the same cut the shading uses
+    var green = 0, red = 0, cells = 0;
+    for (var x = 1; x < 99; x += S.step) {
+      cells++;
+      var hits = rayHits(x);
+      for (var k = 0; k < hits.length; k++) {
+        var hit = hits[k];
+        var inZone = x >= z0 && x <= z1 && hit.y <= ZH;
+        var passes = hit.ny <= cut;
+        var col = null;
+        if (inZone) { if (S.showGreen) { col = good; green++; } else green++; }
+        else if (passes) { if (S.showRed) { col = alert; red++; } else red++; }
+        if (!col) continue;
+        // built in the plane of the normal, so a marker on a steep lean does not
+        // poke through the wall
+        ctx.save();
+        ctx.translate(X(x), Y(hit.y));
+        ctx.rotate(Math.atan2(hit.ty, hit.tx));
+        var mk = Math.max(3, Math.min(7, sc * S.step * 0.85));
+        ctx.fillStyle = col; ctx.globalAlpha = .95;
+        ctx.fillRect(-mk / 2, -1.2, mk, 2.4);
+        ctx.restore();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = rule; ctx.lineWidth = 1;
+    ctx.strokeRect(.5, .5, w - 1, h - 1);
+    last.green = green; last.red = red; last.cells = cells;
+  }, { height: 290, cursor: 'ew-resize' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: slide, onMove: slide
+  });
+  function slide(p) {
+    var sc = Math.min((cv.width - 40) / 100, (cv.height - 34) / 52);
+    var ox = (cv.width - 100 * sc) / 2;
+    S.zx = Math.max(0, Math.min(100 - S.zw, (p.x - ox) / sc - S.zw / 2));
+    upd();
+  }
+
+  var tiles = el('div.sz__tiles');
+  function tile(k) {
+    var v = el('span.sz__tv', { text: '·' });
+    tiles.appendChild(el('div.sz__tile', null, [el('span.sz__tk', { text: k }), v]));
+    return v;
+  }
+  var tG = tile('caught'), tR = tile('nobody caught'), tS = tile('grid step');
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.sz__grp', null, [
+    el('span.sz__gt', { text: 'The two maps' }),
+    Tour.toggle({ label: 'Green: caught by this zone', value: true,
+      onChange: function (v) { S.showGreen = v; upd(); } }),
+    Tour.toggle({ label: 'Red: might need support', value: true,
+      onChange: function (v) { S.showRed = v; upd(); } }),
+    widthS, stepS, thrS
+  ]));
+  var read = el('p.small', { style: 'margin:0' });
+  side.appendChild(el('div.sz__grp', null, [el('span.sz__gt', { text: 'What it means' }), read]));
+
+  function upd() {
+    cv.render();
+    requestAnimationFrame(function () {
+      tG.textContent = last.green + ' pts';
+      tR.textContent = last.red + ' pts';
+      tS.textContent = S.step.toFixed(1) + ' mm';
+      tG.className = 'sz__tv' + (last.green === 0 ? ' is-bad' : '');
+      read.innerHTML = last.green === 0
+        ? 'This zone catches no downward-facing surface, so it will not produce a single gram of support however full it looks. That is the failure the green map exists to make visible.'
+        : 'The zone catches <b>' + last.green + '</b> sampled points of downward-facing surface. ' +
+          '<b>' + last.red + '</b> more lean past ' + S.thr + '° and sit inside no zone, so they <b>might need support</b>; that call stays yours.';
+      var nt = host.querySelector('[data-mnote]');
+      if (nt) nt.textContent = last.green === 0 ? 'this zone is sterile' : 'grid ' + S.step.toFixed(1) + ' mm';
+    });
+  }
+
+  host.appendChild(el('div.sz', null, [box, side]));
+  host.appendChild(tiles);
+  upd();
+
+  Tour.attract({
+    host: host, period: 11000,
+    hint: 'playing · touch anything to take over',
+    idleHint: 'drag the zone across the part',
+    onFrame: function (k) { S.zx = 2 + k * (96 - S.zw); },
+    render: upd
+  });
+});
+
 /* ===========================================================================
  * wave — parallel lines against a diffracting front, over a concave region.
  * ========================================================================= */

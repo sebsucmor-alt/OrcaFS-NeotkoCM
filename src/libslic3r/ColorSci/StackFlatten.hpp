@@ -1,6 +1,6 @@
 // NEOTKO_COLORSCI_TAG_START — P0 (Fase A) + GD2
 // StackFlatten — puente entre el formato autoritativo SurfacePassStack
-// (SurfaceColorMix.hpp:480) y las primitivas ColorSci. Port de la expansión
+// (ColorStitch.hpp:480) y las primitivas ColorSci. Port de la expansión
 // de passes de SandwichDialog::blend_preview_zone (Tab.cpp:5372-5424).
 //
 // Tres consumidores previstos:
@@ -18,19 +18,19 @@
 #include <vector>
 
 #include "ColorSci.hpp"
-#include "../SurfaceColorMix.hpp"   // SurfacePassStack / SurfacePass / PathBlendPassConfig
+#include "../ColorStitch.hpp"   // SurfacePassStack / SurfacePass / PathBlendPassConfig
 
 namespace Slic3r {
 namespace ColorSci {
 
 // Expande un stack en franjas ponderadas (port 1:1 de Tab.cpp:5383-5424):
 //   Solid     → 1 slice {tool, ratio}.
-//   ColorMix  → 1 slice por dígito del pattern, peso = ratio * count/total.
+//   ColorStitch  → 1 slice por dígito del pattern, peso = ratio * count/total.
 //               El pattern se busca en este orden:
 //                 a) kv["pattern"] (clave corta que usa el editor per-pass),
 //                 b) kv["interlayer_colormix_pattern_top" | "_penultimate"]
 //                    (claves largas de los stacks self-contained — Designer
-//                    y bake Plan1 de zone_colormix_snapshot),
+//                    y bake Plan1 de zone_colorstitch_snapshot),
 //                 c) `fallback_pattern` (el caller la saca de su config viva;
 //                    el Designer pasa "" porque sus stacks son autocontenidos).
 //   PathBlend → 2 slices 50/50 (tool_bottom/tool_top del blob v2).
@@ -62,7 +62,7 @@ bool sandwich_colour_legacy(const SurfacePassStack& top,
 
 // Composición física: cada pass del stack es una capa Beer-Lambert apilada
 // bottom→top sobre `bg_rgb` (passes[0] = el más profundo, mismo orden que
-// SurfacePassStack). Un pass ColorMix/PathBlend se colapsa primero a una
+// SurfacePassStack). Un pass ColorStitch/PathBlend se colapsa primero a una
 // capa equivalente:
 //   rgb = blend_parallel de sus franjas (mezcla óptica lateral del dither),
 //   td  = media de los td de sus tools ponderada por el peso de cada franja

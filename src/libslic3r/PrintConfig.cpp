@@ -7072,12 +7072,23 @@ void PrintConfigDef::init_fff_params()
     def = this->add("pathblend_fill_angle", coInt);
     def->label = L("Fill angle override (PathBlend)");
     def->category = L("Quality");
-    def->tooltip = L("Fill angle in degrees for PathBlend surfaces. -1 = follow top surface "
-                     "fill angle. 0–359 = custom fixed angle for PathBlend lines.");
+    def->tooltip = L("Fill line direction in degrees for PathBlend surfaces. Default 45.\n"
+                     "-1 = auto: follows OrcaSlicer's standard infill rotation, which flips "
+                     "90 degrees on every other layer.\n"
+                     "This is NOT only a surface-finish setting: PathBlend assigns each printed "
+                     "line its ramp height from the Y centroid of that line, so the angle decides "
+                     "which lines exist and where their centroids fall - it changes the gradient "
+                     "itself. Lines running along Y all share the same centroid and collapse the "
+                     "gradient entirely. With -1 the angle flips every other layer, so the effect "
+                     "is not the same from one layer to the next.");
     def->min  = -1;
     def->max  = 359;
     def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionInt(-1));
+    // NEOTKO_PATHBLEND_TAG — s280b: default 45, no -1. Mismo criterio y misma constante
+    // que ColorStitch (ver COLORSTITCH_DEFAULT_ANGLE_DEG en PrintConfig.hpp).
+    // El tooltip viejo decia "-1 = follow top surface fill angle" y era FALSO: el codigo
+    // (Fill.cpp) cae al base_angle alternante, no al angulo del top.
+    def->set_default_value(new ConfigOptionInt(COLORSTITCH_DEFAULT_ANGLE_DEG));
 
     // NEOTKO_PATHBLEND_TAG — s69 miniblob: per-zone PathBlend settings (JSON).
     // Hidden keys, written/read by the PathBlend dialog per zone (Top/Penu),
@@ -7103,6 +7114,23 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("neotko_surface_passes_penu", coString);
     def->label = L("Sandwich pass stack (Penultimate)");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
+    // NEOTKO_SUPPORTZONES_TAG s288 — el GESTO que creó una zona de soporte (JSON serializado).
+    //
+    // Clave oculta, por VOLUMEN, escrita y leída sólo por GLGizmoSupportZones. Guarda los dos
+    // clics y los mandos con los que se construyó el pilar, en espacio del OBJETO, para poder
+    // volver a editarlo en vez de tener que borrarlo y repetir el gesto.
+    //
+    // 🚨 Es puramente descriptiva: el motor NO la lee y NO cambia ni un micrón de lo que se
+    // imprime. Lo que cambia la impresión es la malla del volumen, que se invalida sola. Por eso
+    // tiene rama propia de "no invalida nada" en PrintObject::invalidate_state_by_config_options().
+    //
+    // Mismo contrato que los dos blobs de Sandwich de aquí arriba: coString, comDevelop, default
+    // vacío, nunca en un optgroup.
+    def = this->add("neotko_support_zone_gesture", coString);
+    def->label = L("Support zone gesture");
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionString(""));
 
@@ -7143,7 +7171,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(false));
 
     // NEOTKO_NEOWEAVING_TAG — angle-lock keys consumed by Fill (_infill_direction).
-    // The full wave engine + numeric keys (amplitude/period/...) land with GCode/SurfaceColorMix.
+    // The full wave engine + numeric keys (amplitude/period/...) land with GCode/ColorStitch.
     def = this->add("interlayer_neoweave_enabled", coBool);
     def->label = L("Enable Neotko Neoweaving");
     def->category = L("Quality");
@@ -7312,8 +7340,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
-    // NEOTKO_COLORMIX_TAG — s58 line distribution mode.
-    // Controls slot-to-line mapping for ColorMix and PathBlend (Top + Penultimate).
+    // NEOTKO_COLORSTITCH_TAG — s58 line distribution mode.
+    // Controls slot-to-line mapping for ColorStitch and PathBlend (Top + Penultimate).
     def = this->add("surface_color_mix_lane_mode", coInt);
     def->label = L("Line distribution mode");
     def->category = L("Quality");
@@ -7356,9 +7384,9 @@ void PrintConfigDef::init_fff_params()
     // connectors (unlike Monotonic Line, which keeps lines separate). When ON, ColorStitch splits
     // each fused path into per-colour runs so every visual line carries its assigned tool; the
     // connector arc at a colour boundary stays with the OUTGOING colour. Done entirely post-hoc in
-    // SurfaceColorMix — standard (non-ColorStitch) Monotonic infill is NOT affected.
+    // ColorStitch — standard (non-ColorStitch) Monotonic infill is NOT affected.
     // s230 — DEJA DE SER OPCIÓN: siempre activa (default true, retirada de la UI del Tab y
-    // forzada a true en el motor, ver SurfaceColorMix.cpp). Con esto ColorStitch funciona de
+    // forzada a true en el motor, ver ColorStitch.cpp). Con esto ColorStitch funciona de
     // serie sobre Monotonic continuo, Rectilinear e Hilbert Curve, y también sobre Concentric /
     // Octogram / Archimedean (ahí la distribución no siempre es uniforme, pero da efectos
     // válidos). La key se conserva para no romper la lectura de 3mf antiguos.
@@ -7442,7 +7470,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString("12"));
 
-    // NEOTKO_COLORMIX_TAG — s60 numeric gradient mode (Step 1 of UX plan).
+    // NEOTKO_COLORSTITCH_TAG — s60 numeric gradient mode (Step 1 of UX plan).
     // 0 = Legacy pattern string (interlayer_colormix_pattern_top/_penultimate)
     // 1 = Linear 2-color dithered gradient (tool_a + tool_b, percent split)
     //     The dither is generated per-surface at slice time, sized to match
@@ -7514,7 +7542,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(1.0));
 
-    // NEOTKO_COLORMIX_TAG — s60: invert gradient direction.
+    // NEOTKO_COLORSTITCH_TAG — s60: invert gradient direction.
     // Reverses the per-line tool sequence after dither/band generation. Useful
     // when the slicer's natural fill order on a given object goes the wrong
     // way visually relative to what the user expects — toggling this saves the
@@ -7530,7 +7558,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    // NEOTKO_COLORMIX_TAG — s60: how much the colour zones overlap.
+    // NEOTKO_COLORSTITCH_TAG — s60: how much the colour zones overlap.
     // Default triangular weights (0.5) give hard 3-zone bands. Wider overlap
     // (closer to 1.0) lets each colour sprinkle into the neighbouring zones,
     // producing the smooth dithered look users expect from a "gradient".
@@ -7558,7 +7586,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(3));
 
-    // NEOTKO_COLORMIX_TAG — s80: repeat the gradient N times across the surface.
+    // NEOTKO_COLORSTITCH_TAG — s80: repeat the gradient N times across the surface.
     // 1 = single sweep (legacy). N>1 builds the gradient over a 1/N slice of the
     // lines and tiles it N times → N identical repeated gradients. Surface
     // analysis (line count, lane mode) is unchanged.
@@ -7614,12 +7642,12 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
-    // NEOTKO_COLORMIX_TAG — s61: per-role gradient configs.
+    // NEOTKO_COLORSTITCH_TAG — s61: per-role gradient configs.
     // 16 mirror keys with `penu_` infix that override the (top-role) keys
     // above when the slicer is processing a Penultimate surface. Defaults
     // match the top defaults so out-of-the-box behaviour is unchanged for
     // anyone who only ever edited via the Top dialog. The Penultimate
-    // dialog edits these directly; SurfaceColorMix and ToolOrdering pick
+    // dialog edits these directly; ColorStitch and ToolOrdering pick
     // the prefix based on `first_path->role()` at slice time.
     auto add_penu_int = [this](const char* k, int def_v, int mn, int mx,
                                 const char* lbl, const char* tip) {
@@ -7746,18 +7774,25 @@ void PrintConfigDef::init_fff_params()
     def = this->add("interlayer_colormix_angle", coInt);
     def->label = L("Infill angle override");
     def->category = L("Quality");
-    def->tooltip = L("Override standard infill rotation angle on layers where ColorStitch is active.\n"
-                     "-1 = Use standard (default/OrcaSlicer settings).\n"
-                     "0 to 359 = Override with this angle in degrees.");
+    def->tooltip = L("Fill line direction on layers where ColorStitch is active.\n"
+                     "0 to 359 = the stripes keep this angle on every layer, and the "
+                     "3D preview matches the sliced result exactly.\n"
+                     "-1 = auto: follow OrcaSlicer's standard infill rotation, which "
+                     "alternates by 90 degrees on every other layer. The stripes then "
+                     "change direction WITHIN a single ColorStitch band, so no single "
+                     "angle can be previewed - the painter marks those bands by "
+                     "blinking between the two directions.");
     def->min = -1;
     def->max = 359;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(-1));
+    // NEOTKO_COLORSTITCH_TAG — default 45, NOT -1 (auto). See COLORSTITCH_DEFAULT_ANGLE_DEG
+    // in PrintConfig.hpp for the why. -1 stays available as a deliberate opt-in.
+    def->set_default_value(new ConfigOptionInt(COLORSTITCH_DEFAULT_ANGLE_DEG));
 
     add_penu_int  ("interlayer_colormix_penu_angle", -1, -1, 359,
                    "Infill angle override (Penultimate)",
                    "Penultimate-surface variant of Infill angle override.");
-    // NEOTKO_COLORMIX_TAG_END
+    // NEOTKO_COLORSTITCH_TAG_END
 
     // NEOTKO_MULTIPASS_TAG_START — MultiPass Blend
     def = this->add("multipass_enabled", coBool);
@@ -7922,8 +7957,8 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionString(""));
 
     // NEOTKO_MULTIPASS_PRIME_TAG
-    // NEOTKO_MULTIPASS_PRIME_TAG — s58: relabeled as a global SurfaceColorMix wipe reserve.
-    // Applies to both Top and Penultimate sublayer primes (MultiPass + ColorMix + PathBlend).
+    // NEOTKO_MULTIPASS_PRIME_TAG — s58: relabeled as a global ColorStitch wipe reserve.
+    // Applies to both Top and Penultimate sublayer primes (MultiPass + ColorStitch + PathBlend).
     // The legacy `penultimate_multipass_prime_volume` is removed; this key is the single source.
     def = this->add("multipass_perimeter_override", coBool);
     def->label = L("Perimeter Override");
@@ -8152,11 +8187,11 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(3.0));
 
     // NEOTKO_MULTIPASS_PRIME_TAG — per-region prime volume for sublayer toolchanges
-    // (MultiPass / ColorMix / PathBlend, Top + Penultimate). Read by NeoTower.
+    // (MultiPass / ColorStitch / PathBlend, Top + Penultimate). Read by NeoTower.
     def = this->add("multipass_prime_volume", coFloat);
-    def->label = L("Sandwich wipe reserve");
+    def->label = L("Sandwich Purge");
     def->tooltip = L("Volume (mm³) to purge on the wipe tower before each Sandwich "
-                     "sublayer toolchange (MultiPass / ColorMix / PathBlend, Top + Penultimate). "
+                     "sublayer toolchange (MultiPass / ColorStitch / PathBlend, Top + Penultimate). "
                      "Set to 0 to disable. Requires a wipe tower (NeoTower or prime tower) active. "
                      "Lower values = thinner / shorter wipe tower; higher values = better purge.");
     def->sidetext = L("mm³");
@@ -10943,7 +10978,7 @@ TemperaturesConfigDef::TemperaturesConfigDef()
 
     new_def("bed_temperature", coInts, "Bed temperature", "Vector of bed temperatures for each extruder/filament.")
     new_def("bed_temperature_initial_layer", coInts, "Initial layer bed temperature", "Vector of initial layer bed temperatures for each extruder/filament. Provides the same value as first_layer_bed_temperature.")
-    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (initial extruder)", "Initial layer bed temperature for the initial extruder. Same as bed_temperature_initial_layer[initial_extruder]")
+    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of used filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over all used extruders/filaments.")
     new_def("chamber_temperature", coInts, "Chamber temperature", "Vector of chamber temperatures for each extruder/filament.")
     new_def("overall_chamber_temperature", coInt, "Overall chamber temperature", "Overall chamber temperature. This value is the maximum chamber temperature of any extruder/filament used.")
     new_def("first_layer_bed_temperature", coInts, "First layer bed temperature", "Vector of first layer bed temperatures for each extruder/filament. Provides the same value as bed_temperature_initial_layer.")

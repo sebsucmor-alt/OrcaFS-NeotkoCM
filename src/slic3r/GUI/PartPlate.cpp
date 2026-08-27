@@ -5436,14 +5436,45 @@ int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_
 			}
 		}
 
-		//can not find, create a new one
+		//can not find, create a new one using an unused print index.
+		// Upstream Snapmaker #608 (da278db86, Sentry 347): a plain emplace() fails silently when
+		// m_print_index is already taken, leaking the Print/GCodeResult and leaving the plate
+		// pointing at somebody else's Print.
+		while (m_print_list.count(m_print_index) > 0 || m_gcode_result_list.count(m_print_index) > 0)
+		{
+			++m_print_index;
+		}
+
+		const int new_print_index = m_print_index++;
+
 		Print* print = new Print();
 		GCodeResult* gcode = new GCodeResult();
-		m_print_list.emplace(m_print_index, print);
-		m_gcode_result_list.emplace(m_print_index, gcode);
-		m_plate_list[i]->set_print(print, gcode, m_print_index);
+
+		auto print_result = m_print_list.emplace(new_print_index, print);
+		auto gcode_result = m_gcode_result_list.emplace(new_print_index, gcode);
+
+		if (!print_result.second || !gcode_result.second)
+		{
+			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": failed to insert Print/GCodeResult, index=" << new_print_index;
+
+			if (print_result.second)
+				m_print_list.erase(print_result.first);
+
+			if (gcode_result.second)
+				m_gcode_result_list.erase(gcode_result.first);
+
+			delete print;
+			print = nullptr;
+			delete gcode;
+			gcode = nullptr;
+
+			ret = -1;
+			continue;
+		}
+
+		m_plate_list[i]->set_print(print, gcode, new_print_index);
+
 		print->set_plate_index(i);
-		m_print_index++;
 	}
 
 	//go through the print list, and delete the one not used by plate

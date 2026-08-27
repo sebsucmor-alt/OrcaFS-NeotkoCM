@@ -1644,6 +1644,8 @@ void TriangleSelectorPatch::render(ImGuiWrapper* imgui, const Transform3d& matri
         const int n = std::min<int>(64, (int)w->cols.size());
         shader->set_uniform("u_weave_n", n);
         shader->set_uniform("u_weave_tile", w->tile);   // NEOTKO_COLORSTITCH_TAG — wrap vs span
+        // NEOTKO_COLORSTITCH_TAG — s280d: el ángulo se manda tal cual. Una banda en
+        // AUTO ya no parpadea; su aviso es el contorno violeta del painter.
         shader->set_uniform("u_weave_angle", w->angle_rad);
         shader->set_uniform("u_weave_pitch", w->pitch);
         shader->set_uniform("u_weave_p0", w->p0);

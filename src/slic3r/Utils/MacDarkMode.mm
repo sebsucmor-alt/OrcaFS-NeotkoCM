@@ -25,9 +25,22 @@ bool is_in_full_screen_mode = false;
 
 bool mac_dark_mode()
 {
+    // s290 — AppleInterfaceStyle MIENTE. Es una clave del dominio global de NSUserDefaults que no
+    // siempre se borra al volver a claro, asi que seguia diciendo "Dark" con el sistema en dia. La
+    // apariencia EFECTIVA de la app es la unica respuesta fiable, y ademas es la misma que ve
+    // wxSystemSettings::GetAppearance(), que es quien alimenta `dark_color_mode`.
+    if (NSApp != nil) {
+        NSAppearance *ap = [NSApp effectiveAppearance];
+        if (ap != nil) {
+            NSAppearanceName best = [ap bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua,
+                                                                           NSAppearanceNameDarkAqua]];
+            return [best isEqualToString:NSAppearanceNameDarkAqua];
+        }
+    }
+    // Antes de que exista NSApp no hay apariencia efectiva a la que preguntar; ahi la clave cruda
+    // es lo unico que hay.
     NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleInterfaceStyle"];
     return style && [style isEqualToString:@"Dark"];
-
 }
 
 double mac_max_scaling_factor()
@@ -44,9 +57,14 @@ double mac_max_scaling_factor()
     
 void set_miniaturizable(void * window)
 {
-    CGFloat rFloat = 34/255.0;
-    CGFloat gFloat = 34/255.0;
-    CGFloat bFloat = 36/255.0;
+    // El fondo de la ventana pinta la BARRA DE TITULO, porque justo encima se pide
+    // titlebarAppearsTransparent. Estaba clavado a 34,34,36 sin mirar el tema, asi que en modo dia
+    // salia una ventana clara con la barra negra. Un color por tema, y el texto del titulo lo pone
+    // set_title_colour_after_set_title() con el mismo criterio.
+    const bool dark = mac_dark_mode();
+    CGFloat rFloat = (dark ?  34 : 246)/255.0;
+    CGFloat gFloat = (dark ?  34 : 246)/255.0;
+    CGFloat bFloat = (dark ?  36 : 248)/255.0;
     [(NSView*) window window].titlebarAppearsTransparent = true;
     [(NSView*) window window].backgroundColor = [NSColor colorWithCalibratedRed:rFloat green:gFloat blue:bFloat alpha:1.0];
     [(NSView*) window window].styleMask |= NSMiniaturizableWindowMask;
@@ -69,17 +87,20 @@ void set_tag_when_enter_full_screen(bool isfullscreen)
 
 void set_title_colour_after_set_title(void * window)
 {
+  // Blanco fijo dejaba el titulo invisible sobre la barra clara del modo dia.
+  NSColor * title_col = mac_dark_mode() ? NSColor.whiteColor
+                                        : [NSColor colorWithCalibratedRed:0.13 green:0.13 blue:0.14 alpha:1.0];
   NSEnumerator *viewEnum = [[[[[[[(NSView*) window window] contentView] superview] titlebarViewController] view] subviews] objectEnumerator];
   NSView *viewObject;
   while(viewObject = (NSView *)[viewEnum nextObject]) {
     if([viewObject class] == [NSTextField self]) {
-      [(NSTextField*)viewObject setTextColor : NSColor.whiteColor];
+      [(NSTextField*)viewObject setTextColor : title_col];
       mainframe_text_field = viewObject;
     }
   }
 
   if (mainframe_text_field) {
-    [(NSTextField*)mainframe_text_field setTextColor : NSColor.whiteColor];
+    [(NSTextField*)mainframe_text_field setTextColor : title_col];
   }
 }
 

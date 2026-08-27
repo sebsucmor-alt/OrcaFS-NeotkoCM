@@ -13,7 +13,7 @@
 //       blend_parallel — contribuciones lado-a-lado en un mismo plano
 //                        (port de la agregación de blend_preview_zone:
 //                        media ponderada por opacidad). Modelo del dither
-//                        ColorMix/ColorStitch visto desde arriba.
+//                        ColorStitch/ColorStitch visto desde arriba.
 //     El preview legacy del SandwichDialog usa parallel para TODO (incluso
 //     passes Solid apilados); ver StackFlatten.hpp para las dos variantes de
 //     composición de sandwich (legacy-parity vs physical).

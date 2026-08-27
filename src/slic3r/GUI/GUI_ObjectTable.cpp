@@ -2832,7 +2832,7 @@ int ObjectTablePanel::init_filaments_and_colors()
 
         size_t mixed_offset = 0;
         for (const MixedFilament &mf : wxGetApp().preset_bundle->mixed_filaments.mixed_filaments()) {
-            if (!mf.enabled || mf.deleted)
+            if (!mf.is_live())
                 continue;
             if (size_t(i) != physical_count + mixed_offset) {
                 ++mixed_offset;

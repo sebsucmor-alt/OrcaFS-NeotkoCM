@@ -11,7 +11,6 @@
 namespace Slic3r {
 namespace EdgeGrid {
 
-
 class Contour {
 public:
 	Contour() = default;
@@ -224,6 +223,10 @@ public:
 						iy += 1;
 						assert(iy <= iyb);
 					}
+					// Upstream Snapmaker #752 (2e56dd12e): the Bresenham stepping above can walk one
+					// cell past the grid on degenerate input; visitor() then indexes m_cells out of bounds.
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -245,6 +248,10 @@ public:
 						iy -= 1;
 						assert(iy >= iyb);
 					}
+					// Upstream Snapmaker #752 (2e56dd12e): the Bresenham stepping above can walk one
+					// cell past the grid on degenerate input; visitor() then indexes m_cells out of bounds.
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -270,6 +277,10 @@ public:
 						iy += 1;
 						assert(iy <= iyb);
 					}
+					// Upstream Snapmaker #752 (2e56dd12e): the Bresenham stepping above can walk one
+					// cell past the grid on degenerate input; visitor() then indexes m_cells out of bounds.
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -307,6 +318,10 @@ public:
 						iy -= 1;
 						assert(iy >= iyb);
 					}
+					// Upstream Snapmaker #752 (2e56dd12e): the Bresenham stepping above can walk one
+					// cell past the grid on degenerate input; visitor() then indexes m_cells out of bounds.
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);

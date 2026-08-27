@@ -27,15 +27,15 @@ static SurfacePass solid_pass(int tool, double ratio)
 static SurfacePassStack penu_dither(int a, int b)
 {
     SurfacePass p;
-    p.kind       = SurfacePassKind::ColorMix;
+    p.kind       = SurfacePassKind::ColorStitch;
     p.ratio      = 1.0;
     p.solid_tool = a;
     p.angle = -1; p.fan = -1; p.speed_pct = 100;
-    p.colormix.present = true;
+    p.colorstitch.present = true;
     const std::string pat = std::to_string(a + 1) + std::to_string(b + 1);
-    p.colormix.kv["interlayer_colormix_pattern_penultimate"] = pat;
-    p.colormix.kv["interlayer_colormix_penu_tool_a"] = std::to_string(a);
-    p.colormix.kv["interlayer_colormix_penu_tool_b"] = std::to_string(b);
+    p.colorstitch.kv["interlayer_colormix_pattern_penultimate"] = pat;
+    p.colorstitch.kv["interlayer_colormix_penu_tool_a"] = std::to_string(a);
+    p.colorstitch.kv["interlayer_colormix_penu_tool_b"] = std::to_string(b);
     SurfacePassStack st;
     st.enabled = true;
     st.passes.push_back(p);
@@ -53,7 +53,7 @@ static SurfacePassStack penu_dither(int a, int b)
 // Ver BOTTOM_SURFACE.md §5.4.
 //
 // La distribución del patrón es el MISMO Bresenham de longitud 8 que usa
-// pro_cm_write() en el gizmo (GLGizmoColorMixPainter.cpp) — copiado a propósito
+// pro_cm_write() en el gizmo (GLGizmoColorStitchPainter.cpp) — copiado a propósito
 // en vez de compartido, porque aquel vive en la GUI y esto es libslic3r. Si se
 // toca uno hay que tocar el otro: producen el kv que consume el mismo motor.
 static SurfacePassStack bottom_dither(int a, int b, int pct_b)
@@ -70,14 +70,14 @@ static SurfacePassStack bottom_dither(int a, int b, int pct_b)
     }
 
     SurfacePass p;
-    p.kind       = SurfacePassKind::ColorMix;
+    p.kind       = SurfacePassKind::ColorStitch;
     p.ratio      = 1.0;          // altura completa: NO subdivide el bridge
     p.solid_tool = a;            // chip/desc fallback, igual que penu_dither
     p.angle = -1; p.fan = -1; p.speed_pct = 100;
-    p.colormix.present = true;
-    p.colormix.kv["interlayer_colormix_pattern_top"] = pat;
-    p.colormix.kv["interlayer_colormix_tool_a"]      = std::to_string(a);
-    p.colormix.kv["interlayer_colormix_tool_b"]      = std::to_string(b);
+    p.colorstitch.present = true;
+    p.colorstitch.kv["interlayer_colormix_pattern_top"] = pat;
+    p.colorstitch.kv["interlayer_colormix_tool_a"]      = std::to_string(a);
+    p.colorstitch.kv["interlayer_colormix_tool_b"]      = std::to_string(b);
 
     SurfacePassStack st;
     st.enabled = true;

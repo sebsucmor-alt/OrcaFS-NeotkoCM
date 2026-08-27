@@ -16,6 +16,8 @@
 
 #include <imgui/imgui.h>
 
+#include "slic3r/GUI/GUI_App.hpp"
+
 namespace Slic3r { namespace GUI {
 
 // One ramp, not eleven loose IM_COL32s. Before this the two editors had five different greys
@@ -26,6 +28,7 @@ namespace Slic3r { namespace GUI {
 //   - The semantic colours at the end exist because ALH's editor genuinely encodes meaning in
 //     colour (forbidden band, optimal line, locked point) and those meanings predate this file.
 enum class NeoCol {
+    PanelBg,       // el fondo de la VENTANA del gizmo (ver neo_push_window_style)
     Canvas,        // bottom of the graph gradient
     CanvasTop,     // top of it
     Surface,       // widget backgrounds, inactive borders
@@ -47,9 +50,54 @@ enum class NeoCol {
     Endpoint,      // the top endpoint, height-movable only
 };
 
+// s290 — LA RAMPA TIENE DOS CARAS, Y LA VENTANA TAMBIEN.
+//
+// Primer intento fallido, que conviene tener escrito: solo con dar colores claros a los widgets no
+// basta. El fondo de un panel de gizmo lo fija ImGuiWrapper::init_style() (ImGuiWrapper.cpp:2929)
+// con COL_WINDOW_BACKGROUND = {0.1, 0.1, 0.1, 0.8}, una vez y SIN rama de tema, y el texto por
+// defecto se queda blanco. Pintar widgets claros ahi dentro daba "30 deg" en blanco sobre un
+// deslizador claro y botones ilegibles.
+//
+// 🔑 La ventana se arregla empujando ImGuiCol_WindowBg ANTES del Begin, que es lo que hace
+// neo_push_window_style(). Con eso la ventana es nuestra en los dos temas y los widgets encajan.
+//
+// Los papeles NO cambian de una cara a otra: Canvas sigue siendo el lienzo, Ink el texto mas
+// legible, el ambar sigue significando "algo va mal". Solo se invierte la luminancia, y quien
+// dibuja no se entera de nada.
+//
+// 🚨 El tema se lee de wxGetApp().dark_mode(), el MISMO sitio del que come el resto de Orca. No
+// inventes aqui una segunda fuente de verdad.
+inline bool neo_is_dark() { return Slic3r::GUI::wxGetApp().dark_mode(); }
+
 inline ImU32 neo_col_u32(NeoCol c)
 {
+    if (! neo_is_dark()) {
+        switch (c) {
+        case NeoCol::PanelBg:      return IM_COL32(246, 247, 249, 235);
+        case NeoCol::Canvas:       return IM_COL32(231, 235, 240, 255);
+        case NeoCol::CanvasTop:    return IM_COL32(243, 246, 249, 255);
+        case NeoCol::Surface:      return IM_COL32(222, 227, 233, 255);
+        case NeoCol::SurfaceHi:    return IM_COL32(205, 212, 220, 255);
+        case NeoCol::Grid:         return IM_COL32(158, 167, 178, 110);
+        case NeoCol::GridMajor:    return IM_COL32(118, 128, 140, 190);
+        case NeoCol::Accent:       return IM_COL32(  0, 150, 138, 255);
+        case NeoCol::AccentBright: return IM_COL32(  0, 118, 108, 255); // en claro "brillante" = mas contraste, no mas luz
+        case NeoCol::AccentDim:    return IM_COL32(176, 222, 216, 255);
+        case NeoCol::AccentGhost:  return IM_COL32(  0, 150, 138,  42);
+        case NeoCol::Warn:         return IM_COL32(188,  98,   0, 255);
+        case NeoCol::TextDim:      return IM_COL32( 98, 108, 120, 255);
+        case NeoCol::Ink:          return IM_COL32( 24,  28,  34, 255);
+        case NeoCol::Forbid:       return IM_COL32(190,  44,  44, 255);
+        case NeoCol::Optimal:      return IM_COL32( 24, 142,  66, 255);
+        case NeoCol::Slope:        return IM_COL32(118,  64, 194, 255);
+        case NeoCol::Locked:       return IM_COL32(134, 142, 152, 255);
+        case NeoCol::Endpoint:     return IM_COL32(174, 126,  12, 255);
+        }
+        return IM_COL32(255, 0, 255, 255); // loud on purpose: an unhandled enum should be seen
+    }
+
     switch (c) {
+    case NeoCol::PanelBg:      return IM_COL32( 26,  26,  26, 204); // el de Orca, {0.1,0.1,0.1,0.8}
     case NeoCol::Canvas:       return IM_COL32( 18,  21,  26, 255);
     case NeoCol::CanvasTop:    return IM_COL32( 28,  33,  40, 255);
     case NeoCol::Surface:      return IM_COL32( 44,  50,  58, 255);
@@ -81,6 +129,30 @@ inline ImU32 neo_fade(NeoCol c, float alpha)
     v.w *= alpha;
     return ImGui::ColorConvertFloat4ToU32(v);
 }
+
+// 🔑 EL ESTILO DE LA VENTANA. Va ANTES de GizmoImguiBegin(), y su pop DESPUES de GizmoImguiEnd().
+//
+// Tiene que ser antes del Begin porque ImGui resuelve WindowBg y el color del titulo al abrir la
+// ventana: empujarlo despues (donde vive neo_push_panel_style) no pinta nada. ImGuiCol_Text va
+// aqui, y no en el estilo de widgets, por lo mismo — asi cubre el titulo ademas del cuerpo, y de
+// paso todo texto que no pida un color explicito deja de ser blanco fijo.
+//
+// 🚨 ImGuiCol_ChildBg se queda FUERA a proposito: ALH y HAE abren BeginChild, y un fondo opaco
+// ahi se suma al de la ventana y ennegrece esas zonas. Los hijos heredan, que es lo correcto.
+//
+// 🚨 Si te saltas el pop, el fondo claro se cuela en TODOS los demas paneles de gizmo de Orca.
+inline void neo_push_window_style()
+{
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,      neo_col(NeoCol::PanelBg));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,       neo_col(NeoCol::PanelBg));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,       neo_col(NeoCol::PanelBg));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, neo_col(NeoCol::PanelBg));
+    ImGui::PushStyleColor(ImGuiCol_Border,        neo_col(NeoCol::Surface));
+    ImGui::PushStyleColor(ImGuiCol_Separator,     neo_col(NeoCol::Surface));
+    ImGui::PushStyleColor(ImGuiCol_Text,          neo_col(NeoCol::Ink));
+}
+
+inline void neo_pop_window_style() { ImGui::PopStyleColor(7); }
 
 // The widget styling both panels push. Call between GizmoImguiBegin() and the panel body, and pair
 // it with neo_pop_panel_style() before GizmoImguiEnd().

@@ -73,8 +73,8 @@ Transform3d texture_bump_axis_rotation(TextureProjectionAxis axis)
 
 // NEOTKO_TEXTUREBUMP_TAG -- deterministic preview color when a zone hasn't been given one
 // explicitly. Golden-ratio hue stepping -> distinguishable hues for many ids, same idea
-// GLGizmoColorMixPainter::fallback_color_for_id uses (kept as its own small copy here rather than
-// shared, matching this gizmo's canvas being fully independent from ColorMix's).
+// GLGizmoColorStitchPainter::fallback_color_for_id uses (kept as its own small copy here rather than
+// shared, matching this gizmo's canvas being fully independent from ColorStitch's).
 ColorRGBA texture_bump_zone_color(int id)
 {
     const float hue = std::fmod(0.61803398875f * float(id), 1.f);
@@ -98,8 +98,8 @@ ColorRGBA texture_bump_zone_color(int id)
 }
 
 // NEOTKO_TEXTUREBUMP_TAG -- unification pass: minimal 2-option segmented bar for the All/Painter
-// mode switch, same visual mechanism as GLGizmoColorMixPainter's own cs_segmented_bar()
-// (GLGizmoColorMixPainter.cpp) -- not shared code (that one is file-local static there too), but
+// mode switch, same visual mechanism as GLGizmoColorStitchPainter's own cs_segmented_bar()
+// (GLGizmoColorStitchPainter.cpp) -- not shared code (that one is file-local static there too), but
 // deliberately the same technique: an InvisibleButton per segment over a hand-drawn background,
 // no new widget type introduced.
 void tb_mode_bar(const char* const* labels, const char* const* tips, int n, int& active)
@@ -273,8 +273,8 @@ void GLGizmoTextureBump::on_opening()
     // GLCanvas3D::_picking_pass() entirely (GLCanvas3D.cpp), which is the ONLY thing that updates
     // m_hover_id from mouse movement. All mode's 3D grabbers (use_grabbers()/render_grabbers(),
     // GLGizmoBase's own mechanism) depend on m_hover_id -- with picking off they silently stop
-    // responding to hover/click. Same fix GLGizmoColorMixPainter::on_set_state() already applies
-    // for the identical reason (GLGizmoColorMixPainter.cpp:164, "en On apaga picking; lo
+    // responding to hover/click. Same fix GLGizmoColorStitchPainter::on_set_state() already applies
+    // for the identical reason (GLGizmoColorStitchPainter.cpp:164, "en On apaga picking; lo
     // re-encendemos") -- re-enable right after the base's own disable.
     m_parent.enable_picking(true);
 
@@ -297,14 +297,14 @@ void GLGizmoTextureBump::on_shutdown()
     m_parent.use_slope(false);
     m_parent.toggle_model_objects_visibility(true);
     // GLGizmoPainterBase::on_set_state() already re-enables picking on the Off transition before
-    // calling this -- explicit here too for clarity/safety, same as GLGizmoColorMixPainter::on_shutdown().
+    // calling this -- explicit here too for clarity/safety, same as GLGizmoColorStitchPainter::on_shutdown().
     m_parent.enable_picking(true);
 }
 
 PainterGizmoType GLGizmoTextureBump::get_painter_type() const
 {
     // No dedicated enum value (informational only, never switched on) -- same choice
-    // GLGizmoColorMixPainter makes for its own independent multi-slot canvas.
+    // GLGizmoColorStitchPainter makes for its own independent multi-slot canvas.
     return PainterGizmoType::MM_SEGMENTATION;
 }
 
@@ -825,7 +825,7 @@ void GLGizmoTextureBump::commit_config_field(ModelObject* model_object, const ch
     // back on release (visually drags fine, but the commit itself re-entered scene/gizmo state
     // before the current ImGui frame had finished). None of the other GLGizmoPainterBase-derived
     // gizmos with working sliders in this codebase (GLGizmoFuzzySkin, GLGizmoMmuSegmentation,
-    // GLGizmoColorMixPainter) call plater()->update() from inside a slider's commit path -- they
+    // GLGizmoColorStitchPainter) call plater()->update() from inside a slider's commit path -- they
     // all defer via this exact async event instead (already the pattern update_model_object() in
     // this same file already used for facet-paint commits, GLGizmoTextureBump.cpp above). Scene
     // reload isn't needed here anyway: m_overlay_dirty already drives the gizmo's own overlay
@@ -1020,7 +1020,7 @@ void GLGizmoTextureBump::refresh_ebt_colors()
 // drawn on top -- dimming the base mesh doesn't hide that).
 std::vector<ColorRGBA> GLGizmoTextureBump::build_ebt_colors_for_volume(const ModelVolume* mv) const
 {
-    static_assert(MAX_SLOTS == ModelVolume::COLORMIX_SLOT_COUNT,
+    static_assert(MAX_SLOTS == ModelVolume::COLORSTITCH_SLOT_COUNT,
                   "gizmo MAX_SLOTS must match ModelVolume::COLORMIX_SLOT_COUNT (3mf slot table)");
     // NEOTKO_TEXTUREBUMP_TAG -- fix (2026-07-08, real user report on the shipped s183 fix): a single
     // shared alpha for both the unpainted base surface and the painted-zone highlight was wrong on
@@ -1489,7 +1489,7 @@ void GLGizmoTextureBump::on_render_input_window(float x, float y, float bottom_l
     m_imgui->text(_u8L("Bump Mapping Editor"));
 
     // NEOTKO_TEXTUREBUMP_TAG -- unification pass: All/Painter mode switch, same segmented-bar
-    // technique as GLGizmoColorMixPainter's department bar (tb_mode_bar(), anonymous namespace
+    // technique as GLGizmoColorStitchPainter's department bar (tb_mode_bar(), anonymous namespace
     // above).
     // NEOTKO_ZBUMP_TAG -- 3rd mode, own domain (Top Surface Z relief, Feature/ZBump/), reusing
     // this gizmo's shell only (same mode-bar widget, same panel window) -- zero shared code with

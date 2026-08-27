@@ -121,9 +121,9 @@ struct PaintedTextureBumpZone
 };
 
 // Resolves every painted Texture Bump zone active on `po` within a single layer's Z range
-// (slice_z +/- layer_height/2). Independent of ColorMix's painted-facet scan
-// (SurfaceColorMix::painted_footprint_in_z_range): separate canvas
-// (ModelVolume::texture_bump_paint_facets, not color_mix_paint_facets), per-LAYER resolution
+// (slice_z +/- layer_height/2). Independent of ColorStitch's painted-facet scan
+// (ColorStitch::painted_footprint_in_z_range): separate canvas
+// (ModelVolume::texture_bump_paint_facets, not colorstitch_paint_facets), per-LAYER resolution
 // instead of a wide top/penu band (walls are generated layer by layer), and no upward-normal
 // filter (this paints walls, not horizontal surfaces -- any painted triangle whose Z range
 // intersects the layer counts, regardless of facing). Zones sharing the exact same resolved

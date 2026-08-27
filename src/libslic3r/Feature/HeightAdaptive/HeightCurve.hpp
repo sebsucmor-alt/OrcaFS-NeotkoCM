@@ -4,7 +4,7 @@
 // A HeightCurve is a small list of nodes {z, value, tension} that the user draws in the
 // gizmo over the object's REAL layer bands, serialized into a single coString object config
 // key so it travels with the model (undo/redo + 3mf) by construction — see §4 of the plan
-// and the s238 lesson [[bug_colormix_orphan_recipe_gc_undo]]: state that lives outside the
+// and the s238 lesson [[bug_colorstitch_orphan_recipe_gc_undo]]: state that lives outside the
 // model ends up orphaned.
 //
 // The interpolation mode is a property of the EFFECT, never of the user (§2): an effect that

@@ -12,14 +12,14 @@ static std::string pass_pattern(const SurfacePass& p, bool penu,
                                 const std::string& fallback_pattern)
 {
     // a) clave corta del editor per-pass (la que blend_preview_zone mira hoy)
-    auto it = p.colormix.kv.find("pattern");
-    if (it != p.colormix.kv.end() && !it->second.empty())
+    auto it = p.colorstitch.kv.find("pattern");
+    if (it != p.colorstitch.kv.end() && !it->second.empty())
         return it->second;
     // b) claves largas de stacks self-contained (Designer / bake Plan1)
     const char* k = penu ? "interlayer_colormix_pattern_penultimate"
                          : "interlayer_colormix_pattern_top";
-    it = p.colormix.kv.find(k);
-    if (it != p.colormix.kv.end() && !it->second.empty())
+    it = p.colorstitch.kv.find(k);
+    if (it != p.colorstitch.kv.end() && !it->second.empty())
         return it->second;
     // c) fallback del caller (config viva del diálogo); "" si autocontenido
     return fallback_pattern;
@@ -41,7 +41,7 @@ std::vector<Slice> flatten_stack(const SurfacePassStack& st,
         case SurfacePassKind::Solid:
             out.push_back({ std::clamp(p.solid_tool, 0, 3), r_pass });
             break;
-        case SurfacePassKind::ColorMix: {
+        case SurfacePassKind::ColorStitch: {
             const std::string pat = pass_pattern(p, penu, fallback_pattern);
             if (pat.empty())
                 break;
@@ -117,7 +117,7 @@ bool sandwich_colour_legacy(const SurfacePassStack& top,
 }
 
 // Colapsa un pass a una capa Beer-Lambert equivalente (ver nota del .hpp
-// sobre la aproximación del td en passes ColorMix/PathBlend).
+// sobre la aproximación del td en passes ColorStitch/PathBlend).
 static bool pass_to_layer(const SurfacePass& p, bool penu,
                           const Material mats[4], Layer& out)
 {
@@ -135,7 +135,7 @@ static bool pass_to_layer(const SurfacePass& p, bool penu,
     if (p.kind == SurfacePassKind::None)
         return false;
 
-    // ColorMix / PathBlend: franjas → color paralelo + td medio ponderado.
+    // ColorStitch / PathBlend: franjas → color paralelo + td medio ponderado.
     SurfacePassStack one;
     one.enabled = true;
     one.passes.push_back(p);

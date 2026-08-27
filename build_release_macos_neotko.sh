@@ -3,6 +3,102 @@
 set -e
 set -o pipefail
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NEOTKO: resumen de errores. Envuelve TODA la ejecución del script: el progreso
+# se sigue viendo en vivo (pasa por tee) y, al acabar, si hubo fallos imprime la
+# lista limpia de "error:" lista para pegar en una sesión de Claude.
+#   · log completo   -> /tmp/neotko_build_logs/build.log
+#   · errores+ctx    -> /tmp/neotko_build_errors.txt
+# La carpeta se VACÍA al empezar cada build: sólo existe la compilación actual,
+# que es la única que importa. Nada que acordarse de borrar.
+# Si no hay errores, no imprime nada raro: build normal.
+# Desactivar: añade -E a la línea de compilar (p.ej. -s -x -j 9 -CS -E).
+# ─────────────────────────────────────────────────────────────────────────────
+# -E: apagar el resumen. Se busca a mano porque este bloque corre ANTES de getopts,
+# y así funciona tanto suelto (-E) como agrupado (-CSE).
+_nk_off=0
+for _nk_a in "$@"; do
+    case "$_nk_a" in
+        -*E*) _nk_off=1 ;;
+    esac
+done
+
+if [ -z "${NEOTKO_ERRSUM+x}" ] && [ "$_nk_off" -eq 0 ]; then
+    export NEOTKO_ERRSUM=1
+    _nk_dir="/tmp/neotko_build_logs"
+    # Borrón y cuenta nueva: sólo se guarda la compilación en curso.
+    rm -rf "$_nk_dir"
+    mkdir -p "$_nk_dir"
+    rm -f /tmp/neotko_build_errors.txt
+    _nk_log="$_nk_dir/build.log"
+    _nk_err="$_nk_dir/errors.txt"
+
+    set +e
+    "$0" "$@" 2>&1 | tee "$_nk_log"
+    _nk_rc=${PIPESTATUS[0]}
+
+    # Ruido que NO es un fallo y que se descarta ANTES de analizar. El caso que lo
+    # motivó: "^ld: " cazaba los avisos del linker ("ld: warning: ignoring duplicate
+    # libraries: ..."), que salen en TODOS los builds, también en los buenos.
+    # Los warnings siguen íntegros en build.log; sólo se van del análisis.
+    _nk_ign='^ld: warning:|^clang: warning:|^[[:space:]]*[0-9]+ warnings? generated'
+
+    # Quitar códigos de color y el ruido de arriba antes de analizar
+    _nk_plain="$_nk_dir/plain.log"
+    perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' "$_nk_log" 2>/dev/null | grep -Ev "$_nk_ign" > "$_nk_plain"
+    [ -s "$_nk_plain" ] || grep -Ev "$_nk_ign" "$_nk_log" > "$_nk_plain"
+
+    # Patrones de fallo: errores de compilador, de linker y targets fallidos de ninja.
+    # "^ld: " se queda porque los fallos de verdad del linker no dicen "error:"
+    # ("ld: symbol(s) not found...", "ld: library not found for -lfoo"); los avisos
+    # ya se han filtrado arriba.
+    _nk_pat='(^|[[:space:]])error:|^FAILED:|^ld: |Undefined symbols|clang: error|ninja: build stopped|fatal error:'
+
+    _nk_count=$(grep -Ec "$_nk_pat" "$_nk_plain")
+
+    if [ "$_nk_count" -gt 0 ]; then
+        {
+            echo "# Build errors — $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "# comando: $0 $*"
+            echo "# log completo: $_nk_log"
+            echo
+            echo "## Lista de errores"
+            grep -E "$_nk_pat" "$_nk_plain" | sed 's|'"$PWD"'/||' | awk '!seen[$0]++'
+            echo
+            echo "## Con contexto"
+            grep -E -A 12 "$_nk_pat" "$_nk_plain" | sed 's|'"$PWD"'/||'
+        } > "$_nk_err"
+        ln -sfn "$_nk_err" /tmp/neotko_build_errors.txt
+
+        echo
+        echo "════════════════════════════════════════════════════════════════"
+        echo "❌ BUILD CON ERRORES — $_nk_count línea(s) de fallo"
+        echo "════════════════════════════════════════════════════════════════"
+        grep -E "$_nk_pat" "$_nk_plain" | sed 's|'"$PWD"'/||' | awk '!seen[$0]++' | head -60
+        _nk_uniq=$(grep -E "$_nk_pat" "$_nk_plain" | awk '!seen[$0]++' | wc -l | tr -d ' ')
+        [ "$_nk_uniq" -gt 60 ] && echo "   … y $((_nk_uniq - 60)) más (están todas en el fichero)"
+        echo "────────────────────────────────────────────────────────────────"
+        echo "📋 Para pasar a una sesión:  cat /tmp/neotko_build_errors.txt"
+        echo "   (errores + contexto)      $_nk_err"
+        echo "   log completo:             $_nk_log"
+        echo "════════════════════════════════════════════════════════════════"
+        [ "$_nk_rc" -eq 0 ] && _nk_rc=1
+    else
+        rm -f "$_nk_plain"
+        if [ "$_nk_rc" -ne 0 ]; then
+            echo
+            echo "⚠️  El build falló (código $_nk_rc) pero no hay ninguna línea 'error:'."
+            echo "   Log completo: $_nk_log"
+        else
+            # Build limpio: no dejamos basura, sólo el log por si acaso
+            echo
+            echo "✅ Build sin errores. Log: $_nk_log"
+        fi
+    fi
+
+    exit "$_nk_rc"
+fi
+
 # NEOTKO_OSX_SYSROOT — s211: default to the SDK 2.3.6 was actually built/working against.
 # On macOS 26 (Tahoe), Xcode's default SDK (26.x) makes WKWebView enforce new Local Network
 # rules that silently break the Home/Device Flutter webviews (NSURLErrorCannotConnectToHost,
@@ -20,7 +116,7 @@ if [ -z "${NEOTKO_OSX_SYSROOT+x}" ]; then
     unset _neotko_default_sdk
 fi
 
-while getopts ":dpa:snt:xbc:j:1DCSHTh" opt; do
+while getopts ":dpa:snt:xbc:j:1DCSHTEh" opt; do
   case "${opt}" in
     d )
         export BUILD_TARGET="deps"
@@ -63,6 +159,10 @@ while getopts ":dpa:snt:xbc:j:1DCSHTh" opt; do
     S )
         export SMART_CLEAN="1"
         ;;
+    E )
+        # NEOTKO: -E — desactiva el resumen de errores del final. Se procesa
+        # arriba del todo (antes de getopts); aquí sólo para que no sea desconocido.
+        ;;
     H )
         export HALF_CPU="1"
         ;;
@@ -92,6 +192,7 @@ while getopts ":dpa:snt:xbc:j:1DCSHTh" opt; do
         echo "   -H: Limit to 50% CPU (uses half the available cores, runs at lower priority)"
         echo "   -j N: Use exactly N cores (also runs at lower priority, e.g. -j 2)"
         echo "   -1: Use single job for building"
+        echo "   -E: Disable the error summary printed after the build"
         echo "   -T: Additive — after the build, also build & run the Catch2 unit"
         echo "       tests ([NeoTower] suite). Append to your usual command,"
         echo "       e.g. -s -x -j 3 -CS -T. Compiles only fff_print_tests."

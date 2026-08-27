@@ -2,7 +2,7 @@
 // WeaveLibrary — ligamentos textiles como generadores de pattern strings
 // ColorStitch. Implementa C.1 + C.3 del COLOR_PREDICTION_UNIFIED_PLAN.md
 // (dropdown de tafetán/sarga/satén/houndstooth); la sarga REAL (offset por
-// capa, C.2) requiere tocar el dispatcher de SurfaceColorMix — hasta
+// capa, C.2) requiere tocar el dispatcher de ColorStitch — hasta
 // entonces `offset_per_layer` se expone pero la UI debe mostrarlo
 // deshabilitado/informativo (regla del plan: no prometer sarga real antes
 // de C.2).

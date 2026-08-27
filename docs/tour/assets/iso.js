@@ -472,6 +472,52 @@
     return cv;
   }
 
+  /**
+   * Start a named layer. On a real canvas this does nothing at all; on the SVG
+   * recorder it opens a top-level <g id="...">, which is what Illustrator turns
+   * into a layer. Draw order is untouched either way, so adding these to a
+   * figure cannot change how it looks.
+   *
+   * Call it between drawing operations, never inside a save() or a clip().
+   */
+  function layer(ctx, name) {
+    if (ctx && typeof ctx.__layer === 'function') ctx.__layer(name);
+  }
+
+  /**
+   * Draw a figure into an SVG string instead of onto a canvas. Same figure
+   * code, same measurements: the recorder measures text with a real canvas so
+   * every position the figure computed still holds.
+   *
+   * @param mode 'sections' (default) keeps the figure's own layers
+   *             'kind' sorts everything into Artwork and Text, which needs no
+   *             cooperation from the figure
+   */
+  function toSvg(id, mode) {
+    // The tour loads this same file and does not load the recorder, so say so
+    // plainly rather than letting a ReferenceError surface from three frames in.
+    if (typeof global.SvgCanvas !== 'function')
+      throw new Error('SVG export needs assets/svgcanvas.js loaded before iso.js');
+    var def = registry[id];
+    if (!def) throw new Error('no figure registered as "' + id + '"');
+    var w = def.w || 1200, h = def.h || 640;
+    var rec = SvgCanvas(w, h, def.bg || INK.paper);
+    def.draw(rec.ctx, w, h);
+    return rec.toSVG(mode || 'sections');
+  }
+
+  function downloadSvg(id, name, mode) {
+    var blob = new Blob([toSvg(id, mode)], { type: 'image/svg+xml' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.download = (name || id) + '.svg';
+    a.href = url;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+
   function download(cv, name) {
     var a = document.createElement('a');
     a.download = name + '.png';
@@ -574,6 +620,7 @@
     ruleTitle: ruleTitle, mixHex: mixHex,
     SPOOLS: SPOOLS, INK: INK,
     figure: figure, renderInto: renderInto, download: download,
+    layer: layer, toSvg: toSvg, downloadSvg: downloadSvg,
     list: list, get: get, SCALE: SCALE, clamp01: clamp01
   };
 })(window);

@@ -3,7 +3,7 @@
 
 // NEOTKO_MPSCHEDULER_TAG — s79: canonical tool-grouping order for sandwich sublayers.
 //
-// Problem: the sandwich (MultiPass/PathBlend/ColorMix, emitted as MultiPassSubLayer
+// Problem: the sandwich (MultiPass/PathBlend/ColorStitch, emitted as MultiPassSubLayer
 // entries) is dispatched in object-major order, so when two objects assign inverted
 // tools per pass the sequence alternates T0→T1→T0→T1 (one wipe per toolchange).
 //
@@ -21,14 +21,57 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 namespace Slic3r {
 namespace MultiPassScheduler {
 
+// NEOTKO_MPSCHEDULER_TAG s282b — THE chain identity. One function, called by all
+// three sites (GCode.cpp process_layer, NeoTower.cpp collect_all_events, NeoTower.cpp
+// step5). Those three used to repeat the arithmetic inline with comments begging the
+// next reader not to let them diverge; now divergence is impossible.
+//
+// WHY island_id exists. A chain is a HARD sequential dependency: the round-robin in
+// order_sublayers_by_tool only ever sees the HEAD of each chain, everything behind it
+// waits its turn by pass_idx. That is correct when a chain is a real stack, because
+// the cap must print on top of its own ramp.
+//
+// The key used to be (object, layer) alone, whose premise is "one object in one layer
+// is one stack". Assemble breaks that premise: five letters welded into one Assembly
+// are one object, spatially disjoint, stacked on nothing. They collapsed into ONE
+// chain, and because their PathBlend recipes carry opposite tool orders the scheduler
+// had no legal move except to alternate. Measured on PathBlend-Angle.3mf: 132 tool
+// changes at z=1.45 assembled, 3 for the same file split into five objects — with the
+// split carrying TWICE the sublayers. The giant wipe tower was only the bill for those
+// 132 purges, never a wipe-tower fault.
+//
+// island_id (the painted slot tag) restores the premise: same slot = same stack =
+// ramp before cap; different slot = disjoint XY = free to reorder. Passing 0
+// everywhere reproduces the old single-chain behaviour exactly.
+//
+// ORCA_PB_ISLAND_CHAINS=0 forces that old behaviour at runtime for A/B in one build.
+inline bool island_chains_enabled()
+{
+    static const bool v = [] {
+        if (const char* e = std::getenv("ORCA_PB_ISLAND_CHAINS"))
+            return !(e[0] == '0' && e[1] == '\0');
+        return true;
+    }();
+    return v;
+}
+
+inline uint64_t make_chain_key(const void* obj, int layer_id, int island_id)
+{
+    uint64_t h = (uint64_t)(uintptr_t)obj * 1000003ull + (uint64_t)(uint32_t)layer_id;
+    if (island_chains_enabled())
+        h ^= (uint64_t)(uint32_t)(island_id + 1) * 0x9E3779B97F4A7C15ull;
+    return h;
+}
+
 // One real sublayer (emission unit) of a single printed layer (one z_nominal group).
 struct SublayerKey {
-    uint64_t chain_key = 0;  // identity of the stacking chain: hash of (object, layer_id)
+    uint64_t chain_key = 0;  // identity of the stacking chain — ALWAYS via make_chain_key()
     int      pass_idx  = 0;  // 0-based position in the chain (causal: pass0 before pass1)
     int      tool_id   = 0;  // 0-based physical extruder this sublayer prints with
     double   z_actual  = 0.; // sub.print_z — deterministic tie-break within a tool group

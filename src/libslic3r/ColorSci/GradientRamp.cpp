@@ -54,15 +54,15 @@ SurfacePass make_penu_colorstitch_pass(const GradientSpec& s)
     // (gen_gradient_grid.py:56-99). Mismos valores, mismas claves — el kv es
     // el esquema canónico capturado de 8rectangles.3mf.
     SurfacePass p;
-    p.kind       = SurfacePassKind::ColorMix;
+    p.kind       = SurfacePassKind::ColorStitch;
     p.ratio      = 1.0;
     p.solid_tool = s.tool_a;                 // fallback tool — mirrors 3mf
     p.angle      = -1;
     p.fan        = -1;
     p.speed_pct  = 100;
-    p.colormix.present = true;
+    p.colorstitch.present = true;
 
-    auto& kv = p.colormix.kv;
+    auto& kv = p.colorstitch.kv;
     kv["interlayer_colormix_pattern_penultimate"]      = s.penu_pattern;
     kv["interlayer_colormix_penu_tool_a"]              = std::to_string(s.tool_a);
     kv["interlayer_colormix_penu_tool_b"]              = std::to_string(s.tool_b);
@@ -90,10 +90,10 @@ SurfacePass make_penu_colorstitch_pass(const GradientSpec& s)
 static SurfacePass make_solid_top_pass(int tool, double ratio)
 {
     // port de make_solid_top_pass (gen_gradient_grid.py:102). El Python marca
-    // colormix.present=true en el pass inferior solo por mimetizar el 3mf de
+    // colorstitch.present=true en el pass inferior solo por mimetizar el 3mf de
     // referencia ("harmless"); aquí NO se replica — kv vacío + present=false
     // es el estado limpio y el engine no lo distingue (fallback solo aplica a
-    // passes kind=ColorMix).
+    // passes kind=ColorStitch).
     SurfacePass p;
     p.kind       = SurfacePassKind::Solid;
     p.ratio      = ratio;

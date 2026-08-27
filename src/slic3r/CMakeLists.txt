@@ -14,8 +14,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/3DBed.hpp
     GUI/3DScene.cpp
     GUI/3DScene.hpp
-    GUI/ColorMixPaintPreview.cpp
-    GUI/ColorMixPaintPreview.hpp
+    GUI/ColorStitchPaintPreview.cpp
+    GUI/ColorStitchPaintPreview.hpp
     GUI/AboutDialog.cpp
     GUI/AboutDialog.hpp
     GUI/AmsMappingPopup.cpp
@@ -149,6 +149,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoPrecisionALH.hpp
     GUI/Gizmos/GLGizmoHeightAdaptiveEffects.cpp
     GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp
+    GUI/Gizmos/GLGizmoSupportZones.cpp
+    GUI/Gizmos/GLGizmoSupportZones.hpp
     GUI/Gizmos/GizmoNeotkoStyle.hpp
     GUI/Gizmos/GLGizmoCut.cpp
     GUI/Gizmos/GLGizmoCut.hpp
@@ -170,8 +172,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoMeshBoolean.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
     GUI/Gizmos/GLGizmoMmuSegmentation.hpp
-    GUI/Gizmos/GLGizmoColorMixPainter.cpp
-    GUI/Gizmos/GLGizmoColorMixPainter.hpp
+    GUI/Gizmos/GLGizmoColorStitchPainter.cpp
+    GUI/Gizmos/GLGizmoColorStitchPainter.hpp
     GUI/Gizmos/GLGizmoMove.cpp
     GUI/Gizmos/GLGizmoMove.hpp
     GUI/Gizmos/GLGizmoPainterBase.cpp

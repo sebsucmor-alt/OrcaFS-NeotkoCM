@@ -5,6 +5,7 @@
 #include <igl/unproject.h>
 
 #include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/Feature/SupportZones/SupportZoneProbe.hpp" // NEOTKO_SUPPORTZONES_TAG s284 F1
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
@@ -85,7 +86,7 @@
 #include <imgui/imgui_internal.h>
 #include <sstream>   // NEOTKO_PHOTOMODE_TAG s253 — sonda de estado de entrada de ImGui
 // ⚠️ NEOTKO_PHOTOMODE_TAG s253: en ESTE fichero no existe la macro NEOTKO_LOG — vive en
-// libslic3r/SurfaceColorMix.hpp, que GCodeViewer.cpp incluye y este no. Aquí se escribe al log con
+// libslic3r/ColorStitch.hpp, que GCodeViewer.cpp incluye y este no. Aquí se escribe al log con
 // el patrón largo: if (NeoDebug::enabled(...)) { ostringstream; NeoDebug::write(...); }
 // Costó un build creerlo: el error que da es "invalid operands to binary expression", que suena a
 // un problema de tipos y en realidad es que el `<<` se está evaluando fuera de cualquier macro.
@@ -2548,7 +2549,31 @@ void GLCanvas3D::render(bool only_init)
                 [this](const GLVolume& volume) { return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0); },
                 /*partly_inside_enable*/ true); // this branch is always CanvasView3D — see _render_objects's own derivation
         }
+        // NEOTKO_SUPPORTZONES_TAG s284 F1 — the markers go in BEFORE the transparent pass, and the
+        // reason is the whole point of the feature: an enforcer block is drawn translucent, and if
+        // it lands in the depth buffer first it hides exactly the marks that explain what it does.
+        // Drawn here, real opaque geometry still occludes them (GRAVITY_SNAP_AND_DRAG_V2_PLAN.md
+        // §3: a marker behind a wall must read as behind it) while the block they belong to simply
+        // tints them on its way over.
+        //
+        // 🚨 s286b — Y EL PRECIO DE ESE ORDEN LO DICE LA LÍNEA DE ARRIBA: "the block simply tints
+        // them on its way over". Con la pieza fantasma encendida, ese tinte deja los puntos
+        // deslavados justo cuando más falta hacen. Pero mover el dibujo detrás de la pasada
+        // transparente sin más reintroduciría el fallo de s284 cuando el fantasma está APAGADO,
+        // porque entonces los volúmenes transparentes SÍ escriben profundidad y taparían las marcas.
+        //
+        // Así que se elige según quién escribe profundidad, que es exactamente la condición de la
+        // que depende el fallo:
+        //   fantasma APAGADO ⇒ antes (como s284), el bloque translúcido no puede taparlas;
+        //   fantasma ENCENDIDO ⇒ después, y como en ese modo la pasada transparente no escribe
+        //   profundidad, lo único que hay en el buffer es geometría opaca: las marcas siguen
+        //   ocultándose detrás de una pared de verdad y ya no las tiñe nada.
+        const bool ghosted = ! m_volumes.get_transparent_depth_write();
+        if (! ghosted)
+            _render_support_zones();
         _render_objects(GLVolumeCollection::ERenderType::Transparent, !m_gizmos.is_running());
+        if (ghosted)
+            _render_support_zones();
     }
     /* preview render */
     else if (m_canvas_type == ECanvasType::CanvasPreview && m_render_preview) {
@@ -3425,6 +3450,11 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     //BBS:exclude the assmble view
     if (m_canvas_type != ECanvasType::CanvasAssembleView) {
         _set_warning_notification_if_needed(EWarning::GCodeConflict);
+        // NEOTKO_SUPPORTZONES_TAG s284 F1 — reload_scene is the right host: it runs after a model
+        // change, not per frame, and the probe early-outs to nothing on the overwhelmingly common
+        // scene that has no enforcer blocks at all.
+        _update_support_zones();
+        _set_warning_notification(EWarning::SterileSupportZone, m_support_zone_sterile);
         // checks for geometry outside the print volume to render it accordingly
         if (!m_volumes.empty()) {
             ModelInstanceEPrintVolumeState state;
@@ -8845,6 +8875,7 @@ void GLCanvas3D::_render_overlays()
     _render_assemble_control();
     _render_assemble_info();
     _render_shading_debug_panel();  // NEOTKO_SMOOTHNORMALS_TAG s229
+    _render_neodebug_console();     // NEOTKO_NEODEBUG_CONSOLE_TAG s285
 
     _render_separator_toolbar_right();
     _render_separator_toolbar_left();
@@ -11174,6 +11205,102 @@ void GLCanvas3D::_render_photo_mode_panel()
     ImGui::End();
 }
 
+// NEOTKO_NEODEBUG_CONSOLE_TAG s285 — the NeoDebug console. See docs/FUTURE/NEODEBUG_CONSOLE_PLAN.md.
+//
+// The shape of this window comes straight from how the user actually debugs: they launch with
+// ORCA_DEBUG_ALL (twenty channel names are not memorable, one is), slice, and then have to go dig
+// the files out of /tmp by hand. So the window is not a channel picker with a record button — it
+// is stop / resume / clear, with the channel switches sitting underneath for the rare case where
+// one channel is drowning the rest.
+//
+// A "session name" stamped into the banner was tried in s285 and dropped: the name was stored
+// fine but never came out in the logs, and it was not worth another round to chase. If it comes
+// back, the thing to establish FIRST is whether a banner line reaches the files at all.
+void GLCanvas3D::_render_neodebug_console()
+{
+    if (!NeoDebug::console_enabled())
+        return;
+
+    ImGui::Begin("NeoDebug (NEOTKO)");
+
+    const bool is_paused = NeoDebug::paused();
+
+    // --- stop / resume ---------------------------------------------------------------------------
+    // One button that toggles, not two: the state is binary and a pair of buttons would leave the
+    // user guessing which one is live.
+    if (ImGui::Button(is_paused ? "Reanudar" : "Parar"))
+        NeoDebug::set_paused(!is_paused);
+    ImGui::SameLine();
+    ImGui::TextColored(is_paused ? ImVec4(1.0f, 0.75f, 0.2f, 1.0f) : ImVec4(0.4f, 0.9f, 0.4f, 1.0f),
+                       is_paused ? "PARADO - nadie escribe" : "grabando");
+
+    // --- clearing ----------------------------------------------------------------------------------
+    ImGui::Separator();
+    bool sizes_dirty = false;
+    if (ImGui::Button("Borrar todo")) {
+        NeoDebug::clear_all();
+        sizes_dirty = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Todos ON")) {
+        for (int i = 0; i < NeoDebug::CH_COUNT; ++i)
+            NeoDebug::set_enabled(static_cast<NeoDebug::Channel>(i), true);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Todos OFF")) {
+        for (int i = 0; i < NeoDebug::CH_COUNT; ++i)
+            NeoDebug::set_enabled(static_cast<NeoDebug::Channel>(i), false);
+    }
+    ImGui::TextDisabled("%s", NeoDebug::log_dir().c_str());
+
+    // --- one row per channel -----------------------------------------------------------------------
+    // The size column is half the value of this window: seeing at a glance that MULTIPASS is at
+    // 400 MB and WAVESUPPORT at 12 KB is exactly what today costs a trip to Finder.
+    //
+    // Sizes are polled twice a second, not per frame: twenty stat() calls at 60 fps would be over
+    // a thousand syscalls a second for a number nobody can read that fast. Anything that changes
+    // a size (clearing, slicing) is slower than the refresh, so it always looks live.
+    static double    s_last_poll = -1.0;
+    static long long s_sizes[NeoDebug::CH_COUNT] = {};
+    const double now_s = ImGui::GetTime();
+    if (sizes_dirty || s_last_poll < 0.0 || now_s - s_last_poll > 0.5) {
+        for (int i = 0; i < NeoDebug::CH_COUNT; ++i)
+            s_sizes[i] = NeoDebug::log_size(static_cast<NeoDebug::Channel>(i));
+        s_last_poll = now_s;
+    }
+
+    ImGui::Separator();
+    for (int i = 0; i < NeoDebug::CH_COUNT; ++i) {
+        const NeoDebug::Channel ch = static_cast<NeoDebug::Channel>(i);
+        ImGui::PushID(i);
+
+        bool on = NeoDebug::is_enabled(ch);
+        if (ImGui::Checkbox(NeoDebug::channel_name(ch), &on))
+            NeoDebug::set_enabled(ch, on);
+
+        const long long sz = s_sizes[i];
+        ImGui::SameLine(190.0f);
+        if (sz < 0)
+            ImGui::TextDisabled("-");
+        else if (sz >= 1024 * 1024)
+            ImGui::Text("%.1f MB", double(sz) / (1024.0 * 1024.0));
+        else if (sz >= 1024)
+            ImGui::Text("%.1f KB", double(sz) / 1024.0);
+        else
+            ImGui::Text("%lld B", sz);
+
+        ImGui::SameLine(270.0f);
+        if (ImGui::Button("Borrar")) {
+            NeoDebug::clear(ch);
+            s_sizes[i] = 0;
+        }
+
+        ImGui::PopID();
+    }
+
+    ImGui::End();
+}
+
 void GLCanvas3D::_render_shading_debug_panel()
 {
     // NEOTKO_SMOOTHNORMALS_TAG s229: ORCA_DEBUG_RENDER only - see NeoDebug::render_panels_enabled().
@@ -11252,7 +11379,7 @@ void GLCanvas3D::_render_shading_debug_panel()
     ImGui::End();
 
     if (rebuild) {
-        // NEOTKO_LOG lives in SurfaceColorMix.hpp (a heavy engine header this file has no business
+        // NEOTKO_LOG lives in ColorStitch.hpp (a heavy engine header this file has no business
         // pulling in), so log through NeoDebug directly - same channel, same file.
         NeoDebug::write(NeoDebug::SHADING, "shading panel: rebuilding volumes (smooth=" +
                             std::string(smooth ? "1" : "0") + ", crease=" + std::to_string(t.crease_angle) + ")");
@@ -12253,6 +12380,332 @@ void GLCanvas3D::_update_sla_shells_outside_state()
     check_volumes_outside_state();
 }
 
+// NEOTKO_SUPPORTZONES_TAG s284 F1 — see libslic3r/Feature/SupportZones/SupportZoneProbe.hpp.
+//
+// One pass, two outputs. The highlight and the warning are the same question asked once, so they
+// cannot drift apart: if the block lights up nowhere, the warning fires, by construction.
+void GLCanvas3D::_update_support_zones()
+{
+    // How far off the surface the marker floats, in mm. Big enough to beat depth precision at
+    // plate-sized view distances, small enough that it never reads as a gap.
+    static constexpr double MARKER_LIFT_MM = 0.05;
+    // 🔑 s286b, decisión suya: DISCOS, no cuadrados. Un tablero de cuadrados es la imagen de
+    // Simplify3D, y además a paso fino los discos se leen como una mancha continua en vez de como
+    // una cuadrícula. 0.62 del paso los deja tocándose casi sin solaparse: gorditos, pero todavía
+    // se distingue que son puntos.
+    static constexpr float  MARKER_FATNESS = 0.62f;
+    static constexpr int    MARKER_SEGMENTS = 10;
+
+    m_support_zone_lit.reset();
+    m_support_zone_sterile = false;
+    if (m_model == nullptr)
+        return;
+
+    // 🔑 The grid step is the pillar resolution that already governs the printed support, so what
+    // you see and what gets built are driven by the same number.
+    float default_step = 2.f;
+    if (m_config != nullptr && m_config->has("support_base_pattern_spacing"))
+        default_step = float(m_config->opt_float("support_base_pattern_spacing"));
+
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+    unsigned int vertex_count = 0;
+
+    // 🔑 s286b, pedido por él ("los puntos soportados son muy grandes, iguala ambos"): con el mapa
+    // encendido, el VERDE sale del mismo probe y del mismo paso que el ROJO. No es sólo tamaño —
+    // son la misma pregunta partida en dos respuestas, así que compartir rejilla es lo correcto:
+    // dos tamaños distintos sugieren dos medidas distintas, y no lo son.
+    //
+    // Con el mapa apagado se mantiene el camino de F1 (una sonda por zona, al paso del pilar),
+    // donde el tamaño SÍ es el dato: lo que ves es la resolución con la que se va a construir.
+    const bool green_from_coverage = m_support_zone_show_gaps;
+
+    for (const ModelObject *object : m_model->objects) {
+        if (object == nullptr || object->instances.empty())
+            continue;
+        // 🚨 NO se puede saltar el bucle entero cuando el verde sale del mapa: esta misma pasada
+        // es la que enciende el aviso de zona ESTÉRIL, que es la razón por la que F1 existe. Lo que
+        // se salta es sólo la geometría de los marcadores, unas líneas más abajo.
+        // Early out before touching any mesh: almost every scene has no enforcer at all, and
+        // building AABB trees for those would be a real cost paid for nothing.
+        const bool has_enforcer = std::any_of(object->volumes.begin(), object->volumes.end(),
+            [](const ModelVolume *v) { return v->is_support_enforcer(); });
+        if (! has_enforcer)
+            continue;
+
+        float step = default_step;
+        if (object->config.has("support_base_pattern_spacing"))
+            step = float(object->config.opt_float("support_base_pattern_spacing"));
+
+        for (const ModelVolume *volume : object->volumes) {
+            if (! volume->is_support_enforcer())
+                continue;
+            // The probe is instance-independent, so it runs once per zone and every instance reuses
+            // the answer. Probing per instance would multiply the AABB work for identical results.
+            const SupportZones::ZoneProbe probe = SupportZones::probe_zone(*object, *volume, step);
+            if (probe.sterile()) {
+                m_support_zone_sterile = true;
+                continue;
+            }
+            // s286b: at 0.35 the tiles read as a faint dotted screen through a translucent block.
+            // 0.45 leaves a visible gutter between neighbours (so the grid still reads AS a grid)
+            // but gives each tile enough body to be seen through the part.
+            if (green_from_coverage)
+                continue;   // el aviso ya está dado; el verde lo dibuja el mapa, con su rejilla
+            const float half = MARKER_FATNESS * probe.grid_step_mm;
+            for (const ModelInstance *instance : object->instances) {
+                if (instance == nullptr)
+                    continue;
+                const Transform3d &trafo = instance->get_matrix();
+                // Normals do not transform with the matrix itself. Instances only ever carry
+                // rotation, uniform-ish scaling and a translation, but the inverse transpose is the
+                // correct thing regardless and costs one matrix per instance.
+                const Matrix3d normal_matrix = trafo.linear().inverse().transpose();
+                for (const SupportZones::LitSample &sample : probe.lit) {
+                    const Vec3d c = trafo * sample.pos.cast<double>();
+                    Vec3d       n = normal_matrix * sample.normal.cast<double>();
+                    const double n_len = n.norm();
+                    if (n_len <= 0.)
+                        continue;
+                    n /= n_len;
+
+                    // 🔑 Two things the first version got wrong, both visible on screen:
+                    //  - the marker sat exactly ON the surface and z-fought with it, which is what
+                    //    turned it into a row of black dashes instead of a green tile;
+                    //  - it was built horizontal, so on a leaning overhang it went through the wall.
+                    // Building it in the plane of the normal and lifting it a hair along that
+                    // normal fixes both, and keeps it correct on slanted surfaces.
+                    const Vec3d up      = (std::abs(n.z()) > 0.9) ? Vec3d(1., 0., 0.) : Vec3d(0., 0., 1.);
+                    const Vec3d tangent = up.cross(n).normalized();
+                    const Vec3d bitan   = n.cross(tangent);
+                    const Vec3d centre  = c + n * MARKER_LIFT_MM;
+
+                    // Un abanico desde el centro: MARKER_SEGMENTS lados bastan para que a
+                    // tamaño de pantalla lea como un círculo.
+                    init_data.add_vertex(Vec3f(float(centre.x()), float(centre.y()), float(centre.z())));
+                    for (int k = 0; k < MARKER_SEGMENTS; ++ k) {
+                        const double a = 2. * M_PI * double(k) / double(MARKER_SEGMENTS);
+                        const Vec3d  p = centre + tangent * (half * std::cos(a)) + bitan * (half * std::sin(a));
+                        init_data.add_vertex(Vec3f(float(p.x()), float(p.y()), float(p.z())));
+                    }
+                    for (int k = 0; k < MARKER_SEGMENTS; ++ k)
+                        init_data.add_triangle(vertex_count,
+                                               vertex_count + 1 + k,
+                                               vertex_count + 1 + (k + 1) % MARKER_SEGMENTS);
+                    vertex_count += 1 + MARKER_SEGMENTS;
+                }
+            }
+        }
+    }
+
+    if (! green_from_coverage && vertex_count > 0)
+        m_support_zone_lit.init_from(std::move(init_data));
+
+    // --- El mapa de huecos: qué pasa el umbral y no lo coge nadie ------------------------------
+    //
+    // 🚨 §8, y no es cosmética: RENDER Y SÓLO RENDER. Quien decide que hace falta soporte sigue
+    // siendo detect_overhangs() (offset 2D entre capas, en el motor). Esto sólo dibuja, y por eso
+    // en la UI se dice "might need support" y nunca "needs support".
+    //
+    // Es el inverso de Simplify3D, que rellena por todas partes: aquí se enseña el hueco y decide
+    // el usuario. Y reutiliza el mismo probe que F1, así que un solo sitio decide qué es "mirando
+    // hacia abajo" — el mapa y el iluminado verde no pueden contradecirse.
+    m_support_zone_gaps.reset();
+    if (! m_support_zone_show_gaps || m_model == nullptr)
+        return;
+
+    GLModel::Geometry gaps_data;
+    gaps_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+    unsigned int gap_vertices = 0;
+    for (const ModelObject *object : m_model->objects) {
+        if (object == nullptr || object->instances.empty())
+            continue;
+        // 🔑 El mapa NO usa la resolución del pilar: usa la suya. Son dos preguntas distintas —
+        // una es cómo se imprime el soporte, la otra cuánto detalle quiere ver quien mira.
+        const SupportZones::CoverageProbe cov =
+            SupportZones::probe_object_coverage(*object, m_support_zone_gap_step, m_support_zone_gap_normal_z);
+        if (cov.uncovered.empty() && cov.covered.empty())
+            continue;
+        const float half = MARKER_FATNESS * cov.grid_step_mm;
+        for (const ModelInstance *instance : object->instances) {
+            if (instance == nullptr)
+                continue;
+            const Transform3d &trafo = instance->get_matrix();
+            const Matrix3d normal_matrix = trafo.linear().inverse().transpose();
+            // Dos vueltas sobre la misma rejilla: primero lo que ya está cogido (verde) y luego lo
+            // que no (rojo). Mismo paso, mismo tamaño, misma medida.
+            for (const SupportZones::LitSample &sample : cov.covered) {
+                const Vec3d c = trafo * sample.pos.cast<double>();
+                Vec3d       n = normal_matrix * sample.normal.cast<double>();
+                const double n_len = n.norm();
+                if (n_len <= 0.)
+                    continue;
+                n /= n_len;
+                const Vec3d up      = (std::abs(n.z()) > 0.9) ? Vec3d(1., 0., 0.) : Vec3d(0., 0., 1.);
+                const Vec3d tangent = up.cross(n).normalized();
+                const Vec3d bitan   = n.cross(tangent);
+                const Vec3d centre  = c + n * MARKER_LIFT_MM;
+                init_data.add_vertex(Vec3f(float(centre.x()), float(centre.y()), float(centre.z())));
+                for (int k = 0; k < MARKER_SEGMENTS; ++ k) {
+                    const double a = 2. * M_PI * double(k) / double(MARKER_SEGMENTS);
+                    const Vec3d  p = centre + tangent * (half * std::cos(a)) + bitan * (half * std::sin(a));
+                    init_data.add_vertex(Vec3f(float(p.x()), float(p.y()), float(p.z())));
+                }
+                for (int k = 0; k < MARKER_SEGMENTS; ++ k)
+                    init_data.add_triangle(vertex_count, vertex_count + 1 + k,
+                                           vertex_count + 1 + (k + 1) % MARKER_SEGMENTS);
+                vertex_count += 1 + MARKER_SEGMENTS;
+            }
+
+            for (const SupportZones::LitSample &sample : cov.uncovered) {
+                const Vec3d c = trafo * sample.pos.cast<double>();
+                Vec3d       n = normal_matrix * sample.normal.cast<double>();
+                const double n_len = n.norm();
+                if (n_len <= 0.)
+                    continue;
+                n /= n_len;
+                const Vec3d up      = (std::abs(n.z()) > 0.9) ? Vec3d(1., 0., 0.) : Vec3d(0., 0., 1.);
+                const Vec3d tangent = up.cross(n).normalized();
+                const Vec3d bitan   = n.cross(tangent);
+                const Vec3d centre  = c + n * MARKER_LIFT_MM;
+                gaps_data.add_vertex(Vec3f(float(centre.x()), float(centre.y()), float(centre.z())));
+                for (int k = 0; k < MARKER_SEGMENTS; ++ k) {
+                    const double a = 2. * M_PI * double(k) / double(MARKER_SEGMENTS);
+                    const Vec3d  p = centre + tangent * (half * std::cos(a)) + bitan * (half * std::sin(a));
+                    gaps_data.add_vertex(Vec3f(float(p.x()), float(p.y()), float(p.z())));
+                }
+                for (int k = 0; k < MARKER_SEGMENTS; ++ k)
+                    gaps_data.add_triangle(gap_vertices,
+                                           gap_vertices + 1 + k,
+                                           gap_vertices + 1 + (k + 1) % MARKER_SEGMENTS);
+                gap_vertices += 1 + MARKER_SEGMENTS;
+            }
+        }
+    }
+    if (gap_vertices > 0)
+        m_support_zone_gaps.init_from(std::move(gaps_data));
+    if (green_from_coverage && vertex_count > 0)
+        m_support_zone_lit.init_from(std::move(init_data));
+}
+
+void GLCanvas3D::_render_support_zones()
+{
+    if (! m_support_zone_lit.is_initialized() && ! m_support_zone_gaps.is_initialized())
+        return;
+    // The markers are built in world coordinates from the model, and the model only settles when
+    // the drag ends — mid-drag they would hang where the object used to be. Hiding them while
+    // dragging is what the sequential-clearance overlay next door does, for the same reason.
+    if (m_mouse.dragging || m_gizmos.is_dragging())
+        return;
+
+    GLShaderProgram *shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    // 🔑 s286b, las dos quejas eran la misma causa vista por sus dos caras: UN solo ajuste servía
+    // a dos escenas contrarias.
+    //
+    //  - Fuera del gizmo la rejilla es CONTEXTO. El fondo es gris oscuro y delante sólo hay el
+    //    enforcer, que es un cristal claro, así que el verde saturado ya grita de sobra; y el
+    //    polygon offset de -1 la empujaba por delante de paredes que sí debían taparla, haciendo
+    //    de rayos-X gratis. Aquí manda la oclusión honrada: si hay pared delante, no se ve.
+    //  - Dentro del gizmo la rejilla es EL TEMA. "See through the part" baja el alfa pero la pieza
+    //    SIGUE escribiendo depth (la trampa de s284 y s286, otra vez por el mismo sitio): es
+    //    transparente para el ojo y opaca para el depth buffer, así que un marcador con depth test
+    //    se tira justo detrás de las caras que has vuelto translúcidas para poder mirar dentro.
+    //    Aquí sí toca rayos-X — y lo que la tapa lo has hecho translúcido a propósito.
+    const bool in_gizmo = (m_gizmos.get_current_type() == GLGizmosManager::EType::SupportZones);
+
+    shader->start_using();
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    // El verde sobre el gris del plater contrasta solo; sobre el cian del gizmo se funde, así que
+    // dentro la rejilla se va a lima-blanquecino, que es lo que el teal no puede igualar.
+    const ColorRGBA lit_color = in_gizmo ? ColorRGBA(0.75f, 1.00f, 0.35f, m_support_zone_marker_alpha)
+                                         : ColorRGBA(0.15f, 0.90f, 0.55f, 0.60f);
+
+    // El lift de 0.05 mm no basta contra el z-fighting a ángulos rasantes (s233,
+    // SnapDragIndicator::render), pero -1.0 empujaba tanto que atravesaba geometría real. Lo justo
+    // para no parpadear, no para colarse.
+    glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+    glsafe(::glPolygonOffset(-0.35f, -0.35f));
+    // Nunca escribe depth: un enforcer translúcido dibujado después no debe abrirle agujeros.
+    glsafe(::glDepthMask(GL_FALSE));
+
+    auto draw_markers = [this, shader](const ColorRGBA &base, float alpha_scale) {
+        if (! m_support_zone_lit.is_initialized())
+            return;
+        ColorRGBA c = base;
+        c[3] *= alpha_scale;
+        // GLModel::render() no empuja el color de la geometría al shader, así que se pone aquí como
+        // hace todo overlay plano de este canvas. set_color() también, para quien sí lo lea.
+        m_support_zone_lit.set_color(c);
+        shader->set_uniform("uniform_color", c);
+        m_support_zone_lit.render();
+    };
+
+    if (in_gizmo) {
+        // Pasada 1, sin depth: la rejilla está siempre, aunque haya pieza delante.
+        // Pasada 2, con depth: donde de verdad se ve, se lee entera.
+        //
+        // 🔑 s287 — el 0.45 de s286b se quedó corto en cuanto la pieza fantasma pasó a estar
+        // ENCENDIDA POR DEFECTO. Con el fantasma puesto, casi todo lo que se mira son marcadores
+        // vistos A TRAVÉS de la pieza, o sea esta pasada: a 0.45 los puntos parecían pegados a la
+        // transparencia del objeto en vez de ser lo que se está mirando. 0.80 los devuelve a
+        // "fuertes", que es lo que eran antes de que la rejilla tuviera que colarse por debajo.
+        glsafe(::glDisable(GL_DEPTH_TEST));
+        draw_markers(lit_color, 0.80f);
+        glsafe(::glEnable(GL_DEPTH_TEST));
+    }
+    draw_markers(lit_color, 1.0f);
+
+    // El mapa de huecos, con el mismo tratamiento: rojo, y dentro del gizmo también en rayos X,
+    // porque una zona sin cubrir escondida detrás de la pieza es justo la que hay que ver.
+    if (m_support_zone_gaps.is_initialized()) {
+        // 🔑 s287 — el rojo baja un punto de alarma, a coral. Motivo, dicho por él: buena parte de
+        // lo que se marca es la falda de la pieza que APOYA en la cama, donde el motor no va a
+        // fabricar soporte de todas formas. El mapa no está mintiendo — esa superficie sí pasa el
+        // umbral y sí está fuera de toda zona — pero un rojo puro dice "esto es un problema" y ahí
+        // casi nunca lo es.
+        //
+        // ⛔ Y NO se filtra por altura sobre la cama, que era la tentación. La razón por la que esa
+        // falda no necesita soporte no es su altura: es que cada capa crece hacia fuera poco
+        // respecto a la de debajo, y eso lo dice `detect_overhangs()` con un offset 2D entre capas
+        // — el criterio del MOTOR, que §8 nos prohíbe expresamente reimplementar aquí. Un corte por
+        // z sería un número inventado que además escondería huecos de verdad en piezas bajas.
+        const ColorRGBA gap_color(0.98f, 0.42f, 0.35f, in_gizmo ? m_support_zone_marker_alpha : 0.65f);
+        auto draw_gaps = [this, shader](const ColorRGBA &base, float alpha_scale) {
+            ColorRGBA c = base;
+            c[3] *= alpha_scale;
+            m_support_zone_gaps.set_color(c);
+            shader->set_uniform("uniform_color", c);
+            m_support_zone_gaps.render();
+        };
+        if (in_gizmo) {
+            // Mismo número que la rejilla verde, y por el mismo motivo (s287): un hueco sin cubrir
+            // escondido detrás de la pieza es justo el que hay que ver de lejos.
+            glsafe(::glDisable(GL_DEPTH_TEST));
+            draw_gaps(gap_color, 0.80f);
+            glsafe(::glEnable(GL_DEPTH_TEST));
+        }
+        draw_gaps(gap_color, 1.0f);
+    }
+
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glPolygonOffset(0.0f, 0.0f));
+    glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+
+    glsafe(::glDisable(GL_BLEND));
+    shader->stop_using();
+}
+
 void GLCanvas3D::_set_warning_notification_if_needed(EWarning warning)
 {
     _set_current();
@@ -12314,6 +12767,13 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
     // BBS: remove _u8L() for SLA
     case EWarning::SlaSupportsOutside: text = ("SLA supports outside the print area were detected."); error = ErrorType::PLATER_ERROR; break;
     case EWarning::SomethingNotShown:  text = _u8L("Only the object being edited is visible."); break;
+    // NEOTKO_SUPPORTZONES_TAG s284 F1 — the silent failure this whole phase exists to kill: a block
+    // that looks full on screen because it swallows solid material, and produces not a single gram.
+    // ⚠️ The text carries no count on purpose: plater warnings are closed by matching their text,
+    // so a message that changed with the count would leave stale copies behind.
+    case EWarning::SterileSupportZone:
+        text = _u8L("A support zone contains no downward-facing surface and will not generate any support.");
+        break;
     case EWarning::ObjectClashed:
         text = _u8L("An object is laid over the plate boundaries or exceeds the height limit.\n"
             "Please solve the problem by moving it totally on or off the plate, and confirming that the height is within the build volume.");

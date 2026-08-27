@@ -581,7 +581,7 @@ std::vector<wxBitmap*> get_extruder_color_icons(bool thin_icon/* = false*/)
                 const auto &mfs = pb->mixed_filaments.mixed_filaments();
                 size_t visible = 0;
                 for (const auto &mf : mfs) {
-                    if (mf.deleted || !mf.enabled) continue;
+                    if (!mf.is_live()) continue;
                     if (visible == mixed_idx) {
                         const bool is_gradient = is_simple_gradient(mf);
                         if (is_gradient) {

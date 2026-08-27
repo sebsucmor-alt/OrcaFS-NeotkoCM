@@ -1705,7 +1705,7 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     size_t visible_idx = 0;
     size_t running_idx = 0;  // counts all non-deleted entries for virtual ID calculation
     for (size_t j = 0; j < mfs.size(); ++j) {
-        if (mfs[j].deleted || !mfs[j].enabled) continue;
+        if (!mfs[j].is_live()) continue;
 
         // Calculate virtual ID for this mixed filament based on all non-deleted entries
         size_t mixed_virtual_id = num_physical + running_idx;

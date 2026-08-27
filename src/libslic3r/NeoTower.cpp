@@ -26,7 +26,7 @@
 
 // NEOTKO_NEOTOWER_TAG_START — NeoDebug routing
 #include "NeoDebug.hpp"  // NEOTKO_DEBUG_TAG — NeoDebug channels (extracted from
-                         // SurfaceColorMix during the Snapmaker 2.3.4 port).
+                         // ColorStitch during the Snapmaker 2.3.4 port).
 
 #define NT_LOG(msg) do { if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {  \
     std::ostringstream _nt_oss; _nt_oss << "[NEOTOWER] " << msg;         \
@@ -205,10 +205,12 @@ float NeoTower::box_drawer_extra_width(const PrintConfig& config)
 // ---------------------------------------------------------------------------
 void NeoTower::collect_and_plan(const Print& print)
 {
-    // NEOTKO_DEBUG_TAG s79h — write a session banner into ALL active /tmp/neotko_*.log
-    // files so successive slices in the same Orca process are visually separable.
-    // Without this, tests run back-to-back concatenate without delimiter and
-    // post-mortem becomes guesswork ("which slice produced this WARN?").
+    // NEOTKO_DEBUG_TAG s79h — write a session banner into ALL active log files so successive
+    // slices in the same Orca process are visually separable. Without this, tests run
+    // back-to-back concatenate without delimiter and post-mortem becomes guesswork.
+    // ⚠️ s285: this only fires when there IS a tower to plan, so a single-tool slice gets no
+    // separator. Moving it to Print::process() was tried and rolled back unverified — if the
+    // banner is ever revisited, that is the lead.
     NeoDebug::write_session_banner("collect_and_plan");
 
     NT_LOG("collect_and_plan() START");
@@ -366,7 +368,7 @@ void NeoTower::collect_all_events(const Print& print)
         for (int li = 0; li < (int)all_subs.size(); ++li) {
             for (const MultiPassSubLayer& sub : all_subs[li]) {
                 MultiPassScheduler::SublayerKey k;
-                k.chain_key    = (uint64_t)(uintptr_t)obj * 1000003ull + (uint64_t)li;
+                k.chain_key    = MultiPassScheduler::make_chain_key(obj, li, sub.island_key);
                 k.pass_idx     = sub.pass_idx;
                 k.tool_id      = sub.tool_id;
                 k.z_actual     = sub.print_z;
@@ -869,6 +871,10 @@ void NeoTower::collect_all_events(const Print& print)
             // (T_cap→T_ramp), which is the phantom that breaks TCR matching.
             bool               atomic    = false;
             int                effect    = 0;   // s115-dbg — (int)sub.effect (SurfacePassKind)
+            // NEOTKO_MPSCHEDULER_TAG s282b — mirrors MultiPassSubLayer::island_key so
+            // step5 builds the SAME chain identity the emission side does. Synthetic
+            // events (layer_idx == -1) leave it at 0.
+            int                island_key = 0;
         };
 
         if (mp_prime_vol > 0.f) {
@@ -889,6 +895,7 @@ void NeoTower::collect_all_events(const Print& print)
                         se.z_actual  = static_cast<float>(sub.print_z);
                         se.height    = sub.height;
                         se.new_tool  = sub.tool_id;
+                        se.island_key = sub.island_key;   // NEOTKO_MPSCHEDULER_TAG s282b
                         // NEOTKO_PATHBLEND_TAG — s88. PB sublayers are atomic
                         // chains. Mirror the same gate used in mp_znom_keys
                         // (NeoTower.cpp:243) for consistency.
@@ -933,7 +940,7 @@ void NeoTower::collect_all_events(const Print& print)
                 // NEOTKO_NEOTOWER_TAG — s78 fix (sandwich purge knob): sublayer tool
                 // changes are transitions BETWEEN passes of the SAME surface (sandwich),
                 // not full inter-color object changes. They must purge
-                // `multipass_prime_volume` (the "SurfaceColorMix wipe reserve" UI knob,
+                // `multipass_prime_volume` (the "ColorStitch wipe reserve" UI knob,
                 // already set into se.wipe_vol at construction), NOT flush_volumes_matrix.
                 // The old matrix override (a) made the knob DEAD — any populated flush
                 // matrix always won — and (b) forced a full ~15 mm³ flush per thin
@@ -1075,7 +1082,7 @@ void NeoTower::collect_all_events(const Print& print)
                             }
                             _ts << "}";
                             // s115-dbg — effect/atomic provenance of this band z.
-                            // SurfacePassKind: 0=None 1=Solid 2=ColorMix 3=PathBlend.
+                            // SurfacePassKind: 0=None 1=Solid 2=ColorStitch 3=PathBlend.
                             _ts << " all_atomic=" << z_info[zum].all_atomic
                                 << " effects={";
                             bool _ef = true;
@@ -1159,7 +1166,7 @@ void NeoTower::collect_all_events(const Print& print)
             // El desempate final NO es cosmético: es la ÚNICA cosa que fija el orden
             // de herramientas del plan cuando un z_nominal tiene varios sublayers con
             // (z_nominal, z_actual, pass_idx, chain_key) IDÉNTICOS — el caso normal de
-            // un objeto con 3 buckets ColorMix en el mismo plano (T2/p1, T1/p1, T0/p1
+            // un objeto con 3 buckets ColorStitch en el mismo plano (T2/p1, T1/p1, T0/p1
             // @z15.8498). Ahí order_sublayers_by_tool no tiene ninguna decisión que
             // tomar (una sola cadena, todo empatado) y devuelve el orden de ENTRADA
             // tal cual → barajar la entrada = barajar el plan.
@@ -1262,7 +1269,7 @@ void NeoTower::collect_all_events(const Print& print)
                 // (MultiPassScheduler::order_sublayers_by_tool_windowed), so plan order ==
                 // emission order by construction — this is what solved the test04 4-cube
                 // atomic-chain crash. Fusion of consecutive same-tool siblings is preserved as a
-                // post-pass batching so tower compaction across ColorMix-style multi-object
+                // post-pass batching so tower compaction across ColorStitch-style multi-object
                 // lámina is not lost. See NEOTOWER.md §6 and the s88 atomic-chain notes.
                 {
                     // Build SublayerKey items from REAL events at this z_nominal.
@@ -1275,11 +1282,12 @@ void NeoTower::collect_all_events(const Print& print)
                         const SurfaceEvent& se = surf_events[k];
                         if (se.obj == nullptr) continue;
                         MultiPassScheduler::SublayerKey kk;
-                        // chain_key IDENTICAL to GCode.cpp:5288 (single source of
-                        // truth — diverging here would re-introduce the very bug
-                        // this scheduler exists to fix).
-                        kk.chain_key    = (uint64_t)(uintptr_t)se.obj * 1000003ull
-                                          + (uint64_t)se.layer_idx;
+                        // NEOTKO_MPSCHEDULER_TAG s282b — the "IDENTICAL to GCode.cpp"
+                        // comment that used to live here was an honour system over
+                        // duplicated arithmetic. Now all three sites call the one
+                        // function, so they cannot drift apart.
+                        kk.chain_key    = MultiPassScheduler::make_chain_key(
+                                              se.obj, se.layer_idx, se.island_key);
                         kk.pass_idx     = se.pass_idx;
                         kk.tool_id      = se.new_tool;
                         kk.z_actual     = (double)se.z_actual;
@@ -1480,7 +1488,7 @@ void NeoTower::collect_all_events(const Print& print)
 
     // ------------------------------------------------------------------
     // 1c. Structural layers — real layers with no toolchange events in
-    //     prints with MultiPass/ColorMix sublayer activity.
+    //     prints with MultiPass/ColorStitch sublayer activity.
     //
     //     KEY: we do NOT gate on lt.has_wipe_tower. In single-filament MP
     //     scenarios (test 1b) or mixed-object scenarios where only one
@@ -1795,7 +1803,7 @@ void NeoTower::collect_all_events(const Print& print)
     // max(), NOT += : two objects generating the same TC T0→T1 at z=0.65 only need
     // the tower to purge ONCE with the worst-case volume — max(vol_A, vol_B).
     // Summing would imply purging per object sequentially, which is not how the
-    // wipe tower works. Affects ColorMix (dither) and MultiPass (identical passes).
+    // wipe tower works. Affects ColorStitch (dither) and MultiPass (identical passes).
     NeoTowerPure::dedup_events(m_events);
     NeoTowerPure::dedup_events(m_growth_events);  // NEOTKO_NEOTOWER_TAG — hardening P5
 
@@ -2039,7 +2047,7 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     // NEOTKO_NEOTOWER_TAG s114 — standalone painted-layer detection (by composition).
     // A canonical layer whose z_nominal carries NO real (non-sublayer) event is
     // realised entirely by MultiPass sublayers → it IS the layer (PathBlend /
-    // ColorMix / mixed / any gradient shape), not a decoration of a real one.
+    // ColorStitch / mixed / any gradient shape), not a decoration of a real one.
     // Mark its sublayer events so the s102-h lámina classification below treats
     // them as structural planes (keep wall+grid + advance the emitting-plane
     // tracker) instead of frame-free same-plane decorations. Without this, a run
@@ -2430,7 +2438,7 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                         (last_sublayer_z_nominal > 0.f && !_gev.is_sublayer);
                     if (bridge_follows_sublayer) {
                         // NEOTKO_NEOTOWER_TAG — s78 fix (append_tcr THROW on multi-object
-                        // ColorMix: A=gradient + B=inverted gradient + C=plain on top).
+                        // ColorStitch: A=gradient + B=inverted gradient + C=plain on top).
                         // For the real event right after a sublayer group, ev.old_tool is
                         // AUTHORITATIVE — 1a tracked it from the actual sublayer exit (the
                         // GCode writer's tool at the nominal layer, via sublayer_z_tool).

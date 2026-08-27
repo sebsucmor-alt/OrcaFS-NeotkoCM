@@ -18,7 +18,7 @@
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/ColorSci/ColorHeightEnvelope.hpp"
 #include "libslic3r/ColorSci/SlopePerimeterRecolor.hpp"
-#include "libslic3r/SurfaceColorMix.hpp"
+#include "libslic3r/ColorStitch.hpp"
 
 #include <imgui/imgui.h>
 #include <GL/glew.h>
@@ -124,7 +124,7 @@ void GLGizmoPrecisionALH::ensure_session()
         const bool has_penu_override = mo->config.has("penultimate_top_layers");
         const int  penu_layers = has_penu_override ? mo->config.opt_int("penultimate_top_layers")
                                                      : full_config.opt_int("penultimate_top_layers");
-        const bool wants_penu = Slic3r::SurfaceColorMix::object_painter_wants_penu(mo) || penu_layers > 0;
+        const bool wants_penu = Slic3r::ColorStitch::object_painter_wants_penu(mo) || penu_layers > 0;
 
         const bool has_tst_override = mo->config.has("top_shell_thickness");
         const double top_shell_thickness = has_tst_override ? mo->config.opt_float("top_shell_thickness")
@@ -485,7 +485,7 @@ void GLGizmoPrecisionALH::on_render()
 // NEOTKO_ALHCOLOR_TAG — replanteo TD-vs-slope (Frente 1, s220). Z-INDEPENDENT
 // half of the envelope resolution: has_color gate + worst-case materials
 // across all 4 configured filament slots — same spirit/cost as
-// gizmo_materials() in GLGizmoColorMixPainter.cpp. Split out of
+// gizmo_materials() in GLGizmoColorStitchPainter.cpp. Split out of
 // compute_active_color_envelope() so render_curve_editor()'s per-sample
 // shading loop can call this ONCE per frame and reuse the result across
 // every sample, instead of re-reading app_config/materials up to
@@ -513,16 +513,16 @@ bool GLGizmoPrecisionALH::resolve_color_context(Slic3r::ColorSci::ColorHeightCon
     // Gate on the engine's most-complete "painter mode" check — Fill.cpp's
     // _mp_painter_mode (paint OR sticker OR Mixed Filament Object mode,
     // Fill.cpp:1663-1673) is the only one of the engine's several copies of
-    // this check that includes all three sources; SurfaceColorMix.cpp
+    // this check that includes all three sources; ColorStitch.cpp
     // (assign_and_group_tools) and ToolOrdering.cpp are missing the
     // mixed_filament_sandwich_mode term despite a comment claiming parity —
     // a pre-existing engine inconsistency, not something to replicate here.
     // NOT ModelObject::is_mm_painted() — that only reflects the legacy
-    // mmu_segmentation_facets store and is never populated by the ColorMix
+    // mmu_segmentation_facets store and is never populated by the ColorStitch
     // painter, so it would never trigger for this feature's actual target.
     const auto* mf_opt = dynamic_cast<const ConfigOptionBool*>(mo->config.option("mixed_filament_sandwich_mode"));
-    const bool manual_color = Slic3r::SurfaceColorMix::object_has_any_colormix_paint(mo)
-                             || Slic3r::SurfaceColorMix::object_has_any_colormix_stickers(mo);
+    const bool manual_color = Slic3r::ColorStitch::object_has_any_colorstitch_paint(mo)
+                             || Slic3r::ColorStitch::object_has_any_colorstitch_stickers(mo);
     // NEOTKO_ALHCOLOR_TAG — 5.4b (s222, user-reported: Cycle objects showed no envelope, no
     // slope preview, and never wrote a recolor blob). A MixedFilament PATTERN — the object's
     // extruder pointing at a mixed row (Cycle/gradient/manual) — IS a color signal: the
@@ -541,14 +541,14 @@ bool GLGizmoPrecisionALH::resolve_color_context(Slic3r::ColorSci::ColorHeightCon
         // MixedFilament pattern, its palette is KNOWN — the recipe's own components (same
         // resolver Fase 5.2 uses) — so scope the envelope to exactly those tools. Manual
         // paint/stickers still fall back to worst-case-4 (the "which tools are painted"
-        // resolver for the colormix facet store doesn't exist — documented Nivel 0 gap).
+        // resolver for the colorstitch facet store doesn't exist — documented Nivel 0 gap).
         std::vector<unsigned int> comp;
         if (!manual_color)
             comp = pattern_component_tools(pattern_id);
         if (!comp.empty()) {
             ctx.painted_tools.assign(comp.begin(), comp.end());
         } else {
-            // Same pattern as GLGizmoColorMixPainter::gizmo_materials(): worst
+            // Same pattern as GLGizmoColorStitchPainter::gizmo_materials(): worst
             // case across all 4 configured filament slots, not filtered to which
             // tool is actually painted where (Nivel 0 scope, plan §3).
             ctx.painted_tools = { 0, 1, 2, 3 };
@@ -818,7 +818,7 @@ void GLGizmoPrecisionALH::render_slope_recolor_preview(double z_mm, double point
 
     // Fase 5.1 — the numeric readout of the violet shading. TextWrapped (not TextColored)
     // so the notice folds inside the fixed window width instead of clipping.
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.5f, 0.95f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Slope));
     ImGui::TextWrapped("%s",
         (_u8L("Slope here exposes") + " " + std::to_string(n_exposed) + " "
          + _u8L("inner perimeter(s) at this height — pattern will show them.")).c_str());
@@ -833,7 +833,7 @@ void GLGizmoPrecisionALH::render_slope_recolor_preview(double z_mm, double point
     const bool in_top_band = std::any_of(m_top_zone_bands.begin(), m_top_zone_bands.end(),
         [z_mm](const Slic3r::ColorSci::TopZoneBand& b) { return z_mm >= b.z_lo_mm && z_mm <= b.z_hi_mm; });
     if (in_top_band) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.15f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
         ImGui::TextWrapped("%s",
             _u8L("Sandwich + slope zone: fine layers here would need the recipe spread "
                  "across top layers (not available yet) — thick top wins for now.").c_str());
@@ -1156,6 +1156,7 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
 
     const float win_w = 380.0f;
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    neo_push_window_style(); // 🚨 antes del Begin: WindowBg y el titulo se resuelven al abrir
     GizmoImguiBegin(on_get_name(), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
     ImGui::SetWindowSize(ImVec2(win_w, 0.f), ImGuiCond_Always);
 
@@ -1175,6 +1176,7 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
         neo_pop_panel_style();
         ImGui::PopTextWrapPos();
         GizmoImguiEnd();
+        neo_pop_window_style();
     };
 
     if (!m_have_session) {
@@ -1241,7 +1243,7 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
                                            "layer height is unrestricted.").c_str());
         } else {
             if (color_env.conflict) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.15f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
                 ImGui::TextWrapped("%s",
                     _u8L("Color fidelity and pattern resolution don't overlap here "
                          "— prioritizing color fidelity.").c_str());

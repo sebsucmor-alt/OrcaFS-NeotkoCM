@@ -385,8 +385,30 @@ class GLCanvas3D
         ObjectClashed,
         GCodeConflict,
         ToolHeightOutside,
-        SpiralLiftNearBoundary  // Snapmaker: 螺旋抬升靠近边界警告
+        SpiralLiftNearBoundary,  // Snapmaker: 螺旋抬升靠近边界警告
+        SterileSupportZone       // NEOTKO_SUPPORTZONES_TAG s284 F1 — a support zone that catches nothing
     };
+
+    // NEOTKO_SUPPORTZONES_TAG s284 F1 — what each support zone is actually going to catch.
+    // Built in world coordinates so one model covers every instance without a per-instance
+    // transform at render time.
+    GLModel m_support_zone_lit;
+    bool    m_support_zone_sterile { false };
+    // s286b: la opacidad de la rejilla DENTRO del gizmo de zonas. Fuera manda el valor discreto de
+    // _render_support_zones(); dentro es el tema y el gizmo lo gobierna, porque a través de una
+    // pieza translúcida el punto justo depende de la opacidad que el usuario haya elegido y eso no
+    // se acierta desde el código. Deslizador en el panel del gizmo.
+    float   m_support_zone_marker_alpha { 1.00f };   // s287: los marcadores son EL TEMA, no un velo
+    // s286b — el mapa de "esto se te ha quedado sin sujetar". Rejilla ROJA sobre la superficie que
+    // pasa el umbral y no cae dentro de ninguna zona. 🚨 Render y sólo render (§8): quien decide
+    // que hace falta soporte sigue siendo detect_overhangs() en el motor.
+    GLModel m_support_zone_gaps;
+    bool    m_support_zone_show_gaps { false };
+    float   m_support_zone_gap_normal_z { -0.7071f };   // -cos(45°)
+    // El paso de la rejilla del MAPA, en mm. Deliberadamente independiente de
+    // support_base_pattern_spacing: aquél es la resolución del pilar que se imprime, éste es cuánto
+    // detalle quieres ver. Atarlos obligaría a cambiar un ajuste de impresión para mirar mejor.
+    float   m_support_zone_gap_step { 1.0f };
 
     class RenderStats
     {
@@ -869,6 +891,9 @@ public:
 
     unsigned int get_volumes_count() const;
     const GLVolumeCollection& get_volumes() const { return m_volumes; }
+    // NEOTKO_SUPPORTZONES_TAG s286 — non-const twin, so a gizmo can flip render switches on the
+    // collection (set_transparent_depth_write) instead of only mutating the volumes it points to.
+    GLVolumeCollection& get_volumes() { return m_volumes; }
     enum class ResetVolumesMode {
         Normal,
         CanvasDestruction
@@ -1203,6 +1228,20 @@ public:
     bool is_overhang_shown() const { return m_slope.is_GlobalUsed(); }
     void show_overhang(bool show) { m_slope.globalUse(show); }
 
+    void set_support_zone_marker_alpha(float a) { m_support_zone_marker_alpha = a; }
+    // El umbral se pasa desde el gizmo para que el mapa y el sombreado de voladizos no puedan
+    // discrepar: un solo número, dos dibujos.
+    void set_support_zone_gaps(bool on, float max_normal_z, float step_mm) {
+        if (on != m_support_zone_show_gaps || max_normal_z != m_support_zone_gap_normal_z
+            || step_mm != m_support_zone_gap_step) {
+            m_support_zone_show_gaps    = on;
+            m_support_zone_gap_normal_z = max_normal_z;
+            m_support_zone_gap_step     = step_mm;
+            m_support_zone_gaps.reset();
+            _update_support_zones();
+        }
+    }
+    float get_support_zone_marker_alpha() const { return m_support_zone_marker_alpha; }
     bool is_using_slope() const { return m_slope.is_used(); }
     void use_slope(bool use) { m_slope.use(use); }
     void set_slope_normal_angle(float angle_in_deg) { m_slope.set_normal_angle(angle_in_deg); }
@@ -1351,6 +1390,12 @@ private:
     // NEOTKO_SMOOTHNORMALS_TAG s229: live shading tuning panel, gated on ORCA_DEBUG_SHADING.
     void _render_shading_debug_panel();
 
+    // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — the NeoDebug console: one row per log channel with its
+    // switch and its current file size, plus stop / resume / clear / use name. Gated on
+    // NeoDebug::console_enabled() (ORCA_DEBUG_ALL, which is what the user launches with).
+    // See docs/FUTURE/NEODEBUG_CONSOLE_PLAN.md.
+    void _render_neodebug_console();
+
     // NEOTKO_PHOTOMODE_TAG s242 — see PhotoMode.hpp / docs/FUTURE/PHOTO_MODE_PLAN.md.
     // The cyclorama ("lightbox") that replaces the bed, and the user-facing panel that drives the
     // mode. The panel is NOT a debug window: unlike _render_shading_debug_panel above it is not
@@ -1420,6 +1465,12 @@ private:
 	void _load_sla_shells();
     void _update_sla_shells_outside_state();
     void _set_warning_notification_if_needed(EWarning warning);
+    // NEOTKO_SUPPORTZONES_TAG s284 F1 — probes every support enforcer on the plate ONCE and feeds
+    // both outputs from that single pass: the highlight geometry and the sterile-zone flag. They
+    // answer the same question, so they must never be able to disagree.
+    // See libslic3r/Feature/SupportZones/SupportZoneProbe.hpp.
+    void _update_support_zones();
+    void _render_support_zones();
 
     //BBS: add partplate print volume get function
     BoundingBoxf3 _get_current_partplate_print_volume();

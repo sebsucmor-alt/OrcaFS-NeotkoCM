@@ -1012,6 +1012,7 @@ void GLGizmoHeightAdaptiveEffects::on_render_input_window(float x, float y, floa
 
     const float win_w = 540.0f;
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    neo_push_window_style(); // 🚨 antes del Begin: WindowBg y el titulo se resuelven al abrir
     GizmoImguiBegin(on_get_name(), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
     ImGui::SetWindowSize(ImVec2(win_w, 0.f), ImGuiCond_Always);
 
@@ -1046,6 +1047,7 @@ void GLGizmoHeightAdaptiveEffects::on_render_input_window(float x, float y, floa
     neo_pop_panel_style();
     ImGui::PopTextWrapPos();
     GizmoImguiEnd();
+    neo_pop_window_style();
 }
 
 void GLGizmoHeightAdaptiveEffects::render_panel_body(float win_w)
@@ -1271,7 +1273,7 @@ void GLGizmoHeightAdaptiveEffects::render_panel_body(float win_w)
                 std::snprintf(buf, sizeof(buf), "%s: %.3f mm (%.0f%%)",
                               _u8L("Line shift per layer").c_str(), shift, pct);
                 const bool risky = pct > 25.;
-                if (risky) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.55f, 0.15f, 1.f));
+                if (risky) ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
                 ImGui::TextUnformatted(buf);
                 if (risky) ImGui::PopStyleColor();
                 help_marker(_u8L("How far the infill lines of one layer land from the ones below, at the far "
@@ -1299,7 +1301,7 @@ void GLGizmoHeightAdaptiveEffects::render_panel_body(float win_w)
             for (size_t i = 0; i + 1 < ns.size(); ++ i)
                 shortest = std::min(shortest, layers_between(ns[i].z_mm, ns[i + 1].z_mm));
             if (shortest != INT_MAX && shortest < 4) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.55f, 0.15f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
                 ImGui::TextWrapped("%s", (_u8L("Shortest band is") + " " + std::to_string(shortest) + " "
                                           + _u8L("layers — under about 4 layers the jump costs more than it gives.")).c_str());
                 ImGui::PopStyleColor();
@@ -1322,7 +1324,7 @@ void GLGizmoHeightAdaptiveEffects::render_panel_body(float win_w)
                 fz = o->serialize();
             }
             if (fz == "none" || fz.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.55f, 0.15f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
                 ImGui::TextWrapped("%s", _u8L("Fuzzy skin is off for this object, so this curve does nothing. "
                                                "It scales the fuzzy skin thickness; it does not turn the "
                                                "effect on.").c_str());
@@ -1349,7 +1351,7 @@ void GLGizmoHeightAdaptiveEffects::render_panel_body(float win_w)
                 const bool mm_painted = std::any_of(mo->volumes.begin(), mo->volumes.end(),
                                                     [](const ModelVolume* v) { return !v->mmu_segmentation_facets.empty(); });
                 if (mm_painted || mo->is_fuzzy_skin_painted()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.4f, 0.3f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Forbid));
                     ImGui::TextWrapped("%s", _u8L("This object is color- or fuzzy-skin-painted. The slicer drops XY "
                                                    "size compensation on painted objects, so this curve will have no "
                                                    "effect.").c_str());

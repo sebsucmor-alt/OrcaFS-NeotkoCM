@@ -36,6 +36,7 @@ namespace Slic3r {
 class GCode;
 class Layer;
 class ModelObject;
+class ModelVolume;
 class Print;
 class PrintObject;
 class SupportLayer;
@@ -250,6 +251,24 @@ struct PrintInstance
 
 typedef std::vector<PrintInstance> PrintInstances;
 
+// NEOTKO_SUPPORTZONES_TAG s286 F2 — one support zone, sliced on its own.
+// docs/FUTURE/SUPPORT_ZONES_PLAN.md §4 (a zone is a ModelVolume of type SUPPORT_ENFORCER plus its
+// ModelConfigObject) and §5 T2 (why the union across volumes had to go).
+//
+// `model_volume` is the volume inside the Print's OWN copy of the model, which is where F3 will
+// read the per-zone recipe from once PrintApply copies it over (§5 T3). Holding the pointer here
+// costs nothing and saves a lookup by id later.
+struct SupportZoneSlices
+{
+    // Priority = position in ModelObject::volumes, i.e. creation order, which is also the order the
+    // object list shows and lets the user drag around. §6 F2 asks for a deterministic order that is
+    // a business rule and not an implementation detail: this is it.
+    size_t                 priority { 0 };
+    const ModelVolume     *model_volume { nullptr };
+    // Indexed by object layer, exactly like slice_support_volumes()'s output.
+    std::vector<Polygons>  slices;
+};
+
 class PrintObjectRegions
 {
 public:
@@ -350,7 +369,7 @@ private:
 // NEOTKO_SANDWICH_TAG — opaque declaration of the Sandwich pass-kind enum
 // (full definition in SurfacePassKind.hpp). Fixed underlying type → complete
 // type here, so MultiPassSubLayer::effect can be declared without the heavy
-// SurfaceColorMix.hpp include. 1 == SurfacePassKind::Solid.
+// ColorStitch.hpp include. 1 == SurfacePassKind::Solid.
 enum class SurfacePassKind : int;
 
 // NEOTKO_MULTIPASS_TAG_START — Virtual sublayer for MultiPass / Sandwich Z-stacking.
@@ -365,7 +384,7 @@ struct MultiPassSubLayer {
     int                       tool_id    = 0;                  // 0-based physical extruder
     int                       pass_idx   = 0;                  // 0-based position in MultiPassConfig
     // NEOTKO_SANDWICH_TAG — effect kind of this pass (informational / debug).
-    // A ColorMix lámina is emitted as N separate single-tool bucket sublayers
+    // A ColorStitch lámina is emitted as N separate single-tool bucket sublayers
     // (Fill.cpp FASE 2), so the GCode handler / ToolOrdering / NeoTower treat
     // every sublayer uniformly — exactly like a MultiPass pass — regardless of
     // `effect`. 1 == SurfacePassKind::Solid.
@@ -377,7 +396,7 @@ struct MultiPassSubLayer {
     ExtrusionEntityCollection fills;          // infill paths — tool stored directly, no mm3 encoding
     ExtrusionEntityCollection perimeters;     // cloned+scaled perimeter paths (multipass_perimeter_override only)
     // NEOTKO_PATHBLEND_TAG — PathBlend ramp/cap as a sublayer.
-    // pathblend_pass: -1 = not a PathBlend sublayer (Solid/ColorMix — emitted flat by
+    // pathblend_pass: -1 = not a PathBlend sublayer (Solid/ColorStitch — emitted flat by
     // the GCode handler); 0 = ramp (variable-Z), 1 = cap (Full only). When >= 0 the
     // handler routes `fills` through PathBlendEngine::apply_path() using `pathblend_blob`.
     int                       pathblend_pass = -1;
@@ -387,6 +406,13 @@ struct MultiPassSubLayer {
     // ToolOrdering treat bands as co-planar buckets of one layer; the dispatcher
     // substitutes real_extrude_z for the Z move when > 0. Default 0 = legacy.
     coordf_t                  real_extrude_z = 0.;
+    // NEOTKO_MPSCHEDULER_TAG s282b — which painted island this sublayer belongs to
+    // (the painter's slot tag). Feeds MultiPassScheduler::make_chain_key so two
+    // sublayers of the same object+layer that sit on DISJOINT XY islands stop being
+    // treated as one stacking chain. 0 = "no island info", which reproduces the
+    // pre-s282b single-chain behaviour. See the make_chain_key comment for the
+    // Assemble toolchange storm this fixes.
+    int                       island_key = 0;
 };
 // NEOTKO_MULTIPASS_TAG_END
 
@@ -429,6 +455,13 @@ public:
     // source consumed by NeoTower + the GCode dispatcher). Indexed by layer_idx.
     const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
     std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
+    // NEOTKO_MULTIPASS_MINLAYER_TAG — s276: painter slot tags whose Sandwich recipe had to
+    // be collapsed on this layer because a band fell below the minimum printable height.
+    // Indexed by layer_idx exactly like m_multipass_sublayers, so each fill thread only ever
+    // writes its OWN layer's vector (no race, no mutex). Unioned into a single user-facing
+    // warning at the end of PrintObject::infill().
+    const std::vector<std::vector<int>>& minlayer_collapsed_slots() const { return m_minlayer_collapsed_slots; }
+    std::vector<std::vector<int>>&       minlayer_collapsed_slots()       { return m_minlayer_collapsed_slots; }
     // NEOTKO_TEXTUREBUMP_TAG — Fase 3: precomputed, already slope-limited per-object tables, one
     // per distinct TextureBumpConfig actually in use (union of every PrintRegion's config and
     // every painted zone's config) -- see make_perimeters() in PrintObject.cpp. Consumed by
@@ -570,6 +603,51 @@ public:
     std::vector<Polygons>       slice_support_blockers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_BLOCKER); }
     std::vector<Polygons>       slice_support_enforcers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_ENFORCER); }
 
+    // NEOTKO_SUPPORTZONES_TAG s286 F2 — T2: one stream per enforcer volume.
+    // docs/FUTURE/SUPPORT_ZONES_PLAN.md §5 T2. slice_support_volumes() appends every volume of the
+    // type and then union_()s the lot, so a plate with two blocks produces ONE shape and the
+    // corridor of §4.2 ends up guided by the centroid of the union — which jumps the moment one
+    // block starts or stops covering a layer. That is the degradation F0 documented and the reason
+    // this variant exists: same slicing, no union across volumes, identity kept.
+    std::vector<SupportZoneSlices> slice_support_enforcers_per_zone() const;
+
+    // NEOTKO_SUPPORTZONES_TAG s286c F4 — el material por zona necesita que la identidad SOBREVIVA
+    // hasta el toolpath, y hoy no lo hace: bottom_contact_layers_and_layer_support_areas() calcula
+    // el área de cada zona por capa y la funde en `layer_support_areas`. A partir de ahí no queda
+    // rastro de quién era quién, así que no hay forma de decidir con qué herramienta se extruye.
+    //
+    // 🔑 Se guarda POR FAMILIA, no por zona, y la distinción es la que hace barata la fase: la
+    // fusión de s286b ya define familia = misma config, así que **dos materiales distintos son dos
+    // familias distintas y sus áreas están particionadas por construcción**. El reparto exclusivo
+    // que sobraba entre zonas iguales es justo el que hace falta aquí.
+    struct SupportFamily
+    {
+        // Slots de filamento, 1..N. 0 = "como el objeto", que es lo que Orca ya entiende por 0 en
+        // support_filament / support_interface_filament.
+        int body_filament      { 0 };
+        int interface_filament { 0 };
+    };
+    struct SupportFamilyAreas
+    {
+        std::vector<SupportFamily> families;
+        // [capa de objeto][familia] — mismo índice de capa que `layer_support_areas`.
+        std::vector<std::vector<Polygons>> areas;
+        // print_z de cada capa de objeto, para que el lado del toolpath —que trabaja con capas de
+        // SOPORTE, que no están sincronizadas con las del objeto— pueda encontrar la suya sin
+        // conocer al PrintObject.
+        std::vector<float> layer_print_z;
+        // Con una sola familia no hay nada que repartir: el generador toma su camino de siempre y
+        // el gcode sale idéntico al de hoy. Es la misma regla del §4.3 que dejó limpia la
+        // regresión de s286b.
+        bool trivial() const { return families.size() < 2; }
+    };
+    const SupportFamilyAreas& support_family_areas() const { return m_support_family_areas; }
+    // Las áreas por familia en la capa de objeto más cercana a este print_z, o nullptr. El lado del
+    // toolpath trabaja con capas de SOPORTE, que no están sincronizadas con las del objeto, así que
+    // la búsqueda por z es suya y no del llamante.
+    const std::vector<Polygons>* support_family_areas_at(float print_z) const;
+    void  set_support_family_areas(SupportFamilyAreas &&a) const { m_support_family_areas = std::move(a); }
+
     // Helpers to project custom facets on slices
     void project_and_append_custom_facets(bool seam, EnforcerBlockerType type, std::vector<Polygons>& expolys, std::vector<std::pair<Vec3f,Vec3f>>* vertical_points=nullptr) const;
 
@@ -617,6 +695,12 @@ public:
     static PrintObjectConfig object_config_from_model_object(const PrintObjectConfig &default_object_config, const ModelObject &object, size_t num_extruders);
 
 private:
+    // 🚨 `mutable` y con setter const a propósito: lo rellena el generador de soporte, que corre
+    // dentro de un paso const desde fuera. Es caché derivada del modelo, no estado del objeto — la
+    // misma figura que las cachés `mutable` del gizmo, y por el mismo motivo: calcularlo no cambia
+    // nada de lo que el objeto es.
+    mutable SupportFamilyAreas m_support_family_areas;
+
     void make_perimeters();
     void prepare_infill();
     void infill();
@@ -676,6 +760,8 @@ private:
     // Populated by the Sandwich engine; empty until that lands (NeoTower then
     // sees no sublayer events and uses the plain real-layer path).
     std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers;
+    // NEOTKO_MULTIPASS_MINLAYER_TAG — see minlayer_collapsed_slots() accessors above.
+    std::vector<std::vector<int>>               m_minlayer_collapsed_slots;
     // NEOTKO_TEXTUREBUMP_TAG — see texture_bump_tables() accessors above.
     Feature::TextureBump::TextureBumpTableMap   m_texture_bump_tables;
     // NEOTKO_GRAVITY_TAG s226 — see gravity_floor() accessors above. Rebuilt each make_perimeters().

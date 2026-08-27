@@ -1,5 +1,6 @@
 // Orca: NeoWipeTower for all non bbl printers, support all MMU device and toolchanger.
 #include "NeoWipeTower.hpp"
+#include "../NeoDebug.hpp"  // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — log path + live channel switch
 #include "../NeoTowerZ.hpp"  // NEOTKO_NEOTOWER_TAG — synthetic/same_plane thresholds (NOMINAL_LH_MIN)
 
 #include <cassert>
@@ -2192,10 +2193,11 @@ void NeoWipeTower::toolchange_Wipe(NeoWipeTowerWriter& writer, const WipeTower::
     }
     // s117-dbg — WIPE_COVERAGE: per-wipe vertical ledger, mirror of WALL_COVERAGE.
     {
-        static const bool _wt_dbgw = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbgw = NeoDebug::enabled(NeoDebug::WIPETOWER);
         if (_wt_dbgw && m_layer_info != m_plan.end()) {
-            static std::ofstream _wt_logw("/tmp/neotko_wipetower.log", std::ios::app);
+            std::ofstream _wt_logw(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
             const float _h_nom = std::max(m_layer_height, 0.04f);
             _wt_logw << "[NEOTOWER] WIPE_COVERAGE"
                      << " z=" << m_layer_info->z
@@ -2245,8 +2247,9 @@ void NeoWipeTower::toolchange_Wipe(NeoWipeTowerWriter& writer, const WipeTower::
     // box that is too shallow for the ordered volume truncates the purge (the carolina-ibiza
     // #18 ColorStitch case: real-event slot_height = nominal 0.2 → shallow box → 4 passes).
     // Gated by ORCA_DEBUG_WIPETOWER / ORCA_DEBUG_ALL; emits to /tmp/neotko_wipetower.log.
-    static const bool _wt_dbgtr = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                               || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+    // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbgtr = NeoDebug::enabled(NeoDebug::WIPETOWER);
     const float _tr_box_depth = cleaning_box.lu.y() - cleaning_box.ld.y();
     const float _tr_x_ordered = x_to_wipe; // length still in mm before the loop consumes it
     int         _tr_exit      = 0;         // 1 = box-full (truncated), 2 = volume satisfied
@@ -2348,7 +2351,7 @@ void NeoWipeTower::toolchange_Wipe(NeoWipeTowerWriter& writer, const WipeTower::
 
     // NEOTKO_NEOTOWER_TAG s136-dbg — emit the purge-truncation ledger for this toolchange.
     if (_wt_dbgtr && m_layer_info != m_plan.end()) {
-        static std::ofstream _wt_logtr("/tmp/neotko_wipetower.log", std::ios::app);
+        std::ofstream _wt_logtr(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
         const bool _under = (_tr_exit == 1 && x_to_wipe > WT_EPSILON);
         _wt_logtr << "[NEOTOWER] PURGE_TRUNC"
                   << " z="          << m_layer_info->z
@@ -2467,10 +2470,11 @@ WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
         // NEOTKO_NEOTOWER_TAG s102 — also honor ORCA_DEBUG_ALL (NeoDebug::enabled
         // accepts both; the s101 gate only checked the channel var, so slicing with
         // ORCA_DEBUG_ALL produced NT_LOG output but silenced this instrumentation).
-        static const bool _wt_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                 || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbg = NeoDebug::enabled(NeoDebug::WIPETOWER);
         if (_wt_dbg) {
-            static std::ofstream _wt_log("/tmp/neotko_wipetower.log", std::ios::app);
+            std::ofstream _wt_log(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
             const bool _at_end = (m_layer_info == m_plan.end());
             _wt_log << "[NEOTOWER] finish_layer ENTER"
                     << " idx=" << (_at_end ? -1 : (int)(m_layer_info - m_plan.begin()))
@@ -2493,10 +2497,11 @@ WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
         }
     }
     if (_na_skip_frame_synth_sub) {
-        static const bool _wt_dbg2 = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr); // NEOTKO_NEOTOWER_TAG s102
+        // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbg2 = NeoDebug::enabled(NeoDebug::WIPETOWER); // NEOTKO_NEOTOWER_TAG s102
         if (_wt_dbg2) {
-            static std::ofstream _wt_log2("/tmp/neotko_wipetower.log", std::ios::app);
+            std::ofstream _wt_log2(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
             _wt_log2 << "[NEOTOWER] finish_layer SKIP_FRAME_SYNTH_SUB"
                      << " z=" << m_layer_info->z
                      << " next_z=" << (m_layer_info + 1)->z
@@ -2623,10 +2628,11 @@ WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
     // PERMANENT regression canary — these failures historically come back; do NOT
     // remove. GAP is the primary signal (measured from real z's, robust).
     {
-        static const bool _wt_dbgc = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbgc = NeoDebug::enabled(NeoDebug::WIPETOWER);
         if (_wt_dbgc) {
-            static std::ofstream _wt_logc("/tmp/neotko_wipetower.log", std::ios::app);
+            std::ofstream _wt_logc(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
             static float _cov_last_real_top = -1.f;
             const float _cov_z          = m_layer_info->z;
             const float _cov_wall_h     = _bd_wall_mult * m_layer_height;
@@ -2799,10 +2805,11 @@ WipeTower::ToolChangeResult NeoWipeTower::finish_layer()
     // NEOTKO_NEOTOWER_TAG s102 — BRIM_DECISION: one line per finish_layer call
     // showing exactly which branch decided the final loops_num.
     {
-        static const bool _wt_dbg3 = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                                  || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+        // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _wt_dbg3 = NeoDebug::enabled(NeoDebug::WIPETOWER);
         if (_wt_dbg3) {
-            static std::ofstream _wt_log3("/tmp/neotko_wipetower.log", std::ios::app);
+            std::ofstream _wt_log3(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
             _wt_log3 << "[NEOTOWER] finish_layer BRIM_DECISION"
                      << " idx=" << (int)(m_layer_info - m_plan.begin())
                      << " z=" << m_layer_info->z
@@ -3372,15 +3379,16 @@ void NeoWipeTower::neo_plan_group_y_offsets()
 {
     const float D  = m_wipe_tower_depth;
     const float pw = m_perimeter_width;
-    static const bool _t_dbg = (std::getenv("ORCA_DEBUG_WIPETOWER") != nullptr)
-                            || (std::getenv("ORCA_DEBUG_ALL") != nullptr);
+    // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — was a static getenv latch of its own, which
+        // meant the console could neither pause nor switch this site. Two atomics.
+        const bool _t_dbg = NeoDebug::enabled(NeoDebug::WIPETOWER);
 
     // NEOTKO_NEOTOWER_TAG s239b — escritura INCONDICIONAL al canal para los invariantes de
     // este fichero. V22 salía sólo por BOOST_LOG_TRIVIAL, que no llega a
     // /tmp/neotko_wipetower.log: en el análisis de BT/BT-A "V22=0" no significaba "no hay
     // solape" sino "nadie lo podía leer". Un invariante que no se puede grepear no existe.
     auto _v22 = [](const std::string& msg) {
-        static std::ofstream _f("/tmp/neotko_wipetower.log", std::ios::app);
+        std::ofstream _f(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
         _f << "[NEOTOWER] " << msg << "\n"; _f.flush();
         BOOST_LOG_TRIVIAL(error) << "[NeoTower]" << msg;
     };
@@ -3459,7 +3467,7 @@ void NeoWipeTower::neo_plan_group_y_offsets()
                     e.neo_y_shift_planned = std::max(0.f, s);
                     cursor = p + box_e;
                     if (_t_dbg) {
-                        static std::ofstream _t_log("/tmp/neotko_wipetower.log", std::ios::app);
+                        std::ofstream _t_log(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
                         _t_log << "[TETRIS-F2] alloc entry=" << k << " z=" << e.z
                                << " box=" << box_e
                                << " phys=[" << p << ".." << (p + box_e) << "]"

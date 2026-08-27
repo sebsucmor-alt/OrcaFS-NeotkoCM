@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
 	test_elephant_foot_compensation.cpp
 	test_geometry.cpp
 	test_mixed_filament.cpp
+	test_colormix_virtual_remap.cpp
 	test_realcolor_blend.cpp
 	test_color_height_envelope.cpp
 	test_slope_perimeter_recolor.cpp

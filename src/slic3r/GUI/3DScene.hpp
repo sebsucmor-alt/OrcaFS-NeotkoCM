@@ -12,7 +12,7 @@
 #include "libslic3r/ObjectID.hpp"
 
 #include "GLModel.hpp"
-#include "ColorMixPaintPreview.hpp"   // NEOTKO_PROFILE_TAG s233 — WeaveParams de la pintura ColorMix
+#include "ColorStitchPaintPreview.hpp"   // NEOTKO_PROFILE_TAG s233 — WeaveParams de la pintura ColorStitch
 #include "GLShader.hpp"
 #include "MeshUtils.hpp"
 
@@ -217,7 +217,7 @@ public:
     mutable std::vector<GUI::GLModel> mmuseg_models;
     mutable ObjectBase::Timestamp       mmuseg_ts;
 
-    // NEOTKO_PROFILE_TAG_START — s233: pintura ColorMix (ColorStitch / PathBlend /
+    // NEOTKO_PROFILE_TAG_START — s233: pintura ColorStitch (ColorStitch / PathBlend /
     // Solid) en la vista 3D normal, que hasta ahora sólo existía dentro del gizmo.
     // Mecanismo calcado del de MMU de arriba — la malla se parte y cada trozo se dibuja
     // con lo suyo, por sub-malla y no por shader — pero con un trozo por ISLA pintada
@@ -226,7 +226,7 @@ public:
     struct CMPaintPart {
         GUI::GLModel                          model;
         ColorRGBA                             color{0.6f, 0.6f, 0.6f, 1.f};
-        GUI::ColorMixPaintPreview::WeaveParams weave;   // .on=false ⇒ color plano
+        GUI::ColorStitchPaintPreview::WeaveParams weave;   // .on=false ⇒ color plano
         bool                                  is_base = false;  // trozo SIN pintar: su
                                               // color es el render_color vivo del volumen
     };
@@ -437,6 +437,7 @@ private:
     // used by cut gizmo
     std::array<double, 4> m_color_clip_plane;
     bool m_use_color_clip_plane{ false };
+    bool m_transparent_depth_write { true }; // NEOTKO_SUPPORTZONES_TAG s286
     std::array<ColorRGBA, 2> m_color_clip_plane_colors{ ColorRGBA::RED(), ColorRGBA::BLUE() };
 
     struct Slope
@@ -520,6 +521,17 @@ public:
 
     const std::array<float, 2>& get_z_range() const { return m_z_range; }
     const std::array<double, 4>& get_clipping_plane() const { return m_clipping_plane; }
+
+    // NEOTKO_SUPPORTZONES_TAG s286 — the transparent pass writes depth, and for a closed
+    // non-convex mesh that is what makes a see-through part look like two drawings fighting: front
+    // faces at different depths reject each other in mesh order, and anything drawn afterwards
+    // (a gizmo overlay, say) is occluded by a wall you can see straight through.
+    //
+    // Turning depth writes off for that pass is the textbook fix, but it changes the look of every
+    // translucent volume, so it is a switch and not a new default: only the tool that needs it
+    // asks for it, and it puts it back when it closes. Default true == exactly today's behaviour.
+    void set_transparent_depth_write(bool on) { m_transparent_depth_write = on; }
+    bool get_transparent_depth_write() const { return m_transparent_depth_write; }
 
     void set_use_color_clip_plane(bool use) { m_use_color_clip_plane = use; }
     void set_color_clip_plane(const Vec3d& cp_normal, double offset) {

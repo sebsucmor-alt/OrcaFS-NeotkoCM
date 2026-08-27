@@ -5,8 +5,8 @@
 // SurfacePassKind — effect kind of a Sandwich/MultiPass sub-layer pass.
 // Extracted into a standalone lightweight header during the Snapmaker 2.3.4 port
 // so consumers that only need the enum (NeoTower, Print.hpp's MultiPassSubLayer,
-// the GCode dispatcher) don't have to pull in the heavy SurfaceColorMix.hpp.
-// When the Sandwich engine is ported, SurfaceColorMix.hpp must include THIS header
+// the GCode dispatcher) don't have to pull in the heavy ColorStitch.hpp.
+// When the Sandwich engine is ported, ColorStitch.hpp must include THIS header
 // instead of redefining the enum (avoid an ODR clash).
 //
 // NOTE: the enum is `SurfacePassKind`, NOT `SurfaceEffectKind` — the latter
@@ -17,7 +17,7 @@ namespace Slic3r {
 enum class SurfacePassKind : int {
     None      = 0,   // passthrough — natural object surface, no effect, no gap
     Solid     = 1,   // flat colour (a classic MultiPass pass)
-    ColorMix  = 2,   // dithered numeric gradient
+    ColorStitch  = 2,   // dithered numeric gradient
     PathBlend = 3,   // diagonal Z+flow blend (legacy whole-surface until Fase 5)
     // NEOTKO_ZBUMP_TAG — top-surface Z relief driven by a height map (own module,
     // Feature/ZBump/, no shared code with PathBlend — see docs/WIP/ZBUMP_TOP_SURFACE_PLAN.md).

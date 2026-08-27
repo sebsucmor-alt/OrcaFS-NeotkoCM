@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "../SurfaceColorMix.hpp"   // SurfacePassStack / SurfacePass
+#include "../ColorStitch.hpp"   // SurfacePassStack / SurfacePass
 
 namespace Slic3r {
 namespace ColorSci {
@@ -45,7 +45,7 @@ struct GradientStep {
     double           a_mm = 0.0;       // grosor top A (arriba) — informativo/UI
     double           b_mm = 0.0;       // grosor top B (abajo)
     SurfacePassStack top;              // passes = [SOLID B, SOLID A] (bottom→top)
-    SurfacePassStack penu;             // passes = [ColorMix self-contained]
+    SurfacePassStack penu;             // passes = [ColorStitch self-contained]
 };
 
 // Espesor mínimo de pass que sobrevive a la normalización del SandwichDialog

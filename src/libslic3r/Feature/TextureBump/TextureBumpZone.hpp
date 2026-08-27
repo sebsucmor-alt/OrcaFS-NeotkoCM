@@ -10,7 +10,7 @@
 // NEOTKO_TEXTUREBUMP_TAG_START — Fase 3 (paint a zone, give it its own Texture Bump). Dedicated,
 // deliberately minimal registry for painted-zone configs: same "id/name, edited from a painter"
 // shape as SurfaceEffectProfileManager, but NOT that manager -- Texture Bump zones describe wall
-// geometry (image/scale/thickness/...), a different domain from ColorMix/PathBlend/MultiPass
+// geometry (image/scale/thickness/...), a different domain from ColorStitch/PathBlend/MultiPass
 // surface-pass profiles, and reuse TextureBumpConfig directly as the payload (it already has
 // operator==/std::hash; no generic kv/JSON snapshot layer is needed here).
 // See docs/ATTRIBUTION_TEXTURE_BUMP.md.
@@ -43,7 +43,7 @@ public:
     // Content fingerprint of the zones referenced by `ids` (hash-combine of each resolved
     // TextureBumpConfig's own std::hash). Used by Model.cpp's
     // model_texture_bump_paint_data_changed() to detect "same paint, edited zone content" --
-    // mirrors ModelVolume::colormix_profiles_fingerprint's role for ColorMix profiles. Ids that no
+    // mirrors ModelVolume::colorstitch_profiles_fingerprint's role for ColorStitch profiles. Ids that no
     // longer resolve (zone deleted) are skipped, not treated as an error.
     static uint64_t fingerprint_of_ids(const std::vector<int>& ids);
 

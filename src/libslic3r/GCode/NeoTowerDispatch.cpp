@@ -12,7 +12,7 @@
 // GCode.cpp — they are either already Z-keyed (structural) or upstream code.
 
 #include "GCode.hpp"           // WipeTowerIntegration, GCode, NeoTower (via GCode.hpp)
-#include "SurfaceColorMix.hpp" // NEOTKO_LOG / NeoDebug (brings <limits>)
+#include "ColorStitch.hpp" // NEOTKO_LOG / NeoDebug (brings <limits>)
 
 #include <algorithm>
 #include <string>

@@ -26,7 +26,7 @@
 
 #include "ColorSci.hpp"
 #include "GradientRamp.hpp"         // GradientSpec / GradientStep (dispatcher)
-#include "../SurfaceColorMix.hpp"   // SurfacePassStack
+#include "../ColorStitch.hpp"   // SurfacePassStack
 #include "../MixedFilament.hpp"     // MixedFilament (NEOTKO_MIXEDFIL_SANDWICH_TAG)
 
 namespace Slic3r {

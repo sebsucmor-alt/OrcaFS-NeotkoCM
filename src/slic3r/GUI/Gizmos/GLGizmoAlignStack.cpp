@@ -1,6 +1,7 @@
 // NEOTKO_ALIGNSTACK_TAG_START
 #include "GLGizmoAlignStack.hpp"
 #include "GLGizmoMeasure.hpp" // for TransformHelper::world_to_ss
+#include "GizmoNeotkoStyle.hpp" // s290 — solo el estilo de VENTANA, no la rampa de widgets
 
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -1084,6 +1085,11 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
 
     const float win_w = 336.0f;
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    // s290 — este panel NO usa la rampa Neotko: sus colores (el naranja de #1, el azul de los
+    // radios) son suyos y funcionan en los dos temas. Lo unico que le faltaba era que el fondo
+    // de la ventana y el texto por defecto dejaran de estar clavados en oscuro, y eso es
+    // exactamente lo que empuja neo_push_window_style(). Va antes del Begin a proposito.
+    neo_push_window_style();
     GizmoImguiBegin(on_get_name(),
                     ImGuiWindowFlags_AlwaysAutoResize |
                     ImGuiWindowFlags_NoCollapse);
@@ -1222,6 +1228,7 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
     m_imgui->disabled_end();
 
     GizmoImguiEnd();
+    neo_pop_window_style();
 }
 
 }} // namespace Slic3r::GUI

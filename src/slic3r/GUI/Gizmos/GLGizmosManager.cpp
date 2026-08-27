@@ -22,7 +22,7 @@
 //#include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSeam.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMmuSegmentation.hpp"
-#include "slic3r/GUI/Gizmos/GLGizmoColorMixPainter.hpp" // NEOTKO_PROFILE_TAG — s130 port
+#include "slic3r/GUI/Gizmos/GLGizmoColorStitchPainter.hpp" // NEOTKO_PROFILE_TAG — s130 port
 #include "slic3r/GUI/Gizmos/GLGizmoAlignStack.hpp" // NEOTKO_ALIGNSTACK_TAG
 #include "slic3r/GUI/Gizmos/GLGizmoSimplify.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
@@ -32,6 +32,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoTextureBump.hpp" // NEOTKO_TEXTUREBUMP_TAG -- unified gizmo (All + Painter modes)
 #include "slic3r/GUI/Gizmos/GLGizmoPrecisionALH.hpp" // NEOTKO_PRECISIONALH_TAG
 #include "slic3r/GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp" // NEOTKO_HAE_TAG
+#include "slic3r/GUI/Gizmos/GLGizmoSupportZones.hpp" // NEOTKO_SUPPORTZONES_TAG s286
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -167,8 +168,8 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case(EType::MmSegmentation):
             gizmo->set_icon_filename(m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg");
             break;
-        case(EType::ColorMixPainter): // NEOTKO_PROFILE_TAG — s130 port (real ColorStitch icon, not fork placeholder)
-            gizmo->set_icon_filename(m_is_dark ? "mmu_surfacecolormix_dark.svg" : "mmu_surfacecolormix.svg");
+        case(EType::ColorStitchPainter): // NEOTKO_PROFILE_TAG — s130 port (real ColorStitch icon, not fork placeholder)
+            gizmo->set_icon_filename(m_is_dark ? "mmu_colorstitch_dark.svg" : "mmu_colorstitch.svg");
             break;
         case(EType::FuzzySkin):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg");
@@ -196,6 +197,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
             break;
         case (EType::HeightAdaptiveEffects): // NEOTKO_HAE_TAG
             gizmo->set_icon_filename(m_is_dark ? "toolbar_height_adaptive_effects_dark.svg" : "toolbar_height_adaptive_effects.svg");
+            break;
+        case (EType::SupportZones): // NEOTKO_SUPPORTZONES_TAG s286
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_support_zones_dark.svg" : "toolbar_support_zones.svg");
             break;
         }
 
@@ -234,7 +238,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
     m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmSegmentation));
     // NEOTKO_PROFILE_TAG — s130 port: 3D Painter for SurfaceEffectProfile / ColorStitch.
-    m_gizmos.emplace_back(new GLGizmoColorMixPainter(m_parent, m_is_dark ? "mmu_surfacecolormix_dark.svg" : "mmu_surfacecolormix.svg", EType::ColorMixPainter));
+    m_gizmos.emplace_back(new GLGizmoColorStitchPainter(m_parent, m_is_dark ? "mmu_colorstitch_dark.svg" : "mmu_colorstitch.svg", EType::ColorStitchPainter));
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent, m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg", EType::Emboss));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
     m_gizmos.emplace_back(new GLGizmoMeasure(m_parent, m_is_dark ? "toolbar_measure_dark.svg" : "toolbar_measure.svg", EType::Measure));
@@ -250,6 +254,11 @@ bool GLGizmosManager::init()
     // NEOTKO_HAE_TAG — Height Adaptive Effects curve editor (LibreMode-gated via on_is_activable).
     // Order in this vector MUST match the order in EType — it goes right after PrecisionALH there.
     m_gizmos.emplace_back(new GLGizmoHeightAdaptiveEffects(m_parent, m_is_dark ? "toolbar_height_adaptive_effects_dark.svg" : "toolbar_height_adaptive_effects.svg", EType::HeightAdaptiveEffects));
+    // NEOTKO_SUPPORTZONES_TAG s286 — Support Zones (LibreMode-gated via on_is_activable).
+    // Order in this vector MUST match the order in EType — it goes right after
+    // HeightAdaptiveEffects there. 🚨 The two SVGs must exist: GLGizmoBase::init() fails on a
+    // missing icon and the loop below then clears EVERY gizmo, not just this one.
+    m_gizmos.emplace_back(new GLGizmoSupportZones(m_parent, m_is_dark ? "toolbar_support_zones_dark.svg" : "toolbar_support_zones.svg", EType::SupportZones));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -526,7 +535,7 @@ bool GLGizmosManager::is_paint_gizmo()
 {
     return m_current == EType::FdmSupports ||
            m_current == EType::MmSegmentation ||
-           m_current == EType::ColorMixPainter || // NEOTKO_PROFILE_TAG — s130 port
+           m_current == EType::ColorStitchPainter || // NEOTKO_PROFILE_TAG — s130 port
            m_current == EType::FuzzySkin ||
            m_current == EType::Seam;
 }
@@ -1460,8 +1469,8 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Text";
     case GLGizmosManager::EType::MmSegmentation:
         return "Color Painting";
-    case GLGizmosManager::EType::ColorMixPainter: // NEOTKO_PROFILE_TAG — s130 port
-        return "ColorMix Painter";
+    case GLGizmosManager::EType::ColorStitchPainter: // NEOTKO_PROFILE_TAG — s130 port
+        return "ColorStitch Painter";
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";
     default:

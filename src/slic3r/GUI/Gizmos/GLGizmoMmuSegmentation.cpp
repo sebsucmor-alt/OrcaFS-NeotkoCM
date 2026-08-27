@@ -2,7 +2,7 @@
 
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GLShader.hpp"                // s235 F5b — mm_gouraud para el preview del sandwich
-#include "slic3r/GUI/ColorMixPaintPreview.hpp"    // s235 F5 — colores/tejido/solape compartidos
+#include "slic3r/GUI/ColorStitchPaintPreview.hpp"    // s235 F5 — colores/tejido/solape compartidos
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -75,7 +75,7 @@ void GLGizmoMmuSegmentation::on_opening()
     // NEOTKO_PROFILE_TAG s235 F5b — el toggle se relee al abrir (persiste en app_config) y
     // se invalida el preview: el objeto o su pintura pueden haber cambiado con el gizmo
     // cerrado, y las claves solas no cubren un cambio de plato entero.
-    m_sw_show      = ColorMixPaintPreview::show_in_mmu_gizmo();
+    m_sw_show      = ColorStitchPaintPreview::show_in_mmu_gizmo();
     m_sw_built_oid = -2;
     m_coexist_oid  = -2;
 }
@@ -301,8 +301,8 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
 // NEOTKO_PROFILE_TAG_START — s235 F5b, ver la nota del .hpp.
 //
 // Construye los selectores de preview del objeto activo leyendo su pintura de sandwich
-// guardada (color_mix_paint_facets), con los colores por slot y el tejido por isla que
-// calcula ColorMixPaintPreview — la misma unidad que alimenta al painter de sandwich y a
+// guardada (colorstitch_paint_facets), con los colores por slot y el tejido por isla que
+// calcula ColorStitchPaintPreview — la misma unidad que alimenta al painter de sandwich y a
 // la vista 3D normal, así que los tres enseñan exactamente lo mismo.
 //
 // Es CARO (deserializa + union-find por isla), por eso sólo se reconstruye cuando cambia
@@ -319,11 +319,11 @@ void GLGizmoMmuSegmentation::rebuild_sandwich_preview_if_dirty()
         return;
     }
 
-    const uint64_t pk = ColorMixPaintPreview::overlap_key(mo);
+    const uint64_t pk = ColorStitchPaintPreview::overlap_key(mo);
     uint64_t ck = 0;
     for (const ModelVolume* mv : mo->volumes)
         if (mv->is_model_part())
-            ck ^= ColorMixPaintPreview::context_key(mv, mo);
+            ck ^= ColorStitchPaintPreview::context_key(mv, mo);
 
     if (oid == m_sw_built_oid && pk == m_sw_paint_key && ck == m_sw_color_key)
         return;
@@ -332,20 +332,20 @@ void GLGizmoMmuSegmentation::rebuild_sandwich_preview_if_dirty()
     m_sw_color_key = ck;
     m_sw_preview_sel.clear();
 
-    const auto max_ebt = static_cast<EnforcerBlockerType>(ModelVolume::COLORMIX_SLOT_COUNT - 1);
+    const auto max_ebt = static_cast<EnforcerBlockerType>(ModelVolume::COLORSTITCH_SLOT_COUNT - 1);
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv->is_model_part())
             continue;
         // El vector va PARALELO a m_triangle_selectors (mismo filtro is_model_part, mismo
         // orden), así que se empuja un nullptr por los volúmenes sin pintar en vez de
         // saltárselos: si no, los índices se desalinearían.
-        if (mv->color_mix_paint_facets.empty()) {
+        if (mv->colorstitch_paint_facets.empty()) {
             m_sw_preview_sel.emplace_back(nullptr);
             continue;
         }
 
-        std::vector<ColorRGBA> ebt = ColorMixPaintPreview::slot_colors(mv, mo);
-        // El índice 0 es "sin pintar". ColorMixPaintPreview lo deja en el gris neutro del
+        std::vector<ColorRGBA> ebt = ColorStitchPaintPreview::slot_colors(mv, mo);
+        // El índice 0 es "sin pintar". ColorStitchPaintPreview lo deja en el gris neutro del
         // painter de sandwich, pero aquí el usuario está pintando MMU y necesita ver el
         // color de extrusor del objeto: mismo cálculo que init_model_triangle_selectors().
         if (!m_extruders_colors.empty() && !ebt.empty()) {
@@ -356,13 +356,13 @@ void GLGizmoMmuSegmentation::rebuild_sandwich_preview_if_dirty()
 
         // edge_limit por defecto: este selector NUNCA pinta, sólo deserializa y dibuja.
         auto sel = std::make_unique<TriangleSelectorPatch>(mv->mesh(), ebt);
-        sel->deserialize(mv->color_mix_paint_facets.get_data(), false, max_ebt);
+        sel->deserialize(mv->colorstitch_paint_facets.get_data(), false, max_ebt);
         // DESPUÉS de deserialize: el tejido mide el área realmente pintada (get_facets).
-        // Mismo orden y misma razón que en GLGizmoColorMixPainter::rebuild_preview_selectors_if_dirty.
+        // Mismo orden y misma razón que en GLGizmoColorStitchPainter::rebuild_preview_selectors_if_dirty.
         {
             std::unordered_map<int, int>                            fwi;
             std::vector<TriangleSelectorPatch::WeaveParams>          wl;
-            ColorMixPaintPreview::weave_islands_for_volume(mv, sel.get(), mo, fwi, wl);
+            ColorStitchPaintPreview::weave_islands_for_volume(mv, sel.get(), mo, fwi, wl);
             sel->set_ebt_weave_islands(std::move(fwi), std::move(wl));
         }
         // El patch base del preview sustituye al del MMU, así que hereda su wireframe: sin
@@ -375,7 +375,7 @@ void GLGizmoMmuSegmentation::rebuild_sandwich_preview_if_dirty()
 
 bool GLGizmoMmuSegmentation::render_sandwich_preview()
 {
-    if (!m_sw_show || !ColorMixPaintPreview::show_in_mmu_gizmo())
+    if (!m_sw_show || !ColorStitchPaintPreview::show_in_mmu_gizmo())
         return false;
 
     const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
@@ -462,7 +462,7 @@ bool GLGizmoMmuSegmentation::render_sandwich_preview()
 // local del volumen (sin la escala de la instancia) y además es una cota superior, así que
 // un mm² absoluto sería un número que invita a confiar en él más de lo que aguanta. El
 // porcentaje es invariante a la escala y es la pregunta real ("¿cuánto de mi efecto se
-// pierde?"). Ver la nota de ColorMixPaintPreview::CoexistOverlap.
+// pierde?"). Ver la nota de ColorStitchPaintPreview::CoexistOverlap.
 void GLGizmoMmuSegmentation::render_coexist_warning()
 {
     const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
@@ -470,7 +470,7 @@ void GLGizmoMmuSegmentation::render_coexist_warning()
         return;
     bool has_sandwich = false;
     for (const ModelVolume* mv : mo->volumes)
-        if (mv->is_model_part() && !mv->color_mix_paint_facets.empty()) { has_sandwich = true; break; }
+        if (mv->is_model_part() && !mv->colorstitch_paint_facets.empty()) { has_sandwich = true; break; }
     if (!has_sandwich)
         return;
 
@@ -487,11 +487,11 @@ void GLGizmoMmuSegmentation::render_coexist_warning()
                                      "Where both paints meet, MMU wins.").c_str());
 
     const int oid = m_parent.get_selection().get_object_idx();
-    const uint64_t key = ColorMixPaintPreview::overlap_key(mo);
+    const uint64_t key = ColorStitchPaintPreview::overlap_key(mo);
     if (oid != m_coexist_oid || key != m_coexist_key) {
         m_coexist_oid = oid;
         m_coexist_key = key;
-        m_coexist     = ColorMixPaintPreview::mmu_sandwich_overlap(mo);
+        m_coexist     = ColorStitchPaintPreview::mmu_sandwich_overlap(mo);
     }
     if (m_coexist.any() && m_coexist.sandwich_mm2 > 0.) {
         const int pct = std::max(1, std::min(100,

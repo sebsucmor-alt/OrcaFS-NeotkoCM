@@ -91,6 +91,13 @@ struct MixedFilament
     // True when this mixed filament row was deleted from UI and should stay hidden.
     bool deleted = false;
 
+    // NEOTKO_COLORSTITCH_TAG (A-bis §5) — SINGLE predicate for "this row counts as a virtual
+    // filament". Three places used to spell it out by hand and one of them forgot `deleted`,
+    // which shifted every virtual above it by one and made Sandwich recipes resolve to the
+    // wrong colour without any warning. Anything that enumerates or counts virtuals must go
+    // through here.
+    bool is_live() const { return enabled && !deleted; }
+
     // True when this row was user-created (custom) instead of auto-generated.
     bool custom = false;
 

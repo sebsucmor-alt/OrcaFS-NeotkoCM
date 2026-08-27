@@ -358,7 +358,7 @@ enum class ModelVolumeType : int {
 // composed later via PrintObject::trafo_centered() (s161 lesson — NEVER trafo()).
 // Pile order: index 0 = bottom of the pile, back() = topmost. On XY overlap the
 // topmost sticker WINS (occludes, does not blend) — resolved top-down in Fill.cpp.
-struct ColorMixSticker
+struct ColorStitchSticker
 {
     std::string name;                                  // display label (SVG filename stem)
     std::string svg_data;                              // raw SVG text — persisted source of truth
@@ -368,14 +368,14 @@ struct ColorMixSticker
     template<class Archive> void serialize(Archive& ar) { ar(name, svg_data, transform, profile_id); }
 };
 
-inline bool operator==(const ColorMixSticker& a, const ColorMixSticker& b)
+inline bool operator==(const ColorStitchSticker& a, const ColorStitchSticker& b)
 {
     return a.profile_id == b.profile_id
         && a.transform.matrix() == b.transform.matrix()
         && a.name == b.name
         && a.svg_data == b.svg_data;
 }
-inline bool operator!=(const ColorMixSticker& a, const ColorMixSticker& b) { return !(a == b); }
+inline bool operator!=(const ColorStitchSticker& a, const ColorStitchSticker& b) { return !(a == b); }
 
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
 // and possibly having multiple modifier volumes, each modifier volume with its set of parameters and materials.
@@ -432,14 +432,14 @@ public:
 
     // NEOTKO_STICKER_TAG — ordered pile of Sandwich Stickers (see struct above).
     // Object-level (a sticker spans volumes), mirrored in assign_copy/serialize,
-    // persisted as per-object 3mf metadata (colormix_stickers_b64), compared in
-    // Print::apply via model_colormix_sticker_data_changed().
-    std::vector<ColorMixSticker> colormix_stickers;
+    // persisted as per-object 3mf metadata (colorstitch_stickers_b64), compared in
+    // Print::apply via model_colorstitch_sticker_data_changed().
+    std::vector<ColorStitchSticker> colorstitch_stickers;
     // Derived cache — content hash of the profiles the stickers reference (the
     // stacks live in SurfaceEffectProfileManager, outside the model). Written
-    // during apply by model_colormix_sticker_data_changed(); not serialized
+    // during apply by model_colorstitch_sticker_data_changed(); not serialized
     // (a stale 0 only costs one extra re-slice, mirroring the painted path).
-    uint64_t colormix_sticker_profiles_fingerprint = 0;
+    uint64_t colorstitch_sticker_profiles_fingerprint = 0;
 
     // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2 (docs/ATTRIBUTION_TEXTURE_BUMP.md §5 point 4): the base
     // (non-painted-zone) Texture Bump projection plane, orientable beyond the 3 fixed X/Y/Z axes.
@@ -450,7 +450,7 @@ public:
     // sets this transform to a canonical rotation). Read into TextureBumpConfig::plane_transform by
     // PrintObject::make_perimeters(); painted zones carry their OWN copy in
     // TextureBumpZoneProfile::config.plane_transform instead (see TextureBumpZone.hpp), independent
-    // of this one. Persisted per-object to 3mf using the SAME pattern as colormix_stickers just
+    // of this one. Persisted per-object to 3mf using the SAME pattern as colorstitch_stickers just
     // above (Format/bbs_3mf.cpp, base64 JSON of the 16 matrix doubles) -- NOT CutConnector's
     // Transform3d, which is cereal/undo-redo-only and never reaches the 3mf (verified s181/Fase-4
     // planning; the memory that said otherwise was wrong).
@@ -739,7 +739,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, colormix_stickers, // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
+            cut_connectors, cut_id, colorstitch_stickers, // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
             texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2, undo/redo
     }
     template<class Archive> void load(Archive& ar) {
@@ -753,7 +753,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, colormix_stickers, // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
+            cut_connectors, cut_id, colorstitch_stickers, // NEOTKO_STICKER_TAG — undo/redo covers the sticker pile
             texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2, undo/redo
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
@@ -943,29 +943,29 @@ public:
     // 15 round-trip. NEOTKO_COLORSTITCH_TAG — s137: 255 (= EnforcerBlockerType::
     // ExtruderMax sentinel) → 254 usable slots (index 0 unused = unpainted). The 3mf
     // slot table is CSV-iterated, so old projects (≤30 entries) load forward-compatibly.
-    static constexpr int COLORMIX_SLOT_COUNT = 255;  // index 0 unused + slots 1..254
-    FacetsAnnotation    color_mix_paint_facets;
+    static constexpr int COLORSTITCH_SLOT_COUNT = 255;  // index 0 unused + slots 1..254
+    FacetsAnnotation    colorstitch_paint_facets;
     // Slot → SurfaceEffectProfile id mapping. Index 0 unused (slot 0 = unpainted).
-    int                 colormix_slot_to_profile_id[COLORMIX_SLOT_COUNT] = {0};
+    int                 colorstitch_slot_to_profile_id[COLORSTITCH_SLOT_COUNT] = {0};
     // NEOTKO_COLORSTITCH_TAG — content fingerprint of the referenced profiles. Profile
     // content lives in SurfaceEffectProfileManager (outside the model), so editing a tool
     // doesn't change facets/slot-map → Print::apply would consider the volume identical
     // and skip re-slice. The painter recomputes this; Print::apply compares it → editing
     // a colour triggers re-slice. 0 = no painted profiles / not yet computed.
-    uint64_t            colormix_profiles_fingerprint = 0;
+    uint64_t            colorstitch_profiles_fingerprint = 0;
     // NEOTKO_PROFILE_TAG_END
 
     // NEOTKO_TEXTUREBUMP_TAG_START — Fase 3 (paint a zone, give it its own Texture Bump). Own
-    // canvas, deliberately independent from color_mix_paint_facets above (painting a texture zone
+    // canvas, deliberately independent from colorstitch_paint_facets above (painting a texture zone
     // and painting a colour zone are different physical questions and need not share boundaries).
-    // Same 255-slot encoding (index 0 = unpainted, 1..254 = zones) for the same reason ColorMix
+    // Same 255-slot encoding (index 0 = unpainted, 1..254 = zones) for the same reason ColorStitch
     // uses it: FacetsAnnotation's 2-bit prefix + 4-bit extension nibble scheme already round-trips
     // states well beyond 15.
     FacetsAnnotation    texture_bump_paint_facets;
     // Slot → TextureBumpZoneManager zone id mapping (TextureBumpZone.hpp). Index 0 unused.
-    int                 texture_bump_slot_to_zone_id[COLORMIX_SLOT_COUNT] = {0};
+    int                 texture_bump_slot_to_zone_id[COLORSTITCH_SLOT_COUNT] = {0};
     // Content fingerprint of the referenced zones (TextureBumpZoneManager::fingerprint_of_ids),
-    // same role as colormix_profiles_fingerprint above: zone content (image/scale/thickness) lives
+    // same role as colorstitch_profiles_fingerprint above: zone content (image/scale/thickness) lives
     // outside the model, so editing it without repainting wouldn't otherwise change facets/slot
     // map and Print::apply would skip re-slicing.
     uint64_t            texture_bump_zones_fingerprint = 0;
@@ -1096,7 +1096,7 @@ public:
         this->seam_facets.set_new_unique_id();
         this->mmu_segmentation_facets.set_new_unique_id();
         this->fuzzy_skin_facets.set_new_unique_id();
-        this->color_mix_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG — duplicate gets its own paint id
+        this->colorstitch_paint_facets.set_new_unique_id(); // NEOTKO_PROFILE_TAG — duplicate gets its own paint id
         this->texture_bump_paint_facets.set_new_unique_id(); // NEOTKO_TEXTUREBUMP_TAG — same reason
     }
 
@@ -1199,7 +1199,7 @@ private:
         name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        fuzzy_skin_facets(other.fuzzy_skin_facets), color_mix_paint_facets(other.color_mix_paint_facets),
+        fuzzy_skin_facets(other.fuzzy_skin_facets), colorstitch_paint_facets(other.colorstitch_paint_facets),
         texture_bump_paint_facets(other.texture_bump_paint_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
 		assert(this->id().valid()); 
@@ -1219,11 +1219,11 @@ private:
         assert(this->mmu_segmentation_facets.id() == other.mmu_segmentation_facets.id());
         assert(this->fuzzy_skin_facets.id() == other.fuzzy_skin_facets.id());
         // NEOTKO_PROFILE_TAG — slot→profile table + content fingerprint are plain values, copy them.
-        for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
-            this->colormix_slot_to_profile_id[_s] = other.colormix_slot_to_profile_id[_s];
-        this->colormix_profiles_fingerprint = other.colormix_profiles_fingerprint;
+        for (int _s = 0; _s < COLORSTITCH_SLOT_COUNT; ++_s)
+            this->colorstitch_slot_to_profile_id[_s] = other.colorstitch_slot_to_profile_id[_s];
+        this->colorstitch_profiles_fingerprint = other.colorstitch_profiles_fingerprint;
         // NEOTKO_TEXTUREBUMP_TAG — same treatment for the Texture Bump zone slot table.
-        for (int _s = 0; _s < COLORMIX_SLOT_COUNT; ++_s)
+        for (int _s = 0; _s < COLORSTITCH_SLOT_COUNT; ++_s)
             this->texture_bump_slot_to_zone_id[_s] = other.texture_bump_slot_to_zone_id[_s];
         this->texture_bump_zones_fingerprint = other.texture_bump_zones_fingerprint;
         this->set_material_id(other.material_id());
@@ -1298,9 +1298,9 @@ private:
         // tabla slot→perfil) en el undo/redo. Antes no se serializaban → el snapshot
         // se tomaba pero al deshacer no se restauraba lo pintado. Pila en-memoria
         // (no formato de fichero); save/load deben mantener el MISMO orden.
-        cereal::load_by_value(ar, color_mix_paint_facets);
-        ar(colormix_slot_to_profile_id);
-        // NEOTKO_TEXTUREBUMP_TAG — Fase 3: same undo/redo treatment as ColorMix above.
+        cereal::load_by_value(ar, colorstitch_paint_facets);
+        ar(colorstitch_slot_to_profile_id);
+        // NEOTKO_TEXTUREBUMP_TAG — Fase 3: same undo/redo treatment as ColorStitch above.
         cereal::load_by_value(ar, texture_bump_paint_facets);
         ar(texture_bump_slot_to_zone_id);
         cereal::load_by_value(ar, config);
@@ -1325,8 +1325,8 @@ private:
         cereal::save_by_value(ar, mmu_segmentation_facets);
         cereal::save_by_value(ar, fuzzy_skin_facets);
         // NEOTKO_COLORSTITCH_TAG — s139: ver load() — pintura ColorStitch en undo/redo.
-        cereal::save_by_value(ar, color_mix_paint_facets);
-        ar(colormix_slot_to_profile_id);
+        cereal::save_by_value(ar, colorstitch_paint_facets);
+        ar(colorstitch_slot_to_profile_id);
         // NEOTKO_TEXTUREBUMP_TAG — Fase 3: see load() above.
         cereal::save_by_value(ar, texture_bump_paint_facets);
         ar(texture_bump_slot_to_zone_id);
@@ -1857,6 +1857,10 @@ bool model_volume_list_changed(const ModelObject &model_object_old, const ModelO
 // Test whether the now ModelObject has newer custom supports data than the old one.
 // The function assumes that volumes list is synchronized.
 bool model_custom_supports_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+// NEOTKO_SUPPORTZONES_TAG s286 F3 — T3: did the recipe of any SUPPORT_ENFORCER volume change?
+// Only valid when the support volume LIST is unchanged (same ids, same order); the caller must
+// check model_volume_list_changed() first, which is what PrintApply's supports_differ already is.
+bool model_support_volume_config_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // Test whether the now ModelObject has newer custom seam data than the old one.
 // The function assumes that volumes list is synchronized.
@@ -1870,16 +1874,16 @@ extern bool model_mmu_segmentation_data_changed(const ModelObject& mo, const Mod
 // The function assumes that volumes list is synchronized.
 extern bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new);
 
-// NEOTKO_PROFILE_TAG — Test whether the new ModelObject has newer ColorMix painter
+// NEOTKO_PROFILE_TAG — Test whether the new ModelObject has newer ColorStitch painter
 // data (facets, slot table, or referenced profile content) than the old one.
-extern bool model_colormix_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+extern bool model_colorstitch_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // NEOTKO_STICKER_TAG — returns true if the sticker pile differs (order, transform,
 // profile, svg) OR the CONTENT of a referenced profile changed (same fingerprint
 // mechanism as the painted path). Wired into the same PrintApply OR as paint.
-extern bool model_colormix_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+extern bool model_colorstitch_sticker_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
-// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same role as model_colormix_paint_data_changed above, own
+// NEOTKO_TEXTUREBUMP_TAG — Fase 3: same role as model_colorstitch_paint_data_changed above, own
 // canvas (texture_bump_paint_facets / texture_bump_slot_to_zone_id / TextureBumpZoneManager).
 extern bool model_texture_bump_paint_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 

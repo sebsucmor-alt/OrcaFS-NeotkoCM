@@ -3820,9 +3820,13 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
                                            unsigned int deleted_1based,
                                            size_t deleted_mixed_idx)
 {
+    // NEOTKO_COLORSTITCH_TAG (A-bis §5) — these three loops used to test `mf.enabled` alone,
+    // while the engine (mixed_index_from_filament_id) and the counter (enabled_count) both
+    // skip `deleted` rows too. A row left as enabled=true/deleted=true therefore got a slot
+    // here that the engine did not give it, shifting every virtual above it by one.
     size_t old_enabled_mixed = 0;
     for (const auto &mf : old_mixed)
-        if (mf.enabled)
+        if (mf.is_live())
             ++old_enabled_mixed;
 
     const size_t old_total_filaments = old_num_filaments + old_enabled_mixed;
@@ -3848,7 +3852,7 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
     std::map<std::pair<unsigned int, unsigned int>, std::vector<unsigned int>> new_pair_to_ids;
     unsigned int next_virtual_id = unsigned(new_num_filaments + 1);
     for (const auto &mf : this->mixed_filaments.mixed_filaments()) {
-        if (!mf.enabled)
+        if (!mf.is_live())
             continue;
         if (mf.stable_id != 0)
             new_stable_id_to_virtual_id.emplace(mf.stable_id, next_virtual_id);
@@ -3863,7 +3867,7 @@ void PresetBundle::build_filament_id_remap(const std::vector<MixedFilament> &old
     unsigned int old_virtual_id = unsigned(old_num_filaments + 1);
     for (size_t midx = 0; midx < old_mixed.size(); ++midx) {
         const auto &mf = old_mixed[midx];
-        if (!mf.enabled)
+        if (!mf.is_live())
             continue;
 
         // When a mixed filament is explicitly deleted, leave its old virtual ID

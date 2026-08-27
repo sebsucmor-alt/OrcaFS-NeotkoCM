@@ -13,7 +13,7 @@
 #include "../Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 4 — real floor
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
-#include "NeoDebug.hpp" // NEOTKO_WAVESUPPORT_TAG — lightweight, no SurfaceColorMix.hpp dependency
+#include "NeoDebug.hpp" // NEOTKO_WAVESUPPORT_TAG — lightweight, no ColorStitch.hpp dependency
 
 #include <sstream>
 #include <cmath>
@@ -56,9 +56,9 @@
 // #undef NDEBUG
 #include <cassert>
 
-// NEOTKO_WAVESUPPORT_TAG — local equivalent of SurfaceColorMix.hpp's NEOTKO_LOG macro, named
+// NEOTKO_WAVESUPPORT_TAG — local equivalent of ColorStitch.hpp's NEOTKO_LOG macro, named
 // differently on purpose (WAVESUPPORT_LOG) so this file never collides if it ever also includes
-// SurfaceColorMix.hpp — WaveSupport.cpp only depends on the lightweight NeoDebug.hpp.
+// ColorStitch.hpp — WaveSupport.cpp only depends on the lightweight NeoDebug.hpp.
 #define WAVESUPPORT_LOG(channel, body)                          \
     do {                                                        \
         if (Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::channel)) { \

@@ -316,7 +316,7 @@ public:
         size_t visible = 0;
         const auto& mfs_ref = mixed_filaments.mixed_filaments();
         for (size_t k = 0; k < mfs_ref.size(); ++k) {
-            if (!mfs_ref[k].enabled || mfs_ref[k].deleted) continue;
+            if (!mfs_ref[k].is_live()) continue;
             if (std::find(dependent.begin(), dependent.end(), k) != dependent.end())
                 deleted_mixed_indices.insert(num_physical + visible);
             ++visible;

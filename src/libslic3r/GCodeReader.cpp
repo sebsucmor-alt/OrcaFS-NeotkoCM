@@ -126,6 +126,15 @@ template<typename ParseLineCallback, typename LineEndCallback>
 bool GCodeReader::parse_file_raw_internal(const std::string &filename, ParseLineCallback parse_line_callback, LineEndCallback line_end_callback)
 {
     FilePtr in{ boost::nowide::fopen(filename.c_str(), "rb") };
+    // Upstream Snapmaker #648 (24593a3b7): fopen failed — file missing, inaccessible, or path
+    // invalid. Returning false here prevents ::fread(buffer.data(), 1, ..., NULL) below, which
+    // would otherwise trigger a CRT invalid-parameter crash on Windows (and undefined behavior
+    // elsewhere).
+    if (in.f == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "GCodeReader::parse_file_raw_internal: "
+                                 << "failed to open file '" << filename << "'";
+        return false;
+    }
 
     // Read the input stream 64kB at a time, extract lines and process them.
     std::vector<char> buffer(65536 * 10, 0);

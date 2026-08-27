@@ -320,7 +320,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     // reconstruction the same way it already reaches PrintObject::make_perimeters()'s table build.
     g.texture_bump_plane_transform = this->layer()->object()->model_object()->texture_bump_plane_transform;
     // NEOTKO_TEXTUREBUMP_TAG — Fase 3: painted zones resolved for THIS layer specifically (own
-    // canvas, not ColorMix's). `painted_zones` must outlive g.process_arachne()/process_classic()
+    // canvas, not ColorStitch's). `painted_zones` must outlive g.process_arachne()/process_classic()
     // below, hence the local (not a temporary) -- PerimeterGenerator only stores a pointer to it.
     std::vector<Slic3r::Feature::TextureBump::PaintedTextureBumpZone> painted_texture_bump_zones =
         Slic3r::Feature::TextureBump::painted_texture_bump_zones_in_layer(
@@ -805,7 +805,7 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
         //   3) zone_*_mm2 → cuánta área hay de cada vecino. Si solid=0, no hay a dónde crecer.
         //   4) bridges_before/after + área → el efecto real sobre la superficie de bridge.
         // NOTA: se usa NeoDebug::write directo, NO la macro NEOTKO_LOG — esa vive en
-        // SurfaceColorMix.hpp, una cabecera pesada que este fichero no incluye ni necesita.
+        // ColorStitch.hpp, una cabecera pesada que este fichero no incluye ni necesita.
         int    _n_bridge_before = 0;
         double _a_bridge_before = 0.;
         const bool _dbg = NeoDebug::enabled(NeoDebug::BOTTOM);

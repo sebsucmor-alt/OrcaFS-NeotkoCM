@@ -193,7 +193,7 @@ private:
     // MixedFilament's normal pattern coloring (confirmed by the project owner,
     // s220). Returns false only if there is no valid object to inspect;
     // otherwise fills `out` (out.passthrough == true when the object has no
-    // ColorMix paint/stickers AND Mixed Filament Object mode is off).
+    // ColorStitch paint/stickers AND Mixed Filament Object mode is off).
     // Re-resolves the ModelObject fresh each call —
     // no cached ModelObject*, matching every other method in this class.
     // Cheap (app_config string reads + facet-emptiness checks + an interval

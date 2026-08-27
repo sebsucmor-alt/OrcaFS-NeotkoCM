@@ -4,12 +4,12 @@
 // NEOTKO_DEBUG_TAG_START
 // Centralised debug infrastructure for all Neotko features. Extracted into a
 // standalone TU during the Snapmaker 2.3.4 port so NeoTower (and later the
-// Sandwich engine) can use the debug channels without pulling in SurfaceColorMix.
+// Sandwich engine) can use the debug channels without pulling in ColorStitch.
 // Env vars (set before launching the slicer):
-//   ORCA_DEBUG_COLORMIX     — Surface ColorMix assign/group logic
+//   ORCA_DEBUG_COLORSTITCH     — Surface ColorStitch assign/group logic
 //   ORCA_DEBUG_MULTIPASS    — MultiPass CAMINO 1/2 fill generation
 //   ORCA_DEBUG_PENULTIMATE  — Penultimate surface classification pipeline
-//   ORCA_DEBUG_TOOLORDER    — ToolOrdering ColorMix/MultiPass extruder registration
+//   ORCA_DEBUG_TOOLORDER    — ToolOrdering ColorStitch/MultiPass extruder registration
 //   ORCA_DEBUG_ZBLEND       — ZBlend sub-layer computation
 //   ORCA_DEBUG_WIPETOWER    — NeoTower planner / wipe tower
 //   ORCA_DEBUG_PROFILE      — Surface Effect Profile / 3D Painter pipeline
@@ -22,9 +22,16 @@
 //   ORCA_DEBUG_WAVEROOF     — NEOTKO_WAVESUPPORT_TAG: Wave-Huygens roof algorithm (wavefronts, convergence) (see docs/FUTURE/WAVESUPPORT_PLAN.md)
 //   ORCA_DEBUG_NEOSTITCH    — NEOTKO_NEOSTITCH_TAG: Z-Stitch Interlock notch/fill signal + junction walk (see docs/FUTURE/NEOSTITCH_PLAN.md)
 //   ORCA_DEBUG_XOBJ         — NEOTKO_XOBJ_TAG: cross-object support avoidance occupancy (see docs/FUTURE/CROSS_OBJECT_SUPPORT_PREPLAN.md)
+//   ORCA_DEBUG_SUPPORTZONES — NEOTKO_SUPPORTZONES_TAG: geometría del pilar de Zonas de Soporte
+//                             (parche, recorte, borde, anillos) + volcado OBJ del sólido
 //   ORCA_DEBUG_GRAVITY      — NEOTKO_GRAVITY_TAG: real floor per object/layer + bridge reclassification diagnostics (see docs/FUTURE/GRAVITY_MASTER_PLAN.md)
 //   ORCA_DEBUG_ALL          — Enable every channel at once
-// Log files: /tmp/neotko_{colormix|multipass|penultimate|toolorder|zblend|wipetower|profile|dispatch|bottom|realcolor|texturebump|zbump|wavesupport|waveroof|neostitch|contact}.log
+//
+// NEOTKO_NEODEBUG_CONSOLE_TAG s285 — logs now live in their own folder:
+//   /tmp/neotko_logs/<channel>.log      (was /tmp/neotko_<channel>.log)
+// The folder is created on demand and is the only place NeoDebug ever writes, so the logs no
+// longer sit mixed in with everything else the user is testing in /tmp. See
+// docs/FUTURE/NEODEBUG_CONSOLE_PLAN.md.
 
 #include <string>
 
@@ -32,7 +39,7 @@ namespace Slic3r {
 
 namespace NeoDebug {
     enum Channel : int {
-        COLORMIX    = 0,
+        COLORSTITCH = 0,
         MULTIPASS   = 1,
         PENULTIMATE = 2,
         TOOLORDER   = 3,
@@ -54,7 +61,14 @@ namespace NeoDebug {
         FLUTTERDARK = 19, // NEOTKO_FLUTTERDARK_TAG s252 — dark mode of Snapmaker's Flutter pages:
                           // which palette class was detected in the bundle this user happens to
                           // have, and whether it was patched or left light.
-        CH_COUNT    = 20
+        INFILL      = 20, // NeotkoLIBRE_DBG s133 — SurfaceFill pre-list / fill loop. Was writing
+                          // straight to /tmp/neotko_infill.log from Fill.cpp with its own getenv,
+                          // outside NeoDebug entirely; folded in for the console (s285) so it can
+                          // be switched, sized and cleared like every other channel.
+        SUPPORTZONES = 21, // NEOTKO_SUPPORTZONES_TAG s289 — geometría del pilar: qué parche se
+                          // tomó, cómo se recortó, dónde está el borde y qué sólido salió. Existe
+                          // para no tener que exportar un 3mf cada vez que una huella sale rara.
+        CH_COUNT    = 22
     };
     // NEOTKO_SMOOTHNORMALS_TAG s229 — gate for the on-screen render tuning panels (RealColor and
     // Shading), as opposed to log channels. Deliberately NOT covered by ORCA_DEBUG_ALL: that var
@@ -64,9 +78,37 @@ namespace NeoDebug {
     //   ORCA_DEBUG_RENDER=1
     bool render_panels_enabled();
 
-    // Returns true if the channel is active (env var set, or ORCA_DEBUG_ALL set).
-    // Cheap after first call (static flag per channel).
+    // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — gate for the NeoDebug console window (the floating
+    // channel switchboard). Opened by ORCA_DEBUG_ALL, which is what the user actually launches
+    // with, plus ORCA_DEBUG_RENDER so a single-channel session can reach it too. This is a
+    // deliberate exception to the s229 rule above: that rule exists so ORCA_DEBUG_ALL doesn't
+    // drop *renderer tuning* panels on top of the model. The console is the opposite — it is the
+    // control surface for the very firehose ORCA_DEBUG_ALL just opened.
+    bool console_enabled();
+
+    // Returns true if the channel should write right now: its own switch is on AND logging is
+    // not paused. Reads two atomics; safe to call from any thread at any time.
+    // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — this used to latch its answer in a static array on first
+    // call, which made live toggling impossible. It no longer caches: the env vars are read once
+    // into the switch state at startup, and after that the state is the truth.
     bool enabled(Channel c);
+
+    // ---- NEOTKO_NEODEBUG_CONSOLE_TAG s285 — live control (used by the console window) ---------
+    // Channel switch, independent of the pause state. is_enabled() answers "is this channel
+    // armed", enabled() answers "is it writing right now".
+    bool  is_enabled(Channel c);
+    void  set_enabled(Channel c, bool on);
+    // Global pause. While paused every channel is silent, including the session banner, and the
+    // switches keep their positions. This is the stop/resume of the console.
+    bool  paused();
+    void  set_paused(bool on);
+    // ---- files ------------------------------------------------------------------------------
+    const char* channel_name(Channel c);   // "WAVESUPPORT"
+    std::string log_dir();                 // "/tmp/neotko_logs"
+    std::string log_path(Channel c);       // "/tmp/neotko_logs/wavesupport.log"
+    long long   log_size(Channel c);       // bytes, or -1 if the file doesn't exist
+    void        clear(Channel c);          // truncate one log
+    void        clear_all();               // truncate every log
     // Append msg + newline to the channel's log file (thread-safe).
     void write(Channel c, const std::string& msg);
     // NEOTKO_DEBUG_TAG s79h — write a session banner to ALL active channels.
