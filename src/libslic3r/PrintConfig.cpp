@@ -1359,6 +1359,48 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool{ true });
     
+    // NEOTKO_OVERHANGSHADOW_TAG / NeotkoLIBRE — LIBREMODE.md §3, Tier B (hidden unless LibreMode is on).
+    def = this->add("overhang_shadow_inner_wall", coBool);
+    def->label = L("Slow down inner walls next to overhangs");
+    def->category = L("Speed");
+    def->tooltip = L("Give the inner wall a share of the slowdown its overhanging neighbour gets.\n\n"
+                     "The outer wall of an overhang is printed onto the inner wall next to it, and that "
+                     "inner wall went down at full speed a few seconds earlier because it is itself "
+                     "supported. This makes the anchor as careful as the wall it has to hold up.\n\n"
+                     "Costs nothing away from an overhang: a wall with solid material under it is graded "
+                     "the same either way. Requires \'Slow down for overhang\', and has no effect when "
+                     "walls are printed outer wall first.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool{ false });
+
+    def = this->add("overhang_shadow_speed_ratio", coPercent);
+    def->label = L("Inner wall slowdown");
+    def->category = L("Speed");
+    def->tooltip = L("How much of the neighbouring wall's treatment this wall borrows. 100% grades the "
+                     "inner wall exactly as if it were the overhanging wall itself, which also brings the "
+                     "overhang fan with it. 50% takes it halfway. 0% disables the effect.\n\n"
+                     "The default of 30% is deliberately gentle: enough to make the anchor more likely to "
+                     "be there, without a speed change large enough to show on the wall.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(30));
+
+    def = this->add("overhang_shadow_distance", coPercent);
+    def->label = L("Inner wall reach");
+    def->category = L("Speed");
+    def->tooltip = L("How far outwards to look for the wall being mirrored, as a percentage of line "
+                     "width. 100% is the wall immediately next to this one. Larger values mirror "
+                     "something further out, so the slowdown reaches deeper into the walls.\n\n"
+                     "The default of 200% looks two line widths out, which catches the overhang even "
+                     "where it starts a little beyond the neighbouring wall.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
+
     def = this->add("slowdown_for_curled_perimeters", coBool);
     def->label = L("Slow down for curled perimeters");
     def->category = L("Speed");
@@ -2205,7 +2247,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("filament_colour_mode", coInts);
     def->label = L("Filament color display mode");
-    def->tooltip = L("Filament color display mode: 0 for split colors, 1 for gradient.");
+    def->tooltip = L("Filament color display mode: 0 for split colors, 1 for vertical gradient.");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
     def->min = 0;
@@ -5646,6 +5688,33 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(0));
 
 
+    // NEOTKO_TOOLSLEEP_TAG s294 — "Turn off unused hotends fully (0 C)".
+    // Slice-time mirror of the app_config toggle of the same name, injected by the GUI in
+    // Plater::priv::neotko_full_config(). comDevelop on purpose: this must never be rendered in a
+    // Tab, so it can never be saved into (or conflict with) a Snapmaker profile.
+    // Default off => stock behaviour, byte-identical gcode.
+    def = this->add("neotko_idle_tool_power_down", coBool);
+    def->label = L("Turn off unused hotends fully (slice-time)");
+    def->tooltip = L("Internal: true while \"Turn off unused hotends fully\" is active. After a tool's "
+                     "last use in the file, its standby M104 is rewritten to S0 instead of the idle "
+                     "temperature, so it stops heating for the rest of the print.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+
+    // NEOTKO_TOOLSLEEP_TAG s294 — "Extra Energy Save" (slice-time mirror, same as its sibling).
+    // Widens the power-down rule to every park, and leans on Orca's own preheat backtrace to undo
+    // it whenever the tool comes back too soon to be worth it. comDevelop; default off.
+    def = this->add("neotko_idle_tool_deep_sleep", coBool);
+    def->label = L("Extra Energy Save mode (slice-time)");
+    def->tooltip = L("Internal: true while \"Extra Energy Save\" is active. Every parked tool is set "
+                     "to S0, not only after its last use. The preheat backtrace removes the shutdown "
+                     "again for any tool that returns within its preheat window, so a tool is only "
+                     "left cold when there is time to bring it back.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+
     def = this->add("preheat_steps", coInt);
     def->label = L("Preheat steps");
     def->tooltip = L("Insert multiple preheat commands (e.g. M104.1). Only useful for Prusa XL. For other printers, please set it to 1.");
@@ -7133,6 +7202,67 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Support zone gesture");
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionString(""));
+
+    // NEOTKO_SUPPORTZONES_TAG s299 — el ángulo de la zona, y esta SÍ la lee el motor.
+    //
+    // 🔑 El ángulo ya viaja dentro del JSON del gesto de aquí arriba, pero el generador de soporte
+    // no puede ponerse a parsear JSON: esta clave suelta es la frontera limpia entre el editor y
+    // el motor. Las dos se escriben a la vez en write_pillar_into().
+    //
+    // 🚨 Y por eso, al revés que el gesto, ésta invalida posSupportMaterial: cambiar el ángulo
+    // cambia por dónde baja la columna, así que hay que volver a generar el soporte. Ver la rama
+    // de PrintObject::invalidate_state_by_config_options().
+    //
+    // 0 = "usa el ángulo por defecto", igual que el 0 de support_filament en una zona.
+    // NEOTKO_SUPPORTZONES_TAG s299c — «sólo bajo el voladizo», por zona.
+    //
+    // 🔑 Un enforcer clásico dice "soporta TODO lo que caiga dentro de este bloque, como si fuera
+    // un voladizo de 90°", en TODAS las capas que el bloque cruza. Para un bloque dibujado a mano
+    // eso está bien; para un pilar que sube desde la cama hasta la superficie que quieres sujetar
+    // es un desastre: siembra contacto en cada capa por la que pasa, así que salen soportes
+    // pegados a la pared del objeto en todo el recorrido. El dueño lo estaba tapando con support
+    // blockers, que era la señal de que faltaba esta opción.
+    //
+    // Con esto encendido, la zona sólo siembra contacto donde la geometría dice que hay superficie
+    // sin apoyo — el MISMO criterio 2D entre capas que usa el soporte automático — y en el resto
+    // de su altura se limita a ser el corredor por el que baja la columna.
+    //
+    // 🚨 Sigue sin decidir NADA sobre necesidad de soporte fuera de la zona: acota hacia dentro,
+    // nunca hacia fuera. Es un diff 2D entre capas, ni rayos ni normales (§8 del plan).
+    def = this->add("neotko_zone_roof_only", coBool);
+    def->label = L("Support zone: only under unsupported surface");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_SUPPORTZONES_TAG s299c — «maciza»: el bloque es la columna.
+    //
+    // 🔑 Su razonamiento, y es el bueno: lo que está antes del codo es la parte BÁSICA (la que
+    // aguanta) y lo que viene después es la NECESARIA. La básica no tiene por qué justificarse
+    // tocando un voladizo: existe porque hace falta algo debajo. Sin esto, lo que desciende es la
+    // sección del contacto y el pilar sale más flaco de lo que se dibujó.
+    // NEOTKO_SUPPORTZONES_TAG s299d — «sólo aterriza al final».
+    //
+    // 🔑 El gesto de una zona dice dos cosas: de dónde cuelga y DÓNDE ATERRIZA. Sólo la segunda es
+    // un apoyo querido. Sin esto, la columna se posa sobre cada superficie superior del objeto por
+    // la que pasa —en una pieza hueca, cada repisa interior— y genera su interfaz allí, que es lo
+    // que se ve en el visor como un parche macizo dentro de la pieza.
+    def = this->add("neotko_zone_land_only", coBool);
+    def->label = L("Support zone: only land at the end");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("neotko_zone_solid", coBool);
+    def->label = L("Support zone: print the whole block");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("neotko_zone_lean_deg", coFloat);
+    def->label = L("Support zone lean angle");
+    def->sidetext = L("°");
+    def->min = 0;
+    def->max = 89;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     // NEOTKO_ALHCOLOR_TAG — Fase 5.3. Hidden blob key, same contract as the Sandwich pass
     // stacks above: written/erased per-object by the Precision ALH gizmo (opt-in), never

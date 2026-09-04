@@ -155,6 +155,10 @@ std::vector<double> layer_height_profile_adaptive(
     const SlicingParameters& slicing_params,
     const ModelObject& object, float quality_factor);
 
+// NEOTKO_PRECISIONALH_TAG s299 — Reescala en Z un perfil de altura variable ya existente para
+// que su última Z valga new_height, dejando las alturas de capa intactas. Ver Slicing.cpp.
+bool rescale_layer_height_profile(std::vector<coordf_t> &profile, coordf_t new_height);
+
 struct HeightProfileSmoothingParams
 {
     unsigned int radius;

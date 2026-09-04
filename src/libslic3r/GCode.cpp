@@ -2278,6 +2278,20 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
 
     m_processor.result().long_retraction_when_cut = activate_long_retraction_when_cut;
 
+    // NEOTKO_SPIRALGUARD_TAG — carry the spiral lift tally from the writer to the preview. The GUI
+    // turns it into one of three outcomes: silence (no spiral lift happened at all), a plain
+    // confirmation (every spiral fits), or a notice that N of them were emitted as straight lifts
+    // because the circle left the printable area. The straight ones cost nothing in safety but they
+    // do lose the nozzle-cleaning the spiral gives, which is why the count is worth surfacing.
+    m_processor.result().spiral_lift_total            = m_writer.spiral_lift_total();
+    m_processor.result().spiral_lift_degraded         = m_writer.spiral_lift_degraded();
+    m_processor.result().spiral_lift_first_degraded_z = m_writer.spiral_lift_first_degraded_z();
+    if (NeoDebug::enabled(NeoDebug::TOOLORDER))
+        NeoDebug::write(NeoDebug::TOOLORDER,
+                        "[SPIRALGUARD] spiral lifts: " + std::to_string(m_writer.spiral_lift_total()) +
+                            ", degraded to normal lift: " + std::to_string(m_writer.spiral_lift_degraded()) +
+                            ", first degraded at Z=" + std::to_string(m_writer.spiral_lift_first_degraded_z()));
+
     { // BBS:check bed and filament compatible
         const ConfigOptionDef* bed_type_def = print_config_def.get("curr_bed_type");
         assert(bed_type_def != nullptr);
@@ -2641,7 +2655,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     } else
         m_enable_extrusion_role_markers = false;
 
-    if (!print.config().small_area_infill_flow_compensation_model.empty())
+    // Upstream Snapmaker #810 (02ab778a7b): el modelo por defecto ya no esta vacio, asi que sin
+    // mirar tambien el interruptor el compensador se construia SIEMPRE. m_config ya esta aplicado
+    // (apply_print_config mas arriba en esta misma funcion).
+    if (m_config.small_area_infill_flow_compensation.value && !m_config.small_area_infill_flow_compensation_model.empty())
         m_small_area_infill_flow_compensator = make_unique<SmallAreaInfillFlowCompensator>(print.config());
 
     // Orca: Don't output Header block if BTT thumbnail is identified in the list
@@ -9063,6 +9080,19 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
         ConfigOptionPercents overhang_overlap_levels({90, 75, 50, 25, 13, 0});
 
+        // NEOTKO_OVERHANGSHADOW_TAG / NeotkoLIBRE — Tier B (LIBREMODE.md §3). Only the inner wall
+        // (erPerimeter) borrows slowdown from the overhang it runs alongside on this same layer; the
+        // outer/overhang/bridge paths keep their stock treatment. Ratio 0 or LibreMode OFF -> both
+        // params stay 0 and the estimator takes its stock path, byte-identical gcode.
+        float shadow_ratio = 0.f;
+        float shadow_reach = 0.f;
+        if (m_config.neotko_libre_mode.value && m_config.overhang_shadow_inner_wall.value && path.role() == erPerimeter) {
+            shadow_ratio = float(m_config.overhang_shadow_speed_ratio.value) / 100.f;
+            // How far outboard the wall we are mirroring sits, in line widths. 100% = the wall
+            // immediately next to this one.
+            shadow_reach = float(m_config.overhang_shadow_distance.value) / 100.f * path.width;
+        }
+
         if (m_config.slowdown_for_curled_perimeters) {
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
@@ -9084,7 +9114,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed,
-                                                                                  m_config.slowdown_for_curled_perimeters);
+                                                                                  m_config.slowdown_for_curled_perimeters,
+                                                                                  shadow_ratio, shadow_reach);
         } else {
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
@@ -9104,7 +9135,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed,
-                                                                                  m_config.slowdown_for_curled_perimeters);
+                                                                                  m_config.slowdown_for_curled_perimeters,
+                                                                                  shadow_ratio, shadow_reach);
         }
         variable_speed = std::any_of(new_points.begin(), new_points.end(), [speed](const ProcessedPoint& p) {
             return fabs(double(p.speed) - speed) > 1;

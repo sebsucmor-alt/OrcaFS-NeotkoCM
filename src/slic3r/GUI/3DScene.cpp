@@ -362,7 +362,23 @@ BoundingBoxf3 GLVolume::transformed_convex_hull_bounding_box(const Transform3d& 
 
 BoundingBoxf3 GLVolume::transformed_non_sinking_bounding_box(const Transform3d& trafo) const
 {
-    return GUI::wxGetApp().plater()->model().objects[object_idx()]->volumes[volume_idx()]->mesh().transformed_bounding_box(trafo, 0.0);
+    // Upstream Snapmaker #753 (785c690f47): durante el recreate de la GUI el plater puede no estar,
+    // y los indices de objeto/volumen del GLVolume pueden haber quedado obsoletos.
+    auto* plater = GUI::wxGetApp().plater();
+    if (!plater)
+        return bounding_box().transformed(trafo);
+
+    const auto& objects = plater->model().objects;
+    int         obj_idx = object_idx();
+    if (obj_idx < 0 || obj_idx >= (int) objects.size() || !objects[obj_idx])
+        return bounding_box().transformed(trafo);
+
+    const auto& volumes = objects[obj_idx]->volumes;
+    int         vol_idx = volume_idx();
+    if (vol_idx < 0 || vol_idx >= (int) volumes.size())
+        return bounding_box().transformed(trafo);
+
+    return volumes[vol_idx]->mesh().transformed_bounding_box(trafo, 0.0);
 }
 
 const BoundingBoxf3& GLVolume::transformed_non_sinking_bounding_box() const
@@ -1275,7 +1291,8 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
 bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, ModelInstanceEPrintVolumeState* out_state) const
 {
-    if (GUI::wxGetApp().plater() == NULL) {
+    // Upstream Snapmaker #753 (785c690f47): tambien durante el recreate de la GUI.
+    if (GUI::wxGetApp().plater() == NULL || GUI::wxGetApp().is_recreating_gui()) {
         if (out_state != nullptr)
             *out_state = ModelInstancePVS_Inside;
         return false;
@@ -1308,6 +1325,42 @@ bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, Mo
     const Pointfs&                    pp_bed_shape = curr_plate->get_shape();
     BuildVolume                       plate_build_volume(pp_bed_shape, build_volume.printable_height());
     const std::vector<BoundingBoxf3>& exclude_areas = curr_plate->get_exclude_areas();
+
+    // NEOTKO_SPIRALGUARD_TAG — pre-slice hint for spiral lift near the bed edge (Snapmaker's
+    // original check used a flat 3.5 mm and fired whatever the lift settings were).
+    //
+    // This is a HINT and nothing more: it compares the object's bounding box against the bed, and
+    // whether a spiral lift actually happens depends on where the retracts fall, which is only
+    // known after slicing. The real answer is measured per lift in GCodeWriter::travel_to_xyz and
+    // reported in the preview. What this does is size the hint honestly:
+    //
+    //   - 0 when a spiral lift cannot happen at all (z_hop 0, or a hop type that is never spiral).
+    //   - otherwise the true envelope. The spiral is a full circle of radius
+    //     hop / (2*PI*tan(slope)), centred one radius off the retract point, so the nozzle reaches
+    //     2*radius away from it. With the U1 defaults (hop 0.4, slope 3 deg) that is 2.44 mm.
+    //
+    // Note "Auto Lift" counts: it picks a spiral whenever the travel crosses an overhang
+    // (GCode.cpp, needs_retraction), and it is what the stock U1 profile ships.
+    double spiral_lift_margin = 0.0;
+    {
+        const DynamicPrintConfig& printer_cfg = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        const auto* opt_hop   = printer_cfg.option<ConfigOptionFloats>("z_hop");
+        const auto* opt_type  = printer_cfg.option<ConfigOptionEnumsGeneric>("z_hop_types");
+        const auto* opt_slope = printer_cfg.option<ConfigOptionFloats>("travel_slope");
+        if (opt_hop != nullptr && opt_type != nullptr && opt_slope != nullptr) {
+            for (size_t i = 0; i < opt_type->values.size(); ++i) {
+                const ZHopType type = ZHopType(opt_type->values[i]);
+                if (type != ZHopType::zhtSpiral && type != ZHopType::zhtAuto)
+                    continue;
+                const double hop       = i < opt_hop->values.size() ? opt_hop->values[i] : 0.0;
+                const double slope_deg = i < opt_slope->values.size() ? opt_slope->values[i] : 0.0;
+                if (hop <= 0.0 || slope_deg <= 0.0)
+                    continue;
+                const double radius = hop / (2.0 * PI * std::tan(slope_deg * PI / 180.0));
+                spiral_lift_margin  = std::max(spiral_lift_margin, 2.0 * radius);
+            }
+        }
+    }
 
     for (GLVolume* volume : this->volumes) {
         // Snapmaker: 初始化螺旋抬升边界状态（在循环开始时就清除所有标志）
@@ -1348,8 +1401,8 @@ bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, Mo
             // 只对矩形床进行检测（Snapmaker U1），只检测可打印的对象
             // 只检测完全在床内的对象（state == Inside），避免对跨越边界的对象误报
             if (plate_build_volume.type() == BuildVolume_Type::Rectangle && volume->composite_id.volume_id >= 0 &&
-                state == BuildVolume::ObjectState::Inside && volume->printable) {
-                constexpr double     SPIRAL_LIFT_SAFETY_MARGIN = 3.5; // mm
+                state == BuildVolume::ObjectState::Inside && volume->printable && spiral_lift_margin > 0.0) {
+                const double         SPIRAL_LIFT_SAFETY_MARGIN = spiral_lift_margin; // mm, measured (see above)
                 const BoundingBoxf3& bb                        = volume_bbox(*volume);
                 const BoundingBoxf3& bed_bb                    = plate_build_volume.bounding_volume();
 

@@ -36,6 +36,7 @@
 #ifndef slic3r_SupportZoneProbe_hpp_
 #define slic3r_SupportZoneProbe_hpp_
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -128,7 +129,44 @@ std::vector<const ModelVolume*> sterile_zones(const ModelObject &object, float g
 //
 // The `k` in d_max = k * line_width. §3 wants it as a hidden comDevelop config key one day so it
 // can be calibrated against real prints; until that key exists this is its single owner.
+//
+// 🔑 s299 — CAMBIO DE PAPEL, y es el motivo de que el §3 del plan quedara revertido a propósito.
+// Este número YA NO gobierna la inclinación. La inclinación la elige el usuario por zona y el
+// motor recalcula su tope por capa (`corridor_d_max_mm()` de aquí abajo). Lo que `k` significa
+// ahora es el tope FÍSICO de cordura: por debajo de `k · ancho` de solape una capa se apoya en tan
+// poca superficie de la de abajo que se despega. El editor lo enseña como recomendación y como
+// marca en el deslizador, y no bloquea nada con él.
+//
+// El porqué del cambio, en una línea: con `d_max` constante la misma zona se inclinaba distinto en
+// cada tramo de un objeto con altura de capa variable, que es exactamente lo que el dueño midió
+// (42° con capa 0.32). Con el ángulo como entrada, la pared sale recta.
 constexpr double SUPPORT_CORRIDOR_K = 0.75;
+
+// El ángulo con el que nace una zona cuando nadie ha dicho otra cosa, en grados. Dueño único aquí
+// porque lo usan los dos lados: el editor para sembrar el deslizador, y el motor para las zonas
+// que no traen ángulo propio (una malla ajena cargada a mano, o una zona de antes de s299).
+constexpr double SUPPORT_ZONE_DEFAULT_LEAN_DEG = 45.;
+
+// El tope duro del deslizador. 75° es el caso extremo que el dueño ha impreso a velocidad baja; por
+// encima de eso no hay dato, así que no se ofrece.
+constexpr double SUPPORT_ZONE_MAX_LEAN_DEG = 75.;
+
+// 🔑 s299 — EL FRENO, INVERTIDO. Cuánto puede desplazarse una columna en UNA capa, en mm.
+//
+// Antes esto era `k · ancho`, un escalar para todas las capas y todas las zonas, y el ángulo salía
+// de despejarlo. Ahora el ángulo es el dato y esto es la consecuencia: una capa de altura `dz`
+// recorriendo un ángulo `θ` pide exactamente `dz · tan(θ)`.
+//
+// 🚨 `dz` es la diferencia REAL de `print_z` entre la capa y la de arriba, nunca `layer_height`
+// (§8 del plan). Con ALH cambia en cada capa, y usar la nominal es justo el bug que esto arregla.
+inline double corridor_d_max_mm(double dz_mm, double lean_deg)
+{
+    if (dz_mm <= 0.)
+        return 0.;
+    const double a = std::clamp(lean_deg, 0., SUPPORT_ZONE_MAX_LEAN_DEG);
+    constexpr double deg2rad = 0.01745329251994329576923690768489;
+    return dz_mm * std::tan(a * deg2rad);
+}
 
 // How far a column may move sideways in ONE layer, in mm. Note it does NOT depend on the layer
 // height: it is a per-layer allowance, so under adaptive layer height the resulting angle adapts
@@ -138,7 +176,12 @@ inline double corridor_step_mm(double support_line_width_mm)
     return SUPPORT_CORRIDOR_K * support_line_width_mm;
 }
 
-// El ángulo más inclinado que el corredor puede seguir, en grados, para una altura de capa dada.
+// El ángulo RECOMENDADO como máximo, en grados, para una altura de capa dada.
+//
+// 🚨 s299 — ESTO YA NO ES UN CANDADO. Antes era el techo del deslizador y el motor lo imponía por
+// su cuenta; ahora el ángulo lo elige el usuario y esto es lo que el panel dibuja como marca y
+// como color. Pasarse de aquí es legítimo (el dueño lo imprime a velocidad baja); lo que no es
+// legítimo es no avisarlo.
 //
 // 🔑 s286b — el pilar con rodilla. El freno es un tope al desplazamiento POR CAPA, así que un pilar
 // que se inclina a un ángulo fijo pide exactamente `dz · tan(ángulo)` en cada capa: constante, y

@@ -531,7 +531,23 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
     update_mixed_layer_height_settings();
 
     // Initialize the print layers for all objects and all layers.
-    coordf_t object_bottom_z = 0.;
+    // NEOTKO_NEOTOWER_TAG s303 — object_bottom_z debe ser el fondo del objeto MAS BAJO.
+    // Upstream lo asignaba dentro del bucle de objetos (`object_bottom_z = ...; break;`), asi
+    // que el valor que sobrevivia era el del ULTIMO objeto de la lista. Con todos los objetos
+    // apoyados en la cama da igual (mismo fondo) y por eso el bug nunca se vio; con un objeto
+    // ELEVADO metia un fondo alto, y la clausula `lt.print_z < object_bottom_z + EPSILON` de
+    // fill_wipe_tower_partitions encendia has_wipe_tower en TODOS los planos por debajo,
+    // incluidos los que no tienen ningun objeto (has_object=0).
+    // Medido (s303, torus-07a en cama + torus-07b elevado a 11.83): object_bottom_z=11.83 en
+    // vez de 0 → 75 planos fantasma con capa de torre en la base. La torre se plantaba en la
+    // rejilla de un objeto que aun no existe, y las capas reales del objeto de abajo (0.32)
+    // llegaban con 0.02-0.04 mm de hueco libre → torre de paja y fallo de impresion.
+    // Las 37 capas reales de esa base tienen by_object=1, o sea se sostienen solas: bajar
+    // object_bottom_z a 0 apaga los 75 fantasmas sin perder ni una capa buena (verificado en
+    // el reparto de WT_RULE). Con el objeto mas bajo en la cama la clausula queda inerte, que
+    // es su intencion original: cubrir los planos por DEBAJO del objeto mas bajo (raft,
+    // soporte bajo un objeto elevado), nunca por debajo del mas alto.
+    coordf_t object_bottom_z = std::numeric_limits<coordf_t>::max();
     coordf_t max_layer_height = 0.;
     {
         std::vector<coordf_t> zs;
@@ -548,13 +564,54 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
             // NEOTKO_MULTIPASS_TAG_END
 
             // Find first object layer that is not empty and save its print_z
-            for (const Layer* layer : object->layers())
-                if (layer->has_extrusions()) {
-                    object_bottom_z = layer->print_z - layer->height;
-                    break;
-                }
+            // NEOTKO_WIPETOWER_DEBUG_TAG s303 — OBZ_PROBE: sonda de object_bottom_z.
+            // Sospecha: esta asignacion esta DENTRO del bucle de objetos y ASIGNA en vez de
+            // tomar el minimo, asi que el valor final es el del ULTIMO objeto de la lista, no
+            // el del mas bajo. Con un objeto elevado eso mete un object_bottom_z alto y la
+            // formula base de fill_wipe_tower_partitions (print_z < object_bottom_z) enciende
+            // has_wipe_tower en TODOS los planos por debajo, fantasmas incluidos.
+            // Solo mide, no cambia nada. Retirar al cerrar.
+            {
+                const coordf_t _obz_prev = object_bottom_z;
+                bool           _obz_hit  = false;
+                for (const Layer* layer : object->layers())
+                    if (layer->has_extrusions()) {
+                        object_bottom_z = std::min<coordf_t>(object_bottom_z,
+                                                             layer->print_z - layer->height);
+                        _obz_hit = true;
+                        break;
+                    }
+                NEOTKO_LOG(WIPETOWER, "OBZ_PROBE obj='" << object->model_object()->name
+                    << "' n_layers=" << object->layers().size()
+                    << " found_extrusions=" << (_obz_hit ? 1 : 0)
+                    << " obz_before=" << _obz_prev
+                    << " obz_after="  << object_bottom_z
+                    << (_obz_hit && object_bottom_z > _obz_prev + EPSILON
+                        ? "  <<< SUBE: pisa el fondo de un objeto anterior" : ""));
+            }
 
             max_layer_height = std::max(max_layer_height, object->config().layer_height.value);
+        }
+        // NEOTKO_NEOTOWER_TAG s303 — sin ningun objeto con extrusiones el centinela vuelve a 0
+        // (valor original de upstream), asi la clausula by_bottom queda inerte en vez de
+        // encender la torre en toda la placa.
+        if (object_bottom_z == std::numeric_limits<coordf_t>::max())
+            object_bottom_z = 0.;
+
+        // NEOTKO_WIPETOWER_DEBUG_TAG s303 — OBZ_FINAL: el valor que se lleva la formula base.
+        {
+            coordf_t _obz_true = std::numeric_limits<coordf_t>::max();
+            for (auto _o : print.objects())
+                for (const Layer* layer : _o->layers())
+                    if (layer->has_extrusions()) {
+                        _obz_true = std::min<coordf_t>(_obz_true, layer->print_z - layer->height);
+                        break;
+                    }
+            NEOTKO_LOG(WIPETOWER, "OBZ_FINAL object_bottom_z=" << object_bottom_z
+                << " minimo_real=" << _obz_true
+                << " n_objetos=" << print.objects().size()
+                << (object_bottom_z > _obz_true + EPSILON
+                    ? "  <<< DIVERGE: se usa el fondo del ULTIMO objeto, no el mas bajo" : "  (coinciden)"));
         }
         this->initialize_layers(zs);
     }
@@ -1144,7 +1201,45 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         // Store the sequential layer index and mixed-filament context for resolution.
         layer_tools.layer_index       = layerCount;
         layer_tools.object_layer_count = int(object.layers().size());
-        layer_tools.layer_height      = layer->height;
+        // NEOTKO_TOOLORDER_DEBUG_TAG s303 — LH_COLLIDE: `layer_height` se ASIGNA dentro del
+        // bucle por objeto, y tools_for_layer() devuelve el plano COMPARTIDO. Si dos objetos
+        // tienen capa en el mismo print_z, gana el ultimo, aunque su capa este vacia.
+        // Medido (s303): en z=5.08 y z=9.88 (los dos unicos planos donde la rejilla 0.32 de
+        // torus-07a y la 0.15 de torus-07b coinciden) el 0.15 pisa al 0.32, y NeoTower emite
+        // una capa de torre 0.17 mm por debajo de su apoyo (AIR_GAP).
+        // Esta sonda mide la opcion A (quedarse con el MAXIMO) sin aplicarla: dice cuantas
+        // colisiones hay, con que valores, y si la capa que pisa tiene extrusiones o no.
+        // Solo diagnostico. Retirar al cerrar.
+        if (layer_tools.layer_height > 0. && std::abs(layer_tools.layer_height - layer->height) > 1e-6) {
+            NEOTKO_LOG(WIPETOWER, "LH_COLLIDE z=" << layer->print_z
+                << " previo="       << layer_tools.layer_height
+                << " escribe="      << layer->height
+                << " obj='"         << object.model_object()->name << "'"
+                << " con_extrusiones=" << (layer->has_extrusions() ? 1 : 0)
+                << " maximo="       << std::max<coordf_t>(layer_tools.layer_height, layer->height)
+                << (layer->height < layer_tools.layer_height
+                    ? "  <<< PISA A LA BAJA (es el caso que deja aire)" : "")
+                << (!layer->has_extrusions() && layer_tools.layer_height > 0.
+                    ? "  ***BLOQUEADA por s303 (capa vacia, se conserva el valor previo)***"
+                    : "  (se escribe: la capa imprime)"));
+        }
+        // NEOTKO_NEOTOWER_TAG s303 — una capa SIN EXTRUSIONES no dicta la altura del plano.
+        // `tools_for_layer()` devuelve el plano COMPARTIDO, y esta asignacion vive dentro del
+        // bucle por objeto, asi que cuando dos objetos tienen capa en el mismo print_z gana el
+        // ultimo aunque su capa este vacia. Un objeto existe en la lista de capas desde z=0
+        // aunque su geometria empiece mas arriba: esas capas vacias no son objeto, solo rejilla.
+        // Medido (s303, torus-07a 0.32 en cama + torus-07b 0.15 elevado): las rejillas coinciden
+        // cada 4.80 mm y hay 9 colisiones. Las 2 con la capa vacia (z=5.08, z=9.88) metian un
+        // 0.15 donde el hueco real es 0.32 → NeoTower emitia una capa de torre con 0.17 mm de
+        // aire debajo (Z_BUDGET NO_LLEGA_AL_APOYO + WALL_COVERAGE AIR_GAP). Las otras 7 tienen
+        // extrusiones y su 0.15 es CORRECTO (el hueco alli es 0.15): por eso el criterio no
+        // puede ser "coger el maximo", que romperia esas 7 para arreglar 2. Lo que separa
+        // limpiamente los dos grupos es justo tener extrusiones o no.
+        // Se conserva la escritura cuando el plano aun no tiene altura (valor 0), para que una
+        // capa vacia siga sembrando un valor y las gap layers no caigan al suelo de seguridad
+        // de NeoTower; lo que ya no puede es PISAR el valor de un objeto que si imprime.
+        if (layer->has_extrusions() || layer_tools.layer_height <= 0.)
+            layer_tools.layer_height  = layer->height;
 
         // Override extruder with the next 
     	for (; it_per_layer_extruder_override != per_layer_extruder_switches.end() && it_per_layer_extruder_override->first < layer->print_z + EPSILON; ++ it_per_layer_extruder_override)
@@ -1543,9 +1638,29 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // NEOTKO_MULTIPASS_TAG_END
 
     //FIXME this is a hack to get the ball rolling.
-    for (LayerTools &lt : m_layer_tools)
-        lt.has_wipe_tower = (lt.has_object && (config.timelapse_type == TimelapseType::tlSmooth || lt.wipe_tower_partitions > 0))
-            || lt.print_z < object_bottom_z + EPSILON;
+    // NEOTKO_WIPETOWER_DEBUG_TAG s303 — WT_RULE: quien enciende la torre en cada plano.
+    // La formula tiene DOS clausulas y hasta ahora no sabiamos cual manda en los planos
+    // fantasma (has_object=0). Separamos las dos ramas SOLO para poder nombrarlas; el
+    // valor asignado es identico al original. Retirar al cerrar.
+    std::vector<char> _wt_after_base;  // NEOTKO_WIPETOWER_DEBUG_TAG s303 — snapshot para WT_FINAL
+    _wt_after_base.reserve(m_layer_tools.size());
+    for (LayerTools &lt : m_layer_tools) {
+        const bool _by_object = lt.has_object
+            && (config.timelapse_type == TimelapseType::tlSmooth || lt.wipe_tower_partitions > 0);
+        const bool _by_bottom = lt.print_z < object_bottom_z + EPSILON;
+        lt.has_wipe_tower = _by_object || _by_bottom;
+        NEOTKO_LOG(WIPETOWER, "WT_RULE z=" << lt.print_z
+            << " has_obj="     << (lt.has_object ? 1 : 0)
+            << " wipe_parts="  << lt.wipe_tower_partitions
+            << " n_extruders=" << lt.extruders.size()
+            << " by_object="   << (_by_object ? 1 : 0)
+            << " by_bottom="   << (_by_bottom ? 1 : 0)
+            << " obz="         << object_bottom_z
+            << " → has_wt="    << (lt.has_wipe_tower ? 1 : 0)
+            << (!lt.has_object && _by_bottom
+                ? "  <<< FANTASMA ENCENDIDO POR object_bottom_z" : ""));
+        _wt_after_base.push_back(lt.has_wipe_tower ? 1 : 0);
+    }
 
     // NEOTKO_LIBRE_TAG_START — s130 port: restored from fork (dropped in s122-s129).
     // The dropped block was the ONLY functional divergence in the has_wt region and
@@ -1635,9 +1750,16 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
                     LayerTools lt_new(0.5f * (lt.print_z + lt_object.print_z));
                     // Find the 1st layer above lt_new.
                     for (j = i + 1; j < m_layer_tools.size() && m_layer_tools[j].print_z < lt_new.print_z - EPSILON; ++ j);
-                    if (std::abs(m_layer_tools[j].print_z - lt_new.print_z) < EPSILON) {
+                    // Upstream Snapmaker #784 (0613c52f0c): el bucle de arriba puede terminar con
+                    // j == m_layer_tools.size(), asi que m_layer_tools[j] leia fuera del vector. Y la
+                    // capa justo encima de la insertada puede no llevar extrusores (p.ej. al apagar los
+                    // soportes tras un laminado que si los tenia: el plan del hueco del raft se queda
+                    // sin extrusiones en algunas capas), con lo que lt_next.extruders.front() de mas
+                    // abajo desreferencia un begin() nulo. Esto es justo el NEOTKO_WIPETOWER_DEBUG_TAG
+                    // de aqui debajo: el id=8 fantasma que nunca trazaba por resolve_mixed.
+                    if (j < m_layer_tools.size() && std::abs(m_layer_tools[j].print_z - lt_new.print_z) < EPSILON) {
 						m_layer_tools[j].has_wipe_tower = true;
-					} else {
+					} else if (j < m_layer_tools.size() && ! m_layer_tools[j].extruders.empty()) {
 						LayerTools &lt_extra = *m_layer_tools.insert(m_layer_tools.begin() + j, lt_new);
                         //LayerTools &lt_prev  = m_layer_tools[j];
                         LayerTools &lt_next  = m_layer_tools[j + 1];
@@ -1889,6 +2011,44 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             lt.wipe_tower_layer_height = lt.print_z - wipe_tower_print_z_last;
             wipe_tower_print_z_last = lt.print_z;
         }
+
+    // NEOTKO_WIPETOWER_DEBUG_TAG s303 — WT_FINAL: estado definitivo, DESPUES de todos los
+    // bloques que mutan has_wipe_tower (LIBRE, s79i, ZPACE, DRAWER_CONTINUITY...). El volcado
+    // de arriba se escribe justo tras s79i, asi que no veia estos. Marca los que cambiaron
+    // respecto a la formula base y la altura de capa que le queda a la torre. Retirar al cerrar.
+    {
+        size_t _n_ghost_on = 0, _n_mutados = 0;
+        for (size_t _i = 0; _i < m_layer_tools.size(); ++_i) {
+            const LayerTools& lt = m_layer_tools[_i];
+            const bool _base = _i < _wt_after_base.size() && _wt_after_base[_i] != 0;
+            if (_base != lt.has_wipe_tower) ++_n_mutados;
+            if (lt.has_wipe_tower && !lt.has_object) ++_n_ghost_on;
+            NEOTKO_LOG(WIPETOWER, "WT_FINAL idx=" << _i
+                << " z="        << lt.print_z
+                << " has_obj="  << (lt.has_object ? 1 : 0)
+                << " base="     << (_base ? 1 : 0)
+                << " final="    << (lt.has_wipe_tower ? 1 : 0)
+                << " wt_lh="    << lt.wipe_tower_layer_height
+                << (_base != lt.has_wipe_tower ? "  <<< MUTADO tras la formula base" : "")
+                << (lt.has_wipe_tower && !lt.has_object ? "  [FANTASMA CON TORRE]" : ""));
+        }
+        // NEOTKO_WIPETOWER_DEBUG_TAG s303 — ToolOrdering::has_wipe_tower() SOLO mira
+        // m_layer_tools.front().has_wipe_tower, asi que si el fix apagara el plano 0 la torre
+        // desapareceria entera. Vigilarlo explicitamente.
+        if (!m_layer_tools.empty()) {
+            const LayerTools& _f = m_layer_tools.front();
+            NEOTKO_LOG(WIPETOWER, "WT_FRONT_GUARD z=" << _f.print_z
+                << " has_obj="    << (_f.has_object ? 1 : 0)
+                << " is_mp_sub="  << (_f.is_mp_sublayer ? 1 : 0)
+                << " n_extruders="<< _f.extruders.size()
+                << " has_wt="     << (_f.has_wipe_tower ? 1 : 0)
+                << (_f.has_wipe_tower ? "" : "  <<< ALERTA: la torre entera se apaga"));
+        }
+        NEOTKO_LOG(WIPETOWER, "WT_FINAL_RESUMEN planos=" << m_layer_tools.size()
+            << " fantasmas_con_torre=" << _n_ghost_on
+            << " mutados_tras_base="   << _n_mutados
+            << " object_bottom_z="     << object_bottom_z);
+    }
 }
 
 void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)

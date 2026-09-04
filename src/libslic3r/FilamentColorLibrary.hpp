@@ -10,8 +10,8 @@ namespace Slic3r
 
 enum class FilamentColorMode
 {
-    Segment = 0, //Single colors or side by side segments
-    Gradient = 1
+    Segment = 0, // Single colors or side-by-side segments.
+    Gradient = 1 // Gradient stops ordered from bottom to top.
 };
 
 std::string NormalizeFilamentHexColor(const std::string& color);
@@ -44,6 +44,10 @@ struct FilamentColorItem
 {
     std::unordered_map<std::string, std::string> colorNames;
     std::string sku;
+    // Upstream Snapmaker #778 (464d509e87): la TD que Snapmaker publica para cada SKU oficial en
+    // resources/profiles/Snapmaker/filament/filaments_colours.json. Es SU tabla, no la nuestra:
+    // aqui solo se lee. Ver docs/REALCOLOR_OPTICS_AND_MATH.md.
+    double tdValue = 0.0;
     FilamentColor colorData;
 };
 

@@ -4020,7 +4020,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             else if (boost::starts_with(m_curr_characters, "Snapmaker_Orca-")) {
                 m_is_bbl_3mf = true;
-                m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(11));
+                // Upstream Snapmaker #762 (97eb2ee6b2): "Snapmaker_Orca-" son 15 caracteres, no 11.
+                // Con substr(11) le llegaba "rca-2.3.6" a Semver::parse. Rama muerta mientras
+                // nosotros escribiamos "BambuStudio-", pero a partir de la 2.3.6 upstream SI escribe
+                // esta etiqueta, asi que cualquier 3mf suyo pasa por aqui.
+                m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(15));
             }
         //TODO: currently use version 0, no need to load&&save this string
         /*} else if (m_curr_metadata_name == BBS_FDM_SUPPORTS_PAINTING_VERSION) {
@@ -6860,8 +6864,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // Orca: PRIVACY: do not store creation & modification date in 3mf
                 metadata_item_map[BBL_CREATION_DATE_TAG] = "";
                 metadata_item_map[BBL_MODIFICATION_TAG]  = "";
-                //SoftFever: write BambuStudio tag to keep it compatible 
-                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "BambuStudio" % Snapmaker_VERSION).str();
+                // Upstream Snapmaker #762 (97eb2ee6b2), y decision del usuario en s302: escribir
+                // Snapmaker_Orca en vez de BambuStudio, para que otros slicers no traten nuestro 3mf
+                // como un proyecto de Bambu. El lector de mas arriba acepta las dos etiquetas, asi
+                // que los 3mf viejos siguen abriendose igual.
+                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "Snapmaker_Orca" % Snapmaker_VERSION).str();
             }
             metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
 

@@ -265,8 +265,41 @@ struct SupportZoneSlices
     // a business rule and not an implementation detail: this is it.
     size_t                 priority { 0 };
     const ModelVolume     *model_volume { nullptr };
+    // NEOTKO_SUPPORTZONES_TAG s299 — el ángulo con el que se dibujó esta zona, en grados.
+    //
+    // 🔑 El freno del corredor dejó de ser un escalar global: cada zona baja al ángulo que pidió su
+    // autor, y el desplazamiento permitido por capa se recalcula con el `dz` real de esa capa. Una
+    // zona que no traiga ángulo propio (una malla ajena cargada a mano, o una de antes de s299) se
+    // rellena con SUPPORT_ZONE_DEFAULT_LEAN_DEG al rebanar, así que aquí nunca hay un 0.
+    double                 lean_deg { 0. };
+    // NEOTKO_SUPPORTZONES_TAG s299c — el bloque ES la columna, no sólo el corredor por el que baja.
+    //
+    // 🔑 Sin esto, lo que desciende es el CONTACTO: se siembra donde el bloque toca superficie y esa
+    // sección es la que baja, así que un pilar dibujado ancho salía estrecho — "falta medio objeto
+    // en el slice". Con esto, cada capa aporta además la sección del bloque en esa capa.
+    bool                   solid { false };
+    // NEOTKO_SUPPORTZONES_TAG s299d — la zona sólo se posa en su tramo final, no en lo que pille.
+    //
+    // 🔑 Sin esto, una columna que cruza una pieza hueca se apoya en cada repisa interior por la
+    // que pasa y genera su interfaz allí: los "techos dentro del objeto" que en realidad son suelos.
+    bool                   land_only { false };
     // Indexed by object layer, exactly like slice_support_volumes()'s output.
     std::vector<Polygons>  slices;
+    // NEOTKO_SUPPORTZONES_TAG s300g — DÓNDE TERMINA EL BLOQUE POR ARRIBA. Una sola verdad.
+    //
+    // 🚨 Había dos consumidores calculándolo por su cuenta, los dos con el mismo error, y los dos
+    // mintiendo: el contacto (`SupportAnnotations`) sembró 31 capas seguidas, y la semilla de
+    // columna de s300f dio 300 de 300. El fallo era comparar `slices[i]` contra `slices[i+1]` a
+    // secas: en un bloque INCLINADO cada capa deja borde que no estaba en la de arriba, así que el
+    // diff nunca sale vacío y todo parece techo.
+    //
+    // 🔑 La corrección es restar la capa de arriba TRASLADADA por el desplazamiento del bloque
+    // entre esas dos capas. En un tramo inclinado uniforme el resultado es vacío —que es lo
+    // correcto: un lado inclinado no sujeta nada— y en el techo de verdad queda la banda.
+    //
+    // Se calcula una vez, al rebanar, y lo leen los dos. Si hay que volver a tocar el criterio, se
+    // toca aquí y no en dos sitios que se separan sin avisar.
+    std::vector<char>      roof_layer;
 };
 
 class PrintObjectRegions
@@ -446,6 +479,16 @@ public:
     {
         this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message,
                                        PrintStateBase::SlicingGcodeOverlap);
+    }
+
+    // NEOTKO_SUPPORTZONES_TAG s304 — hermano del de arriba, y por la misma razon:
+    // PrintObjectSupportMaterial::generate() necesita avisar al usuario de que ha pedido
+    // zonas de soporte pintadas con un estilo que no es Snug, y `active_step_add_warning()`
+    // es protected. Un solo aviso, un solo passthrough, en vez de abrir la superficie entera.
+    void push_support_zone_style_warning(const std::string &message)
+    {
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message,
+                                      PrintStateBase::SlicingDefaultNotification);
     }
 
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.

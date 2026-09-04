@@ -919,7 +919,7 @@ static std::vector<std::string> s_Preset_print_options {
      "tree_support_branch_diameter", "tree_support_branch_diameter_angle",
      "detect_narrow_internal_solid_infill",
      "gcode_add_line_number", "enable_arc_fitting", "precise_z_height", "infill_combination","infill_combination_max_layer_height", /*"adaptive_layer_height",*/
-     "support_bottom_interface_spacing", "enable_overhang_speed", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
+     "support_bottom_interface_spacing", "enable_overhang_speed", "overhang_shadow_inner_wall", "overhang_shadow_speed_ratio", "overhang_shadow_distance", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
@@ -952,7 +952,7 @@ static std::vector<std::string> s_Preset_print_options {
      // NEOTKO_NEOTOWER_TAG_END
      "multipass_prime_volume", // NEOTKO_MULTIPASS_PRIME_TAG — per-region sublayer prime volume
      // NEOTKO_SANDWICH_ENGINE_TAG_START — Sandwich engine per-region/object keys (Fase 2)
-     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_libre_mode", "neotko_true_objects", "gravity_contact_gap_ratio", "neotko_assemble_boolean", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
+     "penultimate_solid_infill_pattern", "penultimate_solid_infill_density", "penultimate_top_layers", "penultimate_infill_speed", "neotko_libre_mode", "neotko_true_objects", "neotko_idle_tool_power_down", "neotko_idle_tool_deep_sleep", "gravity_contact_gap_ratio", "neotko_assemble_boolean", "neotko_interlayer_nesting_enabled", "interlayer_colormix_enabled",
      "interlayer_colormix_surface", "interlayer_colormix_tool_a", "interlayer_colormix_tool_b", "interlayer_colormix_tool_c", "interlayer_colormix_tool_d", "interlayer_colormix_min_length",
      "interlayer_colormix_pattern_top", "interlayer_colormix_pattern_penultimate", "interlayer_colormix_mode", "interlayer_colormix_pct_a", "interlayer_colormix_pct_b", "interlayer_colormix_easing",
      "interlayer_colormix_gamma", "interlayer_colormix_min_surface_lines", "interlayer_colormix_overlap", "interlayer_colormix_invert", "interlayer_colormix_repetitions", "interlayer_colormix_penu_mode",
@@ -974,6 +974,9 @@ static std::vector<std::string> s_Preset_print_options {
      "pathblend_layer_ratio_4", "pathblend_min_ratio", "pathblend_max_ratio", "pathblend_ease_mode", "pathblend_surface", "pathblend_invert_gradient",
      "pathblend_fill_angle", "pathblend_top", "pathblend_penu", "neotko_surface_passes_top", "neotko_surface_passes_penu",
      "neotko_support_zone_gesture", // NEOTKO_SUPPORTZONES_TAG s288 — sin esta línea el gesto no viaja al 3mf
+     "neotko_zone_lean_deg",        // NEOTKO_SUPPORTZONES_TAG s299 — el ángulo, que sí lee el motor
+     "neotko_zone_roof_only", "neotko_zone_solid",  // NEOTKO_SUPPORTZONES_TAG s299c
+     "neotko_zone_land_only",                       // NEOTKO_SUPPORTZONES_TAG s299d
      "neotko_slope_perimeter_recolor",
      "neotko_alh_adapt_to_color",
      "neotko_alh_slope_recolor",

@@ -9,6 +9,7 @@
     "Snapmaker U1 (0.4 nozzle)"
   ],
   "enable_pressure_advance": ["1"],
+  "filament_is_high_temperature": ["1"],
   "chamber_temperature": ["60"],
   "complete_print_exhaust_fan_speed": ["70"],
   "during_print_exhaust_fan_speed": ["70"],

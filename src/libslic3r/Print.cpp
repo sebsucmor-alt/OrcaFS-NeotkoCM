@@ -663,7 +663,13 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "long_retractions_when_cut",
         "retraction_distances_when_cut",
         "filament_long_retractions_when_cut",
-        "filament_retraction_distances_when_cut"
+        "filament_retraction_distances_when_cut",
+        // NEOTKO_TOOLSLEEP_TAG s294 — consumed only by GCodeProcessor::run_post_process (a rewrite
+        // of the already-emitted gcode), so flipping it needs the export step and nothing else.
+        // Without this it falls through to the "unknown option -> invalidate everything" catch-all
+        // below and forces a full re-slice for a toggle that never touches geometry.
+        "neotko_idle_tool_power_down",
+        "neotko_idle_tool_deep_sleep"
     };
 
     // NEOTKO_GCODE_REPROCESSOR: this option is never read by Print/PrintObject/GCodeGenerator —

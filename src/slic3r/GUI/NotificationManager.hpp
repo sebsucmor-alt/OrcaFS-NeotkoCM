@@ -151,6 +151,10 @@ enum class NotificationType
     BBLPrinterConfigUpdateAvailable,
 	BBLUserPresetExceedLimit,
         FilamentIncompatibleMixed,
+	// NEOTKO_SPIRALGUARD_TAG — post-slice report on spiral lifts near the bed edge. Its own type so
+	// it can be closed by type before each push: the text carries counts, and plater warnings are
+	// closed by matching their text, which would leave a stale copy behind on every reslice.
+	NeotkoSpiralLift,
 };
 
 class NotificationManager

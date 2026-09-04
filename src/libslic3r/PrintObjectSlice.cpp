@@ -24,6 +24,7 @@
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
 #include "libslic3r/Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 5 — elephant foot
 #include "libslic3r/Feature/HeightAdaptive/HeightCurve.hpp" // NEOTKO_HAE_EXPANSION_TAG s247 — per-layer XY compensation
+#include "libslic3r/Feature/SupportZones/SupportZoneProbe.hpp" // NEOTKO_SUPPORTZONES_TAG s299 — el default del ángulo
 
 //! macro used to mark string used at localization, return same string
 #define L(s) Slic3r::I18N::translate(s)
@@ -5862,6 +5863,27 @@ std::vector<SupportZoneSlices> PrintObject::slice_support_enforcers_per_zone() c
         SupportZoneSlices zone;
         zone.priority     = priority ++;
         zone.model_volume = v;
+        // NEOTKO_SUPPORTZONES_TAG s299 — el ángulo de la zona, resuelto aquí de una vez.
+        //
+        // 0 significa "no lo he dicho", igual que en `support_filament`, y entonces manda el
+        // default. Se resuelve en este punto y no en el generador para que el motor no tenga que
+        // acordarse nunca de la regla: lo que sale de aquí es siempre un ángulo utilizable.
+        // s299c — «maciza»: la sección del bloque se imprime, toque o no toque voladizo.
+        // 🚨 `ModelConfig` no tiene `opt_bool()`, así que la opción se lee por su tipo.
+        if (const auto *so = dynamic_cast<const ConfigOptionBool *>(v->config.option("neotko_zone_solid"));
+            so != nullptr)
+            zone.solid = so->value;
+        // s299d — «sólo aterriza al final»: no se posa en las repisas que encuentra por el camino.
+        if (const auto *lo = dynamic_cast<const ConfigOptionBool *>(v->config.option("neotko_zone_land_only"));
+            lo != nullptr)
+            zone.land_only = lo->value;
+
+        zone.lean_deg = SupportZones::SUPPORT_ZONE_DEFAULT_LEAN_DEG;
+        if (v->config.has("neotko_zone_lean_deg")) {
+            const double a = v->config.opt_float("neotko_zone_lean_deg");
+            if (a > 0.)
+                zone.lean_deg = std::min(a, SupportZones::SUPPORT_ZONE_MAX_LEAN_DEG);
+        }
         zone.slices.reserve(slices2.size());
         for (ExPolygons &src : slices2)
             zone.slices.emplace_back(to_polygons(std::move(src)));
@@ -5870,6 +5892,60 @@ std::vector<SupportZoneSlices> PrintObject::slice_support_enforcers_per_zone() c
         // slice_support_volumes() exists only to merge DIFFERENT volumes, which is precisely what
         // this function must not do.
         zone.slices.resize(zs.size(), Polygons());
+
+        // NEOTKO_SUPPORTZONES_TAG s300g — EL TECHO DEL BLOQUE, CALCULADO UNA VEZ Y BIEN.
+        //
+        // 🚨 Lo que había antes era `diff(slices[i], slices[i+1])` en dos sitios distintos, y los
+        // dos daban falsos positivos en cuanto el bloque se inclinaba: cada capa de un prisma
+        // esviado deja borde que no estaba en la de arriba. Medido: el contacto sembró 31 capas
+        // seguidas y la semilla de columna 300 de 300.
+        //
+        // 🔑 Se compensa la inclinación antes de comparar. El desplazamiento del bloque entre dos
+        // capas es la diferencia de sus centroides ponderados por área — la misma cuenta que hace
+        // `support_corridor_centroid()` en el motor. Restando la capa de arriba YA TRASLADADA, un
+        // tramo inclinado uniforme da vacío y sólo queda banda donde el bloque de verdad termina.
+        {
+            auto centroid_of = [](const Polygons &polys) -> Vec2d {
+                double area_total = 0.;
+                Vec2d  acc        = Vec2d::Zero();
+                for (const Polygon &poly : polys) {
+                    if (poly.size() < 3)
+                        continue;
+                    const double a = std::abs(poly.area());
+                    if (a <= 0.)
+                        continue;
+                    const Point c = poly.centroid();
+                    acc        += Vec2d(double(c.x()), double(c.y())) * a;
+                    area_total += a;
+                }
+                return (area_total > 0.) ? Vec2d(acc / area_total) : Vec2d::Zero();
+            };
+            const size_t n = zone.slices.size();
+            zone.roof_layer.assign(n, char(0));
+            for (size_t i = 0; i < n; ++ i) {
+                if (zone.slices[i].empty())
+                    continue;
+                // Nada encima: techo entero. Es el caso que garantiza que TODA columna arranque
+                // llena, aunque el bloque sea un prisma perfectamente vertical.
+                if (i + 1 >= n || zone.slices[i + 1].empty()) {
+                    zone.roof_layer[i] = char(1);
+                    continue;
+                }
+                const Vec2d v = centroid_of(zone.slices[i]) - centroid_of(zone.slices[i + 1]);
+                Polygons above = zone.slices[i + 1];
+                const Point shift(coord_t(std::lround(v.x())), coord_t(std::lround(v.y())));
+                for (Polygon &p : above)
+                    p.translate(shift);
+                const Polygons band = diff(zone.slices[i], above);
+                // ⚠️ Un residuo minúsculo es el redondeo del traslado a coordenadas enteras, no un
+                // techo. Se pide que la banda valga algo frente a la propia capa; si no, cualquier
+                // pared inclinada volvería a colarse por la puerta de al lado.
+                const double a_layer = std::abs(area(zone.slices[i]));
+                if (! band.empty() && a_layer > 0. && std::abs(area(band)) > 0.02 * a_layer)
+                    zone.roof_layer[i] = char(1);
+            }
+        }
+
         zones.emplace_back(std::move(zone));
     }
     return zones;

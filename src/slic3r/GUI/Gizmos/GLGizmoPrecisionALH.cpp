@@ -199,12 +199,27 @@ void GLGizmoPrecisionALH::seed_flat_profile()
     m_points.push_back(ALHPoint{ m_object_height, h, 0.0 });
 }
 
-void GLGizmoPrecisionALH::load_points_from_profile(const std::vector<coordf_t>& profile)
+void GLGizmoPrecisionALH::load_points_from_profile(const std::vector<coordf_t>& profile_in)
 {
     // Cap: a profile denser than this is almost certainly from the stock brush
     // (per-pixel samples), not a reasonable set of draggable control points —
     // fall back to a flat seed rather than flooding the band with circles.
     constexpr size_t kMaxPointsToImport = 80;
+
+    // NEOTKO_PRECISIONALH_TAG s299 — el perfil guardado esta en Z ABSOLUTA, asi que en cuanto el
+    // objeto se escala en Z su ultima Z se queda en la altura VIEJA. Con eso, el test de abajo
+    // (pts.back().z_mm >= m_object_height - 1e-3) fallaba al agrandar y caiamos en
+    // seed_flat_profile(): abrir el gizmo tras escalar borraba la curva. Al encoger pasaba algo
+    // peor todavia: el test SI pasaba, se pinchaba solo el ultimo punto a la altura nueva y los
+    // intermedios se quedaban por encima del techo del objeto.
+    //
+    // Ahora se remapea primero (mismo helper que usa el motor en
+    // PrintObject::update_layer_height_profile, para que editor y slice cuenten lo mismo).
+    std::vector<coordf_t> profile = profile_in;
+    m_rescaled_on_load = false;
+    if (profile.size() >= 4 && (profile.size() & 1) == 0 && m_object_height > 1e-4 &&
+        std::abs(profile[profile.size() - 2] - m_object_height) > 1e-3)
+        m_rescaled_on_load = Slic3r::rescale_layer_height_profile(profile, m_object_height);
 
     if (profile.size() >= 4 && profile.size() <= kMaxPointsToImport * 2 && profile.size() % 2 == 0) {
         std::vector<ALHPoint> pts;
@@ -224,6 +239,7 @@ void GLGizmoPrecisionALH::load_points_from_profile(const std::vector<coordf_t>& 
             return;
         }
     }
+    m_rescaled_on_load = false;
     seed_flat_profile();
 }
 
@@ -1188,6 +1204,17 @@ void GLGizmoPrecisionALH::on_render_input_window(float x, float y, float bottom_
     ImGui::TextWrapped("%s", _u8L("Click to add a point, drag to move it, right-click to delete it. "
                                    "The bottom point is the fixed first layer and the top point can "
                                    "only move in height.").c_str());
+    // NEOTKO_PRECISIONALH_TAG s299 — aviso de que la curva que se ve NO es literalmente la que
+    // habia guardada: el objeto se ha escalado en Z y el perfil se ha estirado/encogido con el.
+    // Sin este aviso el usuario ve numeros de Z distintos a los que dejo y no sabe por que.
+    if (m_rescaled_on_load) {
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
+        ImGui::TextWrapped("%s",
+            _u8L("The object's height changed: the saved curve has been stretched to the new "
+                 "height. Layer heights are untouched; only the Z of each point moved.").c_str());
+        ImGui::PopStyleColor();
+    }
+
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
     render_curve_editor(win_w - 16.0f, 220.0f);

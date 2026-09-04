@@ -1317,6 +1317,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, top_surface_speed))
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))
+    // NEOTKO_OVERHANGSHADOW_TAG / NeotkoLIBRE — Tier B (LIBREMODE.md §3): carry part of the overhang
+    // slowdown over to the inner wall printed right before the overhanging outer wall, so the outer
+    // wall lands on a bead that was itself laid down carefully. Ratio 0 == stock behaviour.
+    ((ConfigOptionBool,                 overhang_shadow_inner_wall))
+    ((ConfigOptionPercent,              overhang_shadow_speed_ratio))
+    ((ConfigOptionPercent,              overhang_shadow_distance))
     ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))
     ((ConfigOptionFloatOrPercent,       overhang_2_4_speed))
     ((ConfigOptionFloatOrPercent,       overhang_3_4_speed))
@@ -1557,6 +1563,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,  pathblend_penu))
     // NEOTKO_SANDWICH_TAG — Sandwich pass-stack blob (1 coString JSON per zone).
     ((ConfigOptionString,  neotko_support_zone_gesture))   // NEOTKO_SUPPORTZONES_TAG s288
+    ((ConfigOptionFloat,   neotko_zone_lean_deg))          // NEOTKO_SUPPORTZONES_TAG s299
+    ((ConfigOptionBool,    neotko_zone_roof_only))         // NEOTKO_SUPPORTZONES_TAG s299c
+    ((ConfigOptionBool,    neotko_zone_solid))             // NEOTKO_SUPPORTZONES_TAG s299c
+    ((ConfigOptionBool,    neotko_zone_land_only))         // NEOTKO_SUPPORTZONES_TAG s299d
     ((ConfigOptionString,  neotko_surface_passes_top))
     ((ConfigOptionString,  neotko_surface_passes_penu))
     // NEOTKO_ALHCOLOR_TAG — Fase 5.3: slope-perimeter recolor blob (JSON array of
@@ -1909,6 +1919,16 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              spiral_starting_flow_ratio))
     ((ConfigOptionInt,                standby_temperature_delta))
     ((ConfigOptionFloat,                preheat_time))
+    // NEOTKO_TOOLSLEEP_TAG s294 — "Turn off unused hotends fully (0 C)". Slice-time mirror of the
+    // app_config "neotko_idle_tool_power_down" toggle (Bed and Nozzle Extras, sidebar Printer).
+    // Lives here (PrintConfig) and NOT in any Snapmaker profile: GCodeProcessor::apply_config takes
+    // a const PrintConfig&, and keeping it out of the presets is the whole point — see
+    // docs/FUTURE/IDLE_TOOL_POWER_DOWN.md. false = stock, byte-identical gcode.
+    ((ConfigOptionBool,               neotko_idle_tool_power_down))
+    // NEOTKO_TOOLSLEEP_TAG s294 — "Extra Energy Save": widens the rule above from "never used
+    // again" to "any park long enough that the preheat can bring it back in time". Same mirror,
+    // same reason. Requires neotko_idle_tool_power_down to be on.
+    ((ConfigOptionBool,               neotko_idle_tool_deep_sleep))
     ((ConfigOptionInt,                delta_temperature))
     ((ConfigOptionInt,                preheat_steps))
     ((ConfigOptionInts,               nozzle_temperature))

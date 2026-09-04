@@ -1659,8 +1659,15 @@ boost::any& Choice::get_value()
                     m_opt_id == "ironing_pattern" || m_opt_id == "support_ironing_pattern" ||
                     m_opt_id == "support_style" || m_opt_id == "curr_bed_type")
         {
-            const std::string &key = m_opt.enum_values[field->GetSelection()];
-            m_value = int(m_opt.enum_keys_map->at(key));
+            // Upstream Snapmaker #784 (0613c52f0c): la seleccion puede ser invalida cuando el valor
+            // actual no esta en la lista recien reconstruida (support_style viejo contra el
+            // support_type nuevo). Caer en la primera entrada en vez de indexar fuera de rango.
+            const int selection = field->GetSelection();
+            if (! m_opt.enum_values.empty()) {
+                const int index = (selection >= 0 && selection < static_cast<int>(m_opt.enum_values.size())) ? selection : 0;
+                const std::string &key = m_opt.enum_values[index];
+                m_value = static_cast<int>(m_opt.enum_keys_map->at(key));
+            }
         }
         // Support ThirdPartyPrinter
         else if (m_opt_id.compare("host_type") == 0 && m_opt.enum_values.size() > field->GetCount())

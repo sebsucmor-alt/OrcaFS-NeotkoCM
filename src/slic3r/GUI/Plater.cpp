@@ -1,5 +1,6 @@
 #include "Plater.hpp"
 #include "MixedFilamentDialog.hpp"
+#include "NeotkoBedNozzleExtras.hpp"  // NEOTKO_TOOLSLEEP_TAG s294
 #include "MixedGradientSelector.hpp"
 #include "MixedColorMatchPanel.hpp"
 #include "MixedFilamentBadge.hpp"
@@ -1035,6 +1036,11 @@ struct Sidebar::priv
     wxPanel* m_panel_project_title;
     ScalableButton* m_filament_icon = nullptr;
     Button * m_flushing_volume_btn = nullptr;
+    // NEOTKO_TOOLSLEEP_TAG s294 — "Bed and Nozzle Extras" button, under the Bed type combo.
+    Button * m_neotko_extras_btn = nullptr;
+    // Repaints the button so an active extra is never on in silence: the overrides in there do not
+    // live in any preset, so nothing else on screen would hint that the gcode is being changed.
+    void neotko_update_extras_btn();
     TextInput* m_search_item = nullptr;
     StaticBox* m_search_bar = nullptr;
     Search::SearchObjectDialog* dia = nullptr;
@@ -1088,6 +1094,33 @@ Sidebar::priv::~priv()
 #if 0
     delete frequently_changed_parameters;
 #endif
+}
+
+// NEOTKO_TOOLSLEEP_TAG s294 — keep the "Bed and Nozzle Extras" button honest. These overrides live
+// in app_config, so no preset goes dirty and nothing else on screen would tell the user that the
+// exported gcode is being altered. The button label carries that itself.
+void Sidebar::priv::neotko_update_extras_btn()
+{
+    if (m_neotko_extras_btn == nullptr)
+        return;
+
+    int active = 0;
+    if (wxGetApp().app_config->get_bool("neotko_idle_tool_power_down")) {
+        ++active;
+        // Extra Energy Save only counts when its parent is on, which is the only way it does
+        // anything, so the number on the button matches what the gcode is actually getting.
+        if (wxGetApp().app_config->get_bool("neotko_idle_tool_deep_sleep"))
+            ++active;
+    }
+
+    if (active > 0) {
+        m_neotko_extras_btn->SetLabel(wxString::Format(_L("Bed and Nozzle Extras (%d on)"), active));
+        m_neotko_extras_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Compact);
+    } else {
+        m_neotko_extras_btn->SetLabel(_L("Bed and Nozzle Extras"));
+        m_neotko_extras_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    }
+    m_neotko_extras_btn->Refresh();
 }
 
 void Sidebar::priv::show_preset_comboboxes()
@@ -2242,6 +2275,26 @@ Sidebar::Sidebar(Plater *parent)
 
         // 添加到垂直布局
         vsizer_printer->Add(p->panel_printer_preset, 0, wxEXPAND | wxALL, FromDIP(4));
+
+        // NEOTKO_TOOLSLEEP_TAG s294 — "Bed and Nozzle Extras", right under Bed type on purpose.
+        // Everything behind this button is an app_config preference, same storage as the Bed type
+        // combo above it, so it never enters a Snapmaker preset and survives profile updates.
+        // See slic3r/GUI/NeotkoBedNozzleExtras.hpp and docs/FUTURE/IDLE_TOOL_POWER_DOWN.md.
+        p->m_neotko_extras_btn = new Button(p->m_panel_printer_content, _L("Bed and Nozzle Extras"));
+        p->m_neotko_extras_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+        p->m_neotko_extras_btn->Bind(wxEVT_BUTTON, [this, parent](wxCommandEvent&) {
+            if (neotko_show_bed_nozzle_extras(this)) {
+                // The toggle is mirrored into the print config at apply time, so the gcode already
+                // exported is stale. It only invalidates psGCodeExport (see the steps_gcode set in
+                // Print.cpp), so this re-exports without a full re-slice. Same wake-up the flushing
+                // volumes button uses.
+                wxPostEvent(parent, SimpleEvent(EVT_SCHEDULE_BACKGROUND_PROCESS, parent));
+            }
+            p->neotko_update_extras_btn();
+        });
+        vsizer_printer->Add(p->m_neotko_extras_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(4));
+        p->neotko_update_extras_btn();
+
         vsizer_printer->AddSpacer(FromDIP(8));
 
         auto& project_config = wxGetApp().preset_bundle->project_config;
@@ -8282,6 +8335,11 @@ void Sidebar::show_sync_filament_dialog()
         std::vector<FilamentData> syncedData = dlg.getSyncDataList();
 
         size_t effective_size = syncedData.size();
+        // Upstream Snapmaker #740 (8168f5f0c5): con el dispositivo 1 sin montar la sincronizacion
+        // llegaba con 0 consumibles; bajar a cero filamentos y volver a anadir uno crasheaba.
+        if (effective_size == 0)
+            return;
+
         size_t combo_Size = p->combos_filament.size();
         if (effective_size != combo_Size) {
             if (effective_size > combo_Size &&
@@ -8378,10 +8436,27 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
     if (!p->m_nozzle_notebook)
         return;
 
+    // Upstream Snapmaker #769 (79cdfadc93).
+    const DynamicPrintConfig& printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+
     // Get new nozzle count
-    auto* nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(
-        wxGetApp().preset_bundle->printers.get_edited_preset().config.option("nozzle_diameter"));
+    auto* nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(printer_config.option("nozzle_diameter"));
     size_t new_nozzle_count = nozzle_diameter ? nozzle_diameter->values.size() : 1;
+
+    std::string diam_str = "";
+    if (const auto* pv = printer_config.option<ConfigOptionString>("printer_variant")) // absent in bare configs
+        diam_str = pv->value;
+
+    // Visible presets for this printer_model (system + user). Imported multi-nozzle variants are
+    // usually non-system; diameters_for_same_printer_model() only counted system and kept the combo disabled.
+    auto diameters = wxGetApp().preset_bundle->printers.diameters_of_selected_printer();
+
+    // Record focus before DeleteAllPages destroys the focused control.
+    bool focus_was_in_notebook = false;
+    if (wxWindow* focus = wxWindow::FindFocus())
+        focus_was_in_notebook = p->m_nozzle_notebook->IsDescendant(focus);
+
+    wxWindowUpdateLocker noUpdates(p->m_nozzle_notebook);
 
     // Clear existing pages and controls
     p->m_nozzle_notebook->DeleteAllPages();
@@ -8414,16 +8489,11 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
                                                 nullptr, wxCB_READONLY);
         
 
-        // Visible presets for this printer_model (system + user). Imported multi-nozzle variants are
-        // usually non-system; diameters_for_same_printer_model() only counted system and kept the combo disabled.
-        auto diameters = wxGetApp().preset_bundle->printers.diameters_of_selected_printer();
-        for (auto& diameter : diameters) {
+        for (auto& diameter : diameters) {   // Upstream Snapmaker #769: izado fuera del bucle
             diameter_combo->AppendString(wxString(diameter) + "mm");
         }
-        if (diameter_combo->GetCount() == 0) {
-            const auto *pv = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionString>("printer_variant");
-            if (pv)
-                diameter_combo->AppendString(wxString(pv->value) + "mm");
+        if (diameter_combo->GetCount() == 0 && !diam_str.empty()) {
+            diameter_combo->AppendString(wxString(diam_str) + "mm");
         }
         if (diameters.size() < 2) {
             diameter_combo->Enable(false);
@@ -8482,9 +8552,9 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             // Do not event.Skip(): select_preset rebuilds nozzle UI and can destroy this combo; skipping would let sidebar treat this as bed-type combo and use-after-free.
         });
         
-        auto diam_str = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionString>("printer_variant")->value;
-        
-        diameter_combo->SetValue(diam_str + "mm");
+        // Upstream Snapmaker #769 + #775: printer_variant puede no existir en una config pelada,
+        // y aqui se le hacia ->value directo sobre un puntero nulo.
+        diameter_combo->SetValue(diam_str.empty() ? wxString() : wxString(diam_str) + "mm");
 
         p->m_nozzle_diameter_lists.push_back(diameter_combo);
 
@@ -8530,7 +8600,8 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
     if (switch_machine) {
         p->combo_printer->SetFocus();
-    } else {
+    } else if (focus_was_in_notebook) {
+        // Upstream Snapmaker #769: el control con el foco lo acaba de destruir el rebuild.
         p->combo_printer->GetParent()->SetFocus();
     }
 }
@@ -8772,6 +8843,19 @@ void Sidebar::auto_calc_flushing_volumes(const int modify_id)
 
         single_filament.push_back(wxColour(extruder_colours[i]));
         multi_colours.push_back(single_filament);
+    }
+
+    // Upstream Snapmaker #805 (dfbd784cfc): si la matriz no cuadra con el numero de filamentos,
+    // los bucles de abajo escriben fuera de matrix[] y leen fuera de min_flush_volumes[].
+    // NEOTKO: ellos solo lo registran; nosotros ademas nos salimos, porque seguir es corromper
+    // el heap. Con el arreglo de Tab::select_preset esto no deberia dispararse nunca.
+    const size_t expectedMatrixSize = multi_colours.size() * multi_colours.size();
+    if (matrix.size() != expectedMatrixSize) {
+        BOOST_LOG_TRIVIAL(error) << "Invalid flushing volume matrix: modify_id=" << modify_id
+                                 << ", filament_count=" << multi_colours.size()
+                                 << ", matrix_size=" << matrix.size()
+                                 << ", expected_size=" << expectedMatrixSize;
+        return;
     }
 
     if (modify_id >= 0 && modify_id < multi_colours.size()) {
@@ -12268,6 +12352,7 @@ void Plater::priv::reset(bool apply_presets_change)
     Plater::TakeSnapshot snapshot(q, "Reset Project", UndoRedo::SnapshotType::ProjectSeparator);
 
     clear_warnings();
+    first_enter_assemble = true;   // Upstream Snapmaker #735 (ce37018471)
 
     set_project_filename("");
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " call set_project_filename: empty";
@@ -12708,6 +12793,14 @@ DynamicPrintConfig Plater::priv::neotko_full_config() const
     // app_config lookup on a path that already rebuilds the whole config.
     cfg.set_key_value("neotko_true_objects",
         new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_true_objects")));
+    // NEOTKO_TOOLSLEEP_TAG s294 — "Turn off unused hotends fully" (Bed and Nozzle Extras, sidebar
+    // Printer). Same mirror pattern and for the same reason: it must persist across profile
+    // updates, so it lives in app_config and never in a Snapmaker preset.
+    // docs/FUTURE/IDLE_TOOL_POWER_DOWN.md.
+    cfg.set_key_value("neotko_idle_tool_power_down",
+        new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_idle_tool_power_down")));
+    cfg.set_key_value("neotko_idle_tool_deep_sleep",
+        new ConfigOptionBool(wxGetApp().app_config->get_bool("neotko_idle_tool_deep_sleep")));
     // NEOTKO_MIXEDFIL_SANDWICH_TAG — mirror the per-tool TD scalars (app_config-only)
     // so ColorStitch.cpp (pure engine) can build ColorSci materials for the
     // "MixedFilament Object" auto-sandwich without touching app_config.
@@ -14353,6 +14446,10 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
 void Plater::priv::on_slicing_completed(wxCommandEvent & evt)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": event_type %1%, string %2%") % evt.GetEventType() % evt.GetString();
+
+    // Upstream Snapmaker #753 (785c690f47): el evento puede llegar con la GUI a medio recrear.
+    if (GUI::wxGetApp().is_recreating_gui())
+        return;
     //BBS: add slice project logic
     if (m_slice_all && (m_cur_slice_plate < (partplate_list.get_plate_count() - 1))) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format("slicing all, finished plate %1%, will continue next.")%m_cur_slice_plate;

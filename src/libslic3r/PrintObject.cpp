@@ -1259,7 +1259,15 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "tree_support_branch_angle"
             || opt_key == "tree_support_branch_angle_organic"
             || opt_key == "tree_support_angle_slow"
-            || opt_key == "tree_support_wall_count") {
+            || opt_key == "tree_support_wall_count"
+            // NEOTKO_SUPPORTZONES_TAG s299 — el ángulo de una zona decide cuánto puede desplazarse
+            // su columna en cada capa, así que cambiarlo cambia la geometría del soporte y hay que
+            // regenerarlo. Es justo lo contrario del gesto de s288, que es descriptivo y tiene su
+            // `continue` al principio de esta función.
+            || opt_key == "neotko_zone_lean_deg"
+            || opt_key == "neotko_zone_roof_only"
+            || opt_key == "neotko_zone_solid"
+            || opt_key == "neotko_zone_land_only") {
             steps.emplace_back(posSupportMaterial);
         } else if (
                opt_key == "bottom_shell_layers"
@@ -1453,6 +1461,12 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "internal_solid_infill_speed"
             || opt_key == "top_surface_speed"
             || opt_key == "neostitch_fill_speed"
+            // NEOTKO_OVERHANGSHADOW_TAG — consumed only by the gcode exporter, so it re-exports
+            // without reslicing. Without these three the legacy else-branch below invalidates every
+            // step and each change of the percentage costs a full slice.
+            || opt_key == "overhang_shadow_inner_wall"
+            || opt_key == "overhang_shadow_speed_ratio"
+            || opt_key == "overhang_shadow_distance"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"
@@ -4279,12 +4293,35 @@ bool PrintObject::update_layer_height_profile(const ModelObject          &model_
     }
 
     // Verify the layer_height_profile.
-    if (!layer_height_profile.empty() &&
+    if (!layer_height_profile.empty()) {
         // Must not be of even length.
-        ((layer_height_profile.size() & 1) != 0 ||
+        if ((layer_height_profile.size() & 1) != 0)
+            layer_height_profile.clear();
+        else {
             // Last entry must be at the top of the object.
-            std::abs(layer_height_profile[layer_height_profile.size() - 2] - slicing_parameters.object_print_z_uncompensated_max + slicing_parameters.object_print_z_min) > 1e-3))
-        layer_height_profile.clear();
+            const coordf_t target_top = slicing_parameters.object_print_z_uncompensated_max - slicing_parameters.object_print_z_min;
+            if (std::abs(layer_height_profile[layer_height_profile.size() - 2] - target_top) > 1e-3) {
+                // NEOTKO_PRECISIONALH_TAG s299 — antes esto era un clear() seco, y el perfil se
+                // regeneraba plano unas lineas mas abajo. Efecto real: escalabas el objeto en Z y
+                // toda la altura variable (la del gizmo Precision ALH o la del pincel de stock)
+                // desaparecia del gcode sin decir nada, porque la ultima Z del perfil se habia
+                // quedado en la altura VIEJA.
+                //
+                // Ahora se intenta primero remapear el perfil a la altura nueva (proporcional en
+                // z, alturas de capa intactas — ver rescale_layer_height_profile en Slicing.cpp).
+                // Solo se descarta si el perfil no da para eso.
+                //
+                // 🚨 Esto trabaja sobre la COPIA del PrintObject, no sobre
+                // ModelObject::layer_height_profile: el dato del modelo se queda como estaba y el
+                // remapeo se rehace en cada slice desde la misma fuente, asi que es idempotente y
+                // no se acumula.
+                if (Slic3r::rescale_layer_height_profile(layer_height_profile, target_top))
+                    updated = true;
+                else
+                    layer_height_profile.clear();
+            }
+        }
+    }
 
     // Upstream Snapmaker #757 (b826bb225): a differing first layer height must NOT force
     // regeneration: doing so discards a valid variable layer height profile (e.g. loaded from a

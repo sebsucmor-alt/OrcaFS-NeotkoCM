@@ -27,6 +27,19 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
     this->config.apply(print_config, true);
     m_single_extruder_multi_material = print_config.single_extruder_multi_material.value;
+
+    // NEOTKO_SPIRALGUARD_TAG — capture the bed outline for spiral_lift_fits_printable_area().
+    // Has to happen here: printable_area is a PrintConfig key and this->config is a GCodeConfig,
+    // which does not carry it.
+    m_bed_printable_area.points.clear();
+    if (print_config.printable_area.values.size() >= 3) {
+        m_bed_printable_area.points.reserve(print_config.printable_area.values.size());
+        for (const Vec2d &p : print_config.printable_area.values)
+            m_bed_printable_area.points.emplace_back(Point::new_scale(p.x(), p.y()));
+    }
+    m_spiral_lift_total             = 0;
+    m_spiral_lift_degraded          = 0;
+    m_spiral_lift_first_degraded_z  = 0.;
     bool use_mach_limits = print_config.gcode_flavor.value == gcfMarlinLegacy || print_config.gcode_flavor.value == gcfMarlinFirmware ||
                            print_config.gcode_flavor.value == gcfKlipper || print_config.gcode_flavor.value == gcfRepRapFirmware;
     m_max_acceleration = std::lrint(use_mach_limits ? print_config.machine_max_acceleration_extruding.values.front() : 0);
@@ -545,11 +558,32 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         if (delta(2) > 0 && delta_no_z.norm() != 0.0f)    {
             //BBS: SpiralLift
             if (m_to_lift_type == LiftType::SpiralLift && this->is_current_position_clear()) {
-                //BBS: todo: check the arc move all in bed area, if not, then use lazy lift
+                // NEOTKO_SPIRALGUARD_TAG — this is the "todo: check the arc move all in bed area,
+                // if not, then use lazy lift" that BBS left here and never wrote. Ported from
+                // upstream OrcaSlicer, which settled on a NORMAL lift for the fallback rather than
+                // the lazy lift the note proposed: normal moves no XY at all, so it cannot leave
+                // the bed under any geometry, and needs no reasoning about the travel destination.
+                //
+                // ⚠️ atan() here is upstream's own slip: travel_slope() already returns radians
+                // (Extruder.cpp:206), so it should be tan(). At 3 degrees the two differ by 0.05%.
+                // It is left exactly as it is on purpose — the guard has to measure the SAME circle
+                // that gets emitted, mistake included, or it would validate a circle that is not
+                // the one in the G-code.
                 double radius = delta(2) / (2 * PI * atan(this->extruder()->travel_slope()));
                 Vec2d ij_offset = radius * delta_no_z.normalized();
                 ij_offset = { -ij_offset(1), ij_offset(0) };
-                slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
+                // source already has the plate offset removed, which is the frame printable_area
+                // is expressed in.
+                const Vec2d spiral_center = { source.x() + ij_offset.x(), source.y() + ij_offset.y() };
+                ++m_spiral_lift_total;
+                if (this->spiral_lift_fits_printable_area(spiral_center, radius)) {
+                    slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
+                } else {
+                    if (m_spiral_lift_degraded == 0)
+                        m_spiral_lift_first_degraded_z = target(2);
+                    ++m_spiral_lift_degraded;
+                    slop_move = this->_travel_to_z(target(2), "normal lift Z");
+                }
             }
             //BBS: LazyLift
             else if (m_to_lift_type == LiftType::LazyLift &&
@@ -668,6 +702,28 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     return w.string();
+}
+
+// NEOTKO_SPIRALGUARD_TAG — port of upstream OrcaSlicer's spiral_lift_fits_printable_area().
+// The spiral traces a full circle of `radius` around `center`, so the centre must lie inside the
+// printable area AND every edge of it must be at least `radius` away. `center` is in the same
+// frame as printable_area: bed coordinates with the plate offset already removed.
+bool GCodeWriter::spiral_lift_fits_printable_area(const Vec2d &center, double radius) const
+{
+    if (m_bed_printable_area.points.size() < 3)
+        return true;  // Boundary unknown: don't restrict, keep the previous behaviour.
+
+    const Point  c        = Point::new_scale(center.x(), center.y());
+    const double r_scaled = scale_(radius);
+    const double r2       = r_scaled * r_scaled;
+
+    if (!m_bed_printable_area.contains(c))
+        return false;
+    const Points &pts = m_bed_printable_area.points;
+    for (size_t i = 0, n = pts.size(); i < n; ++i)
+        if (Line::distance_to_squared(c, pts[i], pts[(i + 1) % n]) < r2)
+            return false;
+    return true;
 }
 
 std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment)

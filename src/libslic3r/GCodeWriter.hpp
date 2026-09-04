@@ -6,6 +6,7 @@
 #include <charconv>
 #include "Extruder.hpp"
 #include "Point.hpp"
+#include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "GCode/CoolingBuffer.hpp"
 
@@ -121,6 +122,20 @@ public:
 
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
+
+    // NEOTKO_SPIRALGUARD_TAG — a spiral lift traces a FULL circle around a point offset from the
+    // retract position, so it reaches up to 2*radius away and can leave the bed even when every
+    // extrusion is comfortably inside it. Upstream OrcaSlicer closed the "todo: check the arc move
+    // all in bed area" left in travel_to_xyz(); this is that check, ported. It matters on the
+    // Snapmaker U1, whose firmware ABORTS the print on any out-of-bounds move: one bad lift on
+    // layer 480 throws away the whole print.
+    bool spiral_lift_fits_printable_area(const Vec2d &center, double radius) const;
+    // Diagnostics for the post-slice report: how many spiral lifts were emitted, how many had to be
+    // degraded to a straight lift, and the Z of the first degraded one.
+    unsigned int spiral_lift_total()             const { return m_spiral_lift_total; }
+    unsigned int spiral_lift_degraded()          const { return m_spiral_lift_degraded; }
+    double       spiral_lift_first_degraded_z()  const { return m_spiral_lift_first_degraded_z; }
+
   private:
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_extruders;
@@ -161,6 +176,15 @@ public:
     //BBS: x, y offset for gcode generated
     double          m_x_offset{ 0 };
     double          m_y_offset{ 0 };
+
+    // NEOTKO_SPIRALGUARD_TAG — the bed outline in SCALED coordinates, without the plate offset
+    // (which is exactly the frame the emitted coordinates are in, see travel_to_xyz). Captured in
+    // apply_print_config() because printable_area lives on PrintConfig, not on the GCodeConfig this
+    // class keeps. Empty (< 3 points) means "boundary unknown" and the guard stands down.
+    Polygon         m_bed_printable_area;
+    unsigned int    m_spiral_lift_total{ 0 };
+    unsigned int    m_spiral_lift_degraded{ 0 };
+    double          m_spiral_lift_first_degraded_z{ 0. };
     
     std::string m_gcode_label_objects_start;
     std::string m_gcode_label_objects_end;

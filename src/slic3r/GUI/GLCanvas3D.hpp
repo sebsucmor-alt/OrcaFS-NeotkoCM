@@ -398,7 +398,8 @@ class GLCanvas3D
     // _render_support_zones(); dentro es el tema y el gizmo lo gobierna, porque a través de una
     // pieza translúcida el punto justo depende de la opacidad que el usuario haya elegido y eso no
     // se acierta desde el código. Deslizador en el panel del gizmo.
-    float   m_support_zone_marker_alpha { 1.00f };   // s287: los marcadores son EL TEMA, no un velo
+    // s299f — 0.35 pedido por el dueño tras usarlo: al 1.0 los marcadores tapaban la pieza.
+    float   m_support_zone_marker_alpha { 0.35f };
     // s286b — el mapa de "esto se te ha quedado sin sujetar". Rejilla ROJA sobre la superficie que
     // pasa el umbral y no cae dentro de ninguna zona. 🚨 Render y sólo render (§8): quien decide
     // que hace falta soporte sigue siendo detect_overhangs() en el motor.
@@ -1481,6 +1482,8 @@ private:
     bool _is_any_volume_outside() const;
     // Snapmaker: 检查是否有任何 volume 靠近边界（螺旋抬升风险）
     bool _is_any_volume_near_boundary_for_spiral_lift() const;
+    // NEOTKO_SPIRALGUARD_TAG — post-slice report on spiral lifts (see the .cpp for the three outcomes).
+    void _set_spiral_lift_notification(const GCodeProcessorResult& gcode_result);
 
     // updates the selection from the content of m_hover_volume_idxs
     void _update_selection_from_hover();

@@ -1450,6 +1450,10 @@ public:
         // "delete this rule" popup — same (kind ordinal, index) addressing as chart_drag_*.
         int chart_delete_kind  = -1;
         int chart_delete_index = -1;
+        // NEOTKO_GCODE_REPROCESSOR s299 — que extremo se clico con el boton derecho (0 =
+        // layer_from, 1 = layer_to). El popup de ese punto ya no solo borra: tambien deja teclear
+        // la capa de ESE extremo, y para eso necesita recordar cual era.
+        int chart_delete_end   = 0;
     };
 
     //BBS
@@ -1463,6 +1467,8 @@ private:
     const GCodeProcessorResult* m_gcode_result;
     //BBS: add only gcode mode
     bool m_only_gcode_in_preview {false};
+    // Upstream Snapmaker #722 (f94b10af1f): guardia de reentrada de load(). Ver GCodeViewer.cpp.
+    bool m_loading{ false };
     std::vector<size_t> m_ssid_to_moveid_map;
 
     std::vector<TBuffer> m_buffers{ static_cast<size_t>(EMoveType::Extrude) };

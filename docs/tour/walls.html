@@ -383,6 +383,119 @@
     </p>
 
     <!-- ================================================================= -->
+    <h2 id="overhangshadow" data-short="Overhang Shadow">Overhang Shadow</h2>
+
+    <ul class="badges">
+      <li class="badge badge--gate">Libre Mode</li>
+      <li class="badge badge--free">print-verified</li>
+      <li class="badge badge--ver">2.4.5</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Speed</b><span class="sep">›</span><b>Overhang speed</b><span class="sep">›</span><b>Slow down inner walls next to overhangs</b>
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>Stock</h4>
+        <p>The outer wall of an overhang is slowed down and gets the overhang fan. The inner wall
+        right behind it went down a few seconds earlier at full speed, because the slicer measured
+        it as supported. It is. The wall it has to hold up is not.</p>
+      </div>
+      <div class="fold--after">
+        <h4>With the shadow</h4>
+        <p>The inner wall is graded as if it were the wall next to it, by a percentage you set. At
+        100% it gets exactly what the overhang gets, fan included. At 30% it gets a third of the
+        way there.</p>
+      </div>
+    </div>
+
+    <p>
+      Orca decides how much to slow a wall down by measuring how far each point of it sits from the
+      edge of what was printed underneath. That measurement is a signed distance: negative while the
+      point is over solid material, positive once it is over air. The buckets in the table below are
+      just that distance carved into bands.
+    </p>
+
+    <p>
+      The whole feature is one line of arithmetic on that number. The wall you want to protect sits
+      one line width further out than the one being measured, so adding <b>ratio × reach</b> to the
+      distance walks the inner wall that far towards its neighbour and lets the existing grading do
+      the rest. The fan comes along for free, because the fan reads the same measurement.
+    </p>
+
+    <p>
+      Away from an overhang it costs nothing and there is nothing to detect. A wall with solid
+      material under it sits far inside that boundary, so shifting it one line width does not move
+      it into a different band. The geometry does the filtering.
+    </p>
+
+    <figure>
+      <img src="../images/Inner-Slowdown.png" width="1836" height="1534" alt="Four panels. Top left and top right show the same overhanging nose in the Gcode speed view, off and on: off, only the outermost line is blue and the wall behind it stays at full speed; on, the blue band widens to take in the wall behind it and the tip slows further. Bottom right is the SLOWINNER test plate, two copies of a row of overhang steps from 70 down to 45 degrees. Bottom left are photographs of the printed steps seen from underneath" loading="lazy">
+      <figcaption>Top, the same nose in the speed view with the box off and on. Bottom, the plate that
+      was printed to check it: the same row of steps from 70 down to 45 degrees, twice, everything
+      else equal.</figcaption>
+    </figure>
+
+    <p>
+      <b>It is printed.</b> The undersides of those steps come out visibly better with the box on,
+      and the difference is bigger than the size of the change would lead you to expect. The
+      overhang comes out better because the bead it lands on was printed better.
+    </p>
+
+    <div class="demo bleed" id="shadow-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">A slope in cross section, and what each wall is graded at</span>
+        <span class="demo__hint">drag the step, then the ratio</span>
+      </div>
+      <div class="demo__body" data-demo="shadow">
+        <noscript><p class="noscript">This demo needs JavaScript. It shows a slope in cross section: as each layer steps further out, the outer wall leaves the material below and slows down, while the inner wall stays supported and stays fast until the shadow reaches it.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        <span class="seal">✓</span> The grading is a port of <code>estimate_extrusion_quality()</code>
+        in <code>GCode/ExtrusionProcessor.hpp</code>: the same overlap bands, the same interpolation
+        between them, the same shift this feature adds. Speeds are a sample profile, 200 inner and
+        125 outer, with the overhang bands at 0 / 50 / 30 / 10 and bridge at 50.
+      </div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>Default</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Slow down inner walls next to overhangs</b></td><td><b>Off</b></td><td>The feature. Needs <b>Slow down for overhang</b> on, since that is the machinery it feeds.</td></tr>
+        <tr><td><b>Inner wall slowdown</b></td><td>30%</td><td>How much of the neighbour's treatment this wall borrows. 100% grades it exactly as the overhanging wall, fan included.</td></tr>
+        <tr><td><b>Inner wall reach</b></td><td>200%</td><td>How far out to look, as a percentage of line width. 100% is the wall immediately next to this one; 200% still finds the overhang when it starts a little beyond it.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note note--warn">
+      <span class="note__t">Where it does nothing, measured</span>
+      <p style="margin:0">
+        On the first model this was tested on, 96% of the inner wall running within 1.3&nbsp;mm of an
+        overhang was <b>already</b> being slowed by Orca on its own, median 50&nbsp;mm/s against 200
+        elsewhere, and the median was the same with the feature off.
+      </p>
+      <p style="margin:.5rem 0 0">
+        The demo says where the window actually is. Grading starts about a quarter of a line width
+        past the edge, and the inner wall sits a full line width behind the outer one, so the inner
+        wall only starts slowing on its own once a layer steps out by more than roughly 1.25 line
+        widths. Below that the outer wall is over air and the inner one is still at full speed,
+        which is the case this exists for. Above it, Orca was going to slow both anyway.
+      </p>
+    </div>
+
+    <p class="small">
+      It has no effect when walls print outer wall first, since then the inner wall goes down after
+      the overhang and there is nothing left to anchor. Someone asked upstream for this kind of
+      control and the request closed with no answer,
+      <a href="https://github.com/OrcaSlicer/OrcaSlicer/issues/3891">OrcaSlicer #3891</a>.
+    </p>
+
+    <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
 
     <ul>
@@ -395,6 +508,9 @@
         tower then has to absorb.</li>
       <li><strong>NeoStitch has never been printed</strong>, and one of its controls does nothing.
         It is here because it is interesting, not because it is ready.</li>
+      <li><strong>Overhang Shadow only has a window on shallow slopes.</strong> The print behind it
+        is clear, but on steeper geometry Orca already slows most of those walls without it, so
+        there is nothing left for it to do.</li>
     </ul>
 
     <nav class="pager">
@@ -562,6 +678,193 @@ Tour.demo('engines', function (host) {
       waistSlider.set(Math.round(S.waist * 100));
     },
     render: upd
+  });
+});
+
+/* ===========================================================================
+ * shadow — a slope in cross section. Port of the speed grading in
+ * estimate_extrusion_quality() (GCode/ExtrusionProcessor.hpp), plus the shift
+ * this feature adds. Sample speeds, real arithmetic.
+ * ========================================================================= */
+Tour.demo('shadow', function (host) {
+  var el = Tour.el;
+  var W = 0.42;                       // line width, mm
+  var SPACING = 0.42;                 // wall to wall, mm
+  var INNER = 200, OUTER = 125;       // ref speeds, mm/s
+  var BANDS = [90, 75, 50, 25, 13, 0];              // overlap percentages
+  var SPEEDS = [null, null, 50, 30, 10, 50];        // null means "keep ref speed"
+  var S = { step: 0.12, ratio: 30, reach: 200, on: true };
+
+  /** speed_sections: overlap band -> {distance mm, speed}. Sorted by distance. */
+  function sections(ref) {
+    var out = [];
+    for (var i = 0; i < BANDS.length; i++) {
+      out.push({ d: W * (1 - BANDS[i] / 100), v: SPEEDS[i] === null ? ref : SPEEDS[i] });
+    }
+    out.sort(function (a, b) { return a.d === b.d ? b.v - a.v : a.d - b.d; });
+    return out;
+  }
+  /** calculate_speed(): flat below the first band, flat above the last, linear between. */
+  function grade(dist, ref) {
+    var s = sections(ref);
+    if (dist <= s[0].d) return ref;
+    if (dist >= s[s.length - 1].d) return s[s.length - 1].v;
+    var i = 0;
+    while (dist > s[i + 1].d) i++;
+    var t = (dist - s[i].d) / (s[i + 1].d - s[i].d);
+    return s[i].v + (s[i + 1].v - s[i].v) * Math.max(0, Math.min(1, t));
+  }
+  /** How fast each wall of the top layer ends up going. */
+  function speeds() {
+    var dOuter = S.step;                       // signed distance past the layer below
+    var dInner = S.step - SPACING;
+    var shift = S.on ? (S.ratio / 100) * (S.reach / 100) * W : 0;
+    var stock = Math.min(grade(dInner, INNER), INNER);
+    return {
+      outer: Math.min(grade(dOuter, OUTER), OUTER),
+      innerStock: stock,
+      inner: Math.min(stock, grade(dInner + shift, INNER)),
+      dOuter: dOuter, dInner: dInner, shift: shift
+    };
+  }
+  /** Fast reads calm, slow reads hot. Demo output, so colour is allowed here. */
+  function speedInk(v) {
+    var t = Math.max(0, Math.min(1, (INNER - v) / (INNER - 10)));
+    return t < 0.5 ? Tour.token('--good') : (t < 0.85 ? Tour.token('--warn') : Tour.token('--alert'));
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [
+    el('span', { text: 'Five layers of a slope, seen from the side' }),
+    el('span', { 'data-snote': true })
+  ]));
+  var cvHost = el('div');
+  box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var sp = speeds();
+    var faint = Tour.token('--ink-faint'), rule = Tour.token('--rule-firm');
+    var ink = Tour.token('--ink'), soft = Tour.token('--ink-soft');
+    var mmPx = Math.min(w / 6.0, 150);          // 6 mm across the view
+    var layerH = Math.max(14, h / 9);
+    var baseX = w * 0.30, topY = h * 0.16;
+    var N = 5;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = '11px ' + (Tour.token('--sans') || 'system-ui');
+    ctx.textBaseline = 'middle';
+
+    // the layers below, each one stepping out
+    for (var k = 0; k < N; k++) {
+      var y = topY + (N - 1 - k) * layerH;
+      var edge = baseX + k * S.step * mmPx;
+      ctx.fillStyle = (k === N - 1) ? Tour.token('--surface') : Tour.token('--surface-2');
+      ctx.fillRect(8, y, edge - 8, layerH - 2);
+      ctx.strokeStyle = rule; ctx.lineWidth = 1;
+      ctx.strokeRect(8.5, y + 0.5, edge - 8, layerH - 3);
+    }
+
+    var topEdge = baseX + (N - 1) * S.step * mmPx;
+    var prevEdge = baseX + (N - 2) * S.step * mmPx;
+    var yTop = topY;
+
+    // where the layer below ends: the line every distance is measured from
+    ctx.save();
+    ctx.setLineDash([4, 3]); ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(prevEdge, yTop - 26); ctx.lineTo(prevEdge, h - 6); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = faint;
+    ctx.textAlign = 'center';
+    ctx.fillText('edge of the layer below', prevEdge, yTop - 34);
+
+    // the two walls of the top layer
+    var wpx = W * mmPx;
+    function bead(cxp, v, label, dist) {
+      ctx.fillStyle = speedInk(v);
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(cxp - wpx / 2, yTop, wpx, layerH - 2, 3);
+      else ctx.rect(cxp - wpx / 2, yTop, wpx, layerH - 2);
+      ctx.fill();
+      ctx.fillStyle = ink; ctx.textAlign = 'center';
+      ctx.fillText(Math.round(v) + ' mm/s', cxp, yTop - 10);
+      ctx.fillStyle = soft;
+      ctx.fillText(label, cxp, yTop + layerH + 10);
+      ctx.fillStyle = faint;
+      ctx.fillText((dist >= 0 ? '+' : '') + dist.toFixed(2) + ' mm', cxp, yTop + layerH + 24);
+    }
+    var xOuter = topEdge - wpx / 2;
+    var xInner = xOuter - SPACING * mmPx;
+    bead(xInner, sp.inner, 'inner wall', sp.dInner);
+    bead(xOuter, sp.outer, 'outer wall', sp.dOuter);
+
+    // the shift, drawn as the arrow it is
+    if (S.on && sp.shift > 0.0005) {
+      var x1 = xInner, x2 = xInner + sp.shift * mmPx, ya = yTop + (layerH - 2) / 2;
+      ctx.strokeStyle = Tour.token('--accent'); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x1, ya); ctx.lineTo(x2, ya); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x2, ya); ctx.lineTo(x2 - 5, ya - 4); ctx.lineTo(x2 - 5, ya + 4);
+      ctx.closePath(); ctx.fillStyle = Tour.token('--accent'); ctx.fill();
+    }
+
+    // what it cost, in words, under the drawing
+    ctx.textAlign = 'left';
+    ctx.fillStyle = soft;
+    var msg;
+    if (sp.inner < sp.innerStock - 0.5) msg = 'The shadow is doing the work here: ' + Math.round(sp.innerStock) + ' → ' + Math.round(sp.inner) + ' mm/s on the inner wall.';
+    else if (sp.innerStock < INNER - 0.5) msg = 'Orca slowed this inner wall on its own. It is over air too, so there is nothing left to add.';
+    else if (sp.outer < OUTER - 0.5) msg = S.on
+      ? 'The case this exists for: outer wall over air, inner wall on solid material at full speed. The shift is not long enough to reach it yet.'
+      : 'The case this exists for: outer wall over air at ' + Math.round(sp.outer) + ', inner wall still at ' + Math.round(sp.inner) + '. Turn it on.';
+    else msg = 'Both walls are over solid material. Nothing to slow down.';
+    ctx.fillText(msg, 10, h - 12);
+  }, { height: 260 });
+
+  var note = function () {
+    var sp = speeds();
+    Tour.$$('[data-snote]', box).forEach(function (n) {
+      n.textContent = 'step ' + S.step.toFixed(2) + ' mm · ' + (S.step / W).toFixed(1) + ' line widths';
+    });
+    return sp;
+  };
+  function redraw() { note(); cv.render(); }
+
+  var stepS = Tour.slider({
+    label: 'Step out per layer', min: 0, max: 63, step: 1, value: S.step * 100,
+    format: function (v) { return (v / 100).toFixed(2) + ' mm'; },
+    onInput: function (v) { S.step = v / 100; redraw(); }
+  });
+  var ratioS = Tour.slider({
+    label: 'Inner wall slowdown', min: 0, max: 100, step: 5, value: S.ratio,
+    format: function (v) { return v + '%'; },
+    onInput: function (v) { S.ratio = v; redraw(); }
+  });
+  var reachS = Tour.slider({
+    label: 'Inner wall reach', min: 0, max: 400, step: 25, value: S.reach,
+    format: function (v) { return v + '%'; },
+    onInput: function (v) { S.reach = v; redraw(); }
+  });
+  var onT = Tour.toggle({
+    label: 'Slow down inner walls next to overhangs', value: S.on,
+    onChange: function (v) { S.on = v; redraw(); }
+  });
+
+  var ctrls = el('div.ctrls');
+  [stepS, ratioS, reachS, onT].forEach(function (c) { ctrls.appendChild(c.el || c); });
+
+  host.appendChild(box);
+  host.appendChild(ctrls);
+  redraw();
+
+  Tour.attract({
+    host: host, period: 8200,
+    hint: 'playing · touch anything to take over',
+    idleHint: 'drag the step, then the ratio',
+    onFrame: function (k) {
+      S.step = 0.02 + k * 0.52;
+      stepS.set(S.step * 100);
+      redraw();
+    },
+    render: redraw
   });
 });
 </script>

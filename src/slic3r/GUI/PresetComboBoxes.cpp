@@ -1048,6 +1048,15 @@ void PlaterPresetComboBox::ChangeExtruderColor()
         return;
 
     const std::string filamentPresetName = CurrentFilamentPresetName();
+    // Upstream Snapmaker #795 (443cb5ce8b): con un preset incompatible (o que ya no existe) el
+    // selector nuevo no tiene de donde sacar la paleta; caer al selector de color de siempre.
+    const Preset* currentPreset = m_collection != nullptr ? m_collection->find_preset(filamentPresetName, false, true) : nullptr;
+    if (currentPreset == nullptr || !currentPreset->is_compatible)
+    {
+        SelectLegacyFilamentColor();
+        return;
+    }
+
     const std::string filamentBaseName = FilamentBaseName(filamentPresetName);
     if (!IsSnapmakerFilamentName(filamentBaseName))
     {

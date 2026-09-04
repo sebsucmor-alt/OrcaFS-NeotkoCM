@@ -960,6 +960,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
 
+    // NEOTKO_OVERHANGSHADOW_TAG / NeotkoLIBRE — Tier B: the whole block is invisible with LibreMode
+    // OFF, and the two numeric sub-options only show once the toggle itself is on. Reading
+    // app_config here mirrors the NeoArachne gate a few lines below (LIBREMODE.md §2.3).
+    const bool libre_active_shadow = wxGetApp().app_config->get_bool("neotko_libre_mode");
+    const bool has_overhang_shadow = libre_active_shadow && has_overhang_speed;
+    toggle_line("overhang_shadow_inner_wall", has_overhang_shadow);
+    const bool shadow_on = has_overhang_shadow && config->has("overhang_shadow_inner_wall")
+                        && config->opt_bool("overhang_shadow_inner_wall");
+    for (auto el : { "overhang_shadow_speed_ratio", "overhang_shadow_distance" })
+        toggle_line(el, shadow_on);
+
     toggle_line("flush_into_objects", !is_global_config);
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));

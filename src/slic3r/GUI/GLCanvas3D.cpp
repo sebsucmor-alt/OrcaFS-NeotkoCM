@@ -3564,6 +3564,8 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, co
         _set_warning_notification_if_needed(EWarning::ToolHeightOutside);
         _set_warning_notification_if_needed(EWarning::ToolpathOutside);
         _set_warning_notification_if_needed(EWarning::GCodeConflict);
+        // NEOTKO_SPIRALGUARD_TAG — the measured verdict on spiral lifts, from the gcode we just loaded.
+        _set_spiral_lift_notification(gcode_result);
     }
 
     m_gcode_viewer.refresh(gcode_result, str_tool_colors);
@@ -12780,9 +12782,14 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
         error = ErrorType::PLATER_ERROR;
         break;
     // Snapmaker: 螺旋抬升靠近边界警告
+    // NEOTKO_SPIRALGUARD_TAG — this is a HINT, not a diagnosis. It compares the object's bounding
+    // box against the bed; whether a spiral lift actually happens depends on where the retracts
+    // fall, which is only known after slicing. The old text asserted a collision it could not know
+    // about, and its SLICING_SERIOUS_WARNING level said so in red. The measured answer now comes
+    // from the slice (see _set_spiral_lift_notification), so this one just points at it.
     case EWarning::SpiralLiftNearBoundary:
-         text = _u8L("Model too close to bed boundary. Disable spiral lifting or keep at least 3.5mm gap to avoid collision.");
-        error = ErrorType::SLICING_SERIOUS_WARNING;
+        text = _u8L("Model close to the bed boundary. Slice to check whether any spiral lift leaves the printable area.");
+        error = ErrorType::PLATER_WARNING;
         break;
     }
     //BBS: this may happened when exit the app, plater is null
@@ -12842,6 +12849,50 @@ bool GLCanvas3D::_is_any_volume_outside() const
 bool GLCanvas3D::_is_any_volume_near_boundary_for_spiral_lift() const
 {
     return m_volumes.is_any_volume_near_boundary_for_spiral_lift();
+}
+
+// NEOTKO_SPIRALGUARD_TAG — the post-slice verdict, measured lift by lift in
+// GCodeWriter::travel_to_xyz rather than guessed from the model's bounding box. Three outcomes:
+//
+//   no spiral lift at all   -> silence. There is nothing to confirm.
+//   all of them fit         -> a plain confirmation that fades on its own.
+//   some had to be degraded -> a notice that stays. Nothing will run off the bed any more (the
+//                              degraded ones go straight up, XY untouched), but a straight lift
+//                              does not sweep the nozzle the way the spiral does, so those spots
+//                              lose the anti-stringing the spiral was there for. That is a quality
+//                              call the user has to be able to make, hence the count and the Z.
+//
+// Closed by TYPE before each push. The text carries counts, and the plater/slicing notifications
+// are closed by matching their text, so a changing message would pile up a copy per reslice.
+void GLCanvas3D::_set_spiral_lift_notification(const GCodeProcessorResult& gcode_result)
+{
+    if (!wxGetApp().plater())
+        return;
+    NotificationManager& nm = *wxGetApp().plater()->get_notification_manager();
+    nm.close_notification_of_type(NotificationType::NeotkoSpiralLift);
+
+    const unsigned int total    = gcode_result.spiral_lift_total;
+    const unsigned int degraded = gcode_result.spiral_lift_degraded;
+    if (total == 0)
+        return;  // Also the case for a G-code opened from disk: no counters, nothing to say.
+
+    if (degraded == 0) {
+        const std::string text = (boost::format(_u8L("Spiral lift: all %1% spiral lifts fit inside the printable area.")) % total).str();
+        nm.push_notification(NotificationType::NeotkoSpiralLift, NotificationManager::NotificationLevel::PrintInfoNotificationLevel, text);
+        return;
+    }
+
+    // Z formatted apart: boost::format does not take kindly to mixing %1% with printf-style
+    // positional specifiers in the same string.
+    char z_buf[32];
+    ::snprintf(z_buf, sizeof(z_buf), "%.2f", gcode_result.spiral_lift_first_degraded_z);
+    const std::string text =
+        (boost::format(_u8L("Spiral lift: %1% of %2% spiral lifts reached outside the printable area and were emitted as straight lifts "
+                            "(the first at Z %3%). Nothing will move off the bed, but those spots lose the nozzle cleaning the spiral "
+                            "gives. Move the model away from the edge to get them back.")) %
+         degraded % total % std::string(z_buf))
+            .str();
+    nm.push_notification(NotificationType::NeotkoSpiralLift, NotificationManager::NotificationLevel::ImportantNotificationLevel, text);
 }
 
 void GLCanvas3D::_update_selection_from_hover()

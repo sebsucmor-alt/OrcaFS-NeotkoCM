@@ -69,11 +69,12 @@
     <p class="eyebrow">§12 · §16 · §24 — Placing</p>
     <h1>Supports</h1>
     <p class="lede">
-      Three unrelated things live here. The big one is <b>Support Zones</b>: you point at the
-      surface you want held up, then at where the column should land, and the pillar is built
-      between the two. The second is support that knows about the other objects on the plate, which
-      is a first for this family of slicers. The third is an experiment, a support roof built out of
-      wave fronts instead of straight lines, sitting on a hollow pillar.
+      Three unrelated things live here. The big one is <b>Support Zones</b>: you say what to hold
+      up and where the foot goes, and the column is built between the two. There are two ways to do
+      that, an aimed pillar and a block tree, and the second one is what 2.4.5 adds. The second
+      feature is support that knows about the other objects on the plate, which is a first for this
+      family of slicers. The third is an experiment, a support roof built out of wave fronts instead
+      of straight lines, sitting on a hollow pillar.
     </p>
 
     <!-- ================================================================= -->
@@ -81,9 +82,9 @@
 
     <ul class="badges">
       <li class="badge badge--gate">Libre Mode</li>
-      <li class="badge badge--free">engine print-verified</li>
-      <li class="badge badge--wip">brush and cover: build-verified, print-pending</li>
-      <li class="badge badge--ver badge--plain">2.4.4</li>
+      <li class="badge badge--free">aimed pillar: engine print-verified</li>
+      <li class="badge badge--free">block trees: print-verified</li>
+      <li class="badge badge--ver badge--plain">2.4.4 · 2.4.5</li>
     </ul>
 
     <p class="where">
@@ -98,6 +99,34 @@
       wherever you put the box. A support zone says what to hold up <strong>and where the column may
       come down</strong>.
     </p>
+
+    <div class="note note--key">
+      <span class="note__t">These are supports you think about</span>
+      <p style="margin:0">
+        Worth saying first, because it sets the expectation for everything below. This is not a click
+        and forget generator. You choose the surface, you choose where the foot goes, and on a long
+        or awkward area you choose whether one foot is enough. The tool measures, draws and warns; it
+        does not decide for you, and it never plants anything you did not ask for. Automatic supports
+        already exist and they are one checkbox away. What was missing was a way to place one
+        deliberately and see what you were going to get before slicing. Leave the tool alone and the
+        slicer behaves as it always did.
+      </p>
+    </div>
+
+    <p>
+      There are two ways to build one, and the footprint you pick decides which, so there is no extra
+      mode to learn.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Footprint</th><th>What gets built</th></tr></thead>
+      <tbody>
+        <tr><td>Whole patch, round, square</td><td><b>An aimed pillar.</b> One solid from the surface you picked down to the landing, with a lean and a knee.</td></tr>
+        <tr><td><b>Paint</b></td><td><b>A block tree.</b> A head over what you painted, a stump on the plate, and nothing drawn in between. The slicer grows that stretch.</td></tr>
+      </tbody>
+    </table>
+    </div>
 
     <div class="fold">
       <div class="fold--before">
@@ -114,12 +143,20 @@
       </div>
     </div>
 
-    <h3 id="gesture">Two clicks</h3>
+    <h3 id="gesture">One click, and a foot placed for you</h3>
 
     <p>
-      Point at the surface you want held up, then point at where it should land. Only surfaces
-      facing downward can be picked, so the top of the part is never taken by mistake, and when
-      several stacked surfaces sit under the cursor the wheel cycles through them.
+      Point at the surface you want held up. Only surfaces facing downward can be picked, so the top
+      of the part is never taken by mistake, and when several stacked surfaces sit under the cursor
+      the wheel cycles through them.
+    </p>
+
+    <p>
+      The landing is then placed for you, <strong>plumb under the middle of what you took</strong>.
+      Before 2.4.5 the second click was compulsory and the foot followed the cursor until you made
+      it, which is how a pillar ended up 40 mm to one side of the thing it was holding without
+      anyone asking for that. Moving the foot is still there, on the <b>Move it again</b> button,
+      and it is now a decision instead of a step.
     </p>
 
     <p>
@@ -146,6 +183,12 @@
     <p>
       Because the angle is the input rather than the outcome, a link the slicer cannot follow is
       not something you get warned about afterwards. It is something you cannot draw.
+    </p>
+
+    <p>
+      A <b>block tree</b> has no knee, because that stretch is not drawn at all. The same angle still
+      governs it: there it is the budget the column spends per layer on moving toward its stump and
+      closing onto it.
     </p>
 
     <div class="demo bleed" id="knee-demo">
@@ -187,7 +230,8 @@
     <p>
       The footprint is one of four: the whole patch, a round or a square shape around the point you
       picked, or painted by hand. It starts in <strong>square</strong>, because whole patch is the
-      one mode that cannot be expanded.
+      one mode that cannot be expanded. The first three build an aimed pillar; painting builds a
+      block tree, which is its own section below.
     </p>
 
     <p>
@@ -303,6 +347,94 @@
       The detail of both maps is adjustable and it is a viewing preference, not a print setting.
     </p>
 
+    <h3 id="blocktrees">Block trees: paint the area, plant the stump, the middle grows</h3>
+
+    <p>
+      Aimed pillars work on simple parts and stop working on real ones. The reason is measured and it
+      is always the same. The footprint came from flattening the surface into plan view, and on the
+      inside of a curve that goes vertical and then turns back, one spot on the plate has several
+      heights. The outline crosses the equator of the shape and falls down the other side.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Growing a circle inside a torus</th><th>Points on the outline</th><th>Footprint</th><th>Slope of the roof</th></tr></thead>
+      <tbody>
+        <tr><td>expand 9.0 mm</td><td>94</td><td>23.4 × 35.8 mm</td><td>2.51 mm</td></tr>
+        <tr><td>expand 18.8 mm</td><td>207</td><td>26.1 × 47.9 mm</td><td>5.81 mm</td></tr>
+        <tr><td>expand 37.6 mm</td><td>292</td><td>26.1 × 57.7 mm</td><td>8.73 mm</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>
+      That is not a circle growing. It is a mask crossing to the far side of a hole. On the roof of
+      one of those pillars, 42 of its 512 points sat more than a millimetre away from the point next
+      to them, the worst of them 7.56 mm across a gap of 0.49 mm. Smoothing those spikes would hide
+      the symptom, so the shape changed instead.
+    </p>
+
+    <div class="fold">
+      <div class="fold--before">
+        <h4>The aimed pillar</h4>
+        <p>One solid, drawn from the roof to the foot. The roof follows the surface by sampling a
+        height map, which is the step that goes wrong where the surface folds back on itself.</p>
+      </div>
+      <div class="fold--after">
+        <h4>The block tree</h4>
+        <p>Two solids and a gap. A straight prism over what you painted, a stump on the plate, and
+        nothing in between. The slicer walks the column down through the gap.</p>
+      </div>
+    </div>
+
+    <p>
+      <strong>The head is a straight prism.</strong> Flat roof, the outline of what you painted, no
+      curve on it. That is what takes the ambiguous projection out of the picture: the slope of the
+      roof is now zero, measured rather than described as small.
+    </p>
+
+    <p>
+      <strong>The stump is a magnet, not an origin.</strong> The column is born from the whole
+      painted area, so it covers everything you marked by definition. Coming down it does two things
+      at once out of one budget: it moves toward the nearest stump, and once it is over the stump it
+      contracts onto it. The budget is the lean you set, so the taper comes out at the angle you
+      asked for and no steeper. Travelling gets paid first, and whatever is left over goes on
+      closing, which is why a column far from its foot barely narrows until it has arrived.
+    </p>
+
+    <div class="note note--key">
+      <span class="note__t">Why the growth was cheap to add</span>
+      <p style="margin:0">
+        None of the walking is new. The corridor has been stepping a column sideways layer by layer
+        since 2.4.4, with the same per layer budget of <code>dz × tan(angle)</code> recomputed from
+        the real layer height, and it has been pairing islands between layers for just as long. One
+        line decided the direction, and it read it from the shape of the block. Now it reads it from
+        the stump. Everything else was already written and printed.
+      </p>
+    </div>
+
+    <p>
+      <strong>One stump is usually enough</strong>, and the first one is planted for you. The tray
+      tells you when it is not: a piece of the column that reaches the bottom without meeting any
+      stump is counted and named, with its layer and how far short it fell, and the answer to that is
+      to plant another. Two stumps split the area between them, each taking the part that is closer
+      to it, so a long or forked area comes down as two legs instead of one leaning slab. A ring
+      around a hole is the clearest case, because a single stump in the middle sits under the hole
+      rather than under the ring and can never be reached.
+    </p>
+
+    <div class="note note--warn">
+      <span class="note__t">What a block tree will not do</span>
+      <p style="margin:0">
+        It does not branch. One stump grows one trunk, so an area that cannot converge onto the feet
+        you gave it stops narrowing and says so rather than inventing a shape. And the head being a
+        straight prism means it takes slightly more room at the contact than the surface needs. It is
+        trimmed against the part like everything else, so it does not print more; what it loses is
+        finesse on screen. Putting the curve back on the roof is a later job, once the shape is
+        proven on real prints.
+      </p>
+    </div>
+
     <h3 id="roof">A soluble roof, and an ordinary body</h3>
 
     <p>
@@ -329,10 +461,19 @@
 
     <p>
       Creating the first pillar on an object writes the support settings these pillars were tested
-      and printed with onto <em>that object</em>: normal supports, a 0.1 mm top gap, one support
+      and printed with onto <em>that object</em>: normal supports, a 0.2 mm top gap, one support
       wall, three interface layers, solid rectilinear interface. Two rules keep that honest. It only
       writes a setting you have not already chosen yourself, and everything it writes is a per
       object setting you can see, undo, or remove from the object list.
+    </p>
+
+    <p>
+      The top gap was 0.1 mm until 2.4.5, and on the vase print the roof welded itself to the part
+      here and there. The zone is not what decides that: it is how well the overhang of that layer
+      comes out, and a layer sitting a little high closes the gap on its own. 0.2 is also the value
+      the default profile uses. With adaptive layer height there is one more reason to keep the
+      margin, which is that the support roof is not sliced at the height the part is using there, so
+      the gap you ask for and the gap you get drift apart.
     </p>
 
     <div class="tbl-wrap">
@@ -349,9 +490,9 @@
     <h3 id="reopen">Zones you can reopen, once</h3>
 
     <p>
-      A pillar built with this tool remembers the two clicks that made it. Pick the <b>pencil</b> on
-      its card and the whole gesture comes back into the panel: the patch, the landing, the
-      footprint, the edges and the angle. Change what you want and press <b>Apply changes</b>.
+      A pillar built with this tool remembers the gesture that made it. Pick the <b>pencil</b> on
+      its card and the whole thing comes back into the panel: the patch, the brush strokes, the
+      landing, any extra stumps, the footprint, the edges and the angle. Change what you want and press <b>Apply changes</b>.
       Nothing is written until you apply, and one edit is one undo.
     </p>
 
@@ -368,8 +509,9 @@
     <h3 id="vstree">Why this instead of tree supports</h3>
 
     <p>
-      A drawn pillar is one column that goes where you put it. The toolhead prints it in one place
-      and moves on. Tree supports branch, and every branch is another island on the layer, which is
+      A drawn pillar is one column that goes where you put it, and a block tree is one trunk that
+      goes where you put its foot. Either way the toolhead prints it in one place and moves on. Tree
+      supports branch, and every branch is another island on the layer, which is
       another travel and another retraction. Fewer retractions is not only faster, it is much kinder
       to the materials that hate being pulled back, and those are exactly the flexible and moisture
       sensitive filaments where stringing and grinding show up first. You also decide where the foot
@@ -594,11 +736,23 @@
         of the surface.</li>
       <li><strong>The landing stays put while you edit a zone.</strong> Editing is for the dials.
         Moving the foot means a new zone, which is two clicks.</li>
+      <li><strong>Use Snug as the support style.</strong> The tool sets it on the object when you
+        open it. With Grid or Default the column is snapped to the support grid, so it cannot come
+        out thinner than one whole cell, about 2.8 mm at the default spacing and 5.3 mm at 5 mm, and
+        it steps sideways a cell at a time instead of sliding. It prints, and for some shapes that
+        chunkiness is useful, but it lays support walls where nothing needed holding and that is
+        stringing. Slicing a painted zone with either style raises a notice.</li>
+      <li><strong>Automatic support stays on unless you turn it off.</strong> A zone adds to what the
+        slicer already decided to hold up, so support you did not draw is the automatic overhang
+        detection doing its job. The <b>only my zones</b> switch at the top of the zone list turns it
+        off for that object, and the panel offers the same switch as a one click fix while the
+        condition holds. It stays a switch on purpose: someone who wants both should keep both.</li>
       <li><strong>Painting costs CPU.</strong> Every mark is real geometry being clipped against the
         surface, and a long stroke is a lot of it.</li>
-      <li><strong>The geometry rewrite, the brush and cover mode are build-verified, not yet
-        printed.</strong> The engine underneath them has been: a part held up by leaning pillars,
-        and a torus with a 0.2 mm gap.</li>
+      <li><strong>Cover mode is build verified, not yet printed.</strong> The brush and the block
+        trees have been: a vase printed with two extruders, Precision Adapter Layer Height and
+        height ramps from 0.32 mm down to 0.08 mm, held up by two painted stumps. So has the engine
+        underneath them, on a part held up by leaning pillars and a torus with a 0.2 mm gap.</li>
       <li><strong>PerObject Support gives up first-layer grip.</strong> The wide base is dropped so
         bases cannot spill across objects. On a tall thin support that is a real trade.</li>
       <li><strong>By-layer printing only.</strong> Sequential by-object printing makes avoidance

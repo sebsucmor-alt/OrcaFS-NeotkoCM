@@ -70,7 +70,6 @@ const ColorRGBA kReachBadCol  (1.00f, 0.59f, 0.20f, 0.30f);
 const ColorRGBA kFootCol      (0.30f, 0.55f, 0.95f, 0.70f);
 // s289 — el LIENZO del pincel: hasta dónde se puede pintar. Flojo a propósito: es el fondo sobre
 // el que se pinta, no una marca. Lo que se pinta encima va en kTargetCol y tiene que ganarle.
-const ColorRGBA kPaintAreaCol (0.35f, 0.80f, 1.00f, 0.22f);
 
 } // namespace
 
@@ -101,9 +100,19 @@ bool GLGizmoSupportZones::on_is_activable() const
 
 CommonGizmosDataID GLGizmoSupportZones::on_get_requirements() const
 {
-    // SelectionInfo only. The ObjectClipper was here in the first build and came back out: see
-    // apply_see_through() for why a cut is the wrong instrument for this particular tool.
-    return CommonGizmosDataID(int(CommonGizmosDataID::SelectionInfo));
+    // NEOTKO_SUPPORTZONES_TAG s299d — EL CORTE VUELVE, Y AHORA SÍ ES EL INSTRUMENTO CORRECTO.
+    //
+    // 🚨 Estuvo aquí en la primera versión, salió, y vuelve por el camino contrario al que se fue.
+    // Lo que salió mal entonces fue el FANTASMA —teñir la pieza de translúcida— y era malo por su
+    // cuenta: bajo un bloque que ya es translúcido no se distingue qué está delante de qué. Se
+    // quitó en s299c y con él se fue también, por error de bulto, la única forma de mirar dentro.
+    //
+    // 🔑 El corte no tiene ese problema: quita materia en vez de transparentarla, así que lo que
+    // queda se ve sólido y sin ambigüedad. Es el mismo `ObjectClipper` que usan el painter de
+    // soportes, el de costuras y el de fuzzy skin, o sea el que el usuario ya sabe usar — y es
+    // barato, porque lo hace el shader y no un repintado de volúmenes.
+    return CommonGizmosDataID(int(CommonGizmosDataID::SelectionInfo)
+                            | int(CommonGizmosDataID::ObjectClipper));
 }
 
 void GLGizmoSupportZones::on_set_state()
@@ -122,6 +131,27 @@ void GLGizmoSupportZones::on_set_state()
         m_parent.enable_moving(true);
         restore_overhang_highlight();
         restore_see_through();
+        // ⛔ s299h — AQUÍ SE RESETEABA EL CORTE AL SALIR, Y ERA EL CRASH. La traza de lldb lo señala
+        // sin intermediarios:
+        //
+        //   Plater::remove_selected → Selection::erase → delete_from_model_and_list
+        //     → del_subobject_from_object → changed_object → reload_scene
+        //     → refresh_on_off_state → activate_gizmo(Undefined) → set_state(Off)
+        //     → ESTA LÍNEA → ObjectClipper::set_position_by_ratio → mo->instances[…] 💥
+        //
+        // `set_position_by_ratio()` lee `mo->instances[active_inst]` (GLGizmosCommon.cpp:384). Este
+        // `on_set_state(Off)` se ejecuta EN MEDIO de un borrado, desde `reload_scene()`, cuando el
+        // objeto ya se ha ido o se está yendo: el vector de instancias está vacío y el acceso cae en
+        // 0x58. Nada que ver con la zona ni con la lista; era tocar el clipper en el peor momento
+        // posible.
+        //
+        // 🔑 Y no hace falta reponer nada: el corte no sobrevive al gizmo por su cuenta. Al cerrarse,
+        // `on_get_requirements()` deja de pedir `ObjectClipper` y el pool de datos comunes lo suelta,
+        // que es justo el mecanismo para el que existe. Por eso los painters tampoco lo resetean
+        // aquí: sólo lo tocan cuando el usuario pulsa «reset direction».
+        //
+        // La lección, que ya está pagada dos veces en esta sesión: dentro de `on_set_state(Off)` no
+        // se puede dar por hecho que el modelo siga entero.
         clear_pick();
         m_forced_snug       = false;
         m_lean_angle_seeded = false;
@@ -155,6 +185,31 @@ void GLGizmoSupportZones::data_changed(bool /*is_serializing*/)
         clear_pick();
     }
     m_edit_lost_surface = false;
+
+    // 🚨 s299g — Y TODO LO QUE SE CACHEÓ CONTRA LA MALLA, TAMBIÉN.
+    //
+    // Esto salta cuando el modelo cambia por debajo, y un undo es exactamente eso. Lo que se quedaba
+    // vivo eran las cachés que s299 añadió: el lienzo (índices de TRIÁNGULOS de la malla anterior),
+    // su mapa de alturas, la máscara y las marcas del pincel con su cara semilla. Ninguna de ellas
+    // tiene forma de saber que la malla ya no es la misma — sus claves son el índice de la cara y la
+    // matriz, y las dos pueden coincidir por casualidad con las de la malla nueva.
+    //
+    // ⚠️ No puedo afirmar que esto sea el crash del undo que él vio; no lo he reproducido. Lo que sí
+    // es cierto es que un índice de triángulo cacheado contra una malla que ya no existe es la
+    // familia de fallos a la que ese crash pertenece, y aquí es donde se cortan todos de una vez.
+    m_region_cache_facet = -1;
+    m_region_cache.clear();
+    m_region_area_cache.clear();
+    m_hm_nx = m_hm_ny = 0;
+    m_hm_z.clear();
+    m_hm_n.clear();
+    invalidate_patch();
+    m_mask_cache = ZoneMask();
+    m_stamps.clear();
+    clear_painted();
+    m_brush_seed_facet = -1;
+    m_cand_mouse       = Vec2d(-1e9, -1e9);
+
     // The volume list may have been rebuilt under us, so the ghost is re-applied against the live
     // volumes. apply_see_through() restores first, which is what keeps the saved colours honest.
     if (get_state() == On)
@@ -295,6 +350,21 @@ void GLGizmoSupportZones::ensure_raycaster()
     m_raycaster_obj_idx = idx;
     m_face_normals      = its_face_normals(m_mesh.its);
     m_face_neighbors    = its_face_neighbors(m_mesh.its);
+    // 🚨 s299 — la malla es OTRA, así que el lienzo cacheado (la región, su proyección y el mapa de
+    // alturas) apunta a triángulos que ya no existen. Se tira aquí, que es el único sitio por el
+    // que pasa un cambio de malla.
+    m_region_cache_facet = -1;
+    m_region_cache.clear();
+    m_region_area_cache.clear();
+    m_hm_nx = m_hm_ny = 0;
+    m_hm_z.clear();
+    m_hm_n.clear();
+    // s300b — y el pintado, que va por índices de TRIÁNGULO de la malla anterior.
+    m_painted.clear();
+    m_painted_list.clear();
+    m_painted_count = 0;
+    m_visit_stamp.clear();
+    ++ m_stamp_stamp;
     m_hover_model_facet = m_target_model_facet = -1; // force the overlays to rebuild
     m_overhang_model_dirty = true;
     m_candidates.clear();
@@ -304,14 +374,15 @@ void GLGizmoSupportZones::clear_pick()
 {
     m_target_pick_mode  = false;
     m_landing_pick_mode = false;
+    m_stump_pick_mode   = false;   // s301 — el tercer modo de picking se apaga con los otros dos
     m_has_target        = false;
     m_has_landing       = false;
     m_landing_locked    = false;
     m_mouse_down        = false;
     m_painting          = false;
-    m_paint_area_model.reset();
-    m_paint_area_facet  = -1;
+    m_extra_stumps.clear();
     m_stamps.clear();
+    clear_painted();
     m_brush_seed_facet  = -1;
     invalidate_patch();
     m_preview_dirty     = true;
@@ -333,6 +404,15 @@ void GLGizmoSupportZones::clear_pick()
 void GLGizmoSupportZones::update_candidates(const Vec2d &mouse_pos)
 {
     ensure_raycaster();
+
+    // 🔑 s299 — el ratón quieto no cuesta nada. Esta función se llama desde el render, así que sin
+    // este corte es una consulta al árbol AABB por frame sólo por tener el cursor encima de la
+    // pieza. Medio píxel es más fino que cualquier gesto humano.
+    if ((mouse_pos - m_cand_mouse).squaredNorm() < 0.25 && m_cand_trafo.isApprox(m_world_trafo)
+        && ! m_candidates.empty())
+        return;
+    m_cand_mouse = mouse_pos;
+    m_cand_trafo = m_world_trafo;
 
     // Remember which surface the wheel had landed on, so a small mouse move does not silently
     // swap the live candidate under the user's finger.
@@ -358,10 +438,48 @@ void GLGizmoSupportZones::update_candidates(const Vec2d &mouse_pos)
     const AABBMesh &tree = m_raycaster->get_aabb_mesh();
     std::vector<AABBMesh::hit_result> hits = tree.query_ray_hits(local_src, local_dir);
 
+    // NEOTKO_SUPPORTZONES_TAG s299d — NO SE PINTA DENTRO DE LA PIEZA.
+    //
+    // 🚨 Éste era el fallo de raíz de "está pintando zonas de dentro", y se ve claro contándolo: el
+    // filtro de abajo se queda con la primera cara que MIRA HACIA ABAJO. Si lo primero que hay bajo
+    // el cursor es una pared vertical o una cara de arriba, esa se descarta y el candidato pasa a
+    // ser la siguiente que sí mira hacia abajo — que está DETRÁS, o sea dentro de la pieza. En una
+    // pieza hueca eso es la cara interior, y ahí es donde se pintaba sin querer.
+    //
+    // 🔑 La regla es la que usa cualquier painter y es la que el ojo espera: se pinta sobre lo que
+    // SE VE. El primer impacto del rayo es la superficie visible; a partir del segundo ya estás
+    // mirando a través de materia. Se conservan los candidatos apilados para la rueda, porque una
+    // pieza fina tiene dos caras casi pegadas y elegir entre ellas es legítimo, pero sólo hasta
+    // donde el rayo sigue dentro del MISMO grosor: `depth_limit` es el primer impacto más un
+    // margen, y lo que caiga más allá es otra pared y no se ofrece.
+    //
+    // 🔑 s299f — FUERA O DENTRO, y lo elige el usuario. Idea suya: "tal vez tengamos que elegir
+    // paint outside / paint inside, así no se escaparía el pintado dentro".
+    //
+    // Es la respuesta correcta porque las dos cosas son legítimas: normalmente pintas la piel que
+    // ves, pero en una pieza hueca puede que quieras sujetar de verdad una superficie interior. Lo
+    // que no vale es que el modo interior se cuele sin pedirlo, que es lo que pasaba.
+    //
+    // 🚨 El margen de 3 mm de la primera versión de este corte era justo el escape: una pared de 2
+    // mm cabe dentro de él, así que la cara interior seguía siendo elegible. Ahora en modo FUERA no
+    // hay margen ninguno — sólo la primera superficie del rayo — y en modo DENTRO no hay límite.
+    // Entre esos dos no queda hueco por el que colarse.
+    double depth_limit = std::numeric_limits<double>::max();
+    if (! m_paint_inside)
+        for (const AABBMesh::hit_result &h : hits)
+            if (h.is_hit()) {
+                // Sólo lo que esté a la misma profundidad que el primer impacto: dos triángulos
+                // coplanares de la misma cara sí, la pared de enfrente no.
+                depth_limit = h.distance() + 1e-4;
+                break;
+            }
+
     const int n_facets = int(m_mesh.its.indices.size());
     for (const AABBMesh::hit_result &h : hits) {
         if (! h.is_hit())
             continue;
+        if (h.distance() > depth_limit)
+            break;   // ya estamos mirando a través de la pieza: lo de aquí en adelante es interior
         const int f = h.face();
         if (f < 0 || f >= n_facets || f >= int(m_face_normals.size()))
             continue;
@@ -428,6 +546,12 @@ const GLGizmoSupportZones::Candidate *GLGizmoSupportZones::live_candidate() cons
 //
 // 🚨 Frontera del §8 intacta: esto elige DESTINO (dónde puedes pintar), nunca decide que ahí haga
 // falta soporte. Eso sigue siendo `detect_overhangs()`.
+// ⚠️ s299b — YA NO ESTÁ EN NINGÚN CAMINO CALIENTE, y no debe volver a estarlo. Esto recorre TODA la
+// superficie que mira hacia abajo: en una pieza de millones de triángulos son cientos de miles de
+// caras y varios segundos, y unir su proyección en XY es peor todavía. Fue el error de la primera
+// versión de s299 y se veía en la mano: el pincel se quedaba pensando y luego marcaba media pieza.
+// El pincel ya no tiene región. Queda aquí porque el volcado de diagnóstico lo usa para decir
+// cuánta superficie hay, y eso sólo ocurre con el canal encendido.
 std::vector<int> GLGizmoSupportZones::collect_paint_region(int facet_idx) const
 {
     std::vector<int> region;
@@ -506,8 +630,8 @@ std::vector<int> GLGizmoSupportZones::collect_region(int facet_idx) const
             // culling porque "raw-mesh winding varies": en una malla con winding mixto el vecino
             // coplanar tiene la normal AL REVÉS, así que el `>=` de antes lo dejaba fuera y el
             // parche salía con agujeros — agujeros que luego se convertían en bucles de borde y en
-            // paredes por dentro del pilar. Se acepta, y `build_patch()` le da la vuelta al
-            // triángulo para que el parche quede orientado a una sola cara.
+            // paredes por dentro del pilar. Se acepta: la proyección a XY de `region_for()` le da
+            // la vuelta a los que hagan falta, así que el lienzo sale orientado a una sola cara.
             if (std::abs(m_face_normals[nb].normalized().dot(seed_n)) >= cos_thresh) {
                 visited[nb] = 1;
                 stack.push_back(nb);
@@ -523,63 +647,79 @@ void GLGizmoSupportZones::build_face_model(GLModel &model, int facet_idx, const 
     // 🔑 Lo que se ENCIENDE es lo que se va a tomar, forma incluida. Si el resaltado enseñara el
     // parche entero y el pilar saliera recortado, el gizmo estaría mintiendo en el sitio donde más
     // se mira.
-    // ✅ s289 — y ahora es literalmente el mismo `PatchGeom` que va a acabar siendo el techo del
-    // sólido: recortado exacto, soldado y orientado. Antes el resaltado usaba el filtro por
-    // centroide y el pilar también, así que los dos mentían a la vez y a nadie le chirriaba.
-    const PatchGeom *pg = patch(facet_idx, centre_xy);
-    if (pg == nullptr)
+    // ✅ s299 — y ahora es literalmente la misma `ZoneMask` que va a ser el techo del sólido: la
+    // misma área de Clipper y el mismo mapa de alturas. No hay forma de que discrepen porque no hay
+    // dos geometrías, hay una.
+    // 🔑 s300 — CON EL PINCEL SE ENSEÑAN LOS TRIÁNGULOS, no la huella proyectada.
+    //
+    // Es la diferencia que se ve en la mano: lo que marcas está SOBRE la superficie, así que
+    // enseñarlo proyectado y vuelto a triangular era enseñar otra cosa —y en un arco que rodea un
+    // agujero, algo que no se parecía en nada. Aquí se dibuja lo que de verdad está marcado.
+    if (m_foot_shape == FootShape::Brush && ! m_painted_list.empty()) {
+        const float lift = 0.10f;   // por la normal de cada cara, contra el z-fighting
+        indexed_triangle_set its;
+        its.vertices.reserve(m_painted_list.size() * 3);
+        its.indices.reserve(m_painted_list.size());
+        int base = 0;
+        // s300b — por la LISTA de pintados, nunca por la malla: son cientos, y esto se rehace cada
+        // vez que el trazo crece.
+        for (int f : m_painted_list) {
+            if (f < 0 || f >= int(m_mesh.its.indices.size()))
+                continue;
+            const Vec3i32 tri = m_mesh.its.indices[f];
+            Vec3f n = m_face_normals[f];
+            const float nl = n.norm();
+            if (nl < 1e-6f)
+                continue;
+            n /= nl;
+            its.vertices.push_back(m_mesh.its.vertices[tri[0]] + n * lift);
+            its.vertices.push_back(m_mesh.its.vertices[tri[1]] + n * lift);
+            its.vertices.push_back(m_mesh.its.vertices[tri[2]] + n * lift);
+            its.indices.emplace_back(base, base + 1, base + 2);
+            base += 3;
+        }
+        if (! its.indices.empty()) {
+            model.init_from(its);
+            model.set_color(col);
+        }
+        return;
+    }
+
+    const ZoneMask *mk = mask(facet_idx, centre_xy);
+    if (mk == nullptr || mk->area.empty())
         return;
 
-    // 🚨 `PatchGeom` está en MUNDO y estos overlays se dibujan con la matriz del objeto puesta en
-    // el shader (`view_model_matrix * m_world_trafo`), así que hay que volver. Dibujarlos en mundo
-    // con esa matriz puesta los colocaría el doble de lejos, que es el bug clásico de esta familia.
-    const Transform3d inv = m_world_trafo.inverse();
-    const double      lift = 0.10;   // por la normal de cada vértice, contra el z-fighting
+    // 🚨 La máscara está en MUNDO y estos overlays se dibujan con la matriz del objeto puesta en el
+    // shader (`view_model_matrix * m_world_trafo`), así que hay que volver. Dibujarlos en mundo con
+    // esa matriz puesta los colocaría el doble de lejos, que es el bug clásico de esta familia.
+    const Transform3d inv  = m_world_trafo.inverse();
+    const double      lift = 0.10;   // por la normal, contra el z-fighting
 
     indexed_triangle_set its;
-    its.vertices.reserve(pg->V.size());
-    its.indices.reserve(pg->F.size());
-    for (size_t i = 0; i < pg->V.size(); ++ i) {
-        const Vec3d w = inv * (pg->V[i] + pg->vnormal[i] * lift);
-        its.vertices.emplace_back(float(w.x()), float(w.y()), float(w.z()));
+    for (const ExPolygon &ep : mk->area) {
+        const Points               pts = to_points(ep);
+        const std::vector<Vec3i32> idx = Triangulation::triangulate(ep);
+        if (idx.empty() || pts.empty())
+            continue;
+        const int base = int(its.vertices.size());
+        its.vertices.reserve(its.vertices.size() + pts.size());
+        for (const Point &q : pts) {
+            const Vec2d  p2(unscaled<double>(q.x()), unscaled<double>(q.y()));
+            const Vec3d  n = n_at(*mk, p2);
+            const Vec3d  w = inv * (Vec3d(p2.x(), p2.y(), z_at(*mk, p2)) + n * lift);
+            its.vertices.emplace_back(float(w.x()), float(w.y()), float(w.z()));
+        }
+        for (const Vec3i32 &t : idx) {
+            if (t[0] < 0 || t[1] < 0 || t[2] < 0 ||
+                t[0] >= int(pts.size()) || t[1] >= int(pts.size()) || t[2] >= int(pts.size()))
+                continue;
+            its.indices.emplace_back(base + t[0], base + t[1], base + t[2]);
+        }
     }
-    its.indices = pg->F;
     if (its.indices.empty())
         return;
     model.init_from(its);
     model.set_color(col);
-}
-
-// s289 — el lienzo dibujado. Sin esto el pincel es adivinar: pintas, se corta, y no hay forma de
-// saber por qué. Con el lienzo encendido la respuesta está en pantalla antes de empezar.
-void GLGizmoSupportZones::build_paint_area_model(int seed_facet)
-{
-    m_paint_area_model.reset();
-    const std::vector<int> region = collect_paint_region(seed_facet);
-    if (region.empty())
-        return;
-    const float lift = 0.06f;   // por debajo del 0.10 de las marcas: el lienzo va DETRÁS
-    indexed_triangle_set its;
-    its.vertices.reserve(region.size() * 3);
-    its.indices.reserve(region.size());
-    int base = 0;
-    for (int f : region) {
-        const Vec3i32 tri = m_mesh.its.indices[f];
-        Vec3f n = m_face_normals[f];
-        const float nl = n.norm();
-        if (nl < 1e-6f)
-            continue;
-        n /= nl;
-        its.vertices.push_back(m_mesh.its.vertices[tri[0]] + n * lift);
-        its.vertices.push_back(m_mesh.its.vertices[tri[1]] + n * lift);
-        its.vertices.push_back(m_mesh.its.vertices[tri[2]] + n * lift);
-        its.indices.emplace_back(base, base + 1, base + 2);
-        base += 3;
-    }
-    if (its.indices.empty())
-        return;
-    m_paint_area_model.init_from(its);
-    m_paint_area_model.set_color(kPaintAreaCol);
 }
 
 void GLGizmoSupportZones::render_pick_overlays()
@@ -636,27 +776,21 @@ void GLGizmoSupportZones::render_pick_overlays()
         m_target_model_facet = m_target_facet_idx;
     }
 
-    // El lienzo del pincel: se enseña mientras el pincel está elegido y el paso 1 armado, o
-    // mientras se está pintando. Fuera de eso estorbaría.
-    {
-        const bool want = (m_foot_shape == FootShape::Brush) && (m_target_pick_mode || m_painting);
-        const int  seed = (m_brush_seed_facet >= 0) ? m_brush_seed_facet : hover_face;
-        if (! want || seed < 0) {
-            if (m_paint_area_facet != -1) {
-                m_paint_area_model.reset();
-                m_paint_area_facet = -1;
-            }
-        } else if (seed != m_paint_area_facet) {
-            build_paint_area_model(seed);
-            m_paint_area_facet = seed;
-        }
-    }
+    // ⛔ s299b — AQUÍ SE DIBUJABA EL LIENZO DEL PINCEL, y se ha quitado, no apagado.
+    //
+    // El lienzo existía para enseñar hasta dónde te dejaba pintar el flood-fill. El pincel ya no
+    // tiene flood-fill: lo que pintas es la huella, así que no hay límite que enseñar y el dibujo
+    // se quedaba sin significado.
+    //
+    // Y de paso se lleva por delante lo que el dueño veía en pantalla: en una pieza de millones de
+    // triángulos ese modelo era la mancha enorme que aparecía tras la espera, porque era la
+    // superficie entera que miraba hacia abajo.
 
     if (m_overhang_model_dirty)
         build_overhang_model();
 
     if (! m_hover_model.is_initialized() && ! m_target_model.is_initialized()
-        && ! m_paint_area_model.is_initialized() && ! m_overhang_model.is_initialized())
+        && ! m_overhang_model.is_initialized())
         return;
 
     GLShaderProgram *shader = wxGetApp().get_shader("flat");
@@ -685,12 +819,6 @@ void GLGizmoSupportZones::render_pick_overlays()
     // Pass 2, depth ON and solid: where it really is visible it reads bright.
     // Together they say both "this is the surface" and "it is behind something".
     auto draw_both = [this](float alpha_scale) {
-        // El lienzo primero y siempre por debajo: es el fondo sobre el que se pinta.
-        if (m_paint_area_model.is_initialized()) {
-            ColorRGBA c = kPaintAreaCol; c[3] *= alpha_scale;
-            m_paint_area_model.set_color(c);
-            m_paint_area_model.render();
-        }
         // El mapa de voladizos ya no se rellena (build_overhang_model), así que aquí no hay nada
         // debajo: el único sujeto es la cara bajo el cursor y la cara tomada.
         if (m_target_model.is_initialized()) {
@@ -742,6 +870,18 @@ void GLGizmoSupportZones::on_render()
     render_pick_overlays();
     render_reach();
     render_preview();
+
+    // NEOTKO_SUPPORTZONES_TAG s299f — LA TAPA DEL CORTE.
+    //
+    // 🚨 Esto es lo que faltaba para que el corte se lea como un corte. El plano ya recortaba TODOS
+    // los volúmenes —el canvas se lo pasa a `m_volumes` sin distinguir objeto de soporte— pero sin
+    // esta llamada la pieza cortada se ve hueca por dentro, como una cáscara, y el soporte macizo
+    // que hay detrás sí parece cortado. De ahí "sólo corta los soportes, no el objeto": los dos
+    // estaban cortados, sólo que uno enseñaba su sección y el otro no.
+    //
+    // Es la misma línea que GLGizmoFdmSupports y GLGizmoSeam tienen en su on_render.
+    if (m_c != nullptr && m_c->object_clipper() != nullptr)
+        m_c->object_clipper()->render_cut();
 }
 
 bool GLGizmoSupportZones::resolve_landing(const Vec2d &mouse_pos, Vec3d &out_pos, bool &out_on_bed)
@@ -803,9 +943,100 @@ bool GLGizmoSupportZones::resolve_landing(const Vec2d &mouse_pos, Vec3d &out_pos
     return true;
 }
 
+// NEOTKO_SUPPORTZONES_TAG s300g — EL ATERRIZAJE NACE A PLOMO.
+//
+// 🔑 Medido en s300g sobre el `.obj` del pilar recién construido, antes de rebanar nada: cuatro
+// anillos, los dos de abajo con centro (139.3, 93.6) y el tercero en (129.9, 133.1). El pilar se iba
+// 40.6 mm de lado en 32.9 mm de altura — razón 1.234, y `tan(51°) = 1.2349`, o sea el ángulo clavado.
+// Ese viaje es el que atravesaba la pieza, y de ahí salían los "techos dentro del muro".
+//
+// 🔑 La causa no era el pincel ni el motor: era que el gesto EXIGE un segundo clic, y ese clic fija
+// `shift = landing − c_top` (ver `build_pillar_mesh`). Pintabas una zona de 23 × 16 mm y el pilar se
+// iba a donde hubieras dejado el ratón. Dicho por el dueño: "yo lo que quiero es pintar el área que
+// se cree el soporte y que se genere bien".
+//
+// ⚠️ Y el mando del ángulo no ayudaba a entenderlo, porque no decide CUÁNTO se viaja —eso lo fija el
+// aterrizaje— sino a qué altura empieza el viaje (`z_knee = lean_top - offset_d/tan_a`). Subirlo
+// acerca la rodilla al techo y hace el salto MÁS brusco, que es lo contrario de lo que promete.
+//
+// Así que el aterrizaje de salida es el de debajo: `shift = 0` ⇒ sin rodilla ⇒ prisma recto ⇒ el
+// pilar ES la huella pintada, extruida hacia abajo. Mover el aterrizaje sigue estando entero
+// (`m_landing_pick_mode` y el botón "Move it again"), pero ahora es un acto deliberado y no un paso
+// obligatorio del gesto. El §4-bis.1 del plan ya contaba con este caso: "con C1 == C0 degenera en
+// prisma recto, v = 0".
+bool GLGizmoSupportZones::resolve_landing_plumb(Vec3d &out_pos, bool &out_on_bed)
+{
+    ensure_raycaster();
+    if (! m_has_target)
+        return false;
+
+    // El plomo se mide desde el MISMO centroide que usa el alcance, el aviso de travesía y la
+    // construcción del sólido. Calcularlo aquí a mano sería tener dos centros que se separan sin
+    // avisar, que es exactamente el fallo que este fichero ya documenta en `build_pillar_mesh`.
+    const std::vector<Vec2d> foot = target_footprint_world();
+    Vec2d c { 0., 0. };
+    if (foot.size() >= 3) {
+        for (const Vec2d &p : foot)
+            c += p;
+        c /= double(foot.size());
+    } else {
+        // Sin huella todavía (el sólido aún no se ha levantado): el punto señalado sirve igual.
+        c = Vec2d(m_target_world_pos.x(), m_target_world_pos.y());
+    }
+
+    const Vec3d src(c.x(), c.y(), m_target_world_pos.z());
+    const Vec3d dir(0., 0., -1.);
+
+    // Una repisa de la propia pieza, igual que en `resolve_landing()`: mirando hacia arriba y por
+    // debajo de la superficie que se sujeta. El backend ya sabe qué hacer con eso
+    // (`support_bottom_z_distance`, Slicing.cpp:120).
+    if (m_raycaster) {
+        const Transform3d inv  = m_world_trafo.inverse();
+        const AABBMesh   &tree = m_raycaster->get_aabb_mesh();
+        const std::vector<AABBMesh::hit_result> hits = tree.query_ray_hits(inv * src, inv.linear() * dir);
+        const int n_facets = int(m_mesh.its.indices.size());
+        double best_dist = std::numeric_limits<double>::max();
+        bool   found     = false;
+        Vec3d  best_pos { Vec3d::Zero() };
+        for (const AABBMesh::hit_result &h : hits) {
+            if (! h.is_hit())
+                continue;
+            const int f = h.face();
+            if (f < 0 || f >= n_facets || f >= int(m_face_normals.size()))
+                continue;
+            Vec3d wn = m_world_trafo.linear() * m_face_normals[f].cast<double>();
+            const double nl = wn.norm();
+            if (nl < 1e-9)
+                continue;
+            wn /= nl;
+            if (wn.z() < - double(DOWN_FACING_MAX_NORMAL_Z))
+                continue; // no mira hacia arriba
+            const Vec3d wp = m_world_trafo * h.position();
+            if (wp.z() >= m_target_world_pos.z() - 0.2)
+                continue; // no está por debajo de lo que se sujeta
+            if (h.distance() < best_dist) {
+                best_dist = h.distance();
+                best_pos  = wp;
+                found     = true;
+            }
+        }
+        if (found) {
+            out_pos    = best_pos;
+            out_on_bed = false;   // §4.2-bis Stop
+            return true;
+        }
+    }
+
+    // Nada debajo: la cama, en la misma vertical.
+    out_pos    = Vec3d(c.x(), c.y(), 0.);
+    out_on_bed = true;            // §4.2-bis Straighten
+    return true;
+}
+
 bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
 {
-    const bool picking = m_target_pick_mode || (m_landing_pick_mode && m_has_target);
+    const bool picking = m_target_pick_mode || (m_landing_pick_mode && m_has_target)
+                      || (m_stump_pick_mode && m_has_target);
     if (! picking) {
         m_mouse_down = false;
         return false;
@@ -828,7 +1059,6 @@ bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
             // Cada botón abajo abre un trazo nuevo: lo que se une con cápsulas es lo de DENTRO de
             // un trazo, nunca el salto de un sitio a otro con el botón levantado.
             if (! m_paint_erase)
-                ++ m_stroke_id;
             if (paint_at(mpos, m_paint_erase)) {
                 m_painting = true;
                 m_parent.set_as_dirty();
@@ -852,6 +1082,22 @@ bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
     if (m_painting && mouse_event.LeftUp()) {
         m_painting   = false;
         m_mouse_down = false;
+        // s299 — el trazo ha terminado: AHORA se levanta el sólido, una sola vez.
+        m_preview_dirty = true;
+        // NEOTKO_SUPPORTZONES_TAG s300g — y el plomo se recentra sobre la huella ya terminada.
+        //
+        // Cada pincelada mueve el centroide, así que el aterrizaje sembrado con el primer toque se
+        // queda corto en cuanto pintas de verdad. Sólo si el aterrizaje NO está echado el pestillo:
+        // si el usuario lo puso a mano, mandar él.
+        if (m_has_target && ! m_landing_locked) {
+            Vec3d plumb_pos;
+            bool  plumb_on_bed = true;
+            if (resolve_landing_plumb(plumb_pos, plumb_on_bed)) {
+                m_landing_world_pos = plumb_pos;
+                m_landing_on_bed    = plumb_on_bed;
+                m_has_landing       = true;
+            }
+        }
         // Con el canal encendido, cada trazo deja su radiografía. Es la respuesta a "empieza a
         // pintar y me marca zona verde, pero desaparece": el volcado dice cuántas marcas hay,
         // cuánto lienzo había y qué parche ha salido de las dos cosas.
@@ -901,15 +1147,60 @@ bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
                 // usuario lo ha movido, hacer tres pilares seguidos no debe devolverlo al valor de
                 // fábrica a sus espaldas. 45 es el que él esperaba; el techo suele estar más alto.
                 if (! m_lean_angle_seeded) {
-                    m_lean_angle_deg    = float(std::min(45., max_lean_angle_deg()));
+                    m_lean_angle_deg    = float(SupportZones::SUPPORT_ZONE_DEFAULT_LEAN_DEG);
                     m_lean_angle_seeded = true;
                 }
-                // Hand the gesture straight to step 2 instead of making the user find a second
-                // checkbox.
+                // NEOTKO_SUPPORTZONES_TAG s300g — EL PASO 2 DEJA DE SER OBLIGATORIO.
+                //
+                // Antes esto encendía `m_landing_pick_mode` y ponía `m_has_landing = false`: el
+                // pilar no existía hasta que movías el ratón, y entonces el aterrizaje SEGUÍA al
+                // cursor. Por eso acababa a 40 mm de lo señalado sin que nadie lo hubiera pedido.
+                //
+                // 🚨 Y no basta con sembrar el plomo dejando el modo encendido: mientras
+                // `m_landing_pick_mode && ! m_landing_locked`, el `Moving()` de arriba lo vuelve a
+                // llevar tras el cursor en el primer píxel que muevas, y el arreglo se deshace solo.
+                // Así que el plomo entra con el pestillo ECHADO, igual que si lo hubieras puesto tú:
+                // el panel enseña "Move it again", que es la puerta de siempre para moverlo.
                 m_target_pick_mode    = false;
-                m_landing_pick_mode   = true;
-                m_landing_locked      = false;
-                m_has_landing         = false;
+                Vec3d plumb_pos;
+                bool  plumb_on_bed = true;
+                m_has_landing = resolve_landing_plumb(plumb_pos, plumb_on_bed);
+                if (m_has_landing) {
+                    m_landing_world_pos = plumb_pos;
+                    m_landing_on_bed    = plumb_on_bed;
+                    m_landing_pick_mode = false;
+                    m_landing_locked    = true;
+                } else {
+                    // Sin plomo resoluble (raro: siempre queda la cama) se cae al gesto de antes.
+                    m_landing_pick_mode = true;
+                    m_landing_locked    = false;
+                }
+            }
+        } else if (m_stump_pick_mode && m_has_target) {
+            // NEOTKO_SUPPORTZONES_TAG s301 — PLANTAR (O ARRANCAR) UN TOCÓN.
+            //
+            // 🔑 Se reutiliza `resolve_landing()` entero: ya sabe resolver «una repisa de la pieza
+            // que mire hacia arriba, y si no la cama», que es exactamente dónde puede caer un tocón.
+            // Un segundo resolvedor con la misma regla es un segundo sitio donde se separan.
+            //
+            // Un clic DENTRO de un tocón ya plantado lo arranca. Es el gesto que uno espera de una
+            // herramienta de plantar, y ahorra un botón de borrar por tocón en el panel.
+            Vec3d pos;
+            bool  on_bed = true;
+            if (resolve_landing(mpos, pos, on_bed)) {
+                const double r = std::max(0.5, 0.5 * double(m_stump_size_mm));
+                bool         removed = false;
+                for (size_t i = 0; i < m_extra_stumps.size(); ++ i)
+                    if ((Vec2d(m_extra_stumps[i].p.x(), m_extra_stumps[i].p.y())
+                         - Vec2d(pos.x(), pos.y())).norm() < r) {
+                        m_extra_stumps.erase(m_extra_stumps.begin() + i);
+                        removed = true;
+                        break;
+                    }
+                if (! removed)
+                    m_extra_stumps.push_back(StumpSpot{ pos, on_bed });
+                m_preview_dirty         = true;
+                m_footprint_model_dirty = true;
             }
         } else if (m_landing_pick_mode && m_has_target) {
             Vec3d pos;
@@ -946,13 +1237,14 @@ bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
 // Pick #2 and the pillar
 // -----------------------------------------------------------------------------
 
-// NEOTKO_SUPPORTZONES_TAG s289 — EL PARCHE, UNA SOLA VEZ
+// NEOTKO_SUPPORTZONES_TAG s299 — LA HUELLA, UNA SOLA VEZ Y EN 2D
 // -----------------------------------------------------------------------------
-// La auditoría de la geometría (§ "cómo se crea el objeto") encontró que la huella tenía DOS
-// implementaciones que no podían coincidir, y que las dos dependían de la teselación de la malla.
-// Todo lo que sigue es una sola: `build_patch()` produce el parche recortado, orientado, soldado y
-// con su borde; el contorno 2D es la SILUETA de ese parche, y el sólido son sus anillos. El porqué
-// de cada pieza vive con la declaración de `PatchGeom` en la cabecera.
+// La huella tuvo primero DOS implementaciones que no podían coincidir (s286b), luego una sola pero
+// atada a la teselación de la malla (s289), y ahora una sola que no depende de la malla en
+// absoluto: `build_mask()` produce un `ExPolygons` de Clipper más un mapa de alturas para el techo.
+// El contorno del panel es esa área, los anillos del sólido son offsets de esa área, y el resaltado
+// es su triangulación. El porqué de cada pieza vive con la declaración de `ZoneMask` en la
+// cabecera.
 
 // 🚨 Nada de `M_PI`: no es estándar y en MSVC hace falta `_USE_MATH_DEFINES` antes de <cmath>.
 // Es una de las trampas que ya costó una sesión en este árbol.
@@ -960,179 +1252,228 @@ bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
 // dentro de una lambda sin captura por defecto (C3493), mientras que clang/gcc la dejan pasar.
 static constexpr double PI_D = 3.14159265358979323846;
 
-ExPolygons GLGizmoSupportZones::crop_shape(const Vec2d &centre_xy) const
+// NEOTKO_SUPPORTZONES_TAG s299 — EL LIENZO, CACHEADO POR OBJETO
+//
+// 🔑 El flood-fill no depende de dónde esté el ratón: una vez elegida la semilla, la región es
+// siempre la misma hasta que cambia la malla. Rehacerlo en cada marca del pincel —hasta 200.000
+// caras— era una de las tres cosas que se comían la CPU. Ahora se hace una vez y se guarda, junto
+// con su proyección en XY, que es el lienzo real donde puede caer la huella.
+const std::vector<int> &GLGizmoSupportZones::region_for(int seed_facet) const
 {
-    ExPolygons out;
-    auto disc = [](const Vec2d &c, double r) {
-        Points pts;
-        const int seg = 48;
-        pts.reserve(seg);
-        for (int i = 0; i < seg; ++ i) {
-            const double a = 2.0 * PI_D * double(i) / double(seg);
-            pts.emplace_back(scaled<coord_t>(c.x() + r * std::cos(a)), scaled<coord_t>(c.y() + r * std::sin(a)));
-        }
-        return Polygon(std::move(pts));
-    };
+    if (m_region_cache_facet == seed_facet && m_region_cache_trafo.isApprox(m_world_trafo))
+        return m_region_cache;
 
-    switch (m_foot_shape) {
-    case FootShape::Patch:
-        return out;   // sin recorte
-    case FootShape::Round: {
-        if (m_foot_size_mm <= 0.f)
-            return out;
-        out.emplace_back(disc(centre_xy, 0.5 * double(m_foot_size_mm)));
-        return out;
-    }
-    case FootShape::Square: {
-        if (m_foot_size_mm <= 0.f)
-            return out;
-        const double h = 0.5 * double(m_foot_size_mm);
-        Points pts { { scaled<coord_t>(centre_xy.x() - h), scaled<coord_t>(centre_xy.y() - h) },
-                     { scaled<coord_t>(centre_xy.x() + h), scaled<coord_t>(centre_xy.y() - h) },
-                     { scaled<coord_t>(centre_xy.x() + h), scaled<coord_t>(centre_xy.y() + h) },
-                     { scaled<coord_t>(centre_xy.x() - h), scaled<coord_t>(centre_xy.y() + h) } };
-        out.emplace_back(Polygon(std::move(pts)));
-        return out;
-    }
-    case FootShape::Brush: {
-        // 🔑 La unión de todas las marcas. Es donde el recorte deja de ser una forma y pasa a ser
-        // lo que has pintado — y por eso el recorte tenía que dejar de ser convexo y pasar por
-        // Clipper: una unión de discos tiene muescas, y un recorte por semiplanos no sabe hacerlas.
-        if (m_stamps.empty())
-            return out;
-        Polygons all;
-        all.reserve(m_stamps.size() * 2);
-        for (size_t i = 0; i < m_stamps.size(); ++ i) {
-            const Stamp &st = m_stamps[i];
-            all.emplace_back(disc(st.c, st.r));
-            // 🔑 La CÁPSULA entre esta marca y la anterior del mismo trazo. Sin ella, un ratón
-            // rápido deja el rosario de puntos que él vio; con ella el trazo es una banda continua
-            // pase lo que pase con la cadencia del sistema operativo.
-            if (i == 0)
-                continue;
-            const Stamp &pv = m_stamps[i - 1];
-            if (pv.stroke != st.stroke)
-                continue;
-            const Vec2d d = st.c - pv.c;
-            const double l = d.norm();
-            if (l < 1e-6)
-                continue;
-            const Vec2d u = d / l;
-            const Vec2d n(- u.y(), u.x());
-            const Vec2d a0 = pv.c + n * pv.r, a1 = pv.c - n * pv.r;
-            const Vec2d b0 = st.c + n * st.r, b1 = st.c - n * st.r;
-            Points q { { scaled<coord_t>(a0.x()), scaled<coord_t>(a0.y()) },
-                       { scaled<coord_t>(b0.x()), scaled<coord_t>(b0.y()) },
-                       { scaled<coord_t>(b1.x()), scaled<coord_t>(b1.y()) },
-                       { scaled<coord_t>(a1.x()), scaled<coord_t>(a1.y()) } };
-            Polygon band(std::move(q));
-            if (! band.is_counter_clockwise())
-                band.reverse();
-            all.emplace_back(std::move(band));
+    // 🚨 s299b — SIEMPRE el flood-fill COPLANAR (20° contra la semilla), nunca el del pincel.
+    // El de «toda la superficie que mira hacia abajo» (`collect_paint_region`) era el que se comía
+    // la pieza grande, y ya no hace falta: el pincel no tiene región. Aquí sólo llega «tomar la
+    // cara» y el recorte de círculo/cuadrado, y los dos quieren la cara que pinchaste, que es lo
+    // que este flood-fill acota.
+    m_region_cache       = collect_region(seed_facet);
+    m_region_cache_facet = seed_facet;
+    m_region_cache_trafo = m_world_trafo;
+    m_region_area_cache.clear();
+
+    if (m_region_cache.empty())
+        return m_region_cache;
+
+    // La proyección en XY, unida de una vez. El micro-offset cierra las costuras de un entero que
+    // el redondeo deja entre triángulos vecinos y que sobrevivirían a la unión como astillas.
+    Polygons tris;
+    tris.reserve(m_region_cache.size());
+    for (int f : m_region_cache) {
+        const Vec3i32 t = m_mesh.its.indices[f];
+        Points p;
+        p.reserve(3);
+        for (int k = 0; k < 3; ++ k) {
+            const Vec3d w = m_world_trafo * m_mesh.its.vertices[t[k]].cast<double>();
+            p.emplace_back(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()));
         }
-        return union_ex(all);
+        Polygon q(std::move(p));
+        if (q.area() == 0.)
+            continue;                       // de canto: en XY es una línea
+        if (! q.is_counter_clockwise())
+            q.reverse();
+        tris.emplace_back(std::move(q));
     }
-    }
-    return out;
+    if (! tris.empty())
+        m_region_area_cache = union_ex(offset(tris, scaled<float>(0.002f)));
+    return m_region_cache;
 }
 
-bool GLGizmoSupportZones::build_patch(int facet_idx, const Vec2d &centre_xy, PatchGeom &out) const
+// NEOTKO_SUPPORTZONES_TAG s299b — EL TECHO, MUESTREADO SÓLO DEBAJO DE LO PINTADO
+//
+// 🚨 La primera versión de s299 rasterizaba el mapa recorriendo los triángulos de la región entera.
+// Con una pieza de millones de polígonos eso es inaceptable, y además obligaba a tener región, que
+// es justo lo que el pincel no debe necesitar.
+//
+// 🔑 Ahora el mapa cubre SÓLO la caja de lo que has pintado, con un margen, y se muestrea con un
+// rayo vertical por nodo contra el árbol AABB que el gizmo ya tiene montado. Unos miles de rayos en
+// vez de millones de triángulos, y el coste deja de depender del tamaño del objeto: depende del
+// tamaño de la zona, que es lo que el usuario controla.
+//
+// La caja sólo crece, nunca encoge, así que seguir pintando sobre lo ya pintado no vuelve a
+// muestrear nada. Cuando el trazo se sale, se rehace la caja nueva de una vez.
+//
+// 🚨 Frontera del §8: estos rayos eligen la ALTURA del techo del bloque que el usuario ha dibujado.
+// No deciden dónde hace falta soporte — eso sigue siendo `detect_overhangs()` en el motor — ni
+// proponen destinos. Es la misma clase de consulta que el picking del cursor.
+// NEOTKO_SUPPORTZONES_TAG s300c — EL TECHO, RASTERIZADO DESDE LO PINTADO
+//
+// 🔑 La segunda mitad del híbrido, y la que faltaba: si la marca ya vive en la superficie, la altura
+// del techo no hay que ir a buscarla — está en los triángulos que marcaste. Una pasada por ellos y
+// listo, sin tocar el árbol de la malla ni una vez.
+//
+// Frente a los rayos: coste proporcional a lo PINTADO en vez de al área de la caja, exacto en vez de
+// muestreado, y sin el riesgo de que un rayo se encuentre otra pared por el camino.
+void GLGizmoSupportZones::heightmap_from_painted(const BoundingBox &area_bb) const
 {
-    out = PatchGeom();
-    const int n_facets = int(m_mesh.its.indices.size());
-    if (facet_idx < 0 || facet_idx >= n_facets || int(m_face_normals.size()) != n_facets)
-        return false;
+    m_hm_nx = m_hm_ny = 0;
+    m_hm_z.clear();
+    m_hm_n.clear();
+    if (m_painted_list.empty())
+        return;
 
-    // El pincel pinta sobre TODA la superficie que mira hacia abajo; el resto de formas siguen
-    // atadas a la cara que pinchaste, que es lo que uno espera de "pincha y te doy esa cara".
-    const std::vector<int> region = (m_foot_shape == FootShape::Brush)
-        ? collect_paint_region(facet_idx)
-        : collect_region(facet_idx);
-    if (region.empty())
-        return false;
+    constexpr double MARGIN = 1.0;   // mm: el borde del área se interpola con nodos de fuera
+    const double x0 = unscaled<double>(double(area_bb.min.x())) - MARGIN;
+    const double y0 = unscaled<double>(double(area_bb.min.y())) - MARGIN;
+    const double x1 = unscaled<double>(double(area_bb.max.x())) + MARGIN;
+    const double y1 = unscaled<double>(double(area_bb.max.y())) + MARGIN;
 
-    // Soldadura POR POSICIÓN, no por índice. `raw_mesh()` es un `merge()` de volúmenes y la malla
-    // de origen puede traer costuras sin soldar: con índices, una costura interior se cuenta como
-    // borde y el pilar sale con paredes por dentro.
-    std::map<std::tuple<long long, long long, long long>, int> weld;
-    auto add_vertex = [&](const Vec3d &w) {
-        const auto key = std::make_tuple(std::llround(w.x() * 10000.0),
-                                         std::llround(w.y() * 10000.0),
-                                         std::llround(w.z() * 10000.0));
-        auto it = weld.find(key);
-        if (it != weld.end())
-            return it->second;
-        const int idx = int(out.V.size());
-        weld.emplace(key, idx);
-        out.V.push_back(w);
-        return idx;
-    };
+    double step = 0.5;
+    constexpr int MAX_CELLS = 250000;
+    int nx = std::max(1, int(std::ceil((x1 - x0) / step)));
+    int ny = std::max(1, int(std::ceil((y1 - y0) / step)));
+    while (nx * ny > MAX_CELLS) {
+        step *= 1.5;
+        nx = std::max(1, int(std::ceil((x1 - x0) / step)));
+        ny = std::max(1, int(std::ceil((y1 - y0) / step)));
+    }
+    m_hm_origin = Vec2d(x0, y0);
+    m_hm_step   = step;
+    m_hm_nx     = nx;
+    m_hm_ny     = ny;
+    m_hm_trafo  = m_world_trafo;
+    const int w = nx + 1;
+    m_hm_z.assign(size_t(w) * size_t(ny + 1), std::numeric_limits<float>::quiet_NaN());
+    m_hm_n.assign(size_t(w) * size_t(ny + 1), Vec3f::Zero());
 
-    const ExPolygons crop = crop_shape(centre_xy);
-    const BoundingBox crop_bb = crop.empty() ? BoundingBox() : get_extents(crop);
+    for (int f : m_painted_list) {
+        if (f < 0 || f >= int(m_mesh.its.indices.size()))
+            continue;
+        const Vec3i32 t = m_mesh.its.indices[f];
+        const Vec3d A = m_world_trafo * m_mesh.its.vertices[t[0]].cast<double>();
+        const Vec3d B = m_world_trafo * m_mesh.its.vertices[t[1]].cast<double>();
+        const Vec3d C = m_world_trafo * m_mesh.its.vertices[t[2]].cast<double>();
+        Vec3d nrm = (B - A).cross(C - A);
+        const double nl = nrm.norm();
+        if (nl < 1e-12)
+            continue;
+        nrm /= nl;
+        if (nrm.z() > 0.)
+            nrm = - nrm;                 // todo mirando hacia abajo, como el resto del gizmo
+        if (std::abs(nrm.z()) < 1e-9)
+            continue;                    // de canto: en XY es una línea y no tapa ningún nodo
 
-    // ------------------------------------------------------------------------------------------
-    // s289 — DE DÓNDE SALEN LOS TRIÁNGULOS DEL TECHO
-    // ------------------------------------------------------------------------------------------
-    // Dos orígenes y un solo camino después. En «recortar» son los triángulos de la MALLA (el
-    // parche de siempre); en «cubrir» son una rejilla sobre la forma pedida, con la z de cada nodo
-    // sacada de un rayo vertical contra la pieza.
-    //
-    // 🔑 Idea suya, y es la buena: "en vez de crecer podamos transformar la zona de soporte o base
-    // que toca por un círculo grande o un cuadrado pequeño, así crece según queremos y no según la
-    // forma original". Eso es esto. Crecer el contorno del parche siempre acaba cruzándose porque
-    // la forma manda; sustituir el contorno por una primitiva no tiene ese techo, y a cambio el
-    // bloque ocupa más área — que él ya ha dicho que es el precio que quiere pagar.
-    //
-    // El techo sigue siendo la superficie DE VERDAD donde la hay (por eso el rayo, y no un plano),
-    // así que un círculo grande sobre una zona curva sigue quedando a ras. Donde no hay pieza
-    // debajo, la z cae al plano de la cara semilla: es plano, está en el aire, y es exactamente lo
-    // que uno espera de un bloque que sobresale del voladizo.
-    std::vector<std::array<Vec3d, 3>> src;
+        const int i_lo = std::max(0,  int(std::floor((std::min({ A.x(), B.x(), C.x() }) - x0) / step)));
+        const int i_hi = std::min(nx, int(std::ceil ((std::max({ A.x(), B.x(), C.x() }) - x0) / step)));
+        const int j_lo = std::max(0,  int(std::floor((std::min({ A.y(), B.y(), C.y() }) - y0) / step)));
+        const int j_hi = std::min(ny, int(std::ceil ((std::max({ A.y(), B.y(), C.y() }) - y0) / step)));
+        if (i_lo > i_hi || j_lo > j_hi)
+            continue;
 
-    // El plano de la cara pinchada, que es el respaldo cuando el rayo no encuentra nada.
-    Vec3d seed_p { Vec3d::Zero() }, seed_n { 0., 0., -1. };
-    {
-        const Vec3i32 t0 = m_mesh.its.indices[facet_idx];
-        seed_p = (m_world_trafo * m_mesh.its.vertices[t0[0]].cast<double>()
-                + m_world_trafo * m_mesh.its.vertices[t0[1]].cast<double>()
-                + m_world_trafo * m_mesh.its.vertices[t0[2]].cast<double>()) / 3.;
-        Vec3d n = m_world_trafo.linear().inverse().transpose() * m_face_normals[facet_idx].cast<double>();
-        if (n.norm() > 1e-12) {
-            n.normalize();
-            if (n.z() > 0.)
-                n = - n;
-            seed_n = n;
+        const double d = (B.y() - C.y()) * (A.x() - C.x()) + (C.x() - B.x()) * (A.y() - C.y());
+        if (std::abs(d) < 1e-12)
+            continue;
+        const double d_plane = nrm.dot(A);
+
+        for (int j = j_lo; j <= j_hi; ++ j) {
+            const double py = y0 + step * j;
+            for (int i = i_lo; i <= i_hi; ++ i) {
+                const double px = x0 + step * i;
+                const double l1 = ((B.y() - C.y()) * (px - C.x()) + (C.x() - B.x()) * (py - C.y())) / d;
+                const double l2 = ((C.y() - A.y()) * (px - C.x()) + (A.x() - C.x()) * (py - C.y())) / d;
+                const double l3 = 1. - l1 - l2;
+                // El épsilon cose los nodos que caen justo sobre una arista compartida.
+                if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9)
+                    continue;
+                const double zw = (d_plane - nrm.x() * px - nrm.y() * py) / nrm.z();
+                const size_t k  = size_t(j) * size_t(w) + size_t(i);
+                // 🔑 Gana el MÁS ALTO, y aquí sí es lo correcto: todo lo que se mira está pintado, o
+                // sea elegido por el usuario, y el techo del bloque tiene que llegar a lo más alto de
+                // lo que sujeta. (Con los rayos había que elegir "el más cercano al clic" porque
+                // entraban superficies que nadie había pedido.)
+                if (std::isnan(m_hm_z[k]) || zw > double(m_hm_z[k])) {
+                    m_hm_z[k] = float(zw);
+                    m_hm_n[k] = nrm.cast<float>();
+                }
+            }
         }
     }
+}
 
-    if (crop.empty() || ! m_shape_covers) {
-        src.reserve(region.size());
-        for (int f : region) {
-            const Vec3i32 t = m_mesh.its.indices[f];
-            src.push_back({ m_world_trafo * m_mesh.its.vertices[t[0]].cast<double>(),
-                            m_world_trafo * m_mesh.its.vertices[t[1]].cast<double>(),
-                            m_world_trafo * m_mesh.its.vertices[t[2]].cast<double>() });
-        }
-    } else {
-        // Un rayo vertical por nodo de la rejilla: la superficie que MIRA HACIA ABAJO más cercana
-        // en z a la cara pinchada. "La más cercana" y no "la primera" porque una pieza con varios
-        // pisos tiene varias, y la que interesa es la que estás sujetando.
-        const Transform3d inv  = m_world_trafo.inverse();
-        const AABBMesh   *tree = m_raycaster ? &m_raycaster->get_aabb_mesh() : nullptr;
-        const double      z_ref = seed_p.z();
-        auto sample_z = [&](double x, double y) {
-            auto on_plane = [&]() {
-                if (std::abs(seed_n.z()) < 1e-6)
-                    return z_ref;
-                return (seed_n.dot(seed_p) - seed_n.x() * x - seed_n.y() * y) / seed_n.z();
-            };
-            if (tree == nullptr)
-                return on_plane();
-            const Vec3d src_w { x, y, z_ref + 1000. };
-            const Vec3d dir_w { 0., 0., -1. };
-            std::vector<AABBMesh::hit_result> hits = tree->query_ray_hits(inv * src_w, inv.linear() * dir_w);
-            double best = std::numeric_limits<double>::max();
+void GLGizmoSupportZones::ensure_heightmap(const BoundingBox &area_bb, double z_ref) const
+{
+    if (! m_raycaster)
+        return;
+
+    constexpr double MARGIN = 3.0;   // mm: el trazo siguiente casi siempre cae dentro
+    double nx0 = unscaled<double>(double(area_bb.min.x())) - MARGIN;
+    double ny0 = unscaled<double>(double(area_bb.min.y())) - MARGIN;
+    double nx1 = unscaled<double>(double(area_bb.max.x())) + MARGIN;
+    double ny1 = unscaled<double>(double(area_bb.max.y())) + MARGIN;
+
+    const bool same_frame = m_hm_trafo.isApprox(m_world_trafo) && std::abs(m_hm_z_ref - z_ref) < 1e-6;
+    if (m_hm_nx > 0 && m_hm_ny > 0 && same_frame) {
+        const double ox1 = m_hm_origin.x() + m_hm_step * m_hm_nx;
+        const double oy1 = m_hm_origin.y() + m_hm_step * m_hm_ny;
+        if (nx0 >= m_hm_origin.x() && ny0 >= m_hm_origin.y() && nx1 <= ox1 && ny1 <= oy1)
+            return;                     // lo que hay ya lo cubre
+        // Crece englobando lo viejo, para que el mapa no se vaya rehaciendo a trocitos.
+        nx0 = std::min(nx0, m_hm_origin.x());
+        ny0 = std::min(ny0, m_hm_origin.y());
+        nx1 = std::max(nx1, ox1);
+        ny1 = std::max(ny1, oy1);
+    }
+
+    // Medio milímetro es más fino que la propia extrusión del soporte, y el techo de celdas evita
+    // que una zona enorme se convierta en un problema: cede el paso antes que la interactividad.
+    double step = 0.5;
+    constexpr int MAX_CELLS = 90000;
+    int nx = std::max(1, int(std::ceil((nx1 - nx0) / step)));
+    int ny = std::max(1, int(std::ceil((ny1 - ny0) / step)));
+    while (nx * ny > MAX_CELLS) {
+        step *= 1.5;
+        nx = std::max(1, int(std::ceil((nx1 - nx0) / step)));
+        ny = std::max(1, int(std::ceil((ny1 - ny0) / step)));
+    }
+
+    m_hm_origin = Vec2d(nx0, ny0);
+    m_hm_step   = step;
+    m_hm_nx     = nx;
+    m_hm_ny     = ny;
+    m_hm_trafo  = m_world_trafo;
+    m_hm_z_ref  = z_ref;
+    const int w = nx + 1;
+    m_hm_z.assign(size_t(w) * size_t(ny + 1), std::numeric_limits<float>::quiet_NaN());
+    m_hm_n.assign(size_t(w) * size_t(ny + 1), Vec3f::Zero());
+
+    // El árbol vive en espacio de malla, así que el rayo va allí. La dirección NO se normaliza tras
+    // la transformación a propósito: sólo se usa para ordenar y para reconstruir el punto.
+    const Transform3d inv  = m_world_trafo.inverse();
+    const AABBMesh   &tree = m_raycaster->get_aabb_mesh();
+    const Matrix3d    nrm  = m_world_trafo.linear().inverse().transpose();
+    const Vec3d       dir_w { 0., 0., -1. };
+    const Vec3d       ldir = inv.linear() * dir_w;
+
+    std::vector<AABBMesh::hit_result> hits;
+    for (int j = 0; j <= ny; ++ j) {
+        for (int i = 0; i <= nx; ++ i) {
+            const double px = nx0 + step * i;
+            const double py = ny0 + step * j;
+            const Vec3d  src_w { px, py, z_ref + 1000. };
+            hits = tree.query_ray_hits(inv * src_w, ldir);
+            double best  = 0.;
+            Vec3f  best_n { Vec3f::Zero() };
             bool   found = false;
             for (const AABBMesh::hit_result &h : hits) {
                 if (! h.is_hit())
@@ -1140,378 +1481,602 @@ bool GLGizmoSupportZones::build_patch(int facet_idx, const Vec2d &centre_xy, Pat
                 const int f = h.face();
                 if (f < 0 || f >= int(m_face_normals.size()))
                     continue;
-                Vec3d wn = m_world_trafo.linear().inverse().transpose() * m_face_normals[f].cast<double>();
+                Vec3d wn = nrm * m_face_normals[f].cast<double>();
                 if (wn.norm() < 1e-12)
                     continue;
                 wn.normalize();
-                if (wn.z() > double(DOWN_FACING_MAX_NORMAL_Z))
-                    continue;   // no mira hacia abajo
+                // 🚨 s299g — AQUÍ SE FILTRABA POR "MIRA HACIA ABAJO", Y ERA UN ERROR DE CONCEPTO.
+                //
+                // El filtro tiene todo el sentido para ELEGIR dónde se puede pintar: una cara que
+                // mira hacia arriba no necesita que la sujeten. Pero este mapa no elige nada: dice
+                // A QUÉ ALTURA está la pieza sobre cada punto, para que el techo del bloque la
+                // toque. Y la pieza está donde está, mire su normal hacia donde mire.
+                //
+                // Lo que pasaba: en una superficie que se va poniendo vertical —el ecuador de un
+                // toro, justo donde uno pinta— muchos nodos no pasaban el filtro y se quedaban en
+                // NaN, así que su z caía al plano de la cara semilla. El techo se alejaba de la
+                // pieza y el bloque no llegaba a tocarla: "tiene buena pinta, pero no toca y no
+                // genera techo". La malla estaba perfecta; lo que estaba mal era su altura.
                 const double zw = (m_world_trafo * h.position()).z();
+                // La más cercana en z a la cara pinchada, no la primera: una pieza con varios pisos
+                // tiene varias, y la que interesa es la que estás sujetando.
                 if (! found || std::abs(zw - z_ref) < std::abs(best - z_ref)) {
-                    best  = zw;
-                    found = true;
+                    best   = zw;
+                    best_n = wn.cast<float>();
+                    found  = true;
                 }
             }
-            return found ? best : on_plane();
-        };
-
-        const double x0 = unscaled<double>(double(crop_bb.min.x())) - 0.001;
-        const double y0 = unscaled<double>(double(crop_bb.min.y())) - 0.001;
-        const double x1 = unscaled<double>(double(crop_bb.max.x())) + 0.001;
-        const double y1 = unscaled<double>(double(crop_bb.max.y())) + 0.001;
-        double step = std::clamp(double(m_foot_size_mm) / 24.0, 0.4, 2.0);
-        int nx = std::max(1, int(std::ceil((x1 - x0) / step)));
-        int ny = std::max(1, int(std::ceil((y1 - y0) / step)));
-        // Tope de celdas: una forma de 200 mm con paso fino son cientos de miles de rayos, y esto
-        // se recalcula al mover el deslizador. El paso cede antes que la interactividad.
-        constexpr int MAX_CELLS = 40000;
-        while (nx * ny > MAX_CELLS) {
-            step *= 1.5;
-            nx = std::max(1, int(std::ceil((x1 - x0) / step)));
-            ny = std::max(1, int(std::ceil((y1 - y0) / step)));
-        }
-        std::vector<double> zg(size_t(nx + 1) * size_t(ny + 1));
-        for (int j = 0; j <= ny; ++ j)
-            for (int i = 0; i <= nx; ++ i)
-                zg[size_t(j) * size_t(nx + 1) + size_t(i)] = sample_z(x0 + step * i, y0 + step * j);
-        auto node = [&](int i, int j) {
-            return Vec3d(x0 + step * i, y0 + step * j, zg[size_t(j) * size_t(nx + 1) + size_t(i)]);
-        };
-        src.reserve(size_t(nx) * size_t(ny) * 2);
-        for (int j = 0; j < ny; ++ j)
-            for (int i = 0; i < nx; ++ i) {
-                // Winding para que la normal salga hacia abajo, que es lo que espera todo lo de
-                // debajo. El bucle de abajo lo comprueba igualmente, pero mejor no darle trabajo.
-                src.push_back({ node(i, j), node(i + 1, j + 1), node(i + 1, j) });
-                src.push_back({ node(i, j), node(i, j + 1), node(i + 1, j + 1) });
+            if (found) {
+                const size_t k = size_t(j) * size_t(w) + size_t(i);
+                m_hm_z[k] = float(best);
+                m_hm_n[k] = best_n;
             }
-    }
-
-    // Área proyectada de los triángulos ANTES de unirlos: contra el área de la unión dice si el
-    // parche se pliega sobre sí mismo visto desde arriba.
-    double area_sum = 0.;
-    Polygons projected;
-
-    for (const std::array<Vec3d, 3> &tri3 : src) {
-        Vec3d A = tri3[0];
-        Vec3d B = tri3[1];
-        Vec3d C = tri3[2];
-        Vec3d n = (B - A).cross(C - A);
-        const double nl = n.norm();
-        if (nl < 1e-12)
-            continue;                       // triángulo degenerado en la propia malla
-        n /= nl;
-        // 🔑 Winding normalizado de una vez: todo el parche mira hacia ABAJO. A partir de aquí, el
-        // sentido del borde, el "hacia dentro" y las tapas son ciertos sin depender de la malla.
-        if (n.z() > 0.) {
-            std::swap(B, C);
-            n = - n;
-        }
-        if (std::abs(n.z()) < 1e-9)
-            continue;                       // de canto: en XY es una línea, no aporta nada al prisma
-
-        if (crop.empty()) {
-            const int a = add_vertex(A), b = add_vertex(B), c = add_vertex(C);
-            if (a != b && b != c && a != c)
-                out.F.emplace_back(a, b, c);
-            Points pp { { scaled<coord_t>(A.x()), scaled<coord_t>(A.y()) },
-                        { scaled<coord_t>(B.x()), scaled<coord_t>(B.y()) },
-                        { scaled<coord_t>(C.x()), scaled<coord_t>(C.y()) } };
-            Polygon pg(std::move(pp));
-            area_sum += std::abs(pg.area());
-            if (! pg.is_counter_clockwise())
-                pg.reverse();
-            projected.emplace_back(std::move(pg));
-            continue;
-        }
-
-        // ---- recorte EXACTO en XY -------------------------------------------------------------
-        // 🚨 Aquí es donde se arregla el fallo que se veía en las superficies sencillas. El filtro
-        // de antes era "¿cae el centroide del triángulo dentro de la forma?", y en una cara de dos
-        // triángulos de 20 mm eso sólo sabe contestar "todo" o "nada": pedías un pie de 8 mm y te
-        // salía media pieza. Ahora el triángulo se corta de verdad contra la forma y se vuelve a
-        // triangular, así que la resolución de la huella es la del mando y no la de la malla.
-        Points pp { { scaled<coord_t>(A.x()), scaled<coord_t>(A.y()) },
-                    { scaled<coord_t>(B.x()), scaled<coord_t>(B.y()) },
-                    { scaled<coord_t>(C.x()), scaled<coord_t>(C.y()) } };
-        Polygon tri_xy(std::move(pp));
-        if (tri_xy.area() == 0.)
-            continue;
-        if (! tri_xy.is_counter_clockwise())
-            tri_xy.reverse();
-        BoundingBox tbb = get_extents(Polygons{ tri_xy });
-        if (! tbb.overlap(crop_bb))
-            continue;                       // ni lo toca
-
-        // El plano del triángulo, para devolverle la z a cada punto recortado.
-        const double d_plane = n.dot(A);
-        auto z_at = [&](const Point &p) {
-            const double x = unscaled<double>(p.x()), y = unscaled<double>(p.y());
-            return (d_plane - n.x() * x - n.y() * y) / n.z();
-        };
-
-        // Atajo: si los tres vértices están dentro, el triángulo entra tal cual. Ahorra una llamada
-        // a Clipper por cada triángulo del interior, que en una malla densa es casi todo.
-        // ⚠️ Un triángulo enorme podría puentear una muesca del recorte con sus tres vértices
-        // dentro. Pide una concavidad más estrecha que un triángulo, y el resultado es un puente
-        // convexo de fracción de milímetro en un bloque de soporte: se acepta a sabiendas.
-        bool all_in = true;
-        for (const Point &q : tri_xy.points) {
-            bool in = false;
-            for (const ExPolygon &ep : crop)
-                if (ep.contains(q)) { in = true; break; }
-            if (! in) { all_in = false; break; }
-        }
-        if (all_in) {
-            const int a = add_vertex(A), b = add_vertex(B), c = add_vertex(C);
-            if (a != b && b != c && a != c)
-                out.F.emplace_back(a, b, c);
-            area_sum += std::abs(tri_xy.area());
-            projected.emplace_back(tri_xy);
-            continue;
-        }
-
-        const ExPolygons piece = intersection_ex(ExPolygons{ ExPolygon(tri_xy) }, crop);
-        for (const ExPolygon &ep : piece) {
-            if (ep.contour.points.size() < 3)
-                continue;
-            const Points pts = to_points(ep);
-            const std::vector<Vec3i32> idx = Triangulation::triangulate(ep);
-            if (idx.empty())
-                continue;
-            std::vector<int> local;
-            local.reserve(pts.size());
-            for (const Point &q : pts)
-                local.push_back(add_vertex(Vec3d(unscaled<double>(q.x()), unscaled<double>(q.y()), z_at(q))));
-            for (const Vec3i32 &ti : idx) {
-                if (ti[0] < 0 || ti[1] < 0 || ti[2] < 0 ||
-                    ti[0] >= int(local.size()) || ti[1] >= int(local.size()) || ti[2] >= int(local.size()))
-                    continue;
-                const int a = local[ti[0]], b = local[ti[1]], c = local[ti[2]];
-                if (a == b || b == c || a == c)
-                    continue;
-                // `Triangulation` devuelve el sentido de la ExPolygon (CCW en XY, normal +Z); el
-                // parche mira hacia abajo, así que van del revés.
-                out.F.emplace_back(a, c, b);
-            }
-            area_sum += std::abs(ep.contour.area());
-            Polygon c2 = ep.contour;
-            if (! c2.is_counter_clockwise())
-                c2.reverse();
-            projected.emplace_back(std::move(c2));
         }
     }
+}
 
-    if (out.F.empty() || out.V.size() < 3)
+// El disco de las formas de clic (redondo). Sigue siendo 2D: esas formas SON una primitiva en XY,
+// a diferencia del pincel, que ahora vive en la malla.
+static Polygon zone_disc(const Vec2d &c, double r)
+{
+    Points pts;
+    const int seg = 32;
+    pts.reserve(seg);
+    for (int i = 0; i < seg; ++ i) {
+        const double a = 2.0 * PI_D * double(i) / double(seg);
+        pts.emplace_back(scaled<coord_t>(c.x() + r * std::cos(a)), scaled<coord_t>(c.y() + r * std::sin(a)));
+    }
+    return Polygon(std::move(pts));
+}
+
+// NEOTKO_SUPPORTZONES_TAG s300 — PINTAR TRIÁNGULOS
+//
+// 🔑 Un recorrido por VECINDAD desde el triángulo que has tocado, aceptando los que caen dentro del
+// radio. Y ahí está toda la diferencia con lo de antes: el radio se mide en el espacio, pero el
+// camino se anda por la malla. Al otro lado de un agujero no se llega aunque esté a dos milímetros
+// en línea recta, porque no hay triángulos que lleven hasta allí.
+//
+// Es la misma idea que el pincel esférico de los painters de Orca, y el motivo de que aquéllos sean
+// instantáneos: marcar un byte por triángulo no cuesta nada.
+//
+// ⚠️ Se mide el CENTROIDE contra el punto tocado. Con triángulos mucho más grandes que el pincel el
+// borde queda a saltos — es la escalera que Rhino no tiene porque allí el contorno es una curva.
+// Se acepta: el contorno se suaviza después, al proyectar (`resample_ring` simplifica a 0.02 mm).
+size_t GLGizmoSupportZones::paint_facets(int seed, const Vec3d &hit_world, double radius, bool erase)
+{
+    const int n_facets = int(m_mesh.its.indices.size());
+    if (seed < 0 || seed >= n_facets || int(m_face_neighbors.size()) != n_facets)
+        return 0;
+    if (int(m_painted.size()) != n_facets) {
+        m_painted.assign(n_facets, 0);
+        m_painted_list.clear();
+        m_painted_count = 0;
+    }
+    // 🚨 s300b — EL SELLO EN VEZ DE UN `visited` NUEVO. Reservar y limpiar un vector del tamaño de la
+    // malla en CADA marca es, en una pieza de millones de triángulos, varios megas por movimiento
+    // del ratón. Con un sello que sube, "no visitado" es "su número no es el de esta pincelada" y no
+    // hay nada que limpiar.
+    // ⚠️ El desbordamiento del contador se trata: al dar la vuelta, todo el mundo parecería visitado.
+    if (int(m_visit_stamp.size()) != n_facets) {
+        m_visit_stamp.assign(n_facets, 0);
+        m_visit_epoch = 0;
+    }
+    if (++ m_visit_epoch == 0) {
+        std::fill(m_visit_stamp.begin(), m_visit_stamp.end(), 0);
+        m_visit_epoch = 1;
+    }
+
+    const char   want = erase ? 0 : 1;
+    const double r2   = radius * radius;
+
+    // 🚨 s300d — EL TIPO DE RETORNO VA ESCRITO, Y ÉSTE ERA EL FALLO QUE PINTABA LA PIEZA ENTERA.
+    //
+    // Con `auto`, esta lambda NO devolvía un `Vec3d`: devolvía la EXPRESIÓN de Eigen que describe
+    // "suma estos tres productos matriz-vector y divide por tres". Eigen no evalúa hasta que se
+    // asigna a un tipo concreto, y esa expresión guarda REFERENCIAS a los temporales de dentro de la
+    // lambda — que mueren al salir de ella. Lo que llegaba a la resta de fuera era basura.
+    //
+    // Por eso el log decía `visitas=200000 cambiados=200000` con un pincel de 4 mm: el test del
+    // radio no filtraba nada porque la distancia se calculaba contra memoria muerta, y el recorrido
+    // se comía la pieza hasta el tope. No era el radio, ni la vecindad, ni la matriz.
+    //
+    // Es la misma trampa que el fork ya tiene apuntada con `normalized()`: en Eigen, `auto` guarda
+    // la receta, no el resultado. En este fichero se escribe el tipo, siempre.
+    auto centroid = [&](int f) -> Vec3d {
+        const Vec3i32 t = m_mesh.its.indices[f];
+        return (m_world_trafo * m_mesh.its.vertices[t[0]].cast<double>()
+              + m_world_trafo * m_mesh.its.vertices[t[1]].cast<double>()
+              + m_world_trafo * m_mesh.its.vertices[t[2]].cast<double>()) / 3.;
+    };
+
+    size_t changed = 0;
+    std::vector<int> stack { seed };
+    m_visit_stamp[seed] = m_visit_epoch;
+    // Tope de cordura para un pincel enorme sobre una malla densa.
+    const size_t max_visit = 200000;
+    size_t visits = 0;
+    while (! stack.empty() && visits < max_visit) {
+        const int f = stack.back();
+        stack.pop_back();
+        ++ visits;
+        if ((centroid(f) - hit_world).squaredNorm() > r2)
+            continue;                    // fuera del pincel: ni se pinta ni se sigue por aquí
+        if (m_painted[f] != want) {
+            m_painted[f] = want;
+            if (want)
+                m_painted_list.push_back(f);
+            ++ changed;
+        }
+        for (int e = 0; e < 3; ++ e) {
+            const int nb = m_face_neighbors[f][e];
+            if (nb >= 0 && nb < n_facets && m_visit_stamp[nb] != m_visit_epoch) {
+                m_visit_stamp[nb] = m_visit_epoch;
+                stack.push_back(nb);
+            }
+        }
+    }
+    // 🔎 s300c — cuánto cuesta UNA pincelada, en el log. Es el número que faltaba: cuando él dijo
+    // "sale la ruedita" no había forma de saber si el caro era el pincel, la huella o el techo, y
+    // se fue a buscar al sitio equivocado. Ahora lo dice.
+    if (NeoDebug::enabled(NeoDebug::SUPPORTZONES)) {
+        char b[192];
+        std::snprintf(b, sizeof(b), "brush     visitas=%d  cambiados=%d  pintados=%d  (radio %.1f mm)",
+                      int(visits), int(changed), int(m_painted_list.size()), radius);
+        NeoDebug::write(NeoDebug::SUPPORTZONES, b);
+    }
+    if (changed > 0) {
+        // Al borrar, la lista se queda con índices que ya no están pintados: se compacta aquí, que
+        // es barato porque la lista son los pintados, no la malla.
+        if (erase)
+            m_painted_list.erase(std::remove_if(m_painted_list.begin(), m_painted_list.end(),
+                                                [this](int f) { return ! m_painted[f]; }),
+                                 m_painted_list.end());
+        m_painted_count = m_painted_list.size();
+        ++ m_stamp_stamp;
+    }
+    return changed;
+}
+
+void GLGizmoSupportZones::clear_painted()
+{
+    // Sin `assign` sobre la malla entera: se apagan sólo los que estaban encendidos.
+    for (int f : m_painted_list)
+        if (f >= 0 && f < int(m_painted.size()))
+            m_painted[f] = 0;
+    m_painted_list.clear();
+    m_painted_count = 0;
+    ++ m_stamp_stamp;
+}
+
+// La proyección en XY de lo pintado. Es la frontera entre las dos mitades del híbrido: de aquí para
+// abajo todo vuelve a ser 2D y Clipper, igual que antes.
+//
+// 🚨 s300b — CACHEADA. La piden el sólido, el contorno del panel, la huella y los avisos, varias
+// veces por frame. Sin caché, cada una de esas llamadas volvía a unir todos los triángulos pintados
+// con Clipper.
+ExPolygons GLGizmoSupportZones::painted_area_world() const
+{
+    if (m_painted_area_stamp == m_stamp_stamp && m_painted_area_trafo.isApprox(m_world_trafo))
+        return m_painted_area;
+
+    ExPolygons out;
+    if (! m_painted_list.empty()) {
+        Polygons tris;
+        tris.reserve(m_painted_list.size());
+        for (int f : m_painted_list) {
+            if (f < 0 || f >= int(m_mesh.its.indices.size()))
+                continue;
+            const Vec3i32 t = m_mesh.its.indices[f];
+            Points p;
+            p.reserve(3);
+            for (int k = 0; k < 3; ++ k) {
+                const Vec3d w = m_world_trafo * m_mesh.its.vertices[t[k]].cast<double>();
+                p.emplace_back(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()));
+            }
+            Polygon q(std::move(p));
+            if (q.area() == 0.)
+                continue;                // de canto: en XY es una línea
+            if (! q.is_counter_clockwise())
+                q.reverse();
+            tris.emplace_back(std::move(q));
+        }
+        // El micro-offset cierra las costuras de un entero que el redondeo deja entre triángulos
+        // vecinos y que sobrevivirían a la unión como astillas.
+        if (! tris.empty())
+            out = union_ex(offset(tris, scaled<float>(0.002f)));
+    }
+    m_painted_area       = out;
+    m_painted_area_stamp = m_stamp_stamp;
+    m_painted_area_trafo = m_world_trafo;
+    return out;
+}
+
+// Vuelve a pintar desde cero a partir de los toques guardados. Lo usan el borrado (que no se puede
+// hacer sumando) y la reapertura de una zona guardada.
+void GLGizmoSupportZones::repaint_from_stamps()
+{
+    clear_painted();
+    if (! m_raycaster)
+        return;
+    for (const Stamp &st : m_stamps) {
+        // El triángulo bajo el toque se reencuentra por posición, no por índice: un índice a la
+        // malla no sobrevive a una reparación, y el gesto tiene que sobrevivir (misma razón que
+        // documenta `begin_edit_zone`).
+        const Vec3d local = m_world_trafo.inverse() * st.p;
+        const int   f     = m_raycaster->get_closest_facet(local.cast<float>());
+        if (f >= 0)
+            paint_facets(f, st.p, st.r, false);
+    }
+}
+
+// --------------------------------------------------------------------------------------------
+// El mapa de alturas: leer
+// --------------------------------------------------------------------------------------------
+double GLGizmoSupportZones::z_at(const ZoneMask &mk, const Vec2d &p) const
+{
+    auto on_plane = [&]() {
+        if (std::abs(mk.seed_n.z()) < 1e-6)
+            return mk.seed_p.z();
+        return (mk.seed_n.dot(mk.seed_p) - mk.seed_n.x() * p.x() - mk.seed_n.y() * p.y()) / mk.seed_n.z();
+    };
+    if (m_hm_nx < 1 || m_hm_ny < 1 || m_hm_step <= 0.)
+        return on_plane();
+
+    const double fx = (p.x() - m_hm_origin.x()) / m_hm_step;
+    const double fy = (p.y() - m_hm_origin.y()) / m_hm_step;
+    const int    i0 = int(std::floor(fx));
+    const int    j0 = int(std::floor(fy));
+    if (i0 < 0 || j0 < 0 || i0 + 1 > m_hm_nx || j0 + 1 > m_hm_ny)
+        return on_plane();
+    const double tx = fx - double(i0);
+    const double ty = fy - double(j0);
+    const int    w  = m_hm_nx + 1;
+    const float  z00 = m_hm_z[size_t(j0)     * size_t(w) + size_t(i0)];
+    const float  z10 = m_hm_z[size_t(j0)     * size_t(w) + size_t(i0 + 1)];
+    const float  z01 = m_hm_z[size_t(j0 + 1) * size_t(w) + size_t(i0)];
+    const float  z11 = m_hm_z[size_t(j0 + 1) * size_t(w) + size_t(i0 + 1)];
+    // 🚨 Un solo nodo sin superficie invalida la celda entera: interpolar contra un NaN da NaN, e
+    // inventarse el valor del vecino estiraría el techo hacia un sitio donde no hay pieza. Ahí
+    // manda el plano, que es plano y está en el aire, que es lo honesto.
+    if (std::isnan(z00) || std::isnan(z10) || std::isnan(z01) || std::isnan(z11))
+        return on_plane();
+    const double a = double(z00) + (double(z10) - double(z00)) * tx;
+    const double b = double(z01) + (double(z11) - double(z01)) * tx;
+    return a + (b - a) * ty;
+}
+
+Vec3d GLGizmoSupportZones::n_at(const ZoneMask &mk, const Vec2d &p) const
+{
+    if (m_hm_nx < 1 || m_hm_ny < 1 || m_hm_step <= 0.)
+        return mk.seed_n;
+    const int i = int(std::lround((p.x() - m_hm_origin.x()) / m_hm_step));
+    const int j = int(std::lround((p.y() - m_hm_origin.y()) / m_hm_step));
+    if (i < 0 || j < 0 || i > m_hm_nx || j > m_hm_ny)
+        return mk.seed_n;
+    const Vec3f &n = m_hm_n[size_t(j) * size_t(m_hm_nx + 1) + size_t(i)];
+    if (n.squaredNorm() < 1e-12f)
+        return mk.seed_n;
+    return n.cast<double>();
+}
+
+// --------------------------------------------------------------------------------------------
+// NEOTKO_SUPPORTZONES_TAG s299 — CONSTRUIR LA MÁSCARA
+// --------------------------------------------------------------------------------------------
+// Dos cosas y en este orden: el ÁREA (Clipper) y el TECHO (un mapa de alturas rasterizado desde
+// los triángulos de la región). A partir de aquí nadie vuelve a mirar la malla: el sólido, el
+// contorno del panel, el resaltado y los avisos salen todos de estas dos.
+//
+// 🔑 El techo no es plano y eso es deliberado: el dueño descartó el plano por ser el caso fácil.
+// Donde hay pieza, la z sale de la superficie de verdad; donde no la hay, del plano de la cara que
+// pinchaste, que es lo que uno espera de un bloque que sobresale del voladizo.
+bool GLGizmoSupportZones::build_mask(int seed_facet, const Vec2d &centre_xy, ZoneMask &out) const
+{
+    out = ZoneMask();
+    const int n_facets = int(m_mesh.its.indices.size());
+    if (seed_facet < 0 || seed_facet >= n_facets || int(m_face_normals.size()) != n_facets)
         return false;
 
-    // ---- normales por vértice ------------------------------------------------------------------
-    out.vnormal.assign(out.V.size(), Vec3d::Zero());
-    for (const Vec3i32 &t : out.F) {
-        const Vec3d n = (out.V[t[1]] - out.V[t[0]]).cross(out.V[t[2]] - out.V[t[0]]);   // sin normalizar: pondera por área
-        for (int k = 0; k < 3; ++ k)
-            out.vnormal[t[k]] += n;
-    }
-    for (Vec3d &n : out.vnormal) {
-        // 🚨 Sin ternario: `normalized()` devuelve una expresión de Eigen con otra alineación que
-        // `Vec3d` y el compilador no sabe a cuál convertir (lessons_code_traps).
-        if (n.norm() > 1e-12)
+    // El plano de la cara pinchada, que es el respaldo del techo donde no hay pieza debajo.
+    {
+        const Vec3i32 t0 = m_mesh.its.indices[seed_facet];
+        out.seed_p = (m_world_trafo * m_mesh.its.vertices[t0[0]].cast<double>()
+                    + m_world_trafo * m_mesh.its.vertices[t0[1]].cast<double>()
+                    + m_world_trafo * m_mesh.its.vertices[t0[2]].cast<double>()) / 3.;
+        Vec3d n = m_world_trafo.linear().inverse().transpose() * m_face_normals[seed_facet].cast<double>();
+        if (n.norm() > 1e-12) {
             n.normalize();
-        else
-            n = Vec3d(0., 0., -1.);
+            if (n.z() > 0.)
+                n = - n;
+            out.seed_n = n;
+        }
     }
 
-    // ---- el borde ------------------------------------------------------------------------------
-    std::map<std::pair<int, int>, int> edge_count;
-    for (const Vec3i32 &t : out.F)
-        for (int k = 0; k < 3; ++ k)
-            ++ edge_count[std::minmax(t[k], t[(k + 1) % 3])];
-    for (const Vec3i32 &t : out.F)
-        for (int k = 0; k < 3; ++ k) {
-            const int a = t[k], b = t[(k + 1) % 3];
-            if (edge_count[std::minmax(a, b)] == 1)
-                out.border.emplace_back(a, b);
-        }
-    if (out.border.empty())
-        return false;   // una región sin borde es una cáscara cerrada, no un parche
-
-    // ---- "hacia dentro" CON INGLETE ------------------------------------------------------------
-    // 🔑 Lo de antes era la media de las normales de las aristas, normalizada. En una esquina de
-    // 90° eso mide 1 cuando el inglete pide √2, así que los lados se metían lo pedido y la esquina
-    // se quedaba corta: la huella se redondeaba y no coincidía con el contorno que dibuja el panel.
-    // Con 400 vértices (el torus) no se ve; con 4 (un rectángulo) es todo el efecto.
+    // ---- el área ------------------------------------------------------------------------------
     //
-    // El parche mira hacia abajo, así que visto desde ARRIBA su recorrido es horario y el interior
-    // queda a la DERECHA de cada arista: la normal interior de una arista `d` es `(d.y, -d.x)`.
-    std::vector<Vec2d> n_in(out.V.size(), Vec2d::Zero()), n_out(out.V.size(), Vec2d::Zero());
-    std::vector<int>   cnt_in(out.V.size(), 0), cnt_out(out.V.size(), 0);
-    for (const auto &e : out.border) {
-        const Vec2d d = (out.V[e.second] - out.V[e.first]).head<2>();
-        if (d.norm() < 1e-9)
-            continue;
-        Vec2d nn(d.y(), - d.x());
-        nn.normalize();
-        n_out[e.first]  += nn; ++ cnt_out[e.first];
-        n_in [e.second] += nn; ++ cnt_in [e.second];
+    // 🚨 s299b — EL PINCEL NO TIENE REGIÓN, Y ÉSTE ERA EL ERROR QUE SE VEÍA EN LA MANO.
+    //
+    // La primera versión de s299 seguía atando el pincel al flood-fill: recortaba lo pintado contra
+    // la proyección en XY de TODA la superficie que mira hacia abajo. En una pieza de millones de
+    // triángulos eso son dos cosas carísimas seguidas — el flood-fill de cientos de miles de caras
+    // y una unión de Clipper con todos esos triángulos — y encima da un área enorme, que es el
+    // bloque gigante que salía en pantalla.
+    //
+    // 🔑 Lo dijo el dueño desde el principio y no lo apliqué hasta el final: "pintar un área es
+    // pintar un área", y "es un fake, no necesitamos una recreación perfecta, tenemos margen". Lo
+    // que pintas ES la huella. Punto. Nadie le pregunta nada a la malla.
+    //
+    // La superficie sigue entrando, pero sólo donde importa: el TECHO se muestrea debajo de lo
+    // pintado (`ensure_heightmap`), que son unos miles de puntos y no depende del tamaño del
+    // objeto.
+    ExPolygons shape;
+    bool needs_region = false;
+    switch (m_foot_shape) {
+    case FootShape::Patch:
+        // «Tomar la cara»: aquí la región SÍ es el gesto, y es el flood-fill coplanar a 20°, que
+        // está acotado por construcción (una cara, no media pieza).
+        needs_region = true;
+        break;
+    case FootShape::Round:
+        if (m_foot_size_mm > 0.f)
+            shape.emplace_back(zone_disc(centre_xy, 0.5 * double(m_foot_size_mm)));
+        needs_region = ! m_shape_covers;
+        break;
+    case FootShape::Square: {
+        if (m_foot_size_mm <= 0.f)
+            break;
+        const double h = 0.5 * double(m_foot_size_mm);
+        Points pts { { scaled<coord_t>(centre_xy.x() - h), scaled<coord_t>(centre_xy.y() - h) },
+                     { scaled<coord_t>(centre_xy.x() + h), scaled<coord_t>(centre_xy.y() - h) },
+                     { scaled<coord_t>(centre_xy.x() + h), scaled<coord_t>(centre_xy.y() + h) },
+                     { scaled<coord_t>(centre_xy.x() - h), scaled<coord_t>(centre_xy.y() + h) } };
+        shape.emplace_back(Polygon(std::move(pts)));
+        needs_region = ! m_shape_covers;
+        break;
     }
-    out.inward.assign(out.V.size(), Vec2d::Zero());
-    for (size_t i = 0; i < out.V.size(); ++ i) {
-        if (cnt_in[i] == 0 && cnt_out[i] == 0)
-            continue;
-        if (cnt_in[i] == 1 && cnt_out[i] == 1) {
-            Vec2d a = n_in[i], b = n_out[i];
-            Vec2d m = a + b;
-            const double ml = m.norm();
-            if (ml < 1e-6) {
-                out.inward[i] = Vec2d::Zero();   // pincho de 180°: no hay dirección que valga
-                continue;
-            }
-            m /= ml;
-            const double c = m.dot(a);           // cos(θ/2)
-            // El tope del inglete: en un pico muy agudo el factor se va al infinito y el vértice
-            // saldría disparado. 4 es el mismo orden que usa cualquier offsetter antes de cortar.
-            out.inward[i] = m * std::min(4.0, (c > 1e-3) ? (1.0 / c) : 4.0);
-        } else {
-            Vec2d m = n_in[i] + n_out[i];
-            if (m.norm() > 1e-9)
-                m.normalize();
-            out.inward[i] = m;                   // vértice pinzado: sin inglete, media y ya está
-        }
-    }
-
-    // ---- el tope real del borde ----------------------------------------------------------------
-    // Cuánto se puede meter antes de que la forma se cruce consigo misma. Sale en forma CERRADA:
-    // una arista se da la vuelta cuando su dirección invertida, y eso es un producto escalar.
-    //   d(t) = d0 + t·(inward_b − inward_a)  ⇒  d0·d(t) = |d0|² + t·(d0·Δ) = 0
-    double t_in  = std::numeric_limits<double>::max();
-    double t_out = std::numeric_limits<double>::max();
-    for (const auto &e : out.border) {
-        const Vec2d d0 = (out.V[e.second] - out.V[e.first]).head<2>();
-        const double l2 = d0.squaredNorm();
-        if (l2 < 1e-18)
-            continue;
-        const double den = d0.dot(out.inward[e.second] - out.inward[e.first]);
-        if (den < -1e-12)
-            t_in  = std::min(t_in,  l2 / (- den));   // se cruza METIENDO
-        else if (den > 1e-12)
-            t_out = std::min(t_out, l2 / den);       // se cruza SACANDO
-    }
-    // Sin arista que limite por ese lado, el tope es de cordura y no de geometría: la mitad del
-    // lado mayor de la huella para el metido (más allá no queda nada), y un palmo generoso para el
-    // crecido, que es donde él pedía sitio.
-    const BoundingBox bb = get_extents(projected);
-    const double half_span = 0.5 * unscaled<double>(double(std::max(bb.size().x(), bb.size().y())));
-    if (t_in  == std::numeric_limits<double>::max())
-        t_in  = half_span;
-    if (t_out == std::numeric_limits<double>::max())
-        t_out = std::max(50.0, half_span);
-    // El margen es para no dejar al usuario justo en el borde del colapso, donde la forma es una
-    // astilla y el pilar no imprimiría nada.
-    out.max_inset  = std::max(0., t_in  * 0.9);
-    out.max_outset = std::max(0., t_out * 0.9);
-
-    // ---- se pliega sobre sí mismo? -------------------------------------------------------------
-    if (! projected.empty()) {
-        double union_area = 0.;
-        for (const ExPolygon &ep : union_ex(projected))
-            union_area += ep.area();
-        out.folded = (union_area > 0.) && (area_sum > union_area * 1.05);
+    case FootShape::Brush:
+        // s300 — la proyección de los TRIÁNGULOS pintados. Ni flood-fill ni recorte: lo que has
+        // marcado sobre la superficie es la huella, y ya viene de la malla, así que no puede
+        // contener nada que no hayas tocado.
+        shape = painted_area_world();
+        needs_region = false;
+        break;
     }
 
+    if (needs_region) {
+        const std::vector<int> &region = region_for(seed_facet);
+        if (region.empty() || m_region_area_cache.empty())
+            return false;
+        out.area = shape.empty() ? m_region_area_cache
+                                 : intersection_ex(m_region_area_cache, shape);
+    } else {
+        if (shape.empty())
+            return false;
+        out.area = shape;
+    }
+
+    if (out.area.empty())
+        return false;
+    const BoundingBox abb = get_extents(out.area);
+    // 🚨 s300c — CON EL PINCEL, EL TECHO SALE DE LOS TRIÁNGULOS PINTADOS, NO DE RAYOS. Éste era el
+    // cuelgue, y no estaba en el pincel: estaba aquí.
+    //
+    // `ensure_heightmap()` dispara UN RAYO VERTICAL POR NODO contra el árbol de la malla. Con paso
+    // de medio milímetro y un área pintada mediana eso son decenas de miles de rayos, y con la pieza
+    // de 1,47 millones de triángulos cada rayo cuesta. Y como la máscara se invalida con cada marca
+    // del pincel, ese barrido entero se repetía EN CADA MARCA. De ahí la ruedita y que lo único que
+    // se refrescara de vez en cuando fuera un frame suelto.
+    //
+    // 🔑 Y era trabajo tirado además de caro: los triángulos de la superficie que queremos ya los
+    // tenemos marcados. Rasterizarlos cuesta lo que cuesta recorrerlos —cientos— y da la altura
+    // EXACTA de lo que pintaste, no la de lo que un rayo se encuentre por el camino.
+    //
+    // Las formas de clic (círculo, cara entera) siguen con los rayos: ahí no hay lista de triángulos
+    // pintados, y su área está acotada por el tamaño del mando.
+    if (m_foot_shape == FootShape::Brush && ! m_painted_list.empty())
+        heightmap_from_painted(abb);
+    else
+        ensure_heightmap(abb, out.seed_p.z());
+
+    // ---- el rango de alturas ------------------------------------------------------------------
+    // Se mide sobre lo que de verdad va a acabar en el techo: los nodos con superficie y los puntos
+    // del contorno del área, que son los que llevan la pared.
     out.z_low  = std::numeric_limits<double>::max();
     out.z_high = std::numeric_limits<double>::lowest();
-    for (const Vec3d &w : out.V) {
-        out.z_low  = std::min(out.z_low,  w.z());
-        out.z_high = std::max(out.z_high, w.z());
+    // 🚨 Sólo los nodos de la BBOX de la huella, no los del lienzo entero. El mapa de alturas cubre
+    // toda la región —puede tener cientos de miles de nodos— y la huella de un pincel es un
+    // pañuelo: recorrer el mapa completo con un `contains` por nodo era gratis en el papel y se
+    // notaba en la mano, porque esto se recalcula con cada marca.
+    int i0 = 0, i1 = -1, j0 = 0, j1 = -1;
+    if (m_hm_nx > 0 && m_hm_ny > 0 && m_hm_step > 0.) {
+        i0 = std::max(0, int(std::floor((unscaled<double>(double(abb.min.x())) - m_hm_origin.x()) / m_hm_step)));
+        i1 = std::min(m_hm_nx, int(std::ceil((unscaled<double>(double(abb.max.x())) - m_hm_origin.x()) / m_hm_step)));
+        j0 = std::max(0, int(std::floor((unscaled<double>(double(abb.min.y())) - m_hm_origin.y()) / m_hm_step)));
+        j1 = std::min(m_hm_ny, int(std::ceil((unscaled<double>(double(abb.max.y())) - m_hm_origin.y()) / m_hm_step)));
     }
+    for (int j = j0; j <= j1; ++ j)
+        for (int i = i0; i <= i1; ++ i) {
+            const float z = m_hm_z[size_t(j) * size_t(m_hm_nx + 1) + size_t(i)];
+            if (std::isnan(z))
+                continue;
+            const Vec2d p(m_hm_origin.x() + m_hm_step * i, m_hm_origin.y() + m_hm_step * j);
+            const Point q(scaled<coord_t>(p.x()), scaled<coord_t>(p.y()));
+            bool inside = false;
+            for (const ExPolygon &ep : out.area)
+                if (ep.contains(q)) { inside = true; break; }
+            if (! inside)
+                continue;
+            out.z_low  = std::min(out.z_low,  double(z));
+            out.z_high = std::max(out.z_high, double(z));
+        }
+    for (const ExPolygon &ep : out.area)
+        for (const Point &q : ep.contour.points) {
+            const double z = z_at(out, Vec2d(unscaled<double>(q.x()), unscaled<double>(q.y())));
+            out.z_low  = std::min(out.z_low,  z);
+            out.z_high = std::max(out.z_high, z);
+        }
+    if (out.z_low > out.z_high) {
+        // Ni un nodo ni un punto de contorno: el área está entera fuera de la pieza. El plano de la
+        // semilla es entonces todo lo que hay, y sigue siendo una respuesta válida.
+        out.z_low = out.z_high = out.seed_p.z();
+    }
+
     out.ok = true;
     return true;
 }
 
 void GLGizmoSupportZones::invalidate_patch()
 {
-    m_patch_cache_facet = -1;
-    m_foot_cache_facet  = -1;
+    m_mask_cache_facet = -1;
+    m_foot_cache_facet = -1;
 }
 
-const GLGizmoSupportZones::PatchGeom *GLGizmoSupportZones::patch(int facet_idx, Vec2d centre_xy) const
+const GLGizmoSupportZones::ZoneMask *GLGizmoSupportZones::mask(int facet_idx, Vec2d centre_xy) const
 {
-    // 🚨 El centro y la matriz entran en la clave por lo mismo que ya entraban en la de la huella:
-    // el recorte se mueve con el cursor dentro de la MISMA cara, y el parche está en MUNDO, así que
-    // mover el objeto lo cambia entero sin que el índice de la cara se mueva un pelo.
     // 🔑 s289 — con el pincel la semilla NO es la cara bajo el cursor: es la primera que se pintó.
-    // Así el parche sigue siendo el flood-fill desde ella y pintar nunca se salta una esquina hacia
-    // otra cara; y de paso todos los sitios que ya llamaban con la cara del cursor siguen valiendo
-    // sin tocarlos, que es lo que mantiene el resto del panel ajeno al modo.
+    // Así el lienzo sigue siendo el flood-fill desde ella y pintar nunca se salta una esquina hacia
+    // otra cara; y de paso todos los sitios que ya llamaban con la cara del cursor siguen valiendo.
     if (m_foot_shape == FootShape::Brush && m_brush_seed_facet >= 0 && ! m_stamps.empty()) {
         facet_idx = m_brush_seed_facet;
-        centre_xy = m_stamps.front().c;
+        centre_xy = Vec2d(m_stamps.front().p.x(), m_stamps.front().p.y());
     }
     // El modo cubrir va DENTRO de la clave de forma (+100): cambia la geometría entera y no tener
-    // que añadir un campo a las dos cachés es exactamente lo que evita olvidarse de una.
+    // que añadir un campo a las dos cachés es lo que evita olvidarse de una.
     const int shape_key = int(m_foot_shape) + (m_shape_covers ? 100 : 0);
-    if (m_patch_cache_facet == facet_idx && m_patch_cache_shape == shape_key
-        && m_patch_cache_size == m_foot_size_mm && m_patch_cache_centre == centre_xy
-        && m_patch_cache_stamps == m_stamps.size()
-        && m_patch_cache_trafo.isApprox(m_world_trafo))
-        return m_patch_cache.ok ? &m_patch_cache : nullptr;
+    if (m_mask_cache_facet == facet_idx && m_mask_cache_shape == shape_key
+        && m_mask_cache_size == m_foot_size_mm && m_mask_cache_centre == centre_xy
+        && m_mask_cache_stamp == m_stamp_stamp
+        && m_mask_cache_trafo.isApprox(m_world_trafo))
+        return m_mask_cache.ok ? &m_mask_cache : nullptr;
 
-    build_patch(facet_idx, centre_xy, m_patch_cache);
-    m_patch_cache_facet  = facet_idx;
-    m_patch_cache_shape  = shape_key;
-    m_patch_cache_size   = m_foot_size_mm;
-    m_patch_cache_centre = centre_xy;
-    m_patch_cache_stamps = m_stamps.size();
-    m_patch_cache_trafo  = m_world_trafo;
-    return m_patch_cache.ok ? &m_patch_cache : nullptr;
+    build_mask(facet_idx, centre_xy, m_mask_cache);
+    m_mask_cache_facet  = facet_idx;
+    m_mask_cache_shape  = shape_key;
+    m_mask_cache_size   = m_foot_size_mm;
+    m_mask_cache_centre = centre_xy;
+    m_mask_cache_stamp  = m_stamp_stamp;
+    m_mask_cache_trafo  = m_world_trafo;
+    return m_mask_cache.ok ? &m_mask_cache : nullptr;
 }
 
+// NEOTKO_SUPPORTZONES_TAG s299 — REMUESTREAR UN ANILLO
+//
+// 🔑 Es la pieza que hace posible dejar de mover vértices a mano. Cada anillo del pilar se calcula
+// con su propio `offset_ex()`, así que ni comparten número de vértices ni orden, y sin eso no se
+// pueden coser las paredes. Remuestrear los dos por LONGITUD DE ARCO, con el mismo número de
+// puntos y empezando por el mismo sitio, los vuelve a hacer cosibles sin volver al método que se
+// cruzaba consigo mismo.
+//
+// ⚠️ Se queda con la isla más grande. Un anillo partido en dos por un offset agresivo no es un
+// prisma, y el bloque de soporte quiere ser uno.
+std::vector<Vec2d> GLGizmoSupportZones::resample_ring(const ExPolygons &area, int n_pts)
+{
+    std::vector<Vec2d> out;
+    if (area.empty() || n_pts < 3)
+        return out;
+    size_t best = 0;
+    for (size_t i = 1; i < area.size(); ++ i)
+        if (std::abs(area[i].contour.area()) > std::abs(area[best].contour.area()))
+            best = i;
+    Polygon c = area[best].contour;
+    // ⚠️ Los agujeros se tiran a propósito: el pilar es un prisma macizo, y el techo que hay sobre
+    // un agujero también quiere sujeción.
+    if (! c.is_counter_clockwise())
+        c.reverse();
+    // 🚨 s299e — SIMPLIFICAR ANTES DE MUESTREAR, y no es cosmético.
+    //
+    // El contorno viene de Clipper con detalle de micras. Muestrearlo a paso fijo puede saltarse un
+    // diente estrecho y devolver una poligonal que se cruza consigo misma; y una tapa triangulada
+    // sobre un contorno que se cruza sale rota, que es de donde salían mallas no-manifold sin que
+    // nada avisara. Quitando antes lo que es más fino que el propio muestreo, eso no puede pasar.
+    c.douglas_peucker(scaled<double>(0.02));
+    if (c.points.size() < 3)
+        return out;
+
+    std::vector<Vec2d> pts;
+    pts.reserve(c.points.size());
+    for (const Point &p : c.points)
+        pts.emplace_back(unscaled<double>(p.x()), unscaled<double>(p.y()));
+
+    // El punto de partida: el más cercano a la dirección +X desde el centroide. Es arbitrario, pero
+    // es EL MISMO para todos los anillos, que es lo único que importa para que la costura no gire.
+    Vec2d ctr { 0., 0. };
+    for (const Vec2d &p : pts)
+        ctr += p;
+    ctr /= double(pts.size());
+    size_t start = 0;
+    double best_a = 1e9;
+    for (size_t i = 0; i < pts.size(); ++ i) {
+        const Vec2d d = pts[i] - ctr;
+        const double a = std::abs(std::atan2(d.y(), d.x()));
+        if (a < best_a) { best_a = a; start = i; }
+    }
+
+    std::vector<double> seg(pts.size(), 0.);
+    double total = 0.;
+    for (size_t i = 0; i < pts.size(); ++ i) {
+        const Vec2d &a = pts[(start + i) % pts.size()];
+        const Vec2d &b = pts[(start + i + 1) % pts.size()];
+        seg[i] = (b - a).norm();
+        total += seg[i];
+    }
+    if (total < 1e-9)
+        return out;
+
+    out.reserve(n_pts);
+    size_t si = 0;
+    double acc = 0.;
+    for (int k = 0; k < n_pts; ++ k) {
+        const double want = total * double(k) / double(n_pts);
+        while (si + 1 < seg.size() && acc + seg[si] < want) {
+            acc += seg[si];
+            ++ si;
+        }
+        const Vec2d &a = pts[(start + si) % pts.size()];
+        const Vec2d &b = pts[(start + si + 1) % pts.size()];
+        const double t = (seg[si] > 1e-12) ? std::clamp((want - acc) / seg[si], 0., 1.) : 0.;
+        out.push_back(a + (b - a) * t);
+    }
+    // 🚨 s299e — Y NINGUNO REPETIDO. Dos puntos de muestreo que caen en el mismo sitio producen un
+    // par de triángulos de pared con área cero. No es un detalle estético: es de donde salía la
+    // malla no-manifold, porque el filtro de degenerados que había al final los borraba y dejaba
+    // sus tres aristas huérfanas. Se evita el degenerado en vez de borrarlo después.
+    //
+    // Devuelve vacío en vez de un anillo corto: el resto del sólido cuenta con que todos los
+    // anillos tengan el mismo número de puntos, y un anillo distinto sería peor que ninguno.
+    for (size_t i = 0; i < out.size(); ++ i)
+        if ((out[(i + 1) % out.size()] - out[i]).squaredNorm() < 1e-12)
+            return std::vector<Vec2d>();
+    return out;
+}
+
+// El contorno de la huella metida `edge_mm` por su borde. Con `offset_ex` esto ES la sección del
+// sólido a esa altura, no una aproximación de ella: el mismo Clipper que construye el anillo del
+// pilar construye lo que dibuja el panel, así que no pueden discrepar.
+//
+// 🚨 s299 — y aquí es donde se arregla el bug de expandir dos veces. `offset_ex` con un delta
+// negativo (crecer) resuelve las auto-intersecciones y funde las islas que se tocan; el
+// desplazamiento por bisectriz que había antes no sabía hacer ninguna de las dos cosas, y por eso
+// una zona cóncava —todo lo pintado con pincel lo es— salía con las paredes cruzadas.
 std::vector<Vec2d> GLGizmoSupportZones::ring_outline_world(double edge_mm) const
 {
-    // 🔑 La SILUETA DEL SÓLIDO, no un contorno paralelo calculado aparte. Se proyectan los mismos
-    // vértices desplazados que van a acabar en la malla, así que el contorno que dibuja el panel y
-    // la forma que se imprime son la misma cosa por construcción — que era justo la tercera mentira
-    // que encontró la auditoría.
     std::vector<Vec2d> out;
     if (! m_has_target)
         return out;
-    const PatchGeom *pg = patch(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
-    if (pg == nullptr)
-        return out;
-    const double e = std::min(edge_mm, pg->max_inset);
-
-    Polygons tris;
-    tris.reserve(pg->F.size());
-    for (const Vec3i32 &t : pg->F) {
-        Points p;
-        p.reserve(3);
-        for (int k = 0; k < 3; ++ k) {
-            const Vec2d w = pg->V[t[k]].head<2>() + pg->inward[t[k]] * e;
-            p.emplace_back(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()));
-        }
-        Polygon q(std::move(p));
-        if (q.area() == 0.)
-            continue;
-        if (! q.is_counter_clockwise())
-            q.reverse();
-        tris.emplace_back(std::move(q));
-    }
-    if (tris.empty())
+    const ZoneMask *mk = mask(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
+    if (mk == nullptr)
         return out;
 
-    // El micro-offset cierra las costuras de un píxel que el redondeo a entero deja entre
-    // triángulos vecinos y que sobrevivirían a la unión como astillas.
-    ExPolygons islands = union_ex(offset(tris, scaled<float>(0.002f)));
-    if (islands.empty())
-        return out;
+    const ExPolygons ring = (std::abs(edge_mm) < 1e-6)
+        ? mk->area
+        : offset_ex(mk->area, scaled<float>(- edge_mm), ClipperLib::jtRound);
+    if (ring.empty())
+        return out;   // te has pasado metiendo: no hay forma, y eso es una respuesta
+
     size_t best = 0;
-    for (size_t i = 1; i < islands.size(); ++ i)
-        if (std::abs(islands[i].contour.area()) > std::abs(islands[best].contour.area()))
+    for (size_t i = 1; i < ring.size(); ++ i)
+        if (std::abs(ring[i].contour.area()) > std::abs(ring[best].contour.area()))
             best = i;
-    Polygon outline = islands[best].contour;
-    // ⚠️ Los agujeros se tiran a propósito: el pilar es un prisma macizo, y un bloque de soporte
-    // con un agujero sólo complica el corredor para nada — el techo que hay sobre el agujero
-    // también quiere sujeción.
+    Polygon outline = ring[best].contour;
     outline.douglas_peucker(scaled<double>(0.05));
     if (outline.points.size() < 3)
         return out;
@@ -1532,17 +2097,16 @@ std::vector<Vec2d> GLGizmoSupportZones::target_footprint_world() const
     if (m_foot_cache_facet == m_target_facet_idx && m_foot_cache_shrink == m_footprint_shrink_mm
         && m_foot_cache_shape == int(m_foot_shape) + (m_shape_covers ? 100 : 0)
         && m_foot_cache_size == m_foot_size_mm
-        && m_foot_cache_centre == centre && m_foot_cache_stamps == m_stamps.size()
+        && m_foot_cache_centre == centre && m_foot_cache_stamp == m_stamp_stamp
         && m_foot_cache_trafo.isApprox(m_world_trafo))
         return m_foot_cache;
 
-    const PatchGeom *pg = patch(m_target_facet_idx, centre);
-    if (pg == nullptr)
+    const ZoneMask *mk = mask(m_target_facet_idx, centre);
+    if (mk == nullptr)
         return out;
-    // El z más bajo del parche (donde empieza la inclinación) sale del mismo sitio que todo lo
-    // demás, así que no puede discrepar de la malla.
-    m_foot_cache_z_low     = pg->z_low;
-    m_foot_cache_max_inset = pg->max_inset;
+    // El z más bajo de la huella (donde empieza la inclinación) sale del mismo sitio que todo lo
+    // demás, así que no puede discrepar del sólido.
+    m_foot_cache_z_low     = mk->z_low;
     out = ring_outline_world(double(m_footprint_shrink_mm));
 
     m_foot_cache        = out;
@@ -1551,27 +2115,39 @@ std::vector<Vec2d> GLGizmoSupportZones::target_footprint_world() const
     m_foot_cache_shape  = int(m_foot_shape) + (m_shape_covers ? 100 : 0);
     m_foot_cache_size   = m_foot_size_mm;
     m_foot_cache_centre = centre;
-    m_foot_cache_stamps = m_stamps.size();
+    m_foot_cache_stamp  = m_stamp_stamp;
     m_foot_cache_trafo  = m_world_trafo;
     return out;
 }
 
+// 🚨 s299 — el rango del mando, no un tope de colapso. Ver la nota de la declaración: con Clipper
+// el colapso se NOTA (la forma sale vacía) en vez de predecirse, así que esto sólo dice hasta dónde
+// tiene sentido ofrecer. La mitad del lado menor mete la huella hasta cerrarla y ni un mm más.
 double GLGizmoSupportZones::max_inset_mm() const
 {
     if (! m_has_target)
         return 0.;
-    const PatchGeom *pg = patch(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
-    return (pg == nullptr) ? 0. : pg->max_inset;
+    const ZoneMask *mk = mask(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
+    if (mk == nullptr || mk->area.empty())
+        return 0.;
+    const BoundingBox bb = get_extents(mk->area);
+    const double side = unscaled<double>(double(std::min(bb.size().x(), bb.size().y())));
+    return std::max(0., 0.5 * side);
 }
 
 double GLGizmoSupportZones::max_outset_mm() const
 {
     if (! m_has_target)
         return 0.;
-    const PatchGeom *pg = patch(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
-    return (pg == nullptr) ? 0. : pg->max_outset;
+    const ZoneMask *mk = mask(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
+    if (mk == nullptr || mk->area.empty())
+        return 0.;
+    // Crecer no tiene tope geométrico —Clipper siempre sabe crecer— así que el tope es de cordura:
+    // un palmo generoso, que es donde el dueño pedía sitio para agarrar un alero.
+    const BoundingBox bb = get_extents(mk->area);
+    const double span = unscaled<double>(double(std::max(bb.size().x(), bb.size().y())));
+    return std::max(50.0, span);
 }
-
 
 // NEOTKO_SUPPORTZONES_TAG s289 — EL PINCEL
 //
@@ -1590,15 +2166,22 @@ bool GLGizmoSupportZones::paint_at(const Vec2d &mouse_pos, bool erase)
     const Candidate *live = live_candidate();
     if (live == nullptr)
         return false;
-    const Vec2d p { live->world_pos.x(), live->world_pos.y() };
     const double r = std::max(0.2, 0.5 * double(m_foot_size_mm));
 
+    // s300 — el toque va en 3D y la marca se hace sobre la malla. Ya no hay discos ni cápsulas: el
+    // pincel recorre triángulos vecinos, así que el trazo es continuo porque la superficie lo es.
     if (erase) {
         const size_t before = m_stamps.size();
         m_stamps.erase(std::remove_if(m_stamps.begin(), m_stamps.end(),
-                                      [&](const Stamp &st) { return (st.c - p).norm() <= r; }),
+                                      [&](const Stamp &st) { return (st.p - live->world_pos).norm() <= r; }),
                        m_stamps.end());
-        if (m_stamps.size() == before)
+        // 🚨 Borrar NO es pintar del revés: quitar los triángulos del pincel se llevaría por delante
+        // los que otro toque anterior también cubría. Se vuelve a pintar desde los toques que
+        // quedan, que es la única cuenta que no miente. Cuesta un trazo entero y sólo pasa al
+        // borrar, que es raro.
+        const size_t painted_before = m_painted_count;
+        repaint_from_stamps();
+        if (m_stamps.size() == before && m_painted_count == painted_before)
             return false;
         if (m_stamps.empty()) {
             // Borrado del todo: se suelta también la semilla, para que la siguiente pincelada pueda
@@ -1607,12 +2190,10 @@ bool GLGizmoSupportZones::paint_at(const Vec2d &mouse_pos, bool erase)
             m_has_target       = false;
         }
     } else {
-        // Una marca por cada medio radio recorrido: menos es sopa de polígonos y más deja el trazo
-        // con festones. Es la misma cadencia que usa cualquier pincel de mapa de bits.
-        // Con la cápsula uniendo marcas consecutivas la cadencia ya no tiene que garantizar solape,
-        // así que puede ser MÁS espaciada: menos polígonos que unir, menos CPU, y el trazo sale
-        // igual de continuo. Era una de las cosas que él notaba que costaban.
-        if (! m_stamps.empty() && (m_stamps.back().c - p).norm() < 0.8 * r
+        // Una marca por cada 0.8 radios recorridos. Con el pincel sobre la malla la cadencia ya no
+        // tiene que garantizar solape —lo garantiza la vecindad— así que es sólo para no guardar mil
+        // toques idénticos en el gesto.
+        if (! m_stamps.empty() && (m_stamps.back().p - live->world_pos).norm() < 0.8 * r
             && std::abs(m_stamps.back().r - r) < 1e-6)
             return false;
         if (m_stamps.empty()) {
@@ -1620,17 +2201,28 @@ bool GLGizmoSupportZones::paint_at(const Vec2d &mouse_pos, bool erase)
             m_target_facet_idx    = live->facet_idx;
             m_target_world_pos    = live->world_pos;
             m_target_world_normal = live->world_normal;
-            // El parche queda tomado con la primera pincelada, así que el paso 2 se enciende solo.
+            // La zona queda tomada con la primera pincelada, así que el paso 2 se enciende solo.
             // ⛔ Y NO se salta al paso 2 como hace el clic: con el pincel se sigue pintando hasta
-            // que uno dice que ha terminado. Avanzar solo aquí obligaría a volver al paso 1 para
-            // cada trazo, que es justo el UX que él pidió no romper.
+            // que uno dice que ha terminado.
             m_has_target = true;
             if (! m_lean_angle_seeded) {
-                m_lean_angle_deg    = float(std::min(45., max_lean_angle_deg()));
+                m_lean_angle_deg    = float(SupportZones::SUPPORT_ZONE_DEFAULT_LEAN_DEG);
                 m_lean_angle_seeded = true;
             }
+            // NEOTKO_SUPPORTZONES_TAG s300g — y el pie a plomo desde la primera pincelada, para que
+            // haya pilar que mirar mientras se pinta. Se refina al soltar, cuando la huella ya es la
+            // definitiva (ver el `LeftUp` del pincel).
+            Vec3d plumb_pos;
+            bool  plumb_on_bed = true;
+            if (! m_landing_locked && resolve_landing_plumb(plumb_pos, plumb_on_bed)) {
+                m_landing_world_pos = plumb_pos;
+                m_landing_on_bed    = plumb_on_bed;
+                m_has_landing       = true;
+            }
         }
-        m_stamps.push_back({ p, r, m_stroke_id });
+        if (paint_facets(live->facet_idx, live->world_pos, r, false) == 0 && ! m_stamps.empty())
+            return false;               // ni un triángulo nuevo: no hay nada que redibujar
+        m_stamps.push_back({ live->world_pos, r });
     }
 
     invalidate_patch();
@@ -1641,34 +2233,44 @@ bool GLGizmoSupportZones::paint_at(const Vec2d &mouse_pos, bool erase)
     return true;
 }
 
-bool GLGizmoSupportZones::build_pillar_mesh(TriangleMesh &out_world) const
+// NEOTKO_SUPPORTZONES_TAG s299 — EL SÓLIDO, DESDE LA MÁSCARA
+//
+// 🔑 Sigue siendo un EXTRUDE DE SUPERFICIE, que es como el dueño lo pensó en s286b: el techo es la
+// superficie de verdad, con su curva, y las paredes bajan de su contorno. Lo que cambia es de
+// dónde sale cada anillo.
+//
+// Antes: un parche de triángulos de la malla, y cada anillo se obtenía moviendo CADA VÉRTICE por su
+// bisectriz. Eso no es un offset — no sabe que el borde se cruce consigo mismo, ni fundir dos
+// brazos que se tocan — y por eso expandir dos veces daba polígonos imposibles.
+//
+// Ahora: cada anillo es `offset_ex()` sobre la máscara. Clipper no puede devolver un contorno
+// cruzado. A cambio, dos anillos ya no comparten vértices, así que se cosen remuestreándolos a un
+// número fijo de puntos por longitud de arco (`resample_ring`).
+//
+// Los cuatro anillos siguen queriendo decir lo mismo que en s286b:
+//   T  el techo, con la z de la superficie por punto, subido medio milímetro para que la superficie
+//      quede DENTRO del bloque y nunca justo en una frontera de capa (con ALH esa frontera se
+//      mueve, §4-bis.1);
+//   M  la cota más baja del techo, en vertical bajo T: aquí acaba lo que ENVUELVE la superficie.
+//      Inclinar ahí dentro dejaría la parte media de una banda fuera del bloque — el donut;
+//   K  LA RODILLA: aquí se ha consumido TODO el desplazamiento, a ángulo constante desde M;
+//   B  el pie, tras el tramo de bajada, que es vertical y por tanto no gasta corredor.
+// NEOTKO_SUPPORTZONES_TAG s300h — el eje del pilar, calculado una vez para todo el que pregunte.
+// El porqué vive en la declaración (GLGizmoSupportZones.hpp). En corto: el pilar tiene RODILLA, y
+// quien lo sondee por la recta de extremo a extremo está mirando donde el pilar no está.
+bool GLGizmoSupportZones::pillar_axis(PillarAxis &out) const
 {
     if (! m_has_target || ! m_has_landing)
         return false;
     const Vec2d centre  = Vec2d(m_target_world_pos.x(), m_target_world_pos.y());
     const Vec3d landing = m_landing_world_pos;
 
-    // 🔑 s286b, dicho por él y es la forma correcta de pensarlo: esto es un EXTRUDE DE SUPERFICIE,
-    // no una silueta extruida. Antes se aplastaba el parche a XY, se unían los triángulos, y se
-    // levantaba ese contorno plano. Eso convierte una banda curva en un prisma gordo con techo
-    // plano que se traga media pieza. Lo que se quiere es lo de Rhino: coger los polígonos DE LA
-    // SUPERFICIE y barrerlos. El techo del sólido es entonces el parche de verdad, con su curva,
-    // y las paredes salen de su borde.
-    //
-    // ✅ s289 — el parche, su borde y su "hacia dentro" ya no se calculan aquí: vienen de
-    // `PatchGeom`, que es también de donde sale el contorno que dibuja el panel. Una sola verdad.
-    const PatchGeom *pg = patch(m_target_facet_idx, centre);
-    if (pg == nullptr)
-        return false;
-    const std::vector<Vec3d>              &top    = pg->V;
-    const std::vector<Vec3i32>            &tris   = pg->F;
-    const std::vector<std::pair<int,int>> &border = pg->border;
-    const int nv = int(top.size());
-    if (nv < 3 || tris.empty() || border.empty())
+    const ZoneMask *mk = mask(m_target_facet_idx, centre);
+    if (mk == nullptr || mk->area.empty())
         return false;
 
-    const double z_low  = pg->z_low;
-    const double z_high = pg->z_high;
+    out.z_low  = mk->z_low;
+    out.z_high = mk->z_high;
 
     // El desplazamiento se mide contra el MISMO centroide que usa el alcance y el aviso de fuera de
     // alcance (target_footprint_world). Calcularlo aquí a mano sería tener dos centros que se
@@ -1680,76 +2282,381 @@ bool GLGizmoSupportZones::build_pillar_mesh(TriangleMesh &out_world) const
     for (const Vec2d &p : foot)
         c_top += p;
     c_top /= double(foot.size());
+    out.c_top = c_top;
 
     const double z_bottom  = landing.z();
-    const double z_bot_ext = m_landing_on_bed ? -0.5 : z_bottom;
-    if (z_high - z_bot_ext < 0.2)
+    out.z_bot_ext = m_landing_on_bed ? -0.5 : z_bottom;
+    if (out.z_high - out.z_bot_ext < 0.2)
         return false;   // nothing worth building
-    const Vec2d shift = Vec2d(landing.x(), landing.y()) - c_top;
+    out.shift = Vec2d(landing.x(), landing.y()) - c_top;
 
-    // 🔑 s286b — EL PILAR CON RODILLA, y es un cambio de qué manda. Antes la inclinación se repartía
-    // entre todas las capas que hubiera, así que el `v` por capa salía de dividir el desplazamiento
-    // total entre ellas y sólo se sabía si cabía DESPUÉS. Ahora el ángulo es el dato de entrada:
-    // cada capa del tramo inclinado pide exactamente `dz · tan(ángulo)`, constante, comparable con
-    // el tope del §3 de un vistazo, y el caso imposible deja de poder dibujarse en vez de avisarse.
-    //
-    // Cuatro anillos, y cada uno responde a algo distinto:
-    //   T  el parche mismo, subido medio milímetro para que la superficie quede DENTRO del bloque
-    //      y nunca justo en una frontera de capa (con ALH esa frontera se mueve, §4-bis.1);
-    //   M  la cota más baja del parche, en vertical bajo T: aquí acaba lo que ENVUELVE el parche.
-    //      Inclinar ahí dentro dejaría la parte media de una banda fuera del bloque — el donut;
-    //   K  LA RODILLA: aquí se ha consumido TODO el desplazamiento, a `v` constante desde M;
-    //   B  el pie, tras el tramo de bajada, que es vertical y por tanto no gasta corredor.
     constexpr double ROOF_LIFT_MM = 0.5;
-    const bool   wraps    = (z_low > z_bot_ext + 0.2);
-    const double offset   = shift.norm();
+    out.wraps             = (out.z_low > out.z_bot_ext + 0.2);
+    const double offset_d = out.shift.norm();
     constexpr double deg2rad = 0.01745329251994329576923690768489;
     const double tan_a    = std::tan(std::max(0.05, double(m_lean_angle_deg)) * deg2rad);
-    const double lean_top = wraps ? z_low : (z_high + ROOF_LIFT_MM);
+    const double lean_top = out.wraps ? out.z_low : (out.z_high + ROOF_LIFT_MM);
     // Lo que le cuesta al ángulo recorrer esa distancia. A plomo no cuesta nada y no hay rodilla.
-    const double z_knee   = (offset < 1e-6) ? z_bot_ext : (lean_top - offset / tan_a);
-    // 🚨 La rodilla por debajo del pie es el nuevo "fuera de alcance": ese ángulo no cubre esa
-    // distancia en la altura que hay. Se rechaza aquí y no se dibuja nada, que es la promesa del §1.
-    if (z_knee < z_bot_ext - 1e-6)
+    out.z_knee = (offset_d < 1e-6) ? out.z_bot_ext : (lean_top - offset_d / tan_a);
+    // 🚨 La rodilla por debajo del pie es "fuera de alcance": ese ángulo no cubre esa distancia en
+    // la altura que hay. Se rechaza aquí y no se dibuja nada, que es la promesa del §1.
+    if (out.z_knee < out.z_bot_ext - 1e-6)
         return false;
-    // Una rodilla pegada al pie no es una rodilla: sería una banda de altura cero.
-    const bool has_knee = (offset > 1e-6) && (z_knee > z_bot_ext + 0.2);
+    out.has_knee = (offset_d > 1e-6) && (out.z_knee > out.z_bot_ext + 0.2);
+
+    out.rings.clear();
+    out.rings.emplace_back(out.z_high + ROOF_LIFT_MM, Vec2d(0., 0.));    // T  (z real por punto)
+    if (out.wraps)
+        out.rings.emplace_back(out.z_low, Vec2d(0., 0.));                // M
+    if (out.has_knee)
+        out.rings.emplace_back(out.z_knee, out.shift);                   // K
+    out.rings.emplace_back(out.z_bot_ext, out.shift);                    // B
+    return true;
+}
+
+// NEOTKO_SUPPORTZONES_TAG s301 — EXTRUIR UN `ExPolygons` EN UN PRISMA, EXACTO Y SIN REMUESTREAR.
+//
+// 🔑 Ésta es la pieza que mata el problema medido en el §1 del estudio. El pilar lofteado tiene que
+// remuestrear sus anillos (`resample_ring`) porque cose dos contornos que Clipper calculó por
+// separado y que no comparten ni número de puntos ni orden. Un prisma no cose nada: arriba y abajo
+// son EL MISMO contorno a dos alturas. Así que aquí no hay remuestreo, y con él se van las tres
+// cosas que dolían — el contorno que pasaba de 94 a 292 puntos al expandir, los puntos repetidos que
+// salían degenerados, y quedarse con «la isla más grande» perdiendo el resto de lo pintado.
+//
+// 🔑 El truco que lo hace corto: `Triangulation::triangulate(const ExPolygons&)` devuelve índices
+// EN EL ESPACIO DE `to_points(area)` —contorno y luego agujeros, expolígono a expolígono
+// (ExPolygon.hpp:196)—, así que una sola triangulación sirve para las dos tapas y los agujeros
+// entran solos. Nada de un caso especial para las islas ni para los huecos.
+static void zone_extrude_prism(const ExPolygons &area, double z_bot, double z_top,
+                               indexed_triangle_set &its)
+{
+    if (area.empty() || z_top <= z_bot)
+        return;
+    const Points pts = to_points(area);
+    if (pts.size() < 3)
+        return;
+    const std::vector<Vec3i32> cap = Triangulation::triangulate(area);
+    if (cap.empty())
+        return;
+
+    const int n    = int(pts.size());
+    const int up   = int(its.vertices.size());   // el anillo de ARRIBA
+    const int dn   = up + n;                     // el de ABAJO, mismos XY
+    its.vertices.reserve(its.vertices.size() + size_t(2 * n));
+    for (const Point &p : pts)
+        its.vertices.emplace_back(float(unscaled<double>(p.x())), float(unscaled<double>(p.y())), float(z_top));
+    for (const Point &p : pts)
+        its.vertices.emplace_back(float(unscaled<double>(p.x())), float(unscaled<double>(p.y())), float(z_bot));
+
+    for (const Vec3i32 &t : cap) {
+        if (t[0] < 0 || t[1] < 0 || t[2] < 0 || t[0] >= n || t[1] >= n || t[2] >= n)
+            continue;
+        // `Triangulation` devuelve el sentido de la ExPolygon (CCW en XY, normal +Z), que como techo
+        // es lo correcto; el suelo va del revés.
+        its.indices.emplace_back(up + t[0], up + t[1], up + t[2]);
+        its.indices.emplace_back(dn + t[0], dn + t[2], dn + t[1]);
+    }
+
+    // 🚨 EL WINDING DE LAS PAREDES ES EL DE s299f, y ahí está escrito por qué: para un contorno
+    // antihorario visto desde arriba, esta pareja da la normal EXTERIOR y recorre la arista común
+    // con el techo en sentido opuesto, que es lo que hace que emparejen. La versión intuitiva deja
+    // 960 aristas abiertas y una malla que parece cerrada.
+    //
+    // 🔑 Y vale igual para los agujeros sin un solo `if`: un agujero viene en horario, así que la
+    // misma fórmula le da también su normal exterior, que mirando desde dentro del hueco es la
+    // contraria. Escribir el caso del agujero a mano es escribir la ocasión de equivocarse.
+    int off = 0;
+    auto wall = [&](const Polygon &ring) {
+        const int m = int(ring.points.size());
+        for (int i = 0; i < m; ++ i) {
+            const int a = off + i, b = off + (i + 1) % m;
+            its.indices.emplace_back(up + a, dn + b, up + b);
+            its.indices.emplace_back(up + a, dn + a, dn + b);
+        }
+        off += m;
+    };
+    for (const ExPolygon &ep : area) {
+        wall(ep.contour);
+        for (const Polygon &h : ep.holes)
+            wall(h);
+    }
+}
+
+// Todos los tocones en MUNDO, el primario incluido. El primario NO se guarda aparte: es el
+// aterrizaje de siempre, sembrado a plomo por `resolve_landing_plumb()` (s300g) y movible con «Move
+// it again». Tener una copia suya en `m_extra_stumps` sería exactamente la trampa de los dos
+// centroides que este fichero ya documenta.
+std::vector<GLGizmoSupportZones::StumpSpot> GLGizmoSupportZones::all_stumps() const
+{
+    std::vector<StumpSpot> out;
+    if (m_has_landing)
+        out.push_back(StumpSpot{ m_landing_world_pos, m_landing_on_bed });
+    for (const StumpSpot &s : m_extra_stumps)
+        out.push_back(s);
+    return out;
+}
+
+// De dónde a dónde va el prisma de la cabeza. En una función porque lo piden dos sitios —el
+// constructor y el aviso del hueco— y porque el `0.4` de abajo es una regla, no un detalle.
+bool GLGizmoSupportZones::block_tree_head_z(double &z_bot, double &z_top) const
+{
+    if (! m_has_target)
+        return false;
+    const ZoneMask *mk = mask(m_target_facet_idx,
+                              Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
+    if (mk == nullptr || mk->area.empty())
+        return false;
+    // El mismo medio milímetro de siempre: el techo del bloque se levanta por encima de la frontera
+    // de capa para que la primera capa de contacto caiga dentro y no justo en el borde.
+    z_top = mk->z_high + 0.5;
+    z_bot = mk->z_low;
+    // Un área pintada sobre una cara plana da `z_low == z_high` y el prisma saldría sin altura. Se
+    // le da el mínimo para que exista y se pueda rebanar; el motor no necesita más de la cabeza que
+    // saber dónde agarra.
+    if (z_top - z_bot < 0.4)
+        z_bot = z_top - 0.4;
+    return true;
+}
+
+double GLGizmoSupportZones::block_tree_gap_mm() const
+{
+    double z_bot = 0., z_top = 0.;
+    if (! block_tree_head_z(z_bot, z_top))
+        return 0.;
+    const std::vector<StumpSpot> stumps = all_stumps();
+    if (stumps.empty())
+        return 0.;
+    double stump_top = - std::numeric_limits<double>::max();
+    for (const StumpSpot &st : stumps)
+        stump_top = std::max(stump_top, st.p.z() + STUMP_HEIGHT_MM);
+    return z_bot - stump_top;
+}
+
+// NEOTKO_SUPPORTZONES_TAG s301 — LA CABEZA Y LOS TOCONES, Y NADA EN MEDIO.
+//
+// 🔑 La cabeza es un PRISMA RECTO (decisión suya en s300: prisma ahora, curva después sólo si el
+// preview resulta demasiado tosco). Con eso desaparecen `z_at()`, `n_at()` y el mapa de alturas del
+// constructor, y con ellos la proyección ambigua que producía los 42 picos: el techo pasa a ser
+// plano, así que su desnivel es CERO por construcción y no «pequeño».
+//
+// 🔑 Y las dos partes salen SEPARADAS a propósito. Ese hueco no es un descuido de la malla: es el
+// dato de entrada del motor. Al rebanar deja capas vacías entre la cabeza y el tocón, y eso es lo
+// que `SupportMaterial.cpp` reconoce como árbol de bloques para bajar la columna hacia el tocón.
+bool GLGizmoSupportZones::build_block_tree_mesh(TriangleMesh &out_world) const
+{
+    if (! m_has_target)
+        return false;
+    const ZoneMask *mk = mask(m_target_facet_idx,
+                              Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
+    if (mk == nullptr || mk->area.empty())
+        return false;
+    const std::vector<StumpSpot> stumps = all_stumps();
+    if (stumps.empty())
+        return false;
+
+    double head_bot = 0., head_top = 0.;
+    if (! block_tree_head_z(head_bot, head_top))
+        return false;
+
+    // --- la cabeza ------------------------------------------------------------------------------
+    // El mando `head` se conserva y sigue significando lo mismo: meter o sacar el borde de lo
+    // pintado. Es un `offset_ex`, así que no puede devolver un contorno cruzado — y si te pasas
+    // metiendo devuelve VACÍO, que es una respuesta y no un sólido imposible (s299).
+    const double     e   = double(m_footprint_shrink_mm);
+    const ExPolygons raw = (std::abs(e) < 1e-6)
+        ? mk->area
+        : offset_ex(mk->area, scaled<float>(- e), ClipperLib::jtRound);
+    if (raw.empty())
+        return false;
+
+    // 🚨 s301b — Y SE SIMPLIFICA, QUE NO ES COSMÉTICA. Medido en el primer build: la cabeza salía
+    // con 28.976 vértices y 57.944 triángulos, porque el contorno de lo pintado lleva una arista por
+    // cada triángulo del borde de la malla. El pilar lofteado no lo notaba porque `resample_ring()`
+    // le ponía un techo de 512 puntos; el prisma no remuestrea, que es justo su virtud, así que el
+    // recuento entra crudo — y esa malla se rebana en cada slice.
+    //
+    // 🔑 `ExPolygon::simplify()` va por Clipper, así que no puede devolver un contorno cruzado (a
+    // diferencia de un Douglas-Peucker a pelo, que sí). 0.05 mm es la misma tolerancia con la que
+    // `ring_outline_world()` dibuja el contorno del panel: por debajo de la extrusión, o sea
+    // invisible en la pieza y en el preview.
+    const ExPolygons head = expolygons_simplify(raw, scaled<double>(0.05));
+    if (head.empty())
+        return false;
+
+    indexed_triangle_set its;
+    zone_extrude_prism(head, head_bot, head_top, its);
+    if (its.indices.empty())
+        return false;
+    const size_t head_tris = its.indices.size();
+    // 🔎 El desnivel del techo, MEDIDO y no afirmado. Es el número con el que se juzga si el
+    // problema de raíz se fue: hoy, con el techo remuestreado contra el mapa de alturas, son 42 de
+    // 512 puntos por encima de 1 mm y el peor salta 7.56 mm. Con el prisma tiene que salir 0.00
+    // exacto, y sale de recorrer los vértices de verdad — escribir un cero a mano aquí no probaría
+    // nada. Se mide ANTES de soldar, que es cuando el anillo del techo son los primeros n vértices.
+    double roof_lo = 1e9, roof_hi = -1e9;
+    for (size_t i = 0; i < its.vertices.size() / 2; ++ i) {
+        roof_lo = std::min(roof_lo, double(its.vertices[i].z()));
+        roof_hi = std::max(roof_hi, double(its.vertices[i].z()));
+    }
+
+    // --- los tocones ----------------------------------------------------------------------------
+    // Redondos y todos del mismo tamaño: un tocón no es una forma que se dibuje, es un sitio donde
+    // se planta el pie. El −0.5 en la cama es el mismo que usa el pilar lofteado, para que la
+    // primera capa entre entera.
+    size_t n_stumps = 0;
+    for (const StumpSpot &st : stumps) {
+        const double zb = st.on_bed ? -0.5 : st.p.z();
+        const double zt = st.p.z() + STUMP_HEIGHT_MM;
+        if (zt - zb < 0.2)
+            continue;
+        const ExPolygons one { ExPolygon(zone_disc(Vec2d(st.p.x(), st.p.y()),
+                                                   0.5 * double(m_stump_size_mm))) };
+        zone_extrude_prism(one, zb, zt, its);
+        ++ n_stumps;
+    }
+    if (n_stumps == 0)
+        return false;
+
+    // Mismo remate que el pilar lofteado, y por el mismo motivo (s299e): los degenerados no se
+    // borran —borrarlos deja aristas huérfanas— se sueldan.
+    its_merge_vertices(its, true);
+    its_remove_degenerate_faces(its, true);
+    its_compactify_vertices(its, true);
+    if (its.indices.empty())
+        return false;
+    const bool flipped = its_volume(its) < 0.f;
+    if (flipped)
+        its_flip_triangles(its);
+
+    // 🔑 El hueco se lo pregunta al MISMO dueño al que se lo pregunta el panel. Restar aquí
+    // `head_bot - stump_top_max` daría el mismo número hoy y dejaría abierta la puerta a que
+    // mañana no lo diera: es la trampa de los dos centroides otra vez.
+    const double gap = block_tree_gap_mm();
+
+    if (NeoDebug::enabled(NeoDebug::SUPPORTZONES)) {
+        const size_t open_edges = its_num_open_edges(its);
+        double bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+        for (const Vec3f &v : its.vertices) {
+            bx0 = std::min(bx0, double(v.x())); bx1 = std::max(bx1, double(v.x()));
+            by0 = std::min(by0, double(v.y())); by1 = std::max(by1, double(v.y()));
+        }
+        // 🔎 El `hueco=` es EL número de esta feature: es lo que separa la cabeza del tocón, y por
+        // tanto lo que decide si el motor ve un tramo que guiar o un pilar corriente. Si sale
+        // negativo, la cabeza y el tocón se tocan y no hay árbol — se dice aquí y en el panel.
+        //
+        // Y el `desnivel` tiene que ser 0.00 EXACTO. Con el techo plano ya no es «por debajo de
+        // 1 mm»: cualquier otra cosa significa que alguien le devolvió el mapa de alturas.
+        char b[320];
+        std::snprintf(b, sizeof(b),
+                      "cabeza    %s  verts=%d tris=%d (cabeza %d)  aristas_abiertas=%d"
+                      "  huella=%.1fx%.1f mm  techo=%.2f..%.2f (desnivel %.2f)"
+                      "  tocones=%d ø%.1f  hueco=%.2f mm%s",
+                      open_edges == 0 ? "cerrada" : "🚨 MALLA ABIERTA",
+                      int(its.vertices.size()), int(its.indices.size()), int(head_tris), int(open_edges),
+                      bx1 - bx0, by1 - by0, roof_lo, roof_hi, roof_hi - roof_lo,
+                      int(n_stumps), double(m_stump_size_mm), gap,
+                      flipped ? "  🚨 el sólido salió del revés y se ha volteado" : "");
+        NeoDebug::write(NeoDebug::SUPPORTZONES, b);
+        if (gap <= 0.)
+            NeoDebug::write(NeoDebug::SUPPORTZONES,
+                            "cabeza    🚨 sin hueco entre la cabeza y el tocón: el motor no verá un árbol de "
+                            "bloques, bajará como un pilar corriente");
+    }
+
+    out_world = TriangleMesh(std::move(its));
+    return ! out_world.empty();
+}
+
+bool GLGizmoSupportZones::build_pillar_mesh(TriangleMesh &out_world) const
+{
+    // 🔑 s301 — el despacho, en la primera línea y en un solo sitio. Ver la nota de la cabecera.
+    if (block_tree_mode())
+        return build_block_tree_mesh(out_world);
+    // NEOTKO_SUPPORTZONES_TAG s300h — la forma del eje sale del helper, no de aquí.
+    PillarAxis ax;
+    if (! pillar_axis(ax))
+        return false;
+    // El helper ya ha validado la máscara y la huella; aquí se recupera la máscara porque el techo
+    // se remuestrea contra ella más abajo.
+    const ZoneMask *mk = mask(m_target_facet_idx,
+                              Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
+    if (mk == nullptr || mk->area.empty())
+        return false;
+
+    const double z_low     = ax.z_low;
+    const double z_high    = ax.z_high;
+    const Vec2d  c_top     = ax.c_top;
+    const double z_bot_ext = ax.z_bot_ext;
+    // El mismo medio milímetro que usa el helper para levantar el techo del bloque por encima de la
+    // frontera de capa. Aquí lo necesitan el `edge_at()` y el remuestreo del techo, más abajo.
+    constexpr double ROOF_LIFT_MM = 0.5;
 
     struct Ring { double z; Vec2d off; };
     std::vector<Ring> rings;
-    rings.push_back({ z_high + ROOF_LIFT_MM, Vec2d(0., 0.) });           // T  (z real por vértice)
-    if (wraps)
-        rings.push_back({ z_low, Vec2d(0., 0.) });                       // M
-    if (has_knee)
-        rings.push_back({ z_knee, shift });                              // K
-    rings.push_back({ z_bot_ext, shift });                               // B
+    rings.reserve(ax.rings.size());
+    for (const auto &r : ax.rings)
+        rings.push_back({ r.first, r.second });
 
     // 🔑 s286b, idea suya: el borde no tiene por qué valer lo mismo arriba que abajo. Al engordar
     // para agarrar un alero, engordaba también el pie, y ahí no hace ninguna falta — sólo material.
-    // Con un valor en el parche y otro en el pie, interpolados POR ALTURA, el pilar sale cónico: la
-    // rama gorda donde sujeta y fina donde apoya. Es el mando de "cuánto material y cuánta
-    // resistencia" que él pedía, y de paso el codo crece solo, porque la rodilla es un anillo más y
-    // le toca su fracción.
+    // Con un valor arriba y otro en el pie, interpolados POR ALTURA, el pilar sale cónico: la rama
+    // gorda donde sujeta y fina donde apoya.
     //
     // 🚨 ¿No rompe esto la sección constante del §4-bis.1? No, y el motivo importa: el corredor no
     // mide ÁREA, mide desplazamiento del CENTROIDE. Un crecimiento simétrico deja el centroide
-    // donde estaba, así que `v` sigue constante. Lo que sí movería el centroide es un crecimiento
-    // desigual — y por eso esto se aplica por la normal del borde y no por un lado.
+    // donde estaba. Y un `offset_ex` es simétrico por definición, que es una razón más para que sea
+    // él quien lo haga y no un desplazamiento por vértice.
     const double z_span = std::max(1e-6, (z_high + ROOF_LIFT_MM) - z_bot_ext);
-    // El tope del colapso, aplicado también aquí: el deslizador ya no deja pasarse, pero un valor
-    // guardado de antes o una huella que ha cambiado de forma sí pueden, y una malla del revés no
-    // se avisa sola.
-    // 🚨 s289 — y ahora también por abajo. El tope de antes era `std::min(v, cap)`, que sólo frena
-    // el METIDO; la EXPANSIÓN (valores negativos) no tenía freno ninguno, y es justo la dirección
-    // que cruza los lados de una muesca en un parche cóncavo. El inglete la empeora, además, porque
-    // multiplica por 1/cos(θ/2). Se acota igual de simétrica.
-    const double inset_cap  = pg->max_inset;
-    const double outset_cap = pg->max_outset;
+    const double inset_cap  = max_inset_mm();
+    const double outset_cap = max_outset_mm();
     auto edge_at = [&](double z) {
         const double t = std::clamp(((z - z_bot_ext) / z_span), 0., 1.);
         const double v = double(m_footprint_base_mm) + (double(m_footprint_shrink_mm) - double(m_footprint_base_mm)) * t;
         return std::clamp(v, - outset_cap, inset_cap);
     };
+
+    // Cuántos puntos tiene cada anillo. El MISMO para todos, que es lo que permite coser dos
+    // contornos que Clipper ha calculado por separado.
+    //
+    // 🚨 s299e — y adaptado al perímetro, no fijo en 128. Un número fijo es una cuerda de longitud
+    // arbitraria: en una huella de 200 mm se salta el detalle, y en una de 3 mm pone puntos más
+    // juntos que la precisión del entero y salen repetidos, que es de donde venían los degenerados.
+    // Una cuerda de ~0.3 mm es más fina que la extrusión y sigue siendo barata.
+    int N_RING = 128;
+    {
+        double perim = 0.;
+        for (const ExPolygon &ep : mk->area) {
+            const Points &p = ep.contour.points;
+            for (size_t i = 0; i < p.size(); ++ i) {
+                const Point &a = p[i], &b = p[(i + 1) % p.size()];
+                perim += (Vec2d(unscaled<double>(b.x()), unscaled<double>(b.y())) -
+                          Vec2d(unscaled<double>(a.x()), unscaled<double>(a.y()))).norm();
+            }
+        }
+        N_RING = std::clamp(int(std::lround(perim / 0.3)), 24, 512);
+    }
+
+    std::vector<std::vector<Vec2d>> ring_pts;
+    ring_pts.reserve(rings.size());
+    for (size_t ri = 0; ri < rings.size(); ++ ri) {
+        const Ring  &r = rings[ri];
+        // El anillo del techo se mide a la altura del punto MÁS ALTO de la huella, no a la z que
+        // lleva escrita: su z de verdad es una por punto y sale del mapa de alturas más abajo.
+        const double e = edge_at((ri == 0) ? (z_high + ROOF_LIFT_MM) : r.z);
+        const ExPolygons ring_area = (std::abs(e) < 1e-6)
+            ? mk->area
+            : offset_ex(mk->area, scaled<float>(- e), ClipperLib::jtRound);
+        // 🚨 s299 — AQUÍ ES DONDE SE NOTA EL COLAPSO, y por eso ya no hay que predecirlo. Si te has
+        // pasado metiendo, Clipper devuelve vacío y no se construye nada. La versión de antes
+        // intentaba adivinar ese punto con una condición local que no veía chocar dos aristas
+        // lejanas, y cuando se equivocaba dibujaba un sólido imposible en vez de no dibujar nada.
+        std::vector<Vec2d> pts = resample_ring(ring_area, N_RING);
+        if (pts.size() != size_t(N_RING))
+            return false;
+        for (Vec2d &p : pts)
+            p += r.off;
+        ring_pts.push_back(std::move(pts));
+    }
 
     // La cota del anillo que va justo debajo del techo. El techo sigue la superficie y encima se
     // corrige en Z por el plano tangente, así que puede bajar; si baja por debajo del anillo de
@@ -1758,75 +2665,170 @@ bool GLGizmoSupportZones::build_pillar_mesh(TriangleMesh &out_world) const
 
     indexed_triangle_set its;
     const int nblocks = int(rings.size());
-    its.vertices.reserve(size_t(nblocks) * size_t(nv));
+    its.vertices.reserve(size_t(nblocks) * size_t(N_RING) + size_t(N_RING));
+
+    // --- los vértices de cada anillo ------------------------------------------------------------
     for (int r = 0; r < nblocks; ++ r) {
-        const Ring &ring = rings[r];
-        for (int i = 0; i < nv; ++ i) {
-            const Vec3d &w = top[i];
-            // Sólo el anillo de arriba lleva la z de cada vértice: es la superficie de verdad, con
-            // su curva. Los demás son planos.
-            double      z = (r == 0) ? w.z() + ROOF_LIFT_MM : ring.z;
-            const Vec2d e = pg->inward[i] * edge_at(z);
-            // Sólo el techo sigue la superficie, así que sólo él se corrige en Z. Los demás anillos
-            // son planos por construcción y ahí la corrección no significaría nada.
-            //
-            // 🔑 s286b, visto por él: "expande de manera muy lineal x/y y falla en las curvas a
-            // tocarlos; tendría que crecer en Z en menor medida, pero sí, para compensar". Exacto,
-            // y hay respuesta cerrada: el techo del sólido ES la superficie, así que al mover un
-            // vértice del borde en XY hay que mantenerlo en el PLANO TANGENTE de ese vértice:
-            //     dz = -(n.x·Δx + n.y·Δy) / n.z
-            // que en una cara horizontal (n = (0,0,-1)) da cero y crece con la pendiente. "En menor
-            // medida" es literalmente el cociente por n.z.
-            if (r == 0 && e.squaredNorm() > 0.) {
-                const Vec3d &n = pg->vnormal[i];
-                if (std::abs(n.z()) > 1e-3)
-                    z += - (n.x() * e.x() + n.y() * e.y()) / n.z();
+        for (int i = 0; i < N_RING; ++ i) {
+            const Vec2d &p = ring_pts[r][i];
+            double z = rings[r].z;
+            if (r == 0) {
+                // 🔑 Sólo el techo sigue la superficie. Su z sale del mapa de alturas, y la
+                // corrección por plano tangente es la respuesta a lo que él vio en s286b:
+                // "expande de manera muy lineal x/y y falla en las curvas a tocarlos; tendría que
+                // crecer en Z en menor medida, pero sí, para compensar".
+                //     dz = -(n.x·Δx + n.y·Δy) / n.z
+                // que en una cara horizontal da cero y crece con la pendiente.
+                //
+                // ⚠️ El mapa se lee en el punto SIN desplazar: el desplazamiento del borde es
+                // justamente lo que se está compensando, así que preguntar por la z en el sitio
+                // nuevo sería contar el efecto dos veces.
+                const Vec2d p_src = p - rings[r].off;
+                z = z_at(*mk, p_src) + ROOF_LIFT_MM;
+                const double e = edge_at(z_high + ROOF_LIFT_MM);
+                if (std::abs(e) > 1e-9) {
+                    const Vec3d n = n_at(*mk, p_src);
+                    if (std::abs(n.z()) > 1e-3) {
+                        // La dirección en la que se movió este punto, que es hacia dónde apunta el
+                        // offset: del contorno sin offset al de con offset. Basta su componente
+                        // radial respecto al centro, que es lo que el plano tangente necesita.
+                        const Vec2d d = p_src - c_top;
+                        const double dl = d.norm();
+                        if (dl > 1e-9) {
+                            const Vec2d u = (d / dl) * (- e);   // e>0 = meter ⇒ hacia dentro
+                            z += - (n.x() * u.x() + n.y() * u.y()) / n.z();
+                        }
+                    }
+                }
                 z = std::max(z, z_under_roof + 0.05);
             }
-            its.vertices.emplace_back(float(w.x() + ring.off.x() + e.x()),
-                                      float(w.y() + ring.off.y() + e.y()), float(z));
+            its.vertices.emplace_back(float(p.x()), float(p.y()), float(z));
         }
     }
-    const int bot_base = (nblocks - 1) * nv;
+    const int bot_base = (nblocks - 1) * N_RING;
 
-    // Tapas. Los triángulos del parche miran hacia ABAJO (para eso se eligen), así que como techo
-    // del sólido van invertidos, y aplastados en el plano del aterrizaje sirven de suelo tal cual.
-    for (const Vec3i32 &t : tris) {
-        its.indices.emplace_back(t[0], t[2], t[1]);                                     // techo
-        its.indices.emplace_back(bot_base + t[0], bot_base + t[1], bot_base + t[2]);     // suelo
-    }
-    // Paredes, una banda por cada par de bloques consecutivos.
-    for (int blk = 0; blk + 1 < nblocks; ++ blk) {
-        const int lo = blk * nv, hi = (blk + 1) * nv;
-        for (const auto &e : border) {
-            const int a = e.first, b = e.second;
-            // Recorrido horario visto desde arriba ⇒ el exterior queda a la izquierda de la
-            // arista, que es justo lo que da esta pareja de triángulos.
-            its.indices.emplace_back(lo + a, lo + b, hi + b);
-            its.indices.emplace_back(lo + a, hi + b, hi + a);
-        }
-    }
-
-    // s289 — fuera los triángulos de área cero antes de entregar nada. Una arista de borde que en
-    // XY es un punto (una pared vertical del parche) genera un par degenerado por cada banda, y a
-    // un visor le da igual pero a un booleano o a un `its_volume` no.
+    // --- las tapas ------------------------------------------------------------------------------
+    // 🔑 Una sola triangulación, la del contorno del techo ya remuestreado, y sirve para las dos
+    // tapas. Al usar los MISMOS puntos que lleva la pared, la tapa cierra sin costuras y sin tener
+    // que soldar nada por posición, que era otro `std::map` por reconstrucción.
     {
-        std::vector<Vec3i32> keep;
-        keep.reserve(its.indices.size());
-        for (const Vec3i32 &t : its.indices) {
-            const Vec3f &A = its.vertices[t[0]], &B = its.vertices[t[1]], &C = its.vertices[t[2]];
-            if ((B - A).cross(C - A).norm() > 1e-10f)
-                keep.push_back(t);
+        Points cap;
+        cap.reserve(N_RING);
+        for (int i = 0; i < N_RING; ++ i)
+            cap.emplace_back(scaled<coord_t>(ring_pts[0][i].x()), scaled<coord_t>(ring_pts[0][i].y()));
+        Polygon cap_poly(std::move(cap));
+        // 🚨 s299e — SE EXIGE CCW, no se reordena. La versión de antes invertía el contorno para
+        // triangular y luego recuperaba los índices leyéndolos al revés (`N_RING-1-t[k]`). Funciona
+        // sólo mientras `reverse()` sea exactamente eso, y una tapa mal indexada no se ve: sale una
+        // malla que se cruza por dentro y nadie sabe de dónde viene.
+        //
+        // `resample_ring()` ya devuelve el anillo en sentido antihorario, así que aquí no puede
+        // llegar del revés. Si llegara, es un fallo de invariante y se dice, en vez de apañarlo.
+        if (! cap_poly.is_counter_clockwise()) {
+            NeoDebug::write(NeoDebug::SUPPORTZONES,
+                            "pillar    🚨 el anillo del techo llego en sentido horario: resample_ring deberia darlo CCW");
+            return false;
         }
-        its.indices = std::move(keep);
+        const std::vector<Vec3i32> idx = Triangulation::triangulate(ExPolygon(cap_poly));
+        if (idx.empty())
+            return false;
+        for (const Vec3i32 &t : idx) {
+            if (t[0] < 0 || t[1] < 0 || t[2] < 0 ||
+                t[0] >= N_RING || t[1] >= N_RING || t[2] >= N_RING)
+                continue;
+            // `Triangulation` devuelve el sentido de la ExPolygon (CCW en XY, normal +Z), que como
+            // techo del sólido es lo correcto; el suelo va del revés.
+            its.indices.emplace_back(t[0], t[1], t[2]);                                       // techo
+            its.indices.emplace_back(bot_base + t[0], bot_base + t[2], bot_base + t[1]);       // suelo
+        }
     }
+
+    // --- las paredes ----------------------------------------------------------------------------
+    // 🚨 s299e — sin banda entre dos anillos que están en el mismo sitio. Una banda de altura y
+    // desplazamiento cero son N pares de triángulos degenerados, que es justo lo que ya no queremos
+    // ni crear ni borrar. Puede pasar de verdad: el anillo M está en `z_low` y el techo puede
+    // acabar ahí mismo en una superficie plana.
+    for (int blk = 0; blk + 1 < nblocks; ++ blk) {
+        if (blk > 0
+            && std::abs(rings[blk + 1].z - rings[blk].z) < 1e-6
+            && (rings[blk + 1].off - rings[blk].off).squaredNorm() < 1e-12)
+            continue;
+        const int lo = blk * N_RING, hi = (blk + 1) * N_RING;
+        for (int i = 0; i < N_RING; ++ i) {
+            const int a = i, b = (i + 1) % N_RING;
+            // 🚨 s299f — ESTE WINDING ESTABA DEL REVÉS, Y ERA LA CAUSA DE LAS 960 ARISTAS ABIERTAS.
+            //
+            // La cuenta lo señala sin margen de duda: el log daba `aristas_abiertas` = `verts` =
+            // anillos × puntos, o sea TODAS las aristas de anillo. Eso no es un caso raro de una
+            // geometría concreta, es un fallo de orientación en todas.
+            //
+            // El porqué, con los vectores en la mano. Para un contorno antihorario visto desde
+            // arriba, la normal exterior de una arista `d` es `(d.y, -d.x)`. La pareja que había
+            // —(lo+a, lo+b, hi+b)— da como normal `d × (0,0,-h) ∝ (-d.y, d.x)`, que es la INTERIOR.
+            // Con las paredes mirando hacia dentro y las tapas hacia fuera, `its_volume()` salía
+            // negativo y el volteo global de más abajo le daba la vuelta a todo, dejando la malla
+            // consistente en apariencia y con las mismas aristas sin emparejar.
+            //
+            // 🔑 Y hay un segundo motivo, el que rompía el emparejamiento: dos caras vecinas con
+            // normal exterior tienen que recorrer su arista común en sentidos OPUESTOS. El techo,
+            // antihorario, recorre `a→b`; la pared de antes también `a→b`, así que no emparejaban
+            // ni siendo ambas correctas. Intercambiando los dos últimos índices sale `b→a`.
+            its.indices.emplace_back(lo + a, hi + b, lo + b);
+            its.indices.emplace_back(lo + a, hi + a, hi + b);
+        }
+    }
+
+    // 🚨 s299e — AQUÍ SE BORRABAN LOS TRIÁNGULOS DE ÁREA CERO, Y ERA LA CAUSA DE LAS MALLAS ROTAS.
+    //
+    // El razonamiento de entonces sonaba bien: "a un visor le dan igual, pero a un booleano no". El
+    // fallo es lo que pasa AL BORRARLOS. Un triángulo degenerado sigue teniendo tres aristas, y esas
+    // tres aristas emparejan con las de sus vecinos; quitarlo de la lista deja tres aristas
+    // huérfanas, o sea tres agujeros. Por eso el pilar "siempre salía non-manifold": no era la
+    // geometría, era la limpieza.
+    //
+    // 🔑 Ahora los degenerados no se borran: se EVITAN antes de existir (el remuestreo ya no
+    // devuelve puntos repetidos, y dos anillos con la misma altura y el mismo offset no generan
+    // banda), y lo que quede se resuelve soldando vértices, que es una operación que mantiene la
+    // malla cerrada porque une en vez de quitar.
+    its_merge_vertices(its, true);
+    its_remove_degenerate_faces(its, true);
+    its_compactify_vertices(its, true);
     if (its.indices.empty())
         return false;
 
-    // Red de seguridad barata: si el sólido sale del revés (una huella degenerada puede darle la
-    // vuelta a todo), se voltea entero en vez de entregar una malla con las normales hacia dentro.
+    // Red de seguridad barata: si el sólido sale del revés se voltea entero, en vez de entregar una
+    // malla con las normales hacia dentro.
     if (its_volume(its) < 0.f)
         its_flip_triangles(its);
+
+    // 🔎 s299e — y se DICE si ha salido abierta, en vez de dejarlo para que lo descubra un booleano
+    // tres sesiones después. Cero aristas abiertas es la definición de cerrada; cualquier otra cosa
+    // es un pilar que se va a comportar raro y aquí es donde se ve.
+    if (NeoDebug::enabled(NeoDebug::SUPPORTZONES)) {
+        const size_t open_edges = its_num_open_edges(its);
+        char b[256];
+        // 🔎 s299g — y la HUELLA, que es lo que de verdad se quiere mirar cuando algo sale raro.
+        //
+        // El .obj de su último informe lo demostró: la malla decía `cerrada` y aun así el resultado
+        // era una lámina absurda. Midiéndolo, la huella ocupaba 31 × 82 mm — una banda que cruzaba
+        // el agujero del toro de lado a lado. El problema nunca estuvo en la construcción del
+        // sólido, estuvo en lo que se le pidió construir, y ese número no estaba en ninguna parte.
+        //
+        // Con el ancho, el largo y el desnivel del techo aquí, "esto no es lo que pinté" se ve en
+        // una línea en vez de exportando un .obj y midiéndolo a mano.
+        double bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+        for (const Vec3f &v : its.vertices) {
+            bx0 = std::min(bx0, double(v.x())); bx1 = std::max(bx1, double(v.x()));
+            by0 = std::min(by0, double(v.y())); by1 = std::max(by1, double(v.y()));
+        }
+        std::snprintf(b, sizeof(b),
+                      "pillar    %s  verts=%d tris=%d anillos=%d pts/anillo=%d  aristas_abiertas=%d"
+                      "  huella=%.1fx%.1f mm  techo=%.2f..%.2f (desnivel %.2f)",
+                      open_edges == 0 ? "cerrada" : "🚨 MALLA ABIERTA",
+                      int(its.vertices.size()), int(its.indices.size()), nblocks, N_RING, int(open_edges),
+                      bx1 - bx0, by1 - by0, z_low, z_high, z_high - z_low);
+        NeoDebug::write(NeoDebug::SUPPORTZONES, b);
+    }
 
     out_world = TriangleMesh(std::move(its));
     return ! out_world.empty();
@@ -1845,6 +2847,15 @@ void GLGizmoSupportZones::update_preview()
 
 void GLGizmoSupportZones::render_preview()
 {
+    // 🔑 s299 — MIENTRAS SE PINTA NO SE CONSTRUYE EL SÓLIDO, y es la mitad de la sensación de
+    // fluidez que él pedía. Levantar el pilar es triangular, cuatro offsets y coser las paredes;
+    // hacerlo en cada marca del pincel es pagarlo cincuenta veces por un trazo del que sólo importa
+    // el final. Lo que sí se dibuja mientras tanto es la máscara sobre la superficie (el resaltado
+    // de `build_face_model`), que es lo que uno mira cuando está pintando.
+    //
+    // El sólido aparece al soltar el botón, que es exactamente cuando uno quiere verlo.
+    if (m_painting)
+        return;
     if (m_preview_dirty)
         update_preview();
     if (! m_preview_model.is_initialized())
@@ -1979,6 +2990,26 @@ bool GLGizmoSupportZones::landing_out_of_reach() const
 {
     if (! m_has_target || ! m_has_landing)
         return false;
+    // s301 — con varios tocones la pregunta es «¿alguno queda fuera de mi presupuesto?». Misma
+    // fórmula, un `for` por encima: el alcance de cada tocón se mide a SU altura, porque el techo
+    // de desplazamiento sale de la altura que queda por bajar y ésa cambia con cada tocón.
+    //
+    // ⚠️ Es un aviso, no un veto: el motor recorta a `d_max` por capa y la isla que no llegue se
+    // dice en `wavesupport.log` con su capa y su área («esta raíz no da para todo»). Aquí sólo se
+    // adelanta antes de crear nada.
+    if (block_tree_mode()) {
+        const std::vector<Vec2d> foot = target_footprint_world();
+        if (foot.empty())
+            return false;
+        Vec2d c { 0., 0. };
+        for (const Vec2d &p : foot)
+            c += p;
+        c /= double(foot.size());
+        for (const StumpSpot &st : all_stumps())
+            if ((Vec2d(st.p.x(), st.p.y()) - c).norm() > reach_radius_mm(st.p.z()) + 1e-6)
+                return true;
+        return false;
+    }
     return landing_offset_mm() > reach_radius_mm(m_landing_world_pos.z()) + 1e-6;
 }
 
@@ -2013,6 +3044,56 @@ void GLGizmoSupportZones::update_footprint_model()
     m_footprint_model.reset();
     if (! m_has_target || ! m_has_landing)
         return;
+
+    // NEOTKO_SUPPORTZONES_TAG s301 — LA SOMBRA DE LOS TOCONES, Y LA LÍNEA QUE LOS UNE AL ÁREA.
+    //
+    // 🔑 Es la misma respuesta a la misma queja de s286b —«cuesta clavar dónde caerá y toca girar la
+    // cama»— con varios pies en vez de uno. El disco dice dónde se planta cada tocón; la cinta dice
+    // a qué trozo del área va, que es la pregunta nueva que trae tener más de uno.
+    if (block_tree_mode()) {
+        const std::vector<StumpSpot> stumps = all_stumps();
+        const std::vector<Vec2d>     top    = target_footprint_world();
+        if (stumps.empty() || top.empty())
+            return;
+        Vec2d c { 0., 0. };
+        for (const Vec2d &p : top)
+            c += p;
+        c /= double(top.size());
+
+        indexed_triangle_set its;
+        const double r    = 0.5 * double(m_stump_size_mm);
+        const int    segs = 32;
+        for (const StumpSpot &st : stumps) {
+            const double z = st.p.z() + 0.05;   // un pelo sobre la cama, no dentro de ella
+            const int    b = int(its.vertices.size());
+            its.vertices.emplace_back(float(st.p.x()), float(st.p.y()), float(z));
+            for (int i = 0; i < segs; ++ i) {
+                const double a = 2.0 * PI_D * double(i) / double(segs);
+                its.vertices.emplace_back(float(st.p.x() + r * std::cos(a)),
+                                          float(st.p.y() + r * std::sin(a)), float(z));
+            }
+            for (int i = 0; i < segs; ++ i)
+                its.indices.emplace_back(b, b + 1 + i, b + 1 + (i + 1) % segs);
+
+            // La cinta al centroide del área, estrecha a propósito: es una indicación de a dónde va
+            // esa raíz, no una promesa de por dónde bajará. Por dónde baja lo decide el motor.
+            const Vec2d d = c - Vec2d(st.p.x(), st.p.y());
+            const double dl = d.norm();
+            if (dl < 1e-6)
+                continue;
+            const Vec2d n(-d.y() / dl * 0.3, d.x() / dl * 0.3);
+            const int   q = int(its.vertices.size());
+            its.vertices.emplace_back(float(st.p.x() + n.x()), float(st.p.y() + n.y()), float(z));
+            its.vertices.emplace_back(float(st.p.x() - n.x()), float(st.p.y() - n.y()), float(z));
+            its.vertices.emplace_back(float(c.x() - n.x()),    float(c.y() - n.y()),    float(z));
+            its.vertices.emplace_back(float(c.x() + n.x()),    float(c.y() + n.y()),    float(z));
+            its.indices.emplace_back(q, q + 1, q + 2);
+            its.indices.emplace_back(q, q + 2, q + 3);
+        }
+        if (! its.indices.empty())
+            m_footprint_model.init_from(its);
+        return;
+    }
 
     // El contorno DEL PIE (no el de arriba: con el borde progresivo no son el mismo) llevado al
     // sitio donde aterriza.
@@ -2150,6 +3231,23 @@ double GLGizmoSupportZones::min_footprint_width_mm() const
 
 std::vector<Vec2d> GLGizmoSupportZones::foot_outline_world() const
 {
+    // s301 — en el árbol de bloques el pie es el TOCÓN. Devolver aquí el anillo de abajo del pilar
+    // sería enseñar en el alzado un pie que no se construye, que es justo el fallo que la nota de
+    // s289 documenta un párrafo más abajo, cometido otra vez con otra forma.
+    if (block_tree_mode()) {
+        std::vector<Vec2d> out;
+        if (! m_has_landing)
+            return out;
+        const double r    = 0.5 * double(m_stump_size_mm);
+        const int    segs = 32;
+        out.reserve(segs);
+        for (int i = 0; i < segs; ++ i) {
+            const double a = 2.0 * PI_D * double(i) / double(segs);
+            out.emplace_back(m_landing_world_pos.x() + r * std::cos(a),
+                             m_landing_world_pos.y() + r * std::sin(a));
+        }
+        return out;
+    }
     // ✅ s289 — la silueta del anillo DE ABAJO, sacada del mismo parche que el sólido. Antes esto
     // era el contorno de arriba pasado otra vez por `offset()` de Clipper, y eso ya son dos
     // operaciones distintas sobre dos formas distintas: el pie que se comprobaba (¿cabe en la cama?
@@ -2159,6 +3257,11 @@ std::vector<Vec2d> GLGizmoSupportZones::foot_outline_world() const
 
 bool GLGizmoSupportZones::footprint_too_narrow() const
 {
+    // s301 — en el árbol de bloques el pie es el TOCÓN, no el anillo de abajo del pilar. Y como el
+    // tocón es un disco de un tamaño que se elige con un mando, la pregunta se contesta con el
+    // número directamente: nada de rehacer un `offset` para medir el ancho de un círculo.
+    if (block_tree_mode())
+        return double(m_stump_size_mm) < min_footprint_width_mm();
     const std::vector<Vec2d> foot = foot_outline_world();
     if (foot.size() < 3)
         return true;
@@ -2178,7 +3281,13 @@ bool GLGizmoSupportZones::landing_off_bed() const
 {
     // A landing on a shelf of the part stops there (§4.2-bis, `Stop`), so it never reaches the
     // plate and the plate has no say.
-    if (! m_has_target || ! m_has_landing || ! m_landing_on_bed)
+    //
+    // 🚨 s301 — y con varios tocones esa condición ya no puede mirar SÓLO al primario: el primario
+    // puede estar sobre una repisa y un tocón adicional caerse de la cama. La pregunta «¿alguno se
+    // posa en la cama?» se resuelve abajo, tocón a tocón.
+    if (! m_has_target || ! m_has_landing)
+        return false;
+    if (! block_tree_mode() && ! m_landing_on_bed)
         return false;
 
     const BuildVolume &bv = wxGetApp().plater()->build_volume();
@@ -2187,6 +3296,24 @@ bool GLGizmoSupportZones::landing_off_bed() const
     const Polygon &bed = bv.polygon();
     if (bed.points.size() < 3)
         return false;
+
+    // s301 — en el árbol de bloques se pregunta por CADA tocón, en su sitio y con su radio. Aquí no
+    // hay desplazamiento que aplicar —el tocón ya está donde está— y aplicarle el del pilar
+    // lofteado movería un pie que no existe.
+    if (block_tree_mode()) {
+        const double r = 0.5 * double(m_stump_size_mm);
+        for (const StumpSpot &st : all_stumps()) {
+            if (! st.on_bed)
+                continue;   // el que se posa en una repisa no llega nunca a la cama
+            for (int i = 0; i < 16; ++ i) {
+                const double a = 2.0 * PI_D * double(i) / 16.0;
+                const Vec2d  w(st.p.x() + r * std::cos(a), st.p.y() + r * std::sin(a));
+                if (! bed.contains(Point(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()))))
+                    return true;
+            }
+        }
+        return false;
+    }
 
     // The foot is the same ring as the roof, translated (build_pillar_mesh) — same polygon top and
     // bottom is what makes the section constant. Asking about the ring rather than the click point
@@ -2241,6 +3368,18 @@ bool GLGizmoSupportZones::support_style_blocks_corridor() const
 
 bool GLGizmoSupportZones::pillar_crosses_object() const
 {
+    // NEOTKO_SUPPORTZONES_TAG s301 — SE JUBILA EN EL ÁRBOL DE BLOQUES, Y NO POR COMODIDAD.
+    //
+    // 🔑 Esta función existe porque un pilar lofteado es un sólido dibujado de una vez, de arriba
+    // abajo, y hay que interrogarlo con rayos para saber si atraviesa la pieza. El árbol de bloques
+    // no se dibuja: el tramo del medio lo construye el motor capa a capa, y cada capa se recorta
+    // contra `offset(layer.lslices, gap_xy)` antes de imprimirse. O sea que no PUEDE meterse en la
+    // pieza — la pregunta deja de tener respuesta que dar porque deja de tener sentido.
+    //
+    // 🚨 Y esto es lo que el §4-bis.8 A1 del plan pedía desde s265, resuelto por construcción en vez
+    // de con la sonda de 9×19 rayos que costó s300h y s300i.
+    if (block_tree_mode())
+        return false;
     if (! m_has_target || ! m_has_landing || ! m_raycaster)
         return false;
     const std::vector<Vec2d> foot = target_footprint_world();
@@ -2251,9 +3390,78 @@ bool GLGizmoSupportZones::pillar_crosses_object() const
         c += p;
     c /= double(foot.size());
 
-    // The axis of the pillar, in world.
-    const Vec3d top(c.x(), c.y(), m_target_world_pos.z());
-    const Vec3d bot = m_landing_world_pos;
+    // NEOTKO_SUPPORTZONES_TAG s300h — SE SIGUE LA RODILLA, NO LA RECTA ENTRE LOS EXTREMOS.
+    //
+    // 🚨 Esto es lo que hacía saltar el aviso con un pilar que a la vista no tocaba nada. El pilar
+    // baja a plomo del techo a M, se inclina de M a K, y vuelve a plomo de K al pie: una ele. La
+    // recta que une el techo con el pie corta por DENTRO de esa ele, y por ese atajo sí que pasa la
+    // pared de la pieza. Se estaba preguntando por sitios donde el pilar no está.
+    //
+    // Con el eje verdadero, un pilar que rodea la pared contesta que no cruza, que es lo que se ve.
+    PillarAxis ax;
+    if (! pillar_axis(ax) || ax.rings.size() < 2)
+        return false;
+
+    const Vec3d top(c.x() + ax.rings.front().second.x(),
+                    c.y() + ax.rings.front().second.y(),
+                    ax.rings.front().first);
+    const Vec3d bot(c.x() + ax.rings.back().second.x(),
+                    c.y() + ax.rings.back().second.y(),
+                    ax.rings.back().first);
+
+    // NEOTKO_SUPPORTZONES_TAG s300g — la respuesta de este frame, si nada ha cambiado.
+    if (m_cross_cache_valid && m_cross_cache_npts == foot.size()
+        && m_cross_cache_head == m_footprint_shrink_mm
+        && m_cross_cache_foot == m_footprint_base_mm
+        && (m_cross_cache_top - top).squaredNorm() < 1e-12
+        && (m_cross_cache_bot - bot).squaredNorm() < 1e-12)
+        return m_cross_cache_value;
+
+    // NEOTKO_SUPPORTZONES_TAG s300g — SE MIDE EL CUERPO, NO SÓLO EL EJE.
+    //
+    // 🚨 Esto miraba únicamente la línea del centro, y con una sección de 23 × 16 mm un eje que pasa
+    // rozando la pared por fuera contesta "no cruza" con medio pilar metido dentro. Medido en s300g:
+    // el pilar atravesaba el toro de lado a lado y este aviso no saltó.
+    //
+    // 🔑 El arreglo es barato porque la huella ya está calculada: se llevan unos cuantos puntos de
+    // su CONTORNO por la misma trayectoria, además del centroide. Sigue siendo el mismo test de
+    // dentro/fuera por paridad, sólo que ahora sobre el bulto y no sobre una raya.
+    //
+    // ⚠️ Frontera de patente (§8 NEVER, PATENT_US9524357_ANALYSIS.md): esto NO cae en la
+    // reivindicación 1 — no se calcula la normal en el punto de impacto ni se decide necesidad de
+    // soporte por el ángulo rayo↔normal; es un contador de cruces para un aviso. Si algún día hace
+    // falta más fino, el camino que pide el plan (§4-bis.8 A1) es la intersección 2D por capa, NO
+    // más rayos.
+    std::vector<Vec2d> probes;
+    probes.reserve(9);
+    probes.push_back(c);
+    {
+        // Ocho puntos repartidos por el contorno. Más no compra nada: lo que se busca es un túnel,
+        // no un roce, y un túnel lo cruzan todos.
+        const size_t n_ring = 8;
+        const size_t step   = std::max<size_t>(1, foot.size() / n_ring);
+        for (size_t i = 0; i < foot.size() && probes.size() <= n_ring; i += step)
+            probes.push_back(foot[i]);
+    }
+
+    m_cross_cache_top   = top;
+    m_cross_cache_bot   = bot;
+    m_cross_cache_npts  = foot.size();
+    m_cross_cache_head  = m_footprint_shrink_mm;
+    m_cross_cache_foot  = m_footprint_base_mm;
+    m_cross_cache_valid = true;
+    m_cross_cache_value = false;
+
+    // El eje como polilínea, de arriba abajo, y su longitud para poder recorrerlo a paso constante.
+    std::vector<Vec3d> axis;
+    axis.reserve(ax.rings.size());
+    for (const auto &r : ax.rings)
+        axis.emplace_back(c.x() + r.second.x(), c.y() + r.second.y(), r.first);
+    double axis_len = 0.;
+    for (size_t i = 1; i < axis.size(); ++ i)
+        axis_len += (axis[i] - axis[i - 1]).norm();
+    if (axis_len < 1e-6)
+        return false;
 
     // 🔑 Both ends touch geometry ON PURPOSE — the top is under the surface being held up, the
     // bottom may rest on a shelf — so the ends are skipped and only the span in between is asked
@@ -2261,23 +3469,61 @@ bool GLGizmoSupportZones::pillar_crosses_object() const
     const Transform3d inv  = m_world_trafo.inverse();
     const AABBMesh   &tree = m_raycaster->get_aabb_mesh();
     const int         n_samples = 24;
-    int               inside = 0;
-    for (int i = 1; i < n_samples; ++ i) {
-        const double t = double(i) / double(n_samples);
-        if (t < 0.10 || t > 0.90)
-            continue;
-        const Vec3d w = top + (bot - top) * t;
-        // Inside-ness by parity: shoot straight up and count crossings of the watertight shell.
-        const std::vector<AABBMesh::hit_result> hits = tree.query_ray_hits(inv * w, inv.linear() * Vec3d(0., 0., 1.));
-        int crossings = 0;
-        for (const AABBMesh::hit_result &h : hits)
-            if (h.is_hit() && h.distance() > 1e-6)
-                ++ crossings;
-        if (crossings % 2 == 1)
-            ++ inside;
+    size_t            probes_inside = 0;
+    for (const Vec2d &probe : probes) {
+        // Cada sonda recorre el MISMO eje quebrado, desplazada a su punto de la huella. La sección
+        // del pilar es la misma en todos los anillos (los offsets del borde son simétricos y no
+        // mueven el centroide), así que trasladar la huella a lo largo del eje describe el cuerpo.
+        const Vec2d d = probe - c;
+        int inside = 0;
+        for (int i = 1; i < n_samples; ++ i) {
+            const double t = double(i) / double(n_samples);
+            if (t < 0.10 || t > 0.90)
+                continue;
+            // Punto a distancia t del recorrido, siguiendo los tramos de la polilínea.
+            double want = t * axis_len;
+            Vec3d  w    = axis.back();
+            for (size_t k = 1; k < axis.size(); ++ k) {
+                const double seg = (axis[k] - axis[k - 1]).norm();
+                if (want <= seg || k + 1 == axis.size()) {
+                    w = axis[k - 1] + (axis[k] - axis[k - 1]) * (seg > 1e-9 ? (want / seg) : 0.);
+                    break;
+                }
+                want -= seg;
+            }
+            w += Vec3d(d.x(), d.y(), 0.);
+            // Inside-ness by parity: shoot straight up and count crossings of the watertight shell.
+            const std::vector<AABBMesh::hit_result> hits = tree.query_ray_hits(inv * w, inv.linear() * Vec3d(0., 0., 1.));
+            int crossings = 0;
+            for (const AABBMesh::hit_result &h : hits)
+                if (h.is_hit() && h.distance() > 1e-6)
+                    ++ crossings;
+            if (crossings % 2 == 1)
+                ++ inside;
+        }
+        // One stray sample can be a grazing pass along a wall; a run of them is a tunnel.
+        if (inside >= 3)
+            ++ probes_inside;
     }
-    // One stray sample can be a grazing pass along a wall; a run of them is a tunnel.
-    return inside >= 3;
+
+    // 🚨 s300h — UNA SONDA NO BASTA PARA BLOQUEAR. Con nueve sondas repartidas por el contorno,
+    // exigir sólo una era convertir cualquier roce de una esquina en "no puedes crear esto", y eso
+    // es peor que no avisar: le quita al dueño una zona que a la vista está bien. Se pide un tercio
+    // del cuerpo, que es lo que distingue un túnel de un rasguño.
+    const size_t need = std::max<size_t>(2, probes.size() / 3);
+    m_cross_cache_value = (probes_inside >= need);
+
+    // 🔎 s300h — el dato que faltaba para no volver a discutir esto a ojo. Sólo cuando alguna sonda
+    // entra: si nunca cruza, no hay nada que contar y el log se queda limpio.
+    if (probes_inside > 0 && NeoDebug::enabled(NeoDebug::SUPPORTZONES))
+        NeoDebug::write(NeoDebug::SUPPORTZONES,
+                        "cross     sondas_dentro=" + std::to_string(probes_inside) +
+                        " de " + std::to_string(probes.size()) +
+                        "  hacen_falta=" + std::to_string(need) +
+                        "  rodilla=" + std::string(ax.has_knee ? "si" : "no") +
+                        "  veredicto=" + std::string(m_cross_cache_value ? "ATRAVIESA" : "roza"));
+
+    return m_cross_cache_value;
 }
 
 // -----------------------------------------------------------------------------
@@ -2286,6 +3532,12 @@ bool GLGizmoSupportZones::pillar_crosses_object() const
 
 void GLGizmoSupportZones::delete_selected_zone()
 {
+    // 🚨 s299h — se llega aquí por `CallAfter`, o sea un rato DESPUÉS del clic. En ese rato
+    // el usuario ha podido cerrar el gizmo o cambiar de objeto, así que lo primero es
+    // comprobar que la orden sigue teniendo sentido. Sin esto, diferir cambia un crash por
+    // otro más raro de encontrar.
+    if (get_state() != On)
+        return;
     if (m_selected_zone < 0 || m_selected_zone >= int(m_zones.size()))
         return;
     Model *model = m_parent.get_selection().get_model();
@@ -2297,12 +3549,32 @@ void GLGizmoSupportZones::delete_selected_zone()
     if (mo == nullptr || vi < 0 || vi >= int(mo->volumes.size()))
         return;
 
-    Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Delete support zone"));
-    mo->delete_volume(size_t(vi));
+    // 🚨 s299g — EL VOLUMEN SE BORRA POR LA LISTA DE OBJETOS, NO A MANO. Éste es el crash.
+    //
+    // Lo que había era `mo->delete_volume(vi)` directo. Borra el ModelVolume, sí, pero el árbol de
+    // la lista de objetos NO se entera: se queda con un item que apunta a un volumen que ya no
+    // existe. El siguiente refresco resuelve ese item contra un índice inválido y el proceso se cae
+    // — que es exactamente lo que él vio, `Segmentation fault` justo al borrar, sin nada anterior
+    // en el log.
+    //
+    // 🔑 `delete_from_model_and_list()` es el camino que usa el propio menú Borrar de la lista:
+    // quita el volumen del modelo Y su item del árbol, en ese orden, y con sus reglas puestas — la
+    // de "no puedes borrar la última pieza sólida", por ejemplo. Una zona nunca es una pieza sólida,
+    // así que para nosotros esa regla no aplica; lo que importa es no volver a mantener a mano un
+    // estado que la aplicación ya sabe mantener.
+    //
+    // ⛔ Y SIN snapshot propio: `delete_from_model_and_list()` toma el suyo. Anidar dos deja el
+    // undo con un paso vacío, que es el bug con el que empieza el siguiente informe.
+    if (wxGetApp().obj_list() == nullptr)
+        return;
     m_selected_zone = -1;
     m_zones_dirty   = true;
-    wxGetApp().obj_list()->update_info_items(size_t(obj_idx));
-    wxGetApp().plater()->update();
+    // El estado del editor se suelta ANTES de tocar el modelo: `data_changed()` va a llegar desde
+    // dentro de la llamada, y todo lo que quede apuntando a este volumen habrá dejado de valer.
+    if (editing())
+        end_edit();
+    clear_pick();
+    wxGetApp().obj_list()->delete_from_model_and_list(itVolume, obj_idx, vi);
     m_parent.set_as_dirty();
 }
 
@@ -2314,6 +3586,12 @@ void GLGizmoSupportZones::delete_selected_zone()
 // quien prefiere decidirlo él antes de tocar nada.
 void GLGizmoSupportZones::unlock_selected_zone()
 {
+    // 🚨 s299h — se llega aquí por `CallAfter`, o sea un rato DESPUÉS del clic. En ese rato
+    // el usuario ha podido cerrar el gizmo o cambiar de objeto, así que lo primero es
+    // comprobar que la orden sigue teniendo sentido. Sin esto, diferir cambia un crash por
+    // otro más raro de encontrar.
+    if (get_state() != On)
+        return;
     if (m_selected_zone < 0 || m_selected_zone >= int(m_zones.size()))
         return;
     const int obj_idx = current_object_idx();
@@ -2335,6 +3613,12 @@ void GLGizmoSupportZones::unlock_selected_zone()
 
 void GLGizmoSupportZones::duplicate_selected_zone()
 {
+    // 🚨 s299h — se llega aquí por `CallAfter`, o sea un rato DESPUÉS del clic. En ese rato
+    // el usuario ha podido cerrar el gizmo o cambiar de objeto, así que lo primero es
+    // comprobar que la orden sigue teniendo sentido. Sin esto, diferir cambia un crash por
+    // otro más raro de encontrar.
+    if (get_state() != On)
+        return;
     if (m_selected_zone < 0 || m_selected_zone >= int(m_zones.size()))
         return;
     Model *model = m_parent.get_selection().get_model();
@@ -2380,7 +3664,14 @@ void GLGizmoSupportZones::duplicate_selected_zone()
     m_select_volume_idx_pending = int(mo->volumes.size()) - 1;
 
     m_zones_dirty = true;
-    wxGetApp().obj_list()->update_info_items(size_t(obj_idx));
+    // 🚨 s299g — MISMA LECCIÓN QUE EL BORRADO, del otro lado. Añadir un volumen a mano deja el árbol
+    // de la lista sin la fila nueva, y a partir de ahí los índices del árbol y los del modelo van
+    // desfasados: cualquier acción posterior sobre la lista opera sobre el volumen equivocado.
+    // `add_volumes_to_object_in_list()` es lo que usa `create_pillar()`, y es lo que faltaba aquí.
+    if (wxGetApp().obj_list() != nullptr) {
+        wxGetApp().obj_list()->add_volumes_to_object_in_list(size_t(obj_idx));
+        wxGetApp().obj_list()->update_info_items(size_t(obj_idx));
+    }
     wxGetApp().plater()->update();
     m_parent.set_as_dirty();
 }
@@ -2410,6 +3701,20 @@ std::string GLGizmoSupportZones::gesture_to_json(const ZoneGesture &g)
             st.push_back({ q.x(), q.y(), q.z(), q.w() });
         r["st"] = st;
     }
+    // s301 — los tocones ADICIONALES y su tamaño.
+    //
+    // 🚨 `tz` se escribe con el PINCEL, no con «hay tocones extra»: un árbol con un solo tocón —el
+    // primario, que viaja en `lp`— no tiene extras, y sin esta distinción su tamaño no se guardaría
+    // y la zona se reabriría con otro pie. Una zona de círculo o cuadrado sigue produciendo
+    // exactamente el mismo JSON que producía.
+    if (! g.stumps.empty()) {
+        nlohmann::json tk = nlohmann::json::array();
+        for (const StumpSpot &s : g.stumps)
+            tk.push_back({ s.p.x(), s.p.y(), s.p.z(), s.on_bed ? 1. : 0. });
+        r["tk"] = tk;
+    }
+    if (g.foot_shape == FootShape::Brush)
+        r["tz"] = g.stump_size_mm;
     r["ep"]  = g.edge_patch_mm;
     r["ef"]  = g.edge_foot_mm;
     r["la"]  = g.lean_deg;
@@ -2437,7 +3742,14 @@ bool GLGizmoSupportZones::gesture_from_json(const std::string &text, ZoneGesture
         // 🔑 s289 — v2 añade las marcas del pincel y NADA más, así que un v1 se lee entero y se
         // queda sin marcas, que es exactamente lo que era. Rechazar v1 aquí habría dejado sin
         // candado todas las zonas ya creadas.
-        if (g.version != 1 && g.version != 2)
+        // 🚨 s301 — AQUÍ FALTABA LA 3 Y LA ZONA PINTADA NO SE PODÍA REABRIR NUNCA.
+        //
+        // s300 subió el gesto a v3 al pasar los toques a 3D (`current_gesture`) y no tocó esta
+        // puerta, que seguía aceptando 1 y 2. Resultado: toda zona con pincel se guardaba como v3,
+        // volvía como "no parseable", y por tanto sin candado — o sea sin el botón de editar. El
+        // `begin_edit_zone` de al lado da por hecho que un v3 llega entero, así que las dos mitades
+        // estaban de acuerdo en todo menos en esta línea.
+        if (g.version < 1 || g.version > 4)
             return false;   // formato futuro o corrupto: no se adivina
         if (! vec3(r["tp"], g.target_pos) || ! vec3(r["tn"], g.target_normal) ||
             ! vec3(r["lp"], g.landing_pos) || ! vec3(r["lo"], g.lock_offset))
@@ -2457,6 +3769,15 @@ bool GLGizmoSupportZones::gesture_from_json(const std::string &text, ZoneGesture
                     // a lo que el usuario dibujó y no puede quedar peor que el rosario de antes.
                     g.stamps.emplace_back(q[0].get<double>(), q[1].get<double>(), q[2].get<double>(),
                                           q.size() > 3 ? q[3].get<double>() : 0.);
+        // s301 — los tocones adicionales. Un gesto v1-v3 no los trae y se queda con la lista vacía,
+        // que es exactamente lo que era: su único apoyo es el aterrizaje.
+        g.stump_size_mm = r.value("tz", 8.f);
+        if (r.contains("tk") && r["tk"].is_array())
+            for (const auto &q : r["tk"])
+                if (q.is_array() && q.size() >= 3)
+                    g.stumps.push_back(StumpSpot{
+                        Vec3d(q[0].get<double>(), q[1].get<double>(), q[2].get<double>()),
+                        q.size() > 3 ? (q[3].get<double>() != 0.) : true });
         out = g;
         return true;
     } catch (...) {
@@ -2483,14 +3804,37 @@ GLGizmoSupportZones::ZoneGesture GLGizmoSupportZones::current_gesture(const Tran
         g.version = 2;
     // Las marcas viajan en espacio del OBJETO, como todo lo demás del gesto: en mundo, Orca
     // renormaliza objeto e instancias sola y el trazo se descoloca sin que nadie lo toque.
+    // 🚨 s300 — LOS TOQUES SON 3D, y por eso el gesto sube a la versión 3.
+    //
+    // En v2 se guardaba (x, y, radio, trazo): el toque era un disco en XY y el trazo servía para
+    // saber qué marcas unir con una cápsula. Ahora el toque es un PUNTO SOBRE LA SUPERFICIE y lo
+    // que se reproduce al reabrir es el recorrido por la malla, así que hace falta la z y sobra el
+    // trazo. Los dos campos ocupan el mismo hueco, y el número de versión es lo que impide que un
+    // gesto viejo se lea como si fuera nuevo.
+    //
+    // ⛔ Una zona pintada guardada con v2 ya NO se puede reabrir para editar: sus marcas describen
+    // una geometría que este pincel no sabe reproducir. Se sigue imprimiendo igual —la malla está
+    // en el volumen— y la tarjeta lo dice. Es la decisión que él tomó al empezar el rediseño.
     g.stamps.clear();
     g.stamps.reserve(m_stamps.size());
     for (const Stamp &st : m_stamps) {
-        const Vec3d o = inv * Vec3d(st.c.x(), st.c.y(), 0.);
-        g.stamps.emplace_back(o.x(), o.y(), st.r, double(st.stroke));
+        const Vec3d o = inv * st.p;
+        g.stamps.emplace_back(o.x(), o.y(), o.z(), st.r);
     }
     if (! g.stamps.empty())
-        g.version = 2;
+        g.version = 3;
+    // NEOTKO_SUPPORTZONES_TAG s301 — LOS TOCONES, y con ellos la v4.
+    //
+    // 🚨 La versión sube con el PINCEL, no con «hay tocones extra». El modo se deduce de la forma
+    // de la huella, así que un árbol con un solo tocón —lo normal— no tiene extras y aun así es un
+    // gesto nuevo: su `tz` hace falta para reabrirlo con el mismo pie.
+    g.stumps.clear();
+    g.stumps.reserve(m_extra_stumps.size());
+    for (const StumpSpot &s : m_extra_stumps)
+        g.stumps.push_back(StumpSpot{ inv * s.p, s.on_bed });
+    g.stump_size_mm = m_stump_size_mm;
+    if (block_tree_mode())
+        g.version = 4;
     g.edge_patch_mm = m_footprint_shrink_mm;
     g.edge_foot_mm  = m_footprint_base_mm;
     g.lean_deg      = m_lean_angle_deg;
@@ -2550,6 +3894,80 @@ void GLGizmoSupportZones::write_pillar_into(ModelVolume &v, TriangleMesh &&world
     ZoneGesture stamped = g;
     stamped.lock_offset = local_centre;
     v.config.set_key_value("neotko_support_zone_gesture", new ConfigOptionString(gesture_to_json(stamped)));
+
+    // NEOTKO_SUPPORTZONES_TAG s299 — el ángulo, otra vez y suelto.
+    //
+    // 🔑 Sí, está duplicado: vive dentro del JSON de aquí arriba y también en su propia clave. No
+    // es descuido. El gesto es del editor y el motor no debe parsear JSON para nada; esta clave es
+    // la frontera, y es la que `slice_support_enforcers_per_zone()` lee para saber a qué ángulo
+    // baja la columna de esta zona. La otra diferencia importante es que ÉSTA invalida el soporte
+    // y el gesto no.
+    v.config.set_key_value("neotko_zone_lean_deg", new ConfigOptionFloat(double(g.lean_deg)));
+
+    // NEOTKO_SUPPORTZONES_TAG s299c — y la zona nace sembrando SÓLO bajo el voladizo.
+    //
+    // 🔑 Es el default correcto para un pilar, y no para un enforcer cualquiera. Este bloque sube
+    // desde la cama hasta la superficie que sujetas, así que con el contrato clásico del enforcer
+    // ("soporta todo lo que caiga dentro, en todas las capas") iba dejando soporte pegado a la
+    // pared del objeto en todo el recorrido. El dueño lo estaba tapando a mano con blockers.
+    //
+    // ⛔ Sólo se pone en las zonas que crea este gizmo. Un enforcer que traiga el usuario de fuera
+    // conserva el comportamiento clásico, que es el que espera quien lo dibujó.
+    // NEOTKO_SUPPORTZONES_TAG s300e — «agarra sólo en su techo», ENCENDIDA por defecto.
+    //
+    // 🚨 Es la misma clave que en s299e se apagó, con OTRO significado. Entonces quería decir "sólo
+    // donde el diff 2D dice que hay superficie sin apoyo", y él la quitó con razón: dentro de una
+    // pieza hueca la cara interior de una pared también es superficie sin apoyo, así que aquel
+    // criterio seguía sembrando techos pasado el muro y encima recortaba de más.
+    //
+    // 🔑 Ahora quiere decir "el bloque agarra donde EMPIEZA, no por donde pasa", calculado como lo
+    // que hay del bloque en una capa y no había en la de arriba. Por el tramo que atraviesa la
+    // pieza el bloque ya venía de arriba, así que no hay techo y no siembra. No recorta el pilar:
+    // sólo decide dónde se pega.
+    // NEOTKO_SUPPORTZONES_TAG s301b — LAS DOS SE APAGAN, EN TODOS LOS MODOS.
+    //
+    // 🚨 Dicho por el dueño mirando el gcode del primer build: «desactiva grab only at its roof y
+    // print the whole block, son la causa de que aparezcan techos dentro de la pieza; si no están
+    // activos los soportes normales se crean casi bien». O sea que el veredicto ya no es una
+    // sospecha: con las dos apagadas el pilar de círculo/cuadrado/parche sale bien, y con ellas
+    // encendidas siembra interfaz contra las paredes por las que pasa.
+    //
+    // 🔑 Y encaja con lo que el §8 del estudio ya había razonado para el árbol de bloques: la zona
+    // vuelve a ser un enforcer NORMAL, del camino clásico, que siembra donde corta superficie sin
+    // apoyo. `roof_only` nació para evitar los techos dentro del muro y acabó causándolos porque
+    // decide dónde AGARRA con un criterio (lo que hay aquí y no arriba) que en un bloque inclinado
+    // o en un prisma recto no dice lo que parece.
+    //
+    // ⛔ Las claves NO se borran, pero NO es por compatibilidad: ninguna de las dos llegó nunca a un
+    // build publicado (dicho por el dueño, s301b), así que no hay un solo 3mf ahí fuera que las
+    // traiga puestas y no hay migración que hacer. Se quedan porque el motor las entiende y son la
+    // palanca para probar a mano, sin recompilar, qué hace cada una — que es justo lo que hará
+    // falta el día que se toquen los soportes que NO son de tocón.
+    v.config.set_key_value("neotko_zone_roof_only", new ConfigOptionBool(false));
+
+    // NEOTKO_SUPPORTZONES_TAG s299c — y MACIZA, que es la otra mitad de la misma promesa.
+    //
+    // 🔑 Las dos van juntas y hacen cosas distintas: `roof_only` decide dónde se AGARRA (sólo bajo
+    // superficie sin apoyo, para no pegarse a la pared en todo el descenso) y `solid` decide qué se
+    // IMPRIME (la sección del bloque, entera). Sin la segunda, lo que baja es la sección del
+    // contacto y el pilar sale más flaco que el dibujo — "falta medio objeto en el slice".
+    //
+    // Encendida por defecto porque el §1 de esta herramienta es que lo que ves es lo que sale. Un
+    // preview que enseña un pilar entero y un gcode que imprime una lámina es exactamente la
+    // mentira que esto existe para no contar.
+    //
+    // s301b — apagada también, y por la misma medida del dueño. En el árbol de bloques además no
+    // tendría sentido: `solid` aporta la sección del BLOQUE en cada capa, y en el tramo del medio
+    // no hay bloque — lo que baja ahí es la columna, guiada hacia el tocón.
+    v.config.set_key_value("neotko_zone_solid", new ConfigOptionBool(false));
+
+    // NEOTKO_SUPPORTZONES_TAG s299d — y se posa SÓLO donde tú dijiste.
+    //
+    // 🔑 El gesto tiene un aterrizaje elegido con el segundo clic. Todo lo demás que la columna se
+    // encuentre por el camino —una repisa interior, el borde de una cavidad— no lo ha pedido nadie,
+    // y el generador se apoyaba en ello generando su interfaz de fondo allí mismo: los "techos
+    // dentro de la pieza" que en realidad son suelos.
+    v.config.set_key_value("neotko_zone_land_only", new ConfigOptionBool(false));
 }
 
 // NEOTKO_SUPPORTZONES_TAG s288 F2 — cargar un gesto guardado en el panel.
@@ -2597,33 +4015,47 @@ bool GLGizmoSupportZones::begin_edit_zone(int row_idx)
     m_foot_shape          = g.foot_shape;
     m_foot_size_mm        = g.foot_size_mm;
     m_shape_covers        = g.covers;
-    // s289 — las marcas vuelven a mundo y con ellas la semilla, para que editar una zona pintada
-    // enseñe el mismo trazo y no el parche entero.
+    // s300 — los toques vuelven a mundo y se vuelve a pintar sobre la malla, para que editar una
+    // zona pintada enseñe lo mismo que dejaste.
+    //
+    // 🚨 Sólo un gesto v3 trae toques 3D. Uno anterior los guardó como discos en XY, que describen
+    // una geometría que este pincel ya no sabe reproducir: reproducirlos a ojo daría una zona
+    // PARECIDA a la del usuario, y una zona parecida es peor que ninguna. Se degrada y se dice.
     m_stamps.clear();
-    for (const Vec4d &q : g.stamps) {
-        const Vec3d w = inst * Vec3d(q.x(), q.y(), 0.);
-        m_stamps.push_back({ Vec2d(w.x(), w.y()), q.z(), int(q.w()) });
-        m_stroke_id = std::max(m_stroke_id, int(q.w()));
+    clear_painted();
+    if (! g.stamps.empty() && g.version < 3) {
+        m_edit_lost_surface = true;
+        return false;
     }
+    for (const Vec4d &q : g.stamps)
+        m_stamps.push_back({ inst * Vec3d(q.x(), q.y(), q.z()), q.w() });
+    repaint_from_stamps();
+    // s301 — y los tocones vuelven a mundo. Un gesto anterior a la v4 llega sin ellos y se queda
+    // con el aterrizaje como único apoyo, que es lo que era.
+    m_extra_stumps.clear();
+    m_extra_stumps.reserve(g.stumps.size());
+    for (const StumpSpot &s : g.stumps)
+        m_extra_stumps.push_back(StumpSpot{ inst * s.p, s.on_bed });
+    m_stump_size_mm       = g.stump_size_mm;
     m_brush_seed_facet    = m_stamps.empty() ? -1 : facet;
     m_footprint_shrink_mm = g.edge_patch_mm;
     m_footprint_base_mm   = g.edge_foot_mm;
     m_lean_angle_deg      = g.lean_deg;
 
-    // 🚨 P2 del plan, resuelto por el lado seguro: el tope del ángulo sale de milímetros por capa,
-    // así que si el objeto se escaló —o si cambió la altura de capa o la boquilla desde que se
-    // creó— un ángulo perfectamente válido entonces puede estar fuera de rango ahora. Se recorta y
-    // se deja que el alzado enseñe el ángulo de verdad, en vez de dibujar uno que el motor no puede
-    // seguir.
-    const double a_max = max_lean_angle_deg();
-    if (double(m_lean_angle_deg) > a_max)
-        m_lean_angle_deg = float(a_max);
+    // 🚨 s299 — AQUÍ SE RECORTABA EL ÁNGULO GUARDADO y ya no se recorta. El tope de antes salía de
+    // milímetros por capa, así que reabrir una zona con otra altura de capa le cambiaba el ángulo a
+    // sus espaldas. Ahora el motor recalcula su tope A PARTIR del ángulo, no al revés, así que el
+    // valor guardado es válido siempre y lo único que cambia con la altura de capa es el color de
+    // la recomendación. Se acota sólo contra el máximo duro del deslizador.
+    m_lean_angle_deg = float(std::clamp(double(m_lean_angle_deg), 0.05,
+                                        SupportZones::SUPPORT_ZONE_MAX_LEAN_DEG));
 
     m_has_target        = true;
     m_has_landing       = true;
     m_landing_locked    = true;   // el aterrizaje ya está decidido: no persigue al cursor
     m_target_pick_mode  = false;
     m_landing_pick_mode = false;
+    m_stump_pick_mode   = false;
     m_have_hover_pos    = false;
     m_candidates.clear();
     m_painting           = false;
@@ -2740,60 +4172,71 @@ void GLGizmoSupportZones::dump_geometry(const char *why, const TriangleMesh *sol
         L(b);
     }
     if (! m_stamps.empty()) {
-        std::snprintf(b, sizeof(b), "brush     %d marks, seed facet %d", int(m_stamps.size()), m_brush_seed_facet);
+        std::snprintf(b, sizeof(b), "brush     %d toques, %d triangulos pintados, cara semilla %d",
+                      int(m_stamps.size()), int(m_painted_count), m_brush_seed_facet);
         L(b);
         for (size_t i = 0; i < m_stamps.size() && i < 200; ++ i) {
-            std::snprintf(b, sizeof(b), "  mark %3d  (%.3f %.3f)  r=%.3f", int(i), m_stamps[i].c.x(), m_stamps[i].c.y(), m_stamps[i].r);
+            std::snprintf(b, sizeof(b), "  toque %3d  (%.3f %.3f %.3f)  r=%.3f", int(i),
+                          m_stamps[i].p.x(), m_stamps[i].p.y(), m_stamps[i].p.z(), m_stamps[i].r);
             L(b);
         }
     }
 
-    const PatchGeom *pg = m_has_target
-        ? patch(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()))
+    // NEOTKO_SUPPORTZONES_TAG s299 — la sonda mira la MÁSCARA, que es lo que hay ahora.
+    //
+    // Las tres preguntas de antes (aristas no-manifold, bucles de borde, inglete máximo) eran
+    // preguntas sobre un parche de triángulos, y ya no hay parche. Con Clipper esas tres patologías
+    // no se pueden dar: un `ExPolygons` es válido por construcción. Lo que sí hay que poder mirar
+    // es cuánta huella queda, cuántas islas, y qué dice el mapa de alturas.
+    const ZoneMask *mk = m_has_target
+        ? mask(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()))
         : nullptr;
-    if (pg == nullptr) {
-        L("patch     NONE — no hay parche que extruir (revisa el recorte: puede que no toque la región)");
+    if (mk == nullptr || mk->area.empty()) {
+        L("mask      NONE — no hay huella que extruir (revisa la forma: puede que no toque la region)");
     } else {
-        // Cuántas aristas están compartidas por más de dos triángulos: si esto no es 0 el parche no
-        // es una superficie de verdad y las paredes van a salir cruzadas.
-        std::map<std::pair<int,int>, int> ec;
-        for (const Vec3i32 &t : pg->F)
-            for (int k = 0; k < 3; ++ k)
-                ++ ec[std::minmax(t[k], t[(k + 1) % 3])];
-        int nonmanifold = 0;
-        for (const auto &e : ec)
-            if (e.second > 2)
-                ++ nonmanifold;
-        // Bucles del borde: 1 es lo normal; más de 1 significa agujeros dentro del parche.
-        std::map<int, int> nxt;
-        for (const auto &e : pg->border)
-            nxt[e.first] = e.second;
-        std::set<int> seen;
-        int loops = 0;
-        for (const auto &e : pg->border) {
-            if (seen.count(e.first))
-                continue;
-            int v = e.first, guard = 0;
-            while (nxt.count(v) && ! seen.count(v) && guard ++ < 1000000) {
-                seen.insert(v);
-                v = nxt[v];
-            }
-            ++ loops;
+        double area_mm2 = 0.;
+        size_t holes = 0, pts = 0;
+        for (const ExPolygon &ep : mk->area) {
+            area_mm2 += unscale<double>(unscale<double>(ep.area()));
+            holes    += ep.holes.size();
+            pts      += ep.contour.points.size();
         }
-        double inw_max = 0.;
-        for (const Vec2d &n : pg->inward)
-            inw_max = std::max(inw_max, n.norm());
-        std::snprintf(b, sizeof(b), "patch     verts=%d  tris=%d  border edges=%d  loops=%d  non-manifold edges=%d",
-                      int(pg->V.size()), int(pg->F.size()), int(pg->border.size()), loops, nonmanifold);
+        std::snprintf(b, sizeof(b), "mask      islas=%d  agujeros=%d  pts=%d  area=%.3f mm2",
+                      int(mk->area.size()), int(holes), int(pts), area_mm2);
         L(b);
-        std::snprintf(b, sizeof(b), "patch     z_low=%.3f  z_high=%.3f  max_inset=%.3f  max_outset=%.3f mm  miter max=%.2f  folded=%s",
-                      pg->z_low, pg->z_high, pg->max_inset, pg->max_outset, inw_max,
-                      pg->folded ? "YES (el suelo se solapa consigo mismo)" : "no");
+        size_t hm_valid = 0;
+        for (float z : m_hm_z)
+            if (! std::isnan(z))
+                ++ hm_valid;
+        std::snprintf(b, sizeof(b), "mask      z_low=%.3f  z_high=%.3f  heightmap=%dx%d paso=%.2f mm  nodos con superficie=%d",
+                      mk->z_low, mk->z_high, m_hm_nx, m_hm_ny, m_hm_step, int(hm_valid));
         L(b);
-        if (loops > 1)
-            L("patch     ⚠️ mas de un bucle de borde: el parche tiene agujeros, el pilar llevara paredes por dentro");
-        if (nonmanifold > 0)
-            L("patch     🚨 aristas no-manifold: la region no es una superficie simple");
+        // 🚨 s301 — este aviso SOLO vale para el pilar lofteado. La cabeza del árbol de bloques se
+        // extruye con `zone_extrude_prism()`, que no remuestrea nada y por tanto conserva todas las
+        // islas y todos los agujeros. Dejarlo dicho para los dos casos sería mentir en el log, que
+        // es la clase de mentira que cuesta una sesión entera.
+        if (mk->area.size() > 1 && ! block_tree_mode())
+            L("mask      ⚠️ mas de una isla: el pilar se queda con la mas grande y descarta el resto");
+        else if (mk->area.size() > 1)
+            L("mask      islas multiples: la cabeza las extruye TODAS (el prisma no remuestrea)");
+        if (hm_valid == 0)
+            L("mask      ⚠️ el mapa de alturas esta vacio: el techo sera el plano de la cara semilla");
+    }
+
+    // NEOTKO_SUPPORTZONES_TAG s301 — los tocones, que en este modo son la mitad del gesto.
+    if (block_tree_mode()) {
+        const std::vector<StumpSpot> stumps = all_stumps();
+        std::snprintf(b, sizeof(b), "arbol     tocones=%d  ø%.2f mm  alto=%.2f mm  hueco cabeza-tocón=%.2f mm%s",
+                      int(stumps.size()), double(m_stump_size_mm), STUMP_HEIGHT_MM,
+                      block_tree_gap_mm(),
+                      block_tree_gap_mm() <= 0. ? "  🚨 SIN HUECO: el motor no verá un arbol" : "");
+        L(b);
+        for (size_t i = 0; i < stumps.size() && i < 64; ++ i) {
+            std::snprintf(b, sizeof(b), "  tocón %2d  (%.3f %.3f %.3f)  en_cama=%d  alcance=%.2f mm",
+                          int(i), stumps[i].p.x(), stumps[i].p.y(), stumps[i].p.z(),
+                          int(stumps[i].on_bed), reach_radius_mm(stumps[i].p.z()));
+            L(b);
+        }
     }
 
     const std::vector<Vec2d> top  = target_footprint_world();
@@ -2804,7 +4247,9 @@ void GLGizmoSupportZones::dump_geometry(const char *why, const TriangleMesh *sol
     L(b);
 
     if (solid == nullptr) {
-        L("solid     NONE — build_pillar_mesh() ha dicho que no. Mira la rodilla y el alcance de arriba.");
+        L(block_tree_mode()
+              ? "solid     NONE — no hay cabeza que extruir: revisa la huella y que haya al menos un tocón."
+              : "solid     NONE — build_pillar_mesh() ha dicho que no. Mira la rodilla y el alcance de arriba.");
     } else {
         const BoundingBoxf3 bb = solid->bounding_box();
         std::snprintf(b, sizeof(b), "solid     verts=%d  tris=%d  volume=%.3f mm3",
@@ -3052,7 +4497,13 @@ bool GLGizmoSupportZones::seed_support_defaults(ModelObject &mo)
 
     // Los valores son los suyos, medidos e impresos, no una elección de diseño de este fichero.
     seed("enable_support",               new ConfigOptionBool(true));
-    seed("support_top_z_distance",       new ConfigOptionFloat(0.1));
+    // 🚨 s305 — 0.2, no 0.1. En la impresión verificada de s304 (jarrón, 2 extrusores, ALH de 0.32
+    // a 0.08) el techo a 0.1 se pegaba a la pieza a ratos. No es del ancho de la zona: depende de
+    // lo bien que salga el voladizo de esa capa, y cuando sale un poco alto el hueco desaparece.
+    // 0.2 es además lo que trae el perfil por defecto, así que sembrar 0.1 era apartarse del perfil
+    // para dejarlo peor. ⚠️ El hueco REAL sigue sin ser exactamente éste con altura de capa
+    // variable, porque el techo del soporte no se lamina a la altura de la zona: cola de features.
+    seed("support_top_z_distance",       new ConfigOptionFloat(0.2));
     seed("tree_support_wall_count",      new ConfigOptionInt(1));      // "Support wall loops"
     seed("support_interface_top_layers", new ConfigOptionInt(3));
     seed("support_interface_spacing",    new ConfigOptionFloat(0.));   // techo macizo
@@ -3122,34 +4573,25 @@ void GLGizmoSupportZones::ensure_snug_style()
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
+// ⛔ s299c — AQUÍ VIVÍA EL «VER A TRAVÉS DE LA PIEZA», y se ha quitado por decisión del dueño:
+// "cuanto más lo pienso menos sentido tiene". Y tenía razón por partida doble.
+//
+// Teñía de translúcido toda la geometría impresa para poder mirar dentro. El problema es que un
+// bloque de soporte YA se dibuja translúcido, así que con la pieza también translúcida se
+// superponen dos transparencias sin profundidad fiable y lo que sale no es "ver dentro", es un
+// revoltijo donde no se distingue qué está delante de qué. Eso es lo que él veía como "muestra mal
+// los objetos". Un instrumento que enseña algo distinto de la verdad, en la herramienta cuya
+// promesa es que lo que dibujas es lo que sale, no vale la pena arreglarlo: sobra.
+//
+// Se conserva el resaltado de la zona seleccionada, que es lo ÚNICO de este bloque que hacía falta
+// y que además nació aparte (s286b).
 void GLGizmoSupportZones::apply_see_through()
 {
-    // 🚨 Restore FIRST, always. Otherwise the second call saves an already-ghosted colour as "the
-    // original" and the scene fades a bit more on every refresh until it is gone.
+    // 🚨 Restaurar SIEMPRE primero. Si no, la segunda llamada guardaría un color ya teñido como "el
+    // original" y la escena se iría apagando en cada refresco hasta desaparecer.
     restore_see_through();
-
-    // The switch that stops the ghosted part from writing depth (3DScene.hpp). Without it a
-    // see-through part still occludes everything drawn after it, and blends against itself in mesh
-    // order, which is the "two drawings clashing" look.
-    m_parent.get_volumes().set_transparent_depth_write(! (m_see_through && get_state() == On));
-
     if (get_state() != On)
         return;
-
-    // Only the printed geometry is ghosted. Support enforcers and the other modifiers are already
-    // drawn translucent and carry their own meaning: ghosting them too would erase the very blocks
-    // this gizmo is about. (is_modifier is set from !is_model_part(), GLCanvas3D.cpp:3123.)
-    if (m_see_through)
-        for (GLVolume *v : m_parent.get_volumes().volumes) {
-            if (v == nullptr || v->is_modifier || v->is_wipe_tower)
-                continue;
-            const ColorRGBA orig = v->color;
-            ColorRGBA out = orig;
-            out[3] = m_see_through_alpha;
-            m_saved_colors.emplace(std::make_tuple(v->object_idx(), v->volume_idx(), v->instance_idx()), orig);
-            v->set_color(out);
-        }
-
     highlight_selected_zone();
     m_parent.set_as_dirty();
 }
@@ -3677,6 +5119,40 @@ bool neo_row_slider(const char *id, const char *caption, float *v, float mn, flo
     return changed;
 }
 
+// s299c — la misma fila, con un interruptor en vez de un deslizador. Misma columna de etiqueta que
+// todo lo demás del panel, que es lo que mantiene la rejilla del rediseño.
+bool neo_row_toggle(const char *id, const char *caption, bool *v, const char *tip)
+{
+    // 🚨 s299c — NO se recorta a la columna de etiqueta, y aquí está la diferencia con el
+    // deslizador. Un deslizador necesita todo el ancho que queda, así que su etiqueta cede; una
+    // casilla ocupa un cuadrado, así que hay sitio de sobra y recortar sólo servía para dejar
+    // "only my zo…" en pantalla. Se recorta contra lo que queda de verdad, menos el hueco de la
+    // casilla, y la casilla se coloca DESPUÉS del texto cuando éste se pasa de la columna.
+    const float col = neo_label_col();
+    const float box = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+    const float room = std::max(col - 0.4f * neo_u(),
+                                ImGui::GetContentRegionAvail().x - box - 0.4f * neo_u());
+    ImGui::PushID(id);
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+    const std::string label = fit_text(caption, room);
+    ImGui::TextUnformatted(label.c_str());
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", tip != nullptr ? tip : caption);
+    // Si la etiqueta cabe en la columna, la casilla se alinea con el resto del panel y la rejilla
+    // se mantiene. Si no cabe, va detrás del texto en vez de encima de él.
+    if (ImGui::GetItemRectSize().x + 0.4f * neo_u() < col)
+        ImGui::SameLine(col);
+    else
+        ImGui::SameLine(0.f, 0.4f * neo_u());
+    const bool changed = ImGui::Checkbox("##v", v);
+    if (tip != nullptr && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", tip);
+    ImGui::PopID();
+    return changed;
+}
+
 // Una baldosa de dato: rótulo pequeño arriba, número grande abajo, y una barra opcional que dice
 // cuánto del presupuesto se ha gastado. Tres de estas cuentan de un vistazo lo que antes eran
 // cuatro frases seguidas.
@@ -3735,8 +5211,10 @@ void neo_warn_row(const char *id, const char *text, const char *why, bool amber 
 // pantalla, y por eso se puede juzgar la forma mirándola en vez de leyendo tres números.
 //
 // Qué dibuja, y de dónde sale cada trazo:
-//   · la cuña fantasma  = ±(z_low - z)·tan(ángulo MÁXIMO), o sea el corredor del motor
-//     (max_lean_angle_deg → SupportZoneProbe). Lo que cae fuera de la cuña, el motor no lo sigue.
+//   · la cuña fantasma  = ±(z_low - z)·tan(ángulo RECOMENDADO), o el del pilar si es mayor.
+//     🚨 s299 — antes esto era el tope del motor y lo de fuera no se seguía. Ya no: el motor
+//     deriva su tope del ángulo que pediste, así que la cuña es la referencia de lo cómodo, y un
+//     pilar que la desborda se imprime igual, sólo que con cuidado.
 //   · el parche         = el contorno real de la huella, medido a lo largo de la dirección del
 //                         aterrizaje (target_footprint_world).
 //   · el pie            = foot_outline_world, que con el borde progresivo YA NO es el mismo.
@@ -4112,16 +5590,33 @@ void GLGizmoSupportZones::render_zone_cards()
 
         // Las acciones se resuelven DESPUÉS de dibujar la tarjeta: borrar reconstruye la lista, y
         // hacerlo a mitad de un bucle que la está recorriendo es la manera clásica de leer basura.
+        // 🚨 s299h — LAS TRES SE DIFIEREN, Y ÉSTE ES EL CRASH QUE SEGUÍA CAYENDO AL BORRAR.
+        //
+        // Borrar el volumen por el camino correcto (`delete_from_model_and_list`) arregló el árbol
+        // de la lista, pero no el problema de FONDO: esa función llama a `select_item()`, que llama
+        // a `part_selection_changed()`, que cambia la selección del canvas — y eso reentra en este
+        // mismo gizmo (`data_changed()`, y en algunos casos `on_set_state`) MIENTRAS estamos dentro
+        // de su frame de ImGui, recorriendo `m_zones`. Al volver, la mitad del estado que este
+        // bucle está usando ya no es el mismo. Es la re-entrada de wx que el proyecto ya tiene
+        // documentada, esta vez por la puerta de la lista de objetos.
+        //
+        // 🔑 `CallAfter` lo saca del render: la acción se ejecuta en el bucle de eventos, con el
+        // frame de ImGui ya cerrado y sin nadie recorriendo nada. Es lo mismo que hace el reset del
+        // plano de sección unas líneas más abajo, y lo que hacen los demás gizmos para tocar el
+        // modelo desde un botón.
+        //
+        // ⛔ Y el `return` se queda: aunque la acción ya no ocurra aquí, este frame ha terminado de
+        // dibujar una lista que en el siguiente será otra.
         if (del_hit) {
-            delete_selected_zone();
+            wxGetApp().CallAfter([this]() { delete_selected_zone(); });
             return;
         }
         if (dup_hit) {
-            duplicate_selected_zone();
+            wxGetApp().CallAfter([this]() { duplicate_selected_zone(); });
             return;
         }
         if (unlock_hit) {
-            unlock_selected_zone();
+            wxGetApp().CallAfter([this]() { unlock_selected_zone(); });
             return;
         }
         if (edit_hit) {
@@ -4294,12 +5789,6 @@ void GLGizmoSupportZones::render_view_strip()
         m_show_gaps = ! m_show_gaps;
         m_parent.set_support_zone_gaps(m_show_gaps && get_state() == On, overhang_normal_z_cut(), m_gap_step_mm);
     }
-    ImGui::SameLine(0.f, 6.f);
-    if (neo_glyph_toggle("##vxray", sz, m_see_through, Glyph::Xray,
-                         _u8L("See through the part").c_str())) {
-        m_see_through = ! m_see_through;
-        apply_see_through();
-    }
 
     // El estado de las zonas, en la misma fila: dos píldoras que dicen cuántas hay y cuántas no
     // cogen nada. Es lo primero que se quiere saber al abrir el gizmo.
@@ -4338,18 +5827,33 @@ void GLGizmoSupportZones::render_view_strip()
                            _u8L("Red marks surface that leans past the threshold and sits inside no zone: it might need support and nothing is holding it. Green is already caught by a zone.").c_str()))
             m_parent.set_support_zone_gaps(true, overhang_normal_z_cut(), m_gap_step_mm);
     }
-    if (m_see_through) {
-        if (neo_row_slider("##stalpha", _u8L("ghost").c_str(), &m_see_through_alpha, 0.05f, 0.75f, "%.2f",
-                           _u8L("See through the part").c_str()))
-            apply_see_through();
+    // NEOTKO_SUPPORTZONES_TAG s299d — EL CORTE, en el mismo sitio donde estaba el fantasma.
+    //
+    // 🔑 Pedido por el dueño después de usar el painter de Orca: "la barra al lado de reset
+    // direction permite ver el interior y se ve en rojo el interior del objeto que necesita
+    // soportes". Es esa barra, el mismo `ObjectClipper` compartido, así que se comporta igual que
+    // en los otros painters y el plano se puede reorientar desde ellos.
+    //
+    // El botón sólo aparece cuando hay corte: con la barra a cero no hay dirección que resetear, y
+    // un botón que no hace nada es peor que no tenerlo. Mismo criterio que GLGizmoFdmSupports.
+    if (m_c != nullptr && m_c->object_clipper() != nullptr) {
+        float clp = float(m_c->object_clipper()->get_position());
+        if (neo_row_slider("##clp", _u8L("section").c_str(), &clp, 0.f, 1.f, "%.2f",
+                           _u8L("Cut the part away to look inside. It is the same section view the support painter has, so the plane keeps whatever direction you gave it there.").c_str()))
+            m_c->object_clipper()->set_position_by_ratio(clp, true);
+        if (clp != 0.f) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(_u8L("reset direction").c_str()))
+                wxGetApp().CallAfter([this]() { m_c->object_clipper()->set_position_by_ratio(-1., false); });
+        }
     }
 
-    // 🚨 s287 — el mando de los marcadores SALE de dentro del bloque del fantasma. En s286b vivía
-    // ahí porque los dos números se afinaban juntos, y el efecto secundario fue que la rejilla y el
-    // mapa se leían como parte de la transparencia del objeto: bajabas el fantasma y los puntos se
-    // iban con él. Son cosas distintas — el fantasma es la PIEZA, esto son los MARCADORES — y ahora
-    // se manda en cada una por separado, con el fantasma encendido o apagado.
-    if (m_show_gaps || m_see_through) {
+    // ⛔ s299c — el deslizador del fantasma se va con el fantasma.
+    //
+    // 🔑 Y el de los marcadores se queda, que es la razón por la que en s287 se sacó de dentro del
+    // bloque del fantasma: el fantasma era la PIEZA y esto son los MARCADORES. Aquella separación
+    // es justo lo que hace que quitar uno no se lleve el otro por delante.
+    if (m_show_gaps) {
         float marker_alpha = m_parent.get_support_zone_marker_alpha();
         if (neo_row_slider("##markera", _u8L("grid marks").c_str(), &marker_alpha, 0.10f, 1.0f, "%.2f",
                            _u8L("How strong the green grid and the red gap map are drawn. They are read through the part, so they do not depend on how ghosted the part is.").c_str())) {
@@ -4365,18 +5869,38 @@ void GLGizmoSupportZones::render_view_strip()
 // Todos juntos y en un solo sitio, en vez de repartidos por el panel donde cada uno cae. Un aviso
 // que aparece a mitad de una columna de controles la desplaza entera y hace bailar el panel; aquí
 // crecen hacia abajo y no mueven nada de lo que estabas usando.
+// NEOTKO_SUPPORTZONES_TAG s304 — «SÓLO MIS ZONAS», EN UN SOLO SITIO.
+//
+// 🔑 El cuerpo era del interruptor de s299c y ahora lo comparten el interruptor y el aviso del
+// cajón. Lo que hace por debajo ya existía en Orca —`support_type` en `normal(manual)`— pero está
+// a tres menús de distancia y con un nombre que no dice esto.
+//
+// ⛔ No se toca la familia (árbol contra normal): eso lo decide `seed_support_defaults()` al crear,
+// y cambiarlo aquí de rebote sería secuestrar un ajuste que el usuario no ha tocado. Sólo el
+// auto/manual, que es exactamente lo que dice la etiqueta.
+void GLGizmoSupportZones::apply_only_my_zones(bool only_mine)
+{
+    ModelObject *mo = const_cast<ModelObject *>(current_object());
+    if (mo == nullptr)
+        return;
+    const bool tree = is_tree(effective_support_type());
+    // Con snapshot, como el resto de overrides que pone este gizmo: un Ctrl+Z lo deshace.
+    wxGetApp().plater()->take_snapshot(_u8L("Support zones: only my zones"));
+    mo->config.set_key_value("support_type",
+        new ConfigOptionEnum<SupportType>(only_mine ? (tree ? stTree     : stNormal)
+                                                    : (tree ? stTreeAuto : stNormalAuto)));
+    if (wxGetApp().obj_list() != nullptr)
+        wxGetApp().obj_list()->update_and_show_object_settings_item();
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+}
+
 void GLGizmoSupportZones::render_issue_tray()
 {
-    // s289 — el parche que se pliega sobre sí mismo visto desde arriba. El suelo del sólido es esa
-    // misma triangulación aplastada, así que se solapa consigo mismo y el pie sale cruzado. No se
-    // arregla en silencio: se dice, porque la salida es del usuario (recortar más pequeño), no de
-    // la geometría.
-    if (m_has_target) {
-        const PatchGeom *pg = patch(m_target_facet_idx, Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
-        if (pg != nullptr && pg->folded)
-            neo_warn_row("##w_folded", _u8L("The patch folds over itself").c_str(),
-                         _u8L("The patch folds over itself seen from above, so the foot of the pillar overlaps itself. Crop it smaller, or pick a flatter part of the surface.").c_str());
-    }
+    // ⛔ s299 — aquí vivía el aviso de "el parche se pliega sobre sí mismo". Se ha QUITADO, no
+    // movido: era un problema de la geometría de antes, donde el suelo del sólido era la
+    // triangulación del parche aplastada y una banda que pasaba de la vertical se solapaba consigo
+    // misma. La huella ya es un `ExPolygons` plano, así que ese solape no puede existir: Clipper lo
+    // resolvió al unir. Un aviso que no puede dispararse es peor que ninguno.
 
     if (m_has_target && footprint_too_narrow())
         neo_warn_row("##w_narrow", _u8L("Too narrow to print").c_str(),
@@ -4403,14 +5927,32 @@ void GLGizmoSupportZones::render_issue_tray()
                      false);
     }
 
+    // NEOTKO_SUPPORTZONES_TAG s301 — EL HUECO, QUE ES LA CONDICIÓN DE QUE ESTO SEA UN ÁRBOL.
+    //
+    // 🔑 Sin hueco entre la cabeza y el tocón no hay tramo que crecer: el motor ve un bloque
+    // contiguo y baja como un pilar corriente. No es un fallo —sale una zona válida— pero es otra
+    // cosa que la que el panel está prometiendo, así que se dice.
+    if (block_tree_mode() && m_has_target && ! all_stumps().empty() && block_tree_gap_mm() <= 0.)
+        neo_warn_row("##w_nogap", _u8L("The stump reaches the area").c_str(),
+                     _u8L("The stump reaches the area: with nothing in between there is no stretch for the column to grow through, so this comes out as a plain block instead of a tree. Lower the stump, or aim at a surface higher up.").c_str());
+
     if (landing_out_of_reach()) {
         // Ámbar ganado: este enlace pide más inclinación de la que el motor puede seguir, y la
         // columna se quedaría detrás del dibujo. Decirlo aquí es la diferencia entre una herramienta
         // que informa y una que miente.
-        neo_warn_row("##w_reach", _u8L("Too far for this lean").c_str(),
-                     _u8L("Too far for this lean: the knee would come out below the bed. Steepen the lean, or bring the foot closer.").c_str());
-        if (ImGui::SmallButton(_u8L("Bring it into reach").c_str()))
-            bring_landing_into_reach();
+        // s301 — dos avisos con el mismo nombre y distinta cuenta: en el pilar lofteado la rodilla
+        // saldría por debajo de la cama; en el árbol es una raíz a la que la columna no llega
+        // gastando `d_max` en cada capa. Y ahí «Bring it into reach» no vale: sólo sabe mover el
+        // tocón primario, así que con un tocón adicional lejos arreglaría el que no falla.
+        if (block_tree_mode()) {
+            neo_warn_row("##w_reach", _u8L("A stump is too far for this lean").c_str(),
+                         _u8L("A stump is too far for this lean: the column cannot walk that far sideways in the height it has, so that root would be left behind. Steepen the lean, move the stump closer, or plant one nearer the area. The log names the layer and the island if it happens.").c_str());
+        } else {
+            neo_warn_row("##w_reach", _u8L("Too far for this lean").c_str(),
+                         _u8L("Too far for this lean: the knee would come out below the bed. Steepen the lean, or bring the foot closer.").c_str());
+            if (ImGui::SmallButton(_u8L("Bring it into reach").c_str()))
+                bring_landing_into_reach();
+        }
     }
 
     // El árbol, dicho ANTES de crear nada. Es un aviso con fecha de caducidad a propósito: crear el
@@ -4419,6 +5961,29 @@ void GLGizmoSupportZones::render_issue_tray()
     if (is_tree(effective_support_type()))
         neo_warn_row("##w_tree", _u8L("Support type is Tree").c_str(),
                      _u8L("The tree generator does not know about the corridor, so the lean and the knee you draw here would not come out. Creating the pillar switches this object to Normal, keeping whether it was auto or manual. It is an object setting: undo it, or remove it from the object list.").c_str());
+
+    // NEOTKO_SUPPORTZONES_TAG s304 — EL AUTOMÁTICO SIGUE ENCENDIDO, Y ES LA PREGUNTA QUE SE HACE
+    // MIRANDO EL RESULTADO.
+    //
+    // 🔑 Dicho por el dueño con los tocones ya funcionando: «se generan soportes no deseados... la
+    // solución para mí fue activar On Build Plate Only», y acto seguido cayó en que con
+    // `normal(manual)` salía perfecto. El interruptor «only my zones» de s299c hace exactamente
+    // eso y estaba a un dedo, arriba en esta misma ventana. O sea que no faltaba la función:
+    // faltaba que el aviso llegara en el momento en el que uno se hace la pregunta.
+    //
+    // ⛔ Y NO se cambia el ajuste solo al plantar un tocón. Esa decisión ya está tomada por escrito
+    // en `seed_support_defaults()` (s287-bis) y sigue valiendo: quien tiene `normal(auto)` y añade
+    // una zona puede querer las dos cosas, y quitarle el automático por haber pintado un tocón
+    // sería secuestrarle el objeto. Se avisa y se ofrece el clic; decide él.
+    //
+    // ⚠️ Sólo con zonas ya creadas. Con el gizmo abierto y nada dibujado, el automático no es un
+    // problema de nadie y el aviso sería ruido.
+    if (! m_zones.empty() && is_auto(effective_support_type())) {
+        neo_warn_row("##w_auto", _u8L("Automatic support is also on").c_str(),
+                     _u8L("Automatic support is also on: besides your zones, the slicer supports everything else it thinks needs holding, which is where the support you did not draw comes from. Turning it off leaves only what you painted.").c_str());
+        if (ImGui::SmallButton(_u8L("Only my zones").c_str()))
+            apply_only_my_zones(true);
+    }
 
     if (m_has_target && m_has_landing && ! m_preview_model.is_initialized())
         // Ni un crash ni un silencio: la geometría salió degenerada.
@@ -4442,12 +6007,46 @@ void GLGizmoSupportZones::render_panel_body()
 
     // --- Las zonas que ya existen ---------------------------------------------
     neo_section(_u8L("Zones on this object").c_str());
+
+    // NEOTKO_SUPPORTZONES_TAG s299c — SÓLO MIS ZONAS.
+    //
+    // 🔑 Pedido por el dueño con estas palabras: "los soportes se crean, pero a la vez crea todos
+    // los demás soportes naturales que necesitaría el objeto, y debería ser sólo el creado por mí".
+    //
+    // Lo que hace por debajo ya existía en Orca —`support_type` en `normal(manual)`— pero estaba a
+    // tres menús de distancia y con un nombre que no dice esto. Aquí es una línea, en el sitio
+    // donde uno se hace la pregunta, y escribe el override EN EL OBJETO, así que se ve en la lista
+    // de objetos y se puede quitar desde allí como cualquier otro.
+    if (current_object() != nullptr) {
+        bool only_mine = ! is_auto(effective_support_type());
+        if (neo_row_toggle("##onlymine", _u8L("only my zones").c_str(), &only_mine,
+                           (_u8L("Only the zones you drew get support. The automatic overhang detection is turned off for this object.") + "\n\n" +
+                            _u8L("With it off, the slicer also supports everything else it thinks needs holding, and your zones are added on top.")).c_str()))
+            // s304 — el cuerpo vive en `apply_only_my_zones()`: el aviso del cajón ofrece el mismo
+            // cambio de un clic y los dos tienen que escribir exactamente lo mismo.
+            apply_only_my_zones(only_mine);
+    }
+
     if (m_zones.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
         ImGui::TextWrapped("%s", _u8L("No support zones yet. A zone is a support enforcer volume: add one from the object list, or pick a surface below.").c_str());
         ImGui::PopStyleColor();
     } else {
         render_zone_cards();
+        // ⛔ s301b — AQUÍ VIVÍAN «grab only at its roof» Y «print the whole block», Y SE HAN QUITADO.
+        //
+        // 🚨 Medido por el dueño en el gcode del primer build de s301: las dos son la causa de los
+        // techos de soporte DENTRO de la pieza, y con las dos apagadas los pilares de círculo,
+        // cuadrado y parche salen bien. Un interruptor cuyo único efecto medido es romper la pieza
+        // no es una opción, es una trampa — y encima estaba encendido por defecto.
+        //
+        // 🔑 Ahora las dos nacen apagadas en `write_pillar_into()`, para todos los modos. Y no hay
+        // migración que hacer: ninguna llegó a un build publicado, así que no existe un 3mf que las
+        // traiga puestas. El motor las sigue entendiendo, que es lo que permitirá volver a medirlas
+        // a mano cuando se toquen los soportes que no son de tocón.
+        //
+        // ⛔ s299e — y antes de éstos vivía aquí «land only at the end», fuera del panel por otra
+        // razón: recorta dónde puede posarse el pilar y esta herramienta promete lo contrario.
         if (m_selected_zone >= 0)
             render_zone_materials();
     }
@@ -4492,7 +6091,10 @@ void GLGizmoSupportZones::render_panel_body()
     // casilla: es un MODO, y un modo activo tiene que verse desde el otro lado de la pantalla.
     {
         const float bh = 2.15f * neo_u();
-        const float bw = (avail - 6.f) * 0.5f;
+        // s301 — con el pincel son TRES pasos: superficie, aterrizaje y tocones. Los otros modos
+        // siguen teniendo dos, así que el ancho sale de cuántos hay y no de un número escrito.
+        const int   n_steps = block_tree_mode() ? 3 : 2;
+        const float bw = (avail - 6.f * float(n_steps - 1)) / float(n_steps);
         auto step_button = [&](const char *id, bool active, bool done, bool enabled, Glyph g,
                                const char *label, const char *tip) -> bool {
             const bool pressed = ImGui::InvisibleButton(id, ImVec2(bw, bh));
@@ -4532,6 +6134,7 @@ void GLGizmoSupportZones::render_panel_body()
                 m_candidates.clear();
             } else {
                 m_landing_pick_mode = false;
+                m_stump_pick_mode   = false;
             }
             m_parent.set_as_dirty();
         }
@@ -4542,9 +6145,41 @@ void GLGizmoSupportZones::render_panel_body()
                                    : (_u8L("2 · Where it lands") + "\n\n" +
                                       _u8L("Click the bed, or a surface of the part below the one you picked."))).c_str())) {
             m_landing_pick_mode = ! m_landing_pick_mode;
-            if (m_landing_pick_mode)
+            if (m_landing_pick_mode) {
                 m_target_pick_mode = false;
+                m_stump_pick_mode  = false;
+            }
             m_parent.set_as_dirty();
+        }
+
+        // NEOTKO_SUPPORTZONES_TAG s301 — EL TERCER PASO: PLANTAR TOCONES.
+        //
+        // 🔑 El paso 2 sigue siendo el que hay: el tocón primario, sembrado a plomo y movible. Éste
+        // añade los DEMÁS, que es lo que hace falta para un área grande — con un tocón a cada lado
+        // del centro de un donut la columna se parte sola al bajar y cada mitad va a la suya.
+        if (block_tree_mode()) {
+            ImGui::SameLine(0.f, 6.f);
+            char lbl[64];
+            std::snprintf(lbl, sizeof(lbl), "%s (%d)", _u8L("3 · Stumps").c_str(),
+                          int(all_stumps().size()));
+            if (step_button("##step3", m_stump_pick_mode, ! m_extra_stumps.empty(),
+                            m_has_target && ! editing(), Glyph::Landing, lbl,
+                            (_u8L("3 · Plant the stumps") + "\n\n" +
+                             // 🔑 s301b, dicho por él: «no me queda claro si realmente lo necesito o
+                             // simplemente puedo». Un mando que no dice CUÁNDO hace falta es un mando
+                             // que obliga a experimentar, así que la respuesta va primero y el gesto
+                             // después.
+                             _u8L("One is enough almost always: the first one is planted for you, plumb under what you painted.") + "\n" +
+                             _u8L("Plant another only when the tray below says a root does not reach - a long or forked area needs a foot at each end, or the column would lean further than the angle allows.") + "\n\n" +
+                             _u8L("Click the bed, or a shelf of the part, to plant one. Click a stump again to pull it out.") + "\n" +
+                             _u8L("The column is born from the whole painted area and splits on the way down, each piece heading for its nearest stump.")).c_str())) {
+                m_stump_pick_mode = ! m_stump_pick_mode;
+                if (m_stump_pick_mode) {
+                    m_target_pick_mode  = false;
+                    m_landing_pick_mode = false;
+                }
+                m_parent.set_as_dirty();
+            }
         }
     }
 
@@ -4585,21 +6220,44 @@ void GLGizmoSupportZones::render_panel_body()
     // --- Las tres baldosas ----------------------------------------------------
     if (m_has_target) {
         const float tw = (avail - 12.f) / 3.f;   // tres baldosas con 6 px entre ellas
-        const double a_max = max_lean_angle_deg();
-        char v[48], tip[256];
+        // NEOTKO_SUPPORTZONES_TAG s299 — los tres tramos de la recomendación, en un solo sitio.
+        //
+        // 🔑 El color ya no dice "te has pasado del tope", porque tope no hay. Dice en qué terreno
+        // estás: verde lo seguro, ámbar lo que hay que imprimir con cuidado, rojo lo que sólo sale
+        // a velocidad baja. El número calculado (`a_adv`) sigue en el tooltip porque depende de la
+        // altura de capa y de la boquilla, y esos sí cambian de una placa a otra.
+        const double a_adv = max_lean_angle_deg();
+        const double lean  = double(m_lean_angle_deg);
+        char v[48], tip[320];
 
-        std::snprintf(v, sizeof(v), "%.0f°", double(m_lean_angle_deg));
-        std::snprintf(tip, sizeof(tip), "%s %.0f deg  ·  %s %.2f mm %s",
-                      _u8L("At most").c_str(), a_max,
-                      _u8L("the support can only step").c_str(),
-                      SupportZones::corridor_step_mm(support_line_width_mm()),
-                      _u8L("per layer").c_str());
+        std::snprintf(v, sizeof(v), "%.0f°", lean);
+        std::snprintf(tip, sizeof(tip), "%s\n\n%s %.0f deg  ·  %s %.2f mm %s",
+                      lean > 60. ? _u8L("Above 60 deg: only at low speed.").c_str()
+                        : lean > 50. ? _u8L("Above 50 deg: needs enough width and top gap.").c_str()
+                                     : _u8L("Safe range.").c_str(),
+                      _u8L("Recommended up to").c_str(), a_adv,
+                      _u8L("at this layer height a support line is").c_str(),
+                      support_line_width_mm(),
+                      _u8L("wide").c_str());
         neo_stat_tile("##t_lean", tw, _u8L("LEAN").c_str(), v,
-                      double(m_lean_angle_deg) >= a_max - 0.5 ? neo_col_u32(NeoCol::Warn) : neo_col_u32(NeoCol::AccentBright),
-                      float(double(m_lean_angle_deg) / std::max(1., a_max)), tip);
+                      lean > 60. ? neo_col_u32(NeoCol::Forbid)
+                        : lean > 50. ? neo_col_u32(NeoCol::Warn)
+                                     : neo_col_u32(NeoCol::Optimal),
+                      float(lean / SupportZones::SUPPORT_ZONE_MAX_LEAN_DEG), tip);
 
         ImGui::SameLine(0.f, 6.f);
-        if (! m_has_landing) {
+        if (block_tree_mode()) {
+            // s301 — en el árbol de bloques la baldosa cambia de pregunta: no hay rodilla que
+            // enseñar porque no hay tramo dibujado. Lo que sí importa es cuántas raíces tiene, que
+            // es lo que decide si el área se reparte o se queda coja.
+            char sv[32];
+            std::snprintf(sv, sizeof(sv), "%d", int(all_stumps().size()));
+            neo_stat_tile("##t_knee", tw, _u8L("STUMPS").c_str(), sv,
+                          all_stumps().empty() ? neo_fade(NeoCol::TextDim, 0.9f)
+                                               : neo_col_u32(NeoCol::AccentBright), -1.f,
+                          (_u8L("No knee here: the stretch between the area and the stumps is not drawn, it grows.") + "\n\n" +
+                           _u8L("The column is born from the whole painted area and contracts toward the nearest stump as it descends, spending at most one lean-step per layer.")).c_str());
+        } else if (! m_has_landing) {
             neo_stat_tile("##t_knee", tw, _u8L("KNEE").c_str(), "·", neo_fade(NeoCol::TextDim, 0.9f), -1.f, nullptr);
         } else {
             const double offs   = landing_offset_mm();
@@ -4652,29 +6310,75 @@ void GLGizmoSupportZones::render_panel_body()
         ImGui::TextUnformatted(_u8L("footprint").c_str());
         ImGui::PopStyleColor();
         ImGui::SameLine(neo_label_col());
-        // s289 — cuatro, y la cuarta es el pincel. Las tres primeras recortan alrededor del punto
-        // que pinchaste; el pincel recorta contra lo que hayas ido marcando al arrastrar. Por
-        // dentro todas producen lo mismo (`crop_shape()`), así que el resto del panel ni se entera.
-        const Glyph       shape_g[4] = { Glyph::Patch, Glyph::Round, Glyph::Square, Glyph::Brush };
-        const std::string shape_t[4] = { _u8L("Whole patch"), _u8L("Round"), _u8L("Square"), _u8L("Paint") };
+        // 🔑 s299 — TRES, y el cuadrado deja de ser uno de ellos. Decisión del dueño: "círculo para
+        // point/click, área agrandar/achicar, y brocha libre".
+        //
+        // El cuadrado no se va porque estorbe: se va porque era EL QUE MEJOR FUNCIONABA por el
+        // motivo equivocado. Con el desplazamiento por vértice de antes, cuatro esquinas convexas
+        // eran el único caso donde crecer daba una forma correcta, así que el cuadrado parecía el
+        // bueno y las otras formas, rotas. Ahora crece Clipper y las tres van igual de bien, así
+        // que sobra un modo que estaba ahí para tapar un bug.
+        //
+        // 🚨 s301c — Y AQUÍ ESTABA EL BUG QUE ÉL ARRASTRABA DESDE s299: «el cuadrado desaparece al
+        // cambiar a pintar o círculo».
+        //
+        // La lista era `{ Patch, Round, Brush }` y el cuadrado se añadía SÓLO si era la forma
+        // activa. La intención de arriba es buena —jubilarlo, porque era el que mejor funcionaba
+        // por el motivo equivocado— pero «oculto salvo herencia» salió implementado como PUERTA DE
+        // UN SOLO SENTIDO: al pulsar cualquier otra forma el botón se iba de la lista y no había
+        // manera de volver salvo reabrir una zona ya guardada con él.
+        //
+        // 🔑 Un modo del que se puede salir y no entrar no es un modo jubilado, es un modo roto. Y
+        // la razón para jubilarlo se cayó sola: con `offset_ex()` de Clipper las cuatro formas
+        // crecen igual de bien, así que el cuadrado ya no tapa ningún bug — es una forma más, y hay
+        // huellas que son cuadradas.
+        std::vector<FootShape> shapes { FootShape::Patch, FootShape::Round, FootShape::Square, FootShape::Brush };
+        auto glyph_of = [](FootShape f) {
+            switch (f) {
+            case FootShape::Round:  return Glyph::Round;
+            case FootShape::Square: return Glyph::Square;
+            case FootShape::Brush:  return Glyph::Brush;
+            default:                return Glyph::Patch;
+            }
+        };
+        auto title_of = [](FootShape f) {
+            switch (f) {
+            case FootShape::Round:  return _u8L("Round");
+            case FootShape::Square: return _u8L("Square");
+            case FootShape::Brush:  return _u8L("Paint");
+            default:                return _u8L("Whole patch");
+            }
+        };
         const std::string cut_tip    = _u8L("Cut around the point you picked. The roof still follows the surface, so it stays flush on a curve.");
         const std::string brush_tip  = _u8L("Drag on the surface to mark the area you want held up. Shift-drag rubs it out. The mark is the size of the brush, so a small brush draws a narrow strip.");
-        for (int i = 0; i < 4; ++ i) {
+        for (size_t i = 0; i < shapes.size(); ++ i) {
             if (i > 0)
                 ImGui::SameLine(0.f, 5.f);
             char id[16];
-            std::snprintf(id, sizeof(id), "##shape%d", i);
-            if (neo_glyph_toggle(id, 1.6f * neo_u(), int(m_foot_shape) == i, shape_g[i],
-                                 i == 0 ? shape_t[i].c_str()
-                                        : (shape_t[i] + "\n\n" + (i == 3 ? brush_tip : cut_tip)).c_str())
-                && int(m_foot_shape) != i) {
-                m_foot_shape       = FootShape(i);
+            std::snprintf(id, sizeof(id), "##shape%d", int(shapes[i]));
+            const std::string title = title_of(shapes[i]);
+            if (neo_glyph_toggle(id, 1.6f * neo_u(), m_foot_shape == shapes[i], glyph_of(shapes[i]),
+                                 shapes[i] == FootShape::Patch
+                                     ? title.c_str()
+                                     : (title + "\n\n" + (shapes[i] == FootShape::Brush ? brush_tip : cut_tip)).c_str())
+                && m_foot_shape != shapes[i]) {
+                m_foot_shape       = shapes[i];
                 // Cambiar de forma no borra lo pintado: se puede ir y volver al pincel sin perder
                 // el trazo, que es lo que uno espera de un modo y no de un botón destructivo.
                 m_preview_dirty    = true;
                 invalidate_patch();
                 m_parent.set_as_dirty();
             }
+        }
+
+        // s299f — fuera o dentro. Va aquí, con la forma, porque decide DÓNDE cae lo que pintas y no
+        // qué se hace con ello después.
+        if (neo_row_toggle("##paintin", _u8L("paint inside").c_str(), &m_paint_inside,
+                           (_u8L("Off: you paint the surface you can see, and only that one. It is what you want almost always.") + "\n\n" +
+                            _u8L("On: the pick goes through the wall, so you can grab a surface inside a hollow part. Use the section view to see what you are doing.")).c_str())) {
+            m_cand_mouse = Vec2d(-1e9, -1e9);   // la lista de candidatos se rehace con la regla nueva
+            invalidate_patch();
+            m_parent.set_as_dirty();
         }
 
         if (m_foot_shape != FootShape::Patch) {
@@ -4747,6 +6451,7 @@ void GLGizmoSupportZones::render_panel_body()
                 ImGui::SameLine(0.f, 8.f);
                 if (ImGui::SmallButton(_u8L("clear").c_str())) {
                     m_stamps.clear();
+                    clear_painted();
                     m_brush_seed_facet = -1;
                     m_preview_dirty    = true;
                     invalidate_patch();
@@ -4755,6 +6460,54 @@ void GLGizmoSupportZones::render_panel_body()
             }
         }
 
+        // NEOTKO_SUPPORTZONES_TAG s301 — EL TOCÓN: UN TAMAÑO Y UNA CUENTA.
+        //
+        // 🔑 El §9.3 del estudio dejaba abierto qué pasaba con `expand` en el modelo nuevo. La
+        // respuesta es que no pasa nada: con el pincel `expand` ya era el TAMAÑO DE LA BROCHA y
+        // sigue siéndolo. El tocón necesita el suyo, y es otro mando porque es otra cosa — uno dice
+        // cuánto pintas y el otro cuánto pie plantas.
+        //
+        // ⛔ Y no hay mando de ALTURA (decisión suya): la altura de un tocón no es algo que se juzgue
+        // mirándola, sólo tiene que dar unas capas de imán. Vive como constante en la cabecera.
+        if (block_tree_mode()) {
+            if (neo_row_slider("##stumpsize", _u8L("stump").c_str(), &m_stump_size_mm, 1.f, 40.f, "%.1f mm",
+                               (_u8L("How wide each stump is where it stands.") + "\n\n" +
+                                _u8L("The column narrows down to this on the last few layers, so a stump much smaller than the area you painted starves it. The log says so if it happens.")).c_str())) {
+                m_preview_dirty         = true;
+                m_footprint_model_dirty = true;
+                m_parent.set_as_dirty();
+            }
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+            ImGui::TextUnformatted(_u8L("stumps").c_str());
+            ImGui::PopStyleColor();
+            ImGui::SameLine(neo_label_col());
+            const size_t n_st = all_stumps().size();
+            char stmsg[128];
+            if (n_st == 0)
+                std::snprintf(stmsg, sizeof(stmsg), "%s", _u8L("none yet").c_str());
+            else if (m_extra_stumps.empty())
+                std::snprintf(stmsg, sizeof(stmsg), "1  %s", _u8L("(plumb, under the area)").c_str());
+            else
+                std::snprintf(stmsg, sizeof(stmsg), "%d", int(n_st));
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  n_st == 0 ? neo_col(NeoCol::TextDim) : neo_col(NeoCol::AccentBright));
+            ImGui::TextUnformatted(stmsg);
+            ImGui::PopStyleColor();
+            if (! m_extra_stumps.empty()) {
+                ImGui::SameLine(0.f, 8.f);
+                if (ImGui::SmallButton((_u8L("clear") + "##stumps").c_str())) {
+                    // ⛔ Sólo los ADICIONALES. El primario es el aterrizaje y se mueve con «Move it
+                    // again»; borrarlo desde aquí dejaría el árbol sin ningún pie y sin forma de
+                    // recuperarlo salvo repintando.
+                    m_extra_stumps.clear();
+                    m_preview_dirty         = true;
+                    m_footprint_model_dirty = true;
+                    m_parent.set_as_dirty();
+                }
+            }
+        }
     }
 
     if (m_has_target) {
@@ -4791,7 +6544,11 @@ void GLGizmoSupportZones::render_panel_body()
             invalidate_patch();
             m_parent.set_as_dirty();
         }
-        if (neo_row_slider("##shrinkbase", _u8L("foot").c_str(), &m_footprint_base_mm,
+        // ⛔ s301 — el `foot` no se ofrece en el árbol de bloques. Ahí el pie no es el anillo de
+        // abajo de un pilar: es el TOCÓN, y tiene su propio mando arriba. Dejar este deslizador
+        // sería ofrecer un número que no cambia nada de lo que se ve, que es peor que no ofrecerlo.
+        if (! block_tree_mode() &&
+            neo_row_slider("##shrinkbase", _u8L("foot").c_str(), &m_footprint_base_mm,
                            edge_lo, edge_hi, "%.1f mm", taper.c_str())) {
             m_preview_dirty = true;
             invalidate_patch();
@@ -4813,20 +6570,29 @@ void GLGizmoSupportZones::render_panel_body()
     }
 
     if (m_has_target && m_has_landing) {
-        // 🔑 Este deslizador es el dato de entrada del pilar. Su tope NO lo pone el gusto del
-        // usuario: sale de `d_max` (SupportZoneProbe.hpp), o sea de cuánto puede moverse el soporte
-        // de una capa a la siguiente.
-        const double a_max = max_lean_angle_deg();
-        if (m_lean_angle_deg > float(a_max))
-            m_lean_angle_deg = float(a_max);
-        char tip[256];
-        std::snprintf(tip, sizeof(tip), "%s %.0f deg  ·  %s %.2f mm %s",
-                      _u8L("At most").c_str(), a_max,
-                      _u8L("the support can only step").c_str(),
-                      SupportZones::corridor_step_mm(support_line_width_mm()),
-                      _u8L("per layer").c_str());
+        // 🔑 s299 — ESTE DESLIZADOR YA NO TIENE CANDADO, y es el cambio que pidió el dueño.
+        //
+        // Antes su tope era `max_lean_angle_deg()`, o sea `atan(k·ancho / altura_de_capa)`. Con
+        // capa 0.32 eso son 42°, y con altura de capa variable el mismo bloque se inclinaba
+        // distinto en cada tramo. Ahora el ángulo es el DATO y el motor deriva de él su tope por
+        // capa, así que se puede pedir lo que se quiera hasta el máximo duro.
+        //
+        // Lo que queda de `max_lean_angle_deg()` es la RECOMENDACIÓN: el color del deslizador y lo
+        // que dice el tooltip. Pasarse es legítimo, no avisarlo no lo sería.
+        const double a_adv = max_lean_angle_deg();
+        char tip[320];
+        std::snprintf(tip, sizeof(tip), "%s %.0f deg %s %.2f mm %s.\n%s",
+                      _u8L("Recommended up to").c_str(), a_adv,
+                      _u8L("for this layer height and a support line of").c_str(),
+                      support_line_width_mm(),
+                      _u8L("wide").c_str(),
+                      double(m_lean_angle_deg) > 60.
+                          ? _u8L("Above 60 deg: only at low speed.").c_str()
+                          : double(m_lean_angle_deg) > 50.
+                              ? _u8L("Above 50 deg: needs enough width and top gap.").c_str()
+                              : _u8L("Safe range.").c_str());
         if (neo_row_slider("##leanangle", _u8L("lean").c_str(), &m_lean_angle_deg,
-                           1.f, float(std::max(2., a_max)), "%.0f deg", tip)) {
+                           1.f, float(SupportZones::SUPPORT_ZONE_MAX_LEAN_DEG), "%.0f deg", tip)) {
             m_preview_dirty = true;
             m_reach_model_r = -1.;   // la franja depende del ángulo: se vuelve a construir
             m_parent.set_as_dirty();
@@ -4888,7 +6654,18 @@ void GLGizmoSupportZones::render_panel_body()
     // --- Crear ----------------------------------------------------------------
     ImGui::Spacing();
     {
-        const bool ready = m_has_target && m_has_landing && m_preview_model.is_initialized();
+        // NEOTKO_SUPPORTZONES_TAG s300g — LA TRAVESÍA YA NO SE PUEDE CREAR, SÓLO SE PODÍA VER.
+        //
+        // 🚨 Esto ya avisaba desde s286 ("It goes through the part") pero el aviso sólo elegía un
+        // color: el botón seguía dejando crear la zona. Medido en s300g: un pilar que cruzaba el
+        // toro de lado a lado se creó sin que nada lo impidiera, y de ahí salió media tarde de
+        // buscar en el motor un fallo que estaba en el editor.
+        //
+        // El §1 del plan se compromete con "un editor que no miente: no dibuja columnas que luego
+        // no salen". Un pilar enterrado en la pieza es exactamente eso, y encima peor que no tener
+        // pilar: se imprime y se suelda a la pared.
+        const bool crosses = m_has_target && m_has_landing && pillar_crosses_object();
+        const bool ready = m_has_target && m_has_landing && m_preview_model.is_initialized() && ! crosses;
         const bool edit  = editing();
         const float bh = 2.3f * neo_u();
         // 🚨 El disparo va con el RETORNO del botón (soltar), no con IsItemClicked (pulsar): crear
@@ -4916,7 +6693,8 @@ void GLGizmoSupportZones::render_panel_body()
                 create_pillar();
         }
         if (! ready && ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", m_has_target ? _u8L("Click the bed, or a surface of the part below the one you picked.").c_str()
+            ImGui::SetTooltip("%s", crosses ? _u8L("This pillar goes through the part: move the landing spot to a side where the way down is clear.").c_str()
+                                            : m_has_target ? _u8L("Click the bed, or a surface of the part below the one you picked.").c_str()
                                                  : _u8L("Only surfaces that look downward can be picked, so the top of the part is never taken by mistake.").c_str());
     }
 

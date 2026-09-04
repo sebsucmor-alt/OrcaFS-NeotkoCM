@@ -1119,11 +1119,10 @@ int WebPresetDialog::GetFilamentInfo(std::string VendorDirectory, json& pFilaLis
                 std::string FPath = pFilaList[FName]["sub_path"];
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Before Format Inherits Path: VendorDirectory - " << VendorDirectory
                                         << ", sub_path - " << FPath;
-                wxString                strNewFile = wxString::Format("%s%c%s", wxString(VendorDirectory.c_str(), wxConvUTF8),
-                                                                      boost::filesystem::path::preferred_separator, FPath);
-                boost::filesystem::path inherits_path(w2s(strNewFile));
+                // Upstream Snapmaker #729 (c3dff6add9): evitar w2s()/mb_str(), que en Windows
+                // pasa por la code page ANSI y rompe las rutas con Unicode.
+                boost::filesystem::path inherits_path = (boost::filesystem::path(VendorDirectory) / FPath).make_preferred();
 
-                // boost::filesystem::path nf(strNewFile.c_str());
                 if (boost::filesystem::exists(inherits_path))
                     return GetFilamentInfo(VendorDirectory, pFilaList, inherits_path.string(), sVendor, sType);
                 else {

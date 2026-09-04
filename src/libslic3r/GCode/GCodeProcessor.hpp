@@ -220,6 +220,12 @@ class Print;
         PrintEstimatedStatistics print_statistics;
         std::vector<CustomGCode::Item> custom_gcode_per_print_z;
         std::vector<std::pair<float, std::pair<size_t, size_t>>> spiral_vase_layers;
+        // NEOTKO_SPIRALGUARD_TAG — post-slice report for spiral lifts, filled by GCode.cpp from the
+        // GCodeWriter counters. Zero across the board (an opened .gcode, a print with no spiral
+        // lift at all) means "nothing to say" and the GUI stays quiet.
+        unsigned int spiral_lift_total{ 0 };
+        unsigned int spiral_lift_degraded{ 0 };
+        double       spiral_lift_first_degraded_z{ 0. };
         //BBS
         std::vector<SliceWarning> warnings;
         int nozzle_hrc;
@@ -254,6 +260,9 @@ class Print;
             print_statistics = other.print_statistics;
             custom_gcode_per_print_z = other.custom_gcode_per_print_z;
             spiral_vase_layers = other.spiral_vase_layers;
+            spiral_lift_total = other.spiral_lift_total;
+            spiral_lift_degraded = other.spiral_lift_degraded;
+            spiral_lift_first_degraded_z = other.spiral_lift_first_degraded_z;
             warnings = other.warnings;
             bed_type = other.bed_type;
             bed_match_result = other.bed_match_result;
@@ -734,6 +743,30 @@ class Print;
         int m_delta_temperature;
         int m_preheat_steps;
         bool m_disable_m73;
+
+        // NEOTKO_TOOLSLEEP_TAG s294 — "Turn off unused hotends fully (0 C)".
+        // docs/FUTURE/IDLE_TOOL_POWER_DOWN.md. Mirrored from the app_config toggle through
+        // PrintConfig (see Plater::priv::neotko_full_config).
+        bool m_neotko_toolsleep_enabled{ false };
+        // "Extra Energy Save": power down on EVERY park, not just after the last use. Orca's own
+        // preheat backtrace then removes the shutdown for any tool that comes back inside its
+        // preheat window, so this can never cost print time. See the .cpp for the three cases.
+        bool m_neotko_toolsleep_deep{ false };
+        // Per-tool gcode line id of the LAST line that extrudes with that tool, taken from
+        // m_result.moves (already fully parsed by the time run_post_process runs). 0 = never used.
+        // This is what makes "does this tool come back?" answerable in a single forward pass.
+        std::vector<unsigned int> m_neotko_toolsleep_last_use;
+        // Tools already switched off, so a tool is never powered down twice.
+        std::vector<bool> m_neotko_toolsleep_done;
+        // Diagnostics for the ORCA_DEBUG_TOOLSLEEP channel and the "nothing happened" warning.
+        unsigned int m_neotko_toolsleep_rewrites{ 0 };
+        // How many tools actually EXTRUDE in this print, counted from m_neotko_toolsleep_last_use.
+        // Not m_result.extruders_count, which counts loaded slots: on a single-tool print with four
+        // filaments loaded that would be 4, and the "nothing was switched off" warning below would
+        // fire on a print that has no toolchange and therefore nothing to park.
+        unsigned int m_neotko_toolsleep_tools_used{ 0 };
+        void neotko_toolsleep_prepare();
+        bool neotko_toolsleep_rewrite_line(std::string& gcode_line, unsigned int line_id);
 #if ENABLE_GCODE_VIEWER_STATISTICS
         std::chrono::time_point<std::chrono::high_resolution_clock> m_start_time;
 #endif // ENABLE_GCODE_VIEWER_STATISTICS

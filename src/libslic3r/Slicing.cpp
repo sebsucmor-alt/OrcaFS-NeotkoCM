@@ -239,6 +239,50 @@ std::vector<coordf_t> layer_height_profile_from_ranges(
    	return layer_height_profile;
 }
 
+// NEOTKO_PRECISIONALH_TAG s299 — reescalado del perfil cuando el objeto cambia de altura.
+//
+// El perfil vive en Z ABSOLUTA (mm desde la base del objeto), asi que en cuanto se escala el
+// objeto en Z su ultima Z deja de coincidir con la altura nueva. Hasta s299 eso lo trataban
+// como "perfil corrupto" DOS sitios distintos, y los dos lo tiraban a la basura:
+//   - PrintObject::update_layer_height_profile(): clear() + regeneracion plana (el slice).
+//   - GLGizmoPrecisionALH::load_points_from_profile(): seed_flat_profile() (el editor).
+// Desde fuera eso se ve como "al reescalar se borra el dato".
+//
+// Un escalado en Z es exactamente un cambio de escala de la coordenada Z del perfil: las
+// ALTURAS DE CAPA no se tocan (una capa de 0.12 sigue siendo de 0.12; lo que cambia es entre
+// que Z y que Z se aplica). De ahi que el remapeo sea proporcional en z e identidad en h.
+//
+// Devuelve false y deja el perfil INTACTO cuando el remapeo no se puede defender: perfil mal
+// formado, altura nueva absurda, o un factor fuera de banda (un x100 no es un reescalado, es
+// otro objeto). El que llama decide entonces si tira el perfil.
+bool rescale_layer_height_profile(std::vector<coordf_t> &profile, coordf_t new_height)
+{
+    if (profile.size() < 4 || (profile.size() & 1) != 0)
+        return false;
+    if (new_height < 1e-4)
+        return false;
+    // El perfil tiene que arrancar en la base del objeto: si no, no es un perfil entero y
+    // reescalarlo solo esconderia el problema de verdad.
+    if (std::abs(profile.front()) > 1e-3)
+        return false;
+    const coordf_t old_height = profile[profile.size() - 2];
+    if (old_height < 1e-4)
+        return false;
+
+    const double k = double(new_height) / double(old_height);
+    if (k < 0.02 || k > 50.0)
+        return false;
+
+    for (size_t i = 0; i + 1 < profile.size(); i += 2)
+        profile[i] *= k;
+    // Los dos extremos, exactos: la primera Z y la ultima son justo lo que comprueban
+    // update_layer_height_profile() y generate_object_layers(), y un error de redondeo ahi
+    // vuelve a disparar el descarte que estamos evitando.
+    profile.front() = 0.;
+    profile[profile.size() - 2] = new_height;
+    return true;
+}
+
 // Based on the work of @platsch
 // Fill layer_height_profile by heights ensuring a prescribed maximum cusp height.
 std::vector<double> layer_height_profile_adaptive(const SlicingParameters& slicing_params, const ModelObject& object, float quality_factor)

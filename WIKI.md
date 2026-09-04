@@ -87,7 +87,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 11. [Precision Adaptive Layer Height — point-based layer height curve](#11-precision-adaptive-layer-height--point-based-layer-height-curve)
     - 11a. [Adapt to Color — color-aware height guidance](#11a-adapt-to-color-238-wip--color-aware-height-guidance)
     - 11b. [Slope Pattern Recolor — keep the pattern alive on slopes](#11b-slope-pattern-recolor-238-wipexperimental--keep-the-pattern-alive-on-slopes)
-12. [NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar](#12-neowave-support-wip--wave-huygens-roof--hollow-pillar)
+12. [NeoWave Support (WIP) — Wave-Huygens roof + hollow pillar + contact layer](#12-neowave-support-wip--wave-huygens-roof--hollow-pillar--contact-layer)
 13. [Painter Pro Mode — precision tools for the stock Color Painting gizmo](#13-painter-pro-mode--precision-tools-for-the-stock-color-painting-gizmo)
     - 13a. [Brush precision](#13a-brush-precision)
     - 13b. [Paint perimeters only + Extra walls](#13b-paint-perimeters-only--extra-walls)
@@ -106,7 +106,7 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 21. [Real prints — what this actually looks like off the bed](#21-real-prints--what-this-actually-looks-like-off-the-bed)
 22. [Photo Mode (2.4.2) — a photo studio inside Prepare](#22-photo-mode-242--a-photo-studio-inside-prepare)
 23. [Height Adaptive Effects (2.4.3) — settings that change with height](#23-height-adaptive-effects-243--settings-that-change-with-height)
-24. [Support Zones (2.4.4) — supports you aim](#24-support-zones-244--supports-you-aim)
+24. [Support Zones (2.4.4, extended in 2.4.5) — supports you aim](#24-support-zones-244-extended-in-245--supports-you-aim)
     - 23a. [Building the list](#23a-building-the-list)
     - 23b. [Drawing the curve](#23b-drawing-the-curve)
     - 23c. [Steps or ramp — and the number that decides](#23c-steps-or-ramp--and-the-number-that-decides)
@@ -993,7 +993,23 @@ between them.
 5. Every discrete edit (point add/move/delete, tension change, Reset) is a normal undo step and
    triggers a re-slice, same as the stock brush.
 
+**Resizing the object keeps your curve (2.4.5, new)**
+
+The profile is stored as heights against Z, in millimetres from the base of the object, so scaling
+the object taller or shorter leaves every Z pointing at the old height. That used to be read as a
+corrupt profile and thrown away twice over: the slicer regenerated a flat one, and this editor
+reseeded a flat curve the next time you opened it, which then wrote the loss into the project.
+Shrinking behaved worse than growing — the curve was kept but every point except the top one was
+left above the roof of the object.
+
+Both now stretch the curve to the new height instead. The Z of each point is scaled and the layer
+heights themselves are untouched, so a 0.12 layer is still a 0.12 layer and what changes is between
+which heights it applies. The panel says so in amber when it has done it. A profile that is genuinely
+damaged rather than merely out of date is still discarded, as before.
+
 **Current limitations (first version)**
+- Scaling the curve **by hand** — pulling the detail towards the bottom, or spreading it out, with
+  the top pinned where it is — isn't in yet. Only the automatic rescale above.
 - Min/max layer height are **read-only** (from the printer/nozzle) — no per-object override yet.
 - Reopening the gizmo on an object that already has a *very* dense profile (e.g. one painted with
   the old stock brush) falls back to a flat 2-point start rather than importing hundreds of points
@@ -1274,10 +1290,20 @@ column (**T0, T1, T2, ...** — 0-based, matching the real `T<n>` G-code command
   view) — a small menu offers the four rule types, color-coded.
 - **Drag either endpoint** of a rule's bar to change its layer range — dragging the top endpoint
   all the way up snaps it to "to the end of the file."
+- **Click either layer number** (in the text summary below the chart) to type it instead of
+  dragging (2.4.5, new). The chart is around 200 px tall and the whole print has to fit in it, so on
+  a 1200 layer print one pixel is worth six layers and some numbers can't be reached with a mouse at
+  all. The upper number also carries a **to END** tick, and typing the last layer means the same
+  thing, exactly as dragging a point to the top always did. Both routes clamp the range identically,
+  so there's only one answer to what counts as a valid range.
 - **Click a rule's colored value badge** (in the text summary below the chart) to type its exact
   number — percent for speed/flow, raw PWM for fan, mm for Z-offset.
-- **Right-click an existing point** for a menu with **"Skip WT" / "Don't Skip WT"** (see below)
+- **Right-click an existing point** for a menu that starts with a field to **type that endpoint's
+  layer** (2.4.5, new — whichever end you clicked), then **"Skip WT" / "Don't Skip WT"** (see below)
   and **"Delete this rule."**
+
+A typed layer number saves the moment you type it, while a dragged one saves when you let go. Both
+end up in the same rule.
 
 A rule whose layer range no longer exists (e.g. the object got shorter after the rule was
 created) shows its dot pinned to the chart's edge in gray instead of disappearing off-screen —
@@ -1978,9 +2004,13 @@ damper, a clip, a bumper or a foot, out of one object with no modifiers and no b
 
 ---
 
-## 24. Support Zones (2.4.4) — supports you aim
+## 24. Support Zones (2.4.4, extended in 2.4.5) — supports you aim
 
-> **Requires Libre Mode** (§4). The engine has been printed, not only previewed.
+> **Requires Libre Mode** (§4). The aimed pillar has been printed, not only previewed, and so have
+> the block trees added in 2.4.5. Their first print was a vase with two extruders, Precision
+> Adapter Layer Height, and height ramps running from 0.32 mm down to 0.08 mm, held up by two
+> painted stumps: hours of it, and the stumps came out solid. Use **Snug** as the support style,
+> and see the note on Grid and Default below.
 
 A support enforcer block has always been a box that says *what* to support. Everything about it below
 the object was thrown away, so the column fell straight down from the overhang no matter where you
@@ -1988,11 +2018,38 @@ put the box.
 
 A support zone says *what* to hold up **and where the column may come down**.
 
+### These are supports you think about
+
+Worth saying before anything else, because it sets the expectation for the whole tool. This is not a
+click and forget generator. You choose the surface, you choose where the foot goes, and on a long or
+awkward area you choose whether one foot is enough. The tool measures, draws and warns; it does not
+decide for you, and it never plants anything you did not ask for.
+
+That is the feature, not a gap in it. Automatic supports already exist and they are one checkbox
+away. What was missing was a way to place one deliberately and see what you were going to get before
+you sliced. Nothing here is compulsory: leave the tool alone and the slicer behaves exactly as it
+always did.
+
+### Two ways to build one
+
+The footprint you pick decides which one you get, so there is no extra mode to learn.
+
+| Footprint | What gets built |
+|---|---|
+| Whole patch, round, square | **An aimed pillar.** One solid from the surface you picked down to the landing, with a lean and a knee. |
+| **Paint** | **A block tree.** A head over what you painted, a stump on the plate, and nothing drawn in between: the slicer grows that stretch. |
+
 ### The gesture
 
-You point at the surface you want held up, then you point at where it should land. That is the whole
-thing. Only surfaces facing downward can be picked, so the top of the part is never taken by mistake,
-and when several stacked surfaces sit under the cursor you cycle through them with the wheel.
+You point at the surface you want held up. Only surfaces facing downward can be picked, so the top of
+the part is never taken by mistake, and when several stacked surfaces sit under the cursor you cycle
+through them with the wheel.
+
+The landing is then **placed for you, plumb under the middle of what you took**. Before 2.4.5 the
+second click was compulsory and the foot followed the cursor until you made it, which is how a
+pillar ended up 40 mm to one side of the thing it was holding without anyone asking for that. Moving
+the foot is still there, on the **Move it again** button, and it is now a decision rather than a
+step.
 
 The pillar that appears follows the surface you picked rather than a bounding box. Its roof **is** the
 real patch, curve included, so it sits flush against a rounded underside instead of leaving a gap.
@@ -2018,6 +2075,9 @@ So the angle is what you set, and everything else follows from it. The pillar le
 reaches a **knee**, and drops straight down from there. Because the angle is the input rather than
 the outcome, a link the slicer cannot follow is not something you get warned about: it is something
 you cannot draw.
+
+A **block tree** has no knee, because that stretch is not drawn at all. The same angle still governs
+it: it is the budget the column spends per layer on moving toward its stump and closing onto it.
 
 ### Two maps, and they answer opposite questions
 
@@ -2059,8 +2119,11 @@ Replacing the outline with a shape has no such ceiling. That is the whole reason
 
 **Painting.** Pick the brush and drag on the surface to mark the area you want held up. The brush is
 the size of the slider, so a small brush draws a narrow strip and a big one fills a region in one
-sweep. Shift and drag rubs it out. Marks left in one stroke are joined into a continuous band rather
-than a row of dots.
+sweep. Shift and drag rubs it out. The brush marks triangles of the mesh, so it stops where the
+surface stops: it cannot jump across a hole to the far side, and it cannot reach the inside face of
+a wall you are not looking at.
+
+Painting is also what turns the zone into a **block tree**, which is the section after this one.
 
 While the brush is chosen, the surface you *can* paint on is lit faintly: everything connected to
 where you are that faces downward. That canvas is deliberately much larger than the patch a single
@@ -2083,6 +2146,51 @@ somewhere.
 same overhang used to split the shared band, and the loser came out thinner all the way to the
 plate.
 
+### Block trees (2.4.5) — paint the area, plant the stump, the middle grows
+
+Aimed pillars work on simple parts and stop working on real ones. The reason is measured and it is
+always the same: the footprint came from flattening the surface into plan view, and on the inside of
+a curve that goes vertical and then turns back, the same spot on the plate has several heights. The
+outline crosses the equator of the shape and falls down the other side. Growing a circle inside a
+torus took its outline from 94 points to 292 and tripled the slope of its roof, and 42 of the 512
+points on that roof jumped more than a millimetre away from the point next to them.
+
+Smoothing those spikes would hide the symptom. So the shape changed instead.
+
+**The gesture is three words: paint, plant, done.**
+
+![Support Area Painter, stumps step by step — 1: open the brush and pick Surface, the three steps being surface, landing and stumps. 2: paint the faces you want held up, with the overhang grid available to see them by angle first. 3: pick where the column lands and set the lean, REACH turning red when you go past the limit. 4: add stumps for a safer support, like legs under a tree. 5: the green area is what ends up supported, with supports on Normal (Manual) so Orca does not add its own, Snug as the style, and the roof filament picked at the top](docs/images/Stump-Painter-Help.png)
+
+1. **Paint** the area you want held up. That part was already right, because marking triangles on a
+   surface projects nothing.
+2. **A stump is planted for you**, plumb under the middle of what you painted. It is the same
+   landing you always had, so you can still move it.
+3. **The middle is never drawn.** The block has a head on top and a stump at the bottom with a gap
+   between them, and the slicer fills the gap by walking the column down.
+
+**The head is a straight prism.** Flat roof, the outline of what you painted, no curve on it. That
+is what removes the ambiguous projection at the root: the slope of the roof is now zero, measured,
+not "small".
+
+**The stump is a magnet, not an origin.** The column is born from the whole painted area, so it
+covers everything you marked by definition. Coming down it does two things at once, sharing one
+budget: it moves toward the nearest stump, and once it is over the stump it contracts onto it. The
+budget is the same lean you set, so the taper comes out at the angle you asked for and no steeper.
+
+**One stump is usually enough.** The tray tells you when it is not: a piece of the column that
+reaches the bottom without meeting any stump is counted and named, with its layer and its distance,
+and the answer is to plant another. That check is worth trusting because it can only fire for a real
+reason, and it is the only time the count matters.
+
+**Why more than one, when it happens.** Two stumps split the area between them, each taking the part
+that is closer to it, so a long or forked area comes down as two legs instead of one leaning slab.
+A ring around a hole is the clearest case: one stump in the middle is under the hole rather than
+under the ring, so it can never be reached, and two on opposite sides can.
+
+**What the tool does not do here.** It does not branch. A stump grows one trunk, not several, so an
+area that cannot converge onto the feet you gave it stops narrowing and says so rather than
+inventing a shape.
+
 ### A soluble roof, and an ordinary body
 
 Each zone can take **its own filament for the roof**, chosen from a strip of colour chips rather than
@@ -2100,9 +2208,16 @@ column.
 ### It sets up the object for you
 
 Creating your first pillar on an object writes a set of support settings onto **that object**: normal
-supports, a 0.1 mm top gap, one support wall, three interface layers, solid rectilinear interface.
+supports, a 0.2 mm top gap, one support wall, three interface layers, solid rectilinear interface.
 They are the values these pillars were tested and printed with, and they are per object settings you
 can see, undo, or remove from the object list.
+
+The top gap was 0.1 mm until 2.4.5, and on the vase print the roof welded itself to the part here and
+there. It is not the zone that decides that, it is how well the overhang of that layer comes out: a
+layer sitting a little high closes the gap on its own. 0.2 is also what the default profile uses.
+With adaptive layer height there is a further reason to keep the margin, which is that the support
+roof is not sliced at the height the part is using there, so the gap you ask for and the gap you get
+drift apart. Making the roof follow the part's layer height is on the list.
 
 Two rules keep that honest. It only writes a setting you have not already set yourself. And if the
 object was on **tree** supports it is switched to normal, keeping whether it was automatic or manual,
@@ -2133,8 +2248,8 @@ are for making a new one.
 
 ### Why this instead of tree supports
 
-A drawn pillar is one column that goes where you put it. The toolhead prints it in one place and moves
-on.
+A drawn pillar is one column that goes where you put it, and a block tree is one trunk that goes
+where you put its foot. Either way the toolhead prints it in one place and moves on.
 
 Tree supports branch, and every branch is another island on the layer, which is another travel and
 another retraction. Fewer retractions is not only faster: it is much kinder to the materials that
@@ -2150,8 +2265,15 @@ its way down.
   what stops it fabricating support nobody asked for, but it does limit what shapes are possible.
 - **The whole patch mode follows the flat surface it starts on.** On a large flat ceiling that means
   the whole ceiling, which is what the round and square cuts are there for. That mode is also the one
-  that cannot be expanded, because there is no shape to put in the outline's place — which is why the
-  tool does not start there.
+  that cannot be expanded, because there is no shape to put in the outline's place, and that is why
+  the tool does not start there.
+- **A block tree does not branch.** One stump is one trunk. An area too long or too forked for the
+  feet you gave it stops narrowing and tells you, and the fix is another stump rather than a cleverer
+  shape.
+- **A block tree head is a straight prism**, so in the preview it takes a little more room at the
+  contact than the surface strictly needs. It is trimmed against the part like everything else, so it
+  does not print more; what it loses is finesse on screen. Putting the curve back on the roof is a
+  later job, once the shape is proven.
 - **The edge slider runs out on the way in.** Push the edge inward far enough and the shape would
   fold through itself, so the limit shrinks as you go. That is the shape telling you it has no more
   room. Growing outward usually has no such limit; if you need much more than the patch allows, that
@@ -2159,8 +2281,87 @@ its way down.
 - **A patch that folds over itself in plan view is flagged, not fixed.** A band that wraps past the
   vertical projects onto itself from above, so the foot of the pillar would overlap itself. The panel
   says so and leaves the fix to you: crop it smaller, or pick a flatter part of the surface.
+- **Use Snug as the support style.** The gizmo sets it on the object the moment you open it, and the
+  panel says so. With **Grid** or **Default** the column is snapped to the support grid, so it cannot
+  come out thinner than one whole cell (about 2.8 mm at the default spacing, 5.3 mm at 5 mm) and it
+  steps sideways a cell at a time instead of sliding. It prints, and for some shapes that chunkiness
+  is even useful, but it lays down support walls where nothing needed holding and that is stringing.
+  The slicer raises a notice when you slice a painted zone with either of those two.
+- **Automatic support stays on unless you turn it off.** A zone adds to what the slicer already
+  decided to hold up, so the support you did not draw is the automatic overhang detection doing its
+  job. The **only my zones** switch at the top of the zone list turns it off for that object, and the
+  panel offers the same switch as a one click fix while the condition holds. It is left as a switch
+  on purpose: someone who wants both should keep both.
 - **Painting costs CPU.** Every mark is real geometry being clipped against the surface, and a long
   stroke is a lot of it.
+
+---
+
+## 25. Overhang Shadow (2.4.5) — the wall an overhang lands on
+
+> **Requires Libre Mode** (§4). Verified in the G-code and printed.
+
+Orca slows the outer wall of an overhang down and turns the fan on it. The inner wall right behind
+that overhang went down a few seconds earlier at full inner wall speed, because the slicer measured
+it as supported. It is supported. The wall it has to hold up is not.
+
+So the anchor for the overhang is the fastest, least controlled bead in the area, and everything the
+overhang settings do is spent landing carefully onto it. If the layer below came out perfect then the
+overhang above is well anchored and none of this matters. That assumption is the thing worth removing.
+
+### How it works
+
+Orca decides how much to slow a wall by measuring how far each of its points sits from the edge of
+what was printed underneath (`estimate_extrusion_quality()` in `GCode/ExtrusionProcessor.hpp`). The
+measurement is a signed distance: negative while the point is over solid material, positive once it
+is over air. The overhang speed bands are that distance cut into ranges.
+
+The whole feature is one piece of arithmetic on that number. The wall being protected sits one line
+width further out than the one being measured, so adding **ratio × reach** to the distance walks the
+inner wall that far towards its neighbour and lets the existing grading do the rest. At 100% it is
+graded exactly as the overhanging wall it supports. The overhang fan follows on its own, because the
+fan reads the same measurement.
+
+Away from an overhang it costs nothing and there is nothing to detect. A wall with solid material
+under it sits far inside that boundary, and shifting it one line width does not move it into another
+band. The geometry does the filtering, so there is no region to compute and no extra pass.
+
+### Controls
+
+| Control | Default | What it does |
+|---|---|---|
+| Slow down inner walls next to overhangs | Off | The feature. Needs **Slow down for overhang** on, which is the machinery it feeds. |
+| Inner wall slowdown | 30% | How much of the neighbour's treatment this wall borrows. 100% grades it exactly as the overhanging wall, fan included. |
+| Inner wall reach | 200% | How far outwards to look, as a percentage of line width. 100% is the wall immediately next to this one. |
+
+Changing any of the three exports the G-code again without reslicing the plate.
+
+### The print
+
+The test plate is a row of overhang steps from 70 down to 45 degrees, printed twice with everything
+else the same, once with the box off and once with it on. The undersides come out visibly better on
+the second one, by more than the size of the change would lead you to expect. The overhang comes out
+better because the bead it lands on was printed better.
+
+![Four panels. Top left and top right show the same overhanging nose in the Gcode speed view, off and on: off, only the outermost line is blue and the wall behind it stays at full speed; on, the blue band widens to take in the wall behind it and the tip slows further. Bottom right is the SLOWINNER test plate, two copies of a row of overhang steps from 70 down to 45 degrees. Bottom left are photographs of the printed steps seen from underneath](docs/images/Inner-Slowdown.png)
+
+### Where it does nothing, measured
+
+On the first model this was tested on, 96% of the inner wall running within 1.3 mm of an overhang was
+**already** being slowed by Orca on its own, median 50 mm/s against 200 elsewhere, and that median was
+the same with the feature off.
+
+The window is narrower than it first looks and worth stating plainly. Grading starts about a quarter
+of a line width past the edge, and the inner wall sits a full line width behind the outer one, so the
+inner wall does not start slowing by itself until a layer steps out by more than roughly 1.25 line
+widths. Below that the outer wall is over air while the inner one is still at full speed, which is
+the case this exists for. Above it, Orca was going to slow both anyway.
+
+It has no effect at all when walls print outer wall first, since then the inner wall goes down after
+the overhang and there is nothing left to anchor.
+
+Someone asked upstream for this kind of control and the request closed with no answer,
+[OrcaSlicer #3891](https://github.com/OrcaSlicer/OrcaSlicer/issues/3891).
 
 ---
 
@@ -2178,6 +2379,7 @@ its way down.
 | Top surface fill pattern (needed for ColorStitch) | Quality → **Top surface pattern → Monotonic Line** |
 | Penultimate layers / density | Strength → Top/bottom shells |
 | Neoweaving (WIP) | *Not wired in this build* |
+| Overhang Shadow (§25) | Speed → Overhang speed → **Slow down inner walls next to overhangs** *(Libre Mode only)* |
 | Libre Mode master switch | **Preferences → Enable Neotko LibreMode (requires restart)** |
 | Libre Mode toggle | Toolbar side button **"Neotko LM: On/Off"** |
 | Assembled Boolean mode | Right-click an object (Libre Mode) |

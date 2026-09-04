@@ -54,6 +54,11 @@ private:
     SlicingParameters      m_slicing_params;
     std::vector<ALHPoint>  m_points;
 
+    // NEOTKO_PRECISIONALH_TAG s299 — true cuando el perfil que venia del objeto estaba en la
+    // altura vieja y se ha remapeado a la actual al abrir la sesion (objeto reescalado en Z).
+    // Solo sirve para avisar en el panel; el remapeo ya esta hecho en m_points.
+    bool                   m_rescaled_on_load = false;
+
     // NEOTKO_ALHCOLOR_TAG — Fase 1+2 (PRECISION_ALH_ADAPT_TO_COLOR_PLAN.md §5).
     // When on: render_curve_editor() shades the forbidden
     // [nozzle_min,h_min)/(h_max,nozzle_max] bands and the h_opt line (Fase 1),

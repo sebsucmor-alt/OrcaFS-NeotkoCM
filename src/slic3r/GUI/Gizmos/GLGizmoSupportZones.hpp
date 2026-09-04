@@ -39,6 +39,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -88,6 +89,25 @@ private:
     enum class FootShape : int { Patch = 0, Round = 1, Square = 2, Brush = 3 };
 
     // ------------------------------------------------------------------------
+    // NEOTKO_SUPPORTZONES_TAG s301 — EL TOCÓN
+    // ------------------------------------------------------------------------
+    // 🔑 El gesto acordado en s300: «pintamos área, plantamos tocón, el resto crece solo». Un tocón
+    // es un prisma corto plantado en la cama (o en una repisa), y NO se une con la cabeza: entre los
+    // dos queda un hueco que el motor rellena bajando la columna hacia el tocón más cercano
+    // (SupportMaterial.cpp, «GUIADO POR TOCÓN»). El tramo intermedio no se dibuja nunca.
+    //
+    // 🚨 Declarado aquí arriba por la misma razón que `FootShape`: un miembro no puede usar un tipo
+    // que se declara más abajo en la misma clase.
+    //
+    // ⚠️ El mismo tipo se usa en dos espacios distintos y hay que saber cuál: `m_extra_stumps` está
+    // en MUNDO, y `ZoneGesture::stumps` en espacio del OBJETO, como todo lo que se guarda.
+    struct StumpSpot
+    {
+        Vec3d p      { Vec3d::Zero() };
+        bool  on_bed { true };
+    };
+
+    // ------------------------------------------------------------------------
     // NEOTKO_SUPPORTZONES_TAG s288 — EL GESTO (docs/FUTURE/SUPPORT_ZONES_RELOCK_PLAN.md)
     // ------------------------------------------------------------------------
     // Lo que hizo falta para construir un pilar, guardado en la config del volumen para poder
@@ -121,6 +141,11 @@ private:
         // demás de aquí: el mundo se renormaliza solo). z no hace falta: el recorte es en XY.
         // Vacío en todo lo que no sea `Brush`, y en un gesto v1 leído de un 3mf viejo.
         std::vector<Vec4d> stamps;   // (x, y, radio, trazo)
+        // s301 — los tocones ADICIONALES, en espacio del objeto. El primario NO está aquí: es
+        // `landing_pos` / `on_bed`, que ya existían y ya se guardaban. Meterlo también en esta
+        // lista sería tener dos verdades del mismo tocón.
+        std::vector<StumpSpot> stumps;
+        float     stump_size_mm { 8.f };
         float     edge_patch_mm { 0.f };
         float     edge_foot_mm  { 0.f };
         float     lean_deg      { 45.f };
@@ -207,6 +232,20 @@ private:
     };
     std::vector<Candidate> m_candidates;
     int                    m_candidate_idx = 0;   // which one the wheel has landed on
+    // NEOTKO_SUPPORTZONES_TAG s299 — contra qué se decide que la lista sigue valiendo.
+    //
+    // 🔑 `render_pick_overlays()` llamaba a `update_candidates()` en CADA frame mientras hubiera
+    // cursor sobre la pieza, y eso es una consulta al árbol AABB por frame con el ratón quieto.
+    // Con el píxel y la matriz guardados, un ratón parado no cuesta nada y uno que se mueve paga
+    // exactamente una consulta por movimiento, que es lo que hace falta.
+    // NEOTKO_SUPPORTZONES_TAG s299f — pintar fuera (la piel que ves) o dentro (una cavidad).
+    //
+    // 🔑 Por defecto FUERA, que es lo que uno espera y lo que evita que el pincel se cuele a la cara
+    // interior de una pared sin haberlo pedido. DENTRO existe porque sujetar una superficie interna
+    // es legítimo, pero tiene que ser una decisión.
+    bool                   m_paint_inside = false;
+    Vec2d                  m_cand_mouse { Vec2d(-1e9, -1e9) };
+    Transform3d            m_cand_trafo { Transform3d::Identity() };
     Vec2d                  m_hover_mouse_pos { Vec2d::Zero() };
     bool                   m_have_hover_pos = false;
 
@@ -272,7 +311,7 @@ private:
     // sin llegar a la sopa de puntos.
     // s289 — 0.5 mm por defecto, pedido por él tras usarlo: a 1 mm el mapa cuenta la historia pero
     // no enseña la FORMA del hueco, que es para lo que se mira.
-    float m_gap_step_mm = 0.5f;
+    float m_gap_step_mm = 0.8f;   // s299f — pedido por el dueño tras usarlo: 0.8 es su punto
     // s289 — 30 por defecto (antes 45). ⚠️ Sigue sembrándose de `support_threshold_angle` al abrir
     // el gizmo, así que el preset manda si dice otra cosa: la herramienta y el motor hablando del
     // mismo ángulo vale más que un número fijo.
@@ -338,6 +377,12 @@ private:
     // Where a pillar would land for this cursor position: a surface of the part below the target
     // if there is one, the bed otherwise. Used by both the live preview and the click.
     bool resolve_landing(const Vec2d &mouse_pos, Vec3d &out_pos, bool &out_on_bed);
+    // NEOTKO_SUPPORTZONES_TAG s300g — el aterrizaje A PLOMO, que es el que se usa de salida.
+    //
+    // Mismo criterio que `resolve_landing()` —primero una repisa de la pieza que mire hacia arriba,
+    // si no la cama— pero con un rayo vertical bajo el centroide de la huella en vez del rayo de
+    // cámara. Sin ratón de por medio: es el aterrizaje que el pilar tendría si nadie lo tocase.
+    bool resolve_landing_plumb(Vec3d &out_pos, bool &out_on_bed);
     // Facet indices of the connected coplanar patch grown from `facet_idx`.
     std::vector<int> collect_region(int facet_idx) const;
     // s289 — el LIENZO del pincel: conectada y mirando hacia abajo, sin límite de ángulo contra la
@@ -370,83 +415,167 @@ private:
     bool      m_shape_covers = false;
 
     // ------------------------------------------------------------------------
-    // s289 — EL PARCHE, DE UNA VEZ Y PARA TODOS (auditoría de la geometría)
-    // ------------------------------------------------------------------------
-    // 🚨 Antes había DOS geometrías para la misma huella y no podían coincidir: el contorno 2D lo
-    // hacía Clipper (unión de triángulos proyectados + Douglas-Peucker + `offset()`), y el sólido
-    // lo hacía `build_pillar_mesh()` moviendo vértices a mano. De ahí salían tres mentiras a la
-    // vez — el centroide con el que se desplaza el pilar, el tope del borde, y el aviso de
-    // demasiado estrecho — todas midiendo una forma que no era la que se imprimía.
+    // NEOTKO_SUPPORTZONES_TAG s299 — LA HUELLA DEJA DE SER GEOMETRÍA 3D Y PASA A SER UNA MÁSCARA.
     //
-    // Ahora hay UNA: este `PatchGeom`. El contorno 2D se DERIVA de él (la silueta del anillo ya
-    // desplazado), así que no puede discrepar del sólido por construcción.
+    // 🔑 Lo dijo el dueño y es el cambio de raíz: "pintar un área es pintar un área". Lo de antes
+    // era un parche de TRIÁNGULOS DE LA MALLA, recortado triángulo a triángulo contra la forma y
+    // desplazado vértice a vértice. De ahí salían los tres problemas que se veían en la mano, y los
+    // tres eran el mismo problema:
     //
-    // Y de paso arregla lo que rompía las superficies sencillas:
-    //   · el recorte ya no es "¿cae el centroide del triángulo dentro?" — que en una cara de dos
-    //     triángulos de 20 mm sólo sabe decir "todo" o "nada" — sino un recorte EXACTO en XY
-    //     contra la forma pedida, retriangulado. La resolución de la huella deja de ser la de la
-    //     malla y pasa a ser la del mando;
-    //   · el winding se normaliza (el render ya avisaba: "raw-mesh winding varies"), así que el
-    //     borde, las tapas y el sentido de "hacia dentro" dejan de depender de que la malla venga
-    //     bien orientada;
-    //   · los vértices se sueldan POR POSICIÓN, así que una costura sin soldar deja de inventarse
-    //     aristas de borde por dentro del parche;
-    //   · el desplazamiento del borde va con INGLETE, así que una esquina de 90° se mete lo que se
-    //     le pide y no lo que le sale (antes, un factor cos(θ/2) de menos: invisible en el torus,
-    //     el 100% del efecto en un rectángulo de cuatro vértices).
-    struct PatchGeom
+    //   · **la CPU**: cada marca del pincel rehacía el parche entero. Recorrer todos los triángulos
+    //     de la región y cortar cada uno contra una máscara que crece con cada pincelada es
+    //     cuadrático en el trazo. Ahora pintar sólo une un disco a un `ExPolygons` y el sólido no
+    //     se construye hasta que sueltas el botón;
+    //   · **expandir**: el "crecer" era mover cada vértice por su bisectriz, que NO es un offset y
+    //     no sabe resolver que el borde se cruce consigo mismo. Por eso al expandir dos veces
+    //     salían polígonos imposibles. Ahora crecer es `offset_ex()`, que no puede devolver un
+    //     contorno cruzado;
+    //   · **el cuadrado era el que mejor iba**, y no por suerte: cuatro vértices convexos son el
+    //     único caso donde mover por bisectriz coincide con un offset de verdad.
+    //
+    // Lo que se conserva a propósito: el techo NO es plano. La z de cada punto sale del mapa de
+    // alturas de abajo, así que un círculo grande sobre una zona curva sigue quedando a ras.
+    //
+    // 🚨 Frontera del §8 intacta: esto elige DÓNDE va el bloque, nunca decide que ahí haga falta
+    // soporte. Eso sigue siendo `detect_overhangs()`.
+    struct ZoneMask
     {
-        std::vector<Vec3d>              V;        // vértices en MUNDO, ya soldados
-        std::vector<Vec3i32>            F;        // triángulos, winding ya normalizado (miran abajo)
-        std::vector<Vec3d>              vnormal;  // normal por vértice, en mundo
-        std::vector<std::pair<int,int>> border;   // aristas de borde, dirigidas como su triángulo
-        // Dirección "hacia dentro" en XY por vértice, CON EL FACTOR DE INGLETE ya dentro: mover un
-        // vértice `inward[i] * d` mete el borde exactamente `d` mm en los dos lados de su esquina.
-        std::vector<Vec2d>              inward;
+        // La huella, en XY de MUNDO. Sale de Clipper, así que es válida por construcción: sin
+        // auto-intersecciones, con sus islas separadas y sus agujeros donde toque.
+        ExPolygons area;
+
+        // El plano de la cara semilla: el respaldo donde el mapa de alturas no tiene nada. Es plano
+        // y está en el aire, que es lo que uno espera de un bloque que sobresale del voladizo.
+        Vec3d  seed_p { Vec3d::Zero() };
+        Vec3d  seed_n { Vec3d(0., 0., -1.) };
+
         double z_low  { 0. };
         double z_high { 0. };
-        // 🚨 s289 — DOS topes, no uno, y el error de tener uno solo se notaba en la mano: el
-        // deslizador del borde se quedaba cortísimo. Meter hacia dentro y sacar hacia fuera NO
-        // tienen el mismo límite. Una arista se da la vuelta cuando `|d0|² + t·(d0·Δ) = 0`; según
-        // el signo de `d0·Δ` esa raíz cae del lado del metido o del lado del sacado, y sólo las de
-        // su lado limitan. En una forma convexa —un círculo, un cuadrado, casi cualquier huella
-        // sana— NINGUNA arista limita al crecer, así que crecer no tiene tope geométrico.
-        // Aplicar el tope del metido también al crecido, como hacía la versión de antes, era
-        // prohibir lo que sí se puede hacer.
-        double max_inset  { 0. };   // hacia dentro (positivo)
-        double max_outset { 0. };   // hacia fuera (el valor absoluto del negativo)
-        // El parche se pliega sobre sí mismo visto desde arriba (una banda que pasa de la
-        // vertical). El suelo del sólido es esa misma triangulación aplastada, así que se solapa
-        // consigo mismo. No se corrige aquí: se DICE, en el panel y en el log.
-        bool   folded { false };
         bool   ok     { false };
     };
-    // El recorte pedido, en XY de mundo. Vacío = sin recorte (modo `Patch`).
-    ExPolygons crop_shape(const Vec2d &centre_xy) const;
-    bool       build_patch(int facet_idx, const Vec2d &centre_xy, PatchGeom &out) const;
-    // La misma, cacheada contra lo único que la cambia. Devuelve nullptr si no hay parche.
-    const PatchGeom *patch(int facet_idx, Vec2d centre_xy) const;
-    mutable PatchGeom   m_patch_cache;
-    mutable int         m_patch_cache_facet = -1;
-    mutable int         m_patch_cache_shape = -1;
-    mutable float       m_patch_cache_size  = -1.f;
-    mutable Vec2d       m_patch_cache_centre { Vec2d(1e9, 1e9) };
-    mutable size_t      m_patch_cache_stamps = size_t(-1);
-    mutable Transform3d m_patch_cache_trafo { Transform3d::Identity() };
+
+    // --- el mapa de alturas del techo -----------------------------------------------------------
+    // 🔑 s299b — cubre SÓLO la caja de lo pintado, con margen, y se muestrea con un rayo vertical
+    // por nodo. Unos miles de rayos, y el coste deja de depender del tamaño del objeto: depende del
+    // tamaño de la zona, que es lo que el usuario controla.
+    //
+    // 🚨 La primera versión de s299 lo rasterizaba desde los triángulos de la región ENTERA, y en
+    // una pieza de millones de polígonos eso era media espera; la otra media era el flood-fill que
+    // ya no hace falta.
+    mutable Vec2d              m_hm_origin { Vec2d::Zero() };
+    mutable double             m_hm_step   { 0.5 };
+    mutable int                m_hm_nx     { 0 };
+    mutable int                m_hm_ny     { 0 };
+    mutable std::vector<float> m_hm_z;      // NaN donde no hay superficie mirando hacia abajo
+    mutable std::vector<Vec3f> m_hm_n;      // normal de quien puso esa z
+    // La caja del mapa sólo crece, así que seguir pintando encima no vuelve a muestrear nada.
+    mutable Transform3d        m_hm_trafo { Transform3d::Identity() };
+    mutable double             m_hm_z_ref { 0. };
+    void   ensure_heightmap(const BoundingBox &area_bb, double z_ref) const;
+    // s300c — la variante del pincel: sin rayos, desde los triángulos que ya están marcados.
+    void   heightmap_from_painted(const BoundingBox &area_bb) const;
+    // z de la superficie en un punto XY de mundo, bilineal, con respaldo al plano de la semilla.
+    double z_at(const ZoneMask &mk, const Vec2d &p) const;
+    // La normal en ese punto, para la corrección del techo por plano tangente.
+    Vec3d  n_at(const ZoneMask &mk, const Vec2d &p) const;
+    bool build_mask(int seed_facet, const Vec2d &centre_xy, ZoneMask &out) const;
+    // La misma, cacheada contra lo único que la cambia. Devuelve nullptr si no hay huella.
+    //
+    // 🚨 s299 — la clave sigue teniendo casi los mismos campos, pero lo que cuesta una fallada ha
+    // cambiado de orden de magnitud. Antes, una marca más invalidaba y recorría la malla entera;
+    // ahora el lienzo y el mapa de alturas están cacheados aparte, así que lo único que se rehace
+    // es una intersección de Clipper contra la unión de marcas, que ya viene hecha.
+    const ZoneMask *mask(int facet_idx, Vec2d centre_xy) const;
+    mutable ZoneMask    m_mask_cache;
+    mutable int         m_mask_cache_facet = -1;
+    mutable int         m_mask_cache_shape = -1;
+    mutable float       m_mask_cache_size  = -1.f;
+    mutable Vec2d       m_mask_cache_centre { Vec2d(1e9, 1e9) };
+    mutable size_t      m_mask_cache_stamp = size_t(-1);
+    mutable Transform3d m_mask_cache_trafo { Transform3d::Identity() };
     void                invalidate_patch();
+
+    // El lienzo: la región de la malla que mira hacia abajo, cacheada POR OBJETO y no por cursor.
+    // 🔑 s299 — el flood-fill no depende de dónde esté el ratón una vez elegida la semilla, así que
+    // rehacerlo con cada marca (hasta 200.000 caras) era trabajo tirado.
+    const std::vector<int> &region_for(int seed_facet) const;
+    mutable std::vector<int> m_region_cache;
+    mutable int              m_region_cache_facet = -1;
+    // 🚨 La matriz entra en la clave: el lienzo y su mapa de alturas están en MUNDO, así que mover
+    // o rotar el objeto los cambia enteros sin que el índice de la cara se mueva un pelo. Sin esto
+    // la caché sobreviviría a un arrastre y el pilar se construiría donde el objeto ESTABA.
+    mutable Transform3d      m_region_cache_trafo { Transform3d::Identity() };
+    // La proyección XY de esa región, que es el lienzo real donde puede caer la huella.
+    mutable ExPolygons       m_region_area_cache;
+
+    // Un anillo del sólido, remuestreado a un número fijo de puntos por longitud de arco. Es lo que
+    // permite coser las paredes entre dos anillos que Clipper ha calculado por separado y que por
+    // tanto no comparten ni número de vértices ni orden.
+    static std::vector<Vec2d> resample_ring(const ExPolygons &area, int n_pts);
     // La silueta en XY del anillo del parche desplazado `edge_mm` por su borde: es literalmente la
     // sección del sólido a esa altura, proyectada. Los dos contornos que usa el panel salen de
     // aquí, así que los dos son el sólido.
     std::vector<Vec2d> ring_outline_world(double edge_mm) const;
 
-    // El pincel: las marcas dejadas al arrastrar, en XY de MUNDO, con su radio.
-    // 🔑 s289, dicho por él: "los dots deben estar conectados, así evitamos crear geometría de
-    // puntitos". Por eso la marca lleva a qué TRAZO pertenece: dos marcas seguidas del mismo trazo
-    // se unen con una cápsula, así que el recorte es una banda continua y no un rosario. Entre
-    // trazos distintos no se une nada, que es lo que uno espera al levantar el botón.
-    struct Stamp { Vec2d c { Vec2d::Zero() }; double r { 4. }; int stroke { 0 }; };
+    // NEOTKO_SUPPORTZONES_TAG s300 — EL PINCEL PINTA TRIÁNGULOS, NO ÁREA EN XY.
+    //
+    // 🔑 Idea suya, dicha en lenguaje de Rhino: "yo haría un WireCut de la zona pintada y un extrude
+    // surface en el ángulo". Esa es exactamente la mitad que faltaba. Lo de antes marcaba discos en
+    // XY y de ahí salían tres fallos que fuimos tapando uno a uno:
+    //
+    //   · el pincel se colaba a la cara de DENTRO de una pieza hueca, porque el candidato era "el
+    //     primer impacto que mira hacia abajo" y ése podía estar detrás de una pared;
+    //   · al pasar por encima de un agujero, la marca aparecía AL OTRO LADO y la banda que unía dos
+    //     marcas cruzaba el aire;
+    //   · y la huella era la proyección del trazo, así que un arco que rodea un agujero salía como
+    //     una banda de 99 mm que no se parecía a lo pintado (medido en su log).
+    //
+    // Los tres se caen solos marcando TRIÁNGULOS: la marca vive en la superficie, y lo que decide
+    // hasta dónde llega es la VECINDAD de la malla, no la distancia en pantalla. Al otro lado de un
+    // agujero no se llega porque no hay triángulos que conecten.
+    //
+    // ⚠️ Lo que NO cambia: el sólido se sigue construyendo con Clipper a partir de la proyección de
+    // lo pintado (anillos, offsets, la rodilla). Esa mitad funciona y no se toca — el híbrido es
+    // pintar en 3D y extruir en 2D.
+    // 🚨 s300b — TRES ESTRUCTURAS Y NINGÚN RECORRIDO DE LA MALLA ENTERA. La primera versión de esto
+    // se colgaba con su pieza, y por un motivo que no se ve mirando una sola función: cada marca del
+    // pincel recorría los millones de triángulos TRES veces (contar los pintados, proyectarlos,
+    // dibujarlos) y encima reservaba un `visited` del tamaño de la malla. Multiplicado por cada
+    // movimiento del ratón, eso es la ruedita.
+    //
+    // 🔑 Lo que hace instantáneos a los painters de Orca no es marcar bytes, es no tocar nunca lo
+    // que no ha cambiado. Aquí:
+    //   · `m_painted`      responde "¿está pintado este triángulo?" en O(1);
+    //   · `m_painted_list` es la lista de los que SÍ, y es por donde se itera siempre — son cientos,
+    //     no millones. Nadie recorre `m_painted` de punta a punta;
+    //   · `m_visit_stamp`  sustituye al `visited` de cada pincelada por un sello que se compara, así
+    //     que el recorrido no reserva ni limpia nada.
+    std::vector<char>     m_painted;         // 1 por triángulo de m_mesh, 1 = pintado
+    std::vector<int>      m_painted_list;    // los índices pintados, sin orden
+    size_t                m_painted_count = 0;
+    mutable std::vector<uint32_t> m_visit_stamp;
+    mutable uint32_t              m_visit_epoch = 0;
+    void clear_painted();
+    // La proyección, cacheada contra el sello: la piden el sólido, el contorno y los avisos, varias
+    // veces por frame, y sólo cambia cuando cambia lo pintado.
+    mutable ExPolygons    m_painted_area;
+    mutable size_t        m_painted_area_stamp = size_t(-1);
+    mutable Transform3d   m_painted_area_trafo { Transform3d::Identity() };
+    // Marca los triángulos alcanzables desde `seed` cuya distancia al punto tocado sea menor que el
+    // radio, andando SOLO por vecinos. Devuelve cuántos cambiaron.
+    size_t paint_facets(int seed, const Vec3d &hit_world, double radius, bool erase);
+    // La proyección en XY de lo pintado, que es lo que come el constructor del sólido.
+    ExPolygons painted_area_world() const;
+
+    // El registro del gesto: cada toque, en MUNDO y en 3D. Es lo que se guarda para poder reabrir la
+    // zona, y lo que se vuelve a reproducir al editarla.
+    // ⛔ Ya no hay `stroke`: existía para unir dos marcas seguidas con una cápsula, y las cápsulas se
+    // han ido con la proyección. La continuidad la da ahora la malla.
+    struct Stamp { Vec3d p { Vec3d::Zero() }; double r { 4. }; };
     std::vector<Stamp> m_stamps;
-    int   m_stroke_id = 0;
+    // El sello sube con cada cambio de lo pintado y es lo que entra en la clave de la caché.
+    size_t     m_stamp_stamp = 0;
+    void       repaint_from_stamps();
     bool  m_painting     = false;   // botón abajo y pintando (no orbitando)
     bool  m_paint_erase  = false;   // con Shift: quita en vez de poner
     // Añade (o quita) una marca en la posición del cursor si cae sobre la superficie. Devuelve si
@@ -469,8 +598,15 @@ private:
     // quieren las dos preguntas que van del apoyo: si es demasiado estrecho para imprimirse y si
     // se sale de la cama. Preguntárselo al de arriba avisaría de un pie que no existe.
     std::vector<Vec2d> foot_outline_world() const;
+    // 🚨 s299 — ESTOS DOS YA NO SON TOPES GEOMÉTRICOS, son el RANGO DEL DESLIZADOR.
+    //
+    // Antes eran el punto donde el desplazamiento por vértice se cruzaba consigo mismo, calculado
+    // con una condición local que sólo veía la inversión de una arista y no que dos aristas lejanas
+    // chocaran. Por eso protegían mal y el borde salía imposible al expandir dos veces.
+    //
+    // Con `offset_ex()` el colapso no hay que predecirlo: cuando te pasas metiendo, la forma sale
+    // VACÍA y el sólido no se construye. Así que esto es sólo cuánto ofrece el mando.
     double max_inset_mm() const;
-    // s289 — su hermano de signo contrario. Ver el porqué en `PatchGeom::max_outset`.
     double max_outset_mm() const;
     // 🚨 s286b: la huella dejó de ser barata. El casco convexo era un barrido y ya está; el
     // contorno real es flood-fill + unión de N triángulos + Douglas-Peucker, y el PANEL la pide
@@ -488,11 +624,8 @@ private:
     // recortada, pinchar otro punto de LA MISMA cara da otro contorno sin que el índice de la cara
     // cambie. Sin esto la caché devolvería el recorte del punto anterior.
     mutable Vec2d              m_foot_cache_centre { Vec2d(1e9, 1e9) };
-    // s289 — y cuántas marcas de pincel había: pintar una más cambia la huella sin mover nada más.
-    mutable size_t             m_foot_cache_stamps = size_t(-1);
-    // Cuánto se le puede meter al borde antes de que la forma colapse. El desplazamiento por
-    // vértice no sabe colapsar: se cruza y sale del revés. Esto es el tope que lo impide.
-    mutable double             m_foot_cache_max_inset = 0.;
+    // s299 — el sello de la unión de marcas: pintar una más cambia la huella sin mover nada más.
+    mutable size_t             m_foot_cache_stamp = size_t(-1);
     mutable double             m_foot_cache_z_low = 0.;   // el z más bajo del parche, del mismo barrido
     // 🚨 Y la matriz entra en la clave: la huella está en MUNDO, así que mover o rotar el objeto la
     // cambia entera sin que el índice de la cara se mueva un pelo. Sin esto la caché sobreviviría a
@@ -500,7 +633,45 @@ private:
     mutable Transform3d        m_foot_cache_trafo { Transform3d::Identity() };
     // Builds the skewed prism between the picked patch and the landing spot. Returns false when
     // there is nothing sane to build.
+    //
+    // 🔑 s301 — ES EL ÚNICO PUNTO DE ENTRADA, y bifurca en su primera línea. Lo llaman el preview,
+    // crear, editar y el botón de volcado; despachar aquí es lo que impide que uno de los cuatro se
+    // quede con el constructor viejo sin que nadie se entere.
     bool build_pillar_mesh(TriangleMesh &out_world) const;
+    // ------------------------------------------------------------------------
+    // NEOTKO_SUPPORTZONES_TAG s301 — EL ÁRBOL DE BLOQUES
+    // ------------------------------------------------------------------------
+    // 🔑 El pincel ES el modo nuevo (decisión suya): pintar marca el OBJETIVO, y la huella deja de
+    // salir de proyectar la superficie en planta — que es la causa medida en el §1 del estudio de
+    // los 42 picos del techo y del contorno que pasaba de 94 a 292 puntos.
+    //
+    // ⛔ Círculo, cuadrado y «parche entero» siguen dando el pilar lofteado de siempre. Funcionan,
+    // son personalizables y no cuesta mantenerlos.
+    bool block_tree_mode() const { return m_foot_shape == FootShape::Brush; }
+    // La cabeza (prisma recto sobre lo pintado) más un prisma por tocón, en una sola malla con las
+    // dos partes SEPARADAS: ese hueco es lo que el motor reconoce como árbol de bloques.
+    bool build_block_tree_mesh(TriangleMesh &out_world) const;
+    // Todos los tocones en MUNDO, el primario incluido. Lo piden la malla, el alcance, el aviso de
+    // fuera de cama y la sombra del pie: una sola lista para que las cuatro respuestas no se
+    // separen.
+    std::vector<StumpSpot> all_stumps() const;
+    // Los milímetros que separan la tapa del tocón más alto de la base de la cabeza. 🔑 Es EL número
+    // de esta feature: si no es positivo no hay hueco, el motor no ve un árbol de bloques y la
+    // columna baja como un pilar corriente. Lo leen el log del constructor y el aviso del panel —
+    // uno solo, para que no puedan discrepar.
+    double block_tree_gap_mm() const;
+    // La cota de la cabeza: de dónde a dónde va el prisma. La piden el constructor y el hueco de
+    // aquí arriba, y por eso vive aparte — calcularla dos veces es cómo se separan dos números que
+    // tenían que ser el mismo.
+    bool   block_tree_head_z(double &z_bot, double &z_top) const;
+    // Los ADICIONALES. El primario es `m_landing_world_pos` / `m_landing_on_bed`, que ya existen,
+    // ya se siembran a plomo (`resolve_landing_plumb`, s300g) y ya se guardan en el gesto.
+    std::vector<StumpSpot> m_extra_stumps;
+    bool  m_stump_pick_mode = false;
+    float m_stump_size_mm   = 8.f;
+    // 🔑 Altura FIJA y no un mando (decisión suya): la altura de un tocón no es algo que se juzgue
+    // mirándola, sólo tiene que dar unas cuantas capas de imán y de pie. 2 mm son 6 capas a 0.32.
+    static constexpr double STUMP_HEIGHT_MM = 2.0;
     void update_preview();
     void render_preview();
 
@@ -555,7 +726,45 @@ private:
     // §4-bis.8 A1: a link that tunnels through the part. The reach says nothing about this — you
     // can be well inside the strip and still have the object in the way — and a pillar buried in
     // the model is worse than no pillar, because it prints and welds.
+    // NEOTKO_SUPPORTZONES_TAG s300h — LA FORMA DEL EJE DEL PILAR, EN UN SOLO SITIO.
+    //
+    // 🚨 El pilar NO es un prisma recto del techo al pie: tiene RODILLA. Baja a plomo desde el
+    // techo hasta M, se inclina de M a K, y vuelve a plomo de K a B. La recta que une los dos
+    // extremos corta por DENTRO de esa ele, y por ahí es justo por donde pasa la pared de la pieza.
+    // Sondear a lo largo de esa recta es preguntar por sitios donde el pilar no está.
+    //
+    // Se calcula aquí, una vez, y lo usan `build_pillar_mesh()` (que construye la malla) y
+    // `pillar_crosses_object()` (que la interroga). Tenerlo en dos sitios es exactamente la trampa
+    // que este fichero ya documenta con los centroides: dos cuentas del mismo dato se separan.
+    struct PillarAxis {
+        double z_low { 0. }, z_high { 0. }, z_bot_ext { 0. }, z_knee { 0. };
+        Vec2d  c_top { Vec2d::Zero() }, shift { Vec2d::Zero() };
+        bool   wraps { false }, has_knee { false };
+        // De arriba abajo: T, [M], [K], B. `off` es el desplazamiento XY de ese anillo.
+        std::vector<std::pair<double, Vec2d>> rings;
+    };
+    bool pillar_axis(PillarAxis &out) const;
+
     bool pillar_crosses_object() const;
+    // NEOTKO_SUPPORTZONES_TAG s300g — caché de una sola respuesta, y hace falta.
+    //
+    // El aviso lo preguntan tres sitios por frame (el color del alzado, la bandeja de avisos y la
+    // puerta del botón de crear) y desde s300g sondea el contorno además del eje: 9 sondas × 19
+    // muestras. Sin caché serían ~500 raycasts por frame en un panel que se redibuja siempre.
+    // La firma es lo único que puede cambiar la respuesta.
+    //
+    // 🚨 s300i — LA FIRMA LLEVA head Y foot, y su ausencia era un bug con cara de otra cosa.
+    // Visto por el dueño: "no me dejaba crear, toqué el ancho de cabeza a negativo y se activó, lo
+    // puse a 0.0 y me dejó". El borde cambia la huella, o sea el cuerpo que se sondea — pero no
+    // movía ni el techo, ni el pie, ni el número de puntos del contorno, así que la firma no se
+    // enteraba y el veredicto se quedaba congelado del cálculo anterior.
+    mutable Vec3d m_cross_cache_top   { Vec3d::Zero() };
+    mutable Vec3d m_cross_cache_bot   { Vec3d::Zero() };
+    mutable size_t m_cross_cache_npts { 0 };
+    mutable float m_cross_cache_head  { 0.f };
+    mutable float m_cross_cache_foot  { 0.f };
+    mutable bool  m_cross_cache_valid { false };
+    mutable bool  m_cross_cache_value { false };
     // §4-bis.8 A4: a footprint too narrow to extrude. The corridor would strangle the column and
     // remove_sticks() in project_support_to_grid() would then eat what is left (T7).
     bool footprint_too_narrow() const;
@@ -585,6 +794,13 @@ private:
     // Se llama desde create_pillar(), dentro de su snapshot: el pilar y los ajustes que lo hacen
     // imprimible se deshacen juntos.
     bool seed_support_defaults(ModelObject &mo);
+    // NEOTKO_SUPPORTZONES_TAG s304 — el «sólo mis zonas» de s299c, sacado a funcion.
+    //
+    // 🔑 Lo piden DOS sitios: el interruptor de la seccion de zonas y el aviso del cajon, que
+    // ofrece el mismo cambio de un clic en el momento en el que la condicion se da. Un `set_key_value`
+    // duplicado en dos sitios es un sitio donde se desincronizan, y esta clave tiene familia
+    // (arbol contra normal) que hay que respetar en los dos.
+    void apply_only_my_zones(bool only_mine);
     // Sólo para que el panel sepa si el Snug de ahora lo puso él y pueda decirlo.
     bool m_forced_snug = false;
 
@@ -657,9 +873,9 @@ private:
     void build_face_model(GLModel &model, int facet_idx, const Vec2d &centre_xy, const ColorRGBA &col);
     // s289 — el LIENZO: toda la superficie mirando hacia abajo conectada con la semilla, dibujada
     // flojita detrás de lo pintado. Es el "hasta aquí puedes" que faltaba.
-    GLModel m_paint_area_model;
-    int     m_paint_area_facet = -1;
-    void    build_paint_area_model(int seed_facet);
+    // ⛔ s299b — aquí vivían `m_paint_area_model` y `build_paint_area_model()`, el lienzo del
+    // pincel. Se han quitado: el lienzo enseñaba hasta dónde dejaba pintar el flood-fill, y el
+    // pincel ya no tiene flood-fill. Lo que pintas es la huella.
     void render_pick_overlays();
 
     // ------------------------------------------------------------------------
@@ -715,30 +931,21 @@ private:
     // already uses for its face pick; this is its second user, which is the only honest reason to
     // repeat a pattern.
     //
-    // 🔑 It also completes the picking story: you SEE the stacked undersides, the normal filter
-    // makes only the downward ones eligible, and the wheel chooses between them.
-    // ⛔ s286b nació APAGADO y ✅ s287 lo enciende, y no es un cambio de opinión sin más: en s286b
-    // la pieza fantasma desorientaba porque los marcadores se veían por debajo de ella y flojos.
-    // Con la rejilla y el mapa ya fuertes en la pasada de rayos X (GLCanvas3D, 0.80), entrar con la
-    // pieza translúcida enseña de golpe lo que la herramienta sabe en vez de esconderlo.
-    bool  m_see_through = true;
-    // 0.12 because that is what the part had to be dialled down to before the undersides read
-    // clearly (s286, in the hand). The first guess of 0.28 was too solid to see through.
-    // 0.60 (s286b): con los marcadores ya sin teñir por la pieza fantasma, una opacidad alta deja
-    // ver la pieza Y las marcas a la vez. El 0.12 de s286 era lo mínimo para que las marcas se
-    // colaran por debajo, y esa razón ya no existe.
-    float m_see_through_alpha = 0.60f;
+    // ⛔ s299c — aquí vivían `m_see_through` y su opacidad. Se han quitado con la opción: la pieza
+    // translúcida bajo un bloque que YA es translúcido no enseñaba el interior, enseñaba dos
+    // transparencias peleándose sin profundidad fiable. Sobrevive `m_saved_colors`, que ahora sólo
+    // lo usa el resaltado de la zona seleccionada.
 
     // Original colours, keyed by a stable (object_idx, volume_idx, instance_idx) so we can restore
     // by matching live volumes. Safe across selection changes AND volume rebuilds: a stale id
     // simply finds no match instead of dangling.
     std::map<std::tuple<int, int, int>, ColorRGBA> m_saved_colors;
 
-    // 🚨 Always restores before it ghosts. Saving an already-ghosted colour as "the original" is
-    // how a tint accumulates until the scene fades to nothing over a few refreshes.
+    // 🚨 Restaura SIEMPRE antes de teñir. Guardar un color ya teñido como "el original" es como un
+    // tinte se acumula hasta que la escena se apaga del todo en unos cuantos refrescos.
+    // El nombre se conserva porque es por donde pasan todos los sitios que refrescan el color.
     void apply_see_through();
-    // Enciende en el 3D la zona seleccionada en la lista. Comparte `m_saved_colors` con el
-    // fantasma a propósito: un solo dueño del color de cada volumen, una sola restauración.
+    // Enciende en el 3D la zona seleccionada en la lista.
     void highlight_selected_zone();
     void restore_see_through();
 };

@@ -1596,6 +1596,9 @@ void NeoTower::collect_all_events(const Print& print)
                     struct_tool = m_initial_tool;
             }
             bool first_real_layer_struct = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
+            // NEOTKO_NEOTOWER_DEBUG_TAG s303 — ultimo plano de torre emitido, para medir el
+            // hueco real que le toca a cada capa (ver LH_DECIDE). Solo diagnostico.
+            double _s303_prev_z = -1.0;
 
             for (const LayerTools& lt : tool_ordering) {
                 // Sublayers are not structural targets (they get prime events).
@@ -1713,6 +1716,35 @@ void NeoTower::collect_all_events(const Print& print)
                 // first layer where the tower has real work (e.g. z=0.68), wipe_tower_layer_height
                 // == z (accumulated), while lt.layer_height stays = nominal (0.2). Source-tag
                 // = "s86/lh-trace". Retirar tras validar fix.
+                // NEOTKO_NEOTOWER_DEBUG_TAG s303 — LH_DECIDE: comparar los DOS candidatos a
+                // altura de capa de torre ANTES de elegir camino, sin cambiar nada.
+                //   lt_lh  = lo que se usa HOY (LayerTools::layer_height). Lo pisa el ULTIMO
+                //            objeto que tenga capa en ese plano, aunque esa capa este vacia.
+                //   wt_lh  = LayerTools::wipe_tower_layer_height (opcion B).
+                //   gap    = hueco real hasta el ultimo plano de torre emitido, medido aqui.
+                // s86 descarto wt_lh porque entonces ACUMULABA varias capas en una. Si esa
+                // premisa sigue viva, wt_lh != gap en algun plano y aqui se vera.
+                // `sublayer_ev` dice si el plano lo sirve otra rama (sandwich/MP/CM/PB): esos
+                // se saltan justo debajo por event_zs, o sea la opcion B NO los tocaria.
+                {
+                    const double _gap = (_s303_prev_z < 0.0) ? double(z) : double(z) - _s303_prev_z;
+                    const bool   _sub = (event_zs.count(z_um) > 0);
+                    const double _wt  = double(lt.wipe_tower_layer_height);
+                    const double _lt  = double(lt.layer_height);
+                    NT_LOG("LH_DECIDE z=" << z
+                        << " lt_lh="      << _lt
+                        << " wt_lh="      << _wt
+                        << " gap_real="   << _gap
+                        << " sublayer_ev="<< (_sub ? 1 : 0)
+                        << " gap_layer="  << (gap_layer ? 1 : 0)
+                        << " n_ext="      << lt.extruders.size()
+                        << (std::abs(_wt - _gap) > 0.005
+                            ? "  <<< B_INSEGURO: wt_lh no es el hueco (premisa de s86 VIVA)" : "")
+                        << (std::abs(_lt - _gap) > 0.005
+                            ? (_lt < _gap ? "  <<< HOY_DEJA_AIRE" : "  <<< HOY_ARA") : "")
+                        << (_sub ? "  [lo sirve otra rama: B no lo tocaria]" : ""));
+                    if (!_sub) _s303_prev_z = double(z);
+                }
                 NT_LOG("s86/lh-trace z=" << z
                     << " has_wt=" << lt.has_wipe_tower
                     << " wt_lh=" << lt.wipe_tower_layer_height

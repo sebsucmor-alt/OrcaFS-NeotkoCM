@@ -1329,7 +1329,11 @@ static void make_perimeter_and_infill(ExtrusionEntitiesPtr& dst, const ExPolygon
             dst = std::move(loops_entities);
         }
     }
-    dst.erase(std::remove_if(dst.begin(), dst.end(), [](ExtrusionEntity *entity) { return static_cast<ExtrusionEntityCollection *>(entity)->empty(); }), dst.end());
+    // Upstream Snapmaker #784 (0613c52f0c) / Orca: aqui hay entidades que son caminos sueltos,
+    // asi que hay que mirar el tipo antes de preguntar si la coleccion esta vacia.
+    dst.erase(std::remove_if(dst.begin(), dst.end(), [](ExtrusionEntity *entity) {
+        return entity != nullptr && entity->is_collection() && static_cast<ExtrusionEntityCollection *>(entity)->empty();
+    }), dst.end());
     if (infill_first) {
         // sort regions to reduce travel
         Points ordering_points;
@@ -1560,9 +1564,27 @@ void TreeSupport::generate_toolpaths()
                         bool need_infill = with_infill;
                         if(m_object_config->support_base_pattern==smpDefault)
                             need_infill &= area_group.need_infill;
-                        std::shared_ptr<Fill> filler_support = std::shared_ptr<Fill>(Fill::new_from_type(layer_id == 0 ? ipConcentric : m_support_params.base_fill_pattern));
+                        // Upstream Snapmaker #728 (a89f36c4c5), que a su vez lo trae de OrcaSlicer d2ca5d3a1e.
+                        //
+                        // La base del soporte que toca la cama (capa 0 y sin raft) forzaba ipConcentric y
+                        // calculaba el spacing como support_base_pattern_spacing * support_density. Cuando el
+                        // support_base_pattern_spacing efectivo es 0 (override por objeto, o el default), el
+                        // spacing sale 0 y el bucle while(!last.empty()) de FillConcentric no converge NUNCA:
+                        // con distancia 0 el offset2_ex(last, -(0+0), +0) es un no-op y el poligono no encoge.
+                        // Sintoma: laminado colgado al 70% para siempre.
+                        //
+                        // Arreglo: en esa capa usar ipRectilinear (que no tiene bucle de convergencia) y el
+                        // spacing real del flow, que siempre es > 0.
+                        const bool support_base_on_bed = (layer_id == 0 && m_raft_layers == 0);
+                        const InfillPattern base_fill_pattern = support_base_on_bed
+                            ? ipRectilinear
+                            : m_support_params.base_fill_pattern;
+                        std::shared_ptr<Fill> filler_support =
+                            std::shared_ptr<Fill>(Fill::new_from_type(base_fill_pattern));
                         filler_support->set_bounding_box(bbox_object);
-                        filler_support->spacing = object_config.support_base_pattern_spacing.value * support_density;// constant spacing to align support infill lines
+                        filler_support->spacing = support_base_on_bed
+                            ? flow.spacing()
+                            : (object_config.support_base_pattern_spacing.value * support_density);// constant spacing to align support infill lines
                         filler_support->angle = Geometry::deg2rad(object_config.support_angle.value);
 
                         Polygons loops = to_polygons(poly);

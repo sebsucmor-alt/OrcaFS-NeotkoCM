@@ -35,6 +35,7 @@
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
 #include <wx/wupdlock.h>
+#include <wx/weakref.h>   // Upstream Snapmaker #769 — wxWeakRef<Sidebar> en select_preset
 
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
@@ -7766,6 +7767,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_interface_speed", "speed_settings_other_layers_speed#support-interface");
         optgroup = page->new_optgroup(L("Overhang speed"), L"param_overhang_speed", 15);
         optgroup->append_single_option_line("enable_overhang_speed", "speed_settings_overhang_speed#slow-down-for-overhang");
+        // NEOTKO_OVERHANGSHADOW_TAG / NeotkoLIBRE — line always appended; ConfigManipulation hides it
+        // (and its two sub-options) unless LibreMode is active. Same pattern as the NeoArachne controls.
+        optgroup->append_single_option_line("overhang_shadow_inner_wall");
+        optgroup->append_single_option_line("overhang_shadow_speed_ratio");
+        optgroup->append_single_option_line("overhang_shadow_distance");
         optgroup->append_single_option_line("slowdown_for_curled_perimeters", "speed_settings_overhang_speed#slow-down-for-curled-perimeters");
         Line line = { L("Overhang speed"), L("This is the speed for various overhang degrees. Overhang degrees are expressed as a percentage of line width. 0 speed means no slowing down for the overhang degree range and wall speed is used") };
         line.label_path = "slow-down-for-overhang";
@@ -8130,6 +8136,13 @@ void TabPrint::toggle_options()
             cb->Append(_(def->enum_labels[i]));
         }
         cb->SetValue(n);
+        // Upstream Snapmaker #784 (0613c52f0c): la etiqueta vieja (un estilo de arbol que se quedo
+        // ahi tras cambiar support_type con los soportes apagados) puede no existir en la lista
+        // recien reconstruida; entonces SetValue deja la seleccion invalida y Choice::get_value
+        // indexa enum_values fuera de rango. Nos toca mas a nosotros que a ellos, porque el bucle
+        // de arriba ademas se salta "organic" cuando PerObject Support esta encendido.
+        if (cb->GetSelection() == wxNOT_FOUND && cb->GetCount() > 0)
+            cb->SetSelection(0);
     }
 
     // Keep plate bed-type list in sync with currently selected printer.
@@ -11221,12 +11234,32 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                         oldFilamentColors[i] = "#26A69A";
                     if (oldFilamentMultiColors[i].empty())
                         oldFilamentMultiColors[i] = oldFilamentColors[i];
-                    oldFilamentColourModes[i] = oldFilamentColourModes[i] == 1 ? 1 : 0;
+                    // Upstream Snapmaker #778 (464d509e87): normalizar por el mismo camino que todo
+                    // lo demas, en vez de con un ternario que se salta el default nuevo.
+                    const FilamentColorMode mode = FilamentColorModeFromConfig(oldFilamentColourModes[i]);
+                    oldFilamentColourModes[i] = FilamentColorModeToConfig(mode);
                 }
+
+                // Upstream Snapmaker #805 (dfbd784cfc): update_selections rehace la matriz de purga
+                // para el numero de filamentos de la impresora NUEVA, pero justo debajo devolvemos
+                // los filament_presets VIEJOS. La matriz se quedaba con el tamano nuevo y
+                // auto_calc_flushing_volumes la indexaba con el conteo viejo: corrupcion de heap,
+                // no un warning. Hay que salvarla y devolverla igual que los colores.
+                std::vector<double> oldFlushVolumesMatrix;
+                std::vector<double> oldFlushVolumesVector;
+                if (const ConfigOptionFloats* flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    oldFlushVolumesMatrix = flushMatrix->values;
+                if (const ConfigOptionFloats* flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    oldFlushVolumesVector = flushVector->values;
 
                 m_preset_bundle->update_selections(*wxGetApp().app_config);
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
+
+                if (ConfigOptionFloats* flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    flushMatrix->values = oldFlushVolumesMatrix;
+                if (ConfigOptionFloats* flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    flushVector->values = oldFlushVolumesVector;
 
                 projectConfig.option<ConfigOptionStrings>("filament_colour")->values = oldFilamentColors;
                 projectConfig.option<ConfigOptionStrings>("filament_multi_colors", true)->values = oldFilamentMultiColors;
@@ -11234,8 +11267,8 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 
                 std::vector<std::string> filamentColourModeStrings;
                 filamentColourModeStrings.reserve(oldFilamentColourModes.size());
-                for (int mode : oldFilamentColourModes)
-                    filamentColourModeStrings.emplace_back(mode == 1 ? "1" : "0");
+                for (const int mode : oldFilamentColourModes)
+                    filamentColourModeStrings.emplace_back(std::to_string(mode));
                 const std::string filamentColors = boost::algorithm::join(oldFilamentColors, ",");
                 const std::string filamentMultiColors = boost::algorithm::join(oldFilamentMultiColors, ",");
                 const std::string filamentColourModes = boost::algorithm::join(filamentColourModeStrings, ",");
@@ -11284,6 +11317,22 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 
         // Trigger the on_presets_changed event to apply cached config for dependent tabs
         on_presets_changed();
+
+        // Upstream Snapmaker #769 (79cdfadc93): refrescar el nozzle del sidebar tras cambiar de
+        // preset. Las entradas que no vienen del sidebar (combo de Machine Settings, borrado de
+        // preset, transferencia del UnsavedChangesDialog, impresora fisica) solo pasan por aqui.
+        // Solo FFF: SLA no tiene nozzle_diameter.
+        if (m_type == Preset::TYPE_PRINTER && m_presets->get_edited_preset().printer_technology() == ptFFF) {
+            // Guarda: plater_ queda colgando durante el teardown de recreate_GUI (nunca se re-anula).
+            if (Plater* plater = wxGetApp().plater()) {
+                // Referencia debil: un Sidebar destruido (cierre o recreacion de la GUI) da null.
+                wxWeakRef<Sidebar> weak_sidebar = &plater->sidebar();
+                wxTheApp->CallAfter([weak_sidebar]() {
+                    if (Sidebar* sidebar = weak_sidebar.get())
+                        sidebar->update_nozzle_settings();
+                });
+            }
+        }
     }
 
     if (technology_changed)

@@ -360,6 +360,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/OAuthDialog.cpp
     GUI/OAuthDialog.hpp
     GUI/MixedFilamentDialog.cpp
+    # NEOTKO_TOOLSLEEP_TAG s294 — "Bed and Nozzle Extras" (sidebar Printer, under Bed type)
+    GUI/NeotkoBedNozzleExtras.cpp
+    GUI/NeotkoBedNozzleExtras.hpp
     GUI/MixedFilamentDialog.hpp
     GUI/MixedGradientSelector.hpp
     GUI/MixedGradientSelector.cpp

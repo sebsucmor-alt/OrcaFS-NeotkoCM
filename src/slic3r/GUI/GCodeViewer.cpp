@@ -1019,16 +1019,28 @@ void GCodeViewer::load(const GCodeProcessorResult& gcode_result, const Print& pr
     //BBS: add logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": gcode result %1%, new id %2%, gcode file %3% ") % (&gcode_result) % m_last_result_id % gcode_result.filename;
 
-    // release gpu memory, if used
+    // Upstream Snapmaker #722 (f94b10af1f).
+    // release gpu memory, if used.
+    // OJO: esto TIENE que ir antes de armar m_loading. reset() se sale de vacio cuando m_loading
+    // esta puesto, asi que armarlo primero se saltaria esta limpieza en silencio y los buffers del
+    // gcode anterior se quedarian ahi para que load_toolpaths() les fuera anadiendo encima.
     reset();
+
+    // load_toolpaths() de mas abajo bombea el bucle de eventos a traves de su dialogo de progreso
+    // modal; un evento despachado puede reentrar en reset() (via reset_gcode_toolpaths) y poner
+    // m_moves_count a 0 a mitad de vuelo, que es el underflow sin signo del reserve() de
+    // load_toolpaths. Con la guardia armada, cualquier reset() reentrante se ignora. El ScopeGuard
+    // la baja en todas las salidas, incluida una excepcion desde load_toolpaths().
+    m_loading = true;
+    ScopeGuard loading_guard([this]() { m_loading = false; });
 
     //BBS: add mutex for protection of gcode result
     gcode_result.lock();
+    ScopeGuard unlock_guard([&gcode_result]() { gcode_result.unlock(); });
     //BBS: add safe check
     if (gcode_result.moves.size() == 0) {
         //result cleaned before slicing ,should return here
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": gcode result reset before, return directly!");
-        gcode_result.unlock();
         return;
     }
 
@@ -1050,8 +1062,7 @@ void GCodeViewer::load(const GCodeProcessorResult& gcode_result, const Print& pr
 
     //BBS: add mutex for protection of gcode result
     if (m_layers.empty()) {
-        gcode_result.unlock();
-        return;
+        return;   // Upstream Snapmaker #722: el unlock lo hace el ScopeGuard.
     }
 
     m_settings_ids = gcode_result.settings_ids;
@@ -1148,9 +1159,8 @@ void GCodeViewer::load(const GCodeProcessorResult& gcode_result, const Print& pr
     m_conflict_result = gcode_result.conflict_result;
     if (m_conflict_result) { m_conflict_result.value().layer = m_layers.get_l_at(m_conflict_result.value()._height); }
 
-    //BBS: add mutex for protection of gcode result
-    gcode_result.unlock();
     //BBS: add logs
+    // Upstream Snapmaker #722: gcode_result.unlock() y m_loading = false salen aqui por los ScopeGuard.
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": finished, m_buffers size %1%!")%m_buffers.size();
 }
 
@@ -1162,19 +1172,18 @@ void GCodeViewer::refresh(const GCodeProcessorResult& gcode_result, const std::v
 
     //BBS: add mutex for protection of gcode result
     gcode_result.lock();
+    ScopeGuard unlock_guard([&gcode_result]() { gcode_result.unlock(); });   // Upstream Snapmaker #722
 
     //BBS: add safe check
     if (gcode_result.moves.size() == 0) {
         //result cleaned before slicing ,should return here
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": gcode result reset before, return directly!");
-        gcode_result.unlock();
         return;
     }
 
     //BBS: add mutex for protection of gcode result
     if (m_moves_count == 0) {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": gcode result m_moves_count is 0, return directly!");
-        gcode_result.unlock();
         return;
     }
 
@@ -1251,8 +1260,8 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
     m_statistics.refresh_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count();
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
 
-    //BBS: add mutex for protection of gcode result
-    gcode_result.unlock();
+    // Upstream Snapmaker #722: el unlock lo hace el ScopeGuard al salir. refresh_render_paths()
+    // no vuelve a coger este mutex, asi que sostenerlo un poco mas no puede bloquear.
 
     // update buffers' render paths
     refresh_render_paths();
@@ -1462,6 +1471,10 @@ void GCodeViewer::reset_shell()
 
 void GCodeViewer::reset()
 {
+    // Upstream Snapmaker #722 (f94b10af1f): reentrada desde el bucle de eventos que bombea el
+    // dialogo de progreso de load_toolpaths(). Ver load().
+    if (m_loading)
+        return;
     //BBS: should also reset the result id
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": current result id %1% ")%m_last_result_id;
     m_last_result_id = -1;
@@ -2800,7 +2813,9 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
 
         // update progress dialog
         ++progress_count;
-        if (progress_dialog != nullptr && progress_count % progress_threshold == 0) {
+        // Upstream Snapmaker #753 (785c690f47): sin mainframe el dialogo de progreso ya no tiene
+        // padre valido y Update()/Fit() revientan al cerrar o recrear la GUI a mitad de carga.
+        if (progress_dialog != nullptr && progress_count % progress_threshold == 0 && wxGetApp().mainframe != nullptr) {
             progress_dialog->Update(int(100.0f * float(i) / (2.0f * float(m_moves_count))),
                 _L("Generating geometry vertex data") + ": " + wxNumberFormatter::ToString(100.0 * double(i) / double(m_moves_count), 0, wxNumberFormatter::Style_None) + "%");
             progress_dialog->Fit();
@@ -2891,8 +2906,18 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
     };
     //BBS: generate map from ssid to move id in advance to reduce computation
     m_ssid_to_moveid_map.clear();
-    m_ssid_to_moveid_map.reserve( m_moves_count - biased_seams_ids.size());
-    for (size_t i = 0; i < m_moves_count - biased_seams_ids.size(); i++)
+    // Upstream Snapmaker #722 (f94b10af1f). Tope defensivo: si m_moves_count llegara a ser menor
+    // que el numero de costuras (p.ej. puesto a 0 por un reset() reentrante), esta resta sin signo
+    // da la vuelta hasta ~SIZE_MAX y reserve() lanza std::length_error. Hoy la guardia m_loading ya
+    // lo impide; esto lo deja a salvo pase lo que pase.
+    const size_t ssid_count = (m_moves_count > biased_seams_ids.size()) ? (m_moves_count - biased_seams_ids.size()) : 0;
+    m_ssid_to_moveid_map.reserve(ssid_count);
+    if (ssid_count == 0 && m_moves_count > 0) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__
+            << boost::format(": reentrancy detected -- m_moves_count=%1% biased_seams=%2% moves.size=%3%")
+                   % m_moves_count % biased_seams_ids.size() % gcode_result.moves.size();
+    }
+    for (size_t i = 0; i < ssid_count; i++)
         m_ssid_to_moveid_map.push_back(extract_move_id(i));
 
     //BBS: smooth toolpaths corners for the given TBuffer using triangles
@@ -3200,7 +3225,8 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
             next = &gcode_result.moves[i + 1];
 
         ++progress_count;
-        if (progress_dialog != nullptr && progress_count % progress_threshold == 0) {
+        // NEOTKO: mismo peligro que arriba (#753). Upstream solo parcheo el primer bucle.
+        if (progress_dialog != nullptr && progress_count % progress_threshold == 0 && wxGetApp().mainframe != nullptr) {
             progress_dialog->Update(int(100.0f * float(m_moves_count + i) / (2.0f * float(m_moves_count))),
                 _L("Generating geometry index data") + ": " + wxNumberFormatter::ToString(100.0 * double(i) / double(m_moves_count), 0, wxNumberFormatter::Style_None) + "%");
             progress_dialog->Fit();
@@ -3307,7 +3333,7 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
         }
     }
 
-    if (progress_dialog != nullptr) {
+    if (progress_dialog != nullptr && wxGetApp().mainframe != nullptr) {   // Upstream Snapmaker #753
         progress_dialog->Update(100, "");
         progress_dialog->Fit();
     }
@@ -3414,7 +3440,10 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result, const
                 m_roles.emplace_back(move.extrusion_role);
         }
         else if (move.type == EMoveType::Travel) {
-            if (move_id - last_travel_s_id > 1 && !m_layers.empty())
+            // Upstream Snapmaker #765 (fdbd87498a): con "> 1" un travel pegado al anterior no movia
+            // el final de la capa, asi que max_s_id se quedaba corto. Va en pareja con el && de
+            // refresh_render_paths: este ENSANCHA el rango y aquel APRIETA quien entra.
+            if (move_id - last_travel_s_id > 0 && !m_layers.empty())
                 m_layers.get_endpoints().back().last = move_id;
 
             last_travel_s_id = move_id;
@@ -3667,7 +3696,19 @@ void GCodeViewer::refresh_render_paths(bool keep_sequential_current_first, bool 
         const size_t min_s_id = m_layers.get_endpoints_at(min_id).first;
         const size_t max_s_id = m_layers.get_endpoints_at(max_id).last;
 
-        return (min_s_id <= path.sub_paths.front().first.s_id && path.sub_paths.front().first.s_id <= max_s_id) ||
+        // Upstream Snapmaker #765 (fdbd87498a): el bucle de arriba FUSIONA caminos adyacentes que
+        // se tocan, asi que front()/back() son los extremos de una CADENA que puede cruzar varias
+        // capas. Con "||" bastaba con que UN extremo cayera dentro para dibujar la cadena entera, y
+        // por eso al mover el slider aparecian lineas de capas que no estaban seleccionadas.
+        //
+        // s302, medido: el isApprox de arriba compara un Vec3f ENTERO, o sea tambien la Z, con
+        // precision relativa de ~1e-5 sobre la norma (milesimas de mm a escala de plato). Una altura
+        // de capa esta tres ordenes por encima, asi que una cadena NO puede fusionarse a traves de un
+        // cambio de capa: cada cadena vive dentro de su capa y el && da lo mismo que el ||.
+        // La unica excepcion es la Z CONTINUA, es decir modo espiral, donde la pieza entera es una
+        // sola cadena y con && podria no dibujarse salvo con el rango completo. Si alguna vez importa,
+        // la vuelta atras es cambiar este && por || y nada mas.
+        return (min_s_id <= path.sub_paths.front().first.s_id && path.sub_paths.front().first.s_id <= max_s_id) &&
             (min_s_id <= path.sub_paths.back().last.s_id && path.sub_paths.back().last.s_id <= max_s_id);
     };
 
@@ -6459,6 +6500,52 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
         return { nullptr, nullptr };
     };
 
+    // NEOTKO_GCODE_REPROCESSOR s299 — entrada manual de la capa. Con 1200 capas arrastrar el punto
+    // no tiene resolucion: la altura del chart son ~200 px, asi que un pixel valen 6 capas y hay
+    // numeros a los que sencillamente no se puede llegar con el raton. Ahora ademas de arrastrar
+    // se puede TECLEAR el numero, con el mismo campo en dos sitios: el popup del boton derecho
+    // sobre el punto y las insignias de capa de la fila de resumen.
+    //
+    // 🚨 Las capas se enseñan 1-based (como en toda esta ventana) y se guardan 0-based (como las
+    // cuenta el motor), igual que hace el arrastre; y se recortan con los MISMOS topes que el
+    // arrastre para que no haya dos verdades sobre que rango es valido.
+    auto edit_layer_field = [this, &rule_range, total_layers, scale](int kind, int idx, int end) -> bool {
+        auto [p_from, p_to] = rule_range(kind, idx);
+        if (p_from == nullptr || p_to == nullptr)
+            return false;
+
+        bool edited = false;
+        const std::string label = (end == 0) ? _u8L("From layer") : _u8L("To layer");
+        int shown = (end == 0) ? *p_from + 1 : (*p_to < 0 ? total_layers : *p_to + 1);
+
+        ImGui::SetNextItemWidth(110.0f * scale);
+        if (ImGui::InputInt((label + "##reproc_layer_edit").c_str(), &shown, 1, 10,
+                            ImGuiInputTextFlags_AutoSelectAll)) {
+            const int layer0 = shown - 1;
+            if (end == 0) {
+                const int to_eff = (*p_to < 0) ? total_layers - 1 : *p_to;
+                *p_from = std::clamp(layer0, 0, to_eff);
+            } else {
+                const int v = std::clamp(layer0, *p_from, total_layers - 1);
+                // Teclear la ultima capa significa lo mismo que soltar el punto arriba del todo:
+                // "hasta el final del fichero", que el motor codifica como -1.
+                *p_to = (v >= total_layers - 1) ? -1 : v;
+            }
+            edited = true;
+        }
+
+        if (end == 1) {
+            bool to_end = (*p_to < 0);
+            if (ImGui::Checkbox(_u8L("to END").c_str(), &to_end)) {
+                // Al desmarcar, el rango se cierra en la penultima capa (la ultima ES "END"), nunca
+                // por debajo de layer_from.
+                *p_to = to_end ? -1 : std::max(*p_from, total_layers - 2);
+                edited = true;
+            }
+        }
+        return edited;
+    };
+
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const float hit_r = 8.0f * scale;
     ChartEntry* hover_entry = nullptr;
@@ -6484,7 +6571,10 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             const int shown = (hover_end == 0) ? hover_entry->layer_from + 1
                                                : (hover_entry->layer_to < 0 ? total_layers : hover_entry->layer_to + 1);
-            ImGui::SetTooltip("%s %s %d — %s", kind_name(hover_entry->kind).c_str(), _u8L("layer").c_str(), shown, _u8L("drag to move").c_str());
+            // NEOTKO_GCODE_REPROCESSOR s299 — el tooltip anuncia la via de teclado; sin esto nadie
+            // descubre que el boton derecho hace algo mas que borrar.
+            ImGui::SetTooltip("%s %s %d — %s", kind_name(hover_entry->kind).c_str(), _u8L("layer").c_str(), shown,
+                              _u8L("drag to move, right-click to type it").c_str());
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 m_expert_reprocessor.chart_drag_kind = static_cast<int>(hover_entry->kind);
                 m_expert_reprocessor.chart_drag_index = hover_entry->index;
@@ -6537,6 +6627,7 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
         if (hover_entry != nullptr) {
             m_expert_reprocessor.chart_delete_kind = static_cast<int>(hover_entry->kind);
             m_expert_reprocessor.chart_delete_index = hover_entry->index;
+            m_expert_reprocessor.chart_delete_end = hover_end; // NEOTKO_GCODE_REPROCESSOR s299
             ImGui::OpenPopup("##reproc_chart_delete");
         } else {
             m_expert_reprocessor.chart_add_tool = by_tool_view
@@ -6668,11 +6759,44 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
                 std::string prefix;
                 if (!col_label.empty())
                     prefix = (first_row ? col_label : std::string(col_label.size(), ' ')) + "  ";
-                prefix += kind_name(e->kind) + " " + std::to_string(e->layer_from + 1) + " to " + to_str + " - ";
+                prefix += kind_name(e->kind);
                 first_row = false;
 
                 imgui.text(prefix);
+                ImGui::SameLine(0.0f, 6.0f * scale);
+
+                // NEOTKO_GCODE_REPROCESSOR s299 — los dos numeros del rango dejan de ser texto muerto:
+                // son insignias que abren un campo numerico (edit_layer_field). Es la via de teclado
+                // para lo que hasta ahora solo se podia arrastrar en el chart, que con 1200 capas no
+                // llega: la caja mide ~200 px, o sea 6 capas por pixel.
+                ImGui::PushID(static_cast<int>(e->kind) * 100000 + e->index);
+                const ColorRGBA& kc_layer = kind_color(e->kind);
+                auto layer_badge = [&](int end, const std::string& text, const char* popup_id) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImGuiWrapper::to_ImU32(ColorRGBA(kc_layer.r(), kc_layer.g(), kc_layer.b(), 0.14f)));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGuiWrapper::to_ImU32(ColorRGBA(kc_layer.r(), kc_layer.g(), kc_layer.b(), 0.32f)));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImGuiWrapper::to_ImU32(ColorRGBA(kc_layer.r(), kc_layer.g(), kc_layer.b(), 0.45f)));
+                    ImGui::PushStyleColor(ImGuiCol_Text, white);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                    if (ImGui::SmallButton((text + "##" + popup_id).c_str()))
+                        ImGui::OpenPopup(popup_id);
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(4);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", _u8L("Click to type the layer number").c_str());
+                    if (ImGui::BeginPopup(popup_id)) {
+                        changed |= edit_layer_field(static_cast<int>(e->kind), e->index, end);
+                        ImGui::EndPopup();
+                    }
+                };
+                layer_badge(0, std::to_string(e->layer_from + 1), "reproc_lfrom");
+                ImGui::SameLine(0.0f, 4.0f * scale);
+                imgui.text(std::string("to"));
+                ImGui::SameLine(0.0f, 4.0f * scale);
+                layer_badge(1, to_str, "reproc_lto");
+                ImGui::SameLine(0.0f, 4.0f * scale);
+                imgui.text(std::string("-"));
                 ImGui::SameLine(0.0f, 2.0f * scale);
+                ImGui::PopID();
 
                 ImGui::PushID(static_cast<int>(e->kind) * 100000 + e->index);
                 const ColorRGBA& kc = kind_color(e->kind);
@@ -6767,6 +6891,18 @@ bool GCodeViewer::render_expert_gcode_reprocessor_chart()
         }
         imgui.text(label);
         ImGui::Separator();
+
+        // NEOTKO_GCODE_REPROCESSOR s299 — teclear la capa DEL EXTREMO que se clico (chart_delete_end,
+        // capturado con el clic derecho). Va lo primero porque es la accion no destructiva del popup;
+        // borrar sigue abajo del todo, en rojo.
+        {
+            ImGui::PushID("reproc_popup_layer");
+            changed |= edit_layer_field(m_expert_reprocessor.chart_delete_kind,
+                                        m_expert_reprocessor.chart_delete_index,
+                                        m_expert_reprocessor.chart_delete_end);
+            ImGui::PopID();
+            ImGui::Separator();
+        }
 
         // NEOTKO_GCODE_REPROCESSOR "Avoid Wipetower" (s216j): moved here from the value-edit
         // popup after user feedback — this right-click-on-a-point popup is where they actually
@@ -9316,10 +9452,27 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
 
             //BBS: replace model custom gcode with current plate custom gcode
             std::vector<CustomGCode::Item> custom_gcode_per_print_z = wxGetApp().is_editor() ? wxGetApp().plater()->model().get_curr_plate_custom_gcodes().gcodes : m_custom_gcode_per_print_z;
-            std::vector<ColorRGBA> last_color(m_extruders_count);
-            for (size_t i = 0; i < m_extruders_count; ++i) {
+            // Upstream Snapmaker #743 (1ea4b31407): un resultado degenerado (gcode cuyo productor no
+            // se reconocio) puede dejar extruders_count == 0 y custom gcodes que apuntan a extrusores
+            // por encima de los colores/volumenes disponibles. Aqui abajo todo indice va comprobado.
+            const size_t last_color_count = std::max<size_t>(m_extruders_count, 1);
+            std::vector<ColorRGBA> last_color(last_color_count, ColorRGBA::GRAY());
+            for (size_t i = 0; i < last_color_count && i < m_tools.m_tool_colors.size(); ++i) {
                 last_color[i] = m_tools.m_tool_colors[i];
             }
+            auto color_at = [&last_color](int extruder_id) {
+                return (extruder_id >= 1 && static_cast<size_t>(extruder_id) <= last_color.size()) ?
+                    last_color[extruder_id - 1] : ColorRGBA::GRAY();
+            };
+            auto used_filament_at =
+                [this, get_used_filament_from_volume, &used_filaments](size_t idx, int extruder_id) {
+                if (extruder_id < 1 || idx >= used_filaments.size())
+                    return std::make_pair(0.0, 0.0);
+                const size_t filament_id = static_cast<size_t>(extruder_id - 1);
+                if (filament_id >= m_filament_diameters.size() || filament_id >= m_filament_densities.size())
+                    return std::make_pair(0.0, 0.0);
+                return get_used_filament_from_volume(used_filaments[idx], extruder_id - 1);
+            };
             int last_extruder_id = 1;
             int color_change_idx = 0;
             for (const auto& time_rec : times) {
@@ -9328,7 +9481,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 case CustomGCode::PausePrint: {
                     auto it = std::find_if(custom_gcode_per_print_z.begin(), custom_gcode_per_print_z.end(), [time_rec](const CustomGCode::Item& item) { return item.type == time_rec.first; });
                     if (it != custom_gcode_per_print_z.end()) {
-                        items.push_back({ PartialTime::EType::Print, it->extruder, last_color[it->extruder - 1], ColorRGBA::BLACK(), time_rec.second });
+                        items.push_back({ PartialTime::EType::Print, it->extruder, color_at(it->extruder),
+                            ColorRGBA::BLACK(), time_rec.second });
                         items.push_back({ PartialTime::EType::Pause, it->extruder, ColorRGBA::BLACK(), ColorRGBA::BLACK(), time_rec.second });
                         custom_gcode_per_print_z.erase(it);
                     }
@@ -9337,16 +9491,19 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 case CustomGCode::ColorChange: {
                     auto it = std::find_if(custom_gcode_per_print_z.begin(), custom_gcode_per_print_z.end(), [time_rec](const CustomGCode::Item& item) { return item.type == time_rec.first; });
                     if (it != custom_gcode_per_print_z.end()) {
-                        items.push_back({ PartialTime::EType::Print, it->extruder, last_color[it->extruder - 1], ColorRGBA::BLACK(), time_rec.second, get_used_filament_from_volume(used_filaments[color_change_idx++], it->extruder - 1) });
+                        items.push_back({ PartialTime::EType::Print, it->extruder, color_at(it->extruder),
+                            ColorRGBA::BLACK(), time_rec.second, used_filament_at(color_change_idx++, it->extruder) });
                         ColorRGBA color;
                         decode_color(it->color, color);
-                        items.push_back({ PartialTime::EType::ColorChange, it->extruder, last_color[it->extruder - 1], color, time_rec.second });
-                        last_color[it->extruder - 1] = color;
+                        items.push_back({ PartialTime::EType::ColorChange, it->extruder, color_at(it->extruder), color, time_rec.second });
+                        if (it->extruder >= 1 && static_cast<size_t>(it->extruder) <= last_color.size())
+                            last_color[it->extruder - 1] = color;
                         last_extruder_id = it->extruder;
                         custom_gcode_per_print_z.erase(it);
                     }
                     else
-                        items.push_back({ PartialTime::EType::Print, last_extruder_id, last_color[last_extruder_id - 1], ColorRGBA::BLACK(), time_rec.second, get_used_filament_from_volume(used_filaments[color_change_idx++], last_extruder_id - 1) });
+                        items.push_back({ PartialTime::EType::Print, last_extruder_id, color_at(last_extruder_id),
+                            ColorRGBA::BLACK(), time_rec.second, used_filament_at(color_change_idx++, last_extruder_id) });
 
                     break;
                 }

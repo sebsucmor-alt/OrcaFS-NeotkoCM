@@ -16,7 +16,9 @@
 #define SLIC3R_APP_LEGACY_DATA_KEY "Snapmaker_Orca"
 #define SLIC3R_VERSION "01.10.01.50"
 #define Snapmaker_VERSION "2.3.5"
-#define MIN_FIRM_VER "1.5.0"
+// Upstream Snapmaker #775 (5417538a1c): las U1 con firmware < 1.6.0 ya no se soportan.
+// Sólo lo consume AboutDialog.cpp para escribir el texto informativo; no cierra ninguna puerta.
+#define MIN_FIRM_VER "1.6.0"
 #ifndef GIT_COMMIT_HASH
 #define GIT_COMMIT_HASH "0000000" // 0000000 means uninitialized
 #endif

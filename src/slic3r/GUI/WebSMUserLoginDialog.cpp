@@ -184,7 +184,9 @@ void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
         std::string token;
         
         start += std::string("token=").size(); // 跳过"token="的长度
-        size_t end = tmpUrl.find("?", start);
+        // Upstream Snapmaker #741 (cef36b121c): el token puede venir seguido de & o de #, no solo
+        // de ?, y entonces se colaban dentro del token.
+        size_t end = tmpUrl.find_first_of("?&#", start);
         if (end != std::string::npos) {
             token = tmpUrl.substr(start, end - start).ToStdString();
         } else {
