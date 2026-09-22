@@ -51,13 +51,8 @@
 
   .runs { font-family: var(--mono); font-size: .68rem; color: var(--ink-faint); }
 
-  /* ---- line distribution diagram --------------------------------------- */
-  .ld { display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; }
-  @container demo (max-width: 640px) { .ld { grid-template-columns: repeat(2, 1fr); } }
-  .ld figure { margin: 0; }
-  .ld figcaption { font-size: .74rem; padding: .4rem .5rem; }
-  .ld b { display: block; font-family: var(--mono); font-size: .68rem; letter-spacing: .06em;
-          text-transform: uppercase; color: var(--ink); margin-bottom: .15rem; }
+  /* ---- band field: one stripe setting, four objects -------------------- */
+  .bf__sum { margin: .5rem 0 0; font-size: .82rem; line-height: 1.5; color: var(--ink-soft); }
 </style>
 </head>
 <body>
@@ -110,11 +105,12 @@
 
     <p class="where">
       <span class="where__label">Where</span>
-      <b>Sandwich editor</b><span class="sep">›</span><span>a pass set to</span><b>ColorStitch</b><span class="sep">›</span><b>Edit gradient…</b>
+      <b>ColorStitch Painter</b><span class="sep">›</span><b>Pro</b><span class="sep">›</span><span>a pass set to</span><b>ColorStitch</b><span class="sep">›</span><b>ADV…</b>
     </p>
     <p class="small" style="margin-top:-.9rem">
-      The same dialog opens from the <a href="painter.html">ColorStitch Painter</a>'s
-      Pro tray via the <code>ADV…</code> button. Two doors, one room.
+      Up to 2.4.5 the same dialog also opened from the Sandwich editor's <b>Edit gradient…</b>
+      button. The editor is gone in 2.4.6, so the <a href="painter.html">Painter</a> is the only
+      way in now.
     </p>
 
     <!-- ================================================================= -->
@@ -181,7 +177,7 @@
         <tr><td><b>Textile weave</b></td><td>Ready-made weave structures, generated for you. <a href="#weaves">Below</a>.</td></tr>
         <tr><td><b>Smooth blend, 2 colours</b></td><td>Two filaments spread across the surface at a percentage split, dithered so the transition looks continuous. The one most people want.</td></tr>
         <tr><td><b>Smooth blend, 3 colours</b></td><td>Three filaments at configurable percentages, with the middle colour concentrating around the centre.</td></tr>
-        <tr><td><b>Stripes, manual band sizes</b></td><td>Explicit band counts: N lines of Colour 1, M of Colour 2, repeating.</td></tr>
+        <tr><td><b>Stripes, band sizes in mm</b></td><td>Bands of a set width in millimetres, so many of Colour 1, so many of Colour 2, repeating across the surface. New in 2.4.6; the old version counted lines, <a href="#field">and that was the problem</a>.</td></tr>
       </tbody>
     </table>
     </div>
@@ -217,6 +213,8 @@
         &nbsp;· <code>build_dithered_tools_2color</code>, <code>build_dithered_tools_3color</code>,
         <code>build_custom_bands</code> and <code>colormix_easing_apply</code>, ported from
         <code>SurfaceColorMix.cpp</code>. The strip is the sequence, not a picture of one.
+        Stripes turn your millimetres into lines at the real line spacing, which on a plain
+        surface is what the engine's position sampling gives.
         <br><a href="play.html">More simulators in the Playground →</a>
       </div>
     </div>
@@ -283,6 +281,7 @@
         <tr><td><b>How much Color 1 / Color 2</b></td><td>The percentage split. In the 3-colour blend, Color 3 automatically takes whatever is left.</td></tr>
         <tr><td><b>Color overlap</b></td><td>Soft to hard zones. How far each colour bleeds into its neighbour's territory in a 3-colour blend.</td></tr>
         <tr><td><b>Transition shape</b></td><td>Even, <b>Slow start</b> (what you get when you first pick a blend style), Slow end, S-curve, Custom shape with a <b>γ</b> value, or Hard step.</td></tr>
+        <tr><td><b>Gradient scale</b></td><td>New in 2.4.6. <b>Fit to surface (real position)</b> runs the gradient once across each surface, from where its lines really are, so a hole cannot shift it. <b>Repeat every… mm</b> repeats it at a fixed size, the same on every object whatever its line width.</td></tr>
         <tr><td><b>Skip tiny areas</b></td><td>Surfaces with fewer than N fill lines fall back to Color 1 alone. A four-line surface cannot express a ratio, and trying costs you toolchanges for nothing.</td></tr>
         <tr><td><b>Invert direction ⇆</b></td><td>Reverses the per-line sequence. Blend and stripe styles have this; Custom and Weave have their own <code>Invert</code> button instead.</td></tr>
       </tbody>
@@ -292,11 +291,6 @@
     <figure>
       <img src="../images/colotstitch-slowstart.png" width="1406" height="1148" alt="Smooth blend with three colours at 32% and 37%, the third auto-filling the remaining 31%, 31% overlap and an Even transition, with the line strip and a square sample drawn at the pass angle" loading="lazy">
       <figcaption>A three-colour blend at <b>32% / 37%</b>, the third colour taking the remaining 31%, with 31% overlap and an Even transition. Both previews are live: the strip and the square sample drawn at the pass angle.</figcaption>
-    </figure>
-
-    <figure>
-      <img src="../images/colotstitch-stripes.png" width="1418" height="842" alt="Stripes with manual band sizes: ten lines of Colour 1 then ten of Colour 2, repeating" loading="lazy">
-      <figcaption>Manual stripes. Ten lines of Colour 1, then ten of Colour 2, repeating. A colour set to zero lines is skipped rather than silently falling back to tool 0.</figcaption>
     </figure>
 
     <!-- ================================================================= -->
@@ -363,56 +357,88 @@
     </p>
 
     <!-- ================================================================= -->
-    <h2 id="distribution" data-short="Line distribution">Line distribution mode</h2>
+    <h2 id="field" data-short="★ Sizes, not counts">Sizes, not counts</h2>
 
     <p>
-      This one has nothing to do with the pattern. It controls how the slicer maps colour slots
-      onto the <strong>physical fill lines</strong> of a surface, which matters the moment a
-      surface has a hole in it.
-    </p>
-
-    <p class="where">
-      <span class="where__label">Where</span>
-      <b>Quality</b><span class="sep">›</span><b>Surface ColorStitch</b><span class="sep">›</span><b>Line distribution mode</b>
+      Up to 2.4.5 there was a setting here called <b>Line distribution mode</b>, with four
+      choices for how a pattern got dealt out over the lines of a surface. It is gone in 2.4.6,
+      because the thing it was working around is gone.
     </p>
 
     <p>
-      Picture a rectangle with a hole in the middle. Physically, a fill line that crosses the
-      hole is two separate line segments. In raw print order those two halves are numbered
-      separately, so slot 40 might be the left half of one row and slot 41 the right half of a
-      completely different row. Feed a gradient through that numbering and it comes apart.
+      The old engine counted lines. A stripe was "so many lines of each colour", and a gradient
+      was spread over the lines in some order. A line count is not a size, though, and three
+      things nobody could see from the settings kept changing it: the line width can be different
+      on every object on the plate, the lines sit a little closer than their width so neighbours
+      overlap, and a hole or a bit of embossed text cuts a line in two, so the count grows while
+      the surface stays the same.
     </p>
 
-    <div class="demo bleed">
+    <p>
+      Now the design lives in millimetres on the surface, measured from the object, and every
+      line asks what colour the spot under it is. Nothing gets counted, so all three stop
+      mattering at once.
+    </p>
+
+    <div class="demo bleed" id="field-demo">
       <div class="demo__head">
-        <span class="demo__tag">diagram</span>
-        <span class="demo__title">The four modes on a surface with a hole</span>
-        <span class="demo__hint">illustrative, not the engine</span>
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">One stripe setting, four objects</span>
+        <span class="demo__hint">set a band, then switch to counting lines</span>
       </div>
-      <div class="demo__body" data-demo="line-dist">
-        <noscript><p class="noscript">This diagram needs JavaScript. The table below says the same thing in words.</p></noscript>
+      <div class="demo__body" data-demo="band-field">
+        <noscript><p class="noscript">This demo needs JavaScript. It stripes four parts with four different line widths and a hole each, from one setting. The measured numbers are in the text below.</p></noscript>
       </div>
       <div class="demo__foot">
-        This one is a <b>diagram</b>, not a port. It shows what each mode is trying to achieve;
-        the real GeoSort, LaneQuant and DirCluster implementations live in the engine and do more
-        than this.
+        <span class="seal">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.4l3.2 3.2L13 4.8"/></svg>
+          real algorithm
+        </span>
+        &nbsp;· the mm mode is <code>compute_slot_per_line_band_mm</code>: each line's position
+        across the surface, measured from the object, compared with the band edges in mm by
+        <code>fmod</code> over one cycle. The line count mode is the old way, bands of so many
+        lines dealt out in print order, where a line cut by the hole counts twice. Line spacing is
+        <code>width − height·(1 − π/4)</code>, as in <code>Flow.cpp</code>. The part shapes are drawings.
       </div>
     </div>
 
+    <p>
+      Measured on a real plate before the change, one stripe setting on four keychains: the band
+      came out between <b>6.79 and 7.20 mm</b>, a different size on each one. After it, 8 mm typed
+      once printed between <b>7.92 and 8.06 mm</b> on all four. A band can only end between two
+      lines, so it lands within one line of what you asked for, and that error does not pile up
+      across the surface.
+    </p>
+
     <div class="tbl-wrap">
     <table>
-      <thead><tr><th>Mode</th><th>Best for</th></tr></thead>
+      <thead><tr><th>What</th><th>How it finds its lines, since 2.4.6</th></tr></thead>
       <tbody>
-        <tr><td><b>Default</b></td><td>Raw print order. Simple rectangular surfaces, and Custom-text patterns where you want the digits to land in print order.</td></tr>
-        <tr><td><b>GeoSort</b></td><td>Print order is scrambled but the spatial direction is clean.</td></tr>
-        <tr><td><b>LaneQuant</b></td><td>Surfaces with holes, concavities or disconnected sub-regions. Fragmented stripes keep the same colour. The one to reach for on a complex top.</td></tr>
-        <tr><td><b>DirCluster</b></td><td>The fill engine rotated its direction per sub-region, and each region keeps its own coherent gradient.</td></tr>
+        <tr><td><b>Stripes</b></td><td>Set in millimetres: <b>Stripes, band sizes in mm (real size)</b> in the style list. The dialog shows how many lines each band comes to at your line width, and how long one full cycle is.</td></tr>
+        <tr><td><b>Gradients</b></td><td><b>Gradient scale</b>. <em>Fit to surface</em> runs the gradient once across each surface from where the lines really are; <em>Repeat every… mm</em> repeats it at a fixed size.</td></tr>
+        <tr><td><b>Patterns</b></td><td>Custom pattern, MixedFilament recipe and Textile weave repeat at their natural size, one digit per line, instead of being stretched over the surface once.</td></tr>
+        <tr><td><b>Holes</b></td><td>The two pieces of a line cut by a hole sit at the same place across the surface, so they get the same colour.</td></tr>
+        <tr><td><b>Top and penultimate</b></td><td>Both measure from the same point on the object, so with the same angle they line up line by line.</td></tr>
       </tbody>
     </table>
     </div>
 
+    <div class="note note--key">
+      <span class="note__t">Same walls on both, or they will not line up</span>
+      <p style="margin:0">
+        For the top and the layer below it to line up, give both the same number of walls: turn
+        off <b>Only one wall on top surfaces</b>, or match them another way. The slicer spaces the
+        lines of each solid region so a whole number of them fits, and a different number of
+        walls gives a different region, so the lines land in different places.
+      </p>
+    </div>
+
     <p class="small">
-      Quick rule: if the gradient looks wrong, move one mode down the list and re-slice.
+      A project from an older version is converted when it opens, and a notice says how many
+      gradients and stripe recipes changed. Gradients keep their shape. Stripes that were set in
+      lines become millimetres, worked out from the default top surface line width, so they can
+      come out slightly different from what the old version printed. 2.4.5 still has the old
+      system.
     </p>
 
     <!-- ================================================================= -->
@@ -444,12 +470,16 @@
         steps and nothing finer. The dither is doing its job; there is just nothing to work
         with. <b>Skip tiny areas</b> exists for exactly this.</li>
       <li><strong>Auto angle and static previews disagree.</strong> On auto the fill direction
-        alternates every layer, so the on-model preview and the print will not line up. An amber
-        <b>auto angle</b> tag appears next to <code>ADV</code> to remind you. Set a fixed angle
+        alternates every layer, so the on-model preview and the print will not line up. The
+        angle then reads <b>auto</b> in violet in the Painter's Pro department, to remind you. Set a fixed angle
         if you care about orientation.</li>
       <li><strong>Twills are not diagonal yet.</strong> Twill 2/2 and Twill 3/1 currently print
         as a static repeat, because the per-layer offset that makes a twill a twill is not
         implemented.</li>
+      <li><strong>The painted preview lags the slicer.</strong> Since 2.4.6 the slicer places
+        everything by position; the preview on the painted model has not caught up yet, so on a
+        surface with holes, or with stripes in mm, a band can start in a slightly different place.
+        Check the G-code in <a href="realcolor.html">RealColor</a> when it has to be exact.</li>
       <li><strong>Concentric and friends are a gamble.</strong> They work, the line distribution
         is just not uniform, so what you get is harder to predict than on Monotonic Line.</li>
     </ul>
@@ -495,7 +525,7 @@ Tour.demo('pattern-lab', function (host) {
     easing: Stitch.EASING.EASE_IN,   // "slow start", the app's default for a new blend
     gamma: 1.6,
     overlap: 0.3,
-    counts: [10, 10, 0, 0],
+    bandMm: [3, 3, 0, 0],             // stripes are set in mm since 2.4.6
     pattern: '1122',
     weave: 'plain',
     invert: false,
@@ -511,12 +541,20 @@ Tour.demo('pattern-lab', function (host) {
 
   function nLines() { return Stitch.estimateLines(S.surfaceMm, S.lineWidth, 0.15); }
 
+  // Real line spacing (Flow.cpp): lines sit closer than their width.
+  function spacing() { return S.lineWidth - S.layerH * (1 - Math.PI / 4); }
+  // Bands in mm, turned into lines at that spacing. On a plain surface this is what the
+  // engine's position sampling gives; the difference shows up with holes (see #field).
+  function bandCounts() {
+    return S.bandMm.map(function (mm) { return mm > 0 ? Math.max(1, Math.round(mm / spacing())) : 0; });
+  }
+
   function cfg() {
     return {
       style: S.style, tools: S.tools,
       pctA: S.pctA, pctB: S.pctB,
       easing: S.easing, gamma: S.gamma, overlap: S.overlap,
-      counts: S.counts, pattern: S.pattern, weave: S.weave,
+      counts: bandCounts(), pattern: S.pattern, weave: S.weave,
       invert: S.invert, repeat: S.repeat
     };
   }
@@ -622,7 +660,7 @@ Tour.demo('pattern-lab', function (host) {
     options: [
       ['blend2', 'Smooth blend, 2 colours'],
       ['blend3', 'Smooth blend, 3 colours'],
-      ['stripes', 'Stripes, manual bands'],
+      ['stripes', 'Stripes, band sizes in mm'],
       ['custom', 'Custom pattern'],
       ['weave', 'Textile weave']
     ],
@@ -696,11 +734,11 @@ Tour.demo('pattern-lab', function (host) {
       }
 
     } else if (S.style === 'stripes') {
-      S.counts.forEach(function (c, i) {
+      S.bandMm.forEach(function (c, i) {
         body.appendChild(Tour.slider({
-          label: S.filaments[S.tools[i]].name + ' band', min: 0, max: 30, step: 1, value: c,
-          format: function (v) { return v === 0 ? 'skipped' : v + ' lines'; },
-          onInput: function (v) { S.counts[i] = v; redraw(); }
+          label: S.filaments[S.tools[i]].name + ' band', min: 0, max: 12, step: 0.5, value: c,
+          format: function (v) { return v === 0 ? 'skipped' : v + ' mm'; },
+          onInput: function (v) { S.bandMm[i] = v; redraw(); }
         }));
       });
 
@@ -851,82 +889,154 @@ Tour.demo('pattern-lab', function (host) {
 
 
 /* ===========================================================================
- * line-dist — a diagram, clearly labelled as one.
+ * band-field — one stripe setting on four objects (s317, replaces line-dist).
  *
- * A rectangle with a hole. Each scanline that crosses the hole is two
- * segments. The four panels show what each mode is trying to do with the
- * numbering of those segments.
+ * Four parts, four line widths (the four of the keychain plate), a hole in each.
+ * Lines run across X, stacked along Y at the real Flow spacing. Two ways to
+ * colour them:
+ *   mm    — compute_slot_per_line_band_mm: the line's position from the object's
+ *           origin, fmod over one cycle, compared with the band edges in mm.
+ *   lines — the old way: bands of N lines dealt out in print order. A line cut by
+ *           the hole is two segments and counts twice. N is the band typed as a
+ *           number of lines on the first part.
+ * The readout measures the drawing itself, on the left edge of each part.
  * ========================================================================= */
-Tour.demo('line-dist', function (host) {
+Tour.demo('band-field', function (host) {
   var el = Tour.el;
-  var MODES = [
-    ['Default', 'Raw print order. The two halves of a split row get consecutive slots, so the pattern restarts inside the hole.'],
-    ['GeoSort', 'Reordered by position. The direction across the surface is clean again, but the halves are still separate.'],
-    ['LaneQuant', 'Segments are bucketed into spatial lanes. Both halves of a row land in the same lane and take the same colour.'],
-    ['DirCluster', 'Each connected sub-region gets its own coherent run, which is what you want when the fill engine rotated per region.']
+  var LAYER_H = 0.20;
+  var H = 44;                                  // part size across the lines, mm
+  var HOLE = [0.36, 0.62];                     // hole, as a fraction of H
+  var HOLE_X = [0.36, 0.64];
+  var PARTS = [
+    { w: 0.30, len: 26 }, { w: 0.33, len: 34 }, { w: 0.36, len: 22 }, { w: 0.42, len: 30 }
   ];
+  PARTS.forEach(function (p) { p.sp = p.w - LAYER_H * (1 - Math.PI / 4); });
+  var A = '#1d3f8f', B = '#f2b705';
+  var S = { mode: 'mm', band: 8 };
 
-  var wrap = el('div.ld');
+  function linesTyped() { return Math.max(1, Math.round(S.band / PARTS[0].sp)); }
 
-  MODES.forEach(function (m, mi) {
-    var box = el('figure.vbox');
-    var cvHost = el('div');
-    box.appendChild(cvHost);
-    box.appendChild(el('figcaption', null, [
-      el('b', { text: m[0] }),
-      el('span', { text: m[1] })
-    ]));
-
-    Tour.canvas(cvHost, function (ctx, w, h) {
-      var rows = 26;
-      var rh = h / rows;
-      var holeX0 = w * 0.34, holeX1 = w * 0.66;
-      var holeR0 = 7, holeR1 = 18;
-
-      // Two filaments, dithered 50/50 by the real Bresenham so the panels
-      // differ only in HOW the slots are numbered, never in the pattern.
-      var A = '#1d3f8f', B = '#f2b705';
-
-      for (var r = 0; r < rows; r++) {
-        var split = r >= holeR0 && r < holeR1;
-        var segs = split
-          ? [[0, holeX0], [holeX1, w]]
-          : [[0, w]];
-
-        segs.forEach(function (sg, si) {
-          var slot;
-          if (mi === 0) {
-            // Default: every segment is its own slot, counted in print order.
-            slot = split ? (r * 2 + si) : r * 2;
-          } else if (mi === 1) {
-            // GeoSort: sorted by position, still one slot per segment.
-            slot = split ? (r + si * rows) : r;
-          } else if (mi === 2) {
-            // LaneQuant: the lane is the row, whatever the segment.
-            slot = r;
-          } else {
-            // DirCluster: each side of the hole is its own region with its
-            // own run, restarted from that region's own first row.
-            slot = split ? (si === 0 ? r : r - holeR0) : r;
-          }
-          var seq = Stitch.dither2(rows * 2, 0, 1, 50, Stitch.EASING.LINEAR);
-          ctx.fillStyle = seq[slot % seq.length] === 0 ? A : B;
-          ctx.fillRect(sg[0], r * rh, sg[1] - sg[0], rh + 0.8);
-        });
+  function colour(p) {
+    var rows = Math.floor(H / p.sp), out = [];
+    var anchor = H / 2, cycle = 2 * S.band, n = linesTyped(), k = 0;
+    for (var r = 0; r < rows; r++) {
+      var y = (r + 0.5) * p.sp;
+      var cut = y > HOLE[0] * H && y < HOLE[1] * H;
+      var segs = cut ? [[0, HOLE_X[0]], [HOLE_X[1], 1]] : [[0, 1]];
+      var row = { y: y, segs: [] };
+      for (var s = 0; s < segs.length; s++) {
+        var c;
+        if (S.mode === 'mm') {
+          var t = ((y - anchor) % cycle + cycle) % cycle;
+          c = t < S.band ? 0 : 1;
+        } else {
+          c = Math.floor(k / n) % 2;
+          k++;
+        }
+        row.segs.push({ x0: segs[s][0], x1: segs[s][1], c: c });
       }
+      out.push(row);
+    }
+    return out;
+  }
 
-      // the hole
-      ctx.fillStyle = Tour.token('--surface');
-      ctx.fillRect(holeX0, holeR0 * rh, holeX1 - holeX0, (holeR1 - holeR0) * rh);
+  // Mean band on the left edge, leaving out the two bands the part edges cut short.
+  function measure(p, rows) {
+    var runs = [], cur = rows[0].segs[0].c, n = 0;
+    rows.forEach(function (row) {
+      var c = row.segs[0].c;
+      if (c === cur) n++; else { runs.push(n); cur = c; n = 1; }
+    });
+    runs.push(n);
+    var inner = runs.slice(1, -1);
+    if (!inner.length) return null;
+    var lo = Math.min.apply(null, inner), hi = Math.max.apply(null, inner);
+    return { lo: lo * p.sp, hi: hi * p.sp };
+  }
+
+  var results = [];
+  var cvHost = el('div');
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    var pad = 10, gap = 16, capH = 40;
+    var colW = (w - pad * 2 - gap * 3) / 4;
+    var scale = Math.min((h - pad * 2 - capH) / H, colW / 34);
+    var mono = Tour.token('--mono') || 'monospace';
+    results = [];
+    PARTS.forEach(function (p, i) {
+      var rows = colour(p);
+      var pw = p.len * scale, ph = H * scale;
+      var ox = pad + i * (colW + gap) + (colW - pw) / 2, oy = pad;
+      var rh = p.sp * scale;
+      rows.forEach(function (row) {
+        var yy = oy + ph - row.y * scale;
+        row.segs.forEach(function (sg) {
+          ctx.fillStyle = sg.c ? B : A;
+          ctx.fillRect(ox + sg.x0 * pw, yy - rh / 2, (sg.x1 - sg.x0) * pw, rh + 0.6);
+        });
+      });
       ctx.strokeStyle = Tour.token('--rule-firm');
       ctx.lineWidth = 1;
-      ctx.strokeRect(holeX0 + .5, holeR0 * rh + .5, holeX1 - holeX0 - 1, (holeR1 - holeR0) * rh - 1);
-    }, { height: 128 });
+      ctx.strokeRect(ox + HOLE_X[0] * pw + .5, oy + ph - HOLE[1] * ph + .5,
+                     (HOLE_X[1] - HOLE_X[0]) * pw - 1, (HOLE[1] - HOLE[0]) * ph - 1);
+      var m = measure(p, rows);
+      results.push(m);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = Tour.token('--ink');
+      ctx.font = '600 11px ' + mono;
+      ctx.fillText('line ' + p.w.toFixed(2) + ' mm', ox + pw / 2, oy + ph + 16);
+      ctx.fillStyle = Tour.token('--ink-soft');
+      ctx.font = '11px ' + mono;
+      ctx.fillText(m ? (m.lo.toFixed(1) === m.hi.toFixed(1) ? m.lo.toFixed(1) : m.lo.toFixed(1) + '–' + m.hi.toFixed(1)) + ' mm'
+                     : 'band > part', ox + pw / 2, oy + ph + 31);
+    });
+  }, { height: 300 });
 
-    wrap.appendChild(box);
+  var sum = el('p.bf__sum');
+
+  function summary() {
+    // Measured here, not read back from the drawing: Tour.canvas may paint later.
+    results = PARTS.map(function (p) { return measure(p, colour(p)); });
+    var all = [];
+    results.forEach(function (m) { if (m) { all.push(m.lo); all.push(m.hi); } });
+    if (!all.length) { sum.textContent = 'The band is wider than the parts. Make it smaller.'; return; }
+    var lo = Math.min.apply(null, all).toFixed(1), hi = Math.max.apply(null, all).toFixed(1);
+    if (S.mode === 'mm') {
+      sum.textContent = 'Asked for ' + S.band + ' mm. Every part prints between ' + lo + ' and ' + hi +
+        ' mm, within one line of it, and the hole changes nothing.';
+    } else {
+      sum.textContent = 'Typed as ' + linesTyped() + ' lines (' + S.band + ' mm on the first part). ' +
+        'The parts print anything from ' + lo + ' to ' + hi + ' mm: each line width gives its own size, ' +
+        'and next to the hole the bands shrink, because each cut line counts twice.';
+    }
+  }
+
+  var bandSlider = Tour.slider({
+    label: 'Band', min: 2, max: 12, step: 0.5, value: S.band,
+    format: function (v) { return v + ' mm'; },
+    onInput: function (v) { S.band = v; redraw(); }
+  });
+  var modeSeg = Tour.segmented({
+    label: 'How the lines are coloured', value: S.mode,
+    options: [['mm', 'By position, in mm (2.4.6)'], ['lines', 'Counting lines (up to 2.4.5)']],
+    onChange: function (v) { S.mode = v; redraw(); }
   });
 
-  host.appendChild(wrap);
+  function redraw() { cv.render(); summary(); }
+
+  host.appendChild(cvHost);
+  host.appendChild(sum);
+  host.appendChild(el('div.ctrls', null, [modeSeg, bandSlider]));
+  redraw();
+
+  Tour.attract({
+    host: host, period: 7600,
+    hint: 'playing · touch anything to take over',
+    onFrame: function (k) {
+      S.band = Math.round((4 + k * 6) * 2) / 2;
+      bandSlider.set(S.band);
+    },
+    render: redraw
+  });
 });
 </script>
 

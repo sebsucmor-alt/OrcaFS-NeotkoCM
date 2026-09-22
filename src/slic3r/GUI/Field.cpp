@@ -1561,7 +1561,16 @@ void Choice::set_value(const boost::any& value, bool change_event)
             m_opt_id == "internal_solid_infill_pattern" || m_opt_id == "sparse_infill_pattern" ||
             m_opt_id == "support_base_pattern" || m_opt_id == "support_interface_pattern" ||
             m_opt_id == "ironing_pattern" || m_opt_id == "support_ironing_pattern" ||
-            m_opt_id == "support_style" || m_opt_id == "curr_bed_type")
+            m_opt_id == "support_style" || m_opt_id == "curr_bed_type" ||
+            // NEOTKO_NEOSTROKE_TAG C1 (s325) — mismo bug que el de s155 de aquí al lado: sin estar
+            // en esta lista, el combo guarda el ÍNDICE del desplegable en vez del valor del enum, y
+            // sólo coinciden mientras la lista de la UI vaya en el mismo orden que el enum. Los tres
+            // selectores de NeoArachne no la llevan igual (a inner walls no se le ofrece "off", a
+            // gap fill sí), así que al añadir NeoStroke — índice 3 en la lista de inner walls, valor
+            // 4 en el enum — elegirlo guardaba Off. Se veía en el 3mf: neoarachne_inner_walls =
+            // "off" con el desplegable marcando NeoStroke.
+            m_opt_id == "neoarachne_outer_wall" || m_opt_id == "neoarachne_inner_walls" ||
+            m_opt_id == "neoarachne_gap_fill")
 		{
 			std::string key;
 			const t_config_enum_values& map_names = *m_opt.enum_keys_map;
@@ -1657,7 +1666,10 @@ boost::any& Choice::get_value()
                     m_opt_id == "penultimate_solid_infill_pattern" ||
                     m_opt_id == "support_base_pattern" || m_opt_id == "support_interface_pattern" ||
                     m_opt_id == "ironing_pattern" || m_opt_id == "support_ironing_pattern" ||
-                    m_opt_id == "support_style" || m_opt_id == "curr_bed_type")
+                    m_opt_id == "support_style" || m_opt_id == "curr_bed_type" ||
+                    // NEOTKO_NEOSTROKE_TAG C1 (s325) — ver el comentario del set_value de arriba.
+                    m_opt_id == "neoarachne_outer_wall" || m_opt_id == "neoarachne_inner_walls" ||
+                    m_opt_id == "neoarachne_gap_fill")
         {
             // Upstream Snapmaker #784 (0613c52f0c): la seleccion puede ser invalida cuando el valor
             // actual no esta en la lista recien reconstruida (support_style viejo contra el

@@ -824,16 +824,15 @@ private:
     // objects placed anywhere on the build plate get the full [0..1] gradient range.
     BoundingBox m_pathblend_surface_bbox;
 
-    // NEOTKO_COLORSTITCH_TAG — s58 per-path pre-computed surface_t for PathBlend.
-    // Populated by extrude_infill() before iterating an EEC when
-    // surface_color_mix_lane_mode != Default.  Each PathBlend-eligible path gets
-    // a t in [0..1] computed according to the chosen lane mode.
-    std::map<const ExtrusionPath*, double> m_pathblend_path_t;
-
-    // NEOTKO_PATHBLEND_TAG — s59 path-pointer mismatch fix. Key the map by a stable
-    // signature derived from the polyline values (first point + last point + size),
-    // because extrude_path receives a LOCAL COPY of the path (address changes, values survive).
-    std::map<uint64_t, double> m_pathblend_polyline_t;
+    // NEOTKO_PATHBLEND_TAG — s316: aquí vivían m_pathblend_path_t (s58) y
+    // m_pathblend_polyline_t (s59), el `surface_t` pre-calculado por lane mode.
+    // BORRADOS: el comentario decía "populated by extrude_infill()" y extrude_infill()
+    // nunca los rellenó — sólo había .clear() y un .find() que no acertaba jamás.
+    // ⚠️ La ruta legacy de PathBlend (single-Fill ramp/cap) ya venía sacando su
+    // `surface_t` del fallback por bbox Y, así que quitarlos NO cambia el gcode.
+    // 📌 Ese fallback sigue clavado a Y: el fix del eje de s280e sólo llegó a la
+    // ESCALERA (Fill.cpp `_t_of`, PCA). Anotado, no arreglado — la ruta legacy sólo
+    // se alcanza con mid_end <= floor, donde la rampa es plana de todas formas.
 
     // NEOTKO_PATHBLEND_TAG — s58 Bug 2 safety: max-z reached per (layer, pass).
     // Clamp z so the nozzle never descends within a pass. Reset every real layer.

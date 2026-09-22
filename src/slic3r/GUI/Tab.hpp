@@ -391,6 +391,13 @@ public:
 	void            update_saved_preset_from_current_preset();
 
 	DynamicPrintConfig*	get_config() { return m_config; }
+	// NEOTKO_NEOSTROKE_TAG s335 — grupos de opciones que viven FUERA de la página activa, hoy los de
+	// la ventana "NeoStroke — Advanced". `decorate()` pinta las flechitas de "modificado" y "volver
+	// al valor del sistema" buscando el Field por `get_field`, y `get_field` sólo miraba la página
+	// activa: sin esto, los mandos movidos a una ventana pierden sus flechitas y el usuario deja de
+	// ver qué ha tocado — que es justo la queja que abrió s335. La ventana se registra al abrirse y
+	// se borra al cerrarse; punteros débiles no hacen falta porque el registro dura lo que el modal.
+	std::vector<ConfigOptionsGroupShp> m_neotko_extra_optgroups;
     PresetCollection *  get_presets() { return m_presets; }
     TabPresetComboBox *  get_combo_box() { return m_presets_choice; }
 

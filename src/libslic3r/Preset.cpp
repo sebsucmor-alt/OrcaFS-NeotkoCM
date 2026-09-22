@@ -930,6 +930,20 @@ static std::vector<std::string> s_Preset_print_options {
      "neoarachne_max_bead_width_pct", "neoarachne_min_feature_size_pct",
      "neoarachne_keep_short_tails", "neoarachne_pin_outer_width", "neoarachne_bead_count_hysteresis_pct",
      "neoarachne_transition_filter_dist_mm",
+     // NEOTKO_NEOARACHNE_TAG v3-spine (s323)
+     "neoarachne_spine", "neoarachne_spine_min_width_pct", "neoarachne_spine_max_width_pct",
+     "neoarachne_spine_min_length", "neoarachne_spine_sliver_pct",
+     "neostroke_bead_min_pct", "neostroke_layer_jitter",   // NEOTKO_NEOSTROKE_TAG s332
+     "neostroke_corner_hooks",   // NEOTKO_NEOSTROKE_TAG C5b (s325)
+     "neostroke_min_width_pct", "neostroke_max_width_pct",   // NEOTKO_NEOSTROKE_TAG s326
+     "neostroke_detail_min_pct",   // NEOTKO_NEOSTROKE_TAG s329
+     "neostroke_width_ref",   // NEOTKO_NEOSTROKE_TAG s331c
+     "neostroke_curve_overlap", "neostroke_overlap_width_end",   // NEOTKO_NEOSTROKE_TAG s331
+     "neostroke_overlap_turn_min", "neostroke_overlap_turn_max", "neostroke_overlap_span",
+     "neostroke_overlap_straight",   // NEOTKO_NEOSTROKE_TAG s331b
+     "neostroke_cap_join",   // NEOTKO_NEOSTROKE_TAG s331d
+     "neostroke_max_bead_pct", "neostroke_max_stroke_width",
+     "neostroke_skate", "neostroke_skate_detour",   // NEOTKO_NEOSTROKE_TAG C6 (s326)
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "min_length_factor",
      "small_perimeter_speed", "small_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","default_junction_deviation",
@@ -949,6 +963,8 @@ static std::vector<std::string> s_Preset_print_options {
      // list, so the toggle never persisted to presets/3mf and always loaded back off
      // (user-reported s223) — an option absent here is invisible to save/load entirely.
      "neotower_variable_layer_height",
+     // NEOTKO_NEOTOWER_TAG s310 — skip-ramming (keep tower visit).
+     "neotower_no_ramming",
      // NEOTKO_NEOTOWER_TAG_END
      "multipass_prime_volume", // NEOTKO_MULTIPASS_PRIME_TAG — per-region sublayer prime volume
      // NEOTKO_SANDWICH_ENGINE_TAG_START — Sandwich engine per-region/object keys (Fase 2)
@@ -959,7 +975,11 @@ static std::vector<std::string> s_Preset_print_options {
      "interlayer_colormix_penu_pct_a", "interlayer_colormix_penu_pct_b", "interlayer_colormix_penu_easing", "interlayer_colormix_penu_gamma", "interlayer_colormix_penu_min_surface_lines", "interlayer_colormix_penu_overlap",
      "interlayer_colormix_penu_invert", "interlayer_colormix_penu_repetitions", "interlayer_colormix_penu_band_count_a", "interlayer_colormix_penu_band_count_b", "interlayer_colormix_penu_band_count_c", "interlayer_colormix_penu_band_count_d",
      "interlayer_colormix_penu_tool_a", "interlayer_colormix_penu_tool_b", "interlayer_colormix_penu_tool_c", "interlayer_colormix_penu_tool_d", "interlayer_colormix_band_count_a", "interlayer_colormix_band_count_b",
-     "interlayer_colormix_band_count_c", "interlayer_colormix_band_count_d", "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone", "interlayer_colormix_filament_filter", "interlayer_colormix_use_virtual",
+     "interlayer_colormix_band_count_c", "interlayer_colormix_band_count_d",
+     // NEOTKO_COLORSTITCH_TAG — s314: bandas en mm (Pattern mode 4).
+     "interlayer_colormix_band_mm_a", "interlayer_colormix_band_mm_b", "interlayer_colormix_band_mm_c", "interlayer_colormix_band_mm_d",
+     "interlayer_colormix_penu_band_mm_a", "interlayer_colormix_penu_band_mm_b", "interlayer_colormix_penu_band_mm_c", "interlayer_colormix_penu_band_mm_d",
+     "interlayer_colormix_gradient_span_mm", "interlayer_colormix_penu_gradient_span_mm",   // s315 "interlayer_colormix_top_zone", "interlayer_colormix_penu_zone", "interlayer_colormix_filament_filter", "interlayer_colormix_use_virtual",
      "interlayer_colormix_angle", "interlayer_colormix_penu_angle", "surface_color_mix_lane_mode", "colorstitch_monotonic_replan", "colorstitch_monotonic_split", "multipass_enabled", "multipass_surface", "multipass_num_passes",
      "multipass_tool_1", "multipass_tool_2", "multipass_tool_3", "multipass_width_ratio_1", "multipass_width_ratio_2", "multipass_width_ratio_3",
      "multipass_vary_pattern", "multipass_angle_1", "multipass_angle_2", "multipass_angle_3", "multipass_pa_mode", "multipass_pa_value",
@@ -1242,6 +1262,11 @@ void PresetCollection::add_default_preset(const std::vector<std::string> &keys, 
 
 // Load all presets found in dir_path.
 // Throws an exception on error.
+// NEOTKO_SANDWICH_TAG — s317 fase D. Declarada a mano, como en PrintConfig.cpp: la definición vive en
+// ColorStitchLegacyMigration.cpp (ligero) para que el validador de perfiles, que enlaza Preset.cpp,
+// no arrastre ColorStitch.cpp ni nanosvg. Ver ColorStitch.hpp.
+namespace ColorStitchLegacyMigration { bool switch_off_sandwich_preset(DynamicPrintConfig& cfg, const std::string& preset_name); }
+
 void PresetCollection::load_presets(
     const std::string &dir_path, const std::string &subdir,
     PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule substitution_rule)
@@ -1375,6 +1400,11 @@ void PresetCollection::load_presets(
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " load preset: " << preset.name << " and filament_id: " << preset.filament_id << " and base_id: " << preset.base_id;
                     preset.config.apply(std::move(config));
                     Preset::normalize(preset.config);
+                    // NEOTKO_SANDWICH_TAG — s317 fase D: un preset de usuario con receta del Sandwich
+                    // Editor la aplicaría sola a todo lo no pintado, sin botón para quitarla. No hay
+                    // paleta donde moverla: se APAGA (sólo en memoria) y GUI_App::post_init avisa.
+                    if (m_type == Preset::TYPE_PRINT)
+                        ColorStitchLegacyMigration::switch_off_sandwich_preset(preset.config, preset.name);
                     // Report configuration fields, which are misplaced into a wrong group.
                     std::string incorrect_keys = Preset::remove_invalid_keys(preset.config, default_preset.config);
                     if (!incorrect_keys.empty()) {

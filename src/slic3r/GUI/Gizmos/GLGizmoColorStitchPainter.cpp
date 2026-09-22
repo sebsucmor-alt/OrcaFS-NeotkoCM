@@ -1,5 +1,6 @@
 // NEOTKO_PROFILE_TAG_START
 #include "GLGizmoColorStitchPainter.hpp"
+#include "GizmoNeotkoStyle.hpp"   // s318 — el lenguaje de panel compartido (Zonas de Soporte, s287)
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -1678,38 +1679,42 @@ static bool cs_zone_angle(const SurfacePassStack& st, bool penu, int& out_deg)
 static int draw_palette_strip(const char* id,
                               const std::vector<Slic3r::ColorSci::ColorRecipe>& pal,
                               const std::vector<std::string>& fcolors,
-                              float strip_w, float strip_h,
+                              float strip_w, float /*strip_h*/,
                               int sel_idx = -1)
 {
+    // s318 — de tira con scroll horizontal a REJILLA de 8 por fila en un pozo Canvas: las tres tiras
+    // del Generator (y Flat color, que era la que hacía scroll) miden igual y se ven enteras.
+    // Mismo contrato: devuelve el índice pulsado, tooltip con la cajita sandwich.
     if (pal.empty()) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.f), "—");
+        ImGui::TextDisabled("—");
         return -1;
     }
     int clicked = -1;
-    ImGui::BeginChild(id, ImVec2(strip_w, strip_h), false, ImGuiWindowFlags_HorizontalScrollbar);
-    const float gap = 3.f;
-    const float sw  = std::max(10.f, strip_h - ImGui::GetStyle().ScrollbarSize - 2.f * gap);
-    ImDrawList* dl  = ImGui::GetWindowDrawList();
-
+    const int    per  = 8;
+    const float  pad  = 5.f, gap = 4.f;
+    const float  w    = (strip_w > 0.f) ? strip_w : ImGui::GetContentRegionAvail().x;
+    const float  sw   = std::max(8.f, std::floor((w - 2.f * pad - gap * float(per - 1)) / float(per)));
+    const int    rows = (int(pal.size()) + per - 1) / per;
+    const float  h    = 2.f * pad + float(rows) * sw + float(rows - 1) * gap;
+    ImDrawList*  dl   = ImGui::GetWindowDrawList();
+    const ImVec2 p0   = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), neo_col_u32(NeoCol::Canvas), 5.f);
+    ImGui::PushID(id);
     for (int i = 0; i < (int)pal.size(); ++i) {
         ImGui::PushID(i);
-        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const ImVec2 p(p0.x + pad + float(i % per) * (sw + gap), p0.y + pad + float(i / per) * (sw + gap));
+        ImGui::SetCursorScreenPos(p);
         if (ImGui::InvisibleButton("##sw", ImVec2(sw, sw))) clicked = i;
         const bool hov = ImGui::IsItemHovered();
-
         const auto& c = pal[i].rgb;
         const ImU32 col = IM_COL32((int)std::min(255.f, c[0] * 255.f),
                                    (int)std::min(255.f, c[1] * 255.f),
                                    (int)std::min(255.f, c[2] * 255.f), 255);
-        dl->AddRectFilled(p, ImVec2(p.x + sw, p.y + sw), col);
-        // Activo = borde blanco grueso (mismo idioma que la rejilla de guardados);
-        // hover = borde claro fino; resto = borde oscuro.
-        const bool is_sel = (i == sel_idx);
-        dl->AddRect(p, ImVec2(p.x + sw, p.y + sw),
-                    is_sel ? IM_COL32(255, 255, 255, 255)
-                           : (hov ? IM_COL32(210, 210, 210, 255) : IM_COL32(20, 20, 20, 255)),
-                    0.f, 0, is_sel ? 2.5f : 1.f);
-
+        dl->AddRectFilled(p, ImVec2(p.x + sw, p.y + sw), col, 3.f);
+        if (i == sel_idx)
+            neo_sel_ring(dl, p, ImVec2(p.x + sw, p.y + sw), 3.f);
+        else if (hov)
+            dl->AddRect(p, ImVec2(p.x + sw, p.y + sw), neo_col_u32(NeoCol::TextDim), 3.f, 0, 1.f);
         if (hov) {
             ImGui::BeginTooltip();
             const ImVec2 tp = ImGui::GetCursorScreenPos();
@@ -1729,58 +1734,14 @@ static int draw_palette_strip(const char* id,
             ImGui::EndTooltip();
         }
         ImGui::PopID();
-        ImGui::SameLine(0.f, gap);
     }
-    ImGui::NewLine();
-    ImGui::EndChild();
-    return clicked;
-}
-
-// Fila de chips de filamento para elegir el tool de inicio/fin (A/B) del
-// gradient. Devuelve el tool clicado (-1 si ninguno); `cur` resalta el activo.
-static int draw_tool_selector_row(const char* id, const char* label,
-                                  const std::vector<std::string>& fcolors,
-                                  int nfil, int cur)
-{
-    int clicked = -1;
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine();
-    ImGui::PushID(id);
-    const float sw  = ImGui::GetTextLineHeight() * 1.2f;
-    const float gap = 4.f;
-    ImDrawList* dl  = ImGui::GetWindowDrawList();
-    for (int t = 0; t < nfil; ++t) {
-        ImGui::PushID(t);
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        if (ImGui::InvisibleButton("##tool", ImVec2(sw, sw))) clicked = t;
-        const bool hov    = ImGui::IsItemHovered();
-        const bool active = (t == cur);
-        dl->AddRectFilled(p, ImVec2(p.x + sw, p.y + sw), tool_col_u32(fcolors, t));
-        dl->AddRect(p, ImVec2(p.x + sw, p.y + sw),
-                    active ? IM_COL32(255, 255, 255, 255)
-                           : (hov ? IM_COL32(200, 200, 200, 255) : IM_COL32(20, 20, 20, 255)),
-                    0.f, 0, active ? 2.f : 1.f);
-        if (hov) ImGui::SetTooltip("T%d", t + 1);
-        ImGui::PopID();
-        ImGui::SameLine(0.f, gap);
-    }
-    ImGui::NewLine();
     ImGui::PopID();
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + h));
+    ImGui::Dummy(ImVec2(w, 0.f));
     return clicked;
 }
 
-// Header colapsable + tira de swatches (Flat / Mixed). El Gradient se renderiza
-// inline en render_palette_panel para alojar los selectores A/B en medio.
-static int draw_palette_section(const char* id, const std::string& label,
-                                const std::vector<Slic3r::ColorSci::ColorRecipe>& pal,
-                                const std::vector<std::string>& fcolors,
-                                float strip_w, float strip_h,
-                                int sel_idx = -1)
-{
-    if (!ImGui::CollapsingHeader(label.c_str())) return -1;
-    return draw_palette_strip(id, pal, fcolors, strip_w, strip_h, sel_idx);
-}
+
 
 // ---------------------------------------------------------------------------
 // Pro mode v2 (s108) — pass rows that mirror the SandwichDialog row anatomy:
@@ -1793,16 +1754,6 @@ static int draw_palette_section(const char* id, const std::string& label,
 // from the tray slices exactly like one authored in the Sandwich Editor.
 // ---------------------------------------------------------------------------
 
-// wx SandwichDialog kind_colour(), as ImU32.
-static ImU32 pro_kind_colour(SurfacePassKind k)
-{
-    switch (k) {
-    case SurfacePassKind::Solid:     return IM_COL32(214, 124,  48, 255);
-    case SurfacePassKind::ColorStitch:  return IM_COL32( 72, 110, 200, 255);
-    case SurfacePassKind::PathBlend: return IM_COL32(150,  88, 178, 255);
-    default:                         return IM_COL32(110, 110, 110, 255);
-    }
-}
 
 // PB blob round-trip on a pass. Self-contained (kv only) — unlike the dialog's
 // read_pb_blob/write_pb_blob there is no live region config to mirror here.
@@ -2057,22 +2008,51 @@ static void pro_backfill_cm(Slic3r::SurfacePassStack& st, bool penu)
 // `interlayer_colormix_penu_*`: copiar el stack tal cual dejaría los pases sin patrón
 // legible para la zona destino y el motor los degradaría a Solid (mismo fallo que s118
 // documentó para los ColorStitch con kv vacío). Se conservan tools, mezcla y ángulo.
+// 🔧 s317 — antes hacía kv.clear() y reescribía SÓLO A/B/mezcla/ángulo: el modo (bandas o
+// degradado), los anchos en mm, gradient_span_mm, easing, invert, repeticiones, tools C/D… se
+// perdían y la copia salía como un dither A/B de 8 dígitos. Ahora TRADUCE cada clave de receta
+// del rol origen al destino (mismo juego que colorstitch_keys() por rol) y deja intactas las que
+// no son de rol. Sólo un pase SIN receta cae al camino viejo (defaults vía pro_cm_read/write).
 static void pro_retarget_cm(Slic3r::SurfacePassStack& st, bool from_penu, bool to_penu)
 {
     if (from_penu == to_penu) return;   // Top ↔ Bottom comparten claves: nada que hacer
-    const char* from_akey = from_penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle";
-    const char* to_akey   = to_penu   ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle";
+    static const char* const kRoleSuffixes[] = {
+        "mode", "pct_a", "pct_b", "easing", "gamma", "min_surface_lines", "overlap", "invert",
+        "repetitions", "band_count_a", "band_count_b", "band_count_c", "band_count_d",
+        "band_mm_a", "band_mm_b", "band_mm_c", "band_mm_d", "gradient_span_mm",
+        "tool_a", "tool_b", "tool_c", "tool_d", "angle" };
+    const std::string fp = from_penu ? "interlayer_colormix_penu_" : "interlayer_colormix_";
+    const std::string tp = to_penu   ? "interlayer_colormix_penu_" : "interlayer_colormix_";
+    const std::string fpat = pro_cm_pattern_key(from_penu), tpat = pro_cm_pattern_key(to_penu);
+    auto is_role_key = [&](const std::string& k, const std::string& pre, const std::string& pat) {
+        if (k == pat) return true;
+        for (const char* s : kRoleSuffixes) if (k == pre + s) return true;
+        return false;
+    };
     for (Slic3r::SurfacePass& p : st.passes) {
         if (p.kind != Slic3r::SurfacePassKind::ColorStitch) continue;
-        int a, b, pct;
-        pro_cm_read(p, from_penu, a, b, pct);
-        int ang = -1;
-        { const auto it = p.colorstitch.kv.find(from_akey);
-          if (it != p.colorstitch.kv.end()) { try { ang = std::stoi(it->second); } catch (...) {} } }
-        p.colorstitch.kv.clear();                 // fuera las claves de la zona de origen
-        pro_cm_write(p, to_penu, a, b, pct);   // patrón + tools con las claves destino
-        p.colorstitch.kv[to_akey] = std::to_string(ang);
-        p.angle = ang;
+        if (p.colorstitch.kv.empty()) {           // sin receta: el camino de siempre (defaults)
+            int a, b, pct; pro_cm_read(p, from_penu, a, b, pct);
+            pro_cm_write(p, to_penu, a, b, pct);
+            p.colorstitch.kv[tp + "angle"] = std::to_string(p.angle);
+            continue;
+        }
+        std::map<std::string, std::string> out;
+        // 1) lo que no es de rol (flags globales, "pattern" corto del editor por pase) tal cual;
+        //    las claves de rol de AMBAS zonas fuera, para que no se mezclen dos recetas.
+        for (const auto& [k, v] : p.colorstitch.kv)
+            if (!is_role_key(k, fp, fpat) && !is_role_key(k, tp, tpat)) out[k] = v;
+        // 2) las del rol origen, renombradas al destino.
+        for (const auto& [k, v] : p.colorstitch.kv) {
+            if (k == fpat) { out[tpat] = v; continue; }
+            for (const char* s : kRoleSuffixes)
+                if (k == fp + s) { out[tp + s] = v; break; }
+        }
+        p.colorstitch.kv = std::move(out);
+        p.colorstitch.present = true;
+        const auto it = p.colorstitch.kv.find(tp + "angle");
+        if (it != p.colorstitch.kv.end()) { try { p.angle = std::stoi(it->second); } catch (...) {} }
+        else p.colorstitch.kv[tp + "angle"] = std::to_string(p.angle);
     }
 }
 
@@ -2116,52 +2096,62 @@ static std::string pass_desc_line(int n, const Slic3r::SurfacePass& p, bool penu
 static bool pro_tool_chip(const char* id, const std::vector<std::string>& fcolors,
                           int nfil, int& tool, const char* tip)
 {
+    // s318 — la ficha numerada del lenguaje nuevo (número dentro, tinta por luminancia) y, al
+    // pulsarla, la tira de fichas de GizmoNeotkoStyle en el popup. Mismo contrato que antes.
     bool changed = false;
     ImGui::PushID(id);
-    const float sw = ImGui::GetTextLineHeight() * 1.2f;
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    if (ImGui::InvisibleButton("##chip", ImVec2(sw, sw)))
+    const float  u  = neo_u();
+    const float  sw = 1.25f * u;
+    const float  fh = ImGui::GetFrameHeight();
+    const ImVec2 p  = ImGui::GetCursorScreenPos();
+    if (ImGui::InvisibleButton("##chip", ImVec2(sw, fh)))
         ImGui::OpenPopup("##pick");
     const bool hov = ImGui::IsItemHovered();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, ImVec2(p.x + sw, p.y + sw), tool_col_u32(fcolors, tool));
-    dl->AddRect(p, ImVec2(p.x + sw, p.y + sw),
-                hov ? IM_COL32(255, 255, 255, 255) : IM_COL32(20, 20, 20, 255));
+    ImDrawList*  dl  = ImGui::GetWindowDrawList();
+    const ImVec2 a(p.x, p.y + (fh - sw) * 0.5f), b(a.x + sw, a.y + sw);
+    const ImU32  col = tool_col_u32(fcolors, tool);
+    dl->AddRectFilled(a, b, col, 3.f);
+    char num[4];
+    std::snprintf(num, sizeof(num), "%d", tool + 1);
+    const float  fs = 0.7f * u;
+    const ImVec2 ns = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.f, num);
+    dl->AddText(ImGui::GetFont(), fs, ImVec2((a.x + b.x - ns.x) * 0.5f, (a.y + b.y - ns.y) * 0.5f), ink_on(col), num);
+    if (hov)
+        dl->AddRect(a, b, neo_col_u32(NeoCol::AccentBright), 3.f, 0, 1.4f);
     if (hov && tip) ImGui::SetTooltip("%s (T%d)", tip, tool + 1);
     if (ImGui::BeginPopup("##pick")) {
-        ImDrawList* pdl = ImGui::GetWindowDrawList();
-        for (int t = 0; t < nfil; ++t) {
-            ImGui::PushID(t);
-            const ImVec2 q = ImGui::GetCursorScreenPos();
-            if (ImGui::InvisibleButton("##t", ImVec2(sw, sw))) {
-                tool = t; changed = true;
-                ImGui::CloseCurrentPopup();
-            }
-            pdl->AddRectFilled(q, ImVec2(q.x + sw, q.y + sw), tool_col_u32(fcolors, t));
-            pdl->AddRect(q, ImVec2(q.x + sw, q.y + sw),
-                         (t == tool) ? IM_COL32(255, 255, 255, 255) : IM_COL32(20, 20, 20, 255),
-                         0.f, 0, (t == tool) ? 2.f : 1.f);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("T%d", t + 1);
-            ImGui::PopID();
-            if (t + 1 < nfil) ImGui::SameLine(0.f, 4.f);
-        }
+        ImU32 cols[4];
+        const int nn = std::max(1, std::min(nfil, 4));
+        for (int t = 0; t < nn; ++t) cols[t] = tool_col_u32(fcolors, t);
+        const int c = neo_tool_chips("##pk", cols, nn, tool);
+        if (c >= 0) { tool = c; changed = true; ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
     ImGui::PopID();
     return changed;
 }
 
-// Coloured kind badge (SOLID / COLORSTITCH / PB HALF / PB FULL), wx visual mirror.
-static void pro_kind_badge(const char* text, ImU32 col)
+// s318 — ficha mini de SÓLO LECTURA (los dos filamentos de un ColorStitch en su fila: el editor
+// de patrón es quien los cambia). Mismo dibujo que las fichas, sin botón.
+static void cs_mini_tool(const std::vector<std::string>& fcolors, int t)
 {
-    ImDrawList* dl  = ImGui::GetWindowDrawList();
+    const float  u  = neo_u();
+    const float  s  = 1.05f * u;
+    const float  fh = ImGui::GetFrameHeight();
     const ImVec2 p  = ImGui::GetCursorScreenPos();
-    const ImVec2 ts = ImGui::CalcTextSize(text);
-    const ImVec2 sz(ts.x + 12.f, ImGui::GetTextLineHeight() + 4.f);
-    dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), col, 2.f);
-    dl->AddText(ImVec2(p.x + 6.f, p.y + 2.f), IM_COL32(255, 255, 255, 255), text);
-    ImGui::Dummy(sz);
+    ImGui::Dummy(ImVec2(s, fh));
+    ImDrawList*  dl  = ImGui::GetWindowDrawList();
+    const ImVec2 a(p.x, p.y + (fh - s) * 0.5f), b(a.x + s, a.y + s);
+    const ImU32  col = tool_col_u32(fcolors, t < 0 ? 0 : t);
+    dl->AddRectFilled(a, b, col, 3.f);
+    char num[4];
+    std::snprintf(num, sizeof(num), "%d", (t < 0 ? 0 : t) + 1);
+    const float  fs = 0.62f * u;
+    const ImVec2 ns = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.f, num);
+    dl->AddText(ImGui::GetFont(), fs, ImVec2((a.x + b.x - ns.x) * 0.5f, (a.y + b.y - ns.y) * 0.5f), ink_on(col), num);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("T%d", (t < 0 ? 0 : t) + 1);
 }
+
 
 // Preview bar for one pass — Solid: fill-angle hatch (wheel rotates);
 // ColorStitch: interleaved tool bands straight from the pattern digits (same
@@ -2175,7 +2165,7 @@ static void pro_pass_preview(ImDrawList* dl, ImVec2 a, ImVec2 b,
                              const std::vector<std::string>& fcolors,
                              double layer_h)
 {
-    dl->AddRectFilled(a, b, IM_COL32(45, 45, 45, 255));
+    dl->AddRectFilled(a, b, neo_col_u32(NeoCol::Canvas));   // s318 — token, no gris a pelo
     switch (p.kind) {
     case SurfacePassKind::Solid: {
         const ImU32 col = tool_col_u32(fcolors, p.solid_tool);
@@ -2203,7 +2193,24 @@ static void pro_pass_preview(ImDrawList* dl, ImVec2 a, ImVec2 b,
         // rotates with the wheel (mirrors the Solid hatch + the 3D weave).
         const float bw     = 4.f;
         const int   nbands = (int)(std::hypot(b.x - a.x, b.y - a.y) / bw) + 2;
-        std::vector<int> seq = colorstitch_tool_sequence(p.colorstitch.kv, penu, std::max(2, nbands));
+        // NEOTKO_COLORSTITCH_TAG — s314: en modo 4 (bandas en mm) la barra pasa a tener
+        // ESCALA. Cada celda de bw px representa una porción fija de milímetros, así que la
+        // barra siempre enseña la misma ventana física (kBarMM) y una banda de 4 mm se ve
+        // justo la mitad que una de 8 mm. Sin esto la barra dibujaba una celda por línea
+        // impresa y el diseño no cabía. Los modos 0-3 pasan 0 y no se enteran.
+        double bar_spacing_mm = 0.0;
+        {
+            const auto it = p.colorstitch.kv.find(penu ? "interlayer_colormix_penu_mode"
+                                                       : "interlayer_colormix_mode");
+            int m4 = 0;
+            if (it != p.colorstitch.kv.end()) { try { m4 = std::stoi(it->second); } catch (...) {} }
+            if (m4 == 4) {
+                constexpr double kBarMM = 40.0;
+                bar_spacing_mm = kBarMM / std::max(2, nbands);
+            }
+        }
+        std::vector<int> seq = colorstitch_tool_sequence(p.colorstitch.kv, penu,
+                                                         std::max(2, nbands), bar_spacing_mm);
         if (seq.empty()) seq.push_back(0);
         // angle from the pass kv (auto=-1 → display at 45°). Bands run ALONG the fill
         // lines, so band boundaries step across the perpendicular axis.
@@ -2221,7 +2228,14 @@ static void pro_pass_preview(ImDrawList* dl, ImVec2 a, ImVec2 b,
         dl->PushClipRect(a, b, true);
         const int half = nbands / 2 + 1;
         for (int i = -half; i <= half; ++i) {
-            const int t = seq[((i % ns) + ns) % ns];
+            // s319 — la secuencia se lee EN ORDEN de un extremo al otro de la barra (i + half). Antes
+            // era seq[i % ns] con i de −half a +half: la mitad izquierda salía del FINAL del patrón
+            // y la derecha del PRINCIPIO, así que un degradado se veía partido por la mitad (el
+            // diálogo Pattern y el slice, que leen en orden, salían bien). En un patrón que se repite
+            // sólo cambia la fase.
+            // s319b — y de DERECHA a izquierda: leída al derecho la barra salía con los colores al
+            // revés que el 3D y el slice (probado con el dedo, el ángulo sí coincidía).
+            const int t = seq[(ns - 1) - ((((i + half) % ns) + ns) % ns)];
             const ImU32 col = tool_col_u32(fcolors, t < 0 ? 0 : t);
             const float o0 = bw * (float)i, o1 = bw * (float)(i + 1);
             const ImVec2 p0(c.x + nx * o0 - dx * ext, c.y + ny * o0 - dy * ext);
@@ -2304,7 +2318,7 @@ static void pro_pass_preview(ImDrawList* dl, ImVec2 a, ImVec2 b,
     default:
         break;
     }
-    dl->AddRect(a, b, IM_COL32(20, 20, 20, 255));
+    dl->AddRect(a, b, IM_COL32(0, 0, 0, 110), 3.f);
 }
 
 // Editor de una zona (Top / Penu) del pro mode — v2 s108: filas estilo
@@ -2343,89 +2357,90 @@ static ColorRGBA cs_zone_rgba(int zone, float alpha)
     return ColorRGBA(r, g, b, alpha);
 }
 
-// Título de zona como CHAPA: rectángulo redondeado del color de la zona con el
-// texto encima, en vez de una línea de texto que la vista se salta.
-static void cs_zone_title(int zone, const char* label)
-{
-    ImDrawList*  dl  = ImGui::GetWindowDrawList();
-    ImFont*      fnt = ImGui::GetFont();
-    const float  fs  = ImGui::GetFontSize();
-    const ImVec2 tsz = fnt->CalcTextSizeA(fs, FLT_MAX, 0.f, label);
-    const float  padx = 8.f, pady = 3.f;
-    const ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const ImVec2 sz(tsz.x + 2.f * padx, tsz.y + 2.f * pady);
-    dl->AddRectFilled(p0, ImVec2(p0.x + sz.x, p0.y + sz.y), cs_zone_u32(zone, 235), 4.f);
-    // Texto negro o blanco según la luminancia del propio tono: el verde del Top y el
-    // naranja del Bottom piden negro, pero el verde oscuro del Penúltimo lo tragaría.
-    float r, g, b; cs_zone_rgb(zone, r, g, b);
-    const float lum = 0.299f * r + 0.587f * g + 0.114f * b;
-    dl->AddText(fnt, fs, ImVec2(p0.x + padx, p0.y + pady),
-                lum > 0.45f ? IM_COL32(18, 20, 24, 255) : IM_COL32(245, 245, 245, 255), label);
-    ImGui::Dummy(sz);   // reserva el sitio para que el layout siga como con el texto
-}
 
+static std::string cs_strip_warn(std::string s);   // s318 — definida junto a la toolbar
+
+// s318 — EDITOR DE UNA ZONA, rehecho con el lenguaje de panel (GizmoNeotkoStyle.hpp). Lo que se ve:
+//   · una TARJETA biselada con filo teal: glifo de la zona (el bloque con su capa encendida),
+//     nombre, "n/3 · 0.20 mm", y a la derecha copiar (menú con los dos destinos) y vaciar.
+//     Zona vacía = contorno a trazos con un solo botón "Add…".
+//   · la barra de mm a la izquierda (misma matemática de arrastre, s169/s232) y cada pase como
+//     un pozo en tres líneas fijas: [#N · tipo en 4 glifos · nombre · ▲ ▼ 🗑] · [filamentos ·
+//     ángulo] · [tejido]. PathBlend añade floor / ramp end / modo / perfil.
+// 🔑 Lo que NO cambia: la lógica de cada control está copiada tal cual de la versión anterior
+// (caps del Bottom, colapso a PB, payloads, diferidos, rueda, contextual, "+ layer"). Sólo cambian
+// el dibujo, el orden y el sitio. El badge SOLID/COLORSTITCH y el combo "##kind" se fueron: el tipo
+// lo dicen los 4 glifos y el nombre en teal, una sola vez.
+// 🚨 Dos tarjetas anidadas (zona y pase) ⇒ dos ImDrawListSplitter DISTINTOS: ImGui no admite
+// ChannelsSplit dentro de otro ChannelsSplit sobre la misma lista.
 static void draw_zone_editor(const char* id, const char* label,
                              Slic3r::SurfacePassStack& st, bool allow_disable,
                              bool penu, const std::vector<std::string>& fcolors,
                              int nfil, double layer_h, float row_avail_w,
                              bool bottom_caps = false,
                              const char* add_label = nullptr,
-                             const char* clear_label = nullptr)
+                             const char* clear_label = nullptr,
+                             const char* copy_label1 = nullptr,
+                             const char* copy_label2 = nullptr,
+                             int* copy_dest = nullptr,
+                             std::vector<PainterTrayMsg>* tray = nullptr)
 {
-    // NEOTKO_BOTTOM_TAG — Fase 1 §5.5 (strict caps, bottom only). When bottom_caps:
-    //   · max 2 Solid passes · max 1 ColorStitch pass · PathBlend ALWAYS Full
-    //     (PB Half is hidden — a Half on the bottom would leave an empty layer and
-    //      destabilize how the print is built up). Top/Penu pass false → untouched.
-    // Caps are enforced at authoring (kind dropdown + "+ layer" default kind);
-    // total passes are already bounded by kMaxPasses (2 Solid + 1 ColorStitch = 3).
+    // NEOTKO_BOTTOM_TAG — Fase 1 §5.5 (caps estrictos, sólo Bottom): máx 2 Solid · máx 1
+    // ColorStitch · PathBlend SIEMPRE Full (PB Half no se ofrece abajo).
     using namespace Slic3r;
     using K = SurfacePassKind;
     ImGui::PushID(id);
 
-    // NEOTKO_SANDWICH_TAG s119 (EMPTY model): NO "Enabled" gate. A zone is simply
-    // "Empty" (no effect) or "not Empty" (has painted content) — the content is the
-    // only control. This kills the gate that made identically-painted regions
-    // diverge (one passed the enable check, the other didn't). The Top zone is the
-    // colour itself (always present); the Penultimate is Empty by default and is
-    // added/cleared explicitly — no checkbox.
-    // s232 — chapa de color en vez de texto plano (ver cs_zone_title). El índice de
-    // zona se deriva de los flags con los que ya llama el caller: penu → 1,
-    // bottom_caps → 2, resto → Top.
-    const int zone_idx = penu ? 1 : (bottom_caps ? 2 : 0);
-    cs_zone_title(zone_idx, label);
-    if (allow_disable) {
-        if (!st.any_effect()) {
-            st.passes.clear();            // canonical Empty = no passes
-            st.enabled = false;
-            ImGui::SameLine();
-            if (ImGui::SmallButton(add_label ? add_label : _u8L("+ Add penultimate").c_str())) {
+    const float  u        = neo_u();
+    const float  fh       = ImGui::GetFrameHeight();
+    const float  gb       = 1.4f * u;
+    ImDrawList*  dl       = ImGui::GetWindowDrawList();
+    const int    zone_idx = penu ? 1 : (bottom_caps ? 2 : 0);
+    const Glyph  zg       = (zone_idx == 1) ? Glyph::ZonePenu : (zone_idx == 2) ? Glyph::ZoneBottom : Glyph::ZoneTop;
+    const float  card_w   = row_avail_w;
+    // "+ Add…" / "x Clear…" llevan el signo delante porque eran botones de texto; con glifo sobra.
+    auto strip_sign = [](const std::string& t) {
+        return (t.size() > 2 && (t[0] == '+' || t[0] == 'x') && t[1] == ' ') ? t.substr(2) : t;
+    };
+    auto zone_glyph = [&](Glyph g, ImU32 col) {
+        const ImVec2 gp = ImGui::GetCursorScreenPos();
+        const float  gs = 1.35f * u;
+        draw_glyph(dl, ImVec2(gp.x, gp.y + (fh - gs) * 0.5f), gs, g, col);
+        ImGui::Dummy(ImVec2(gs, fh));
+    };
+
+    // NEOTKO_SANDWICH_TAG s119 (EMPTY model): no hay "Enabled"; una zona está vacía o no. Top es
+    // el color mismo (siempre presente); Penu y Bottom se añaden y se vacían explícitamente.
+    if (allow_disable && !st.any_effect()) {
+        st.passes.clear();            // canonical Empty = no passes
+        st.enabled = false;
+        const ImVec2 c0 = ImGui::GetCursorScreenPos();
+        const float  h  = fh + 0.9f * u;
+        ImGui::SetCursorScreenPos(ImVec2(c0.x + 0.7f * u, c0.y + 0.45f * u));
+        zone_glyph(zg, neo_col_u32(NeoCol::TextDim));
+        ImGui::SameLine(0.f, 0.45f * u);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", label);
+        const std::string add = strip_sign(add_label ? std::string(add_label) : _u8L("+ Add penultimate"));
+        const float bw = ImGui::CalcTextSize(add.c_str()).x + 2.5f * u;
+        neo_same_line_at(c0.x + card_w - 0.5f * u - bw);
+        if (neo_text_button((add + "##add").c_str(), NeoBtn::Ghost, true, Glyph::Plus)) {
                 SurfacePass sp; sp.kind = K::ColorStitch; sp.ratio = 1.0;
                 st.passes.push_back(sp);
                 pro_cm_write(st.passes.back(), penu, 0, 1, 50);  // default A/B/mix
                 st.enabled = true;
-            }
-            ImGui::PopID();
-            return;                       // Empty → nothing else to render
         }
-        st.enabled = true;                // has content → not Empty
-        ImGui::SameLine();
-        if (ImGui::SmallButton(clear_label ? clear_label : _u8L("x Clear penultimate").c_str())) {
-            st.passes.clear();
-            st.enabled = false;
-            ImGui::PopID();
-            return;
-        }
-    } else {
-        st.enabled = true;
-        if (st.passes.empty()) {
-            SurfacePass sp; sp.ratio = 1.0;
-            st.passes.push_back(sp);
-        }
+        neo_card_dashed(dl, c0, ImVec2(c0.x + card_w, c0.y + h));
+        ImGui::SetCursorScreenPos(ImVec2(c0.x, c0.y + h));
+        ImGui::Dummy(ImVec2(card_w, 0.f));
+        ImGui::PopID();
+        return;                       // Empty → nothing else to render
     }
-
-    // NEOTKO_COLORSTITCH_TAG — s118: el "Perimeter override" YA NO es per-zona aquí.
-    // Pasó a ser una opción ÚNICA del color (decisión usuario s118), pintada una sola
-    // vez en render_pro_mode_panel y replicada a top+penu. Ver apply_perim_override_*.
+    st.enabled = true;
+    if (!allow_disable && st.passes.empty()) {
+        SurfacePass sp; sp.ratio = 1.0;
+        st.passes.push_back(sp);
+    }
 
     // Ratio sanity — equal split when degenerate (covers stacks seeded with the
     // default ratio 0.0 by the s107 MVP, which would otherwise predict black).
@@ -2450,164 +2465,129 @@ static void draw_zone_editor(const char* id, const char* label,
     int move_idx         = -1;
     int move_dir         = 0;    // +1 = hacia la superficie (arriba), -1 = hacia dentro
 
-    const std::string kind_items[4] = {
-        _u8L("Solid"), _u8L("ColorStitch"),
-        _u8L("PB Half"), _u8L("PB Full")
-    };
     const std::string ease_names[4] = {
         _u8L("Mode: Linear"), _u8L("Mode: Ease In"),
         _u8L("Mode: Ease Out"), _u8L("Mode: Ease In/Out")
     };
 
-    // s169 F4 — ratio-bar arrastrable (port de Tab.cpp paint_ratio_bar +
-    // ratio_bar_motion): columna a la izquierda de TODAS las filas, mismo ancho
-    // de arriba abajo. Se pinta DESPUÉS del loop (necesitamos y1 = borde inferior
-    // de la última fila), pero el indent debe aplicarse ANTES para que las filas
-    // se corran a la derecha y le hagan sitio.
-    // s232 — aire entre la chapa de zona y su primera fila: la chapa tiene fondo, así
-    // que sin margen el bloque de filas parece pegado a ella (con el título en texto
-    // plano no se notaba).
-    ImGui::Spacing();
+    bool clear_req = false;
 
-    // s232 — el doble de ancha (feedback usuario): el número de mm que va DENTRO de la
-    // barra no cabía y se solapaba con el "#1"/"#2" de la fila. Hay sitio de sobra en
-    // el panel, y el ancho de las filas se recalcula desde aquí (left_w), así que
-    // ensanchar la columna las corre solas sin descuadrar nada.
-    const float bar_w  = ImGui::GetTextLineHeight() * 2.4f;
-    const ImVec2 bar_p0 = ImGui::GetCursorScreenPos();   // (bar_x, y0)
-    ImGui::Indent(bar_w + 6.f);
+    ImDrawListSplitter card_split;
+    card_split.Split(dl, 2);
+    card_split.SetCurrentChannel(dl, 1);     // contenido; el fondo va al canal 0 al final
+    const ImVec2 c0 = ImGui::GetCursorScreenPos();
 
-    // Visual order = physical order: top of the layer first (#1 = topmost,
-    // like the SandwichDialog draws its rows). Vector is bottom→top.
+    // ---- cabecera de la tarjeta ----
+    ImGui::SetCursorScreenPos(ImVec2(c0.x + 0.7f * u, c0.y + 0.45f * u));
+    zone_glyph(zg, neo_col_u32(NeoCol::AccentBright));
+    ImGui::SameLine(0.f, 0.45f * u);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(0.f, 0.5f * u);
+    ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+    ImGui::Text("%d/%d \xc2\xb7 %.2f mm", n, SurfacePassStack::kMaxPasses, layer_h);
+    ImGui::PopStyleColor();
+    {
+        const int nbtn = (copy_dest ? 1 : 0) + (allow_disable ? 1 : 0);
+        if (nbtn > 0) {
+            neo_same_line_at(c0.x + card_w - 0.5f * u - float(nbtn) * gb - float(nbtn - 1) * 2.f);
+            if (copy_dest) {
+                // s231 F4 — copia ZONA→ZONA. s318: en vez de una fila "copy to:" siempre visible,
+                // un glifo que abre los dos destinos. La copia la hace el caller (do_copy), con la
+                // normalización de caps del Bottom intacta.
+                if (neo_glyph_button("##copy", gb, Glyph::Copy, false, _u8L("Copy this zone to…").c_str()))
+                    ImGui::OpenPopup("##copy_to");
+                if (ImGui::BeginPopup("##copy_to")) {
+                    ImGui::TextDisabled("%s", _u8L("copy to:").c_str());
+                    ImGui::Separator();
+                    if (copy_label1 && ImGui::MenuItem(copy_label1)) *copy_dest = 0;
+                    if (copy_label2 && ImGui::MenuItem(copy_label2)) *copy_dest = 1;
+                    ImGui::EndPopup();
+                }
+                if (allow_disable) ImGui::SameLine(0.f, 2.f);
+            }
+            if (allow_disable) {
+                const std::string clr = strip_sign(clear_label ? std::string(clear_label) : _u8L("x Clear penultimate"));
+                if (neo_glyph_button("##clear", gb, Glyph::Trash, true, clr.c_str()))
+                    clear_req = true;     // se aplica al final: la tarjeta de este frame se cierra entera
+            }
+        }
+    }
+
+    // ---- cuerpo: barra de mm + columna de pases ----
+    const float  body_y = ImGui::GetCursorScreenPos().y + 0.15f * u;
+    const float  bar_w  = 2.6f * u;
+    const float  col_dx = 0.7f * u + bar_w + 0.45f * u;
+    const float  pass_w = std::max(8.f * u, card_w - col_dx - 0.5f * u);
+    const float  pin    = 0.4f * u;
+    const ImVec2 bar_p0(c0.x + 0.7f * u, body_y);
+    ImGui::SetCursorScreenPos(ImVec2(c0.x + col_dx, body_y));
+    ImGui::Indent(col_dx);
+    float bar_bottom = body_y;
+
+    // Visual order = physical order: #1 = el pase más cercano a la superficie.
     for (int i = n - 1; i >= 0; --i) {
         SurfacePass& p = st.passes[i];
         ImGui::PushID(i);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->ChannelsSplit(2);
-        dl->ChannelsSetCurrent(1);          // content above the bg rect
-
-        // NEOTKO_COLORSTITCH_TAG — s139: ancho de fila ESTABLE pasado por el caller
-        // (medido UNA vez antes de ambas zonas). Antes se recalculaba por-fila con
-        // GetContentRegionAvail().x → variaba entre Top (arriba) y Penu (abajo) si
-        // aparecía scrollbar o derivaba el cursor → el Z-box (tamaño de capa) y la
-        // banda quedaban en X distinto entre zonas. Anclar a un único ancho los iguala.
-        // s169 — el Z-box de la derecha se retiró (feedback usuario): las filas
-        // ya no reservan su ancho, ganan sitio para chips/combo/angle.
-        const float left_w = std::max(140.f, row_avail_w - (bar_w + 6.f));
+        ImDrawListSplitter ps;
+        ps.Split(dl, 2);
+        ps.SetCurrentChannel(dl, 1);
+        const ImVec2 pr0    = ImGui::GetCursorScreenPos();
+        const float  left_w = pass_w - 2.f * pin;   // ancho útil dentro del pase (lo usa la barra de tejido)
 
         const PathBlendPassConfig pbc =
             (p.kind == K::PathBlend) ? pro_pb_read(p) : PathBlendPassConfig{};
         const bool is_pb_half =
             p.kind == K::PathBlend && pbc.mode == PathBlendPassConfig::Mode::Half;
 
+        ImGui::SetCursorScreenPos(ImVec2(pr0.x + pin, pr0.y + pin));
+        const float line_y = pr0.y + pin;
         ImGui::BeginGroup();
-        // ---- line 1: #N · chips · badge · kind · per-kind fields · [x] ----
-        // s232 — la "x" de quitar el pase estaba a la IZQUIERDA, pegada a la columna
-        // de la barra de ratio (el control de altura de capa / reparto entre pasadas):
-        // dos cosas de significado opuesto — una ajusta, la otra destruye — a un par de
-        // píxeles. Se va al extremo DERECHO de la fila (feedback usuario). Se guarda
-        // aquí la X de inicio para poder alinearla al borde al cerrar la línea.
-        const float row_x0 = ImGui::GetCursorPosX();
+
+        // ---- línea 1: #N · tipo · nombre · ▲ ▼ 🗑 ----
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("#%d", n - i);
-        ImGui::SameLine();
-
-        if (p.kind == K::Solid) {
-            int t = p.solid_tool;
-            if (pro_tool_chip("##sol", fcolors, nfil, t, _u8L("Tool").c_str()))
-                p.solid_tool = t;
-            ImGui::SameLine();
-        } else if (p.kind == K::ColorStitch) {
-            // display-only mini chips (the A/B pickers live on line 3)
-            int ca, cb, cp; pro_cm_read(p, penu, ca, cb, cp);
-            const float msw = ImGui::GetTextLineHeight() * 0.8f;
-            for (int t : { ca, cb }) {
-                const ImVec2 q = ImGui::GetCursorScreenPos();
-                dl->AddRectFilled(q, ImVec2(q.x + msw, q.y + msw), tool_col_u32(fcolors, t));
-                dl->AddRect(q, ImVec2(q.x + msw, q.y + msw), IM_COL32(20, 20, 20, 255));
-                ImGui::Dummy(ImVec2(msw, msw));
-                ImGui::SameLine(0.f, 2.f);
-            }
-            ImGui::SameLine(0.f, 6.f);
-        } else if (p.kind == K::PathBlend) {
-            PathBlendPassConfig pbe = pbc;
-            bool pb_changed = false;
-            int tb = std::max(0, pbe.tool_bottom);
-            if (pro_tool_chip("##pbb", fcolors, nfil, tb, _u8L("Ramp tool (bottom)").c_str())) {
-                pbe.tool_bottom = tb; pb_changed = true;
-            }
-            if (!is_pb_half) {
-                ImGui::SameLine(0.f, 2.f);
-                int tt = std::max(0, pbe.tool_top);
-                if (pro_tool_chip("##pbt", fcolors, nfil, tt, _u8L("Cap tool (top)").c_str())) {
-                    pbe.tool_top = tt; pb_changed = true;
-                }
-            }
-            if (pb_changed) pro_pb_write(p, pbe, layer_h);
-            ImGui::SameLine();
-        }
-
-        const char* btxt = "SOLID";
-        if (p.kind == K::ColorStitch)       btxt = "COLORSTITCH";
-        else if (p.kind == K::PathBlend) btxt = is_pb_half ? "PB HALF" : "PB FULL";
-        pro_kind_badge(btxt, pro_kind_colour(p.kind));
-        ImGui::SameLine();
-
-        // s232 — REPARACIÓN de los pases ya degradados. Los perfiles que se guardaron
-        // antes del arreglo llevan dentro un `kind:Solid` con su payload de efecto vivo
-        // (así estaban los pid 33 y 40 del proyecto del usuario). No se "cura" en
-        // silencio al cargar, porque un Solid con payload huérfano también puede ser una
-        // decisión legítima del usuario de antes, y adivinar cuál es cuál sería
-        // inventarse su receta: se AVISA y se ofrece restaurar de un click.
-        if (p.kind == K::Solid && (p.colorstitch.present || p.pathblend.present)) {
-            const bool orphan_pb = p.pathblend.present;
-            if (ImGui::SmallButton(orphan_pb ? "!PB" : "!CS")) {
-                p.kind = orphan_pb ? K::PathBlend : K::ColorStitch;
-                if (!orphan_pb) p.colorstitch.present = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("This pass is Solid but still carries a "
-                    "leftover effect payload (a pass degraded by an older build). "
-                    "Click to restore it.").c_str());
-            ImGui::SameLine();
-        }
-
+        ImGui::TextDisabled("#%d", n - i);
+        ImGui::SameLine(0.f, 0.4f * u);
         int sel = 0;
-        if (p.kind == K::ColorStitch)       sel = 1;
+        if (p.kind == K::ColorStitch)    sel = 1;
         else if (p.kind == K::PathBlend) sel = is_pb_half ? 2 : 3;
-        // NEOTKO — light mode readability: the default ImGui popup theme is dark, so the open
-        // dropdown was dark text on dark bg (user report). Force a light popup background + dark
-        // text + translucent Orca header in light mode. Dark mode keeps the default (untouched).
-        const bool _kind_light = !ImGuiWrapper::is_dark_mode();
-        if (_kind_light) {
-            ImGui::PushStyleColor(ImGuiCol_PopupBg,       ImGuiWrapper::COL_WINDOW_BG);
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0.00f, 0.59f, 0.53f, 0.45f));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.59f, 0.53f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0.00f, 0.59f, 0.53f, 0.55f));
-        }
-        ImGui::PushItemWidth(110.f);   // s169 F4: 100→110 (más aire, ya no compite con el rail muerto en F1)
-        if (ImGui::BeginCombo("##kind", kind_items[sel].c_str())) {
-            // NEOTKO_BOTTOM_TAG — §5.5: count the OTHER passes' kinds so switching
-            // THIS pass to a capped kind respects the bottom caps (the target kind
-            // replaces this pass's current kind, so pass i is excluded from the count).
+        const std::string kind_names[4] = { _u8L("Solid"), _u8L("ColorStitch"), _u8L("PB Half"), _u8L("PB Full") };
+        {
+            // NEOTKO_BOTTOM_TAG — §5.5: los tipos de los OTROS pases, para que cambiar ESTE a un tipo
+            // con tope respete los caps (el tipo nuevo sustituye al suyo, así que i no cuenta).
             int _n_solid_other = 0, _n_cs_other = 0;
             if (bottom_caps)
                 for (int j = 0; j < n; ++j) if (j != i) {
-                    if (st.passes[j].kind == K::Solid)         ++_n_solid_other;
+                    if (st.passes[j].kind == K::Solid)            ++_n_solid_other;
                     else if (st.passes[j].kind == K::ColorStitch) ++_n_cs_other;
                 }
+            const Glyph  kg[4] = { Glyph::KSolid, Glyph::KStitch, Glyph::KPbHalf, Glyph::KPbFull };
+            const float  kb    = 1.5f * u;
+            const int    nk    = bottom_caps ? 3 : 4;   // PB Half nunca abajo (dejaría una capa vacía)
+            const ImVec2 wp    = ImGui::GetCursorScreenPos();
+            dl->AddRectFilled(ImVec2(wp.x - 2.f, line_y + (fh - kb) * 0.5f - 2.f),
+                              ImVec2(wp.x + float(nk) * kb + float(nk - 1) * 2.f + 2.f, line_y + (fh + kb) * 0.5f + 2.f),
+                              neo_fade(NeoCol::Surface, 0.7f), 5.f);
+            ImGui::SetCursorScreenPos(ImVec2(wp.x, line_y + (fh - kb) * 0.5f));
+            bool first = true;
             for (int k = 0; k < 4; ++k) {
-                // PB Half is never offered on the bottom (would leave an empty layer).
                 if (bottom_caps && k == 2) continue;
-                // Disable a capped kind when picking it would exceed its bottom cap.
+                if (!first) ImGui::SameLine(0.f, 2.f);
+                first = false;
                 const bool _capped = bottom_caps &&
                     ((k == 0 && _n_solid_other >= 2) ||   // max 2 Solid
                      (k == 1 && _n_cs_other    >= 1));    // max 1 ColorStitch
-                // (Sin BeginDisabled: esta versión de ImGui no lo trae → dim manual +
-                //  guarda. El Selectable sigue clicable; el `&& !_capped` veta la acción.)
-                if (_capped) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
-                if (ImGui::Selectable(kind_items[k].c_str(), k == sel) && k != sel && !_capped) {
+                const std::string tip = !_capped ? kind_names[k]
+                                      : (k == 0 ? _u8L("Bottom: max 2 Solid passes")
+                                                : _u8L("Bottom: max 1 ColorStitch pass"));
+                char kid[8];
+                std::snprintf(kid, sizeof(kid), "##k%d", k);
+                // (Sin BeginDisabled en esta ImGui: se atenúa con Alpha — neo_col_u32 lo respeta —
+                //  y el clic se veta con `!_capped`, igual que hacía el combo.)
+                if (_capped) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+                const bool hit = neo_glyph_toggle(kid, kb, k == sel, kg[k], tip.c_str());
+                if (_capped) ImGui::PopStyleVar();
+                if (hit && k != sel && !_capped) {
                     if (k == 0) {
                         // s232 — RAÍZ del "la receta dice ColorStitch y sale plana":
                         // pasar un pase a Solid dejaba su payload de efecto DENTRO
@@ -2631,146 +2611,195 @@ static void draw_zone_editor(const char* id, const char* label,
                         pb_collapse_mode = (k == 2) ? 0 : 1;
                     }
                 }
-                if (_capped) {
-                    ImGui::PopStyleVar();
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s", (k == 0)
-                            ? _u8L("Bottom: max 2 Solid passes").c_str()
-                            : _u8L("Bottom: max 1 ColorStitch pass").c_str());
-                }
             }
-            ImGui::EndCombo();
         }
-        ImGui::PopItemWidth();
-        if (_kind_light) ImGui::PopStyleColor(5);
+        ImGui::SameLine(0.f, 0.5f * u);
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, line_y));
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::AccentBright));
+        ImGui::TextUnformatted(kind_names[sel].c_str());
+        ImGui::PopStyleColor();
 
-        if (p.kind == K::Solid) {
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(_u8L("angle:").c_str());
-            ImGui::SameLine();
-            int av = p.angle;
-            ImGui::PushItemWidth(42.f);
-            if (ImGui::DragInt("##ang", &av, 1.f, -1, 359)) {
-                if (av < 0) av = -1; else if (av > 359) av = 359;
-                p.angle = av;
+        if (p.kind == K::Solid && (p.colorstitch.present || p.pathblend.present)) {
+            ImGui::SameLine(0.f, 0.4f * neo_u());
+            const bool orphan_pb = p.pathblend.present;
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));   // s318: es un aviso real
+            const bool _restore = ImGui::SmallButton(orphan_pb ? "!PB" : "!CS");
+            ImGui::PopStyleColor();
+            if (_restore) {
+                p.kind = orphan_pb ? K::PathBlend : K::ColorStitch;
+                if (!orphan_pb) p.colorstitch.present = true;
             }
-            ImGui::PopItemWidth();
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("-1 = auto (follow fill angle). Wheel over the bar rotates.").c_str());
-        } else if (p.kind == K::ColorStitch) {
-            // NEOTKO_COLORSTITCH_TAG — inline fill-angle for ColorStitch (mirrors Solid).
-            // Writes the pass kv so it persists into the profile stack → the slice honours
-            // it (Fill.cpp painted_colorstitch_angle_for_slot). -1 = auto (follow fill angle).
-            const char* akey = penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle";
-            // NEOTKO_COLORSTITCH_TAG — clave ausente: el TOP cae al default (45), no a auto.
-            // El PENU se queda en -1 a propósito: ahí -1 NO significa "alternar" sino
-            // "heredar el ángulo del top" (ColorStitch.cpp:1795), así que cambiarlo
-            // rompería la herencia.
-            int cm_ang = penu ? COLORSTITCH_ANGLE_AUTO : COLORSTITCH_DEFAULT_ANGLE_DEG;
-            { const auto it = p.colorstitch.kv.find(akey);
-              if (it != p.colorstitch.kv.end()) { try { cm_ang = std::stoi(it->second); } catch (...) {} } }
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(_u8L("angle:").c_str());
-            ImGui::SameLine();
-            ImGui::PushItemWidth(42.f);
-            if (ImGui::DragInt("##cm_ang", &cm_ang, 1.f, -1, 359)) {
-                if (cm_ang < -1) cm_ang = -1; else if (cm_ang > 359) cm_ang = 359;
-                p.colorstitch.present = true;
-                p.colorstitch.kv[akey] = std::to_string(cm_ang);
-                p.angle = cm_ang;
-            }
-            ImGui::PopItemWidth();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Fill line direction, 0-359. Default 45.\n"
-                                             "-1 = auto: follows Orca's infill rotation, which flips 90 degrees "
-                                             "every other layer, so the stripes change direction inside one band "
-                                             "and cannot be previewed - the zone is outlined in pulsing violet to show it.\n"
-                                             "Wheel over the bar rotates.").c_str());
+                ImGui::SetTooltip("%s", _u8L("This pass is Solid but still carries a "
+                    "leftover effect payload (a pass degraded by an older build). "
+                    "Click to restore it.").c_str());
         }
 
-        // s169 F4 — PathBlend en su PROPIA línea (antes compartía la línea 1 con
-        // chips+badge+combo, quedando apretado). SOLO recolocación: los mismos
-        // widgets/helpers/clamps que antes (floor venía del Z-box; ahora vive
-        // aquí, el Z-box de PB pasa a mostrar "full" más abajo).
-        if (p.kind == K::PathBlend) {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(_u8L("floor:").c_str());
-            ImGui::SameLine();
-            {
-                float fv = pbc.floor_mm;
-                ImGui::PushItemWidth(52.f);
-                if (ImGui::DragFloat("##floor", &fv, 0.005f, 0.01f, (float)layer_h, "%.2f")) {
-                    PathBlendPassConfig pbe = pro_pb_read(p);
-                    pbe.floor_mm = fv;
-                    // keep the ramp alive when floor crosses mid (dialog mirror)
-                    if (pbe.mid_end_mm <= pbe.floor_mm) pbe.mid_end_mm = pbe.floor_mm + 0.001f;
-                    pro_pb_write(p, pbe, layer_h);
-                }
-                ImGui::PopItemWidth();
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", _u8L("Ramp floor (mm)").c_str());
-            }
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(_u8L("ramp end:").c_str());
-            ImGui::SameLine();
-            if (is_pb_half) {
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("%.2f", layer_h);   // Half: mid forced to layer top
-            } else {
-                float mv = pbc.mid_end_mm;
-                ImGui::PushItemWidth(52.f);
-                if (ImGui::DragFloat("##mid", &mv, 0.005f, 0.f, (float)layer_h, "%.3f")) {
-                    PathBlendPassConfig pbe = pro_pb_read(p);
-                    pbe.mid_end_mm = mv;
-                    pro_pb_write(p, pbe, layer_h);
-                }
-                ImGui::PopItemWidth();
-            }
-        }
-
-        // s232 — cierre de la fila de cabecera: la "x" alineada al borde derecho del
-        // ancho ESTABLE de fila (`left_w`, medido una vez por el caller — usar
-        // GetContentRegionAvail aquí la haría bailar entre zonas, ver la nota de s139).
         if (n > 1) {
-            // s232 — reordenar el pase desde la propia fila. Estaba SÓLO en el
-            // contextual de la barra (s231 F4), que nadie descubre solo, mientras el
-            // Sandwich Editor lo tiene a la vista con ▲▼ desde s84c — y reordenar
-            // (subir el Solid, bajar el ColorStitch, intercambiarlos) es de lo que más
-            // se usa componiendo una receta. Mismo `move_idx/move_dir` diferido, así
-            // que el vector no se toca a mitad de iteración.
-            // Orden visual = físico: ▲ hacia la superficie (idx+1), ▼ hacia dentro.
-            const float btn_w = ImGui::GetFrameHeight();
-            ImGui::SameLine();
-            // Los tres botones cierran la fila juntos por la derecha, con la "x"
-            // separada del par de flechas: es la única destructiva de las tres y
-            // pegada a ellas sería un missclick esperando a pasar (feedback usuario).
-            ImGui::SetCursorPosX(row_x0 + std::max(3.f * btn_w,
-                                                   left_w - (3.f * btn_w + 14.f)));
-            // En los extremos la flecha no se dibuja, pero su hueco SÍ se reserva
-            // (Dummy del mismo tamaño): así la "x" cae en la misma X en todas las
-            // filas. `draw_zone_editor` es una función libre y no tiene el ImGuiWrapper
-            // del gizmo, así que nada de disabled_begin aquí.
-            const ImVec2 arrow_sz(btn_w * 0.9f, ImGui::GetTextLineHeight());
+            // s232 — subir / bajar / quitar cierran la fila por la derecha, con la papelera
+            // separada de las flechas (anti-missclick) y los huecos reservados en los extremos para
+            // que la papelera caiga en la misma X en todas las filas.
+            neo_same_line_at(pr0.x + pin + left_w - (3.f * gb + 0.6f * u));
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, line_y + (fh - gb) * 0.5f));
+            {
+                // s319 — un pozo detrás de los tres: sueltos sobre el fondo del pase no se veían.
+                const ImVec2 w0 = ImGui::GetCursorScreenPos();
+                dl->AddRectFilled(ImVec2(w0.x - 2.f, w0.y - 2.f),
+                                  ImVec2(w0.x + 3.f * gb + 2.f + 0.6f * u + 2.f, w0.y + gb + 2.f),
+                                  neo_fade(NeoCol::Surface, 0.7f), 5.f);
+            }
             if (i < n - 1) {
-                if (ImGui::SmallButton("^")) { move_idx = i; move_dir = +1; }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", _u8L("Move this pass up (towards the surface)").c_str());
-            } else ImGui::Dummy(arrow_sz);
+                if (neo_glyph_button("##up", gb, Glyph::Up, false, _u8L("Move this pass up (towards the surface)").c_str())) {
+                    move_idx = i; move_dir = +1;
+                }
+            } else ImGui::Dummy(ImVec2(gb, gb));
             ImGui::SameLine(0.f, 2.f);
             if (i > 0) {
-                if (ImGui::SmallButton("v")) { move_idx = i; move_dir = -1; }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", _u8L("Move this pass down (into the part)").c_str());
-            } else ImGui::Dummy(arrow_sz);
-            ImGui::SameLine(0.f, 14.f);   // el hueco anti-missclick
-            if (ImGui::SmallButton("x")) remove_idx = i;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Remove this pass").c_str());
+                if (neo_glyph_button("##dn", gb, Glyph::Down, false, _u8L("Move this pass down (into the part)").c_str())) {
+                    move_idx = i; move_dir = -1;
+                }
+            } else ImGui::Dummy(ImVec2(gb, gb));
+            ImGui::SameLine(0.f, 0.6f * u);
+            if (neo_glyph_button("##del", gb, Glyph::Trash, true, _u8L("Remove this pass").c_str()))
+                remove_idx = i;
         }
 
+        // ---- línea 2: filamentos (+ patrón) · ángulo a la derecha ----
+        if (p.kind == K::Solid) {
+            ImU32 cols[4];
+            const int nn = std::max(1, std::min(nfil, 4));
+            for (int t = 0; t < nn; ++t) cols[t] = tool_col_u32(fcolors, t);
+            const int c = neo_tool_chips("##sol", cols, nn, p.solid_tool);
+            if (c >= 0) p.solid_tool = c;
+        } else if (p.kind == K::ColorStitch) {
+            // Backfill defensivo: un pase sin payload no debe degradar a Solid.
+            if (pro_cm_pattern(p, penu).empty()) {
+                int a, b, cp; pro_cm_read(p, penu, a, b, cp);
+                pro_cm_write(p, penu, a, b, cp);
+            }
+            int ca, cb, cp; pro_cm_read(p, penu, ca, cb, cp);
+            cs_mini_tool(fcolors, ca);
+            ImGui::SameLine(0.f, 0.18f * u);
+            cs_mini_tool(fcolors, cb);
+            ImGui::SameLine(0.f, 0.5f * u);
+            if (neo_text_button((_u8L("Pattern…") + "##cs_pat").c_str(), NeoBtn::Ghost, true, Glyph::Adv)) {
+                auto* cfg = const_cast<DynamicPrintConfig*>(
+                    &wxGetApp().preset_bundle->prints.get_edited_preset().config);
+                std::map<std::string, std::string> out_kv;
+                // El diálogo devuelve el PAYLOAD COMPLETO del pase (string + knobs
+                // del gradiente). Sembrarlo con el kv actual permite re-editar. Así
+                // cada pase lleva su PROPIO diseño → el motor (Fill.cpp FASE2) los
+                // sliccea distintos; antes solo se capturaba el string y todos los
+                // pases caían al gradiente compartido de la región (bug "salen todos
+                // iguales", tanto en preview como en slice).
+                if (open_colorstitch_pattern_dialog(
+                        wxGetApp().plater(), fcolors, penu, cfg, p.colorstitch.kv, out_kv)) {
+                    p.colorstitch.present = true;
+                    p.colorstitch.kv      = std::move(out_kv);
+                    // Sync chip/preview/wheel desde el payload nuevo.
+                    int a, b, cp; pro_cm_read(p, penu, a, b, cp);
+                    p.solid_tool = a;
+                    const auto it = p.colorstitch.kv.find(
+                        penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle");
+                    if (it != p.colorstitch.kv.end()) {
+                        try { p.angle = std::stoi(it->second); } catch (...) {}
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Open the ColorStitch pattern editor").c_str());
+        } else if (p.kind == K::PathBlend) {
+            PathBlendPassConfig pbe = pbc;
+            bool pb_changed = false;
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", _u8L("ramp").c_str());
+            ImGui::SameLine(0.f, 0.3f * u);
+            int tb = std::max(0, pbe.tool_bottom);
+            if (pro_tool_chip("##pbb", fcolors, nfil, tb, _u8L("Ramp tool (bottom)").c_str())) {
+                pbe.tool_bottom = tb; pb_changed = true;
+            }
+            if (!is_pb_half) {
+                ImGui::SameLine(0.f, 0.5f * u);
+                ImGui::TextDisabled("%s", _u8L("cap").c_str());
+                ImGui::SameLine(0.f, 0.3f * u);
+                int tt = std::max(0, pbe.tool_top);
+                if (pro_tool_chip("##pbt", fcolors, nfil, tt, _u8L("Cap tool (top)").c_str())) {
+                    pbe.tool_top = tt; pb_changed = true;
+                }
+            }
+            if (pb_changed) pro_pb_write(p, pbe, layer_h);
+        }
+        {
+            // El ángulo, en el mismo sitio para los tres tipos (s318: el de PathBlend subía desde la
+            // línea del modo). −1 = auto, que se pinta "auto" en el violeta del contorno que pulsa en
+            // el visor — el mismo aviso que antes daba el "auto angle" ámbar, sin gastar una línea.
+            const char* akey = penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle";
+            int av = -1;
+            if (p.kind == K::Solid) {
+                av = p.angle;
+            } else if (p.kind == K::ColorStitch) {
+                // NEOTKO_COLORSTITCH_TAG — clave ausente: el TOP cae al default (45), no a auto; el
+                // PENU se queda en -1 a propósito (ahí -1 = heredar el ángulo del top).
+                av = penu ? COLORSTITCH_ANGLE_AUTO : COLORSTITCH_DEFAULT_ANGLE_DEG;
+                const auto it = p.colorstitch.kv.find(akey);
+                if (it != p.colorstitch.kv.end()) { try { av = std::stoi(it->second); } catch (...) {} }
+            } else {
+                av = pbc.fill_angle;
+            }
+            const float aw = 4.0f * u;
+            neo_same_line_at(pr0.x + pin + left_w - aw);
+            {
+                const ImVec2 gp = ImGui::GetCursorScreenPos();
+                draw_glyph(dl, ImVec2(gp.x, gp.y + (fh - 0.9f * u) * 0.5f), 0.9f * u, Glyph::Angle,
+                           neo_col_u32(NeoCol::TextDim));
+                ImGui::Dummy(ImVec2(0.9f * u, fh));
+            }
+            ImGui::SameLine(0.f, 0.25f * u);
+            ImGui::PushItemWidth(aw - 1.15f * u);
+            const bool is_auto = av < 0;
+            if (is_auto) ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Slope));
+            const bool ach = ImGui::DragInt("##ang", &av, 1.f, -1, 359, is_auto ? "auto" : "%d\xc2\xb0");
+            if (is_auto) ImGui::PopStyleColor();
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) {
+                if (p.kind == K::Solid)
+                    ImGui::SetTooltip("%s", _u8L("-1 = auto (follow fill angle). Wheel over the bar rotates.").c_str());
+                else if (p.kind == K::ColorStitch)
+                    ImGui::SetTooltip("%s", _u8L("Fill line direction, 0-359. Default 45.\n"
+                                                 "-1 = auto: follows Orca's infill rotation, which flips 90 degrees "
+                                                 "every other layer, so the stripes change direction inside one band "
+                                                 "and cannot be previewed - the zone is outlined in pulsing violet to show it.\n"
+                                                 "Wheel over the bar rotates.").c_str());
+                else
+                    ImGui::SetTooltip("%s", _u8L("Fill line direction, 0-359. Default 45.\n"
+                                                 "-1 = auto: flips 90 degrees every other layer. In "
+                                                 "PathBlend that is not just surface finish - each "
+                                                 "line takes its ramp height from its Y centroid, so "
+                                                 "the angle shapes the gradient itself and auto makes "
+                                                 "it differ layer to layer. The zone is outlined in pulsing violet to show it.").c_str());
+            }
+            if (ach) {
+                if (p.kind == K::Solid) {
+                    if (av < 0) av = -1; else if (av > 359) av = 359;
+                    p.angle = av;
+                } else if (p.kind == K::ColorStitch) {
+                    // Escribe el kv del pase: persiste en el stack del perfil y el slice lo honra
+                    // (Fill.cpp painted_colorstitch_angle_for_slot).
+                    if (av < -1) av = -1; else if (av > 359) av = 359;
+                    p.colorstitch.present = true;
+                    p.colorstitch.kv[akey] = std::to_string(av);
+                    p.angle = av;
+                } else {
+                    if (av < 0) av = -1; else av %= 360;
+                    PathBlendPassConfig pbe = pro_pb_read(p);
+                    pbe.fill_angle = av;
+                    pro_pb_write(p, pbe, layer_h);
+                }
+            }
+        }
+
+        // ---- línea 3: el tejido (rueda = ajustar, botón derecho = duplicar / reordenar / borrar) ----
         // ---- preview bar (hover wheel: Solid angle / PB Full mid) — line 2 for
         // Solid/ColorStitch, line 3 for PathBlend (tiene su línea propia arriba) ----
         {
@@ -2856,175 +2885,132 @@ static void draw_zone_editor(const char* id, const char* label,
             pro_pass_preview(dl, q, ImVec2(q.x + left_w, q.y + bar_h), p, penu, fcolors, layer_h);
         }
 
-        // s169 F4 FIX — Mode (ease) button on its OWN line, BELOW the preview bar.
-        // Mirrors Tab.cpp's build_row anatomy (row1 = kind fields, row2 = preview,
-        // row3 = Mode/Advanced buttons): the previous port crammed this button onto
-        // the floor/ramp-end line, where it competed for width and could overflow
-        // the panel. Giving it its own line removes that pressure entirely.
+        // ---- línea 4 (PathBlend): floor / ramp end, y modo + perfil ----
         if (p.kind == K::PathBlend) {
-            const int em = std::clamp(pbc.ease_mode, 0, 3);
-            if (ImGui::SmallButton((ease_names[em] + "##ease").c_str())) {
-                PathBlendPassConfig pbe = pro_pb_read(p);
-                pbe.ease_mode = (em + 1) % 4;
-                pro_pb_write(p, pbe, layer_h);
-            }
-            // s172 — fill_angle: existía en el motor (PathBlendPassConfig::fill_angle,
-            // Fill.cpp lo lee ya) pero nunca se expuso en ninguna UI. Visible y
-            // editable igual que ColorStitch (DragInt -1=auto/0-359), en esta línea
-            // (con sitio de sobra) para no repetir el overflow de floor/ramp-end.
-            ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(_u8L("angle:").c_str());
+            ImGui::TextDisabled("%s", _u8L("floor:").c_str());
             ImGui::SameLine();
             {
-                int pb_ang = pbc.fill_angle;
-                ImGui::PushItemWidth(42.f);
-                if (ImGui::DragInt("##pb_ang", &pb_ang, 1.f, -1, 359)) {
-                    if (pb_ang < 0) pb_ang = -1; else pb_ang %= 360;
+                float fv = pbc.floor_mm;
+                ImGui::PushItemWidth(3.6f * neo_u());
+                if (ImGui::DragFloat("##floor", &fv, 0.005f, 0.01f, (float)layer_h, "%.2f")) {
                     PathBlendPassConfig pbe = pro_pb_read(p);
-                    pbe.fill_angle = pb_ang;
+                    pbe.floor_mm = fv;
+                    // keep the ramp alive when floor crosses mid (dialog mirror)
+                    if (pbe.mid_end_mm <= pbe.floor_mm) pbe.mid_end_mm = pbe.floor_mm + 0.001f;
                     pro_pb_write(p, pbe, layer_h);
                 }
                 ImGui::PopItemWidth();
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", _u8L("Fill line direction, 0-359. Default 45.\n"
-                                                 "-1 = auto: flips 90 degrees every other layer. In "
-                                                 "PathBlend that is not just surface finish - each "
-                                                 "line takes its ramp height from its Y centroid, so "
-                                                 "the angle shapes the gradient itself and auto makes "
-                                                 "it differ layer to layer. The zone is outlined in pulsing violet to show it.").c_str());
+                    ImGui::SetTooltip("%s", _u8L("Ramp floor (mm)").c_str());
             }
-            // NEOTKO_PATHBLEND_TAG — s190. ADV button encapsulates the ramp
-            // start/end-zone editor (Img 2/3). Default (linear) shows no mark; a
-            // profiled ramp shows "*". Same model reused by the SandwichDialog.
             ImGui::SameLine();
-            if (ImGui::SmallButton(_u8L("ADV…##pb_prof").c_str()))
-                ImGui::OpenPopup("##pb_profile_pop");
-            if (pro_pb_is_profiled(pbc)) {
-                ImGui::SameLine(0.f, 4.f);
-                ImGui::TextColored(ImVec4(1.f, 0.7f, 0.2f, 1.f), "*");
-            }
-            if (ImGui::BeginPopup("##pb_profile_pop")) {
-                ImGui::TextUnformatted(_u8L("Ramp profile — floor / ramp end / start / end").c_str());
-                PathBlendPassConfig pbe = pro_pb_read(p);
-                if (pro_pb_profile_editor(pbe, layer_h, is_pb_half))
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", _u8L("ramp end:").c_str());
+            ImGui::SameLine();
+            if (is_pb_half) {
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%.2f", layer_h);   // Half: mid forced to layer top
+            } else {
+                float mv = pbc.mid_end_mm;
+                ImGui::PushItemWidth(3.6f * neo_u());
+                if (ImGui::DragFloat("##mid", &mv, 0.005f, 0.f, (float)layer_h, "%.3f")) {
+                    PathBlendPassConfig pbe = pro_pb_read(p);
+                    pbe.mid_end_mm = mv;
                     pro_pb_write(p, pbe, layer_h);
-                ImGui::EndPopup();
-            }
-        }
-
-        // ---- line 3 (ColorStitch only): botón ADV → editor avanzado de patrón ----
-        // NEOTKO_COLORSTITCH_TAG — el editor inline A/B + mix% (derivado del sistema
-        // de predicción textil) se retiró: solo generaba un patrón Bresenham de 2
-        // tools y no aportaba a la *creación* de color. Ahora un único botón abre el
-        // ColorStitchPatternDialog (4 tools, S-curve, overlap, ángulo…), que TOMA el
-        // patrón actual y DEVUELVE el editado → se escribe en el pase. La preview del
-        // patrón ya se dibuja en la línea 2 (pro_pass_preview), que sigue siendo el
-        // feedback visual. Knobs de diseño NO round-trip per-pase (solo el patrón).
-        if (p.kind == K::ColorStitch) {
-            // Backfill defensivo: un pase sin payload no debe degradar a Solid.
-            if (pro_cm_pattern(p, penu).empty()) {
-                int a, b, cp; pro_cm_read(p, penu, a, b, cp);
-                pro_cm_write(p, penu, a, b, cp);
-            }
-            if (ImGui::Button(_u8L("ADV…").c_str())) {
-                auto* cfg = const_cast<DynamicPrintConfig*>(
-                    &wxGetApp().preset_bundle->prints.get_edited_preset().config);
-                std::map<std::string, std::string> out_kv;
-                // El diálogo devuelve el PAYLOAD COMPLETO del pase (string + knobs
-                // del gradiente). Sembrarlo con el kv actual permite re-editar. Así
-                // cada pase lleva su PROPIO diseño → el motor (Fill.cpp FASE2) los
-                // sliccea distintos; antes solo se capturaba el string y todos los
-                // pases caían al gradiente compartido de la región (bug "salen todos
-                // iguales", tanto en preview como en slice).
-                if (open_colorstitch_pattern_dialog(
-                        wxGetApp().plater(), fcolors, penu, cfg, p.colorstitch.kv, out_kv)) {
-                    p.colorstitch.present = true;
-                    p.colorstitch.kv      = std::move(out_kv);
-                    // Sync chip/preview/wheel desde el payload nuevo.
-                    int a, b, cp; pro_cm_read(p, penu, a, b, cp);
-                    p.solid_tool = a;
-                    const auto it = p.colorstitch.kv.find(
-                        penu ? "interlayer_colormix_penu_angle" : "interlayer_colormix_angle");
-                    if (it != p.colorstitch.kv.end()) {
-                        try { p.angle = std::stoi(it->second); } catch (...) {}
-                    }
                 }
+                ImGui::PopItemWidth();
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Open the ColorStitch pattern editor").c_str());
-            // NEOTKO_COLORSTITCH_TAG — auto-angle (-1) notice next to ADV. With -1 the slicer
-            // alternates the fill angle per layer (uniform finish), so the print won't keep the
-            // previewed orientation. Compact amber tag + tooltip; set a fixed angle to lock it.
+            // NEOTKO_PATHBLEND_TAG — s316 F2b: ESCALA de la rampa, en mm.
+            // Tres estados en un float, los mismos que el degradado de ColorStitch:
+            // -1 legacy · 0 ajustar a la superficie · >0 periodo físico. El default
+            // es -1, así que una receta que ya existía no cambia de sitio ni de gcode.
+            // En su PROPIA línea (s316b): en la misma que floor/ramp end no cabía y se
+            // salía por la derecha del panel.
+            // 🔒 s316d — OCULTO por decisión del usuario: PathBlend usa siempre span 0.
+            // El control se conserva para el futuro editor de degradados con helper
+            // gráfico de distancia; poner esto a true lo devuelve tal cual.
+            constexpr bool kPathBlendSpanUI = false;
+            if (kPathBlendSpanUI) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(_u8L("span:").c_str());
+            ImGui::SameLine();
             {
-                // NEOTKO_COLORSTITCH_TAG — clave ausente = default (45), NO auto. Este
-                // fallback era -1, así que el aviso se encendía en TODAS las bandas que
-                // nunca hubieran tocado el control (o sea, casi todas) y acababa siendo
-                // ruido que nadie lee. Ahora sólo sale con un -1 puesto a propósito.
-                // El penu cae primero a la clave del top: ahí -1 significa heredar.
-                int _adv_ang = COLORSTITCH_DEFAULT_ANGLE_DEG;
-                auto it = p.colorstitch.kv.find(penu ? "interlayer_colormix_penu_angle"
-                                                     : "interlayer_colormix_angle");
-                if (it == p.colorstitch.kv.end() && penu)
-                    it = p.colorstitch.kv.find("interlayer_colormix_angle");
-                if (it != p.colorstitch.kv.end()) { try { _adv_ang = std::stoi(it->second); } catch (...) {} }
-                if (_adv_ang < 0) {
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1.f), "%s", _u8L("auto angle").c_str());
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s", _u8L("Angle -1 = auto: the slicer flips the fill angle "
-                                                     "by 90 degrees every other layer, so the stripes "
-                                                     "change direction INSIDE this band and no single "
-                                                     "orientation can be previewed - that is why the "
-                                                     "zone pulses violet in the 3D view. Set a fixed angle "
-                                                     "(wheel over the bar) to lock it.").c_str());
+                float sv = pbc.span_mm;
+                ImGui::PushItemWidth(3.6f * neo_u());
+                // El step arranca en -1 y el mínimo ES -1: no hay nada por debajo,
+                // y dejar bajar más daría tres valores distintos con el mismo efecto.
+                if (ImGui::DragFloat("##pbspan", &sv, 0.25f, -1.f, 500.f, "%.2f")) {
+                    PathBlendPassConfig pbe = pro_pb_read(p);
+                    pbe.span_mm = (sv < -0.5f) ? -1.f : std::max(0.f, sv);
+                    pro_pb_write(p, pbe, layer_h);
+                }
+                ImGui::PopItemWidth();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L(
+                        "Ramp span (mm).\n"
+                        "-1 = legacy: the ramp always stretches to fit the surface, so the "
+                        "same recipe measures something different on every object.\n"
+                        "0 = fit the surface, sampled on the real line grid: a hole no longer "
+                        "splits one line into two heights.\n"
+                        "> 0 = physical period in mm: the ramp measures the same everywhere, "
+                        "whatever the surface size.").c_str());
+            }
+            } // kPathBlendSpanUI
+            const int em = std::clamp(pbc.ease_mode, 0, 3);
+            if (neo_text_button((ease_names[em] + "##ease").c_str(), NeoBtn::Ghost, true, Glyph::Ease)) {
+                PathBlendPassConfig pbe = pro_pb_read(p);
+                pbe.ease_mode = (em + 1) % 4;
+                pro_pb_write(p, pbe, layer_h);
+            }
+            {
+                // NEOTKO_PATHBLEND_TAG — s190. El editor del perfil de rampa (start/end zone). Si la
+                // rampa está perfilada, un punto teal en la esquina del botón (antes un "*" ámbar).
+                const std::string prof = _u8L("Profile…");
+                const float pw = ImGui::CalcTextSize(prof.c_str()).x + 2.5f * u;
+                neo_same_line_at(pr0.x + pin + left_w - pw);
+                if (neo_text_button((prof + "##pb_prof").c_str(), NeoBtn::Ghost, true, Glyph::Adv))
+                    ImGui::OpenPopup("##pb_profile_pop");
+                if (pro_pb_is_profiled(pbc))
+                    dl->AddCircleFilled(ImVec2(ImGui::GetItemRectMax().x - 3.f, ImGui::GetItemRectMin().y + 3.f),
+                                        3.f, neo_col_u32(NeoCol::AccentBright), 10);
+                if (ImGui::BeginPopup("##pb_profile_pop")) {
+                    ImGui::TextUnformatted(_u8L("Ramp profile — floor / ramp end / start / end").c_str());
+                    PathBlendPassConfig pbe = pro_pb_read(p);
+                    if (pro_pb_profile_editor(pbe, layer_h, is_pb_half))
+                        pro_pb_write(p, pbe, layer_h);
+                    ImGui::EndPopup();
                 }
             }
         }
         ImGui::EndGroup();
 
-        const ImVec2 gmin = ImGui::GetItemRectMin();
+        // ---- el pozo del pase (detrás) ----
         const ImVec2 gmax = ImGui::GetItemRectMax();
-
+        const ImVec2 pr1(pr0.x + pass_w, gmax.y + pin);
         // thin-pass warning (Solid/ColorStitch sub-bands; PB has its own gate)
         const double pass_mm = p.ratio * layer_h;
-        const bool thin = (p.kind != K::PathBlend) && (pass_mm < 0.04 - 1e-9);
-
-        dl->ChannelsSetCurrent(0);          // bg rect behind the block
-        // NEOTKO_COLORSTITCH_TAG — la caja de la fila debe contrastar con el TEXTO,
-        // que es claro en modo oscuro y oscuro en modo claro. Una caja gris-oscura
-        // fija dejaba texto oscuro sobre fondo oscuro en light mode (ilegible). Caja
-        // adaptativa: oscura en dark mode (como estaba), clara en light mode.
-        const bool _dark = ImGuiWrapper::is_dark_mode();
-        const ImU32 _box_col = thin
-            ? (_dark ? IM_COL32(48, 40, 32, 255) : IM_COL32(245, 232, 205, 255))
-            : (_dark ? IM_COL32(60, 60, 60, 255) : IM_COL32(214, 214, 214, 255));
-        // s169 F4 — más aire (feedback usuario): padding de bloque 3→6 px (ya no
-        // compite con el rail, que murió en F1).
-        dl->AddRectFilled(ImVec2(gmin.x - 6.f, gmin.y - 2.f),
-                          ImVec2(gmin.x + left_w + 6.f, gmax.y + 2.f),
-                          _box_col, 3.f);
-        dl->ChannelsMerge();
-
-        // s169 (feedback usuario, tras ver F4 compilado) — el Z-box numérico de
-        // la derecha (mm / "full") se RETIRA: quedaba descolocado, duplicando el
-        // número que la ratio-bar ya muestra a la izquierda. La barra pasa a ser
-        // la ÚNICA fuente de "cuánto mide este pase" (ver más abajo, tras el
-        // loop) — ahora también etiqueta el caso de un solo pase / PathBlend
-        // (antes solo etiquetaba con 2+ pases). Esto retira el "set esta altura,
-        // reescala TODOS los hermanos proporcionalmente" del DragFloat viejo; el
-        // drag de la barra sigue permitiendo mover cualquier frontera entre dos
-        // pases adyacentes.
-
-        // resume the layout below the block — s169 F4: separación entre filas
-        // 5→8 px (más aire, feedback usuario).
-        ImGui::SetCursorScreenPos(ImVec2(gmin.x, gmax.y + 8.f));
+        const bool   thin    = (p.kind != K::PathBlend) && (pass_mm < 0.04 - 1e-9);
+        ps.SetCurrentChannel(dl, 0);
+        dl->AddRectFilled(pr0, pr1, neo_col_u32(NeoCol::Canvas), 5.f);
         if (thin)
-            ImGui::TextColored(ImVec4(0.86f, 0.59f, 0.24f, 1.f), "%s",
-                _u8L("⚠ < 0.04 mm — pass is dropped at slice time").c_str());
+            dl->AddRectFilled(pr0, ImVec2(pr0.x + 2.f, pr1.y), neo_col_u32(NeoCol::Warn));
+        ps.Merge(dl);
+        if (thin && tray)
+            tray->push_back(PainterTrayMsg{ cs_strip_warn(_u8L("⚠ < 0.04 mm — pass is dropped at slice time")), {}, true });
+        bar_bottom = pr1.y;
+        ImGui::SetCursorScreenPos(ImVec2(pr0.x, pr1.y + 0.4f * u));
         ImGui::PopID();
     }
-    ImGui::Unindent(bar_w + 6.f);
+
+    // ---- "+ pase" (antes "+ layer"), oculto con PathBlend (ocupa la capa entera) o con 3 pases ----
+    bool has_pb_now = false;
+    for (const auto& pp : st.passes) has_pb_now |= (pp.kind == K::PathBlend);
+    bool add_clicked = false;
+    if (!has_pb_now && (int)st.passes.size() < SurfacePassStack::kMaxPasses)
+        add_clicked = neo_dashed_button((_u8L("Add pass") + "##add_pass").c_str(), pass_w);
+    const float col_bottom = ImGui::GetCursorScreenPos().y;
+    ImGui::Unindent(col_dx);
 
     // s169 — pintar la ratio-bar: bandas (draw_zone, ya escala por ratio) +
     // etiqueta mm por banda (SIEMPRE, incluso con 1 solo pase / PathBlend —
@@ -3034,7 +3020,7 @@ static void draw_zone_editor(const char* id, const char* label,
     {
         const float bar_x  = bar_p0.x;
         const float bar_y0 = bar_p0.y;
-        const float bar_y1 = ImGui::GetCursorScreenPos().y;   // el loop nos dejó aquí
+        const float bar_y1 = bar_bottom;   // s318 — el borde de abajo del ÚLTIMO pase, medido en el bucle
         const float bar_h  = std::max(1.f, bar_y1 - bar_y0);
         ImDrawList* bdl = ImGui::GetWindowDrawList();
 
@@ -3067,8 +3053,12 @@ static void draw_zone_editor(const char* id, const char* label,
             bdl->AddText(mmp, IM_COL32(255, 255, 255, 255), mmbuf);
 
             if (dp != n - 1) {   // divider — only reached when n >= 2
-                bdl->AddLine(ImVec2(bar_x, y1f), ImVec2(bar_x + bar_w, y1f),
-                            IM_COL32(235, 235, 235, 255), 2.f);
+                // s318 — el divisor: un corte del color del pozo con una muesca teal (el asa), en vez
+                // de la línea blanca de 2 px. La zona agarrable y la matemática no cambian.
+                bdl->AddRectFilled(ImVec2(bar_x, y1f - 1.5f), ImVec2(bar_x + bar_w, y1f + 1.5f),
+                                   neo_col_u32(NeoCol::Canvas));
+                bdl->AddRectFilled(ImVec2(bar_x + bar_w * 0.3f, y1f - 1.f), ImVec2(bar_x + bar_w * 0.7f, y1f + 1.f),
+                                   neo_col_u32(NeoCol::AccentBright), 1.f);
 
                 // s232 — la zona agarrable eran 8 px (±4) y con 3 pases el divisor de
                 // enmedio era casi imposible de pillar (feedback usuario). Se ensancha a
@@ -3092,7 +3082,7 @@ static void draw_zone_editor(const char* id, const char* label,
                 // ancha que la línea que se ve es adivinar dónde empieza.
                 if (ImGui::IsItemHovered() || ImGui::IsItemActive())
                     bdl->AddLine(ImVec2(bar_x, y1f), ImVec2(bar_x + bar_w, y1f),
-                                 IM_COL32(38, 198, 182, 255), 4.f);
+                                 neo_col_u32(NeoCol::AccentBright), 4.f);
                 if (ImGui::IsItemActive()) {
                     // s169 F4 — matemática EXACTA de Tab.cpp ratio_bar_motion: solo
                     // tocamos los DOS pases adyacentes a este divisor, Σ intacta.
@@ -3117,7 +3107,6 @@ static void draw_zone_editor(const char* id, const char* label,
             }
         }
 
-        ImGui::SetCursorScreenPos(ImVec2(bar_x, bar_y1));
     }
 
     // s231 F4 — duplicar / mover (deferido, fuera de la iteración: insertar en el
@@ -3162,11 +3151,10 @@ static void draw_zone_editor(const char* id, const char* label,
         st.passes.assign(1, pb);
     }
 
-    // + layer — hidden when the zone holds a PB pass (whole-layer by definition)
+    // + layer — la lógica de siempre (reparto de ratios y caps del Bottom), sobre el stack YA mutado
     bool has_pb = false;
     for (const auto& p : st.passes) has_pb |= (p.kind == K::PathBlend);
-    if (!has_pb && (int)st.passes.size() < SurfacePassStack::kMaxPasses) {
-        if (ImGui::SmallButton((std::string("+ layer##") + id).c_str())) {
+    if (add_clicked && !has_pb && (int)st.passes.size() < SurfacePassStack::kMaxPasses) {
             const double newR = 1.0 / (double)(st.passes.size() + 1);
             double tot = 0.0;
             for (const auto& p : st.passes) tot += std::max(0.0, p.ratio);
@@ -3190,8 +3178,19 @@ static void draw_zone_editor(const char* id, const char* label,
                 }
             }
             st.passes.push_back(np);    // becomes the new TOPMOST pass (#1)
-        }
     }
+    if (clear_req) {
+        st.passes.clear();
+        st.enabled = false;
+    }
+
+    // ---- el fondo de la tarjeta (canal 0, detrás de todo) ----
+    const float bottom = std::max(col_bottom, bar_bottom + 0.4f * u) + 0.1f * u;
+    card_split.SetCurrentChannel(dl, 0);
+    neo_card_bg(dl, c0, ImVec2(c0.x + card_w, bottom), 0.9f * u, true, neo_fade(NeoCol::Surface, 0.38f));
+    card_split.Merge(dl);
+    ImGui::SetCursorScreenPos(ImVec2(c0.x, bottom));
+    ImGui::Dummy(ImVec2(card_w, 0.f));
     ImGui::PopID();
 }
 // NEOTKO_COLORSTITCH_TAG_END
@@ -3307,7 +3306,10 @@ using ColorStitchPaintPreview::colorstitch_weave_theta;
 using ColorStitchPaintPreview::colorstitch_make_weave;
 using ColorStitchPaintPreview::pathblend_top_config;
 using ColorStitchPaintPreview::pathblend_make_weave;
-static double GLGizmoColorStitchPainter_top_line_width() { return ColorStitchPaintPreview::weave_top_line_width(); }
+// NEOTKO_COLORSTITCH_TAG — s314: devuelve el SPACING real entre líneas, no el ancho. El
+// nombre se conserva porque es lo que consumen los call-sites, pero lo que hace falta para
+// contar líneas es la separación (ancho − altura·(1−π/4)); ver weave_top_line_spacing().
+static double GLGizmoColorStitchPainter_top_line_width() { return ColorStitchPaintPreview::weave_top_line_spacing(); }
 static double GLGizmoColorStitchPainter_layer_height()   { return ColorStitchPaintPreview::weave_layer_height(); }
 std::vector<TriangleSelectorPatch::WeaveParams>
 GLGizmoColorStitchPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
@@ -3331,7 +3333,7 @@ GLGizmoColorStitchPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
     const Slic3r::BoundingBoxf3 bb = mv->mesh().bounding_box();   // object-local (fallback)
     // Real top-surface line width (resolved from config, no slice). Drives the line COUNT
     // so stripe/gradient scale matches what the slicer lays on the top.
-    const float line_w = (float) GLGizmoColorStitchPainter_top_line_width();
+    const float line_w = (float) GLGizmoColorStitchPainter_top_line_width();   // s314: spacing
     const double lh = GLGizmoColorStitchPainter_layer_height();
 
     const auto& mgr = SurfaceEffectProfileManager::get();
@@ -3343,7 +3345,12 @@ GLGizmoColorStitchPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
         const std::map<std::string, std::string> kv = colorstitch_top_kv(*p);
         PathBlendPassConfig pbc;
         const bool is_pathblend = kv.empty() && pathblend_top_config(*p, pbc);
-        if (kv.empty() && !is_pathblend) continue;   // neither ColorStitch nor PathBlend → flat
+        // s318 F3 — opción A, igual que ColorStitchPaintPreview::weave_islands_for_volume.
+        const ModelObject* fr_owner = owner
+            ? owner
+            : (m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr);
+        const auto zr = ColorStitchPaintPreview::resolve_top_zone(*p, mv, fr_owner, mats);
+        if (!zr && kv.empty() && !is_pathblend) continue;   // neither ColorStitch nor PathBlend → flat
 
         // PathBlend's axis is fixed at 0 (see pathblend_make_weave doc comment);
         // ColorStitch follows its own configured band angle.
@@ -3375,32 +3382,53 @@ GLGizmoColorStitchPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
         // 📌 s280e — ya NO es "centroide Y": el eje estaba clavado a Y y ése era el bug que
         // colapsaba el efecto a 90°. Ahora se mide sobre las líneas reales.
         if (is_pathblend && pbc.fill_angle < 0) is_auto = true;
+        if (zr) is_auto = ColorStitchPaintPreview::top_zone_auto(*zr);
         if (is_auto) m_weave_any_auto_angle = true;
-        const float sN = std::sin(theta), cN = std::cos(theta);
+        // s318 F3 — mismo marco que el motor (ColorStitchPaintPreview::weave_frame). Semiplano
+        // cuando el motor MIDE el eje: ColorStitch en auto y PathBlend siempre.
+        const ColorStitchPaintPreview::WeaveFrame fr = zr
+            ? ColorStitchPaintPreview::top_zone_frame(*zr, false)
+            : ColorStitchPaintPreview::weave_frame(mv, fr_owner, theta,
+                                                   /*canon*/ is_pathblend || is_auto);
+        const ColorStitchPaintPreview::WeaveFrame fr2 = zr
+            ? ColorStitchPaintPreview::top_zone_frame(*zr, true) : fr;
 
         // -- surface span along the cross-axis: union of the slot's painted facets (this is
         // the PER-SLOT fallback used by fragment patches; the per-ISLAND split happens in
         // build_ebt_weave_islands_for_volume). Falls back to the object AABB when no facets.
         float pmin = 1e9f, pmax = -1e9f;
+        float qmin = 1e9f, qmax = -1e9f;   // s318 F3 — sobre el eje del pase de arriba
         bool  have_painted = false;
         if (sel) {
             const indexed_triangle_set its = sel->get_facets(static_cast<EnforcerBlockerType>(s));
             for (const stl_vertex& v : its.vertices) {
-                const float pr = -v.x() * sN + v.y() * cN;
+                const float pr = fr.proj(v.x(), v.y(), v.z());   // s318 F3
                 pmin = std::min(pmin, pr); pmax = std::max(pmax, pr);
+                const float pr2 = fr2.proj(v.x(), v.y(), v.z());
+                qmin = std::min(qmin, pr2); qmax = std::max(qmax, pr2);
                 have_painted = true;
             }
         }
         if (!have_painted) {
             for (double X : { bb.min.x(), bb.max.x() })
-                for (double Y : { bb.min.y(), bb.max.y() }) {
-                    const float pr = -float(X) * sN + float(Y) * cN;
-                    pmin = std::min(pmin, pr); pmax = std::max(pmax, pr);
-                }
+                for (double Y : { bb.min.y(), bb.max.y() })
+                    for (double Z : { bb.min.z(), bb.max.z() }) {   // s318 F3: el eje puede tener Z
+                        const float pr = fr.proj(float(X), float(Y), float(Z));
+                        pmin = std::min(pmin, pr); pmax = std::max(pmax, pr);
+                        const float pr2 = fr2.proj(float(X), float(Y), float(Z));
+                        qmin = std::min(qmin, pr2); qmax = std::max(qmax, pr2);
+                    }
         }
-        TriangleSelectorPatch::WeaveParams w = is_pathblend
-            ? pathblend_make_weave(pbc, mats, bg_rgb, lh, theta, pmin, pmax, line_w)
-            : colorstitch_make_weave(kv, fcolors, theta, pmin, pmax, line_w);
+        TriangleSelectorPatch::WeaveParams w;
+        if (zr) {
+            w = ColorStitchPaintPreview::make_zone_weave(*zr, fcolors, mats, bg_rgb, line_w, lh,
+                                                         pmin, pmax, qmin, qmax);   // s318 F3 opción A
+        } else {
+            w = is_pathblend
+                ? pathblend_make_weave(pbc, mats, bg_rgb, lh, theta, pmin, pmax, line_w, fr.anchor_proj)
+                : colorstitch_make_weave(kv, fcolors, theta, pmin, pmax, line_w, fr.anchor_proj);
+            std::copy(fr.axis, fr.axis + 3, w.axis);   // s318 F3
+        }
         // NEOTKO_COLORSTITCH_TAG — marca la banda: la lee el marcador de ángulo auto.
         w.auto_angle = is_auto;
         if (w.on) out[s] = std::move(w);
@@ -3578,61 +3606,93 @@ void GLGizmoColorStitchPainter::render_palette_panel(float window_width)
     const int nfil = std::max(1, std::min(4, (int)fcolors.size()));
     while (fcolors.size() < 4) fcolors.push_back("#808080");
 
-    const float strip_h = ImGui::GetTextLineHeight() * 3.2f;
+    // s318 — el Generator en TRES TARJETAS iguales (glifo · nombre · dato), siempre abiertas: los
+    // CollapsingHeader naranjas de Orca se fueron. A y B en una sola línea de fichas numeradas.
+    // El comportamiento es el de siempre: cambiar A/B basta (rebuild_palettes_if_stale lo detecta en
+    // la firma de caché) y elegir un swatch fija m_active_pal_kind/idx (s231 F5).
+    (void)window_width;
+    const float u = neo_u();
+    ImU32 cols[4];
+    for (int t = 0; t < 4; ++t) cols[t] = tool_col_u32(fcolors, t);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto ab_row = [&](const char* id, int& ta, int& tb) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("A");
+        ImGui::SameLine(0.f, 0.35f * u);
+        const int ca = neo_tool_chips((std::string(id) + "a").c_str(), cols, nfil, ta);
+        if (ca >= 0) ta = ca;
+        ImGui::SameLine(0.f, 0.35f * u);
+        {
+            const ImVec2 gp = ImGui::GetCursorScreenPos();
+            const float  fh = ImGui::GetFrameHeight();
+            draw_glyph(dl, ImVec2(gp.x, gp.y + (fh - 0.8f * u) * 0.5f), 0.8f * u, Glyph::ChevR, neo_col_u32(NeoCol::TextDim));
+            ImGui::Dummy(ImVec2(0.8f * u, fh));
+        }
+        ImGui::SameLine(0.f, 0.35f * u);
+        ImGui::TextDisabled("B");
+        ImGui::SameLine(0.f, 0.35f * u);
+        const int cb = neo_tool_chips((std::string(id) + "b").c_str(), cols, nfil, tb);
+        if (cb >= 0) tb = cb;
+    };
+    // Una tarjeta: fondo biselado detrás (splitter propio), cabecera con glifo y dato, y el cuerpo.
+    auto card = [&](Glyph g, const std::string& title, const std::string& aside, const std::function<void(float)>& body) {
+        ImDrawListSplitter sp;
+        sp.Split(dl, 2);
+        sp.SetCurrentChannel(dl, 1);
+        const ImVec2 c0  = ImGui::GetCursorScreenPos();
+        const float  cw  = ImGui::GetContentRegionAvail().x;
+        const float  pad = 0.55f * u;
+        ImGui::SetCursorScreenPos(ImVec2(c0.x + pad, c0.y + pad));
+        ImGui::BeginGroup();
+        ImGui::PushItemWidth(cw - 2.f * pad);
+        {
+            const ImVec2 gp = ImGui::GetCursorScreenPos();
+            const float  gs = 1.1f * u;
+            draw_glyph(dl, ImVec2(gp.x, gp.y + (ImGui::GetTextLineHeight() - gs) * 0.5f), gs, g, neo_col_u32(NeoCol::AccentBright));
+            ImGui::Dummy(ImVec2(gs, ImGui::GetTextLineHeight()));
+            ImGui::SameLine(0.f, 0.4f * u);
+            ImGui::TextUnformatted(title.c_str());
+            if (!aside.empty()) {
+                const float aw = ImGui::CalcTextSize(aside.c_str()).x;
+                neo_same_line_at(c0.x + cw - pad - aw);
+                ImGui::TextDisabled("%s", aside.c_str());
+            }
+        }
+        ImGui::Dummy(ImVec2(0.f, 0.15f * u));
+        body(cw - 2.f * pad);   // el ancho útil, con el padding de los dos lados ya descontado
+        ImGui::PopItemWidth();
+        ImGui::EndGroup();
+        const float bottom = ImGui::GetItemRectMax().y + pad;
+        sp.SetCurrentChannel(dl, 0);
+        neo_card_bg(dl, c0, ImVec2(c0.x + cw, bottom), 0.7f * u, false, neo_fade(NeoCol::Surface, 0.45f));
+        sp.Merge(dl);
+        ImGui::SetCursorScreenPos(ImVec2(c0.x, bottom));
+        ImGui::Dummy(ImVec2(cw, 0.45f * u));
+    };
     int ci;
-    // s120: banda "Mixed approximation (predict)" retirada — el painter ofrece
-    // Gradient ramp (top-only) + Flat color. El penu lo añade el usuario aparte.
-    // Gradient: header propio para alojar los selectores A/B de tool en medio.
-    // Cambiar m_grad_tool_a/b basta — rebuild_palettes_if_stale lo detecta en la
-    // firma de caché y regenera la tira sola.
-    if (ImGui::CollapsingHeader(_u8L("Gradient ramp").c_str())) {
-        const int ta = draw_tool_selector_row("##grad_a", _u8L("Start (A)").c_str(),
-                                               fcolors, nfil, m_grad_tool_a);
-        const int tb = draw_tool_selector_row("##grad_b", _u8L("End (B)").c_str(),
-                                               fcolors, nfil, m_grad_tool_b);
-        if (ta >= 0) m_grad_tool_a = ta;
-        if (tb >= 0) m_grad_tool_b = tb;
-        ci = draw_palette_strip("##pal_gradient", m_pal_gradient, fcolors,
-                                window_width, strip_h,
+    card(Glyph::TabGen, _u8L("Gradient ramp"), _u8L("Top only"), [&](float bw) {
+        ab_row("##grad_", m_grad_tool_a, m_grad_tool_b);
+        ci = draw_palette_strip("##pal_gradient", m_pal_gradient, fcolors, bw, 0.f,
                                 m_active_pal_kind == 1 ? m_active_pal_idx : -1);
-        // s231 F5 — set_active_recipe limpia el enlace, así que la única forma de
-        // recordar "estoy usando el swatch #ci de esta tira" es anotarlo aquí.
+        // s231 F5 — set_active_recipe limpia el enlace: anotar aquí qué swatch se está usando.
         if (ci >= 0) { set_active_recipe(m_pal_gradient[ci], _u8L("Gradient"));
                        m_active_pal_kind = 1; m_active_pal_idx = ci; }
-    }
-    ci = draw_palette_section("##pal_flat", _u8L("Flat color"),
-                              m_pal_flat, fcolors, window_width, strip_h,
-                              m_active_pal_kind == 2 ? m_active_pal_idx : -1);
-    if (ci >= 0) { set_active_recipe(m_pal_flat[ci], _u8L("Flat"));
-                   m_active_pal_kind = 2; m_active_pal_idx = ci; }
-
-    // s171 — "Mixed (ColorStitch)" NUKEADO (predict_mixed_palette, ruta muerta
-    // desde s120, siempre predecía amarillo). "ColorStitch Pattern Color": mismo
-    // header propio que Gradient ramp (selectores A/B en medio), pero la tira
-    // sale de build_colorstitch_gradient_palette — solo ColorStitch, 2 pasadas
-    // (Top+Penu) sobrepuestas, mismos tools/ángulo.
-    if (ImGui::CollapsingHeader(_u8L("ColorStitch Pattern Color").c_str())) {
-        const int ta = draw_tool_selector_row("##cs_a", _u8L("Start (A)").c_str(),
-                                               fcolors, nfil, m_cs_tool_a);
-        const int tb = draw_tool_selector_row("##cs_b", _u8L("End (B)").c_str(),
-                                               fcolors, nfil, m_cs_tool_b);
-        if (ta >= 0) m_cs_tool_a = ta;
-        if (tb >= 0) m_cs_tool_b = tb;
-        ci = draw_palette_strip("##pal_cs_gradient", m_pal_cs_gradient, fcolors,
-                                window_width, strip_h,
+    });
+    card(Glyph::KSolid, _u8L("Flat color"), std::to_string(m_pal_flat.size()), [&](float bw) {
+        ci = draw_palette_strip("##pal_flat", m_pal_flat, fcolors, bw, 0.f,
+                                m_active_pal_kind == 2 ? m_active_pal_idx : -1);
+        if (ci >= 0) { set_active_recipe(m_pal_flat[ci], _u8L("Flat"));
+                       m_active_pal_kind = 2; m_active_pal_idx = ci; }
+    });
+    // s171 — "ColorStitch Pattern Color": la tira sale de build_colorstitch_gradient_palette (sólo
+    // ColorStitch, 2 pasadas Top+Penu sobrepuestas, mismos tools/ángulo).
+    card(Glyph::KStitch, _u8L("ColorStitch Pattern Color"), "Top + Penu", [&](float bw) {
+        ab_row("##cs_", m_cs_tool_a, m_cs_tool_b);
+        ci = draw_palette_strip("##pal_cs_gradient", m_pal_cs_gradient, fcolors, bw, 0.f,
                                 m_active_pal_kind == 3 ? m_active_pal_idx : -1);
         if (ci >= 0) { set_active_recipe(m_pal_cs_gradient[ci], _u8L("ColorStitch"));
                        m_active_pal_kind = 3; m_active_pal_idx = ci; }
-    }
-
-    // (s169 F1: el swatch "Active colour" vive ahora en el header persistente
-    //  — render_header — y la biblioteca guardada en la rejilla de Paint —
-    //  render_paint_palette_grid.)
-
-    // NEOTKO_COLORSTITCH_TAG — the weave preview is now always on (it matches the slice);
-    // the "Preview weave" toggle + the auto-angle (!) notice were retired. m_weave_preview
-    // stays as an internal flag (default true) in case we need to disable it programmatically.
-    ImGui::Separator();
+    });
 }
 
 // NEOTKO_COLORSTITCH_TAG — s118: fwd-decl (recipe_argb se define más abajo, tras
@@ -3653,6 +3713,98 @@ static bool object_has_mixed_filament(const ModelObject* mo)
     for (const ModelVolume* mv : mo->volumes)
         if (mv && mv->is_model_part()) { extruder_id = mv->extruder_id(); break; }
     return extruder_id > (int)num_physical;
+}
+
+// s318 — LA CABECERA DEL PRO. Un corte de la pieza: Top, Penultimate, un trozo rayado que es la pieza
+// y Bottom, cada zona con su banda de pases (draw_zone, la misma que usaban Recipe y el tooltip de
+// la rejilla) y, a la derecha, el Result grande con halo. Es un ESQUEMA y lo dice en su cara (cada
+// zona = una capa; los grosores sí van a escala dentro de la zona). Bottom se atenúa porque no
+// forma parte del color.
+static void draw_pro_hero(const Slic3r::SurfacePassStack& top, const Slic3r::SurfacePassStack& penu,
+                          const Slic3r::SurfacePassStack& bottom, const float out[3],
+                          const std::vector<std::string>& fcolors, double layer_h)
+{
+    const float  u       = neo_u();
+    const float  w       = ImGui::GetContentRegionAvail().x;
+    const float  pad     = 0.6f * u;
+    const float  bh      = 1.35f * u;
+    const float  ph      = 1.0f * u;
+    const float  gap     = 0.3f * u;
+    const float  fs      = 0.7f * u;
+    const float  rs      = 5.f * u;
+    const float  stamp_h = 0.9f * u;
+    const float  h       = 2.f * pad + 3.f * bh + ph + 3.f * gap + stamp_h;
+    ImDrawList*  dl      = ImGui::GetWindowDrawList();
+    ImFont*      font    = ImGui::GetFont();
+    const ImVec2 p0      = ImGui::GetCursorScreenPos();
+    neo_draw_canvas(dl, p0, w, h);
+
+    const std::string lt = _u8L("Top"), lp = _u8L("Penultimate"), lb = _u8L("Bottom");
+    float lw = 0.f;
+    for (const std::string* t : { &lt, &lp, &lb })
+        lw = std::max(lw, font->CalcTextSizeA(fs, FLT_MAX, 0.f, t->c_str()).x);
+    lw = std::min(lw, w * 0.24f);
+    const float gsz    = 1.0f * u;
+    const float x_lab  = p0.x + pad;
+    const float x_band = x_lab + lw + 0.3f * u + gsz + 0.4f * u;
+    const float x_res  = p0.x + w - pad - rs;
+    const float band_w = std::max(2.f * u, x_res - 0.8f * u - x_band);
+
+    auto row = [&](float y, float hh, const std::string& lbl, Glyph g) {
+        const std::string t  = fit_text(lbl, lw / 0.7f);
+        const ImVec2      ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, t.c_str());
+        dl->AddText(font, fs, ImVec2(x_lab + lw - ts.x, y + (hh - ts.y) * 0.5f), neo_col_u32(NeoCol::TextDim), t.c_str());
+        draw_glyph(dl, ImVec2(x_lab + lw + 0.3f * u, y + (hh - gsz) * 0.5f), gsz, g, neo_col_u32(NeoCol::TextDim));
+    };
+    auto band = [&](float y, const Slic3r::SurfacePassStack& st, bool is_penu, bool dim) {
+        const ImVec2 a(x_band, y), b(x_band + band_w, y + bh);
+        if (st.passes.empty()) { neo_card_dashed(dl, a, b); return; }
+        // s319 — cada pase con SU tejido (el mismo pro_pass_preview de las filas de abajo: rayas de
+        // ColorStitch a su ángulo, rampa de PathBlend, líneas del Solid), apilados de arriba abajo
+        // en el orden físico y con el alto proporcional a su grosor. Antes sólo salían los colores.
+        double tot = 0.0;
+        for (const Slic3r::SurfacePass& sp : st.passes) tot += std::max(0.0, sp.ratio);
+        if (tot < 1e-6) tot = 1.0;
+        float yy = a.y;
+        const int np = (int)st.passes.size();
+        for (int k = np - 1; k >= 0; --k) {
+            const float hk = (k == 0) ? (b.y - yy) : bh * float(std::max(0.0, st.passes[k].ratio) / tot);
+            if (hk > 0.5f)
+                pro_pass_preview(dl, ImVec2(a.x, yy), ImVec2(b.x, yy + hk), st.passes[k], is_penu, fcolors, layer_h);
+            yy += hk;
+        }
+        dl->AddRect(a, b, IM_COL32(0, 0, 0, 110), 2.f);
+        if (dim) dl->AddRectFilled(a, b, neo_fade(NeoCol::Canvas, 0.45f), 2.f);
+    };
+    float y = p0.y + pad;
+    row(y, bh, lt, Glyph::ZoneTop);    band(y, top,  false, false); y += bh + gap;
+    row(y, bh, lp, Glyph::ZonePenu);   band(y, penu, true,  false); y += bh + gap;
+    hatch_rect(dl, ImVec2(x_band, y), ImVec2(x_band + band_w, y + ph), neo_fade(NeoCol::TextDim, 0.25f), 6.f);
+    dashed_line(dl, ImVec2(x_band, y), ImVec2(x_band, y + ph), neo_col_u32(NeoCol::GridMajor), 1.f, 3.f, 3.f);
+    dashed_line(dl, ImVec2(x_band + band_w, y), ImVec2(x_band + band_w, y + ph), neo_col_u32(NeoCol::GridMajor), 1.f, 3.f, 3.f);
+    y += ph + gap;
+    row(y, bh, lb, Glyph::ZoneBottom); band(y, bottom, false, true); y += bh + gap;
+    {
+        const float sfs = 0.62f * u;
+        const std::string stamp = fit_text(_u8L("schematic · each zone = 1 layer"), (x_res - x_lab - 0.5f * u) / 0.62f);
+        dl->AddText(font, sfs, ImVec2(x_lab, y + 0.1f * u), neo_col_u32(NeoCol::TextDim), stamp.c_str());
+    }
+    {
+        const float  ry = p0.y + (h - rs) * 0.5f - 0.3f * u;
+        const ImVec2 r0(x_res, ry), r1(x_res + rs, ry + rs);
+        dl->AddRectFilled(r0, r1, IM_COL32((int)std::min(255.f, out[0] * 255.f),
+                                           (int)std::min(255.f, out[1] * 255.f),
+                                           (int)std::min(255.f, out[2] * 255.f), 255), 5.f);
+        neo_halo(dl, r0, r1, 5.f);
+        const float lfs = 0.66f * u;
+        const std::string res = _u8L("Result");
+        const ImVec2 rt = font->CalcTextSizeA(lfs, FLT_MAX, 0.f, res.c_str());
+        dl->AddText(font, lfs, ImVec2(x_res + (rs - rt.x) * 0.5f, r0.y - rt.y - 0.2f * u), neo_col_u32(NeoCol::TextDim), res.c_str());
+        const char* tp = "Top + Penu";
+        const ImVec2 tt = font->CalcTextSizeA(lfs, FLT_MAX, 0.f, tp);
+        dl->AddText(font, lfs, ImVec2(x_res + (rs - tt.x) * 0.5f, r1.y + 0.25f * u), neo_col_u32(NeoCol::TextDim), tp);
+    }
+    ImGui::Dummy(ImVec2(w, h));
 }
 
 // NEOTKO_COLORSTITCH_TAG — Bandeja "pro mode": compone Top/Penu + TD y muestra
@@ -3713,8 +3865,6 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
         m_pro_bottom_loaded_id = m_selected_profile_id;
     }
 
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
     // --- Color resultante en vivo (Top+Penu — el color ACTIVO de pintura; Bottom no
     // forma parte de la receta de color, ver NEOTKO_BOTTOM_TAG) ---
     // NEOTKO_SANDWICH_TAG — Fase 2 (s167): fondo real del objeto activo en vez de negro
@@ -3724,52 +3874,12 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     resolve_object_base_bg(mats, bg);
     CS::sandwich_colour_stacked(m_pro_top, m_pro_penu, mats, bg, out);
 
-    // s230 — "Recipe | Result" REUBICADO aquí arriba, al hueco que dejaron los botones
-    // Top Surface / Bottom Surface (retirados: las tres zonas se editan ahora seguidas
-    // en un solo sitio). Cajas reducidas un 25% respecto a s169 (6x4 → 4.5x3) para que
-    // quepan sin empujar los editores de zona hacia abajo. El discriminador de Recipe
-    // por m_pro_surface_mode desaparece con los botones: Recipe SIEMPRE muestra Top+Penu
-    // apilados, que es lo que Result computa.
-    // Nota: out[]/los stacks se leen ANTES de que draw_zone_editor los edite este frame,
-    // así que un cambio se refleja en el frame siguiente (ImGui redibuja continuo → no
-    // perceptible).
-    {
-        const float rw = m_imgui->scaled(4.5f);
-        const float rh = m_imgui->scaled(3.f);
-
-        ImGui::BeginGroup();
-        m_imgui->text(_u8L("Recipe"));
-        {
-            const ImVec2 rp = ImGui::GetCursorScreenPos();
-            ImGui::Dummy(ImVec2(rw, rh));
-            if (!m_pro_penu.enabled || m_pro_penu.passes.empty()) {
-                draw_zone(dl, rp, ImVec2(rp.x + rw, rp.y + rh), m_pro_top, false, fcolors);
-            } else {
-                const float midy = rp.y + rh * 0.5f;
-                draw_zone(dl, rp, ImVec2(rp.x + rw, midy - 1.f), m_pro_top,  false, fcolors);
-                draw_zone(dl, ImVec2(rp.x, midy + 1.f), ImVec2(rp.x + rw, rp.y + rh), m_pro_penu, true, fcolors);
-            }
-        }
-        ImGui::EndGroup();
-
-        ImGui::SameLine(0.f, 20.f);
-
-        ImGui::BeginGroup();
-        m_imgui->text(_u8L("Result"));
-        {
-            const ImVec2 sp = ImGui::GetCursorScreenPos();
-            dl->AddRectFilled(sp, ImVec2(sp.x + rw, sp.y + rh),
-                              IM_COL32((int)std::min(255.f, out[0] * 255.f),
-                                       (int)std::min(255.f, out[1] * 255.f),
-                                       (int)std::min(255.f, out[2] * 255.f), 255));
-            dl->AddRect(sp, ImVec2(sp.x + rw, sp.y + rh), IM_COL32(255, 255, 255, 255));
-            ImGui::Dummy(ImVec2(rw, rh));
-        }
-        ImGui::EndGroup();
-    }
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    // s318 — la CABECERA del Pro: las tres zonas apiladas como están en la pieza (Top, Penu, la
+    // pieza, Bottom) y el Result grande con halo. Sustituye a las cajitas Recipe | Result de s230.
+    // Mismos datos: out[] es el sandwich_colour_stacked de arriba; Bottom se ve atenuado porque NO
+    // entra en el color (NEOTKO_BOTTOM_TAG).
+    draw_pro_hero(m_pro_top, m_pro_penu, m_pro_bottom, out, fcolors, lh);
+    ImGui::Dummy(ImVec2(0.f, 0.3f * neo_u()));
 
     // s230 — las TRES zonas seguidas en un solo sitio (antes Bottom vivía tras un
     // discriminador Top/Bottom). Orden visual = orden físico de arriba abajo:
@@ -3780,83 +3890,69 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     // payload ColorStitch con las claves de la zona DESTINO — copiar un pase de Top a
     // Penu sin traducir las claves lo dejaría sin patrón (el motor lo degradaría a
     // Solid, el mismo fallo que s118 documentó para los pases sin payload).
-    auto zone_copy_row = [&](const char* id, const Slic3r::SurfacePassStack& src,
-                             bool src_penu,
-                             const char* l1, Slic3r::SurfacePassStack* d1, bool d1_penu,
-                             const char* l2, Slic3r::SurfacePassStack* d2, bool d2_penu) {
-        if (src.passes.empty()) return;
-        ImGui::PushID(id);
-        // s232 — la fila "copy to:" pertenece a la zona de ARRIBA, pero pegada al
-        // "+ layer" se leía como parte de la siguiente. Un pelo de aire arriba y el
-        // grupo queda cerrado.
-        ImGui::Spacing();
-        ImGui::TextDisabled("%s", _u8L("copy to:").c_str());
-        ImGui::SameLine();
-        auto do_copy = [&](Slic3r::SurfacePassStack* dst, bool dst_penu) {
-            *dst = src;
-            pro_retarget_cm(*dst, src_penu, dst_penu);
-            // NEOTKO_BOTTOM_TAG — §5.5: el Bottom tiene reglas propias (máx 2 Solid,
-            // máx 1 ColorStitch, PB SIEMPRE Full — un PB Half abajo dejaría una capa
-            // vacía). Una copia no puede colar por la puerta de atrás lo que el editor
-            // no deja autorar, así que se normaliza al aterrizar.
-            if (dst == &m_pro_bottom) {
-                int ns = 0, nc = 0;
-                std::vector<Slic3r::SurfacePass> keep;
-                for (Slic3r::SurfacePass& pp : dst->passes) {
-                    if (pp.kind == Slic3r::SurfacePassKind::PathBlend) {
-                        PathBlendPassConfig pbc = pro_pb_read(pp);
-                        if (pbc.mode == PathBlendPassConfig::Mode::Half) {
-                            pbc.mode = PathBlendPassConfig::Mode::Full;
-                            pro_pb_write(pp, pbc, lh);
-                        }
-                        keep.assign(1, pp);   // PB ocupa la zona entera
-                        break;
+    auto do_copy = [&](const Slic3r::SurfacePassStack& src, bool src_penu,
+                       Slic3r::SurfacePassStack* dst, bool dst_penu) {
+        *dst = src;
+        pro_retarget_cm(*dst, src_penu, dst_penu);
+        // NEOTKO_BOTTOM_TAG — §5.5: el Bottom tiene reglas propias (máx 2 Solid,
+        // máx 1 ColorStitch, PB SIEMPRE Full — un PB Half abajo dejaría una capa
+        // vacía). Una copia no puede colar por la puerta de atrás lo que el editor
+        // no deja autorar, así que se normaliza al aterrizar.
+        if (dst == &m_pro_bottom) {
+            int ns = 0, nc = 0;
+            std::vector<Slic3r::SurfacePass> keep;
+            for (Slic3r::SurfacePass& pp : dst->passes) {
+                if (pp.kind == Slic3r::SurfacePassKind::PathBlend) {
+                    PathBlendPassConfig pbc = pro_pb_read(pp);
+                    if (pbc.mode == PathBlendPassConfig::Mode::Half) {
+                        pbc.mode = PathBlendPassConfig::Mode::Full;
+                        pro_pb_write(pp, pbc, lh);
                     }
-                    if (pp.kind == Slic3r::SurfacePassKind::Solid    && ++ns > 2) continue;
-                    if (pp.kind == Slic3r::SurfacePassKind::ColorStitch && ++nc > 1) continue;
-                    keep.push_back(pp);
+                    keep.assign(1, pp);   // PB ocupa la zona entera
+                    break;
                 }
-                dst->passes = std::move(keep);
-                // Re-normalizar ratios si se descartó algún pase por los caps.
-                double tot = 0.0;
-                for (const auto& pp : dst->passes) tot += std::max(0.0, pp.ratio);
-                if (tot > 1e-6)
-                    for (auto& pp : dst->passes) pp.ratio = std::max(0.0, pp.ratio) / tot;
-                else
-                    for (auto& pp : dst->passes) pp.ratio = 1.0 / double(dst->passes.size());
+                if (pp.kind == Slic3r::SurfacePassKind::Solid    && ++ns > 2) continue;
+                if (pp.kind == Slic3r::SurfacePassKind::ColorStitch && ++nc > 1) continue;
+                keep.push_back(pp);
             }
-            dst->enabled = dst->any_effect();
-        };
-        if (ImGui::SmallButton(l1)) do_copy(d1, d1_penu);
-        ImGui::SameLine();
-        if (ImGui::SmallButton(l2)) do_copy(d2, d2_penu);
-        ImGui::PopID();
+            dst->passes = std::move(keep);
+            // Re-normalizar ratios si se descartó algún pase por los caps.
+            double tot = 0.0;
+            for (const auto& pp : dst->passes) tot += std::max(0.0, pp.ratio);
+            if (tot > 1e-6)
+                for (auto& pp : dst->passes) pp.ratio = std::max(0.0, pp.ratio) / tot;
+            else
+                for (auto& pp : dst->passes) pp.ratio = 1.0 / double(dst->passes.size());
+        }
+        dst->enabled = dst->any_effect();
     };
-
-    draw_zone_editor("##pro_top",  _u8L("Top").c_str(),         m_pro_top,
-                     /*allow_disable=*/false, /*penu=*/false, fcolors, nfil, lh, pro_row_w);
-    zone_copy_row("##cp_top", m_pro_top, false,
-                  (_u8L("Penultimate") + "##cp1").c_str(), &m_pro_penu,   true,
-                  (_u8L("Bottom") + "##cp2").c_str(),      &m_pro_bottom, false);
-    // s232 — separación entre zonas algo mayor que el aire interno de cada una (6 px vs
-    // el Spacing de dentro): con las chapas de color, lo que agrupa ya no es la
-    // distancia sino el bloque, y este hueco es el que dice "aquí empieza otra zona".
-    ImGui::Dummy(ImVec2(0.f, 6.f));
-    draw_zone_editor("##pro_penu", _u8L("Penultimate").c_str(), m_pro_penu,
-                     /*allow_disable=*/true,  /*penu=*/true,  fcolors, nfil, lh, pro_row_w);
-    zone_copy_row("##cp_penu", m_pro_penu, true,
-                  (_u8L("Top") + "##cp3").c_str(),    &m_pro_top,    false,
-                  (_u8L("Bottom") + "##cp4").c_str(), &m_pro_bottom, false);
-    ImGui::Dummy(ImVec2(0.f, 6.f));   // s232 — ver la nota de arriba
+    // s318 — cada zona pide su copia desde el glifo de su cabecera (menú con los dos destinos) y
+    // aquí se ejecuta. Mismos destinos y mismo orden que las filas "copy to:" de s231.
+    const std::string l_top = _u8L("Top"), l_penu = _u8L("Penultimate"), l_bot = _u8L("Bottom");
+    int cp = -1;
+    draw_zone_editor("##pro_top",  l_top.c_str(), m_pro_top,
+                     /*allow_disable=*/false, /*penu=*/false, fcolors, nfil, lh, pro_row_w,
+                     false, nullptr, nullptr, (l_penu + "##cp1").c_str(), (l_bot + "##cp2").c_str(), &cp, &m_tray);
+    if (cp == 0) do_copy(m_pro_top, false, &m_pro_penu, true);
+    else if (cp == 1) do_copy(m_pro_top, false, &m_pro_bottom, false);
+    ImGui::Dummy(ImVec2(0.f, 0.45f * neo_u()));
+    cp = -1;
+    draw_zone_editor("##pro_penu", l_penu.c_str(), m_pro_penu,
+                     /*allow_disable=*/true,  /*penu=*/true,  fcolors, nfil, lh, pro_row_w,
+                     false, nullptr, nullptr, (l_top + "##cp3").c_str(), (l_bot + "##cp4").c_str(), &cp, &m_tray);
+    if (cp == 0) do_copy(m_pro_penu, true, &m_pro_top, false);
+    else if (cp == 1) do_copy(m_pro_penu, true, &m_pro_bottom, false);
+    ImGui::Dummy(ImVec2(0.f, 0.45f * neo_u()));
+    cp = -1;
     // Bottom zone — same authoring widget, §5.5 caps, "+ Add Bottom Paint" wording.
-    draw_zone_editor("##pro_bottom", _u8L("Bottom").c_str(), m_pro_bottom,
+    draw_zone_editor("##pro_bottom", l_bot.c_str(), m_pro_bottom,
                      /*allow_disable=*/true,  /*penu=*/false, fcolors, nfil, lh, pro_row_w,
                      /*bottom_caps=*/true,
                      _u8L("+ Add Bottom Paint").c_str(),
-                     _u8L("x Clear Bottom Paint").c_str());
-    zone_copy_row("##cp_bottom", m_pro_bottom, false,
-                  (_u8L("Top") + "##cp5").c_str(),          &m_pro_top,  false,
-                  (_u8L("Penultimate") + "##cp6").c_str(),  &m_pro_penu, true);
+                     _u8L("x Clear Bottom Paint").c_str(),
+                     (l_top + "##cp5").c_str(), (l_penu + "##cp6").c_str(), &cp, &m_tray);
+    if (cp == 0) do_copy(m_pro_bottom, false, &m_pro_top, false);
+    else if (cp == 1) do_copy(m_pro_bottom, false, &m_pro_penu, true);
 
     // NEOTKO_PATHBLEND_TAG — s230: PathBlend no sobrevive a un puente real (su escalera
     // ramp/cap subdivide la altura de capa y sobre aire eso deja hilos de sección
@@ -3885,10 +3981,9 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
         }
 
         if (_has_pb && _thick) {
-            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-            m_imgui->text_colored(ImVec4(1.0f, 0.85f, 0.1f, 1.0f),
-                _u8L("PathBlend won't work on Bridges, will use MultiPass with same colors"));
-            ImGui::PopTextWrapPos();
+            tray(_u8L("PathBlend won't work on Bridges, will use MultiPass with same colors"),
+                 _u8L("thick_bridges is on for this object: over a real bridge the engine prints "
+                      "PathBlend as MultiPass with the same tools."));
         }
     }
 
@@ -3896,12 +3991,10 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     // también: el Bottom usa la pila completa en todas partes, puentes incluidos. Lo que
     // queda es AVISAR, no prohibir — el painter no puede saber hasta el slice si una zona
     // acabará siendo puente, así que el texto tiene que llegar antes que el resultado.
-    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-    m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.f),
-        _u8L("On bridges, tune before you stack"));
-    ImGui::PopTextWrapPos();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Bottom uses the full stack everywhere — supported faces and "
+    // s230 — el Bottom usa la pila completa también en puentes: se AVISA, no se prohíbe. s318: es
+    // información (gris), no un problema, y va a la bandeja con el porqué entero en el tooltip.
+    tray(_u8L("On bridges, tune before you stack"),
+         _u8L("Bottom uses the full stack everywhere — supported faces and "
                                      "real bridges alike. Pass #1 always keeps bridge flow, speed "
                                      "and fan; passes above it print as controlled solid.\n\n"
                                      "Over open air the extrusion is shared between the passes, so "
@@ -3911,22 +4004,21 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
                                      "on a real print.\n\n"
                                      "The fill angle is honoured on bridges too. The default bridge "
                                      "angle is planned to cross perpendicular to its anchors, so "
-                                     "rotating it can leave line ends unsupported.").c_str());
-    ImGui::Spacing();
+                                     "rotating it can leave line ends unsupported."), /*amber=*/false);
 
     // NEOTKO_COLORSTITCH_TAG — s118: Perimeter override ÚNICO para el color (no
     // per-zona). El motor lo lee por-zona (Fill.cpp mp_stack.perimeter_override), así
     // que un solo checkbox replica el flag a top y penu. Misma semántica que el
     // SandwichDialog tras unificarlo allí.
     {
+        neo_section_g(_u8L("Options").c_str(), Glyph::Adv);
         bool perim = m_pro_top.perimeter_override || m_pro_penu.perimeter_override;
-        if (ImGui::Checkbox(_u8L("Perimeter override").c_str(), &perim)) {
+        if (neo_glyph_toggle_row("##perim", Glyph::Square, _u8L("Perimeter override").c_str(), &perim,
+                                 _u8L("Clone the walls into every Solid pass "
+                                      "(MultiPass perimeter override).").c_str())) {
             m_pro_top.perimeter_override  = perim;
             m_pro_penu.perimeter_override = perim;
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Clone the walls into every Solid pass "
-                                         "(MultiPass perimeter override).").c_str());
         // NEOTKO_MMU_COEXIST_TAG s234 — the walls are NOT clipped by the painted
         // footprint: cloning them paints perimeter loops that run all the way
         // around the region, so the effect shows up outside the area the user
@@ -3934,8 +4026,9 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
         // itself no longer touches). Nothing breaks — it just reads as confusing
         // in the preview, so the trade-off is stated where the switch lives.
         if (perim)
-            ImGui::TextColored(ImVec4(0.86f, 0.59f, 0.24f, 1.f), "%s",
-                _u8L("⚠ Will go beyond Normal Paint Areas").c_str());
+            tray(cs_strip_warn(_u8L("⚠ Will go beyond Normal Paint Areas")),
+                 _u8L("The walls are NOT clipped by the painted footprint: the cloned perimeter "
+                      "loops run all the way around the region."));
     }
 
     ImGui::Spacing();
@@ -4034,7 +4127,6 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     // s169 F2 — el nombre editable + "Pin to palette" se movieron al header
     // persistente (render_header): mismo código, solo cambia dónde se dibuja
     // (visible en todos los departamentos, no solo en Pro).
-    ImGui::Separator();
 }
 
 // s169 F0 — rejilla (TD) por filamento, extraída tal cual de render_pro_mode_panel
@@ -4044,6 +4136,9 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
 // patrón de padding que render_palette_panel).
 void GLGizmoColorStitchPainter::render_td_grid()
 {
+    // s318 — una FILA por filamento (ficha numerada + deslizador a todo el ancho con el valor dentro)
+    // en vez de la rejilla 2×2 de cuadros sueltos. Mismo guardado: td_changed marca la caché de
+    // paletas cada frame del arrastre; td_committed guarda a disco y re-slicea UNA vez, al soltar.
     std::vector<std::string> fcolors;
     if (auto* o = wxGetApp().preset_bundle->project_config
                       .option<ConfigOptionStrings>("filament_colour"))
@@ -4053,22 +4148,30 @@ void GLGizmoColorStitchPainter::render_td_grid()
 
     auto* ac = wxGetApp().app_config;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const int   td_rows = (nfil + 1) / 2;
-    const float col_w   = ImGui::GetContentRegionAvail().x * 0.5f;
-    const float sq      = ImGui::GetTextLineHeight();
-    auto td_cell = [&](int t) {
+    const float u  = neo_u();
+    const float fh = ImGui::GetFrameHeight();
+    for (int t = 0; t < nfil; ++t) {
         ImGui::PushID(2000 + t);
         float td = 1.f;
         if (ac) {
             const std::string v = ac->get("neotko_td_" + std::to_string(t + 1));
             try { if (!v.empty()) td = std::stof(v); } catch (...) {}
         }
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        dl->AddRectFilled(p, ImVec2(p.x + sq, p.y + sq), tool_col_u32(fcolors, t));
-        dl->AddRect(p, ImVec2(p.x + sq, p.y + sq), IM_COL32(20, 20, 20, 255));
-        ImGui::Dummy(ImVec2(sq, sq));
-        ImGui::SameLine();
-        ImGui::PushItemWidth(std::max(70.f, col_w - sq - 18.f));
+        {
+            const float  sq  = 1.45f * u;
+            const ImVec2 p   = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(sq, fh));
+            const ImVec2 a(p.x, p.y + (fh - sq) * 0.5f), z(a.x + sq, a.y + sq);
+            const ImU32  col = tool_col_u32(fcolors, t);
+            dl->AddRectFilled(a, z, col, 4.f);
+            char num[4];
+            std::snprintf(num, sizeof(num), "%d", t + 1);
+            const float  fs = 0.78f * u;
+            const ImVec2 ns = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.f, num);
+            dl->AddText(ImGui::GetFont(), fs, ImVec2((a.x + z.x - ns.x) * 0.5f, (a.y + z.y - ns.y) * 0.5f), ink_on(col), num);
+        }
+        ImGui::SameLine(0.f, 0.5f * u);
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
         const bool td_changed = ImGui::SliderFloat("##td", &td, 0.01f, 10.f, "%.2f");
         // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): IsItemDeactivatedAfterEdit
         // fires once, on mouse release — save()+reslice here instead of inside
@@ -4093,12 +4196,9 @@ void GLGizmoColorStitchPainter::render_td_grid()
             m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
         }
         ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Transmission distance").c_str());
         ImGui::PopID();
-    };
-    for (int r = 0; r < td_rows; ++r) {
-        td_cell(r);
-        const int t2 = td_rows + r;
-        if (t2 < nfil) { ImGui::SameLine(col_w + 8.f); td_cell(t2); }
     }
 }
 
@@ -4569,243 +4669,110 @@ void GLGizmoColorStitchPainter::show_tooltip_information(float caption_max, floa
     ImGui::PopStyleVar(2);
 }
 
-// s169 F0 — toggle "pill" transparente (teal cuando activo), extraído tal cual
-// del lambda local `tool_toggle` de render_tool_row para que el futuro selector
-// segmentado de departamentos (F1) pueda reusar el mismo idiom visual.
-static bool cs_toggle_button(const char* label, bool active, const char* tip)
+// s318 — PESTAÑAS de departamento: glifo arriba, palabra abajo, la activa sobre Surface con un
+// subrayado AccentBright. Sustituye a cs_segmented_bar (s174), que era sólo texto sobre un teal
+// sólido. Mismo contrato: `active` se actualiza en sitio y cada pestaña lleva su tooltip.
+static void cs_department_tabs(const char* const* labels, const char* const* tips, const Glyph* glyphs,
+                               int n, int& active)
 {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.f, 0.f, 0.f));
-    // s173 — feedback usuario ("bonito y claro" en la propuesta de zonas): el
-    // activo pasa de un tinte teal casi transparente (0.25) a un relleno SÓLIDO
-    // (0.85) + texto blanco forzado, para que se lea como pill/tab de verdad en
-    // vez de un simple resaltado de texto. Inactivo sigue igual (texto sigue al
-    // modo, sin fondo).
-    ImGui::PushStyleColor(ImGuiCol_Text,
-        active ? ImVec4(1.f, 1.f, 1.f, 1.f)
-        : (ImGuiWrapper::is_dark_mode() ? ImVec4(1.f, 1.f, 1.f, 1.f)
-                                        : ImVec4(50 / 255.f, 58 / 255.f, 61 / 255.f, 1.f)));
-    if (active) {
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.f, 0.59f, 0.53f, 0.85f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.64f, 0.58f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_Border,        ImGuiWrapper::COL_ORCA);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    }
-    const bool clicked = ImGui::Button(label);
-    if (active) { ImGui::PopStyleColor(3); ImGui::PopStyleVar(1); }
-    ImGui::PopStyleColor(2);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-    return clicked;
-}
-
-// s169 F1 (helper listo desde F0) — "card" con caja redondeada adaptada al modo
-// (Add-Mix style). begin/end envuelven contenido ImGui arbitrario; end() pinta la
-// caja DETRÁS del contenido (canal 0, truco ChannelsSplit ya usado en
-// draw_zone_editor) + el título encima, y deja el cursor bajo la caja con el hueco
-// de separación entre cards. Sin llamadas aún (F0 = cero cambio visual).
-static void cs_card_begin()
-{
-    ImGui::BeginGroup();
-    ImGui::GetWindowDrawList()->ChannelsSplit(2);
-    ImGui::GetWindowDrawList()->ChannelsSetCurrent(1);
-}
-
-// s174 — `same_line_after`: cuando la card debe seguir compartiendo fila con lo
-// que venga después (p.ej. header + toolbar + erase-all en una sola línea, pedido
-// del usuario "recolocamos"), en vez de forzar el cursor abajo-izquierda (el
-// comportamiento de apilado original, que se mantiene por defecto para cards
-// futuras verticales) se deja la línea ABIERTA con un SameLine() propio.
-static void cs_card_end(const char* title, bool same_line_after = false)
-{
-    ImGui::EndGroup();
-    const ImVec2 gmin = ImGui::GetItemRectMin();
-    const ImVec2 gmax = ImGui::GetItemRectMax();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->ChannelsSetCurrent(0);
-    const bool  dark = ImGuiWrapper::is_dark_mode();
-    const float pad  = 6.f;
-    const ImVec2 b0(gmin.x - pad, gmin.y - pad);
-    const ImVec2 b1(gmax.x + pad, gmax.y + pad);
-    // s173 fix — el fill (52,52,52) era casi idéntico al fondo real del panel
-    // (COL_WINDOW_BG_DARK = 45,45,49) y el borde iba a 47% de alpha: la card
-    // resultaba invisible en la práctica (motivo real de "lo veo igual", no un
-    // problema de rebuild). Delta de fill mayor + borde opaco, mismo criterio de
-    // contraste que ya usa pro_pass_preview (borde opaco 20,20,20 contra fondo 45).
-    dl->AddRectFilled(b0, b1, dark ? IM_COL32(64, 64, 68, 255) : IM_COL32(228, 228, 228, 255), 4.f);
-    dl->AddRect(b0, b1, dark ? IM_COL32(20, 20, 20, 255) : IM_COL32(0, 0, 0, 90), 4.f);
-    if (title && *title)
-        dl->AddText(ImVec2(b0.x, b0.y - ImGui::GetTextLineHeight()),
-                    IM_COL32(178, 178, 178, 255), title);   // gris (0.7,0.7,0.7,1)
-    dl->ChannelsMerge();
-    if (same_line_after) {
-        ImGui::SameLine(0.f, pad * 2.f + 6.f);   // respeta el padding derecho de la card
-    } else {
-        ImGui::SetCursorScreenPos(ImVec2(gmin.x, b1.y));
-        ImGui::Dummy(ImVec2(gmax.x - gmin.x, 6.f));   // separación vertical entre cards
-    }
-}
-
-// s174 — selector de departamento como BARRA segmentada de verdad (pista con
-// fondo propio + segmentos proporcionales al ancho + activo = relleno sólido
-// que ocupa TODO su segmento), reemplazando los 4 cs_toggle_button sueltos que
-// dejaban huecos de aire desigual — pedido del usuario: "la barra de selección
-// bien hecha como tu mockup, no como sale ahora". `active` se actualiza in-place.
-static void cs_segmented_bar(const char* const* labels, const char* const* tips,
-                             int n, int& active)
-{
+    const float  u     = neo_u();
     const float  avail = ImGui::GetContentRegionAvail().x;
-    const float  h     = ImGui::GetFrameHeight();
-    const float  seg_w = avail / (float)n;
-    const bool   dark  = ImGuiWrapper::is_dark_mode();
+    const float  pad   = 3.f;
+    const float  h     = 2.55f * u;
+    const float  seg_w = (avail - 2.f * pad - float(n - 1) * pad) / float(n);
     ImDrawList*  dl    = ImGui::GetWindowDrawList();
     const ImVec2 p0    = ImGui::GetCursorScreenPos();
-
-    dl->AddRectFilled(p0, ImVec2(p0.x + avail, p0.y + h),
-                      dark ? IM_COL32(32, 32, 35, 255) : IM_COL32(205, 205, 205, 255), 4.f);
-
+    dl->AddRectFilled(p0, ImVec2(p0.x + avail, p0.y + h + 2.f * pad), neo_col_u32(NeoCol::Canvas), 6.f);
     for (int i = 0; i < n; ++i) {
         ImGui::PushID(i);
-        const ImVec2 a(p0.x + seg_w * (float)i, p0.y);
+        const ImVec2 a(p0.x + pad + float(i) * (seg_w + pad), p0.y + pad);
         const ImVec2 b(a.x + seg_w, a.y + h);
         ImGui::SetCursorScreenPos(a);
-        if (ImGui::InvisibleButton("##seg", ImVec2(seg_w, h))) active = i;
-        const bool hov      = ImGui::IsItemHovered();
-        const bool is_active = (i == active);
-        if (is_active)
-            dl->AddRectFilled(a, b, ImGui::GetColorU32(ImVec4(0.f, 0.59f, 0.53f, 0.85f)), 4.f);
-        else if (hov)
-            dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 20), 4.f);
-        const ImVec2 tsz  = ImGui::CalcTextSize(labels[i]);
-        const ImU32  tcol = is_active ? IM_COL32(255, 255, 255, 255)
-                          : (dark ? IM_COL32(220, 220, 220, 255) : IM_COL32(50, 58, 61, 255));
-        dl->AddText(ImVec2(a.x + (seg_w - tsz.x) * 0.5f, a.y + (h - tsz.y) * 0.5f), tcol, labels[i]);
+        if (ImGui::InvisibleButton("##tab", ImVec2(seg_w, h))) active = i;
+        const bool hov = ImGui::IsItemHovered();
+        const bool on  = (i == active);
+        if (on || hov)
+            dl->AddRectFilled(a, b, neo_col_u32(NeoCol::Surface), 4.f);
+        const float gs = 1.2f * u;
+        draw_glyph(dl, ImVec2(a.x + (seg_w - gs) * 0.5f, a.y + 0.28f * u), gs, glyphs[i],
+                   on ? neo_col_u32(NeoCol::AccentBright) : neo_col_u32(hov ? NeoCol::Ink : NeoCol::TextDim));
+        const float fs = 0.8f * u;
+        const std::string lbl = fit_text(labels[i], (seg_w - 0.4f * u) / 0.8f);
+        const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.f, lbl.c_str());
+        dl->AddText(ImGui::GetFont(), fs, ImVec2(a.x + (seg_w - ts.x) * 0.5f, a.y + 0.28f * u + gs + 0.12f * u),
+                    neo_col_u32((on || hov) ? NeoCol::Ink : NeoCol::TextDim), lbl.c_str());
+        if (on)
+            dl->AddRectFilled(ImVec2(a.x + seg_w * 0.18f, b.y - 2.f), ImVec2(b.x - seg_w * 0.18f, b.y),
+                              neo_col_u32(NeoCol::AccentBright), 1.f);
         if (hov && tips[i] && *tips[i]) ImGui::SetTooltip("%s", tips[i]);
         ImGui::PopID();
     }
-    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + h));
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + h + 2.f * pad));
     ImGui::Dummy(ImVec2(avail, 0.f));
 }
 
-// s173 — carga (UNA vez) los 5 iconos de la toolbar que Fable entregó como SVG en
-// resources/images/ (cs_tool_*.svg, 4 variantes cada uno: light/dark × normal/
-// hover). Mismo mecanismo que el botón (?) (IMTexture::load_from_svg_file →
-// ImTextureID), pero en un mapa PRIVADO de este painter — ver nota en el .hpp.
-void GLGizmoColorStitchPainter::ensure_tool_icons_loaded()
+// s318 — la columna de etiquetas de ESTE panel, medida sobre sus textos traducidos (GizmoNeotkoStyle
+// neo_label_col_for). neo_row_slider la pide al pintar cada fila.
+static float cs_label_col()
 {
-    if (m_tool_icons_loaded) return;
-    m_tool_icons_loaded = true;
-    const std::string dir = Slic3r::resources_dir() + "/images/";
-    auto load = [&](const char* filename, void*& out) {
-        ImTextureID tid;
-        if (IMTexture::load_from_svg_file(dir + filename, 25, 25, tid)) out = tid;
-    };
-    load("cs_tool_select.svg",             m_icon_select.normal);
-    load("cs_tool_select_dark.svg",        m_icon_select.normal_dark);
-    load("cs_tool_select_hover.svg",       m_icon_select.hover);
-    load("cs_tool_select_hover_dark.svg",  m_icon_select.hover_dark);
-    load("cs_tool_paint.svg",              m_icon_paint.normal);
-    load("cs_tool_paint_dark.svg",         m_icon_paint.normal_dark);
-    load("cs_tool_paint_hover.svg",        m_icon_paint.hover);
-    load("cs_tool_paint_hover_dark.svg",   m_icon_paint.hover_dark);
-    load("cs_tool_eraser.svg",             m_icon_eraser.normal);
-    load("cs_tool_eraser_dark.svg",        m_icon_eraser.normal_dark);
-    load("cs_tool_eraser_hover.svg",       m_icon_eraser.hover);
-    load("cs_tool_eraser_hover_dark.svg",  m_icon_eraser.hover_dark);
-    load("cs_tool_pick.svg",               m_icon_pick.normal);
-    load("cs_tool_pick_dark.svg",          m_icon_pick.normal_dark);
-    load("cs_tool_pick_hover.svg",         m_icon_pick.hover);
-    load("cs_tool_pick_hover_dark.svg",    m_icon_pick.hover_dark);
-    load("cs_tool_erase_all.svg",              m_icon_erase_all.normal);
-    load("cs_tool_erase_all_dark.svg",         m_icon_erase_all.normal_dark);
-    load("cs_tool_erase_all_hover.svg",        m_icon_erase_all.hover);
-    load("cs_tool_erase_all_hover_dark.svg",   m_icon_erase_all.hover_dark);
+    return neo_label_col_for({ _u8L("Smart fill angle"), _u8L("Section view"), _u8L("Rotate"), _u8L("Scale") });
 }
 
-// s173 — icono-toggle: mismo idioma visual que cs_toggle_button (fondo/borde
-// teal sólido cuando activo, transparente cuando no) pero dibujando la textura
-// del icono en vez de texto. ImageButton3 ya soporta bg_col + swap normal/hover
-// nativo (ImageButtonEx3, imgui_widgets.cpp:1173) — el borde sale de
-// ImGuiCol_Button/Hovered/Active (FrameBorderSize ya viene a 1.0 desde
-// push_toolbar_style), así que basta con empujar esos 3 colores cuando active.
-static bool cs_icon_toggle_button(void* normal_id, void* hover_id, bool active,
-                                  float size_px, const char* tip)
+// s318 — el "⚠ " con que empiezan algunas cadenas traducidas sobra en la bandeja: allí el triángulo
+// ya lo pinta neo_warn_row. Sólo se quita si va al principio; la cadena (y su traducción) no cambia.
+static std::string cs_strip_warn(std::string s)
 {
-    const ImVec2 sz(size_px, size_px);
-    // Igual que cs_toggle_button: SIEMPRE transparente de base (idle = sin caja
-    // visible, solo el icono) y, si active, se empuja el teal sólido ENCIMA —
-    // si no se hiciera así, el borde heredado de push_toolbar_style (gris,
-    // FrameBorderSize ya a 1.0) dejaría una cajita visible incluso en idle.
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.f, 0.f, 0.f));
-    ImVec4 bg(0.f, 0.f, 0.f, 0.f);
-    if (active) {
-        bg = ImVec4(0.f, 0.59f, 0.53f, 0.85f);
-        ImGui::PushStyleColor(ImGuiCol_Button,        bg);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.64f, 0.58f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.f, 0.64f, 0.58f, 0.95f));
+    static const char k[] = "\xE2\x9A\xA0";   // U+26A0
+    if (s.compare(0, 3, k) == 0) {
+        s.erase(0, 3);
+        while (!s.empty() && s.front() == ' ') s.erase(0, 1);
     }
-    const bool clicked = ImGui::ImageButton3((ImTextureID)normal_id, (ImTextureID)hover_id,
-                                              sz, ImVec2(0.f, 0.f), ImVec2(1.f, 1.f),
-                                              -1, bg);
-    if (active) ImGui::PopStyleColor(3);
-    ImGui::PopStyleColor(1);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-    return clicked;
+    return s;
 }
 
-// s111 — fila de herramientas [Select][Paint][Eraser][Pick] (toggles mutuamente
-// excluyentes). Select intercepta clics para marcar/activar objetos (re-activa el
-// picking); Paint pinta; Eraser despinta. NEOTKO_COLORSTITCH_TAG. s173: iconos
-// reales (Fable) en vez de texto/glifo, mismo idioma de 2 zonas de color.
+// s111 — fila de herramientas (toggles mutuamente excluyentes, set_tool es el único dueño de la
+// exclusión desde s231 F6). s318: cinco glifos vectoriales dentro de un pozo Canvas, en vez de los
+// SVG de s173 + un "Sticker" de texto que no tenía icono. Deja el cursor DEBAJO del pozo; quien
+// quiera seguir en la misma fila (el ? y Erase all) hace su propio SameLine().
 void GLGizmoColorStitchPainter::render_tool_row()
 {
-    ensure_tool_icons_loaded();
-    const bool  dark     = ImGuiWrapper::is_dark_mode();
-    const float icon_px  = 20.f * m_parent.get_scale();
+    const float  u   = neo_u();
+    const float  bs  = 2.1f * u;
+    const float  pad = 3.f, gap = 3.f;
+    ImDrawList*  dl  = ImGui::GetWindowDrawList();
+    const ImVec2 p0  = ImGui::GetCursorScreenPos();
+    const float  w   = 5.f * bs + 4.f * gap + 2.f * pad;
+    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + bs + 2.f * pad), neo_col_u32(NeoCol::Canvas), 6.f);
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
 
-    // s173 — agrupados en su propia card (zona "modo de herramienta", teal):
-    // feedback usuario, propuesta de 2 zonas de color aprobada — separa
-    // visualmente el MODO de pintura de la acción destructiva "Erase all
-    // painting" (que queda fuera de esta card, con su propio tinte de peligro).
-    cs_card_begin();
-    if (cs_icon_toggle_button(dark ? m_icon_select.normal_dark : m_icon_select.normal,
-                              dark ? m_icon_select.hover_dark  : m_icon_select.hover,
-                              m_select_mode, icon_px,
-                              _u8L("Select objects to paint — click them in the scene "
-                                   "(Shift-click to unmark)").c_str()))
+    if (neo_glyph_toggle("##t_select", bs, m_select_mode, Glyph::Select,
+                         _u8L("Select objects to paint — click them in the scene "
+                              "(Shift-click to unmark)").c_str()))
         set_tool_mode(/*select=*/true, /*erase=*/false);
-    ImGui::SameLine();
-    if (cs_icon_toggle_button(dark ? m_icon_paint.normal_dark : m_icon_paint.normal,
-                              dark ? m_icon_paint.hover_dark  : m_icon_paint.hover,
-                              // NEOTKO_STICKER_TAG — Paint es el catch-all "nada más
-                              // activo"; sin excluir pick/sticker aquí se mostraba
-                              // encendido A LA VEZ que Sticker (bug reportado: "da la
-                              // sensación de que puedes hacer las dos cosas").
-                              !m_select_mode && !m_erase_mode && !m_pick_mode && !m_sticker_mode, icon_px,
-                              _u8L("Paint (smart fill)").c_str()))
+    ImGui::SameLine(0.f, gap);
+    // NEOTKO_STICKER_TAG — Paint es el catch-all "nada más activo" (bug de s170: se veía
+    // encendido a la vez que Sticker).
+    if (neo_glyph_toggle("##t_paint", bs, !m_select_mode && !m_erase_mode && !m_pick_mode && !m_sticker_mode,
+                         Glyph::Paint, _u8L("Paint (smart fill)").c_str()))
         set_tool_mode(/*select=*/false, /*erase=*/false);
-    ImGui::SameLine();
-    if (cs_icon_toggle_button(dark ? m_icon_eraser.normal_dark : m_icon_eraser.normal,
-                              dark ? m_icon_eraser.hover_dark  : m_icon_eraser.hover,
-                              !m_select_mode && m_erase_mode, icon_px,
-                              _u8L("Eraser — smart-fill removes paint").c_str()))
+    ImGui::SameLine(0.f, gap);
+    if (neo_glyph_toggle("##t_erase", bs, !m_select_mode && m_erase_mode, Glyph::Erase,
+                         _u8L("Eraser — smart-fill removes paint").c_str()))
         set_tool_mode(/*select=*/false, /*erase=*/true);
-    ImGui::SameLine();
-    // NEOTKO_COLORSTITCH_TAG — s118: eyedropper. Click sobre un objeto → lee su
-    // receta pintada y la enlaza como color activo (+ dump de debug).
-    if (cs_icon_toggle_button(dark ? m_icon_pick.normal_dark : m_icon_pick.normal,
-                              dark ? m_icon_pick.hover_dark  : m_icon_pick.hover,
-                              m_pick_mode, icon_px,
-                              _u8L("Eyedropper — click a painted object to load its colour "
-                                   "(and dump what it has painted / its base).").c_str()))
-        set_tool(TOOL_PICK);   // s231 F6 — exclusión de herramientas en un solo sitio
-    ImGui::SameLine();
-    // NEOTKO_STICKER_TAG — sin icono propio todavía (los 5 SVG de Fable de s173
-    // son Select/Paint/Eraser/Pick/EraseAll); texto plano hasta que haya un
-    // sexto asset, mismo idioma visual que `cs_toggle_button` (pill teal).
-    if (cs_toggle_button(_u8L("Sticker").c_str(), m_sticker_mode,
+    ImGui::SameLine(0.f, gap);
+    // NEOTKO_COLORSTITCH_TAG — s118: eyedropper.
+    if (neo_glyph_toggle("##t_pick", bs, m_pick_mode, Glyph::Pick,
+                         _u8L("Eyedropper — click a painted object to load its colour "
+                              "(and dump what it has painted / its base).").c_str()))
+        set_tool(TOOL_PICK);
+    ImGui::SameLine(0.f, gap);
+    if (neo_glyph_toggle("##t_sticker", bs, m_sticker_mode, Glyph::Sticker,
                          _u8L("Sticker — click a flat top face to place the loaded SVG "
                               "(load it below, in the Palette panel)").c_str()))
-        set_tool(TOOL_STICKER);   // s231 F6 — idem (este botón era el que se colaba)
-    cs_card_end(nullptr, /*same_line_after=*/true);   // s174 — sigue en la misma fila (info + erase-all)
+        set_tool(TOOL_STICKER);
+
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Dummy(ImVec2(w, bs + 2.f * pad));
 }
 
 // NEOTKO_COLORSTITCH_TAG — s118: eyedropper + debug read. Lee la receta pintada de
@@ -5116,44 +5083,45 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
 // con el modelo mental de "apilar pegatinas" del plan.
 void GLGizmoColorStitchPainter::render_sticker_section()
 {
-    const bool open = ImGui::CollapsingHeader(_u8L("Stickers (SVG)").c_str());
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Place a 1-colour SVG shape on a flat top face and give it "
-                                     "its own Sandwich recipe. Stack several — the topmost "
-                                     "occludes the ones below (no blending).").c_str());
-    if (!open) return;
+    // s318 — sección plegable del lenguaje nuevo; acciones de cada pegatina como glifos en su fila.
+    if (!neo_section_toggle("##stk_sec", _u8L("Stickers (SVG)").c_str(), Glyph::Sticker, &m_stickers_open,
+                            _u8L("Place a 1-colour SVG shape on a flat top face and give it "
+                                 "its own Sandwich recipe. Stack several — the topmost "
+                                 "occludes the ones below (no blending).").c_str()))
+        return;
 
-    if (m_imgui->button(_L("Load SVG...")))
+    const float u  = neo_u();
+    const float gb = 1.4f * u;
+
+    if (neo_text_button((_u8L("Load SVG...") + "##stk_load").c_str(), NeoBtn::Ghost, true, Glyph::Load))
         load_sticker_svg_dialog();
     if (!m_pending_sticker_svg.empty()) {
-        ImGui::SameLine();
-        m_imgui->text_colored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f),
-            (_u8L("Loaded:") + " " + m_pending_sticker_name).c_str());
-        ImGui::PushTextWrapPos(0.f);
-        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            _u8L("Pick the Sticker tool above, then click a flat top face to place it.").c_str());
-        ImGui::PopTextWrapPos();
-        // s231 F6 — un sticker hereda el color ACTIVO al colocarse (place_sticker_at).
-        // Si no hay ninguno enlazado nacía "(no profile)" y no se avisaba hasta verlo
-        // en la lista, ya colocado. Se dice ANTES de colocarlo, que es cuando importa.
-        if (m_selected_profile_id == 0) {
-            ImGui::PushTextWrapPos(0.f);
-            m_imgui->text_colored(ImVec4(0.95f, 0.75f, 0.20f, 1.0f),
-                _u8L("No colour selected: the sticker will be placed without a recipe. "
-                     "Pick a saved colour first (or assign one afterwards with "
-                     "\"Assign active\").").c_str());
-            ImGui::PopTextWrapPos();
-        }
+        ImGui::SameLine(0.f, 0.5f * u);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::AccentBright));
+        ImGui::TextUnformatted((_u8L("Loaded:") + " " + m_pending_sticker_name).c_str());
+        ImGui::PopStyleColor();
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+        ImGui::TextWrapped("%s", _u8L("Pick the Sticker tool above, then click a flat top face to place it.").c_str());
+        ImGui::PopStyleColor();
+        // s231 F6 — un sticker hereda el color ACTIVO al colocarse. Sin color enlazado nacía
+        // "(no profile)": se avisa ANTES de colocarlo. s318: a la bandeja.
+        if (m_selected_profile_id == 0)
+            tray(_u8L("No colour selected: the sticker will be placed without a recipe. "
+                      "Pick a saved colour first (or assign one afterwards with "
+                      "\"Assign active\")."));
     }
 
     ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (!mo || mo->colorstitch_stickers.empty()) {
-        m_imgui->text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), _u8L("No stickers on this object yet.").c_str());
+        m_imgui->text_colored(neo_col(NeoCol::TextDim), _u8L("No stickers on this object yet.").c_str());
         return;
     }
 
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.f, 0.2f * u));
     auto& mgr = SurfaceEffectProfileManager::get();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float fh = ImGui::GetFrameHeight();
     const size_t n = mo->colorstitch_stickers.size();
     int move_from = -1, move_to = -1;
     int remove_idx = -1;
@@ -5162,51 +5130,68 @@ void GLGizmoColorStitchPainter::render_sticker_section()
         ColorStitchSticker& st = mo->colorstitch_stickers[i];
         ImGui::PushID((int)i);
 
+        const ImVec2 r0 = ImGui::GetCursorScreenPos();
+        const float  rw = ImGui::GetContentRegionAvail().x;
         const SurfaceEffectProfile* p = st.profile_id ? mgr.find(st.profile_id) : nullptr;
         const ColorRGBA sw_col = p ? color_for_profile(*p) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
-        ImGui::ColorButton("##stk_sw", ImVec4(sw_col.r(), sw_col.g(), sw_col.b(), 1.f),
-                            ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
-                            ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
-        ImGui::SameLine();
-        ImGui::TextUnformatted(st.name.empty() ? "?" : st.name.c_str());
-        ImGui::SameLine();
-        m_imgui->text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-            (p ? cs_strip_group(p->name) : _u8L("(no profile)")).c_str());
-
-        if (m_imgui->button(_L("Assign active")))
+        {
+            const float  sq = 1.2f * u;
+            const ImVec2 a(r0.x, r0.y + (fh - sq) * 0.5f), z(a.x + sq, a.y + sq);
+            dl->AddRectFilled(a, z, ImGui::ColorConvertFloat4ToU32(ImVec4(sw_col.r(), sw_col.g(), sw_col.b(), 1.f)), 3.f);
+            ImGui::Dummy(ImVec2(sq, fh));
+        }
+        const bool  editing = ((int)i == m_editing_sticker_idx);
+        const int   nbtn    = 5;
+        const float btns_w  = float(nbtn) * gb + float(nbtn - 1) * 2.f + 0.5f * u;
+        ImGui::SameLine(0.f, 0.45f * u);
+        {
+            const std::string nm   = st.name.empty() ? "?" : st.name;
+            const std::string prof = p ? cs_strip_group(p->name) : _u8L("(no profile)");
+            const float room = std::max(2.f * u, r0.x + rw - btns_w - ImGui::GetCursorScreenPos().x - 0.3f * u);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(fit_text(nm, room * 0.55f).c_str());
+            ImGui::SameLine(0.f, 0.4f * u);
+            ImGui::TextDisabled("%s", fit_text(prof, room * 0.45f).c_str());
+        }
+        neo_same_line_at(r0.x + rw - btns_w + 0.5f * u);
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, r0.y + (fh - gb) * 0.5f));
+        if (neo_glyph_button("##stk_assign", gb, Glyph::Target, false,
+                             _u8L("Assign the currently selected palette profile "
+                                  "(the one you'd paint with) to this sticker").c_str()))
             st.profile_id = m_selected_profile_id;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Assign the currently selected palette profile "
-                                         "(the one you'd paint with) to this sticker").c_str());
-        ImGui::SameLine();
-        m_imgui->disabled_begin(disp == 0);
-        if (m_imgui->button("^")) { move_from = (int)i; move_to = (int)i + 1; }
-        m_imgui->disabled_end();
-        ImGui::SameLine();
-        m_imgui->disabled_begin(disp == n - 1);
-        if (m_imgui->button("v")) { move_from = (int)i; move_to = (int)i - 1; }
-        m_imgui->disabled_end();
-        ImGui::SameLine();
-        if (m_imgui->button(_L("Remove")))
+        ImGui::SameLine(0.f, 2.f);
+        // (Sin disabled_begin: aquí dentro ya hay uno abierto por el departamento y no se anida.)
+        const bool can_up = disp != 0, can_dn = disp != n - 1;
+        if (!can_up) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+        if (neo_glyph_button("##stk_up", gb, Glyph::Up, false, nullptr) && can_up) { move_from = (int)i; move_to = (int)i + 1; }
+        if (!can_up) ImGui::PopStyleVar();
+        ImGui::SameLine(0.f, 2.f);
+        if (!can_dn) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+        if (neo_glyph_button("##stk_dn", gb, Glyph::Down, false, nullptr) && can_dn) { move_from = (int)i; move_to = (int)i - 1; }
+        if (!can_dn) ImGui::PopStyleVar();
+        ImGui::SameLine(0.f, 2.f);
+        // NEOTKO_STICKER_TAG — mover/rotar/escalar: "Edit placement" entra en el modo de on_mouse
+        // (arrastrar mueve); los deslizadores rotan Z y escalan. Encendido = teal, como el editar de Zonas.
+        if (neo_glyph_button("##stk_edit", gb, Glyph::Edit, false,
+                             editing ? _u8L("Done").c_str()
+                                     : _u8L("Drag on the model to move it, then use the "
+                                            "slider to rotate — the colour preview shows "
+                                            "how it will land against everything else.").c_str(),
+                             NeoCol::AccentBright, editing)) {
+            if (editing) exit_sticker_edit();
+            else         enter_sticker_edit((int)i);
+        }
+        ImGui::SameLine(0.f, 2.f);
+        if (neo_glyph_button("##stk_rm", gb, Glyph::Trash, true, _u8L("Remove").c_str()))
             remove_idx = (int)i;
 
-        // NEOTKO_STICKER_TAG — mover/rotar/escalar: "Edit placement" entra en
-        // el modo descrito en on_mouse (arrastrar mueve); estos sliders rotan
-        // Z y escalan; "Done" sale. Cada slider reescribe transform EN VIVO
-        // conservando lo demás (posición/ángulo/escala) y solo agenda re-slice
-        // al soltar (IsItemDeactivatedAfterEdit), igual que el drag de
-        // posición solo re-slicea en LeftUp — evita spamear el scheduler
-        // mientras se ajusta.
-        const bool is_editing_this = ((int)i == m_editing_sticker_idx);
-        if (is_editing_this) {
-            if (m_imgui->button(_L("Done")))
-                exit_sticker_edit();
-            ImGui::SameLine();
-            ImGui::TextUnformatted(_u8L("Rotate").c_str());
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(m_imgui->scaled(6.f));
+        if (editing) {
+            // Cada deslizador reescribe transform EN VIVO conservando lo demás y sólo agenda
+            // re-slice al soltar (IsItemDeactivatedAfterEdit), como el arrastre en LeftUp.
+            ImGui::Indent(1.65f * u);
             const std::string spin_fmt = std::string("%.0f") + I18N::translate_utf8("°", "deg");
-            if (ImGui::SliderFloat("##stk_spin", &m_editing_spin_deg, -180.f, 180.f, spin_fmt.c_str())) {
+            if (neo_row_slider("##stk_spin", _u8L("Rotate").c_str(), &m_editing_spin_deg, -180.f, 180.f,
+                               spin_fmt.c_str(), _u8L("Rotate around the vertical axis").c_str())) {
                 const Vec3d pos = st.transform.translation();
                 const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
                 st.transform = Eigen::Translation3d(pos) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
@@ -5214,41 +5199,23 @@ void GLGizmoColorStitchPainter::render_sticker_section()
                 m_parent.set_as_dirty();
                 m_parent.request_extra_frame();
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Rotate around the vertical axis").c_str());
             if (ImGui::IsItemDeactivatedAfterEdit())
                 m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-
-            ImGui::TextUnformatted(_u8L("Scale").c_str());
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(m_imgui->scaled(6.f));
-            if (ImGui::SliderFloat("##stk_scale", &m_editing_scale, 0.2f, 5.0f, "%.2fx")) {
+            if (neo_row_slider("##stk_scale", _u8L("Scale").c_str(), &m_editing_scale, 0.2f, 5.0f, "%.2fx",
+                               _u8L("Resize the sticker (uniform)").c_str())) {
                 const Vec3d pos = st.transform.translation();
                 const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
                 st.transform = Eigen::Translation3d(pos) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
                              * Eigen::Scaling(double(m_editing_scale));
-                // Nota: NO hace falta invalidar m_sticker_overlay_built_for — la
-                // geometría del overlay vive en frame LOCAL (1:1, sin escalar);
-                // el tamaño en pantalla sale del uniform view_model_matrix
-                // (que ya incluye Scaling(m_editing_scale) vía st.transform),
-                // releído cada frame en render_sticker_edit_overlay().
+                // La geometría del overlay vive en frame LOCAL: el tamaño en pantalla sale del
+                // view_model_matrix (que ya incluye la escala), releído cada frame.
                 m_parent.set_as_dirty();
                 m_parent.request_extra_frame();
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Resize the sticker (uniform)").c_str());
             if (ImGui::IsItemDeactivatedAfterEdit())
                 m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-        } else {
-            ImGui::SameLine();
-            if (m_imgui->button(_L("Edit placement")))
-                enter_sticker_edit((int)i);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Drag on the model to move it, then use the "
-                                             "slider to rotate — the colour preview shows "
-                                             "how it will land against everything else.").c_str());
+            ImGui::Unindent(1.65f * u);
         }
-
         ImGui::PopID();
     }
 
@@ -5281,9 +5248,8 @@ void GLGizmoColorStitchPainter::render_group_selector()
     auto& mgr = SurfaceEffectProfileManager::get();
 
     // s231 F6 — el techo de grupos se derivaba SÓLO de los nombres existentes, así que
-    // un grupo recién creado y todavía vacío desaparecía del combo en cuanto cambiabas
-    // el activo ("he creado un grupo y no está"). El hint lo mantiene vivo durante la
-    // sesión; seguir sin persistir grupos vacíos en el proyecto es lo correcto.
+    // un grupo recién creado y todavía vacío desaparecía ("he creado un grupo y no está").
+    // El hint lo mantiene vivo durante la sesión.
     int max_group = std::max(m_active_group, m_max_group_hint);
     for (const SurfaceEffectProfile& gp : mgr.list())
         max_group = std::max(max_group, cs_parse_group(gp.name));
@@ -5295,45 +5261,68 @@ void GLGizmoColorStitchPainter::render_group_selector()
         return c;
     };
 
-    m_imgui->text(_u8L("Palette group"));
-    ImGui::SameLine();
-
-    // NEOTKO — light mode readability for the dropdown popup (see ##kind combo above).
-    const bool _grp_light = !ImGuiWrapper::is_dark_mode();
-    if (_grp_light) {
-        ImGui::PushStyleColor(ImGuiCol_PopupBg,       ImGuiWrapper::COL_WINDOW_BG);
-        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0.00f, 0.59f, 0.53f, 0.45f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.00f, 0.59f, 0.53f, 0.30f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0.00f, 0.59f, 0.53f, 0.55f));
+    // s318 — cabecera de la biblioteca: sección "Library" con el contador del grupo activo, y debajo
+    // los grupos como FICHAS (antes un combo que había que abrir para ver cuántos había), el "+", la
+    // papelera y "Save all" — que antes vivía suelto debajo, fuera de su sitio.
+    const float u  = neo_u();
+    const float gb = 1.4f * u;
+    {
+        const std::string cnt = std::to_string(group_count(m_active_group));
+        neo_section_g(_u8L("Library").c_str(), Glyph::Group, cnt.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Swatches are re-predicted live using the TD values of Object & TD").c_str());
     }
-    ImGui::PushItemWidth(ImGui::GetFontSize() * 9.f);
-    char gid[40];
-    std::snprintf(gid, sizeof(gid), "%s %d", _u8L("Group").c_str(), m_active_group);
-    if (ImGui::BeginCombo("##cs_group", gid)) {
-        for (int g = 1; g <= max_group; ++g) {
-            char lbl[56];
-            std::snprintf(lbl, sizeof(lbl), "%s %d  (%d)", _u8L("Group").c_str(), g, group_count(g));
-            if (ImGui::Selectable(lbl, g == m_active_group)) m_active_group = g;
+    const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h  = 1.45f * u;
+    bool first = true;
+    for (int g = 1; g <= max_group; ++g) {
+        char lbl[48];
+        std::snprintf(lbl, sizeof(lbl), "%s %d", _u8L("Group").c_str(), g);
+        const std::string num = std::to_string(group_count(g));
+        const float w = ImGui::CalcTextSize(lbl).x + ImGui::CalcTextSize(num.c_str()).x + 1.4f * u;
+        if (!first) {
+            // Fichas que no caben pasan a la línea siguiente (hasta MAX_GROUPS = 10 grupos).
+            if (ImGui::GetItemRectMax().x + 3.f + w <= right) ImGui::SameLine(0.f, 3.f);
         }
-        ImGui::EndCombo();
+        first = false;
+        ImGui::PushID(g);
+        if (ImGui::InvisibleButton("##grp", ImVec2(w, h))) m_active_group = g;
+        const bool   hv = ImGui::IsItemHovered();
+        const bool   on = (g == m_active_group);
+        const ImVec2 ga = ImGui::GetItemRectMin(), gz = ImGui::GetItemRectMax();
+        if (on)      dl->AddRectFilled(ga, gz, neo_fade(NeoCol::Accent, 0.85f), 4.f);
+        else if (hv) dl->AddRectFilled(ga, gz, neo_col_u32(NeoCol::AccentGhost), 4.f);
+        if (!on)     dl->AddRect(ga, gz, neo_col_u32(hv ? NeoCol::AccentBright : NeoCol::SurfaceHi), 4.f, 0, 1.f);
+        const float ty = ga.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
+        dl->AddText(ImVec2(ga.x + 0.5f * u, ty), neo_col_u32(on ? NeoCol::Ink : NeoCol::TextDim), lbl);
+        dl->AddText(ImVec2(gz.x - 0.5f * u - ImGui::CalcTextSize(num.c_str()).x, ty),
+                    on ? neo_fade(NeoCol::Ink, 0.7f) : neo_col_u32(NeoCol::TextDim), num.c_str());
+        if (hv) ImGui::SetTooltip("%s %d  (%s)", _u8L("Group").c_str(), g, num.c_str());
+        ImGui::PopID();
     }
-    ImGui::PopItemWidth();
-    if (_grp_light) ImGui::PopStyleColor(5);
 
-    // (Sin BeginDisabled: esta versión de ImGui no lo trae → dim manual + guarda.)
+    // (Sin BeginDisabled en esta ImGui: atenuar con Alpha — neo_col_u32 lo respeta — y vetar el clic.)
     const bool can_add = max_group < GLGizmoColorStitchPainter::MAX_GROUPS;
-    ImGui::SameLine();
-    if (!can_add) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
-    if (m_imgui->button(_L("+ New group")) && can_add)
+    ImGui::SameLine(0.f, 3.f);
+    if (!can_add) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
+    if (neo_glyph_button("##grp_new", gb, Glyph::Plus, false, _u8L("Create a new palette group").c_str()) && can_add)
         m_active_group = std::min(max_group + 1, GLGizmoColorStitchPainter::MAX_GROUPS);
     if (!can_add) ImGui::PopStyleVar();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _u8L("Create a new palette group").c_str());
 
-    const bool can_del = m_active_group > 1;
-    ImGui::SameLine();
-    if (!can_del) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
-    if (m_imgui->button(_L("- Delete")) && can_del) {
+    // A la derecha: papelera del grupo y "Save all" (sólo si hay colores de trabajo sin guardar).
+    const bool        can_del  = m_active_group > 1;
+    const bool        unsaved  = has_unsaved_palettes();
+    const std::string save_lbl = _u8L("Save all");
+    const float       save_w   = unsaved ? ImGui::CalcTextSize(save_lbl.c_str()).x + 2.5f * u + 3.f : 0.f;
+    const float       block_w  = gb + save_w;
+    if (ImGui::GetItemRectMax().x + 0.8f * u + block_w <= right)
+        neo_same_line_at(right - block_w);
+    else
+        ImGui::SetCursorScreenPos(ImVec2(right - block_w, ImGui::GetCursorScreenPos().y));
+    if (!can_del) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
+    if (neo_glyph_button("##grp_del", gb, Glyph::Trash, true,
+                         _u8L("Delete group (its colours move to Group 1)").c_str()) && can_del) {
         // Borrar grupo = mover sus colores al Grupo 1 (sin perder trabajo).
         Plater::TakeSnapshot snap(wxGetApp().plater(), _u8L("Delete ColorStitch group"),
                                   UndoRedo::SnapshotType::GizmoAction);
@@ -5350,15 +5339,20 @@ void GLGizmoColorStitchPainter::render_group_selector()
         refresh_selector_palettes();
     }
     if (!can_del) ImGui::PopStyleVar();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Delete group (its colours move to Group 1)").c_str());
-
-    // Guía SUAVE (no bloquea): aviso si el grupo activo pasa de 30.
-    const int active_cnt = group_count(m_active_group);
-    if (active_cnt > 30) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.9f, 0.63f, 0.16f, 1.f), "%d/30", active_cnt);
+    if (unsaved) {
+        ImGui::SameLine(0.f, 3.f);
+        if (neo_text_button((save_lbl + "##save_all").c_str(), NeoBtn::Accent, true, Glyph::Save))
+            save_all_palettes();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Save every unsaved working colour into the active palette group").c_str());
     }
+
+    // Guía SUAVE (no bloquea): el grupo activo pasa de 30 colores. A la bandeja.
+    const int active_cnt = group_count(m_active_group);
+    if (active_cnt > 30)
+        tray(std::to_string(active_cnt) + "/30 " + _u8L("colours in this group"),
+             _u8L("A group this full is hard to browse. Consider splitting it into another group."));
+    ImGui::Dummy(ImVec2(0.f, 0.15f * u));
 }
 
 // s169 F0 — color-resultado predicho en vivo (top+penu compuestos contra el fondo
@@ -5401,36 +5395,94 @@ void GLGizmoColorStitchPainter::render_header()
     if (m_selected_profile_id != 0)
         m_active_slot = slot_for_selected_profile(/*assign_if_missing=*/false);
 
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float hs = ImGui::GetTextLineHeight() * 1.6f;
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    bool have = false;
+    // s318 — TARJETA del color activo (biselada, como las zonas del Pro): swatch grande, nombre, el
+    // estado honesto de s231 F0 como píldora, la receta en una línea, y New / Save / Duplicate como
+    // glifos a la derecha. Mismas acciones, mismos tooltips y la misma predicción en vivo de antes.
+    bool        have = false;
+    uint32_t    argb = 0;
+    std::string desc;
     if (m_has_active_recipe) {
-        // Re-predecir en vivo con los TD actuales (no usar m_active_recipe.rgb,
-        // que quedó congelado al seleccionar).
-        const uint32_t argb = predict_argb_for(m_active_recipe.top, m_active_recipe.penu);
-        dl->AddRectFilled(p, ImVec2(p.x + hs, p.y + hs),
-                          IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255));
+        // Re-predecir en vivo con los TD actuales (no usar m_active_recipe.rgb, congelado al elegir).
+        argb = predict_argb_for(m_active_recipe.top, m_active_recipe.penu);
         have = true;
+        desc = "Top " + zone_desc(m_active_recipe.top);
+        if (!m_active_recipe.penu.passes.empty())
+            desc += " · Penu " + zone_desc(m_active_recipe.penu);
     } else if (const SurfaceEffectProfile* sp_sel = mgr.find(m_selected_profile_id)) {
-        // Paleta guardada seleccionada → re-predecir su color-resultado en vivo
-        // desde el stack (los TD actuales mandan, no el preview_argb cacheado).
         const SurfacePassStack st_top  = SurfacePassStack::from_json(sp_sel->stack_top_json);
         const SurfacePassStack st_penu = SurfacePassStack::from_json(sp_sel->stack_penu_json);
-        const uint32_t argb = predict_argb_for(st_top, st_penu);
-        dl->AddRectFilled(p, ImVec2(p.x + hs, p.y + hs),
-                          IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255));
+        argb = predict_argb_for(st_top, st_penu);
         have = true;
+        desc = "Top " + zone_desc(st_top);
+        if (!st_penu.passes.empty())
+            desc += " · Penu " + zone_desc(st_penu);
     }
-    dl->AddRect(p, ImVec2(p.x + hs, p.y + hs),
-                have ? IM_COL32(255, 255, 255, 255) : IM_COL32(120, 120, 120, 255));
-    ImGui::Dummy(ImVec2(hs, hs));
 
-    // s169 F2 — "+ New": receta en blanco (1 pase Solid T1, penu vacío) y salta a
-    // Pro para editarla. set_active_recipe ya desenlaza el perfil anterior y
-    // siembra m_pro_top/penu (load_recipe_into_pro) — no duplicar esa lógica aquí.
-    ImGui::SameLine();
-    if (m_imgui->button(_L("+ New"))) {
+    // s231 F0 — el estado del color activo, con el vocabulario del sistema:
+    //   slot N (teal) = ya materializado aquí · ready (gris) = se creará al pintar ·
+    //   no colour (ámbar) = el clic no va a pintar. Es el único ámbar de la cabecera, y lo es porque
+    //   de verdad algo no va a funcionar.
+    std::string chip_txt, chip_tip;
+    ImU32       chip_col;
+    if (m_active_slot >= 1 && m_active_slot < MAX_SLOTS) {
+        chip_txt = _u8L("slot") + " " + std::to_string(m_active_slot);
+        chip_col = neo_col_u32(NeoCol::AccentBright);
+        chip_tip = _u8L("This colour already has a paint slot on the active "
+                        "object — painting applies it directly.");
+    } else if (m_has_active_recipe || m_selected_profile_id != 0) {
+        chip_txt = _u8L("ready");
+        chip_col = neo_col_u32(NeoCol::TextDim);
+        chip_tip = _u8L("Colour selected. It takes a paint slot on this object "
+                        "the first time you paint with it.");
+    } else {
+        chip_txt = _u8L("no colour");
+        chip_col = neo_col_u32(NeoCol::Warn);
+        chip_tip = _u8L("No colour selected — clicking the model will not paint. "
+                        "Pick one from the palette, the generator, or the "
+                        "eyedropper.");
+    }
+
+    const float  u   = neo_u();
+    const float  pad = 0.45f * u;
+    const float  sw  = 2.9f * u;
+    const float  bs  = 1.75f * u;
+    ImDrawList*  dl  = ImGui::GetWindowDrawList();
+    const ImVec2 c0  = ImGui::GetCursorScreenPos();
+    const float  cw  = ImGui::GetContentRegionAvail().x;
+    const ImVec2 c1(c0.x + cw, c0.y + sw + 2.f * pad);
+    neo_card_bg(dl, c0, c1, 0.9f * u, false, neo_col_u32(NeoCol::CanvasTop));
+
+    const ImVec2 s0(c0.x + pad, c0.y + pad), s1(s0.x + sw, s0.y + sw);
+    if (have) {
+        dl->AddRectFilled(s0, s1, IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255), 4.f);
+        dl->AddRect(s0, s1, IM_COL32(255, 255, 255, 46), 4.f, 0, 1.f);
+    } else {
+        // Sin color: rayado de "aquí no hay nada", no un cuadro negro que parece un color.
+        dl->AddRectFilled(s0, s1, neo_col_u32(NeoCol::Canvas), 4.f);
+        hatch_rect(dl, s0, s1, neo_fade(NeoCol::SurfaceHi, 0.7f), 5.f);
+        dl->AddRect(s0, s1, neo_col_u32(NeoCol::SurfaceHi), 4.f, 0, 1.f);
+    }
+
+    const float bx0 = c1.x - pad - (3.f * bs + 4.f);
+    const float tx  = s1.x + 0.6f * u;
+    const std::string name   = have ? (m_active_style.empty() ? _u8L("Custom") : m_active_style) : std::string("—");
+    const float       chip_w = ImGui::CalcTextSize(chip_txt.c_str()).x + 0.95f * u;
+    ImGui::SetCursorScreenPos(ImVec2(tx, s0.y + 0.12f * u));
+    ImGui::TextUnformatted(fit_text(name, std::max(2.f * u, bx0 - tx - chip_w - 0.9f * u)).c_str());
+    ImGui::SameLine(0.f, 0.45f * u);
+    neo_status_chip(chip_txt.c_str(), chip_col, false);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", chip_tip.c_str());
+    if (!desc.empty()) {
+        const float fs = 0.74f * u;
+        const std::string d = fit_text(desc, (bx0 - tx - 0.4f * u) / 0.74f);
+        dl->AddText(ImGui::GetFont(), fs, ImVec2(tx, s1.y - fs - 0.15f * u), neo_col_u32(NeoCol::TextDim), d.c_str());
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(bx0, c0.y + (c1.y - c0.y - bs) * 0.5f));
+    // s169 F2 — "+ New": receta en blanco (1 pase Solid T1, penu vacío) y salta a Pro.
+    if (neo_glyph_button("##cs_new", bs, Glyph::Plus, false,
+                         _u8L("Start a new colour from scratch in Pro mode").c_str())) {
         Slic3r::ColorSci::ColorRecipe recipe;
         Slic3r::SurfacePass sp;
         sp.kind       = Slic3r::SurfacePassKind::Solid;
@@ -5441,58 +5493,22 @@ void GLGizmoColorStitchPainter::render_header()
         set_active_recipe(recipe, _u8L("Custom"));
         m_department = 2;   // saltar a Pro para editar la receta recién creada
     }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Start a new colour from scratch in Pro mode").c_str());
-
-    // s174 — feedback usuario: el nombre editable no aportaba nada visible (el
-    // color activo ya se ve en el swatch) y "Pin to palette" pasa a llamarse
-    // simplemente "Save" — mismo save_active_as_palette() debajo, solo cambia
-    // el label. Renombrar NO toca el nombre guardado del perfil (que se sigue
-    // asignando internamente al materializar/promover).
-    ImGui::SameLine();
-    if (m_imgui->button(_L("Save")))
+    ImGui::SameLine(0.f, 2.f);
+    // s174 — "Save" (= save_active_as_palette, antes "Pin to palette").
+    if (neo_glyph_button("##cs_save", bs, Glyph::Save, false,
+                         _u8L("Keep this colour in the saved palette library "
+                              "(otherwise it is a temporary working colour).").c_str()))
         save_active_as_palette();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Keep this colour in the saved palette library "
-                                     "(otherwise it is a temporary working colour).").c_str());
-
-    // s231 F4 — "Duplicate": crea una COPIA independiente del color activo y la deja
-    // enlazada, para poder variarla en Pro sin destruir el original. Sin esto, editar
-    // un color guardado lo reescribía para todos los objetos que lo usaran (write-back
-    // live de s118) y no había forma evidente de derivar.
-    ImGui::SameLine();
-    if (m_imgui->button(_L("Duplicate")))
+    ImGui::SameLine(0.f, 2.f);
+    // s231 F4 — "Duplicate": copia independiente, enlazada, para variarla sin tocar el original.
+    if (neo_glyph_button("##cs_dup", bs, Glyph::Copy, false,
+                         _u8L("Make an independent copy of this colour and edit "
+                              "the copy in Pro — the original stays untouched "
+                              "everywhere it is already painted.").c_str()))
         duplicate_active_as_new();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Make an independent copy of this colour and edit "
-                                     "the copy in Pro — the original stays untouched "
-                                     "everywhere it is already painted.").c_str());
 
-    // s231 F0 — indicador HONESTO del estado del color activo. El swatch por sí solo
-    // mentía: seguía enseñando el color aunque el enlace se hubiera perdido (bug s209).
-    // Ahora se dice en qué estado está, con el mismo vocabulario del sistema:
-    //   · "slot N"   → ya materializado en ESTE objeto (pinta seguro)
-    //   · "ready"    → hay color elegido; el slot se creará en el primer trazo
-    //   · "no colour"→ no hay nada elegido: el click no va a pintar (y no borra)
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    if (m_active_slot >= 1 && m_active_slot < MAX_SLOTS) {
-        ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.5f, 1.f), "%s %d", _u8L("slot").c_str(), m_active_slot);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("This colour already has a paint slot on the active "
-                                         "object — painting applies it directly.").c_str());
-    } else if (m_has_active_recipe || m_selected_profile_id != 0) {
-        ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.f), "%s", _u8L("ready").c_str());
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Colour selected. It takes a paint slot on this object "
-                                         "the first time you paint with it.").c_str());
-    } else {
-        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1.f), "%s", _u8L("no colour").c_str());
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("No colour selected — clicking the model will not paint. "
-                                         "Pick one from the palette, the generator, or the "
-                                         "eyedropper.").c_str());
-    }
+    ImGui::SetCursorScreenPos(ImVec2(c0.x, c1.y));
+    ImGui::Dummy(ImVec2(cw, 0.f));
 
     // NEOTKO_MMU_COEXIST_TAG s235 F5a — el aviso que faltaba: donde el objeto ya tiene
     // pintura de MMU manda el MMU (precedencia del motor desde s234), así que ESA parte de
@@ -5519,12 +5535,11 @@ void GLGizmoColorStitchPainter::render_header()
                     (int) (100. * m_coexist.area_mm2 / m_coexist.sandwich_mm2 + 0.5)));
                 const std::string msg = into_u8(GUI::format(
                     _L("⚠ ~%1%%% of this paint is under MMU paint — flat there, no effect"), pct));
-                ImGui::TextColored(ImVec4(0.86f, 0.59f, 0.24f, 1.f), "%s", msg.c_str());
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", _u8L("Where MMU paint and Sandwich paint overlap, MMU "
-                                                 "wins: that area prints flat in its own filament, "
-                                                 "with no Sandwich effect. Move one of the two "
-                                                 "paints if you want the effect there.").c_str());
+                // s318 — a la bandeja (R7): aquí arriba empujaba toda la columna.
+                tray(cs_strip_warn(msg), _u8L("Where MMU paint and Sandwich paint overlap, MMU "
+                                              "wins: that area prints flat in its own filament, "
+                                              "with no Sandwich effect. Move one of the two "
+                                              "paints if you want the effect there."));
             }
         }
     }
@@ -5543,7 +5558,7 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
     std::vector<std::string> fcolors;   // solo para el draw_zone del tooltip
     { CS::Material mats[4]; gizmo_materials(mats, fcolors); }
 
-    m_imgui->text(m_desc["profiles"]);
+    // s318 — el título lo pone la sección "Library" (render_group_selector).
 
     const ModelObject* mo = m_c->selection_info()->model_object();
 
@@ -5582,17 +5597,24 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
     int profile_to_delete = 0;   // diferido: no mutar mgr.list() durante la iteración
     int profile_to_duplicate = 0;   // s231 F4 — idem (add() invalida la iteración)
     int profile_to_save      = 0;   // s231 F4 — promover un color de trabajo concreto
+    // s318 — el lado del swatch se REPARTE en el ancho (≈2.3u, nunca menos de 4 por fila), así la
+    // rejilla llena su pozo de borde a borde en vez de dejar un hueco a la derecha.
+    const float u       = neo_u();
     const float avail_w = ImGui::GetContentRegionAvail().x;
-    const float sw      = m_imgui->scaled(2.0f);                       // lado de cada swatch
-    const int   per_row = std::max(1, (int)std::floor(avail_w / (sw + 4.f)));
+    const float gap     = 4.f;
+    const float inner_w = avail_w - 8.f - ImGui::GetStyle().ScrollbarSize;   // padding 4+4 y la barra siempre visible
+    const int   per_row = std::max(4, (int)std::floor((inner_w + gap) / (2.3f * u + gap)));
+    const float sw      = std::max(1.2f * u, std::floor((inner_w - gap * float(per_row - 1)) / float(per_row)) - 0.5f);
     // NEOTKO_STICKER_TAG — feedback usuario: la rejilla se comía media pantalla
     // y dejaba la sección "Stickers (SVG)" (debajo) sin aire. Limitada a ~2
     // filas de swatches (calculado desde `sw`, no un alto fijo, para que siga
     // siendo robusto a DPI/escala); el resto hace scroll como siempre.
     const float grid_h  = 2.f * (sw + 4.f) + 8.f;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2.f, 2.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.f);          // s318 — pozo, sin borde
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.f, 4.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, neo_col(NeoCol::Canvas));
     // AlwaysVerticalScrollbar: reservar SIEMPRE el ancho de la scrollbar (evita
     // el "fliqueo" de s137/s138 — su aparición/desaparición cambiaría el ancho
     // disponible → cambiaría per_row/tamaño → oscilación cada frame).
@@ -5600,7 +5622,7 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
                       ImGuiWindowFlags_AlwaysVerticalScrollbar);
     if (mgr.size() == 0) {
         ImGui::PushTextWrapPos(0.f);
-        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), m_desc["no_profiles"]);
+        m_imgui->text_colored(neo_col(NeoCol::TextDim), m_desc["no_profiles"]);
         ImGui::PopTextWrapPos();
     } else {
         ImDrawList* ldl = ImGui::GetWindowDrawList();
@@ -5671,19 +5693,43 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
             {
                 const uint32_t argb = predict_argb_for(st_top, st_penu);
                 ldl->AddRectFilled(sp, ImVec2(sp.x + sw, sp.y + sw),
-                                   IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255));
+                                   IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255), 3.f);
             }
-            ldl->AddRect(sp, ImVec2(sp.x + sw, sp.y + sw),
-                         sel ? IM_COL32(255, 255, 255, 255)
-                             : (hov ? IM_COL32(210, 210, 210, 255) : IM_COL32(20, 20, 20, 255)),
-                         0.f, 0, sel ? 2.5f : 1.f);
-            // NEOTKO_COLORSTITCH_TAG — s118: marca ámbar = color de TRABAJO (auto, no
-            // guardado) que ocupa un slot; distinguible de las paletas guardadas para
-            // borrarlo sin miedo (right-click→Delete).
-            if (p.auto_generated)
-                ldl->AddRect(ImVec2(sp.x + 2.f, sp.y + 2.f),
-                             ImVec2(sp.x + sw - 2.f, sp.y + sw - 2.f),
-                             IM_COL32(230, 160, 40, 220), 0.f, 0, 2.0f);
+            // s318 — marcas del swatch, todas leídas del propio perfil:
+            //   · elegido = anillo teal (antes borde blanco de 2.5 px);
+            //   · color de TRABAJO (auto, no guardado) = muesca en la esquina. Antes era un borde
+            //     ámbar, pero el ámbar es de avisos y un color sin guardar no es un error;
+            //   · tipo de efecto (rayas = ColorStitch, rampa = PathBlend) en la esquina de abajo;
+            //   · punto teal = este color ocupa slot en el objeto / los marcados.
+            if (sel)
+                neo_sel_ring(ldl, sp, ImVec2(sp.x + sw, sp.y + sw), 3.f);
+            else
+                ldl->AddRect(sp, ImVec2(sp.x + sw, sp.y + sw),
+                             hov ? neo_col_u32(NeoCol::TextDim) : IM_COL32(0, 0, 0, 90), 3.f, 0, 1.f);
+            if (p.auto_generated) {
+                const float k = sw * 0.34f;
+                ldl->AddTriangleFilled(sp, ImVec2(sp.x + k, sp.y), ImVec2(sp.x, sp.y + k), neo_fade(NeoCol::Ink, 0.85f));
+            }
+            {
+                bool has_pb = false, has_cs = false;
+                for (const SurfacePassStack* zs : { &st_top, &st_penu })
+                    for (const SurfacePass& pp : zs->passes) {
+                        has_pb |= (pp.kind == SurfacePassKind::PathBlend);
+                        has_cs |= (pp.kind == SurfacePassKind::ColorStitch);
+                    }
+                if (has_pb || has_cs) {
+                    const float  m  = sw * 0.44f;
+                    const ImVec2 m0(sp.x + sw - m - 1.f, sp.y + sw - m - 1.f), m1(sp.x + sw - 1.f, sp.y + sw - 1.f);
+                    ldl->AddRectFilled(m0, m1, neo_fade(NeoCol::Canvas, 0.78f), 2.f);
+                    draw_glyph(ldl, ImVec2(m0.x + m * 0.08f, m0.y + m * 0.08f), m * 0.84f,
+                               has_pb ? Glyph::KPbFull : Glyph::KStitch, neo_col_u32(NeoCol::Ink));
+                }
+            }
+            if (occupies_slot) {
+                const ImVec2 dc(sp.x + sw - 4.5f, sp.y + 4.5f);
+                ldl->AddCircleFilled(dc, 3.2f, neo_col_u32(NeoCol::Canvas), 10);
+                ldl->AddCircleFilled(dc, 2.2f, neo_col_u32(NeoCol::AccentBright), 10);
+            }
 
             // Hover → cajita sandwich (Top sobre Penu) como preview de
             // verificación + nombre / zonas / slot.
@@ -5751,7 +5797,37 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
         }
     }
     ImGui::EndChild();
-    ImGui::PopStyleVar(2);   // ChildBorderSize + WindowPadding de la rejilla
+    ImGui::PopStyleColor(1);
+    ImGui::PopStyleVar(3);   // ChildBorderSize + WindowPadding + ItemSpacing de la rejilla
+
+    // s318 — la leyenda de las marcas, una línea pequeña: sin ella la muesca y la esquina se adivinan.
+    {
+        ImDrawList*  ldl = ImGui::GetWindowDrawList();
+        const float  fs  = 0.7f * u;
+        const float  gs  = 0.8f * u;
+        ImFont*      fnt = ImGui::GetFont();
+        ImVec2       q   = ImGui::GetCursorScreenPos();
+        q.y += 0.15f * u;
+        const ImU32  dim = neo_col_u32(NeoCol::TextDim);
+        auto item = [&](int kind, const std::string& txt) {
+            if (kind == 0) {
+                ldl->AddRectFilled(ImVec2(q.x, q.y + 0.1f * u), ImVec2(q.x + gs, q.y + 0.1f * u + gs), neo_col_u32(NeoCol::SurfaceHi), 2.f);
+                ldl->AddTriangleFilled(ImVec2(q.x, q.y + 0.1f * u), ImVec2(q.x + gs * 0.5f, q.y + 0.1f * u),
+                                       ImVec2(q.x, q.y + 0.1f * u + gs * 0.5f), neo_col_u32(NeoCol::Ink));
+            } else if (kind == 1) {
+                ldl->AddCircleFilled(ImVec2(q.x + gs * 0.5f, q.y + 0.1f * u + gs * 0.5f), 2.5f, neo_col_u32(NeoCol::AccentBright), 10);
+            } else {
+                draw_glyph(ldl, ImVec2(q.x, q.y + 0.1f * u), gs, kind == 2 ? Glyph::KStitch : Glyph::KPbFull, dim);
+            }
+            ldl->AddText(fnt, fs, ImVec2(q.x + gs + 0.25f * u, q.y + 0.1f * u), dim, txt.c_str());
+            q.x += gs + 0.25f * u + fnt->CalcTextSizeA(fs, FLT_MAX, 0.f, txt.c_str()).x + 0.8f * u;
+        };
+        item(0, _u8L("not saved"));
+        item(1, _u8L("on this object"));
+        item(2, _u8L("ColorStitch"));
+        item(3, _u8L("PathBlend"));
+        ImGui::Dummy(ImVec2(avail_w, gs + 0.35f * u));
+    }
 
     // s231 F4 — acciones diferidas del contextual, fuera de la iteración de mgr.list()
     // (add/rename reordenan o invalidan el contenedor).
@@ -5827,11 +5903,8 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
             }
             if (free_everywhere) any_free = true;
         }
-        if (!any_free) {
-            ImGui::PushTextWrapPos(0.f);
-            m_imgui->text_colored(ImVec4(0.9f, 0.5f, 0.1f, 1.0f), m_desc["slots_full"]);
-            ImGui::PopTextWrapPos();
-        }
+        if (!any_free)
+            tray(into_u8(m_desc["slots_full"]));   // s318 — a la bandeja
     }
 }
 // NEOTKO_COLORSTITCH_TAG_END
@@ -5868,63 +5941,95 @@ void GLGizmoColorStitchPainter::render_slots_in_use()
         }
     }
 
-    const bool open = ImGui::CollapsingHeader(_u8L("In use on this object").c_str());
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Every paint slot this object is spending, with the colour "
-                                     "it holds. Freeing a slot removes that colour's paint from "
-                                     "this object only.").c_str());
-    if (!open) return;
-
+    // s318 — sección siempre visible (antes plegable) con el contador de slots a la derecha.
+    {
+        const std::string aside = std::to_string(in_use.size()) + " " + _u8L("slots");
+        neo_section_g(_u8L("In use on this object").c_str(), Glyph::Target, aside.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Every paint slot this object is spending, with the colour "
+                                         "it holds. Freeing a slot removes that colour's paint from "
+                                         "this object only.").c_str());
+    }
     if (in_use.empty()) {
-        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.f), _u8L("Nothing painted yet.").c_str());
+        m_imgui->text_colored(neo_col(NeoCol::TextDim), _u8L("Nothing painted yet.").c_str());
         return;
     }
 
     int slot_to_free = 0, pid_to_use = 0;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float sw = ImGui::GetTextLineHeight();
+    const float u  = neo_u();
+    const float fh = ImGui::GetFrameHeight();
+    const float gb = 1.4f * u;
+    const float sq = 1.2f * u;
+    int max_faces = 1;
+    for (const auto& kv : in_use) max_faces = std::max(max_faces, kv.second.second);
     for (const auto& kv : in_use) {
         const int slot = kv.first, pid = kv.second.first, faces = kv.second.second;
         const SurfaceEffectProfile* p = mgr.find(pid);
         ImGui::PushID(4000 + slot);
         ImGui::BeginGroup();   // s232 — la fila entera como zona de hover del realce
 
-        const ImVec2 q = ImGui::GetCursorScreenPos();
+        const ImVec2 r0 = ImGui::GetCursorScreenPos();
+        const float  rw = ImGui::GetContentRegionAvail().x;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("s%d", slot);
+        neo_same_line_at(r0.x + 2.2f * u);
+
         uint32_t argb = 0xFF808080u;
         if (p) {
             const SurfacePassStack st  = SurfacePassStack::from_json(p->stack_top_json);
             const SurfacePassStack stp = SurfacePassStack::from_json(p->stack_penu_json);
             argb = predict_argb_for(st, stp);
         }
-        dl->AddRectFilled(q, ImVec2(q.x + sw, q.y + sw),
-                          IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255));
-        dl->AddRect(q, ImVec2(q.x + sw, q.y + sw),
-                    (pid == m_selected_profile_id) ? IM_COL32(255, 255, 255, 255)
-                                                   : IM_COL32(20, 20, 20, 255));
-        ImGui::Dummy(ImVec2(sw, sw));
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("s%d  %s", slot, p ? cs_strip_group(p->name).c_str() : "?");
+        {
+            const ImVec2 q = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(sq, fh));
+            const ImVec2 a(q.x, q.y + (fh - sq) * 0.5f), z(a.x + sq, a.y + sq);
+            dl->AddRectFilled(a, z, IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255), 3.f);
+            if (pid == m_selected_profile_id) neo_sel_ring(dl, a, z, 3.f);
+        }
+        ImGui::SameLine(0.f, 0.45f * u);
+
+        // nombre + medidor de caras (relativo al slot que más gasta en este objeto)
+        char fbuf[24];
+        std::snprintf(fbuf, sizeof(fbuf), "%d", faces);
+        const float fw     = faces > 0 ? ImGui::CalcTextSize(fbuf).x + 0.5f * u : 0.f;
+        const float btns_w = 2.f * gb + 2.f;
+        const ImVec2 np    = ImGui::GetCursorScreenPos();
+        const float name_w = std::max(2.f * u, r0.x + rw - btns_w - fw - 0.5f * u - np.x);
+        const std::string name = p ? cs_strip_group(p->name) : std::string("?");
+        dl->AddText(ImVec2(np.x, np.y + 0.1f * u), neo_col_u32(NeoCol::Ink), fit_text(name, name_w).c_str());
+        {
+            const float my = np.y + fh - 0.3f * u;
+            dl->AddLine(ImVec2(np.x, my), ImVec2(np.x + name_w, my), neo_col_u32(NeoCol::SurfaceHi), 3.f);
+            if (faces > 0)
+                dl->AddLine(ImVec2(np.x, my), ImVec2(np.x + name_w * float(faces) / float(max_faces), my),
+                            neo_col_u32(NeoCol::Accent), 3.f);
+        }
+        ImGui::Dummy(ImVec2(name_w, fh));
         if (faces > 0) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.f), "(%d)", faces);
+            ImGui::SameLine(0.f, 0.4f * u);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", fbuf);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", _u8L("Painted facets on this object").c_str());
         }
-        ImGui::SameLine();
-        if (m_imgui->button(_L("Use")))  pid_to_use  = pid;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Make this the active paint colour").c_str());
-        ImGui::SameLine();
-        if (m_imgui->button(_L("Free"))) slot_to_free = slot;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Erase this colour from this object and release its slot").c_str());
+        neo_same_line_at(r0.x + rw - btns_w);
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, r0.y + (fh - gb) * 0.5f));
+        if (neo_glyph_button("##use", gb, Glyph::Target, false, _u8L("Make this the active paint colour").c_str()))
+            pid_to_use = pid;
+        ImGui::SameLine(0.f, 2.f);
+        if (neo_glyph_button("##free", gb, Glyph::Trash, true,
+                             _u8L("Erase this colour from this object and release its slot").c_str()))
+            slot_to_free = slot;
         ImGui::EndGroup();
-        // s232 — hover en la fila = "enséñame dónde está este slot". Aquí es donde
-        // más se pedía: el inventario ya decía cuántas caras gasta cada slot, pero
-        // no cuáles.
-        if (ImGui::IsItemHovered())
+        // s232 — hover en la fila = "enséñame dónde está este slot" en el visor.
+        if (ImGui::IsItemHovered()) {
             hover_slot(slot);
+            dl->AddRectFilled(ImVec2(ImGui::GetItemRectMin().x - 3.f, ImGui::GetItemRectMin().y - 1.f),
+                              ImVec2(ImGui::GetItemRectMax().x + 3.f, ImGui::GetItemRectMax().y + 1.f),
+                              neo_col_u32(NeoCol::AccentGhost), 4.f);
+        }
         ImGui::PopID();
     }
 
@@ -5995,13 +6100,11 @@ void GLGizmoColorStitchPainter::render_object_department()
     // Editarla dispara el mismo save()+SCHEDULE_BACKGROUND_PROCESS de la Fase 1 de
     // s167/s168 → apply → resolve_mixed_filament_sandwich_profiles() recalcula → el
     // live recipe de abajo se refresca solo (próximo frame post-reslice).
-    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.f), "(TD)");
+    // s318 — sección con nombre en vez de "(TD)" suelto. TD vive SOLO aquí (decisión del usuario).
+    neo_section_g(_u8L("Transmission distance").c_str(), Glyph::Spot);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Transmission distance").c_str());
+        ImGui::SetTooltip("%s", _u8L("Swatches below are re-predicted live using these TD values").c_str());
     render_td_grid();
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
 
     bool mf_mode_on = false;
     if (mo) {
@@ -6009,8 +6112,10 @@ void GLGizmoColorStitchPainter::render_object_department()
             mf_mode_on = mf_opt->value;
     }
 
+    neo_section_g(_u8L("MixedFilament Object").c_str(), Glyph::Mix);
     m_imgui->disabled_begin(!mf_has_mixed_filament);
-    if (ImGui::Checkbox(_u8L("MixedFilament Object").c_str(), &mf_mode_on) && mo) {
+    if (neo_glyph_toggle_row("##mf_obj", Glyph::Cube, _u8L("MixedFilament Object").c_str(), &mf_mode_on)
+        && mo && mf_has_mixed_filament) {
         wxGetApp().plater()->take_snapshot("Toggle MixedFilament Object");
         mo->config.set_key_value("mixed_filament_sandwich_mode", new ConfigOptionBool(mf_mode_on));
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -6025,7 +6130,7 @@ void GLGizmoColorStitchPainter::render_object_department()
             : _u8L("Assign a MixedFilament to this object's extruder first.").c_str());
 
     if (mf_has_mixed_filament) {
-        ImGui::SameLine();
+        // s318 — el swatch va en su propia línea: la fila del interruptor llega hasta el borde.
         // Swatch: resolved profile from the last apply (best-effort — may be one
         // apply-cycle stale right after editing the MixedFilament itself).
         uint32_t mf_argb = 0;
@@ -6044,8 +6149,8 @@ void GLGizmoColorStitchPainter::render_object_department()
         if (mf_argb) {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const ImU32 col = IM_COL32((mf_argb >> 16) & 0xFF, (mf_argb >> 8) & 0xFF, mf_argb & 0xFF, 255);
-            dl->AddRectFilled(p0, ImVec2(p0.x + sw, p0.y + sw), col);
-            dl->AddRect(p0, ImVec2(p0.x + sw, p0.y + sw), IM_COL32(0, 0, 0, 80));
+            dl->AddRectFilled(p0, ImVec2(p0.x + sw, p0.y + sw), col, 3.f);
+            dl->AddRect(p0, ImVec2(p0.x + sw, p0.y + sw), IM_COL32(0, 0, 0, 80), 3.f);
         }
         ImGui::Dummy(ImVec2(sw, sw));
     }
@@ -6053,21 +6158,19 @@ void GLGizmoColorStitchPainter::render_object_department()
 
     if (!mf_has_mixed_filament) {
         ImGui::PushTextWrapPos(m_imgui->scaled(16.f));
-        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.f),
+        m_imgui->text_colored(neo_col(NeoCol::TextDim),
             _u8L("Assign a MixedFilament to this object's extruder to use this department."));
         ImGui::PopTextWrapPos();
         return;
     }
     if (!mf_mode_on) {
         ImGui::PushTextWrapPos(m_imgui->scaled(16.f));
-        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.f),
+        m_imgui->text_colored(neo_col(NeoCol::TextDim),
             _u8L("Turn on \"MixedFilament Object\" above to replace this object's painting "
                  "with an auto-generated sandwich approximating its MixedFilament colour."));
         ImGui::PopTextWrapPos();
         return;
     }
-
-    ImGui::Separator();
 
     // ---- Live recipe --------------------------------------------------------
     int pid = 0;
@@ -6080,9 +6183,9 @@ void GLGizmoColorStitchPainter::render_object_department()
         }
     }
 
-    m_imgui->text(_u8L("Live recipe"));
+    neo_section_g(_u8L("Live recipe").c_str(), Glyph::TabPro);
     if (pid == 0) {
-        m_imgui->text_colored(ImVec4(0.7f, 0.7f, 0.7f, 1.f),
+        m_imgui->text_colored(neo_col(NeoCol::TextDim),
             _u8L("No recipe resolved yet — slice once to resolve"));
     } else if (const SurfaceEffectProfile* p = SurfaceEffectProfileManager::get().find(pid)) {
         const SurfacePassStack st_top  = SurfacePassStack::from_json(p->stack_top_json);
@@ -6139,7 +6242,7 @@ void GLGizmoColorStitchPainter::render_object_department()
                               IM_COL32((int)std::min(255.f, out[0] * 255.f),
                                        (int)std::min(255.f, out[1] * 255.f),
                                        (int)std::min(255.f, out[2] * 255.f), 255));
-            dl->AddRect(rp, ImVec2(rp.x + rh, rp.y + rh), IM_COL32(255, 255, 255, 255));
+            neo_halo(dl, rp, ImVec2(rp.x + rh, rp.y + rh), 3.f);
             ImGui::Dummy(ImVec2(rh, rh));
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
@@ -6147,14 +6250,12 @@ void GLGizmoColorStitchPainter::render_object_department()
         }
     }
 
-    ImGui::Separator();
-
     // s230 — la rejilla (TD) que se repetía aquí subió al principio de la función
     // (siempre visible, fuera de los `return` tempranos). Ver comentario allí.
 
     ImGui::Spacing();
     ImGui::PushTextWrapPos(m_imgui->scaled(16.f));
-    m_imgui->text_colored(ImVec4(0.5f, 0.5f, 0.5f, 1.f),
+    m_imgui->text_colored(neo_col(NeoCol::TextDim),
         _u8L("Passes shown come from the last slice apply — may lag one cycle "
              "right after editing the MixedFilament itself."));
     ImGui::PopTextWrapPos();
@@ -6164,102 +6265,84 @@ void GLGizmoColorStitchPainter::render_object_department()
 // dentro del departamento Palette (donde eran inalcanzables desde Pro/Object aunque el
 // pincel siguiera pintando) para dibujarse una sola vez, fuera del switch. Mismo
 // contenido y mismos anchos de slider que tenían; sólo cambia dónde se dibujan.
-void GLGizmoColorStitchPainter::render_brush_and_view(float sliders_left_width, float sliders_width,
-                                                   float drag_left_width, float slider_icon_width)
+void GLGizmoColorStitchPainter::render_brush_and_view()
 {
-    if (!ImGui::CollapsingHeader(_u8L("Brush & view").c_str()))
+    // s318 — sección plegable del lenguaje nuevo (antes CollapsingHeader de Orca), y los dos
+    // deslizadores SIN la cajita numérica de al lado (decisión del usuario): el valor va dentro
+    // del deslizador y se teclea con Ctrl+clic, que es nativo de ImGui.
+    if (!neo_section_toggle("##cmp_brush_view", _u8L("Brush & view").c_str(), Glyph::Paint, &m_brush_open))
         return;
 
-    ImGui::AlignTextToFramePadding();
-    m_imgui->text(m_desc["smart_fill_angle"]);
     const std::string fmt = std::string("%.1f") + I18N::translate_utf8("°", "deg");
-    ImGui::SameLine(sliders_left_width);
-    ImGui::PushItemWidth(sliders_width);
-    if (m_imgui->bbl_slider_float_style("##cmp_smart_fill_angle", &m_smart_fill_angle,
-                                        SmartFillAngleMin, SmartFillAngleMax, fmt.c_str(), 1.0f, true))
+    if (neo_row_slider("##cmp_smart_fill_angle", into_u8(m_desc.at("smart_fill_angle")).c_str(),
+                       &m_smart_fill_angle, SmartFillAngleMin, SmartFillAngleMax, fmt.c_str(), nullptr))
         for (auto& sel : m_triangle_selectors) {
             sel->seed_fill_unselect_all_triangles();
             sel->request_update_render_data();
         }
-    ImGui::SameLine(drag_left_width + sliders_left_width);
-    ImGui::PushItemWidth(1.5f * slider_icon_width);
-    ImGui::BBLDragFloat("##cmp_smart_fill_angle_input", &m_smart_fill_angle, 0.05f, 0.f, 0.f, "%.2f");
 
     // ---- Clipping plane ----
-    if (m_c->object_clipper()->get_position() == 0.f) {
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(m_desc.at("clipping_of_view"));
-    } else {
-        if (m_imgui->button(m_desc.at("reset_direction")))
-            wxGetApp().CallAfter([this]() { m_c->object_clipper()->set_position_by_ratio(-1., false); });
+    {
+        auto clp = float(m_c->object_clipper()->get_position());
+        if (neo_row_slider("##cmp_clp", into_u8(m_desc.at("clipping_of_view")).c_str(), &clp, 0.f, 1.f, "%.2f", nullptr))
+            m_c->object_clipper()->set_position_by_ratio(clp, true);
+        if (m_c->object_clipper()->get_position() != 0.f) {
+            // El deslizador ocupa la fila entera: el reset va debajo, alineado con él.
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + cs_label_col());
+            if (neo_text_button(into_u8(m_desc.at("reset_direction")).c_str(), NeoBtn::Ghost))
+                wxGetApp().CallAfter([this]() { m_c->object_clipper()->set_position_by_ratio(-1., false); });
+        }
     }
-    auto clp = float(m_c->object_clipper()->get_position());
-    ImGui::SameLine(sliders_left_width);
-    ImGui::PushItemWidth(sliders_width);
-    const bool sl_clp = m_imgui->bbl_slider_float_style("##cmp_clp", &clp, 0.f, 1.f, "%.2f", 1.0f, true);
-    ImGui::SameLine(drag_left_width + sliders_left_width);
-    ImGui::PushItemWidth(1.5f * slider_icon_width);
-    const bool dr_clp = ImGui::BBLDragFloat("##cmp_clp_input", &clp, 0.05f, 0.f, 0.f, "%.2f");
-    if (sl_clp || dr_clp) m_c->object_clipper()->set_position_by_ratio(clp, true);
+    ImGui::Dummy(ImVec2(0.f, 0.2f * neo_u()));
 
-    // s232 — realce del slot en el viewport. Es una AYUDA, no una vista del
-    // resultado, así que tiene que poder apagarse para comprobar el preview
-    // limpio (mismo criterio que "Preview weave").
-    if (m_imgui->bbl_checkbox(_L("Highlight active colour"), m_slot_highlight)) {
-        m_hl_dirty   = true;
-        m_auto_dirty = true;   // s280d
-        m_parent.set_as_dirty();
+    // s232 — realce del slot en el viewport (una AYUDA: tiene que poder apagarse). El contador que
+    // antes iba al lado entra en la etiqueta; "not painted here" es un aviso y va a la bandeja.
+    {
+        std::string lbl = _u8L("Highlight active colour");
+        if (m_slot_highlight && m_hl_slot_built > 0) {
+            if (m_hl_facets > 0)
+                lbl += "  · s" + std::to_string(m_hl_slot_built) + " — " + std::to_string(m_hl_facets);
+            else
+                tray("s" + std::to_string(m_hl_slot_built) + " — " + _u8L("not painted here"));
+        }
+        if (neo_glyph_toggle_row("##cmp_hl", Glyph::Spot, lbl.c_str(), &m_slot_highlight,
+                                 _u8L("Outline in the 3D view the faces painted with the active "
+                                      "colour — or with the one under the cursor while hovering a "
+                                      "swatch or a row of \"In use on this object\".").c_str())) {
+            m_hl_dirty   = true;
+            m_auto_dirty = true;   // s280d
+            m_parent.set_as_dirty();
+        }
     }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Outline in the 3D view the faces painted with the active "
-                                     "colour — or with the one under the cursor while hovering a "
-                                     "swatch or a row of \"In use on this object\".").c_str());
-    if (m_slot_highlight && m_hl_slot_built > 0) {
-        // Contador: "está activo pero no se ve nada" tiene dos causas muy
-        // distintas (no está pintado en ninguna parte / está detrás), y sin este
-        // número no se distinguen.
-        ImGui::SameLine();
-        if (m_hl_facets > 0)
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.f), "s%d — %d", m_hl_slot_built, m_hl_facets);
-        else
-            ImGui::TextColored(ImVec4(0.9f, 0.63f, 0.16f, 1.f), "s%d — %s", m_hl_slot_built,
-                               _u8L("not painted here").c_str());
+    // s280d — marcador de ángulo AUTO (contorno violeta que pulsa).
+    {
+        std::string lbl = _u8L("Mark bands with no angle");
+        if (m_auto_marker && m_auto_slots > 0)
+            lbl += "  · " + std::to_string(m_auto_slots);
+        if (neo_glyph_toggle_row("##cmp_auto", Glyph::NoAngle, lbl.c_str(), &m_auto_marker,
+                                 _u8L("Outline in violet, with a slow pulse, the zones whose fill "
+                                      "angle is left on auto (-1). There the slicer flips the angle "
+                                      "by 90 degrees every other layer, so no single direction can "
+                                      "be previewed. Applies to ColorStitch and to PathBlend — in "
+                                      "PathBlend the angle also decides the gradient, not just the "
+                                      "line direction. Set a fixed angle (wheel over the bar) to "
+                                      "lock it.").c_str())) {
+            m_auto_dirty = true;
+            m_parent.set_as_dirty();
+        }
     }
-
-    // s280d — marcador de ángulo AUTO. Reemplaza al parpadeo del tejido (s280b/s280c):
-    // el mismo aviso, pero en el contorno y sin marear la vista ni forzar repintado
-    // continuo. Apagable como el resto de ayudas del viewport.
-    if (m_imgui->bbl_checkbox(_L("Mark bands with no angle"), m_auto_marker)) {
-        m_auto_dirty = true;
-        m_parent.set_as_dirty();
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Outline in violet, with a slow pulse, the zones whose fill "
-                                     "angle is left on auto (-1). There the slicer flips the angle "
-                                     "by 90 degrees every other layer, so no single direction can "
-                                     "be previewed. Applies to ColorStitch and to PathBlend — in "
-                                     "PathBlend the angle also decides the gradient, not just the "
-                                     "line direction. Set a fixed angle (wheel over the bar) to "
-                                     "lock it.").c_str());
-    if (m_auto_marker && m_auto_slots > 0) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.78f, 0.36f, 0.96f, 1.f), "%d", m_auto_slots);
-    }
-
-    // s233 — la pintura ya se ve en la vista 3D con el gizmo CERRADO (color plano por
-    // slot; el degradado sigue siendo cosa del preview de aquí dentro). El interruptor
-    // vive junto a las demás ayudas de vista y es global, no por objeto.
+    // s233 — la pintura visible con el gizmo CERRADO (global, no por objeto).
     {
         auto* ac = wxGetApp().app_config;
         bool show_outside = ColorStitchPaintPreview::show_outside_gizmo();
-        if (m_imgui->bbl_checkbox(_L("Keep paint visible outside this gizmo"), show_outside)) {
+        if (neo_glyph_toggle_row("##cmp_outside", Glyph::Eye, _u8L("Keep paint visible outside this gizmo").c_str(),
+                                 &show_outside,
+                                 _u8L("Show the painted zones in the normal 3D view, with this "
+                                      "gizmo closed. Flat colour per slot — the woven/gradient "
+                                      "preview only exists inside the painter.").c_str())) {
             if (ac) ac->set("neotko_show_paint_outside_gizmo", show_outside ? "1" : "0");
             m_parent.set_as_dirty();
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Show the painted zones in the normal 3D view, with this "
-                                         "gizmo closed. Flat colour per slot — the woven/gradient "
-                                         "preview only exists inside the painter.").c_str());
     }
 }
 
@@ -6283,12 +6366,12 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
 #else
         GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
 #endif
-        ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
+        neo_push_window_style();   // s318 — antes del Begin (GizmoNeotkoStyle.hpp explica por qué)
         GizmoImguiBegin(get_name(),
                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize
                       | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
-        m_imgui->text_colored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f), "(WIP Beta)");
-        ImGui::Separator();
+        neo_push_panel_style();
+        // s317 fase E: fuera el "(WIP Beta)".
         ImGui::PushTextWrapPos(m_imgui->scaled(16.f));
         // s231 F2 — el texto prometía algo que el código impedía (ver la nota de
         // on_set_state): en modo pintar el click sobre un objeto no marcado se
@@ -6298,9 +6381,11 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
                            "(Shift-click removes one). Then pick a colour and paint — "
                            "you can paint several objects in one go."));
         ImGui::PopTextWrapPos();
+        ImGui::Spacing();
         render_tool_row();
+        neo_pop_panel_style();
         GizmoImguiEnd();
-        ImGuiWrapper::pop_toolbar_style();
+        neo_pop_window_style();
         return;
     }
 
@@ -6312,109 +6397,87 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
 #endif
 
-    ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
+    neo_push_window_style();   // s318 — antes del Begin (GizmoNeotkoStyle.hpp explica por qué)
+    // s319 — RED DE SEGURIDAD: la ventana es AlwaysAutoResize, y cualquier item que caiga fuera del
+    // borde la ensancha, lo que mueve el borde, lo que… (el panel creció hasta tapar el 3D). Con un
+    // tope de ancho, un descuido futuro se ve como algo recortado, no como el panel comiéndose la vista.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.f, 0.f), ImVec2(34.f * ImGui::GetFontSize(), FLT_MAX));
     GizmoImguiBegin(get_name(),
                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize
                   | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    // 🚨 s318 — el estilo del panel se empuja y se saca AQUÍ, y el cuerpo vive en su propia función:
+    // un PushStyleColor cuyo Pop se salta un `return` contamina TODAS las ventanas ImGui de Orca.
+    neo_push_panel_style();
+    neo_set_label_col_fn(&cs_label_col);
+    render_panel_body(x, y);
+    neo_pop_panel_style();
+    GizmoImguiEnd();
+    neo_pop_window_style();
+}
 
-    const float space_size            = m_imgui->get_style_scaling() * 8;
-    const float clipping_slider_left  = std::max(
-        m_imgui->calc_text_size(m_desc.at("clipping_of_view")).x + m_imgui->scaled(1.5f),
-        m_imgui->calc_text_size(m_desc.at("reset_direction")).x + m_imgui->scaled(1.5f)
-            + ImGui::GetStyle().FramePadding.x * 2);
-    const float smart_fill_slider_left = m_imgui->calc_text_size(m_desc.at("smart_fill_angle")).x  + m_imgui->scaled(1.5f);
-    const float sliders_left_width     = std::max(smart_fill_slider_left, clipping_slider_left);
-    const float sliders_width          = m_imgui->scaled(7.0f);
-    const float slider_icon_width      = m_imgui->get_slider_icon_size().x;
-    const float drag_left_width        = ImGui::GetStyle().WindowPadding.x + sliders_width - space_size;
-    const float window_width           = std::max(m_imgui->scaled(18.f),
-                                            sliders_left_width + sliders_width + slider_icon_width);
-    const float max_tooltip_width      = ImGui::GetFontSize() * 20.0f;
+// s318 — el cuerpo del panel (antes, en línea dentro de on_render_input_window). Orden de arriba
+// abajo: tarjeta del color activo · herramientas · pestañas · departamento · Brush & view ·
+// BANDEJA de avisos. Todo lo que avisa durante el frame escribe en m_tray y se pinta al final.
+void GLGizmoColorStitchPainter::render_panel_body(float x, float y)
+{
+    m_tray.clear();
+    const float u = neo_u();
 
     float caption_max = 0.f;
     for (const auto& t : { "paint", "erase", "smart_fill_angle", "clipping_of_view" })
         caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc[std::string(t) + "_caption"]).x);
     caption_max += m_imgui->scaled(1.f);
 
-    // WIP beta banner — NEOTKO_COLORSTITCH_TAG (quick&dirty para la beta).
-    m_imgui->text_colored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f), "(WIP Beta)");
-    ImGui::Separator();
+    // s169 F1 — ancho estable entre departamentos (la ventana es AlwaysAutoResize). s318: en neo_u.
+    ImGui::Dummy(ImVec2(std::max(m_imgui->scaled(24.f), 28.f * u), 0.f));
+    // 🚨 Mismo tope de ajuste que Zonas (s286c): sin él una frase larga ESTIRA la ventana.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
 
-    // s169 F1 — revamp "departamentos" (estilo Add Mix): el layout de 2 columnas
-    // (carril + cuerpo) muere; una sola columna con un selector segmentado
-    // Paint/Create/Pro/Object que decide qué bloque se dibuja. Ancho estable
-    // entre departamentos: esta línea impone un mínimo para que la ventana
-    // AlwaysAutoResize no cambie de ancho al cambiar de pestaña (la altura sí
-    // varía — eso ya pasaba con Pro antes de este revamp).
-    ImGui::Dummy(ImVec2(m_imgui->scaled(24.f), 0.f));
-
-    // ---- Header persistente: swatch Active + "+ New" + "Save" (s174 quita el
-    // nombre editable, no aportaba nada; recolocado para compartir fila con la
-    // toolbar de abajo — pedido del usuario) ------------------------------------
-    // s232 — la toolbar (Select…Sticker + ? + Erase all) YA NO comparte fila con el
-    // header: entre swatch Active + New/Save/Duplicate y 6 botones más, la ventana se
-    // había ido de ancho. Ahora el header ocupa su fila y la toolbar la de debajo.
     render_header();
 
-    // ---- Smart-Fill only ----------------------------------------------------
-    // NEOTKO_PROFILE_TAG — the ColorStitch Painter only paints coplanar top
-    // surfaces, so the inherited brush tools (Circle/Sphere/Triangle) were
-    // removed. Smart-Fill is the sole tool; pinned unconditionally regardless of
-    // which department tab is visible — painting on the canvas must keep
-    // working even while e.g. the Pro tab is open.
+    // NEOTKO_PROFILE_TAG — Smart-Fill es la única herramienta, fijada sea cual sea el departamento.
     m_current_tool = ImGui::FillButtonIcon;
     m_cursor_type  = TriangleSelector::CursorType::POINTER;
     m_tool_type    = ToolType::SMART_FILL;
 
-    // s169 F3 — MixedFilament Object gobierna el objeto: Paint/Palette/Pro se
-    // deshabilitan enteros (el motor bypassea el pintado por-cara para este
-    // objeto igualmente) con un banner ámbar explicándolo. Object (el propio
-    // departamento que gestiona el toggle) queda siempre operativo.
+    // s169 F3 — MixedFilament Object gobierna el objeto: Palette/Generator/Pro se deshabilitan.
     const bool mf_mode_on = active_object_mixed_filament_mode();
 
-    // s169 — Select/Paint/Eraser/Pick + "Erase all painting" pasan a ser
-    // GLOBALES (antes solo vivían en Palette): feedback usuario — al editar
-    // una receta en Pro a veces no sabes si sigue aplicada al mismo objeto (se
-    // puede haber deseleccionado a pesar de estar en modo Select), y hacía
-    // falta volver a Palette para limpiar/recoger de otro objeto/cambiar de
-    // objeto. Solo reubicación por ahora — SIN iconos todavía (ver plan de
-    // beauty-up para otra sesión, docs/WIP/PAINTER_TOOLBAR_ICONS_BEAUTYUP_PLAN.md).
+    // ---- Herramientas (globales desde s169) + ? + Erase all, en una fila ----
+    ImGui::Dummy(ImVec2(0.f, 0.3f * u));
     m_imgui->disabled_begin(mf_mode_on);
-    render_tool_row();   // s174 — ya deja la línea abierta (cs_card_end same_line_after)
-
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 10.0f));
-    const float cur_y = ImGui::GetContentRegionMax().y + ImGui::GetFrameHeight() + y;
-    show_tooltip_information(caption_max, x, cur_y);
-    const float f_scale = m_parent.get_gizmos_manager().get_layout_scale();
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f * f_scale));
-    ImGui::SameLine();
-
-    // s173 — zona "peligro" (coral): única acción irreversible de la fila, tinte
-    // propio para que no se confunda visualmente con un cambio de modo (feedback
-    // usuario, propuesta de 2 zonas de color aprobada). Mismos stops que el
-    // mockup (coral 900/800 de la paleta de referencia) + icono real de Fable
-    // (cs_tool_erase_all.svg — gota de pintura tachada) en vez de texto plano.
-    ensure_tool_icons_loaded();
     {
-        const bool  dark    = ImGuiWrapper::is_dark_mode();
-        const float icon_px = 20.f * m_parent.get_scale();
-        const ImVec4 coral_bg     (74  / 255.f, 27 / 255.f, 12 / 255.f, 1.f);
-        const ImVec4 coral_bg_hov (113 / 255.f, 43 / 255.f, 19 / 255.f, 1.f);
-        ImGui::PushStyleColor(ImGuiCol_Button,        coral_bg);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, coral_bg_hov);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  coral_bg_hov);
-        const bool _remove_all_clicked = ImGui::ImageButton3(
-            (ImTextureID)(dark ? m_icon_erase_all.normal_dark : m_icon_erase_all.normal),
-            (ImTextureID)(dark ? m_icon_erase_all.hover_dark  : m_icon_erase_all.hover),
-            ImVec2(icon_px, icon_px), ImVec2(0.f, 0.f), ImVec2(1.f, 1.f), -1, coral_bg);
-        ImGui::PopStyleColor(3);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", _u8L("Erase all painting").c_str());
-        // s231 F6 — confirmación. Es la ÚNICA acción irreversible de la fila (borra la
-        // pintura de TODOS los objetos marcados, no sólo del activo) y estaba a un
-        // click de distancia, pegada a los toggles de modo. Hay snapshot de undo, pero
-        // "he perdido media hora de pintura y no sé qué he pulsado" no es un buen sitio
-        // donde descubrir el Ctrl+Z. Se dice cuántos objetos se van a limpiar.
+        const float bs     = 2.1f * u;
+        const float well_h = bs + 6.f;                  // = render_tool_row: bs + 2·pad
+        const float help_h = 25.f * m_parent.get_scale() + 2.f * ImGui::GetStyle().FramePadding.y;
+        const float help_w = 25.f * m_parent.get_scale() + 2.f * ImGui::GetStyle().FramePadding.x;
+        const float row_y  = ImGui::GetCursorPosY();
+        render_tool_row();
+        // s319 — alineado a la derecha con el ancho MEDIDO en el frame anterior (el del botón ? de
+        // Orca no se puede calcular de antemano). Estimarlo corto empujaba la ventana cada frame.
+        const float right   = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+        const float group_w = (m_tool_right_w > 0.f) ? m_tool_right_w : (help_w + 0.9f * u + 1.f + bs);
+        neo_same_line_at(right - group_w);
+        const float group_x0 = ImGui::GetCursorScreenPos().x;
+        ImGui::SetCursorPosY(row_y + std::max(0.f, (well_h - help_h) * 0.5f));
+        const float cur_y = ImGui::GetContentRegionMax().y + ImGui::GetFrameHeight() + y;
+        show_tooltip_information(caption_max, x, cur_y);
+        ImGui::SameLine(0.f, 0.45f * u);
+        ImGui::SetCursorPosY(row_y + (well_h - bs) * 0.5f);
+        {
+            ImDrawList*  dl = ImGui::GetWindowDrawList();
+            const ImVec2 sp = ImGui::GetCursorScreenPos();
+            dl->AddLine(ImVec2(sp.x, sp.y + 0.25f * u), ImVec2(sp.x, sp.y + bs - 0.25f * u),
+                        neo_col_u32(NeoCol::SurfaceHi), 1.f);
+            ImGui::Dummy(ImVec2(1.f, bs));
+        }
+        ImGui::SameLine(0.f, 0.45f * u);
+        ImGui::SetCursorPosY(row_y + (well_h - bs) * 0.5f);
+        // s173/s231 F6 — la ÚNICA acción irreversible de la fila: glifo de peligro (gris que se pone
+        // ámbar al pasar) y confirmación con el número de objetos afectados.
+        const bool _remove_all_clicked = neo_glyph_button("##cs_erase_all", bs, Glyph::EraseAll,
+                                                          /*danger=*/true, _u8L("Erase all painting").c_str());
+        m_tool_right_w = ImGui::GetItemRectMax().x - group_x0;
         if (_remove_all_clicked)
             ImGui::OpenPopup("##cs_erase_all_confirm");
         bool _do_erase_all = false;
@@ -6496,14 +6559,10 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
         m_parent.set_as_dirty();
         }
     }
-    ImGui::PopStyleVar(2);
     m_imgui->disabled_end();
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.f, 0.25f * u));
 
-    // ---- Selector de departamento — barra segmentada de verdad (s174) -------
-    // Recolocado DEBAJO de header+toolbar (antes iba arriba) — pedido del
-    // usuario, mismo orden que su mockup. Nombres (feedback s169): "Palette" =
-    // pintar + biblioteca guardada; "Generator" = elegir entre paletas GENERADAS.
+    // ---- Departamentos (s169; nombres s169; s318 con glifo) ----
     {
         const std::string lbl0 = _u8L("Palette"),   lbl1 = _u8L("Generator"),
                            lbl2 = _u8L("Pro"),       lbl3 = _u8L("Object & TD");
@@ -6513,97 +6572,49 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
         const std::string tip3 = _u8L("MixedFilament Object — object-wide sandwich + Transmission Distance");
         const char* labels[4] = { lbl0.c_str(), lbl1.c_str(), lbl2.c_str(), lbl3.c_str() };
         const char* tips[4]   = { tip0.c_str(), tip1.c_str(), tip2.c_str(), tip3.c_str() };
-        cs_segmented_bar(labels, tips, 4, m_department);
+        const Glyph glyphs[4] = { Glyph::TabPalette, Glyph::TabGen, Glyph::TabPro, Glyph::Cube };
+        cs_department_tabs(labels, tips, glyphs, 4, m_department);
     }
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.f, 0.2f * u));
 
-    // ---- Contenido del departamento activo ----------------------------------
+    // s169 F3 — el banner de MixedFilament: a la bandeja (s318), una vez, en los tres departamentos
+    // que deshabilita. Object & TD es el que gestiona el interruptor y nunca se deshabilita.
+    if (mf_mode_on && m_department != 3)
+        tray(_u8L("MixedFilament Object governs this object — painting is disabled"));
+
     switch (m_department) {
-    case 0: { // Palette (renamed from "Paint" — feedback usuario s169)
-        if (mf_mode_on) {
-            m_imgui->text_colored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
-                _u8L("MixedFilament Object governs this object — painting is disabled"));
-            ImGui::Separator();
-        }
+    case 0: { // Palette — biblioteca (grupo + rejilla), slots en uso y stickers.
+        // s318 — TD ya NO vive aquí: sólo en Object & TD (decisión del usuario, s318). La rejilla
+        // se sigue prediciendo con esos TD; lo dice el tooltip de la sección Library.
         m_imgui->disabled_begin(mf_mode_on);
-
-        // s231 F6 — el ángulo de smart-fill y el plano de corte vivían aquí dentro,
-        // aunque el pincel es GLOBAL (se pinta con cualquier departamento abierto):
-        // estabas en Pro, pintabas, y para ajustar el ángulo tenías que volver. Ahora
-        // se dibujan una sola vez fuera del switch (render_brush_and_view).
-
-        // s169 — (TD) vive AQUÍ, no en Generator (feedback usuario): refresca en
-        // vivo la predicción de TODA la paleta guardada (rejilla de abajo) y del
-        // swatch Active del header — Generator solo elige entre paletas ya
-        // generadas, no es donde se "ve cómo queda" el resultado.
-        {
-            const bool td_open = ImGui::CollapsingHeader(_u8L("(TD)").c_str());
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Swatches below are re-predicted live using these TD values").c_str());
-            if (td_open)
-                render_td_grid();
-        }
-        ImGui::Spacing();
-
-        // ---- Palette library: grupo activo + Save all + rejilla de guardados
-        render_group_selector();
-        if (has_unsaved_palettes()) {
-            if (m_imgui->button(_L("Save all")))
-                save_all_palettes();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", _u8L("Save every unsaved working colour into the active palette group").c_str());
-        }
-        ImGui::Spacing();
+        render_group_selector();          // s318 — incluye "Save all" (antes, suelto aquí)
         render_paint_palette_grid();
-
-        ImGui::Separator();
-        render_slots_in_use();   // s231 F6 — qué slots gasta este objeto y en qué
-        ImGui::Separator();
-
-        // NEOTKO_STICKER_TAG — s170 confirmó Palette como departamento destino
-        // para "pintar con SVG" (ver future_svg_sticker_sandwich.md). Card propia
-        // para no mezclar visualmente con la rejilla de paletas de arriba.
-        render_sticker_section();
-
+        render_slots_in_use();            // s231 F6
+        render_sticker_section();         // NEOTKO_STICKER_TAG — s170
         m_imgui->disabled_end();
         break;
     }
-    case 1: { // Generator (elige entre paletas GENERADAS — no "crea" nada; (TD)
-              // vive en Palette, no aquí — feedback usuario s169)
-        if (mf_mode_on) {
-            m_imgui->text_colored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
-                _u8L("MixedFilament Object governs this object — painting is disabled"));
-            ImGui::Separator();
-        }
+    case 1: { // Generator — elige entre paletas GENERADAS (no crea nada).
         m_imgui->disabled_begin(mf_mode_on);
-        // ---- Style palettes (PR.2 — ColorSci::build_palette, cached) -------
-        render_palette_panel(window_width);
+        render_palette_panel(ImGui::GetContentRegionAvail().x);
         m_imgui->disabled_end();
         break;
     }
     case 2: { // Pro
-        if (mf_mode_on) {
-            m_imgui->text_colored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
-                _u8L("MixedFilament Object governs this object — painting is disabled"));
-            ImGui::Separator();
-        }
         m_imgui->disabled_begin(mf_mode_on);
         render_pro_mode_panel();
         m_imgui->disabled_end();
         break;
     }
-    default: { // Object — MixedFilament Object toggle + live recipe (F3)
+    default: { // Object & TD — MixedFilament Object + TD
         render_object_department();
         break;
     }
     }
 
-    // s231 F6 — pincel + vista, comunes a todos los departamentos (ver la nota de
-    // render_brush_and_view). Deshabilitados con el resto del pintado cuando
-    // MixedFilament gobierna el objeto.
-    ImGui::Separator();
+    // s231 F6 — pincel + vista, comunes a todos los departamentos.
     m_imgui->disabled_begin(mf_mode_on);
-    render_brush_and_view(sliders_left_width, sliders_width, drag_left_width, slider_icon_width);
+    render_brush_and_view();
     m_imgui->disabled_end();
 
     // s231 F3 — red de seguridad del re-slice diferido: el commit normal vive al final
@@ -6627,9 +6638,17 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
         m_parent.request_extra_frame();
     }
 
-    GizmoImguiEnd();
-
-    ImGuiWrapper::pop_toolbar_style();
+    // ---- s318 — LA BANDEJA: todos los avisos del frame, juntos y al final (R7 de s287) ----
+    if (!m_tray.empty()) {
+        ImGui::Dummy(ImVec2(0.f, 0.3f * u));
+        for (size_t i = 0; i < m_tray.size(); ++i) {
+            ImGui::PushID(int(i));
+            neo_warn_row("##tray", m_tray[i].text.c_str(),
+                         m_tray[i].why.empty() ? nullptr : m_tray[i].why.c_str(), m_tray[i].amber);
+            ImGui::PopID();
+        }
+    }
+    ImGui::PopTextWrapPos();
 }
 
 // ----------------------------------------------------------------------------

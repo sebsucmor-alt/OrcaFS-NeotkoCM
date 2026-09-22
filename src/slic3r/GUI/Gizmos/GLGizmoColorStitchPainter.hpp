@@ -18,6 +18,15 @@
 
 namespace Slic3r::GUI {
 
+// s318 — un aviso de la BANDEJA del painter (neo_warn_row, al final del panel). Todos los avisos van
+// juntos abajo: uno a mitad de columna desplaza el panel entero bajo el ratón (regla R7 de s287).
+// Vive fuera de la clase porque draw_zone_editor es una función libre y también emite.
+struct PainterTrayMsg {
+    std::string text;         // la frase corta
+    std::string why;          // el porqué entero, al tooltip
+    bool        amber = true; // false = información (gris), no un problema
+};
+
 class GLGizmoColorStitchPainter : public GLGizmoPainterBase
 {
 public:
@@ -163,8 +172,7 @@ private:
     // ver nota en on_render_input_window) pero sus dos parámetros — ángulo de
     // smart-fill y plano de corte — vivían SÓLO dentro de Palette. Extraídos aquí
     // para dibujarlos una vez, fuera del switch de departamentos.
-    void render_brush_and_view(float sliders_left_width, float sliders_width,
-                               float drag_left_width, float slider_icon_width);
+    void render_brush_and_view();
     // s231 F1 — ¿el objeto activo tiene el pintado gobernado por MixedFilament? Gate
     // compartido por la UI (banner + disabled) y por el CANVAS (on_mouse): sin el
     // segundo, deshabilitar el panel sólo apagaba los botones y se seguía pintando en
@@ -312,19 +320,17 @@ private:
     void switch_active_object(int object_idx);       // activar objeto + RE-APLICAR el color
     void render_tool_row();                          // fila [Select][Paint][Eraser][Pick]
 
-    // s173 — iconos reales (Fable) para la toolbar: 4 variantes por icono
-    // (light/dark × normal/hover), cargadas UNA vez. Mapa PRIVADO de este painter
-    // (no toca GLGizmosManager::MENU_ICON_NAME, compartido por todos los gizmos —
-    // decisión del plan de beauty-up, más barato y sin blast radius ajeno).
-    struct ToolIconSet {
-        void* normal      = nullptr;
-        void* normal_dark = nullptr;
-        void* hover       = nullptr;
-        void* hover_dark  = nullptr;
-    };
-    ToolIconSet m_icon_select, m_icon_paint, m_icon_eraser, m_icon_pick, m_icon_erase_all;
-    bool        m_tool_icons_loaded = false;
-    void        ensure_tool_icons_loaded();
+    // s318 — la toolbar pasa a glifos vectoriales (GizmoNeotkoStyle.hpp): fuera los 20 SVG de s173 y
+    // su cargador. Los ficheros cs_tool_*.svg se quedan en resources/images sin uso.
+    void render_panel_body(float x, float y);        // s318 — cuerpo del panel, fuera del push/pop de estilo
+
+    // s318 — bandeja de avisos: se vacía al empezar cada frame y se pinta al final del panel.
+    std::vector<PainterTrayMsg> m_tray;
+    void tray(const std::string &text, const std::string &why = {}, bool amber = true)
+    { m_tray.push_back(PainterTrayMsg{ text, why, amber }); }
+    float m_tool_right_w = 0.f;     // s319 — ancho MEDIDO del grupo ? / Erase all (frame anterior)
+    bool m_brush_open    = true;    // s318 — sección Brush & view (antes CollapsingHeader)
+    bool m_stickers_open = false;   // s318 — sección Stickers (SVG)
     // NEOTKO_NEOTOWER_TAG — al pintar, promociona el tipo de torre a NeoTower en el preset
     // de impresión (one-shot, no-op si ya está) para que la UI refleje el planificador real.
     void ensure_neotower_tower_type();

@@ -16,7 +16,12 @@
 
 namespace Slic3r {
 class PerimeterGenerator;
+class ExtrusionEntity;
 namespace NeoArachne {
+
+// NEOTKO_NEOSTROKE_TAG C1-C5 (s325) — marca un árbol de extrusiones para que NADA de lo emitido en
+// una región NeoArachne dispare el SpiralLift del Auto Lift (s93 #30b). Lo usa la v3 y NeoStroke.
+void set_no_spiral_lift_recursive(ExtrusionEntity* ee);
 
 class Plan {
 public:

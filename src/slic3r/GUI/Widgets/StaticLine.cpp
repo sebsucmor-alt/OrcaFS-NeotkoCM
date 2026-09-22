@@ -9,6 +9,8 @@ BEGIN_EVENT_TABLE(StaticLine, wxWindow)
 
 // catch paint events
 EVT_PAINT(StaticLine::paintEvent)
+// NeotkoLIBRE_FOLD s330 - toda la cabecera es clicable
+EVT_LEFT_UP(StaticLine::mouseUp)
 
 END_EVENT_TABLE()
 
@@ -49,6 +51,39 @@ void StaticLine::Rescale()
     if (this->icon.bmp().IsOk())
         this->icon.msw_rescale();
     messureSize();
+}
+
+// NeotkoLIBRE_FOLD s330
+void StaticLine::SetFoldable(bool foldable)
+{
+    if (m_foldable == foldable)
+        return;
+    m_foldable = foldable;
+    SetCursor(foldable ? wxCursor(wxCURSOR_HAND) : wxNullCursor);
+    Refresh();
+}
+
+void StaticLine::SetFolded(bool folded)
+{
+    if (m_folded == folded)
+        return;
+    m_folded = folded;
+    Refresh();
+}
+
+void StaticLine::SetModifiedMark(bool modified)
+{
+    if (m_modified == modified)
+        return;
+    m_modified = modified;
+    Refresh();
+}
+
+void StaticLine::mouseUp(wxMouseEvent& evt)
+{
+    evt.Skip();
+    if (m_foldable && on_toggle_fold)
+        on_toggle_fold(evt.AltDown());
 }
 
 void StaticLine::paintEvent(wxPaintEvent& evt)
@@ -105,6 +140,14 @@ void StaticLine::render(wxDC& dc)
         titleRect.x += textSize.GetWidth() + 5;
     }
     dc.SetPen(wxPen(StateColor::darkModeColorFor(lineColor)));
+    // NeotkoLIBRE_FOLD s330 - punto de "hay cambios ahi dentro" en un apartado plegado
+    if (!vertical && m_foldable && m_folded && m_modified) {
+        const int r = wxMax(3, FromDIP(3));
+        wxDCBrushChanger brush(dc, wxBrush(StateColor::darkModeColorFor(wxColour("#00675b"))));
+        wxDCPenChanger   pen(dc, *wxTRANSPARENT_PEN);
+        dc.DrawCircle(size.x - r - FromDIP(2), size.y / 2, r);
+        size.x -= 2 * r + FromDIP(6);
+    }
     if (vertical) {
         size.x /= 2;
         if (titleRect.y > 0) titleRect.y += 5;

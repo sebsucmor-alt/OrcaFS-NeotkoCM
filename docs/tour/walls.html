@@ -51,12 +51,12 @@
 
   <main class="article" id="main">
 
-    <p class="eyebrow">§8 · §13 · §14 — Structure</p>
+    <p class="eyebrow">§8 · §13 · §14 · §26 — Structure</p>
     <h1>Walls</h1>
     <p class="lede">
-      Three separate things about the outside of a print: which engine generates the wall paths,
-      how precisely you can paint on them, and an experiment in interlocking layers without ever
-      moving Z.
+      Four separate things about the outside of a print: which engine generates the wall paths, a
+      second engine that plans them as strokes for lettering, how precisely you can paint on them,
+      and an experiment in interlocking layers without ever moving Z.
     </p>
 
     <!-- ================================================================= -->
@@ -147,17 +147,122 @@
     <h3 id="previewlab">Preview Lab</h3>
 
     <p>
-      A panel inside the NeoArachne section that renders the planned wall paths <strong>before
-      slicing</strong>: outer and inner paths in distinct colours, the execution order, seam dots,
-      travel moves and a head animation. There is a layer slider, an animation speed, a ghost or
-      printed build mode, zoom, "use selection", and a <b>Dump</b> button that exports the whole
-      plan as JSON for off-line diagnosis.
+      A panel that renders the planned wall paths <strong>before slicing</strong>: outer and inner
+      paths in distinct colours, the execution order, seam dots, travel moves and a head animation.
+      There is a layer slider, an animation speed, a ghost or printed build mode, zoom, "use
+      selection", and a <b>Dump</b> button that exports the whole plan as JSON for diagnosis away
+      from the app.
     </p>
+
+    <div class="note note--key">
+      <p class="note__t">Moved in 2.4.6</p>
+      <p>
+        It used to sit inline under <b>Wall generator</b>, where it filled half the page and only
+        lit up for NeoArachne. It was taken out of there. The same panel is now the path viewer
+        inside <a href="#neostroke">NeoStroke</a>'s advanced window, drawing NeoStroke's paths.
+      </p>
+    </div>
 
     <p class="small">
       Known limitation: a small visual divergence against the real slice on the second-to-last inner
       wall, in narrow waist regions of some geometries. If you hit it, <b>Dump</b> the JSON and share
       it with the 3MF.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="neostroke" data-short="NeoStroke">NeoStroke <span class="badge badge--risk" style="font-size:.62rem;vertical-align:middle">debug mode only</span></h2>
+
+    <ul class="badges">
+      <li class="badge badge--risk">Libre Mode + env var</li>
+      <li class="badge badge--risk">does not print reliably yet</li>
+      <li class="badge badge--wip">flow cuts still open</li>
+      <li class="badge badge--ver">2.4.6</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Quality</b><span class="sep">›</span><b>Wall generator</b><span class="sep">›</span><b>NeoStroke</b>
+    </p>
+
+    <div class="note note--alert">
+      <p class="note__t">Read this before you turn it on</p>
+      <p>
+        NeoStroke is published so people can look at it and help, not so it can be used on parts
+        that matter. Prints with it are not stable. Getting a usable result takes a real
+        understanding of how the wall engine works, and reading the G-code before you print is part
+        of using it. It needs <b>two keys at once</b>: Libre Mode on, and <b>Enable NeoStroke wall
+        generator</b> ticked in Preferences, right under the Libre Mode switch. Starting the app
+        with <code>ORCA_DEBUG_NEOSTROKE=1</code> turns the same key. Miss either and picking it
+        shows a warning and offers to put the setting back.
+      </p>
+    </div>
+
+    <h3 id="ns-why">What breaks without it</h3>
+
+    <p>
+      Every wall generator builds a wall as a loop, then works inwards, loop after loop. On a letter
+      1&nbsp;mm wide that runs out of room after the outer wall, and whatever is left over is handed
+      to gap fill, which breaks it into short strokes with a start and a stop on each one. That is
+      where the holes in small raised lettering come from, and why a plate of text has thousands of
+      tiny moves in it.
+    </p>
+
+    <p>
+      NeoStroke keeps the outer wall from Classic and then drops the loops. It takes the middle line
+      of the shape, its skeleton, and lays beads <strong>along</strong> each stroke of the letter, as
+      many as fit side by side, with the width following the room there is. The stem of a T gets one
+      long path down the stem instead of a ring around it. The outer wall is always Classic and there
+      is no setting for it.
+    </p>
+
+    <h3 id="ns-controls">The controls</h3>
+
+    <p>
+      Three sit under the dropdown. The rest are behind <b>Advanced options…</b>, which opens them
+      next to a live drawing of the paths, so a change can be judged without slicing.
+    </p>
+
+    <table class="tbl">
+      <thead><tr><th>Control</th><th>Default</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>NS — minimum width</b></td><td>23% of nozzle</td>
+            <td>The floor under a bead's width. Below it the bead is not laid at all.</td></tr>
+        <tr><td><b>NS — hard bead limit</b></td><td>175% of nozzle</td>
+            <td>No bead ever goes wider. A bead much wider than the nozzle stops lying flat and its
+                edges stop merging with the neighbour.</td></tr>
+        <tr><td><b>NS — end-cap join</b></td><td>0%</td>
+            <td>Closes the gap at the turn of a U. 0 leaves it open.</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The advanced window also carries <b>Classic wall width</b>, marked experimental. Those are
+      Orca's own outer and inner line width settings, put there because the width Classic takes for
+      the outer wall is exactly the room NeoStroke does not get. It is the one number that moves
+      every path at once, and it is worth watching that happen.
+    </p>
+
+    <h3 id="ns-state">Where it stands</h3>
+
+    <p>
+      Measured on test plates: on thin strokes it covers ground the other engines leave empty, and
+      with fewer separate paths. A letter comes out clean when roughly <b>95%</b> of its interior is
+      covered by a real bead, and comes out with holes below about <b>60%</b>. That figure is written
+      to the log on every layer, so it can be read without printing anything.
+    </p>
+
+    <p>
+      The advanced window draws each bead at the width its <strong>flow</strong> implies rather than
+      the width written in the G-code comment. The two usually agree, but a few settings add
+      material without changing the stated width, and on those the stated width tells you nothing.
+      The dump carries both numbers.
+    </p>
+
+    <p>
+      Not settled: the paths are continuous on screen, but the G-code still breaks into more short
+      moves than it should in places, and a break in the flow shows on the part. It has not been
+      through enough shapes and nozzle sizes to say what it does outside small lettering. For bold
+      text, Classic or Arachne is still the answer.
     </p>
 
     <!-- ================================================================= -->
@@ -526,7 +631,7 @@
   <div class="foot__in">
     <div>
       <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
-      <p class="small">This page covers <b>§8</b>, <b>§13</b> and <b>§14</b> of the
+      <p class="small">This page covers <b>§8</b>, <b>§13</b>, <b>§14</b> and <b>§26</b> of the
         <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
     </div>
     <div class="small">

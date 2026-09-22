@@ -298,15 +298,42 @@ uniform int   u_weave_n;
 uniform float u_weave_angle;
 uniform float u_weave_pitch;
 uniform float u_weave_p0;
+uniform vec3  u_weave_axis;       // s318 F3 — eje en coords de malla, ya con instancia+volumen (weave_frame)
+// s318 F3 — opción A (ColorStitchPaintPreview::make_zone_weave): con u_weave_dual el pase de
+// ARRIBA es la LUT 1 (u_weave_cols = su color propio, u_weave_a = su transmitancia, en lineal)
+// y se compone sobre la LUT 2 (color lineal de todo lo de debajo), cada una con su eje.
+uniform bool  u_weave_dual;
+uniform vec3  u_weave_a[64];
+uniform int   u_weave2_n;
+uniform bool  u_weave2_tile;
+uniform float u_weave2_pitch;
+uniform float u_weave2_p0;
+uniform vec3  u_weave2_axis;
+uniform vec3  u_weave2_cols[64];
+int weave_index2(float proj)
+{
+    float line = floor((proj - u_weave2_p0) / max(u_weave2_pitch, 0.0001));
+    if (u_weave2_tile) {
+        float fn = float(u_weave2_n);
+        return int(line - fn * floor(line / fn));
+    }
+    int idx = int(line);
+    if (idx < 0)              idx = 0;
+    if (idx > u_weave2_n - 1) idx = u_weave2_n - 1;
+    return idx;
+}
+float weave_to_srgb(float c)
+{
+    return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
 uniform vec3  u_weave_cols[64];
 
 vec3 weave_color(vec3 base)
 {
     if (!u_weave_on || u_weave_n <= 0)
         return base;
-    float s = sin(u_weave_angle);
-    float c = cos(u_weave_angle);
-    float proj = -weave_model_pos.x * s + weave_model_pos.y * c;
+    // s318 F3 — el eje llega resuelto en CPU al marco de rebanado del motor.
+    float proj = dot(u_weave_axis, weave_model_pos.xyz);
     float line = floor((proj - u_weave_p0) / max(u_weave_pitch, 0.0001));
     int   idx;
     if (u_weave_tile) {
@@ -317,9 +344,19 @@ vec3 weave_color(vec3 base)
         if (idx < 0)             idx = 0;
         if (idx > u_weave_n - 1) idx = u_weave_n - 1;
     }
+    // s318 F3 — sin dual, idéntico a antes (color sRGB de la LUT). Con dual, a·c2 + b.
+    vec3 b = base;
+    vec3 a = vec3(0.0);
     for (int i = 0; i < 64; ++i)
-        if (i == idx) return u_weave_cols[i];
-    return base;
+        if (i == idx) { b = u_weave_cols[i]; a = u_weave_a[i]; }
+    if (!u_weave_dual)
+        return b;
+    int  idx2 = weave_index2(dot(u_weave2_axis, weave_model_pos.xyz));
+    vec3 c2   = vec3(0.0);
+    for (int i = 0; i < 64; ++i)
+        if (i == idx2) c2 = u_weave2_cols[i];
+    vec3 lin = clamp(a * c2 + b, 0.0, 1.0);
+    return vec3(weave_to_srgb(lin.r), weave_to_srgb(lin.g), weave_to_srgb(lin.b));
 }
 
 void main()

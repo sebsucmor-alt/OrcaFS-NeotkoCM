@@ -2,6 +2,7 @@
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
 #include "NeoArachnePreviewPanel.hpp" // NEOTKO_NEOARACHNE_TAG Inc3 (port s134)
+#include "NeoStrokeAdvancedDialog.hpp" // NEOTKO_NEOSTROKE_TAG s335
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -47,9 +48,12 @@
 #include "EditGCodeDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
+#include "ColorStitchPaintPreview.hpp"   // NEOTKO_COLORSTITCH_TAG s314 — weave_top_line_spacing (dueño único)
+#include <numeric>                      // NEOTKO_COLORSTITCH_TAG s315 — std::iota en el preview de campo
 
 #include "Widgets/Label.hpp"
 #include "Widgets/TabCtrl.hpp"
+#include "Widgets/StaticLine.hpp" // NeotkoLIBRE_FOLD s330
 #include "MarkdownTip.hpp"
 #include "Search.hpp"
 #include "BedShapeDialog.hpp"
@@ -153,14 +157,18 @@ public:
     // engine distributes the gradient across the entire surface, so it must
     // fill the sample, not tile. stretch=false (patterns/stripes): the
     // sequence is a repeating motif — tile it at a fixed line width.
+    // NEOTKO_COLORSTITCH_TAG — s314: `px_per_entry` > 0 fija el paso de teselado en
+    // píxeles por LÍNEA impresa, para que el cuadrado se dibuje a escala física real en el
+    // modo de bandas en mm. Con 0 se conserva el paso fijo de ~3 px de siempre.
     void set_sequence(const std::vector<int>& tool_seq,
                       const std::vector<wxColour>& tool_colors,
-                      int angle_deg, bool stretch)
+                      int angle_deg, bool stretch, double px_per_entry = 0.0)
     {
         m_seq     = tool_seq;
         m_colors  = tool_colors;
         m_angle   = angle_deg;
         m_stretch = stretch;
+        m_px_per_entry = px_per_entry;
         Refresh();
     }
 private:
@@ -168,6 +176,7 @@ private:
     std::vector<wxColour> m_colors;
     int                   m_angle   = -1;
     bool                  m_stretch = false;
+    double                m_px_per_entry = 0.0;   // s314: 0 = paso fijo legacy
 
     void on_paint(wxPaintEvent&) {
         wxPaintDC dc(this);
@@ -180,7 +189,14 @@ private:
         const double a  = ((m_angle >= 0 ? m_angle : 45) % 360)
                           * (3.14159265358979323846 / 180.0);
         const double ux =  std::cos(a), uy = -std::sin(a);   // line direction (y down)
-        const double nx = -uy,          ny =  ux;            // stripe advance
+        // NEOTKO_COLORSTITCH_TAG — s315 FIX: el avance estaba ESPEJADO respecto al motor.
+        // El motor recorre el efecto sobre `perp = (-sin θ, cos θ)` en coordenadas de mundo
+        // (lane_perp_axis, dueño único). Este panel dibuja con Y hacia ABAJO, así que ese
+        // mismo vector es (-sin θ, -cos θ) en pantalla. Lo que había, `(-uy, ux)` =
+        // (+sin θ, cos θ), es exactamente su negación: a 90° el motor avanza hacia −X y el
+        // preview lo pintaba hacia +X. De ahí el "la dirección del preview y la del
+        // degradado son distintas" que reportó el usuario en s315.
+        const double nx = -std::sin(a), ny = -std::cos(a);   // stripe advance (= perp del motor)
         const double cx = sz.x / 2.0, cy = sz.y / 2.0;
         const double diag = std::sqrt(double(sz.x) * sz.x + double(sz.y) * sz.y);
         // Extent of the square measured along the stripe-advance axis — how
@@ -188,7 +204,8 @@ private:
         const double half_ext = (std::abs(nx) * sz.x + std::abs(ny) * sz.y) / 2.0 + 2.0;
         // In stretch mode one line per sequence entry (spans the extent once);
         // in tile mode a fixed ~3px line width repeats the motif.
-        const int    n = m_stretch ? m : std::max(1, (int)std::ceil(2.0 * half_ext / 3.0));
+        const double tile_px = (m_px_per_entry > 0.05) ? m_px_per_entry : 3.0;   // s314
+        const int    n = m_stretch ? m : std::max(1, (int)std::ceil(2.0 * half_ext / tile_px));
         const double step = (2.0 * half_ext) / std::max(1, n);
         // Pen 1px wider than the step so adjacent lines overlap — no dark
         // gaps bleeding through between parallel diagonals (fix: #1).
@@ -315,6 +332,7 @@ public:
             case CAT_BLEND2:  return 1;
             case CAT_BLEND3:  return 2;
             case CAT_STRIPES: return 3;
+            case CAT_STRIPES_MM: return 4;   // s314
             default:          return 0;
         }
     }
@@ -329,6 +347,22 @@ public:
     int    get_grad_band_b()     const { return m_sc_band_b         ? m_sc_band_b->GetValue()            : m_grad_band_b; }
     int    get_grad_band_c()     const { return m_sc_band_c         ? m_sc_band_c->GetValue()            : m_grad_band_c; }
     int    get_grad_band_d()     const { return m_sc_band_d         ? m_sc_band_d->GetValue()            : m_grad_band_d; }
+    // NEOTKO_COLORSTITCH_TAG — s314: anchos de banda en mm (Pattern mode 4).
+    double get_grad_band_mm_a() const { return m_sc_band_mm_a ? m_sc_band_mm_a->GetValue() : m_grad_band_mm_a; }
+    double get_grad_band_mm_b() const { return m_sc_band_mm_b ? m_sc_band_mm_b->GetValue() : m_grad_band_mm_b; }
+    double get_grad_band_mm_c() const { return m_sc_band_mm_c ? m_sc_band_mm_c->GetValue() : m_grad_band_mm_c; }
+    double get_grad_band_mm_d() const { return m_sc_band_mm_d ? m_sc_band_mm_d->GetValue() : m_grad_band_mm_d; }
+    // NEOTKO_COLORSTITCH_TAG — s315: los tres estados de la escala del degradado se
+    // codifican en un solo float, para no cambiar el significado de `mode` ni meter dos
+    // entradas más en el desplegable de estilos. 0=Ajustar, 1=Cada N mm (s316: sin Legacy).
+    double get_grad_span_mm() const {
+        if (!m_choice_grad_scale) return m_grad_span_mm;
+        // s316 fase C: "Legacy" salió del desplegable ⇒ 0 = Ajustar, 1 = Cada N mm.
+        switch (m_choice_grad_scale->GetSelection()) {
+            case 1:  return m_sc_grad_span ? std::max(0.1, m_sc_grad_span->GetValue()) : 20.0;
+            default: return 0.0;
+        }
+    }
     int    get_tool_a()          const { return m_choice_tool_a     ? m_choice_tool_a->GetSelection()    : m_tool_a; }
     int    get_tool_b()          const { return m_choice_tool_b     ? m_choice_tool_b->GetSelection()    : m_tool_b; }
     int    get_tool_c()          const { return m_choice_tool_c     ? m_choice_tool_c->GetSelection()    : m_tool_c; }
@@ -380,6 +414,11 @@ private:
     int    m_grad_band_b    = 10;
     int    m_grad_band_c    = 0;
     int    m_grad_band_d    = 0;
+    double m_grad_band_mm_a = 8.0;   // s314
+    double m_grad_band_mm_b = 8.0;
+    double m_grad_band_mm_c = 0.0;
+    double m_grad_band_mm_d = 0.0;
+    double m_grad_span_mm   = 0.0;    // s315: 0 campo ajustado · >0 periodo mm (s316: el −1 legacy ya no existe)
     int    m_tool_a         = 0;
     int    m_tool_b         = 1;
     int    m_tool_c         = 2;
@@ -409,6 +448,14 @@ private:
     wxSpinCtrl*       m_sc_band_b        = nullptr;
     wxSpinCtrl*       m_sc_band_c        = nullptr;
     wxSpinCtrl*       m_sc_band_d        = nullptr;
+    wxSpinCtrlDouble* m_sc_band_mm_a     = nullptr;   // s314
+    wxSpinCtrlDouble* m_sc_band_mm_b     = nullptr;
+    wxSpinCtrlDouble* m_sc_band_mm_c     = nullptr;
+    wxSpinCtrlDouble* m_sc_band_mm_d     = nullptr;
+    wxChoice*         m_choice_grad_scale = nullptr;   // s315
+    wxSpinCtrlDouble* m_sc_grad_span      = nullptr;
+    wxStaticText*     m_lbl_band_mm_snap = nullptr;   // "8,0 mm -> 31 lineas = 7,99 mm"
+    wxPanel*          m_panel_bands_mm   = nullptr;
     wxStaticText*     m_lbl_preview      = nullptr;
     wxStaticText*     m_lbl_lines_est    = nullptr;
     wxPanel*          m_panel_linear     = nullptr;
@@ -426,7 +473,17 @@ private:
     // ── NEOTKO_COLORSTITCH_TAG — s195 ADV revamp: category machinery ──
     // UI categories (NOT config values — get_grad_mode() maps them back to
     // the interlayer_colormix_mode 0-3 the engine understands).
-    enum UICat { CAT_CUSTOM = 0, CAT_MIXED, CAT_WEAVE, CAT_BLEND2, CAT_BLEND3, CAT_STRIPES };
+    // NEOTKO_COLORSTITCH_TAG — s314: CAT_STRIPES_MM = Pattern mode 4 (bandas en mm, "modo
+    // campo"). Va al FINAL del enum a propósito: los valores anteriores se serializan en
+    // ningún sitio, pero el orden del desplegable sí lo lee el usuario, y la entrada nueva
+    // debe aparecer junto a su hermana en líneas sin desplazarla.
+    enum UICat { CAT_CUSTOM = 0, CAT_MIXED, CAT_WEAVE, CAT_BLEND2, CAT_BLEND3, CAT_STRIPES,
+                 CAT_STRIPES_MM };
+
+    // NEOTKO_COLORSTITCH_TAG — s314: ancho de envoltura de la nota de categoría, en px.
+    // Un poco más ancho que el desplegable (380) para que la nota no mande sobre el
+    // tamaño del diálogo pero tampoco quede en una columna estrecha.
+    static constexpr int kCatNoteWrapPx = 560;
     int               m_category      = CAT_CUSTOM;
     int               m_loaded_mode   = 0;       // config mode at open (Slow-start rule)
     std::string       m_custom_stash;            // hand-built pattern kept across category trips
@@ -437,6 +494,17 @@ private:
     wxPanel*          m_panel_mixed   = nullptr;
     wxPanel*          m_panel_weave   = nullptr;
     wxPanel*          m_panel_slots   = nullptr; // "Colours used" (blends + stripes)
+    // s319 — la fila "Colours used" se ORDENA y se NOMBRA como sale en el degradado (ver
+    // refresh_slot_order). Índice = color del motor (0 = tool_a … 3 = tool_d).
+    wxStaticBoxSizer* m_slot_box      = nullptr;
+    wxBoxSizer*       m_slot_row[4]   = {};
+    wxStaticText*     m_slot_lbl[4]   = {};
+    wxBoxSizer*       m_linear_sizer  = nullptr;
+    wxBoxSizer*       m_row_pct_b     = nullptr;
+    wxBoxSizer*       m_row_fill      = nullptr;
+    wxStaticText*     m_tag_pct_a     = nullptr;
+    wxStaticText*     m_tag_fill      = nullptr;
+    wxStaticText*     m_tag_skip      = nullptr;
     wxChoice*         m_choice_weave   = nullptr;
     wxChoice*         m_choice_weave_a = nullptr;
     wxChoice*         m_choice_weave_b = nullptr;
@@ -448,6 +516,7 @@ private:
     wxStaticText*     m_lbl_mixed_active = nullptr;
     SurfaceSwatchPanel* m_square = nullptr;      // square "how it looks" sample
     ColorSwatch*      m_sw_band[4] = { nullptr, nullptr, nullptr, nullptr };
+    ColorSwatch*      m_sw_band_mm[4] = { nullptr, nullptr, nullptr, nullptr };   // s314
     wxArrayString          m_tool_labels;        // "T0".."T3" for the slot pickers
     std::vector<wxColour>  m_tool_cols;
 
@@ -492,6 +561,11 @@ private:
         m_grad_band_b    = gi(grad_key("band_count_b"), 10);
         m_grad_band_c    = gi(grad_key("band_count_c"), 0);
         m_grad_band_d    = gi(grad_key("band_count_d"), 0);
+        m_grad_band_mm_a = gf(grad_key("band_mm_a"), 8.0);   // s314
+        m_grad_band_mm_b = gf(grad_key("band_mm_b"), 8.0);
+        m_grad_band_mm_c = gf(grad_key("band_mm_c"), 0.0);
+        m_grad_band_mm_d = gf(grad_key("band_mm_d"), 0.0);
+        m_grad_span_mm   = std::max(0.0, gf(grad_key("gradient_span_mm"), 0.0));   // s315 · s316: sin legacy
         // Legacy config defaulted tool_c/_d to -1 ("off"). Treat any negative
         // value as "user hasn't configured this slot yet" and default it to a
         // sensible physical index in the dialog (2, 3) so the slot picker
@@ -620,7 +694,13 @@ private:
             add_cat(CAT_WEAVE,   _L("Textile weave — plain / twill / satin…"));
             add_cat(CAT_BLEND2,  _L("Smooth blend — 2 colours"));
             add_cat(CAT_BLEND3,  _L("Smooth blend — 3 colours"));
-            add_cat(CAT_STRIPES, _L("Stripes — manual band sizes"));
+            // 🔒 s316 — "manual band sizes" (bandas en LÍNEAS, mode 3) SALE del menú: un recuento de
+            // líneas no es una medida (paso ≠ ancho, fragmentación). Lo nuevo nace en mm (mode 4).
+            // Sólo se sigue listando si la receta ABIERTA ya es de ese tipo, para que un fichero
+            // viejo no se abra como "Custom pattern" sin avisar. Cuando entre la migración al
+            // cargar (fase B, mode 3 → 4) esta excepción deja de alcanzarse y la línea se borra.
+            // s316 fase C: CAT_STRIPES ya no se lista NUNCA (detect_category convierte el mode 3 a mm).
+            add_cat(CAT_STRIPES_MM, _L("Stripes — band sizes in mm (real size)"));
 
             m_choice_cat = new wxChoice(this, wxID_ANY,
                 wxDefaultPosition, wxSize(380, -1), labels);
@@ -640,6 +720,7 @@ private:
             // old grey-out + lock note as the mutual-exclusion feedback.
             m_lbl_cat_note = new wxStaticText(this, wxID_ANY, "");
             m_lbl_cat_note->SetForegroundColour(wxColour(130, 130, 130));
+            m_lbl_cat_note->Wrap(kCatNoteWrapPx);   // s314
             vs->Add(m_lbl_cat_note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
         }
 
@@ -650,6 +731,7 @@ private:
         build_slots_box(vs, PAD);
         build_linear_panel(vs, PAD);
         build_bands_panel(vs, PAD);
+        build_bands_mm_panel(vs, PAD);       // s314
         build_preview_box(vs, PAD);
         build_options_box(vs, PAD);
 
@@ -672,7 +754,20 @@ private:
     {
         if      (m_grad_mode == 1) { m_category = CAT_BLEND2;  return; }
         else if (m_grad_mode == 2) { m_category = CAT_BLEND3;  return; }
-        else if (m_grad_mode == 3) { m_category = CAT_STRIPES; return; }
+        else if (m_grad_mode == 3) {
+            // s316 fase C: las bandas en LÍNEAS ya no existen. Una receta así que llegue hasta aquí
+            // (se escapó de la migración al cargar) se abre convertida a mm con el paso real de esta
+            // config, igual que hace el motor con su red. `invert` se conserva: el modo 4 lo respeta.
+            const double sp = resolved_line_spacing_mm();
+            m_grad_band_mm_a = (m_grad_band_a > 0) ? m_grad_band_a * sp : 0.0;
+            m_grad_band_mm_b = (m_grad_band_b > 0) ? m_grad_band_b * sp : 0.0;
+            m_grad_band_mm_c = (m_grad_band_c > 0) ? m_grad_band_c * sp : 0.0;
+            m_grad_band_mm_d = (m_grad_band_d > 0) ? m_grad_band_d * sp : 0.0;
+            m_grad_mode = 4;
+            m_category  = CAT_STRIPES_MM;
+            return;
+        }
+        else if (m_grad_mode == 4) { m_category = CAT_STRIPES_MM; return; }   // s314
         if (m_use_virtual && (m_mixed_filament_selected || pattern_uses_mixed_filament())) {
             m_category = CAT_MIXED;
             return;
@@ -1110,12 +1205,14 @@ private:
     {
         m_panel_slots = new wxPanel(this);
         auto* sb = new wxStaticBoxSizer(wxHORIZONTAL, m_panel_slots, _L("Colours used"));
-        auto make_slot = [&](const wxString& slot_lbl, int cur_tool,
+        m_slot_box = sb;
+        auto make_slot = [&](int idx, const wxString& slot_lbl, int cur_tool,
                              wxChoice*& out_choice, ColorSwatch*& out_swatch)
         {
             auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(m_panel_slots, wxID_ANY, slot_lbl),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            m_slot_row[idx] = row;
+            m_slot_lbl[idx] = new wxStaticText(m_panel_slots, wxID_ANY, slot_lbl);
+            row->Add(m_slot_lbl[idx], 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
             out_choice = new wxChoice(m_panel_slots, wxID_ANY,
                 wxDefaultPosition, wxSize(60, -1), m_tool_labels);
             const int sel = std::clamp(cur_tool, 0, (int)m_tool_labels.GetCount() - 1);
@@ -1129,10 +1226,10 @@ private:
             });
             sb->Add(row, 0, wxALIGN_CENTER_VERTICAL);
         };
-        make_slot(_L("Color 1:"), m_tool_a, m_choice_tool_a, m_sw_tool_a);
-        make_slot(_L("Color 2:"), m_tool_b, m_choice_tool_b, m_sw_tool_b);
-        make_slot(_L("Color 3:"), m_tool_c, m_choice_tool_c, m_sw_tool_c);
-        make_slot(_L("Color 4:"), m_tool_d, m_choice_tool_d, m_sw_tool_d);
+        make_slot(0, _L("Color 1:"), m_tool_a, m_choice_tool_a, m_sw_tool_a);
+        make_slot(1, _L("Color 2:"), m_tool_b, m_choice_tool_b, m_sw_tool_b);
+        make_slot(2, _L("Color 3:"), m_tool_c, m_choice_tool_c, m_sw_tool_c);
+        make_slot(3, _L("Color 4:"), m_tool_d, m_choice_tool_d, m_sw_tool_d);
         m_panel_slots->SetSizer(sb);
         vs->Add(m_panel_slots, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
     }
@@ -1143,12 +1240,16 @@ private:
     {
         m_panel_linear = new wxPanel(this);
         auto* pv = new wxBoxSizer(wxVERTICAL);
+        m_linear_sizer = pv;
         auto add_pct_row = [&](const wxString& tag, int init_v,
-                               wxSlider*& out_sl, wxStaticText*& out_lbl)
+                               wxSlider*& out_sl, wxStaticText*& out_lbl,
+                               wxStaticText** out_tag = nullptr, wxBoxSizer** out_row = nullptr)
         {
             auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(m_panel_linear, wxID_ANY, tag),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            auto* tag_txt = new wxStaticText(m_panel_linear, wxID_ANY, tag);
+            if (out_tag) *out_tag = tag_txt;
+            if (out_row) *out_row = row;
+            row->Add(tag_txt, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
             out_sl = new wxSlider(m_panel_linear, wxID_ANY, init_v, 0, 100,
                 wxDefaultPosition, wxSize(220, -1), wxSL_HORIZONTAL);
             out_lbl = new wxStaticText(m_panel_linear, wxID_ANY,
@@ -1157,14 +1258,14 @@ private:
             row->Add(out_lbl, 0, wxALIGN_CENTER_VERTICAL);
             pv->Add(row, 0, wxEXPAND | wxALL, 2);
         };
-        add_pct_row(_L("How much Color 1:"), m_grad_pct_a, m_sl_pct_a, m_lbl_pct_a);
+        add_pct_row(_L("How much Color 1:"), m_grad_pct_a, m_sl_pct_a, m_lbl_pct_a, &m_tag_pct_a);
         add_pct_row(_L("How much Color 2 (3-colour blend only):"),
-                    m_grad_pct_b, m_sl_pct_b, m_lbl_pct_b);
+                    m_grad_pct_b, m_sl_pct_b, m_lbl_pct_b, nullptr, &m_row_pct_b);
         {
             auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                        _L("Color 3 fills the rest (auto):")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_row_fill = row;
+            m_tag_fill = new wxStaticText(m_panel_linear, wxID_ANY, _L("Color 3 fills the rest (auto):"));
+            row->Add(m_tag_fill, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
             m_lbl_pct_c = new wxStaticText(m_panel_linear, wxID_ANY, "17%");
             row->Add(m_lbl_pct_c, 0, wxALIGN_CENTER_VERTICAL);
             pv->Add(row, 0, wxEXPAND | wxALL, 2);
@@ -1225,9 +1326,9 @@ private:
         }
         {
             auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(m_panel_linear, wxID_ANY,
-                        _L("Skip tiny areas — fewer than N lines use Color 1 only:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            m_tag_skip = new wxStaticText(m_panel_linear, wxID_ANY,
+                        _L("Skip tiny areas — fewer than N lines use Color 1 only:"));
+            row->Add(m_tag_skip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
             m_sc_min_lines = new wxSpinCtrl(m_panel_linear, wxID_ANY,
                 wxString::Format("%d", m_grad_min_lines),
                 wxDefaultPosition, wxSize(80, -1),
@@ -1235,6 +1336,59 @@ private:
             row->Add(m_sc_min_lines, 0, wxALIGN_CENTER_VERTICAL);
             pv->Add(row, 0, wxEXPAND | wxALL, 2);
         }
+        // NEOTKO_COLORSTITCH_TAG_START — s315: escala del degradado.
+        // Tres estados en una fila, porque son excluyentes y el usuario tiene que ver de un
+        // vistazo cuál está activo. "Legacy" se queda el primero y es el default para que
+        // abrir un perfil viejo no cambie nada de lo que ya imprimió.
+        {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("Gradient scale:")),
+                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+            wxArrayString sc;
+            sc.Add(_L("Fit to surface (real position)"));
+            sc.Add(_L("Repeat every…"));
+            m_choice_grad_scale = new wxChoice(m_panel_linear, wxID_ANY,
+                wxDefaultPosition, wxSize(230, -1), sc);
+            m_choice_grad_scale->SetSelection(
+                m_grad_span_mm > 1e-4 ? 1 : 0);
+            m_choice_grad_scale->SetToolTip(_L(
+                "Fit to surface — same size, but each line takes its colour from its real "
+                "position, so splits and line width stop mattering.\n"
+                "Repeat every N mm — the ramp gets a real physical size and measures the "
+                "same on every object. This replaces \"Gradient repetitions\"."));
+            row->Add(m_choice_grad_scale, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            m_sc_grad_span = new wxSpinCtrlDouble(m_panel_linear, wxID_ANY,
+                wxEmptyString, wxDefaultPosition, wxSize(90, -1),
+                wxSP_ARROW_KEYS, 0.1, 1000.0,
+                (m_grad_span_mm > 1e-4 ? m_grad_span_mm : 20.0), 0.5);
+            m_sc_grad_span->SetDigits(2);
+            row->Add(m_sc_grad_span, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            row->Add(new wxStaticText(m_panel_linear, wxID_ANY, _L("mm")),
+                     0, wxALIGN_CENTER_VERTICAL);
+            pv->Add(row, 0, wxEXPAND | wxALL, 2);
+
+            // ⚠️ `refresh` = false en la llamada de construcción: este panel se monta ANTES
+            // que build_preview_box y build_options_box, así que ni la tira ni
+            // m_sc_repetitions existen todavía. Refrescar aquí tocaría punteros a medio
+            // nacer; los enables se recalculan igual en el primer cambio y en
+            // refresh_category_visibility.
+            auto sync_span = [this](bool refresh) {
+                const int sel = m_choice_grad_scale ? m_choice_grad_scale->GetSelection() : 0;
+                if (m_sc_grad_span)   m_sc_grad_span->Enable(sel == 1);
+                // "Gradient repetitions" sigue valiendo en Ajustar, pero con un
+                // periodo físico sería doblar la repetición: se apaga para que no engañe.
+                if (m_sc_repetitions) m_sc_repetitions->Enable(sel != 1);
+                if (refresh) refresh_grad_preview();
+            };
+            m_choice_grad_scale->Bind(wxEVT_CHOICE,
+                                      [sync_span](wxCommandEvent&) { sync_span(true); });
+            m_sc_grad_span->Bind(wxEVT_SPINCTRLDOUBLE,
+                                 [this](wxSpinDoubleEvent&) { refresh_grad_preview(); });
+            m_sc_grad_span->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { refresh_grad_preview(); });
+            sync_span(false);
+        }
+        // NEOTKO_COLORSTITCH_TAG_END — s315
+
         m_panel_linear->SetSizer(pv);
         vs->Add(m_panel_linear, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
 
@@ -1287,6 +1441,77 @@ private:
         m_sc_band_c->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
         m_sc_band_d->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { refresh_grad_preview(); });
     }
+
+    // ── NEOTKO_COLORSTITCH_TAG_START — s314: Stripes en MILÍMETROS (Pattern mode 4).
+    // Gemelo del panel de bandas en líneas, pero lo que se teclea es una MEDIDA. La
+    // diferencia no es de unidades, es de modelo: en modo 3 el número es un recuento que
+    // el motor reparte (y que acaba midiendo distinto en cada objeto según su ancho de
+    // línea, el spacing y cuánto fragmenten los agujeros la superficie); en modo 4 el
+    // número ES el diseño y las líneas sólo lo muestrean. Ver la nota grande de
+    // compute_slot_per_line_band_mm() en libslic3r/ColorStitch.hpp.
+    void build_bands_mm_panel(wxBoxSizer* vs, int PAD)
+    {
+        m_panel_bands_mm = new wxPanel(this);
+        auto* pv = new wxBoxSizer(wxVERTICAL);
+        auto* grid = new wxFlexGridSizer(4, 4, 4, 8);
+        auto band_row = [&](int slot, const wxString& lbl, double init_v,
+                            wxSpinCtrlDouble*& out_spin)
+        {
+            grid->Add(new wxStaticText(m_panel_bands_mm, wxID_ANY, lbl),
+                      0, wxALIGN_CENTER_VERTICAL);
+            m_sw_band_mm[slot] = new ColorSwatch(m_panel_bands_mm, colour_for_tool(slot));
+            grid->Add(m_sw_band_mm[slot], 0, wxALIGN_CENTER_VERTICAL);
+            grid->Add(new wxStaticText(m_panel_bands_mm, wxID_ANY, _L("width:")),
+                      0, wxALIGN_CENTER_VERTICAL);
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            out_spin = new wxSpinCtrlDouble(m_panel_bands_mm, wxID_ANY,
+                wxEmptyString, wxDefaultPosition, wxSize(90, -1),
+                wxSP_ARROW_KEYS, 0.0, 1000.0, init_v, 0.1);
+            out_spin->SetDigits(2);
+            row->Add(out_spin, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            row->Add(new wxStaticText(m_panel_bands_mm, wxID_ANY, _L("mm")),
+                     0, wxALIGN_CENTER_VERTICAL);
+            grid->Add(row, 0, wxALIGN_CENTER_VERTICAL);
+        };
+        band_row(0, _L("Color 1"), m_grad_band_mm_a, m_sc_band_mm_a);
+        band_row(1, _L("Color 2"), m_grad_band_mm_b, m_sc_band_mm_b);
+        band_row(2, _L("Color 3"), m_grad_band_mm_c, m_sc_band_mm_c);
+        band_row(3, _L("Color 4"), m_grad_band_mm_d, m_sc_band_mm_d);
+        pv->Add(grid, 0, wxALL, 2);
+
+        auto* note = new wxStaticText(m_panel_bands_mm, wxID_ANY,
+            _L("Real size on the part; bands repeat until the surface is filled. 0 mm skips\n"
+               "that colour. The object's line width no longer changes the result."));
+        note->SetForegroundColour(wxColour(130, 130, 130));
+        pv->Add(note, 0, wxEXPAND | wxALL, 2);
+
+        // La cuantización se ENSEÑA, no se esconde: una frontera de banda casi nunca cae
+        // justo entre dos líneas, así que lo que se imprime es el múltiplo más cercano de
+        // la separación entre líneas. Mejor verlo aquí que descubrirlo en el gcode.
+        m_lbl_band_mm_snap = new wxStaticText(m_panel_bands_mm, wxID_ANY, "");
+        m_lbl_band_mm_snap->SetForegroundColour(wxColour(150, 150, 110));
+        pv->Add(m_lbl_band_mm_snap, 0, wxEXPAND | wxALL, 2);
+
+        m_panel_bands_mm->SetSizer(pv);
+        vs->Add(m_panel_bands_mm, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
+
+        auto bind_spin = [this](wxSpinCtrlDouble* sc) {
+            if (!sc) return;
+            sc->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { refresh_grad_preview(); });
+            sc->Bind(wxEVT_TEXT,           [this](wxCommandEvent&)    { refresh_grad_preview(); });
+        };
+        bind_spin(m_sc_band_mm_a); bind_spin(m_sc_band_mm_b);
+        bind_spin(m_sc_band_mm_c); bind_spin(m_sc_band_mm_d);
+    }
+
+    // NEOTKO_COLORSTITCH_TAG — s314: separación REAL entre líneas para ESTE config.
+    // Delega en el dueño único (ColorStitchPaintPreview::weave_top_line_spacing) pasándole
+    // el config del diálogo, para que el preview y el tejido 3D no puedan usar dos números
+    // distintos. NO es el ancho de línea: ver la nota de esa función.
+    double resolved_line_spacing_mm() const {
+        return Slic3r::GUI::ColorStitchPaintPreview::weave_top_line_spacing(m_cfg);
+    }
+    // NEOTKO_COLORSTITCH_TAG_END — s314
 
     // ── Unified preview (ALL sources) — s195. Strip + square sample at the
     // infill angle; the old dialog only previewed the blend modes. ───────
@@ -1443,6 +1668,52 @@ private:
         refresh_grad_preview();
     }
 
+    // s319 — "Colours used" en el ORDEN Y CON EL NOMBRE con que salen en el degradado (petición del
+    // usuario). La tira y el cuadrado pintan el principio de la secuencia a la DERECHA (como el 3D y
+    // el slice), así que en un degradado el color que el motor llama tool_a sale al FINAL. En vez de
+    // tocar el motor o la receta, la ventana reordena y renombra: en 3 colores sale c · b · a como
+    // "Color 1 · 2 · 3"; en 2 colores, b · a como "Color 1 · 2". Los textos de los deslizadores se
+    // renombran a juego. Stripes se queda con su orden y sus cuatro colores de siempre.
+    void refresh_slot_order()
+    {
+        if (!m_slot_box) return;
+        const int c = m_category;
+        int order[4] = { 0, 1, 2, 3 };
+        int shown    = 4;
+        if (c == CAT_BLEND3)      { order[0] = 2; order[1] = 1; order[2] = 0; order[3] = 3; shown = 3; }
+        else if (c == CAT_BLEND2) { order[0] = 1; order[1] = 0; order[2] = 2; order[3] = 3; shown = 2; }
+        const wxString names[4] = { _L("Color 1:"), _L("Color 2:"), _L("Color 3:"), _L("Color 4:") };
+        for (int k = 0; k < 4; ++k)
+            if (m_slot_row[k]) m_slot_box->Detach(m_slot_row[k]);
+        for (int k = 0; k < 4; ++k) {
+            const int e = order[k];
+            if (!m_slot_row[e]) continue;
+            m_slot_box->Add(m_slot_row[e], 0, wxALIGN_CENTER_VERTICAL);
+            m_slot_box->Show(m_slot_row[e], k < shown);
+            if (m_slot_lbl[e]) m_slot_lbl[e]->SetLabel(names[k]);
+        }
+        // Textos de los deslizadores: tool_a es "Color 3" en 3 colores y "Color 2" en 2.
+        if (c == CAT_BLEND3) {
+            if (m_tag_pct_a) m_tag_pct_a->SetLabel(_L("How much Color 3:"));
+            if (m_tag_fill)  m_tag_fill ->SetLabel(_L("Color 1 fills the rest (auto):"));
+            if (m_tag_skip)  m_tag_skip ->SetLabel(_L("Skip tiny areas — fewer than N lines use Color 3 only:"));
+        } else if (c == CAT_BLEND2) {
+            if (m_tag_pct_a) m_tag_pct_a->SetLabel(_L("How much Color 2:"));
+            if (m_tag_skip)  m_tag_skip ->SetLabel(_L("Skip tiny areas — fewer than N lines use Color 2 only:"));
+        } else {
+            if (m_tag_pct_a) m_tag_pct_a->SetLabel(_L("How much Color 1:"));
+            if (m_tag_fill)  m_tag_fill ->SetLabel(_L("Color 3 fills the rest (auto):"));
+            if (m_tag_skip)  m_tag_skip ->SetLabel(_L("Skip tiny areas — fewer than N lines use Color 1 only:"));
+        }
+        // En 2 colores las dos filas que sólo sirven para 3 colores sobran (antes salían en gris).
+        if (m_linear_sizer) {
+            if (m_row_pct_b) m_linear_sizer->Show(m_row_pct_b, c != CAT_BLEND2);
+            if (m_row_fill)  m_linear_sizer->Show(m_row_fill,  c != CAT_BLEND2);
+        }
+        m_panel_slots->Layout();
+        if (m_panel_linear) m_panel_linear->Layout();
+    }
+
     void refresh_category_visibility()
     {
         const int  c    = m_category;
@@ -1450,16 +1721,26 @@ private:
         if (m_panel_custom) m_panel_custom->Show(c == CAT_CUSTOM);
         if (m_panel_mixed)  m_panel_mixed ->Show(c == CAT_MIXED);
         if (m_panel_weave)  m_panel_weave ->Show(c == CAT_WEAVE);
-        if (m_panel_slots)  m_panel_slots ->Show(grad || c == CAT_STRIPES);
+        const bool stripes_any = (c == CAT_STRIPES || c == CAT_STRIPES_MM);   // s314
+        if (m_panel_slots)  m_panel_slots ->Show(grad || stripes_any);
         if (m_panel_linear) m_panel_linear->Show(grad);
         if (m_panel_bands)  m_panel_bands ->Show(c == CAT_STRIPES);
+        if (m_panel_bands_mm) m_panel_bands_mm->Show(c == CAT_STRIPES_MM);   // s314
+        // s315 — los enables de la escala del degradado, ahora que TODOS los widgets existen
+        // (build_options_box ya creó m_sc_repetitions).
+        if (m_choice_grad_scale) {
+            const int gsel = m_choice_grad_scale->GetSelection();
+            if (m_sc_grad_span)   m_sc_grad_span->Enable(grad && gsel == 1);   // s316: 1 = Cada N mm
+            if (m_sc_repetitions) m_sc_repetitions->Enable(!(grad && gsel == 1));
+        }
         const bool b3 = (c == CAT_BLEND3);
         if (m_sl_pct_b)  m_sl_pct_b ->Enable(b3);
         if (m_lbl_pct_b) m_lbl_pct_b->Enable(b3);
         if (m_lbl_pct_c) m_lbl_pct_c->Enable(b3);
+        refresh_slot_order();   // s319
         // The engine invert flag belongs to the generated modes; for string
         // sources the Invert button (reverses the string) is the real thing.
-        if (m_chk_invert) m_chk_invert->Enable(grad || c == CAT_STRIPES);
+        if (m_chk_invert) m_chk_invert->Enable(grad || stripes_any);
         if (m_lbl_cat_note) {
             wxString note;
             wxColour col(130, 130, 130);
@@ -1474,6 +1755,14 @@ private:
             case CAT_WEAVE:
                 note = _L("Classic textile weaves as ready-made line patterns — pick the two colours below.");
                 break;
+            case CAT_STRIPES_MM:
+                // s314 — el aviso dice explícitamente lo que este modo NO usa, porque el
+                // usuario venía de pelear con "Line distribution mode" para conseguir esto.
+                note = _L("Bands sized in millimetres on the real part — independent of line width, "
+                          "of the line count, and of holes or embossing. \"Line distribution mode\" "
+                          "does not apply here.");
+                col  = wxColour(90, 170, 120);
+                break;
             case CAT_BLEND2:
                 note = _L("Numeric dither between two colours. Any custom/Mixed pattern string is ignored in this style.");
                 break;
@@ -1484,7 +1773,13 @@ private:
                 note = _L("Fixed bands repeating until the surface is filled. Any custom/Mixed pattern string is ignored.");
                 break;
             }
+            // NEOTKO_COLORSTITCH_TAG — s314 fix: sin Wrap() una nota larga de una sola
+            // línea fija el ancho MÍNIMO del diálogo y descuadra la ventana entera (lo
+            // destapó la nota del modo mm, que es la más larga). Wrap() es destructivo
+            // —mete saltos en la etiqueta— así que hay que reponer el texto original antes
+            // de volver a envolver, o cada cambio de categoría lo re-parte más estrecho.
             m_lbl_cat_note->SetLabel(note);
+            m_lbl_cat_note->Wrap(kCatNoteWrapPx);
             m_lbl_cat_note->SetForegroundColour(col);
         }
         Layout();
@@ -1546,8 +1841,60 @@ private:
         const int reps    = m_sc_repetitions ? std::max(1, m_sc_repetitions->GetValue())
                                              : std::max(1, m_grad_repetitions);
         const int build_N = (reps > 1) ? std::max(2, N / reps) : N;
-        const bool generated = (cat == CAT_BLEND2 || cat == CAT_BLEND3 || cat == CAT_STRIPES);
-        if (cat == CAT_BLEND2) {
+        // s315 — la ruta de campo ya aplica reps e invert sobre la t; excluirla del
+        // teselado y del volteo posteriores o se aplicarían dos veces.
+        const bool generated = (cat == CAT_BLEND2 || cat == CAT_BLEND3 || cat == CAT_STRIPES)
+                            && !(get_grad_span_mm() >= 0.0
+                                 && (cat == CAT_BLEND2 || cat == CAT_BLEND3));
+        // NEOTKO_COLORSTITCH_TAG — s315: con la escala de CAMPO el preview del degradado
+        // deja de ser "la rampa estirada sobre la tira" y pasa a tener tamaño: la tira
+        // representa 60 mm reales, así que un periodo de 20 mm se ve entrar tres veces.
+        // Se usan los MISMOS builders `_at` que el motor, con la misma `t`.
+        const double grad_span = get_grad_span_mm();
+        const bool   grad_field = (grad_span >= 0.0)
+                               && (cat == CAT_BLEND2 || cat == CAT_BLEND3);
+        if (grad_field) {
+            colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
+            constexpr double kStripMM = 60.0;
+            const double sp = resolved_line_spacing_mm();
+            const int n_strip = std::clamp((int) std::lround(kStripMM / std::max(0.01, sp)),
+                                           8, 2000);
+            std::vector<double> t_asc(n_strip);
+            for (int i = 0; i < n_strip; ++i) {
+                const double pos_mm = (double(i) + 0.5) * sp;
+                if (grad_span > 1e-4) {
+                    double r = std::fmod(pos_mm, grad_span);
+                    if (r < 0.0) r += grad_span;
+                    t_asc[i] = r / grad_span;
+                } else {
+                    // Ajustar a la superficie: la tira ES la superficie, más las
+                    // repeticiones, que en esta ruta siguen valiendo.
+                    double t = double(i) / std::max(1, n_strip - 1);
+                    if (reps > 1) { t = std::fmod(t * double(reps), 1.0); if (t < 0.0) t += 1.0; }
+                    t_asc[i] = t;
+                }
+            }
+            // El invert de la ruta de campo se aplica sobre la t, igual que en el motor.
+            if (m_chk_invert && m_chk_invert->IsEnabled() && m_chk_invert->GetValue())
+                for (double& t : t_asc) t = 1.0 - t;
+            // Los builders esperan la t ASCENDENTE; con periodo (diente de sierra) o con
+            // invert deja de serlo, así que se ordena igual que hace el motor.
+            std::vector<int> order(n_strip);
+            std::iota(order.begin(), order.end(), 0);
+            std::stable_sort(order.begin(), order.end(),
+                             [&](int l, int r) { return t_asc[l] < t_asc[r]; });
+            std::vector<double> t_sorted;
+            t_sorted.reserve(n_strip);
+            for (int idx : order) t_sorted.push_back(t_asc[idx]);
+            const std::vector<int> built = (cat == CAT_BLEND2)
+                ? Slic3r::ColorStitch::build_dithered_tools_2color_at(
+                      t_sorted, 0, 1, pct_a, easing, gamma)
+                : Slic3r::ColorStitch::build_dithered_tools_3color_at(
+                      t_sorted, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
+            seq.assign(n_strip, 0);
+            for (int rank = 0; rank < n_strip && rank < (int) built.size(); ++rank)
+                seq[order[rank]] = built[rank];
+        } else if (cat == CAT_BLEND2) {
             colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
             seq = Slic3r::ColorStitch::build_dithered_tools_2color(
                 build_N, 0, 1, pct_a, easing, gamma);
@@ -1555,6 +1902,36 @@ private:
             colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
             seq = Slic3r::ColorStitch::build_dithered_tools_3color(
                 build_N, 0, 1, 2, pct_a, pct_b, easing, gamma, overlap);
+        } else if (cat == CAT_STRIPES_MM) {
+            // NEOTKO_COLORSTITCH_TAG — s314: la tira se construye con la MISMA función que
+            // alimenta el tejido 3D y, a través de ella, con la misma cuenta que el motor
+            // (compute_slot_per_line_band_mm). No hay una segunda matemática de preview que
+            // pueda desincronizarse: si esto y el gcode discrepan, el bug está en un sitio.
+            colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
+            for (int i = 0; i < 4; ++i)
+                if (m_sw_band_mm[i]) m_sw_band_mm[i]->set_color(pick_color(i));
+            const double sp = resolved_line_spacing_mm();
+            std::map<std::string, std::string> kv;
+            auto put = [&](const char* k, double v) {
+                kv[std::string("interlayer_colormix_") + k] = std::to_string(v); };
+            kv["interlayer_colormix_mode"]   = "4";
+            kv["interlayer_colormix_tool_a"] = "0";
+            kv["interlayer_colormix_tool_b"] = "1";
+            kv["interlayer_colormix_tool_c"] = "2";
+            kv["interlayer_colormix_tool_d"] = "3";
+            put("band_mm_a", get_grad_band_mm_a());
+            put("band_mm_b", get_grad_band_mm_b());
+            put("band_mm_c", get_grad_band_mm_c());
+            put("band_mm_d", get_grad_band_mm_d());
+            kv["interlayer_colormix_invert"] =
+                (m_chk_invert && m_chk_invert->GetValue()) ? "1" : "0";
+            // La tira representa un ANCHO FÍSICO fijo (kStripMM) para que dos diseños
+            // distintos se puedan comparar a ojo: bandas más anchas = menos repeticiones
+            // en la tira, que es exactamente lo que pasa en la pieza.
+            constexpr double kStripMM = 60.0;
+            const int n_strip = std::clamp((int) std::lround(kStripMM / std::max(0.01, sp)), 8, 2000);
+            seq = Slic3r::GUI::ColorStitchPaintPreview::colorstitch_tool_sequence(
+                      kv, /*penu*/false, n_strip, sp);
         } else if (cat == CAT_STRIPES) {
             colors = { pick_color(0), pick_color(1), pick_color(2), pick_color(3) };
             for (int i = 0; i < 4; ++i)
@@ -1588,17 +1965,39 @@ private:
 
         // s60: mirror only when the engine will honour the invert flag
         // (generated modes) — string sources use the Invert button instead.
-        const bool invert = m_chk_invert && m_chk_invert->IsEnabled() && m_chk_invert->GetValue();
+        // NEOTKO_COLORSTITCH_TAG — s314: en modo mm el invert YA se aplicó dentro de
+        // colorstitch_tool_sequence (volteando el ciclo de bandas, igual que el motor).
+        // Volver a voltear aquí lo cancelaría.
+        const bool invert = m_chk_invert && m_chk_invert->IsEnabled()
+                         && m_chk_invert->GetValue() && cat != CAT_STRIPES_MM
+                         && !grad_field;
         if (invert && seq.size() > 1)
             std::reverse(seq.begin(), seq.end());
 
-        if (m_strip) m_strip->set_sequence(seq, colors);
+        // NEOTKO_COLORSTITCH_TAG — s319: la tira se dibuja DE DERECHA A IZQUIERDA (principio de la
+        // secuencia a la derecha), igual que la barra del pase en Pro, el cuadrado de al lado, el 3D y el
+        // slice. Pintada de izquierda a derecha salía con los colores al revés que todos ellos (reportado
+        // por el usuario). Sólo cambia el dibujo: seq sigue en su orden para el cuadrado y la etiqueta.
+        if (m_strip) {
+            const std::vector<int> strip_seq(seq.rbegin(), seq.rend());
+            m_strip->set_sequence(strip_seq, colors);
+        }
         if (m_square) {
             const int angle = m_sc_angle ? m_sc_angle->GetValue() : m_grad_angle;
             // Blends stretch to fill the square once (the engine spreads the
             // gradient over the whole surface); patterns/stripes tile.
             const bool stretch = (cat == CAT_BLEND2 || cat == CAT_BLEND3);
-            m_square->set_sequence(seq, colors, angle, stretch);
+            // NEOTKO_COLORSTITCH_TAG — s314: en modo mm el cuadrado deja de teselar a 3 px
+            // fijos y se dibuja a ESCALA: representa siempre una ventana de kSquareMM, así
+            // que una banda de 4 mm se ve la mitad de ancha que una de 8 mm. Con el paso
+            // fijo las dos se veían idénticas, que era medio problema del preview.
+            double px_per_line = 0.0;
+            if (cat == CAT_STRIPES_MM) {
+                constexpr double kSquareMM = 30.0;
+                const double sp = resolved_line_spacing_mm();
+                px_per_line = double(m_square->GetSize().x) * sp / kSquareMM;
+            }
+            m_square->set_sequence(seq, colors, angle, stretch, px_per_line);
         }
 
         // Keep the hidden ASCII preview in sync for tools that read it.
@@ -1609,3612 +2008,64 @@ private:
             m_lbl_preview->SetLabel(wxString::FromUTF8(preview));
         }
 
+        // NEOTKO_COLORSTITCH_TAG_START — s314: la etiqueta de referencia.
+        // Antes decía "On a 60x60 mm surface - about N lines (filament width W)" con W
+        // leído SÓLO de top_surface_line_width y sólo si no era porcentaje, cayendo a 0.4
+        // en cuanto valía 0 (que es el default "auto"). En el plato de llaveros del usuario
+        // eso daba 202 líneas en los CUATRO objetos, con cuatro anchos distintos. Ahora el
+        // ancho y la separación salen del dueño único, y se enseñan los dos, porque la
+        // diferencia entre ellos es justo lo que hacía que las cuentas no cuadraran.
         if (m_lbl_lines_est) {
-            double lw = 0.4;
-            if (auto* o = m_cfg->option<ConfigOptionFloatOrPercent>("top_surface_line_width"))
-                if (!o->percent) lw = std::max(0.05, o->value);
-            const int est = Slic3r::ColorStitch::estimate_surface_line_count(
-                60.0 * 60.0, lw, 0.0, 1.0);
+            const double lw = Slic3r::GUI::ColorStitchPaintPreview::weave_top_line_width(m_cfg);
+            const double sp = resolved_line_spacing_mm();
+            const int est = (sp > 0.01) ? (int) std::lround(60.0 / sp) : 0;
             m_lbl_lines_est->SetLabel(wxString::Format(
-                _L("On a 60×60 mm surface — about %d lines  (filament width %.2f mm)"),
-                est, lw));
+                _L("Across 60 mm — about %d lines  (line %.3f mm, spacing %.3f mm)"),
+                est, lw, sp));
         }
+
+        // s314 — el aviso de cuantización del modo mm. Se calcula con la MISMA separación
+        // que usa el motor, así que el número de líneas que sale aquí es el que va a salir
+        // en el gcode; lo único que puede moverlo es que el objeto tenga un ancho de línea
+        // distinto al del config con el que se abrió este diálogo.
+        if (m_lbl_band_mm_snap) {
+            if (cat != CAT_STRIPES_MM) {
+                m_lbl_band_mm_snap->SetLabel("");
+            } else {
+                const double sp = resolved_line_spacing_mm();
+                const double mm[4] = { get_grad_band_mm_a(), get_grad_band_mm_b(),
+                                       get_grad_band_mm_c(), get_grad_band_mm_d() };
+                wxString txt;
+                double period = 0.0;
+                for (int i = 0; i < 4; ++i) {
+                    if (mm[i] <= 1e-4) continue;
+                    period += mm[i];
+                    const int    n_lines = std::max(1, (int) std::lround(mm[i] / sp));
+                    const double real_mm = n_lines * sp;
+                    if (!txt.IsEmpty()) txt += "   ";
+                    txt += wxString::Format(_L("C%d: %.2f → %d lines = %.2f mm"),
+                                            i + 1, mm[i], n_lines, real_mm);
+                }
+                if (txt.IsEmpty())
+                    txt = _L("Every band is 0 mm — set at least two widths.");
+                else
+                    txt += wxString::Format(_L("   ·   cycle %.2f mm"), period);
+                m_lbl_band_mm_snap->SetLabel(txt);
+                // s314 fix: con las cuatro bandas activas esta línea pasa de 140 caracteres
+                // y estiraba el diálogo igual que la nota de categoría. Mismo tratamiento.
+                m_lbl_band_mm_snap->Wrap(kCatNoteWrapPx);
+            }
+            if (m_panel_bands_mm) m_panel_bands_mm->Layout();
+        }
+        // NEOTKO_COLORSTITCH_TAG_END — s314
     }
 };
 
 
-// NEOTKO_SANDWICH_TAG_START — Fase 3: SandwichDialog
-// ===========================================================================
-// SandwichDialog — additive editor for the per-zone pass-stack ("sandwich").
-//
-// Independent of the ~4000-line SurfaceColorMixerDialog: it does NOT touch it.
-// SurfaceColorMixerDialog keeps editing the legacy keys; this dialog edits the
-// 2 blob keys `neotko_surface_passes_top` / `_penu`. The engine's resolve()
-// reads the blob first and only falls back to synthesize_from_legacy() when the
-// blob is empty — so writing "" here restores legacy behaviour.
-//
-// A zone (Top, and an independent Penultimate) is a stack of 1..3 passes; each
-// pass has a Z-ratio and a kind (None/Solid/ColorStitch/PathBlend). Slot rule:
-//   1 slot    → ColorStitch or PathBlend only
-//   2-3 slots → any kind
-// PathBlend collapses the zone to a single full-height pass (legacy engine).
-// ===========================================================================
-class SandwichDialog : public wxDialog
-{
-    using Kind = Slic3r::SurfacePassKind;
-    static constexpr int TOOL_MENU_BASE = 1700;
-
-public:
-    SandwichDialog(wxWindow* parent,
-                   DynamicPrintConfig* config,
-                   std::function<void(const std::string&)> on_change_cb)
-        : wxDialog(parent, wxID_ANY, _L("Sandwich Editor"),
-                   wxDefaultPosition, wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
-        , m_config(config)
-        , m_on_change(std::move(on_change_cb))
-    {
-        if (auto* o = wxGetApp().preset_bundle->project_config
-                          .option<ConfigOptionStrings>("filament_colour"))
-            m_fcolors = o->values;
-        while (m_fcolors.size() < 4) m_fcolors.push_back("#808080");
-
-        // NEOTKO_PATHBLEND_TAG — s88. Seed PathBlend runtimes from app_config
-        // so last-session toggles take effect immediately. Runtimes are split:
-        //   • PathBlendDispatcherRuntime → chain_continuous, chain_max_xy_mm
-        //   • PathBlendSchedulerRuntime  → chain_atomic
-        // Both live in ColorStitch.hpp (PathBlend ingredient section).
-        if (auto* ac = wxGetApp().app_config) {
-            Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
-            Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
-            // NEOTKO_PATHBLEND_TAG — s191: these are internal scheduler toggles,
-            // ALL ON by default. Only developer_mode can change them (and see them
-            // in the Advanced modal). For everyone else force ON — ignore any stale
-            // OFF a previous dev session may have saved — so the safe behavior can't
-            // be left broken by a hidden setting.
-            const bool dev = (ac->get("developer_mode") == "true");
-            if (dev) {
-                const std::string vc = ac->get("neotko_pb_chain_continuous");
-                const std::string va = ac->get("neotko_pb_chain_atomic");
-                const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
-                // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — use_canon_scheduler removed (canon is the
-                // only scheduler now); the neotko_pb_use_canon_scheduler app_config key is dead.
-                if (!vc.empty()) d.chain_continuous   = (vc == "1" || vc == "true");
-                if (!va.empty()) s.chain_atomic       = (va == "1" || va == "true");
-                if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
-            } else {
-                d.chain_continuous    = true;
-                s.chain_atomic        = true;
-            }
-        }
-
-        // Load the current state of both zones (blob, or synthesized legacy).
-        m_stack[0] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, false);
-        m_stack[1] = Slic3r::SurfacePassStack::resolve_for_zone(*m_config, true);
-        // NEOTKO_BOTTOM_TAG — Bottom (m_stack[2]) has no region-config representation
-        // (engine consumes it only via the painter), so it starts empty here and is
-        // populated when a saved profile is loaded into the dialog.
-        for (int z = 0; z < 3; ++z)
-            sanitize_stack(z);
-
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD from app_config (same keys
-        // as SurfaceColorMixerDialog: neotko_td_1..4 — single source of truth).
-        {
-            auto* ac = wxGetApp().app_config;
-            for (int i = 0; i < 4; ++i) {
-                const std::string key = "neotko_td_" + std::to_string(i + 1);
-                const std::string val = ac ? ac->get(key) : "";
-                float v = 0.f;
-                try { if (!val.empty()) v = std::stof(val); } catch (...) {}
-                m_td[i] = std::max(0.01f, std::min(10.f, v > 0.f ? v : 1.f));
-            }
-            // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): snapshot at load time so
-            // commit() can tell whether TD actually changed (gate the reslice —
-            // don't fire one just because the user opened/closed the TD panel).
-            m_td_at_open = m_td;
-        }
-
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): preload virtual MixedColor
-        // options for Blend Suggestion target picker.
-        load_mix_opts();
-
-        build_ui();
-    }
-
-private:
-    DynamicPrintConfig*                     m_config = nullptr;
-    std::function<void(const std::string&)> m_on_change;
-    std::vector<std::string>                m_fcolors;
-
-    // NEOTKO_BOTTOM_TAG — 0 = Top, 1 = Penultimate, 2 = Bottom surface. The editor
-    // shows all three (it doubles as the saved-profile "pro" editor). Bottom is
-    // PROFILE-scoped only: commit() writes Top/Penu to region config (the engine's
-    // preset path), but the engine consumes Bottom solely via the painter (stack_
-    // bottom_json), so Bottom flows out only through on_save_profile / Update.
-    Slic3r::SurfacePassStack m_stack[3];     // 0 = Top, 1 = Penultimate, 2 = Bottom
-    int m_pending_load_id = 0;               // NEOTKO_SANDWICH_TAG — deferred Load (see on_manage_profiles)
-
-    // Everything is inline per row — no shared "Advanced" panel. The fill angle
-    // is a per-row field bound to that pass's own SurfacePass.angle. fan/speed/
-    // gcode of SurfacePass are kept in the data model (round-trip, "forgotten
-    // box") but have no widgets — they do nothing for a Solid pass.
-    struct ZoneUI {
-        wxCheckBox*   enable_chk = nullptr;
-        wxCheckBox*   perim_chk  = nullptr;
-        wxCheckBox*   supported_chk = nullptr;  // NEOTKO_BOTTOM_TAG — bottom zone only
-        wxRadioBox*   slots_rb   = nullptr;
-        wxPanel*      ratio_bar  = nullptr;   // stacked draggable Z-ratio bar
-        wxPanel*      rows_host  = nullptr;
-        wxBoxSizer*   rows_sizer = nullptr;
-        wxStaticText* sum_lbl    = nullptr;
-        wxButton*     norm_btn   = nullptr;
-        std::vector<wxPanel*>          row_panel;
-        std::vector<wxPanel*>          chips;
-        std::vector<wxStaticText*>     badge;
-        std::vector<wxChoice*>         kind_choice;
-        std::vector<wxSpinCtrlDouble*> ratio_spin;
-        std::vector<wxStaticText*>     angle_lbl;   // Solid only
-        std::vector<wxTextCtrl*>       angle_txt;   // Solid only
-        std::vector<wxPanel*>          preview;
-        std::vector<wxButton*>         adv_btn;     // ColorStitch / PathBlend
-        // NEOTKO_PATHBLEND_TAG — s88. "Advanced ⚙" button shown next to the
-        // adv_btn ONLY for PathBlend rows. Opens the PB Advanced toggles modal
-        // (chain_continuous, chain_max_xy_mm, chain_atomic).
-        std::vector<wxButton*>         pb_advanced_btn;
-        std::vector<wxStaticText*>     minlbl;      // "< 0.04 mm" warning
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): move-up / move-down per row.
-        std::vector<wxButton*>         up_btn;
-        std::vector<wxButton*>         down_btn;
-        // NEOTKO_SANDWICH_TAG — Fase 5 s73: KindEntry encodes Kind + PB mode
-        // so the kind selector can list "PathBlend Half" and "PathBlend Full"
-        // as distinct entries while both map to Kind::PathBlend internally.
-        struct KindEntry {
-            Kind     kind;
-            int      pb_mode;  // 0 = Half, 1 = Full; -1 for non-PB kinds
-            wxString label;
-        };
-        std::vector<KindEntry>         kindlist;    // choice-index -> KindEntry
-    };
-    ZoneUI m_ui[3];     // NEOTKO_BOTTOM_TAG — 0=Top, 1=Penu, 2=Bottom
-
-    // ratio-bar drag state: which zone / which internal boundary is held.
-    int m_drag_zone  = -1;
-    int m_drag_bound = -1;
-
-    // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD panel + Lane mode + use_virtual
-    // portados del SurfaceColorMixerDialog viejo. Decisión usuario s84:
-    //   - Panel derecho fijo (BoxSizer horizontal, mockup s71).
-    //   - El viejo diálogo NO se toca todavía (duplicación intencional;
-    //     consolidación en una sesión futura de "retirar UX viejo").
-    //   - Color Science Roadmap (docs/FUTURE/COLOR SCIENCE ROADMAP.md):
-    //     este panel es el punto de entrada natural para N1.1 (RGB→Lab) y
-    //     N1.3 (TD por canal). Por ahora se mantiene escalar + RGB.
-    std::array<float, 4>          m_td       = {};
-    // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): value at dialog-open, to gate
-    // commit()'s reslice on an actual TD change (see load block above).
-    std::array<float, 4>          m_td_at_open = {};
-    std::array<wxSlider*, 4>      m_sl_td    = {};
-    std::array<wxStaticText*, 4>  m_lbl_td   = {};
-    std::array<wxPanel*, 4>       m_sw_td    = {};
-    wxPanel*       m_stacked_sw_top  = nullptr;
-    wxPanel*       m_stacked_sw_penu = nullptr;
-    wxPanel*       m_stacked_swatch  = nullptr;
-    wxStaticText*  m_lbl_opacity_top = nullptr;
-    wxCheckBox*    m_chk_use_virtual  = nullptr;
-
-    // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): Blend Suggestion (Beer-Lambert
-    // joint optimizer) portado del SurfaceColorMixerDialog viejo. Escribe a
-    // m_stack[] (autoritativo) en vez de las legacy multipass_* keys.
-    wxComboBox*    m_bs_combo_target  = nullptr;
-    wxPanel*       m_bs_swatch_target = nullptr;
-    wxRadioButton* m_bs_rb_top        = nullptr;
-    wxRadioButton* m_bs_rb_joint      = nullptr;
-    wxPanel*       m_bs_swatch        = nullptr;
-    wxStaticText*  m_bs_lbl_score     = nullptr;
-    std::vector<Slic3r::ColorStitchOption> m_bs_mix_opts;
-
-    // NEOTKO_COLORSCI_TAG GD1+GD2+GD3 — Gradient Designer embebido (columna
-    // derecha, bajo el panel TD). Engine puro en libslic3r/ColorSci/ — aquí
-    // solo UI. Decisión UX usuario (2026-06-11): Line distribution baja a la
-    // columna izquierda y este panel ocupa su hueco + el stretch.
-    wxChoice*         m_gd_tool_a   = nullptr;
-    wxChoice*         m_gd_tool_b   = nullptr;
-    wxPanel*          m_gd_sw_a     = nullptr;   // swatch color tool A
-    wxPanel*          m_gd_sw_b     = nullptr;   // swatch color tool B
-    wxChoice*         m_gd_weave    = nullptr;
-    wxTextCtrl*       m_gd_pattern  = nullptr;
-    wxSpinCtrl*       m_gd_steps    = nullptr;
-    wxSpinCtrlDouble* m_gd_min      = nullptr;
-    wxSpinCtrlDouble* m_gd_max      = nullptr;
-    wxTextCtrl*       m_gd_name     = nullptr;
-    wxStaticText*     m_gd_warn     = nullptr;
-    wxPanel*          m_gd_strip    = nullptr;   // tira de swatches clicables
-    std::vector<Slic3r::ColorSci::GradientStep> m_gd_ramp;
-    std::vector<bool>                           m_gd_selected;
-
-    // NEOTKO_COLORSCI_TAG Predict — ronda Flat/Mixed (3 modos). Selector arriba
-    // del panel: 0 Gradient (ramp manual), 1 Flat (predicción solo-solids),
-    // 2 Mixed (predicción dither penu + top solid → gamut extendido).
-    // En modos predicción la tira muestra `m_gd_recipes` y CLICK CARGA la
-    // receta en el sandwich vivo (m_stack[] + reload_ui_from_stack) en vez de
-    // togglear selección de export.
-    wxChoice*         m_gd_mode        = nullptr;
-    wxPanel*          m_gd_design_pnl  = nullptr;   // controles modo Gradient
-    wxPanel*          m_gd_predict_pnl = nullptr;   // controles modos Flat/Mixed
-    wxChoice*         m_gd_ptarget     = nullptr;   // target picker (= m_bs_mix_opts)
-    wxStaticText*     m_gd_de          = nullptr;   // ΔE del match
-    std::vector<Slic3r::ColorSci::ColorRecipe> m_gd_recipes;
-    int               m_gd_match_idx   = -1;        // swatch resaltado tras Match
-    // Debounce: al mover un slider TD se disparan muchos eventos; regeneramos
-    // las tres tiras (gradient/flat/mixed) UNA vez ~150 ms tras el último.
-    wxTimer           m_gd_td_timer;
-    static constexpr int kGdTdTimerId = wxID_HIGHEST + 4201;
-
-    // ----------------------------------------------------------- small helpers
-    // Layer height (mm) — pass heights are shown as ratio × this.
-    double layer_height_mm() const
-    {
-        if (auto* o = m_config->option<ConfigOptionFloat>("layer_height"))
-            if (o->value > 0.001) return o->value;
-        return 0.2;
-    }
-    static constexpr double kMinPassMM = 0.04;   // engine MinLayer rule
-
-    wxColour tool_colour(int t) const
-    {
-        if (t >= 0 && t < (int)m_fcolors.size() && !m_fcolors[t].empty()) {
-            unsigned long rgb = 0;
-            wxString s = wxString::FromUTF8(m_fcolors[t]);
-            if (s.StartsWith("#")) s = s.Mid(1);
-            if (s.ToULong(&rgb, 16))
-                return wxColour((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
-        }
-        return wxColour(128, 128, 128);
-    }
-
-    static wxString kind_name(Kind k)
-    {
-        switch (k) {
-            case Kind::None:      return _L("None");
-            case Kind::Solid:     return _L("Solid");
-            case Kind::ColorStitch:  return _L("ColorStitch"); // NEOTKO_COLORSTITCH_TAG
-            case Kind::PathBlend: return _L("PathBlend");
-        }
-        return wxEmptyString;
-    }
-    static wxString kind_badge(Kind k)
-    {
-        switch (k) {
-            case Kind::None:      return "NONE";
-            case Kind::Solid:     return "SOLID";
-            case Kind::ColorStitch:  return "COLORSTITCH";
-            case Kind::PathBlend: return "PATHBLEND";
-        }
-        return wxEmptyString;
-    }
-    static wxColour kind_colour(Kind k)
-    {
-        switch (k) {
-            case Kind::None:      return wxColour(110, 110, 110);
-            case Kind::Solid:     return wxColour(214, 124, 48);
-            case Kind::ColorStitch:  return wxColour(72, 110, 200);
-            case Kind::PathBlend: return wxColour(150, 88, 178);
-        }
-        return wxColour(110, 110, 110);
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73: PB badge text reflects Half/Full mode.
-    static wxString kind_badge_for(const Slic3r::SurfacePass& p)
-    {
-        if (p.kind != Kind::PathBlend) return kind_badge(p.kind);
-        const auto it = p.pathblend.kv.find("blob");
-        if (it == p.pathblend.kv.end() || it->second.empty()) return "PB FULL";
-        const Slic3r::PathBlendPassConfig pbc =
-            Slic3r::PathBlendPassConfig::from_blob_json(it->second);
-        return (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half) ? "PB HALF" : "PB FULL";
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73: kind entries with explicit Half/Full
-    // PathBlend distinction. Selecting either PB entry collapses the stack to
-    // a single PB pass with the chosen mode (handled in on_kind_change).
-    static std::vector<ZoneUI::KindEntry> kind_entries_for_slots(int n, bool bottom = false)
-    {
-        using PBMode = Slic3r::PathBlendPassConfig::Mode;
-        std::vector<ZoneUI::KindEntry> out;
-        // NEOTKO_SANDWICH_TAG s119 (EMPTY model): None is NOT a per-row kind. Empty
-        // is a zone-level, exclusive, single-pass state (the Enabled checkbox) — it
-        // can never be one band among several. So a multi-pass stack only offers
-        // Solid here; "no effect" is expressed by disabling the whole zone.
-        if (n > 1) {
-            out.push_back({ Kind::Solid,     -1, _L("Solid") });
-        }
-        out.push_back({ Kind::ColorStitch,  -1,                _L("ColorStitch") }); // NEOTKO_COLORSTITCH_TAG
-        // NEOTKO_BOTTOM_TAG — §5.5: PathBlend on the bottom is ALWAYS Full. A PB Half
-        // on the bottom would leave an empty layer and destabilize how the print is
-        // built up, so the Half entry is not offered for the Bottom zone.
-        if (!bottom)
-            out.push_back({ Kind::PathBlend, (int)PBMode::Half, _L("PathBlend Half") });
-        out.push_back({ Kind::PathBlend, (int)PBMode::Full, _L("PathBlend Full") });
-        return out;
-    }
-
-    // NEOTKO_SANDWICH_TAG — read a ColorStitch gradient int key for a given pass:
-    // the pass's per-lámina override (pass.colorstitch.kv) first, region config as
-    // fallback. `full_key` is the full region-key name (e.g. interlayer_colormix_tool_a).
-    int cm_pass_int(const Slic3r::SurfacePass* p, const std::string& full_key, int dflt) const
-    {
-        if (p && p->colorstitch.present) {
-            auto it = p->colorstitch.kv.find(full_key);
-            if (it != p->colorstitch.kv.end()) {
-                try { return std::stoi(it->second); } catch (...) {}
-            }
-        }
-        if (auto* o = m_config->option<ConfigOptionInt>(full_key)) return o->value;
-        return dflt;
-    }
-    double cm_pass_dbl(const Slic3r::SurfacePass* p, const std::string& full_key, double dflt) const
-    {
-        if (p && p->colorstitch.present) {
-            auto it = p->colorstitch.kv.find(full_key);
-            if (it != p->colorstitch.kv.end()) {
-                try { return std::stod(it->second); } catch (...) {}
-            }
-        }
-        if (auto* o = m_config->option<ConfigOptionFloat>(full_key)) return o->value;
-        return dflt;
-    }
-    std::string cm_pass_str(const Slic3r::SurfacePass* p, const std::string& full_key,
-                            const std::string& dflt) const
-    {
-        if (p && p->colorstitch.present) {
-            auto it = p->colorstitch.kv.find(full_key);
-            if (it != p->colorstitch.kv.end()) return it->second;
-        }
-        if (auto* o = m_config->option<ConfigOptionString>(full_key)) return o->value;
-        return dflt;
-    }
-
-    // NEOTKO_SANDWICH_TAG — s80: build the REAL per-line ColorStitch tool sequence
-    // for a pass preview. Mirrors ColorStitch::assign_and_group_tools dither
-    // + repetitions + invert, reading the pass's per-lámina override (region
-    // fallback). Returns physical tool indices; -1 = unknown (mixed digit 5-9).
-    std::vector<int> colorstitch_preview_seq(int z, const Slic3r::SurfacePass& p, int N) const
-    {
-        const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
-                                         : "interlayer_colormix_";
-        const int    mode    = cm_pass_int(&p, pre + "mode", 0);
-        const int    pct_a   = cm_pass_int(&p, pre + "pct_a", 50);
-        const int    pct_b   = cm_pass_int(&p, pre + "pct_b", 33);
-        const int    easing  = cm_pass_int(&p, pre + "easing", 0);
-        const double gamma   = cm_pass_dbl(&p, pre + "gamma", 1.0);
-        const double overlap = cm_pass_dbl(&p, pre + "overlap", 0.6);
-        const int    reps    = std::max(1, cm_pass_int(&p, pre + "repetitions", 1));
-        const int    ta      = cm_pass_int(&p, pre + "tool_a", 0);
-        const int    tb      = cm_pass_int(&p, pre + "tool_b", 1);
-        const int    tc      = cm_pass_int(&p, pre + "tool_c", 2);
-        const int    td      = cm_pass_int(&p, pre + "tool_d", 3);
-        const int    build_N = (reps > 1) ? std::max(2, N / reps) : N;
-        std::vector<int> seq;
-        if (mode == 1) {
-            seq = Slic3r::ColorStitch::build_dithered_tools_2color(
-                build_N, ta, tb, pct_a, easing, gamma);
-        } else if (mode == 2) {
-            seq = Slic3r::ColorStitch::build_dithered_tools_3color(
-                build_N, ta, tb, tc, pct_a, pct_b, easing, gamma, overlap);
-        } else if (mode == 3) {
-            seq = Slic3r::ColorStitch::build_custom_bands(
-                build_N, ta, cm_pass_int(&p, pre + "band_count_a", 0),
-                         tb, cm_pass_int(&p, pre + "band_count_b", 0),
-                         tc, cm_pass_int(&p, pre + "band_count_c", 0),
-                         td, cm_pass_int(&p, pre + "band_count_d", 0));
-        } else {
-            // NEOTKO_BOTTOM_TAG — bottom (z==2) uses the top key family (matches `pre`).
-            const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
-                                           : "interlayer_colormix_pattern_top";
-            const std::string pat = cm_pass_str(&p, pat_key, "");
-            for (char c : pat) {
-                if      (c >= '1' && c <= '4') seq.push_back(c - '1');
-                else if (c >= '5' && c <= '9') seq.push_back(-1);
-            }
-            if (seq.empty()) seq.push_back(-1);
-        }
-        if (reps > 1 && mode >= 1 && mode <= 3 && !seq.empty() && (int)seq.size() < N) {
-            const int period = (int)seq.size();
-            std::vector<int> tiled; tiled.reserve(N);
-            for (int i = 0; i < N; ++i) tiled.push_back(seq[i % period]);
-            seq.swap(tiled);
-        }
-        if (cm_pass_int(&p, pre + "invert", 0) != 0 && seq.size() > 1)
-            std::reverse(seq.begin(), seq.end());
-        return seq;
-    }
-
-    // Read the ColorStitch gradient tools for chip previews. When `p` carries a
-    // per-lámina override the tools come from it; otherwise the shared region config.
-    std::vector<int> colorstitch_tools(int z, const Slic3r::SurfacePass* p = nullptr) const
-    {
-        const std::string pre = (z == 1) ? "interlayer_colormix_penu_"
-                                         : "interlayer_colormix_";
-        std::vector<int> out;
-        for (const char* s : { "tool_a", "tool_b", "tool_c", "tool_d" }) {
-            const int v = cm_pass_int(p, pre + s, -1);
-            if (v >= 0) out.push_back(v);
-        }
-        if (out.empty()) out = { 0, 1 };
-        return out;
-    }
-    std::vector<int> pathblend_tools(int z) const
-    {
-        const char* zkey = (z == 1) ? "pathblend_penu" : "pathblend_top";
-        std::string blob;
-        if (auto* o = m_config->option<ConfigOptionString>(zkey)) blob = o->value;
-        std::vector<int> out;
-        if (!blob.empty()) {
-            const Slic3r::PathBlendPassConfig pb =
-                Slic3r::PathBlendPassConfig::from_blob_json(blob);
-            for (int i = 0; i < pb.num_passes && i < 4; ++i)
-                if (pb.tool[i] >= 0) out.push_back(pb.tool[i]);
-        }
-        if (out.empty()) out = { 0, 1 };
-        return out;
-    }
-
-    // Force a stack into a valid shape (1..3 passes, slot rule, PathBlend solo).
-    void sanitize_stack(int z)
-    {
-        Slic3r::SurfacePassStack& st = m_stack[z];
-        if ((int)st.passes.size() > Slic3r::SurfacePassStack::kMaxPasses)
-            st.passes.resize(Slic3r::SurfacePassStack::kMaxPasses);
-        // PathBlend is always a single full-height pass.
-        bool has_pb = false;
-        for (const auto& p : st.passes)
-            if (p.kind == Kind::PathBlend) has_pb = true;
-        if (has_pb && st.passes.size() > 1) {
-            Slic3r::SurfacePass pb;
-            pb.kind = Kind::PathBlend; pb.ratio = 1.0;
-            st.passes.assign(1, pb);
-        }
-        // NEOTKO_SANDWICH_TAG s119 (EMPTY model): a lone None pass is the canonical
-        // Empty zone (explicit passthrough loaded from a [None] blob). Keep it as a
-        // DISABLED zone with its single None pass so commit()'s to_json() writes the
-        // explicit [None] blob (not ""→synthesize, which is what captures the zone).
-        // Do NOT promote it to ColorStitch — Empty is the Enabled-checkbox-off state.
-        if (st.passes.size() == 1 && st.passes[0].kind == Kind::None) {
-            st.enabled = false;
-        } else if (st.passes.size() == 1 && st.passes[0].kind == Kind::Solid) {
-            st.passes[0].kind = Kind::ColorStitch;   // lone Solid is meaningless
-        }
-        if (st.passes.empty())
-            st.enabled = false;                   // nothing to show
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 6b: re-sync the WHOLE dialog UI to the current
-    // m_stack[] without destroying any window. Mirrors what the constructor's
-    // build_ui() tail does (header widgets + refresh_rows + sync_zone_enabled),
-    // but post-construction. This is the in-place refresh the s81 note said a
-    // "Load into dialog" would need — refresh_rows only shows/hides the fixed row
-    // panels (never frees them), so it is safe on macOS (no live-NSView free).
-    void reload_ui_from_stack()
-    {
-        for (int z = 0; z < 3; ++z) {
-            sanitize_stack(z);
-            m_ui[z].enable_chk->SetValue(m_stack[z].enabled && !m_stack[z].passes.empty());
-            const int n0 = std::max(1, (int)m_stack[z].passes.size());
-            m_ui[z].slots_rb->SetSelection(std::min(3, n0) - 1);
-            // s118: perim_chk único (sólo z==0), refleja el estado combinado.
-            if (m_ui[z].perim_chk)
-                m_ui[z].perim_chk->SetValue(m_stack[0].perimeter_override || m_stack[1].perimeter_override);
-            // NEOTKO_BOTTOM_TAG — supported-bottom checkbox (only z==2).
-            if (m_ui[z].supported_chk)
-                m_ui[z].supported_chk->SetValue(m_stack[z].bottom_supported_control);
-            refresh_rows(z);
-            sync_zone_enabled(z);
-        }
-        Layout();
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 6b: load a saved profile's stacks into the
-    // dialog so it can be edited / re-saved (the tests need this to iterate on
-    // debug profiles without losing them). Deferred-call safe: invoked AFTER the
-    // Manage modal closes, so no parent UI is mutated while a child modal lives.
-    void load_profile_into_dialog(int id)
-    {
-        const auto* p = Slic3r::SurfaceEffectProfileManager::get().find(id);
-        if (!p) return;
-        m_stack[0] = Slic3r::SurfacePassStack::from_json(p->stack_top_json);
-        m_stack[1] = Slic3r::SurfacePassStack::from_json(p->stack_penu_json);
-        m_stack[2] = Slic3r::SurfacePassStack::from_json(p->stack_bottom_json);  // NEOTKO_BOTTOM_TAG
-        reload_ui_from_stack();
-    }
-
-    // ------------------------------------------------------------------- build
-    // ------------------------------------------------------------------ Blend Suggestion data
-    // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): mirror of refresh_mix_opts from
-    // the old SurfaceColorMixerDialog, scoped to virtual-only options.
-    void load_mix_opts()
-    {
-        m_bs_mix_opts.clear();
-        std::string mixed_defs;
-        if (auto* o = wxGetApp().preset_bundle->project_config
-                          .option<ConfigOptionString>("mixed_filament_definitions"))
-            mixed_defs = o->value;
-        if (mixed_defs.empty()) {
-            if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-                mixed_defs = o->value;
-        }
-        if (!mixed_defs.empty()) {
-            for (auto& opt : Slic3r::ColorStitch::get_mix_options(mixed_defs, m_fcolors))
-                if (!opt.is_physical)
-                    m_bs_mix_opts.push_back(opt);
-        }
-    }
-
-    void refresh_bs_target_swatch()
-    {
-        if (!m_bs_swatch_target) return;
-        const int sel = m_bs_combo_target ? m_bs_combo_target->GetSelection() : -1;
-        wxColour c(128,128,128);
-        if (sel >= 0 && sel < (int)m_bs_mix_opts.size()) {
-            const std::string& dc = m_bs_mix_opts[sel].display_color;
-            if (dc.size() >= 7 && dc[0] == '#') {
-                unsigned long rgb = 0;
-                if (wxString::FromUTF8(dc.substr(1)).ToULong(&rgb, 16))
-                    c = wxColour((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
-            }
-        }
-        m_bs_swatch_target->SetBackgroundColour(c);
-        m_bs_swatch_target->Refresh();
-    }
-
-    // ------------------------------------------------------------------ TD preview helpers
-    // NEOTKO_SANDWICH_TAG — Fase 7 (s84): SandwichDialog-native Beer-Lambert
-    // blend preview. Walks m_stack[z].passes (authoritative) instead of the
-    // legacy keys the old SurfaceColorMixerDialog reads. Solid → 1 tool at
-    // pass.ratio; ColorStitch → histogram of pattern digits (kv override or
-    // region-config fallback); PathBlend → 50/50 cap+ramp from blob.
-    // Single-channel TD (same maths as the old dialog) — Color Science N1.3
-    // (TD por canal) entrará cuando se ataque la roadmap futura.
-    // NEOTKO_COLORSCI_TAG A — CS-1 (parcial): la expansión de passes y el
-    // blend paralelo viven ahora en libslic3r/ColorSci/StackFlatten (port 1:1
-    // de la lógica que estaba aquí — borrada en el mismo cambio, regla N1.1).
-    // Paridad: con TD escalar (r=g=b) ColorSci::blend_parallel es equivalente
-    // al weighted-average original. stacked_preview_color() no se toca — ya
-    // composita sobre esta función.
-    wxColour blend_preview_zone(int z, float* out_w = nullptr) const
-    {
-        const auto& st = m_stack[z];
-        if (!st.enabled || st.passes.empty()) {
-            if (out_w) *out_w = 0.f;
-            return GetBackgroundColour();
-        }
-        Slic3r::ColorSci::Material mats[4];
-        for (int t = 0; t < 4; ++t)
-            mats[t] = Slic3r::ColorSci::material_from_hex(
-                t < (int)m_fcolors.size() ? m_fcolors[t] : std::string(), m_td[t]);
-        // fallback de patrón para passes ColorStitch sin kv (config viva del diálogo)
-        std::string fallback;
-        const char* k = (z == 1) ? "interlayer_colormix_pattern_penultimate"
-                                 : "interlayer_colormix_pattern_top";
-        if (auto* o = m_config->option<ConfigOptionString>(k)) fallback = o->value;
-
-        float rgb[3], w = 0.f;
-        if (!Slic3r::ColorSci::zone_colour(st, z == 1, fallback, mats, rgb, &w)) {
-            if (out_w) *out_w = 0.f;
-            return wxColour(180, 180, 180);   // mismo gris fallback que antes
-        }
-        if (out_w) *out_w = w;
-        return wxColour((unsigned char)std::min(255.f, rgb[0] * 255.f),
-                        (unsigned char)std::min(255.f, rgb[1] * 255.f),
-                        (unsigned char)std::min(255.f, rgb[2] * 255.f));
-    }
-
-    wxColour stacked_preview_color() const
-    {
-        float op = 0.f;
-        const wxColour c_top  = blend_preview_zone(0, &op);
-        const wxColour c_penu = blend_preview_zone(1);
-        const float a  = std::clamp(op, 0.f, 1.f);
-        const float ia = 1.f - a;
-        return wxColour(
-            (unsigned char)(c_top.Red()   * a + c_penu.Red()   * ia),
-            (unsigned char)(c_top.Green() * a + c_penu.Green() * ia),
-            (unsigned char)(c_top.Blue()  * a + c_penu.Blue()  * ia));
-    }
-
-    void refresh_td_previews()
-    {
-        float transmit_top = 0.f;
-        blend_preview_zone(0, &transmit_top);
-        if (m_stacked_sw_top)  m_stacked_sw_top ->Refresh();
-        if (m_stacked_sw_penu) m_stacked_sw_penu->Refresh();
-        if (m_stacked_swatch)  m_stacked_swatch ->Refresh();
-        if (m_lbl_opacity_top)
-            m_lbl_opacity_top->SetLabel(
-                wxString::Format(_L("transmit=%.2f"),
-                                  std::clamp(transmit_top, 0.f, 1.f)));
-        // NEOTKO_COLORSCI_TAG GD2 — la rampa del Gradient Designer depende de
-        // los TD: repintar la tira (los stacks no cambian, solo su color).
-        if (m_gd_strip) m_gd_strip->Refresh();
-        // Per-pass previews (rows) are RGB-only swatches today; nothing to refresh.
-    }
-
-    // ------------------------------------------------------------------ TD panel builder
-    wxSizer* build_td_panel()
-    {
-        const int PAD = 6;
-        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this, _L("Filament & TD"));
-        wxWindow* host = sb->GetStaticBox();
-
-        auto* note = new wxStaticText(host, wxID_ANY,
-            _L("Transmission Distance (TD)"));
-        note->SetForegroundColour(wxColour(90, 90, 90));
-        sb->Add(note, 0, wxALL, PAD);
-
-        auto* grid = new wxFlexGridSizer(4, 4, 4, 8);
-        grid->AddGrowableCol(2, 1);
-        for (int i = 0; i < 4; ++i) {
-            auto* sw = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
-            sw->SetBackgroundColour(tool_colour(i));
-            m_sw_td[i] = sw;
-            grid->Add(sw, 0, wxALIGN_CENTER_VERTICAL);
-
-            grid->Add(new wxStaticText(host, wxID_ANY, wxString::Format("T%d", i + 1)),
-                      0, wxALIGN_CENTER_VERTICAL);
-
-            const int iv = (int)(m_td[i] * 100.f + 0.5f);
-            auto* sl = new wxSlider(host, wxID_ANY, iv, 1, 1000,
-                                    wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
-            m_sl_td[i] = sl;
-            grid->Add(sl, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
-
-            auto* lbl = new wxStaticText(host, wxID_ANY,
-                wxString::Format("%.2f", m_td[i]),
-                wxDefaultPosition, wxSize(38, -1));
-            m_lbl_td[i] = lbl;
-            grid->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
-
-            sl->Bind(wxEVT_SLIDER, [this, i](wxCommandEvent&) {
-                m_td[i] = m_sl_td[i]->GetValue() / 100.f;
-                m_lbl_td[i]->SetLabel(wxString::Format("%.2f", m_td[i]));
-                refresh_td_previews();
-                gd_schedule_recalc();   // regenera gradient/flat/mixed (debounced)
-            });
-        }
-        sb->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        // Stacked preview row (Top × Penu Beer-Lambert).
-        {
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(host, wxID_ANY, _L("Top:")),
-                     0, wxALIGN_CENTER_VERTICAL);
-            m_stacked_sw_top = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(28, 18));
-            m_stacked_sw_top->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_stacked_sw_top->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_stacked_sw_top);
-                dc.SetBackground(wxBrush(blend_preview_zone(0)));
-                dc.Clear();
-            });
-            row->Add(m_stacked_sw_top, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-            row->Add(new wxStaticText(host, wxID_ANY, _L("  Penu:")),
-                     0, wxALIGN_CENTER_VERTICAL);
-            m_stacked_sw_penu = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(28, 18));
-            m_stacked_sw_penu->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_stacked_sw_penu->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_stacked_sw_penu);
-                dc.SetBackground(wxBrush(blend_preview_zone(1)));
-                dc.Clear();
-            });
-            row->Add(m_stacked_sw_penu, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-            row->Add(new wxStaticText(host, wxID_ANY, _L("  Result:")),
-                     0, wxALIGN_CENTER_VERTICAL);
-            m_stacked_swatch = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(40, 18));
-            m_stacked_swatch->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_stacked_swatch->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_stacked_swatch);
-                dc.SetBackground(wxBrush(stacked_preview_color()));
-                dc.Clear();
-            });
-            row->Add(m_stacked_swatch, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-            m_lbl_opacity_top = new wxStaticText(host, wxID_ANY, wxEmptyString,
-                                                 wxDefaultPosition, wxSize(90, -1));
-            m_lbl_opacity_top->SetForegroundColour(wxColour(90, 90, 90));
-            row->Add(m_lbl_opacity_top, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 6);
-            sb->Add(row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-
-        // use_virtual (Mixed Filament digits 5-9 in ColorStitch pattern editor).
-        {
-            bool cur_uv = true;
-            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
-                cur_uv = o->value;
-            m_chk_use_virtual = new wxCheckBox(host, wxID_ANY,
-                _L("Use Mixed Filament colors in pattern"));
-            m_chk_use_virtual->SetValue(cur_uv);
-            m_chk_use_virtual->SetToolTip(
-                _L("When enabled, the pattern editor shows Mixed Filament virtual colors\n"
-                   "(e.g. 'F1+F2') as clickable buttons alongside physical filaments.\n"
-                   "Pattern digits 5-9 reference these virtual colors.\n"
-                   "Requires Mixed Filaments to be defined in the filament panel."));
-            sb->Add(m_chk_use_virtual, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84b): Blend Suggestion (Target +
-        // Mode + Calculate + ΔE). Portado del SurfaceColorMixerDialog viejo;
-        // Calculate escribe a m_stack[] (autoritativo) en vez de las legacy
-        // multipass_* keys. La checkbox "MultiPass Perimeter Override" no se
-        // porta — ya existe per-zone en SandwichDialog (m_ui[z].perim_chk).
-#if 0   // s120: panel "Blend Suggestion" del SandwichDialog RETIRADO (legacy mp_suggest, superseded por ColorStitch Studio → Match, ΔE2000). El pool (load_mix_opts) y el Studio siguen vivos. Pendiente excisión dura.
-        {
-            sb->Add(new wxStaticLine(host), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, PAD);
-            auto* bs_lbl = new wxStaticText(host, wxID_ANY,
-                _L("Blend Suggestion — Beer-Lambert optimizer"));
-            wxFont f = bs_lbl->GetFont(); f.MakeBold(); bs_lbl->SetFont(f);
-            sb->Add(bs_lbl, 0, wxLEFT | wxRIGHT | wxTOP, PAD);
-
-            // Target picker row
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(host, wxID_ANY, _L("Target colour:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                wxArrayString labels;
-                for (auto& opt : m_bs_mix_opts)
-                    labels.Add(wxString::FromUTF8(opt.label));
-                if (labels.IsEmpty()) labels.Add(_L("(no MixedColor defined)"));
-                m_bs_combo_target = new wxComboBox(host, wxID_ANY,
-                    labels.IsEmpty() ? wxString() : labels[0],
-                    wxDefaultPosition, wxSize(170, -1), labels, wxCB_READONLY);
-                m_bs_combo_target->SetToolTip(
-                    _L("Select the virtual MixedColor whose display colour is the blend target."));
-                m_bs_combo_target->Enable(!m_bs_mix_opts.empty());
-                row->Add(m_bs_combo_target, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-
-                m_bs_swatch_target = new wxPanel(host, wxID_ANY,
-                    wxDefaultPosition, wxSize(18, 18));
-                m_bs_swatch_target->SetToolTip(
-                    _L("Display colour of the selected MixedColor target."));
-                refresh_bs_target_swatch();
-                m_bs_combo_target->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
-                    refresh_bs_target_swatch();
-                });
-                row->Add(m_bs_swatch_target, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-
-                auto* btn_refresh = new wxButton(host, wxID_ANY, L"↺",
-                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                btn_refresh->SetToolTip(
-                    _L("Refresh — re-read Mixed Filament definitions from the current project."));
-                btn_refresh->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    load_mix_opts();
-                    if (!m_bs_combo_target) return;
-                    m_bs_combo_target->Clear();
-                    if (m_bs_mix_opts.empty()) {
-                        m_bs_combo_target->Append(_L("(no MixedColor defined)"));
-                        m_bs_combo_target->SetSelection(0);
-                        m_bs_combo_target->Enable(false);
-                    } else {
-                        for (auto& opt : m_bs_mix_opts)
-                            m_bs_combo_target->Append(wxString::FromUTF8(opt.label));
-                        m_bs_combo_target->SetSelection(0);
-                        m_bs_combo_target->Enable(true);
-                    }
-                    refresh_bs_target_swatch();
-                });
-                row->Add(btn_refresh, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-                sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-            }
-
-            // Mode radios
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(host, wxID_ANY, _L("Mode:")),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-                m_bs_rb_top = new wxRadioButton(host, wxID_ANY, _L("Top layer only"),
-                    wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
-                m_bs_rb_joint = new wxRadioButton(host, wxID_ANY,
-                    _L("Top + Penultimate"));
-                m_bs_rb_joint->SetValue(true);
-                m_bs_rb_top->SetToolTip(
-                    _L("Apply suggested passes to the Top zone only."));
-                m_bs_rb_joint->SetToolTip(
-                    _L("Apply the same passes to both Top and Penultimate zones.\n"
-                       "Beer-Lambert models this as a stacked double layer — allows\n"
-                       "smaller per-pass ratios while maintaining physical adhesion."));
-                row->Add(m_bs_rb_top,   0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
-                row->Add(m_bs_rb_joint, 0, wxALIGN_CENTER_VERTICAL);
-                sb->Add(row, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-            }
-
-            // Calculate + result row
-            {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                auto* btn_calc = new wxButton(host, wxID_ANY, _L("Calculate ▶"),
-                    wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                btn_calc->Enable(!m_bs_mix_opts.empty());
-
-                m_bs_swatch = new wxPanel(host, wxID_ANY,
-                    wxDefaultPosition, wxSize(22, 22));
-                m_bs_swatch->SetBackgroundColour(wxColour(128, 128, 128));
-                m_bs_swatch->SetToolTip(
-                    _L("Simulated blend colour after Beer-Lambert optimisation."));
-
-                m_bs_lbl_score = new wxStaticText(host, wxID_ANY, _L("  ΔE: ---"));
-                m_bs_lbl_score->SetToolTip(
-                    _L("CIE76 RGB-cube colour distance between simulated result and target.\n"
-                       "<5 excellent, 5-10 good, >10 poor approximation.\n"
-                       "Color Science N1.1 will upgrade this to CIEDE2000 in Lab space."));
-
-                btn_calc->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    if (m_bs_mix_opts.empty() || !m_bs_combo_target) return;
-                    const int sel = m_bs_combo_target->GetSelection();
-                    if (sel < 0 || sel >= (int)m_bs_mix_opts.size()) return;
-                    const auto& opt = m_bs_mix_opts[sel];
-
-                    // Target display color → RGB [0..255]
-                    const std::string& dc = opt.display_color;
-                    if (dc.size() < 7 || dc[0] != '#') return;
-                    unsigned long rgb_v = 0;
-                    if (!wxString::FromUTF8(dc.substr(1)).ToULong(&rgb_v, 16)) return;
-                    const double t_r = (double)((rgb_v >> 16) & 0xFF);
-                    const double t_g = (double)((rgb_v >>  8) & 0xFF);
-                    const double t_b = (double)( rgb_v        & 0xFF);
-
-                    auto cur_slots = [&](int z) {
-                        const int n = (int)m_stack[z].passes.size();
-                        return n > 0 ? std::clamp(n, 1, 3) : 2;
-                    };
-                    const int top_passes  = cur_slots(0);
-                    const int penu_passes = cur_slots(1);
-
-                    const double LH = layer_height_mm();
-                    const double min_r = std::max(0.05, kMinPassMM / LH);
-
-                    // NEOTKO_SANDWICH_TAG — Fase 7 (s84d) Calculate B: exhaustive
-                    // search over (tool sequence) × (ratio composition), Beer-
-                    // Lambert + ΔE_RGB. Pool = 4 physical filaments; tools may
-                    // repeat. Ratios discretized on a step=0.1 grid summing to 1,
-                    // with floor = min_r (enforced 0.04 mm extrusion). Joint mode
-                    // is greedy: Penu best alone, then Top stacked over it.
-                    // Color Science N1.1 (Lab/CIEDE2000) and N3.1 (NNLS) refinan
-                    // este search — esta es la versión "barata" del N3.2.
-                    constexpr int kPool   = 4;
-                    constexpr int K       = 10;   // 0.1 step
-                    const     int min_int = (int)std::ceil(min_r * K - 1e-6);
-
-                    // Enumerate ratio compositions summing to K, each ≥ min_int.
-                    std::vector<std::vector<double>> ratio_grids[4]; // by n=1..3
-                    auto fill_grid = [&](int n) {
-                        std::vector<std::vector<double>>& out = ratio_grids[n];
-                        out.clear();
-                        if (n == 1) { out.push_back({1.0}); return; }
-                        std::vector<int> acc(n, 0);
-                        std::function<void(int,int)> rec = [&](int i, int rem) {
-                            if (i == n - 1) {
-                                if (rem >= min_int) {
-                                    acc[i] = rem;
-                                    std::vector<double> r(n);
-                                    for (int j = 0; j < n; ++j) r[j] = (double)acc[j] / K;
-                                    out.push_back(std::move(r));
-                                }
-                                return;
-                            }
-                            for (int v = min_int; v <= rem - min_int*(n-1-i); ++v) {
-                                acc[i] = v; rec(i+1, rem - v);
-                            }
-                        };
-                        rec(0, K);
-                    };
-                    fill_grid(1); fill_grid(2); fill_grid(3);
-
-                    // Beer-Lambert color of a (tool, ratio) stack. Returns
-                    // {Rfg, Gfg, Bfg, opacity_total}. Same maths as
-                    // blend_preview_zone (weighted average by per-pass opacity).
-                    auto bl = [&](const std::vector<int>& tools,
-                                  const std::vector<double>& ratios) {
-                        double tr=0, tg=0, tb=0, tw=0;
-                        for (size_t i = 0; i < tools.size(); ++i) {
-                            const int t = std::clamp(tools[i], 0, 3);
-                            const double td = std::max(0.01, (double)m_td[t]);
-                            const wxColour col = tool_colour(t);
-                            const double op = 1.0 - std::pow(0.1, ratios[i] / td);
-                            tr += col.Red()  * op;
-                            tg += col.Green()* op;
-                            tb += col.Blue() * op;
-                            tw += op;
-                        }
-                        std::array<double,4> out;
-                        if (tw < 1e-9) { out = {180.0,180.0,180.0, 0.0}; }
-                        else            { out = {tr/tw, tg/tw, tb/tw, std::clamp(tw, 0.0, 1.0)}; }
-                        return out;
-                    };
-
-                    // Search best (tools, ratios) of length n minimising ΔE² to
-                    // (tr, tg, tb), optionally composited Beer-Lambert over a
-                    // background (br, bg, bb). base_alpha < 1 → fg shows over bg.
-                    auto search = [&](int n, double tr_, double tg_, double tb_,
-                                      double br, double bg, double bb,
-                                      bool composite) {
-                        struct R { std::vector<int> tools; std::vector<double> ratios; double de2; };
-                        R best; best.de2 = 1e18;
-                        std::vector<int> tools(n, 0);
-                        const auto& rgrid = ratio_grids[n];
-                        std::function<void(int)> rec = [&](int depth) {
-                            if (depth == n) {
-                                for (const auto& r : rgrid) {
-                                    const auto c = bl(tools, r);
-                                    double rr, gg, bb_;
-                                    if (composite) {
-                                        const double a = c[3], ia = 1.0 - a;
-                                        rr = c[0]*a + br*ia;
-                                        gg = c[1]*a + bg*ia;
-                                        bb_= c[2]*a + bb*ia;
-                                    } else {
-                                        rr = c[0]; gg = c[1]; bb_ = c[2];
-                                    }
-                                    const double dr = rr - tr_;
-                                    const double dg = gg - tg_;
-                                    const double db = bb_- tb_;
-                                    const double de2 = dr*dr + dg*dg + db*db;
-                                    if (de2 < best.de2) {
-                                        best.de2    = de2;
-                                        best.tools  = tools;
-                                        best.ratios = r;
-                                    }
-                                }
-                                return;
-                            }
-                            for (int t = 0; t < kPool; ++t) {
-                                tools[depth] = t;
-                                rec(depth + 1);
-                            }
-                        };
-                        rec(0);
-                        return best;
-                    };
-
-                    auto write_zone = [&](int z, const std::vector<int>& tools,
-                                          const std::vector<double>& ratios) {
-                        Slic3r::SurfacePassStack& st = m_stack[z];
-                        st.enabled = true;
-                        st.passes.clear();
-                        for (size_t i = 0; i < tools.size(); ++i) {
-                            Slic3r::SurfacePass p;
-                            p.kind       = Kind::Solid;
-                            p.solid_tool = std::clamp(tools[i], 0, 3);
-                            p.ratio      = ratios[i];
-                            p.angle      = -1;
-                            st.passes.push_back(p);
-                        }
-                        sanitize_stack(z);
-                        refresh_rows(z);
-                        sync_zone_enabled(z);
-                    };
-
-                    const bool joint = m_bs_rb_joint && m_bs_rb_joint->GetValue();
-                    if (joint) {
-                        // Penu first: best alone match to target.
-                        auto bp = search(penu_passes, t_r, t_g, t_b,
-                                         0,0,0, /*composite=*/false);
-                        const auto penu_c = bl(bp.tools, bp.ratios);
-                        // Top: stacked over Penu result (composite=true).
-                        auto bt = search(top_passes, t_r, t_g, t_b,
-                                         penu_c[0], penu_c[1], penu_c[2],
-                                         /*composite=*/true);
-                        write_zone(0, bt.tools, bt.ratios);
-                        write_zone(1, bp.tools, bp.ratios);
-                    } else {
-                        // Top-only: best alone match.
-                        auto bt = search(top_passes, t_r, t_g, t_b,
-                                         0,0,0, /*composite=*/false);
-                        write_zone(0, bt.tools, bt.ratios);
-                    }
-
-                    refresh_td_previews();
-
-                    // Predicted result + ΔE for the display swatch (same maths
-                    // used by the search, so this matches what the optimiser saw).
-                    const wxColour rc = joint ? stacked_preview_color()
-                                              : blend_preview_zone(0);
-                    const double dr = rc.Red()   - t_r;
-                    const double dg = rc.Green() - t_g;
-                    const double db = rc.Blue()  - t_b;
-                    const double de = std::sqrt(dr*dr + dg*dg + db*db) * 100.0
-                                      / (255.0 * std::sqrt(3.0));
-                    if (m_bs_swatch) {
-                        m_bs_swatch->SetBackgroundColour(rc);
-                        m_bs_swatch->Refresh();
-                    }
-                    if (m_bs_lbl_score) {
-                        m_bs_lbl_score->SetLabel(wxString::Format(_L("  ΔE: %.1f"), de));
-                        m_bs_lbl_score->SetForegroundColour(
-                            de < 5.0  ? wxColour(30,140,30) :
-                            de < 10.0 ? wxColour(190,130,0) : wxColour(180,40,40));
-                        m_bs_lbl_score->Refresh();
-                    }
-                    Layout();
-                });
-
-                row->Add(btn_calc,       0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-                row->Add(m_bs_swatch,    0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-                row->Add(m_bs_lbl_score, 1, wxALIGN_CENTER_VERTICAL);
-                sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-            }
-        }
-#endif  // s120: fin panel Blend Suggestion (SandwichDialog) eliminado
-
-        return sb;
-    }
-
-    // NEOTKO_COLORSCI_TAG — build_lane_panel() removed (UX 2026-06-24): Line distribution mode
-    // now lives in print settings (Quality → Surface ColorStitch), not in the Sandwich editor.
-
-    // ------------------------------------------------------------- Gradient Designer
-    // NEOTKO_COLORSCI_TAG GD1+GD2+GD3 — diseño de rampas A→penu→B (port in-app
-    // de docs/MULTITEST/gen_gradient_grid.py). El usuario barre el split de
-    // los dos SOLID top sobre un penu ColorStitch y exporta los swatches que
-    // le gusten como perfiles del 3D Painter (mismo camino que on_save_profile:
-    // solo blobs autoritativos + preview_argb).
-
-    // ---- helpers de modo --------------------------------------------------
-    // 0 = Gradient ramp (manual), 1 = Flat (predict solids), 2 = Mixed (predict
-    // dither+top). En 1/2 la tira muestra m_gd_recipes (predicción).
-    int gd_mode() const { return m_gd_mode ? m_gd_mode->GetSelection() : 0; }
-    bool gd_is_predict() const { return gd_mode() != 0; }
-
-    int gd_count() const
-    {
-        return gd_is_predict() ? (int)m_gd_recipes.size() : (int)m_gd_ramp.size();
-    }
-
-    void gd_materials(Slic3r::ColorSci::Material out[4]) const
-    {
-        for (int t = 0; t < 4; ++t)
-            out[t] = Slic3r::ColorSci::material_from_hex(
-                t < (int)m_fcolors.size() ? m_fcolors[t] : std::string(), m_td[t]);
-    }
-
-    // Color del swatch i según el modo activo (ramp = recompute en vivo con TD;
-    // recipe = rgb ya predicho en gd_recalc).
-    wxColour gd_colour_at(int i) const
-    {
-        if (gd_is_predict()) {
-            if (i < 0 || i >= (int)m_gd_recipes.size()) return wxColour(180,180,180);
-            const auto& c = m_gd_recipes[i].rgb;
-            return wxColour((unsigned char)std::min(255.f, c[0]*255.f),
-                            (unsigned char)std::min(255.f, c[1]*255.f),
-                            (unsigned char)std::min(255.f, c[2]*255.f));
-        }
-        if (i < 0 || i >= (int)m_gd_ramp.size()) return wxColour(180,180,180);
-        return gd_step_colour(m_gd_ramp[i]);
-    }
-
-    // Geometría de un swatch i de la tira (compartida por paint/hit-test).
-    wxRect gd_swatch_rect(int i) const
-    {
-        const int N = gd_count();
-        if (N <= 0 || !m_gd_strip) return wxRect();
-        const wxSize sz = m_gd_strip->GetClientSize();
-        const int gap = 3;
-        int w = (sz.x - gap * (N + 1)) / std::max(1, N);
-        w = std::clamp(w, 8, 64);
-        const int h = std::max(28, sz.y - 2 * gap);
-        return wxRect(gap + i * (w + gap), gap, w, h);
-    }
-
-    int gd_swatch_at(const wxPoint& p) const
-    {
-        for (int i = 0; i < gd_count(); ++i)
-            if (gd_swatch_rect(i).Contains(p)) return i;
-        return -1;
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 2.3 (s167 plan, resuelta a favor de (b), ampliada
-    // tras revisión): el Gradient Designer es un editor de PRESET (puede aplicar a
-    // 0, 1 o varios objetos del plato), a diferencia del Painter que SIEMPRE edita
-    // un objeto concreto — de ahí que aquí no hubiera un extruder_id() obvio que
-    // mirar. Pero el viewport SÍ es consultable desde Tab.cpp (misma Selection que
-    // usa el resto de la GUI, solo que el Painter llega a ella vía su propio
-    // m_c->selection_info() en vez de Plater::get_selection() — ambas caminos
-    // llegan al mismo ModelObject). Así que: si hay EXACTAMENTE un objeto
-    // seleccionado en el viewport ahora mismo, usar SU color real (mismo rigor
-    // físico/MixedFilament que el Painter, ver gd_resolve_selected_object_bg) —
-    // más preciso que el preset cuando el usuario está mirando un objeto concreto.
-    // Si no (nada seleccionado, o varios objetos con colores distintos: ambiguo),
-    // caer a "qué filamento imprime ESTE preset por defecto" — solid_infill_filament
-    // (Top se apoya en el relleno sólido, Penu vive dentro de él), wall_filament
-    // como reserva. Negro subestimaba cuánto se ve a través de una capa
-    // translúcida — misma familia del bug "gris lavado" de s165/s166, solo que
-    // aquí era la composición, no las unidades de TD.
-    void gd_resolve_base_bg(const Slic3r::ColorSci::Material mats[4], float bg[3]) const
-    {
-        if (gd_resolve_selected_object_bg(mats, bg))
-            return;
-
-        int fid = 0;
-        if (auto* o = m_config->option<ConfigOptionInt>("solid_infill_filament")) fid = o->value;
-        if (fid <= 0)
-            if (auto* o = m_config->option<ConfigOptionInt>("wall_filament")) fid = o->value;
-        const int idx = std::clamp(fid - 1, 0, 3);
-        bg[0] = mats[idx].rgb[0];
-        bg[1] = mats[idx].rgb[1];
-        bg[2] = mats[idx].rgb[2];
-    }
-
-    // Mismo patrón de resolución que GLGizmoColorStitchPainter::resolve_object_base_bg
-    // (physical tool directo / MixedFilament virtual vía blend_parallel), pero
-    // partiendo de Plater::get_selection() en vez de m_c->selection_info() — este
-    // diálogo no es un gizmo, no tiene CommonGizmosDataObjectsPool. false cuando
-    // la selección no es un único objeto inequívoco o su extruder no resuelve.
-    bool gd_resolve_selected_object_bg(const Slic3r::ColorSci::Material mats[4], float bg[3]) const
-    {
-        Plater* plater = wxGetApp().plater();
-        if (!plater) return false;
-        const Selection& sel = plater->get_selection();
-        const int obj_idx = sel.get_object_idx();   // -1 salvo un único objeto en la selección
-        if (obj_idx < 0) return false;
-        const Model* model = sel.get_model();
-        if (!model || obj_idx >= (int)model->objects.size()) return false;
-        const ModelObject* mo = model->objects[obj_idx];
-        if (!mo) return false;
-
-        int extruder_id = 0;
-        for (const ModelVolume* mv : mo->volumes)
-            if (mv && mv->is_model_part()) { extruder_id = mv->extruder_id(); break; }
-        // extruder_id()==0 = sin "extruder" explícito en volumen ni objeto
-        // (Model.cpp) — el motor lo trata como T0 por defecto, no como "sin
-        // resolver". Antes esto caía a negro para el caso más común (objeto
-        // recién importado, sin tool asignado todavía).
-        if (extruder_id <= 0) extruder_id = 1;
-
-        size_t num_physical = 0;
-        if (auto* o = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour"))
-            num_physical = o->values.size();
-
-        if ((size_t)extruder_id <= num_physical) {
-            const int idx = std::clamp(extruder_id - 1, 0, 3);
-            bg[0] = mats[idx].rgb[0]; bg[1] = mats[idx].rgb[1]; bg[2] = mats[idx].rgb[2];
-            return true;
-        }
-
-        // Virtual MixedFilament id — misma aproximación TD-aware que el Painter
-        // (build_mixed_filament_recipe, ColorPredict.cpp), no el promedio RGB
-        // ingenuo de la lista de swatches.
-        const MixedFilament* mf = wxGetApp().preset_bundle->mixed_filaments
-                                       .mixed_filament_from_id((unsigned)extruder_id, num_physical);
-        if (!mf) return false;
-        const int mix_b = std::clamp(mf->mix_b_percent, 0, 100);
-        const int a = std::clamp<int>((int)mf->component_a - 1, 0, 3);
-        const int b = std::clamp<int>((int)mf->component_b - 1, 0, 3);
-        std::vector<Slic3r::ColorSci::Slice> slices;
-        slices.push_back({ a, (100 - mix_b) / 100.f });
-        slices.push_back({ b, mix_b / 100.f });
-        Slic3r::ColorSci::blend_parallel(slices, mats, bg);
-        return true;
-    }
-
-    // Color previsto de un step: composición física apilada (penu abajo, top
-    // B+A encima) con los TD del panel de la derecha — la tira reacciona en
-    // vivo a los sliders TD vía refresh_td_previews().
-    wxColour gd_step_colour(const Slic3r::ColorSci::GradientStep& g) const
-    {
-        Slic3r::ColorSci::Material mats[4];
-        gd_materials(mats);
-        float bg[3] = { 0.f, 0.f, 0.f };
-        gd_resolve_base_bg(mats, bg);
-        float rgb[3];
-        Slic3r::ColorSci::sandwich_colour_stacked(g.top, g.penu, mats, bg, rgb);
-        return wxColour((unsigned char)std::min(255.f, rgb[0] * 255.f),
-                        (unsigned char)std::min(255.f, rgb[1] * 255.f),
-                        (unsigned char)std::min(255.f, rgb[2] * 255.f));
-    }
-
-    // Cargar una receta en el sandwich vivo (cambia las capas que el usuario
-    // ve). Click en swatch de predicción → esto. reload_ui_from_stack repuebla
-    // filas + checkboxes; refresh_td_previews actualiza el preview TD.
-    void gd_load_recipe(const Slic3r::ColorSci::ColorRecipe& r)
-    {
-        m_stack[0] = r.top;
-        m_stack[1] = r.penu;
-        reload_ui_from_stack();
-        refresh_td_previews();
-    }
-
-    Slic3r::ColorSci::PredictOptions gd_predict_opts() const
-    {
-        Slic3r::ColorSci::PredictOptions o;
-        o.layer_height = layer_height_mm();
-        // NEOTKO_SANDWICH_TAG — Fase 2.3 (s167 plan, resuelta): mismo fondo real
-        // que gd_step_colour(), aquí para el modo Predict (m_gd_recipes, que
-        // hornea el color en la receta — un Refresh solo no basta, ver
-        // gd_schedule_recalc de arriba).
-        Slic3r::ColorSci::Material mats[4];
-        gd_materials(mats);
-        gd_resolve_base_bg(mats, o.bg_rgb);
-        return o;
-    }
-
-    // Debounce de regeneración tras cambios de TD: reinicia el one-shot timer;
-    // al expirar (~150 ms sin más cambios) regenera la tira del modo activo.
-    // En modos predicción esto recomputa m_gd_recipes con los nuevos TD (el
-    // color va baked en la receta, un Refresh solo no basta). En Gradient el
-    // color se recomputa en vivo al pintar, pero recalc tampoco molesta.
-    void gd_schedule_recalc()
-    {
-        if (m_gd_td_timer.GetOwner() == this)
-            m_gd_td_timer.StartOnce(150);
-    }
-
-    void gd_recalc()
-    {
-        if (!m_gd_strip) return;   // aún construyendo la página
-        // Qualify explícito — `using namespace` aquí no inyecta nombres en el
-        // ámbito de `Slic3r::GUI::<anon>` por reglas de lookup.
-        namespace CS = Slic3r::ColorSci;
-        const int mode = gd_mode();
-
-        if (mode == 0) {
-            // -------- modo Gradient: rampa manual --------
-            CS::GradientSpec s;
-            s.tool_a       = std::max(0, m_gd_tool_a->GetSelection());
-            s.tool_b       = std::max(0, m_gd_tool_b->GetSelection());
-            s.steps        = m_gd_steps->GetValue();
-            s.split_min_mm = m_gd_min->GetValue();
-            s.split_max_mm = m_gd_max->GetValue();
-            s.layer_height = layer_height_mm();
-
-            std::vector<std::string> warns;
-            m_gd_ramp = CS::build_ramp(CS::sanitize(s, &warns));
-            if (m_gd_selected.size() != m_gd_ramp.size())
-                m_gd_selected.assign(m_gd_ramp.size(), true);
-
-            if (m_gd_warn) {
-                wxString w;
-                for (const auto& msg : warns) {
-                    if (!w.empty()) w += "  ·  ";
-                    w += wxString::FromUTF8(msg);
-                }
-                m_gd_warn->SetLabel(w);
-                const bool want_shown = !w.empty();
-                if (m_gd_warn->IsShown() != want_shown) { m_gd_warn->Show(want_shown); Layout(); }
-            }
-            if (m_gd_sw_a) { m_gd_sw_a->SetBackgroundColour(tool_colour(s.tool_a)); m_gd_sw_a->Refresh(); }
-            if (m_gd_sw_b) { m_gd_sw_b->SetBackgroundColour(tool_colour(s.tool_b)); m_gd_sw_b->Refresh(); }
-        } else {
-            // -------- modos Flat / Mixed: paleta-predicción --------
-            CS::Material mats[4];
-            gd_materials(mats);
-            const CS::PredictOptions o = gd_predict_opts();
-            // PR.1: frontera única — el dispatcher build_palette unifica las
-            // tres familias. Flat/Mixed pasan por aquí; el ramp manual conserva
-            // su path GradientStep (mismo build_ramp, vivo con los TD).
-            m_gd_recipes = CS::build_palette(
-                mode == 1 ? CS::PaletteKind::Flat : CS::PaletteKind::Mixed,
-                mats, o);
-            m_gd_match_idx = -1;
-            if (m_gd_warn && m_gd_warn->IsShown()) { m_gd_warn->Show(false); Layout(); }
-        }
-        m_gd_strip->Refresh();
-    }
-
-    // Match inverso: target colour (mismo pool que Blend Suggestion) → mejor
-    // receta flat/mixed por ΔE2000. Prepende el resultado a la paleta, lo
-    // resalta y lo CARGA en el sandwich.
-    void gd_on_match()
-    {
-        namespace CS = Slic3r::ColorSci;
-        if (!m_gd_ptarget || m_bs_mix_opts.empty()) return;
-        const int sel = m_gd_ptarget->GetSelection();
-        if (sel < 0 || sel >= (int)m_bs_mix_opts.size()) return;
-        const std::string& dc = m_bs_mix_opts[sel].display_color;
-        if (dc.size() < 7 || dc[0] != '#') return;
-        unsigned long v = 0;
-        if (!wxString::FromUTF8(dc.substr(1)).ToULong(&v, 16)) return;
-        const float target[3] = { ((v>>16)&0xFF)/255.f, ((v>>8)&0xFF)/255.f, (v&0xFF)/255.f };
-
-        CS::Material mats[4];
-        gd_materials(mats);
-        const CS::PredictOptions o = gd_predict_opts();
-        CS::ColorRecipe best = (gd_mode() == 1) ? CS::suggest_flat(target, mats, o)
-                                                : CS::suggest_mixed(target, mats, o);
-        // prepende al frente para que sea visible y resaltado
-        m_gd_recipes.insert(m_gd_recipes.begin(), best);
-        m_gd_match_idx = 0;
-        if (m_gd_de)
-            m_gd_de->SetLabel(wxString::Format(_L("best ΔE %.1f"), best.delta_e));
-        gd_load_recipe(best);
-        m_gd_strip->Refresh();
-    }
-
-    // Helper común: empaqueta un (top,penu,color) como SurfaceEffectProfile y
-    // lo añade al manager. Mismo contrato que on_save_profile() — blobs
-    // autoritativos, payloads legacy present=false (painter Fase 6b consume
-    // los blobs), penu self-contained (no necesita bake).
-    void gd_export_one(const wxString& name,
-                       const Slic3r::SurfacePassStack& top,
-                       const Slic3r::SurfacePassStack& penu,
-                       const wxColour& c)
-    {
-        Slic3r::SurfaceEffectProfile p;
-        p.name            = name.ToStdString();
-        p.stack_top_json  = top.to_json();
-        p.stack_penu_json = penu.to_json();
-        p.preview_argb    = 0xFF000000u
-                          | ((uint32_t)c.Red()   << 16)
-                          | ((uint32_t)c.Green() <<  8)
-                          |  (uint32_t)c.Blue();
-        Slic3r::SurfaceEffectProfileManager::get().add(std::move(p));
-    }
-
-    void gd_on_export()
-    {
-        gd_recalc();
-        const wxString base = m_gd_name->GetValue();
-        int created = 0;
-
-        if (!gd_is_predict()) {
-            // -------- Gradient: exporta los swatches seleccionados de la rampa
-            int n_sel = 0;
-            for (bool b : m_gd_selected) n_sel += b ? 1 : 0;
-            if (n_sel == 0) {
-                wxMessageBox(_L("No swatches selected — click swatches in the ramp "
-                                "to include them."),
-                             _L("Export palette"), wxOK | wxICON_WARNING, this);
-                return;
-            }
-            for (size_t i = 0; i < m_gd_ramp.size(); ++i) {
-                if (!m_gd_selected[i]) continue;
-                gd_export_one(
-                    wxString::Format("%s %d/%d (A%.2f B%.2f)", base, (int)i + 1,
-                                     (int)m_gd_ramp.size(), m_gd_ramp[i].a_mm, m_gd_ramp[i].b_mm),
-                    m_gd_ramp[i].top, m_gd_ramp[i].penu, gd_step_colour(m_gd_ramp[i]));
-                ++created;
-            }
-        } else {
-            // -------- Flat/Mixed: exporta la paleta-predicción completa
-            if (m_gd_recipes.empty()) {
-                wxMessageBox(_L("Empty palette — adjust filaments/TD first."),
-                             _L("Export palette"), wxOK | wxICON_WARNING, this);
-                return;
-            }
-            const wxString kind = (gd_mode() == 1) ? "Flat" : "Mixed";
-            for (size_t i = 0; i < m_gd_recipes.size(); ++i) {
-                const auto& r = m_gd_recipes[i];
-                gd_export_one(
-                    wxString::Format("%s %s %d (%s)", base, kind, (int)i + 1,
-                                     wxString::FromUTF8(r.desc)),
-                    r.top, r.penu, gd_colour_at((int)i));
-                ++created;
-            }
-        }
-        wxMessageBox(wxString::Format(
-                         _L("%d profiles created — available as a palette in "
-                            "the 3D Painter (Sandwich)."), created),
-                     _L("Export palette"), wxOK | wxICON_INFORMATION, this);
-    }
-
-    // Re-aplica visibilidad de sub-paneles + textos según el modo activo.
-    void gd_apply_mode()
-    {
-        const int mode = gd_mode();
-        if (m_gd_design_pnl)  m_gd_design_pnl ->Show(mode == 0);
-        if (m_gd_predict_pnl) m_gd_predict_pnl->Show(mode != 0);
-        if (m_gd_de) m_gd_de->SetLabel(wxEmptyString);
-        Layout();
-        gd_recalc();
-    }
-
-    wxSizer* build_gradient_panel()
-    {
-        const int PAD = 6;
-        auto* sb = new wxStaticBoxSizer(wxVERTICAL, this,
-            _L("ColorStitch Studio"));
-        wxWindow* host = sb->GetStaticBox();
-
-        // ---- selector de modo (siempre visible) -------------------------------
-        {
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(host, wxID_ANY, _L("Mode:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-            wxArrayString modes;
-            modes.Add(_L("Gradient ramp"));
-            modes.Add(_L("Flat color (predict)"));
-            modes.Add(_L("Mixed approximation (predict)"));
-            m_gd_mode = new wxChoice(host, wxID_ANY, wxDefaultPosition, wxDefaultSize, modes);
-            m_gd_mode->SetSelection(0);
-            m_gd_mode->SetToolTip(_L(
-                "Gradient ramp — design a smooth A→penu→B ramp by hand.\n"
-                "Flat color — predicted palette of colors reachable by stacking solids.\n"
-                "Mixed approximation — predicted EXTENDED palette using a ColorStitch\n"
-                "  dither base (e.g. pattern \"12\") + a translucent solid top. Reaches\n"
-                "  colors no flat stack can (optical mix as a new primary)."));
-            m_gd_mode->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { gd_apply_mode(); });
-            row->Add(m_gd_mode, 1, wxALIGN_CENTER_VERTICAL);
-            sb->Add(row, 0, wxEXPAND | wxALL, PAD);
-        }
-
-        // ============ sub-panel modo Gradient (controles manuales) =============
-        m_gd_design_pnl = new wxPanel(host, wxID_ANY);
-        {
-            wxWindow* d = m_gd_design_pnl;
-            auto* dz = new wxBoxSizer(wxVERTICAL);
-
-            // fila: tools A/B con swatch + ligamento
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            wxArrayString tools;
-            for (int i = 1; i <= 4; ++i) tools.Add(wxString::Format("T%d", i));
-            m_gd_sw_a = new wxPanel(d, wxID_ANY, wxDefaultPosition, wxSize(14, 14));
-            m_gd_sw_a->SetBackgroundColour(tool_colour(0));
-            row->Add(m_gd_sw_a, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-            row->Add(new wxStaticText(d, wxID_ANY, _L("A")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-            m_gd_tool_a = new wxChoice(d, wxID_ANY, wxDefaultPosition, wxSize(60, -1), tools);
-            m_gd_tool_a->SetSelection(0);
-            m_gd_tool_a->SetToolTip(_L("Top tool (visible side) — also penu pattern tool A"));
-            row->Add(m_gd_tool_a, 0, wxRIGHT, 10);
-            m_gd_sw_b = new wxPanel(d, wxID_ANY, wxDefaultPosition, wxSize(14, 14));
-            m_gd_sw_b->SetBackgroundColour(tool_colour(1));
-            row->Add(m_gd_sw_b, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-            row->Add(new wxStaticText(d, wxID_ANY, _L("B")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-            m_gd_tool_b = new wxChoice(d, wxID_ANY, wxDefaultPosition, wxSize(60, -1), tools);
-            m_gd_tool_b->SetSelection(1);
-            m_gd_tool_b->SetToolTip(_L("Contrast tool (lower top pass)"));
-            row->Add(m_gd_tool_b, 0, wxRIGHT, 10);
-            // s120: Weave/Pattern retirados — el gradiente es TOP-only (sin penu).
-            // El dither de penu lo añade el usuario aparte si lo quiere.
-            row->AddStretchSpacer(1);
-            dz->Add(row, 0, wxEXPAND | wxBOTTOM, PAD);
-
-            // fila: steps + split  (s120: Pattern retirado — gradiente top-only)
-            auto* row2 = new wxBoxSizer(wxHORIZONTAL);
-            row2->Add(new wxStaticText(d, wxID_ANY, _L("Steps:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            m_gd_steps = new wxSpinCtrl(d, wxID_ANY, "8", wxDefaultPosition, wxSize(56, -1),
-                                        wxSP_ARROW_KEYS, 1, 30, 8);
-            row2->Add(m_gd_steps, 0, wxRIGHT, 10);
-            const double lo = Slic3r::ColorSci::kMinSweepMM;
-            const double hi = std::max(lo, layer_height_mm() - lo);
-            row2->Add(new wxStaticText(d, wxID_ANY, _L("Split:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            m_gd_min = new wxSpinCtrlDouble(d, wxID_ANY, "0.04", wxDefaultPosition, wxSize(72, -1),
-                                            wxSP_ARROW_KEYS, lo, hi, 0.04, 0.01);
-            m_gd_min->SetToolTip(_L("Thinnest top pass (mm). Floor 0.04 = engine MinLayer."));
-            row2->Add(m_gd_min, 0, wxRIGHT, 2);
-            row2->Add(new wxStaticText(d, wxID_ANY, "–"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
-            m_gd_max = new wxSpinCtrlDouble(d, wxID_ANY, "0.16", wxDefaultPosition, wxSize(72, -1),
-                                            wxSP_ARROW_KEYS, lo, hi, 0.16, 0.01);
-            m_gd_max->SetToolTip(_L("Thickest top pass (mm)"));
-            row2->Add(m_gd_max, 0, wxRIGHT, 4);
-            row2->Add(new wxStaticText(d, wxID_ANY,
-                          wxString::Format("mm (LH %.2f)", layer_height_mm())),
-                      0, wxALIGN_CENTER_VERTICAL);
-            dz->Add(row2, 0, wxEXPAND);
-            d->SetSizer(dz);
-            sb->Add(m_gd_design_pnl, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-
-        // ============ sub-panel modos Flat/Mixed (target match) ================
-        m_gd_predict_pnl = new wxPanel(host, wxID_ANY);
-        {
-            wxWindow* pp = m_gd_predict_pnl;
-            auto* pz = new wxBoxSizer(wxVERTICAL);
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(pp, wxID_ANY, _L("Target:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            wxArrayString tlabels;
-            for (auto& opt : m_bs_mix_opts) tlabels.Add(wxString::FromUTF8(opt.label));
-            if (tlabels.IsEmpty()) tlabels.Add(_L("(no MixedColor defined)"));
-            m_gd_ptarget = new wxChoice(pp, wxID_ANY, wxDefaultPosition, wxDefaultSize, tlabels);
-            m_gd_ptarget->SetSelection(0);
-            m_gd_ptarget->SetToolTip(_L("Target colour (same pool as Blend Suggestion). "
-                                        "Define MixedColors in the filament panel."));
-            row->Add(m_gd_ptarget, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-            auto* btn_match = new wxButton(pp, wxID_ANY, _L("Match ▸"));
-            btn_match->SetToolTip(_L("Find the closest achievable recipe (ΔE2000) and load it "
-                                     "into the sandwich above."));
-            btn_match->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { gd_on_match(); });
-            row->Add(btn_match, 0, wxRIGHT, 6);
-            m_gd_de = new wxStaticText(pp, wxID_ANY, wxEmptyString,
-                                       wxDefaultPosition, wxSize(90, -1));
-            m_gd_de->SetForegroundColour(wxColour(90, 90, 90));
-            row->Add(m_gd_de, 0, wxALIGN_CENTER_VERTICAL);
-            pz->Add(row, 0, wxEXPAND);
-            pp->SetSizer(pz);
-            sb->Add(m_gd_predict_pnl, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-            m_gd_predict_pnl->Hide();   // arranca en modo Gradient
-        }
-
-        // ============ tira de swatches (compartida, mode-aware) ================
-        {
-            m_gd_strip = new wxPanel(host, wxID_ANY, wxDefaultPosition, wxSize(-1, 64));
-            m_gd_strip->SetMinSize(wxSize(-1, 56));
-            m_gd_strip->SetBackgroundStyle(wxBG_STYLE_PAINT);
-            m_gd_strip->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
-                wxPaintDC dc(m_gd_strip);
-                dc.SetBackground(wxBrush(m_gd_strip->GetParent()->GetBackgroundColour()));
-                dc.Clear();
-                const bool predict = gd_is_predict();
-                for (int i = 0; i < gd_count(); ++i) {
-                    const wxRect r = gd_swatch_rect(i);
-                    dc.SetBrush(wxBrush(gd_colour_at(i)));
-                    // Gradient: borde azul = incluido en export; hatch = excluido.
-                    // Predict: borde verde = receta resaltada por Match.
-                    const bool sel = predict ? (i == m_gd_match_idx)
-                                             : (i < (int)m_gd_selected.size() && m_gd_selected[i]);
-                    if (predict)
-                        dc.SetPen(sel ? wxPen(wxColour(0, 180, 90), 2)
-                                      : wxPen(wxColour(110, 110, 110), 1));
-                    else
-                        dc.SetPen(sel ? wxPen(wxColour(0, 120, 255), 2)
-                                      : wxPen(wxColour(110, 110, 110), 1));
-                    dc.DrawRectangle(r);
-                    if (!predict && !sel) {
-                        dc.SetBrush(wxBrush(wxColour(110, 110, 110), wxBRUSHSTYLE_BDIAGONAL_HATCH));
-                        dc.SetPen(*wxTRANSPARENT_PEN);
-                        dc.DrawRectangle(r);
-                    }
-                }
-            });
-            m_gd_strip->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-                const int i = gd_swatch_at(e.GetPosition());
-                if (i < 0) return;
-                if (gd_is_predict()) {
-                    // CLICK CARGA la receta en el sandwich vivo (cambia las capas).
-                    if (i < (int)m_gd_recipes.size()) {
-                        m_gd_match_idx = i;
-                        gd_load_recipe(m_gd_recipes[i]);
-                        if (m_gd_de) m_gd_de->SetLabel(wxEmptyString);
-                        m_gd_strip->Refresh();
-                    }
-                } else if (i < (int)m_gd_selected.size()) {
-                    m_gd_selected[i] = !m_gd_selected[i];
-                    m_gd_strip->Refresh();
-                }
-            });
-            m_gd_strip->Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
-                const int i = gd_swatch_at(e.GetPosition());
-                if (i < 0) { m_gd_strip->UnsetToolTip(); e.Skip(); return; }
-                if (gd_is_predict()) {
-                    if (i < (int)m_gd_recipes.size())
-                        m_gd_strip->SetToolTip(wxString::FromUTF8(m_gd_recipes[i].desc));
-                } else if (i < (int)m_gd_ramp.size()) {
-                    m_gd_strip->SetToolTip(wxString::Format(
-                        "A %.2f / B %.2f mm", m_gd_ramp[i].a_mm, m_gd_ramp[i].b_mm));
-                }
-                e.Skip();
-            });
-            m_gd_strip->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { m_gd_strip->Refresh(); e.Skip(); });
-            sb->Add(m_gd_strip, 1, wxEXPAND | wxLEFT | wxRIGHT, PAD);
-
-            auto* hint = new wxStaticText(host, wxID_ANY,
-                _L("Gradient: click toggles export · Predict: click loads the recipe into the sandwich"));
-            hint->SetForegroundColour(wxColour(100, 100, 100));
-            sb->Add(hint, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-
-        // warnings de sanitize (oculto si no hay)
-        m_gd_warn = new wxStaticText(host, wxID_ANY, wxEmptyString);
-        m_gd_warn->SetForegroundColour(wxColour(200, 130, 0));
-        m_gd_warn->Hide();
-        sb->Add(m_gd_warn, 0, wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-
-        // fila final: nombre + export (compartida)
-        {
-            auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(host, wxID_ANY, _L("Name:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            m_gd_name = new wxTextCtrl(host, wxID_ANY, _L("Palette"));
-            row->Add(m_gd_name, 1, wxRIGHT, 8);
-            auto* btn_export = new wxButton(host, wxID_ANY, _L("Export palette…"));
-            btn_export->SetToolTip(_L("Gradient: exports selected ramp swatches.\n"
-                                      "Predict: exports the whole predicted palette.\n"
-                                      "Each becomes a 3D Painter profile."));
-            btn_export->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { gd_on_export(); });
-            row->Add(btn_export, 0);
-            sb->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, PAD);
-        }
-
-        // reactividad modo Gradient
-        m_gd_tool_a->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { gd_recalc(); });
-        m_gd_tool_b->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { gd_recalc(); });
-        m_gd_steps->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&)   { gd_recalc(); });
-        m_gd_min->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { gd_recalc(); });
-        m_gd_max->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { gd_recalc(); });
-
-        // Timer de debounce TD → regenerar. Owner = este diálogo, id propio.
-        m_gd_td_timer.SetOwner(this, kGdTdTimerId);
-        Bind(wxEVT_TIMER, [this](wxTimerEvent&) { gd_recalc(); }, kGdTdTimerId);
-
-        gd_recalc();
-        return sb;
-    }
-
-    void build_ui()
-    {
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84): layout horizontal. Izquierda
-        // editor de pilas + profile manager; derecha panel TD + Lane mode +
-        // use_virtual (mockup s71, portado del SurfaceColorMixerDialog).
-        auto* root = new wxBoxSizer(wxVERTICAL);
-        auto* hbox = new wxBoxSizer(wxHORIZONTAL);
-
-        auto* left  = new wxBoxSizer(wxVERTICAL);
-        auto* right = new wxBoxSizer(wxVERTICAL);
-
-        left->Add(build_zone(0, _L("Top layer")),
-                  0, wxEXPAND | wxALL, 6);
-        left->Add(build_zone(1, _L("Penultimate layer")),
-                  0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
-        // NEOTKO_BOTTOM_TAG — Bottom surface zone (profile-scoped; same authoring
-        // widget as Top/Penu, with §5.5 caps + supported-bottom control below).
-        left->Add(build_zone(2, _L("Bottom surface")),
-                  0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
-        // NEOTKO_COLORSCI_TAG — UX 2026-06-24: Line distribution mode moved out of the
-        // Sandwich editor into print settings (Quality → Surface ColorStitch), below
-        // Minimum line length. The Gradient Designer keeps the freed right column + stretch.
-        left->AddStretchSpacer(1);
-
-        right->Add(build_td_panel(),       0, wxEXPAND | wxALL, 6);
-        right->Add(build_gradient_panel(), 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
-
-        hbox->Add(left,  1, wxEXPAND);
-        hbox->Add(right, 0, wxEXPAND | wxLEFT, 4);
-        root->Add(hbox, 1, wxEXPAND);
-
-        // NEOTKO_PROFILE_TAG — Fase 6: profile manager (3D Painter). Saves the
-        // authoritative pass-stack blobs (stack_top/penu_json) into a
-        // SurfaceEffectProfile so the painter can pick this sandwich. The legacy
-        // 3-payloads stay empty (present=false) — the painter ENGINE migration to
-        // consume the stack is Fase 6b; until then the gizmo previews it.
-        root->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
-        auto* prof_row = new wxBoxSizer(wxHORIZONTAL);
-        auto* btn_save_prof = new wxButton(this, wxID_ANY, _L("Save as profile…"));
-        auto* btn_mgr_prof  = new wxButton(this, wxID_ANY, _L("Manage profiles…"));
-        prof_row->Add(btn_save_prof, 0, wxRIGHT, 6);
-        prof_row->Add(btn_mgr_prof,  0);
-        root->Add(prof_row, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-        btn_save_prof->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_save_profile(); });
-        btn_mgr_prof->Bind(wxEVT_BUTTON,  [this](wxCommandEvent&) { on_manage_profiles(); });
-
-        root->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
-        auto* btns = CreateButtonSizer(wxOK | wxCANCEL);
-        if (btns) root->Add(btns, 0, wxEXPAND | wxALL, 8);
-
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-            if (e.GetId() == wxID_OK) commit();
-            e.Skip();
-        });
-
-        SetSizerAndFit(root);
-        SetMinSize(wxSize(560, 420));
-        for (int z = 0; z < 3; ++z) { refresh_rows(z); sync_zone_enabled(z); }
-        Layout();
-    }
-
-    wxSizer* build_zone(int z, const wxString& title)
-    {
-        auto* box = new wxStaticBoxSizer(wxVERTICAL, this, title);
-        wxWindow* boxw = box->GetStaticBox();
-
-        // header — Enabled checkbox + 1/2/3 slot selector
-        auto* hdr = new wxBoxSizer(wxHORIZONTAL);
-        m_ui[z].enable_chk = new wxCheckBox(boxw, wxID_ANY, _L("Enabled"));
-        m_ui[z].enable_chk->SetValue(m_stack[z].enabled && !m_stack[z].passes.empty());
-        m_ui[z].enable_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
-            const bool on = m_ui[z].enable_chk->GetValue();
-            m_stack[z].enabled = on;
-            if (on) {
-                // NEOTKO_SANDWICH_TAG s119 (EMPTY model): enabling a zone means "I
-                // want an effect here". An empty stack or a lone None (Empty) zone
-                // becomes a real ColorStitch pass — the per-row selector no longer
-                // offers None, so a None row would otherwise show no kind.
-                if (m_stack[z].passes.empty()) {
-                    Slic3r::SurfacePass p;
-                    p.kind = Kind::ColorStitch; p.ratio = 1.0;
-                    m_stack[z].passes.push_back(p);
-                } else if (m_stack[z].passes.size() == 1 &&
-                           m_stack[z].passes[0].kind == Kind::None) {
-                    m_stack[z].passes[0].kind  = Kind::ColorStitch;
-                    m_stack[z].passes[0].ratio = 1.0;
-                }
-            }
-            refresh_rows(z);
-            sync_zone_enabled(z);
-        });
-        hdr->Add(m_ui[z].enable_chk, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 16);
-
-        wxArrayString slots; slots.Add("1"); slots.Add("2"); slots.Add("3");
-        m_ui[z].slots_rb = new wxRadioBox(boxw, wxID_ANY, _L("Passes"),
-                                          wxDefaultPosition, wxDefaultSize,
-                                          slots, 3, wxRA_SPECIFY_COLS);
-        const int n0 = std::max(1, (int)m_stack[z].passes.size());
-        m_ui[z].slots_rb->SetSelection(std::min(3, n0) - 1);
-        m_ui[z].slots_rb->Bind(wxEVT_RADIOBOX, [this, z](wxCommandEvent&) {
-            set_slot_count(z, m_ui[z].slots_rb->GetSelection() + 1);
-        });
-        hdr->Add(m_ui[z].slots_rb, 0, wxALIGN_CENTER_VERTICAL);
-
-        // NEOTKO_COLORSTITCH_TAG — s118: Perimeter override es UNA sola opción del
-        // color (no per-zona). Se crea sólo en la zona Top y aplica a top+penu; la
-        // zona Penu no lo dibuja (m_ui[1].perim_chk queda null → refs guardadas).
-        // El motor lo lee por-zona (Fill.cpp), así que escribimos ambos stacks.
-        if (z == 0) {
-            m_ui[z].perim_chk = new wxCheckBox(boxw, wxID_ANY, _L("Perimeter override"));
-            m_ui[z].perim_chk->SetValue(m_stack[0].perimeter_override || m_stack[1].perimeter_override);
-            m_ui[z].perim_chk->SetToolTip(_L("Clone the walls into every Solid pass "
-                                             "(MultiPass perimeter override). Applies to "
-                                             "Top and Penultimate."));
-            m_ui[z].perim_chk->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-                const bool on = m_ui[0].perim_chk->GetValue();
-                m_stack[0].perimeter_override = on;
-                m_stack[1].perimeter_override = on;
-            });
-            hdr->Add(m_ui[z].perim_chk, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 16);
-        }
-        box->Add(hdr, 0, wxALL, 6);
-
-        // rows host — kMaxPasses fixed row panels, shown/hidden by slot count.
-        m_ui[z].rows_host  = new wxPanel(boxw);
-        m_ui[z].rows_sizer = new wxBoxSizer(wxVERTICAL);
-        m_ui[z].rows_host->SetSizer(m_ui[z].rows_sizer);
-        const int kMax = Slic3r::SurfacePassStack::kMaxPasses;
-        m_ui[z].row_panel  .assign(kMax, nullptr);
-        m_ui[z].chips      .assign(kMax, nullptr);
-        m_ui[z].badge      .assign(kMax, nullptr);
-        m_ui[z].kind_choice.assign(kMax, nullptr);
-        m_ui[z].ratio_spin .assign(kMax, nullptr);
-        m_ui[z].angle_lbl  .assign(kMax, nullptr);
-        m_ui[z].angle_txt  .assign(kMax, nullptr);
-        m_ui[z].preview    .assign(kMax, nullptr);
-        m_ui[z].adv_btn    .assign(kMax, nullptr);
-        m_ui[z].pb_advanced_btn.assign(kMax, nullptr);
-        m_ui[z].minlbl     .assign(kMax, nullptr);
-        m_ui[z].up_btn     .assign(kMax, nullptr);
-        m_ui[z].down_btn   .assign(kMax, nullptr);
-        for (int idx = kMax - 1; idx >= 0; --idx)   // top of stack drawn first
-            m_ui[z].rows_sizer->Add(build_row(z, idx), 0,
-                                    wxEXPAND | wxTOP | wxBOTTOM, 3);
-
-        // stacked draggable Z-ratio bar, left of the rows (drag the dividers).
-        m_ui[z].ratio_bar = new wxPanel(boxw, wxID_ANY,
-                                        wxDefaultPosition, wxSize(30, -1));
-        m_ui[z].ratio_bar->SetToolTip(
-            _L("Drag the dividers to split the layer height between passes."));
-        m_ui[z].ratio_bar->Bind(wxEVT_PAINT,
-            [this, z](wxPaintEvent&) { paint_ratio_bar(z); });
-        m_ui[z].ratio_bar->Bind(wxEVT_LEFT_DOWN,
-            [this, z](wxMouseEvent& e) { ratio_bar_down(z, e); });
-        m_ui[z].ratio_bar->Bind(wxEVT_MOTION,
-            [this, z](wxMouseEvent& e) { ratio_bar_motion(z, e); });
-        m_ui[z].ratio_bar->Bind(wxEVT_LEFT_UP,
-            [this, z](wxMouseEvent& e) { ratio_bar_up(z, e); });
-        m_ui[z].ratio_bar->Bind(wxEVT_MOUSE_CAPTURE_LOST,
-            [this](wxMouseCaptureLostEvent&) { m_drag_zone = -1; m_drag_bound = -1; });
-
-        auto* mid = new wxBoxSizer(wxHORIZONTAL);
-        mid->Add(m_ui[z].ratio_bar, 0, wxEXPAND | wxRIGHT, 5);
-        mid->Add(m_ui[z].rows_host, 1, wxEXPAND);
-        box->Add(mid, 0, wxEXPAND | wxLEFT | wxRIGHT, 6);
-
-        // footer — ratio sum + normalize
-        auto* foot = new wxBoxSizer(wxHORIZONTAL);
-        m_ui[z].sum_lbl = new wxStaticText(boxw, wxID_ANY, wxEmptyString);
-        foot->Add(m_ui[z].sum_lbl, 1, wxALIGN_CENTER_VERTICAL);
-        m_ui[z].norm_btn = new wxButton(boxw, wxID_ANY, _L("Normalize"),
-                                        wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        m_ui[z].norm_btn->Bind(wxEVT_BUTTON, [this, z](wxCommandEvent&) { normalize(z); });
-        foot->Add(m_ui[z].norm_btn, 0, wxLEFT, 8);
-        box->Add(foot, 0, wxEXPAND | wxALL, 6);
-
-        // NEOTKO_BOTTOM_TAG — supported-bottom control, BELOW the Bottom block only.
-        // OFF = single full-height pass (paint-only; a real bridge stays a bridge).
-        // ON = up to 3 Z-stacked passes (pass 0 keeps the base treatment, passes
-        // above print solid). Stored in m_stack[2].bottom_supported_control and
-        // serialized into stack_bottom_json when the profile is saved.
-        if (z == 2) {
-            m_ui[z].supported_chk = new wxCheckBox(boxw, wxID_ANY,
-                _L("Supported bottom — control (stack passes)"));
-            m_ui[z].supported_chk->SetValue(m_stack[z].bottom_supported_control);
-            m_ui[z].supported_chk->SetToolTip(
-                _L("ON: treat this bottom as SUPPORTED and control it (up to 3 stacked "
-                   "passes; pass 0 keeps the base treatment, passes above print solid). "
-                   "OFF: single full-height pass — leave OFF for real bridges (overhangs)."));
-            m_ui[z].supported_chk->Bind(wxEVT_CHECKBOX, [this, z](wxCommandEvent&) {
-                m_stack[z].bottom_supported_control = m_ui[z].supported_chk->GetValue();
-            });
-            box->Add(m_ui[z].supported_chk, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-        }
-        return box;
-    }
-
-    // --------------------------------------------------------------- row build
-    // The 3 row panels are built ONCE and never destroyed — only shown/hidden
-    // and re-synced. Destroying child windows from inside an event handler
-    // (the old rebuild approach) freed NSViews that AppKit still drew → crash.
-    void refresh_rows(int z)
-    {
-        ZoneUI& u = m_ui[z];
-        const int n = (int)m_stack[z].passes.size();
-        u.kindlist = kind_entries_for_slots(n, /*bottom=*/z == 2);   // NEOTKO_BOTTOM_TAG
-
-        for (int idx = 0; idx < (int)u.row_panel.size(); ++idx) {
-            const bool vis = idx < n;
-            if (u.row_panel[idx]) u.row_panel[idx]->Show(vis);
-            if (!vis) continue;
-            const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-
-            // repopulate the kind choice for the current slot rule
-            u.kind_choice[idx]->Clear();
-            for (const auto& e : u.kindlist)
-                u.kind_choice[idx]->Append(e.label);
-            // Select the entry that matches kind + (for PB) mode in the blob.
-            int sel = 0;
-            int pb_mode_cur = (int)Slic3r::PathBlendPassConfig::Mode::Full;
-            if (p.kind == Kind::PathBlend) {
-                const auto it_blob = p.pathblend.kv.find("blob");
-                const std::string blob = (it_blob != p.pathblend.kv.end())
-                    ? it_blob->second : std::string();
-                if (!blob.empty()) {
-                    const Slic3r::PathBlendPassConfig pbc =
-                        Slic3r::PathBlendPassConfig::from_blob_json(blob);
-                    pb_mode_cur = (int)pbc.mode;
-                }
-            }
-            for (size_t i = 0; i < u.kindlist.size(); ++i) {
-                if (u.kindlist[i].kind != p.kind) continue;
-                if (p.kind == Kind::PathBlend) {
-                    if (u.kindlist[i].pb_mode == pb_mode_cur) { sel = (int)i; break; }
-                } else {
-                    sel = (int)i; break;
-                }
-            }
-            u.kind_choice[idx]->SetSelection(sel);
-
-            // NEOTKO_SANDWICH_TAG — Fase 5 s73: ratio_spin shows floor_mm for PB.
-            if (p.kind == Kind::PathBlend) {
-                Slic3r::PathBlendPassConfig pbc;
-                const auto it_blob = p.pathblend.kv.find("blob");
-                if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
-                    pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
-                u.ratio_spin[idx]->SetValue(pbc.floor_mm);
-            } else {
-                u.ratio_spin[idx]->SetValue(p.ratio * layer_height_mm());
-            }
-            sync_row_widgets(z, idx);
-        }
-        u.rows_host->Enable(m_stack[z].enabled);
-        u.rows_host->Layout();
-        update_sum(z);
-        if (GetSizer()) { GetSizer()->Layout(); Fit(); }
-    }
-
-    // Per-row sync that does NOT touch the kind choice items, so it is safe to
-    // call from inside the choice's own event handler. Updates badge, the
-    // angle field (Solid only) and the advanced button (ColorStitch / PathBlend).
-    void sync_row_widgets(int z, int idx)
-    {
-        ZoneUI& u = m_ui[z];
-        if (idx >= (int)m_stack[z].passes.size()) return;
-        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-
-        u.badge[idx]->SetLabel(kind_badge_for(p));   // NEOTKO_SANDWICH_TAG s73
-        u.badge[idx]->SetBackgroundColour(kind_colour(p.kind));
-        u.badge[idx]->Refresh();
-
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): up/down visibility + enable.
-        // Hidden when slots < 2 (or PB collapses the stack to 1).
-        {
-            const int n = (int)m_stack[z].passes.size();
-            const bool visible = n >= 2;
-            if (u.up_btn[idx]) {
-                u.up_btn[idx]->Show(visible);
-                u.up_btn[idx]->Enable(visible && idx < n - 1);
-            }
-            if (u.down_btn[idx]) {
-                u.down_btn[idx]->Show(visible);
-                u.down_btn[idx]->Enable(visible && idx > 0);
-            }
-        }
-
-        // NEOTKO_SANDWICH_TAG — Fase 5 s73: per-row inline PathBlend repurpose.
-        // Solid -> spinner = Z mm (pass height), angle field = fill angle.
-        // PathBlend -> spinner = floor_mm, angle field = mid_end_mm (label
-        // changes from "angle:" to "mid:"). Ease + tools picked via adv_btn
-        // and chip clicks. The kind selector decides Half vs Full.
-        const bool is_solid = (p.kind == Kind::Solid);
-        const bool is_pb    = (p.kind == Kind::PathBlend);
-        // NEOTKO_COLORSTITCH_TAG — ColorStitch now exposes its fill angle inline too
-        // (wheel over the preview rotates it; persisted in the pass colorstitch kv).
-        const bool is_cm    = (p.kind == Kind::ColorStitch);
-
-        // Angle/Mid field is visible for Solid, PathBlend and ColorStitch.
-        u.angle_lbl[idx]->Show(is_solid || is_pb || is_cm);
-        u.angle_txt[idx]->Show(is_solid || is_pb || is_cm);
-        // Default to enabled; the PB-Half branch below disables when needed.
-        u.angle_lbl[idx]->Enable(true);
-        u.angle_txt[idx]->Enable(true);
-        if (is_solid) {
-            u.angle_lbl[idx]->SetLabel(_L("angle:"));
-            u.angle_txt[idx]->ChangeValue(wxString::Format("%d", p.angle));
-        } else if (is_cm) {
-            u.angle_lbl[idx]->SetLabel(_L("angle:"));
-            const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
-                                              : "interlayer_colormix_angle";
-            int a = -1;
-            const auto it = p.colorstitch.kv.find(akey);
-            if (it != p.colorstitch.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
-            u.angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
-        } else if (is_pb) {
-            u.angle_lbl[idx]->SetLabel(_L("ramp end:"));
-            Slic3r::PathBlendPassConfig pbc;
-            const auto it_blob = p.pathblend.kv.find("blob");
-            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
-                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
-            u.angle_txt[idx]->ChangeValue(wxString::Format("%.3f", pbc.mid_end_mm));
-            // NEOTKO_SANDWICH_TAG — Fase 5 s73: in Half mode mid is forced to
-            // the layer height (no cap), so the field is disabled to make the
-            // constraint visible to the user.
-            const bool half = (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half);
-            u.angle_txt[idx]->Enable(!half);
-            u.angle_lbl[idx]->Enable(!half);
-        }
-
-        // adv_btn: "Edit gradient..." for ColorStitch; ease-mode cycler for PB;
-        // hidden for Solid/None.
-        wxButton* adv = u.adv_btn[idx];
-        if (p.kind == Kind::ColorStitch) {
-            adv->SetLabel(_L("Edit gradient…")); adv->Show(true);
-        } else if (is_pb) {
-            static const wxString ease_names[4] = {
-                _L("Mode: Linear"), _L("Mode: Ease In"),
-                _L("Mode: Ease Out"), _L("Mode: Ease In/Out")
-            };
-            Slic3r::PathBlendPassConfig pbc;
-            const auto it_blob = p.pathblend.kv.find("blob");
-            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
-                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
-            const int em = std::clamp(pbc.ease_mode, 0, 3);
-            adv->SetLabel(ease_names[em]);
-            adv->Show(true);
-        } else {
-            adv->Show(false);
-        }
-        // NEOTKO_PATHBLEND_TAG — s88. Advanced ⚙ button is PB-only.
-        if (u.pb_advanced_btn[idx]) {
-            u.pb_advanced_btn[idx]->Show(is_pb);
-            if (is_pb) {
-                // Reflect current runtime state on the label so the user sees
-                // at a glance whether any toggle is non-default.
-                const auto& d = Slic3r::PathBlendDispatcherRuntime::get();
-                const auto& s = Slic3r::PathBlendSchedulerRuntime::get();
-                const bool all_default = d.chain_continuous && s.chain_atomic
-                    // NEOTKO_PATHBLEND_TAG s282 — read the default off the struct
-                    // instead of repeating the literal, which went stale when the
-                    // default moved 1.0 -> 2.0 and made the button read "*" on a
-                    // pristine profile.
-                    && std::abs(d.chain_max_xy_mm
-                                - Slic3r::PathBlendDispatcherRuntime{}.chain_max_xy_mm) < 1e-6;
-                u.pb_advanced_btn[idx]->SetLabel(
-                    all_default ? _L("Advanced \xE2\x9A\x99")
-                                : _L("Advanced \xE2\x9A\x99 *"));
-            }
-        }
-
-        // Ratio spinner label changes: "Z mm:" normally, "floor mm:" for PB.
-        // The spinner itself is at index 0 of its sizer (we just retitle via the
-        // spinner's value, the static label is at row sizer position).
-        // The label widget isn't stored separately; we keep the static text "Z mm:"
-        // in build_row and instead use the tooltip + spinner range to disambiguate.
-        // For PB, the spinner value shows floor_mm directly (refresh_rows handles).
-
-        // min-layer warning: only meaningful for Solid/ColorStitch sub-bands. PB
-        // doesn't go through the sublayer MinLayer gate (its floor can be 0.01).
-        const double mm = p.ratio * layer_height_mm();
-        const bool thin = (!is_pb) && (mm < kMinPassMM - 1e-9);
-        if (u.minlbl[idx]) {
-            u.minlbl[idx]->SetLabel(thin
-                ? _L("⚠ < 0,04 mm — pasada apagada (su altura se reparte al guardar)")
-                : wxString());
-            u.minlbl[idx]->Show(thin);
-        }
-        // NEOTKO_SANDWICH_TAG — s132: row box adaptativo al tema (en light mode el
-        // gris (60,60,60) salía casi negro). Dark = igual que el fork; light = gris claro.
-        // s146-fix: wxGetApp().dark_mode() en macOS sigue la apariencia del SO, no el tema de
-        // la app → en modo día con SO oscuro daba la caja oscura. Usamos la MISMA fuente que
-        // ImGui (app_config "dark_color_mode") para que diálogo y painter coincidan.
-        const bool dark = wxGetApp().app_config->get("dark_color_mode") == "1";
-        u.row_panel[idx]->SetBackgroundColour(
-            thin ? (dark ? wxColour(48, 40, 32) : wxColour(248, 236, 224))
-                 : (dark ? wxColour(60, 60, 60) : wxColour(228, 228, 228)));
-
-        u.chips[idx]->Refresh();
-        u.preview[idx]->Refresh();
-        u.row_panel[idx]->Refresh();
-        u.row_panel[idx]->Layout();
-    }
-
-    // Builds one fixed row panel (widgets only — values synced by refresh_rows).
-    wxPanel* build_row(int z, int idx)
-    {
-        ZoneUI& u = m_ui[z];
-        auto* row = new wxPanel(u.rows_host);
-        // NEOTKO_SANDWICH_TAG — s132: fondo inicial adaptativo (refresh_rows lo re-aplica).
-        // s146-fix: usar el tema de la app (no el SO en mac) — ver refresh_rows.
-        row->SetBackgroundColour(wxGetApp().app_config->get("dark_color_mode") == "1"
-                                     ? wxColour(60, 60, 60)
-                                     : wxColour(228, 228, 228));
-        auto* rv = new wxBoxSizer(wxVERTICAL);
-        auto* rh = new wxBoxSizer(wxHORIZONTAL);
-
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): up/down reorder buttons.
-        // Vector m_stack[z].passes is bottom→top, rows are drawn top-first
-        // (kMax-1 .. 0). Up arrow (visual top direction) = swap with idx+1.
-        // Down arrow = swap with idx-1. Shown only when slots >= 2; disabled
-        // at the extreme positions. State managed in sync_row_widgets.
-        auto* up = new wxButton(row, wxID_ANY, L"▲",
-            wxDefaultPosition, wxSize(22, 22), wxBU_EXACTFIT);
-        up->SetToolTip(_L("Move this pass up (toward the top of the layer)."));
-        up->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
-            move_pass(z, idx, idx + 1);
-        });
-        rh->Add(up, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
-
-        auto* down = new wxButton(row, wxID_ANY, L"▼",
-            wxDefaultPosition, wxSize(22, 22), wxBU_EXACTFIT);
-        down->SetToolTip(_L("Move this pass down (toward the bottom of the layer)."));
-        down->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
-            move_pass(z, idx, idx - 1);
-        });
-        rh->Add(down, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-
-        auto* chip = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(78, 22));
-        chip->Bind(wxEVT_PAINT, [this, z, idx](wxPaintEvent&) { paint_chip(z, idx); });
-        chip->Bind(wxEVT_LEFT_DOWN, [this, z, idx](wxMouseEvent& ev) {
-            if (idx >= (int)m_stack[z].passes.size()) return;
-            const Kind k = m_stack[z].passes[idx].kind;
-            if (k == Kind::Solid) {
-                pick_solid_tool(z, idx);
-            } else if (k == Kind::PathBlend) {
-                // NEOTKO_SANDWICH_TAG — Fase 5 s73: chip is painted in 2 halves
-                // for PB Full. Click in upper half -> cap tool; lower half ->
-                // ramp tool. Half mode: any click -> ramp (only one tool).
-                wxPanel* w = m_ui[z].chips[idx];
-                const int slot = (w && ev.GetY() < w->GetClientSize().y / 2) ? 1 : 0;
-                pick_pathblend_tool(z, idx, slot);
-            }
-        });
-        rh->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, 4);
-
-        auto* badge = new wxStaticText(row, wxID_ANY, wxEmptyString,
-            wxDefaultPosition, wxSize(82, 20), wxALIGN_CENTRE_HORIZONTAL);
-        badge->SetForegroundColour(*wxWHITE);
-        rh->Add(badge, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-
-        auto* choice = new wxChoice(row, wxID_ANY);
-        choice->Bind(wxEVT_CHOICE, [this, z, idx](wxCommandEvent&) {
-            const int sel = m_ui[z].kind_choice[idx]->GetSelection();
-            if (sel >= 0 && sel < (int)m_ui[z].kindlist.size())
-                on_kind_change(z, idx, m_ui[z].kindlist[sel]);  // KindEntry
-        });
-        rh->Add(choice, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-
-        // pass height in mm (= ratio × layer_height). Editing one rescales the
-        // others so the stack always fills the layer.
-        rh->Add(new wxStaticText(row, wxID_ANY, _L("Z mm:")),
-                0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-        auto* ratio = new wxSpinCtrlDouble(row, wxID_ANY, wxEmptyString,
-            wxDefaultPosition, wxSize(78, -1), wxSP_ARROW_KEYS,
-            0.0, 5.0, 0.1, 0.02);
-        ratio->SetDigits(2);
-        ratio->Bind(wxEVT_SPINCTRLDOUBLE,
-            [this, z, idx](wxSpinDoubleEvent&) { on_height_edit(z, idx); });
-        rh->Add(ratio, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
-
-        // fill angle — per-pass, Solid only. Editable + mouse-wheel rotation.
-        auto* albl = new wxStaticText(row, wxID_ANY, _L("angle:"));
-        rh->Add(albl, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-        auto* atxt = new wxTextCtrl(row, wxID_ANY, "-1",
-            wxDefaultPosition, wxSize(48, -1), wxTE_PROCESS_ENTER);
-        atxt->SetToolTip(_L("-1 = auto. Scroll the wheel over the box below to rotate."));
-        atxt->Bind(wxEVT_MOUSEWHEEL,
-            [this, z, idx](wxMouseEvent& e) { on_angle_wheel(z, idx, e); });
-        atxt->Bind(wxEVT_TEXT_ENTER,
-            [this, z, idx](wxCommandEvent&) { store_angle(z, idx); });
-        atxt->Bind(wxEVT_KILL_FOCUS,
-            [this, z, idx](wxFocusEvent& e) { store_angle(z, idx); e.Skip(); });
-        rh->Add(atxt, 0, wxALIGN_CENTER_VERTICAL);
-        rv->Add(rh, 0, wxEXPAND | wxALL, 3);
-
-        // preview box — Solid shows the fill-angle hatch (wheel rotates it here).
-        auto* prev = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(-1, 20));
-        prev->Bind(wxEVT_PAINT, [this, z, idx](wxPaintEvent&) { paint_preview(z, idx); });
-        prev->Bind(wxEVT_MOUSEWHEEL,
-            [this, z, idx](wxMouseEvent& e) { on_angle_wheel(z, idx, e); });
-        rv->Add(prev, 0, wxEXPAND | wxLEFT | wxRIGHT, 3);
-
-        // adv_btn: ColorStitch -> open gradient dialog. PathBlend -> cycle ease_mode.
-        // (Fase 5 s73: PB popup deleted; ease cycles inline on this button.)
-        auto* adv = new wxButton(row, wxID_ANY, _L("Edit…"),
-                                 wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        adv->Bind(wxEVT_BUTTON, [this, z, idx](wxCommandEvent&) {
-            if (idx >= (int)m_stack[z].passes.size()) return;
-            const Kind k = m_stack[z].passes[idx].kind;
-            if (k == Kind::ColorStitch) {
-                open_colorstitch_for(z, idx);
-            } else if (k == Kind::PathBlend) {
-                cycle_pathblend_ease(z, idx);
-            }
-        });
-
-        // NEOTKO_PATHBLEND_TAG — s88. Advanced ⚙ button placed RIGHT NEXT TO
-        // the adv_btn ("Mode: Linear / Ease In / …"). Shown only on PB rows
-        // (sync_row_widgets toggles visibility). Opens the PB Advanced
-        // modal with the runtime toggles (chain_continuous, chain_max_xy_mm,
-        // chain_atomic). The modal reads/writes the singletons in
-        // ColorStitch.hpp (PathBlend ingredient section) and persists
-        // to app_config so choices survive across sessions.
-        auto* pb_adv = new wxButton(row, wxID_ANY,
-            _L("Advanced \xE2\x9A\x99"),
-            wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-        pb_adv->SetToolTip(_L(
-            "PathBlend advanced behavior:\n"
-            "  • Continuous chain — suppress retract+lift between adjacent\n"
-            "    scanlines of the same tool.\n"
-            "  • Atomic chain — complete one object's PathBlend before\n"
-            "    starting the next (no cross-object travels during ramp).\n"
-            "  • XY threshold — beyond this distance, treat scanlines as\n"
-            "    disconnected islands and bring the lift back."));
-        pb_adv->Bind(wxEVT_BUTTON, [this, pb_adv, z, idx](wxCommandEvent&) {
-            auto* ac = wxGetApp().app_config;
-            Slic3r::PathBlendDispatcherRuntime& d = Slic3r::PathBlendDispatcherRuntime::mut();
-            Slic3r::PathBlendSchedulerRuntime&  s = Slic3r::PathBlendSchedulerRuntime::mut();
-            // NEOTKO_PATHBLEND_TAG — s191: chain toggles are internal, ALL ON by
-            // default, and only editable/visible under developer_mode. Everyone
-            // else just gets the ramp-profile editor.
-            const bool dev = (ac && ac->get("developer_mode") == "true");
-            if (dev && ac) {
-                const std::string vc = ac->get("neotko_pb_chain_continuous");
-                const std::string vx = ac->get("neotko_pb_chain_max_xy_mm");
-                const std::string va = ac->get("neotko_pb_chain_atomic");
-                // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — use_canon_scheduler removed (canon-only).
-                if (!vc.empty()) d.chain_continuous    = (vc == "1" || vc == "true");
-                if (!va.empty()) s.chain_atomic        = (va == "1" || va == "true");
-                if (!vx.empty()) { try { d.chain_max_xy_mm = std::stod(vx); } catch (...) {} }
-            }
-            wxDialog dlg(pb_adv, wxID_ANY, _L("PathBlend Advanced"),
-                         wxDefaultPosition, wxDefaultSize,
-                         wxDEFAULT_DIALOG_STYLE);
-            auto* vbox = new wxBoxSizer(wxVERTICAL);
-
-            // ---- Ramp profile editor (visual twin of the painter ADV) --------
-            // NEOTKO_PATHBLEND_TAG — s191: cross-section canvas (X = surface zone
-            // 0..1, Y = height 0..H mm) with two draggable 2D handles:
-            //   low (blue)  = (in_t, floor), high (orange) = (out_t, ramp end).
-            // Same model/math as GLGizmoColorStitchPainter's pro_pb_profile_editor.
-            auto prof = std::make_shared<Slic3r::PathBlendPassConfig>(read_pb_blob(z));
-            const double Hh = layer_height_mm();
-            const bool is_half = (prof->mode == Slic3r::PathBlendPassConfig::Mode::Half);
-            const double Hd0 = std::max(0.04, Hh);
-            double re_disp = (prof->mid_end_mm < 0.f) ? (is_half ? Hd0 : Hd0 - 0.04)
-                                                      : (double)prof->mid_end_mm;
-            re_disp = std::clamp(re_disp, std::max(0.01, (double)prof->floor_mm) + 0.001, Hd0);
-            const double fl_disp = std::clamp((double)std::max(0.01f, prof->floor_mm),
-                                              0.01, re_disp - 0.001);
-
-            vbox->Add(new wxStaticText(&dlg, wxID_ANY,
-                    _L("Ramp profile — drag the handles (X = zone, Y = height):")),
-                    0, wxALL, 8);
-            auto* canvas = new wxPanel(&dlg, wxID_ANY, wxDefaultPosition, wxSize(260, 170),
-                                       wxBORDER_SIMPLE);
-            vbox->Add(canvas, 0, wxLEFT | wxRIGHT | wxALIGN_CENTER_HORIZONTAL, 8);
-
-            auto* hp1 = new wxBoxSizer(wxHORIZONTAL);
-            hp1->Add(new wxStaticText(&dlg, wxID_ANY, _L("start:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            auto* sc_in = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
-                wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.0, 0.98, prof->in_t, 0.02);
-            sc_in->SetDigits(2);
-            hp1->Add(sc_in, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
-            hp1->Add(new wxStaticText(&dlg, wxID_ANY, _L("end:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            auto* sc_out = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
-                wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.02, 1.0, prof->out_t, 0.02);
-            sc_out->SetDigits(2);
-            hp1->Add(sc_out, 0, wxALIGN_CENTER_VERTICAL);
-            vbox->Add(hp1, 0, wxLEFT | wxRIGHT | wxTOP, 8);
-
-            auto* hp2 = new wxBoxSizer(wxHORIZONTAL);
-            hp2->Add(new wxStaticText(&dlg, wxID_ANY, _L("floor:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            auto* sc_floor = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
-                wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.01, Hd0, fl_disp, 0.02);
-            sc_floor->SetDigits(2);
-            sc_floor->SetToolTip(_L("Ramp floor height (mm) — the low end."));
-            hp2->Add(sc_floor, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
-            hp2->Add(new wxStaticText(&dlg, wxID_ANY, _L("ramp end:")),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            wxSpinCtrlDouble* sc_ramp = nullptr;
-            if (is_half) {
-                auto* t = new wxStaticText(&dlg, wxID_ANY, wxString::Format("%.2f (H)", Hd0));
-                t->Enable(false);
-                hp2->Add(t, 0, wxALIGN_CENTER_VERTICAL);
-            } else {
-                sc_ramp = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString,
-                    wxDefaultPosition, wxSize(80, -1), wxSP_ARROW_KEYS, 0.01, Hd0, re_disp, 0.02);
-                sc_ramp->SetDigits(2);
-                sc_ramp->SetToolTip(_L(
-                    "Ramp top height (mm). May reach the full layer height H — the\n"
-                    "cap then vanishes there (a \"techo\" of the bottom tool)."));
-                hp2->Add(sc_ramp, 0, wxALIGN_CENTER_VERTICAL);
-            }
-            vbox->Add(hp2, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 8);
-
-            // Paint the cross-section.
-            canvas->Bind(wxEVT_PAINT, [canvas, prof, Hh, is_half](wxPaintEvent&) {
-                wxPaintDC dc(canvas);
-                const wxSize cs = canvas->GetClientSize();
-                const double pad = 12.0;
-                const double p0x = pad, p0y = pad, p1x = cs.x - pad, p1y = cs.y - pad;
-                const double pw = std::max(1.0, p1x - p0x), ph = std::max(1.0, p1y - p0y);
-                const double Hd = std::max(0.04, Hh);
-                auto SX = [&](double t){ return p0x + std::clamp(t, 0.0, 1.0) * pw; };
-                auto SY = [&](double zz){ return p1y - std::clamp(zz / Hd, 0.0, 1.0) * ph; };
-                auto Pt = [&](double t, double zz){ return wxPoint((int)std::lround(SX(t)),
-                                                                   (int)std::lround(SY(zz))); };
-                double a = std::clamp((double)prof->in_t, 0.0, 1.0);
-                double b = std::clamp((double)prof->out_t, 0.0, 1.0);
-                if (b < a + 0.02) b = std::min(1.0, a + 0.02);
-                double fl = std::clamp((double)std::max(0.01f, prof->floor_mm), 0.01, Hd - 0.001);
-                double re = (prof->mid_end_mm < 0.f) ? (is_half ? Hd : Hd - 0.04)
-                                                     : (double)prof->mid_end_mm;
-                if (is_half) re = Hd;
-                re = std::clamp(re, fl + 0.001, Hd);
-                dc.SetPen(*wxTRANSPARENT_PEN);
-                dc.SetBrush(wxBrush(wxColour(30, 30, 34)));
-                dc.DrawRectangle(0, 0, cs.x, cs.y);
-                { wxPoint p[] = { Pt(0,0), Pt(0,fl), Pt(a,fl), Pt(b,re), Pt(1,re), Pt(1,0) };
-                  dc.SetBrush(wxBrush(wxColour(48, 96, 158))); dc.DrawPolygon(6, p); }
-                if (!is_half) {
-                    wxPoint p[] = { Pt(0,fl), Pt(a,fl), Pt(b,re), Pt(1,re), Pt(1,Hd), Pt(0,Hd) };
-                    dc.SetBrush(wxBrush(wxColour(158, 100, 48))); dc.DrawPolygon(6, p);
-                }
-                dc.SetBrush(*wxTRANSPARENT_BRUSH);
-                dc.SetPen(wxPen(wxColour(90, 90, 100)));
-                dc.DrawRectangle((int)p0x, (int)p0y, (int)pw, (int)ph);
-                dc.SetPen(wxPen(wxColour(150, 210, 255), 2));
-                dc.DrawLine(Pt(0,fl), Pt(a,fl));
-                dc.DrawLine(Pt(a,fl), Pt(b,re));
-                dc.DrawLine(Pt(b,re), Pt(1,re));
-                dc.SetPen(wxPen(*wxWHITE, 1));
-                dc.SetBrush(wxBrush(wxColour(90, 170, 255)));  dc.DrawCircle(Pt(a,fl), 6);
-                dc.SetBrush(wxBrush(wxColour(255, 170, 90)));  dc.DrawCircle(Pt(b,re), 6);
-            });
-
-            // Drag the handles. One lambda bound to LEFT_DOWN + MOTION.
-            auto drag = std::make_shared<int>(-1);
-            auto onMouse = [canvas, prof, Hh, is_half, drag, sc_in, sc_out, sc_floor, sc_ramp]
-                           (wxMouseEvent& e) {
-                const wxSize cs = canvas->GetClientSize();
-                const double pad = 12.0;
-                const double p0x = pad, p0y = pad, p1x = cs.x - pad, p1y = cs.y - pad;
-                const double pw = std::max(1.0, p1x - p0x), ph = std::max(1.0, p1y - p0y);
-                const double Hd = std::max(0.04, Hh);
-                auto SX = [&](double t){ return p0x + std::clamp(t, 0.0, 1.0) * pw; };
-                auto SY = [&](double zz){ return p1y - std::clamp(zz / Hd, 0.0, 1.0) * ph; };
-                double a = std::clamp((double)prof->in_t, 0.0, 1.0);
-                double b = std::clamp((double)prof->out_t, 0.0, 1.0);
-                if (b < a + 0.02) b = std::min(1.0, a + 0.02);
-                double fl = std::clamp((double)std::max(0.01f, prof->floor_mm), 0.01, Hd - 0.001);
-                double re = (prof->mid_end_mm < 0.f) ? (is_half ? Hd : Hd - 0.04)
-                                                     : (double)prof->mid_end_mm;
-                if (is_half) re = Hd;
-                re = std::clamp(re, fl + 0.001, Hd);
-                const double mx = e.GetX(), my = e.GetY();
-                if (e.LeftDown()) {
-                    const double dlo = (mx-SX(a))*(mx-SX(a)) + (my-SY(fl))*(my-SY(fl));
-                    const double dhi = (mx-SX(b))*(mx-SX(b)) + (my-SY(re))*(my-SY(re));
-                    *drag = (dlo <= dhi) ? 0 : 1;
-                    if (!canvas->HasCapture()) canvas->CaptureMouse();
-                }
-                if (*drag < 0) { e.Skip(); return; }
-                if (!e.LeftDown() && !(e.Dragging() && e.LeftIsDown())) { e.Skip(); return; }
-                const double mt = std::clamp((mx - p0x) / pw, 0.0, 1.0);
-                const double mz = std::clamp((p1y - my) / ph, 0.0, 1.0) * Hd;
-                if (*drag == 0) {
-                    prof->in_t     = (float)std::clamp(mt, 0.0, b - 0.02);
-                    prof->floor_mm = (float)std::clamp(mz, 0.01, re - 0.001);
-                } else {
-                    prof->out_t    = (float)std::clamp(mt, a + 0.02, 1.0);
-                    if (!is_half) prof->mid_end_mm = (float)std::clamp(mz, fl + 0.001, Hd);
-                }
-                sc_in->SetValue(prof->in_t);
-                sc_out->SetValue(prof->out_t);
-                sc_floor->SetValue(std::max(0.01f, prof->floor_mm));
-                if (sc_ramp) sc_ramp->SetValue((prof->mid_end_mm < 0.f) ? re : (double)prof->mid_end_mm);
-                canvas->Refresh();
-            };
-            canvas->Bind(wxEVT_LEFT_DOWN, onMouse);
-            canvas->Bind(wxEVT_MOTION,    onMouse);
-            canvas->Bind(wxEVT_LEFT_UP,   [canvas, drag](wxMouseEvent&) {
-                *drag = -1; if (canvas->HasCapture()) canvas->ReleaseMouse(); });
-            canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST,
-                         [drag](wxMouseCaptureLostEvent&) { *drag = -1; });
-
-            // Numeric edits feed the same shared config + repaint.
-            sc_in->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_in, sc_out, canvas](wxSpinDoubleEvent&) {
-                prof->in_t = (float)sc_in->GetValue();
-                if ((double)prof->out_t < prof->in_t + 0.02) {
-                    prof->out_t = std::min(1.0f, prof->in_t + 0.02f); sc_out->SetValue(prof->out_t); }
-                canvas->Refresh();
-            });
-            sc_out->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_in, sc_out, canvas](wxSpinDoubleEvent&) {
-                prof->out_t = (float)sc_out->GetValue();
-                if ((double)prof->in_t > prof->out_t - 0.02) {
-                    prof->in_t = std::max(0.0f, prof->out_t - 0.02f); sc_in->SetValue(prof->in_t); }
-                canvas->Refresh();
-            });
-            sc_floor->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_floor, canvas](wxSpinDoubleEvent&) {
-                prof->floor_mm = (float)sc_floor->GetValue(); canvas->Refresh();
-            });
-            if (sc_ramp) sc_ramp->Bind(wxEVT_SPINCTRLDOUBLE, [prof, sc_ramp, canvas](wxSpinDoubleEvent&) {
-                prof->mid_end_mm = (float)sc_ramp->GetValue(); canvas->Refresh();
-            });
-
-            // ---- Developer-only internal scheduler toggles -------------------
-            wxCheckBox *chk_cont = nullptr, *chk_atomic = nullptr;  // NEOTKO_NEOTOWER_TAG s204 (Fase 1) — chk_canon removed (canon-only scheduler)
-            wxSpinCtrlDouble* sc_xy = nullptr;
-            if (dev) {
-                vbox->Add(new wxStaticLine(&dlg), 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
-                chk_cont = new wxCheckBox(&dlg, wxID_ANY,
-                    _L("Continuous chain (suppress retract/lift between adjacent scanlines)"));
-                chk_cont->SetValue(d.chain_continuous);
-                vbox->Add(chk_cont, 0, wxALL, 8);
-                chk_atomic = new wxCheckBox(&dlg, wxID_ANY,
-                    _L("Atomic chain (complete each object's PathBlend before next)"));
-                chk_atomic->SetValue(s.chain_atomic);
-                vbox->Add(chk_atomic, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-                auto* hxy = new wxBoxSizer(wxHORIZONTAL);
-                hxy->Add(new wxStaticText(&dlg, wxID_ANY,
-                        _L("Continuous-chain XY threshold (mm):")),
-                        0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-                sc_xy = new wxSpinCtrlDouble(&dlg, wxID_ANY, wxEmptyString, wxDefaultPosition,
-                        wxSize(90, -1), wxSP_ARROW_KEYS, 0.0, 50.0, d.chain_max_xy_mm, 0.1);
-                sc_xy->SetDigits(2);
-                hxy->Add(sc_xy, 0, wxALIGN_CENTER_VERTICAL);
-                vbox->Add(hxy, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-            }
-
-            vbox->Add(dlg.CreateButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 8);
-            dlg.SetSizerAndFit(vbox);
-            if (dlg.ShowModal() == wxID_OK) {
-                if (dev) {
-                    d.chain_continuous    = chk_cont->GetValue();
-                    s.chain_atomic        = chk_atomic->GetValue();
-                    d.chain_max_xy_mm     = sc_xy->GetValue();
-                    if (ac) {
-                        ac->set("neotko_pb_chain_continuous",    d.chain_continuous    ? "1" : "0");
-                        ac->set("neotko_pb_chain_atomic",        s.chain_atomic        ? "1" : "0");
-                        char buf[32];
-                        std::snprintf(buf, sizeof(buf), "%.4f", d.chain_max_xy_mm);
-                        ac->set("neotko_pb_chain_max_xy_mm",  buf);
-                        ac->save();
-                    }
-                }
-                // Commit the profile (spins are the source of truth; drag keeps
-                // them in sync). write_pb_blob applies apply_constraints + re-syncs.
-                prof->in_t     = (float)sc_in->GetValue();
-                prof->out_t    = (float)sc_out->GetValue();
-                prof->floor_mm = (float)sc_floor->GetValue();
-                if (sc_ramp) prof->mid_end_mm = (float)sc_ramp->GetValue();
-                write_pb_blob(z, idx, *prof);
-                const bool prof_lin  = (prof->in_t <= 0.001f && prof->out_t >= 0.999f);
-                const bool chain_def = (d.chain_continuous && s.chain_atomic
-                    && std::abs(d.chain_max_xy_mm
-                                - Slic3r::PathBlendDispatcherRuntime{}.chain_max_xy_mm) < 1e-6);
-                pb_adv->SetLabel((prof_lin && chain_def)
-                    ? _L("Advanced \xE2\x9A\x99") : _L("Advanced \xE2\x9A\x99 *"));
-            }
-        });
-
-        // Place adv_btn and pb_adv side by side in a horizontal sub-sizer.
-        auto* adv_row = new wxBoxSizer(wxHORIZONTAL);
-        adv_row->Add(adv,    0, wxALIGN_CENTER_VERTICAL);
-        adv_row->Add(pb_adv, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-        rv->Add(adv_row, 0, wxLEFT | wxTOP | wxBOTTOM, 3);
-
-        // min-layer warning — shown when this pass's height < 0.04 mm.
-        auto* minl = new wxStaticText(row, wxID_ANY, wxEmptyString);
-        minl->SetForegroundColour(wxColour(220, 150, 60));
-        rv->Add(minl, 0, wxLEFT | wxBOTTOM, 3);
-        minl->Hide();
-
-        row->SetSizer(rv);
-
-        u.row_panel[idx]   = row;
-        u.chips[idx]       = chip;
-        u.badge[idx]       = badge;
-        u.kind_choice[idx] = choice;
-        u.ratio_spin[idx]  = ratio;
-        u.angle_lbl[idx]   = albl;
-        u.angle_txt[idx]   = atxt;
-        u.preview[idx]     = prev;
-        u.adv_btn[idx]     = adv;
-        u.pb_advanced_btn[idx] = pb_adv;
-        u.minlbl[idx]      = minl;
-        u.up_btn[idx]      = up;
-        u.down_btn[idx]    = down;
-        return row;
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 7 (s84c): reorder helper. Passes carry all
-    // their state (kind, colorstitch.kv, pathblend.kv, ratio, angle) so a swap
-    // is non-destructive — no gradients/PB blobs are lost.
-    void move_pass(int z, int i, int j)
-    {
-        auto& ps = m_stack[z].passes;
-        if (i < 0 || j < 0 || i == j) return;
-        if (i >= (int)ps.size() || j >= (int)ps.size()) return;
-        // PathBlend collapses the zone to 1 pass — nothing to reorder there;
-        // the buttons are hidden in that case, but guard anyway.
-        if (ps.size() < 2) return;
-        std::swap(ps[i], ps[j]);
-        refresh_rows(z);
-    }
-
-    // ------------------------------------------------------------- interaction
-    void set_slot_count(int z, int n)
-    {
-        n = std::clamp(n, 1, Slic3r::SurfacePassStack::kMaxPasses);
-        auto& ps = m_stack[z].passes;
-
-        bool has_pb = false;
-        for (const auto& p : ps) if (p.kind == Kind::PathBlend) has_pb = true;
-        if (has_pb && n > 1)                       // PathBlend can't be multi-pass
-            // s232 — el payload TAMBIÉN se va. Degradar a Solid dejando dentro el blob
-            // PathBlend (o un ColorStitch) produce un pase `kind:Solid` con
-            // `present=true`: el motor lo slicea como Solid, pero cualquier lector que
-            // mire el payload (el preview del painter, los nombres de receta) cree que
-            // sigue habiendo efecto → "la receta dice PB/ColorStitch y sale plano".
-            // Visto en vivo en los perfiles 33 y 40 del proyecto del usuario (s232).
-            for (auto& p : ps) { p.kind = Kind::Solid; p.colorstitch = {}; p.pathblend = {}; }
-
-        if ((int)ps.size() < n) {
-            while ((int)ps.size() < n) {
-                Slic3r::SurfacePass p;
-                p.kind = Kind::Solid;
-                // NEOTKO_BOTTOM_TAG — §5.5: a new bottom pass defaults to a kind that
-                // fits the caps (Solid until 2 exist, then ColorStitch).
-                if (z == 2) {
-                    int ns = 0, nc = 0;
-                    for (const auto& q : ps) {
-                        if (q.kind == Kind::Solid)         ++ns;
-                        else if (q.kind == Kind::ColorStitch) ++nc;
-                    }
-                    if (ns >= 2 && nc < 1) p.kind = Kind::ColorStitch;
-                }
-                ps.push_back(p);
-            }
-        } else if ((int)ps.size() > n) {
-            ps.resize(n);
-        }
-        if (n == 1 && (ps[0].kind == Kind::Solid || ps[0].kind == Kind::None))
-            ps[0].kind = Kind::ColorStitch;            // lone Solid/None is meaningless
-
-        const double even = 1.0 / n;
-        for (auto& p : ps) p.ratio = even;
-
-        if (m_ui[z].slots_rb) m_ui[z].slots_rb->SetSelection(n - 1);
-        refresh_rows(z);
-    }
-
-    void on_kind_change(int z, int idx, const ZoneUI::KindEntry& e)
-    {
-        if (e.kind == Kind::PathBlend) {
-            // NEOTKO_SANDWICH_TAG — Fase 5 s73: Half/Full distinction lives in
-            // the blob (pb.mode), not in the enum. Collapse the zone to a
-            // single PB pass and write the blob with the chosen mode.
-            // Deferred via CallAfter: refresh_rows() repopulates the wxChoice
-            // that is firing this very event — safer done after dispatch.
-            const int pb_mode = e.pb_mode;
-            CallAfter([this, z, pb_mode]() {
-                const char* zkey = (z == 0) ? "pathblend_top" : "pathblend_penu";
-                // Preserve other PB fields (floor/mid_end/tools/ease) when
-                // re-selecting; only override the mode.
-                Slic3r::PathBlendPassConfig pbc;
-                if (auto* o = m_config->option<ConfigOptionString>(zkey))
-                    pbc = Slic3r::PathBlendPassConfig::from_blob_json(o->value);
-                pbc.mode = static_cast<Slic3r::PathBlendPassConfig::Mode>(pb_mode);
-                // NEOTKO_SANDWICH_TAG — Fase 5 s73: pb_apply_constraints
-                // re-clamps floor/mid for the new mode (Half forces mid=H,
-                // Full caps mid at H-0.04 and ensures mid > floor strictly).
-                pb_apply_constraints(pbc, layer_height_mm());
-                pbc.sync_legacy_view();
-                const std::string blob = pbc.to_blob_json();
-                if (auto* o = m_config->option<ConfigOptionString>(zkey))
-                    o->value = blob;
-                m_on_change(zkey);
-
-                Slic3r::SurfacePass pb;
-                pb.kind = Kind::PathBlend; pb.ratio = 1.0;
-                pb.pathblend.present = true;
-                pb.pathblend.kv["blob"] = blob;
-                m_stack[z].passes.assign(1, pb);
-                if (m_ui[z].slots_rb) m_ui[z].slots_rb->SetSelection(0);
-                refresh_rows(z);
-            });
-            return;
-        }
-        // NEOTKO_BOTTOM_TAG — §5.5 caps (bottom zone only): reject a change that would
-        // exceed max 2 Solid / max 1 ColorStitch. Non-destructive: the stack is left
-        // unchanged and refresh_rows re-selects the dropdown from it (snaps back).
-        // (PB Full-only is handled by kind_entries_for_slots dropping the Half entry.)
-        if (z == 2 && (e.kind == Kind::Solid || e.kind == Kind::ColorStitch)) {
-            int ns = 0, nc = 0;
-            for (int j = 0; j < (int)m_stack[z].passes.size(); ++j) if (j != idx) {
-                if (m_stack[z].passes[j].kind == Kind::Solid)         ++ns;
-                else if (m_stack[z].passes[j].kind == Kind::ColorStitch) ++nc;
-            }
-            if ((e.kind == Kind::Solid && ns >= 2) || (e.kind == Kind::ColorStitch && nc >= 1)) {
-                CallAfter([this, z]() { refresh_rows(z); });   // revert the choice
-                return;
-            }
-        }
-        // Non-PB: slot count unchanged → kind choice items stay valid; update
-        // only this row's widgets without repopulating the choice that just
-        // fired this event.
-        m_stack[z].passes[idx].kind = e.kind;
-        sync_row_widgets(z, idx);
-        if (GetSizer()) { GetSizer()->Layout(); Fit(); }
-    }
-
-    void pick_solid_tool(int z, int idx)
-    {
-        wxMenu menu;
-        const int n = std::max(1, (int)m_fcolors.size());
-        for (int t = 0; t < n; ++t)
-            menu.Append(TOOL_MENU_BASE + t, wxString::Format(_L("Tool T%d"), t + 1));
-        const int sel = GetPopupMenuSelectionFromUser(menu);
-        if (sel == wxID_NONE) return;
-        m_stack[z].passes[idx].solid_tool = sel - TOOL_MENU_BASE;
-        if (idx < (int)m_ui[z].chips.size())   m_ui[z].chips[idx]->Refresh();
-        if (idx < (int)m_ui[z].preview.size()) m_ui[z].preview[idx]->Refresh();
-    }
-
-    // Edited one pass's height (mm) → set its ratio, rescale the others so the
-    // stack still fills the layer, then re-sync every row.
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73: for PathBlend, the spinner means
-    // floor_mm (not ratio) — delegate to on_pathblend_floor_edit.
-    void on_height_edit(int z, int idx)
-    {
-        auto& ps = m_stack[z].passes;
-        const int n = (int)ps.size();
-        if (idx < 0 || idx >= n || !m_ui[z].ratio_spin[idx]) return;
-        if (ps[idx].kind == Kind::PathBlend) {
-            on_pathblend_floor_edit(z, idx);
-            return;
-        }
-        const double LH = layer_height_mm();
-        double newR = std::clamp(m_ui[z].ratio_spin[idx]->GetValue() / LH, 0.0, 1.0);
-
-        double othersOld = 0;
-        for (int j = 0; j < n; ++j)
-            if (j != idx) othersOld += std::max(0.0, ps[j].ratio);
-        ps[idx].ratio = newR;
-        if (n > 1) {
-            const double target = 1.0 - newR;
-            if (othersOld > 1e-6) {
-                const double k = target / othersOld;
-                for (int j = 0; j < n; ++j)
-                    if (j != idx) ps[j].ratio = std::max(0.0, ps[j].ratio) * k;
-            } else {
-                const double ev = target / (n - 1);
-                for (int j = 0; j < n; ++j) if (j != idx) ps[j].ratio = ev;
-            }
-        }
-        sync_heights(z);
-    }
-
-    // Push m_stack ratios back into every row's spin + warning + bar.
-    void sync_heights(int z)
-    {
-        const double LH = layer_height_mm();
-        const int n = (int)m_stack[z].passes.size();
-        for (int i = 0; i < n; ++i) {
-            if (m_ui[z].ratio_spin[i])
-                m_ui[z].ratio_spin[i]->SetValue(m_stack[z].passes[i].ratio * LH);
-            sync_row_widgets(z, i);
-        }
-        if (m_ui[z].ratio_bar) m_ui[z].ratio_bar->Refresh();
-        update_sum(z);
-        if (GetSizer()) { GetSizer()->Layout(); Fit(); }
-    }
-
-    void normalize(int z)
-    {
-        auto& ps = m_stack[z].passes;
-        double sum = 0;
-        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
-        if (sum < 1e-6) return;
-        for (auto& p : ps) p.ratio = std::max(0.0, p.ratio) / sum;
-        sync_heights(z);
-    }
-
-    void update_sum(int z)
-    {
-        ZoneUI& u = m_ui[z];
-        if (!u.sum_lbl) return;
-        const double LH = layer_height_mm();
-        const int n = (int)m_stack[z].passes.size();
-        double mm = 0;
-        for (int i = 0; i < n; ++i) mm += std::max(0.0, m_stack[z].passes[i].ratio) * LH;
-        u.sum_lbl->SetLabel(wxString::Format(_L("Layer height: %.2f mm   (Σ %.2f)"),
-                                             LH, mm));
-        const bool ok = std::abs(mm - LH) < 0.005;
-        u.sum_lbl->SetForegroundColour(ok ? wxColour(150, 150, 150)
-                                          : wxColour(220, 150, 60));
-        u.sum_lbl->Refresh();
-        if (u.ratio_bar) u.ratio_bar->Refresh();
-    }
-
-    void sync_zone_enabled(int z)
-    {
-        const bool on = m_stack[z].enabled;
-        if (m_ui[z].slots_rb)  m_ui[z].slots_rb->Enable(on);
-        if (m_ui[z].rows_host) m_ui[z].rows_host->Enable(on);
-        if (m_ui[z].norm_btn)  m_ui[z].norm_btn->Enable(on);
-        // s118: perim_chk es global (no se ata al enable de la zona Top).
-        if (m_ui[z].ratio_bar) { m_ui[z].ratio_bar->Enable(on); m_ui[z].ratio_bar->Refresh(); }
-    }
-
-    // ---------------------------------------------------- per-pass fill angle
-    // Each Solid pass owns its own SurfacePass.angle, edited inline on its row.
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73: for PathBlend, the same widget edits
-    // mid_end_mm (label "mid mm:" in sync_row_widgets). Delegate accordingly.
-    void store_angle(int z, int idx)
-    {
-        if (idx >= (int)m_stack[z].passes.size()) return;
-        Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-        if (!m_ui[z].angle_txt[idx]) return;
-        if (p.kind == Kind::PathBlend) {
-            on_pathblend_mid_edit(z, idx);
-            return;
-        }
-        if (p.kind == Kind::ColorStitch) {
-            // NEOTKO_COLORSTITCH_TAG — typed angle persists into the pass colorstitch kv.
-            long v = -1;
-            if (!m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false).ToLong(&v))
-                v = -1;
-            if (v < 0) v = -1; else if (v > 359) v = 359;
-            const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
-                                              : "interlayer_colormix_angle";
-            p.colorstitch.present = true;
-            p.colorstitch.kv[akey] = std::to_string((int)v);
-            m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", (int)v));
-            m_ui[z].preview[idx]->Refresh();
-            return;
-        }
-        if (p.kind != Kind::Solid) return;
-        long v = -1;
-        if (!m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false).ToLong(&v))
-            v = -1;
-        if (v < 0) v = -1; else if (v > 359) v = 359;
-        p.angle = (int)v;
-        m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", (int)v));
-        m_ui[z].preview[idx]->Refresh();
-    }
-
-    void on_angle_wheel(int z, int idx, wxMouseEvent& e)
-    {
-        if (idx >= (int)m_stack[z].passes.size()) { e.Skip(); return; }
-        Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-        if (p.kind == Kind::PathBlend) {
-            Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
-            // Half: mid is locked to H — wheel does nothing on this field.
-            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half) return;
-            // Full: nudge mid_end_mm by 0.01. pb_apply_constraints clamps to
-            // [floor + ε, H - 0.04].
-            const double step = (e.GetWheelRotation() > 0) ? 0.01 : -0.01;
-            pbc.mid_end_mm += (float)step;
-            write_pb_blob(z, idx, pbc);
-            return;
-        }
-        if (p.kind == Kind::ColorStitch) {
-            // NEOTKO_COLORSTITCH_TAG — rotate the ColorStitch fill angle in the pass kv
-            // (same key the engine reads via painted_colorstitch_angle_for_slot).
-            const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
-                                              : "interlayer_colormix_angle";
-            int a = -1;
-            const auto it = p.colorstitch.kv.find(akey);
-            if (it != p.colorstitch.kv.end()) { try { a = std::stoi(it->second); } catch (...) {} }
-            const int step = (e.GetWheelRotation() > 0) ? 5 : -5;
-            if (a < 0) a = (step > 0) ? 0 : -1;
-            else { a += step; if (a < 0) a = -1; else a %= 360; }
-            p.colorstitch.present = true;
-            p.colorstitch.kv[akey] = std::to_string(a);
-            if (m_ui[z].angle_txt[idx]) m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
-            if (m_ui[z].preview[idx])   m_ui[z].preview[idx]->Refresh();
-            return;
-        }
-        if (p.kind != Kind::Solid) { e.Skip(); return; }
-        const int step = (e.GetWheelRotation() > 0) ? 5 : -5;
-        int a = p.angle;
-        if (a < 0) a = (step > 0) ? 0 : -1;          // leave / stay at auto
-        else { a += step; if (a < 0) a = -1; else a %= 360; }
-        p.angle = a;
-        m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%d", a));
-        m_ui[z].preview[idx]->Refresh();
-    }
-
-    // ---------------------------------------------------- PathBlend helpers
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73: inline PathBlend editing helpers.
-    // Read/write the per-zone PB blob (pathblend_top / pathblend_penu), update
-    // both the live config (so the engine sees it) and the SurfacePass kv
-    // (so the dialog round-trips on save).
-
-    Slic3r::PathBlendPassConfig read_pb_blob(int z) const
-    {
-        const char* zkey = (z == 0) ? "pathblend_top" : "pathblend_penu";
-        std::string blob;
-        if (auto* o = m_config->option<ConfigOptionString>(zkey)) blob = o->value;
-        return Slic3r::PathBlendPassConfig::from_blob_json(blob);
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73 UX hardening: enforce physical sanity
-    // on (floor_mm, mid_end_mm) before any write reaches the engine.
-    //   Half: mid_end_mm is the layer top; there is no cap. Forced mid = H.
-    //   Full: cap = top 0,04 mm of flow → mid_end ≤ H − 0,04. Ramp must exist
-    //         (mid > floor strictly); equal values would mean two flat layers,
-    //         which is the MultiPass use-case, not PathBlend.
-    // NEOTKO_COLORSTITCH_TAG s108 — body promoted to the engine
-    // (PathBlendPassConfig::apply_constraints) so the painter pro-mode tray
-    // shares the exact same rules; this wrapper keeps the call sites intact.
-    static void pb_apply_constraints(Slic3r::PathBlendPassConfig& pbc, double H)
-    {
-        pbc.apply_constraints(H);
-    }
-
-    void write_pb_blob(int z, int idx, const Slic3r::PathBlendPassConfig& pbc_in)
-    {
-        Slic3r::PathBlendPassConfig pbc = pbc_in;
-        pb_apply_constraints(pbc, layer_height_mm());
-        pbc.sync_legacy_view();
-        const std::string blob = pbc.to_blob_json();
-        const char* zkey = (z == 0) ? "pathblend_top" : "pathblend_penu";
-        if (auto* o = m_config->option<ConfigOptionString>(zkey))
-            o->value = blob;
-        m_on_change(zkey);
-        if (idx >= 0 && idx < (int)m_stack[z].passes.size()) {
-            Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-            p.pathblend.present = true;
-            p.pathblend.kv["blob"] = blob;
-        }
-        // Re-sync the row widgets so spinners / badge / preview reflect the change.
-        if (idx >= 0 && idx < (int)m_ui[z].ratio_spin.size() && m_ui[z].ratio_spin[idx])
-            m_ui[z].ratio_spin[idx]->SetValue(pbc.floor_mm);
-        if (idx >= 0 && idx < (int)m_ui[z].angle_txt.size() && m_ui[z].angle_txt[idx])
-            m_ui[z].angle_txt[idx]->ChangeValue(wxString::Format("%.3f", pbc.mid_end_mm));
-        if (idx >= 0 && idx < (int)m_ui[z].chips.size())   m_ui[z].chips[idx]->Refresh();
-        if (idx >= 0 && idx < (int)m_ui[z].preview.size()) m_ui[z].preview[idx]->Refresh();
-        if (idx >= 0 && idx < (int)m_ui[z].badge.size())   sync_row_widgets(z, idx);
-    }
-
-    // The ratio_spin for a PB row carries floor_mm. pb_apply_constraints
-    // (in write_pb_blob) enforces the per-mode clamp and bumps mid_end if the
-    // new floor crosses it.
-    void on_pathblend_floor_edit(int z, int idx)
-    {
-        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
-        if (!m_ui[z].ratio_spin[idx]) return;
-        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
-        pbc.floor_mm = (float)m_ui[z].ratio_spin[idx]->GetValue();
-        // If user pushed floor above current mid, bump mid up so the ramp
-        // survives the strict mid>floor rule in pb_apply_constraints.
-        if (pbc.mid_end_mm <= pbc.floor_mm) pbc.mid_end_mm = pbc.floor_mm + 0.001f;
-        write_pb_blob(z, idx, pbc);
-    }
-
-    // The angle_txt for a PB row carries mid_end_mm. In Half mode the field is
-    // read-only (mid is forced to H) — ignore edits and just refresh.
-    void on_pathblend_mid_edit(int z, int idx)
-    {
-        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
-        if (!m_ui[z].angle_txt[idx]) return;
-        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
-        if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Half) {
-            write_pb_blob(z, idx, pbc);  // re-syncs widget to forced mid=H
-            return;
-        }
-        double v = 0;
-        wxString txt = m_ui[z].angle_txt[idx]->GetValue().Trim().Trim(false);
-        if (!txt.ToDouble(&v)) v = pbc.mid_end_mm;
-        pbc.mid_end_mm = (float)v;
-        write_pb_blob(z, idx, pbc);
-    }
-
-    // adv_btn click on a PB row cycles the ease_mode (Linear -> EaseIn ->
-    // EaseOut -> EaseInOut -> Linear ...).
-    void cycle_pathblend_ease(int z, int idx)
-    {
-        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
-        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
-        pbc.ease_mode = (pbc.ease_mode + 1) % 4;
-        write_pb_blob(z, idx, pbc);
-    }
-
-    // chip click on a PB row picks the tool for slot 0 (ramp/bottom) or slot 1
-    // (cap/top). Only slot 0 is meaningful in Half mode.
-    void pick_pathblend_tool(int z, int idx, int slot)
-    {
-        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
-        Slic3r::PathBlendPassConfig pbc = read_pb_blob(z);
-        if (slot == 1 && pbc.mode != Slic3r::PathBlendPassConfig::Mode::Full) return;
-        wxMenu menu;
-        const int n = std::max(1, (int)m_fcolors.size());
-        for (int t = 0; t < n; ++t)
-            menu.Append(TOOL_MENU_BASE + t, wxString::Format(_L("Tool T%d"), t + 1));
-        const int sel = GetPopupMenuSelectionFromUser(menu);
-        if (sel == wxID_NONE) return;
-        const int tool = sel - TOOL_MENU_BASE;
-        if (slot == 0) pbc.tool_bottom = tool;
-        else           pbc.tool_top    = tool;
-        write_pb_blob(z, idx, pbc);
-    }
-
-    // NEOTKO_SANDWICH_TAG — per-lámina ColorStitch gradient editor.
-    // Each ColorStitch pass owns its gradient via pass.colorstitch.kv (colorstitch_keys
-    // of the role + angle, full region-key names). The shared region keys
-    // (interlayer_colormix_*) are NEVER mutated here — they remain the legacy /
-    // synthesize_from_legacy fallback. The ColorStitchPatternDialog reads/writes the
-    // DynamicPrintConfig, so we transiently load the pass override into m_config
-    // to drive the dialog, snapshot the result back into the pass, then restore
-    // the shared config untouched. Engine side: Fill.cpp FASE 2 applies the same
-    // kv over a copy of the region config (single source → wipe-tower stays in sync).
-    void open_colorstitch_for(int z, int idx)
-    {
-        if (idx < 0 || idx >= (int)m_stack[z].passes.size()) return;
-        Slic3r::SurfacePass& pass = m_stack[z].passes[idx];
-
-        // NEOTKO_BOTTOM_TAG — bottom (z==2) uses the top key family (matches `gp`).
-        const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
-                                       : "interlayer_colormix_pattern_top";
-        const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
-                                        : std::string("interlayer_colormix_");
-        // Role gradient keys this editor owns (colorstitch_keys of the role + angle).
-        std::vector<std::string> role_keys;
-        role_keys.push_back(pat_key);
-        for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
-                               "min_surface_lines", "overlap", "invert", "repetitions",
-                               "band_count_a", "band_count_b", "band_count_c",
-                               "band_count_d", "tool_a", "tool_b", "tool_c",
-                               "tool_d", "angle" })
-            role_keys.push_back(gp + s);
-
-        using SEPM = Slic3r::SurfaceEffectProfileManager;
-        // Save the shared region values so we can restore them afterwards, then
-        // load this pass's override (no-op when the pass has none → the dialog
-        // shows the shared fallback, exactly what the engine would use).
-        Slic3r::SurfaceEffectPayload saved = SEPM::snapshot_keys(*m_config, role_keys);
-        SEPM::restore_keys(*m_config, pass.colorstitch);
-
-        std::string mixed_defs;
-        if (auto* o = m_config->option<ConfigOptionString>("mixed_filament_definitions"))
-            mixed_defs = o->value;
-        const auto options =
-            Slic3r::ColorStitch::get_mix_options(mixed_defs, m_fcolors);
-        const std::string cur_pat = m_config->opt_string(pat_key);
-        bool use_virtual = false;
-        if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
-            use_virtual = o->value;
-        ColorStitchPatternDialog dlg(this, options, m_fcolors, cur_pat,
-                                  use_virtual, m_config, z);
-        if (dlg.ShowModal() != wxID_OK) {
-            SEPM::restore_keys(*m_config, saved);   // undo the transient load
-            return;
-        }
-
-        // Apply the dialog outputs into m_config transiently (no m_on_change —
-        // the shared config is reverted below; persistence is via the stack blob).
-        auto si = [&](const std::string& k, int v) {
-            if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
-        };
-        auto sf = [&](const std::string& k, double v) {
-            if (auto* o = m_config->option<ConfigOptionFloat>(k)) o->value = v;
-        };
-        if (auto* o = m_config->option<ConfigOptionString>(pat_key))
-            o->value = dlg.get_pattern();
-        si(gp + "mode",              dlg.get_grad_mode());
-        si(gp + "pct_a",             dlg.get_grad_pct_a());
-        si(gp + "pct_b",             dlg.get_grad_pct_b());
-        si(gp + "easing",            dlg.get_grad_easing());
-        sf(gp + "gamma",             dlg.get_grad_gamma());
-        si(gp + "min_surface_lines", dlg.get_grad_min_lines());
-        sf(gp + "overlap",           dlg.get_grad_overlap());
-        if (auto* o = m_config->option<ConfigOptionBool>(gp + "invert"))
-            o->value = dlg.get_grad_invert();
-        si(gp + "band_count_a", dlg.get_grad_band_a());
-        si(gp + "band_count_b", dlg.get_grad_band_b());
-        si(gp + "band_count_c", dlg.get_grad_band_c());
-        si(gp + "band_count_d", dlg.get_grad_band_d());
-        si(gp + "tool_a",       dlg.get_tool_a());
-        si(gp + "tool_b",       dlg.get_tool_b());
-        si(gp + "tool_c",       dlg.get_tool_c());
-        si(gp + "tool_d",       dlg.get_tool_d());
-        si(gp + "angle",        dlg.get_grad_angle());
-        si(gp + "repetitions",  dlg.get_grad_repetitions());
-        // NEOTKO_COLORSTITCH_TAG — s90: global key (no prefix). NOT included in
-        // role_keys/snapshot — it's intentionally outside the per-pass override
-        // because there's a single value shared by all CM passes.
-        sf("interlayer_colormix_min_length", dlg.get_grad_min_length());
-
-        // Snapshot the edited keys into this pass's override, then restore shared.
-        pass.colorstitch = SEPM::snapshot_keys(*m_config, role_keys);
-        pass.colorstitch.present = true;
-        SEPM::restore_keys(*m_config, saved);
-
-        if (idx >= 0 && idx < (int)m_ui[z].chips.size()) {
-            m_ui[z].chips[idx]->Refresh();
-            m_ui[z].preview[idx]->Refresh();
-        }
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 5 s73: open_pathblend_for removed.
-    // Everything is edited inline on the row (kind selector Half/Full,
-    // floor_mm spinner, mid_end_mm field, ease cycler button, chip click
-    // tool pickers). The PathBlendDialog popup class is also unused (kept
-    // in the file as dead code; safe to delete in a follow-up cleanup).
-
-    // ---------------------------------------------------------------- painting
-    void paint_chip(int z, int idx)
-    {
-        wxPanel* w = m_ui[z].chips[idx];
-        if (!w) return;
-        wxPaintDC dc(w);
-        if (idx >= (int)m_stack[z].passes.size()) return;  // hidden row
-        const wxSize sz = w->GetClientSize();
-        dc.SetBrush(wxBrush(wxColour(45, 45, 45)));
-        dc.SetPen(*wxTRANSPARENT_PEN);
-        dc.DrawRectangle(0, 0, sz.x, sz.y);
-
-        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-
-        // NEOTKO_SANDWICH_TAG — Fase 5 s73: PathBlend chip = 2 stacked halves
-        // (top half = cap tool, bottom half = ramp tool) so the click handler
-        // can pick the slot from the Y coordinate. Half mode hides the cap
-        // half (only ramp visible).
-        if (p.kind == Kind::PathBlend) {
-            Slic3r::PathBlendPassConfig pbc;
-            const auto it_blob = p.pathblend.kv.find("blob");
-            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
-                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
-            const int half_h = sz.y / 2;
-            dc.SetPen(wxPen(wxColour(20, 20, 20)));
-            // Bottom half = ramp (always present).
-            dc.SetBrush(wxBrush(tool_colour(pbc.tool_bottom)));
-            dc.DrawRectangle(1, half_h, sz.x - 2, sz.y - half_h - 1);
-            // Top half = cap (Full only).
-            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
-                dc.SetBrush(wxBrush(tool_colour(pbc.tool_top)));
-                dc.DrawRectangle(1, 1, sz.x - 2, half_h - 1);
-            }
-            // Labels: T# in white on each half.
-            dc.SetTextForeground(*wxWHITE);
-            wxFont f = dc.GetFont(); f.SetPointSize(7); dc.SetFont(f);
-            dc.DrawText(wxString::Format("T%d", pbc.tool_bottom + 1), 3, half_h + 1);
-            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full)
-                dc.DrawText(wxString::Format("T%d", pbc.tool_top + 1), 3, 2);
-            return;
-        }
-
-        std::vector<int> tools;
-        if      (p.kind == Kind::Solid)     tools = { p.solid_tool };
-        else if (p.kind == Kind::ColorStitch)  tools = colorstitch_tools(z, &p);
-        if (tools.empty()) return;
-
-        const int cw = std::min(20, sz.x / (int)tools.size());
-        int x = 1;
-        for (size_t i = 0; i < tools.size() && x + cw <= sz.x; ++i) {
-            dc.SetBrush(wxBrush(tool_colour(tools[i])));
-            dc.SetPen(wxPen(wxColour(20, 20, 20)));
-            dc.DrawRectangle(x, 2, cw - 2, sz.y - 4);
-            if (p.kind == Kind::Solid) {
-                dc.SetTextForeground(*wxWHITE);
-                wxFont f = dc.GetFont(); f.SetPointSize(7); dc.SetFont(f);
-                dc.DrawText(wxString::Format("T%d", tools[i] + 1), x + 2, 4);
-            }
-            x += cw;
-        }
-    }
-
-    void paint_preview(int z, int idx)
-    {
-        wxPanel* w = m_ui[z].preview[idx];
-        if (!w) return;
-        wxPaintDC dc(w);
-        if (idx >= (int)m_stack[z].passes.size()) return;  // hidden row
-        const wxSize sz = w->GetClientSize();
-        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-        dc.SetPen(*wxTRANSPARENT_PEN);
-
-        if (p.kind == Kind::Solid) {
-            // tool colour + hatch lines showing the fill angle (auto = 45°)
-            const wxColour base = tool_colour(p.solid_tool);
-            dc.SetBrush(wxBrush(base));
-            dc.DrawRectangle(0, 0, sz.x, sz.y);
-            const bool   autom = (p.angle < 0);
-            const double PI    = 3.14159265358979323846;
-            const double rad   = (autom ? 45.0 : (double)p.angle) * PI / 180.0;
-            const double dx = std::cos(rad), dy = -std::sin(rad);
-            const double nx = -dy,           ny = dx;
-            const bool   light_bg = (base.Red() + base.Green() + base.Blue() > 384);
-            dc.SetPen(wxPen(light_bg ? wxColour(40, 40, 40)
-                                     : wxColour(225, 225, 225), 1));
-            const int cx = sz.x / 2, cy = sz.y / 2;
-            const int R  = sz.x + sz.y;
-            for (int off = -R; off <= R; off += 6) {
-                const double ox = cx + off * nx, oy = cy + off * ny;
-                dc.DrawLine((int)(ox - dx * R), (int)(oy - dy * R),
-                            (int)(ox + dx * R), (int)(oy + dy * R));
-            }
-        } else if (p.kind == Kind::ColorStitch) {
-            // NEOTKO_SANDWICH_TAG — s80: render the REAL per-line tool sequence
-            // the engine will produce (mode-aware dither + repetitions + invert),
-            // reading this pass's per-lámina override. Each sequence slot is one
-            // vertical stripe — same representation as the ColorStitch dialog strip.
-            const std::vector<int> seq = colorstitch_preview_seq(z, p, std::max(2, sz.x));
-            const int NS = (int)seq.size();
-            if (NS <= 0) {
-                dc.SetBrush(wxBrush(wxColour(90, 90, 90)));
-                dc.DrawRectangle(0, 0, sz.x, sz.y);
-            } else {
-                // NEOTKO_COLORSTITCH_TAG — draw the sequence at the REAL fill angle so the
-                // preview rotates with the wheel (mirrors the Solid hatch + the 3D weave).
-                // The sequence is stretched across the projected extent (schematic, same as
-                // before) but the bands now run along the fill direction.
-                const std::string akey = (z == 1) ? "interlayer_colormix_penu_angle"
-                                                  : "interlayer_colormix_angle";
-                int adeg = -1;
-                const auto it = p.colorstitch.kv.find(akey);
-                if (it != p.colorstitch.kv.end()) { try { adeg = std::stoi(it->second); } catch (...) {} }
-                const double PI  = 3.14159265358979323846;
-                const double rad = ((adeg < 0) ? 45.0 : (double)adeg) * PI / 180.0;  // = cm_angle
-                const double dx = std::cos(rad), dy = -std::sin(rad);   // stripe dir
-                const double nx = -dy,           ny = dx;               // across the lines
-                const double cx = sz.x * 0.5,    cy = sz.y * 0.5;
-                const double ext = 0.5 * std::hypot((double)sz.x, (double)sz.y) + 2.0;
-                const double step = 3.0;
-                const int    half = (int)(ext / step) + 1;
-                dc.SetPen(*wxTRANSPARENT_PEN);
-                for (int i = -half; i <= half; ++i) {
-                    const double o0 = step * i, o1 = step * (i + 1);
-                    const double frac = (o0 + ext) / (2.0 * ext);   // stretch seq across extent
-                    int si = (int)(frac * NS);
-                    si = std::min(NS - 1, std::max(0, si));
-                    const int t = seq[si];
-                    const wxColour c = (t < 0) ? wxColour(150, 150, 150) : tool_colour(t);
-                    wxPoint poly[4] = {
-                        wxPoint((int)(cx + nx * o0 - dx * ext), (int)(cy + ny * o0 - dy * ext)),
-                        wxPoint((int)(cx + nx * o0 + dx * ext), (int)(cy + ny * o0 + dy * ext)),
-                        wxPoint((int)(cx + nx * o1 + dx * ext), (int)(cy + ny * o1 + dy * ext)),
-                        wxPoint((int)(cx + nx * o1 - dx * ext), (int)(cy + ny * o1 - dy * ext))
-                    };
-                    dc.SetBrush(wxBrush(c));
-                    dc.DrawPolygon(4, poly);
-                }
-            }
-        } else if (p.kind == Kind::PathBlend) {
-            // NEOTKO_SANDWICH_TAG — Fase 5 s73: preview reflects the actual
-            // v=2 geometry (floor_mm, mid_end_mm, mode, ease_mode).
-            //   - Dark grey background = the whole layer [0..H].
-            //   - For Full: a flat cap rectangle from mid_end up to H, tool_top color.
-            //   - The ramp: filled polygon from (t=0, floor) up to (t=1, mid_end),
-            //     with vertices following the easing curve (visible steps).
-            //   - Half: no cap rectangle; the area above the ramp stays dark.
-            //   - Horizontal indicator lines at floor and mid_end.
-            //
-            // Coordinate convention: y=0 is top of the panel = nominal_z. y=sz.y
-            // is bottom = bottom_z. Z increases upward visually.
-            Slic3r::PathBlendPassConfig pbc;
-            const auto it_blob = p.pathblend.kv.find("blob");
-            if (it_blob != p.pathblend.kv.end() && !it_blob->second.empty())
-                pbc = Slic3r::PathBlendPassConfig::from_blob_json(it_blob->second);
-
-            const double H = std::max(0.04, layer_height_mm());
-            const double floor_frac   = std::clamp((double)pbc.floor_mm   / H, 0.0, 1.0);
-            const double mid_end_frac = std::clamp((double)pbc.mid_end_mm / H, 0.0, 1.0);
-            auto y_from_frac = [&](double f) -> int {
-                return (int)std::round((1.0 - f) * (double)sz.y);
-            };
-
-            // Background = dark grey (= unfilled / above-ramp area in Half).
-            dc.SetBrush(wxBrush(wxColour(40, 40, 40)));
-            dc.DrawRectangle(0, 0, sz.x, sz.y);
-
-            // Cap (Full only): flat band from mid_end up to nominal.
-            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
-                const int y_mid = y_from_frac(mid_end_frac);
-                const int y_top = y_from_frac(1.0);
-                if (y_mid > y_top) {
-                    dc.SetBrush(wxBrush(tool_colour(pbc.tool_top)));
-                    dc.DrawRectangle(0, y_top, sz.x, y_mid - y_top);
-                }
-            }
-
-            // Ramp: polygon following the easing curve from (t=0, floor) to (t=1, mid_end).
-            // Steps = 16 (enough to make the easing curve visible without aliasing).
-            const int steps = 16;
-            std::vector<wxPoint> poly;
-            poly.reserve(steps + 3);
-            poly.push_back(wxPoint(0, sz.y));      // bottom-left corner
-            for (int i = 0; i <= steps; ++i) {
-                const double t_raw = (double)i / (double)steps;
-                double t = t_raw;
-                switch (pbc.ease_mode) {
-                    case 1: t = t * t;                       break; // EaseIn
-                    case 2: t = 1.0 - (1.0 - t) * (1.0 - t); break; // EaseOut
-                    case 3: t = t * t * (3.0 - 2.0 * t);     break; // EaseInOut
-                    default: break;                                  // Linear
-                }
-                const double z_frac = floor_frac + t * (mid_end_frac - floor_frac);
-                const int x = (int)std::round(t_raw * (double)sz.x);
-                poly.push_back(wxPoint(x, y_from_frac(z_frac)));
-            }
-            poly.push_back(wxPoint(sz.x, sz.y));   // bottom-right corner
-            dc.SetBrush(wxBrush(tool_colour(pbc.tool_bottom)));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawPolygon((int)poly.size(), poly.data());
-
-            // Horizontal indicator lines + mm labels.
-            dc.SetPen(wxPen(wxColour(200, 200, 200), 1, wxPENSTYLE_DOT));
-            dc.SetTextForeground(wxColour(220, 220, 220));
-            wxFont f = dc.GetFont(); f.SetPointSize(6); dc.SetFont(f);
-            const int y_floor = y_from_frac(floor_frac);
-            dc.DrawLine(0, y_floor, sz.x, y_floor);
-            dc.DrawText(wxString::Format("%.2f", pbc.floor_mm), 2, std::min(y_floor, sz.y - 8));
-            if (pbc.mode == Slic3r::PathBlendPassConfig::Mode::Full) {
-                const int y_mid = y_from_frac(mid_end_frac);
-                dc.DrawLine(0, y_mid, sz.x, y_mid);
-                dc.DrawText(wxString::Format("%.2f", pbc.mid_end_mm),
-                            2, std::max(y_mid - 8, 0));
-            }
-        } else { // None — diagonal grey hatch
-            dc.SetBrush(wxBrush(wxColour(70, 70, 70)));
-            dc.DrawRectangle(0, 0, sz.x, sz.y);
-            dc.SetPen(wxPen(wxColour(110, 110, 110)));
-            for (int x = -sz.y; x < sz.x; x += 7)
-                dc.DrawLine(x, sz.y, x + sz.y, 0);
-        }
-    }
-
-    // -------------------------------------------------- stacked Z-ratio bar
-    // Representative colour of a pass for the stacked bar.
-    wxColour seg_colour(int z, int idx) const
-    {
-        const Slic3r::SurfacePass& p = m_stack[z].passes[idx];
-        if (p.kind == Kind::Solid)     return tool_colour(p.solid_tool);
-        if (p.kind == Kind::ColorStitch)  return tool_colour(colorstitch_tools(z, &p).front());
-        if (p.kind == Kind::PathBlend) return tool_colour(pathblend_tools(z).front());
-        return wxColour(90, 90, 90);                       // None
-    }
-
-    void paint_ratio_bar(int z)
-    {
-        wxPanel* w = m_ui[z].ratio_bar;
-        if (!w) return;
-        wxPaintDC dc(w);
-        const wxSize sz = w->GetClientSize();
-        dc.SetBrush(wxBrush(wxColour(30, 30, 30)));
-        dc.SetPen(*wxTRANSPARENT_PEN);
-        dc.DrawRectangle(0, 0, sz.x, sz.y);
-
-        const auto& ps = m_stack[z].passes;
-        const int n = (int)ps.size();
-        if (n == 0 || !m_stack[z].enabled) return;
-        double sum = 0;
-        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
-        if (sum < 1e-6) sum = 1.0;
-
-        wxFont f = dc.GetFont(); f.SetPointSize(7); dc.SetFont(f);
-        double acc = 0.0;
-        for (int dp = 0; dp < n; ++dp) {            // dp 0 = top of stack
-            const int idx  = n - 1 - dp;
-            const double fr = std::max(0.0, ps[idx].ratio) / sum;
-            const int y0 = (int)std::round(acc * sz.y);
-            acc += fr;
-            const int y1 = (dp == n - 1) ? sz.y : (int)std::round(acc * sz.y);
-            dc.SetBrush(wxBrush(seg_colour(z, idx)));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawRectangle(0, y0, sz.x, y1 - y0);
-            dc.SetTextForeground(*wxWHITE);
-            wxFont sf = dc.GetFont(); sf.SetPointSize(7); dc.SetFont(sf);
-            dc.DrawText(wxString::Format("%.2f", fr * layer_height_mm()),
-                        2, y0 + 2);
-            if (dp != n - 1) {                      // draggable divider
-                dc.SetPen(wxPen(wxColour(235, 235, 235), 2));
-                dc.DrawLine(0, y1, sz.x, y1);
-            }
-        }
-    }
-
-    void ratio_bar_down(int z, wxMouseEvent& e)
-    {
-        const auto& ps = m_stack[z].passes;
-        const int n = (int)ps.size();
-        if (n < 2 || !m_stack[z].enabled) return;
-        const int h = m_ui[z].ratio_bar->GetClientSize().y;
-        double sum = 0;
-        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
-        if (sum < 1e-6 || h <= 0) return;
-        double acc = 0;
-        for (int k = 0; k < n - 1; ++k) {           // boundary k = below display pos k
-            acc += std::max(0.0, ps[n - 1 - k].ratio) / sum;
-            if (std::abs(e.GetY() - (int)std::round(acc * h)) <= 6) {
-                m_drag_zone = z; m_drag_bound = k;
-                m_ui[z].ratio_bar->CaptureMouse();
-                return;
-            }
-        }
-    }
-
-    void ratio_bar_motion(int z, wxMouseEvent& e)
-    {
-        if (m_drag_zone != z || m_drag_bound < 0 || !e.Dragging()) return;
-        auto& ps = m_stack[z].passes;
-        const int n = (int)ps.size();
-        const int k = m_drag_bound;
-        if (k < 0 || k >= n - 1) return;
-        const int h = m_ui[z].ratio_bar->GetClientSize().y;
-        if (h <= 0) return;
-        double sum = 0;
-        for (const auto& p : ps) sum += std::max(0.0, p.ratio);
-        if (sum < 1e-6) return;
-
-        const int idxA = n - 1 - k;                 // pass above the divider
-        const int idxB = n - 2 - k;                 // pass below
-        double topAcc = 0;                          // fraction above pass A
-        for (int kk = 0; kk < k; ++kk)
-            topAcc += std::max(0.0, ps[n - 1 - kk].ratio) / sum;
-        const double comb = (std::max(0.0, ps[idxA].ratio)
-                           + std::max(0.0, ps[idxB].ratio)) / sum;
-        // minimum drag fraction = 0.04 mm so the bar can't create a sub-min pass.
-        const double minF = std::min(0.45, kMinPassMM / layer_height_mm());
-        double aFrac = (double)e.GetY() / h - topAcc;
-        aFrac = std::clamp(aFrac, minF, std::max(minF, comb - minF));
-        ps[idxA].ratio = aFrac * sum;               // keeps Σ unchanged
-        ps[idxB].ratio = (comb - aFrac) * sum;
-
-        const double LH = layer_height_mm();
-        if (m_ui[z].ratio_spin[idxA])
-            m_ui[z].ratio_spin[idxA]->SetValue(ps[idxA].ratio / sum * LH);
-        if (m_ui[z].ratio_spin[idxB])
-            m_ui[z].ratio_spin[idxB]->SetValue(ps[idxB].ratio / sum * LH);
-        sync_row_widgets(z, idxA);
-        sync_row_widgets(z, idxB);
-        m_ui[z].ratio_bar->Refresh();
-        update_sum(z);
-    }
-
-    void ratio_bar_up(int z, wxMouseEvent&)
-    {
-        if (m_drag_zone == z && m_ui[z].ratio_bar
-            && m_ui[z].ratio_bar->HasCapture())
-            m_ui[z].ratio_bar->ReleaseMouse();
-        m_drag_zone = -1; m_drag_bound = -1;
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: snapshot the role-prefixed ColorStitch
-    // gradient keys of zone z from the live config (same key set the per-pass
-    // gradient editor `open_colorstitch_for` owns). Used to bake a self-contained
-    // gradient into a ColorStitch pass that has no per-pass override.
-    Slic3r::SurfaceEffectPayload zone_colorstitch_snapshot(int z) const
-    {
-        // NEOTKO_BOTTOM_TAG — the Bottom zone (z==2) reads the "top" key family, same
-        // as the painter/engine for bottom (s155: a painted bottom carries the top
-        // ColorStitch keys, not the penu ones). Only Penu (z==1) uses the penu family.
-        const char* pat_key = (z == 1) ? "interlayer_colormix_pattern_penultimate"
-                                       : "interlayer_colormix_pattern_top";
-        const std::string gp = (z == 1) ? std::string("interlayer_colormix_penu_")
-                                        : std::string("interlayer_colormix_");
-        std::vector<std::string> role_keys;
-        role_keys.push_back(pat_key);
-        for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
-                               "min_surface_lines", "overlap", "invert", "repetitions",
-                               "band_count_a", "band_count_b", "band_count_c",
-                               "band_count_d", "tool_a", "tool_b", "tool_c",
-                               "tool_d", "angle" })
-            role_keys.push_back(gp + s);
-        auto pl = Slic3r::SurfaceEffectProfileManager::snapshot_keys(*m_config, role_keys);
-        pl.present = true;
-        return pl;
-    }
-
-    // NEOTKO_SANDWICH_TAG — Fase 6: normalize one zone's stack EXACTLY as commit()
-    // does (flush typed angles → read ratio spins → fold sub-0.04 mm passes →
-    // Σ=1) but on a COPY, returning its to_json(). Used by "Save as profile…" so
-    // the profile captures the same blob commit() would write, without mutating
-    // config or closing the dialog.
-    std::string normalized_zone_json(int z)
-    {
-        // flush typed angles into the live model first (same as commit()).
-        for (int idx = 0; idx < (int)m_stack[z].passes.size(); ++idx)
-            if (m_stack[z].passes[idx].kind == Kind::Solid)
-                store_angle(z, idx);
-
-        const double LH = layer_height_mm();
-        Slic3r::SurfacePassStack st = m_stack[z];   // copy
-        for (size_t i = 0; i < m_ui[z].ratio_spin.size() && i < st.passes.size(); ++i)
-            st.passes[i].ratio = m_ui[z].ratio_spin[i]->GetValue() / LH;
-
-        double lost = 0, keepSum = 0;
-        for (auto& p : st.passes) {
-            if (p.ratio * LH < kMinPassMM - 1e-9) { lost += std::max(0.0, p.ratio); p.ratio = 0.0; }
-            else keepSum += std::max(0.0, p.ratio);
-        }
-        if (lost > 0 && keepSum > 1e-6)
-            for (auto& p : st.passes)
-                if (p.ratio > 0) p.ratio += lost * (p.ratio / keepSum);
-
-        double sum = 0;
-        for (const auto& p : st.passes) sum += std::max(0.0, p.ratio);
-        if (sum > 1e-6)
-            for (auto& p : st.passes) p.ratio = std::max(0.0, p.ratio) / sum;
-        else if (!st.passes.empty())
-            for (auto& p : st.passes) p.ratio = 1.0 / st.passes.size();
-
-        // NEOTKO_SANDWICH_TAG — Fase 6b/Plan1: a ColorStitch pass with no per-pass
-        // gradient (the user never opened "Edit gradient…") serializes with an
-        // empty kv. In PAINTER mode the engine would then fall back to the
-        // SLICED OBJECT's preset (default T0/T1), not this profile — so the saved
-        // sandwich is not self-contained and the colors come out wrong. Bake the
-        // current zone gradient snapshot into those passes. Passes that DO carry
-        // a per-pass gradient (kv non-empty, set by open_colorstitch_for) are left
-        // untouched, so an explicit gradient always wins.
-        for (auto& p : st.passes)
-            if (p.kind == Kind::ColorStitch && p.colorstitch.kv.empty())
-                p.colorstitch = zone_colorstitch_snapshot(z);
-
-        return st.to_json();   // "" when disabled/empty
-    }
-
-    // NEOTKO_PROFILE_TAG — Fase 6: save the current sandwich as a 3D-Painter
-    // profile. Stores ONLY the authoritative stack blobs; the legacy 3 payloads
-    // stay empty (engine migration to consume the stack = Fase 6b).
-    void on_save_profile()
-    {
-        wxTextEntryDialog dlg(this, _L("Profile name:"), _L("Save Sandwich Profile"));
-        if (dlg.ShowModal() != wxID_OK) return;
-        const std::string name = dlg.GetValue().ToStdString();
-        if (name.empty()) return;
-        Slic3r::SurfaceEffectProfile p;
-        p.name            = name;
-        p.stack_top_json    = normalized_zone_json(0);
-        p.stack_penu_json   = normalized_zone_json(1);
-        p.stack_bottom_json = normalized_zone_json(2);   // NEOTKO_BOTTOM_TAG
-        if (p.stack_top_json.empty() && p.stack_penu_json.empty() && p.stack_bottom_json.empty()) {
-            wxMessageBox(_L("Nothing to save: all zones are empty or disabled."),
-                         _L("Sandwich Profile"), wxOK | wxICON_WARNING, this);
-            return;
-        }
-        const int new_id = Slic3r::SurfaceEffectProfileManager::get().add(std::move(p));
-        wxMessageBox(wxString::Format(_L("Saved sandwich profile #%d."), new_id),
-                     _L("Sandwich Profile"), wxOK | wxICON_INFORMATION, this);
-    }
-
-    // Short per-zone description for the manage list (e.g. "CM+T2").
-    wxString stack_desc(const std::string& js) const
-    {
-        Slic3r::SurfacePassStack st = Slic3r::SurfacePassStack::from_json(js);
-        if (st.passes.empty()) return "—";
-        wxString s;
-        for (const auto& p : st.passes) {
-            if (!s.empty()) s += "+";
-            switch (p.kind) {
-                case Kind::Solid:     s += wxString::Format("T%d", p.solid_tool + 1); break;
-                case Kind::ColorStitch:  s += "CM"; break;
-                case Kind::PathBlend: s += "PB"; break;
-                default:              s += "·"; break;
-            }
-        }
-        return s;
-    }
-
-    // NEOTKO_PROFILE_TAG — Fase 6 / 6b: manage Sandwich profiles.
-    // Load into dialog / Update / Rename / Delete. "Load into dialog" repopulates
-    // the rows via reload_ui_from_stack() (in-place refresh_rows — never frees a
-    // window), and is deferred until after this modal closes so AppKit can't free
-    // a live NSView (the crash that originally kept Load out).
-    void on_manage_profiles()
-    {
-        auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
-        wxDialog mdlg(this, wxID_ANY, _L("Manage Sandwich Profiles"),
-                      wxDefaultPosition, wxSize(440, 320),
-                      wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
-        auto* ms = new wxBoxSizer(wxVERTICAL);
-        auto* lb = new wxListBox(&mdlg, wxID_ANY);
-        auto refill = [&]() {
-            lb->Clear();
-            for (const auto& p : mgr.list())
-                lb->Append(wxString::Format("#%d  %s   T:%s  P:%s",
-                               p.id, wxString::FromUTF8(p.name),
-                               stack_desc(p.stack_top_json),
-                               stack_desc(p.stack_penu_json)),
-                           reinterpret_cast<void*>((intptr_t)p.id));
-        };
-        refill();
-
-        auto* br = new wxBoxSizer(wxHORIZONTAL);
-        auto* btn_load = new wxButton(&mdlg, wxID_ANY, _L("Load into dialog"));
-        auto* btn_upd = new wxButton(&mdlg, wxID_ANY, _L("Update from current"));
-        auto* btn_ren = new wxButton(&mdlg, wxID_ANY, _L("Rename"));
-        auto* btn_del = new wxButton(&mdlg, wxID_ANY, _L("Delete"));
-        auto* btn_cls = new wxButton(&mdlg, wxID_CLOSE, _L("Close"));
-        br->Add(btn_load, 0, wxRIGHT, 6);
-        br->Add(btn_upd, 0, wxRIGHT, 6);
-        br->Add(btn_ren, 0, wxRIGHT, 6);
-        br->Add(btn_del, 0, wxRIGHT, 6);
-        br->AddStretchSpacer(1);
-        br->Add(btn_cls, 0);
-        ms->Add(lb, 1, wxEXPAND | wxALL, 8);
-        ms->Add(br, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-        mdlg.SetSizer(ms);
-
-        auto selected_id = [&]() -> int {
-            const int sel = lb->GetSelection();
-            if (sel == wxNOT_FOUND) return 0;
-            return (int)(intptr_t)lb->GetClientData(sel);
-        };
-
-        // NEOTKO_SANDWICH_TAG — Fase 6b: Load into dialog. Defer the actual load
-        // until AFTER the modal closes (don't mutate the parent dialog's widgets
-        // while this child modal is alive — that is what crashed AppKit before).
-        btn_load->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
-            const int id = selected_id();
-            if (id == 0) return;
-            m_pending_load_id = id;
-            mdlg.EndModal(wxID_OK);
-        });
-        btn_upd->Bind(wxEVT_BUTTON, [&, this](wxCommandEvent&) {
-            const int id = selected_id();
-            if (id == 0) return;
-            auto* p = mgr.find_mut(id);
-            if (!p) return;
-            if (wxMessageBox(wxString::Format(
-                    _L("Overwrite profile '%s' with the current sandwich?"),
-                    wxString::FromUTF8(p->name)),
-                    _L("Update profile"), wxYES_NO | wxICON_QUESTION, &mdlg) != wxYES)
-                return;
-            p->stack_top_json    = normalized_zone_json(0);
-            p->stack_penu_json   = normalized_zone_json(1);
-            p->stack_bottom_json = normalized_zone_json(2);   // NEOTKO_BOTTOM_TAG
-            refill();
-        });
-        btn_ren->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-            const int id = selected_id();
-            if (id == 0) return;
-            const auto* p = mgr.find(id);
-            wxTextEntryDialog td(&mdlg, _L("New name:"), _L("Rename profile"),
-                                 wxString::FromUTF8(p ? p->name : ""));
-            if (td.ShowModal() == wxID_OK) { mgr.rename(id, td.GetValue().ToStdString()); refill(); }
-        });
-        btn_del->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-            const int id = selected_id();
-            if (id == 0) return;
-            mgr.remove(id);
-            refill();
-        });
-        btn_cls->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { mdlg.EndModal(wxID_CLOSE); });
-        mdlg.ShowModal();
-
-        // Deferred Load: the modal is gone now, so refreshing the parent rows
-        // in place is safe.
-        if (m_pending_load_id != 0) {
-            const int id = m_pending_load_id;
-            m_pending_load_id = 0;
-            load_profile_into_dialog(id);
-        }
-    }
-
-    // ----------------------------------------------------------------- commit
-    void commit()
-    {
-        // flush any angle field still being typed into its pass
-        for (int z = 0; z < 2; ++z)
-            for (int idx = 0; idx < (int)m_stack[z].passes.size(); ++idx)
-                if (m_stack[z].passes[idx].kind == Kind::Solid)
-                    store_angle(z, idx);
-        const double LH = layer_height_mm();
-        for (int z = 0; z < 2; ++z) {
-            Slic3r::SurfacePassStack& st = m_stack[z];
-            // read heights (mm) from spins back into ratios
-            for (size_t i = 0; i < m_ui[z].ratio_spin.size() &&
-                               i < st.passes.size(); ++i)
-                st.passes[i].ratio = m_ui[z].ratio_spin[i]->GetValue() / LH;
-
-            // fold sub-0.04 mm passes into the rest: set them to ratio 0 (the
-            // engine skips a 0-ratio pass cleanly, no Z gap) and redistribute
-            // their share to the passes that ARE ≥ 0.04 mm.
-            double lost = 0, keepSum = 0;
-            for (auto& p : st.passes) {
-                if (p.ratio * LH < kMinPassMM - 1e-9) { lost += std::max(0.0, p.ratio); p.ratio = 0.0; }
-                else keepSum += std::max(0.0, p.ratio);
-            }
-            if (lost > 0 && keepSum > 1e-6)
-                for (auto& p : st.passes)
-                    if (p.ratio > 0) p.ratio += lost * (p.ratio / keepSum);
-
-            // normalize to Σ = 1.0
-            double sum = 0;
-            for (const auto& p : st.passes) sum += std::max(0.0, p.ratio);
-            if (sum > 1e-6)
-                for (auto& p : st.passes) p.ratio = std::max(0.0, p.ratio) / sum;
-            else if (!st.passes.empty())
-                for (auto& p : st.passes) p.ratio = 1.0 / st.passes.size();
-
-            const char* key = (z == 0) ? "neotko_surface_passes_top"
-                                       : "neotko_surface_passes_penu";
-            const std::string json = st.to_json();   // "" when disabled/empty
-            if (auto* o = m_config->option<ConfigOptionString>(key))
-                o->value = json;
-            m_on_change(key);
-        }
-
-        // Sync the legacy enable gates the engine still needs:
-        //  - a ColorStitch pass needs interlayer_colormix_enabled (bucketing gate)
-        //  - a PathBlend pass routes through the legacy GCode engine
-        // Disabled zones also clear their MultiPass enable so a stale legacy key
-        // can't resurrect the zone via synthesize_from_legacy().
-        auto has = [&](int z, Kind k) {
-            if (!m_stack[z].enabled) return false;
-            for (const auto& p : m_stack[z].passes)
-                if (p.kind == k) return true;
-            return false;
-        };
-        const bool cm_t = has(0, Kind::ColorStitch),  cm_p = has(1, Kind::ColorStitch);
-        const bool pb_t = has(0, Kind::PathBlend), pb_p = has(1, Kind::PathBlend);
-        auto wb = [&](const char* k, bool v) {
-            if (auto* o = m_config->option<ConfigOptionBool>(k)) o->value = v;
-            m_on_change(k);
-        };
-        auto wi = [&](const char* k, int v) {
-            if (auto* o = m_config->option<ConfigOptionInt>(k)) o->value = v;
-            m_on_change(k);
-        };
-        wb("interlayer_colormix_enabled", cm_t || cm_p);
-        if (cm_t || cm_p)
-            wi("interlayer_colormix_surface", (cm_t && cm_p) ? 0 : (cm_t ? 1 : 2));
-        wb("multipass_path_gradient", pb_t || pb_p);
-        if (pb_t || pb_p)
-            wi("pathblend_surface", (pb_t && pb_p) ? 0 : (pb_t ? 1 : 2));
-        if (!m_stack[0].enabled) wb("multipass_enabled", false);
-        if (!m_stack[1].enabled) wb("penultimate_multipass_enabled", false);
-
-        // Perimeter override: FASE 2 reads the legacy region key
-        // `multipass_perimeter_override` (shared, not the per-stack blob flag),
-        // so mirror it here or the Sandwich checkbox does nothing.
-        const bool perim = (m_stack[0].enabled && m_stack[0].perimeter_override)
-                        || (m_stack[1].enabled && m_stack[1].perimeter_override);
-        wb("multipass_perimeter_override", perim);
-
-        // NEOTKO_SANDWICH_TAG — Fase 7 (s84): TD + use_virtual write-back.
-        // Lane mode is committed live on its wxChoice handler (no extra work).
-        // NEOTKO_SANDWICH_TAG — Fase 1 (s167 plan): AppConfig::set() only marks
-        // the in-memory store dirty (AppConfig.hpp), it never writes to disk —
-        // so a TD edit here used to survive only if the app later shut down
-        // cleanly. save() is one click on OK, cheap. The reslice is gated on an
-        // actual change (vs. m_td_at_open) so opening the dialog and clicking
-        // OK without touching TD doesn't fire a spurious background process —
-        // this bypassed the normal wb()/wi() -> m_on_change() tracking above,
-        // so nothing else in commit() was already triggering it.
-        bool td_changed = false;
-        if (auto* ac = wxGetApp().app_config) {
-            char buf[32];
-            for (int i = 0; i < 4; ++i) {
-                if (std::abs(m_td[i] - m_td_at_open[i]) > 1e-6f) td_changed = true;
-                std::snprintf(buf, sizeof(buf), "%.3f", m_td[i]);
-                ac->set("neotko_td_" + std::to_string(i + 1), buf);
-            }
-            ac->save();
-        }
-        if (td_changed)
-            wxGetApp().plater()->schedule_background_process();
-        if (m_chk_use_virtual) {
-            if (auto* o = m_config->option<ConfigOptionBool>("interlayer_colormix_use_virtual"))
-                o->value = m_chk_use_virtual->GetValue();
-            m_on_change("interlayer_colormix_use_virtual");
-        }
-    }
-};
-// NEOTKO_SANDWICH_TAG_END
+// NEOTKO_SANDWICH_TAG — s317 fase D: aquí vivía SandwichDialog (Fase 3, ~3640 líneas: pilas por
+// zona, Gradient Designer, TD, Save/Load profile). BORRADO: su receta se aplicaba sola a todo el
+// objeto y ahora es un perfil de la paleta que sólo se pinta. Ver ColorStitch.hpp
+// (ColorStitchLegacyMigration, fase D) y docs/FUTURE/COLORSTITCH_PHASE_D_E_PREPLAN.md.
 
 } // anonymous namespace
 // NEOTKO_COLORSTITCH_TAG_END — s130 UI port (ColorStitchPatternDialog)
@@ -5245,7 +2096,12 @@ bool open_colorstitch_pattern_dialog(
     for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
                            "min_surface_lines", "overlap", "invert", "repetitions",
                            "band_count_a", "band_count_b", "band_count_c",
-                           "band_count_d", "tool_a", "tool_b", "tool_c",
+                           "band_count_d",
+                               // NEOTKO_COLORSTITCH_TAG — s314: sin estas cuatro el diseño
+                               // en mm no viaja de vuelta al pase y se pierde al cerrar.
+                               "band_mm_a", "band_mm_b", "band_mm_c", "band_mm_d",
+                               "gradient_span_mm",   // s315
+                               "tool_a", "tool_b", "tool_c",
                            "tool_d", "angle" })
         role_keys.push_back(gp + s);
 
@@ -5287,6 +2143,12 @@ bool open_colorstitch_pattern_dialog(
     si(gp + "band_count_b", dlg.get_grad_band_b());
     si(gp + "band_count_c", dlg.get_grad_band_c());
     si(gp + "band_count_d", dlg.get_grad_band_d());
+    // NEOTKO_COLORSTITCH_TAG — s314: band_mm_* son coFloat, van por sf() no por si().
+    sf(gp + "band_mm_a", dlg.get_grad_band_mm_a());
+    sf(gp + "band_mm_b", dlg.get_grad_band_mm_b());
+    sf(gp + "band_mm_c", dlg.get_grad_band_mm_c());
+    sf(gp + "band_mm_d", dlg.get_grad_band_mm_d());
+    sf(gp + "gradient_span_mm", dlg.get_grad_span_mm());   // s315
     si(gp + "tool_a",       dlg.get_tool_a());
     si(gp + "tool_b",       dlg.get_tool_b());
     si(gp + "tool_c",       dlg.get_tool_c());
@@ -6157,6 +3019,24 @@ void Tab::update_changed_ui()
 
     decorate();
 
+    // NeotkoLIBRE_FOLD s330 - punto en la cabecera de un apartado plegado si dentro hay
+    // algo cambiado respecto al preset guardado. Asi no se te olvida lo que no ves.
+    if ((m_type == Preset::TYPE_PRINT || m_type == Preset::TYPE_MODEL) && m_active_page) {
+        for (auto g : m_active_page->m_optgroups) {
+            if (g->fold_key.empty())
+                continue;
+            bool modified = false;
+            for (auto& l : g->get_lines()) {
+                for (auto& o : l.get_options()) {
+                    auto it = m_options_list.find(o.opt.opt_key);
+                    if (it != m_options_list.end() && (it->second & osInitValue) == 0) { modified = true; break; }
+                }
+                if (modified) break;
+            }
+            g->set_fold_modified_mark(modified);
+        }
+    }
+
     wxTheApp->CallAfter([this]() {
         if (parent()) //To avoid a crash, parent should be exist for a moment of a tree updating
             update_changed_tree_ui();
@@ -6600,7 +3480,14 @@ void Tab::sys_color_changed()
 
 Field* Tab::get_field(const t_config_option_key& opt_key, int opt_index/* = -1*/) const
 {
-    return m_active_page ? m_active_page->get_field(opt_key, opt_index) : nullptr;
+    if (m_active_page != nullptr)
+        if (Field* f = m_active_page->get_field(opt_key, opt_index))
+            return f;
+    // NEOTKO_NEOSTROKE_TAG s335 — y los grupos que viven en una ventana aparte. Ver Tab.hpp.
+    for (const auto& og : m_neotko_extra_optgroups)
+        if (Field* f = og->get_fieldc(opt_key, opt_index))
+            return f;
+    return nullptr;
 }
 
 Line* Tab::get_line(const t_config_option_key& opt_key)
@@ -6649,7 +3536,14 @@ void Tab::toggle_line(const std::string &opt_key, bool toggle)
 {
     if (!m_active_page) return;
     Line *line = m_active_page->get_line(opt_key);
-    if (line) line->toggle_visible = toggle;
+    if (!line) return;
+    line->toggle_visible = toggle;
+    // NEOTKO_NEOSTROKE_TAG s335 — una línea de SÓLO widget (el botón de "NeoStroke — Advanced") hay
+    // que enseñarla y ocultarla a mano: `toggle_visible` lo consume `OG_CustomCtrl`, que sólo existe
+    // para líneas con opciones, y `OptionsGroup::update_visibility` se sale antes cuando el grupo no
+    // tiene ninguna. Sin esto el botón se queda visible también con Classic y Arachne.
+    if (line->get_options().empty() && line->widget_sizer != nullptr)
+        line->widget_sizer->ShowItems(toggle);
 };
 
 // To be called by custom widgets, load a value into a config,
@@ -7259,6 +4153,26 @@ void Tab::activate_option(const std::string& opt_key, const wxString& category)
            set_focus(field->getWindow());
     }
 
+    // NeotkoLIBRE_FOLD s330 - si la opcion buscada vive en un apartado plegado, abrirlo
+    // (solo hasta que cambies de pagina). Va DESPUES de seleccionar la pagina, porque
+    // activarla reaplica el plegado guardado.
+    if (m_active_page) {
+        for (auto g : m_active_page->m_optgroups) {
+            if (g->fold_key.empty() || !g->is_folded())
+                continue;
+            bool has = false;
+            for (auto& l : g->get_lines()) {
+                for (auto& o : l.get_options())
+                    if (o.opt.opt_key == opt_key) { has = true; break; }
+                if (has) break;
+            }
+            if (has) {
+                g->unfold_temporarily();
+                break;
+            }
+        }
+    }
+
     m_highlighter.init(get_custom_ctrl_with_blinking_ptr(opt_key));
 }
 
@@ -7568,6 +4482,12 @@ void TabPrint::build()
         // (deferred Inc 3 — it must appear only when NeoArachne is selected).
         optgroup->append_single_option_line("neoarachne_outer_wall",           "quality_settings_wall_generator#neoarachne");
         optgroup->append_single_option_line("neoarachne_inner_walls",          "quality_settings_wall_generator#neoarachne");
+        // NEOTKO_NEOARACHNE_TAG v3-spine (s323) — espina tipo S3D (sólo con inner = Classic).
+        optgroup->append_single_option_line("neoarachne_spine",                "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_spine_min_width_pct",  "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_spine_max_width_pct",  "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_spine_min_length",     "quality_settings_wall_generator#neoarachne");
+        optgroup->append_single_option_line("neoarachne_spine_sliver_pct",     "quality_settings_wall_generator#neoarachne");
         optgroup->append_single_option_line("neoarachne_gap_fill",             "quality_settings_wall_generator#neoarachne");
         optgroup->append_single_option_line("neoarachne_allowed_overlap_pct",  "quality_settings_wall_generator#neoarachne-edge-closure");
         optgroup->append_single_option_line("neoarachne_min_bead_width_pct",   "quality_settings_wall_generator#neoarachne-edge-closure");
@@ -7578,20 +4498,61 @@ void TabPrint::build()
         optgroup->append_single_option_line("neoarachne_bead_count_hysteresis_pct", "quality_settings_wall_generator#neoarachne-neotkoedge");
         optgroup->append_single_option_line("neoarachne_transition_filter_dist_mm",  "quality_settings_wall_generator#neoarachne-neotkoedge");
 
-        // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab reactive canvas. Unlike the fork, the
-        // panel self-gates: it only shows when wall_generator == NeoArachne (see NeoArachnePreviewPanel
-        // on_poll_timer / ctor), so no "off TV" sits in the optgroup for Classic/Arachne presets.
+        // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — aquí vivía el canvas reactivo del Preview Lab
+        // ("Edge Closure preview"), que se auto-mostraba sólo con wall_generator == NeoArachne.
+        // NEOTKO_NEOSTROKE_TAG s335 — RETIRADO de la pestaña por petición suya: no aportaba nada
+        // donde estaba (ocupaba media página y sólo se encendía con NeoArachne). La clase
+        // `NeoArachnePreviewPanel` SIGUE VIVA y es la que se usa: el visor de caminos de la ventana
+        // "NeoStroke — Advanced" es esta misma clase con `Gate::NeoStroke`. Volver a ponerlo aquí es
+        // re-añadir estas doce líneas con `Gate::NeoArachne`.
+
+        // NEOTKO_NEOSTROKE_TAG s332 — NeoStroke deja de vivir en fila dentro del grupo de la v3 y
+        // pasa a tener grupo propio, que se enseña sólo con NeoStroke activo
+        // (ConfigManipulation::toggle_print_fff_options), sea por `wall_generator = NeoStroke` o por
+        // la ruta vieja.
+        // 🔑 Los tres básicos son mínimo / máximo / cierres, por petición suya (s332).
+        // NEOTKO_NEOSTROKE_TAG s335 — y el botón de Avanzado va AQUÍ DENTRO, no en un grupo aparte:
+        // un grupo entero con una sola fila y un botón era una cabecera de más, y encima no se
+        // ocultaba con el resto (un grupo sin opciones no pasa por `update_visibility`).
+        optgroup = page->new_optgroup(L("NeoStroke"), L"param_wall_generator");
+        optgroup->append_single_option_line("neostroke_min_width_pct",        "quality_settings_wall_generator#neostroke");   // NEOTKO_NEOSTROKE_TAG s326
+        optgroup->append_single_option_line("neostroke_max_bead_pct",         "quality_settings_wall_generator#neostroke");   // NEOTKO_NEOSTROKE_TAG s331b
+        optgroup->append_single_option_line("neostroke_cap_join",             "quality_settings_wall_generator#neostroke");   // NEOTKO_NEOSTROKE_TAG s331d
+
+        // NEOTKO_NEOSTROKE_TAG s335 — los quince mandos avanzados ya NO están en fila aquí: vivían
+        // debajo de los básicos y eran una pared de campos que empujaba el resto de la página.
+        // Ahora viven en `NeoStrokeAdvancedDialog`, junto al visor de caminos, y aquí queda sólo el
+        // botón que la abre, en el MISMO grupo que los básicos.
         {
-            Line preview_line(_L("Edge Closure preview"), wxEmptyString);
-            preview_line.full_width = 1;
+            Line adv_line(_L("Advanced options"), wxEmptyString);
+            // 🚨🚨 `full_width` NO es cosmético en una línea SIN opciones. `OptionsGroup::activate_line`
+            //    sólo entra en la rama del widget si `full_width && widget != nullptr`; si no, sigue
+            //    a `line.get_options().front()`, que sobre un vector VACÍO es EXC_BAD_ACCESS al
+            //    activar la página (crash al arrancar, antes de que se vea la ventana). La línea del
+            //    preview de Edge Closure lo ponía por esto mismo. Si se añade otra línea de sólo
+            //    widget, ponerlo también.
+            adv_line.full_width = 1;
+            // s335 — clave propia para que `toggle_line` la alcance: es una línea de widget y esas
+            // no tienen `Option` (ver `Line::neotko_toggle_key`).
+            adv_line.neotko_toggle_key = "neostroke_advanced_dialog";
             Tab* tab_self = this;
-            preview_line.widget = [tab_self](wxWindow* parent) -> wxSizer* {
-                auto* sizer  = new wxBoxSizer(wxHORIZONTAL);
-                auto* canvas = new NeoArachnePreviewPanel(parent, tab_self);
-                sizer->Add(canvas, 1, wxEXPAND | wxALL, 4);
+            adv_line.widget = [tab_self](wxWindow* parent) -> wxSizer* {
+                auto* sizer = new wxBoxSizer(wxHORIZONTAL);
+                auto* btn   = new wxButton(parent, wxID_ANY, _L("Advanced options") + dots);
+                btn->SetToolTip(_L("Opens the NeoStroke advanced options next to a live view of the "
+                                   "paths they produce, so a change can be judged without slicing."));
+                btn->Bind(wxEVT_BUTTON, [tab_self](wxCommandEvent&) {
+                    NeoStrokeAdvancedDialog dlg(tab_self, tab_self);
+                    dlg.ShowModal();
+                });
+                // Centrado: la fila ocupa todo el ancho del grupo (`full_width`), así que el botón
+                // se centra con un muelle a cada lado en vez de quedarse pegado al margen.
+                sizer->AddStretchSpacer();
+                sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+                sizer->AddStretchSpacer();
                 return sizer;
             };
-            optgroup->append_line(preview_line);
+            optgroup->append_line(adv_line);
         }
 
         optgroup = page->new_optgroup(L("Walls and surfaces"), L"param_wall_surface");
@@ -7628,40 +4589,21 @@ void TabPrint::build()
         optgroup->append_single_option_line("dont_filter_internal_bridges", "quality_settings_bridging#filter-out-small-internal-bridges");
         optgroup->append_single_option_line("counterbore_hole_bridging", "quality_settings_bridging#bridge-counterbore-hole");
 
-        // NEOTKO_SANDWICH_TAG — s132 port: "Surface ColorStitch" optgroup hosting the
-        // pass-stack (sandwich) editor launcher + ColorStitch min. line length.
-        // El enable real vive en el stack del SandwichDialog (blobs neotko_surface_passes_*),
-        // por eso aquí no hay checkbox externo (retirado s97). El launcher legacy
-        // SurfaceColorMixerDialog (#if 0 en el fork) NO se porta — dead-code retirado.
+        // NEOTKO_SANDWICH_TAG — "Surface ColorStitch": ColorStitch min. line length + nesting.
+        // 🔒 s317 fase D — el botón "Sandwich editor…" y su diálogo (SandwichDialog) FUERA. Su receta
+        // se aplicaba sola a todo el objeto; ahora es un perfil de la paleta y sólo se pinta. Los 3mf
+        // viejos la mueven a la paleta al abrir (bbs_3mf.cpp) y los presets la apagan (Preset.cpp).
+        // Las claves (neotko_surface_passes_*, los enables) se siguen LEYENDO.
         optgroup = page->new_optgroup(L("Surface ColorStitch"));
-        create_line_with_widget(optgroup.get(), "interlayer_colormix_surface", "",
-            [this](wxWindow* parent) -> wxSizer* {
-                auto* sw_btn = new wxButton(parent, wxID_ANY,
-                                            _L("Sandwich editor…"),
-                                            wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-                sw_btn->SetToolTip(_L("Edit the per-layer effect stack (Top and "
-                                      "Penultimate) as a sandwich of passes."));
-                sw_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-                    SandwichDialog dlg(
-                        wxGetApp().mainframe,
-                        m_config,
-                        [this](const std::string& key) {
-                            on_value_change(key, boost::any());
-                        });
-                    dlg.ShowModal();
-                });
-                auto* sz = new wxBoxSizer(wxHORIZONTAL);
-                sz->Add(sw_btn, 0, wxALL, 3);
-                return sz;
-            });
         optgroup->append_single_option_line("interlayer_colormix_min_length");
-        // NEOTKO_COLORSTITCH_TAG — Line distribution mode moved out of the Sandwich editor
-        // into the print settings, directly below Minimum line length (UX decision 2026-06-24).
-        optgroup->append_single_option_line("surface_color_mix_lane_mode");
+        // 🔒 s316 fase C — "Line distribution mode" FUERA de la UI y del motor. La clave se sigue leyendo.
         // NEOTKO_COLORSTITCH_TAG — s230: "Monotonic Line Replan" y "Monotonic Interlayer Nesting"
         // pasan a comDevelop (siguen aquí, pero solo se dibujan en modo Develop). "ColorStitch on
         // Monotonic (continuous)" se RETIRA del todo: ya no es opción, va siempre ON en el motor.
-        optgroup->append_single_option_line("colorstitch_monotonic_replan");
+        // 🔒 s316 — "Monotonic Line Replan" FUERA de la UI: el motor lo fija en 2 (FillBase.cpp,
+        // veto del auto-bucle). La clave se sigue leyendo de los 3mf viejos pero ya no manda.
+        // "Monotonic Interlayer Nesting" se queda: es de neoweaving, no de distribución, y queda
+        // fuera de la retirada del legacy (decisión del usuario).
         optgroup->append_single_option_line("neotko_interlayer_nesting_enabled");
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
@@ -7924,6 +4866,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("neotko_tower_type");
         optgroup->append_single_option_line("neotower_zigurat");
         optgroup->append_single_option_line("neotower_purge_compaction");
+        optgroup->append_single_option_line("neotower_no_ramming"); // NEOTKO_NEOTOWER_TAG s310
         // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental), shown only when
         // Tower type = NeoTower AND LibreMode is active (toggled in ConfigManipulation).
         optgroup->append_single_option_line("neotower_variable_layer_height");
@@ -12327,6 +9270,18 @@ void Page::update_visibility(ConfigOptionMode mode, bool update_contolls_visibil
 #endif
     }
 
+    // NeotkoLIBRE_FOLD s330 - update_visibility (modo Simple/Advanced) vuelve a mostrar el
+    // grupo entero, asi que el plegado se reaplica DESPUES. Tambien cierra el "abierto
+    // temporal" que dejo la busqueda: cambiar de pagina lo pliega otra vez.
+    if (update_contolls_visibility) {
+        for (auto group : m_optgroups) {
+            if (group->fold_key.empty())
+                continue;
+            group->reset_fold_temp();
+            group->apply_fold();
+        }
+    }
+
     m_show = ret_val;
 #ifdef __WXMSW__
     if (!m_show) return;
@@ -12366,6 +9321,24 @@ void Page::activate(ConfigOptionMode mode, std::function<void()> throw_if_cancel
         first = false;
 #endif
         group->reload_config();
+        // NeotkoLIBRE_FOLD s330 - la cabecera hace de boton. Alt+clic = toda la pagina.
+        if (!group->fold_key.empty()) {
+            if (auto* stl = dynamic_cast<::StaticLine*>(group->stb)) {
+                Page* page = this;
+                OptionsGroup* og = group.get();
+                stl->on_toggle_fold = [page, og](bool alt_down) {
+                    const bool next = !og->is_folded();
+                    if (alt_down) {
+                        for (auto g : page->m_optgroups)
+                            if (!g->fold_key.empty())
+                                g->set_folded(next);
+                    } else {
+                        og->set_folded(next);
+                    }
+                };
+            }
+            group->apply_fold();
+        }
         throw_if_canceled();
     }
 
@@ -12452,6 +9425,17 @@ ConfigOptionsGroupShp Page::new_optgroup(const wxString &title, const wxString &
 #endif*/
     auto tab = m_tab_owner;
     optgroup->set_config_category_and_type(m_title, static_cast<Tab*>(tab)->type());
+
+    // NeotkoLIBRE_FOLD s330 - apartados plegables SOLO en Process, y solo si tienen titulo.
+    // Identidad por nombre (sin traducir), nunca por posicion en la lista.
+    // TYPE_MODEL = las mismas paginas en el modo "Objects" del panel Process: mismo
+    // prefijo de clave, asi Global y Objects pliegan igual.
+    if ((static_cast<Tab*>(tab)->type() == Preset::TYPE_PRINT ||
+         static_cast<Tab*>(tab)->type() == Preset::TYPE_MODEL) && !title.IsEmpty()) {
+        optgroup->fold_key = std::string("print|") + m_title.ToUTF8().data() + "|" + title.ToUTF8().data();
+        if (is_extruder_og)
+            optgroup->fold_key += "|extruder";
+    }
     optgroup->m_on_change = [tab](t_config_option_key opt_key, boost::any value) {
         //! This function will be called from OptionGroup.
         //! Using of CallAfter is redundant.

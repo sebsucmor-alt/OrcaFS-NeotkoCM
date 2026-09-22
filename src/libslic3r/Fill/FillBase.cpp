@@ -1644,7 +1644,14 @@ void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Po
 
     const double line_half_width = 0.5 * scale_(spacing);
     // NEOTKO_COLORSTITCH_TAG — Monotonic Line replan gate for the contour-connector self-loop.
-    const int    self_loop_mode  = params.config ? params.config->colorstitch_monotonic_replan.value : 0;
+    // 🔒 s316 — FIJO EN 2 (veto del auto-bucle), decisión del usuario: es el valor con el que
+    // lleva horas de impresión. La clave `colorstitch_monotonic_replan` se sigue LEYENDO de los
+    // 3mf viejos pero ya no manda, y su fila salió de la UI.
+    // 🔑 Por qué el 2 "casaba las capas" con los modos viejos: aquellos repartían un RECUENTO de
+    // líneas, y un trocito de más en una esquina corría todo el patrón una posición. El 2 quitaba
+    // esos trocitos. Con el motor de campo el recuento no importa (cada línea toma el color del
+    // sitio donde cae, anclado al objeto), así que esto queda sólo como geometría de esquinas.
+    const int    self_loop_mode  = 2;
 
 #if 0
     // Connection from end of one infill line to the start of another infill line.

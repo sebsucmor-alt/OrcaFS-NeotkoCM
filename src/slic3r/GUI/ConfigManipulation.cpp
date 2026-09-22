@@ -8,6 +8,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/NeoDebug.hpp"   // NEOTKO_NEOSTROKE_TAG s335 — candado de depuración
 
 #include <wx/msgdlg.h>
 
@@ -559,6 +560,46 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         }
     }
 
+    // NEOTKO_NEOSTROKE_TAG s335 — CANDADO DE DEPURACIÓN de NeoStroke, el mismo de Bump Mapping.
+    // NeoStroke se publica, pero no imprime estable: hay que conocer el sistema antes de mandarlo a
+    // la máquina. Dos llaves y las dos a la vez — LibreMode encendido y el canal
+    // `ORCA_DEBUG_NEOSTROKE` (o `ORCA_DEBUG_ALL`).
+    // 🚨 Se avisa y se REVIERTE, no se esconde la entrada del desplegable. Esconderla haría falta
+    //    tocar `print_config_def`, que es `const` (un `const_cast` sobre eso es comportamiento
+    //    indefinido, y el objeto puede estar en memoria de sólo lectura). Y avisar es además mejor:
+    //    una entrada que desaparece deja al usuario buscándola, mientras que este diálogo es justo
+    //    donde toca decirle por qué está cerrado y qué riesgo corre al abrirlo.
+    if (config->has("wall_generator")
+        && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoStroke
+        && !is_msg_dlg_already_exist)
+    {
+        // 🚨 `neotko_libre_mode` (el interruptor VIVO de la barra), la MISMA clave que lee el motor
+        //    en NeoArachnePlan. Con `neotko_libre_enabled` (el maestro de Preferencias) los dos
+        //    candados podían discrepar: maestro encendido pero interruptor apagado dejaba elegir
+        //    NeoStroke aquí y el motor lo rechazaba en silencio.
+        const bool ns_gate_open = wxGetApp().app_config != nullptr
+                               && wxGetApp().app_config->get_bool("neotko_libre_mode")
+                               && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+        if (!ns_gate_open) {
+            MessageDialog dialog(m_msg_dlg_parent,
+                _L("NeoStroke is a work in progress and is locked behind debug mode.\n\n"
+                   "Prints with it are not stable, and it takes a good understanding of how the "
+                   "wall engine works to get a usable result. To unlock it, turn on Libre Mode in "
+                   "Preferences and start Orca with ORCA_DEBUG_NEOSTROKE=1.\n\n"
+                   "Switch the wall generator back to Arachne?"),
+                _L("NeoStroke — debug mode only"), wxICON_WARNING | wxYES | wxNO);
+            is_msg_dlg_already_exist = true;
+            const auto ans = dialog.ShowModal();
+            is_msg_dlg_already_exist = false;
+            if (ans == wxID_YES) {
+                DynamicPrintConfig nc = *config;
+                nc.set_key_value("wall_generator",
+                    new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
+                apply(config, &nc);
+            }
+        }
+    }
+
     // NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — validate the NeoArachne wall-source combo and Edge
     // Closure invariants. Runs on a possibly-SPARSE per-object config → guard EVERY opt_* read with
     // config->has() (bare opt_enum on a missing key crashes). The neoarachne_* keys travel together,
@@ -590,8 +631,10 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             }
         }
         // (2) outer = Arachne* + inner = Classic breaks Arachne's whole-slab beading.
+        // NEOTKO_NEOSTROKE_TAG C1 (s325) — NeoStroke es interior propio sobre muro exterior Classic:
+        // con un exterior Arachne el combo es el mismo inválido que con Classic dentro.
         else if ((outer == NeoArachneWallSource::ArachneStock || outer == NeoArachneWallSource::ArachneNeotkoEdge)
-                 && inner == NeoArachneWallSource::Classic)
+                 && (inner == NeoArachneWallSource::Classic || inner == NeoArachneWallSource::NeoStroke))
         {
             MessageDialog dialog(m_msg_dlg_parent,
                 _L("NeoArachne — outer = Arachne with inner = Classic is unsupported "
@@ -938,6 +981,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
             config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttNeoTower;
         toggle_line("neotower_zigurat", is_neotower);
         toggle_line("neotower_purge_compaction", is_neotower);
+        toggle_line("neotower_no_ramming", is_neotower); // NEOTKO_NEOTOWER_TAG s310
         // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental): visible whenever the
         // NeoTower planner is selected so users discover it, but the field is greyed out (locked)
         // unless LibreMode is active — it can only be switched on in LibreMode.
@@ -1007,12 +1051,67 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     const bool have_neoarachne =
         config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoArachne
         && libre_active;
-    for (auto el : { "neoarachne_outer_wall", "neoarachne_inner_walls", "neoarachne_gap_fill" })
+    for (auto el : { "neoarachne_outer_wall", "neoarachne_inner_walls" })
         toggle_line(el, have_neoarachne);
+    // NEOTKO_NEOARACHNE_TAG v3-spine (s323) — gap_fill selector never did anything (advisory
+    // only, see NeoArachnePlan.cpp); hidden until it is removed in phase 3.
+    toggle_line("neoarachne_gap_fill", false);
     const bool inner_readable = have_neoarachne && config->has("neoarachne_inner_walls");
     const auto inner_src = inner_readable
         ? config->opt_enum<NeoArachneWallSource>("neoarachne_inner_walls")
-        : NeoArachneWallSource::ArachneStock; // default → assume Arachne, show closure params
+        : NeoArachneWallSource::Classic; // v3 default
+    // Spine keys: only meaningful with inner = Classic; the width/length knobs also need it on.
+    {
+        // NEOTKO_NEOSTROKE_TAG C1-C5 (s325) — la espina es SÓLO de la v3 (inner = Classic). NeoStroke
+        // pone su propio interior y no la usa: enseñar sus mandos ahí engañaría.
+        const bool inner_is_classic = have_neoarachne && inner_src == NeoArachneWallSource::Classic;
+        const bool spine_on = inner_is_classic && config->has("neoarachne_spine")
+                              && config->opt_bool("neoarachne_spine");
+        toggle_line("neoarachne_spine", inner_is_classic);
+        for (auto el : { "neoarachne_spine_min_width_pct", "neoarachne_spine_max_width_pct",
+                         "neoarachne_spine_min_length", "neoarachne_spine_sliver_pct" })
+            toggle_line(el, spine_on);
+    }
+    // NEOTKO_NEOSTROKE_TAG C5b (s325) — los mandos de NeoStroke sólo con NeoStroke dentro.
+    // NEOTKO_NEOSTROKE_TAG s332 — dos caminos llevan a NeoStroke: el generador propio
+    // (`wall_generator = NeoStroke`, sin pasar por LibreMode ni por el panel de la v3) y la RUTA
+    // VIEJA de s325 (NeoArachne + inner_walls = NeoStroke), que se mantiene viva para no romper los
+    // perfiles del TEST13. 🚨 El generador propio NO se cuela por `have_neoarachne`, que exige
+    // LibreMode: se comprueba aparte.
+    // NEOTKO_NEOSTROKE_TAG s335 — los mandos siguen al CANDADO, no sólo al generador elegido: con
+    // el candado cerrado no se enseña nada de NeoStroke, ni aunque un 3mf ajeno traiga la clave.
+    // Misma llave que el motor (ver arriba).
+    const bool ns_gate_open = wxGetApp().app_config != nullptr
+                           && wxGetApp().app_config->get_bool("neotko_libre_mode")
+                           && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+    const bool neostroke_gen = ns_gate_open
+        && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoStroke;
+    const bool neostroke_on = neostroke_gen
+                              || (ns_gate_open && have_neoarachne && inner_src == NeoArachneWallSource::NeoStroke);
+    for (auto el : { "neostroke_bead_min_pct", "neostroke_corner_hooks", "neostroke_width_ref",
+                     "neostroke_min_width_pct", "neostroke_max_width_pct", "neostroke_detail_min_pct",
+                     "neostroke_curve_overlap", "neostroke_max_bead_pct", "neostroke_max_stroke_width",
+                     "neostroke_cap_join", "neostroke_layer_jitter", "neostroke_skate", "neostroke_skate_detour",
+                     // NEOTKO_NEOSTROKE_TAG s335 — el BOTÓN de la ventana de Avanzado. No es una
+                     // clave de config: es la `neotko_toggle_key` de su línea de widget, y se
+                     // enseña/oculta con el mismo criterio que los mandos que abre.
+                     "neostroke_advanced_dialog" })
+        toggle_line(el, neostroke_on);
+    // NEOTKO_NEOSTROKE_TAG s331 — la FORMA de la curva no pinta nada con el overlap apagado.
+    // 🚨🚨 NUNCA `opt_float()` (ni `opt_int()`) sobre una clave `coPercent`. `ConfigOptionPercent`
+    // SÍ hereda de `ConfigOptionFloat`, pero `ConfigBase::option<T>()` NO hace `dynamic_cast`:
+    // compara `opt->type()` con `T::static_type()` y devuelve null si no son EXACTAMENTE iguales
+    // (Config.hpp:2090). Un `coPercent` nunca es `coFloat`, así que `opt_float` devolvía null y
+    // `->value` lo desreferenciaba: EXC_BAD_ACCESS en 0x8, que es justo el offset de `value`.
+    // Y `config->has()` no salva de nada, porque es `options.count(k) > 0` y no mira el tipo.
+    // Se lee con el tipo EXACTO. Y si no se puede leer, se ENSEÑAN los mandos: esconder uno por
+    // no poder leerlo es peor que enseñarlo de más.
+    const auto* ovl_opt = config->option<ConfigOptionPercent>("neostroke_curve_overlap");
+    const bool overlap_on = neostroke_on && (ovl_opt == nullptr || ovl_opt->value > 0.);
+    for (auto el : { "neostroke_overlap_width_end", "neostroke_overlap_straight",
+                     "neostroke_overlap_turn_min", "neostroke_overlap_turn_max",
+                     "neostroke_overlap_span" })
+        toggle_line(el, overlap_on);
     const bool inner_is_arachne =
         inner_src == NeoArachneWallSource::ArachneStock ||
         inner_src == NeoArachneWallSource::ArachneNeotkoEdge;

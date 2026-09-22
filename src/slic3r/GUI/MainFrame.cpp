@@ -1683,6 +1683,13 @@ wxBoxSizer* MainFrame::create_side_tools()
                 // invalidation, same as the old dedicated Gravity button used to do.
                 m_plater->schedule_background_process();
             }
+            // NeotkoLIBRE_FOLD s330 - refrescar Process para que aparezcan/desaparezcan
+            // los apartados plegables (el estado guardado se conserva).
+            if (wxGetApp().get_tab(Preset::TYPE_PRINT))
+                wxGetApp().get_tab(Preset::TYPE_PRINT)->update_visibility();
+            for (bool part : {false, true})
+                if (Tab* mtab = wxGetApp().get_model_tab(part))
+                    mtab->update_visibility();
             m_neotko_libre_btn->SetLabel(next ? "LibreMode: On" : "LibreMode: Off");
             m_neotko_libre_btn->Refresh();
         });

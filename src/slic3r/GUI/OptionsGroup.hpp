@@ -57,6 +57,11 @@ public:
 	std::string	label_path;
     bool        undo_to_sys{false}; // BBS: object config
     bool        toggle_visible{true}; // BBS: hide some line
+    // NEOTKO_NEOSTROKE_TAG s335 — identidad de una línea SIN opciones (sólo widget), para que
+    // `Tab::toggle_line` pueda mostrarla y ocultarla como a cualquier otra. `get_line` salta las
+    // líneas de widget a propósito (no tienen `Option` y `get_first_option_key` reventaría), así
+    // que sin esto un botón puesto en un grupo se queda visible para siempre. Vacío = como antes.
+    std::string neotko_toggle_key;
 
     size_t		full_width {0}; 
     widget_t	widget {nullptr};
@@ -199,6 +204,20 @@ public:
 
 	bool				is_activated() { return sizer != nullptr; }
 
+	// NeotkoLIBRE_FOLD s330 - apartados plegables (solo Process, solo con LibreMode).
+	// fold_key vacia = apartado no plegable.
+	std::string			fold_key;
+	bool				is_folded() const { return m_folded; }
+	// Pliega/despliega y lo guarda en app_config.
+	void				set_folded(bool folded);
+	// Despliega solo hasta el proximo cambio de pagina (lo usa la busqueda).
+	void				unfold_temporarily();
+	// Reaplica el estado guardado despues de cada update_visibility (que re-muestra todo).
+	void				apply_fold();
+	void				set_fold_modified_mark(bool modified);
+	// Cierra el "abierto temporal" de la busqueda (lo llama el cambio de pagina).
+	void				reset_fold_temp() { m_fold_temp_open = false; }
+
 protected:
 	std::map<t_config_option_key, Option>	m_options;
     wxWindow*				m_parent {nullptr};
@@ -212,6 +231,9 @@ protected:
     /// need to cast based on the related ConfigOptionDef.
     t_optionfield_map		m_fields;
     bool					m_disabled {false};
+	// NeotkoLIBRE_FOLD s330
+	bool					m_folded {false};
+	bool					m_fold_temp_open {false};
     wxGridSizer*			m_grid_sizer {nullptr};
 	// "true" if option is created in preset tabs
 	bool					m_use_custom_ctrl{ false };

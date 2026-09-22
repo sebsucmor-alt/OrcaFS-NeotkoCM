@@ -8914,10 +8914,38 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
             if (!Slic3r::SurfaceEffectProfileManager::get().from_json(json)) {
                 BOOST_LOG_TRIVIAL(warning) << "Failed to parse colormix_profiles from 3mf";
                 NEOTKO_LOG(PROFILE, "3MF load: PARSE FAILED");
+            } else {
+                // NEOTKO_COLORSTITCH_TAG — s316 fase B: retirada del legacy en los perfiles
+                // pintados (payload + sus tres pilas). El paso nominal sale de la config del
+                // PROYECTO, que load_model_from_file ya ha cargado en *config (y que
+                // handle_legacy_composite ya ha migrado por su lado). Ver ColorStitch.hpp.
+                double nozzle = 0.4;
+                if (auto* nd = config->option<ConfigOptionFloats>("nozzle_diameter"))
+                    if (!nd->values.empty() && nd->values.front() > 0.05) nozzle = nd->values.front();
+                const double sp = Slic3r::ColorStitchLegacyMigration::nominal_top_line_spacing_mm(*config, nozzle);
+                const int n_mig = Slic3r::SurfaceEffectProfileManager::get().migrate_legacy_colorstitch(sp);
+                NEOTKO_LOG(PROFILE, "3MF load: LEGACY_MIGRATION profiles_changed=" << n_mig
+                    << " sp_nominal=" << sp << "mm nozzle=" << nozzle);
             }
         } else {
             NEOTKO_LOG(PROFILE, "3MF load: no colormix_profiles metadata in 3mf");
         }
+    }
+
+    // NEOTKO_SANDWICH_TAG — s317 fase D: la receta del Sandwich Editor (proyecto y objetos) pasa a
+    // la paleta y se apaga en la config. DESPUÉS del bloque de arriba: from_json vacía la paleta.
+    // Va aquí y no en handle_legacy_composite porque ese también corre con los presets al arrancar
+    // (sin paleta) y porque la config por objeto no pasa por él. Ver ColorStitch.hpp.
+    if (res && model) {
+        double nozzle = 0.4;
+        if (auto* nd = config->option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!nd->values.empty() && nd->values.front() > 0.05) nozzle = nd->values.front();
+        const double sp = Slic3r::ColorStitchLegacyMigration::nominal_top_line_spacing_mm(*config, nozzle);
+        std::vector<std::pair<std::string, ModelConfig*>> objs;
+        for (ModelObject* mo : model->objects)
+            if (mo) objs.emplace_back(mo->name, &mo->config);
+        const int n_sw = SurfaceEffectProfileManager::get().move_sandwich_editor_recipes(*config, objs, sp);
+        NEOTKO_LOG(PROFILE, "3MF load: SANDWICH_EDITOR sources_moved=" << n_sw << " objects=" << objs.size());
     }
 
     // NEOTKO_PROFILE_TAG — s238: RED DE SEGURIDAD al cargar, simétrica al guard de

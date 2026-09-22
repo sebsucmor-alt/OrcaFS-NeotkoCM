@@ -3,8 +3,12 @@
 #include "NeoArachneInterior.hpp"
 #include "NeoArachneRuntime.hpp"
 #include "NeoArachneDebug.hpp"
+#include "NeoArachneSpine.hpp"
+#include "NeoStroke.hpp"   // NEOTKO_NEOSTROKE_TAG C1 (s325)
 
+#include "../NeoDebug.hpp"
 #include "../PerimeterGenerator.hpp"
+#include "../ShortestPath.hpp"
 #include "../PrintConfig.hpp"
 #include "../Print.hpp"
 #include "../SurfaceCollection.hpp"
@@ -12,6 +16,7 @@
 #include "../ExtrusionEntityCollection.hpp"
 
 #include <algorithm>  // std::clamp
+#include <cstdio>     // snprintf (sonda v3-spine)
 
 namespace Slic3r { namespace NeoArachne {
 
@@ -26,7 +31,7 @@ namespace Slic3r { namespace NeoArachne {
 // perimeter exits and trigger spiral. With this, ALL paths emitted during a
 // NeoArachne region opt out of spiral, restoring linear LazyLift everywhere
 // within the region.
-static void set_no_spiral_lift_recursive(ExtrusionEntity *ee)
+void set_no_spiral_lift_recursive(ExtrusionEntity *ee)
 {
     if (ee == nullptr) return;
     if (auto *path = dynamic_cast<ExtrusionPath*>(ee)) {
@@ -77,6 +82,241 @@ static void set_no_spiral_lift_recursive(ExtrusionEntity *ee)
 //   outer = Off                              → forced to Classic
 //   outer = Arachne* + inner = Classic       → inner aligned to outer
 
+// NEOTKO_NEOARACHNE_TAG v3-spine (s323) — NeoArachne v3, "tipo S3D":
+//   1. Classic SÓLO para el muro exterior (y thin walls, si el usuario las tiene), sin gap-fill.
+//   2. Zona = lo que queda dentro del eje del muro exterior y no tapa ese muro.
+//   3. Muros interiores PROPIOS, nivel a nivel, de ancho fijo. ANTES de cada uno, cada zona:
+//        · cabe ENTERA en una línea <= techo → espina, y ahí no hay más muros (regla S3D);
+//        · no quedan muros por poner         → relleno;
+//        · si no                             → un bucle más (offset −spacing/2) y se sigue dentro.
+//      Así desaparecen los muros PARCIALES de Classic y las migas entre muros que la fase 1
+//      rellenaba al suelo (anillo o0.45: 121 % de material y 17–20 caminos, s323).
+//   4. Espina (NeoArachneSpine) y relleno recortado a lo que sobra, con el solape de Classic.
+static void run_classic_spine(PerimeterGenerator& g, const Config& cfg, const PrintRegionConfig* original_cfg)
+{
+    // Muros de verdad para esta capa (mismas reglas que Classic / Hybrid v2).
+    int walls = original_cfg->wall_loops.value;
+    if (walls < 1) {   // sin muros no hay nada que decidir: Classic tal cual
+        g.process_classic();
+        return;
+    }
+    if (g.layer_id == g.object_config->raft_layers && original_cfg->only_one_wall_first_layer)
+        walls = 1;
+    if (walls > 1 && original_cfg->only_one_wall_top && g.upper_slices == nullptr)
+        walls = 1;
+
+    // Copia local, como en Hybrid v2: otras LayerRegion del mismo PrintRegion pueden estar
+    // laminándose en paralelo.
+    PrintRegionConfig modified_cfg = *original_cfg;
+    modified_cfg.wall_loops.value           = 1;      // Classic sólo el exterior
+    modified_cfg.gap_infill_speed.value     = 0;      // la espina sustituye al gap-fill de Classic
+    modified_cfg.alternate_extra_wall.value = false;  // los muros interiores los decide la regla S3D
+
+    ExPolygons original_slice;
+    original_slice.reserve(g.slices->surfaces.size());
+    for (const Surface& s : g.slices->surfaces)
+        original_slice.push_back(s.expolygon);
+
+    const size_t loops_before = g.loops->entities.size();
+    const size_t gap_before   = (g.gap_fill != nullptr) ? g.gap_fill->entities.size() : 0;
+    g.config = &modified_cfg;
+    g.process_classic();
+    g.config = original_cfg;
+    const size_t loops_after_outer = g.loops->entities.size();
+
+    // Lo que tapa el muro exterior, medido por su separación (así el primer interior no deja hueco).
+    Polygons outer_cov;
+    for (size_t i = loops_before; i < loops_after_outer; ++i)
+        g.loops->entities[i]->polygons_covered_by_spacing(outer_cov, float(SCALED_EPSILON));
+
+    // Sólo el interior: por fuera del eje del muro exterior mandan el muro y detect_thin_wall.
+    const float eps           = float(scaled<double>(0.005));   // migas numéricas, no puntas
+    const float inside_offset = float(g.ext_perimeter_flow.scaled_spacing()) / 2.f;
+    ExPolygons todo = diff_ex(offset_ex(original_slice, -inside_offset), outer_cov, ApplySafetyOffset::Yes);
+    todo = opening_ex(todo, eps);
+
+    const double line_w = g.perimeter_flow.width();
+    SpineParams sp;
+    sp.floor_mm      = line_w * cfg.spine_min_width_pct / 100.;
+    sp.ceiling_mm    = line_w * cfg.spine_max_width_pct / 100.;
+    sp.min_length_mm = cfg.spine_min_length_mm;
+    sp.sliver_mm     = line_w * cfg.spine_sliver_pct / 100.;
+    const double ceiling_w = scaled<double>(std::max(sp.ceiling_mm, sp.floor_mm));
+    const float  spacing   = float(g.perimeter_flow.scaled_spacing());
+    // Cuellos que un bucle no alcanza: se quedan como zona si tienen cuerpo; las astillas de las
+    // esquinas del bucle (más finas que medio suelo) se tiran.
+    const float  neck_open = float(std::max(double(eps), scaled<double>(sp.floor_mm) / 4.));
+
+    ExPolygons              spine_regions, forced_spine, fill_left;
+    std::vector<ExPolygons> levels;   // ejes de los bucles interiores; levels[0] = primer interior
+    // Minibucles (s323, S a 0.3: bucles de 0.86 y 1.36 mm en las colas): un bucle que encierra menos
+    // de ~3 líneas de diámetro no es un muro, es una gota con su arranque y su parada. No se hace;
+    // su zona va a espina aunque pase del techo (el ancho se recorta al techo).
+    const double min_loop_len = PI * 3. * scaled<double>(line_w);
+    size_t       tiny_loops   = 0;
+    int loops_left = walls - 1;
+    while (!todo.empty()) {
+        ExPolygons next, centres;
+        for (ExPolygon& comp : todo) {
+            if (fits_in_one_line(comp, ceiling_w)) {
+                spine_regions.emplace_back(std::move(comp));
+                continue;
+            }
+            ExPolygons centre = offset_ex(ExPolygons{ comp }, -spacing / 2.f);
+            const size_t n_raw = centre.size();
+            centre.erase(std::remove_if(centre.begin(), centre.end(),
+                                        [&](const ExPolygon& c) { return c.contour.length() < min_loop_len; }),
+                         centre.end());
+            const bool only_tiny = n_raw > 0 && centre.empty();   // sólo cabrían minibucles
+            if (loops_left <= 0 || centre.empty()) {
+                if (only_tiny) {
+                    tiny_loops += n_raw;
+                    forced_spine.emplace_back(std::move(comp));
+                } else {   // quedan muros agotados, o ni cabe un bucle ni cabe la línea (techo del usuario)
+                    fill_left.emplace_back(std::move(comp));
+                }
+                continue;
+            }
+            tiny_loops += n_raw - centre.size();
+            ExPolygons inner = offset_ex(ExPolygons{ comp }, -spacing);
+            append(inner, opening_ex(diff_ex(ExPolygons{ comp }, offset_ex(centre, spacing / 2.f)), neck_open));
+            append(next, union_ex(inner));
+            append(centres, std::move(centre));
+        }
+        if (!centres.empty())
+            levels.emplace_back(std::move(centres));
+        --loops_left;
+        todo = std::move(next);
+    }
+
+    // Espina primero (se coloca abajo junto a los bucles de su isla). Lo que no da ninguna línea
+    // vuelve a relleno (s323: el centro del ancla se perdía).
+    SpineStats           st;
+    ExPolygons           rejected;
+    ExtrusionEntitiesPtr spine_ents;
+    run_spine(g, spine_regions, sp, &st, &rejected, &forced_spine, &spine_ents);
+    append(fill_left, std::move(rejected));
+
+    // Bucles interiores, de ancho fijo como los de Classic, y la espina, en un cubo por isla (como
+    // Interior::run) para que la impresora termine una isla antes de saltar a la siguiente.
+    //
+    // s323 — orden: la espina es lo MÁS interior. Con InnerOuter (de dentro a fuera) va la primera:
+    // espina → interiores → exterior. Antes iba al final como gap-fill del bloque de relleno y la
+    // impresora "volvía al interior" tras el exterior: un viaje y una retracción de más por isla.
+    // Con OuterInner va la última.
+    const WallSequence ws = original_cfg->wall_sequence;
+    {
+        const ExPolygons islands = union_ex(original_slice);
+        std::vector<ExtrusionEntityCollection> per_island(islands.size() + 1);
+        auto island_of = [&](const Point& p) -> size_t {
+            for (size_t i = 0; i < islands.size(); ++i)
+                if (islands[i].contains(p))
+                    return i;
+            return islands.size();
+        };
+        // Espina repartida por isla y encadenada por cercanía (con la vuelta que convenga a cada línea).
+        std::vector<ExtrusionEntitiesPtr> spine_by_island(islands.size() + 1);
+        for (ExtrusionEntity* e : spine_ents)
+            spine_by_island[island_of(e->first_point())].push_back(e);
+        spine_ents.clear();
+        for (ExtrusionEntitiesPtr& v : spine_by_island)
+            if (v.size() > 1)
+                chain_and_reorder_extrusion_entities(v);
+        auto emit_spine = [&]() {
+            for (size_t i = 0; i < spine_by_island.size(); ++i)
+                if (!spine_by_island[i].empty())
+                    per_island[i].append(std::move(spine_by_island[i]));   // el cubo se queda la propiedad
+        };
+        if (ws != WallSequence::OuterInner)
+            emit_spine();
+        const Flow& pf = g.perimeter_flow;
+        auto emit_level = [&](const ExPolygons& centres, int inset) {
+            for (const ExPolygon& c : centres) {
+                ExtrusionEntityCollection& dst = per_island[island_of(c.contour.first_point())];
+                auto add = [&](const Polygon& poly, bool hole) {
+                    ExtrusionPath path(erPerimeter, pf.mm3_per_mm(), pf.width(), pf.height());
+                    path.polyline  = poly.split_at_first_point();
+                    path.inset_idx = inset;
+                    ExtrusionLoop loop(std::move(path));
+                    loop.make_counter_clockwise();
+                    loop.set_loop_role(hole ? elrHole : elrDefault);
+                    loop.inset_idx = inset;
+                    dst.append(std::move(loop));
+                };
+                add(c.contour, false);
+                for (const Polygon& h : c.holes)
+                    add(h, true);
+            }
+        };
+        // Dentro de cada isla: de fuera a dentro con OuterInner, de dentro a fuera si no.
+        if (ws == WallSequence::OuterInner)
+            for (size_t i = 0; i < levels.size(); ++i)
+                emit_level(levels[i], int(i) + 1);
+        else
+            for (size_t i = levels.size(); i-- > 0;)
+                emit_level(levels[i], int(i) + 1);
+        if (ws == WallSequence::OuterInner)
+            emit_spine();
+        for (ExtrusionEntityCollection& bucket : per_island)
+            if (!bucket.empty()) {
+                bucket.no_sort = true;
+                g.loops->append(bucket);
+            }
+    }
+    // Orden exterior/interiores, igual que Hybrid v2 (s94 task#12): con InnerOuter los interiores
+    // van antes. InnerOuterInner se aproxima como InnerOuter.
+    {
+        const size_t inners_end = g.loops->entities.size();
+        if (ws != WallSequence::OuterInner && loops_before < loops_after_outer && loops_after_outer < inners_end)
+            std::rotate(g.loops->entities.begin() + loops_before,
+                        g.loops->entities.begin() + loops_after_outer,
+                        g.loops->entities.begin() + inners_end);
+    }
+
+    // Relleno: sólo lo que ha quedado ancho, con el mismo solape contra los muros que usa Classic.
+    {
+        const bool topbottom = (g.layer_id == 0 || g.upper_slices == nullptr);
+        const ConfigOptionPercent& ov_opt = topbottom ? original_cfg->top_bottom_infill_wall_overlap
+                                                      : original_cfg->infill_wall_overlap;
+        const coord_t base = coord_t(spacing / 2.f) + g.solid_infill_flow.scaled_spacing() / 2;
+        const double  ov   = scale_(ov_opt.get_abs_value(unscale<double>(base)));
+        const ExPolygons fill_area = offset_ex(fill_left, float(ov));
+        Surfaces clipped;
+        clipped.reserve(g.fill_surfaces->surfaces.size());
+        for (const Surface& s : g.fill_surfaces->surfaces)
+            for (ExPolygon& ex : intersection_ex(ExPolygons{ s.expolygon }, fill_area))
+                clipped.emplace_back(Surface(s, std::move(ex)));
+        g.fill_surfaces->surfaces = std::move(clipped);
+        if (g.fill_no_overlap != nullptr && !g.fill_no_overlap->empty())
+            *g.fill_no_overlap = intersection_ex(*g.fill_no_overlap, fill_left);
+    }
+
+    // Igual que Hybrid v2: nada de lo emitido en una región NeoArachne dispara SpiralLift.
+    for (size_t i = loops_before; i < g.loops->entities.size(); ++i)
+        set_no_spiral_lift_recursive(g.loops->entities[i]);
+    if (g.gap_fill != nullptr)
+        for (size_t i = gap_before; i < g.gap_fill->entities.size(); ++i)
+            set_no_spiral_lift_recursive(g.gap_fill->entities[i]);
+
+    // Sonda (ORCA_DEBUG_DISPATCH → /tmp/neotko_logs/dispatch.log): una línea por capa y región.
+    if (NeoDebug::enabled(NeoDebug::DISPATCH)) {
+        size_t n_loops = 0;
+        for (const ExPolygons& lv : levels)
+            for (const ExPolygon& c : lv)
+                n_loops += 1 + c.holes.size();
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "[NA-v3] L%d muros=%d line_w=%.3f suelo=%.3f techo=%.3f minlen=%.2f | interiores: %zu niveles, %zu bucles"
+                 " | espina: %zu zonas (%.3f mm2), %zu lineas, %.2f mm, %zu cortas fuera, %zu ramitas podadas, %zu cruces unidos,"
+                 " %zu grietas fuera, %zu bucles mini fuera | minibucles->espina: %zu (%zu zonas) | relleno: %zu zonas",
+                 g.layer_id, walls, line_w, sp.floor_mm, sp.ceiling_mm, sp.min_length_mm, levels.size(), n_loops,
+                 st.spine_components, st.spine_area_mm2, st.polylines, st.spine_len_mm, st.dropped_short,
+                 st.spurs_pruned, st.junction_joins, st.slivers_skipped, st.tiny_loops_dropped,
+                 tiny_loops, forced_spine.size(), fill_left.size());
+        NeoDebug::write(NeoDebug::DISPATCH, buf);
+    }
+}
+
 void Plan::run(PerimeterGenerator& g)
 {
     // ── Build the per-region NeoArachne config from the live PrintRegionConfig ──
@@ -90,6 +330,38 @@ void Plan::run(PerimeterGenerator& g)
     cfg.outer_wall  = original_cfg->neoarachne_outer_wall.value;
     cfg.inner_walls = original_cfg->neoarachne_inner_walls.value;
     cfg.gap_fill    = original_cfg->neoarachne_gap_fill.value;
+    // NEOTKO_NEOSTROKE_TAG s332 — `wall_generator = NeoStroke` es una entidad propia, no un ajuste
+    // del panel de la v3: fija las tres fuentes aquí y los tres selectores de NeoArachne dejan de
+    // pintar nada (la UI ni los enseña). El muro exterior lo pone SIEMPRE Classic (s335: NeoWall,
+    // que era la otra opción, se retiró entera).
+    // 🚨 `wall_generator` es de OBJETO, no de región: vive en `PrintObjectConfig` (que es de donde
+    // lo lee `LayerRegion.cpp`), no en `PrintRegionConfig`. Las `neostroke_*` sí son de región.
+    // NEOTKO_NEOSTROKE_TAG s335 — CANDADO DE DEPURACIÓN, igual que el de Bump Mapping. NeoStroke se
+    // publica, pero no es estable en plástico: hay que saber lo que se hace antes de imprimir con
+    // él. Dos llaves, y las dos a la vez:
+    //   1. LibreMode encendido (`neotko_libre_mode`, el espejo en el motor del ajuste de la app)
+    //   2. el canal `ORCA_DEBUG_NEOSTROKE` (o `ORCA_DEBUG_ALL`)
+    // 🚨 Este es el candado del MOTOR, y tiene que existir aparte del de la interfaz: la interfaz
+    //    avisa y revierte (ConfigManipulation), pero un 3mf ajeno, una línea de órdenes o un perfil
+    //    editado a mano no pasan por ella. Con el candado cerrado se cae a la ruta normal de
+    //    NeoArachne y queda el aviso en el log, que es mejor que imprimir con un motor que el
+    //    usuario no ha desbloqueado.
+    // 🚨 `neotko_libre_mode` vive en `PrintObjectConfig` (el espejo que inyecta
+    //    `background_process.apply`), NO en `PrintRegionConfig`, que es lo que apunta `original_cfg`.
+    if (g.object_config != nullptr
+        && g.object_config->wall_generator.value == PerimeterGeneratorType::NeoStroke) {
+        const bool ns_gate_open = g.object_config->neotko_libre_mode.value
+                               && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+        if (ns_gate_open) {
+            cfg.outer_wall  = WallSource::Classic;
+            cfg.inner_walls = WallSource::NeoStroke;
+            cfg.gap_fill    = WallSource::Off;   // NeoStroke se come el interior entero, gap incluido
+        } else {
+            NeoDebug::write(NeoDebug::NEOSTROKE,
+                "[NS] wall_generator=NeoStroke pero el candado esta CERRADO "
+                "(hace falta LibreMode + ORCA_DEBUG_NEOSTROKE): se usa la ruta normal.");
+        }
+    }
     cfg.thin_walls  = WallSource::Classic;  // Fase 6
     // Fase 3.0 — Edge Closure params from the live config.
     cfg.allowed_overlap_pct  = original_cfg->neoarachne_allowed_overlap_pct.value;
@@ -102,6 +374,31 @@ void Plan::run(PerimeterGenerator& g)
     cfg.bead_count_hysteresis_pct = original_cfg->neoarachne_bead_count_hysteresis_pct.value;
     // Fase 4 — SkeletalTrapezoidation transition smoothing.
     cfg.transition_filter_dist_mm = original_cfg->neoarachne_transition_filter_dist_mm.value;
+    // NEOTKO_NEOARACHNE_TAG v3-spine (s323)
+    cfg.spine               = original_cfg->neoarachne_spine.value;
+    cfg.spine_min_width_pct = original_cfg->neoarachne_spine_min_width_pct.value;
+    cfg.spine_max_width_pct = original_cfg->neoarachne_spine_max_width_pct.value;
+    cfg.spine_min_length_mm = original_cfg->neoarachne_spine_min_length.value;
+    cfg.spine_sliver_pct    = original_cfg->neoarachne_spine_sliver_pct.value;
+    // NEOTKO_NEOSTROKE_TAG C5b (s325)
+    cfg.neostroke_corner_hooks = original_cfg->neostroke_corner_hooks.value;
+    cfg.neostroke_min_width_pct = original_cfg->neostroke_min_width_pct.value;
+    cfg.neostroke_max_width_pct = original_cfg->neostroke_max_width_pct.value;
+    cfg.neostroke_detail_min_pct = original_cfg->neostroke_detail_min_pct.value;   // NEOTKO_NEOSTROKE_TAG s329
+    cfg.neostroke_width_ref      = original_cfg->neostroke_width_ref.value;       // NEOTKO_NEOSTROKE_TAG s331c
+    cfg.neostroke_curve_overlap     = original_cfg->neostroke_curve_overlap.value;      // NEOTKO_NEOSTROKE_TAG s331
+    cfg.neostroke_overlap_width_end = original_cfg->neostroke_overlap_width_end.value;
+    cfg.neostroke_overlap_turn_min  = original_cfg->neostroke_overlap_turn_min.value;
+    cfg.neostroke_overlap_turn_max  = original_cfg->neostroke_overlap_turn_max.value;
+    cfg.neostroke_overlap_span      = original_cfg->neostroke_overlap_span.value;
+    cfg.neostroke_overlap_straight  = original_cfg->neostroke_overlap_straight.value;     // s331b
+    cfg.neostroke_cap_join          = original_cfg->neostroke_cap_join.value;            // s331d
+    cfg.neostroke_max_bead_pct      = original_cfg->neostroke_max_bead_pct.value;
+    cfg.neostroke_max_stroke_width  = original_cfg->neostroke_max_stroke_width.value;
+    cfg.neostroke_bead_min_pct  = original_cfg->neostroke_bead_min_pct.value;   // s332
+    cfg.neostroke_layer_jitter  = original_cfg->neostroke_layer_jitter.value;   // s332
+    cfg.neostroke_skate         = original_cfg->neostroke_skate.value;
+    cfg.neostroke_skate_detour  = original_cfg->neostroke_skate_detour.value;
     // pin_outer_width is gated upstream by neotko_edge_active anyway (ConfigManipulation
     // hides the control unless outer or inner wall source is ArachneNeotkoEdge).
     // Merge global advanced toggles from Runtime singleton (Fase 6 will fill these).
@@ -110,6 +407,30 @@ void Plan::run(PerimeterGenerator& g)
     cfg.emit_gcode_comments = runtime.emit_gcode_comments;
     cfg.svg_layer_from      = runtime.svg_layer_from;
     cfg.svg_layer_to        = runtime.svg_layer_to;
+
+    // NEOTKO_NEOSTROKE_TAG C1 (s325) — sonda INCONDICIONAL: una línea cada vez que NeoArachne entra,
+    // antes de decidir nada y valga lo que valga el combo. La falta de esto costó una sesión: el
+    // desplegable marcaba NeoStroke, el 3mf guardaba `off` (bug del índice del combo, Field.cpp), el
+    // despacho se iba a Hybrid v2 — que no escribe en este canal — y el fichero no aparecía, con lo
+    // que parecía que el motor ni se había ejecutado. Un log que sólo escribe cuando actúa no
+    // descarta nada.
+    if (NeoDebug::enabled(NeoDebug::DISPATCH)) {
+        auto src_name = [](WallSource w) {
+            switch (w) {
+            case WallSource::Classic:           return "classic";
+            case WallSource::ArachneStock:      return "arachne_stock";
+            case WallSource::ArachneNeotkoEdge: return "arachne_neotkoedge";
+            case WallSource::Off:               return "off";
+            case WallSource::NeoStroke:         return "neostroke";
+            }
+            return "?";
+        };
+        char b[256];
+        snprintf(b, sizeof(b), "[NA] L%d entra: exterior=%s interior=%s gap=%s espina=%d muros=%d",
+                 g.layer_id, src_name(cfg.outer_wall), src_name(cfg.inner_walls), src_name(cfg.gap_fill),
+                 int(cfg.spine), original_cfg->wall_loops.value);
+        NeoDebug::write(NeoDebug::DISPATCH, b);
+    }
 
     // ── Dispatch on the wall-source combo (s93 #32 revised). ─────────────────
     // The user can mix-and-match outer/inner across {Classic, ArachneStock,
@@ -122,7 +443,22 @@ void Plan::run(PerimeterGenerator& g)
     // Case A: Classic outer + Classic inner — delegate to Classic. Classic
     // handles its own medial-axis gap_fill; the neoarachne_gap_fill selector
     // is informational only here.
+    // NEOTKO_NEOSTROKE_TAG C1 (s325) — NeoStroke: interior por trazos. En C1 lo único que hace es
+    // sacar el esqueleto de cada isla y escribirlo en DISPATCH (para casarlo con el prototipo de la
+    // fase P); los muros los sigue poniendo la v3. C2 pone las k líneas por trazo.
+    if (!outer_is_arachne_family && cfg.inner_walls == WallSource::NeoStroke) {
+        log_dispatch(cfg, g.layer_id, /*region_id=*/-1, "neostroke/C1-C5");
+        run_neostroke(g, cfg, original_cfg);
+        return;
+    }
+
     if (!outer_is_arachne_family && cfg.inner_walls == WallSource::Classic) {
+        // NEOTKO_NEOARACHNE_TAG v3-spine (s323) — default v3: Classic walls + spine.
+        if (cfg.spine) {
+            log_dispatch(cfg, g.layer_id, /*region_id=*/-1, "v3/classic-walls+spine");
+            run_classic_spine(g, cfg, original_cfg);
+            return;
+        }
         log_dispatch(cfg, g.layer_id, /*region_id=*/-1, "phase2.5/sanity-classic");
         g.process_classic();
         return;

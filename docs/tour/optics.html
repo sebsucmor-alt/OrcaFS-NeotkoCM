@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TD &amp; the Studio — Neotko for Snapmaker Orca</title>
+<title>TD &amp; the gamut — Neotko for Snapmaker Orca</title>
 <meta name="description" content="Why a stack of passes reads as one colour: Transmission Density, decadic Beer-Lambert, the gamut four filaments can actually reach, and an inverse ΔE2000 search for a colour you name.">
 <link rel="stylesheet" href="assets/tour.css">
 <style>
@@ -105,7 +105,7 @@
   <main class="article" id="main">
 
     <p class="eyebrow">§1e · §1g — Colour</p>
-    <h1>TD &amp; the Studio</h1>
+    <h1>TD &amp; the gamut</h1>
     <p class="lede">
       Four numbers decide whether everything else on this site works. They describe how much
       light gets through each of your filaments, and they are the reason a stack of thin passes
@@ -119,8 +119,7 @@
 
     <p class="where">
       <span class="where__label">Where</span>
-      <b>Sandwich editor</b><span class="sep">›</span><b>Filament &amp; TD</b>
-      <span class="sep">and</span><b>ColorStitch Studio</b>
+      <b>ColorStitch Painter</b><span class="sep">›</span><b>Object &amp; TD</b>
     </p>
 
     <!-- ================================================================= -->
@@ -216,14 +215,15 @@
     </p>
 
     <p>
-      Four sliders, one per loaded filament, saved against the machine. They also show up in the
-      <a href="painter.html">Painter</a>'s <b>Object &amp; TD</b> department, which is
-      the same four numbers in a second place rather than a second set.
+      Four sliders, one per loaded filament, saved against the machine. They live in the
+      <a href="painter.html">Painter</a>'s <b>Object &amp; TD</b> department. Up to 2.4.5 the
+      same four numbers also sat in the Sandwich editor's Filament &amp; TD panel, which went
+      with the editor.
     </p>
 
     <figure>
-      <img src="../images/sandwich-editor-TD-control.png" width="457" height="644" alt="The Filament and TD panel: a slider per filament, the blended Top result, the Penultimate result, and the final on-print result with a transmit readout" loading="lazy">
-      <figcaption>The <b>Filament &amp; TD</b> panel. Top result, Penultimate result, and the final on-print colour with the penultimate showing through by opacity, plus the <code>transmit=</code> number.</figcaption>
+      <img src="../images/painter-246-object-td.png" width="868" height="802" alt="The Object and TD department of the ColorStitch Painter: one Transmission distance slider per filament, and the MixedFilament Object switch greyed out with its reason underneath" loading="lazy">
+      <figcaption>The TD rows in the Painter's <b>Object &amp; TD</b> department, one per filament. The Result at the top of Pro reads these same numbers.</figcaption>
     </figure>
 
     <h3 id="measuring">Measuring it, honestly</h3>
@@ -242,13 +242,15 @@
     </p>
 
     <!-- ================================================================= -->
-    <h2 id="studio" data-short="★ The Studio">The ColorStitch Studio</h2>
+    <h2 id="studio" data-short="★ The gamut">The reachable gamut</h2>
 
     <p>
       Once you know the TD of four filaments, you know exactly which colours they can and cannot
-      reach by stacking. The <strong>Studio</strong> at the bottom of the Sandwich Editor works
-      that out for you: it generates a strip of swatches, each one a complete pass recipe with
-      its predicted colour, and clicking one loads it straight into the editor.
+      reach by stacking. Up to 2.4.5 the <strong>ColorStitch Studio</strong> at the foot of the
+      Sandwich editor worked that out and could search it backwards. The Studio went with the
+      editor in 2.4.6. Its <b>Gradient ramp</b> and <b>Flat color</b> strips live on in the
+      Painter's <b>Generator</b> department, and the backwards search keeps running here, in the
+      browser, on the same maths.
     </p>
 
     <div class="demo bleed" id="studio-demo">
@@ -266,13 +268,13 @@
           real algorithm
         </span>
         &nbsp;· recipes composited with <code>blend_stacked</code>, matched by minimising
-        <b>CIEDE2000</b>, which is the metric the Studio's own Target + Match uses.
+        <b>CIEDE2000</b>, the metric the Studio's Target + Match used before it was removed.
       </div>
     </div>
 
     <div class="tbl-wrap">
     <table>
-      <thead><tr><th>Studio mode</th><th>What it generates</th></tr></thead>
+      <thead><tr><th>Mode</th><th>What it generates</th></tr></thead>
       <tbody>
         <tr><td><b>Gradient ramp</b></td><td>A manual top-only ramp between two tools: <b>A</b> on the visible side, <b>B</b> as the contrast. You set <b>Steps</b> and the <b>Split</b>, thinnest to thickest top pass in mm, with a floor of 0.04.</td></tr>
         <tr><td><b>Flat color (predict)</b></td><td>The gamut you can reach by stacking solid passes. Robust and predictable, and the mode to start from.</td></tr>
@@ -282,24 +284,24 @@
     </div>
 
     <p>
-      <strong>Target + Match ▸</strong> runs the search backwards. Pick a colour, press
-      <b>Match</b>, and the Studio hunts for the recipe whose predicted colour is closest to it,
+      <strong>Match ▸</strong> runs the search backwards. Pick a colour, press
+      <b>Match</b>, and the demo hunts for the recipe whose predicted colour is closest to it,
       minimising ΔE2000, then loads that recipe and tells you the ΔE it settled for. A ΔE under
       about 2 is a difference most people will not notice side by side. Above 5 you are looking
       at two different colours and the honest answer is that your filaments cannot get there.
     </p>
 
     <p>
-      <strong>Name + Export</strong> turns swatches into saved Surface Effect Profiles, which is
-      the bridge from here to <a href="painter.html">the Painter</a>. The strips react
-      live to the TD sliders, so changing a TD value re-plans every recipe in the strip.
+      In the app the way from a swatch to a surface is <a href="painter.html">the Painter</a>:
+      pick a swatch in <b>Generator</b> and it becomes the colour you paint with. The strips
+      react live to the TD sliders, so changing a TD value re-plans every recipe in the strip.
     </p>
 
     <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
 
     <ul>
-      <li><strong>Wrong TD, wrong everything.</strong> The Studio, the painter's Result swatch,
+      <li><strong>Wrong TD, wrong everything.</strong> The Generator strips, the painter's Result swatch,
         RealColor and every demo on this site read the same four numbers. Get them wrong and they
         are all wrong together, consistently and convincingly.</li>
       <li><strong>TD is one number, not three.</strong> The engine's material struct holds a TD

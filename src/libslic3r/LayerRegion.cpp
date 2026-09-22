@@ -348,6 +348,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         else
             g.process_arachne();
     }
+    // NEOTKO_NEOSTROKE_TAG s332 — NeoStroke como generador propio. Corre el MISMO motor que la ruta
+    // vieja (NeoArachne con outer = Classic e inner = NeoStroke); las tres fuentes se fijan dentro,
+    // en `NeoArachnePlan.cpp`. 🚨 A diferencia de NeoArachne, NO exige LibreMode: elegirlo en el
+    // desplegable es intención explícita. Sin `spiral_mode`, que no tiene interior que planificar.
+    else if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::NeoStroke && !spiral_mode) {
+        Slic3r::NeoArachne::run(g);
+    }
     else
         g.process_classic();
 }

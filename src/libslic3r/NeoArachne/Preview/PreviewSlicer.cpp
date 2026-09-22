@@ -145,7 +145,7 @@ void compute_print_order(PreviewResult& r)
     double cum       = 0.0;
 
     auto push_seg = [&](const Point& a, const Point& b, bool travel,
-                        ExtrusionRole role, float width, bool from_mp) {
+                        ExtrusionRole role, float width, float width_flow, bool from_mp) {
         if (a == b) return;
         OrderedSegment seg;
         seg.from           = a;
@@ -154,7 +154,8 @@ void compute_print_order(PreviewResult& r)
         seg.cum_start      = cum;
         seg.is_travel      = travel;
         seg.role           = role;
-        seg.path_width     = width;
+        seg.path_width      = width;
+        seg.path_width_flow = width_flow > 0.f ? width_flow : width;
         seg.from_multipath = from_mp;
         cum += seg.length_scaled;
         r.total_chain_scaled += seg.length_scaled;
@@ -173,54 +174,80 @@ void compute_print_order(PreviewResult& r)
         }
 
         // Leaf: assemble its polyline points sequence + role/width.
-        Points        pts;
+        // NEOTKO_NEOSTROKE_TAG s335 — 🚨 EL ANCHO VA POR TRAMO, NO POR ENTIDAD.
+        //    Antes esto se quedaba con el MÁXIMO ancho del multipath/bucle y lo aplicaba a TODOS sus
+        //    segmentos. Con Classic o Arachne casi no se nota, porque dentro de un bucle el ancho
+        //    apenas varía. Con NeoStroke el ancho cambia a lo largo del trazo a propósito, así que
+        //    un multipath de 0.134 a 0.448 se pintaba ENTERO a 0.448: hasta 3.3 veces de más. Eso es
+        //    lo que hacía que el visor enseñara un solape enorme que el G-code no tiene, y lo que
+        //    impedía usarlo para ajustar nada.
+        //    `seg_w[i]` es el ancho del segmento pts[i] → pts[i+1].
+        Points             pts;
+        std::vector<float> seg_w;    // nominal, el de `;WIDTH:`
+        std::vector<float> seg_wf;   // s335 — el deducido del caudal, el que se dibuja
         ExtrusionRole role     = e.role();
-        float         width    = 0.f;
+        float         width    = 0.f;   // máximo, sólo como reserva
         bool          from_mp  = false;
         bool          is_loop  = false;
 
-        if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(&e)) {
-            for (const ExtrusionPath& p : loop->paths) {
-                const Points& pp = p.polyline.points;
-                if (pp.empty()) continue;
-                if (pts.empty()) pts = pp;
-                else for (size_t i = 1; i < pp.size(); ++i) pts.push_back(pp[i]);
-                if (p.width > width) width = p.width;
+        // Encadena los puntos de un ExtrusionPath detrás de lo ya acumulado, anotando SU ancho en
+        // cada segmento que aporta. Salta el primer punto cuando ya hay camino, igual que antes.
+        auto append_path = [&](const ExtrusionPath& p) {
+            const Points& pp = p.polyline.points;
+            if (pp.empty()) return;
+            const float wf = flow_equivalent_width(p.mm3_per_mm, p.width, p.height);
+            if (pts.empty()) pts.push_back(pp.front());
+            for (size_t i = 1; i < pp.size(); ++i) {
+                pts.push_back(pp[i]);
+                seg_w.push_back(p.width);
+                seg_wf.push_back(wf);
             }
+            if (p.width > width) width = p.width;
+        };
+
+        if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(&e)) {
+            for (const ExtrusionPath& p : loop->paths)
+                append_path(p);
             // Close the loop visually (the real emit also draws back to start
             // for closed loops; the GCode emitter inserts the closing move
             // even if the paths vector doesn't already wrap around).
-            if (pts.size() >= 2 && pts.front() != pts.back())
+            if (pts.size() >= 2 && pts.front() != pts.back()) {
                 pts.push_back(pts.front());
+                // El cierre pertenece al final del recorrido: hereda el ancho del último tramo.
+                seg_w.push_back(seg_w.empty() ? width : seg_w.back());
+                seg_wf.push_back(seg_wf.empty() ? width : seg_wf.back());
+            }
             is_loop = true;
         } else if (const auto* mp = dynamic_cast<const ExtrusionMultiPath*>(&e)) {
-            for (const ExtrusionPath& p : mp->paths) {
-                const Points& pp = p.polyline.points;
-                if (pp.empty()) continue;
-                if (pts.empty()) pts = pp;
-                else for (size_t i = 1; i < pp.size(); ++i) pts.push_back(pp[i]);
-                if (p.width > width) width = p.width;
-            }
+            for (const ExtrusionPath& p : mp->paths)
+                append_path(p);
             from_mp = true;
         } else if (const auto* path = dynamic_cast<const ExtrusionPath*>(&e)) {
             pts   = path->polyline.points;
             width = path->width;
+            if (pts.size() >= 2) {
+                seg_w.assign(pts.size() - 1, path->width);
+                seg_wf.assign(pts.size() - 1,
+                              flow_equivalent_width(path->mm3_per_mm, path->width, path->height));
+            }
         }
 
         if (pts.size() < 2) return;
 
         // Travel from where we are now to the start of this leaf.
         if (cursor != pts.front())
-            push_seg(cursor, pts.front(), /*travel=*/true, role, 0.f, false);
+            push_seg(cursor, pts.front(), /*travel=*/true, role, 0.f, 0.f, false);
 
         // Loops contribute one seam dot at their start point (post-emit, pre-
         // seam_placer — approximation; see compute_print_order docs above).
         if (is_loop)
             r.seam_points.push_back(pts.front());
 
-        // Extrusion segments in stored order.
+        // Extrusion segments in stored order, cada uno con SU ancho.
         for (size_t i = 1; i < pts.size(); ++i)
-            push_seg(pts[i-1], pts[i], /*travel=*/false, role, width, from_mp);
+            push_seg(pts[i-1], pts[i], /*travel=*/false, role,
+                     (i - 1) < seg_w.size()  ? seg_w[i - 1]  : width,
+                     (i - 1) < seg_wf.size() ? seg_wf[i - 1] : width, from_mp);
 
         cursor = pts.back();
     };
@@ -237,6 +264,10 @@ PreviewResult preview_slice(const ConfigSnapshot& snap, const PreviewGeometrySou
 
     try {
         GeometryBuildResult geom = build_surface_collection(src);
+        // NEOTKO_NEOSTROKE_TAG s335 — las islas viajan SIEMPRE, también cuando no se ha podido
+        // laminar: el caso "demasiadas islas" es precisamente cuando el panel las necesita.
+        r.islands_all = std::move(geom.islands_all);
+        r.needs_pick  = geom.needs_pick;
         if (!geom.surfaces) {
             r.error = geom.error.empty() ? "preview: geometry source returned empty" : geom.error;
             return r;

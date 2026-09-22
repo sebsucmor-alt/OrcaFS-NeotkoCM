@@ -25,6 +25,10 @@
 //   ORCA_DEBUG_SUPPORTZONES — NEOTKO_SUPPORTZONES_TAG: geometría del pilar de Zonas de Soporte
 //                             (parche, recorte, borde, anillos) + volcado OBJ del sólido
 //   ORCA_DEBUG_GRAVITY      — NEOTKO_GRAVITY_TAG: real floor per object/layer + bridge reclassification diagnostics (see docs/FUTURE/GRAVITY_MASTER_PLAN.md)
+//   ORCA_DEBUG_NEOSTROKE    — NEOTKO_NEOSTROKE_TAG s335: NeoStroke. 🚨 Este canal NO es sólo un log:
+//                             es la SEGUNDA LLAVE que desbloquea el generador (la primera es
+//                             LibreMode). Sin él, `wall_generator = NeoStroke` ni sale en el
+//                             desplegable ni se despacha. Ver docs/NEOSTROKE.md §14.
 //   ORCA_DEBUG_ALL          — Enable every channel at once
 //
 // NEOTKO_NEODEBUG_CONSOLE_TAG s285 — logs now live in their own folder:
@@ -68,7 +72,11 @@ namespace NeoDebug {
         SUPPORTZONES = 21, // NEOTKO_SUPPORTZONES_TAG s289 — geometría del pilar: qué parche se
                           // tomó, cómo se recortó, dónde está el borde y qué sólido salió. Existe
                           // para no tener que exportar un 3mf cada vez que una huella sale rara.
-        CH_COUNT    = 22
+        NEOSTROKE   = 22, // NEOTKO_NEOSTROKE_TAG s335 — la sonda `[NS]` por capa (islas, trazos,
+                          // caminos, hueco sin cubrir, solape, y los anchos que salieron), que
+                          // hasta s334 se colaba por DISPATCH. Y, además del log, la llave de
+                          // depuración del generador: ver la nota de arriba.
+        CH_COUNT    = 23
     };
     // NEOTKO_SMOOTHNORMALS_TAG s229 — gate for the on-screen render tuning panels (RealColor and
     // Shading), as opposed to log channels. Deliberately NOT covered by ORCA_DEBUG_ALL: that var

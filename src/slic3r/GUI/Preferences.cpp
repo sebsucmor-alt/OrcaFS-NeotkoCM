@@ -7,6 +7,7 @@
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/NeoDebug.hpp"   // NEOTKO_NEOSTROKE_TAG s335
 #include <wx/language.h>
 #include <wx/notebook.h>
 #include "Notebook.hpp"
@@ -767,6 +768,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         app_config->set_bool(param, checkbox->GetValue());
         app_config->save();
 
+        // NEOTKO_NEOSTROKE_TAG s335 — en caliente: `NeoDebug::set_enabled` es atómico y pegajoso,
+        // así que abrir o cerrar el canal aquí ya mueve los dos candados de NeoStroke sin reiniciar.
+        if (param == "neotko_neostroke_enabled")
+            NeoDebug::set_enabled(NeoDebug::NEOSTROKE, checkbox->GetValue());
+
         if (param == "allow_filament_temp_mixing" && wxGetApp().plater())
             wxGetApp().plater()->notify_filament_usage_changed();
 
@@ -1297,6 +1303,18 @@ wxWindow* PreferencesDialog::create_general_page()
               "parts even when they are not assembled. When off, none of it is shown. "
               "Restart required."),
         50, "neotko_libre_enabled");
+    // NEOTKO_NEOSTROKE_TAG s335 — segunda llave de NeoStroke, para no depender de una variable de
+    // entorno. Equivale EXACTAMENTE a `ORCA_DEBUG_NEOSTROKE=1`: las dos abren el mismo canal, que es
+    // lo que miran los dos candados (interfaz y motor). Se aplica en caliente, sin reiniciar.
+    auto item_neotko_neostroke = create_item_checkbox(
+        _devL("Enable NeoStroke wall generator (unstable)"), page,
+        _devL("NeoStroke plans the inside of a wall as strokes along the shape instead of loops "
+              "around it, for small raised lettering. It does NOT print reliably yet: this is here "
+              "so it can be looked at and reported on, not used on parts that matter. Reading the "
+              "G-code before printing is part of using it. Needs Libre Mode as well. Same thing as "
+              "starting Orca with ORCA_DEBUG_NEOSTROKE=1; it also writes the per layer probe to "
+              "neostroke.log."),
+        50, "neotko_neostroke_enabled");
     // NeotkoLIBRE_END
     // NEOTKO_NOTIF_DIGEST_TAG — s250: fold the warning cards into a single colored band.
     auto item_neotko_notif_digest = create_item_checkbox(

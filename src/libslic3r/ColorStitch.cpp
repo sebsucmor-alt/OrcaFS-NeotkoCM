@@ -1415,6 +1415,16 @@ std::vector<unsigned int> ColorStitch::painted_profile_tools_1based(
     const int band_b  = get_int("band_count_b",    0);
     const int band_c  = get_int("band_count_c",    0);
     const int band_d  = get_int("band_count_d",    0);
+    // NEOTKO_COLORSTITCH_TAG — s314: anchos en mm del Pattern mode 4.
+    auto get_dbl = [&](const char* base, double dflt) -> double {
+        const std::string v = kv_get(prefix + base);
+        if (v.empty()) return dflt;
+        try { return std::stod(v); } catch (...) { return dflt; }
+    };
+    const double mm_a = get_dbl("band_mm_a", 0.0);
+    const double mm_b = get_dbl("band_mm_b", 0.0);
+    const double mm_c = get_dbl("band_mm_c", 0.0);
+    const double mm_d = get_dbl("band_mm_d", 0.0);
 
     auto add_phys = [&](int t) {
         if (t < 0) return;
@@ -1440,6 +1450,22 @@ std::vector<unsigned int> ColorStitch::painted_profile_tools_1based(
         if (band_b > 0 && tool_b >= 0) add_phys(tool_b);
         if (band_c > 0 && tool_c >= 0) add_phys(tool_c);
         if (band_d > 0 && tool_d >= 0) add_phys(tool_d);
+        if (out.size() >= 2) return out;
+        out.clear();
+        // fall through to legacy
+    } else if (mode == 4) {              // NEOTKO_COLORSTITCH_TAG s314 — bandas en MM
+        // ⚠️ Esta rama NO es cosmética. ToolOrdering llama aquí para registrar los tools
+        // que el SLICE va a consumir; si la lista no coincide con la que produce
+        // assign_and_group_tools, la wipe tower peta con MISMATCH. Mismo filtro exacto que
+        // el preflight del modo 4 (mm > 0 y tool >= 0, en orden a/b/c/d) — si uno de los
+        // dos cambia, el otro también.
+        // `invert` no se mira a propósito: voltear el ciclo cambia el ORDEN de impresión,
+        // no el CONJUNTO de tools, y esto último es lo único que la torre necesita saber.
+        constexpr double kMinBandMM = 1e-4;
+        if (mm_a > kMinBandMM && tool_a >= 0) add_phys(tool_a);
+        if (mm_b > kMinBandMM && tool_b >= 0) add_phys(tool_b);
+        if (mm_c > kMinBandMM && tool_c >= 0) add_phys(tool_c);
+        if (mm_d > kMinBandMM && tool_d >= 0) add_phys(tool_d);
         if (out.size() >= 2) return out;
         out.clear();
         // fall through to legacy
@@ -1744,6 +1770,13 @@ int ColorStitch::assign_and_group_tools(
             double gamma, overlap;
             bool   invert;
             int    band_a, band_b, band_c, band_d;
+            // NEOTKO_COLORSTITCH_TAG — s314: anchos de banda en MM (Pattern mode 4).
+            // Viven al lado de los recuentos en líneas, no en vez de: un pase en modo 3
+            // sigue leyendo band_a..d y estos cuatro no se tocan (y al revés).
+            double band_mm_a, band_mm_b, band_mm_c, band_mm_d;
+            // NEOTKO_COLORSTITCH_TAG — s315: escala del degradado. <0 legacy, 0 campo
+            // ajustado a la superficie, >0 periodo físico en mm.
+            double grad_span_mm;
             int    tool_a, tool_b, tool_c, tool_d;
             int    repetitions;  // NEOTKO_COLORSTITCH_TAG — s80: repeat the gradient N times
             // NEOTKO_COLORSTITCH_TAG — s235b: ángulo AUTORADO del efecto en grados (-1 = auto).
@@ -1765,6 +1798,11 @@ int ColorStitch::assign_and_group_tools(
             gv.band_b    = config.interlayer_colormix_band_count_b.value;
             gv.band_c    = config.interlayer_colormix_band_count_c.value;
             gv.band_d    = config.interlayer_colormix_band_count_d.value;
+            gv.band_mm_a = config.interlayer_colormix_band_mm_a.value;   // s314
+            gv.band_mm_b = config.interlayer_colormix_band_mm_b.value;
+            gv.band_mm_c = config.interlayer_colormix_band_mm_c.value;
+            gv.band_mm_d = config.interlayer_colormix_band_mm_d.value;
+            gv.grad_span_mm = std::max(0.0, double(config.interlayer_colormix_gradient_span_mm.value));   // s315 · s316: legacy retirado
             gv.tool_a    = config.interlayer_colormix_tool_a.value;
             gv.tool_b    = config.interlayer_colormix_tool_b.value;
             gv.tool_c    = config.interlayer_colormix_tool_c.value;
@@ -1784,6 +1822,11 @@ int ColorStitch::assign_and_group_tools(
             gv.band_b    = config.interlayer_colormix_penu_band_count_b.value;
             gv.band_c    = config.interlayer_colormix_penu_band_count_c.value;
             gv.band_d    = config.interlayer_colormix_penu_band_count_d.value;
+            gv.band_mm_a = config.interlayer_colormix_penu_band_mm_a.value;   // s314
+            gv.band_mm_b = config.interlayer_colormix_penu_band_mm_b.value;
+            gv.band_mm_c = config.interlayer_colormix_penu_band_mm_c.value;
+            gv.band_mm_d = config.interlayer_colormix_penu_band_mm_d.value;
+            gv.grad_span_mm = std::max(0.0, double(config.interlayer_colormix_penu_gradient_span_mm.value));   // s315 · s316: legacy retirado
             gv.tool_a    = config.interlayer_colormix_penu_tool_a.value;
             gv.tool_b    = config.interlayer_colormix_penu_tool_b.value;
             gv.tool_c    = config.interlayer_colormix_penu_tool_c.value;
@@ -1836,6 +1879,11 @@ int ColorStitch::assign_and_group_tools(
             gv.band_b    = get_int ("band_count_b",      gv.band_b);
             gv.band_c    = get_int ("band_count_c",      gv.band_c);
             gv.band_d    = get_int ("band_count_d",      gv.band_d);
+            gv.band_mm_a = get_dbl ("band_mm_a",         gv.band_mm_a);   // s314
+            gv.band_mm_b = get_dbl ("band_mm_b",         gv.band_mm_b);
+            gv.band_mm_c = get_dbl ("band_mm_c",         gv.band_mm_c);
+            gv.band_mm_d = get_dbl ("band_mm_d",         gv.band_mm_d);
+            gv.grad_span_mm = std::max(0.0, get_dbl("gradient_span_mm", gv.grad_span_mm));   // s315 · s316: legacy retirado
             gv.tool_a    = get_int ("tool_a",            gv.tool_a);
             gv.tool_b    = get_int ("tool_b",            gv.tool_b);
             gv.tool_c    = get_int ("tool_c",            gv.tool_c);
@@ -1863,6 +1911,12 @@ int ColorStitch::assign_and_group_tools(
         // to pass the `tools.size() < 2` guard. The per-line decisions are
         // computed AFTER raw_lines is known.
         std::vector<int> tools;
+        // NEOTKO_COLORSTITCH_TAG — s314: anchos en mm de las bandas ACTIVAS, en el mismo
+        // orden que `tools`. Sólo se rellena en modo 4; vacío = el modo campo no se usa.
+        std::vector<double> band_mm_active;
+        // NEOTKO_COLORSTITCH_TAG — s315: permutación rango→índice-de-línea cuando el
+        // degradado va por la ruta de CAMPO. Vacía = ruta legacy.
+        std::vector<int> grad_field_order;
         const int cm_mode = gv.cm_mode;
         auto fallback_to_pattern_string = [&]() {
             const std::string& pattern_str = gv_is_top_role
@@ -1889,6 +1943,26 @@ int ColorStitch::assign_and_group_tools(
             const auto tools_1b = painted_profile_tools_1based(*eff_profile, gv_is_top_role);
             for (auto t : tools_1b)
                 if (t > 0) tools.push_back(int(t) - 1); // back to 0-based for gv path
+            // NEOTKO_COLORSTITCH_TAG — s316 fase A: el modo 0 necesita la SECUENCIA del patrón
+            // con sus repeticiones ("1122" son dos bandas de dos), y painted_profile_tools_1based()
+            // devuelve el CONJUNTO sin repetidos (que es lo que necesita ToolOrdering). Por aquí un
+            // "1122" pintado sin override de pase se imprimía como "12".
+            // Se reconstruye del mismo string y con el MISMO filtro (sólo dígitos 1-4), y sólo se
+            // sustituye si el conjunto coincide: el conjunto de tools no cambia y la torre no
+            // puede dar MISMATCH. Los dígitos virtuales (5-9) ToolOrdering no los registra por esta
+            // vía, así que tampoco se expanden aquí: eso sí cambiaría el conjunto.
+            if (cm_mode == 0 && tools.size() >= 2) {
+                const auto& pkv = eff_profile->colorstitch.kv;
+                const auto  pit = pkv.find(gv_is_top_role ? "interlayer_colormix_pattern_top"
+                                                          : "interlayer_colormix_pattern_penultimate");
+                if (pit != pkv.end()) {
+                    std::vector<int> seq;
+                    for (char c : pit->second)
+                        if (c >= '1' && c <= '4') seq.push_back(int(c - '1'));
+                    if (std::set<int>(seq.begin(), seq.end()) == std::set<int>(tools.begin(), tools.end()))
+                        tools = std::move(seq);
+                }
+            }
         } else if (cm_mode == 1) {
             if (gv.tool_a >= 0 && gv.tool_b >= 0 && gv.tool_a != gv.tool_b) {
                 tools.push_back(gv.tool_a);
@@ -1913,9 +1987,63 @@ int ColorStitch::assign_and_group_tools(
             if (gv.band_c > 0 && gv.tool_c >= 0) tools.push_back(gv.tool_c);
             if (gv.band_d > 0 && gv.tool_d >= 0) tools.push_back(gv.tool_d);
             if (tools.size() < 2) fallback_to_pattern_string();
+        } else if (cm_mode == 4) {
+            // NEOTKO_COLORSTITCH_TAG — s314: bandas en MM. Mismo criterio que el modo 3
+            // (un ancho > 0 con tool >= 0 entra en el ciclo), pero el "> 0" se mide en
+            // milímetros. Aquí `tools` es EL CICLO DE BANDAS, no una secuencia por línea:
+            // en modo 4 `slot_per_line[i]` indexa directamente este vector (una entrada
+            // por banda activa), en vez de indexar una secuencia tan larga como líneas
+            // haya. Eso es lo que hace que el diseño deje de depender del recuento.
+            constexpr double kMinBandMM = 1e-4;
+            if (gv.band_mm_a > kMinBandMM && gv.tool_a >= 0) tools.push_back(gv.tool_a);
+            if (gv.band_mm_b > kMinBandMM && gv.tool_b >= 0) tools.push_back(gv.tool_b);
+            if (gv.band_mm_c > kMinBandMM && gv.tool_c >= 0) tools.push_back(gv.tool_c);
+            if (gv.band_mm_d > kMinBandMM && gv.tool_d >= 0) tools.push_back(gv.tool_d);
+            if (tools.size() < 2) fallback_to_pattern_string();
         } else {
             fallback_to_pattern_string();
         }
+
+        // NEOTKO_COLORSTITCH_TAG_START — s314: anchos en mm alineados con `tools`.
+        // Se construye AQUÍ, después de toda la cadena de preflight, y no dentro de la
+        // rama del modo 4, porque hay un camino que se salta esa rama entera: en painter
+        // mode sin override per-pase los tools salen de painted_profile_tools_1based().
+        // Filtrando con el MISMO criterio (mm > 0 y tool >= 0) los dos caminos producen
+        // la misma lista. Y si aun así no cuadran, el guard de abajo (tamaños distintos)
+        // manda el pase al reparto clásico en vez de emparejar bandas con tools al azar.
+        // NEOTKO_COLORSTITCH_TAG — s316 fase C: RED para un mode 3 (bandas en LÍNEAS) que se escapó
+        // de la migración al cargar (p. ej. una config POR OBJETO). Se trata como bandas en mm:
+        // mismo filtro que el preflight del modo 3 (cuenta > 0 y tool >= 0, en orden a/b/c/d), así
+        // que `tools` y estas bandas casan también en la rama pintada. Las cuentas entran aquí en
+        // LÍNEAS y pasan a mm en el reparto, cuando ya se conoce el paso real de ESTA superficie.
+        bool band_mm_in_lines = false;
+        if (cm_mode == 3) {
+            if (gv.band_a > 0 && gv.tool_a >= 0) band_mm_active.push_back(double(gv.band_a));
+            if (gv.band_b > 0 && gv.tool_b >= 0) band_mm_active.push_back(double(gv.band_b));
+            if (gv.band_c > 0 && gv.tool_c >= 0) band_mm_active.push_back(double(gv.band_c));
+            if (gv.band_d > 0 && gv.tool_d >= 0) band_mm_active.push_back(double(gv.band_d));
+            band_mm_in_lines = true;
+            if (gv.invert && band_mm_active.size() == tools.size() && band_mm_active.size() > 1) {
+                std::reverse(band_mm_active.begin(), band_mm_active.end());
+                std::reverse(tools.begin(), tools.end());
+            }
+        }
+        if (cm_mode == 4) {
+            constexpr double kMinBandMM = 1e-4;
+            if (gv.band_mm_a > kMinBandMM && gv.tool_a >= 0) band_mm_active.push_back(gv.band_mm_a);
+            if (gv.band_mm_b > kMinBandMM && gv.tool_b >= 0) band_mm_active.push_back(gv.band_mm_b);
+            if (gv.band_mm_c > kMinBandMM && gv.tool_c >= 0) band_mm_active.push_back(gv.band_mm_c);
+            if (gv.band_mm_d > kMinBandMM && gv.tool_d >= 0) band_mm_active.push_back(gv.band_mm_d);
+            // Invertir = dar la vuelta al CICLO. En los modos 0-3 `invert` voltea la
+            // secuencia por línea; aquí el equivalente exacto es voltear las bandas, y hay
+            // que voltear `tools` con ellas o banda y color se desemparejan.
+            if (gv.invert && band_mm_active.size() == tools.size() && band_mm_active.size() > 1) {
+                std::reverse(band_mm_active.begin(), band_mm_active.end());
+                std::reverse(tools.begin(), tools.end());
+            }
+        }
+        // NEOTKO_COLORSTITCH_TAG_END — s314
+
         if (tools.size() < 2) continue;
 
         // Collect lines:
@@ -2034,7 +2162,7 @@ int ColorStitch::assign_and_group_tools(
         // lane_mode (GeoSort/LaneQuant/DirCluster) still maps geometric line
         // index → position in the sequence → the gradient axis follows the
         // chosen geometry, not the emission order.
-        if (cm_mode >= 1 && cm_mode <= 3) {
+        if (cm_mode == 1 || cm_mode == 2) {   // s316 fase C: el mode 3 va por bandas en mm
             // NEOTKO_COLORSTITCH_TAG — s61 BUG FIX: route ALL dither parameters
             // through the per-role `gv` view. Previously these were read with
             // `config.interlayer_colormix_*` directly which always returned
@@ -2046,106 +2174,82 @@ int ColorStitch::assign_and_group_tools(
             const int n         = static_cast<int>(raw_lines.size());
             const int easing    = gv.easing;
             const double gamma  = gv.gamma;
-            // NEOTKO_COLORSTITCH_TAG — s80: gradient repetitions. Build the dither
-            // over a 1/reps slice of the lines (build_n), then tile it `reps`
-            // times to fill all n lines → `reps` identical repeated gradients.
-            // Surface analysis (line count, lane mode) is unchanged: the lane
-            // mapping below still spreads the tiled sequence along the geometry.
+            // NEOTKO_COLORSTITCH_TAG — s80: gradient repetitions. s316 fase C: ya no se tesela
+            // una secuencia por línea; en la ruta de campo `reps` se traduce a un PERIODO
+            // (span / reps) más abajo, que es la única forma de repetir que queda.
             const int reps      = std::max(1, gv.repetitions);
-            const int build_n   = (reps > 1) ? std::max(2, (n + reps - 1) / reps) : n;
             if (min_lines > 0 && n < min_lines) {
                 // Fall back to single tool (Tool A) for tiny surfaces.
                 tools.assign(static_cast<size_t>(n), gv.tool_a);
                 NEOTKO_LOG(COLORSTITCH, "DITHER_MIN_LINES_FALLBACK layer=" << layer_idx
                     << " role=" << (gv_is_top_role ? "Top" : "Penu")
                     << " n=" << n << " < min=" << min_lines << " → all T" << gv.tool_a);
-            } else if (cm_mode == 1 && tools.size() == 2) {
-                const int t_a   = tools[0];
-                const int t_b   = tools[1];
-                const int pct_a = gv.pct_a;
-                tools = build_dithered_tools_2color(build_n, t_a, t_b, pct_a, easing, gamma);
-                if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
-                    int count_a = 0, count_b = 0;
-                    for (int t : tools) (t == t_a ? count_a : count_b)++;
-                    NEOTKO_LOG(COLORSTITCH, "DITHER_2COLOR layer=" << layer_idx
-                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
-                        << " n=" << tools.size()
-                        << " T" << t_a << "=" << count_a
-                        << " T" << t_b << "=" << count_b
-                        << " pct_a=" << pct_a << "% easing=" << easing);
+            } else if ((cm_mode == 1 || cm_mode == 2) && gv.grad_span_mm >= 0.0
+                       && tools.size() >= 2) {
+                // NEOTKO_COLORSTITCH_TAG_START — s315: DEGRADADO POR CAMPO.
+                // Se agrupan las líneas por CARRIL (compute_field_groups) y el dither se
+                // construye con UNA entrada por carril, evaluada en la posición real de ese
+                // carril. Dos segmentos de la misma línea partida por un agujero caen en el
+                // mismo grupo y por tanto comparten color — ese era el costurón de s315.
+                // La ruta legacy (grad_span_mm < 0) no pasa por aquí y queda intacta.
+                double anchor_x_mm = 0.0, anchor_y_mm = 0.0;
+                if (print_object) {
+                    const Vec3d o = print_object->trafo_centered() * Vec3d(0.0, 0.0, 0.0);
+                    anchor_x_mm = o.x(); anchor_y_mm = o.y();
                 }
-            } else if (cm_mode == 2 && tools.size() == 3) {
-                const int t_a   = tools[0];
-                const int t_b   = tools[1];
-                const int t_c   = tools[2];
-                const int pct_a = gv.pct_a;
-                const int pct_b = gv.pct_b;
-                const double overlap = gv.overlap;
-                tools = build_dithered_tools_3color(build_n, t_a, t_b, t_c, pct_a, pct_b,
-                                                    easing, gamma, overlap);
-                if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
-                    int ca = 0, cb = 0, cc = 0;
-                    for (int t : tools) { if (t == t_a) ca++; else if (t == t_b) cb++; else if (t == t_c) cc++; }
-                    NEOTKO_LOG(COLORSTITCH, "DITHER_3COLOR layer=" << layer_idx
-                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
-                        << " n=" << tools.size()
-                        << " T" << t_a << "=" << ca
-                        << " T" << t_b << "=" << cb
-                        << " T" << t_c << "=" << cc
-                        << " pct_a=" << pct_a << "% pct_b=" << pct_b
-                        << "% easing=" << easing << " overlap=" << overlap);
+                // Separación REAL entre líneas: es el tamaño del carril con el que se agrupa.
+                // NO el ancho — ver Flow::rounded_rectangle_extrusion_spacing (Flow.cpp:183).
+                const double lw_mm = raw_lines.empty() ? 0.0 : double(raw_lines[0].width);
+                const double h_mm  = (layer_height > 1e-4) ? layer_height : 0.2;
+                const double sp_mm = std::max(1e-3, lw_mm - h_mm * (1.0 - 0.25 * M_PI));
+                // `repetitions` en modo "ajustar a la superficie" es exactamente un periodo
+                // de span/reps. Traducirlo así evita tener dos caminos que repiten.
+                double period = gv.grad_span_mm;
+                if (period <= 1e-4 && reps > 1) {
+                    // span observado a lo largo del eje, para partirlo en `reps` ciclos.
+                    const FieldGroups probe = compute_field_groups(
+                        raw_lines, gv.angle, 0.0, sp_mm, anchor_x_mm, anchor_y_mm, false);
+                    period = (probe.t_of_group.size() > 1)
+                           ? (double(probe.t_of_group.size() - 1) * sp_mm / double(reps))
+                           : 0.0;
                 }
-            } else if (cm_mode == 3) {
-                // Custom bands: ignore easing (hard blocks by definition).
-                tools = build_custom_bands(build_n,
-                    gv.tool_a, gv.band_a,
-                    gv.tool_b, gv.band_b,
-                    gv.tool_c, gv.band_c,
-                    gv.tool_d, gv.band_d);
-                if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
-                    NEOTKO_LOG(COLORSTITCH, "CUSTOM_BANDS layer=" << layer_idx
-                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
-                        << " n=" << tools.size()
-                        << " cycle=[T" << gv.tool_a << "x" << gv.band_a
-                        << ", T" << gv.tool_b << "x" << gv.band_b
-                        << ", T" << gv.tool_c << "x" << gv.band_c
-                        << ", T" << gv.tool_d << "x" << gv.band_d << "]");
-                }
-            }
+                std::string field_summary;
+                const FieldGroups fg = compute_field_groups(
+                    raw_lines, gv.angle, period, sp_mm,
+                    anchor_x_mm, anchor_y_mm, gv.invert,
+                    NeoDebug::enabled(NeoDebug::COLORSTITCH) ? &field_summary : nullptr);
 
-            // NEOTKO_COLORSTITCH_TAG — s80: tile the built period to fill all lines.
-            // build_n == n when reps == 1 (period == full → tiling is a no-op).
-            if (reps > 1 && !tools.empty() && (int)tools.size() < n) {
-                const int period = static_cast<int>(tools.size());
-                std::vector<int> tiled;
-                tiled.reserve(n);
-                for (int i = 0; i < n; ++i) tiled.push_back(tools[i % period]);
-                tools.swap(tiled);
-                NEOTKO_LOG(COLORSTITCH, "GRADIENT_REPEAT layer=" << layer_idx
-                    << " role=" << (gv_is_top_role ? "Top" : "Penu")
-                    << " reps=" << reps << " period=" << period
-                    << " total=" << tools.size());
-            }
-
-            // NEOTKO_COLORSTITCH_TAG — s60: invert applies AFTER dither/band gen.
-            // We flip the order of the entire per-line sequence so that the
-            // gradient runs in the opposite direction without the user having
-            // to swap tool slots or pct values manually. Equivalent visual
-            // result, single-checkbox UX.
-            // NEOTKO_COLORSTITCH_TAG — s61 BUG FIX: was reading the TOP-only key
-            // (`interlayer_colormix_invert`) regardless of role, so a
-            // Penultimate surface with invert toggled in the Penu dialog was
-            // ignored (and vice versa: a Top invert leaked into Penu). Now
-            // uses `gv.invert` which was loaded from the role-correct key in
-            // the per-role view struct at the top of the loop.
-            if (gv.invert && tools.size() > 1) {
-                std::reverse(tools.begin(), tools.end());
-                if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
-                    NEOTKO_LOG(COLORSTITCH, "INVERT_GRADIENT layer=" << layer_idx
-                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
-                        << " n=" << tools.size() << " (reversed sequence)");
+                if (fg.t_of_group.size() >= 2) {
+                    if (cm_mode == 1)
+                        tools = build_dithered_tools_2color_at(
+                            fg.t_of_group, tools[0], tools[1], gv.pct_a, easing, gamma);
+                    else
+                        tools = build_dithered_tools_3color_at(
+                            fg.t_of_group, tools[0], tools[1],
+                            (tools.size() > 2 ? tools[2] : tools[1]),
+                            gv.pct_a, gv.pct_b, easing, gamma, gv.overlap);
+                    grad_field_order = fg.group_of_line;   // línea → entrada del patrón
                 }
+
+                if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
+                    std::map<int,int> hist;
+                    for (int t : tools) hist[t]++;
+                    std::ostringstream h;
+                    for (const auto& kv2 : hist) h << " T" << kv2.first << "=" << kv2.second;
+                    NEOTKO_LOG(COLORSTITCH, "GRAD_FIELD layer=" << layer_idx
+                        << " role=" << (gv_is_top_role ? "Top" : "Penu")
+                        << " mode=" << cm_mode << " (" << field_summary << ")"
+                        << " reps=" << reps << " period=" << period
+                        << " groups=" << fg.t_of_group.size() << h.str());
+                }
+                // NEOTKO_COLORSTITCH_TAG_END — s315
             }
+            // NEOTKO_COLORSTITCH_TAG — s316 fase C: aquí vivían el dither de degradado POR RECUENTO
+            // (DITHER_2COLOR / DITHER_3COLOR), las bandas en líneas (CUSTOM_BANDS) y el teselado e
+            // inversión de la secuencia por línea (GRADIENT_REPEAT / INVERT_GRADIENT). Borrados con
+            // la retirada del legacy: gradient_span_mm ya nunca es < 0 (se sube a 0 al cargar y al
+            // leer) y el mode 3 va por la red de bandas en mm. Los builders viejos SIGUEN en el
+            // árbol porque los usan los previews de la GUI.
         }
 
         if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
@@ -2169,18 +2273,149 @@ int ColorStitch::assign_and_group_tools(
         // Then group by UNIQUE tool_id; unique_tool_order = first-occurrence order
         // so the first tool in the pattern prints first.
         const int n_slots = static_cast<int>(tools.size());
-        const int lane_mode = config.surface_color_mix_lane_mode.value;
         std::string lane_summary;
-        std::vector<int> slot_per_line =
-            compute_slot_per_line(raw_lines, n_slots, lane_mode,
-                                  NeoDebug::enabled(NeoDebug::COLORSTITCH) ? &lane_summary : nullptr,
-                                  // s235b — el eje lo manda el ángulo AUTORADO (el mismo que
-                                  // usa el preview del painter), no la geometría medida.
-                                  gv.angle);
+        std::vector<int> slot_per_line;
+
+        // NEOTKO_COLORSTITCH_TAG_START — s314: Pattern mode 4 (bandas en mm) = MODO CAMPO.
+        // No pasa por compute_slot_per_line ni por surface_color_mix_lane_mode: no hay un
+        // recuento de líneas que repartir, cada línea muestrea un diseño definido en mm.
+        // Ver la nota larga de compute_slot_per_line_band_mm() en ColorStitch.hpp.
+        // NEOTKO_COLORSTITCH_TAG — s315: si el degradado fue por CAMPO, la permutación ya
+        // está calculada (rango en el patrón = orden por posición) y no hay nada que
+        // repartir: surface_color_mix_lane_mode tampoco aplica aquí, por el mismo motivo
+        // que en el modo 4. Se comprueba el tamaño porque `tools` pudo caer al fallback del
+        // pattern string por el camino, y entonces la permutación ya no lo indexa.
+        // s315 — `grad_field_order[i]` es el GRUPO (carril) de la línea i, y `tools` tiene una
+        // entrada por grupo. Ya no es una permutación: varias líneas pueden apuntar a la
+        // misma entrada, que es justo lo que hace que un carril partido no cambie de color.
+        const bool use_grad_field = !grad_field_order.empty()
+                                 && grad_field_order.size() == raw_lines.size();
+        const bool use_band_mm = (cm_mode == 4 || cm_mode == 3)   // s316: 3 = red, ver arriba
+                              && band_mm_active.size() == tools.size()
+                              && band_mm_active.size() >= 2;
+        // s316 fase A: los patrones (modo 0: Custom pattern, MixedFilament recipe, Textile
+        // weave, que la UI compila a un pattern string) pasan al motor de campo. Ver su rama.
+        const bool use_pattern_field = (cm_mode == 0) && !use_grad_field && tools.size() >= 2;
+        if (use_grad_field) {
+            slot_per_line = grad_field_order;
+            const int ns = static_cast<int>(tools.size());
+            for (int& sl : slot_per_line) sl = std::clamp(sl, 0, std::max(0, ns - 1));
+            if (NeoDebug::enabled(NeoDebug::COLORSTITCH))
+                NEOTKO_LOG(COLORSTITCH, "GRAD_FIELD_MAP layer=" << layer_idx
+                    << " lines=" << raw_lines.size());
+        } else if (use_band_mm) {
+            // Ancla = origen del OBJETO proyectado sobre el eje del efecto. Es lo que hace
+            // que (a) la fase viaje con la pieza si la mueves por la bandeja, y (b) el Top y
+            // el Penultimate compartan diseño, porque comparten ancla y eje en vez de
+            // depender cada uno del mínimo observado de SU capa (que es de donde salía que
+            // hubiese que pelearlos con lane_mode). trafo_centered(), NUNCA trafo() (s161).
+            double anchor_x_mm = 0.0, anchor_y_mm = 0.0;
+            if (print_object) {
+                const Vec3d o = print_object->trafo_centered() * Vec3d(0.0, 0.0, 0.0);
+                anchor_x_mm = o.x();
+                anchor_y_mm = o.y();
+            }
+            if (band_mm_in_lines) {
+                // s316 fase C: cuentas de LÍNEAS → mm con el paso real de esta superficie (el
+                // mismo cálculo que el degradado de campo). Es la red del mode 3, no una ruta.
+                const double lw_mm = raw_lines.empty() ? 0.0 : double(raw_lines[0].width);
+                const double h_mm  = (layer_height > 1e-4) ? layer_height : 0.2;
+                const double sp_mm = std::max(1e-3, lw_mm - h_mm * (1.0 - 0.25 * M_PI));
+                for (double& b : band_mm_active) b *= sp_mm;
+            }
+            // min_surface_lines sigue valiendo: una superficie diminuta con un solo color
+            // es mejor que una banda cortada. Todo al slot 0 → el short-circuit de s99 de
+            // más abajo detecta un único tool y conserva el zig-zag original intacto.
+            if (gv.min_lines > 0 && (int) raw_lines.size() < gv.min_lines) {
+                slot_per_line.assign(raw_lines.size(), 0);
+                lane_summary = "BandMM min_surface_lines fallback";
+            } else {
+                slot_per_line = compute_slot_per_line_band_mm(
+                    raw_lines, band_mm_active, gv.angle,
+                    anchor_x_mm, anchor_y_mm,
+                    NeoDebug::enabled(NeoDebug::COLORSTITCH) ? &lane_summary : nullptr);
+            }
+            if (NeoDebug::enabled(NeoDebug::COLORSTITCH))
+                NEOTKO_LOG(COLORSTITCH, "BAND_MM layer=" << layer_idx
+                    << " role=" << (gv_is_top_role ? "Top" : "Penu")
+                    << " (" << lane_summary << ")"
+                    << " lines=" << raw_lines.size()
+                    << " anchor=[" << anchor_x_mm << "," << anchor_y_mm << "]"
+                    << " width_mm=" << (raw_lines.empty() ? 0.f : raw_lines[0].width));
+        } else if (use_pattern_field) {
+            // NEOTKO_COLORSTITCH_TAG_START — s316 fase A: PATRÓN POR CAMPO.
+            // Cada línea toma la entrada del patrón del CARRIL donde cae, contado desde el origen
+            // del objeto: color = patrón[carril mod longitud]. Periodo físico = longitud × paso
+            // real. Con eso:
+            //   · un agujero no corre el patrón (el viejo Default indexaba por ORDEN de emisión);
+            //   · dos capas con el mismo ángulo casan línea a línea (misma ancla, mismo eje), que
+            //     es lo que Monotonic Line Replan = 2 conseguía de rebote con el recuento;
+            //   · un patrón corto se REPITE. LaneQuant, tras s235, lo estiraba UNA vez sobre toda
+            //     la superficie ("12" en 100 carriles salía mitad T0, mitad T1): aquel fix se hizo
+            //     para degradados, donde el patrón tiene una entrada por línea.
+            // `tools` NO se toca: sólo cambia qué entrada se lleva cada línea, así que el conjunto
+            // de tools (lo que registra ToolOrdering) es exactamente el de antes.
+            // surface_color_mix_lane_mode NO se lee. El desplazamiento por capa de las sargas
+            // (WeaveLibrary `offset_per_layer`) nunca llegó al motor; aquí sería sumar
+            // layer_idx·offset al carril, y queda para cuando se decida.
+            const int len = static_cast<int>(tools.size());
+            if (gv.min_lines > 0 && (int) raw_lines.size() < gv.min_lines) {
+                slot_per_line.assign(raw_lines.size(), 0);
+                lane_summary = "PatternField min_surface_lines fallback";
+            } else {
+                double ref_ang = 0.0; bool flipped = false;
+                const LaneVec2 perp = lane_perp_axis(raw_lines, gv.angle, &ref_ang, &flipped,
+                                                     /*half_plane_when_authored*/ false);   // s315b
+                double anchor_x_mm = 0.0, anchor_y_mm = 0.0;
+                if (print_object) {
+                    const Vec3d o = print_object->trafo_centered() * Vec3d(0.0, 0.0, 0.0);
+                    anchor_x_mm = o.x(); anchor_y_mm = o.y();
+                }
+                // Paso REAL entre líneas (NO el ancho), el mismo cálculo que el degradado de campo.
+                const double lw_mm = raw_lines.empty() ? 0.0 : double(raw_lines[0].width);
+                const double h_mm  = (layer_height > 1e-4) ? layer_height : 0.2;
+                FieldSampler smp;
+                smp.sp     = std::max(1e-3, lw_mm - h_mm * (1.0 - 0.25 * M_PI));
+                smp.period = 0.0;      // carril absoluto: el periodo lo pone el propio patrón
+                smp.anchor = anchor_x_mm * perp.x + anchor_y_mm * perp.y;
+                slot_per_line.assign(raw_lines.size(), 0);
+                for (size_t i = 0; i < raw_lines.size(); ++i) {
+                    const LaneVec2  c = lane_centroid(raw_lines[i].pl);
+                    const long long k = smp.lane_of((c.x * perp.x + c.y * perp.y) / 1e6);
+                    slot_per_line[i] = static_cast<int>(((k % len) + len) % len);
+                }
+                if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
+                    std::ostringstream o;
+                    o << "PatternField axis=" << int(std::round(ref_ang * 180.0 / M_PI)) << "deg"
+                      << " len=" << len << " sp=" << smp.sp << "mm"
+                      << " period=" << (double(len) * smp.sp) << "mm"
+                      << " anchor=[" << anchor_x_mm << "," << anchor_y_mm << "]";
+                    lane_summary = o.str();
+                }
+            }
+            if (NeoDebug::enabled(NeoDebug::COLORSTITCH))
+                NEOTKO_LOG(COLORSTITCH, "PATTERN_FIELD layer=" << layer_idx
+                    << " role=" << (gv_is_top_role ? "Top" : "Penu")
+                    << " (" << lane_summary << ")"
+                    << " lines=" << raw_lines.size());
+            // NEOTKO_COLORSTITCH_TAG_END — s316 fase A
+        } else {
+            if (cm_mode == 4 && NeoDebug::enabled(NeoDebug::COLORSTITCH))
+                NEOTKO_LOG(COLORSTITCH, "BAND_MM_BAILOUT layer=" << layer_idx
+                    << " bands=" << band_mm_active.size() << " tools=" << tools.size()
+                    << " -> reparto clasico (no deberia pasar: mira el preflight)");
+            // s316 fase C: ya no hay reparto "por recuento". Lo único que llega aquí es un pase de
+            // UNA herramienta o una secuencia uniforme (el fallback de pocas líneas): el índice por
+            // orden de emisión es exacto para eso y no depende de la geometría.
+            slot_per_line.assign(raw_lines.size(), 0);
+            for (size_t i = 0; i < raw_lines.size(); ++i)
+                slot_per_line[i] = static_cast<int>(i % size_t(std::max(1, n_slots)));
+            lane_summary = "SinglePass";
+        }
+        // NEOTKO_COLORSTITCH_TAG_END — s314
 
         if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
-            NEOTKO_LOG(COLORSTITCH, "LANE_MODE mode=" << lane_mode
-                << " (" << lane_summary << ") layer=" << layer_idx
+            NEOTKO_LOG(COLORSTITCH, "SLOT_MAP (" << lane_summary << ") layer=" << layer_idx
                 << " lines=" << raw_lines.size() << " slots=" << n_slots);
 
             // NEOTKO_COLORSTITCH_TAG — s235, bug #14: la prueba del fix, para no gastar un
@@ -2413,10 +2648,26 @@ double ColorStitch::colorstitch_easing_apply(double t, int easing, double gamma)
 // shaped by the easing curve — Bresenham still picks A or B based on whether
 // the running count is ahead of or behind the target, giving optimally
 // distributed emission for any monotonic ramp.
+// NEOTKO_COLORSTITCH_TAG — s315 F1: la vieja pasa a ser un envoltorio de la nueva con una
+// `t` lineal. Así no hay dos implementaciones del dither que puedan separarse con el tiempo,
+// y cualquier arreglo del Bresenham vale para las dos rutas a la vez.
 std::vector<int> ColorStitch::build_dithered_tools_2color(
     int n_lines, int tool_a, int tool_b, int pct_a, int easing, double gamma)
 {
+    if (n_lines <= 0) return {};
+    std::vector<double> t_lin(static_cast<size_t>(n_lines));
+    const double denom = std::max(1.0, static_cast<double>(n_lines - 1));
+    for (int i = 0; i < n_lines; ++i)
+        t_lin[i] = (n_lines == 1) ? 0.5 : (static_cast<double>(i) / denom);
+    return build_dithered_tools_2color_at(t_lin, tool_a, tool_b, pct_a, easing, gamma);
+}
+
+std::vector<int> ColorStitch::build_dithered_tools_2color_at(
+    const std::vector<double>& t_asc, int tool_a, int tool_b, int pct_a,
+    int easing, double gamma)
+{
     std::vector<int> out;
+    const int n_lines = static_cast<int>(t_asc.size());
     if (n_lines <= 0) return out;
     out.reserve(static_cast<size_t>(n_lines));
 
@@ -2433,10 +2684,11 @@ std::vector<int> ColorStitch::build_dithered_tools_2color(
     // the target curve so emissions cluster where the easing function rises
     // fastest. Standard Bresenham fast-path when easing==Linear.
     int emitted_b = 0;
-    const double denom = std::max(1.0, static_cast<double>(n_lines - 1));
     for (int i = 0; i < n_lines; ++i) {
-        const double t_lin = (n_lines == 1) ? 0.5 : (static_cast<double>(i) / denom);
-        const double t_eff = colorstitch_easing_apply(t_lin, easing, gamma);
+        // s315 — LA ÚNICA diferencia con la versión por índice: la curva objetivo se evalúa
+        // en la posición REAL de la línea, no en su número de orden.
+        const double t_eff = colorstitch_easing_apply(
+            std::clamp(t_asc[static_cast<size_t>(i)], 0.0, 1.0), easing, gamma);
         // target_b: how many B emissions we should have by position i (inclusive),
         // scaled so that target_b(n-1) == total_b. Bias by half so the first
         // and last picks aren't both A on symmetric ratios.
@@ -2463,11 +2715,26 @@ std::vector<int> ColorStitch::build_dithered_tools_2color(
 // "A→B transition" and "B→C transition" markers using cumulative pct mass.
 // At each step we pick whichever of {A, B, C} is most behind its expected
 // share — a 3-way Bresenham. Optimal distribution; deterministic.
+// NEOTKO_COLORSTITCH_TAG — s315 F1: envoltorio con `t` lineal, igual que su hermana de 2.
 std::vector<int> ColorStitch::build_dithered_tools_3color(
     int n_lines, int tool_a, int tool_b, int tool_c,
     int pct_a, int pct_b, int easing, double gamma, double overlap)
 {
+    if (n_lines <= 0) return {};
+    std::vector<double> t_lin(static_cast<size_t>(n_lines));
+    const double d = std::max(1.0, static_cast<double>(n_lines - 1));
+    for (int i = 0; i < n_lines; ++i)
+        t_lin[i] = (n_lines == 1) ? 0.5 : (static_cast<double>(i) / d);
+    return build_dithered_tools_3color_at(t_lin, tool_a, tool_b, tool_c,
+                                          pct_a, pct_b, easing, gamma, overlap);
+}
+
+std::vector<int> ColorStitch::build_dithered_tools_3color_at(
+    const std::vector<double>& t_asc, int tool_a, int tool_b, int tool_c,
+    int pct_a, int pct_b, int easing, double gamma, double overlap)
+{
     std::vector<int> out;
+    const int n_lines = static_cast<int>(t_asc.size());
     if (n_lines <= 0) return out;
     out.reserve(static_cast<size_t>(n_lines));
 
@@ -2504,10 +2771,10 @@ std::vector<int> ColorStitch::build_dithered_tools_3color(
     // (cum_pos-based) target curves produced once a tool exhausted its quota.
     std::vector<double> cum_a(n_lines), cum_b(n_lines), cum_c(n_lines);
     double sum_a = 0.0, sum_b = 0.0, sum_c = 0.0;
-    const double denom = std::max(1.0, static_cast<double>(n_lines - 1));
     for (int i = 0; i < n_lines; ++i) {
-        const double t_lin = (n_lines == 1) ? 0.5 : (static_cast<double>(i) / denom);
-        const double t_eff = colorstitch_easing_apply(t_lin, easing, gamma);
+        // s315 — misma única diferencia que en la de 2 colores: `t` real, no índice.
+        const double t_eff = colorstitch_easing_apply(
+            std::clamp(t_asc[static_cast<size_t>(i)], 0.0, 1.0), easing, gamma);
         auto hat = [&](double anchor) -> double {
             return std::max(0.0, halfwidth - std::abs(t_eff - anchor)) / halfwidth;
         };
@@ -3380,7 +3647,7 @@ double PathBlendPassConfig::profile_u(double t) const
 std::string PathBlendPassConfig::to_blob_json() const
 {
     nlohmann::json j;
-    j["v"]           = 3;   // s190: adds in_t/out_t (absent ⇒ 0/1 = linear)
+    j["v"]           = 4;   // s316: adds span_mm (absent ⇒ -1 = legacy)
     j["mode"]        = (mode == Mode::Full) ? "full" : "half";
     j["floor_mm"]    = floor_mm;
     j["mid_end_mm"]  = mid_end_mm;
@@ -3390,6 +3657,7 @@ std::string PathBlendPassConfig::to_blob_json() const
     j["fill_angle"]  = fill_angle;
     j["in_t"]        = in_t;
     j["out_t"]       = out_t;
+    j["span_mm"]     = span_mm;
     return j.dump();
 }
 
@@ -3461,6 +3729,10 @@ PathBlendPassConfig PathBlendPassConfig::from_blob_json(const std::string& blob)
             // s190 profile (v=3): absent ⇒ 0/1 ⇒ linear ramp (v=1/v=2 back-compat).
             c.in_t        = static_cast<float>(gf("in_t",  0.0));
             c.out_t       = static_cast<float>(gf("out_t", 1.0));
+            // s316d: ausente ⇒ 0 ⇒ campo. Un −1 guardado (legacy) también se lee como 0:
+            // el usuario decidió arreglar TODO PathBlend, no sólo lo nuevo (mismo criterio
+            // que ColorStitch). Un valor >0 se respeta: sólo llega por blob, sin UI.
+            c.span_mm     = std::max(0.f, static_cast<float>(gf("span_mm", 0.0)));
             // Hard constraint: floor >= 0.01.
             if (c.floor_mm   < 0.01f)         c.floor_mm   = 0.01f;
             // Keep the auto sentinel (<0) intact; only clamp real values.
@@ -4182,6 +4454,12 @@ std::vector<PBBand> compute_pb_bands(
     return out;
 }
 // NEOTKO_PATHBLEND_TAG_END
+
+// NEOTKO_COLORSTITCH_TAG — s316 fase B: ColorStitchLegacyMigration vive en su PROPIO fichero,
+// ColorStitchLegacyMigration.cpp. NO lo devuelvas aquí: PrintConfig.cpp lo llama desde
+// handle_legacy_composite, y si la definición estuviera en este .cpp, cualquier binario que enlace
+// libslic3r arrastraría ColorStitch.cpp.o entero, con NSVGUtils y nanosvg detrás. El validador de
+// perfiles no enlaza nanosvg y el enlace falló por eso (s316).
 
 
 } // namespace Slic3r

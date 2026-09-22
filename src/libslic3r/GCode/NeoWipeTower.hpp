@@ -337,6 +337,12 @@ private:
     // default ON = wall-on-wall). Gated additionally by synthetic presence so the
     // stock tower stays bit-identical until NeoTower is wired (#4).
     bool            m_neo_zigurat = true;
+    // NEOTKO_NEOTOWER_TAG s310 — global skip-ramming (config neotower_no_ramming).
+    // ON: every toolchange still TRAVELS to the tower (drip control + the swap happens
+    // over the tower, never over the part) but deposits zero ramming material and
+    // reserves zero ramming depth. It is the per-print twin of the per-TC skip_ramming
+    // flag s79b added for sandwich sublayers. Default OFF = bit-identical behaviour.
+    bool            m_neo_no_ramming = false;
 
     bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
 

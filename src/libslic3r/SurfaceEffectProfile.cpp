@@ -198,6 +198,14 @@ const std::vector<std::string>& SurfaceEffectProfileManager::colorstitch_keys()
         "interlayer_colormix_band_count_b",
         "interlayer_colormix_band_count_c",
         "interlayer_colormix_band_count_d",
+        // NEOTKO_COLORSTITCH_TAG — s314: bandas en mm (Pattern mode 4). Sin estas cuatro
+        // el diseño en mm no viaja dentro del payload del pase y el round-trip por
+        // perfil / .3mf se pierde a mitad de camino.
+        "interlayer_colormix_band_mm_a",
+        "interlayer_colormix_band_mm_b",
+        "interlayer_colormix_band_mm_c",
+        "interlayer_colormix_band_mm_d",
+        "interlayer_colormix_gradient_span_mm",   // s315
         "interlayer_colormix_tool_a",
         "interlayer_colormix_tool_b",
         "interlayer_colormix_tool_c",
@@ -216,6 +224,11 @@ const std::vector<std::string>& SurfaceEffectProfileManager::colorstitch_keys()
         "interlayer_colormix_penu_band_count_b",
         "interlayer_colormix_penu_band_count_c",
         "interlayer_colormix_penu_band_count_d",
+        "interlayer_colormix_penu_band_mm_a",
+        "interlayer_colormix_penu_band_mm_b",
+        "interlayer_colormix_penu_band_mm_c",
+        "interlayer_colormix_penu_band_mm_d",
+        "interlayer_colormix_penu_gradient_span_mm",   // s315
         "interlayer_colormix_penu_tool_a",
         "interlayer_colormix_penu_tool_b",
         "interlayer_colormix_penu_tool_c",
@@ -355,6 +368,162 @@ static SurfaceEffectPayload payload_from_json(const nlohmann::json& j)
     }
     return out;
 }
+
+// NEOTKO_COLORSTITCH_TAG — s316 fase B. El payload del perfil Y cada pase de sus tres pilas: el
+// motor lee de las dos fuentes (la pila manda cuando hay override de pase), así que migrar sólo una
+// dejaría la otra en legacy.
+// Un perfil: payload + sus tres pilas. true si cambió algo; lo anota en el informe una vez por rol.
+static bool migrate_one_profile(SurfaceEffectProfile& p, double sp_mm)
+{
+    namespace M = ColorStitchLegacyMigration;
+    // Se migra con count = false y se anota UNA vez por perfil y rol: el mismo degradado vive
+    // en el payload y en la pila, y contarlo por almacén daba el doble en el aviso.
+    unsigned roles = 0;
+    bool changed = M::migrate_kv(p.colorstitch.kv, sp_mm, &roles, /*count*/ false);
+    for (std::string* js : { &p.stack_top_json, &p.stack_penu_json, &p.stack_bottom_json }) {
+        if (js->empty()) continue;
+        SurfacePassStack st = SurfacePassStack::from_json(*js);
+        bool st_changed = false;
+        for (auto& pass : st.passes)
+            st_changed |= M::migrate_kv(pass.colorstitch.kv, sp_mm, &roles, /*count*/ false);
+        if (st_changed) { *js = st.to_json(); changed = true; }
+    }
+    if (changed)
+        M::note(int((roles & M::kRoleTopGradient) != 0) + int((roles & M::kRolePenuGradient) != 0),
+                int((roles & M::kRoleTopBands)    != 0) + int((roles & M::kRolePenuBands)    != 0));
+    return changed;
+}
+
+int SurfaceEffectProfileManager::migrate_legacy_colorstitch(double sp_mm)
+{
+    int n = 0;
+    for (auto& p : m_profiles)
+        if (migrate_one_profile(p, sp_mm)) ++n;
+    return n;
+}
+
+// NEOTKO_SANDWICH_TAG_START — s317 fase D: la receta del Sandwich Editor pasa a la paleta.
+// Declaración y porqué en el header y en ColorStitch.hpp (ColorStitchLegacyMigration).
+namespace {
+
+// Mismo juego de claves que horneaba el "Save as profile" del Sandwich Editor (Tab.cpp,
+// zone_colorstitch_snapshot, ya borrado). 🚨 Hace falta: un pase ColorStitch sintetizado de las
+// claves legacy va con el kv VACÍO ("el motor lee el preset"). En modo pintor ese kv vacío cae al
+// preset del objeto, y aquí lo acabamos de apagar: sin hornear, el perfil pintaría nada.
+std::vector<std::string> sandwich_zone_colorstitch_keys(bool penu)
+{
+    const std::string gp = penu ? "interlayer_colormix_penu_" : "interlayer_colormix_";
+    std::vector<std::string> keys;
+    keys.push_back(penu ? "interlayer_colormix_pattern_penultimate" : "interlayer_colormix_pattern_top");
+    for (const char* s : { "mode", "pct_a", "pct_b", "easing", "gamma",
+                           "min_surface_lines", "overlap", "invert", "repetitions",
+                           "band_count_a", "band_count_b", "band_count_c", "band_count_d",
+                           "band_mm_a", "band_mm_b", "band_mm_c", "band_mm_d",
+                           "gradient_span_mm",
+                           "tool_a", "tool_b", "tool_c", "tool_d", "angle" })
+        keys.push_back(gp + s);
+    return keys;
+}
+
+// La receta que `cfg` aplicaría sola, como perfil autocontenido. false si no hay ninguna.
+bool profile_from_sandwich_config(const DynamicPrintConfig& cfg, SurfaceEffectProfile& out)
+{
+    SurfacePassStack st[2] = { SurfacePassStack::resolve_for_zone(cfg, false),
+                               SurfacePassStack::resolve_for_zone(cfg, true) };
+    bool any = false;
+    for (int z = 0; z < 2; ++z) {
+        if (!st[z].enabled || !st[z].any_effect()) { st[z] = SurfacePassStack(); continue; }
+        any = true;
+        for (SurfacePass& pass : st[z].passes)
+            if (pass.kind == SurfacePassKind::ColorStitch && pass.colorstitch.kv.empty()) {
+                pass.colorstitch = SurfaceEffectProfileManager::snapshot_keys(cfg, sandwich_zone_colorstitch_keys(z == 1));
+                pass.colorstitch.present = true;
+            }
+    }
+    if (!any) return false;
+    out.stack_top_json  = st[0].to_json();
+    out.stack_penu_json = st[1].to_json();
+    SurfaceEffectProfileManager::payload_from_stacks(st[0], st[1], out);
+    return true;
+}
+
+// ¿Toca el objeto algo del Sandwich? Si no, hereda la receta del proyecto y no hay nada propio.
+bool object_config_touches_sandwich(const DynamicPrintConfig& oc)
+{
+    static const char* const kPrefixes[] = { "interlayer_colormix_", "multipass_", "penultimate_multipass_",
+                                             "pathblend_", "path_gradient_", "neotko_surface_passes_" };
+    for (const std::string& k : oc.keys())
+        for (const char* pre : kPrefixes)
+            if (k.rfind(pre, 0) == 0) return true;
+    return false;
+}
+
+} // namespace
+
+int SurfaceEffectProfileManager::move_sandwich_editor_recipes(
+    DynamicPrintConfig& project_cfg,
+    const std::vector<std::pair<std::string, ModelConfig*>>& objects,
+    double sp_mm)
+{
+    namespace M = ColorStitchLegacyMigration;
+
+    // 1) Fase B en la config de cada objeto: se lee clave a clave (bbs_3mf, set_deserialize) y NO
+    //    pasa por handle_legacy_composite. Antes de sacar recetas, para que salgan ya migradas.
+    for (const auto& [name, mc] : objects) {
+        if (!mc) continue;
+        DynamicPrintConfig oc = mc->get();
+        if (M::migrate_config(oc, sp_mm)) {
+            mc->assign_config(std::move(oc));
+            NEOTKO_LOG(PROFILE, "SANDWICH_MOVE object='" << name << "' legacy ColorStitch keys migrated");
+        }
+    }
+
+    int sources = 0, created = 0;
+    auto keep = [&](SurfaceEffectProfile&& p, const std::string& label) {
+        migrate_one_profile(p, sp_mm);   // pases con kv propio autorados en el editor (mode 3, span<0)
+        for (const auto& e : m_profiles)
+            if (e.stack_top_json == p.stack_top_json && e.stack_penu_json == p.stack_penu_json
+                && e.stack_bottom_json.empty()) {
+                NEOTKO_LOG(PROFILE, "SANDWICH_MOVE '" << label << "' = existing id=" << e.id
+                    << " name='" << e.name << "' (deduplicated)");
+                return;
+            }
+        p.name = label;
+        const int id = add(std::move(p));
+        ++created;
+        NEOTKO_LOG(PROFILE, "SANDWICH_MOVE '" << label << "' → new profile id=" << id);
+    };
+
+    // 2) Recetas, TODAS con la config del proyecto aún intacta (los objetos la heredan).
+    {
+        SurfaceEffectProfile p;
+        if (profile_from_sandwich_config(project_cfg, p)) { ++sources; keep(std::move(p), "From Sandwich editor"); }
+    }
+    for (const auto& [name, mc] : objects) {
+        if (!mc || !object_config_touches_sandwich(mc->get())) continue;
+        DynamicPrintConfig merged = project_cfg;
+        merged.apply(mc->get(), true);
+        SurfaceEffectProfile p;
+        if (profile_from_sandwich_config(merged, p)) {
+            ++sources;
+            keep(std::move(p), "From Sandwich editor (" + name + ")");
+        }
+    }
+
+    // 3) Y se APAGA. 🚨 Sin esto resolve() la seguiría aplicando sola a lo no pintado.
+    const bool proj_off = M::switch_off_sandwich(project_cfg);
+    int obj_off = 0;
+    for (const auto& [name, mc] : objects) {
+        if (!mc) continue;
+        DynamicPrintConfig oc = mc->get();
+        if (M::switch_off_sandwich(oc)) { mc->assign_config(std::move(oc)); ++obj_off; }
+    }
+    NEOTKO_LOG(PROFILE, "SANDWICH_MOVE sources=" << sources << " created=" << created
+        << " project_switched_off=" << proj_off << " objects_switched_off=" << obj_off);
+    if (sources > 0) M::note_sandwich(sources, created);
+    return sources;
+}
+// NEOTKO_SANDWICH_TAG_END — s317 fase D
 
 std::string SurfaceEffectProfileManager::to_json() const
 {

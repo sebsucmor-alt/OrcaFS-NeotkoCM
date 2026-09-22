@@ -16,6 +16,10 @@
 
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "../../ExPolygon.hpp"
+#include "../../Point.hpp"
 
 namespace Slic3r {
 class TriangleMesh;
@@ -33,6 +37,15 @@ struct PreviewGeometrySource {
     std::shared_ptr<const TriangleMesh>   mesh;            // only used when kind == FromMesh
     double                                slice_z_mm  = -1.0;  // only honoured by FromMesh; <0 means "use mid-Z"
 
+    // NEOTKO_NEOSTROKE_TAG s335 — ISLAS ELEGIDAS. Vacío = todas (el comportamiento de siempre).
+    // Una isla se conserva si CONTIENE alguno de estos puntos.
+    // 🚨 En coordenadas ESCALADAS DE LA MALLA, tal como salen de `mesh.slice()`, NO en las del
+    //    lienzo: `build_from_mesh` traslada el corte para que su caja XY empiece en (0,0), y esa
+    //    traslación cambia con la Z. Guardar la elección en el marco trasladado haría que al mover
+    //    el deslizador se estuvieran mirando otras islas sin enterarse.
+    // 🚨 Y por PUNTO, nunca por índice: las islas se recalculan en cada corte y su orden cambia.
+    std::vector<Point>                    island_picks;
+
     // Convenience factories — keep call sites short and self-documenting.
     static PreviewGeometrySource w();
     static PreviewGeometrySource wedge();
@@ -42,6 +55,15 @@ struct PreviewGeometrySource {
 struct GeometryBuildResult {
     std::unique_ptr<SurfaceCollection>  surfaces;   // null on failure
     std::string                         error;      // empty on success
+
+    // NEOTKO_NEOSTROKE_TAG s335 — las islas del corte ANTES de filtrar y SIN trasladar, o sea en el
+    // mismo marco que `island_picks`. Se rellenan siempre que se haya llegado a cortar, incluso
+    // cuando el resultado es un fallo por exceso de islas: son justo lo que el panel necesita
+    // dibujar para que se pueda elegir. Vacío en las geometrías W/Wedge, que no tienen que elegir.
+    ExPolygons                          islands_all;
+    // true = hay más islas de las que se pueden laminar y NO se ha elegido ninguna todavía. El panel
+    // lo lee para entrar en modo elección en vez de limitarse a enseñar el error.
+    bool                                needs_pick = false;
 };
 
 // Builds the SurfaceCollection for the requested source. Pure compute,

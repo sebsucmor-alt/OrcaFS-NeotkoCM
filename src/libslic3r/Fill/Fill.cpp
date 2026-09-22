@@ -2626,9 +2626,10 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 // entran solos y no hay nada que mantener sincronizado.
                                 //
                                 // Se puede medir porque el fix de s231 garantiza UNA scanline por
-                                // path (`anchor_length_max = 0`): el eje del degradado es la
-                                // dirección en la que se reparten los centroides de los paths, o
-                                // sea el eje principal (PCA) de esa nube de centroides.
+                                // path (`anchor_length_max = 0`). ⚠️ s316c: lo que se mide es la
+                                // DIRECCIÓN de esas líneas, y el eje es su normal. Hasta s316 se
+                                // medía la PCA de sus centroides, que NO es la normal salvo en
+                                // piezas redondas — ver la nota larga en _pb_measure_axis.
                                 //
                                 // 🔑 Byte-idéntico EXACTAMENTE en los casos que hoy funcionan: si
                                 // las líneas corren por X, los centroides se reparten por Y, el eje
@@ -2643,6 +2644,40 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     return double(pt.x()) * _pb_ux + double(pt.y()) * _pb_uy;
                                 };
                                 double _pmin = 0.0, _pmax = 0.0, _pspan = 0.0;
+                                // NEOTKO_PATHBLEND_TAG — s316 F2b: RUTA DE CAMPO.
+                                // pb.span_mm < 0 ⇒ legacy (normalizar contra el bbox
+                                // proyectado). ⚠️ s316d: desde from_blob_json ya NO llega
+                                // ningún −1 (se sube a 0), así que en la práctica PathBlend
+                                // siempre entra por el campo. La rama legacy se deja sólo
+                                // como red si alguien construye el struct a mano con −1. >= 0 ⇒ la rampa se muestrea sobre una rejilla
+                                // de carriles en mm, igual que el degradado de ColorStitch.
+                                //
+                                // 🚨 EL EJE SIGUE SIENDO EL MEDIDO (normal a las líneas, s316c). Lo único
+                                // que entra del motor de campo es la aritmética carril→t;
+                                // el eje NO se toma del ángulo autorado, por la razón larga
+                                // de la nota de s280e de arriba (`f->angle` no es la
+                                // dirección de las líneas impresas).
+                                const bool _pb_field = (pb.span_mm >= 0.f);
+                                FieldSampler _pb_smp;
+                                {
+                                    // Separación REAL entre líneas (NO el ancho): es el
+                                    // tamaño del carril. No se recalcula con la fórmula: se
+                                    // toma la MISMA que se le da al relleno unas líneas más
+                                    // abajo (`f->spacing = _nominal_flow.spacing()`), que es
+                                    // literalmente la que colocó estas líneas. `_nominal_flow`
+                                    // aún no existe aquí y es `params.flow` sin tocar.
+                                    _pb_smp.sp     = std::max(1e-3, double(params.flow.spacing()));
+                                    _pb_smp.period = double(pb.span_mm);
+                                    _pb_smp.invert = false;
+                                }
+                                // Ancla en el origen del OBJETO, igual que el degradado: sin
+                                // ella dos piezas del mismo plato no comparten fase ni con
+                                // periodo físico.
+                                double _pb_anchor_x = 0.0, _pb_anchor_y = 0.0;
+                                if (this->object()) {
+                                    const Vec3d _o = this->object()->trafo_centered() * Vec3d(0.0, 0.0, 0.0);
+                                    _pb_anchor_x = _o.x(); _pb_anchor_y = _o.y();
+                                }
                                 // Extremos de la superficie sobre el eje vigente. Del CONTORNO, no
                                 // del bbox alineado a ejes: con el eje girado el bbox sobra por las
                                 // esquinas y comprimiría el degradado contra los extremos reales.
@@ -2655,49 +2690,74 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                         else { _pmin = std::min(_pmin, q); _pmax = std::max(_pmax, q); }
                                     }
                                     _pspan = _pmax - _pmin;
+                                    // El ancla y los extremos observados dependen del eje
+                                    // vigente, así que se rehacen aquí — este lambda ya se
+                                    // vuelve a llamar cada vez que el eje cambia.
+                                    _pb_smp.anchor = _pb_anchor_x * _pb_ux + _pb_anchor_y * _pb_uy;
+                                    _pb_smp.k0 = _pb_smp.lane_of(_pmin * SCALING_FACTOR);
+                                    _pb_smp.k1 = _pb_smp.lane_of(_pmax * SCALING_FACTOR);
                                 };
                                 _pb_renorm();
                                 // Mide el eje sobre una colección de paths ya rellenada y renormaliza.
                                 // La rampa la llama en cuanto tiene sus líneas; la TAPA reutiliza el
                                 // mismo eje a propósito — su `t` tiene que ser el mismo que el de la
                                 // rampa para que se conserve el volumen (rampa(h_p)+tapa(H−h_p)=H).
+                                // NEOTKO_PATHBLEND_TAG — s316c: EL EJE ES LA NORMAL A LA DIRECCIÓN DE
+                                // LAS LÍNEAS, no la PCA de sus centroides.
+                                //
+                                // Lo que se medía hasta s316 (PCA de los centroides, s280e) es hacia
+                                // dónde se reparten los PUNTOS MEDIOS de las líneas. Y los puntos
+                                // medios de cuerdas paralelas caen sobre el DIÁMETRO CONJUGADO, que
+                                // sólo es perpendicular a las cuerdas en un círculo. Medido en s316
+                                // con líneas a 45° (normal real 135°): pieza casi redonda → 3,5° de
+                                // error; tapa 42×95 → 38°; llavero alargado → 80,5°, o sea la rampa
+                                // corría casi PARALELA a las líneas. s280e se validó con bloques
+                                // cuadrados, que es justo el caso donde las dos cosas coinciden.
+                                //
+                                // 🔑 Sigue siendo MEDIDO, así que la nota de s280e sigue en pie: nada
+                                // se deduce de `f->angle`. Se mide la dirección de los segmentos YA
+                                // GENERADOS (media de ángulos DOBLES ponderada por longitud: una línea
+                                // y su vuelta en sentido contrario suman, no se anulan) y se gira 90°.
+                                // Con líneas por X da (0,1), el eje Y de siempre: el caso que ya
+                                // funcionaba no cambia.
                                 auto _pb_measure_axis = [&](const ExtrusionEntityCollection& coll) {
-                                    std::vector<Vec2d> cs;
+                                    double s2x = 0.0, s2y = 0.0;
                                     std::function<void(const ExtrusionEntity*)> walk = [&](const ExtrusionEntity* e) {
                                         if (!e) return;
                                         if (const auto* c = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
                                             for (const ExtrusionEntity* ee : c->entities) walk(ee);
                                         } else if (const auto* pp = dynamic_cast<const ExtrusionPath*>(e)) {
-                                            if (pp->polyline.points.empty()) return;
-                                            double sx = 0.0, sy = 0.0;
-                                            for (const auto& pt : pp->polyline.points) { sx += double(pt.x()); sy += double(pt.y()); }
-                                            const double n = double(pp->polyline.points.size());
-                                            cs.emplace_back(sx / n, sy / n);
+                                            const Points& pts = pp->polyline.points;
+                                            for (size_t k = 1; k < pts.size(); ++k) {
+                                                const double dx = double(pts[k].x() - pts[k - 1].x());
+                                                const double dy = double(pts[k].y() - pts[k - 1].y());
+                                                const double L  = std::sqrt(dx * dx + dy * dy);
+                                                if (L <= 0.0) continue;
+                                                const double th = std::atan2(dy, dx);
+                                                s2x += L * std::cos(2.0 * th);
+                                                s2y += L * std::sin(2.0 * th);
+                                            }
                                         }
                                     };
                                     for (const ExtrusionEntity* e : coll.entities) walk(e);
-                                    if (cs.size() < 2) return;            // una sola línea: nada que medir
-                                    double mx = 0.0, my = 0.0;
-                                    for (const Vec2d& c : cs) { mx += c.x(); my += c.y(); }
-                                    mx /= double(cs.size()); my /= double(cs.size());
-                                    double sxx = 0.0, sxy = 0.0, syy = 0.0;
-                                    for (const Vec2d& c : cs) {
-                                        const double dx = c.x() - mx, dy = c.y() - my;
-                                        sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
-                                    }
-                                    if (sxx + syy <= 0.0) return;         // centroides coincidentes
-                                    // Eje principal de una covarianza 2x2 simétrica.
-                                    const double phi = 0.5 * std::atan2(2.0 * sxy, sxx - syy);
-                                    double ux = std::cos(phi), uy = std::sin(phi);
-                                    // El signo del autovector es arbitrario y decidiría el SENTIDO
-                                    // del degradado al azar. Se fija: apuntando a +Y (y a +X cuando
-                                    // el eje es horizontal). Con líneas por X esto da exactamente
-                                    // (0,1) = el eje Y de siempre.
+                                    if (s2x * s2x + s2y * s2y <= 0.0) return;   // sin dirección: se queda en Y
+                                    const double line_ang = 0.5 * std::atan2(s2y, s2x);
+                                    // Normal a las líneas.
+                                    double ux = -std::sin(line_ang), uy = std::cos(line_ang);
+                                    // El signo decide el SENTIDO del degradado y no puede quedar al
+                                    // azar. Mismo criterio que la PCA a la que sustituye: apuntando a
+                                    // +Y (y a +X cuando el eje es horizontal).
                                     if (uy < 0.0 || (std::abs(uy) <= 1e-12 && ux < 0.0)) { ux = -ux; uy = -uy; }
                                     if (std::abs(ux) <= 1e-12) ux = 0.0;
                                     if (std::abs(uy) <= 1e-12) uy = 0.0;
                                     _pb_ux = ux; _pb_uy = uy;
                                     _pb_renorm();
+                                    NEOTKO_LOG(MULTIPASS, "PB_AXIS lines=" << (line_ang * 180.0 / M_PI)
+                                        << "deg axis=(" << ux << "," << uy << ")"
+                                        << " span_mm=" << pb.span_mm
+                                        << " field=" << (_pb_field ? 1 : 0)
+                                        << " sp=" << _pb_smp.sp
+                                        << " extent_mm=" << (_pspan * SCALING_FACTOR));
                                 };
                                 const Flow    _nominal_flow = params.flow;
                                 const double  _pb_band_top_sched = this->bottom_z() + this->height - 2.0 * EPSILON;
@@ -2712,6 +2772,12 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     double sum = 0.0;
                                     for (const auto& pt : p->polyline.points) sum += _pb_proj(pt);
                                     const double cq = sum / double(p->polyline.points.size());
+                                    // s316 F2b — ruta de campo. La rampa y la TAPA llaman a
+                                    // este mismo lambda con el mismo muestreador, así que
+                                    // siguen recibiendo la MISMA `t` y el volumen se conserva
+                                    // (rampa(h_p) + tapa(H−h_p) = H). Romper eso aquí sería
+                                    // invisible en pantalla y visible en la pieza.
+                                    if (_pb_field) return _pb_smp.t_of(cq * SCALING_FACTOR);
                                     return std::clamp((cq - _pmin) / _pspan, 0.0, 1.0);
                                 };
                                 // Helper: walk nested EECs, calling visit() on each leaf ExtrusionPath.

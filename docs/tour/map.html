@@ -100,11 +100,11 @@
       </thead>
       <tbody>
         <tr data-gate="none" data-mat="print">
-          <td><a href="sandwich.html">Sandwich editor</a> <span class="muted">§1</span></td>
+          <td><a href="sandwich.html">The Sandwich (pass stack)</a> <span class="muted">§1</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
           <td>2.3</td>
-          <td>Quality › Surface ColorStitch › Sandwich editor…</td>
+          <td>ColorStitch Painter › Pro. The Sandwich editor in Quality was removed in 2.4.6</td>
         </tr>
         <tr data-gate="none" data-mat="print">
           <td><a href="stack3d.html">The stack, in section</a> <span class="muted">§1</span></td>
@@ -118,35 +118,35 @@
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
           <td>2.3</td>
-          <td>A pass set to ColorStitch › Edit gradient…</td>
+          <td>Painter › Pro › a ColorStitch pass › ADV…</td>
         </tr>
         <tr data-gate="none" data-mat="print">
           <td><a href="pathblend.html">PathBlend pass</a> <span class="muted">§1c</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
           <td>2.3</td>
-          <td>A pass set to PathBlend Half or Full › ADV…</td>
+          <td>Painter › Pro › a PathBlend Half or Full pass › ADV…</td>
         </tr>
         <tr data-gate="none" data-mat="print">
-          <td><a href="colorstitch.html#distribution">Line distribution mode</a> <span class="muted">§1f</span></td>
+          <td><a href="colorstitch.html#field">Stripes in mm, gradients by position</a> <span class="muted">§1f</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
-          <td>2.3</td>
-          <td>Quality › Surface ColorStitch › Line distribution mode</td>
+          <td>2.4.6</td>
+          <td>Nothing to switch on. Stripes in mm and Gradient scale are in the ColorStitch ADV… dialog</td>
         </tr>
         <tr data-gate="none" data-mat="print">
           <td><a href="optics.html">Filament &amp; TD</a> <span class="muted">§1e</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
           <td>2.3</td>
-          <td>Sandwich Editor › Filament &amp; TD, and the painter's Object &amp; TD</td>
+          <td>Painter › Object &amp; TD</td>
         </tr>
         <tr data-gate="none" data-mat="print">
-          <td><a href="optics.html#studio">ColorStitch Studio</a> <span class="muted">§1g</span></td>
+          <td><a href="optics.html#studio">Palette generators (was ColorStitch Studio)</a> <span class="muted">§1g</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
           <td>2.3</td>
-          <td>Sandwich Editor › ColorStitch Studio, and Target + Match ▸</td>
+          <td>Painter › Generator. Target + Match was removed in 2.4.6</td>
         </tr>
         <tr data-gate="none" data-mat="wip">
           <td>Neoweaving <span class="muted">§2</span></td>
@@ -245,6 +245,13 @@
           <td><span class="badge badge--free">shipped</span></td>
           <td>2.3</td>
           <td>Quality › Wall generator › NeoArachne</td>
+        </tr>
+        <tr data-gate="envvar" data-mat="risk">
+          <td><a href="walls.html#neostroke">NeoStroke</a> <span class="muted">§26</span></td>
+          <td><span class="badge badge--risk">Libre + env var</span></td>
+          <td><span class="badge badge--risk">does not print reliably</span></td>
+          <td>2.4.6</td>
+          <td>Quality › Wall generator › NeoStroke, once Libre Mode and the NeoStroke switch are on</td>
         </tr>
         <tr data-gate="none" data-mat="print">
           <td><a href="tower.html">NeoTower</a> <span class="muted">§9</span></td>
@@ -552,10 +559,17 @@
       old MultiPass produced. <a href="sandwich.html#passes">More</a>.
     </p>
 
+    <h3>Where did the Sandwich editor go?</h3>
+    <p>
+      It was removed in 2.4.6. Build the stack in the Painter's <b>Pro</b> department, save it,
+      and paint it where you want it. A project that used the old editor opens with its recipe
+      moved into the palette as <b>From Sandwich editor</b>. <a href="painter.html">More</a>.
+    </p>
+
     <h3>My stripes look fragmented across holes</h3>
     <p>
-      Change <a href="colorstitch.html#distribution">Line distribution mode</a> to <b>LaneQuant</b>
-      or <b>DirCluster</b>.
+      Not any more. Since 2.4.6 every line takes its colour from where it sits, so the two halves
+      of a line cut by a hole get the same colour. <a href="colorstitch.html#field">Why</a>.
     </p>
 
     <h3>I do not see the Libre Mode button</h3>
@@ -590,10 +604,10 @@
       promotes every unsaved one at once. <a href="painter.html#working">More</a>.
     </p>
 
-    <h3>The MixedFilament Object checkbox is greyed out</h3>
+    <h3>The MixedFilament Object switch is greyed out</h3>
     <p>
-      The object's extruder is not a MixedFilament. Assign one as the object's extruder, then reopen
-      the Painter.
+      The object's extruder is not a MixedFilament, and the Painter says so right under the switch.
+      Assign one as the object's extruder, then reopen the Painter.
     </p>
 
     <h3>Is Color Painting's Pro Mode the same as the ColorStitch Painter?</h3>

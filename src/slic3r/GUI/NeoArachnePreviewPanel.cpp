@@ -9,6 +9,7 @@
 #include <wx/event.h>
 #include <wx/filedlg.h>
 #include <wx/radiobox.h>
+#include <wx/scrolwin.h>
 #include <wx/sizer.h>
 #include <wx/slider.h>
 #include <wx/stattext.h>
@@ -153,6 +154,18 @@ NPrev::ConfigSnapshot capture_snapshot_from_tab(Tab* tab)
     snap.object = static_cast<const PrintObjectConfig&>(full);
     snap.print  = static_cast<const PrintConfig&>(full);
 
+    // NEOTKO_NEOSTROKE_TAG s335 — 🚨 NEOTKO_CONFIG_MIRROR_TAG. `neotko_libre_mode` NO VIVE EN NINGÚN
+    //    PRESET: para el laminado de verdad lo inyecta `Plater::neotko_full_config()` desde
+    //    app_config, y `live_merged_config()` de aquí arriba sale de `full_config()` en crudo, que
+    //    lo trae con su DEFAULT (false).
+    //    Sin esta línea el candado de NeoStroke (NeoArachnePlan::run) está CERRADO para siempre
+    //    dentro del Preview Lab, aunque LibreMode esté encendido: el visor cae a la ruta normal y
+    //    dibuja caminos de Classic mientras el G-code real sale de NeoStroke. Es exactamente el
+    //    divorcio que se vio en s335, y la razón de ser de la regla del config mirror.
+    if (wxGetApp().app_config != nullptr)
+        snap.object.neotko_libre_mode.value =
+            wxGetApp().app_config->get_bool("neotko_libre_mode");
+
     snap.layer_height = snap.object.layer_height.value > 0.0 ? snap.object.layer_height.value : 0.2;
 
     snap.force_isolated_layer_defaults();
@@ -180,17 +193,23 @@ NPrev::ConfigSnapshot capture_snapshot_from_tab(Tab* tab)
 // Diagnostic-friendly probe — returns a short tag describing what we read
 // from the live merged config. Empty string means "NeoArachne is active and
 // preview should render".
-std::string probe_wall_generator_state(Tab* tab)
+std::string probe_wall_generator_state(Tab* tab, NeoArachnePreviewPanel::Gate gate)
 {
     DynamicPrintConfig dyn = live_merged_config(tab);
     if (dyn.keys().empty()) return "config empty";
     const ConfigOption* opt = dyn.option("wall_generator");
     if (opt == nullptr) return "wall_generator missing";
     const int raw = opt->getInt();
-    if (raw == int(PerimeterGeneratorType::NeoArachne)) return "";  // OK
+    // NEOTKO_NEOSTROKE_TAG s335 — qué generador espera ESTA instancia del panel.
+    const int want = gate == NeoArachnePreviewPanel::Gate::NeoStroke
+                   ? int(PerimeterGeneratorType::NeoStroke)
+                   : int(PerimeterGeneratorType::NeoArachne);
+    if (raw == want) return "";  // OK
     switch (raw) {
-        case int(PerimeterGeneratorType::Classic): return "wall_gen=Classic";
-        case int(PerimeterGeneratorType::Arachne): return "wall_gen=Arachne";
+        case int(PerimeterGeneratorType::Classic):    return "wall_gen=Classic";
+        case int(PerimeterGeneratorType::Arachne):    return "wall_gen=Arachne";
+        case int(PerimeterGeneratorType::NeoArachne): return "wall_gen=NeoArachne";
+        case int(PerimeterGeneratorType::NeoStroke):  return "wall_gen=NeoStroke";
         default: break;
     }
     return std::string("wall_gen=raw:") + std::to_string(raw);
@@ -252,7 +271,12 @@ void render_entity(wxDC& dc, const ExtrusionEntity& e, double scale, const Bound
         // the mm width up to the same unit system first. Without this the
         // thickness floors to ~0 and the round pen draws a 1 px stroke
         // instead of the real extrusion volume.
-        const int fill_thickness   = std::max(1, int(scaled<double>(double(path.width)) * scale));
+        // NEOTKO_NEOSTROKE_TAG s335 — se dibuja el ancho DEDUCIDO DEL CAUDAL, no el nominal. El
+        // nominal es una etiqueta (`;WIDTH:`); el plástico lo manda `mm3_per_mm`, y hay mandos que
+        // lo cambian sin tocar el ancho. Dibujando el nominal, subir `neostroke_curve_overlap` no
+        // movía un pixel aunque la pieza sí cambiara. Ver `flow_equivalent_width`.
+        const float draw_w = NPrev::flow_equivalent_width(path.mm3_per_mm, path.width, path.height);
+        const int fill_thickness   = std::max(1, int(scaled<double>(double(draw_w)) * scale));
         const int border_thickness = fill_thickness + kBorderExtraPx;
 
         wxColour col;
@@ -348,6 +372,15 @@ public:
     void set_anim_pos(double scaled_pos, bool playing) { m_anim_pos_scaled = scaled_pos; m_playing = playing; Refresh(false); }
     void set_build_mode(bool v)                    { m_build_mode = v;   Refresh(false); }
 
+    // NEOTKO_NEOSTROKE_TAG s335 — MODO ELECCIÓN DE ISLAS. El panel es el dueño de la lista de
+    // puntos elegidos; el lienzo sólo dibuja y avisa de un clic. `picks` se guarda por puntero
+    // porque el panel la muta y el lienzo tiene que ver siempre la versión de ahora.
+    void set_pick_source(const std::vector<Point>* picks, std::function<void(Point)> on_click)
+    {
+        m_picks    = picks;
+        m_on_pick  = std::move(on_click);
+    }
+
 private:
     void on_paint(wxPaintEvent&)
     {
@@ -387,9 +420,18 @@ private:
             return;
         }
         if (!m_result->ok) {
+            // NEOTKO_NEOSTROKE_TAG s335 — demasiadas islas no es un callejón sin salida: se dibujan
+            // para que se pueda elegir cuáles mirar. El tope existe porque laminar treinta islas en
+            // cada golpe de deslizador deja el panel colgado, no porque no se puedan enseñar.
+            if (m_result->needs_pick && !m_result->islands_all.empty()) {
+                draw_pick_mode(dc, W, H, margin);
+                return;
+            }
+            m_pick_hot = false;
             draw_status(wxString::FromUTF8(m_result->error.c_str()), wxColour(220, 110, 110));
             return;
         }
+        m_pick_hot = false;
 
         const BoundingBox& bbox = m_result->bbox;
         const double world_w   = std::max<coord_t>(1, bbox.size().x());
@@ -468,7 +510,7 @@ private:
                 // Full alpha for the printed view — this is the "just laid down"
                 // appearance. Width matches the path's real width (mm → pixels
                 // through the same scaled<> conversion render_entity uses).
-                const int thickness = std::max(1, int(scaled<double>(double(seg.path_width)) * scale));
+                const int thickness = std::max(1, int(scaled<double>(double(seg.path_width_flow)) * scale));
                 wxPen pen(wxColour(base.Red(), base.Green(), base.Blue(), 255),
                           thickness, wxPENSTYLE_SOLID);
                 pen.SetCap(wxCAP_ROUND);
@@ -628,8 +670,65 @@ private:
         Refresh(false);
     }
 
+    // NEOTKO_NEOSTROKE_TAG s335 — las islas en su propio marco (sin trasladar), encajadas en el
+    // lienzo con la misma cuenta que el resto. Se guarda la transformación en `m_pk_*` para poder
+    // invertirla en el clic: es la única forma de que lo que se ve y lo que se pulsa coincidan.
+    void draw_pick_mode(wxGCDC& dc, int W, int H, int margin)
+    {
+        const ExPolygons& isl = m_result->islands_all;
+        BoundingBox bb = get_extents(isl);
+        const double world_w = std::max<coord_t>(1, bb.size().x());
+        const double world_h = std::max<coord_t>(1, bb.size().y());
+        const double scale   = std::min((W - 2 * margin) / world_w, (H - 2 * margin) / world_h);
+        const int    mx      = int((W - world_w * scale) / 2);
+        const int    my      = int((H - world_h * scale) / 2);
+
+        m_pk_scale = scale; m_pk_mx = mx; m_pk_my = my; m_pk_bb = bb; m_pk_h = H; m_pick_hot = true;
+
+        for (const ExPolygon& e : isl) {
+            const Points& pts = e.contour.points;
+            if (pts.size() < 3) continue;
+            bool picked = false;
+            if (m_picks != nullptr)
+                for (const Point& pk : *m_picks)
+                    if (e.contains(pk)) { picked = true; break; }
+
+            std::vector<wxPoint> wpts;
+            wpts.reserve(pts.size());
+            for (const Point& p : pts)
+                wpts.emplace_back(mx + int((p.x() - bb.min.x()) * scale),
+                                  H - my - int((p.y() - bb.min.y()) * scale));
+            dc.SetBrush(wxBrush(picked ? wxColour(90, 170, 230, 190) : wxColour(80, 80, 92, 110)));
+            dc.SetPen(wxPen(picked ? wxColour(150, 205, 255) : wxColour(120, 120, 135), 1));
+            dc.DrawPolygon(int(wpts.size()), wpts.data());
+        }
+
+        size_t n_picked = 0;
+        if (m_picks != nullptr) {
+            for (const ExPolygon& e : isl)
+                for (const Point& pk : *m_picks)
+                    if (e.contains(pk)) { ++n_picked; break; }
+        }
+        wxString msg = wxString::Format(
+            _("Click the islands to preview  ·  %zu of %zu picked"), n_picked, isl.size());
+        dc.SetTextForeground(wxColour(200, 200, 210));
+        dc.SetFont(GetFont());
+        dc.DrawText(msg, 8, 6);
+    }
+
     void on_left_down(wxMouseEvent& e)
     {
+        // En modo elección el clic elige, no arrastra.
+        if (m_pick_hot && m_result != nullptr && m_on_pick) {
+            const wxPoint pos = e.GetPosition();
+            // La inversa exacta de `draw_pick_mode`.
+            const Point world(
+                coord_t(m_pk_bb.min.x() + double(pos.x - m_pk_mx) / m_pk_scale),
+                coord_t(m_pk_bb.min.y() + double(m_pk_h - m_pk_my - pos.y) / m_pk_scale));
+            for (const ExPolygon& isl : m_result->islands_all)
+                if (isl.contains(world)) { m_on_pick(world); return; }
+            return;   // clic al aire: no se arrastra el plano en modo elección
+        }
         m_panning      = true;
         m_drag_start   = e.GetPosition();
         m_pan_at_start = wxPoint(m_pan_x, m_pan_y);
@@ -678,20 +777,37 @@ private:
     bool                        m_panning     = false;
     wxPoint                     m_drag_start;
     wxPoint                     m_pan_at_start;
+
+    // NEOTKO_NEOSTROKE_TAG s335 — modo elección de islas. `m_picks` NO es propiedad del lienzo: el
+    // dueño es el panel, y el lienzo mira siempre la lista de ahora a través del puntero.
+    // `m_pk_*` son la transformación que usó el último pintado, guardada para poder invertirla en
+    // el clic; sin eso, lo que se ve y lo que se pulsa se separan en cuanto cambia el tamaño.
+    const std::vector<Point>*   m_picks    = nullptr;
+    std::function<void(Point)>  m_on_pick;
+    bool                        m_pick_hot = false;   // el último pintado fue en modo elección
+    double                      m_pk_scale = 1.0;
+    int                         m_pk_mx    = 0;
+    int                         m_pk_my    = 0;
+    int                         m_pk_h     = 0;
+    BoundingBox                 m_pk_bb;
 };
 
 // ────────────────────────────────────────────────────────────────────────────
 // Outer panel.
 // ────────────────────────────────────────────────────────────────────────────
 
-NeoArachnePreviewPanel::NeoArachnePreviewPanel(wxWindow* parent, Tab* tab)
+NeoArachnePreviewPanel::NeoArachnePreviewPanel(wxWindow* parent, Tab* tab, Gate gate)
     : wxPanel(parent, wxID_ANY)
     , m_tab(tab)
+    , m_gate(gate)
     , m_alive(std::make_shared<AliveFlag>())
 {
     auto* sizer = new wxBoxSizer(wxVERTICAL);
 
     m_canvas = new NeoArachnePreviewCanvas(this);
+    // NEOTKO_NEOSTROKE_TAG s335 — el lienzo dibuja y avisa; la lista vive aquí.
+    m_canvas->set_pick_source(&m_island_picks,
+                              [this](Point w) { toggle_island_pick(w); });
     sizer->Add(m_canvas, 1, wxEXPAND | wxALL, 2);
 
     // ─ layer slider row (label + slider) ────────────────────────────────
@@ -818,7 +934,42 @@ NeoArachnePreviewPanel::NeoArachnePreviewPanel(wxWindow* parent, Tab* tab)
     // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — the "TV" gate. Unlike the fork (where the canvas was
     // always visible, an off TV), the panel is only shown when wall_generator == NeoArachne. Set the
     // initial visibility here (no flash on tab open); on_poll_timer keeps it in sync afterwards.
-    Show(probe_wall_generator_state(m_tab).empty());
+    // NeotkoLIBRE_FOLD s330 — marca de "yo me gestiono la visibilidad": el plegado de
+    // apartados no debe re-mostrar este panel al desplegar, lo decide el poll timer.
+    SetName("neotko_selfgated");
+    Show(probe_wall_generator_state(m_tab, m_gate).empty());
+    neotko_relayout_page();
+}
+
+// NEOTKO_NEOARACHNE_TAG s330 — el visor cambia de alto (aparece/desaparece y crece cuando
+// llega el resultado). Un Layout() del padre directo no basta: la pagina vive en un
+// wxScrolledWindow y, sin FitInside, el canvas se pinta encima de los apartados de abajo
+// (bug viejo: se veia sucio hasta que cambiabas de pestaña y volvias).
+void NeoArachnePreviewPanel::neotko_relayout_page()
+{
+    InvalidateBestSize();
+    wxWindow* w = GetParent();
+    wxScrolledWindow* scrolled = nullptr;
+    while (w != nullptr) {
+        if (scrolled == nullptr)
+            scrolled = dynamic_cast<wxScrolledWindow*>(w);
+        w->Layout();
+        if (scrolled != nullptr)
+            break;
+        // NEOTKO_NEOSTROKE_TAG s335 — 🚨 PARAR en la ventana. Desde que este panel también vive
+        // dentro del diálogo de "NeoStroke — Advanced", subir sin tope se salía del diálogo, llegaba
+        // al wxScrolledWindow de la PESTAÑA y le hacía un FitInside: relayout de una página que no
+        // tiene nada que ver con lo que acaba de cambiar aquí.
+        if (w->IsTopLevel())
+            break;
+        w = w->GetParent();
+    }
+    if (scrolled != nullptr) {
+        scrolled->FitInside();
+        scrolled->Refresh();
+    } else if (GetParent() != nullptr) {
+        GetParent()->Refresh();
+    }
 }
 
 NeoArachnePreviewPanel::~NeoArachnePreviewPanel()
@@ -848,6 +999,14 @@ size_t NeoArachnePreviewPanel::hash_current_relevant_config() const
         const size_t h = opt->hash();
         seed ^= h + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
     }
+    // NEOTKO_NEOSTROKE_TAG s335 — el CANDADO entra en el hash. No es una clave de perfil, así que el
+    // bucle de arriba no lo ve: sin esto, apagar o encender LibreMode con el visor abierto deja el
+    // dibujo anterior en pantalla, que es justo el caso en el que uno está mirando si el candado
+    // hace algo.
+    if (wxGetApp().app_config != nullptr) {
+        const size_t g = wxGetApp().app_config->get_bool("neotko_libre_mode") ? 0x9E3779B1u : 0x85EBCA6Bu;
+        seed ^= g + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    }
     return seed;
 }
 
@@ -856,10 +1015,10 @@ void NeoArachnePreviewPanel::on_poll_timer(wxTimerEvent&)
     // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — the "TV" gate: show the canvas only while
     // wall_generator == NeoArachne, hide it (and skip slicing) otherwise. Relayout the parent so the
     // optgroup collapses the space instead of leaving an off TV behind.
-    const bool na_active = probe_wall_generator_state(m_tab).empty();
+    const bool na_active = probe_wall_generator_state(m_tab, m_gate).empty();
     if (na_active != IsShown()) {
         Show(na_active);
-        if (GetParent() != nullptr) GetParent()->Layout();
+        neotko_relayout_page();
     }
     if (!na_active)
         return;
@@ -878,11 +1037,20 @@ void NeoArachnePreviewPanel::on_debounce_timer(wxTimerEvent&)
 
 void NeoArachnePreviewPanel::on_layer_slider(wxCommandEvent&)
 {
-    if (m_layer_slider != nullptr) {
-        const double z_mm = double(m_layer_slider->GetValue()) * kSliderStepMm;
-        m_layer_label->SetLabel(wxString::Format(_("Layer Z: %.2f mm"), z_mm));
-    }
+    update_layer_label();
     schedule_refresh();
+}
+
+// NEOTKO_NEOSTROKE_TAG s335 — la etiqueta dice la CAPA y la Z que el G-code escribe en `;Z:`, que
+// es el techo de la capa. Así se puede casar a ojo lo que hay en pantalla con una capa del G-code,
+// que era imposible cuando mostraba el desplazamiento en mm desde la base de la pieza.
+void NeoArachnePreviewPanel::update_layer_label()
+{
+    if (m_layer_slider == nullptr || m_layer_label == nullptr)
+        return;
+    const int n = m_layer_slider->GetValue();
+    m_layer_label->SetLabel(wxString::Format(_("Layer %d/%d  ·  Z %.2f mm"),
+                                             n, m_layer_max, layer_print_z(n)));
 }
 
 void NeoArachnePreviewPanel::on_geom_radio(wxCommandEvent&)
@@ -1105,8 +1273,16 @@ void NeoArachnePreviewPanel::on_dump_clicked(wxCommandEvent&)
         f << "; Mesh snapshot Z range: " << std::fixed << std::setprecision(3)
           << m_snapshot_z_min << " .. " << m_snapshot_z_max << " mm\n";
         if (m_layer_slider != nullptr) {
-            const double z_mm = m_snapshot_z_min + double(m_layer_slider->GetValue()) * kSliderStepMm;
-            f << "; Slice Z: " << std::fixed << std::setprecision(3) << z_mm << " mm\n";
+            // s335 — el deslizador es el número de capa; se vuelcan las dos Z que importan: el
+            // plano por el que se corta y la que el G-code escribe en `;Z:` para esa misma capa.
+            const int n = m_layer_slider->GetValue();
+            f << "; Layer: " << n << "/" << m_layer_max
+              << "  (first_layer_h=" << std::fixed << std::setprecision(3) << m_first_layer_h
+              << " layer_h=" << m_layer_h << ")\n";
+            f << "; Slice plane Z (mid of layer): " << std::fixed << std::setprecision(3)
+              << layer_mid_z(n) << " mm\n";
+            f << "; G-code ;Z: for this layer:    " << std::fixed << std::setprecision(3)
+              << layer_print_z(n) << " mm\n";
         }
     }
     const BoundingBox& bb = m_result->bbox;
@@ -1248,6 +1424,7 @@ void NeoArachnePreviewPanel::on_dump_clicked(wxCommandEvent&)
             f << "; segment " << (i+1) << "/" << m_result->ordered_segments.size()
               << " [extrusion " << role_label(seg.role)
               << " w=" << std::fixed << std::setprecision(3) << seg.path_width << "mm"
+              << " flow_w=" << std::fixed << std::setprecision(3) << seg.path_width_flow << "mm"
               << (seg.from_multipath ? " from_multipath" : "") << "]\n";
             f << "G1 X"; write_mm(seg.to); f << "  ; len " << std::fixed << std::setprecision(3)
               << unscale<double>(seg.length_scaled) << "\n";
@@ -1339,21 +1516,66 @@ std::string NeoArachnePreviewPanel::snapshot_selected_model_volume()
     m_snapshot_z_min = bb.min.z();
     m_snapshot_z_max = bb.max.z();
     m_mesh_snapshot  = std::make_shared<const TriangleMesh>(std::move(m));
+    // NEOTKO_NEOSTROKE_TAG s335 — 🚨 objeto nuevo, elección a cero. Los puntos elegidos están en
+    //    coordenadas de la MALLA anterior: conservarlos aquí sería elegir islas al azar sobre otra
+    //    pieza, o peor, no elegir ninguna y dejar el panel en blanco sin explicación.
+    m_island_picks.clear();
     return std::string{};
 }
 
 void NeoArachnePreviewPanel::refresh_slider_range_from_snapshot()
 {
     if (!m_mesh_snapshot || m_layer_slider == nullptr) return;
-    const double range_mm = std::max(0.0, m_snapshot_z_max - m_snapshot_z_min);
-    const int    ticks    = std::max(1, int(range_mm * kSliderTicksPerMm));
-    m_layer_slider->SetRange(0, ticks);
-    // Default to mid-Z, which matches build_from_mesh's mid-Z fallback when
-    // the requested Z is out of range.
-    const int mid = ticks / 2;
+
+    // NEOTKO_NEOSTROKE_TAG s335 — la rejilla de capas del laminador, leída del perfil vivo.
+    const NPrev::ConfigSnapshot snap = capture_snapshot_from_tab(m_tab);
+    m_layer_h       = snap.layer_height > 0.0 ? snap.layer_height : 0.2;
+    m_first_layer_h = snap.print.initial_layer_print_height.value > 0.0
+                        ? snap.print.initial_layer_print_height.value : m_layer_h;
+
+    // 🚨 Sólo las capas cuyo PLANO DE CORTE cae dentro de la pieza. La de más arriba que empieza
+    //    dentro pero cuyo plano se sale NO se ofrece: es la que hacía que el tope del deslizador
+    //    enseñara el centro del objeto en vez de la última capa.
+    int lo = 1, hi = 1;
+    {
+        const auto mid_of = [&](int n) { return layer_mid_z(n); };
+        // primera capa con el plano por encima del suelo de la pieza
+        lo = 1;
+        while (mid_of(lo) < m_snapshot_z_min && lo < 100000) ++lo;
+        // última con el plano aún por debajo del techo
+        hi = lo;
+        while (mid_of(hi + 1) < m_snapshot_z_max && hi < 100000) ++hi;
+    }
+    m_layer_min = lo;
+    m_layer_max = std::max(lo, hi);
+
+    m_layer_slider->SetRange(m_layer_min, m_layer_max);
+    const int mid = m_layer_min + (m_layer_max - m_layer_min) / 2;
     m_layer_slider->SetValue(mid);
-    const double mid_z = m_snapshot_z_min + double(mid) * kSliderStepMm;
-    m_layer_label->SetLabel(wxString::Format(_("Layer Z: %.2f mm"), mid_z));
+    update_layer_label();
+}
+
+// NEOTKO_NEOSTROKE_TAG s335 — alternar una isla. Llega el punto del clic ya en coordenadas de la
+// malla (el lienzo invierte su propia transformación). Si la isla pulsada ya estaba elegida se le
+// quita SU punto, no el del clic: el punto guardado puede ser otro de la misma isla.
+void NeoArachnePreviewPanel::toggle_island_pick(const Point& world)
+{
+    if (!m_result)
+        return;
+    for (const ExPolygon& isl : m_result->islands_all) {
+        if (!isl.contains(world))
+            continue;
+        for (size_t i = 0; i < m_island_picks.size(); ++i) {
+            if (isl.contains(m_island_picks[i])) {
+                m_island_picks.erase(m_island_picks.begin() + long(i));
+                schedule_refresh();
+                return;
+            }
+        }
+        m_island_picks.push_back(world);
+        schedule_refresh();
+        return;
+    }
 }
 
 NPrev::PreviewGeometrySource NeoArachnePreviewPanel::current_source() const
@@ -1363,12 +1585,14 @@ NPrev::PreviewGeometrySource NeoArachnePreviewPanel::current_source() const
         case 1: return NPrev::PreviewGeometrySource::wedge();
         case 2:
             if (m_mesh_snapshot) {
-                // Slider value 0..ticks → mesh-frame Z. The mesh was baked
-                // with the instance transform so its bbox is already in
-                // world coords; the slider range matches that bbox.
-                const double slider_z_offset = double(m_layer_slider->GetValue()) * kSliderStepMm;
-                const double slice_z_world   = m_snapshot_z_min + slider_z_offset;
-                return NPrev::PreviewGeometrySource::from_mesh(m_mesh_snapshot, slice_z_world);
+                // s335 — el deslizador ES el número de capa; se corta por su plano medio, que es
+                // donde corta el laminador de verdad. La malla lleva la transformación del objeto
+                // aplicada, así que su Z ya es la del mundo, la misma rejilla que el G-code.
+                const double slice_z_world = layer_mid_z(m_layer_slider->GetValue());
+                NPrev::PreviewGeometrySource src =
+                    NPrev::PreviewGeometrySource::from_mesh(m_mesh_snapshot, slice_z_world);
+                src.island_picks = m_island_picks;   // s335 — vacío = todas
+                return src;
             }
             // Fallthrough — no snapshot yet, fall back to W so the canvas
             // still shows something useful.
@@ -1382,7 +1606,7 @@ void NeoArachnePreviewPanel::launch_async_slice()
     // If the wall generator isn't NeoArachne, short-circuit with a status
     // message instead of dispatching a useless slice. Avoids the panel
     // showing "Slicing preview…" forever when the user is editing Classic.
-    const std::string gen_state = probe_wall_generator_state(m_tab);
+    const std::string gen_state = probe_wall_generator_state(m_tab, m_gate);
     if (!gen_state.empty()) {
         m_canvas->set_status(wxString::Format(_("Preview idle (%s) — pick NeoArachne"),
                                               wxString::FromUTF8(gen_state.c_str())));
@@ -1432,10 +1656,11 @@ void NeoArachnePreviewPanel::launch_async_slice()
             layer_n = 2 + int(std::floor((raw_z - flh) / lh));
             mid_z   = flh + (double(layer_n) - 1.5) * lh;
         }
-        // Total layers across the mesh height (for label display).
-        const int total_n = (m_snapshot_z_max <= flh)
-            ? 1
-            : 1 + int(std::ceil((m_snapshot_z_max - flh) / lh));
+        // s335 — el tope es el MISMO que ofrece el deslizador: la última capa cuyo plano de corte
+        // cae dentro de la pieza. La cuenta vieja (`ceil` de la altura) daba una capa de más, la
+        // que empieza dentro pero cuyo plano ya se sale, y ésa es la que acababa en el fallback
+        // silencioso al centro del objeto.
+        const int total_n = std::max(1, m_layer_max);
 
         // Clamp layer_n to total so a slider past the mesh top still maps to
         // the actual last printable layer.
@@ -1478,6 +1703,9 @@ void NeoArachnePreviewPanel::launch_async_slice()
             // shrunk). Keep playing state if the user was already playing.
             m_anim_pos_scaled = 0.0;
             m_canvas->set_anim_pos(0.0, m_playing);
+            // NEOTKO_NEOARACHNE_TAG s330 — al llegar el resultado el panel puede cambiar de
+            // alto; sin esto se pinta encima de los apartados de abajo.
+            neotko_relayout_page();
         });
     }).detach();
 }

@@ -44,6 +44,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_FLUTTERDARK", "FLUTTERDARK"  }, // NEOTKO_FLUTTERDARK_TAG s252
         { "ORCA_DEBUG_INFILL",      "INFILL"       }, // NeotkoLIBRE_DBG s133 — folded in s285
         { "ORCA_DEBUG_SUPPORTZONES","SUPPORTZONES" }, // NEOTKO_SUPPORTZONES_TAG s289
+        { "ORCA_DEBUG_NEOSTROKE",   "NEOSTROKE"    }, // NEOTKO_NEOSTROKE_TAG s335
     };
 
     const char* channel_name(Channel c) { return k_chans[static_cast<int>(c)].name; }

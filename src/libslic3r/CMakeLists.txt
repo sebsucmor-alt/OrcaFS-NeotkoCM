@@ -57,6 +57,15 @@ set(lisbslic3r_sources
     NeoArachne/NeoArachnePlan.hpp
     NeoArachne/NeoArachneInterior.cpp
     NeoArachne/NeoArachneInterior.hpp
+    # NEOTKO_NEOARACHNE_TAG v3-spine (s323) — muros Classic + espina tipo S3D.
+    NeoArachne/NeoArachneSpine.cpp
+    NeoArachne/NeoArachneSpine.hpp
+    # NEOTKO_NEOSTROKE_TAG C1 (s325) — muros interiores por trazos.
+    NeoArachne/NeoStroke.cpp
+    NeoArachne/NeoStroke.hpp
+    NeoArachne/NeoStrokeSkeleton.cpp
+    NeoArachne/NeoStrokeSkeleton.hpp
+    NeoArachne/NeoStrokeLink.hpp
     # NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab backend (mini-slicer for the reactive canvas).
     NeoArachne/Preview/PreviewWGeometry.hpp
     NeoArachne/Preview/PreviewWGeometry.cpp
@@ -398,6 +407,7 @@ set(lisbslic3r_sources
     ColorSci/WeaveLibrary.hpp
     ColorStitch.cpp
     ColorStitch.hpp
+    ColorStitchLegacyMigration.cpp   # NEOTKO s316 fase B — aparte para no arrastrar nanosvg al validador
     SurfaceEffectProfile.cpp
     SurfaceEffectProfile.hpp
     # NEOTKO_SANDWICH_TAG_END

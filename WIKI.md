@@ -27,7 +27,7 @@ A normal slicer treats the top of your part as one thing — one filament, one p
 - A **ColorStitch** pass that decides the filament for each fill line — stripes, dithered blends, hard bands or custom patterns.
 - A **PathBlend** pass — a continuous gradient that fades between filaments across the surface.
 
-The two zones together form the Sandwich over your fill. You build it in one place — the **Sandwich Editor** (Quality → Surface ColorStitch → **Sandwich editor…**) — drag dividers to split the layer height between passes, save the result as a profile, and reuse it or **paint** it onto specific faces with the ColorStitch Painter (§6).
+The two zones together form the Sandwich over your fill. You build it in one place, the **Pro** department of the **ColorStitch Painter** (§6): drag dividers to split the layer height between passes, save the result as a profile, and **paint** it onto the faces you want. *(2.4.6)* A recipe only prints where it is painted. The old Sandwich Editor in the print settings, which put one recipe on the whole object, is gone (§1).
 
 The goal is not "presets that work" — it is a **playground**. Mix, stack, experiment, save profiles, paint them, and see what surface comes out.
 
@@ -37,14 +37,14 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
 
 ## Table of Contents
 
-1. [Surface ColorStitch — the Sandwich Editor](#1-surface-colorstitch--the-sandwich-editor)
+1. [Surface ColorStitch — the Sandwich](#1-surface-colorstitch--the-sandwich)
    - 1a. [The pass stack & pass kinds](#1a-the-pass-stack--pass-kinds)
    - 1b. [ColorStitch pass — per-line color patterns](#1b-colorstitch-pass--per-line-color-patterns)
    - 1c. [PathBlend pass — smooth gradient](#1c-pathblend-pass--smooth-gradient)
-   - 1d. [Zone and filament filters](#1d-zone-and-filament-filters)
+   - 1d. [Zone and filament filters (retired in 2.4.6)](#1d-zone-and-filament-filters-retired-in-246)
    - 1e. [Filament & TD preview](#1e-filament--td-preview)
-   - 1f. [Line Distribution Mode](#1f-line-distribution-mode)
-   - 1g. [ColorStitch Studio — palette generators](#1g-colorstitch-studio--palette-generators)
+   - 1f. [How gradients and stripes find their lines (2.4.6)](#1f-how-gradients-and-stripes-find-their-lines-246)
+   - 1g. [Palette generators (the old ColorStitch Studio)](#1g-palette-generators-the-old-colorstitch-studio)
 2. [Neoweaving + Monotonic Interlayer Nesting (WIP)](#2-neoweaving--monotonic-interlayer-nesting-wip)
 3. [Penultimate Top Layers](#3-penultimate-top-layers)
 4. [Libre Mode](#4-libre-mode)
@@ -112,28 +112,39 @@ Beyond surface effects the pack also adds a **new wall-generation engine** — *
     - 23c. [Steps or ramp — and the number that decides](#23c-steps-or-ramp--and-the-number-that-decides)
     - 23d. [The effects](#23d-the-effects)
     - 23e. [What it does to a real print, measured](#23e-what-it-does-to-a-real-print-measured)
+25. [Overhang Shadow (2.4.5) — the wall an overhang lands on](#25-overhang-shadow-245--the-wall-an-overhang-lands-on)
+26. [NeoStroke (2.4.6, debug mode only) — walls planned as strokes, for lettering](#26-neostroke-246-debug-mode-only--walls-planned-as-strokes-for-lettering)
+    - 26a. [What it actually does](#26a-what-it-actually-does)
+    - 26b. [Turning it on](#26b-turning-it-on)
+    - 26c. [The three controls that matter](#26c-the-three-controls-that-matter)
+    - 26d. [The path viewer](#26d-the-path-viewer)
+    - 26e. [Where it stands](#26e-where-it-stands)
 
 ---
 
-## 1. Surface ColorStitch — the Sandwich Editor
+## 1. Surface ColorStitch — the Sandwich
 
-The **Sandwich Editor** is where you build the per-surface effect stack. It lives under **Quality → Surface ColorStitch → Sandwich editor…**.
+The Sandwich is the per-surface effect stack. You build it in the **Pro** department of the **ColorStitch Painter** (§6b), save it as a profile, and paint it onto the faces that should carry it.
+
+> **(2.4.6) The Sandwich Editor is gone.** Up to 2.4.5 there was a second place to build a stack, **Quality → Surface ColorStitch → Sandwich editor…**, and whatever you built there went on every top surface of the object by itself. It has been removed so there is one system instead of two: a recipe is always a palette entry now, and it prints where you paint it.
+>
+> A project that used the old editor opens with its recipe moved into the palette as **From Sandwich editor** (one more for each object that had its own), the old setting switched off, and a notice that says so. Paint it again where you want it; until you do, those surfaces print plain. Surfaces you had already painted stay as they were. A process preset that still carries an old recipe gets it switched off when the app starts, with a notice naming the preset, because a preset has no palette to keep it in. Saving the preset makes the notice go away. If you need the old editor, 2.4.5 still has it.
 
 > **Naming.** The feature family is called **ColorStitch** in the UI. You will still see *ColorMix* in a few internal places — config keys and 3MF data were not renamed, so old projects keep working. They refer to the same system.
 
-### How the editor is laid out
+### How a stack is laid out
 
-The dialog has two columns — **Top layer** and **Penultimate layer**. Each is an independent **stack of 1–3 passes**, chosen with the **Passes** selector. The passes are stacked as thin virtual sub-layers inside the same nominal layer; you **drag the dividers** between them to split the layer height (each pass gets its own Z share). Per pass you can also move it **up/down** in the stack.
+The Pro department shows the three zones one after another, in printing order: **Top**, **Penultimate** and **Bottom**. Each one is an independent **stack of passes**. The passes print as thin virtual sub-layers inside the same nominal layer; you **drag the dividers** on the thickness bar to split the layer height between them, and `^` `v` move a pass up or down (§6b has the whole row layout).
 
 Each pass exposes:
 - a **kind** (see §1a),
-- a **Z mm** height box,
-- an **angle** box (`-1 = auto`; scroll the wheel over the box to rotate). For a PathBlend pass this same box is repurposed to show **ramp end** (the top height of the ramp, in mm) instead — PathBlend's own fill angle isn't edited from this box (see §1c),
-- an **Advanced ⚙** button to open that pass's detailed settings (a `*` marks non-default values) — for PathBlend this is where the start/end zone editor lives (§1c).
+- its **thickness**, on the bar, in mm,
+- an **angle** (`-1 = auto`; scroll the wheel over the pass preview bar to rotate it),
+- an **`ADV…`** button for the pass's detailed settings: the pattern dialog for ColorStitch (§1b), the start and end zone editor for PathBlend (§1c).
 
-A single **Perimeter override** checkbox per zone *clones the walls into every Solid pass* — useful when you want the perimeter reprinted with each glaze.
+A **Perimeter override** checkbox *clones the walls into every Solid pass*, useful when you want the perimeter reprinted with each glaze.
 
-At the bottom are the **Filament & TD** preview (§1e) and the **ColorStitch Studio** (§1g).
+The **Recipe | Result** previews at the top of the panel show the stack and the colour it should come out as, worked out from the TD values in the **Object & TD** department (§1e).
 
 ---
 
@@ -145,7 +156,7 @@ Each pass in a zone is one of:
 |------|--------------|
 | **None** | Empty slot — no pass here. |
 | **Solid** | A normal solid fill pass with its own tool, angle and Z share. **Stack 2–3 Solid passes** and you get the classic *MultiPass* effect: cross-hatch (two angles, two colours), a glaze pass over a base, or an optical colour blend. |
-| **ColorStitch** | Decides the filament line by line across the surface — stripes, dithered blends, hard bands or a custom pattern. Configured in the **Edit gradient…** dialog (§1b). |
+| **ColorStitch** | Decides the filament line by line across the surface — stripes, dithered blends, hard bands or a custom pattern. Configured with its **`ADV…`** button (§1b). |
 | **PathBlend Half** | A gradient pass with **no complementary cap** — the ramp climbs from its floor straight up, one tool only (§1c). |
 | **PathBlend Full** | A gradient pass with a ramp **and** a complementary cap in a second tool, filling the rest of the layer height (§1c). |
 
@@ -157,7 +168,7 @@ PathBlend is always a single full-height gradient — when you pick a PathBlend 
 
 ### 1b. ColorStitch pass — per-line color patterns
 
-A **ColorStitch** pass decides which filament prints each fill line. Open its **Edit gradient…** button to configure it — the same editor also opens from the **ColorStitch Painter**'s Pro tray (**`ADV…`** button), so whichever entry point you use, you get the identical dialog.
+A **ColorStitch** pass decides which filament prints each fill line. Open its **`ADV…`** button in the Painter's Pro department to configure it. *(2.4.6)* That is the only way in now. The **Edit gradient…** button went with the Sandwich Editor, and it opened this same dialog.
 
 > **Which infill patterns does ColorStitch work on? (2.4.0)** Since 2.4.0 it works on **Monotonic**,
 > **Monotonic Line**, **Rectilinear** and **Hilbert Curve** out of the box — the old "ColorStitch on
@@ -177,13 +188,12 @@ A **ColorStitch** pass decides which filament prints each fill line. Open its **
 | **Textile weave** | Ready-made weave structures generated for you — see below. |
 | **Smooth blend — 2 colours** | Two filaments distributed across the surface with a percentage split, dithered so the transition looks smooth. The most common choice. |
 | **Smooth blend — 3 colours** | Three filaments at configurable percentages; the middle colour concentrates in the centre. |
-| **Stripes — manual band sizes** | Explicit band counts: N lines of Colour 1, M of Colour 2, … repeating. |
+| **Stripes — band sizes in mm (real size)** | Bands of a set width in millimetres: so many mm of Colour 1, so many of Colour 2, … repeating across the surface. *(2.4.6)* The old version counted lines instead; it is gone, and a project that used it opens converted (§1f). |
 
-Two of those styles, with the live preview of how the surface will look:
+One of those styles, with the live preview of how the surface will look:
 
 ![Smooth blend, 3 colours — 32% / 37% with the third colour auto-filling the remaining 31%, 31% colour overlap and an Even transition shape. The preview shows both the line strip and a square sample drawn at the pass angle](docs/images/colotstitch-slowstart.png)
 
-![Stripes, manual band sizes — 10 lines of Colour 1 then 10 of Colour 2, repeating; a colour set to 0 lines is skipped](docs/images/colotstitch-stripes.png)
 
 **Colours used** — pick **Color 1–4** (each maps to a loaded filament). Only shown for the two blend styles and Stripes — Custom/MixedFilament/Weave patterns already carry their own colours in the digit string.
 
@@ -196,6 +206,7 @@ Two of those styles, with the live preview of how the surface will look:
 | **How much Color 1 / Color 2** | The percentage split. (In 3-colour, *Color 3 fills the rest* automatically.) |
 | **Color overlap (soft ← hard zones)** | How much colours bleed into each other in 3-colour blends. |
 | **Transition shape** | Even (same density everywhere) · **Slow start** (the default when you first pick a blend style) · Slow end · S-curve (smooth start & end) · Custom shape (set **γ**) · Hard step. |
+| **Gradient scale** *(2.4.6)* | **Fit to surface (real position)**: the gradient runs once across each surface, measured from where its lines really are, so a hole cannot shift it. **Repeat every… mm**: the gradient repeats at a fixed size, the same on every object whatever its line width. See §1f. |
 | **Skip tiny areas** | Surfaces with fewer than N fill lines use Color 1 only. |
 | **Invert direction ⇆** | Reverses the per-line sequence (blend and stripe styles; Custom/Weave have their own `Invert` button instead). |
 
@@ -211,14 +222,14 @@ Two of those styles, with the live preview of how the surface will look:
 
 Pick **Colour A** / **Colour B** to substitute into the weave; if you set both to the same filament, Colour B is nudged to the next one automatically (a one-colour weave isn't a weave). **Edit as custom pattern…** copies the generated string into the Custom style for hand-tweaking.
 
-**Stripes controls** — for each of Color 1–4: a swatch (following the colour picked above) and a **lines:** count. Bands repeat `[Color 1 × lines, Color 2 × lines, …]` until the surface is filled; 0 lines skips that colour.
+**Stripes controls** — for each of Color 1–4: a swatch (following the colour picked above) and a band width in **mm**. Bands repeat `[Color 1, Color 2, …]` across the surface; a width of 0 skips that colour, and you need at least two bands. Under them the dialog shows how many lines each band comes to at your line width, and how long one full cycle is.
 
 **Print options** (apply to every style):
 
 | Control | What it does |
 |---------|--------------|
 | **Infill angle override** | `-1 = Auto`. Scroll the **mouse wheel over the pass preview bar** to rotate it live — the bar's stripes rotate with it. A **fixed** angle (≥ 0) is now honoured **exactly** in the G-code (the per-layer fill rotation is locked out for that pass), so the print keeps the angle you set. `-1 = Auto` lets the slicer alternate per layer (uniform finish, but the orientation won't match a static preview). |
-| **Gradient repetitions** | `1 = single`; higher repeats the pattern across the surface. |
+| **Gradient repetitions** | `1 = single`; higher repeats the gradient across the surface. With **Fit to surface** it cuts the surface into that many equal cycles. |
 | **ColorStitch min. line length** | Fill lines shorter than this (mm) are skipped, so they keep the surrounding colour and avoid toolchanges on tiny segments. Default **0** (don't skip). |
 
 An estimate of how many lines a 60×60 mm surface would have at your filament width is shown next to the strip preview.
@@ -234,35 +245,33 @@ A **PathBlend** pass creates a **continuous gradient** across the surface: one f
 **Basic controls**, on the pass's own row:
 - **floor** — the ramp's starting height (mm), at the low edge of the surface.
 - **ramp end** — the ramp's top height (mm), at the high edge. In **Half** mode this is locked to the full layer height (no cap exists to fill the rest). In **Full** mode you can drag it all the way up to the layer height too — that leaves **zero** of the cap's colour in that area ("techo"), useful when a translucent (high-TD) filament needs full opaque coverage instead of a thin sliver of the wrong colour on top.
-- **Mode** — a cycling button through **Linear / Ease In / Ease Out / Ease In-Out**, shaping how quickly the ramp climbs (only used by the older Sandwich-Editor-only engine path; the per-scanline staircase engine that actually prints today ramps linearly in `t` before the start/end zone below is applied).
+- **Mode** — a cycling button through **Linear / Ease In / Ease Out / Ease In-Out**, shaping how quickly the ramp climbs (only used by an older engine path that normal settings no longer reach; the per-scanline staircase engine that actually prints today ramps linearly in `t` before the start/end zone below is applied).
 
 **`ADV…` — start/end zone editor.** Opens a small cross-section graph of the layer: the horizontal axis is position across the surface, the vertical axis is real height in mm. Two draggable handles set the shape:
 - the **low handle** — where the ramp starts to rise, and how low its floor sits;
 - the **high handle** — where the ramp finishes rising, and how high its top reaches.
 
-By default the ramp spans the full surface edge-to-edge (the classic behaviour). Drag the low handle right to add a flat "start zone" before the ramp begins climbing; drag the high handle left to add a flat "end zone" after it's done. This is the same editor, same model, in both the **Sandwich Editor**'s `ADV…`/Advanced button and the **ColorStitch Painter**'s Pro tray — whichever one you use, they write the same pass data.
+By default the ramp spans the full surface edge-to-edge (the classic behaviour). Drag the low handle right to add a flat "start zone" before the ramp begins climbing; drag the high handle left to add a flat "end zone" after it's done. It opens from the PathBlend pass's `ADV…` button in the Painter's Pro department.
 
 > **(2.4.0) Fixed — a flat PathBlend on some surfaces.** The staircase gives **one height per fill line**, which quietly assumed the surface pattern hands it **one line at a time**. `Monotonic line` does; plain `Monotonic` (and other patterns that chain their lines into a long zigzag) does **not** — the whole surface arrived as a single line, got a single height, and the gradient came out flat with no Z change at all. It was most visible on **bottom surfaces**, whose default pattern is `Monotonic`, while tops set to `Monotonic line` looked fine — but the same top would have broken with the same setting. PathBlend now asks for unchained lines itself, so **the gradient no longer depends on the surface pattern you chose**.
 
-The gradient runs across the build-plate **Y axis** — rotate the object to change direction. PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse. It shares the **Line distribution mode** (§1f) — if a gradient looks broken across holes, try **LaneQuant** or **DirCluster**. In the **ColorStitch Painter** specifically, PathBlend also exposes its own **fill angle** field (`-1 = auto`, or a fixed 0–359° override) next to the Mode button — the Sandwich Editor doesn't have a separate control for this and leaves it on auto.
+**Which way it runs** *(2.4.6)*. Each fill line carries one height, so the ramp has to climb across the lines, and that is the direction it takes: at right angles to the fill lines, on any shape. To aim it, set the pass's **fill angle** (`-1 = auto`, or a fixed 0–359°, next to the Mode button) and the ramp turns with the lines. Before 2.4.6 the direction was worked out from where the middle of each line fell, which gives the right answer on a square or a round part and a wrong one on a long or irregular part: measured on a keychain with lines at 45°, the ramp ran 80° off, almost along the lines. Measured after the change on six test parts with lines at 45°, it runs at 135° on all of them. A hole no longer splits one line into two heights either; both pieces of a cut line get the same height.
+
+PathBlend works best on surfaces with many fill lines; on small surfaces the gradient is coarse.
 
 > ⚠️ **PathBlend is the most fragile part of the engine.** Its per-scanline staircase model — one physical print-height step per fill line, each step resting on the layer below and its neighbours — is validated and must not be disturbed by unrelated changes. The start/end zone and floor/ramp-end controls above are an intentionally **safe** extension of that model: left at their defaults they reproduce the exact same G-code as before. A future, more ambitious idea — letting the ramp rise **and fall** within one pass instead of always climbing — was considered and set aside for now, because the current staircase can't do that without risking unsupported overhangs at the print head; it would need a different, multi-pass engine (closer to the Bump Mapping Editor's approach, §10) to do safely.
 
 ---
 
-### 1d. Zone and filament filters
+### 1d. Zone and filament filters (retired in 2.4.6)
 
-These apply to whichever passes are active on each zone.
-
-**Zone — All surfaces vs. Topmost only.** On many models the "top surface" appears on every horizontal face. *All surfaces* applies the effect everywhere; *Topmost only* restricts it to the single highest horizontal surface. Available independently for Top and Penultimate — use *Topmost only* on stepped objects to colour just the very top.
-
-**Filament filter (0–16).** Apply the effect only to regions assigned to a given filament number. `0` = no filter. Example: red body (filament 1) + white logo (filament 2) → set `1` to leave the logo untouched.
+**Topmost only** and the **Filament filter** decided which surfaces a recipe from the Sandwich Editor landed on: every top surface or only the highest one, and only the regions printed with a given filament. They went with the editor in 2.4.6. A recipe goes exactly where you paint it now, which covers both jobs: paint the top step and only the top step gets it, paint the red body and the white logo stays as it is. A painted object never read these two settings anyway.
 
 ---
 
 ### 1e. Filament & TD preview
 
-The **Filament & TD** panel visualizes how passes combine optically. Each filament has a **Transmission Density (TD)** value — **low TD = opaque, high TD = translucent**:
+The **(TD)** grid in the Painter's **Object & TD** department (§6b) sets how passes combine optically. Each filament has a **Transmission Density (TD)** value — **low TD = opaque, high TD = translucent**:
 
 | TD range | Type |
 |----------|------|
@@ -271,30 +280,43 @@ The **Filament & TD** panel visualizes how passes combine optically. Each filame
 | 3.0 – 7.0 | Translucent — needs several passes to block |
 | 7.0 – 10+ | Highly translucent — lower colour almost always visible |
 
-Four **TD sliders** (one per filament) are saved **per machine** (`neotko_td_1..4`) — they describe your actual filaments, not the print profile. The preview shows the blended Top result, the Penu result, and the final on-print result (penu showing through the top by opacity), plus a `transmit=` readout.
+Four **TD sliders** (one per filament) are saved **per machine** (`neotko_td_1..4`) — they describe your actual filaments, not the print profile. The Pro department's **Recipe | Result** previews use them to show the colour a stack should come out as. *(2.4.6)* The old **Filament & TD** panel at the foot of the Sandwich Editor went with the editor; the sliders were always these same four numbers.
 
-> The inverse colour-match ("find the recipe closest to a target colour") lives in **ColorStitch Studio → Target + Match ▸** (§1g), using ΔE2000.
-
----
-
-### 1f. Line Distribution Mode
-
-This controls *how* the slicer maps colour assignments (ColorStitch slots / PathBlend positions) to the **physical fill lines** of a surface. It does not change the pattern — only how slots find which lines belong to which spatial "lane." It lives in **Quality → Surface ColorStitch → Line distribution mode** (directly below *Minimum line length*) and affects both ColorStitch and PathBlend.
-
-| Mode | Best for |
-|------|----------|
-| **Default** | Raw print order. Simple rectangular surfaces, Custom-text patterns. |
-| **GeoSort** | Print order scrambled but the spatial direction is clean. |
-| **LaneQuant** | Surfaces with **holes, concavities or disconnected sub-regions** — fragmented stripes stay the same colour. Recommended for complex tops. |
-| **DirCluster** | The fill engine rotated direction per sub-region — each region keeps its own coherent gradient. |
-
-**Quick rule**: if the gradient looks wrong, move one mode up and re-slice.
+> *(2.4.6)* The inverse colour match (**Target + Match ▸**, "find the recipe closest to a target colour", by ΔE2000) lived in the ColorStitch Studio and went with it (§1g).
 
 ---
 
-### 1g. ColorStitch Studio — palette generators
+### 1f. How gradients and stripes find their lines (2.4.6)
 
-The **Studio** (bottom of the Sandwich Editor) generates a strip of colour swatches from your loaded filaments + TD, each one a complete pass recipe with its predicted colour. Click a swatch to load it into the live editor. The **Mode** dropdown:
+There used to be a setting here, **Line distribution mode** (Default, GeoSort, LaneQuant, DirCluster). It is gone, because the problem it was working around is gone.
+
+The old engine counted lines. A gradient was dealt out over the lines in some order, and a set of stripes was "so many lines of each colour". A line count is not a size, though, and three things nobody could see from the settings kept changing it: the line width can be different on every object on the plate, the lines sit a little closer than their width so neighbours overlap, and a hole or a bit of embossed text cuts a line in two, so the count grows while the surface stays the same size. Measured on a plate of four keychains sharing one stripe setting: the band came out between 6.79 and 7.20 mm, a different size on each one.
+
+Since 2.4.6 the design lives in millimetres on the surface, measured from the object, and every line asks "what colour is the spot where I land?". Nothing is counted, so all three problems go away together:
+
+- **Stripes are set in mm** (§1b). On that same plate, 8 mm typed once printed between 7.92 and 8.06 mm on all four objects, with four different line widths. A band can only end between two lines, so it lands within one line of what you asked for, and that error does not add up across the surface.
+- **Gradients** run across the surface from where the lines really are (**Gradient scale → Fit to surface**), or repeat at a fixed size (**Repeat every… mm**).
+- **Patterns** (Custom pattern, MixedFilament recipe, Textile weave) repeat at their natural size, one digit per line, instead of being stretched over the surface once.
+- **Holes stop moving things.** The two pieces of a line cut by a hole sit at the same place across the surface, so they get the same colour.
+- **The top and the layer below line up**, line by line, when they share the angle, because both measure from the same point on the object.
+
+> **For the top and the layer below to line up, give them the same number of walls.** Turn off **Only one wall on top surfaces**, or match them another way. The slicer spaces the lines of each solid region so a whole number of them fits, and a different number of walls gives a different region, so the lines land in different places.
+
+**Older projects** are converted when they open, with a notice saying how many gradients and stripe recipes changed. Gradients keep their shape. Stripes that were set in lines become millimetres, worked out from the default top surface line width, so their size can differ slightly from what the old version printed; the exact old size cannot be known without slicing it. If you need the old behaviour for a project, open it in 2.4.5.
+
+**Monotonic Line Replan** left the settings in the same release and is fixed at the value that was giving the cleanest corners.
+
+> **The on-model preview has not caught up yet.** The painted surface in Prepare still draws the pattern its own way, so on a surface with holes, or with stripes in mm, a band can start in a slightly different place than in the G-code. For anything that has to be exact, slice and check it in RealColor (§20). Updating the preview is the next piece of work.
+
+---
+
+### 1g. Palette generators (the old ColorStitch Studio)
+
+*(2.4.6)* The **ColorStitch Studio** lived at the foot of the Sandwich Editor and went with it. What it generated lives on in the Painter's **Generator** department (§6b): **Gradient ramp** and **ColorStitch Pattern Color** strips between a Start (A) and an End (B) filament, and a **Flat color** strip, all worked out from your filaments and their TD, each swatch a complete recipe you can pick and paint. The strips react live to the TD sliders.
+
+Two pieces did not come across: **Target + Match ▸**, the inverse search for the recipe closest to a colour you picked (by ΔE2000), and **Name + Export**. A browser version of that search, with the same maths, still runs on the [tour's TD page](https://sebsucmor-alt.github.io/OrcaFS-NeotkoCM/tour/optics.html#studio).
+
+For reference, the Studio's **Mode** dropdown offered:
 
 | Mode | What it generates |
 |------|-------------------|
@@ -302,9 +324,6 @@ The **Studio** (bottom of the Sandwich Editor) generates a strip of colour swatc
 | **Flat color (predict)** | The gamut reachable by stacking solid passes — robust, predictable colours. |
 | **Mixed approximation (predict)** | An extended gamut: a dithered ColorStitch base plus a translucent solid on top — colours no single filament can make. |
 
-**Target + Match ▸** — pick a MixedColor target and press **Match**; the Studio runs an inverse search (minimising ΔE2000) and loads the closest achievable recipe, showing the resulting ΔE.
-
-**Name + Export** — turns swatches into saved Surface Effect Profiles (§6). The strips react live to the TD sliders.
 
 ---
 
@@ -315,6 +334,8 @@ The **Studio** (bottom of the Sandwich Editor) generates a strip of colour swatc
 **Neoweaving** alternates the Z height of successive fill lines on each layer: odd lines at the nominal height, even lines slightly higher (by an *amplitude*). The next layer inverts the pattern, so the elevated lines nestle into the recesses below — **mechanical interlocking** between layers, like puzzle pieces. It improves inter-layer adhesion and vibration damping without changing external dimensions. This is a structural technique, not a visual one.
 
 **Monotonic Interlayer Nesting** is the companion that makes Neoweaving clean and controllable: it shifts the monotonic fill reference by half the line spacing on alternate layers, so the lines of layer N sit over the *gaps* of layer N−1. That precise registration is what lets Neoweaving's raised/recessed lines lock together layer to layer — so the two ship together.
+
+> **Do not turn it on to make patterns line up.** Moving every other layer by half a line puts the lines of one layer over the gaps of the one below, on purpose, which is the opposite of lining them up. Registration between the top and the layer below comes from §1f.
 
 ---
 
@@ -436,13 +457,13 @@ This pack can open **Simplify3D `.factory` project files** — a complete projec
 
 Save Sandwich configurations as named **profiles**, then **paint them onto specific surfaces** of your model with a brush gizmo — different parts of one object can carry different Sandwiches. Profiles and painted areas are saved inside the **3MF**, so they travel with the print.
 
-At slice time, when an object has any painted facets it switches to **painter mode**: the preset Sandwich settings are ignored for that object and each painted area uses its own profile. This is the cleanest way to apply several different surface effects to one object without splitting the mesh.
+At slice time each painted area uses its own profile, and anything you did not paint prints plain. This is the cleanest way to apply several different surface effects to one object without splitting the mesh. *(2.4.6)* It is also the only way now: the Sandwich Editor, which put one recipe on the whole object from the print settings, is gone (§1).
 
 ---
 
 ### 6a. Saving and managing profiles
 
-In the **Sandwich Editor**, **Save as profile…** captures the current pass stacks as a named profile (a popup reports how many keys were captured). **Manage Sandwich Profiles** lets you **Load into dialog**, **Update from current**, **Rename** and **Delete**.
+In the Painter, **Save** promotes the active recipe into the saved **Profiles** library, **Duplicate** makes an independent copy to edit, and **Save all** promotes every unsaved working colour at once (§6b, §6c). **Right-click a swatch** for **Duplicate / Save to palette / Delete**. *(2.4.6)* The Sandwich Editor's **Save as profile…** and **Manage Sandwich Profiles** went with the editor. A project that used the editor opens with its recipe already saved as a profile called **From Sandwich editor**.
 
 **Orphan warning**: deleting a profile that has painted areas emits a **non-critical slicing warning** (*"…painted regions referencing deleted Surface Effect Profile(s)…"*); the slice continues and those areas just get no effect. Re-paint or re-create the profile to fix.
 
@@ -478,7 +499,7 @@ This replaces a long-standing trap where the swatch kept showing a colour that h
 
 **The panel**
 
-1. **Palette strips** — collapsible **Gradient ramp** and **Flat color** sections, scrollable strips of swatches generated from your filaments + TD (same engine as the Studio, §1g). They regenerate when colours/TD change.
+1. **Palette strips** — collapsible **Gradient ramp** and **Flat color** sections, scrollable strips of swatches generated from your filaments + TD (the generators of §1g). They regenerate when colours/TD change.
 2. **Pro** — the composer, and **the Pro panel IS the active colour**: build **Top / Penultimate / Bottom** passes (Solid / ColorStitch / PathBlend Half|Full) with a per-pass Z box and a **Perimeter override** checkbox. If the active colour is linked to a saved profile, editing it here rewrites that profile in place.
    *(2.4.0)* The three zones are edited one after another in a single panel, top to bottom in printing order — the old **Top Surface / Bottom Surface** switch is gone. The **Recipe | Result** preview sits at the top of the panel, and the **(TD)** grid has moved out to the **Object & TD** department.
    *(2.4.0)* **Right-click any pass's preview bar** for **Duplicate pass**, **Move up / Move down** and **Delete pass** — the clone splits the original's thickness in half, so nothing else in the stack moves. Under each zone a **copy to:** row copies the whole zone onto another one (**Top → Penultimate / Bottom**, and back). The ColorStitch pattern is translated to the destination zone's keys on the way, and a stack landing on **Bottom** is normalised to the Bottom rules (max 2 Solid, max 1 ColorStitch, PathBlend forced to Full).
@@ -576,11 +597,11 @@ the colour is filed where it belongs, not moved behind your back.
 
 | Situation | What applies |
 |-----------|--------------|
-| Object with zero painted facets | **Preset mode** — Sandwich Editor values apply |
-| Painted object — painted area | The **painted profile** applies; preset ignored for that area |
-| Painted object — **unpainted** area | **No effect** (preset suppressed for the whole object) |
+| Object with zero painted facets | **No effect.** *(Up to 2.4.5 the Sandwich Editor's recipe applied here. Since 2.4.6 an old project moves it into the palette when it opens, to be painted.)* |
+| Painted area | The **painted profile** applies |
+| **Unpainted** area | **No effect** |
 
-This "all or nothing" rule prevents mixing preset and painted effects. For each top/penu fill at each layer the slicer uses the dominant painted slot in that Z range, so different regions at the same height each get their own effect. The wipe-tower planner uses the same lookup as the slice, so plan and G-code stay in sync.
+For each top/penu fill at each layer the slicer uses the dominant painted slot in that Z range, so different regions at the same height each get their own effect. The wipe-tower planner uses the same lookup as the slice, so plan and G-code stay in sync.
 
 ---
 
@@ -594,11 +615,11 @@ Everything is saved inside the 3MF: the **profile library** (project-level base6
 
 ### 6f. Weave preview on the painted surface
 
-Painted top surfaces show the **ColorStitch weave directly on the model** — the per-line tool stripes (or dither / gradient / hard bands) instead of a flat swatch colour. The preview is built from the **same per-line sequence the slicer produces** (`build_dithered_tools_*` / `build_custom_bands` / pattern), so the **filament colours, density and pattern match the G-code**. The same sequence builder also drives the small pass strip in the **Pro tray** and the **Sandwich editor**, so the strips and the 3D view stay identical. (The preview is always on now; the old *Preview weave* toggle was retired.)
+Painted top surfaces show the **ColorStitch weave directly on the model** — the per-line tool stripes (or dither / gradient / hard bands) instead of a flat swatch colour. The preview is built from the **same per-line sequence the slicer produces** (`build_dithered_tools_*` / `build_custom_bands` / pattern), so the **filament colours, density and pattern match the G-code**. The same sequence builder also drives the small pass strip in the **Pro tray**, so the strip and the 3D view stay identical. *(2.4.6)* The slicer now places gradients, stripes and patterns by position (§1f) and this preview has not caught up yet; see the note at the end of §1f. (The preview is always on now; the old *Preview weave* toggle was retired.)
 
 **Scale fits the painted area at the real line width.** The stripe pitch comes from the **resolved top line width** (config, no slice needed), and the gradient/pattern is scaled to the **painted region's own extent** — computed **per island**: each flat zone (e.g. a stair step) is detected as a connected component (edge-adjacency, so zones that only touch at a corner stay separate) and gets its **own** gradient ramp, just like the slice. Tiled patterns repeat at the real line width (shader wrap), so the stripe width matches the print regardless of zone size.
 
-**Orientation matches the slice for a fixed angle.** The stripes run at the pass's **fixed angle**, and that angle is now **honoured exactly in the G-code**: for a fixed ColorStitch angle the slicer's per-layer fill-angle rotation is **locked out** (internally via the template-angle flag), so every layer keeps the painted orientation. Set the angle by **scrolling the mouse wheel over the pass preview bar** (Pro tray and Sandwich editor) — the bar, the 3D model and the print all rotate together in real time.
+**Orientation matches the slice for a fixed angle.** The stripes run at the pass's **fixed angle**, and that angle is now **honoured exactly in the G-code**: for a fixed ColorStitch angle the slicer's per-layer fill-angle rotation is **locked out** (internally via the template-angle flag), so every layer keeps the painted orientation. Set the angle by **scrolling the mouse wheel over the pass preview bar** (Pro tray) — the bar, the 3D model and the print all rotate together in real time.
 
 > **Auto angle (`-1`).** With auto angle the slicer **alternates the fill direction every layer** (this is what gives a uniform finish), so a static preview cannot match the print. An amber **"auto angle"** tag appears next to **ADV** in that case — set a **fixed angle** (wheel over the bar) to lock the orientation.
 
@@ -633,7 +654,7 @@ strips, with a small colour swatch next to it showing the approximated result.
 - Turning it **on**:
   - Auto-generates a small sandwich (up to 3 solid passes) that approximates the
     MixedFilament's colour using your other loaded filaments and their **TD** values
-    (§1e) — the same colour-matching math the ColorStitch Studio uses.
+    (§1e) — the same colour-matching math the palette generators use (§1g).
   - Turns **Perimeter override** on automatically, so the walls get reprinted to match too.
   - **Locks out** manual painting/patterns for that object (the palette strips, zone
     editors and the Perimeter override checkbox grey out) — the object is either "painted
@@ -835,7 +856,9 @@ The default **Neotko Hybrid v2** = outer Classic, inner Arachne (stock), gap fil
 
 ### 8d. Preview Lab
 
-A panel inside the NeoArachne section that renders planned wall paths **before slicing**: outer + inner paths in distinct colours, the execution (chain) order, seam dots, travel moves, and a head animation. Controls include a layer slider, animation speed, a ghost/printed build mode, zoom, "use selection," and a **Dump** button that exports the full plan as JSON for off-line diagnosis.
+Renders planned wall paths **before slicing**: outer and inner paths in distinct colours, the execution (chain) order, seam dots, travel moves, and a head animation. Controls include a layer slider, animation speed, a ghost/printed build mode, zoom, "use selection," and a **Dump** button that exports the full plan as JSON for off-line diagnosis.
+
+> **Moved in 2.4.6.** The panel used to sit inline under *Wall generator*, where it took up half the page and only ever lit up for NeoArachne. It was taken out of that page. The same panel is now the path viewer inside **NeoStroke → Advanced options…** (§26d), pointed at NeoStroke.
 
 > **Known limitation**: a small visual divergence vs the real slice on the second-to-last inner wall in narrow "waist" regions of some geometries — use **Dump** to share the JSON (and the 3MF) for diagnosis.
 
@@ -2365,21 +2388,149 @@ Someone asked upstream for this kind of control and the request closed with no a
 
 ---
 
+## 26. NeoStroke (2.4.6, debug mode only) — walls planned as strokes, for lettering
+
+**NeoStroke** is a fourth wall generator, next to Classic, Arachne and NeoArachne. It exists for one
+job: small raised lettering and thin strokes, the case where the other three leave holes.
+
+> ### ⚠️ Debug mode only, and it means it
+>
+> **NeoStroke does not print reliably yet.** It is published so people can look at it and help, not
+> so it can be used on parts that matter. Reading the toolpaths and understanding how the wall
+> engine works is part of using it. If you are not going to check the G-code before you print, this
+> is not for you.
+>
+> It takes **two keys at once**:
+>
+> 1. **Libre Mode** on (§4a), and
+> 2. **NeoStroke** ticked in **Preferences → Enable NeoStroke wall generator (unstable)**.
+>
+> The second key can also be turned with the environment variable **`ORCA_DEBUG_NEOSTROKE=1`**
+> before Orca starts (`ORCA_DEBUG_ALL=1` covers it too). The checkbox and the variable do the same
+> thing: they open the same channel. The checkbox applies straight away, no restart.
+>
+> With either key missing, picking **NeoStroke** in the wall generator dropdown shows a warning and
+> offers to put the setting back to Arachne. The engine has the same check, so a project file or a
+> command line carrying `wall_generator = neostroke` falls back to the normal NeoArachne path and
+> says so in the log.
+
+### 26a. What it actually does
+
+Every other generator builds a wall as a **loop** and then works inwards, loop after loop. On a
+letter 1 mm wide that runs out of room after the outer wall, and whatever is left over gets handed
+to gap fill, which breaks it into short strokes with a start and a stop on each one.
+
+NeoStroke keeps the outer wall from Classic and then throws the loops away. It takes the **middle
+line of the shape** (its skeleton) and lays beads **along** each stroke of the letter, as many as
+fit side by side, with the width following the room available. The stem of a T is printed as one
+long path down the stem, not as a ring around it.
+
+The outer wall is always Classic. There is no setting for it.
+
+### 26b. Turning it on
+
+1. Enable **Libre Mode** (§4a).
+2. In **Preferences**, tick **Enable NeoStroke wall generator (unstable)**, right under the Libre
+   Mode switch. (Or start Orca with `ORCA_DEBUG_NEOSTROKE=1` instead; same effect.)
+3. **Quality → Wall generator** now accepts **NeoStroke**.
+4. The **NeoStroke** section appears below the dropdown with three controls, and a button for the
+   rest.
+
+The probe line for each layer is written to `/tmp/neotko_logs/neostroke.log`: island count, stroke
+and path counts, how much area was left uncovered, how much of it was wide enough for a real bead,
+and the widths that came out. That file is the first thing to read when a layer looks wrong.
+
+### 26c. The three controls that matter
+
+| Control | Default | What it does |
+|---------|---------|--------------|
+| **NS — minimum width** | **23%** of nozzle | The floor under a bead's width. Below this the bead is not emitted at all. |
+| **NS — hard bead limit** | **175%** of nozzle | No bead is ever wider than this. A bead much wider than the nozzle does not lie flat and its edges stop merging with the neighbour. |
+| **NS — end-cap join** | **0%** | Closes the gap at the turn of a U. 0 leaves it open. |
+
+Everything else lives behind **Advanced options…**, in a window with the path viewer beside it
+(§26d). The defaults there are the ones from the best test plate to date, so a first slice needs
+nothing changed.
+
+### 26d. The path viewer
+
+The **Advanced options…** button opens the fifteen remaining controls next to a live drawing of the
+paths NeoStroke plans, without slicing. Change a number on the left and the drawing on the right
+follows. It is the same panel that used to sit under *Wall generator* as the NeoArachne
+**Preview Lab** (§8d), pointed at NeoStroke instead.
+
+The window also carries **Classic wall width**, marked experimental. Those are Orca's own
+`outer_wall_line_width` and `inner_wall_line_width`. They are there because the width Classic takes
+for the outer wall is exactly the room NeoStroke does not get, so it is the one number that moves
+every path at once, and it is worth seeing that happen.
+
+**What the drawing shows.** The viewer draws each bead at the width its **flow** implies, not at the
+width written in the G-code comment. They are usually the same, but a few settings add material
+without changing the stated width (NeoStroke's **curve overlap** is one), and on those the stated
+width would tell you nothing. The dump prints both: `w=` is what goes into `;WIDTH:`, `flow_w=` is
+what actually lands.
+
+**Matching a layer against the G-code.** The layer slider is a layer number, and its label reads
+`Layer 14/15 · Z 2.85 mm`. That Z is the same number the G-code writes in its `;Z:` line for that
+layer, so the two can be put side by side without any arithmetic. Only layers whose slicing plane
+falls inside the object are offered, and a plane outside it now says so instead of quietly showing
+a different layer.
+
+**Picking islands.** The viewer can only plan 8 separate islands at a time, because planning thirty
+of them on every tick of the layer slider leaves the panel hanging. A plate of letters passes that
+count immediately. When it does, the viewer draws the islands instead of giving up: click the ones
+you want and it plans only those. Click a picked island again to drop it. Picking nothing means all
+of them, which is the old behaviour.
+
+The choice is stored as a point inside each island, not as a position in a list, so it survives
+moving the layer slider. Islands are recalculated at every Z and their order changes, so a list
+position would quietly point at a different letter. If you move to a height where none of the picked
+islands exist, the viewer says so and asks you to pick again. Taking a new snapshot with **Use
+current selection** clears the choice, since the stored points belong to the old mesh.
+
+One limit remains: the geometry is a snapshot of whatever object was selected when you pressed
+**Use current selection**, so moving the object on the plate does not update it until you press it
+again.
+
+### 26e. Where it stands
+
+What has been measured, on test plates:
+
+- On thin strokes it covers ground the other engines leave empty, and with fewer separate paths,
+  which means fewer starts and stops.
+- A letter comes out clean when roughly **95%** of its interior is covered by a real bead. Below
+  about **60%** it comes out with holes. That number can be read off the log without printing
+  anything, which is the point of the probe.
+
+What is not settled:
+
+- **Flow cuts.** The paths are continuous on screen, but the emitted G-code still breaks into more
+  short moves than it should in places, and a break in the flow shows on the part.
+- It has not been through a wide enough range of shapes and nozzle sizes to say what it does
+  outside small lettering. On bold text, Classic or Arachne is still the safer answer.
+
+This is why it is behind the gate. When it prints reliably the gate comes off.
+
+---
+
 ## Quick Reference — Where to find things
 
 | Feature | Location in UI |
 |---------|---------------|
-| Sandwich Editor (pass stack, ColorStitch, PathBlend) | Quality → Surface ColorStitch → **Sandwich editor…** |
+| Sandwich (pass stack, ColorStitch, PathBlend) | ColorStitch Painter → **Pro** department *(the Sandwich Editor in Quality was removed in 2.4.6)* |
 | Photo Mode (§22) | Prepare → **camera button** on the plate icon column *(Libre Mode only)* |
-| ColorStitch pass pattern | Sandwich Editor → a pass set to **ColorStitch** → **Edit gradient…** |
-| ColorStitch Studio | Sandwich Editor → **ColorStitch Studio** panel (bottom) |
-| Colour match (inverse ΔE2000) | ColorStitch Studio → **Target + Match ▸** |
-| Filament & TD preview | Sandwich Editor → **Filament & TD** panel |
-| Line distribution mode | Quality → **Surface ColorStitch** → Line distribution mode (below *Minimum line length*) |
+| ColorStitch pass pattern | Painter → Pro → a pass set to **ColorStitch** → **`ADV…`** |
+| Palette generators (was ColorStitch Studio) | Painter → **Generator** department |
+| Colour match (inverse ΔE2000) | *Removed in 2.4.6 with the Studio. A browser version runs on the tour's TD page* |
+| TD sliders | Painter → **Object & TD** department |
+| Stripes in mm / Gradient scale | Painter → Pro → ColorStitch pass → **`ADV…`** *(Line distribution mode was removed in 2.4.6, §1f)* |
 | Top surface fill pattern (needed for ColorStitch) | Quality → **Top surface pattern → Monotonic Line** |
 | Penultimate layers / density | Strength → Top/bottom shells |
 | Neoweaving (WIP) | *Not wired in this build* |
 | Overhang Shadow (§25) | Speed → Overhang speed → **Slow down inner walls next to overhangs** *(Libre Mode only)* |
+| NeoStroke (§26) | Quality → **Wall generator → NeoStroke** *(needs Libre Mode **and** the NeoStroke switch)* |
+| NeoStroke unlock switch | **Preferences → Enable NeoStroke wall generator (unstable)** *(or `ORCA_DEBUG_NEOSTROKE=1`)* |
+| NeoStroke advanced controls + path viewer | Quality → NeoStroke → **Advanced options…** |
 | Libre Mode master switch | **Preferences → Enable Neotko LibreMode (requires restart)** |
 | Libre Mode toggle | Toolbar side button **"Neotko LM: On/Off"** |
 | Assembled Boolean mode | Right-click an object (Libre Mode) |
@@ -2394,7 +2545,7 @@ Someone asked upstream for this kind of control and the request closed with no a
 | Move selection as one block (§17a) | Magnet icon → **Move selection as one block** (requires Snap & Drag on) |
 | World-space import (WIP) | Import with Libre Mode active *(recommend assembled → split)* |
 | S3DFactory import | File → Import → Import 3D model → `.factory` *(loads assembled; split in Libre Mode)* |
-| Save / Manage profiles | Sandwich Editor → **Save as profile… / Manage Sandwich Profiles** |
+| Save / manage profiles | Painter → **Save**, **Duplicate**, **Save all**; right-click a swatch for Duplicate / Save to palette / Delete |
 | ColorStitch Painter | Left-side gizmo toolbar |
 | Painter tools (Paint / Eraser / Pick) | Painter panel top row |
 | Palette groups / Save all / Pin to palette | Painter panel |
@@ -2405,7 +2556,7 @@ Someone asked upstream for this kind of control and the request closed with no a
 | NeoTower (tower type) | Quality → Prime tower → **Tower type** |
 | Zigurat / Sandwich purge compaction / Sandwich wipe reserve | Quality → Prime tower |
 | Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower (greyed unless Libre Mode) |
-| PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray or Sandwich Editor's Advanced button) |
+| PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray) |
 | Bump Mapping Editor (All / Painter / Top) | Left-side gizmo toolbar *(expert gate: Libre Mode active **+** `ORCA_DEBUG_TEXTUREBUMP` set, **+** `ORCA_DEBUG_ZBUMP` for Top/ZBump — see `NEOTKOCM_RELEASE_2_35.md`)* |
 | Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
 | Height Adaptive Effects (§23) | Left-side gizmo toolbar *(needs Libre Mode active)* |
@@ -2433,7 +2584,11 @@ It's now built from the pass stack: add **two or three Solid passes** to a zone 
 
 **Q: My ColorStitch stripes look fragmented across holes.**
 
-Change **Line distribution mode** (Quality, Advanced) to **LaneQuant** or **DirCluster**. See §1f.
+That was the old engine, which counted lines, and it is gone since 2.4.6: every line takes its colour from where it sits, so the two halves of a line cut by a hole get the same colour (§1f). If the top and the layer below do not line up, check that both have the same number of walls. If it still looks wrong, send the 3MF.
+
+**Q: Where did the Sandwich Editor go?**
+
+It was removed in 2.4.6. Build the stack in the Painter's **Pro** department, save it and paint it where you want it (§1, §6). A project that used the old editor opens with its recipe moved into the palette as **From Sandwich editor**; paint it again on the surfaces you want.
 
 **Q: How do I turn on Libre Mode? I don't see the button.**
 
@@ -2467,7 +2622,7 @@ checkbox and its colour swatch become active. See §6g.
 
 **Q: Can I make a PathBlend gradient start or end somewhere other than the surface edges — or make it fully opaque at one end?**
 
-Yes — open **`ADV…`** on the PathBlend pass (Painter Pro tray or the Sandwich Editor's Advanced button) and drag the two handles in the graph that opens. The low handle sets where the ramp starts rising (and its floor height); the high handle sets where it finishes (and its top height). Push the high handle all the way to the top for a full "techo" — zero of the cap colour in that zone. See §1c.
+Yes — open **`ADV…`** on the PathBlend pass (Painter Pro tray) and drag the two handles in the graph that opens. The low handle sets where the ramp starts rising (and its floor height); the high handle sets where it finishes (and its top height). Push the high handle all the way to the top for a full "techo" — zero of the cap colour in that zone. See §1c.
 
 **Q: I want to try NeoArachne safely.**
 

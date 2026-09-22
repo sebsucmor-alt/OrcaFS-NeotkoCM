@@ -18,6 +18,7 @@
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/NeoDebug.hpp"   // NEOTKO_NEOSTROKE_TAG s335 — segunda llave de NeoStroke
 
 // Localization headers: include libslic3r version first so everything in this file
 // uses the slic3r/GUI version (the macros will take precedence over the functions).
@@ -88,6 +89,7 @@
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "libslic3r/ColorStitch.hpp" // NEOTKO_SANDWICH_TAG — s317 fase D: take_sandwich_presets()
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
 
@@ -1006,6 +1008,25 @@ void GUI_App::post_init()
 
     m_open_method = "double_click";
     bool switch_to_3d = false;
+
+    // NEOTKO_SANDWICH_TAG — s317 fase D: presets de proceso que traían receta del Sandwich Editor.
+    // Preset.cpp la ha apagado al cargarlos (no hay paleta donde moverla); aquí se avisa, una vez.
+    {
+        const std::vector<std::string> sw_presets = Slic3r::ColorStitchLegacyMigration::take_sandwich_presets();
+        if (!sw_presets.empty()) {
+            wxString names;
+            for (const std::string& n : sw_presets)
+                names += "\n  " + from_u8(n);
+            const wxString msg =
+                _L("These process presets had a recipe from the Sandwich editor:") + names + "\n\n" +
+                _L("The Sandwich editor has been removed, and its effect is now off in these presets. "
+                   "A preset has no palette to keep the recipe in, so it could not be moved for you. "
+                   "Build it again in the ColorStitch palette and paint it where you want it.") + "\n\n" +
+                _L("The preset files on disk still carry the old recipe, so this message will show again "
+                   "at the next start. Neotko 2.4.5 still has the Sandwich editor.");
+            CallAfter([this, msg]() { show_info(mainframe, msg, _L("Sandwich editor removed")); });
+        }
+    }
 
     if (!this->init_params->input_files.empty()) {
 
@@ -2345,6 +2366,12 @@ void GUI_App::init_app_config()
 #endif // _WIN32
     }
     MixedFilamentManager::set_auto_generate_enabled(app_config->get_bool("auto_generate_gradients"));
+    // NEOTKO_NEOSTROKE_TAG s335 — la casilla de Preferencias abre el MISMO canal que
+    // `ORCA_DEBUG_NEOSTROKE=1`, que es lo que miran los dos candados de NeoStroke (interfaz y motor).
+    // 🚨 Con `|=`, nunca cerrando: si alguien arrancó con la variable puesta, una casilla sin marcar
+    //    no debe apagársela por debajo.
+    if (app_config->get_bool("neotko_neostroke_enabled"))
+        NeoDebug::set_enabled(NeoDebug::NEOSTROKE, true);
     set_logging_level(Slic3r::level_string_to_boost(app_config->get("log_severity_level")));
 
 }

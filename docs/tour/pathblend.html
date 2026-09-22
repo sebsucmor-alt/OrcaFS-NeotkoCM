@@ -84,7 +84,7 @@
 
     <p class="where">
       <span class="where__label">Where</span>
-      <b>Sandwich editor</b><span class="sep">›</span><span>a pass set to</span><b>PathBlend Half</b>
+      <b>ColorStitch Painter</b><span class="sep">›</span><b>Pro</b><span class="sep">›</span><span>a pass set to</span><b>PathBlend Half</b>
       <span class="sep">or</span><b>Full</b><span class="sep">›</span><b>ADV…</b>
     </p>
 
@@ -148,8 +148,8 @@
     <h2 id="adv" data-short="★ The ADV editor">The ADV editor</h2>
 
     <p>
-      This is the cross-section graph the <code>ADV…</code> button opens, and it is the same
-      editor in the Sandwich Editor and in the Painter's Pro tray. Horizontal is position across
+      This is the cross-section graph the <code>ADV…</code> button opens from the Painter's Pro
+      tray. Horizontal is position across
       the surface. Vertical is real height in millimetres. Two handles do all the work.
     </p>
 
@@ -180,7 +180,7 @@
         <tr><td><b>High handle</b></td><td>Where the ramp finishes rising, and how high its top reaches. Drag it left and you get a flat <b>end zone</b> after it is done.</td></tr>
         <tr><td><b>floor</b></td><td>The ramp's starting height in mm, at the low edge.</td></tr>
         <tr><td><b>ramp end</b></td><td>The ramp's top height in mm. In <b>Half</b> this is locked to the full layer height, since there is no cap to fill the rest.</td></tr>
-        <tr><td><b>Mode</b></td><td>Linear / Ease In / Ease Out / Ease In-Out. Only the older Sandwich-Editor-only engine path uses this; the per-scanline staircase that actually prints today ramps linearly in <code>t</code>, then applies the start and end zones on top.</td></tr>
+        <tr><td><b>Mode</b></td><td>Linear / Ease In / Ease Out / Ease In-Out. Only an older engine path that normal settings no longer reach uses this; the per-scanline staircase that actually prints today ramps linearly in <code>t</code>, then applies the start and end zones on top.</td></tr>
       </tbody>
     </table>
     </div>
@@ -205,17 +205,25 @@
     <h2 id="aim" data-short="Aiming it">Aiming the gradient</h2>
 
     <p>
-      The gradient runs across the build plate's <strong>Y axis</strong>. There is no direction
-      control in the Sandwich Editor; you rotate the object to aim it. In the
-      <a href="painter.html">ColorStitch Painter</a> a PathBlend pass does get its own
-      <b>fill angle</b> field next to the Mode button, with <code>-1</code> for auto or a fixed
-      0–359° override.
+      Each fill line carries one height, so the ramp has to climb across the lines, and since
+      2.4.6 that is exactly the direction it takes: at right angles to the fill lines, on any
+      shape. To aim it, set the pass's <b>fill angle</b> in the
+      <a href="painter.html">ColorStitch Painter</a>, next to the Mode button, with
+      <code>-1</code> for auto or a fixed 0–359°. The ramp turns with the lines.
     </p>
 
     <p>
-      PathBlend also shares <a href="colorstitch.html#distribution">Line distribution mode</a> with
-      ColorStitch. If a gradient comes out broken across a hole, try <b>LaneQuant</b> or
-      <b>DirCluster</b> before assuming the pass is wrong.
+      Before 2.4.6 the direction came from where the middle of each line fell. On a square or a
+      round part that gives the same answer. On a long or irregular one it does not: measured on
+      a keychain with its lines at 45°, the ramp ran 80° away from where it should, almost along
+      the lines, and that was the hard diagonal band some people saw where a smooth fade should
+      have been. Measured after the change on six test parts, all with lines at 45°, the ramp runs
+      at 135° on every one of them.
+    </p>
+
+    <p>
+      A hole no longer splits one line into two heights either. When a hole cuts a fill line in
+      two, both pieces get the same height.
     </p>
 
     <!-- ================================================================= -->

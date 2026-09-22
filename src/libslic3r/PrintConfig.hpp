@@ -382,7 +382,13 @@ enum class PerimeterGeneratorType
     // NEOTKO_NEOARACHNE_TAG Inc0 (port s134) — Neotko Hybrid wall generator: Classic owns the outer
     // perimeter, Arachne owns the integrated interior (inner walls + gap-fill). Inc 0 ports only the
     // enum value; dispatch is a passthrough to Classic until the engine lands in Inc 2.
-    NeoArachne
+    NeoArachne,
+    // NEOTKO_NEOSTROKE_TAG s332 — NeoStroke como generador propio: interior planificado POR TRAZOS
+    // (esqueleto de la isla, k lineas por trazo, ancho continuo) con el muro exterior de Classic.
+    // Equivale a NeoArachne con outer = Classic e inner_walls = NeoStroke, pero sin obligar a pasar
+    // por el panel de la v3 ni por LibreMode. 🚨 Va AL FINAL del enum: el valor entero de los
+    // anteriores no puede moverse o los perfiles guardados cambian de generador al abrirse.
+    NeoStroke
 };
 
 // NEOTKO_NEOARACHNE_TAG Inc1 (port s134) — per-feature wall source for NeoArachne.
@@ -400,7 +406,10 @@ enum class NeoArachneWallSource
     Classic,
     ArachneStock,
     ArachneNeotkoEdge,
-    Off
+    Off,
+    // NEOTKO_NEOSTROKE_TAG C1 (s325) — NeoStroke: interior planificado POR TRAZOS (esqueleto de la
+    // isla, k líneas por trazo, ancho continuo). Sólo legal como inner_walls, con outer Classic.
+    NeoStroke
 };
 
 // BBS
@@ -1399,6 +1408,42 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,    neoarachne_keep_short_tails))
     ((ConfigOptionBool,    neoarachne_pin_outer_width))
     ((ConfigOptionPercent, neoarachne_bead_count_hysteresis_pct))
+    // NEOTKO_NEOARACHNE_TAG v3-spine (s323) — espina tipo S3D.
+    ((ConfigOptionBool,    neoarachne_spine))
+    ((ConfigOptionPercent, neoarachne_spine_min_width_pct))
+    ((ConfigOptionPercent, neoarachne_spine_max_width_pct))
+    ((ConfigOptionFloat,   neoarachne_spine_min_length))
+    ((ConfigOptionPercent, neoarachne_spine_sliver_pct))
+    // NEOTKO_NEOSTROKE_TAG s332 — el cordón mínimo REAL del cabezal.
+    ((ConfigOptionPercent, neostroke_bead_min_pct))
+    // NEOTKO_NEOSTROKE_TAG C5b (s325) — ganchos de esquina: las ramitas del esqueleto que mueren
+    // en un cruce (los sobacos de una H, los remates de un palo). Ver NeoStroke.cpp.
+    ((ConfigOptionBool,    neostroke_corner_hooks))
+    // NEOTKO_NEOSTROKE_TAG s326 — suelo y techo del ancho de NeoStroke, % del cabezal.
+    ((ConfigOptionPercent, neostroke_min_width_pct))
+    ((ConfigOptionPercent, neostroke_max_width_pct))
+    // NEOTKO_NEOSTROKE_TAG s331c — referencia de TODOS los % de NeoStroke; 0 = automática.
+    ((ConfigOptionFloat,   neostroke_width_ref))
+    // NEOTKO_NEOSTROKE_TAG s329 — cordón más fino que la máquina sabe hacer, % de la referencia.
+    ((ConfigOptionPercent, neostroke_detail_min_pct))
+    // NEOTKO_NEOSTROKE_TAG s331 — curva de overlap: 0 = apagada, y la FORMA de sus dos rampas.
+    ((ConfigOptionPercent, neostroke_curve_overlap))
+    ((ConfigOptionPercent, neostroke_overlap_width_end))   // % del cabezal; empieza siempre en 100
+    ((ConfigOptionFloat,   neostroke_overlap_turn_min))    // grados/mm: por debajo, es recto
+    ((ConfigOptionFloat,   neostroke_overlap_turn_max))    // grados/mm: por encima, overlap entero
+    ((ConfigOptionFloat,   neostroke_overlap_span))        // mm sobre los que se mide el giro
+    ((ConfigOptionPercent, neostroke_overlap_straight))    // % de la rampa que se aplica en recto
+    // NEOTKO_NEOSTROKE_TAG s331d — costura de la vuelta en U; 100 % = el hueco calculado exacto.
+    ((ConfigOptionPercent, neostroke_cap_join))
+    // NEOTKO_NEOSTROKE_TAG s331b — tope duro del cordón y frontera del motor.
+    ((ConfigOptionPercent, neostroke_max_bead_pct))        // % del cabezal; lo paga k, no el ancho
+    ((ConfigOptionFloat,   neostroke_max_stroke_width))    // mm de hueco útil; más ancho = relleno
+    // NEOTKO_NEOSTROKE_TAG s332 — que cada capa no empiece por el mismo sitio, para que los cortes
+    // de flujo no se apilen en vertical y el error de extrusion no se herede capa a capa.
+    ((ConfigOptionBool,    neostroke_layer_jitter))
+    // NEOTKO_NEOSTROKE_TAG C6 (s326) — patinaje sobre lo ya puesto y su factor de rodeo.
+    ((ConfigOptionBool,    neostroke_skate))
+    ((ConfigOptionFloat,   neostroke_skate_detour))
     ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
 
     // NEOTKO_*_TAG — moved out of PrintRegionConfigBase into this derived class
@@ -1472,6 +1517,21 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,     interlayer_colormix_band_count_b))
     ((ConfigOptionInt,     interlayer_colormix_band_count_c))
     ((ConfigOptionInt,     interlayer_colormix_band_count_d))
+    // NEOTKO_COLORSTITCH_TAG_START — s314: bandas en mm (Pattern mode 4). Van en la clase
+    // DERIVED igual que sus gemelas en líneas, y son per-región como ellas: eso es
+    // justamente el punto, porque el ancho de línea que decide el muestreo también lo es.
+    ((ConfigOptionFloat,   interlayer_colormix_band_mm_a))
+    ((ConfigOptionFloat,   interlayer_colormix_band_mm_b))
+    ((ConfigOptionFloat,   interlayer_colormix_band_mm_c))
+    ((ConfigOptionFloat,   interlayer_colormix_band_mm_d))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_band_mm_a))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_band_mm_b))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_band_mm_c))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_band_mm_d))
+    // NEOTKO_COLORSTITCH_TAG — s315: escala del degradado (-1 legacy / 0 campo / >0 mm).
+    ((ConfigOptionFloat,   interlayer_colormix_gradient_span_mm))
+    ((ConfigOptionFloat,   interlayer_colormix_penu_gradient_span_mm))
+    // NEOTKO_COLORSTITCH_TAG_END — s314
     ((ConfigOptionInt,     interlayer_colormix_top_zone))
     ((ConfigOptionInt,     interlayer_colormix_penu_zone))
     ((ConfigOptionInt,     interlayer_colormix_filament_filter))
@@ -1972,6 +2032,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionEnum<NeoTowerType>, neotko_tower_type))
     ((ConfigOptionBool,               neotower_zigurat))
     ((ConfigOptionBool,               neotower_variable_layer_height))
+    ((ConfigOptionBool,               neotower_no_ramming))
     // NEOTKO_NEOTOWER_TAG_END
 
     // NEOTKO_MIXEDFIL_SANDWICH_TAG — slice-time mirror of the TD-per-tool scalars

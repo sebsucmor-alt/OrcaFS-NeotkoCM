@@ -778,6 +778,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "neotower_purge_compaction" // NEOTKO_NEOTOWER_TAG s104 — s130 port
             || opt_key == "neotko_tower_type"         // NEOTKO_NEOTOWER_TAG s104 — s130 port
             || opt_key == "neotower_zigurat"          // NEOTKO_NEOTOWER_TAG s104 — s130 port
+            || opt_key == "neotower_no_ramming"       // NEOTKO_NEOTOWER_TAG s310
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "flush_volumes_matrix"
             || opt_key == "prime_volume"

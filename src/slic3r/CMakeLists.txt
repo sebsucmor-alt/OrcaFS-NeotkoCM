@@ -471,6 +471,8 @@ set(SLIC3R_GUI_SOURCES
     # NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab reactive canvas (gated to NeoArachne).
     GUI/NeoArachnePreviewPanel.hpp
     GUI/NeoArachnePreviewPanel.cpp
+    GUI/NeoStrokeAdvancedDialog.hpp
+    GUI/NeoStrokeAdvancedDialog.cpp
     GUI/TaskManager.cpp
     GUI/TaskManager.hpp
     GUI/TextLines.cpp

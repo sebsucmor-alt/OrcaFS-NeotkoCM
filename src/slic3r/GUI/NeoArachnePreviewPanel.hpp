@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include "../../libslic3r/NeoArachne/Preview/PreviewResult.hpp"
 #include "../../libslic3r/NeoArachne/Preview/PreviewGeometrySource.hpp"
@@ -46,11 +47,19 @@ class NeoArachnePreviewCanvas;
 class NeoArachnePreviewPanel : public wxPanel
 {
 public:
+    // NEOTKO_NEOSTROKE_TAG s335 — el MISMO lienzo sirve a los dos motores: lo que pinta son las
+    // entidades que `NeoArachne::Plan::run` deja, y ese `run` ya despacha a NeoStroke cuando
+    // `wall_generator` lo dice. Lo único que cambiaba era la puerta: el panel se escondía salvo con
+    // NeoArachne. `Gate` es esa puerta, y nada más.
+    //   NeoArachne — la de siempre (el canvas de Edge Closure, hoy retirado de la pestaña)
+    //   NeoStroke  — la del visor de caminos que vive en la ventana de Avanzado
+    enum class Gate { NeoArachne, NeoStroke };
+
     // `tab` is the live Tab that owns the optgroup. We read its `m_config`
     // (the merged edited config including any per-plate/per-object overrides)
     // so the canvas reflects whatever the user is editing right now — not the
     // bundle's saved preset, which lags behind per-object overrides.
-    NeoArachnePreviewPanel(wxWindow* parent, Tab* tab);
+    NeoArachnePreviewPanel(wxWindow* parent, Tab* tab, Gate gate = Gate::NeoArachne);
     ~NeoArachnePreviewPanel() override;
 
     // Schedules a re-slice (debounced). Safe to call from any GUI-thread event
@@ -60,10 +69,12 @@ public:
     void schedule_refresh();
 
 private:
+    void neotko_relayout_page(); // NEOTKO_NEOARACHNE_TAG s330
     void on_poll_timer(wxTimerEvent&);
     void on_debounce_timer(wxTimerEvent&);
 
     void on_layer_slider(wxCommandEvent&);
+    void update_layer_label();   // s335
     void on_geom_radio(wxCommandEvent&);
     void on_use_selected(wxCommandEvent&);
     void on_translucent_toggle(wxCommandEvent&);
@@ -100,6 +111,7 @@ private:
 
     // ── owners / live config source ──────────────────────────────────────
     Tab*                                        m_tab = nullptr;
+    Gate                                        m_gate = Gate::NeoArachne;   // s335
 
     // ── child widgets ────────────────────────────────────────────────────
     NeoArachnePreviewCanvas*                    m_canvas         = nullptr;
@@ -127,12 +139,36 @@ private:
     size_t                                      m_last_config_hash = 0;
     std::shared_ptr<AliveFlag>                  m_alive;            // worker checks before CallAfter
 
+    // NEOTKO_NEOSTROKE_TAG s335 — ISLAS ELEGIDAS, en coordenadas escaladas de la MALLA (ver
+    // PreviewGeometrySource::island_picks). Vacío = todas. Un punto por isla elegida.
+    // 🚨 Por PUNTO y no por índice a propósito: las islas se recalculan en cada corte y su orden
+    //    cambia con la Z, así que un índice apuntaría a otra letra en cuanto se mueve el deslizador.
+    std::vector<Point>                          m_island_picks;
+    void toggle_island_pick(const Point& world);
+
     // ── snapshot state ───────────────────────────────────────────────────
     // Mesh snapshot frozen at the moment the user clicked "Use selection".
     // Subsequent moves/rotations of the source object on the bed do NOT
     // propagate — the user must click again to refresh.
     std::shared_ptr<const TriangleMesh>         m_mesh_snapshot;
     double                                      m_snapshot_z_min   = 0.0;
+    // NEOTKO_NEOSTROKE_TAG s335 — EL DESLIZADOR VA POR CAPAS, no por milímetros.
+    // 🚨 Antes iba en mm desde la base de la malla, y su tope caía en una capa que la pieza no
+    //    llega a tener: el plano de corte salía por encima del objeto y `build_from_mesh` se iba
+    //    EN SILENCIO al centro de la pieza (su fallback de "Z fuera de rango"), que es la sección
+    //    más llena. O sea que la última posición del deslizador enseñaba justo lo contrario de la
+    //    última capa. Además la etiqueta mostraba el desplazamiento, no la Z, así que no había
+    //    forma de casar lo que veías con una capa del G-code.
+    // La rejilla es la del laminador y es ABSOLUTA desde la cama:
+    //    capa 1 ocupa [0, flh];  capa N>=2 ocupa [flh+(N-2)·lh, flh+(N-1)·lh]
+    //    plano de corte = mitad de la capa;  `;Z:` del G-code = techo de la capa
+    double                                      m_first_layer_h    = 0.2;
+    double                                      m_layer_h          = 0.2;
+    int                                         m_layer_min        = 1;   // primera capa que toca la pieza
+    int                                         m_layer_max        = 1;   // última cuyo plano cae DENTRO
+    double layer_mid_z(int n) const { return n <= 1 ? m_first_layer_h * 0.5
+                                                    : m_first_layer_h + (double(n) - 1.5) * m_layer_h; }
+    double layer_print_z(int n) const { return m_first_layer_h + (double(n) - 1.0) * m_layer_h; }
     double                                      m_snapshot_z_max   = 0.0;
 
     // ── last result ──────────────────────────────────────────────────────

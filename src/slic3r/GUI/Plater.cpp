@@ -18517,7 +18517,43 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files,
     p->m_slice_all_only_has_gcode = false;
     //BBS: wish to reset all plates stats item selected state when load a new file
     p->preview->get_canvas3d()->reset_select_plate_toolbar_selection();
+    // NEOTKO_COLORSTITCH_TAG — s316 fase B: el informe de la migración del legacy se pone a cero
+    // justo antes de cargar y se lee justo después. Sin el reset, los presets que se migran al
+    // ARRANCAR la app dispararían el aviso en el primer proyecto que se abra.
+    Slic3r::ColorStitchLegacyMigration::reset_report();
     std::vector<size_t> loaded = p->load_files(input_files, strategy, ask_multi);
+    {
+        const auto rep = Slic3r::ColorStitchLegacyMigration::take_report();
+        const bool legacy_cs = (rep.gradients > 0 || rep.bands > 0);
+        if (!loaded.empty() && (legacy_cs || rep.sandwich_sources > 0)) {
+            wxString msg = _L("This project was made with an older version of NeotkoCM SnapMaker fork.");
+            if (legacy_cs) {
+                msg += "\n\n" +
+                    _L("ColorStitch and PathBlend now build gradients and stripes from the real size of the "
+                       "surface, so they come out right across holes and on every object. The old way counted "
+                       "lines, and a line count is not a size.") + "\n\n" +
+                    wxString::Format(_L("Converted in this project: %d gradient(s) and %d stripe recipe(s)."),
+                                     rep.gradients, rep.bands);
+                if (rep.bands > 0)
+                    msg += "\n\n" + _L("Stripes that were set in lines are now set in millimetres, measured with "
+                                       "the default top surface line width. Their size can differ slightly from before.");
+            }
+            // NEOTKO_SANDWICH_TAG — s317 fase D: la receta del Sandwich Editor se movió a la paleta.
+            if (rep.sandwich_sources > 0) {
+                msg += "\n\n" + _L("The Sandwich editor has been removed. Its recipe used to go on every top "
+                                   "surface of the object by itself. Now it is a recipe in the palette, named "
+                                   "\"From Sandwich editor\", and it only goes where you paint it. We reworked it "
+                                   "this way to bring everything into one system and make it better.");
+                msg += "\n\n" + _L("Paint it again on the surfaces you want. Until you do, those surfaces print "
+                                   "without the effect. Surfaces you had already painted stay as they were.");
+                if (rep.sandwich_profiles > 0)
+                    msg += "\n\n" + wxString::Format(_L("Recipes added to the palette: %d."), rep.sandwich_profiles);
+            }
+            msg += "\n\n" + _L("If you need the old behaviour for this project, open it in Neotko 2.4.5. "
+                               "The old system will not come back in later versions.");
+            show_info(this, msg, _L("ColorStitch and PathBlend updated"));
+        }
+    }
     if (!loaded.empty())
     {
         // After loading a project, initialize the filament temp mixing state

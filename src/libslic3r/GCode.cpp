@@ -5444,8 +5444,6 @@ LayerResult GCode::process_layer(const Print& print,
             if (_is_pb_sub) {
                 _pb_sub_cfg_local = PathBlendPassConfig::from_blob_json(sub.pathblend_blob);
                 m_pathblend_surface_bbox = BoundingBox();
-                m_pathblend_path_t.clear();
-                m_pathblend_polyline_t.clear();
                 m_pathblend_max_z_per_pass.clear();
                 auto _add_path = [&](const ExtrusionEntity* e) {
                     if (!e) return;
@@ -8597,27 +8595,6 @@ std::string GCode::extrude_perimeters(const Print&                              
     return gcode;
 }
 
-// NEOTKO_PATHBLEND_TAG — s59: stable polyline signature for m_pathblend_polyline_t.
-// extrude_path() copies the ExtrusionPath (address changes), so the surface_t map is
-// keyed by polyline values (first/last point + size) which survive the copy.
-static inline uint64_t pb_polyline_signature(const Polyline& pl)
-{
-    if (pl.points.empty()) return 0u;
-    const Point& a = pl.points.front();
-    const Point& b = pl.points.back();
-    auto mix = [](uint64_t h, uint64_t v) {
-        h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-        return h;
-    };
-    uint64_t h = 0xCBF29CE484222325ull;
-    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(a.x())));
-    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(a.y())));
-    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(b.x())));
-    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(b.y())));
-    h = mix(h, static_cast<uint64_t>(pl.points.size()));
-    return h;
-}
-
 // Chain the paths hierarchically by a greedy algorithm to minimize a travel distance.
 std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing)
 {
@@ -9440,50 +9417,45 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             if (any_pathblend) {
                 // pass_idx comes directly from the sublayer context (0 = ramp, 1 = cap).
                 const int pass_idx = m_pb_sub_pass;
-                // surface_t: position of this path in the surface [0..1]. Prefer the
-                // pre-computed per-path t (lane modes); fall back to per-EEC Y-bbox.
+                // surface_t: posición de este path en la superficie [0..1], por bbox Y.
+                // NEOTKO_PATHBLEND_TAG — s316: antes esto consultaba primero dos mapas de
+                // `t` pre-calculado por lane mode (MAP_SIG / MAP_PTR). Nadie los rellenaba
+                // nunca, así que el resultado SIEMPRE salía de este mismo cálculo. Se
+                // quitaron los mapas; el valor emitido no cambia.
+                // 🚨 Esta rama es la ruta LEGACY de PathBlend (single-Fill ramp/cap,
+                // Fill.cpp), la única que emite pathblend_pass >= 0, y sólo se alcanza
+                // cuando compute_pb_bands() devuelve vacío (mid_end <= floor). La ruta
+                // viva —la ESCALERA— trae la Z y el flow ya cocidos desde Fill.cpp y
+                // pasa con pathblend_pass = -1, o sea NO entra aquí.
+                // 📌 Deuda anotada: este eje sigue clavado a Y. El fix de s280e (eje
+                // medido por PCA) sólo llegó a la escalera. Aquí la rampa es degenerada
+                // por construcción, así que muerde poco, pero es la misma clase de bug.
                 double surface_t = 0.5;
                 const char* t_src = "DEFAULT0.5";
                 {
-                    const uint64_t sig = pb_polyline_signature(path.polyline);
-                    auto it_sig = m_pathblend_polyline_t.find(sig);
-                    bool got_t = false;
-                    if (it_sig != m_pathblend_polyline_t.end()) {
-                        surface_t = it_sig->second; t_src = "MAP_SIG"; got_t = true;
-                    } else {
-                        auto it = m_pathblend_path_t.find(&path);
-                        if (it != m_pathblend_path_t.end()) {
-                            surface_t = it->second; t_src = "MAP_PTR"; got_t = true;
+                    BoundingBox ref_bb;
+                    if (m_pathblend_surface_bbox.defined) {
+                        ref_bb = m_pathblend_surface_bbox;
+                    } else if (m_layer != nullptr && !m_layer->lslices_bboxes.empty()) {
+                        ref_bb = m_layer->lslices_bboxes.front();
+                        for (const auto& bb : m_layer->lslices_bboxes)
+                            ref_bb.merge(bb);
+                    }
+                    if (ref_bb.defined) {
+                        const double y_min = double(ref_bb.min.y());
+                        const double y_max = double(ref_bb.max.y());
+                        if (y_max > y_min + 1.0) {
+                            double sum_y = 0.0;
+                            for (const auto& pt : path.polyline.points)
+                                sum_y += double(pt.y());
+                            const double cy = sum_y / double(path.polyline.points.size());
+                            surface_t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
+                            t_src = "BBOX_Y";
                         }
                     }
-                    if (!got_t) {
-                        BoundingBox ref_bb;
-                        if (m_pathblend_surface_bbox.defined) {
-                            ref_bb = m_pathblend_surface_bbox;
-                        } else if (m_layer != nullptr && !m_layer->lslices_bboxes.empty()) {
-                            ref_bb = m_layer->lslices_bboxes.front();
-                            for (const auto& bb : m_layer->lslices_bboxes)
-                                ref_bb.merge(bb);
-                        }
-                        if (ref_bb.defined) {
-                            const double y_min = double(ref_bb.min.y());
-                            const double y_max = double(ref_bb.max.y());
-                            if (y_max > y_min + 1.0) {
-                                double sum_y = 0.0;
-                                for (const auto& pt : path.polyline.points)
-                                    sum_y += double(pt.y());
-                                const double cy = sum_y / double(path.polyline.points.size());
-                                surface_t = std::clamp((cy - y_min) / (y_max - y_min), 0.0, 1.0);
-                                t_src = "BBOX_Y";
-                            }
-                        }
-                    }
-                    if (NeoDebug::enabled(NeoDebug::MULTIPASS)) {
-                        NEOTKO_LOG(MULTIPASS, "PB_T_SRC " << t_src
-                            << " surface_t=" << surface_t
-                            << " path_ptr=" << static_cast<const void*>(&path)
-                            << " map_size=" << m_pathblend_path_t.size());
-                    }
+                    NEOTKO_LOG(MULTIPASS, "PB_T_SRC " << t_src
+                        << " surface_t=" << surface_t
+                        << " path_ptr=" << static_cast<const void*>(&path));
                 }
                 gcode += PathBlendEngine::apply_path(
                     path, *m_pb_sub_cfg, m_pb_sub_role, m_writer,

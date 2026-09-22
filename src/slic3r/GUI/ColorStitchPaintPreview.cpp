@@ -238,6 +238,31 @@ uint64_t context_key(const ModelVolume* mv, const ModelObject* owner)
             }
         }
     }
+    // NEOTKO_COLORSTITCH_TAG — s318 F3: el tejido depende también de la TRANSFORMACIÓN
+    // (weave_frame) y del preset (paso de línea, altura de capa, ángulos). Sin esto, escalar o
+    // girar la pieza dejaba FUERA del gizmo el tejido calculado antes, porque esta clave no
+    // cambiaba. Síntoma que vio el usuario: al escalar, dentro del gizmo bien y fuera mal
+    // hasta volver a aplicar el perfil. La traslación de la instancia no entra: el ancla la
+    // cancela y mover la pieza no cambia el tejido.
+    const std::hash<double> hd;
+    if (owner && !owner->instances.empty()) {
+        const Transform3d im = owner->instances.front()->get_transformation().get_matrix();
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) mix(h, (uint64_t) hd(im(r, c)));
+    }
+    if (mv) {
+        const Transform3d vm = mv->get_matrix();
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c) mix(h, (uint64_t) hd(vm(r, c)));
+    }
+    mix(h, (uint64_t) hd(weave_top_line_spacing()));
+    mix(h, (uint64_t) hd(weave_layer_height()));
+    mix(h, (uint64_t) hd(double(weave_solid_infill_dir_rad())));
+    {
+        const auto& pc = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        for (const char* k : { "interlayer_colormix_angle", "interlayer_colormix_penu_angle" })
+            if (auto* o = pc.option<ConfigOptionInt>(k)) mix(h, (uint64_t)(int64_t) o->value);
+    }
     return h;
 }
 
@@ -321,10 +346,11 @@ CoexistOverlap mmu_sandwich_overlap(const ModelObject* mo)
 // pidió expresamente NO retirarlos porque sirven justo para este frente.
 // ==================================================================================
 
-double weave_layer_height()
+double weave_layer_height(const Slic3r::DynamicPrintConfig* cfg)
 {
-    if (auto* o = wxGetApp().preset_bundle->prints.get_edited_preset()
-                      .config.option<ConfigOptionFloat>("layer_height"))
+    const Slic3r::DynamicPrintConfig& c = cfg
+        ? *cfg : wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    if (auto* o = c.option<ConfigOptionFloat>("layer_height"))
         if (o->value > 0.001) return o->value;
     return 0.2;
 }
@@ -335,9 +361,10 @@ double weave_layer_height()
 // lays there. Resolved from config WITHOUT a slice (top_surface_line_width → line_width
 // → nozzle), so a Calculate/pre-slice pass is not required for the pitch. See on-screen
 // notice for the only thing slicing would add (per-layer auto-angle).
-double weave_top_line_width()
+double weave_top_line_width(const Slic3r::DynamicPrintConfig* cfg_in)
 {
-    const auto& cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    const Slic3r::DynamicPrintConfig& cfg = cfg_in
+        ? *cfg_in : wxGetApp().preset_bundle->prints.get_edited_preset().config;
     double nozzle = 0.4;
     if (auto* nd = wxGetApp().preset_bundle->printers.get_edited_preset()
                        .config.option<ConfigOptionFloats>("nozzle_diameter"))
@@ -355,6 +382,21 @@ double weave_top_line_width()
         if (v > 0.05) top = v;
     }
     return (top > 0.05) ? top : 0.45;
+}
+
+
+// NEOTKO_COLORSTITCH_TAG — s314: separación REAL entre líneas. Ver la nota de la
+// declaración en el .hpp para el porqué de la fórmula y la medida contra el gcode.
+// Es la única función que debe usarse para convertir milímetros en número de líneas.
+double weave_top_line_spacing(const Slic3r::DynamicPrintConfig* cfg_in)
+{
+    const double w = weave_top_line_width(cfg_in);
+    const double h = weave_layer_height(cfg_in);
+    // Flow::rounded_rectangle_extrusion_spacing (Flow.cpp:183), literal.
+    const double sp = w - h * (1.0 - 0.25 * M_PI);
+    // El motor ABORTA el slice si esto sale <= 0 (FlowErrorNegativeSpacing). Aquí es sólo
+    // preview, así que se devuelve un mínimo utilizable en vez de reventar el diálogo.
+    return (sp > 0.01) ? sp : std::max(0.01, w);
 }
 
 
@@ -385,7 +427,8 @@ float weave_solid_infill_dir_rad()
 // Returns physical tool indices (length n_lines for modes 1-3; pattern length for
 // mode 0 → caller tiles). Empty kv ⇒ empty result.
 std::vector<int> colorstitch_tool_sequence(
-    const std::map<std::string, std::string>& kv, bool penu, int n_lines)
+    const std::map<std::string, std::string>& kv, bool penu, int n_lines,
+    double spacing_mm)
 {
     if (kv.empty()) return {};
     n_lines = std::max(1, n_lines);
@@ -416,6 +459,43 @@ std::vector<int> colorstitch_tool_sequence(
     case 1: seq = Slic3r::ColorStitch::build_dithered_tools_2color(n_lines, ta, tb, pa, ea, ga); break;
     case 2: seq = Slic3r::ColorStitch::build_dithered_tools_3color(n_lines, ta, tb, tc, pa, pb, ea, ga, ov); break;
     case 3: seq = Slic3r::ColorStitch::build_custom_bands(n_lines, ta, ba, tb, bb, tc, bc, td, bd); break;
+    // NEOTKO_COLORSTITCH_TAG — s314: modo 4, bandas en MM. Aquí NO se llama a ningún
+    // builder del motor porque en modo 4 el motor tampoco construye una secuencia: cada
+    // línea muestrea el diseño (compute_slot_per_line_band_mm). Lo que se replica es esa
+    // función, no un builder — misma cuenta, mismas unidades, mismo fmod sobre el periodo.
+    case 4: {
+        const double ma = gd("band_mm_a", 0.0), mb = gd("band_mm_b", 0.0);
+        const double mc = gd("band_mm_c", 0.0), md = gd("band_mm_d", 0.0);
+        constexpr double kMinBandMM = 1e-4;
+        std::vector<std::pair<double,int>> bands;   // (mm, tool)
+        if (ma > kMinBandMM && ta >= 0) bands.emplace_back(ma, ta);
+        if (mb > kMinBandMM && tb >= 0) bands.emplace_back(mb, tb);
+        if (mc > kMinBandMM && tc >= 0) bands.emplace_back(mc, tc);
+        if (md > kMinBandMM && td >= 0) bands.emplace_back(md, td);
+        if (bands.size() < 2) break;                // < 2 bandas → sin tejido, como el motor
+        if (inv) std::reverse(bands.begin(), bands.end());
+        double period = 0.0;
+        for (auto& b : bands) period += b.first;
+        if (period <= 1e-6) break;
+        const double sp = (spacing_mm > 1e-4) ? spacing_mm : weave_top_line_spacing();
+        seq.reserve(n_lines);
+        for (int i = 0; i < n_lines; ++i) {
+            // Centro de la línea i, igual que el centroide que proyecta el motor.
+            double r = std::fmod((double(i) + 0.5) * sp, period);
+            if (r < 0.0) r += period;
+            int slot = int(bands.size()) - 1;
+            double acc = 0.0;
+            for (size_t k = 0; k < bands.size(); ++k) {
+                acc += bands[k].first;
+                if (r < acc) { slot = int(k); break; }
+            }
+            seq.push_back(bands[slot].second);
+        }
+        // El invert de los modos 0-3 voltea la secuencia entera al final; en modo 4 ya se
+        // aplicó volteando el CICLO (igual que en el motor), así que hay que salir aquí
+        // para no aplicarlo dos veces.
+        return seq;
+    }
     default: {   // mode 0 — pattern string, digit → 0-based physical tool ('1' → 0)
         std::string pat;
         auto pit = kv.find(penu ? std::string("interlayer_colormix_pattern_penultimate")
@@ -537,12 +617,172 @@ float colorstitch_weave_theta(const std::map<std::string, std::string>& kv, bool
 // alimenta ese marcador — sólo ha cambiado CÓMO se comunica, no qué se detecta.
 
 // NEOTKO_COLORSTITCH_TAG — one WeaveParams from a projected extent [pmin,pmax] along `theta`.
-// N (line count) comes from the REAL line width; pitch = span/N so each stripe is one line
-// wide (≈ line_w) until the LUT cap (64), beyond which it coarsens to still cover the span.
+// N (line count) comes from the REAL line spacing; pitch = span/N so each stripe is one line
+// wide until the LUT cap (64), beyond which it coarsens to still cover the span.
+// ⚠️ s314 — `line_w` recibe ahora weave_top_line_spacing(), NO el ancho. El nombre se
+// conserva para no tocar las firmas, pero la magnitud es la separación real entre líneas
+// (ancho − altura·(1−π/4)). Con el ancho se contaban un 10-17% menos de líneas de las que
+// el slicer pone de verdad, y el error era distinto en cada objeto del plato.
+// NEOTKO_COLORSTITCH_TAG — s318 F3. Ver la nota larga de la declaración (.hpp).
+WeaveFrame weave_frame(const ModelVolume* mv, const ModelObject* owner,
+                       float theta_rad, bool canon_half_plane)
+{
+    WeaveFrame fr;
+    // perp en el marco de REBANADO, igual que lane_perp_axis(): θ mod π si es autorado, y el
+    // semiplano sólo cuando no lo es (en auto el motor mide el eje de la geometría).
+    double ang = double(theta_rad);
+    if (!canon_half_plane) {
+        ang = std::fmod(ang, M_PI);
+        if (ang < 0.0) ang += M_PI;
+    }
+    Vec3d perp(-std::sin(ang), std::cos(ang), 0.0);
+    if (canon_half_plane
+        && (perp.y() < -1e-12 || (std::abs(perp.y()) <= 1e-12 && perp.x() < 0.0)))
+        perp = -perp;
+
+    // Tipos escritos a mano: con `auto` Eigen guarda la receta, no el resultado.
+    Matrix3d L = Matrix3d::Identity();
+    if (owner && !owner->instances.empty()) {
+        const Transform3d inst = owner->instances.front()->get_transformation().get_matrix();
+        L = inst.linear();
+    }
+    Matrix3d Rv = Matrix3d::Identity();
+    Vec3d    tv = Vec3d::Zero();
+    if (mv) {
+        const Transform3d vm = mv->get_matrix();
+        Rv = vm.linear();
+        tv = vm.translation();
+    }
+    const Matrix3d LR = L * Rv;
+    const Vec3d    ax = LR.transpose() * perp;
+    const Vec3d    Lt = L * tv;
+    fr.axis[0] = float(ax.x());
+    fr.axis[1] = float(ax.y());
+    fr.axis[2] = float(ax.z());
+    fr.anchor_proj = float(-perp.dot(Lt));
+    return fr;
+}
+
+// NEOTKO_COLORSTITCH_TAG — s318 F3: degradado (modos 1/2) muestreado POR CARRIL, como el
+// motor (ColorStitch.cpp, rama GRAD_FIELD: compute_field_groups + FieldSampler +
+// build_dithered_tools_*_at). Antes el preview repartía N líneas contadas desde el borde de
+// la isla con los builders de RECUENTO, e ignoraba `gradient_span_mm` y `repetitions`: un
+// degradado con periodo físico salía en pantalla estirado una vez sobre toda la zona.
+// Todo va en posiciones RELATIVAS al ancla (origen del objeto), como en el motor:
+//   · periodo > 0: carril k = round(fmod(pos, periodo)/sp), t = k/(periodo/sp). Se tesela
+//     un periodo con paso periodo/n exacto, para que no derive de un ciclo al siguiente;
+//   · ajustar a la superficie: t = (k−k0)/(k1−k0) entre los carriles observados. Los
+//     centros de línea caen medio paso por dentro del borde, de ahí el `inset`.
+//   · `repetitions` > 1 sin periodo = periodo (k1−k0)·sp/reps, la misma traducción del motor.
+//   · invertir = dar la vuelta a la lista de tools (el motor invierte la `t` y el orden de los
+//     grupos, que con carriles equiespaciados es lo mismo).
+// Devuelve false si la receta no da tools válidos (mismo filtro que el preflight del motor)
+// o si la superficie es de un solo carril; el llamador cae entonces al camino de siempre.
+// NEOTKO_COLORSTITCH_TAG — s318 F3: la rejilla de carriles del motor (FieldSampler) traducida
+// a una LUT del shader. DUEÑA ÚNICA de esa traducción en el preview: la usan el degradado de
+// ColorStitch y la rampa de PathBlend, igual que en el motor comparten FieldSampler.
+// Todo relativo al ancla (origen del objeto proyectado):
+//   · periodo > 0: carril k = round(fmod(pos, periodo)/sp), t = k/(periodo/sp). Se tesela un
+//     periodo con paso periodo/n EXACTO para que no derive de un ciclo al siguiente;
+//   · ajustar: t = (k−k0)/(k1−k0) entre los carriles de los extremos. `inset` = los extremos
+//     son centros de línea (medio paso por dentro del borde, lo que ve ColorStitch); sin
+//     inset son el contorno (lo que usa PathBlend, Fill.cpp _pb_renorm);
+//   · `reps` > 1 sin periodo = periodo (k1−k0)·sp/reps (traducción del motor, ColorStitch).
+// false = superficie de un solo carril (el motor da t = 0,5 ahí).
+struct FieldLut { std::vector<double> t; bool tile = false; double pitch = 1.0, p0 = 0.0; };
+static bool field_lut(double pmin, double pmax, double anchor, double sp, double period,
+                      int reps, bool inset_edges, FieldLut& out)
+{
+    sp = std::max(1e-3, sp);
+    const double r0 = pmin - anchor, r1 = pmax - anchor;
+    const double inset = (inset_edges && r1 - r0 > sp) ? 0.5 * sp : 0.0;
+    const long long k0 = std::llround((r0 + inset) / sp);
+    const long long k1 = std::max(k0, (long long) std::llround((r1 - inset) / sp));
+    if (period <= 1e-4 && reps > 1)
+        period = double(k1 - k0) * sp / double(reps);
+    out.t.clear();
+    if (period > 1e-4) {
+        const int n = std::clamp((int) std::lround(period / sp), 2, 64);
+        out.pitch = period / double(n);
+        out.t.resize(n);
+        for (int i = 0; i < n; ++i) out.t[i] = double(i) / double(n);
+        out.tile = true;
+        out.p0   = anchor - 0.5 * out.pitch;
+        return true;
+    }
+    const long long N = k1 - k0 + 1;
+    if (N < 2) return false;
+    const int n = int(std::min<long long>(N, 64));
+    out.pitch = double(N) * sp / double(n);   // == sp mientras quepa en la LUT
+    out.t.resize(n);
+    for (int i = 0; i < n; ++i) out.t[i] = double(i) / double(n - 1);
+    out.tile = false;
+    out.p0   = anchor + (double(k0) - 0.5) * sp;
+    return true;
+}
+
+static bool gradient_field_weave(const std::map<std::string, std::string>& kv,
+                                 const std::vector<std::string>& fcolors,
+                                 float theta, float pmin, float pmax, float sp_f,
+                                 float anchor_proj, WeaveParams& w,
+                                 std::vector<int>* out_tools = nullptr)
+{
+    const std::string pre = "interlayer_colormix_";
+    auto gi = [&](const char* k, int d) {
+        const auto it = kv.find(pre + k);
+        if (it != kv.end()) { try { return std::stoi(it->second); } catch (...) {} }
+        return d; };
+    auto gd = [&](const char* k, double d) {
+        const auto it = kv.find(pre + k);
+        if (it != kv.end()) { try { return std::stod(it->second); } catch (...) {} }
+        return d; };
+    auto gb = [&](const char* k, bool d) {
+        const auto it = kv.find(pre + k);
+        return it != kv.end() ? (it->second == "1" || it->second == "true") : d; };
+
+    const int mode = gi("mode", 0);
+    const int ta = gi("tool_a", 0), tb = gi("tool_b", 1), tc = gi("tool_c", 2);
+    if (mode == 1 && !(ta >= 0 && tb >= 0 && ta != tb)) return false;
+    if (mode == 2 && !(ta >= 0 && tb >= 0 && tc >= 0 && (ta != tb || tb != tc))) return false;
+    if (mode != 1 && mode != 2) return false;
+
+    const double sp      = std::max(1e-3, double(sp_f));
+    const double span_mm = std::max(0.0, gd("gradient_span_mm", 0.0));
+    const int    reps    = std::max(1, gi("repetitions", 1));
+    const bool   inv     = gb("invert", false);
+
+    FieldLut lut;
+    if (!field_lut(pmin, pmax, anchor_proj, sp, span_mm, reps, /*inset*/ true, lut))
+        return false;
+    const std::vector<double>& t_asc = lut.t;
+    w.tile  = lut.tile;
+    w.pitch = float(lut.pitch);
+    w.p0    = float(lut.p0);
+
+    std::vector<int> tools = (mode == 1)
+        ? Slic3r::ColorStitch::build_dithered_tools_2color_at(
+              t_asc, ta, tb, gi("pct_a", 50), gi("easing", 0), gd("gamma", 1.0))
+        : Slic3r::ColorStitch::build_dithered_tools_3color_at(
+              t_asc, ta, tb, tc, gi("pct_a", 50), gi("pct_b", 33),
+              gi("easing", 0), gd("gamma", 1.0), gd("overlap", 0.6));
+    if (tools.size() != t_asc.size()) return false;
+    if (inv) std::reverse(tools.begin(), tools.end());
+    if (out_tools) *out_tools = tools;
+
+    w.cols.resize(tools.size());
+    for (size_t i = 0; i < tools.size(); ++i)
+        w.cols[i] = (tools[i] >= 0) ? tool_col_rgba(fcolors, tools[i])
+                                    : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+    w.on = true;
+    w.angle_rad = theta;
+    return true;
+}
+
 WeaveParams
 colorstitch_make_weave(const std::map<std::string, std::string>& kv,
                        const std::vector<std::string>& fcolors,
-                       float theta, float pmin, float pmax, float line_w)
+                       float theta, float pmin, float pmax, float line_w,
+                       float anchor_proj, std::vector<int>* out_tools)
 {
     WeaveParams w;
     const float span = pmax - pmin;
@@ -555,8 +795,10 @@ colorstitch_make_weave(const std::map<std::string, std::string>& kv,
 
     auto fill_cols = [&](const std::vector<int>& seq, int count) {
         w.cols.resize(count);
+        if (out_tools) out_tools->assign(count, 0);   // s318 F3
         for (int i = 0; i < count; ++i) {
             const int tool0 = seq[(size_t) i % seq.size()];
+            if (out_tools) (*out_tools)[i] = tool0;
             w.cols[i] = (tool0 >= 0) ? tool_col_rgba(fcolors, tool0)
                                      : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
         }
@@ -568,8 +810,45 @@ colorstitch_make_weave(const std::map<std::string, std::string>& kv,
         const std::vector<int> base = colorstitch_tool_sequence(kv, /*penu*/false, 1);
         if (base.empty()) return w;
         const int n = std::min<int>((int) base.size(), 64);
-        w.on = true; w.tile = true; w.angle_rad = theta; w.p0 = pmin; w.pitch = lw;
+        // s318 F3 — FASE del motor (rama PatternField): carril k = round((pos − ancla)/sp),
+        // entrada = k mod longitud. Con p0 = ancla − medio paso, el floor() del shader da
+        // exactamente ese round(). Antes p0 era el borde de la isla: patrón bien, fase corrida.
+        w.on = true; w.tile = true; w.angle_rad = theta; w.pitch = lw;
+        w.p0 = anchor_proj - 0.5f * lw;
         fill_cols(base, n);
+    } else if (mode == 4) {
+        // NEOTKO_COLORSTITCH_TAG — s314: bandas en MM. Se TESELA un periodo, como el modo 0,
+        // porque el diseño es periódico en milímetros y no depende del tamaño de la isla —
+        // que es justamente lo que este modo viene a arreglar. Una entrada de la LUT por
+        // línea impresa, a paso `lw` (que el llamador pasa ya como SPACING real, no ancho).
+        //
+        // s318 F3 — CERRADO el límite de la FASE: se ancla en el origen del objeto
+        // (`anchor_proj`, ver weave_frame), igual que compute_slot_per_line_band_mm(). Y el
+        // paso pasa a ser periodo/n EXACTO: con paso = spacing, n·paso ≠ periodo y las
+        // bandas derivaban un poco en cada ciclo teselado (8 mm con paso 0,374 → 21 líneas =
+        // 7,85 mm, 0,15 mm de deriva por ciclo).
+        double period_mm = 0.0;
+        for (const char* k : { "interlayer_colormix_band_mm_a", "interlayer_colormix_band_mm_b",
+                               "interlayer_colormix_band_mm_c", "interlayer_colormix_band_mm_d" }) {
+            const auto it = kv.find(k);
+            if (it == kv.end()) continue;
+            try { period_mm += std::max(0.0, std::stod(it->second)); } catch (...) {}
+        }
+        if (period_mm <= 1e-4) return w;
+        // Un periodo entero medido en líneas. Si no cabe en la LUT de 64 se engorda el paso
+        // para que quepa: las proporciones entre bandas se conservan, sólo se pierde
+        // resolución de borde. Mejor eso que recortar el periodo, que mentiría en el ancho.
+        const int   n     = std::clamp((int) std::lround(period_mm / lw), 2, 64);
+        const float pitch = float(period_mm / double(n));
+        const std::vector<int> base =
+            colorstitch_tool_sequence(kv, /*penu*/false, n, /*spacing_mm*/ pitch);
+        if (base.empty()) return w;
+        w.on = true; w.tile = true; w.angle_rad = theta; w.p0 = anchor_proj; w.pitch = pitch;
+        fill_cols(base, n);
+    } else if ((mode == 1 || mode == 2)
+               && gradient_field_weave(kv, fcolors, theta, pmin, pmax, lw, anchor_proj, w,
+                                       out_tools)) {
+        // s318 F3 — degradado por carril, ver gradient_field_weave(). Ya relleno.
     } else {
         // GRADIENT / dither (modes 1-3): span the island once with N real-width lines,
         // capped at the 64-entry LUT (then it coarsens, but the ramp still reads right).
@@ -616,11 +895,14 @@ pathblend_make_weave(const PathBlendPassConfig& pbc,
                      const float bg_rgb[3],
                      double layer_h_mm,
                      float theta,
-                     float pmin, float pmax, float line_w)
+                     float pmin, float pmax, float line_w,
+                     float anchor_proj,
+                     std::vector<std::vector<Slic3r::ColorSci::Layer>>* out_layers)
 {
     WeaveParams w;
     const float span = pmax - pmin;
     if (span < 1e-3f || pbc.tool_bottom < 0) return w;   // w.on stays false
+    if (out_layers) out_layers->clear();
 
     // Same auto-resolution + clamp as the real ramp block (Fill.cpp): mid_end_mm
     // < 0 means auto (default thin cap H-0.04 Full / H Half). s191: hard ceiling
@@ -634,13 +916,24 @@ pathblend_make_weave(const PathBlendPassConfig& pbc,
     const float mid_end  = std::min(mid_pref, float(H));
     const double range = double(mid_end) - double(floor_pb);
 
-    const int N = std::clamp((int)std::lround(span / std::max(line_w, 0.05f)), 4, 64);
+    // NEOTKO_PATHBLEND_TAG — s318 F3: la rampa se muestrea con la MISMA rejilla de carriles
+    // que el motor (Fill.cpp, `_pb_smp`: FieldSampler con el periodo `span_mm`, el ancla en el
+    // origen del objeto y los extremos del CONTORNO, sin inset), y la altura pasa por
+    // profile_u() como en la escalera real (s190). Antes: N líneas contadas desde el borde de
+    // la isla con t lineal, sin periodo ni perfil de entrada/salida.
+    FieldLut lut;
+    if (!field_lut(pmin, pmax, anchor_proj, std::max(line_w, 0.05f),
+                   std::max(0.0, double(pbc.span_mm)), 1, /*inset*/ false, lut)) {
+        // Un solo carril: el motor le da t = 0,5 (FieldSampler, k1 <= k0).
+        lut.t.assign(1, 0.5); lut.tile = true; lut.pitch = 1.0; lut.p0 = 0.0;
+    }
+    const int N = int(lut.t.size());
     w.cols.resize(N);
     const int tb = std::clamp(pbc.tool_bottom, 0, 3);
     const int tt = std::clamp(pbc.tool_top,    0, 3);
     for (int i = 0; i < N; ++i) {
-        const double t      = (N > 1) ? double(i) / double(N - 1) : 0.5;
-        const double h_ramp = floor_pb + t * range;
+        const double t      = lut.t[i];
+        const double h_ramp = floor_pb + pbc.profile_u(t) * range;
         const double h_cap  = H - h_ramp;
 
         std::vector<Slic3r::ColorSci::Layer> layers;
@@ -664,9 +957,295 @@ pathblend_make_weave(const PathBlendPassConfig& pbc,
         float rgb[3];
         Slic3r::ColorSci::blend_stacked(layers, bg_rgb, rgb);
         w.cols[i] = ColorRGBA(rgb[0], rgb[1], rgb[2], 1.f);
+        if (out_layers) out_layers->push_back(layers);   // s318 F3
     }
-    w.on = true; w.tile = false; w.angle_rad = theta; w.p0 = pmin; w.pitch = span / float(N);
+    w.on = true; w.tile = lut.tile; w.angle_rad = theta;
+    w.p0 = float(lut.p0); w.pitch = float(lut.pitch);
     return w;
+}
+
+// ==================================================================================
+// NEOTKO_COLORSTITCH_TAG — s318 F3, OPCIÓN A: Top y Penu compuestos por fragmento.
+// Decisión del usuario (s318): "es el correcto, ya que aproxima lo que sucede en la
+// realidad".
+//
+// 🔑 Por qué se puede hacer exacto con dos tablas. blend_stacked() (ColorSci.cpp) compone
+// cada capa como  acc = color·(1−T) + acc·T  por canal, en LINEAL, con T = 0,1^(ratio/td)
+// (T = 0 si td≈0: opaca). Eso es AFÍN en `acc`. Una pila entera de pases es entonces una
+// composición de afines = otro afín  (A, B): lo de abajo entra multiplicado por A y se le
+// suma B. Así que para dos pases con efecto, cada uno con su eje:
+//     color = arriba ∘ PaseAlto_j ∘ medio ∘ PaseBajo_i ∘ abajo (fondo)
+// se reparte en dos LUT: la del pase bajo guarda el color YA compuesto hasta él (c2_i) y la
+// del alto guarda su afín con lo de encima ya plegado (A_j, B_j). El shader sólo hace
+// A_j·c2_i + B_j y lo pasa a sRGB. Sin aproximar nada que el color plano del slot
+// (sandwich_colour_stacked) no aproxime ya.
+//
+// El afín de un pase se MIDE con la propia física: se compone sobre negro y sobre blanco
+// (sRGB 0 y 1 = lineal 0 y 1) ⇒ B = lin(sobre negro), A = lin(sobre blanco) − B. Así los
+// pases fijos pasan por el MISMO pass_to_layer del color del slot, sin copiarlo.
+// Cada franja de ColorStitch es su pase con kind=Solid y el tool de esa franja; cada franja
+// de PathBlend son sus capas rampa+tapa (las de pathblend_make_weave).
+//
+// Qué pases llevan tejido: el primer ColorStitch (o, si no hay, el primer PathBlend) de la
+// pila Penu, y el de la pila Top; es el mismo criterio que colorstitch_top_kv /
+// pathblend_top_config. Un tercer pase con efecto se compone plano, como hace el slot.
+// ==================================================================================
+struct TopZoneRecipe {
+    struct Aff { float A[3] = {1.f, 1.f, 1.f}; float B[3] = {0.f, 0.f, 0.f}; };
+    struct Field {
+        bool   on = false, pb = false, penu = false, is_auto = false;
+        std::map<std::string, std::string> kv;   // ColorStitch, YA con claves de Top
+        PathBlendPassConfig pbc;
+        SurfacePass pass;                        // copia: ratio y tipo, para las franjas
+        float theta = 0.f;
+        WeaveFrame fr;
+    };
+    Field lo, hi;            // lo = el pase de abajo (o el único); hi = el de arriba
+    Aff   below, mid, above; // pases fijos: bajo lo, entre lo y hi, sobre hi (o sobre lo)
+};
+
+namespace {
+using ZAff = TopZoneRecipe::Aff;
+
+// g∘f: primero f (abajo) y encima g.
+ZAff zaff_then(const ZAff& f, const ZAff& g)
+{
+    ZAff r;
+    for (int c = 0; c < 3; ++c) {
+        r.A[c] = g.A[c] * f.A[c];
+        r.B[c] = g.A[c] * f.B[c] + g.B[c];
+    }
+    return r;
+}
+
+ZAff zaff_from_black_white(const float o0[3], const float o1[3])
+{
+    ZAff r;
+    for (int c = 0; c < 3; ++c) {
+        const float e = Slic3r::ColorSci::srgb_to_linear(o0[c]);
+        r.B[c] = e;
+        r.A[c] = std::max(0.f, Slic3r::ColorSci::srgb_to_linear(o1[c]) - e);
+    }
+    return r;
+}
+
+ZAff zaff_of_pass(const SurfacePass& p, bool penu_role, const Slic3r::ColorSci::Material mats[4])
+{
+    SurfacePassStack one;
+    one.enabled = true;
+    one.passes.push_back(p);
+    const SurfacePassStack none;
+    const float k0[3] = {0.f, 0.f, 0.f}, k1[3] = {1.f, 1.f, 1.f};
+    float o0[3], o1[3];
+    // El rol importa: pass_to_layer busca el patrón de un ColorStitch con las claves del rol.
+    const SurfacePassStack& t = penu_role ? none : one;
+    const SurfacePassStack& q = penu_role ? one  : none;
+    Slic3r::ColorSci::sandwich_colour_stacked(t, q, mats, k0, o0);
+    Slic3r::ColorSci::sandwich_colour_stacked(t, q, mats, k1, o1);
+    return zaff_from_black_white(o0, o1);
+}
+
+ZAff zaff_of_layers(const std::vector<Slic3r::ColorSci::Layer>& layers)
+{
+    const float k0[3] = {0.f, 0.f, 0.f}, k1[3] = {1.f, 1.f, 1.f};
+    float o0[3], o1[3];
+    Slic3r::ColorSci::blend_stacked(layers, k0, o0);
+    Slic3r::ColorSci::blend_stacked(layers, k1, o1);
+    return zaff_from_black_white(o0, o1);
+}
+
+// El kv de un pase de la pila Penu trae las claves `interlayer_colormix_penu_*` (el motor
+// elige el subconjunto por rol). Todo el preview lee claves de Top, así que se traducen.
+std::map<std::string, std::string> kv_as_top_role(const std::map<std::string, std::string>& kv,
+                                                  bool penu)
+{
+    if (!penu) return kv;
+    static const std::string pp = "interlayer_colormix_penu_", tp = "interlayer_colormix_";
+    std::map<std::string, std::string> out = kv;
+    for (const auto& [k, v] : kv) {
+        if (k.compare(0, pp.size(), pp) == 0)
+            out[tp + k.substr(pp.size())] = v;
+        else if (k == "interlayer_colormix_pattern_penultimate")
+            out["interlayer_colormix_pattern_top"] = v;
+    }
+    // Sin ángulo en el pase, manda el del Penu del preset (no el del Top, que es lo que
+    // colorstitch_weave_theta usaría de fallback).
+    if (kv.find(pp + "angle") == kv.end()) {
+        const auto& pc = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        if (auto* a = pc.option<ConfigOptionInt>("interlayer_colormix_penu_angle"))
+            out[tp + "angle"] = std::to_string(a->value);
+    }
+    return out;
+}
+
+// Tejido de UN pase con efecto y el afín de cada una de sus franjas.
+bool zone_field_stripes(const TopZoneRecipe::Field& F,
+                        const std::vector<std::string>& fcolors,
+                        const Slic3r::ColorSci::Material mats[4], const float bg_rgb[3],
+                        float line_w, double lh, float pmin, float pmax,
+                        WeaveParams& w, std::vector<ZAff>& aff)
+{
+    aff.clear();
+    if (F.pb) {
+        std::vector<std::vector<Slic3r::ColorSci::Layer>> layers;
+        w = pathblend_make_weave(F.pbc, mats, bg_rgb, lh, F.theta, pmin, pmax, line_w,
+                                 F.fr.anchor_proj, &layers);
+        if (!w.on || layers.size() != w.cols.size()) return false;
+        // Las capas de pathblend_make_weave son fracciones de la capa ENTERA; dentro de una
+        // pila el pase ocupa `ratio` de ella. Con un PathBlend solo (ratio 1) no cambia nada.
+        const float r = (F.pass.ratio > 1e-6) ? float(F.pass.ratio) : 1.f;
+        for (auto& L : layers) {
+            for (auto& l : L) l.ratio *= r;
+            aff.push_back(zaff_of_layers(L));
+        }
+    } else {
+        std::vector<int> tools;
+        w = colorstitch_make_weave(F.kv, fcolors, F.theta, pmin, pmax, line_w,
+                                   F.fr.anchor_proj, &tools);
+        if (!w.on || tools.size() != w.cols.size()) return false;
+        for (int t : tools) {
+            SurfacePass s = F.pass;
+            s.kind       = SurfacePassKind::Solid;
+            s.solid_tool = std::clamp(t, 0, 3);
+            aff.push_back(zaff_of_pass(s, F.penu, mats));
+        }
+    }
+    std::copy(F.fr.axis, F.fr.axis + 3, w.axis);
+    return true;
+}
+} // namespace
+
+std::shared_ptr<const TopZoneRecipe> resolve_top_zone(const SurfaceEffectProfile& prof,
+                                                      const ModelVolume* mv, const ModelObject* owner,
+                                                      const Slic3r::ColorSci::Material mats[4])
+{
+    // Perfil legacy (payload sin pilas): se queda en el camino de siempre.
+    if (prof.stack_top_json.empty() && prof.stack_penu_json.empty()) return nullptr;
+    if (prof.stack_top_json.empty() && prof.colorstitch.present) return nullptr;
+    const SurfacePassStack st_t = SurfacePassStack::from_json(prof.stack_top_json);
+    const SurfacePassStack st_p = SurfacePassStack::from_json(prof.stack_penu_json);
+
+    // La pila física de abajo arriba, con el mismo filtro `enabled` que sandwich_colour_stacked.
+    struct Item { const SurfacePass* p; bool penu; };
+    std::vector<Item> L;
+    if (st_p.enabled) for (const SurfacePass& p : st_p.passes) L.push_back({ &p, true });
+    if (st_t.enabled) for (const SurfacePass& p : st_t.passes) L.push_back({ &p, false });
+
+    auto pick = [&](bool penu) -> int {
+        int first_pb = -1;
+        for (int i = 0; i < (int) L.size(); ++i) {
+            if (L[i].penu != penu) continue;
+            const SurfacePass& p = *L[i].p;
+            if (p.kind == SurfacePassKind::ColorStitch && !p.colorstitch.kv.empty()) return i;
+            if (p.kind == SurfacePassKind::PathBlend && first_pb < 0) first_pb = i;
+        }
+        return first_pb;
+    };
+    const int ip = pick(true), it = pick(false);
+    if (ip < 0 && it < 0) return nullptr;
+    const int ilo = (ip >= 0) ? ip : it;
+    const int ihi = (ip >= 0 && it >= 0) ? it : -1;
+
+    auto R = std::make_shared<TopZoneRecipe>();
+    auto fill = [&](int idx, TopZoneRecipe::Field& F) {
+        const SurfacePass& p = *L[idx].p;
+        F.on = true; F.penu = L[idx].penu; F.pass = p;
+        if (p.kind == SurfacePassKind::PathBlend) {
+            F.pb      = true;
+            F.pbc     = pro_pb_read(p);
+            F.is_auto = (F.pbc.fill_angle < 0);
+            F.theta   = F.is_auto ? weave_solid_infill_dir_rad()
+                                  : float(F.pbc.fill_angle) * float(M_PI) / 180.f;
+        } else {
+            F.kv    = kv_as_top_role(p.colorstitch.kv, F.penu);
+            F.theta = colorstitch_weave_theta(F.kv, F.is_auto);
+        }
+        // Semiplano cuando el motor MIDE el eje: ColorStitch en auto y PathBlend siempre
+        // (Fill.cpp _pb_measure_axis canoniza el eje medido a +Y / +X).
+        F.fr = weave_frame(mv, owner, F.theta, /*canon*/ F.pb || F.is_auto);
+    };
+    fill(ilo, R->lo);
+    if (ihi >= 0) fill(ihi, R->hi);
+
+    auto seg = [&](int a, int b) {
+        ZAff f;
+        for (int i = std::max(0, a); i < std::min(b, (int) L.size()); ++i)
+            f = zaff_then(f, zaff_of_pass(*L[i].p, L[i].penu, mats));
+        return f;
+    };
+    R->below = seg(0, ilo);
+    if (ihi >= 0) { R->mid = seg(ilo + 1, ihi); R->above = seg(ihi + 1, (int) L.size()); }
+    else          { R->above = seg(ilo + 1, (int) L.size()); }
+    return R;
+}
+
+const WeaveFrame& top_zone_frame(const TopZoneRecipe& r, bool hi)
+{
+    return (hi && r.hi.on) ? r.hi.fr : r.lo.fr;
+}
+
+bool top_zone_auto(const TopZoneRecipe& r)
+{
+    return r.lo.is_auto || (r.hi.on && r.hi.is_auto);
+}
+
+WeaveParams make_zone_weave(const TopZoneRecipe& R,
+                            const std::vector<std::string>& fcolors,
+                            const Slic3r::ColorSci::Material mats[4], const float bg_rgb[3],
+                            float line_w, double lh,
+                            float lo_min, float lo_max, float hi_min, float hi_max)
+{
+    WeaveParams out;
+    WeaveParams wlo;
+    std::vector<ZAff> alo;
+    if (!zone_field_stripes(R.lo, fcolors, mats, bg_rgb, line_w, lh, lo_min, lo_max, wlo, alo))
+        return out;   // .on = false → color plano del slot
+
+    // ¿Hay pase de arriba con tejido? Si existe pero no da tejido (isla diminuta), entra
+    // como pase fijo: su afín se pliega con lo de encima.
+    WeaveParams       whi;
+    std::vector<ZAff> ahi;
+    const bool two = R.hi.on
+        && zone_field_stripes(R.hi, fcolors, mats, bg_rgb, line_w, lh, hi_min, hi_max, whi, ahi);
+    ZAff after_lo = R.above;
+    if (R.hi.on && !two)
+        after_lo = zaff_then(zaff_then(R.mid, zaff_of_pass(R.hi.pass, R.hi.penu, mats)), R.above);
+    else if (two)
+        after_lo = R.mid;
+
+    float c0[3];
+    for (int c = 0; c < 3; ++c)
+        c0[c] = R.below.A[c] * Slic3r::ColorSci::srgb_to_linear(bg_rgb[c]) + R.below.B[c];
+
+    // LUT 2 = el pase de abajo, con todo lo que tiene debajo y lo fijo de encima ya compuesto.
+    out.cols2.resize(alo.size());
+    for (size_t i = 0; i < alo.size(); ++i) {
+        const ZAff f = zaff_then(alo[i], after_lo);
+        out.cols2[i] = ColorRGBA(f.A[0] * c0[0] + f.B[0], f.A[1] * c0[1] + f.B[1],
+                                 f.A[2] * c0[2] + f.B[2], 1.f);
+    }
+    out.tile2 = wlo.tile; out.pitch2 = wlo.pitch; out.p0_2 = wlo.p0;
+    std::copy(wlo.axis, wlo.axis + 3, out.axis2);
+
+    // LUT 1 = el pase de arriba (su afín con lo de encima plegado) o, si no hay, la identidad.
+    if (two) {
+        out.tile = whi.tile; out.pitch = whi.pitch; out.p0 = whi.p0; out.angle_rad = whi.angle_rad;
+        std::copy(whi.axis, whi.axis + 3, out.axis);
+        out.cols.resize(ahi.size());
+        out.dual_a.resize(ahi.size());
+        for (size_t j = 0; j < ahi.size(); ++j) {
+            const ZAff f = zaff_then(ahi[j], R.above);
+            out.dual_a[j] = ColorRGBA(f.A[0], f.A[1], f.A[2], 1.f);
+            out.cols[j]   = ColorRGBA(f.B[0], f.B[1], f.B[2], 1.f);
+        }
+    } else {
+        out.tile = true; out.pitch = 1.f; out.p0 = 0.f; out.angle_rad = wlo.angle_rad;
+        out.cols.assign(1, ColorRGBA(0.f, 0.f, 0.f, 1.f));
+        out.dual_a.assign(1, ColorRGBA(1.f, 1.f, 1.f, 1.f));
+    }
+    out.dual = true;
+    out.on   = true;
+    return out;
 }
 
 
@@ -687,7 +1266,8 @@ void weave_islands_for_volume(const ModelVolume*              mv,
     // NEOTKO_SANDWICH_TAG — Fase 3.2: real bg, see build_ebt_weave_for_volume.
     float bg_rgb[3] = {0.f, 0.f, 0.f};
     object_base_bg(mats, owner, bg_rgb);
-    const float line_w = (float) weave_top_line_width();
+    // NEOTKO_COLORSTITCH_TAG — s314: SPACING, no ancho. Ver weave_top_line_spacing().
+    const float line_w = (float) weave_top_line_spacing();
     const double lh = weave_layer_height();
 
     // NEOTKO_BOTTOM_TAG — s231 F7: clasificación TOP / BOTTOM de cada faceta. Es lo que
@@ -830,7 +1410,12 @@ void weave_islands_for_volume(const ModelVolume*              mv,
                 continue;
             }
         }
-        if (kv.empty() && !is_pathblend) continue;
+        // s318 F3 — OPCIÓN A: la zona Top sale compuesta con el Penu (ver make_zone_weave).
+        // Se resuelve aunque el Top no tenga efecto: un Penu con ColorStitch bajo un Top
+        // sólido también se ve a través de él.
+        std::shared_ptr<const TopZoneRecipe> zr;
+        if (!zone_bottom) zr = resolve_top_zone(*p, mv, owner, mats);
+        if (!zr && kv.empty() && !is_pathblend) continue;
 
         bool is_auto = false;
         // NEOTKO_PATHBLEND_TAG — s280e: el ángulo de PathBlend YA se dibuja.
@@ -860,8 +1445,14 @@ void weave_islands_for_volume(const ModelVolume*              mv,
         // 📌 s280e — ya NO es "centroide Y": el eje estaba clavado a Y y ése era el bug que
         // colapsaba el efecto a 90°. Ahora se mide sobre las líneas reales.
         if (is_pathblend && pbc.fill_angle < 0) is_auto = true;
+        if (zr) is_auto = top_zone_auto(*zr);
         if (is_auto && any_auto_angle) *any_auto_angle = true;
-        const float sN = std::sin(theta), cN = std::cos(theta);
+        // s318 F3 — proyectar en el MISMO marco que el motor (ver weave_frame). Semiplano cuando
+        // el motor MIDE el eje: ColorStitch en auto y PathBlend siempre (Fill.cpp
+        // _pb_measure_axis lo canoniza a +Y). Con receta compuesta, cada pase trae su marco.
+        const WeaveFrame fr  = zr ? top_zone_frame(*zr, false)
+                                  : weave_frame(mv, owner, theta, /*canon*/ is_pathblend || is_auto);
+        const WeaveFrame fr2 = zr ? top_zone_frame(*zr, true) : fr;
 
         std::vector<int> src;   // parallel to its.indices → original facet index
         const indexed_triangle_set its = sel->get_facets(static_cast<EnforcerBlockerType>(s), src);
@@ -909,6 +1500,7 @@ void weave_islands_for_volume(const ModelVolume*              mv,
         // per-island projected extent + which island each emitted triangle belongs to
         std::map<int,int> root_to_island;
         std::vector<float> imin, imax;
+        std::vector<float> jmin, jmax;   // s318 F3 — extremos sobre el eje del pase de arriba
         std::vector<int>   tri_island(its.indices.size(), -1);
         for (size_t k = 0; k < its.indices.size(); ++k) {
             if (face_of[k] != want_facing) continue;   // s231 F7 — no es de esta zona
@@ -919,22 +1511,36 @@ void weave_islands_for_volume(const ModelVolume*              mv,
                 isl = int(imin.size());
                 root_to_island.emplace(root, isl);
                 imin.push_back(1e9f); imax.push_back(-1e9f);
+                jmin.push_back(1e9f); jmax.push_back(-1e9f);
             } else isl = rit->second;
             tri_island[k] = isl;
             for (int c = 0; c < 3; ++c) {
                 const stl_vertex& v = its.vertices[its.indices[k][c]];
-                const float pr = -v.x() * sN + v.y() * cN;
+                const float pr = fr.proj(v.x(), v.y(), v.z());   // s318 F3
                 imin[isl] = std::min(imin[isl], pr);
                 imax[isl] = std::max(imax[isl], pr);
+                const float pr2 = fr2.proj(v.x(), v.y(), v.z());
+                jmin[isl] = std::min(jmin[isl], pr2);
+                jmax[isl] = std::max(jmax[isl], pr2);
             }
         }
 
         // build one WeaveParams per island; map its facets to the new weave_list entry
         std::vector<int> island_weave(imin.size(), -1);
         for (size_t isl = 0; isl < imin.size(); ++isl) {
-            WeaveParams w = is_pathblend
-                ? pathblend_make_weave(pbc, mats, bg_rgb, lh, theta, imin[isl], imax[isl], line_w)
-                : colorstitch_make_weave(kv, fcolors, theta, imin[isl], imax[isl], line_w);
+            WeaveParams w;
+            if (zr) {
+                // s318 F3 — opción A: los ejes ya van dentro (axis / axis2).
+                w = make_zone_weave(*zr, fcolors, mats, bg_rgb, line_w, lh,
+                                    imin[isl], imax[isl], jmin[isl], jmax[isl]);
+            } else {
+                w = is_pathblend
+                    ? pathblend_make_weave(pbc, mats, bg_rgb, lh, theta, imin[isl], imax[isl], line_w,
+                                           fr.anchor_proj)
+                    : colorstitch_make_weave(kv, fcolors, theta, imin[isl], imax[isl], line_w,
+                                             fr.anchor_proj);
+                std::copy(fr.axis, fr.axis + 3, w.axis);   // s318 F3 — el shader proyecta con esto
+            }
             // NEOTKO_COLORSTITCH_TAG — marca la banda: la lee el marcador de ángulo auto.
             w.auto_angle = is_auto;
             if (!w.on) continue;

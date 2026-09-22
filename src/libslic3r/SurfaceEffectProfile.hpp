@@ -9,11 +9,13 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Slic3r {
 
 class DynamicPrintConfig;
+class ModelConfig;         // NEOTKO_SANDWICH_TAG — s317 move_sandwich_editor_recipes (PrintConfig.hpp)
 struct SurfacePassStack;   // NEOTKO_PROFILE_TAG — payload_from_stacks (ColorStitch.hpp)
 
 enum class SurfaceEffectKind : uint8_t {
@@ -126,6 +128,17 @@ public:
 
     // JSON round-trip — placeholder for Fase C (3mf integration). Empty for now.
     std::string to_json() const;
+    // NEOTKO_COLORSTITCH_TAG — s316 fase B: migra los perfiles pintados (payload + sus TRES pilas)
+    // con ColorStitchLegacyMigration. `sp_mm` = paso nominal del top. Devuelve cuántos cambiaron.
+    int         migrate_legacy_colorstitch(double sp_mm);
+    // NEOTKO_SANDWICH_TAG — s317 fase D: la receta del Sandwich Editor (config del PROYECTO y de
+    // cada OBJETO) pasa a la paleta como perfil "From Sandwich editor", deduplicado, y se APAGA en
+    // esas configs. Además migra (fase B) la config de cada objeto, que no pasa por
+    // handle_legacy_composite. Llamar DESPUÉS de from_json: from_json vacía la paleta.
+    // `objects` = (nombre, config) de cada objeto. Devuelve cuántas fuentes tenían receta.
+    int         move_sandwich_editor_recipes(DynamicPrintConfig& project_cfg,
+                                             const std::vector<std::pair<std::string, ModelConfig*>>& objects,
+                                             double sp_mm);
     bool        from_json(const std::string& text);
 
 private:

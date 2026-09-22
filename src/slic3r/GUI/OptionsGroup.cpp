@@ -17,6 +17,7 @@
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include <wx/scrolwin.h>
 #include "I18N.hpp"
 #include <locale>
 
@@ -236,8 +237,12 @@ Line* OptionsGroup::get_line(const std::string& opt_key)
         // NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — skip widget-only lines (e.g. the NeoArachne
         // Preview canvas). They carry no Option, so get_first_option_key() would dereference an
         // empty vector → EXC_BAD_ACCESS during Tab::decorate's get_line("compatible_printers").
-        if (l.get_options().empty())
+        if (l.get_options().empty()) {
+            // NEOTKO_NEOSTROKE_TAG s335 — salvo que la línea lleve clave propia (ver `Line`).
+            if (!l.neotko_toggle_key.empty() && l.neotko_toggle_key == opt_key)
+                return &l;
             continue;
+        }
         if (l.get_first_option_key() == opt_key)
             return &l;
     }
@@ -266,7 +271,17 @@ void OptionsGroup::activate_line(Line& line)
         sizer->Add(h_sizer, 1, wxEXPAND | wxALL, (wxOSX && !staticbox) ? 0 : 15);
         if (line.widget != nullptr) {
             // description lines
-            sizer->Add(line.widget(this->ctrl_parent()), 0, wxEXPAND | wxALL, (wxOSX && !staticbox) ? 0 : 15);
+            // NEOTKO_NEOSTROKE_TAG s335 — con clave propia, el sizer se GUARDA en `line.widget_sizer`
+            // para poder mostrar/ocultar la línea (ver `Tab::toggle_line`): una línea de sólo widget
+            // no la alcanza `toggle_visible`, porque eso lo consume `OG_CustomCtrl` — que sólo
+            // existe si hay opciones — y `update_visibility` se sale antes con el grupo vacío.
+            // 🚨 SÓLO con clave propia, a propósito. Guardarlo SIEMPRE cambiaría el ciclo de vida de
+            //    todas las líneas de widget de la app: `clear()` les haría un `Clear(true)` que hoy
+            //    no reciben, y eso es tocar diálogos que no tienen nada que ver con esto.
+            wxSizer* wsz = line.widget(this->ctrl_parent());
+            if (!line.neotko_toggle_key.empty())
+                line.widget_sizer = wsz;
+            sizer->Add(wsz, 0, wxEXPAND | wxALL, (wxOSX && !staticbox) ? 0 : 15);
             return;
         }
         if (!line.get_extra_widgets().empty()) {
@@ -743,6 +758,108 @@ void ConfigOptionsGroup::reload_config()
 		this->set_value(opt_id, config_value(opt_key, opt_index, option.gui_flags == "serialized"));
 	}
 }
+
+// NeotkoLIBRE_FOLD s330 --------------------------------------------------------------
+// Apartados plegables en las paginas de ajustes. La cabecera (::StaticLine) hace de
+// boton; el bloque de filas (OG_CustomCtrl / m_grid_sizer) se esconde. El estado vive
+// en app_config, seccion "neotko_fold", con clave "print|Pagina|Apartado".
+static const char* NEOTKO_FOLD_SECTION = "neotko_fold";
+
+static bool neotko_fold_gate_open()
+{
+    return Slic3r::GUI::wxGetApp().app_config->get_bool("neotko_libre_mode");
+}
+
+void OptionsGroup::set_folded(bool folded)
+{
+    if (fold_key.empty())
+        return;
+    m_folded = folded;
+    m_fold_temp_open = false;
+    auto* app_config = Slic3r::GUI::wxGetApp().app_config;
+    if (folded)
+        app_config->set(NEOTKO_FOLD_SECTION, fold_key, "1");
+    else
+        app_config->erase(NEOTKO_FOLD_SECTION, fold_key);
+    apply_fold();
+
+    // Relayout: sin esto la pagina no encoge y queda el hueco (y el scroll fantasma).
+    if (m_parent) {
+        m_parent->Freeze();
+        m_parent->Layout();
+        if (auto* scrolled = dynamic_cast<wxScrolledWindow*>(m_parent))
+            scrolled->FitInside();
+        else if (auto* scrolled_up = dynamic_cast<wxScrolledWindow*>(m_parent->GetParent()))
+            scrolled_up->FitInside();
+        m_parent->Thaw();
+        m_parent->Refresh();
+    }
+}
+
+void OptionsGroup::unfold_temporarily()
+{
+    if (fold_key.empty() || !m_folded)
+        return;
+    m_fold_temp_open = true;
+    apply_fold();
+    if (m_parent) {
+        m_parent->Layout();
+        if (auto* scrolled = dynamic_cast<wxScrolledWindow*>(m_parent))
+            scrolled->FitInside();
+    }
+}
+
+void OptionsGroup::apply_fold()
+{
+    auto* stl = dynamic_cast<::StaticLine*>(stb);
+    if (!stl)
+        return;
+    if (fold_key.empty()) {
+        stl->SetFoldable(false);
+        return;
+    }
+    // Leer el estado guardado la primera vez (y cada vez: es barato y evita desincronizar
+    // dos tabs sobre la misma clave).
+    if (!m_fold_temp_open)
+        m_folded = Slic3r::GUI::wxGetApp().app_config->get_bool(NEOTKO_FOLD_SECTION, fold_key);
+
+    const bool gate   = neotko_fold_gate_open();
+    const bool folded = gate && m_folded && !m_fold_temp_open;
+    stl->SetFoldable(gate);
+    stl->SetFolded(folded);
+    if (!gate)
+        stl->SetModifiedMark(false);
+    if (custom_ctrl)
+        custom_ctrl->Show(!folded);
+    else if (m_grid_sizer)
+        m_grid_sizer->ShowItems(!folded);
+
+    // Widgets extra del grupo (lineas full_width, p.ej. el visor de NeoArachne): viven en
+    // `sizer`, fuera del custom_ctrl, asi que hay que esconderlos aparte o se quedan
+    // colgando bajo la cabecera de un apartado plegado. Al desplegar NO se re-muestra lo
+    // que se gestiona la visibilidad por su cuenta ("neotko_selfgated").
+    if (sizer) {
+        std::function<void(wxSizer*)> walk = [&](wxSizer* sz) {
+            for (auto* item : sz->GetChildren()) {
+                if (wxSizer* child = item->GetSizer()) { walk(child); continue; }
+                wxWindow* win = item->GetWindow();
+                if (win == nullptr || win == stb || win == custom_ctrl)
+                    continue;
+                if (!folded && win->GetName() == "neotko_selfgated")
+                    continue;
+                item->Show(!folded);
+            }
+        };
+        walk(sizer);
+    }
+}
+
+void OptionsGroup::set_fold_modified_mark(bool modified)
+{
+    if (auto* stl = dynamic_cast<::StaticLine*>(stb))
+        stl->SetModifiedMark(modified);
+}
+// ------------------------------------------------------------ fin NeotkoLIBRE_FOLD
 
 void ConfigOptionsGroup::Hide()
 {

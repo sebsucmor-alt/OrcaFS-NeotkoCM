@@ -4,6 +4,8 @@
 #include "../wxExtensions.hpp"
 #include "wx/window.h"
 
+#include <functional>
+
 class StaticLine : public wxWindow
 {
 public:
@@ -18,6 +20,13 @@ public:
     
     void Rescale();
 
+    // NeotkoLIBRE_FOLD s330 - la cabecera hace de boton de plegado.
+    void SetFoldable(bool foldable);
+    void SetFolded(bool folded);
+    void SetModifiedMark(bool modified);
+    bool IsFoldable() const { return m_foldable; }
+    std::function<void(bool alt_down)> on_toggle_fold { nullptr };
+
 private:
     wxColour       lineColor;
     bool vertical;
@@ -25,6 +34,12 @@ private:
 
 private:
     void paintEvent(wxPaintEvent& evt);
+
+    // NeotkoLIBRE_FOLD s330
+    void mouseUp(wxMouseEvent& evt);
+    bool m_foldable {false};
+    bool m_folded {false};
+    bool m_modified {false};
 
     void messureSize();
 

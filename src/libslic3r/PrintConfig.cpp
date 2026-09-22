@@ -509,7 +509,12 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrinterStructure)
 static t_config_enum_values s_keys_map_PerimeterGeneratorType{
     { "classic", int(PerimeterGeneratorType::Classic) },
     { "arachne", int(PerimeterGeneratorType::Arachne) },
-    { "neoarachne", int(PerimeterGeneratorType::NeoArachne) } // NEOTKO_NEOARACHNE_TAG Inc0 (port s134)
+    { "neoarachne", int(PerimeterGeneratorType::NeoArachne) }, // NEOTKO_NEOARACHNE_TAG Inc0 (port s134)
+    // NEOTKO_NEOSTROKE_TAG s332 — NeoStroke deja de ser un ajuste escondido dentro de NeoArachne y
+    // pasa a ser un generador propio. 🚨 La ruta vieja (neoarachne + inner_walls = neostroke) sigue
+    // viva y NO se migra: los dos caminos llevan al mismo motor. Migrar en silencio un perfil ya
+    // guardado es justo lo que costó una sesión en el retiro del `mode 3`.
+    { "neostroke",  int(PerimeterGeneratorType::NeoStroke) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
 
@@ -518,9 +523,15 @@ static t_config_enum_values s_keys_map_NeoArachneWallSource{
     { "classic",            int(NeoArachneWallSource::Classic)           },
     { "arachne_stock",      int(NeoArachneWallSource::ArachneStock)      },
     { "arachne_neotkoedge", int(NeoArachneWallSource::ArachneNeotkoEdge) },
-    { "off",                int(NeoArachneWallSource::Off)               }
+    { "off",                int(NeoArachneWallSource::Off)               },
+    { "neostroke",          int(NeoArachneWallSource::NeoStroke)         }   // NEOTKO_NEOSTROKE_TAG C1 (s325)
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoArachneWallSource)
+
+// NEOTKO_NEOSTROKE_TAG s335 — aquí vivía el mapa de claves de `NeoStrokePerimeter` y, dentro de un
+// `namespace { ... }` anónimo, el truco que forzaba los nombres canónicos de serialización de ese
+// enum. Se fue entero con NeoWall, y con él la apertura del namespace anónimo (su `} // namespace`
+// se quedó huérfano y cerraba `namespace Slic3r` mil líneas antes de tiempo).
 
 static const t_config_enum_values s_keys_map_ZHopType = {
     { "Auto Lift",          zhtAuto },
@@ -7616,9 +7627,13 @@ void PrintConfigDef::init_fff_params()
                      "0 = Pattern string (legacy: use the Top/Penultimate string fields).\n"
                      "1 = Linear 2-color dithered (tool_a + tool_b at pct_a%).\n"
                      "2 = Linear 3-color dithered (tool_a + tool_b + tool_c at pct_a%/pct_b%).\n"
-                     "3 = Custom bands (band_count_a/b/c/d — explicit hard band counts).");
+                     "3 = Custom bands (band_count_a/b/c/d — explicit hard band counts).\n"
+                     "4 = Custom bands in MM (band_mm_a/b/c/d — the design is defined in\n"
+                     "    millimetres over the surface and each extrusion line samples it,\n"
+                     "    so the result is independent of line width, of how many lines the\n"
+                     "    surface has, and of holes/embossing splitting those lines).");
     def->min = 0;
-    def->max = 3;
+    def->max = 4;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
@@ -7772,6 +7787,81 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // NEOTKO_COLORSTITCH_TAG_START — s314: bandas en MILÍMETROS (Pattern mode 4).
+    // El "modo campo": el diseño se define en mm sobre la superficie y cada línea
+    // extruida PREGUNTA de qué color es el sitio donde cae, en vez de que el motor
+    // reparta un recuento de líneas. Ver la nota grande de band_mm_slot_of_proj()
+    // en ColorStitch.hpp para el porqué (los tres factores que hacían que un
+    // recuento de líneas NO fuera una medida física: ancho por objeto, spacing vs
+    // width, y la fragmentación de la superficie).
+    // Sólo se leen cuando Pattern mode = 4; un 3mf anterior no las trae y recibe
+    // estos defaults sin que nada cambie, porque su `mode` sigue siendo 0..3.
+    auto add_band_mm = [this](const char* k, double def_v, const char* lbl, const char* tip) {
+        ConfigOptionDef* d = this->add(k, coFloat);
+        d->label = L(lbl);
+        d->category = L("Quality");
+        d->tooltip = L(tip);
+        d->sidetext = L("mm");
+        d->min = 0; d->max = 1000; d->mode = comAdvanced;
+        d->set_default_value(new ConfigOptionFloat(def_v));
+    };
+    add_band_mm("interlayer_colormix_band_mm_a", 8.0,
+                "Custom band — width A (mm)",
+                "Physical width of Tool A's band, in millimetres, measured across the "
+                "surface perpendicular to the fill lines.\n"
+                "Only used when Pattern mode = 4 (Custom bands in mm). The printed band "
+                "is snapped to a whole number of extrusion lines, so the value you get "
+                "is the nearest multiple of the line spacing.\n"
+                "Set to 0 to skip this tool.");
+    add_band_mm("interlayer_colormix_band_mm_b", 8.0,
+                "Custom band — width B (mm)",
+                "Physical width of Tool B's band in millimetres. 0 skips this tool.");
+    add_band_mm("interlayer_colormix_band_mm_c", 0.0,
+                "Custom band — width C (mm)",
+                "Physical width of Tool C's band in millimetres. 0 skips this tool.");
+    add_band_mm("interlayer_colormix_band_mm_d", 0.0,
+                "Custom band — width D (mm)",
+                "Physical width of Tool D's band in millimetres. 0 skips this tool.");
+    // NEOTKO_COLORSTITCH_TAG_END — s314
+
+    // NEOTKO_COLORSTITCH_TAG_START — s315: escala del DEGRADADO (modos 1 y 2).
+    // Un solo float con tres estados, para no meter dos entradas más en el desplegable de
+    // estilos ni cambiar el significado de `mode`:
+    //   < 0  (default) → LEGACY. Ruta intacta: dither por índice + surface_color_mix_lane_mode.
+    //                    Un 3mf anterior no trae esta clave, recibe -1, y sale byte a byte igual.
+    //   == 0           → CAMPO, ajustado a la superficie. El degradado sigue recorriendo la
+    //                    pieza entera, pero el dither se evalúa en la posición REAL de cada
+    //                    línea. Arregla la distorsión sin cambiar el tamaño del efecto.
+    //   > 0            → CAMPO con PERIODO FÍSICO en mm: el degradado se repite cada N mm,
+    //                    mida lo que mida la superficie. Deja obsoleto a `repetitions`, que
+    //                    reparte un recuento de líneas en vez de una medida.
+    // El porqué de los dos estados de campo está en compute_field_groups() (ColorStitch.hpp).
+    auto add_grad_span = [this](const char* k, const char* lbl, const char* tip) {
+        ConfigOptionDef* d = this->add(k, coFloat);
+        d->label = L(lbl);
+        d->category = L("Quality");
+        d->tooltip = L(tip);
+        d->sidetext = L("mm");
+        d->min = -1; d->max = 1000; d->mode = comAdvanced;
+        // 🔒 s316 fase B: default 0 (campo). Con −1 cualquier 3mf anterior a s315 entraba en
+        // legacy sin que nadie lo pidiera. El mínimo sigue en −1 sólo para poder LEER ficheros
+        // viejos; handle_legacy_composite los sube a 0.
+        d->set_default_value(new ConfigOptionFloat(0.0));
+    };
+    add_grad_span("interlayer_colormix_gradient_span_mm",
+                  "Gradient scale",
+                  "How the smooth-blend gradient is laid out.\n"
+                  "-1 = Legacy — distribute by line index, honouring \"Line distribution mode\".\n"
+                  "0  = Fit to surface — the gradient spans the whole surface, but each line is "
+                  "coloured by its real position, so a hole or embossed text no longer squeezes "
+                  "the ramp.\n"
+                  "> 0 = Repeat every N millimetres — the gradient has a real physical size and "
+                  "measures the same on every object, whatever its line width or extent.");
+    add_grad_span("interlayer_colormix_penu_gradient_span_mm",
+                  "Gradient scale (Penultimate)",
+                  "Penultimate-surface variant of the gradient scale.");
+    // NEOTKO_COLORSTITCH_TAG_END — s315
+
     // NEOTKO_COLORSTITCH_TAG — s61: per-role gradient configs.
     // 16 mirror keys with `penu_` infix that override the (top-role) keys
     // above when the slicer is processing a Penultimate surface. Defaults
@@ -7846,6 +7936,22 @@ void PrintConfigDef::init_fff_params()
     add_penu_int  ("interlayer_colormix_penu_band_count_d",  0, 0, 200,
                    "Custom band — count D (Penultimate)",
                    "Penultimate-surface variant of Custom band D count.");
+    // NEOTKO_COLORSTITCH_TAG — s314: variantes penu de las bandas en mm (Pattern mode 4).
+    // Mismos defaults que el rol Top: un perfil que nunca abrió el diálogo Penultimate
+    // se comporta igual en las dos zonas, que es justo lo que hace falta para que el
+    // Top y el Penu compartan diseño por construcción (ver la nota del ancla).
+    add_penu_float("interlayer_colormix_penu_band_mm_a", 8.0, 0.0, 1000.0,
+                   "Custom band — width A mm (Penultimate)",
+                   "Penultimate-surface variant of Custom band A width in mm.");
+    add_penu_float("interlayer_colormix_penu_band_mm_b", 8.0, 0.0, 1000.0,
+                   "Custom band — width B mm (Penultimate)",
+                   "Penultimate-surface variant of Custom band B width in mm.");
+    add_penu_float("interlayer_colormix_penu_band_mm_c", 0.0, 0.0, 1000.0,
+                   "Custom band — width C mm (Penultimate)",
+                   "Penultimate-surface variant of Custom band C width in mm.");
+    add_penu_float("interlayer_colormix_penu_band_mm_d", 0.0, 0.0, 1000.0,
+                   "Custom band — width D mm (Penultimate)",
+                   "Penultimate-surface variant of Custom band D width in mm.");
     add_penu_int  ("interlayer_colormix_penu_tool_a", 0, -1, 3,
                    "First tool (A, Penultimate)",
                    "Penultimate-surface variant of First tool (A).");
@@ -8391,6 +8497,27 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    // NEOTKO_NEOTOWER_TAG s310 — "visit the tower, deposit nothing". On a multi-tool
+    // machine the real filament swap is done by the printer macro (SM_PRINT_PREEXTRUDE_
+    // FILAMENT on the U1); the tower ramming is an after-print deposit that is redundant
+    // there and eats the box depth the useful pre-print wipe needs (NEOTOWER.md #7).
+    // Turning ramming off in the FILAMENT profile removes the ramming travel too, so the
+    // toolchange ends up happening over the part. This option keeps the visit (travel to
+    // the tower + wipe) and zeroes only the ramming deposit and its reserved depth —
+    // the same gate s79b already applies per-TC to sandwich sublayers (skip_ramming),
+    // now for every NeoTower toolchange.
+    def = this->add("neotower_no_ramming", coBool);
+    def->label = L("Skip ramming (keep tower visit)");
+    def->category = L("Prime tower");
+    def->tooltip = L("Zero the ramming purge on every NeoTower toolchange while keeping the travel "
+                     "to the wipe tower before the swap. On multi-tool printers the filament change "
+                     "is performed by the machine itself, so the ramming deposit only wastes material "
+                     "and eats the depth the useful pre-print wipe needs. Unlike disabling ramming in "
+                     "the filament profile, the toolchange still happens over the wipe tower and never "
+                     "over the part.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     // NEOTKO_NEOTOWER_TAG — Variable Layer Height (Experimental). NeoTower + LibreMode only.
     // When on, the slicer drops the prime-tower uniform-layer-height blocks: it no longer
     // refuses to slice a scene that mixes objects of different layer heights, nor a scene that
@@ -8529,9 +8656,11 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("classic");
     def->enum_values.push_back("arachne");
     def->enum_values.push_back("neoarachne"); // NEOTKO_NEOARACHNE_TAG Inc0 (port s134)
+    def->enum_values.push_back("neostroke");  // NEOTKO_NEOSTROKE_TAG s332
     def->enum_labels.push_back(L("Classic"));
     def->enum_labels.push_back(L("Arachne"));
     def->enum_labels.push_back(L("NeoArachne")); // NEOTKO_NEOARACHNE_TAG Inc0 — gated to LibreMode in Inc 1
+    def->enum_labels.push_back(L("NeoStroke"));  // NEOTKO_NEOSTROKE_TAG s332
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
 
@@ -8556,6 +8685,11 @@ void PrintConfigDef::init_fff_params()
             d->enum_values.push_back("off");
             d->enum_labels.push_back(L("Off"));
         }
+        // NEOTKO_NEOSTROKE_TAG s335 — NeoStroke YA NO se elige desde aquí. Es un generador propio
+        // (4º valor de `wall_generator`), así que ofrecerlo además como fuente de muro interior de
+        // NeoArachne era una segunda puerta a lo mismo. El valor sigue en el enum y en
+        // `s_keys_map_NeoArachneWallSource` a propósito: un 3mf/preset viejo que lo lleve guardado
+        // tiene que seguir CARGANDO sin romper. Simplemente ya no se puede seleccionar.
         d->mode = comAdvanced;
         d->set_default_value(new ConfigOptionEnum<NeoArachneWallSource>(def_val));
     };
@@ -8566,13 +8700,14 @@ void PrintConfigDef::init_fff_params()
           "Arachne variants = variable-width outer (may exhibit width breathing along the contour). "
           "Off is not allowed for the outer wall."),
         NeoArachneWallSource::Classic, /*allow_off=*/false);
+    // NEOTKO_NEOARACHNE_TAG v3-spine (s323) — default Classic (walls of constant width + spine).
     add_neoarachne_wallsource("neoarachne_inner_walls",
         L("NA — inner walls source"),
         L("Engine that emits all interior perimeters (everything past the outer). "
-          "Arachne (stock) is the Neotko Hybrid v2 default — variable-width beading "
-          "with integrated gap-fill, which is what makes NeoArachne shine on letters "
-          "and thin features. Classic falls back to constant-width onion shells."),
-        NeoArachneWallSource::ArachneStock, /*allow_off=*/false);
+          "Classic (default) = constant-width walls placed only where they fit, and whatever is "
+          "left inside is printed as a single variable-width line when it fits in one (see "
+          "\"Single-line fill\"). Arachne variants = variable-width beading, kept for comparison."),
+        NeoArachneWallSource::Classic, /*allow_off=*/false);
     add_neoarachne_wallsource("neoarachne_gap_fill",
         L("NA — gap-fill source"),
         L("Engine for the dedicated gap-fill pass. In Neotko Hybrid v2 this is Off "
@@ -8699,6 +8834,325 @@ void PrintConfigDef::init_fff_params()
     def->max = 500;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(100.0));
+
+    // NEOTKO_NEOARACHNE_TAG v3-spine (s323) — single-line fill ("spine"), Simplify3D style.
+    def = this->add("neoarachne_spine", coBool);
+    def->label = L("NA — single-line fill");
+    def->category = L("Quality");
+    def->tooltip = L("With inner walls = Classic: whatever is left inside the walls is printed as ONE "
+        "line along its centre, with a width that follows the gap, whenever the whole gap fits in a "
+        "line no wider than the maximum below. Wider areas go to infill as usual. This replaces the "
+        "short cross-hatched infill strokes and gap-fill fragments in narrow pockets (small letters). "
+        "Disable to get plain Classic walls + Classic gap fill.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("neoarachne_spine_min_width_pct", coPercent);
+    def->label = L("NA — single-line min width");
+    def->category = L("Quality");
+    def->tooltip = L("Floor of the single-line fill, as a percentage of the inner wall line width. "
+        "Where the gap is narrower than this, the line is still printed at this width, so the tips "
+        "of a pocket get filled instead of being dropped. Simplify3D equivalent: single extrusion "
+        "minimum width.");
+    def->sidetext = L("% of line width");
+    def->min = 1;     // s323: deliberately permissive (S3D style) — the user may hit the wall
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(50));
+
+    def = this->add("neoarachne_spine_max_width_pct", coPercent);
+    def->label = L("NA — single-line max width");
+    def->category = L("Quality");
+    def->tooltip = L("Ceiling of the single-line fill, as a percentage of the inner wall line width. "
+        "A gap that fits entirely under this width becomes one line; if any part is wider, the "
+        "area goes to infill. The line is never split in two. Simplify3D equivalent: single "
+        "extrusion maximum width.");
+    def->sidetext = L("% of line width");
+    def->min = 50;    // s323: deliberately permissive (S3D style); Orca still caps the speed of
+    def->max = 1000;  // wide lines by the filament's max volumetric speed
+    def->mode = comAdvanced;
+    // s323: 300 — Orca's wall spacing (0.357 @0.4) leaves a wider gap than S3D's (0.40), so the
+    // same pocket needs a higher ceiling than S3D's 200 % to become a single line.
+    def->set_default_value(new ConfigOptionPercent(300));
+
+    def = this->add("neoarachne_spine_min_length", coFloat);
+    def->label = L("NA — single-line min length");
+    def->category = L("Quality");
+    def->tooltip = L("Single-line fill paths shorter than this are dropped. Simplify3D equivalent: "
+        "single extrusion minimum length.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    // s323: was a bool tied to the min width; with min 10 % the cracks came back. Now its own threshold.
+    def = this->add("neoarachne_spine_sliver_pct", coPercent);
+    def->label = L("NA — single-line: slivers below");
+    def->category = L("Quality");
+    def->tooltip = L("A gap that never gets this wide anywhere (percentage of the inner wall line width) is "
+        "not a pocket, it is a crack between two passes of the same wall, typically inside the narrow "
+        "tail of a letter. Such cracks are not filled, which removes the thin \"gap fill\" strokes. "
+        "Independent of the single-line minimum width, which only sets how thin the tip of a real "
+        "pocket is printed. 0 = fill every crack, like Simplify3D does.");
+    def->sidetext = L("% of line width");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(35));
+
+    // NEOTKO_NEOSTROKE_TAG C5b (s325) — ganchos de esquina (ver NeoStroke.cpp y el §9 del
+    // pre-plan). Interruptor de prueba: cambia dos puertas a la vez, la poda del esqueleto y el
+    // largo mínimo de una línea que nace en un cruce.
+    def = this->add("neostroke_corner_hooks", coBool);
+    def->label = L("NS — corner hooks");
+    def->category = L("Quality");
+    def->tooltip = L("Print the short skeleton spurs that die into a junction: the armpits of an H, "
+        "the corners of a flat stem end. They are wedges that start thin and grow, and they weld the "
+        "corner where two walls meet. Simplify3D prints them as hooks hanging off a longer path, which "
+        "is why their own length never matters there. Off by default: whether they help or leave a blob "
+        "is something only a real print can tell.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    // NEOTKO_NEOSTROKE_TAG s326 — suelo y techo del ancho de NeoStroke.
+    def = this->add("neostroke_min_width_pct", coPercent);
+    def->label = L("NS — minimum width");
+    def->category = L("Quality");
+    def->tooltip = L("Thinnest a NeoStroke line may get inside a continuous path, as a percentage of the nozzle "
+        "diameter. Short detail paths are never thinner than the nozzle regardless of this value.");
+    def->sidetext = L("% of nozzle");
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(23));
+
+    def = this->add("neostroke_max_width_pct", coPercent);
+    def->label = L("NS — maximum width");
+    def->category = L("Quality");
+    def->tooltip = L("Widest a NeoStroke line may get, as a percentage of the nozzle diameter. This decides how "
+        "many lines a stroke gets: a stroke is split into as many lines as needed to keep each one under this "
+        "width. Lower = more, thinner lines.");
+    def->sidetext = L("% of nozzle");
+    def->min = 50;
+    def->max = 300;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(117));
+
+    // NEOTKO_NEOSTROKE_TAG s331c — la referencia contra la que se miden TODOS los % de NeoStroke.
+    def = this->add("neostroke_width_ref", coFloat);
+    def->label = L("NS — width reference");
+    def->category = L("Quality");
+    def->tooltip = L("The width that every NeoStroke percentage is measured against: the minimum and maximum "
+        "width, the thinnest bead of a detail, the hard bead limit and the start of the flow ramp. 0 means "
+        "automatic, which is the internal solid infill line width, the flow NeoStroke actually prints with. Set "
+        "a value in millimetres to decide what 100 % means yourself, which is what a different nozzle needs. "
+        "Note that what is compared against it is the SPACING of a line, not its printed width: the printed "
+        "width carries an extra layer height times (1 - pi/4) on top. So 100 % is a line that takes up as much "
+        "room as one solid infill line.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.3));
+
+    // NEOTKO_NEOSTROKE_TAG s329 — el cordón más fino que la máquina sabe hacer de verdad.
+    def = this->add("neostroke_detail_min_pct", coPercent);
+    def->label = L("NS — thinnest bead");
+    def->category = L("Quality");
+    def->tooltip = L("Thinnest line NeoStroke may lay for a detail, as a percentage of the nozzle diameter. A "
+        "detail is a short path or a residual fill: a gap that cannot take a line at least this wide is left "
+        "empty instead of being widened over material that is already there. A 0.4 nozzle can lay about 0.25, so "
+        "the default is 60 %. Raise it towards 100 % if thin details come out broken; lower it if small gaps are "
+        "being left unfilled. This does not affect the lines of a stroke, which are governed by the minimum and "
+        "maximum width.");
+    def->sidetext = L("% of nozzle");
+    def->min = 20;
+    def->max = 150;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(70));
+
+    // NEOTKO_NEOSTROKE_TAG s331 — curva de overlap. Ver `curve_overlap()` en NeoStroke.cpp.
+    def = this->add("neostroke_curve_overlap", coPercent);
+    def->label = L("NS — curve overlap");
+    def->category = L("Quality");
+    def->tooltip = L("Extra overlap between NeoStroke lines, where a line is both wider than the nozzle and "
+        "following a curve. The plan already covers the gap exactly at any ceiling, but a bead wider than the "
+        "nozzle laid along a curve does not merge with its neighbour the way the model assumes, and a seam "
+        "opens. This widens those beads, which adds the same percentage of plastic: it is deliberate "
+        "over-extrusion, and only where it is needed. Straight lines, and lines at or below nozzle width, are "
+        "not touched. 0 disables it. 10 % should be enough; above that expect visible over-extrusion against "
+        "the outer wall.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(15));
+
+    // NEOTKO_NEOSTROKE_TAG s331 — la FORMA de la curva. Solo hacen algo con el overlap encendido.
+    def = this->add("neostroke_overlap_width_end", coPercent);
+    def->label = L("NS — overlap: width ramp end");
+    def->category = L("Quality");
+    def->tooltip = L("Where the width ramp of the curve overlap reaches its full value, as a percentage of the "
+        "nozzle diameter. The ramp always starts at 100 %, the nozzle itself: a line at or below nozzle width "
+        "never gets any overlap. Lower values make the overlap kick in sooner, so more shapes get it; higher "
+        "values reserve it for the widest beads only. The width being compared is the line spacing, not the "
+        "printed footprint.");
+    def->sidetext = L("% of nozzle");
+    def->min = 101;
+    def->max = 400;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(125));
+
+    def = this->add("neostroke_overlap_turn_min", coFloat);
+    def->label = L("NS — overlap: turn ramp start");
+    def->category = L("Quality");
+    def->tooltip = L("Below this much sustained turning, a path counts as straight and gets no overlap at all. "
+        "Degrees per millimetre of path: a circle of radius R turns at 57.3 / R degrees per mm, so a 4 mm "
+        "radius is about 14. Keep this above zero, because a sampled path always carries a little turning "
+        "noise and zero would switch the overlap on along straight lines.");
+    def->sidetext = L("deg/mm");
+    def->min = 0;
+    def->max = 180;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(4.));
+
+    def = this->add("neostroke_overlap_turn_max", coFloat);
+    def->label = L("NS — overlap: turn ramp end");
+    def->category = L("Quality");
+    def->tooltip = L("Above this much sustained turning, the full overlap is applied. Degrees per millimetre of "
+        "path: a circle of radius R turns at 57.3 / R degrees per mm. Raise it to reserve the overlap for tight "
+        "curves only; lower it to give gentle curves the full amount as well. If it ends up below the ramp "
+        "start it is pushed back above it, so the ramp is never inverted.");
+    def->sidetext = L("deg/mm");
+    def->min = 0.1;
+    def->max = 360;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15.));
+
+    // NEOTKO_NEOSTROKE_TAG s331d — la costura de la vuelta en U. Ver `uturn_flow()` en NeoStroke.cpp.
+    def = this->add("neostroke_cap_join", coPercent);
+    def->label = L("NS — end-cap join");
+    def->category = L("Quality");
+    def->tooltip = L("Fills the notch left at the flat end of a stroke, where one line turns back into the next "
+        "one. Each line ends in a round tip, and two neighbouring tips interlock in the middle of the seam but "
+        "not in the outer corner, so a small triangular notch is left at every seam of every end cap. The "
+        "amount is worked out from the geometry of those two round tips, not guessed, and it comes out at "
+        "roughly 8 % of the flow of a normal line. This setting scales it: 100 % is exactly what is missing, "
+        "below that falls short, above that deliberately overfills. 0 turns it off and brings back the "
+        "behaviour of leaving that turn unextruded.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("neostroke_overlap_straight", coPercent);
+    def->label = L("NS — overlap: amount on straight runs");
+    def->category = L("Quality");
+    def->tooltip = L("How much of the flow ramp is applied where the path is NOT turning, as a percentage of the "
+        "full amount. At 100 % the ramp depends only on line width and a straight wide line gets the same extra "
+        "flow as a curved one. At 0 % only curves get it, and the turn ramp below decides how much. Anything in "
+        "between blends the two.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(30));
+
+    // NEOTKO_NEOSTROKE_TAG s331b — tope duro del cordón y frontera del motor, las dos medidas.
+    def = this->add("neostroke_max_bead_pct", coPercent);
+    def->label = L("NS — hard bead limit");
+    def->category = L("Quality");
+    def->tooltip = L("No NeoStroke line is ever wider than this, as a percentage of the nozzle diameter. A bead "
+        "much wider than the nozzle does not lie flat and its edges do not merge with the neighbour, so this is "
+        "a physical limit of the hot end, not a preference. It is enforced by using MORE lines, never by "
+        "trimming a line: trimming would leave the gap the lines were placed to fill. It also caps the tips, the "
+        "details and the residual fills, where there is nothing to share and a wide line is just a blob.");
+    def->sidetext = L("% of nozzle");
+    def->min = 50;
+    def->max = 250;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(175));
+
+    def = this->add("neostroke_max_stroke_width", coFloat);
+    def->label = L("NS — widest stroke");
+    def->category = L("Quality");
+    def->tooltip = L("Widest gap NeoStroke will treat as a stroke, in millimetres, measured after the outer wall "
+        "is taken out. Anything wider is a solid area of an ordinary part, not a stroke, and is left to the "
+        "normal infill. This is a width and not a line count on purpose: a line count made the same shape fall "
+        "to the infill or not depending on the maximum line width, which has nothing to do with how wide the "
+        "shape is.");
+    def->sidetext = L("mm");
+    def->min = 0.5;
+    def->max = 30;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.));
+
+    def = this->add("neostroke_overlap_span", coFloat);
+    def->label = L("NS — overlap: turn measured over");
+    def->category = L("Quality");
+    def->tooltip = L("How much path the turning is measured over. It is not measured from one sample to the "
+        "next: at the 0.15 mm sampling step a single degree of noise already reads as almost 7 degrees per mm, "
+        "and straight lines would switch the overlap on by themselves. Too short and noise gets through; too "
+        "long and the start and the end of a real curve are smeared into the straight parts next to them.");
+    def->sidetext = L("mm");
+    def->min = 0.2;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.));
+
+    // NEOTKO_NEOSTROKE_TAG C6 (s326) — patinaje: ir de un camino al siguiente POR ENCIMA de lo ya puesto.
+    // NEOTKO_NEOSTROKE_TAG s332 — el cordón más fino que la máquina saca DE VERDAD.
+    def = this->add("neostroke_bead_min_pct", coPercent);
+    def->label = L("NS — real minimum bead");
+    def->category = L("Quality");
+    def->tooltip = L("The thinnest bead this printer can actually lay down, as a percentage of the nozzle "
+        "diameter. A 0.4 nozzle reaches about 0.25, because the material stretches once it is stuck to the "
+        "layer below, so 70 % is the measured starting point rather than a guess. NeoStroke never plans a "
+        "bead thinner than this: where the shape is too narrow it uses fewer, wider beads instead of "
+        "splitting the room into threads that never come out. Only used when the outer wall is set to "
+        "NeoStroke.");
+    def->sidetext = L("%");
+    def->min = 20;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(70));
+
+    // NEOTKO_NEOSTROKE_TAG s332 — desapilar los cortes de flujo en Z. Ver NeoStroke.cpp.
+    def = this->add("neostroke_layer_jitter", coBool);
+    def->label = L("NS — vary start per layer");
+    def->category = L("Quality");
+    def->tooltip = L("Start each layer from a different point of the shape instead of always from the same "
+        "one. NeoStroke plans every layer identically, so the few places where it stops and restarts the "
+        "flow land on the exact same spot layer after layer, and the little dent they leave turns into a "
+        "channel through the whole part. Rotating the starting point spreads them out, the same way solid "
+        "infill rotates its angle. It changes only where printing starts and in what order, never how much "
+        "material goes down.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("neostroke_skate", coBool);
+    def->label = L("NS — skate over printed lines");
+    def->category = L("Quality");
+    def->tooltip = L("Inside an island, move from one NeoStroke path to the next over the lines already printed "
+        "on this layer, without extruding and without retracting. If no route over printed material fits the "
+        "detour factor, a normal travel is used. This is the opposite intention of Avoid crossing walls: it "
+        "looks for printed material instead of avoiding it.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("neostroke_skate_detour", coFloat);
+    def->label = L("NS — skate detour factor");
+    def->category = L("Quality");
+    def->tooltip = L("Longest skate allowed, relative to the straight distance between the end of a path and the "
+        "start of the next one. 1 = only straight skates; 5 = the skate may be up to five times longer than the "
+        "straight jump.");
+    def->sidetext = "x";
+    def->min = 1;
+    def->max = 999;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.));
 
     def = this->add("wall_transition_length", coPercent);
     def->label = L("Wall transition length");
@@ -9723,8 +10177,17 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
 // Called after a config is loaded as a whole.
 // Perform composite conversions, for example merging multiple keys into one key.
 // Don't convert single options here, implement such conversion in PrintConfigDef::handle_legacy() instead.
+// NEOTKO_COLORSTITCH_TAG — s316 fase B. Declaración adelantada para no arrastrar ColorStitch.hpp
+// (pesado, con plantillas) a PrintConfig.cpp. Debe coincidir con la de ColorStitch.hpp.
+// s317: firma con `sp_mm` (la config de un objeto necesita el paso del proyecto). -1 = de la propia cfg.
+namespace ColorStitchLegacyMigration { bool migrate_config(DynamicPrintConfig& cfg, double sp_mm); }
+
 void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
 {
+    // NEOTKO_COLORSTITCH_TAG — s316 fase B: retirada del legacy de ColorStitch en TODA config que
+    // se carga (presets, .ini, proyecto 3mf). Ver ColorStitchLegacyMigration (ColorStitch.hpp).
+    ColorStitchLegacyMigration::migrate_config(config, -1.0);
+
     if (config.has("thumbnails")) {
         std::string extention;
         if (config.has("thumbnails_format")) {

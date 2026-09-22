@@ -720,6 +720,30 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
             shader->set_uniform("u_weave_angle", w->angle_rad);
             shader->set_uniform("u_weave_pitch", w->pitch);
             shader->set_uniform("u_weave_p0", w->p0);
+            float ax[3]; w->shader_axis(ax);   // s318 F3 — ver ColorStitchPaintPreview::weave_frame
+            shader->set_uniform("u_weave_axis", Vec3f(ax[0], ax[1], ax[2]));
+            // s318 F3 — opción A: segundo pase compuesto por fragmento (make_zone_weave).
+            shader->set_uniform("u_weave_dual", w->dual);
+            if (w->dual) {
+                const int n2 = std::min<int>(64, (int)w->cols2.size());
+                shader->set_uniform("u_weave2_n", n2);
+                shader->set_uniform("u_weave2_tile", w->tile2);
+                shader->set_uniform("u_weave2_pitch", w->pitch2);
+                shader->set_uniform("u_weave2_p0", w->p0_2);
+                shader->set_uniform("u_weave2_axis", Vec3f(w->axis2[0], w->axis2[1], w->axis2[2]));
+                for (int i = 0; i < n2; ++i) {
+                    char nm[24];
+                    std::snprintf(nm, sizeof(nm), "u_weave2_cols[%d]", i);
+                    const ColorRGBA& c = w->cols2[i];
+                    shader->set_uniform(nm, Vec3f(c.r(), c.g(), c.b()));
+                }
+                for (int i = 0; i < n && i < (int)w->dual_a.size(); ++i) {
+                    char nm[24];
+                    std::snprintf(nm, sizeof(nm), "u_weave_a[%d]", i);
+                    const ColorRGBA& c = w->dual_a[i];
+                    shader->set_uniform(nm, Vec3f(c.r(), c.g(), c.b()));
+                }
+            }
             for (int i = 0; i < n; ++i) {
                 char nm[24];
                 std::snprintf(nm, sizeof(nm), "u_weave_cols[%d]", i);

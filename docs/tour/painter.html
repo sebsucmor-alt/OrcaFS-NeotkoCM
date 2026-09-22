@@ -48,8 +48,200 @@
                     border: 1px solid var(--rule); border-radius: 3px; background: var(--surface); color: var(--ink-soft); }
   .slottab button:hover { border-color: var(--alert); color: var(--alert); }
 
-  .zonechip { display: inline-flex; align-items: center; gap: .3rem; font-size: .82rem; }
-  .zonechip i { width: 9px; height: 9px; border-radius: 2px; }
+  .toolg { display: inline-block; width: 1.15em; height: 1.15em; vertical-align: -.22em; margin-right: .45em; color: var(--accent); }
+  .toolg .glyph { width: 100%; height: 100%; display: block; }
+
+  /* ---- panel-map ---------------------------------------------------------
+   * The frame and the legend use the site tokens like every other demo. The
+   * panel itself is drawn with the app's own palette, NeoCol's dark face from
+   * GizmoNeotkoStyle.hpp, and stays dark in BOTH site themes on purpose: it is
+   * a picture of the app, and the app's panel is dark.
+   * overflow: clip instead of the frame's hidden, so the legend can be sticky. */
+  #panelmap-demo { overflow: clip; }
+  .pm { display: grid; grid-template-columns: minmax(0, 392px) minmax(0, 1fr); gap: 1.3rem; align-items: start; }
+  .pm-legend {
+    position: sticky; top: 4.4rem; z-index: 2;
+    border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--surface-2);
+    padding: .75rem .9rem; min-height: 8.5rem;
+  }
+  .pm-leg-where { margin: 0 0 .25rem; font-family: var(--mono); font-size: .62rem; letter-spacing: .11em; text-transform: uppercase; color: var(--ink-faint); }
+  .pm-leg-name { margin: 0 0 .3rem; font-family: var(--sans); font-size: .98rem; font-weight: 600; }
+  .pm-leg-text { margin: 0; font-size: .88rem; line-height: 1.45; color: var(--ink-soft); }
+  @container demo (max-width: 640px) {
+    .pm { grid-template-columns: minmax(0, 1fr); }
+    .pm-legend { order: -1; top: 3.6rem; min-height: 7.2rem; }
+    .pm-panel { width: 100%; max-width: 392px; justify-self: center; }
+  }
+
+  .pm-panel {
+    --P: #1a1a1a; --C: #12151a; --CT: #1c2128; --S: #2c323a; --SH: #3a424c;
+    --A: #00aa9b; --AB: #2ed6c4; --W: #ff9632; --TD: #96a0aa; --I: #e2e8ee; --V: #a76ee8;
+    --u: 13px;
+    color-scheme: dark; background: var(--P); color: var(--I);
+    border-radius: 8px; box-shadow: 0 0 0 1px var(--S); padding: calc(.7 * var(--u));
+    font: var(--u)/1.35 var(--sans);
+  }
+  .pm-panel :where(button) { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left; }
+  .pm-panel :focus-visible { outline: 2px solid var(--AB); outline-offset: 1px; }
+  .pm-panel .glyph { width: 1em; height: 1em; display: block; flex: none; }
+  .pm-panel [aria-disabled="true"] { opacity: .32; cursor: not-allowed; }
+  .pm-r { display: flex; align-items: center; gap: calc(.45 * var(--u)); min-width: 0; }
+  .pm-grow { flex: 1; min-width: 0; }
+  .pm-dim { color: var(--TD); }
+  .pm-mono { font-variant-numeric: tabular-nums; }
+  .pm-well { display: inline-flex; gap: 3px; padding: 3px; background: var(--C); border-radius: 6px; flex: none; }
+
+  .pm-active {
+    display: flex; align-items: center; gap: calc(.6 * var(--u)); padding: calc(.45 * var(--u));
+    background: linear-gradient(var(--CT), var(--C)); border-radius: 5px;
+    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
+  }
+  .pm-sw { width: calc(2.9 * var(--u)); height: calc(2.9 * var(--u)); border-radius: 4px; flex: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
+  .pm-name { font-size: calc(1.1 * var(--u)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pm-desc { margin-top: 3px; color: var(--TD); font-size: calc(.85 * var(--u)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pm-chip {
+    display: inline-flex; align-items: center; height: calc(1.45 * var(--u)); padding: 0 calc(.6 * var(--u));
+    border-radius: 99px; font-size: calc(.95 * var(--u)); white-space: nowrap; flex: none;
+    color: var(--AB); background: rgba(46,214,196,.14); box-shadow: inset 0 0 0 1px rgba(46,214,196,.66);
+  }
+  .pm-gb { width: calc(1.75 * var(--u)); height: calc(1.75 * var(--u)); display: grid; place-items: center; border-radius: 4px; color: var(--TD); font-size: calc(1.15 * var(--u)); flex: none; }
+  .pm-gb:hover { background: rgba(0,170,155,.28); color: var(--AB); }
+  .pm-gb.is-danger:hover { background: rgba(255,150,50,.22); color: var(--W); }
+  .pm-gb.sm { width: calc(1.5 * var(--u)); height: calc(1.5 * var(--u)); font-size: calc(.95 * var(--u)); }
+
+  .pm-toolbar { display: flex; align-items: center; gap: calc(.3 * var(--u)); margin-top: calc(.6 * var(--u)); }
+  .pm-gt { width: calc(2.35 * var(--u)); height: calc(2.35 * var(--u)); display: grid; place-items: center; border-radius: 5px; background: var(--S); color: rgba(150,160,170,.9); font-size: calc(1.35 * var(--u)); }
+  .pm-gt:hover { background: var(--SH); }
+  .pm-gt[aria-pressed="true"] { background: rgba(0,170,155,.85); color: var(--I); box-shadow: inset 0 0 0 1.2px var(--AB); }
+  .pm-help { width: calc(2 * var(--u)); height: calc(2 * var(--u)); display: grid; place-items: center; color: #0ea596; font-size: calc(1.65 * var(--u)); }
+  .pm-vsep { width: 1px; height: calc(1.8 * var(--u)); background: var(--SH); margin: 0 5px; }
+
+  .pm-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; margin-top: calc(.6 * var(--u)); padding: 3px; background: var(--C); border-radius: 6px; }
+  .pm-tab { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: calc(.45 * var(--u)) 0 calc(.4 * var(--u)); border-radius: 4px; color: var(--TD); font-size: calc(.92 * var(--u)); position: relative; text-align: center; }
+  .pm-tab .glyph { font-size: calc(1.3 * var(--u)); }
+  .pm-tab:hover, .pm-tab[aria-selected="true"] { background: var(--S); color: var(--I); }
+  .pm-tab[aria-selected="true"] .glyph { color: var(--AB); }
+  .pm-tab[aria-selected="true"]::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: 0; height: 2px; background: var(--AB); border-radius: 2px; }
+
+  .pm-sec { display: flex; align-items: center; gap: 8px; width: 100%; margin: calc(.9 * var(--u)) 0 calc(.45 * var(--u)); font-size: calc(1.08 * var(--u)); }
+  .pm-sec > .glyph:first-child { color: var(--AB); font-size: 1.05em; }
+  .pm-sec .pm-chev { color: var(--TD); }
+  .pm-rule { flex: 1; height: 1px; background: rgba(58,66,76,.85); }
+  .pm-aside { color: var(--TD); }
+
+  .pm-btn { display: inline-flex; align-items: center; gap: .4em; height: calc(1.8 * var(--u)); padding: 0 calc(.6 * var(--u)); border-radius: 4px; white-space: nowrap; font-size: calc(.98 * var(--u)); flex: none; }
+  .pm-btn > .glyph { color: var(--AB); }
+  .pm-ghost { box-shadow: inset 0 0 0 1px var(--SH); }
+  .pm-ghost:hover { box-shadow: inset 0 0 0 1px var(--AB); color: var(--AB); }
+  .pm-accent { box-shadow: inset 0 0 0 1px var(--A); color: var(--AB); }
+  .pm-panel .pm-dash { width: 100%; justify-content: center; border: 1px dashed var(--SH); color: var(--TD); }
+  .pm-panel .pm-dash:hover { border-color: var(--AB); color: var(--AB); }
+  .pm-prof { position: relative; }
+  .pm-prof i { position: absolute; right: 3px; top: 3px; width: 5px; height: 5px; border-radius: 50%; background: var(--AB); }
+
+  .pm-fi { width: calc(1.6 * var(--u)); height: calc(1.6 * var(--u)); border-radius: 4px; display: grid; place-items: center; font-size: calc(.9 * var(--u)); text-align: center; flex: none; }
+  .pm-fi[aria-pressed="true"] { box-shadow: 0 0 0 1.5px var(--C), 0 0 0 3px var(--AB); }
+  .pm-fi.mini { width: calc(1.3 * var(--u)); height: calc(1.3 * var(--u)); font-size: calc(.72 * var(--u)); border-radius: 3px; }
+
+  .pm-gchip { display: inline-flex; align-items: center; gap: .5em; height: calc(1.85 * var(--u)); padding: 0 .65em; border-radius: 4px; font-size: calc(1.05 * var(--u)); box-shadow: inset 0 0 0 1px var(--SH); }
+  .pm-gchip.is-on { background: rgba(0,170,155,.85); box-shadow: none; }
+  .pm-gchip b { font-weight: 400; opacity: .8; }
+
+  .pm-grid { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 3px; padding: 4px; margin-top: 6px; background: var(--C); border-radius: 5px; }
+  .pm-grid.g8 { grid-template-columns: repeat(8, minmax(0, 1fr)); margin-top: 0; }
+  .pm-s { aspect-ratio: 1; border-radius: 3px; position: relative; box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); cursor: pointer; }
+  .pm-s.is-sel { box-shadow: 0 0 0 1.5px var(--C), 0 0 0 3px var(--AB); z-index: 1; }
+  .pm-s.is-new::before { content: ""; position: absolute; left: 0; top: 0; border-style: solid; border-width: 7px 7px 0 0; border-color: var(--I) transparent transparent transparent; opacity: .85; border-top-left-radius: 3px; }
+  .pm-s.is-here::after { content: ""; position: absolute; right: 2px; top: 2px; width: 4px; height: 4px; border-radius: 50%; background: var(--AB); box-shadow: 0 0 0 1px rgba(0,0,0,.55); }
+  .pm-s > i { position: absolute; right: 2px; bottom: 2px; width: 46%; height: 46%; border-radius: 2px; background: rgba(18,21,26,.8); color: var(--I); display: grid; place-items: center; font-size: 8px; }
+  .pm-key { display: flex; flex-wrap: wrap; gap: .3em calc(.9 * var(--u)); margin-top: 6px; color: var(--TD); font-size: calc(.88 * var(--u)); }
+  .pm-key > span { display: inline-flex; align-items: center; gap: 5px; }
+  .pm-key .nt { width: 9px; height: 9px; border-radius: 2px; background: #3a424c; box-shadow: inset 4px 4px 0 -1px var(--I); }
+  .pm-key .dt { width: 5px; height: 5px; border-radius: 50%; background: var(--AB); }
+
+  .pm-slot { display: grid; grid-template-columns: 1.7em auto minmax(0, 1fr) auto auto auto; gap: calc(.45 * var(--u)); align-items: center; padding: 3px 2px; border-radius: 4px; }
+  .pm-slot:hover { background: rgba(0,170,155,.1); }
+  .pm-slot .sq { width: calc(1.45 * var(--u)); height: calc(1.45 * var(--u)); border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); }
+  .pm-slot .nm { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pm-meter { display: block; height: 3px; margin-top: 3px; background: var(--SH); border-radius: 2px; }
+  .pm-meter i { display: block; height: 100%; background: var(--A); border-radius: 2px; }
+  .pm-stk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--TD); font-size: calc(.92 * var(--u)); }
+
+  .pm-rs { display: grid; grid-template-columns: calc(8.4 * var(--u)) minmax(0, 1fr); gap: 6px; align-items: center; margin: 5px 0; }
+  .pm-rs .l { color: var(--TD); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pm-slider { height: calc(1.65 * var(--u)); background: var(--S); border-radius: 4px; position: relative; display: flex; align-items: center; justify-content: center; font-size: calc(1 * var(--u)); }
+  .pm-slider b { position: absolute; top: 3px; bottom: 3px; width: calc(.6 * var(--u)); margin-left: calc(-.3 * var(--u)); background: var(--A); border-radius: 3px; }
+  .pm-slider span { position: relative; }
+  .pm-slider.is-live { cursor: ew-resize; touch-action: none; }
+  .pm-trow { display: flex; align-items: center; gap: 8px; width: 100%; margin: 7px 0; }
+  .pm-trow > .glyph { color: var(--TD); font-size: 1.1em; }
+  .pm-trow .l { flex: 1; color: var(--TD); }
+  .pm-pill { width: calc(2.5 * var(--u)); height: calc(1.35 * var(--u)); border-radius: 99px; background: var(--S); position: relative; flex: none; }
+  .pm-pill::after { content: ""; position: absolute; top: 2px; left: 2px; width: calc(1.35 * var(--u) - 4px); height: calc(1.35 * var(--u) - 4px); border-radius: 50%; background: var(--TD); }
+  [aria-checked="true"] > .pm-pill { background: rgba(0,170,155,.85); }
+  [aria-checked="true"] > .pm-pill::after { left: auto; right: 2px; background: var(--I); }
+  .pm-tdrow { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; margin: 5px 0; }
+  .pm-why { margin: 0 0 4px; color: var(--TD); font-size: calc(.98 * var(--u)); }
+
+  .pm-gen { margin-top: calc(.6 * var(--u)); padding: calc(.6 * var(--u)); background: rgba(44,50,58,.45); border-radius: 5px; clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%); }
+  .pm-gen .ttl { font-size: calc(1.1 * var(--u)); }
+  .pm-gen .pm-r > .glyph:first-child { color: var(--AB); font-size: 1.15em; }
+  .pm-ab { margin: calc(.5 * var(--u)) 0; }
+  .pm-ab .lbl { color: var(--TD); font-size: calc(1.05 * var(--u)); }
+
+  .pm-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: calc(.6 * var(--u)) calc(.8 * var(--u)); margin-top: calc(.6 * var(--u)); padding: calc(.6 * var(--u)); background: linear-gradient(var(--CT), var(--C)); border-radius: 6px; }
+  .pm-xsec { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; align-items: center; font-size: calc(.9 * var(--u)); color: var(--TD); }
+  .pm-zl { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
+  .pm-zl span { max-width: 5.2em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pm-zl .glyph { font-size: 1.2em; }
+  .pm-zb { height: calc(1.6 * var(--u)); display: flex; flex-direction: column; border-radius: 2px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(0,0,0,.45); }
+  .pm-zb > div { min-height: 2px; }
+  .pm-zb.is-empty { box-shadow: none; border: 1px dashed var(--SH); }
+  .pm-zb.is-dim { opacity: .55; }
+  .pm-part { height: calc(1.1 * var(--u)); background: repeating-linear-gradient(135deg, rgba(150,160,170,.16) 0 2px, transparent 2px 6px); }
+  .pm-result { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; font-size: calc(.9 * var(--u)); color: var(--TD); }
+  .pm-result .rs { width: calc(5.6 * var(--u)); height: calc(5.6 * var(--u)); border-radius: 5px; box-shadow: 0 0 0 1px rgba(255,255,255,.22), 0 0 0 4px rgba(46,214,196,.10), 0 0 0 7px rgba(46,214,196,.05); }
+  .pm-stamp { grid-column: 1 / -1; font-size: calc(.82 * var(--u)); color: var(--TD); }
+
+  .pm-zone { position: relative; margin-top: calc(.75 * var(--u)); background: rgba(44,50,58,.38); border-radius: 6px; clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%); }
+  .pm-zone::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--AB); }
+  .pm-zone.is-empty { background: transparent; clip-path: none; border: 1px dashed var(--SH); }
+  .pm-zone.is-empty::before { display: none; }
+  .pm-zh { display: flex; align-items: center; gap: 7px; padding: calc(.5 * var(--u)) calc(.5 * var(--u)) calc(.45 * var(--u)) calc(.8 * var(--u)); }
+  .pm-zh .zi { font-size: calc(1.5 * var(--u)); color: var(--AB); }
+  .pm-zh .zt { font-size: calc(1.2 * var(--u)); }
+  .pm-zh .zs { color: var(--TD); font-size: calc(1.05 * var(--u)); }
+  .pm-zone.is-empty .zi, .pm-zone.is-empty .zt { color: var(--TD); }
+  .pm-zbody { display: grid; grid-template-columns: calc(2.9 * var(--u)) minmax(0, 1fr); gap: calc(.45 * var(--u)); padding: 0 calc(.5 * var(--u)) calc(.55 * var(--u)) calc(.8 * var(--u)); }
+  .pm-mm { display: flex; flex-direction: column; border-radius: 3px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(0,0,0,.45); }
+  .pm-mm .seg { min-height: calc(2.4 * var(--u)); display: flex; justify-content: flex-end; align-items: flex-start; }
+  .pm-mm .seg span { margin: 2px; padding: 0 3px; border-radius: 2px; background: rgba(0,0,0,.5); color: #fff; font-size: calc(.95 * var(--u)); }
+  .pm-mm .grip { height: 6px; background: var(--C); position: relative; cursor: ns-resize; }
+  .pm-mm .grip::after { content: ""; position: absolute; left: 26%; right: 26%; top: 2px; height: 2px; background: var(--AB); border-radius: 2px; }
+  .pm-passes { display: flex; flex-direction: column; gap: calc(.45 * var(--u)); min-width: 0; }
+  .pm-pass { display: flex; flex-direction: column; gap: calc(.45 * var(--u)); padding: calc(.45 * var(--u)); background: var(--C); border-radius: 5px; }
+  .pm-idx { min-width: 1.6em; color: var(--TD); font-size: calc(1.05 * var(--u)); }
+  .pm-kinds { background: var(--S); }
+  .pm-k { width: calc(1.8 * var(--u)); height: calc(1.65 * var(--u)); display: grid; place-items: center; border-radius: 3px; color: rgba(150,160,170,.9); font-size: calc(1.1 * var(--u)); }
+  .pm-k:hover { background: var(--SH); }
+  .pm-k[aria-pressed="true"] { background: rgba(0,170,155,.85); color: var(--I); box-shadow: inset 0 0 0 1.2px var(--AB); }
+  .pm-kname { color: var(--AB); font-size: calc(1.1 * var(--u)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .pm-ang { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  .pm-ang > .glyph { color: var(--TD); }
+  .pm-ang .v { min-width: 3.4em; height: calc(1.75 * var(--u)); padding: 0 8px; display: grid; place-items: center; background: var(--S); border-radius: 4px; font-size: calc(1.1 * var(--u)); }
+  .pm-ang .v.auto { color: var(--V); background: rgba(167,110,232,.14); box-shadow: inset 0 0 0 1px rgba(167,110,232,.6); }
+  .pm-weave { height: calc(1.4 * var(--u)); border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.45); }
+  .pm-pbrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--TD); font-size: calc(.95 * var(--u)); }
+  .pm-num { display: inline-flex; align-items: center; height: calc(1.5 * var(--u)); padding: 0 6px; background: var(--S); border-radius: 4px; color: var(--I); }
+
+  .pm-tray { display: flex; flex-direction: column; gap: 4px; margin-top: calc(.8 * var(--u)); }
+  .pm-warn { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; background: rgba(255,150,50,.09); box-shadow: inset 2px 0 0 var(--W); color: var(--W); font-size: calc(1 * var(--u)); }
+  .pm-warn.info { background: rgba(150,160,170,.1); box-shadow: inset 2px 0 0 var(--TD); color: var(--TD); }
+  .pm-warn .glyph { font-size: 1.15em; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .pm-panel :where(button, .pm-s) { transition: background-color .12s, color .12s, box-shadow .12s; }
+  }
 
   .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: .9rem; margin: 1.6rem 0; }
   .steps figure { margin: 0; }
@@ -126,7 +318,7 @@
     <h2 id="why" data-short="What breaks without it">What breaks without it</h2>
 
     <p>
-      The Sandwich Editor gives an object one recipe. Print a staircase and every tread gets the
+      Put one recipe on a whole object and every surface gets it. Print a staircase and every tread gets the
       same treatment, which is fine until you want the top step gold and the rest of them to fade
       through a gradient. The only other way to do that is to cut the mesh into separate objects,
       which changes how everything slices and creates seams you did not ask for.
@@ -152,11 +344,11 @@
     <table>
       <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td><b>Select</b></td><td>Click objects in the scene to choose which ones you can paint. Shift-click removes one.</td></tr>
-        <tr><td><b>Paint</b> (smart fill)</td><td>Click a flat face and the coplanar region floods with the active profile.</td></tr>
-        <tr><td><b>Eraser</b></td><td>Smart-fill removes paint under the cursor.</td></tr>
-        <tr><td><b>Pick</b> (eyedropper)</td><td>Reads the recipe under the cursor and makes it the active colour.</td></tr>
-        <tr><td><b>Sticker</b></td><td>Places a loaded SVG on a flat top face. <a href="#stickers">See the warning below.</a></td></tr>
+        <tr><td><span class="toolg" data-glyph="Select"></span><b>Select</b></td><td>Click objects in the scene to choose which ones you can paint. Shift click removes one.</td></tr>
+        <tr><td><span class="toolg" data-glyph="Paint"></span><b>Paint</b> (smart fill)</td><td>Click a flat face and the coplanar region floods with the active profile.</td></tr>
+        <tr><td><span class="toolg" data-glyph="Erase"></span><b>Eraser</b></td><td>The same smart fill, removing paint under the cursor.</td></tr>
+        <tr><td><span class="toolg" data-glyph="Pick"></span><b>Pick</b> (eyedropper)</td><td>Reads the recipe under the cursor and makes it the active colour.</td></tr>
+        <tr><td><span class="toolg" data-glyph="Sticker"></span><b>Sticker</b></td><td>Places a loaded SVG on a flat top face. <a href="#stickers">See the warning below.</a></td></tr>
       </tbody>
     </table>
     </div>
@@ -182,7 +374,7 @@
     <table>
       <thead><tr><th>Badge</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><b style="color:var(--good)">slot N</b></td><td>The colour already owns a paint slot on this object. Painting applies it right away.</td></tr>
+        <tr><td><b style="color:var(--accent)">slot N</b></td><td>The colour already owns a paint slot on this object. Painting applies it right away.</td></tr>
         <tr><td><b class="muted">ready</b></td><td>A colour is chosen. It takes a slot the first time you actually paint with it.</td></tr>
         <tr><td><b style="color:var(--warn)">no colour</b></td><td>Nothing is selected. Clicking the model will not paint, and will not erase either.</td></tr>
       </tbody>
@@ -198,66 +390,102 @@
     <!-- ================================================================= -->
     <h2 id="departments" data-short="The four departments">The four departments</h2>
 
+    <p>
+      Since 2.4.6 the panel reads top to bottom the same way in every department: a card for the
+      active colour, the tools, four tabs, and under them the department you picked, with
+      <b>Brush &amp; view</b> and the warnings at the end. Point at anything in the map and the box
+      beside it says what it is for.
+    </p>
+
+    <div class="demo bleed" id="panelmap-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">Where everything is in the panel</span>
+        <span class="demo__hint">point at anything · the tabs switch</span>
+      </div>
+      <div class="demo__body" data-demo="panel-map">
+        <noscript><p class="noscript">This map of the Painter panel needs JavaScript. The four screenshots below show the same panel, one department each.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the 2.4.6 panel, drawn in HTML after the C++ that builds it
+        (<code>GLGizmoColorStitchPainter.cpp</code>) with its own icons (<code>draw_glyph</code>).
+        Two things in it are computed: the stripe bars come from the port of
+        <code>SurfaceColorMix.cpp</code>, and the Result, the active colour card and the swatches
+        from the port of <code>ColorSci.cpp</code>, so moving a TD slider really changes them. A
+        PathBlend pass is simplified to a cap that thickens from floor to ramp end over the other
+        filament. In Pro the pass buttons work; buttons that open dialogs in the app do nothing here.
+      </div>
+    </div>
+
+    <p class="small">The same four departments in the app, with a different recipe loaded:</p>
+
     <figure>
-      <img src="../images/sandwich-editor-gizmo01.png" width="890" height="1040" alt="Palette department: smart fill angle, the collapsible TD section, palette groups with New group, Delete and Save all, the saved Profiles strip, the Stickers section and the Section view slider" loading="lazy">
-      <figcaption><b>Palette.</b> Smart fill angle, palette groups with <code>+ New group</code> / <code>Delete</code> / <code>Save all</code>, the saved Profiles strip (hover a swatch for its recipe and name), the Stickers section and the section-view slider.</figcaption>
+      <img src="../images/painter-246-palette.png" width="866" height="1154" alt="Palette department: the active colour card and toolbar on top, the Library with its group chip, a grid of swatches with corner marks, the In use on this object row, Stickers folded, Brush and view open with two sliders and three switches, and one amber warning at the bottom" loading="lazy">
+      <figcaption><b>Palette.</b> The Library with its group chips, a grid where every swatch shows its effect, a notch if it is not saved and a dot if it is on this object, then <b>In use on this object</b>, Stickers and Brush &amp; view. The amber line at the bottom is the warnings tray.</figcaption>
     </figure>
 
     <figure>
-      <img src="../images/sandwich-editor-gizmo02.png" width="884" height="1082" alt="Generator department: Gradient ramp and ColorStitch Pattern Color, each with a Start A and End B filament pair and the generated swatch row underneath, plus a scrollable Flat color strip" loading="lazy">
-      <figcaption><b>Generator.</b> Gradient ramp and ColorStitch Pattern Color, each with a Start (A) / End (B) pair and the generated row underneath, plus a scrollable Flat colour strip. Same engine as <a href="optics.html#studio">the Studio</a>.</figcaption>
+      <img src="../images/painter-246-generator.png" width="878" height="1820" alt="Generator department: three cards, Gradient ramp, Flat color and ColorStitch Pattern Color, each a grid of eight swatches per row, two of them with an A and B row of numbered filament chips" loading="lazy">
+      <figcaption><b>Generator.</b> Gradient ramp, Flat color and ColorStitch Pattern Color as three cards, each with its A › B pair where it needs one and a grid of eight per row. Every swatch shows, with no scrolling sideways.</figcaption>
     </figure>
 
     <figure>
-      <img src="../images/sandwich-editor-gizmo03a.png" width="878" height="1392" alt="Pro department: Recipe and Result previews at the top, then the three zones in printing order: Top with a ColorStitch pass over a Solid pass, Penultimate empty with its Add button, and Bottom with a ColorStitch pass" loading="lazy">
-      <figcaption><b>Pro.</b> The composer, and <em>the Pro panel is the active colour</em>. Recipe and Result at the top, then the three zones top to bottom in printing order. Editing here rewrites the linked profile in place, everywhere it is already painted.</figcaption>
+      <img src="../images/painter-246-pro.png" width="868" height="1550" alt="Pro department: the zones stacked at the top with their real stripes next to a large Result swatch, then a card for Top with one ColorStitch pass, an empty Penultimate with its Add penultimate button, a card for Bottom with one ColorStitch pass, Options with Perimeter override, and a grey tip in the tray" loading="lazy">
+      <figcaption><b>Pro.</b> The composer, and <em>the Pro panel is the active colour</em>. At the top, the zones as they sit in the part with each pass drawn with its real stripes, next to the Result. Then one card per zone in printing order. Editing here rewrites the linked profile in place, everywhere it is already painted.</figcaption>
     </figure>
 
     <figure>
-      <img src="../images/sandwich-editor-gizmo04.png" width="886" height="864" alt="Object and TD department: the per-filament TD grid, the MixedFilament Object checkbox and its live recipe readout" loading="lazy">
-      <figcaption><b>Object &amp; TD.</b> The per-filament <a href="optics.html">TD</a> grid, always visible here, plus the <a href="#mixedfilament">MixedFilament Object</a> checkbox and its live recipe readout.</figcaption>
+      <img src="../images/painter-246-object-td.png" width="868" height="802" alt="Object and TD department: one Transmission distance slider per filament, then the MixedFilament Object switch greyed out with the reason written under it" loading="lazy">
+      <figcaption><b>Object &amp; TD.</b> One <a href="optics.html">TD</a> row per filament, the only place TD lives since 2.4.6, and the <a href="#mixedfilament">MixedFilament Object</a> switch. It is greyed out in this shot, with the reason under it, because the object's extruder is not a MixedFilament.</figcaption>
     </figure>
 
-    <h3 id="prorows">Pass rows in Pro <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.0</span></h3>
+    <h3 id="prorows">Pass rows in Pro <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.6</span></h3>
 
     <p>
-      The three zones are edited one after another in a single panel, and each is titled by a
-      coloured chip:
-      <span class="zonechip"><i style="background:#3f9e6b"></i>Top</span>,
-      <span class="zonechip"><i style="background:#2b6b4a"></i>Penultimate</span>,
-      <span class="zonechip"><i style="background:#d98324"></i>Bottom</span>.
-      Three plain labels did not read as three different things, and these are the same codes the
-      3D highlight uses.
+      Each zone is a card: its icon, the name, how many passes it has out of three, and how thick
+      the zone is. The icon is a block with that zone's layer lit, because zones have no colour of
+      their own any more. Amber is kept for warnings, so Bottom stopped being "the orange one".
     </p>
 
     <ul>
-      <li>The <strong>thickness bar</strong> on the left is twice as wide as it used to be, so its
-        millimetre value stops colliding with the pass number, and the drag handles between passes
-        are easier to grab.</li>
-      <li><strong><code>^</code> <code>v</code> reorder</strong> and <strong><code>x</code>
-        remove</strong> close the row on the right, with the <code>x</code> set apart. Reordering
-        passes is a core move when composing a recipe and it used to be buried in a right-click
-        menu, while the destructive button sat next to the thickness control.</li>
+      <li>A pass reads in three lines. The first has its number and four icons for the type:
+        <b>Solid</b>, <b>ColorStitch</b>, <b>PB Half</b> and <b>PB Full</b>. Bottom shows three,
+        because PathBlend there is always Full, and a type that would break the zone's limits is
+        dimmed. <strong>Move up, move down and remove</strong> close the line, in their own well.</li>
+      <li>The second line has what the type needs: filament chips for Solid, the two real tool
+        numbers and <b>Pattern…</b> for ColorStitch, ramp and cap for PathBlend. The <strong>fill
+        angle</strong> sits at the right end for all three, and an angle left on auto reads
+        <b style="color:#8a5ad6">auto</b> in violet, the same violet as the outline in the 3D view.</li>
+      <li>The third line is the <strong>stripe bar</strong>. It reads from right to left, like the 3D
+        view and the slice, so in a gradient the start is on the right. Scroll the wheel over it to
+        turn the angle, and <strong>right click it</strong> for Duplicate, Move up / down and Delete.
+        The clone splits the original's thickness in half so nothing else in the stack moves.</li>
+      <li>PathBlend adds a fourth line with floor and ramp end, the ramp mode, and <b>Profile…</b>,
+        which carries a teal dot once the ramp has been shaped.</li>
+      <li>The <strong>thickness bar</strong> on the left shows each pass with its millimetres. Drag
+        the teal notch between two passes to move thickness from one to the other.</li>
+      <li><strong>Add pass</strong> is a dashed button at the end of the zone. It goes away once the
+        zone has three passes, or when it holds a PathBlend.</li>
       <li>A <strong><code>!CS</code></strong> or <strong><code>!PB</code></strong> button appears on
         a Solid pass still carrying a leftover ColorStitch or PathBlend payload from an older
         build. The engine slices it as Solid (the kind wins) but the recipe looks like an effect,
         so the preview came out flat. Click it to restore the pass. New ones cannot be created;
         switching a pass to Solid now clears its payload.</li>
-      <li><strong>Right-click any pass's preview bar</strong> for Duplicate, Move up / down and
-        Delete. The clone splits the original's thickness in half so nothing else in the stack
-        moves.</li>
-      <li>A <strong><code>copy to:</code></strong> row under each zone copies the whole zone onto
-        another one. The ColorStitch pattern is translated to the destination zone's keys on the
-        way, and a stack landing on Bottom is normalised to the Bottom rules: max 2 Solid, max 1
-        ColorStitch, PathBlend forced to Full.</li>
+      <li><strong>Copy</strong> sits in the zone's header and opens a small menu with the two other
+        zones. The whole zone travels, ColorStitch pattern included, translated to the destination
+        zone's keys, and a stack landing on Bottom is trimmed to the Bottom rules: max 2 Solid, max 1
+        ColorStitch, PathBlend forced to Full. Penultimate and Bottom also have a bin that empties
+        them.</li>
+      <li>Warnings no longer pop up between the controls. They all sit in a <strong>tray</strong> at
+        the bottom of the panel, amber when something is wrong and grey when it is a tip.</li>
     </ul>
 
     <div class="note note--good">
       <span class="note__t">Dragging got quiet</span>
       <p style="margin:0">
-        Dragging a divider or a number in Pro used to re-schedule a slice on <em>every frame</em>
+        Dragging a divider or a number in Pro used to schedule a slice again on <em>every frame</em>
         of the drag. The heavy work is now committed once, when you let go, the same rule the TD
-        sliders already followed. The Recipe and Result previews still update live while you drag.
+        sliders already followed. The Result at the top of Pro still updates live while you drag.
       </p>
     </div>
 
@@ -265,9 +493,9 @@
     <h2 id="walkthrough" data-short="Painting one, step by step">Painting one, step by step</h2>
 
     <p class="small">
-      The panel chrome in these shots predates the 2.4.0 reorganisation, so they still show the
-      old Top Surface / Bottom Surface switch and the TD grid inside Pro. The workflow is the
-      same; for the current layout see the four department shots above.
+      The panel in these shots is older than 2.4.0, so they still show the old Top Surface /
+      Bottom Surface switch and the TD grid inside Pro. The workflow is the same; for the current
+      layout see the map and the four department shots above.
     </p>
 
     <div class="steps">
@@ -302,12 +530,12 @@
     </div>
 
     <!-- ================================================================= -->
-    <h2 id="slots" data-short="★ Slots &amp; all-or-nothing">Slots, and the all-or-nothing rule</h2>
+    <h2 id="slots" data-short="★ Slots">Slots, and what an unpainted face gets</h2>
 
     <p>
       Painting spends <strong>slots</strong>. Each object has up to 254 of them (slot 0 is
-      unpainted), and a slot holds the mapping from a painted region to a recipe. There is one
-      rule about them that catches everybody once, so it is worth seeing rather than reading.
+      unpainted), and a slot holds the mapping from a painted region to a recipe. It is worth
+      seeing what happens to the faces you leave alone, because that changed in 2.4.6.
     </p>
 
     <div class="demo bleed">
@@ -329,27 +557,27 @@
     <table>
       <thead><tr><th>Situation</th><th>What applies</th></tr></thead>
       <tbody>
-        <tr><td>Object with zero painted facets</td><td><b>Preset mode.</b> The Sandwich Editor values apply.</td></tr>
-        <tr><td>Painted object, painted area</td><td>The <b>painted profile</b> applies. The preset is ignored for that area.</td></tr>
-        <tr><td>Painted object, <b>unpainted</b> area</td><td><b>No effect at all.</b> The preset is suppressed for the whole object.</td></tr>
+        <tr><td>Object with zero painted facets</td><td><b>No effect.</b> Up to 2.4.5 the Sandwich editor's recipe applied here; since 2.4.6 an old project moves it into the palette when it opens.</td></tr>
+        <tr><td>Painted area</td><td>The <b>painted profile</b> applies.</td></tr>
+        <tr><td><b>Unpainted</b> area</td><td><b>No effect.</b></td></tr>
       </tbody>
     </table>
     </div>
 
     <p>
-      That last row is the one. Paint one face of an object and every other surface loses the
-      preset Sandwich it would otherwise have had. It is deliberate, because mixing preset and
-      painted effects on the same object produces results nobody can predict, but it does mean
-      "paint the bit I care about and leave the rest" is not a thing you can do. Paint everything,
-      or paint nothing.
+      Up to 2.4.5 that last row caught everybody once. An object could carry a recipe from the
+      Sandwich editor in the print settings, and painting a single face switched it off on every
+      other surface. Since 2.4.6 there is no recipe in the settings any more, so an unpainted face
+      simply prints plain, and "paint the bit I care about and leave the rest" does exactly what
+      it says.
     </p>
 
     <h3 id="working">Working colours and saved palettes</h3>
 
     <p>
       Colours you paint with are <strong>working colours</strong>: created on demand, deduplicated,
-      and garbage-collected when no face uses them any more. They show an amber border while they
-      occupy a slot. Just browsing palettes does not consume anything.
+      and garbage collected when no face uses them any more. In the palette they carry a light
+      notch in the corner until you save them. Just browsing palettes does not consume anything.
     </p>
 
     <p>
@@ -377,9 +605,12 @@
     <p>
       Painted top surfaces show the actual ColorStitch weave on the mesh, not a flat swatch. The
       preview is built from <strong>the same per-line sequence the slicer produces</strong>, so
-      the filament colours, the density and the pattern match the G-code. The same builder drives
-      the little pass strip in the Pro tray and in the Sandwich Editor, so the strips and the 3D
-      view cannot drift apart.
+      the filament colours, the density and the pattern match the G-code. The same builder draws
+      the stripe bar under each pass in Pro, so the bar and the 3D view cannot drift apart. One
+      catch since 2.4.6: the slicer now places everything by position, and this preview has not
+      caught up yet, so on a surface with holes, or with stripes in mm, a band can start in a
+      slightly different place. Check the G-code in <a href="realcolor.html">RealColor</a> when it
+      has to be exact.
     </p>
 
     <ul>
@@ -389,8 +620,9 @@
         only touch at a corner stay separate and each gets its own ramp, exactly like the slice.</li>
       <li><strong>Orientation matches for a fixed angle.</strong> Set the angle by scrolling the
         wheel over the pass preview bar and the bar, the model and the print all rotate together.
-        On auto angle the slicer alternates every layer, so no static preview can match; an amber
-        <b>auto angle</b> tag appears next to <code>ADV</code> to say so.</li>
+        On auto the slicer alternates every layer, so no static preview can match. The angle then
+        reads <b>auto</b> in violet, and <b>Mark bands with no angle</b> outlines those bands on the
+        model in the same violet.</li>
       <li><strong>Bottom is previewed too</strong> <em>(2.4.0)</em>. Upward-facing facets show the
         Top recipe, downward-facing ones show the Bottom, each with its own islands and scale. A
         Bottom made only of Solid passes has no weave to draw, so it gets its own composed colour
@@ -422,8 +654,8 @@
       places. Two differences worth knowing: the <strong>lighting is not the same</strong> (inside
       the gizmo it is the painter's own shader, outside it is the normal one or Libre Mode's
       realistic shading), and <strong>small leftover facets print flat here</strong>, taking the
-      slot's composed colour rather than falling back to a whole-object weave. A checkbox,
-      <b>Keep paint visible outside this gizmo</b>, turns it off; it is on by default and applies to
+      slot's composed colour rather than falling back to a whole-object weave. A switch in
+      Brush &amp; view, <b>Keep paint visible outside this gizmo</b>, turns it off; it is on by default and applies to
       the whole project.
     </p>
 
@@ -446,7 +678,7 @@
     <p>
       The panel always knew which colour was active. The 3D view never said <em>where that colour
       already is</em>, and with two similar colours on one plate there was no answer to that beyond
-      squinting. The checkbox at the bottom of the painter draws the outline of the painted region
+      squinting. The <b>Highlight active colour</b> switch in Brush &amp; view draws the outline of the painted region
       for one slot, boundary edges only so it frames the area without covering the weave, plus a
       faint box around each island and a badge carrying the slot number. The outline is drawn twice,
       solid on the surface and as a ghost through the object, so a zone facing away from you still
@@ -456,7 +688,7 @@
     <p>
       Each badge shows the slot number, a disc in the <em>colour of the slot</em> and a ring plus a
       wedge in the <em>zone colour</em>: the wedge points up for a top island and down for a bottom
-      one, and bottom badges sit under their island. The counter next to the checkbox reads
+      one, and bottom badges sit under their island. The counter next to the switch reads
       <code>sN — 137</code> or <code>sN — not painted here</code>, and that distinction matters,
       because "the colour is active and I see nothing" has two very different causes.
     </p>
@@ -473,7 +705,7 @@
 
     <p>
       A MixedFilament can be assigned to a whole object as its extruder, the same way you would
-      assign any normal filament. This mode is a one-click way to make that object's top surface,
+      assign any normal filament. This mode is a single switch that makes that object's top surface,
       penultimate layer and bottom surface actually <em>look like</em> that MixedFilament's colour.
     </p>
 
@@ -485,8 +717,8 @@
     </p>
 
     <p>
-      And it <strong>locks out manual painting</strong> for that object. The palette strips, zone
-      editors and the Perimeter override checkbox grey out, and since 2.4.0 the lock covers the
+      And it <strong>locks out manual painting</strong> for that object. The palette, the zone
+      editors and the Perimeter override switch grey out, and since 2.4.0 the lock covers the
       brush in the 3D view as well. Before that, the controls greyed out but clicking the model
       still painted: slots were spent and re-slices scheduled for paint the engine then ignored,
       which is work lost with no warning. Placing a sticker is blocked for the same reason. Select
@@ -494,8 +726,8 @@
     </p>
 
     <p class="small">
-      If the object's extruder is not a MixedFilament the checkbox is greyed out with a tooltip
-      telling you to assign one. One known rough edge: the swatch shows the colour only, not a
+      If the object's extruder is not a MixedFilament the switch is greyed out, and the reason is
+      written right under it. One known rough edge: the swatch shows the colour only, not a
       preview of the passes that will print.
     </p>
 
@@ -503,9 +735,10 @@
     <h2 id="profiles" data-short="Profiles &amp; the 3MF">Profiles and the 3MF</h2>
 
     <p>
-      In the Sandwich Editor, <b>Save as profile…</b> captures the current pass stacks under a
-      name, and <b>Manage Sandwich Profiles</b> gives you Load into dialog, Update from current,
-      Rename and Delete. Deleting a profile that still has painted areas raises a non-critical
+      In the Painter, the icons on the active colour card do the work: <b>Save</b> puts the active
+      recipe in the saved Profiles library, <b>Duplicate</b> makes an independent copy to edit, and right clicking a swatch gives you
+      Duplicate, Save to palette and Delete. A project that used the old Sandwich editor opens with
+      its recipe already saved, as <b>From Sandwich editor</b>. Deleting a profile that still has painted areas raises a non-critical
       slicing warning; the slice continues and those areas simply get no effect until you re-paint
       or re-create the profile.
     </p>
@@ -574,8 +807,6 @@
     <h2 id="costs" data-short="The catch">The catch</h2>
 
     <ul>
-      <li><strong>All or nothing, per object.</strong> One painted facet suppresses the preset
-        Sandwich everywhere else on that object.</li>
       <li><strong>Editing in Pro rewrites the profile in place</strong>, everywhere it is already
         painted. That is usually what you want. When it is not, use <b>Duplicate</b> to get an
         independent copy first.</li>
@@ -716,7 +947,7 @@ Tour.demo('slots', function (host) {
     var tbl = el('table.slottab');
     if (!used.length) {
       tbl.appendChild(el('tr', null, [el('td', {
-        text: 'Nothing painted. The object is in preset mode: the Sandwich Editor settings apply to all of it.',
+        text: 'Nothing painted. Every face prints plain.',
         style: 'color:var(--ink-soft)'
       })]));
     } else {
@@ -727,7 +958,8 @@ Tour.demo('slots', function (host) {
           el('td.n', { text: 's' + slotOf[p] }),
           el('td', null, [
             (function () { var s = el('i'); s.style.background = PALETTE[p].hex;
-              if (!isSaved) s.style.outline = '2px solid var(--warn)'; return s; })(),
+              if (!isSaved) s.style.backgroundImage = 'linear-gradient(135deg, var(--ink) 0 32%, transparent 32%)';
+              return s; })(),
             el('span', { text: ' ' + PALETTE[p].name + (isSaved ? ' ★' : '') })
           ]),
           el('td.n', { text: count + ' faces' }),
@@ -744,11 +976,10 @@ Tour.demo('slots', function (host) {
 
     var unpainted = faces.filter(function (f) { return f < 0; }).length;
     if (!used.length) {
-      status.innerHTML = '<span class="muted">Preset mode. Every face gets the Sandwich from the settings.</span>';
+      status.innerHTML = '<span class="muted">Nothing painted. Every face prints plain.</span>';
     } else if (unpainted > 0) {
       status.innerHTML = '<span style="color:var(--alert)">' + unpainted + ' unpainted face' +
-        (unpainted === 1 ? '' : 's') + ' (hatched). They print with <b>no effect at all</b>: ' +
-        'the preset is suppressed for the whole object once anything is painted.</span>';
+        (unpainted === 1 ? '' : 's') + ' (hatched). They print plain, with no effect.</span>';
     } else {
       status.innerHTML = '<span style="color:var(--good)">Fully painted. Every face is governed by its own recipe.</span>';
     }
@@ -759,13 +990,665 @@ Tour.demo('slots', function (host) {
   host.appendChild(wrap);
   host.appendChild(el('p.small', {
     style: 'margin:.8rem 0 0',
-    html: 'An amber ring means the colour is a <b>working colour</b>: it exists because a face uses it, ' +
+    html: 'A notch in the corner means the colour is a <b>working colour</b>: it exists because a face uses it, ' +
           'and it is collected the moment none do. <b>Save all</b> promotes them (★) into the palette so ' +
           'an Erase all leaves nothing dangling.'
   }));
 
   buildGrid();
   render();
+});
+</script>
+<script src="assets/glyphs.js"></script>
+<script>
+/* ===========================================================================
+ * panel-map — the Painter panel of 2.4.6, drawn after the C++ that builds it:
+ * GLGizmoColorStitchPainter.cpp (the active colour card, the tool row, the
+ * tabs, the Palette, In use, Stickers, the three Generator cards,
+ * draw_pro_hero, draw_zone_editor, the Object department, Brush & view), with
+ * the icons of GizmoNeotkoStyle.hpp ported in assets/glyphs.js.
+ *
+ * A DIAGRAM. Two things are computed: the stripe bars come from Stitch
+ * (SurfaceColorMix.cpp) and every predicted colour (the Result, the active
+ * colour card, the swatches) from Optics (ColorSci.cpp). The panel keeps the
+ * app's dark palette in both site themes on purpose, see .pm-panel above.
+ *
+ * Passes are stored in panel order: index 0 is #1, the one at the surface.
+ * ========================================================================= */
+Tour.demo('panel-map', function (host) {
+  var g = Glyphs.svg;
+  var LH = 0.20;                        // one layer per zone, nominal height
+  var N = 48;                           // columns averaged into a predicted colour
+  var FIL = [                           // the four loaded filaments (one U1)
+    { hex: '#56cdf2', td: 2.83 },
+    { hex: '#dc4b5b', td: 0.61 },
+    { hex: '#f2e62c', td: 1.94 },
+    { hex: '#1d3a86', td: 0.23 }
+  ];
+  var BASE = 0;                         // the object's own filament in this example
+  var MODES = ['Mode: Linear', 'Mode: Ease In', 'Mode: Ease Out', 'Mode: Ease In/Out'];
+  var KIND = { s: 'Solid', cs: 'ColorStitch', pbh: 'PB Half', pbf: 'PB Full' };
+  var KGLYPH = { s: 'KSolid', cs: 'KStitch', pbh: 'KPbHalf', pbf: 'KPbFull' };
+  var ZN = { top: 'Top', penu: 'Penultimate', bottom: 'Bottom' };
+  var ZG = { top: 'ZoneTop', penu: 'ZonePenu', bottom: 'ZoneBottom' };
+  var TABS = [['TabPalette', 'Palette'], ['TabGen', 'Generator'], ['TabPro', 'Pro'], ['Cube', 'Object &amp; TD']];
+  var TOOLS = [['Select', 't_select', 'Select'], ['Paint', 't_paint', 'Paint'], ['Erase', 't_erase', 'Eraser'],
+               ['Pick', 't_pick', 'Eyedropper'], ['Sticker', 't_sticker', 'Sticker']];
+  var ease = Stitch.easingApply || function (t) { return t; };
+
+  function P(o) {
+    var p = { k: 's', t: 0, a: 0, b: 1, ang: 45, th: LH, floor: 0.04, end: 0.16, mode: 3 };
+    for (var key in o) p[key] = o[key];
+    return p;
+  }
+
+  var S = {
+    tab: 2, tool: 1, sel: 0, brush: true, stickers: false, perim: false,
+    hl: true, mark: true, keep: true, mf: false,
+    gen: { ramp: [0, 1], cs: [0, 1] },
+    td: FIL.map(function (f) { return f.td; }),
+    zones: {
+      top:    [P({ k: 'cs', a: 0, b: 1, ang: 45, th: 0.12 }), P({ k: 's', t: 3, ang: -1, th: 0.08 })],
+      penu:   [],
+      bottom: [P({ k: 'cs', a: 0, b: 1, ang: 45, th: 0.20 })]
+    }
+  };
+
+  /* ---------------------------------------------------------------- colour */
+  function hex(i) { return FIL[i].hex; }
+  function slab(tool, th) { return { colorHex: hex(tool), thickness: Math.max(0, th), tdMm: S.td[tool] * LH }; }
+  var seqCache = {};
+  function seqOf(p, n) {
+    var pct = p.pct == null ? 50 : p.pct, key = p.a + '|' + p.b + '|' + pct + '|' + n;
+    return seqCache[key] || (seqCache[key] = Stitch.build(n, { style: 'blend2', tools: [p.a, p.b], pctA: pct }));
+  }
+  function slabs(p, i, n) {
+    if (p.k === 's') return [slab(p.t, p.th)];
+    if (p.k === 'cs') { var q = seqOf(p, n); return [slab(q[i % q.length], p.th)]; }
+    var t = n > 1 ? i / (n - 1) : 0;
+    var h = Math.min(p.th, p.floor + (p.end - p.floor) * ease(t, p.mode));
+    return [slab(p.a, p.th - h), slab(p.b, h)];          // the ramp underneath, the cap over it
+  }
+  // zoneLists: deepest zone first, each list in panel order (surface first).
+  function predict(zoneLists) {
+    var sum = [0, 0, 0];
+    for (var i = 0; i < N; i++) {
+      var st = [];
+      zoneLists.forEach(function (L) {
+        for (var k = L.length - 1; k >= 0; k--) st = st.concat(slabs(L[k], i, N));
+      });
+      var c = Optics.blendStacked(st, hex(BASE));
+      sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+    }
+    return Optics.linearToHex([sum[0] / N, sum[1] / N, sum[2] / N]);
+  }
+  function resultHex() { return predict([S.zones.penu, S.zones.top]); }
+
+  /* -------------------------------------------------------------- drawing */
+  function drawAng(p) { return 180 - (p.ang < 0 ? 45 : p.ang); }
+  function hardStops(cols, w) {
+    var out = [], x = 0, i = 0;
+    while (i < cols.length) {
+      var j = i;
+      while (j + 1 < cols.length && cols[j + 1] === cols[i]) j++;
+      var x2 = x + (j - i + 1) * w;
+      out.push(cols[i] + ' ' + x + 'px ' + x2 + 'px');
+      x = x2; i = j + 1;
+    }
+    return out.join(',');
+  }
+  function weaveCss(p) {
+    if (p.k === 's')
+      return 'background:repeating-linear-gradient(' + drawAng(p) + 'deg,rgba(0,0,0,.2) 0 1px,transparent 1px 5px),' + hex(p.t);
+    if (p.k === 'cs') {
+      // Read from right to left, like the 3D view and the slice (BUG_QUEUE #31).
+      var q = seqOf(p, 90).slice().reverse();
+      return 'background:linear-gradient(' + drawAng(p) + 'deg,' + hardStops(q.map(hex), 4) + ')';
+    }
+    var cols = [];
+    for (var k = 0; k < 7; k++) cols.push(Optics.linearToHex(Optics.blendStacked(slabs(p, k, 7), hex(BASE))));
+    return 'background:repeating-linear-gradient(90deg,rgba(0,0,0,.18) 0 1px,transparent 1px 5px),' +
+           'linear-gradient(to left,' + cols.join(',') + ')';
+  }
+  function mmCss(p) {
+    if (p.k === 's') return 'background:' + hex(p.t);
+    if (p.k === 'cs') return 'background:linear-gradient(90deg,' + hex(p.a) + ' 50%,' + hex(p.b) + ' 50%)';
+    return 'background:linear-gradient(to top,' + hex(p.a) + ',' + hex(p.b) + ')';
+  }
+  function zoneDesc(L) {                 // zone_desc(): deepest pass first
+    return L.slice().reverse().map(function (p) {
+      return p.k === 's' ? 'T' + (p.t + 1) : p.k === 'cs' ? 'CS' : 'PB';
+    }).join('+');
+  }
+  function recipeLine() {
+    var s = 'Top ' + (S.zones.top.length ? zoneDesc(S.zones.top) : '—');
+    if (S.zones.penu.length) s += ' · Penu ' + zoneDesc(S.zones.penu);
+    return s;
+  }
+
+  /* ---------------------------------------------------------- tiny builders */
+  function at(a) {
+    var s = '';
+    for (var k in a) if (a[k] != null) s += ' ' + k + '="' + a[k] + '"';
+    return s;
+  }
+  function B(cls, inner, a) { return '<button type="button" class="' + cls + '"' + at(a || {}) + '>' + inner + '</button>'; }
+  function T(tag, cls, inner, a) { return '<' + tag + ' class="' + cls + '"' + at(a || {}) + '>' + inner + '</' + tag + '>'; }
+  function fi(t, o) {
+    o = o || {};
+    return B('pm-fi' + (o.mini ? ' mini' : ''), String(t + 1), {
+      style: 'background:' + hex(t) + ';color:' + Optics.inkOn(hex(t)),
+      'aria-label': 'Filament ' + (t + 1), 'aria-pressed': o.pressed,
+      'data-act': o.act, 'data-z': o.z, 'data-i': o.i, 'data-v': o.act ? t : null, 'data-tip': o.tip
+    });
+  }
+  function handle(f) { return 'calc(.3 * var(--u) + (100% - .6 * var(--u)) * ' + f.toFixed(4) + ')'; }
+  function sec(gl, title, aside, tip, fold) {
+    var inner = g(gl) + '<span>' + title + '</span><span class="pm-rule"></span>' +
+                (aside != null ? '<span class="pm-aside">' + aside + '</span>' : '');
+    if (fold) return B('pm-sec', inner + g(S[fold] ? 'ChevD' : 'ChevR', 'pm-chev'),
+                       { 'aria-expanded': String(!!S[fold]), 'data-act': 'fold', 'data-v': fold, 'data-tip': tip });
+    return T('div', 'pm-sec', inner, { 'data-tip': tip, tabindex: 0 });
+  }
+  function tog(gl, label, key, tip, dis) {
+    return B('pm-trow', g(gl) + '<span class="l">' + label + '</span><span class="pm-pill"></span>', {
+      role: 'switch', 'aria-checked': String(!!S[key]), 'aria-disabled': dis ? 'true' : null,
+      'data-act': dis ? null : 'toggle', 'data-v': key, 'data-tip': tip
+    });
+  }
+  function rs(label, val, f, tip) {
+    return T('div', 'pm-rs', '<span class="l">' + label + '</span>' +
+      T('span', 'pm-slider', '<b style="left:' + handle(f) + '"></b><span class="pm-mono">' + val + '</span>',
+        { 'data-tip': tip, tabindex: 0 }));
+  }
+
+  /* ---------------------------------------------------------- common parts */
+  function header() {
+    return T('div', 'pm-active',
+      T('span', 'pm-sw', '', { style: 'background:' + resultHex(), role: 'img', 'aria-label': 'Active colour', 'data-tip': 'h_sw', tabindex: 0 }) +
+      T('div', 'pm-grow',
+        T('div', 'pm-r', T('span', 'pm-name', 'Custom', { 'data-tip': 'h_name', tabindex: 0 }) +
+                         T('span', 'pm-chip', 'slot 1', { 'data-tip': 'h_chip', tabindex: 0 })) +
+        T('div', 'pm-desc', recipeLine(), { 'data-tip': 'h_desc', tabindex: 0 })) +
+      B('pm-gb', g('Plus'), { 'aria-label': 'New', 'data-tip': 'h_new' }) +
+      B('pm-gb', g('Save'), { 'aria-label': 'Save', 'data-tip': 'h_save' }) +
+      B('pm-gb', g('Copy'), { 'aria-label': 'Duplicate', 'data-tip': 'h_dup' }));
+  }
+  function toolbar() {
+    return T('div', 'pm-toolbar',
+      T('span', 'pm-well', TOOLS.map(function (t, i) {
+        return B('pm-gt', g(t[0]), { 'aria-label': t[2], 'aria-pressed': String(S.tool === i), 'data-act': 'tool', 'data-v': i, 'data-tip': t[1] });
+      }).join('')) +
+      '<span class="pm-grow"></span>' +
+      B('pm-help', g('OrcaHelp'), { 'aria-label': 'Help', 'data-tip': 'help' }) +
+      '<span class="pm-vsep"></span>' +
+      B('pm-gb is-danger', g('EraseAll'), { 'aria-label': 'Erase all painting', 'data-tip': 'eraseall' }));
+  }
+  function tabs() {
+    return T('div', 'pm-tabs', TABS.map(function (t, i) {
+      return B('pm-tab', g(t[0]) + '<span>' + t[1] + '</span>', {
+        role: 'tab', id: 'pm-tab' + i, 'aria-selected': String(S.tab === i), 'aria-controls': 'pm-body',
+        tabindex: S.tab === i ? 0 : -1, 'data-act': 'tab', 'data-v': i, 'data-tip': 'tab' + i
+      });
+    }).join(''), { role: 'tablist', 'aria-label': 'Departments' });
+  }
+  function brush() {
+    var s = sec('Paint', 'Brush &amp; view', null, 'brush', 'brush');
+    if (!S.brush) return s;
+    return s +
+      rs('Smart fill angle', '1.5°', 0.015, 'b_fill') +
+      rs('Section view', '0.00', 0, 'b_cut') +
+      tog('Spot', 'Highlight active colour · s1 — 97', 'hl', 'b_hl') +
+      tog('NoAngle', 'Mark bands with no angle', 'mark', 'b_mark') +
+      tog('Eye', 'Keep paint visible outside this gizmo', 'keep', 'b_keep');
+  }
+  function tray(msgs) {
+    if (!msgs.length) return '';
+    return T('div', 'pm-tray', msgs.map(function (m) {
+      return T('div', 'pm-warn' + (m.info ? ' info' : ''), g('Warn') + '<span>' + m.text + '</span>', { 'data-tip': m.tip, tabindex: 0 });
+    }).join(''));
+  }
+
+  /* --------------------------------------------------------------- Palette */
+  var LIB = [
+    { k: 'cs', z: [P({ k: 'cs', a: 0, b: 1 })], isNew: 1, here: 1 },       // the active colour, s1
+    { k: 's',  z: [P({ t: 1, th: 0.1 }), P({ t: 0, th: 0.1 })] },
+    { k: 'pb', z: [P({ k: 'pbf', a: 2, b: 1 })] },
+    { k: 's',  z: [P({ t: 2, th: 0.1 }), P({ t: 1, th: 0.1 })], isNew: 1 },
+    { k: 'cs', z: [P({ k: 'cs', a: 2, b: 3 })] },
+    { k: 'cs', z: [P({ k: 'cs', a: 3, b: 0 })], here: 1 },                  // s2
+    { k: 'pb', z: [P({ k: 'pbf', a: 3, b: 0 })] },
+    { k: 's',  z: [P({ t: 3, th: 0.1 }), P({ t: 1, th: 0.1 })] },
+    { k: 's',  z: [P({ t: 0, th: 0.06 }), P({ t: 2, th: 0.14 })] },
+    { k: 'cs', z: [P({ k: 'cs', a: 0, b: 2 })], isNew: 1 },
+    { k: 's',  z: [P({ t: 2, th: 0.2 })] },
+    { k: 's',  z: [P({ t: 1, th: 0.2 })] },
+    { k: 'pb', z: [P({ k: 'pbf', a: 0, b: 1 })] },
+    { k: 'cs', z: [P({ k: 'cs', a: 1, b: 3 })] },
+    { k: 's',  z: [P({ t: 0, th: 0.2 })] },
+    { k: 'cs', z: [P({ k: 'cs', a: 2, b: 1 })] },
+    { k: 's',  z: [P({ t: 3, th: 0.2 })] },
+    { k: 'pb', z: [P({ k: 'pbf', a: 1, b: 2 })] },
+    { k: 's',  z: [P({ t: 1, th: 0.05 }), P({ t: 3, th: 0.15 })] },
+    { k: 'cs', z: [P({ k: 'cs', a: 0, b: 3 })] }
+  ];
+  function palette() {
+    var res = resultHex();
+    var grid = LIB.map(function (e, i) {
+      var cls = 'pm-s' + (S.sel === i ? ' is-sel' : '') + (e.isNew ? ' is-new' : '') + (e.here ? ' is-here' : '');
+      var mark = e.k === 'cs' ? '<i>' + g('KStitch') + '</i>' : e.k === 'pb' ? '<i>' + g('KPbFull') + '</i>' : '';
+      var tip = e.isNew ? 'sw_new' : e.here ? 'sw_here' : e.k === 'cs' ? 'sw_cs' : e.k === 'pb' ? 'sw_pb' : 'sw';
+      return T('span', cls, mark, { style: 'background:' + (i === 0 ? res : predict([e.z])), 'data-act': 'sw', 'data-v': i, 'data-tip': tip });
+    }).join('');
+    var slotRow = function (s, col, name, faces, frac) {
+      return T('div', 'pm-slot',
+        '<span class="pm-dim pm-mono">' + s + '</span><span class="sq" style="background:' + col + '"></span>' +
+        '<span class="pm-grow"><span class="nm">' + name + '</span><span class="pm-meter"><i style="width:' + Math.round(frac * 100) + '%"></i></span></span>' +
+        '<span class="pm-dim pm-mono">' + faces + '</span>' +
+        B('pm-gb sm', g('Target'), { 'aria-label': 'Use', 'data-tip': 'u_use' }) +
+        B('pm-gb sm is-danger', g('Trash'), { 'aria-label': 'Free', 'data-tip': 'u_free' }),
+        { 'data-tip': 'slot', tabindex: 0 });
+    };
+    return sec('Group', 'Library', '20', 'library') +
+      T('div', 'pm-r',
+        T('span', 'pm-gchip is-on', 'Group 1 <b>20</b>', { 'data-tip': 'group', tabindex: 0 }) +
+        T('span', 'pm-gchip', 'Group 2 <b>6</b>', { 'data-tip': 'group', tabindex: 0 }) +
+        B('pm-gb sm', g('Plus'), { 'aria-label': 'New group', 'data-tip': 'g_new' }) +
+        '<span class="pm-grow"></span>' +
+        B('pm-gb sm is-danger', g('Trash'), { 'aria-label': 'Delete group', 'data-tip': 'g_del' }) +
+        B('pm-btn pm-accent', g('Save') + 'Save all', { 'data-tip': 'g_saveall' })) +
+      T('div', 'pm-grid', grid, { 'data-tip': 'grid', tabindex: 0, role: 'group', 'aria-label': 'Library swatches' }) +
+      T('div', 'pm-key',
+        '<span><i class="nt"></i>not saved</span><span><i class="dt"></i>on this object</span>' +
+        '<span>' + g('KStitch') + 'ColorStitch</span><span>' + g('KPbFull') + 'PathBlend</span>',
+        { 'data-tip': 'legend', tabindex: 0 }) +
+      sec('Target', 'In use on this object', '2 slots', 'inuse') +
+      slotRow('s1', res, 'Custom', 97, 1) +
+      slotRow('s2', predict([LIB[5].z]), 'Blue stitch', 41, 41 / 97) +
+      sec('Sticker', 'Stickers (SVG)', null, 'stickers', 'stickers') +
+      (S.stickers ? T('div', 'pm-stk', B('pm-btn pm-ghost', g('Load') + 'Load SVG...', { 'data-tip': 'stk_load' }) +
+                                        '<span>No stickers on this object yet.</span>') : '') +
+      brush();
+  }
+
+  /* ------------------------------------------------------------- Generator */
+  function genRow(key) {
+    var v = S.gen[key];
+    var chips = function (end) {
+      return [0, 1, 2, 3].map(function (t) {
+        return fi(t, { pressed: String(v[end] === t), act: 'gen', z: key, i: end, tip: end ? 'gen_b' : 'gen_a' });
+      }).join('');
+    };
+    return T('div', 'pm-r pm-ab', '<span class="lbl">A</span>' + chips(0) + g('ChevR', 'pm-dim') + '<span class="lbl">B</span>' + chips(1));
+  }
+  function genCard(gl, title, aside, tip, key, cols) {
+    return T('div', 'pm-gen',
+      T('div', 'pm-r', g(gl) + '<span class="ttl">' + title + '</span><span class="pm-grow"></span><span class="pm-aside">' + aside + '</span>',
+        { 'data-tip': tip, tabindex: 0 }) +
+      (key ? genRow(key) : '') +
+      T('div', 'pm-grid g8', cols.map(function (c) {
+        return '<span class="pm-s" style="background:' + c + '" data-tip="gen_sw"></span>';
+      }).join(''), { 'data-tip': 'gen_grid', tabindex: 0, role: 'group', 'aria-label': title + ' swatches' }));
+  }
+  function generator() {
+    var r = S.gen.ramp, c = S.gen.cs, ramp = [], flat = [], cs = [];
+    for (var k = 0; k < 8; k++) {
+      var f = k / 7;
+      ramp.push(predict([[P({ t: r[0], th: LH * (1 - f) }), P({ t: r[1], th: LH * f })]]));
+      var pass = P({ k: 'cs', a: c[0], b: c[1], pct: Math.round(100 - f * 100) });
+      cs.push(predict([[pass], [pass]]));
+    }
+    [0.35, 0.65].forEach(function (split) {
+      for (var i = 0; i < 4; i++) for (var j = 0; j < 4; j++)
+        if (i !== j) flat.push(predict([[P({ t: i, th: LH * split }), P({ t: j, th: LH * (1 - split) })]]));
+    });
+    return genCard('TabGen', 'Gradient ramp', 'Top only', 'gen_ramp', 'ramp', ramp) +
+           genCard('KSolid', 'Flat color', String(flat.length), 'gen_flat', null, flat) +
+           genCard('KStitch', 'ColorStitch Pattern Color', 'Top + Penu', 'gen_cs', 'cs', cs) +
+           brush();
+  }
+
+  /* ------------------------------------------------------------------- Pro */
+  function isPB(p) { return p.k === 'pbh' || p.k === 'pbf'; }
+  function count(L, k, skip) { return L.filter(function (p, j) { return j !== skip && p.k === k; }).length; }
+  function allowed(z, L, i, k) {
+    if (isPB({ k: k })) return z !== 'penu';
+    if (z !== 'bottom') return true;
+    return k === 's' ? count(L, 's', i) < 2 : count(L, 'cs', i) < 1;   // Bottom: max 2 Solid, 1 ColorStitch
+  }
+  function nextPass(z) {
+    var L = S.zones[z];
+    if (L.length >= 3 || L.some(isPB)) return null;
+    if (z === 'bottom') {
+      if (count(L, 's') < 2) return P({ t: 2 });
+      if (count(L, 'cs') < 1) return P({ k: 'cs' });
+      return null;
+    }
+    var last = L[L.length - 1];
+    return P({ t: last ? (last.t + 1) % 4 : 2 });
+  }
+  function equalize(L) { L.forEach(function (p) { p.th = Math.round(LH / L.length * 1000) / 1000; }); }
+
+  function passRow(z, p, i, n) {
+    var L = S.zones[z];
+    var kinds = ['s', 'cs', 'pbh', 'pbf'].filter(function (k) { return !(z === 'bottom' && k === 'pbh'); }).map(function (k) {
+      var ok = allowed(z, L, i, k);
+      return B('pm-k', g(KGLYPH[k]), {
+        'aria-label': KIND[k], 'aria-pressed': String(p.k === k), 'aria-disabled': ok ? null : 'true',
+        'data-act': 'kind', 'data-z': z, 'data-i': i, 'data-v': k,
+        'data-tip': ok ? 'k_' + k : (z === 'penu' ? 'k_pbpenu' : 'k_cap')
+      });
+    }).join('');
+    var ctl = n > 1 ? T('span', 'pm-well',
+      B('pm-gb sm', g('Up'), { 'aria-label': 'Move up', 'data-act': 'up', 'data-z': z, 'data-i': i, 'data-tip': 'p_up', style: i === 0 ? 'visibility:hidden' : null }) +
+      B('pm-gb sm', g('Down'), { 'aria-label': 'Move down', 'data-act': 'down', 'data-z': z, 'data-i': i, 'data-tip': 'p_down', style: i === n - 1 ? 'visibility:hidden' : null }) +
+      B('pm-gb sm is-danger', g('Trash'), { 'aria-label': 'Remove this pass', 'data-act': 'del', 'data-z': z, 'data-i': i, 'data-tip': 'p_del' })) : '';
+    var l2;
+    if (p.k === 's')
+      l2 = [0, 1, 2, 3].map(function (t) { return fi(t, { pressed: String(p.t === t), act: 'stool', z: z, i: i, tip: 'p_stool' }); }).join('');
+    else if (p.k === 'cs')
+      l2 = fi(p.a, { tip: 'p_cstools' }) + fi(p.b, { tip: 'p_cstools' }) + B('pm-btn pm-ghost', g('Adv') + 'Pattern…', { 'data-tip': 'p_pattern' });
+    else
+      l2 = '<span class="pm-dim">ramp</span>' + fi(p.a, { mini: 1, tip: 'p_rampcap' }) +
+           '<span class="pm-dim">cap</span>' + fi(p.b, { mini: 1, tip: 'p_rampcap' });
+    var ang = T('span', 'pm-ang', g('Angle') + T('span', 'v pm-mono' + (p.ang < 0 ? ' auto' : ''), p.ang < 0 ? 'auto' : p.ang + '°'),
+                { 'data-tip': 'p_ang', tabindex: 0 });
+    var l4 = !isPB(p) ? '' :
+      T('div', 'pm-pbrow', '<span>floor:</span><span class="pm-num pm-mono">' + p.floor.toFixed(2) + '</span>' +
+                           '<span>ramp end:</span><span class="pm-num pm-mono">' + p.end.toFixed(2) + '</span>',
+        { 'data-tip': 'p_floor', tabindex: 0 }) +
+      T('div', 'pm-r', B('pm-btn pm-ghost', g('Ease') + MODES[p.mode], { 'data-act': 'mode', 'data-z': z, 'data-i': i, 'data-tip': 'p_mode' }) +
+                       '<span class="pm-grow"></span>' +
+                       B('pm-btn pm-ghost pm-prof', g('Adv') + 'Profile…<i></i>', { 'data-tip': 'p_profile' }));
+    return T('div', 'pm-pass',
+      T('div', 'pm-r', T('span', 'pm-idx pm-mono', '#' + (i + 1), { 'data-tip': 'p_idx' }) +
+                       T('span', 'pm-well pm-kinds', kinds, { role: 'group', 'aria-label': 'Pass type' }) +
+                       T('span', 'pm-kname', KIND[p.k], { 'data-tip': 'p_kname' }) +
+                       '<span class="pm-grow"></span>' + ctl) +
+      T('div', 'pm-r', l2 + '<span class="pm-grow"></span>' + ang) +
+      T('div', 'pm-weave', '', { style: weaveCss(p), 'data-tip': 'p_weave', tabindex: 0, role: 'img', 'aria-label': 'Stripe bar of pass ' + (i + 1) }) +
+      l4);
+  }
+  function zoneCard(z) {
+    var L = S.zones[z];
+    if (!L.length)
+      return T('div', 'pm-zone is-empty', T('div', 'pm-zh',
+        g(ZG[z], 'zi') + '<span class="zt">' + ZN[z] + '</span><span class="pm-grow"></span>' +
+        B('pm-btn pm-ghost', g('Plus') + (z === 'penu' ? 'Add penultimate' : 'Add Bottom Paint'),
+          { 'data-act': 'addzone', 'data-z': z, 'data-tip': 'addzone' }), { 'data-tip': 'addzone' }));
+    var head = T('div', 'pm-zh',
+      g(ZG[z], 'zi') + '<span class="zt">' + ZN[z] + '</span>' +
+      T('span', 'zs pm-mono', L.length + '/3 · ' + LH.toFixed(2) + ' mm', { 'data-tip': 'zcount', tabindex: 0 }) +
+      '<span class="pm-grow"></span>' +
+      B('pm-gb sm', g('Copy'), { 'aria-label': 'Copy this zone to…', 'data-tip': 'zcopy' }) +
+      (z !== 'top' ? B('pm-gb sm is-danger', g('Trash'), { 'aria-label': 'Empty ' + ZN[z], 'data-act': 'clearzone', 'data-z': z, 'data-tip': 'zclear' }) : ''),
+      { 'data-tip': 'zicon' });
+    var mm = T('div', 'pm-mm', L.map(function (p, i) {
+      return (i ? '<div class="grip" data-tip="grip"></div>' : '') +
+             T('div', 'seg', '<span class="pm-mono">' + p.th.toFixed(2) + '</span>', { style: 'flex:' + Math.round(p.th * 1000) + ' 1 0;' + mmCss(p) });
+    }).join(''), { 'data-tip': 'mm', tabindex: 0, role: 'img', 'aria-label': 'Thickness bar' });
+    var add = nextPass(z) ? B('pm-btn pm-dash', g('Plus') + 'Add pass', { 'data-act': 'addpass', 'data-z': z, 'data-tip': 'addpass' }) : '';
+    return T('div', 'pm-zone', head + T('div', 'pm-zbody', mm +
+      T('div', 'pm-passes', L.map(function (p, i) { return passRow(z, p, i, L.length); }).join('') + add)));
+  }
+  function pro() {
+    var Z = S.zones;
+    var zb = function (z, tip, dim) {
+      if (!Z[z].length) return T('div', 'pm-zb is-empty', '', { 'data-tip': tip });
+      return T('div', 'pm-zb' + (dim ? ' is-dim' : ''), Z[z].map(function (p) {
+        return '<div style="flex:' + Math.round(p.th * 1000) + ' 1 0;' + weaveCss(p) + '"></div>';
+      }).join(''), { 'data-tip': tip });
+    };
+    var zl = function (name, gl) { return T('span', 'pm-zl', '<span>' + name + '</span>' + g(gl)); };
+    var hero = T('div', 'pm-hero',
+      T('div', 'pm-xsec',
+        zl('Top', 'ZoneTop') + zb('top', 'hero') +
+        zl('Penultimate', 'ZonePenu') + zb('penu', 'hero') +
+        '<span></span>' + T('div', 'pm-part', '', { 'data-tip': 'hero_part' }) +
+        zl('Bottom', 'ZoneBottom') + zb('bottom', 'hero_bottom', true),
+        { 'data-tip': 'hero', tabindex: 0 }) +
+      T('div', 'pm-result', '<span>Result</span><span class="rs" style="background:' + resultHex() + '"></span><span>Top + Penu</span>',
+        { 'data-tip': 'result', tabindex: 0 }) +
+      T('span', 'pm-stamp', 'schematic · each zone = 1 layer', { 'data-tip': 'stamp' }));
+    return hero + zoneCard('top') + zoneCard('penu') + zoneCard('bottom') +
+      sec('Adv', 'Options', null, 'options') +
+      tog('Square', 'Perimeter override', 'perim', 'perim') +
+      brush() +
+      tray(Z.bottom.length ? [{ text: 'On bridges, tune before you stack', info: 1, tip: 'tray' }] : []);
+  }
+
+  /* --------------------------------------------------------- Object & TD */
+  function tdSlider(i) {
+    var v = S.td[i];
+    return T('span', 'pm-slider is-live', '<b style="left:' + handle((v - 0.01) / 9.99) + '"></b><span class="pm-mono">' + v.toFixed(2) + '</span>', {
+      role: 'slider', tabindex: 0, 'aria-label': 'TD of filament ' + (i + 1),
+      'aria-valuemin': '0.01', 'aria-valuemax': '10', 'aria-valuenow': v.toFixed(2), 'data-td': i, 'data-tip': 'td_slider'
+    });
+  }
+  function object() {
+    return sec('Spot', 'Transmission distance', null, 'td') +
+      S.td.map(function (v, i) { return T('div', 'pm-tdrow', fi(i, { tip: 'td_chip' }) + tdSlider(i)); }).join('') +
+      sec('Mix', 'MixedFilament Object', null, 'mf') +
+      tog('Cube', 'MixedFilament Object', 'mf', 'mf_toggle', true) +
+      T('p', 'pm-why', 'Assign a MixedFilament to this object’s extruder to use this department.', { 'data-tip': 'mf_why', tabindex: 0 }) +
+      brush();
+  }
+
+  /* --------------------------------------------------------------- legend */
+  var E = 'Every tab', TB = 'Toolbar', BV = 'Brush &amp; view';
+  var TIPS = {
+    h_sw: ['Active colour', 'The colour your next click paints. It is predicted from the recipe and the TD values, so it changes when you move a TD slider in Object &amp; TD.', E],
+    h_name: ['Name', 'The profile name. A colour you have not named yet reads Custom.', E],
+    h_chip: ['State', '<b>slot N</b> in teal: this colour already owns a paint slot on the object. <b>ready</b> in grey: it takes one on your first click. <b>no colour</b> in amber: nothing is chosen, so clicking the model does nothing.', E],
+    h_desc: ['The recipe, short', 'Top and Penultimate, deepest pass first. <b>T4</b> is a Solid pass in tool 4, <b>CS</b> is ColorStitch and <b>PB</b> is PathBlend.', E],
+    h_new: ['New', 'Starts a new colour from scratch.', E],
+    h_save: ['Save', 'Puts the active colour in the library, in the active group.', E],
+    h_dup: ['Duplicate', 'Makes an independent copy of the active colour, so you can change it without touching the faces already painted with the original.', E],
+    t_select: ['Select', 'Click objects in the scene to choose which ones you can paint. Shift click removes one.', TB],
+    t_paint: ['Paint', 'Smart fill. Click a flat face and the whole coplanar region fills with the active colour.', TB],
+    t_erase: ['Eraser', 'The same smart fill, removing paint instead.', TB],
+    t_pick: ['Eyedropper', 'Reads the recipe under the cursor and makes it the active colour.', TB],
+    t_sticker: ['Sticker', 'Places a loaded SVG on a flat top face. Experimental, see Stickers further down this page.', TB],
+    help: ['Help', 'Orca’s own help button, with the shortcuts for this gizmo.', TB],
+    eraseall: ['Erase all', 'Removes all the paint from the selected objects. It asks first, and turns amber on hover so you can tell it apart from the rest.', TB],
+    tab0: ['Palette', 'Paint, erase and pick colours on the model: the library, what is in use on this object, and stickers.', 'Tabs'],
+    tab1: ['Generator', 'Rows of colours made for you from your filaments, ready to click and paint.', 'Tabs'],
+    tab2: ['Pro', 'Where a colour is composed, pass by pass, in Top, Penultimate and Bottom. The Pro panel is the active colour, so editing here changes it everywhere it is painted.', 'Tabs'],
+    tab3: ['Object &amp; TD', 'The Transmission Distance of every filament, and MixedFilament Object mode.', 'Tabs'],
+
+    library: ['Library', 'Every saved colour in the active group. The number at the end of the line is how many it holds.'],
+    group: ['Groups', 'Palette groups, up to 10, each with its count. The filled one is active.'],
+    g_new: ['New group', 'Adds a palette group.'],
+    g_del: ['Delete group', 'Deletes the active group.'],
+    g_saveall: ['Save all', 'Saves every colour that is not saved yet into the active group, in one go. It only shows up while there is something to save, and it is the thing to press before an Erase all.'],
+    grid: ['The grid', 'Click a swatch to make it the active colour, hover it for its recipe and name, and right click it for Duplicate, Save to palette and Delete. The line underneath explains the marks.'],
+    sw: ['A saved colour', 'No marks: saved, made of Solid passes, and not painted on this object.'],
+    sw_new: ['Not saved', 'The light notch in the top left corner means the colour is not saved. It exists because a face uses it, and it goes away when no face does.'],
+    sw_here: ['On this object', 'The teal dot means this colour is painted somewhere on this object.'],
+    sw_cs: ['ColorStitch', 'The striped mark in the corner means the recipe has a ColorStitch pass.'],
+    sw_pb: ['PathBlend', 'The ramp mark in the corner means the recipe has a PathBlend pass.'],
+    legend: ['The marks', 'What the notch, the dot and the two corner marks on a swatch mean.'],
+    inuse: ['In use on this object', 'Every colour that owns a paint slot on this object, with the number of slots at the end of the line.'],
+    slot: ['A slot', '<b>s1</b> is the slot number. The bar under the name shows how many faces use it next to the others, and the number is the faces. Hover the row in the app and the model shows where it is.'],
+    u_use: ['Use', 'Makes this the active paint colour.'],
+    u_free: ['Free', 'Removes this colour from this object and gives the slot back.'],
+    stickers: ['Stickers (SVG)', 'Folds open to Load SVG and the stickers on this object. Experimental.'],
+    stk_load: ['Load SVG', 'Picks an SVG file to place with the Sticker tool.'],
+    brush: ['Brush &amp; view', 'The same section at the bottom of all four tabs. Click the title to fold it.', E],
+    b_fill: ['Smart fill angle', 'How much a neighbouring face can tilt and still fill as part of the same flat region. The value sits inside the slider; Ctrl+click it to type a number.', BV],
+    b_cut: ['Section view', 'Cuts the model open so you can reach faces inside it. Ctrl+click to type a number.', BV],
+    b_hl: ['Highlight active colour', 'Outlines where the active colour is painted on the model, with a badge per island. The counter says how many faces, or that it is not painted here.', BV],
+    b_mark: ['Mark bands with no angle', 'Outlines in violet the bands whose angle is on auto. The slicer turns those every layer, so no still preview can match them.', BV],
+    b_keep: ['Keep paint visible outside this gizmo', 'Painted objects stay drawn painted in the normal 3D view when the Painter is closed. On by default, for the whole project.', BV],
+
+    gen_ramp: ['Gradient ramp', 'A row of colours going from filament A to filament B. Top only.'],
+    gen_flat: ['Flat color', 'Colours made of Solid passes, all of them in one grid. The number is how many there are.'],
+    gen_cs: ['ColorStitch Pattern Color', 'A row of ColorStitch colours between A and B, using Top and Penultimate.'],
+    gen_a: ['Start (A)', 'The filament at the start of the row. Pick one and the row changes.'],
+    gen_b: ['End (B)', 'The filament at the end of the row.'],
+    gen_grid: ['The row', 'Eight per line, the same size in all three cards, and every swatch shows. Click one to make it the active colour.'],
+    gen_sw: ['A generated colour', 'Click it and it becomes the active colour, ready to paint.'],
+
+    hero: ['The stack', 'The zones as they sit in the part: Top, Penultimate, the part itself, then Bottom. Every pass is drawn with its real stripes or ramp, at its thickness inside the zone.'],
+    hero_part: ['The part', 'The body of the object, between the painted zones.'],
+    hero_bottom: ['Bottom, dimmed', 'Bottom is drawn faint because it faces the plate, so it does not count toward the colour you see from above.'],
+    result: ['Result', 'What Top and Penultimate make together, seen from above. Here it is computed with the same colour maths the app uses, over the object’s own filament.'],
+    stamp: ['Schematic', 'A reminder that this top drawing is a diagram: each zone is one layer.'],
+    zicon: ['The zone', 'Its icon is a block with its own layer lit. Zones have no colour of their own any more; amber is for warnings.'],
+    zcount: ['Passes and thickness', 'How many passes the zone has out of three, and how thick the zone is.'],
+    zcopy: ['Copy this zone to', 'Opens a small menu with the other two zones and copies the whole zone there, ColorStitch pattern included. A stack landing on Bottom is trimmed to the Bottom rules.'],
+    zclear: ['Empty the zone', 'Clears this zone. Penultimate and Bottom have one; Top does not.'],
+    addzone: ['An empty zone', 'Nothing here yet. The button gives the zone its first pass.'],
+    mm: ['Thickness bar', 'Each block is a pass, with its millimetres. Drag the teal notch between two blocks to move thickness from one pass to the other.'],
+    grip: ['Divider', 'Drag it to share the thickness between the two passes it separates.'],
+    k_s: ['Solid', 'One filament for the whole pass.'],
+    k_cs: ['ColorStitch', 'Filaments woven line by line.'],
+    k_pbh: ['PB Half', 'PathBlend: one filament ramping over another, up to half the pass. A PathBlend pass takes the whole zone.'],
+    k_pbf: ['PB Full', 'PathBlend all the way up. A PathBlend pass takes the whole zone, so Add pass goes away.'],
+    k_pbpenu: ['PathBlend, not here', 'PathBlend is Top only for now, so its icons are dimmed in Penultimate.'],
+    k_cap: ['Over the limit', 'Dimmed because the zone cannot take another pass of that type. Bottom takes at most 2 Solid and 1 ColorStitch.'],
+    p_idx: ['Pass number', 'Counted from the surface down.'],
+    p_kname: ['Type', 'The type of this pass, in words.'],
+    p_up: ['Move up', 'Moves the pass up, toward the surface.'],
+    p_down: ['Move down', 'Moves the pass down, into the part.'],
+    p_del: ['Remove', 'Removes this pass.'],
+    p_stool: ['Filament', 'The filament this Solid pass prints with. Pick another and watch the Result.'],
+    p_cstools: ['Tools', 'The two tools this ColorStitch pass weaves, with their real numbers. They change in Pattern.'],
+    p_pattern: ['Pattern', 'Opens the ColorStitch pattern editor: stripes or gradient, band widths, the transition, invert, repetitions and colours 3 and 4.'],
+    p_rampcap: ['Ramp and cap', 'The two filaments of the PathBlend: the ramp underneath and the cap that thickens over it.'],
+    p_ang: ['Fill angle', 'The angle of this pass, in the same place for all three types. Scroll the wheel over the stripe bar to turn it. On auto it reads <b style="color:#8a5ad6">auto</b> in violet, the same violet as the outline in the 3D view.'],
+    p_weave: ['Stripe bar', 'The pass as it prints. It reads from right to left like the 3D view and the slice, so in a gradient the start is on the right. Right click it for Duplicate, Move and Delete.'],
+    p_floor: ['Floor and ramp end', 'Where the ramp starts and where it tops out, in millimetres.'],
+    p_mode: ['Mode', 'How the ramp rises: Linear, Ease In, Ease Out or Ease In/Out. Click it for the next one.'],
+    p_profile: ['Profile', 'Shapes the ramp with floor, ramp end, start and end. The teal dot says it has been shaped.'],
+    addpass: ['Add pass', 'Adds a pass to the zone. It goes away once the zone has three passes, or when it holds a PathBlend.'],
+    options: ['Options', 'Settings for the colour as a whole.'],
+    perim: ['Perimeter override', 'Reprints the walls to match, so the sides of the painted area carry the colour too.'],
+    tray: ['The tray', 'Every warning sits here at the bottom of the panel, so nothing jumps up between the controls: amber when something is wrong, grey when it is a tip. This one is about Bottom on bridges.'],
+
+    td: ['Transmission distance', 'One row per filament. Every prediction in the Painter reads these, and since 2.4.6 this is the only place they live.'],
+    td_chip: ['Filament', 'The loaded filament this row belongs to.'],
+    td_slider: ['TD', 'How far light gets through this filament. Drag it, or use the arrow keys, and watch the active colour at the top change. In the app, Ctrl+click types a number.'],
+    mf: ['MixedFilament Object', 'Makes this object’s surfaces look like the MixedFilament assigned to it, with a small sandwich worked out from your other filaments.'],
+    mf_toggle: ['The switch', 'Greyed out here because this object’s extruder is not a MixedFilament.'],
+    mf_why: ['Why it is greyed out', 'The reason sits right under the switch. Assign a MixedFilament as the object’s extruder and reopen the Painter.']
+  };
+
+  host.innerHTML =
+    '<div class="pm"><div class="pm-panel"></div>' +
+    '<aside class="pm-legend" aria-live="polite"><p class="pm-leg-where"></p><p class="pm-leg-name"></p><p class="pm-leg-text"></p></aside></div>';
+  var panel = host.querySelector('.pm-panel');
+  var leg = host.querySelectorAll('.pm-legend p');
+
+  function say(where, name, text) { leg[0].innerHTML = where; leg[1].innerHTML = name; leg[2].innerHTML = text; }
+  function intro() {
+    say('How to read it', 'Point at anything',
+        'Hover or tab through the panel and this box says what each part is for. The tabs switch departments, and in Pro the pass buttons work, so you can add, move and retype passes and watch the Result follow.');
+  }
+  function showTip(el) {
+    var t = el && el.closest && el.closest('[data-tip]');
+    if (!t || !panel.contains(t)) return;
+    var d = TIPS[t.getAttribute('data-tip')];
+    if (d) say(d[2] || TABS[S.tab][1], d[0], d[1]);
+  }
+
+  function keyOf(el) {
+    if (!el || !panel.contains(el)) return '';
+    return ['data-act', 'data-tip', 'data-z', 'data-i', 'data-v', 'data-td'].map(function (a) { return el.getAttribute(a) || ''; }).join('|');
+  }
+  function render() {
+    var key = keyOf(document.activeElement);
+    panel.innerHTML = header() + toolbar() + tabs() +
+      T('div', 'pm-body', [palette, generator, pro, object][S.tab](), { id: 'pm-body', role: 'tabpanel', 'aria-labelledby': 'pm-tab' + S.tab });
+    if (key) {
+      var m = [].slice.call(panel.querySelectorAll('button, [tabindex]')).filter(function (el) { return keyOf(el) === key; })[0];
+      if (m) m.focus({ preventScroll: true });
+    }
+  }
+
+  function swap(L, a, b) { if (b < 0 || b >= L.length) return; var t = L[a]; L[a] = L[b]; L[b] = t; }
+  panel.addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-act]');
+    if (!b || !panel.contains(b) || b.getAttribute('aria-disabled') === 'true') return;
+    var act = b.getAttribute('data-act'), z = b.getAttribute('data-z'), v = b.getAttribute('data-v');
+    var i = +b.getAttribute('data-i'), L = z ? S.zones[z] : null;
+    switch (act) {
+      case 'tab': S.tab = +v; break;
+      case 'tool': S.tool = +v; break;
+      case 'fold': case 'toggle': S[v] = !S[v]; break;
+      case 'sw': S.sel = +v; break;
+      case 'gen': S.gen[z][i] = +v; break;
+      case 'stool': L[i].t = +v; break;
+      case 'mode': L[i].mode = (L[i].mode + 1) % 4; break;
+      case 'up': swap(L, i, i - 1); break;
+      case 'down': swap(L, i, i + 1); break;
+      case 'del': {
+        var gone = L.splice(i, 1)[0];
+        L[Math.min(i, L.length - 1)].th += gone.th;
+        break;
+      }
+      case 'kind':
+        // A PathBlend pass takes the whole zone on its own.
+        if (isPB({ k: v })) { var q = L[i]; q.k = v; q.th = LH; S.zones[z] = [q]; }
+        else L[i].k = v;
+        break;
+      case 'addpass': { var np = nextPass(z); if (np) { L.push(np); equalize(L); } break; }
+      case 'addzone': S.zones[z] = [z === 'bottom' ? P({ t: 2 }) : P({ t: 2 })]; break;
+      case 'clearzone': S.zones[z] = []; break;
+    }
+    render();
+    if (act === 'tab') showTip(panel.querySelector('#pm-tab' + S.tab));
+  });
+
+  function setTd(sl, v) {
+    var i = +sl.getAttribute('data-td');
+    v = Math.round(Math.min(10, Math.max(0.01, v)) * 100) / 100;
+    S.td[i] = v;
+    sl.setAttribute('aria-valuenow', v.toFixed(2));
+    sl.querySelector('span').textContent = v.toFixed(2);
+    sl.querySelector('b').style.left = handle((v - 0.01) / 9.99);
+    panel.querySelector('.pm-sw').style.background = resultHex();
+  }
+  panel.addEventListener('pointerdown', function (ev) {
+    var sl = ev.target.closest('[data-td]');
+    if (!sl) return;
+    ev.preventDefault();
+    sl.focus({ preventScroll: true });
+    var move = function (e) {
+      var r = sl.getBoundingClientRect();
+      setTd(sl, 0.01 + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * 9.99);
+    };
+    move(ev);
+    sl.setPointerCapture(ev.pointerId);
+    sl.onpointermove = move;
+    sl.onpointerup = sl.onpointercancel = function () { sl.onpointermove = null; };
+  });
+
+  panel.addEventListener('keydown', function (ev) {
+    var t = ev.target;
+    if (t.getAttribute('role') === 'tab') {
+      var n = { ArrowRight: (S.tab + 1) % 4, ArrowLeft: (S.tab + 3) % 4, Home: 0, End: 3 }[ev.key];
+      if (n == null) return;
+      ev.preventDefault();
+      S.tab = n; render();
+      var tab = panel.querySelector('#pm-tab' + n);
+      tab.focus(); showTip(tab);
+      return;
+    }
+    if (t.hasAttribute('data-td')) {
+      var i = +t.getAttribute('data-td'), d = { ArrowRight: 0.05, ArrowUp: 0.05, ArrowLeft: -0.05, ArrowDown: -0.05, PageUp: 0.5, PageDown: -0.5 }[ev.key];
+      if (ev.key === 'Home') d = -10; else if (ev.key === 'End') d = 10;
+      if (d == null) return;
+      ev.preventDefault();
+      setTd(t, S.td[i] + d);
+    }
+  });
+
+  panel.addEventListener('pointerover', function (ev) { showTip(ev.target); });
+  panel.addEventListener('focusin', function (ev) { showTip(ev.target); });
+
+  render();
+  intro();
 });
 </script>
 

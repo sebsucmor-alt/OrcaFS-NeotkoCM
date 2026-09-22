@@ -16,13 +16,16 @@
 #include "libslic3r/ColorSci/ColorSci.hpp"   // ColorSci::Material
 #include "libslic3r/Color.hpp"               // ColorRGBA
 
+#include <cmath>     // s318 F3 — WeaveParams::shader_axis
 #include <cstdint>
 #include <map>
+#include <memory>    // s318 F3 — shared_ptr<const TopZoneRecipe>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace Slic3r {
+class DynamicPrintConfig;   // NEOTKO_COLORSTITCH_TAG — s314
 class ModelObject;
 class ModelVolume;
 class TriangleSelector;
@@ -120,11 +123,84 @@ struct WeaveParams {
     // ángulo único es cierto para la banda entera. s280d — el aviso lo da el
     // contorno violeta pulsante del painter (antes: parpadeo del propio tejido).
     bool                   auto_angle = false;
+    // NEOTKO_COLORSTITCH_TAG — s318 F3: eje de proyección en coordenadas de MALLA del
+    // volumen, ya con la transformación de instancia y volumen metida (ver weave_frame).
+    // El shader hace `proj = dot(u_weave_axis, pos)`. A cero = "no calculado" y se deriva
+    // de `angle_rad` como antes (−sin, cos, 0): así un tejido que nadie ha pasado por
+    // weave_frame (el color plano del Bottom) sigue pintando igual.
+    float                  axis[3]   = {0.f, 0.f, 0.f};
+    // NEOTKO_COLORSTITCH_TAG — s318 F3, opción A (ver make_zone_weave). Con `dual` el shader
+    // compone DOS pases, cada uno con su eje: el de ARRIBA es esta LUT (`cols` = su color
+    // propio y `dual_a` = su transmitancia, los dos en LINEAL) y el de ABAJO es la LUT 2
+    // (`cols2` = color lineal de todo lo que queda debajo). color = a·c2 + b, luego a sRGB.
+    // dual=false ⇒ nada de esto se lee y `cols` es sRGB como siempre.
+    bool                   dual      = false;
+    std::vector<ColorRGBA> dual_a;
+    bool                   tile2     = false;
+    float                  pitch2    = 1.f;
+    float                  p0_2      = 0.f;
+    float                  axis2[3]  = {0.f, 0.f, 0.f};
+    std::vector<ColorRGBA> cols2;
+    void shader_axis(float out[3]) const {
+        if (axis[0] != 0.f || axis[1] != 0.f || axis[2] != 0.f) {
+            out[0] = axis[0]; out[1] = axis[1]; out[2] = axis[2];
+        } else {
+            out[0] = -std::sin(angle_rad); out[1] = std::cos(angle_rad); out[2] = 0.f;
+        }
+    }
 };
 
+// NEOTKO_COLORSTITCH_TAG — s318 F3: el MARCO del tejido, para que el preview proyecte
+// exactamente donde proyecta el motor.
+//
+// 🔑 El problema que cierra (plan F3 §3.1a). El motor proyecta cada línea en el marco de
+// REBANADO: punto = trafo_centered() · M_volumen · v, y le resta el ancla, que es el origen
+// del objeto en ese mismo marco. Como trafo_centered() sólo difiere de la matriz de la
+// instancia en una traslación, lo que queda es
+//     proj_motor − ancla = perp · L·(R_v·v + t_v)
+// con L = parte LINEAL de la instancia (rotación, escala, espejo) y R_v/t_v las del volumen.
+// El tejido, en cambio, proyectaba el vértice CRUDO de la malla (`−x·sin + y·cos`) y anclaba
+// en el borde de la isla. Con un objeto sin rotar y un volumen sin transformar da igual; con
+// la pieza girada en el plato las bandas giraban CON la pieza mientras el motor las deja
+// fijas a la cama, y con escala el paso salía en mm de malla y no en mm impresos.
+//
+// Salida: `axis` = (L·R_v)ᵀ · perp, un vector en coordenadas de malla, y `anchor_proj` =
+// dot(axis, origen del objeto en coords de malla) = −perp·(L·t_v). Así, para un vértice v:
+//     proj_motor − ancla == dot(axis, v) − anchor_proj
+// sin aproximaciones (incluye las inclinaciones de "apoyar en cara", que meten Z).
+//
+// `perp` sale como en lane_perp_axis(): (−sin θ, cos θ) en el marco de rebanado, con θ mod π
+// si el ángulo es autorado, y con la canonización de semiplano SÓLO si no lo es
+// (`canon_half_plane`), igual que las rutas de campo del motor (s315b).
+// ⚠️ Instancia: se usa la primera, como ya hacía facing_of(). Dos instancias con distinta
+// rotación son dos PrintObject distintos en el motor; aquí comparten tejido.
+// ⚠️ La compensación de encogimiento del filamento (una escala) no se mete: es de décimas.
+struct WeaveFrame {
+    float axis[3]     = {0.f, 1.f, 0.f};
+    float anchor_proj = 0.f;
+    float proj(float x, float y, float z) const { return axis[0] * x + axis[1] * y + axis[2] * z; }
+};
+WeaveFrame weave_frame(const ModelVolume* mv, const ModelObject* owner,
+                       float theta_rad, bool canon_half_plane);
+
 // Contexto resuelto sin slice (preset actual).
-double weave_layer_height();
-double weave_top_line_width();
+// NEOTKO_COLORSTITCH_TAG — s314: los tres aceptan un `cfg` opcional. Con nullptr leen el
+// preset de impresión EDITADO, que es lo que hacían siempre (todos los call-sites previos
+// siguen valiendo sin tocarlos). Pasando un config concreto se puede resolver contra la
+// config de UN objeto, que es lo que hace falta cuando el plato tiene varios anchos de
+// línea: el preview del diálogo se abre para un objeto, no para el preset.
+double weave_layer_height(const Slic3r::DynamicPrintConfig* cfg = nullptr);
+double weave_top_line_width(const Slic3r::DynamicPrintConfig* cfg = nullptr);
+// NEOTKO_COLORSTITCH_TAG — s314: SEPARACIÓN real entre líneas de relleno, en mm. DUEÑO
+// ÚNICO, y no es lo mismo que el ancho: Orca modela el cordón como un rectángulo con los
+// flancos redondeados y coloca las líneas a
+//     spacing = width - layer_height * (1 - PI/4)
+// (Flow::rounded_rectangle_extrusion_spacing, Flow.cpp:183) para que los flancos se solapen
+// y no quede valle entre cordones. Con capa 0,2 el solape es 0,0429 mm FIJO, así que cuanto
+// más fina la línea mayor es el porcentaje: 10% a 0,42 y 14% a 0,30. Medido contra el gcode
+// del usuario en s314, clavado a la tercera cifra en cuatro objetos distintos.
+// Cualquier cuenta de "cuántas líneas caben" DEBE dividir por esto y no por el ancho.
+double weave_top_line_spacing(const Slic3r::DynamicPrintConfig* cfg = nullptr);
 // NEOTKO_COLORSTITCH_TAG — dirección base del relleno sólido (rad). Punto de partida
 // de una banda en AUTO; ver el comentario de la definición.
 float  weave_solid_infill_dir_rad();
@@ -137,8 +213,12 @@ ColorRGBA tool_col_rgba(const std::vector<std::string>& fcolors, int tool0);
 
 // Secuencia de herramientas por línea de un ColorStitch — única fuente de verdad de
 // todos los previews, construida con los MISMOS builders del motor.
+// NEOTKO_COLORSTITCH_TAG — s314: `spacing_mm` sólo lo usa el modo 4 (bandas en mm), que
+// necesita saber cuánto mide una línea para traducir el diseño a la secuencia. Con 0 se
+// resuelve solo desde el preset editado (weave_top_line_spacing). Los modos 0-3 lo ignoran.
 std::vector<int> colorstitch_tool_sequence(const std::map<std::string, std::string>& kv,
-                                           bool penu, int n_lines);
+                                           bool penu, int n_lines,
+                                           double spacing_mm = 0.0);
 // Round-trip del blob PathBlend de un pase.
 Slic3r::PathBlendPassConfig pro_pb_read(const Slic3r::SurfacePass& p);
 
@@ -148,9 +228,13 @@ std::map<std::string, std::string> colorstitch_top_kv(const Slic3r::SurfaceEffec
 bool  pathblend_top_config(const Slic3r::SurfaceEffectProfile& prof, Slic3r::PathBlendPassConfig& out);
 float colorstitch_weave_theta(const std::map<std::string, std::string>& kv, bool& is_auto);
 
+// s318 F3 — `pmin/pmax` son proyecciones con el eje de weave_frame() y `anchor_proj` la del
+// origen del objeto (WeaveFrame::anchor_proj). Con 0 se ancla en el origen de la malla.
 WeaveParams colorstitch_make_weave(const std::map<std::string, std::string>& kv,
                                    const std::vector<std::string>& fcolors,
-                                   float theta, float pmin, float pmax, float line_w);
+                                   float theta, float pmin, float pmax, float line_w,
+                                   float anchor_proj = 0.f,
+                                   std::vector<int>* out_tools = nullptr);   // s318 F3: tool por entrada de `cols`
 // NEOTKO_PATHBLEND_TAG — s280e: `theta` (orientación de las bandas) es un parámetro, ya no
 // va clavado a 0. Estaba hardcodeado y por eso el ángulo de PathBlend NO se veía en el
 // preview ni con el eje del degradado ya arreglado: las bandas salían siempre horizontales.
@@ -158,7 +242,35 @@ WeaveParams pathblend_make_weave(const Slic3r::PathBlendPassConfig& pbc,
                                  const Slic3r::ColorSci::Material mats[4],
                                  const float bg_rgb[3], double layer_h_mm,
                                  float theta,
-                                 float pmin, float pmax, float line_w);
+                                 float pmin, float pmax, float line_w,
+                                 // s318 F3: ancla del objeto (WeaveFrame::anchor_proj) y, si se
+                                 // pide, las capas físicas de cada franja (rampa + tapa).
+                                 float anchor_proj = 0.f,
+                                 std::vector<std::vector<Slic3r::ColorSci::Layer>>* out_layers = nullptr);
+
+// NEOTKO_COLORSTITCH_TAG — s318 F3, OPCIÓN A: la zona Top de un slot compuesta de verdad.
+// El color que se ve en un punto es la pila física entera (Penu debajo, Top encima, cada
+// pase una capa Beer-Lambert sobre el fondo del objeto). Si el Top y el Penu llevan cada uno
+// un pase con efecto (ColorStitch o PathBlend), cada uno tiene SU eje y SU tejido, y en cada
+// punto la franja de uno cae sobre la del otro. Eso es lo que ahora se compone por fragmento.
+// Receta opaca: vive en el .cpp para no meter ColorStitch.hpp en todos los que incluyen esto.
+// nullptr = el perfil no tiene pilas (payload legacy) o no hay ningún pase con efecto; el
+// llamador sigue por el camino de siempre.
+struct TopZoneRecipe;
+std::shared_ptr<const TopZoneRecipe> resolve_top_zone(const Slic3r::SurfaceEffectProfile& prof,
+                                                      const ModelVolume* mv, const ModelObject* owner,
+                                                      const Slic3r::ColorSci::Material mats[4]);
+// Marco del pase de abajo (o del único) con hi=false; del de arriba con hi=true (si no hay
+// pase de arriba devuelve el de abajo).
+const WeaveFrame& top_zone_frame(const TopZoneRecipe& r, bool hi);
+bool              top_zone_auto(const TopZoneRecipe& r);
+// Tejido compuesto de UNA isla. lo_* = extremos sobre el eje del pase de abajo, hi_* sobre
+// el del pase de arriba. .on=false si no hay tejido que dibujar.
+WeaveParams make_zone_weave(const TopZoneRecipe& r,
+                            const std::vector<std::string>& fcolors,
+                            const Slic3r::ColorSci::Material mats[4], const float bg_rgb[3],
+                            float line_w, double layer_h_mm,
+                            float lo_min, float lo_max, float hi_min, float hi_max);
 
 // Tejido por ISLA de un volumen pintado. `sel` es un TriangleSelector ya deserializado
 // desde mv->colorstitch_paint_facets (el gizmo pasa el suyo, vivo; la vista normal

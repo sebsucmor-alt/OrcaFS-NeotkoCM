@@ -1333,6 +1333,7 @@ NeoWipeTower::NeoWipeTower(const PrintConfig&                     config,
     , m_local_z_wipe_tower_purge_lines(float(config.local_z_wipe_tower_purge_lines))
     , m_neo_purge_compaction(float(config.neotower_purge_compaction)) // NEOTKO_NEOTOWER_TAG s104
     , m_neo_zigurat(config.neotower_zigurat.value)                    // NEOTKO_NEOTOWER_TAG s104
+    , m_neo_no_ramming(config.neotower_no_ramming.value)              // NEOTKO_NEOTOWER_TAG s310
     , m_y_shift(0.f)
     , m_z_pos(0.f)
     , m_bridging(float(config.wipe_tower_bridging))
@@ -1801,7 +1802,10 @@ float NeoWipeTower::predict_ramming_end_x(int old_tool, float layer_height) cons
     float xr = m_wipe_tower_width - m_perimeter_width / 2.f - 1.f * line_width;
 
     // Same condition as Unload (L1654)
-    bool do_ramming = (m_semm && m_enable_filament_ramming) || m_filpar[old_tool].multitool_ramming;
+    // NEOTKO_NEOTOWER_TAG s310 — with neotower_no_ramming the nozzle travels to the
+    // ramming start and deposits nothing, so it ends exactly where it started (xl).
+    bool do_ramming = !m_neo_no_ramming &&
+                      ((m_semm && m_enable_filament_ramming) || m_filpar[old_tool].multitool_ramming);
     if (!do_ramming)
         return xl; // nozzle stays at ramming_start_pos
 
@@ -1849,7 +1853,10 @@ void NeoWipeTower::toolchange_Unload(NeoWipeTowerWriter&                 writer,
     float e_done    = 0;       // measures E move done from each segment
 
     // Orca: Do ramming when SEMM and ramming is enabled or when multi tool head when ramming is enabled on the multi tool.
-    const bool do_ramming   = (m_semm && m_enable_filament_ramming) || m_filpar[m_current_tool].multitool_ramming;
+    // NEOTKO_NEOTOWER_TAG s310 — split in two: filament_ramming is the stock predicate
+    // (does the FILAMENT profile ask for a ramming deposit), do_ramming now only governs
+    // the tower VISIT (travel in / travel out). See the neotower_no_ramming block below.
+    const bool filament_ramming = (m_semm && m_enable_filament_ramming) || m_filpar[m_current_tool].multitool_ramming;
     const bool cold_ramming = m_is_mk4mmu3;
 
     // NEOTKO_MPSCHEDULER_TAG s79b — sandwich sublayer TCs: keep the TRAVEL to the tower
@@ -1859,19 +1866,33 @@ void NeoWipeTower::toolchange_Unload(NeoWipeTowerWriter&                 writer,
     // starving the useful pre-print wipe. With ram_deposit=false the box is left empty
     // for the wipe to fill. Body real-layer TCs (skip_ramming=false) keep full ramming.
     // Inert on stock: m_active_tool_change->skip_ramming is false for every non-NeoTower TC.
-    const bool ram_deposit  = do_ramming &&
+    //
+    // NEOTKO_NEOTOWER_TAG s310 — neotower_no_ramming: the same gate, print-wide.
+    // The user-visible problem it solves: switching ramming OFF in the filament profile
+    // also kills the travel (do_ramming guards both the travel in here and the travel out
+    // at the end of this function), so the toolchange fires wherever the nozzle happened
+    // to be — over the part. With this option the visit is FORCED (do_ramming true even
+    // when the filament profile has ramming off) and only the deposit is zeroed.
+    const bool ram_deposit  = filament_ramming && !m_neo_no_ramming &&
                               !(m_active_tool_change != nullptr && m_active_tool_change->skip_ramming);
+    const bool do_ramming   = filament_ramming || m_neo_no_ramming;
 
     if (do_ramming) {
         writer.travel(ramming_start_pos); // move to starting position
-        if (!m_is_mk4mmu3) {
-            if (m_change_pressure) {
-                writer.disable_linear_advance_value(m_change_pressure_value);
+        // NEOTKO_NEOTOWER_TAG s310 — the pressure-advance override and the cold-ramming
+        // temperature drop belong to the DEPOSIT, not to the visit: keep them on the stock
+        // predicate so enabling neotower_no_ramming never emits gcode that was not emitted
+        // before (there is no matching re-enable for the linear-advance override in here).
+        if (filament_ramming) {
+            if (!m_is_mk4mmu3) {
+                if (m_change_pressure) {
+                    writer.disable_linear_advance_value(m_change_pressure_value);
+                }
             }
-        }
 
-        if (cold_ramming)
-            writer.set_extruder_temp(old_temperature - 20);
+            if (cold_ramming)
+                writer.set_extruder_temp(old_temperature - 20);
+        }
     } else
         writer.set_position(ramming_start_pos);
 
@@ -3013,7 +3034,10 @@ void NeoWipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned
     // top). The fork's old 0.25*accumulate(ramming_speed) gave ~0 for multitool (empty
     // ramming_speed), so this never surfaced. Gating by skip_ramming restores the fork's
     // effective behavior. Inert on the stock path (stock TCs pass skip_ramming=false).
-    bool  has_ramming       = !skip_ramming && (m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming);
+    // NEOTKO_NEOTOWER_TAG s310 — neotower_no_ramming reserves no ramming depth either:
+    // the whole box goes to the wipe, exactly like a per-TC skip_ramming sublayer.
+    bool  has_ramming       = !skip_ramming && !m_neo_no_ramming &&
+                              (m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming);
     float num_lines         = has_ramming ? std::max(1.0f, std::ceil(length_to_extrude / width)) : 0.f;
     float ramming_depth     = num_lines * ramming_lw * m_filpar[old_tool].ramming_step_multiplicator *
                               m_extra_spacing_ramming;
@@ -3038,7 +3062,8 @@ void NeoWipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned
                                              m_extra_spacing_wipe, width, _line_cushion);
 
     m_plan.back().tool_changes.push_back(
-        WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume, skip_ramming));
+        WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume,
+                                  skip_ramming || m_neo_no_ramming)); // NEOTKO_NEOTOWER_TAG s310
     m_plan.back().tool_changes.back().flow_mult = _neo_mult; // NEOTKO_NEOTOWER_TAG s104
 }
 
@@ -3061,7 +3086,8 @@ void NeoWipeTower::plan_local_z_toolchange(float z_par, float layer_height_par, 
         ? 0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(), m_filpar[old_tool].ramming_speed.end(), 0.f)
         : m_filpar[old_tool].multitool_ramming_volume;
     float length_to_extrude = volume_to_length(ramming_volume, ramming_lw, layer_height_par);
-    bool  has_ramming       = m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming;
+    // NEOTKO_NEOTOWER_TAG s310 — neotower_no_ramming (see plan_toolchange).
+    bool  has_ramming       = !m_neo_no_ramming && (m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming);
     float num_lines         = has_ramming ? std::max(1.0f, std::ceil(length_to_extrude / width)) : 0.f;
     float ramming_depth     = num_lines * ramming_lw * m_filpar[old_tool].ramming_step_multiplicator *
                               m_extra_spacing_ramming;
@@ -3095,7 +3121,9 @@ void NeoWipeTower::plan_local_z_reserve(float z_par, float layer_height_par, siz
     float max_ramming_depth = 0.f;
     if (wipe_width > WT_EPSILON) {
         for (const FilamentParameters& filament : m_filpar) {
-            const bool do_ramming = (m_semm && m_enable_filament_ramming) || filament.multitool_ramming;
+            // NEOTKO_NEOTOWER_TAG s310 — neotower_no_ramming: no ramming depth to budget.
+            const bool do_ramming = !m_neo_no_ramming &&
+                                    ((m_semm && m_enable_filament_ramming) || filament.multitool_ramming);
             if (!do_ramming || filament.ramming_speed.empty())
                 continue;
 
@@ -3350,7 +3378,8 @@ void NeoWipeTower::get_all_wall_skip_points()
         for (size_t tc_idx = 0; tc_idx < layer.tool_changes.size(); ++tc_idx) {
             const auto& tc = layer.tool_changes[tc_idx];
             // Gap on wall closest to where ramming ends; Y at ramming-wiping boundary
-            bool do_ramming = (m_semm && m_enable_filament_ramming) || m_filpar[tc.old_tool].multitool_ramming;
+            bool do_ramming = !m_neo_no_ramming && // NEOTKO_NEOTOWER_TAG s310
+                              ((m_semm && m_enable_filament_ramming) || m_filpar[tc.old_tool].multitool_ramming);
             float x = (predict_ramming_end_x((int) tc.old_tool, layer.height) < m_wipe_tower_width / 2.f) ? 0.f : m_wipe_tower_width;
             float y = process_depth + (do_ramming ? tc.ramming_depth : 0.f) + m_perimeter_width / 2.f;
             skip_points.emplace_back(x, y);
@@ -3818,7 +3847,8 @@ NeoWipeTower::WipeTowerInfo::ToolChange NeoWipeTower::set_toolchange(int old_too
     }
     float length_to_extrude = volume_to_length(ramming_volume, line_width, layer_height);
 
-    bool  has_ramming     = m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming;
+    // NEOTKO_NEOTOWER_TAG s310 — neotower_no_ramming (see plan_toolchange).
+    bool  has_ramming     = !m_neo_no_ramming && (m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming);
     float num_lines     = has_ramming ? std::max(1.0f, std::ceil(length_to_extrude / width)) : 0.f;
     float ramming_depth = num_lines * line_width * m_filpar[old_tool].ramming_step_multiplicator *
                           m_extra_spacing_ramming;
