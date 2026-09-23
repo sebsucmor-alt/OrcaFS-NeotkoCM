@@ -18,7 +18,7 @@
 
 namespace Slic3r { namespace GUI {
 
-// Los quince mandos avanzados, en el MISMO orden en el que estaban en la pestaña (s332). El orden
+// Los mandos avanzados (quince de s332 + tres de s336), en el MISMO orden en el que estaban en la pestaña (s332). El orden
 // no es decorativo: va de lo que decide el cordón a lo que decide el camino, y así se lee.
 // 🚨 `neostroke_wall_eat` y `neostroke_perimeter` NO están: se fueron con NeoWall en s335.
 static const std::vector<std::string>& ns_advanced_keys()
@@ -39,6 +39,10 @@ static const std::vector<std::string>& ns_advanced_keys()
         "neostroke_layer_jitter",
         "neostroke_skate",
         "neostroke_skate_detour",
+        // s336 (2_47) — pruebas: las tres mejoras de camino, apagadas = 2_46
+        "neostroke_continuous_turns",
+        "neostroke_offset_lines",
+        "neostroke_variable_k",
     };
     return keys;
 }

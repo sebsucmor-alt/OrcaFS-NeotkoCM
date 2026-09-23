@@ -65,6 +65,10 @@ struct Config {
     bool   neostroke_layer_jitter  = true;
     bool   neostroke_skate         = false;   // C6: patinar sobre lo ya puesto entre caminos
     double neostroke_skate_detour  = 5.0;     // largo máximo del patín / salto recto (como S3D)
+    // s336 (2_47) — las tres mejoras de camino, apagadas = 2_46
+    bool   neostroke_continuous_turns = false;
+    bool   neostroke_offset_lines     = false;
+    bool   neostroke_variable_k       = false;
 
     // ── Edge Closure params (Fase 3.0 — S3D heritage) ───────────────────────
     // Defaults reflect "PA-safe" starting point; user adjusts via UI.

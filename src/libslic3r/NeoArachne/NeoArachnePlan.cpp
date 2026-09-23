@@ -350,8 +350,8 @@ void Plan::run(PerimeterGenerator& g)
     //    `background_process.apply`), NO en `PrintRegionConfig`, que es lo que apunta `original_cfg`.
     if (g.object_config != nullptr
         && g.object_config->wall_generator.value == PerimeterGeneratorType::NeoStroke) {
-        const bool ns_gate_open = g.object_config->neotko_libre_mode.value
-                               && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+        // s336 — una sola llave (la casilla de Preferencias o ORCA_DEBUG_NEOSTROKE). LibreMode fuera.
+        const bool ns_gate_open = NeoDebug::enabled(NeoDebug::NEOSTROKE);
         if (ns_gate_open) {
             cfg.outer_wall  = WallSource::Classic;
             cfg.inner_walls = WallSource::NeoStroke;
@@ -359,7 +359,7 @@ void Plan::run(PerimeterGenerator& g)
         } else {
             NeoDebug::write(NeoDebug::NEOSTROKE,
                 "[NS] wall_generator=NeoStroke pero el candado esta CERRADO "
-                "(hace falta LibreMode + ORCA_DEBUG_NEOSTROKE): se usa la ruta normal.");
+                "(Preferencias > Enable NeoStroke, o ORCA_DEBUG_NEOSTROKE): se usa la ruta normal.");
         }
     }
     cfg.thin_walls  = WallSource::Classic;  // Fase 6
@@ -399,6 +399,9 @@ void Plan::run(PerimeterGenerator& g)
     cfg.neostroke_layer_jitter  = original_cfg->neostroke_layer_jitter.value;   // s332
     cfg.neostroke_skate         = original_cfg->neostroke_skate.value;
     cfg.neostroke_skate_detour  = original_cfg->neostroke_skate_detour.value;
+    cfg.neostroke_continuous_turns = original_cfg->neostroke_continuous_turns.value;   // s336
+    cfg.neostroke_offset_lines     = original_cfg->neostroke_offset_lines.value;
+    cfg.neostroke_variable_k       = original_cfg->neostroke_variable_k.value;
     // pin_outer_width is gated upstream by neotko_edge_active anyway (ConfigManipulation
     // hides the control unless outer or inner wall source is ArachneNeotkoEdge).
     // Merge global advanced toggles from Runtime singleton (Fase 6 will fill these).

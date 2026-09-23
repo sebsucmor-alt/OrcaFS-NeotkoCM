@@ -577,15 +577,17 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         //    en NeoArachnePlan. Con `neotko_libre_enabled` (el maestro de Preferencias) los dos
         //    candados podían discrepar: maestro encendido pero interruptor apagado dejaba elegir
         //    NeoStroke aquí y el motor lo rechazaba en silencio.
-        const bool ns_gate_open = wxGetApp().app_config != nullptr
-                               && wxGetApp().app_config->get_bool("neotko_libre_mode")
-                               && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+        // NEOTKO_NEOSTROKE_TAG s336 — UNA sola llave: la casilla de Preferencias (o la variable, que
+        //    abre el mismo canal). LibreMode ya NO cuenta: dos llaves a la vez era la trampa en la que
+        //    caía él (variable puesta, interruptor de la barra apagado, y el aviso sin decir cuál faltaba).
+        const bool ns_gate_open = NeoDebug::enabled(NeoDebug::NEOSTROKE);
         if (!ns_gate_open) {
             MessageDialog dialog(m_msg_dlg_parent,
                 _L("NeoStroke is a work in progress and is locked behind debug mode.\n\n"
                    "Prints with it are not stable, and it takes a good understanding of how the "
-                   "wall engine works to get a usable result. To unlock it, turn on Libre Mode in "
-                   "Preferences and start Orca with ORCA_DEBUG_NEOSTROKE=1.\n\n"
+                   "wall engine works to get a usable result. To unlock it, tick \"Enable NeoStroke "
+                   "wall generator (unstable)\" in Preferences (Neotko section). It applies right away, "
+                   "no restart needed.\n\n"
                    "Switch the wall generator back to Arachne?"),
                 _L("NeoStroke — debug mode only"), wxICON_WARNING | wxYES | wxNO);
             is_msg_dlg_already_exist = true;
@@ -1081,9 +1083,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     // NEOTKO_NEOSTROKE_TAG s335 — los mandos siguen al CANDADO, no sólo al generador elegido: con
     // el candado cerrado no se enseña nada de NeoStroke, ni aunque un 3mf ajeno traiga la clave.
     // Misma llave que el motor (ver arriba).
-    const bool ns_gate_open = wxGetApp().app_config != nullptr
-                           && wxGetApp().app_config->get_bool("neotko_libre_mode")
-                           && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+    const bool ns_gate_open = NeoDebug::enabled(NeoDebug::NEOSTROKE);   // s336 — una sola llave
     const bool neostroke_gen = ns_gate_open
         && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoStroke;
     const bool neostroke_on = neostroke_gen
@@ -1092,6 +1092,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                      "neostroke_min_width_pct", "neostroke_max_width_pct", "neostroke_detail_min_pct",
                      "neostroke_curve_overlap", "neostroke_max_bead_pct", "neostroke_max_stroke_width",
                      "neostroke_cap_join", "neostroke_layer_jitter", "neostroke_skate", "neostroke_skate_detour",
+                     "neostroke_continuous_turns", "neostroke_offset_lines", "neostroke_variable_k",   // s336
                      // NEOTKO_NEOSTROKE_TAG s335 — el BOTÓN de la ventana de Avanzado. No es una
                      // clave de config: es la `neotko_toggle_key` de su línea de widget, y se
                      // enseña/oculta con el mismo criterio que los mandos que abre.

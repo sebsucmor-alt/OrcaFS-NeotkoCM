@@ -9154,6 +9154,36 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5.));
 
+    // NEOTKO_NEOSTROKE_TAG s336 (2_47) — tres mejoras de camino, apagadas por defecto para poder
+    // imprimir la misma placa con y sin. Ver NeoStroke.cpp.
+    def = this->add("neostroke_continuous_turns", coBool);
+    def->label = L("NS — continuous U-turns");
+    def->category = L("Quality");
+    def->tooltip = L("Print the turn between two neighbouring lines of a stroke as a small arc, inside the same "
+        "path, instead of stopping the flow and starting again on the next line. Every stop and restart of "
+        "the flow can leave a small dent, and a stroke with several lines has one at each turn. Off = the "
+        "behaviour of 2.46.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("neostroke_offset_lines", coBool);
+    def->label = L("NS — wall-parallel lines");
+    def->category = L("Quality");
+    def->tooltip = L("Place each line of a stroke at its distance from the wall, so it runs parallel to it, instead "
+        "of pushing it sideways from the centre line of the stroke. Helps where a stroke gets wider or "
+        "narrower, near junctions, and in tight curves. Off = the behaviour of 2.46.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("neostroke_variable_k", coBool);
+    def->label = L("NS — variable line count");
+    def->category = L("Quality");
+    def->tooltip = L("Let the number of lines change along a stroke: fewer lines where it gets narrow, so no line "
+        "goes below the thinnest bead the nozzle really prints (NS — real minimum bead). Off = one line count "
+        "for the whole stroke, as in 2.46.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("wall_transition_length", coPercent);
     def->label = L("Wall transition length");
     def->category = L("Quality");

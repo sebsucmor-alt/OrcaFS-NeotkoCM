@@ -1311,7 +1311,7 @@ wxWindow* PreferencesDialog::create_general_page()
         _devL("NeoStroke plans the inside of a wall as strokes along the shape instead of loops "
               "around it, for small raised lettering. It does NOT print reliably yet: this is here "
               "so it can be looked at and reported on, not used on parts that matter. Reading the "
-              "G-code before printing is part of using it. Needs Libre Mode as well. Same thing as "
+              "G-code before printing is part of using it. Applies right away, no restart. Same thing as "
               "starting Orca with ORCA_DEBUG_NEOSTROKE=1; it also writes the per layer probe to "
               "neostroke.log."),
         50, "neotko_neostroke_enabled");
@@ -1429,6 +1429,7 @@ wxWindow* PreferencesDialog::create_general_page()
     // NeotkoLIBRE_START — s133: master availability gate
     sizer_page->Add(title_neotko, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_neotko_libre_enabled, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_neotko_neostroke, 0, wxTOP, FromDIP(3));   // s336 — se creaba y no se añadía
     sizer_page->Add(item_neotko_notif_digest, 0, wxTOP, FromDIP(3)); // NEOTKO_NOTIF_DIGEST_TAG — s250
     // NeotkoLIBRE_END
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));

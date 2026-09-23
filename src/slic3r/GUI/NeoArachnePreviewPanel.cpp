@@ -1,5 +1,6 @@
 // NEOTKO_NEOARACHNE_TAG preview-lab PL.2+PL.3+PL.6+PL.8
 #include "NeoArachnePreviewPanel.hpp"
+#include "libslic3r/NeoDebug.hpp"   // s336 — el candado de NeoStroke entra en el hash
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -1004,7 +1005,8 @@ size_t NeoArachnePreviewPanel::hash_current_relevant_config() const
     // dibujo anterior en pantalla, que es justo el caso en el que uno está mirando si el candado
     // hace algo.
     if (wxGetApp().app_config != nullptr) {
-        const size_t g = wxGetApp().app_config->get_bool("neotko_libre_mode") ? 0x9E3779B1u : 0x85EBCA6Bu;
+        // s336 — el candado ya es sólo el canal NEOSTROKE (la casilla de Preferencias).
+        const size_t g = NeoDebug::enabled(NeoDebug::NEOSTROKE) ? 0x9E3779B1u : 0x85EBCA6Bu;
         seed ^= g + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
     }
     return seed;

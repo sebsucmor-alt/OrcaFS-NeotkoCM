@@ -934,6 +934,7 @@ static std::vector<std::string> s_Preset_print_options {
      "neoarachne_spine", "neoarachne_spine_min_width_pct", "neoarachne_spine_max_width_pct",
      "neoarachne_spine_min_length", "neoarachne_spine_sliver_pct",
      "neostroke_bead_min_pct", "neostroke_layer_jitter",   // NEOTKO_NEOSTROKE_TAG s332
+     "neostroke_continuous_turns", "neostroke_offset_lines", "neostroke_variable_k",   // NEOTKO_NEOSTROKE_TAG s336
      "neostroke_corner_hooks",   // NEOTKO_NEOSTROKE_TAG C5b (s325)
      "neostroke_min_width_pct", "neostroke_max_width_pct",   // NEOTKO_NEOSTROKE_TAG s326
      "neostroke_detail_min_pct",   // NEOTKO_NEOSTROKE_TAG s329

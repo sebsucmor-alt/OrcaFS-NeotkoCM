@@ -1444,6 +1444,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // NEOTKO_NEOSTROKE_TAG C6 (s326) — patinaje sobre lo ya puesto y su factor de rodeo.
     ((ConfigOptionBool,    neostroke_skate))
     ((ConfigOptionFloat,   neostroke_skate_detour))
+    // NEOTKO_NEOSTROKE_TAG s336 (2_47) — tres mejoras de camino, cada una con su interruptor y
+    // APAGADAS por defecto: con las tres en false el G-code es el de 2_46. Ver NeoStroke.cpp.
+    ((ConfigOptionBool,    neostroke_continuous_turns))
+    ((ConfigOptionBool,    neostroke_offset_lines))
+    ((ConfigOptionBool,    neostroke_variable_k))
     ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
 
     // NEOTKO_*_TAG — moved out of PrintRegionConfigBase into this derived class

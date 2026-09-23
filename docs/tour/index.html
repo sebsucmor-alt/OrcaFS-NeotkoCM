@@ -21,6 +21,33 @@
   .hero__cta { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.6rem; }
   .hero__cta .btn { padding: .5rem 1rem; font-size: .9rem; }
   .hero__cta .btn--on { font-weight: 550; }
+
+  /* intro — the 20 second boot reel, shown once per browser (localStorage fs-tour-intro-seen).
+     Always dark on purpose: it is a CRT, not a page. Hidden unless JS opens it. */
+  .intro { position: fixed; inset: 0; z-index: 1000; display: none; background: #07090a; color: #d9f7ef;
+           font-family: var(--mono); overflow: hidden; }
+  .intro.is-on { display: block; animation: introIn .35s ease-out; }
+  .intro.is-out { animation: introOut .45s ease-in forwards; }
+  @keyframes introIn { from { opacity: 0; } }
+  @keyframes introOut { to { opacity: 0; transform: scale(1.03); } }
+  .intro canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .intro__crt { position: absolute; inset: 0; pointer-events: none;
+    background:
+      repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.28) 2px 3px),
+      radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.75) 100%);
+    animation: introFlicker 4s steps(40) infinite; }
+  @keyframes introFlicker { 0%,100% { opacity: .92; } 47% { opacity: .85; } 48% { opacity: 1; } }
+  .intro__hud { position: absolute; left: 16px; right: 16px; top: 14px; display: flex; justify-content: space-between;
+    font-size: .72rem; letter-spacing: .08em; color: #2dd4bf; pointer-events: none; }
+  .intro__bar { position: absolute; left: 16px; right: 16px; bottom: 16px; display: flex; gap: 4px; align-items: center; }
+  .intro__bar i { flex: 1; height: 3px; background: rgba(45,212,191,.18); position: relative; overflow: hidden; }
+  .intro__bar i b { position: absolute; inset: 0; background: #2dd4bf; transform-origin: left; transform: scaleX(0); }
+  .intro__skip { margin-left: 10px; background: none; border: 1px solid rgba(45,212,191,.5); color: #2dd4bf;
+    font: inherit; font-size: .7rem; letter-spacing: .14em; padding: .3rem .7rem; cursor: pointer; }
+  .intro__skip:hover, .intro__skip:focus-visible { background: #2dd4bf; color: #07090a; outline: none; }
+  .hero__replay { background: none; border: 0; padding: 0; margin-top: .9rem; font: inherit; font-family: var(--mono);
+    font-size: .78rem; color: var(--ink-soft); cursor: pointer; letter-spacing: .06em; }
+  .hero__replay:hover { color: var(--accent); }
   @media (max-width: 900px) { .hero__grid { grid-template-columns: 1fr; gap: 2.2rem; } }
 
   .ribbon {
@@ -91,6 +118,12 @@
 </style>
 </head>
 <body>
+<div class="intro" id="intro" role="dialog" aria-label="Intro reel" hidden>
+  <canvas></canvas>
+  <div class="intro__crt"></div>
+  <div class="intro__hud"><span data-hud-l>NeotkoCM // sys</span><span data-hud-r>T+00.0</span></div>
+  <div class="intro__bar"><span style="display:contents" data-segs></span><button class="intro__skip" type="button">Skip ▸</button></div>
+</div>
 
 <a class="skip" href="#main">Skip to content</a>
 
@@ -136,6 +169,7 @@
         <a class="btn btn--on" href="sandwich.html">Start with the Sandwich →</a>
         <a class="btn" href="play.html">Go and play →</a>
       </div>
+      <button class="hero__replay" type="button" data-intro-replay hidden>▶ Replay intro</button>
       <ul class="stat">
         <li><b>24</b><span>feature families</span></li>
         <li><b>2.4.4</b><span>current version</span></li>
@@ -769,6 +803,392 @@ Tour.demo('hero-ribbon', function (host) {
   host.addEventListener('mouseleave', clear);
   clear();
 });
+</script>
+
+<script>
+/* ---------------------------------------------------------------------------
+ * intro — a 20 s boot reel over the hub, once per browser.
+ * A diagram, not a port: shapes are drawn to show what each feature is for,
+ * nothing here runs the slicer's math except the ColorStitch sequences
+ * (Stitch.fromPattern / Stitch.build when present). Four filaments on screen
+ * at most, because the U1 has four slots.
+ * Replay: the "Replay intro" button, or ?intro in the URL.
+ * ------------------------------------------------------------------------- */
+(function () {
+  var KEY = 'fs-tour-intro-seen';
+  var root = document.getElementById('intro');
+  if (!root) return;
+  var cv = root.querySelector('canvas'), ctx = cv.getContext('2d');
+  var hudL = root.querySelector('[data-hud-l]'), hudR = root.querySelector('[data-hud-r]');
+  var FIL = ['#19c3d6', '#e0357a', '#f2c230', '#f1eee6'];       // cyan, magenta, yellow, white
+  var PH = '#2dd4bf', AMB = '#f0a14a', DIM = 'rgba(45,212,191,.22)';
+  var SCENES = [
+    { id: 'boot',   dur: 1.3, label: 'Boot' },
+    { id: 'snap',   dur: 2.6, label: '01 Snap & Drag' },
+    { id: 'libre',  dur: 2.6, label: '02 Libre Mode' },
+    { id: 'sand',   dur: 3.4, label: '03 Sandwich' },
+    { id: 'stitch', dur: 2.6, label: '04 ColorStitch' },
+    { id: 'hae',    dur: 2.6, label: '05 Height Adaptive FX' },
+    { id: 'photo',  dur: 3.2, label: '06 Photo Mode' },
+    { id: 'end',    dur: 1.7, label: 'Ready' }
+  ];
+  var TOTAL = SCENES.reduce(function (a, s) { return a + s.dur; }, 0);
+  var segHost = root.querySelector('[data-segs]'), segs = [];
+  SCENES.forEach(function (s) { var i = document.createElement('i'), b = document.createElement('b'); i.appendChild(b); segHost.appendChild(i); segs.push(b); });
+
+  var W = 0, H = 0, S = 1, raf = 0, t0 = 0, running = false;
+  function size() {
+    var d = Math.min(window.devicePixelRatio || 1, 2);
+    W = root.clientWidth; H = root.clientHeight;
+    cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0);
+    S = Math.min(W, H) / 22;
+  }
+
+  /* ---- tiny helpers ---- */
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function ease(t) { t = clamp(t, 0, 1); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+  function back(t) { t = clamp(t, 0, 1); var c = 1.9; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); }
+  function shade(hex, f) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgb(' + [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(function (c) { return Math.round(c * f); }).join(',') + ')';
+  }
+  var cx = 0, cy = 0;
+  function P(x, y, z) { return [cx + (x - y) * 0.866 * S, cy + (x + y) * 0.5 * S - z * S]; }
+  function poly(pts, fill, stroke) {
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+  }
+  // prism from a centre, size, rotation about Z; draws only the faces that look at the camera
+  function prism(x, y, z, w, d, h, rot, col, edge) {
+    var c = Math.cos(rot), s = Math.sin(rot), hw = w / 2, hd = d / 2;
+    var b = [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map(function (p) { return [x + p[0] * c - p[1] * s, y + p[0] * s + p[1] * c]; });
+    for (var i = 0; i < 4; i++) {
+      var a = b[i], q = b[(i + 1) % 4];
+      var nx = q[1] - a[1], ny = -(q[0] - a[0]);                  // outward normal (CCW in world)
+      var face = nx + ny;                                          // camera sits toward +x +y
+      if (face <= 0) continue;
+      var lit = nx > ny ? 0.8 : 0.62;
+      poly([P(a[0], a[1], z), P(q[0], q[1], z), P(q[0], q[1], z + h), P(a[0], a[1], z + h)], shade(col, lit), edge);
+    }
+    poly(b.map(function (p) { return P(p[0], p[1], z + h); }), col, edge);
+    return b;
+  }
+  function grid(r, alpha) {
+    ctx.strokeStyle = 'rgba(45,212,191,' + alpha + ')'; ctx.lineWidth = 1;
+    for (var i = -r; i <= r; i++) {
+      var a = P(i, -r, 0), b = P(i, r, 0), c = P(-r, i, 0), d = P(r, i, 0);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.moveTo(c[0], c[1]); ctx.lineTo(d[0], d[1]); ctx.stroke();
+    }
+  }
+  function txt(s, x, y, px, col, align) {
+    ctx.font = '600 ' + px + 'px ' + getComputedStyle(root).fontFamily;
+    ctx.fillStyle = col; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+  }
+  function title(label, k) {                                       // scene title, typed in
+    var n = Math.floor(clamp(k * 3, 0, 1) * label.length);
+    var px = Math.max(14, Math.min(28, W / 26));
+    txt(label.slice(0, n) + (k < .34 && (Date.now() / 120 | 0) % 2 ? '█' : ''), 16, 58, px, PH);
+  }
+  function seq(n, pattern) {
+    try { if (window.Stitch && Stitch.fromPattern) return Stitch.fromPattern(n, pattern); } catch (e) {}
+    var o = []; for (var i = 0; i < n; i++) o.push((+pattern[i % pattern.length]) - 1); return o;
+  }
+
+  /* ---- scenes: k is 0..1 across the scene, ts is seconds into it ---- */
+  var DRAW = {
+    boot: function (k) {
+      var lines = ['> neotko.orca --fork', '> slots: 4', '> sandwich ok · stitch ok · realcolor ok', '> loading tour_'];
+      var px = Math.max(12, Math.min(18, W / 42));
+      lines.forEach(function (l, i) {
+        var kk = clamp(k * 1.6 - i * .28, 0, 1);
+        txt(l.slice(0, Math.floor(kk * l.length)), W * .12, H * .38 + i * px * 1.7, px, i === 3 ? AMB : PH);
+      });
+      for (var i = 0; i < 4; i++) { ctx.fillStyle = FIL[i]; ctx.globalAlpha = clamp(k * 3 - 1.4 - i * .2, 0, 1); ctx.fillRect(W * .12 + i * px * 1.6, H * .38 - px * 2.4, px, px); }
+      ctx.globalAlpha = 1;
+    },
+    snap: function (k, ts) {
+      cx = W * .5; cy = H * .56; grid(8, .12);
+      prism(-2, 1, 0, 6, 5, 3, 0, '#3a4a50', 'rgba(0,0,0,.35)');
+      prism(4, -3, 0, 3, 3, 1.4, 0, '#2c3a3f', 'rgba(0,0,0,.35)');
+      var drag = ease(k / .55), drop = back((k - .55) / .25);
+      var x = 7 - drag * 8.5, y = -6 + drag * 6.5, z = 6.5 - (6.5 - 3) * drop;
+      if (k > .55) { x = -1.5; y = .5; }
+      // ghost projection line
+      var g = P(x, y, 3), top = P(x, y, z);
+      ctx.setLineDash([3, 4]); ctx.strokeStyle = AMB; ctx.beginPath(); ctx.moveTo(top[0], top[1]); ctx.lineTo(g[0], g[1]); ctx.stroke(); ctx.setLineDash([]);
+      prism(x, y, z, 2.2, 2.2, 2.2, 0, FIL[0], 'rgba(0,0,0,.3)');
+      var cur = P(x + 1.1, y + 1.1, z + 2.2);
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(cur[0], cur[1]); ctx.lineTo(cur[0] + 11, cur[1] + 12); ctx.lineTo(cur[0] + 4, cur[1] + 12); ctx.lineTo(cur[0], cur[1] + 17); ctx.closePath(); ctx.fill();
+      if (k > .78) {
+        var f = clamp((k - .78) / .22, 0, 1), r = 2.2 + f * 3;
+        ctx.globalAlpha = 1 - f;
+        poly([P(x - r / 2, y - r / 2, 3), P(x + r / 2, y - r / 2, 3), P(x + r / 2, y + r / 2, 3), P(x - r / 2, y + r / 2, 3)], null, AMB);
+        ctx.globalAlpha = 1;
+        var l = P(x + 3, y - 2, 4); txt('Snap ▸ Z 3.00', l[0], l[1], 13, AMB);
+      }
+    },
+    libre: function (k, ts) {
+      cx = W * .5; cy = H * .58; grid(8, .1);
+      var objs = [
+        { x: -4, y: 2, z: 0, w: 2.5, d: 2.5, h: 4.5, r: .5 + ts * .5, c: FIL[1], tag: '0.12 mm · 4 walls' },
+        { x: 1, y: -3, z: 2.6 + Math.sin(ts * 2) * .4, w: 3.2, d: 1.8, h: 1.6, r: -.3 - ts * .7, c: FIL[2], tag: 'gyroid 15% · z free' },
+        { x: 3.5, y: 3, z: 0, w: 3, d: 3, h: 2.2, r: .8 + ts * .3, c: FIL[0], tag: '0.28 mm · ironing' }
+      ];
+      objs.sort(function (a, b) { return (a.x + a.y) - (b.x + b.y); });
+      objs.forEach(function (o, i) {
+        var a = clamp(k * 3 - i * .35, 0, 1);
+        ctx.globalAlpha = a;
+        if (o.z > 0) { var sh = P(o.x, o.y, 0); ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.ellipse(sh[0], sh[1], S * 1.8, S * .9, 0, 0, 7); ctx.fill(); }
+        prism(o.x, o.y, o.z, o.w, o.d, o.h, o.r, o.c, 'rgba(0,0,0,.3)');
+        var p = P(o.x, o.y, o.z + o.h + .6), tk = clamp(k * 2.5 - .5 - i * .25, 0, 1);
+        ctx.strokeStyle = PH; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0] + 18, p[1] - 18); ctx.stroke();
+        txt(o.tag.slice(0, Math.floor(tk * o.tag.length)), p[0] + 22, p[1] - 18, 12, PH);
+      });
+      ctx.globalAlpha = 1;
+    },
+    sand: function (k) {
+      // Four passes of real thickness (drawn ×6 in Z so they can be seen), mixing pass kinds.
+      // The final top colour is Optics.blendStacked: the slicer's TD compositing, when loaded.
+      cx = W * .4; cy = H * .64; grid(7, .1);
+      var ZX = 6, base = 1.6, bgHex = '#d9d4ca';
+      var passes = [
+        { kind: 'Solid',      mm: .12, a: FIL[3] },
+        { kind: 'Stitch 1122', mm: .08, a: FIL[1], b: FIL[2] },
+        { kind: 'PathBlend',  mm: .16, a: FIL[0], b: FIL[2] },
+        { kind: 'Solid · TD', mm: .08, a: FIL[1] }
+      ];
+      function mix(h1, h2) {
+        if (!h2) return h1;
+        try { var x = Optics.hexToLinear(h1), y = Optics.hexToLinear(h2); return Optics.linearToHex([0, 1, 2].map(function (i) { return (x[i] + y[i]) / 2; })); } catch (e) { return h1; }
+      }
+      prism(0, 0, 0, 8, 8, base, 0, bgHex, 'rgba(0,0,0,.35)');
+      var z = base, px = Math.max(11, Math.min(13, W / 64)), lx = W * .7, ly = H * .3, done = [];
+      passes.forEach(function (ps, i) {
+        var a = clamp((k - .06 - i * .13) / .12, 0, 1);
+        if (a <= 0) return;
+        var h = ps.mm * ZX, zz = z + (1 - back(a)) * 2.5;
+        prism(0, 0, zz, 8, 8, h, 0, ps.b ? mix(ps.a, ps.b) : ps.a, 'rgba(0,0,0,.25)');
+        var top = [P(-4, -4, zz + h), P(4, -4, zz + h), P(4, 4, zz + h), P(-4, 4, zz + h)];
+        if (ps.b) {                                                   // the pass's own texture on its top
+          ctx.save(); ctx.beginPath(); top.forEach(function (q, j) { j ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); ctx.clip();
+          if (ps.kind === 'PathBlend') {
+            var g = ctx.createLinearGradient(top[0][0], top[0][1], top[2][0], top[2][1]);
+            for (var st = 0; st <= 8; st++) { g.addColorStop(st / 8, st % 2 ? mix(ps.a, ps.b) : (st < 4 ? ps.a : ps.b)); }
+            var steps = 10;                                           // staircase per scanline
+            for (var sI = 0; sI < steps; sI++) poly([P(-4 + 8 * sI / steps, -4, zz + h), P(-4 + 8 * (sI + 1) / steps, -4, zz + h), P(-4 + 8 * (sI + 1) / steps, 4, zz + h), P(-4 + 8 * sI / steps, 4, zz + h)], mix(sI / steps < .5 ? ps.a : ps.b, sI / steps < .25 || sI / steps > .75 ? null : (sI / steps < .5 ? ps.b : ps.a)));
+          } else {
+            var sq = seq(24, '1122');
+            for (var l = 0; l < 24; l++) { var y0 = -4 + l / 3, y1 = y0 + 1 / 3 * .85; poly([P(-4, y0, zz + h), P(4, y0, zz + h), P(4, y1, zz + h), P(-4, y1, zz + h)], sq[l] ? ps.b : ps.a); }
+          }
+          ctx.restore();
+        }
+        var ly2 = ly + (3 - i) * px * 2.1;
+        ctx.fillStyle = ps.a; ctx.fillRect(lx, ly2, ps.b ? px / 2 : px, px);
+        if (ps.b) { ctx.fillStyle = ps.b; ctx.fillRect(lx + px / 2, ly2, px / 2, px); }
+        txt(ps.kind + '  ' + ps.mm.toFixed(2) + ' mm', lx + px * 1.6, ly2 + px / 2, px, PH);
+        done.push({ colorHex: ps.b ? mix(ps.a, ps.b) : ps.a, thickness: ps.mm, tdMm: .25 });
+        z += h;
+      });
+      // what the eye gets: the stack composited through TD, fading over the top face
+      var r = clamp((k - .62) / .14, 0, 1);
+      if (r > 0 && done.length === 4) {
+        var out = null;
+        try { out = Optics.linearToHex(Optics.blendStacked(done, bgHex)); } catch (e) {}
+        if (out) {
+          ctx.globalAlpha *= r;
+          poly([P(-4, -4, z), P(4, -4, z), P(4, 4, z), P(-4, 4, z)], out, 'rgba(255,255,255,.4)');
+          var ly3 = ly + 4 * px * 2.1 + px * .6;
+          ctx.fillStyle = out; ctx.fillRect(lx, ly3, px * 3, px * 1.6);
+          txt('TD → ' + out.toUpperCase(), lx + px * 3.6, ly3 + px * .8, px + 1, AMB);
+          ctx.globalAlpha /= r;
+        }
+      }
+    },
+    stitch: function (k, ts) {
+      var sz = Math.min(W, H) * .52, x0 = W / 2 - sz / 2, y0 = H / 2 - sz / 2 + 16;
+      var pats = [['1122', 'Pattern 1122'], ['1112', 'Pattern 1112'], ['121', 'Weave 121'], ['11112222', 'Stripes']];
+      var pi = Math.min(3, Math.floor(k * 4)), n = 44, lw = sz * 1.42 / n;
+      var s = seq(n, pats[pi][0]), cols = [FIL[1], FIL[3]];
+      if (pi === 2) cols = [FIL[0], FIL[2]];
+      ctx.save(); ctx.beginPath(); ctx.rect(x0, y0, sz, sz); ctx.clip();
+      ctx.translate(W / 2, y0 + sz / 2); ctx.rotate(Math.PI / 4);
+      var sweep = clamp((k * 4 - pi) * 2.2, 0, 1) * n;
+      for (var i = 0; i < n; i++) {
+        if (i > sweep) break;
+        ctx.fillStyle = cols[s[i] % 2]; ctx.fillRect(-sz, -sz * .71 + i * lw, sz * 2, lw * .82);
+      }
+      ctx.restore();
+      ctx.strokeStyle = PH; ctx.strokeRect(x0 - .5, y0 - .5, sz + 1, sz + 1);
+      txt(pats[pi][1], x0, y0 + sz + 18, 13, AMB);
+    },
+    hae: function (k, ts) {
+      var base = H * .86, top = H * .2, n = 40, mid = W * .42, r0 = Math.min(W, H) * .16;
+      var gx = W * .74, gw = Math.min(W * .18, 150);
+      ctx.strokeStyle = DIM; ctx.strokeRect(gx, top, gw, base - top);
+      ctx.beginPath();
+      for (var i = 0; i < n; i++) {
+        var f = i / (n - 1), shown = clamp(k * 1.5 * n - i, 0, 1);
+        var amp = Math.pow(Math.sin(f * Math.PI), 2);                // effect strength follows height
+        var y = base - f * (base - top), lh = (base - top) / n;
+        var r = r0 * (1 - .25 * f) + amp * r0 * .22 * Math.sin(f * 30 + ts * 3);
+        if (shown > 0) {
+          ctx.globalAlpha = shown;
+          ctx.fillStyle = shade(FIL[i % 8 < 4 ? 0 : 2], .55 + .45 * amp);
+          ctx.fillRect(mid - r, y - lh, r * 2, lh * .78);
+          ctx.globalAlpha = 1;
+        }
+        var gxv = gx + amp * gw * .9;
+        if (i === 0) ctx.moveTo(gxv, y); else ctx.lineTo(gxv, y);
+      }
+      ctx.strokeStyle = AMB; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+      var yk = base - clamp(k * 1.5, 0, 1) * (base - top);
+      ctx.strokeStyle = PH; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(mid - r0 * 1.5, yk); ctx.lineTo(gx + gw, yk); ctx.stroke(); ctx.setLineDash([]);
+      txt('Z → effect', gx, top - 12, 12, AMB);
+    },
+    photo: function (k, ts) {
+      // Same scene twice: the flat preview, then a wipe into the Photo Mode look
+      // (key light, cast shadows on the floor AND on other objects, speculars, floor reflection).
+      cx = W * .5; cy = H * .6;
+      var LA = 1.0, LB = -.15;                                        // key light from the left, shadows fall toward +x
+      var box = [{ x: -2, y: -1, w: 2.4, d: 2.4, h: 5, c: FIL[1] }, { x: -2.6, y: 3, w: 2, d: 2, h: 1.5, c: FIL[2] }];
+      var sph = { x: 2.1, y: -.7, r: 1.4, c: FIL[0] };
+      function corners(o, z) { return [[o.x - o.w / 2, o.y - o.d / 2], [o.x + o.w / 2, o.y - o.d / 2], [o.x + o.w / 2, o.y + o.d / 2], [o.x - o.w / 2, o.y + o.d / 2]].map(function (p) { return [p[0], p[1], z]; }); }
+      function boxPts(o) { return corners(o, 0).concat(corners(o, o.h)); }
+      function sphPts(o) { var r = []; for (var i = 0; i < 12; i++) for (var j = 0; j <= 6; j++) { var th = i / 12 * 6.283, ph = j / 6 * 3.1416; r.push([o.x + o.r * Math.sin(ph) * Math.cos(th), o.y + o.r * Math.sin(ph) * Math.sin(th), o.r + o.r * Math.cos(ph)]); } return r; }
+      function hull(pts) {                                            // monotone chain, screen space
+        pts.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+        function cr(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+        var lo = [], up = [];
+        pts.forEach(function (p) { while (lo.length > 1 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); });
+        pts.slice().reverse().forEach(function (p) { while (up.length > 1 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); });
+        return lo.slice(0, -1).concat(up.slice(0, -1));
+      }
+      function shadow(pts, zp) { return hull(pts.filter(function (p) { return p[2] >= zp; }).map(function (p) { var dz = p[2] - zp; return P(p[0] + dz * LA, p[1] + dz * LB, zp); })); }
+      function ball(o, lit) {
+        var c = P(o.x, o.y, o.r), R = o.r * S * 1.05;
+        if (!lit) { ctx.fillStyle = shade(o.c, .85); ctx.beginPath(); ctx.arc(c[0], c[1], R, 0, 7); ctx.fill(); return; }
+        var g = ctx.createRadialGradient(c[0] - R * .4, c[1] - R * .45, R * .05, c[0], c[1], R);
+        g.addColorStop(0, shade(o.c, 1.15)); g.addColorStop(.55, shade(o.c, .8)); g.addColorStop(1, shade(o.c, .22));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(c[0], c[1], R, 0, 7); ctx.fill();
+        var sp = ctx.createRadialGradient(c[0] - R * .38, c[1] - R * .42, 0, c[0] - R * .38, c[1] - R * .42, R * .32);
+        sp.addColorStop(0, 'rgba(255,255,255,.95)'); sp.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = sp; ctx.beginPath(); ctx.arc(c[0], c[1], R, 0, 7); ctx.fill();
+        ctx.strokeStyle = 'rgba(180,240,255,.35)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(c[0], c[1], R - 1, .2, 1.6); ctx.stroke(); ctx.lineWidth = 1;
+      }
+      function glossBox(o) {
+        var b = prism(o.x, o.y, 0, o.w, o.d, o.h, 0, o.c, null);
+        var tl = P(o.x - o.w / 2, o.y - o.d / 2, o.h), br = P(o.x + o.w / 2, o.y + o.d / 2, 0);
+        var g = ctx.createLinearGradient(tl[0], tl[1], br[0], br[1]);
+        g.addColorStop(0, 'rgba(255,255,255,.28)'); g.addColorStop(.45, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(0,0,0,.45)');
+        var xm = o.x + o.w / 2, ym = o.y + o.d / 2;
+        poly([P(o.x - o.w / 2, ym, 0), P(xm, ym, 0), P(xm, o.y - o.d / 2, 0), P(xm, o.y - o.d / 2, o.h), P(o.x - o.w / 2, o.y - o.d / 2, o.h), P(o.x - o.w / 2, ym, o.h)], g);
+        var e1 = P(xm, ym, 0), e2 = P(xm, ym, o.h);                  // lit front edge
+        ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.moveTo(e1[0], e1[1]); ctx.lineTo(e2[0], e2[1]); ctx.stroke();
+        var s1 = P(xm, o.y - o.d * .1, o.h * .15), s2 = P(xm, o.y - o.d * .3, o.h * .95);   // specular streak on the right face
+        ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = S * .25; ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke(); ctx.lineWidth = 1;
+      }
+      function scene(lit) {
+        if (!lit) { grid(8, .12); } else {
+          var f = P(0, 0, 0), fg = ctx.createRadialGradient(f[0] - S * 2, f[1] - S * 2, 0, f[0], f[1], S * 11);
+          fg.addColorStop(0, '#4a5156'); fg.addColorStop(.6, '#23282b'); fg.addColorStop(1, '#0b0d0e');
+          poly([P(-8, -8, 0), P(8, -8, 0), P(8, 8, 0), P(-8, 8, 0)], fg);
+          // reflection: the scene mirrored under the floor, faded
+          ctx.globalAlpha *= .14;
+          box.forEach(function (o) { prism(o.x, o.y, -o.h, o.w, o.d, o.h, 0, o.c, null); });
+          var m = P(sph.x, sph.y, -sph.r); ctx.fillStyle = sph.c; ctx.beginPath(); ctx.arc(m[0], m[1], sph.r * S * 1.05, 0, 7); ctx.fill();
+          ctx.globalAlpha /= .14;
+          // cast shadows on the floor, soft edge by stacking
+          [1.6, .8, 0].forEach(function (blur, i) {
+            ctx.save(); ctx.filter = 'blur(' + blur * S * .25 + 'px)';
+            box.concat([sph]).forEach(function (o) { poly(shadow(o.r ? sphPts(o) : boxPts(o), 0), 'rgba(0,0,0,' + (.25 + i * .15) + ')'); });
+            ctx.restore();
+          });
+        }
+        var order = [box[0], box[1], sph];
+        order.forEach(function (o) {
+          if (o.r) {
+            ball(o, lit);
+            if (lit) {                                                // the tower's shadow falling ON the sphere
+              var c = P(o.x, o.y, o.r); ctx.save(); ctx.beginPath(); ctx.arc(c[0], c[1], o.r * S * 1.05, 0, 7); ctx.clip();
+              ctx.filter = 'blur(' + S * .3 + 'px)'; poly(shadow(boxPts(box[0]), o.r * 1.5), 'rgba(0,0,0,.45)'); ctx.restore();
+            }
+          } else if (lit) glossBox(o); else prism(o.x, o.y, 0, o.w, o.d, o.h, 0, o.c, 'rgba(0,0,0,.3)');
+        });
+        if (lit) {                                                    // warm key light glow
+          var L = P(-9, 1, 9), lg = ctx.createRadialGradient(L[0], L[1], 0, L[0], L[1], S * 9);
+          lg.addColorStop(0, 'rgba(255,230,190,.3)'); lg.addColorStop(1, 'rgba(255,230,190,0)');
+          ctx.fillStyle = lg; ctx.fillRect(0, 0, W, H);
+        }
+      }
+      var wipe = ease((k - .3) / .4) * W;
+      scene(false);
+      if (wipe > 0) {
+        ctx.save(); ctx.beginPath(); ctx.rect(0, 0, wipe, H); ctx.clip();
+        ctx.fillStyle = '#07090a'; ctx.fillRect(0, 0, W, H); scene(true); ctx.restore();
+        if (wipe < W) { ctx.fillStyle = AMB; ctx.fillRect(wipe - 1, 70, 2, H - 110); }
+      }
+      txt(k < .5 ? 'Preview' : 'Photo Mode · RealColor', 16, H - 44, 13, AMB);
+    },
+    end: function (k) {
+      var px = Math.max(34, Math.min(96, W / 8)), y = H * .46;
+      var glitch = k < .3 ? (Math.random() - .5) * 14 * (1 - k / .3) : 0;
+      FIL.forEach(function (c, i) {
+        ctx.globalAlpha = .55; txt('NeotkoCM', W / 2 + glitch * (i - 1.5), y + (i - 1.5) * 2, px, c, 'center');
+      });
+      ctx.globalAlpha = 1; txt('NeotkoCM', W / 2, y, px, '#f1eee6', 'center');
+      txt('Orca fork · live tour', W / 2, y + px * .8, Math.max(12, px / 5), PH, 'center');
+      var bw = Math.min(W * .5, 320);
+      for (var i = 0; i < 4; i++) { ctx.fillStyle = FIL[i]; ctx.fillRect(W / 2 - bw / 2 + i * bw / 4, y + px * 1.2, bw / 4 * clamp(k * 3 - i * .3, 0, 1), 4); }
+    }
+  };
+
+  function frame(now) {
+    if (!running) return;
+    var el = (now - t0) / 1000;
+    if (el >= TOTAL) { close(); return; }
+    ctx.fillStyle = '#07090a'; ctx.fillRect(0, 0, W, H);
+    var acc = 0, idx = 0;
+    while (idx < SCENES.length - 1 && el > acc + SCENES[idx].dur) acc += SCENES[idx++].dur;
+    var sc = SCENES[idx], ts = el - acc, k = ts / sc.dur;
+    // scene cross-fade: fade in over the first 0.25 s, out over the last 0.2 s
+    ctx.globalAlpha = clamp(Math.min(ts / .25, (sc.dur - ts) / .2), 0, 1);
+    DRAW[sc.id](k, ts);
+    ctx.globalAlpha = 1;
+    if (sc.id !== 'boot' && sc.id !== 'end') title(sc.label, k);
+    segs.forEach(function (b, i) { b.style.transform = 'scaleX(' + (i < idx ? 1 : i > idx ? 0 : k) + ')'; });
+    hudL.textContent = 'NeotkoCM // ' + (idx + 1 < 10 ? '0' : '') + (idx + 1) + '/' + SCENES.length;
+    hudR.textContent = 'T+' + el.toFixed(1).padStart(4, '0');
+    raf = requestAnimationFrame(frame);
+  }
+
+  function open() {
+    root.hidden = false; root.classList.remove('is-out'); root.classList.add('is-on');
+    document.documentElement.style.overflow = 'hidden';
+    size(); running = true; t0 = performance.now(); raf = requestAnimationFrame(frame);
+    root.querySelector('.intro__skip').focus({ preventScroll: true });
+  }
+  function close() {
+    if (!running) return;
+    running = false; cancelAnimationFrame(raf);
+    try { localStorage.setItem(KEY, '1'); } catch (e) {}
+    root.classList.add('is-out');
+    setTimeout(function () { root.classList.remove('is-on', 'is-out'); root.hidden = true; document.documentElement.style.overflow = ''; }, 450);
+  }
+
+  root.querySelector('.intro__skip').addEventListener('click', close);
+  root.addEventListener('click', function (e) { if (e.target === cv && SCENES.length && (performance.now() - t0) / 1000 > TOTAL - SCENES[SCENES.length - 1].dur) close(); });
+  document.addEventListener('keydown', function (e) { if (running && e.key === 'Escape') close(); });
+  window.addEventListener('resize', function () { if (running) size(); });
+  var rb = document.querySelector('[data-intro-replay]');
+  if (rb) { rb.hidden = false; rb.addEventListener('click', open); }
+
+  var seen = false, calm = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  try { seen = localStorage.getItem(KEY) === '1'; } catch (e) {}
+  if (/[?&]intro\b/.test(location.search) || (!seen && !calm)) open();
+})();
 </script>
 
 </body>

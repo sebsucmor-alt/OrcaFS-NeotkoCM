@@ -138,6 +138,12 @@ struct NsParams {
     double detail_min     = 0.24;   // suelo de un detalle / de un relleno del residuo
     // Cuánto puede pisar una línea de una rama a lo ya planificado por otra rama antes de sobrar.
     double branch_overlap = 0.65;
+    // NEOTKO_NEOSTROKE_TAG s336 (2_47) — tres mejoras de camino, cada una con su interruptor para
+    // poder imprimir la misma placa con y sin. Las tres en false = el G-code de 2_46, byte a byte:
+    // cada una entra por una rama propia y el camino viejo queda intacto.
+    bool   cont_turns     = false;  // la vuelta en U se extruye como un arco, sin cortar el flujo
+    bool   offset_lines   = false;  // cada línea a su distancia de la pared, no empujada por la normal
+    bool   var_k          = false;  // k a lo largo del trazo, sin bajar de `bead_min`
 };
 
 enum class Kind { Outer, Stroke, Tip, Fill, Join, Skate };
@@ -362,6 +368,7 @@ struct CoverIndex {
 // algun cordon, y cuanto material se ha metido de mas en total. Sin esto solo podemos suponer,
 // y ya hemos supuesto mal una vez.
 static thread_local size_t ns_ov_runs = 0, ns_ov_touched = 0;
+static thread_local size_t ns_cuts = 0;            // s336 — cortes de flujo DENTRO de un camino
 static thread_local size_t ns_join_n = 0;          // s331d — costuras de tapa extruidas
 static thread_local double ns_join_mm3 = 0.;       // y el plástico que han metido, en mm3
 static thread_local double ns_ov_vol_in = 0., ns_ov_vol_out = 0.;
@@ -400,6 +407,7 @@ struct StrokeStats {
     size_t strokes = 0, slivers = 0, fills = 0, too_wide = 0, dropped_detail = 0;
     size_t repainted = 0;   // s329 — líneas de una rama que caían encima de otra rama
     size_t caps      = 0;   // s330 — extremos de trazo alargados por ser un nodo de TAPA
+    size_t thin = 0, thin_of = 0;   // s336 — muestras de trazo con ancho < bead_min, de cuántas
     std::map<int, size_t> k_hist;
 };
 
@@ -449,9 +457,10 @@ static bool ns_env_get(const char* k, double lo, double hi, double& out)
 }
 struct NsOvlEnv {
     bool   has_pct = false, has_w1 = false, has_g0 = false, has_g1 = false, has_span = false,
-           has_str = false, has_bead = false, has_sw = false, has_wref = false;
+           has_str = false, has_bead = false, has_sw = false, has_wref = false,
+           has_turns = false, has_offs = false, has_vark = false;   // s336
     double pct = 0., w1 = 1.25, g0 = 4., g1 = 15., span = 1., str = 1., bead = 0.60, sw = 5.0,
-           wref = 0.40;
+           wref = 0.40, turns = 0., offs = 0., vark = 0.;
     NsOvlEnv()
     {
         has_pct  = ns_env_get("ORCA_NS_OVL",      0.0,  50.0, pct);
@@ -463,6 +472,10 @@ struct NsOvlEnv {
         has_bead = ns_env_get("ORCA_NS_BEAD",     0.05,  2.0, bead);   // mm, tope duro del cordón
         has_sw   = ns_env_get("ORCA_NS_STROKE_W", 0.5,  30.0, sw);     // mm, ancho máximo de trazo
         has_wref = ns_env_get("ORCA_NS_WREF",     0.05,  5.0, wref);   // mm, referencia del 100 %
+        // s336 — 0/1, pisan la casilla del perfil para un A/B sin tocar el 3mf
+        has_turns = ns_env_get("ORCA_NS_CONT_TURNS",   0.0, 1.0, turns);
+        has_offs  = ns_env_get("ORCA_NS_OFFSET_LINES", 0.0, 1.0, offs);
+        has_vark  = ns_env_get("ORCA_NS_VAR_K",        0.0, 1.0, vark);
     }
 };
 static const NsOvlEnv& ns_ovl_env() { static const NsOvlEnv e; return e; }
@@ -484,6 +497,196 @@ static const NsOvlEnv& ns_ovl_env() { static const NsOvlEnv e; return e; }
 // segmentos de una letra bajan a ~0.05 mm, que a 60 mm/s son 1250 órdenes por segundo y ahí ya se
 // entra en el terreno donde la placa se atraganta.
 static double ns_conv_tol() { static const double t = std::max(0.002, std::min(0.10, ns_env_num("ORCA_NS_TOL", 0.02))); return t; }
+
+// ── s336 (2_47): carriles ───────────────────────────────────────────────────
+// NEOTKO_NEOSTROKE_TAG s336 — la rama nueva de `plan_stroke`, sólo con `offset_lines` o `var_k`.
+// Con los dos apagados no se llama y el bucle de siempre sale intacto (2_46 byte a byte).
+//
+// 🔑 `offset_lines` — DÓNDE cae cada punto. Hasta 2_46 la línea se empujaba desde el eje por su
+// normal, `eje + n·f·W/2`. Eso vale mientras las dos paredes corran paralelas al eje. Donde el trazo
+// se abre o se cierra, o cerca de un cruce, la normal del eje sale OBLICUA a la pared y la línea
+// del borde no queda a la distancia que le toca. El ruido del eje, además, crece con la distancia.
+// Y en una curva más cerrada que el empuje, la línea interior hace un bucle. Ahora cada punto se
+// busca en el mismo rayo, pero por su DISTANCIA A LA PARED: `bnd(p) = bnd(eje) − |f|·W/2`, por
+// bisección. Así las líneas corren paralelas a la pared, que es lo que es un cordón.
+//
+// 🔑 `var_k` — CUÁNTAS líneas. Hasta 2_46 `k` se decidía una vez por rama con el percentil 98, y
+// donde el trazo se estrechaba `W/k` bajaba a pelos de 0.07 que la boquilla no saca (s332: el 42 %).
+// Ahora hay `k` CARRILES de borde a borde. Cada muestra pide los suyos, con el techo y el tope duro
+// igual que antes, y además `W/n ≥ bead_min`. Cuando sobran, se apagan los del CENTRO, así que los
+// de fuera, que son los que van pegados al muro, siguen continuos. El carril que se apaga lo hace
+// en rampa, en `2·techo` de arco: su peso baja de 1 a 0 y sus vecinos lo absorben.
+// ⚠️ v1: cuando se apaga un carril del centro, sus vecinos dejan de ser `idx±1` y se pierde esa
+//    vuelta en U; queda la costura normal. Anotado.
+static Vec2d lane_point(const Vec2d& q, const Vec2d& nrm, double W, double f, const Boundary& bnd,
+                        const NsParams& P)
+{
+    const Vec2d naive = q + nrm * (f * W / 2.);
+    if (!P.offset_lines || std::abs(f) < 1e-9 || W <= 1e-9)
+        return naive;
+    const double b0     = bnd(q);
+    const double off    = std::abs(f) * W / 2.;   // lo que la línea se aparta de la pared del eje
+    const double target = b0 - off;               // su distancia a SU pared
+    const Vec2d  dir    = nrm * (f > 0. ? 1. : -1.);
+    // Por el rayo oblicuo la pared queda a off/cos(a). Pasado 60° (cos < 0.5) el rayo ya no mira a
+    // la pared (un cruce, una punta): ahí se queda el punto de siempre.
+    double lo = 0., hi = 2. * off;
+    if (bnd(q + dir * hi) > target)
+        return naive;
+    for (int it = 0; it < 14; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        if (bnd(q + dir * mid) > target)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return q + dir * (0.5 * (lo + hi));
+}
+
+static void plan_lanes(const std::vector<Vec2d>& pts, const std::vector<double>& W,
+                       const std::vector<Vec2d>& nrm, const std::vector<double>& s,
+                       const std::vector<std::pair<int, int>>& tramos, bool cycle, bool closed, int k,
+                       int sid, const size_t deg[2], bool cap_front, bool cap_back,
+                       const Boundary& bnd, const NsParams& P, StrokeStats& st, NsLines& out)
+{
+    (void)closed;
+    const int last = int(pts.size()) - 1;
+    // El orden en que se apagan los carriles: del centro hacia fuera; en empate, el de índice menor.
+    std::vector<int> drop(k);
+    std::iota(drop.begin(), drop.end(), 0);
+    std::stable_sort(drop.begin(), drop.end(), [k](int a, int b) {
+        return std::abs(2 * a - (k - 1)) < std::abs(2 * b - (k - 1));
+    });
+    for (const auto& r : tramos) {
+        std::vector<int> seg;
+        for (int i = r.first; i <= r.second; ++i)
+            seg.push_back(i);
+        if (cycle)
+            seg.push_back(r.first);
+        const int m = int(seg.size());
+        const int e0 = cycle ? 0 : (r.first  == 0    ? int(deg[0]) : 0);
+        const int e1 = cycle ? 0 : (r.second == last ? int(deg[1]) : 0);
+
+        // Cuántos carriles pide cada muestra.
+        std::vector<int> n(m, k);
+        if (P.var_k) {
+            for (int a = 0; a < m; ++a) {
+                const double w = W[seg[a]];
+                int want = std::max(int(std::ceil(w / P.ceiling_w - 1e-9)), int(std::ceil(w / P.max_bead - 1e-9)));
+                want     = std::min(want, std::max(1, int(std::floor(w / P.bead_min + 1e-9))));
+                n[a]     = std::clamp(want, 1, k);
+            }
+            // Histéresis: un tramo de `n` constante de menos de 1 mm se funde con el vecino de
+            // MENOS carriles (más ancho, nunca más fino). Unas pocas vueltas bastan.
+            const double hyst = 1.0;
+            for (int pass = 0; pass < 8; ++pass) {
+                bool changed = false;
+                int a = 0;
+                while (a < m) {
+                    int b = a;
+                    while (b + 1 < m && n[b + 1] == n[a])
+                        ++b;
+                    const double len = std::abs(s[seg[b]] - s[seg[a]]);
+                    const bool has_l = a > 0, has_r = b + 1 < m;
+                    if (len < hyst && (has_l || has_r)) {
+                        int to = has_l && has_r ? std::min(n[a - 1], n[b + 1]) : (has_l ? n[a - 1] : n[b + 1]);
+                        to = std::min(to, n[a]);
+                        if (to != n[a]) {
+                            for (int c = a; c <= b; ++c)
+                                n[c] = to;
+                            changed = true;
+                        }
+                    }
+                    a = b + 1;
+                }
+                if (!changed)
+                    break;
+            }
+        }
+        // Peso de cada carril en cada muestra: 1 encendido, 0 apagado, y rampa de `2·techo` de arco
+        // entre los dos (media móvil del escalón por longitud de arco = rampa lineal).
+        std::vector<std::vector<double>> wt(k, std::vector<double>(m, 1.));
+        if (P.var_k) {
+            std::vector<double> sa(m);
+            for (int a = 0; a < m; ++a)
+                sa[a] = (a > 0 && seg[a] < seg[a - 1]) ? sa[a - 1] + (pts[seg[a]] - pts[seg[a - 1]]).norm()
+                                                       : s[seg[a]] - s[seg[0]];
+            const double half = P.ceiling_w;
+            for (int lane = 0; lane < k; ++lane) {
+                const int rank = int(std::find(drop.begin(), drop.end(), lane) - drop.begin());
+                std::vector<double> step(m);
+                for (int a = 0; a < m; ++a)
+                    step[a] = rank < k - n[a] ? 0. : 1.;
+                int lo = 0, hi = 0;
+                for (int a = 0; a < m; ++a) {
+                    while (lo < a && sa[a] - sa[lo] > half)
+                        ++lo;
+                    if (hi < a)
+                        hi = a;
+                    while (hi + 1 < m && sa[hi + 1] - sa[a] <= half)
+                        ++hi;
+                    double acc = 0.;
+                    for (int c = lo; c <= hi; ++c)
+                        acc += step[c];
+                    wt[lane][a] = acc / double(hi - lo + 1);
+                }
+            }
+        }
+        // Los carriles, cada uno partido donde se apaga.
+        for (int lane = 0; lane < k; ++lane) {
+            NsLine L;
+            bool   open_front = true;
+            auto flush = [&](bool at_end) {
+                if (L.pts.size() >= 2) {
+                    L.kind = Kind::Stroke; L.sid = sid; L.idx = lane + 1; L.k = k;
+                    L.e0 = open_front ? e0 : 0;
+                    L.e1 = at_end ? e1 : 0;
+                    L.cap0 = !cycle && open_front && cap_front && r.first == 0;
+                    L.cap1 = !cycle && at_end && cap_back && r.second == last;
+                    if (P.offset_lines) {   // la cúspide del lado interior de una curva cerrada
+                        std::vector<Vec2d>  kp{ L.pts.front() };
+                        std::vector<double> kw{ L.w.front() };
+                        for (size_t c = 1; c < L.pts.size(); ++c) {
+                            const Vec2d t = L.pts[c] - kp.back();
+                            if (c + 1 < L.pts.size() && t.dot(L.pts.back() - L.pts.front()) <= 0.
+                                && t.norm() < P.step)
+                                continue;
+                            kp.push_back(L.pts[c]);
+                            kw.push_back(L.w[c]);
+                        }
+                        L.pts = smooth(kp, 2, false);
+                        L.w   = kw;
+                    }
+                    const double min_len = (P.corner_hooks && (L.e0 >= 3 || L.e1 >= 3)) ? P.step : P.min_len;
+                    if (L.length() >= min_len)
+                        out.push_back(std::move(L));
+                }
+                L = NsLine{};
+                open_front = false;
+            };
+            for (int a = 0; a < m; ++a) {
+                const int j = seg[a];
+                double sum = 0., before = 0.;
+                for (int c = 0; c < k; ++c) {
+                    sum += wt[c][a];
+                    if (c < lane)
+                        before += wt[c][a];
+                }
+                const double my = wt[lane][a];
+                const double w  = sum > 1e-12 ? W[j] * my / sum : 0.;
+                const bool   on = my > 1e-9 && (!P.var_k || w >= P.bead_min - 1e-9);
+                if (!on) {
+                    flush(false);
+                    continue;
+                }
+                const double f = 2. * (before + 0.5 * my) / sum - 1.;   // de -1 (un borde) a +1
+                L.pts.push_back(lane_point(pts[j], nrm[j], W[j], f, bnd, P));
+                L.w.push_back(std::min(P.max_bead, std::max(P.floor_w, w)));
+            }
+            flush(true);
+        }
+    }
+}
 
 static NsLines plan_stroke(const StrokeBranch& br, const Boundary& bnd, const NsParams& P,
                            StrokeStats& st, bool cap_front = false, bool cap_back = false)
@@ -565,7 +768,9 @@ static NsLines plan_stroke(const StrokeBranch& br, const Boundary& bnd, const Ns
     std::vector<char> ok(pts.size());
     bool all_ok = true;
     for (size_t i = 0; i < pts.size(); ++i) {
-        ok[i] = char(W[i] >= k * P.floor_w);
+        // s336 — con `var_k` el número de líneas baja con el hueco, así que el tramo vale donde
+        // quepa UN cordón real; lo demás lo deciden los carriles de abajo.
+        ok[i] = P.var_k ? char(W[i] >= P.bead_min) : char(W[i] >= k * P.floor_w);
         all_ok = all_ok && ok[i];
     }
     // 🚨 Un ciclo TAMBIÉN se parte donde no hay sitio. El prototipo daba el ciclo entero por
@@ -575,6 +780,9 @@ static NsLines plan_stroke(const StrokeBranch& br, const Boundary& bnd, const Ns
     // suelo, no se imprime; la costura vuelve a unir los arcos si se tocan.
     const std::vector<std::pair<int,int>> tramos = runs(ok);
     const bool cycle = closed && all_ok;
+    if (P.offset_lines || P.var_k) {
+        plan_lanes(pts, W, nrm, s, tramos, cycle, closed, k, sid, deg, cap_front, cap_back, bnd, P, st, out);
+    } else
     for (const auto& r : tramos) {
         std::vector<int> seg;
         for (int i = r.first; i <= r.second; ++i)
@@ -601,6 +809,12 @@ static NsLines plan_stroke(const StrokeBranch& br, const Boundary& bnd, const Ns
                 out.push_back(std::move(L));
         }
     }
+    for (const NsLine& L : out)            // s336 — la sonda `finos=`: sólo mira, no cambia nada
+        for (double w : L.w) {
+            ++st.thin_of;
+            if (w < P.bead_min - 1e-9)
+                ++st.thin;
+        }
     if (cycle)
         return out;
 
@@ -1202,7 +1416,79 @@ struct Run {
 // dos tramos, que se imprimen seguidos y sin retracción por ir en el mismo cubo sin reordenar.
 // 🚨 El corte sale del MISMO bucle que los puntos (trampa 14): llevar la lista por separado se
 // desalinea en cuanto se mete una costura.
-static std::vector<Run> path_runs(const NsPath& path)
+// s336 — recorta `len` mm de arco por el final (o por el principio) de una polilínea con ancho.
+static void trim_back(std::vector<Vec2d>& p, std::vector<double>& w, double len)
+{
+    while (p.size() >= 2 && len > 1e-12) {
+        const size_t n   = p.size();
+        const double seg = (p[n - 1] - p[n - 2]).norm();
+        if (seg <= len) {
+            len -= seg;
+            p.pop_back();
+            w.pop_back();
+        } else {
+            const double t = len / seg;
+            p[n - 1] = p[n - 1] + (p[n - 2] - p[n - 1]) * t;
+            w[n - 1] = w[n - 1] + (w[n - 2] - w[n - 1]) * t;
+            len = 0.;
+        }
+    }
+}
+static void trim_front(std::vector<Vec2d>& p, std::vector<double>& w, double len)
+{
+    std::reverse(p.begin(), p.end());
+    std::reverse(w.begin(), w.end());
+    trim_back(p, w, len);
+    std::reverse(p.begin(), p.end());
+    std::reverse(w.begin(), w.end());
+}
+
+// NEOTKO_NEOSTROKE_TAG s336 (2_47) — `neostroke_continuous_turns`. LA VUELTA EN U SE EXTRUYE.
+// Hasta 2_46 la U se cortaba (ver s329 abajo), y eso deja `k−1` cortes de flujo en cada extremo de
+// cada trazo. s332 midió que la raja son justo cortes de flujo, y `cap_join` metía un ~8 % de caudal
+// en el salto, que para la presión de la boquilla sigue siendo un corte. El pegote de s329 no era
+// la U: era el repintado de ramas (arreglado entonces). Un cordón que gira SIN parar no tiene remates
+// redondos que se pisen: esos sólo existen donde se arranca y se para.
+// Cómo: las dos líneas se recortan `r = salto/2` de arco y se unen con un SEMICÍRCULO de radio `r`
+// abombado hacia donde iban, así el vértice del arco cae donde acababa la línea y no se sale de la
+// tapa. Si una de las dos es más corta que `2r`, o el salto es de más de dos cordones (no es una U
+// de verdad), se une en recto. El salto `gap <= w/2` (dos remates que ya se tocan) se une en recto.
+static void join_continuous(Run& cur, const NsLine& L, bool uturn, double w)
+{
+    std::vector<Vec2d>  lp = L.pts;
+    std::vector<double> lw = L.w;
+    const double gap = (cur.pts.back() - lp.front()).norm();
+    const double r   = 0.5 * gap;
+    if (uturn && gap <= 2. * w && poly_len(cur.pts) > 2. * r && poly_len(lp) > 2. * r) {
+        Vec2d out_dir = cur.pts.back() - cur.pts[cur.pts.size() - 2];
+        trim_back(cur.pts, cur.w, r);
+        trim_front(lp, lw, r);
+        const Vec2d A = cur.pts.back(), B = lp.front();
+        Vec2d e = B - A;
+        const double eab = e.norm();
+        if (eab > 1e-9) {
+            e /= eab;
+            Vec2d u = out_dir - e * out_dir.dot(e);
+            if (u.norm() < 1e-9)
+                u = Vec2d(-e.y(), e.x());
+            u.normalize();
+            const Vec2d  C  = 0.5 * (A + B);
+            const double rr = 0.5 * eab;
+            const double wa = std::min(cur.w.back(), lw.front());
+            for (int m = 1; m < 8; ++m) {
+                const double th = PI * double(m) / 8.;
+                cur.pts.push_back(C - e * (rr * std::cos(th)) + u * (rr * std::sin(th)));
+                cur.w.push_back(wa);
+            }
+        }
+    }
+    cur.pts.push_back(lp.front());
+    cur.w.push_back(std::min(cur.w.back(), lw.front()));
+    cur.pts.insert(cur.pts.end(), lp.begin() + 1, lp.end());
+    cur.w.insert(cur.w.end(), lw.begin() + 1, lw.end());
+}
+
+static std::vector<Run> path_runs(const NsPath& path, const NsParams& P)
 {
     std::vector<Run> out;
     Run cur;
@@ -1229,6 +1515,10 @@ static std::vector<Run> path_runs(const NsPath& path)
         // mismo trazo y líneas vecinas, que es la misma pareja que eligió `stitch`.
         const bool uturn = (prev_sid >= 0 && prev_sid == L.sid && std::abs(prev_idx - L.idx) == 1);
         prev_sid = L.sid; prev_idx = L.idx;
+        if (gap > 1e-9 && (uturn || gap <= w / 2.) && P.cont_turns && cur.pts.size() >= 2) {
+            join_continuous(cur, L, uturn, w);   // s336 — sin cortar el flujo
+            continue;
+        }
         if (gap > 1e-9 && (uturn || gap <= w / 2.)) {
             // s331d — el salto sigue SIN formar parte del tramo (el ancho de una `ThickPolyline`
             // no puede bajar a las centésimas que hacen falta aquí), pero se apunta: sólo la
@@ -1619,7 +1909,10 @@ static void emit_path(const NsPath& path, PerimeterGenerator& g, ExtrusionEntiti
     //    la sonda `[NS]`.
     const ExtrusionRole role = (!path.empty() && path.front().kind == Kind::Outer) ? erExternalPerimeter
                                                                                   : erPerimeter;
-    for (Run& r : path_runs(path)) {   // el temporal lo alarga el for, se puede tocar
+    std::vector<Run> runs_of = path_runs(path, P);
+    if (runs_of.size() > 1)
+        ns_cuts += runs_of.size() - 1;      // s336 — la sonda `cortes=`
+    for (Run& r : runs_of) {
         if (r.pts.size() < 2)
             continue;
         flow_ramp(r, P);                    // s331b — se sale solo si el mando está a 0
@@ -1876,6 +2169,7 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
     ns_ov_runs = ns_ov_touched = 0;   // s331 — la sonda de la curva de overlap, por laminado
     ns_ov_vol_in = ns_ov_vol_out = 0.;
     ns_join_n = 0; ns_join_mm3 = 0.;  // s331d
+    ns_cuts = 0;                      // s336
     int walls = original_cfg->wall_loops.value;
     if (walls < 1) {
         g.process_classic();
@@ -1954,6 +2248,15 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         if (E.has_bead) P.max_bead     = E.bead;
         if (E.has_sw)   P.max_stroke_w = E.sw;
     }
+    P.cont_turns   = cfg.neostroke_continuous_turns;   // s336
+    P.offset_lines = cfg.neostroke_offset_lines;
+    P.var_k        = cfg.neostroke_variable_k;
+    {
+        const NsOvlEnv& E = ns_ovl_env();
+        if (E.has_turns) P.cont_turns   = E.turns > 0.5;
+        if (E.has_offs)  P.offset_lines = E.offs  > 0.5;
+        if (E.has_vark)  P.var_k        = E.vark  > 0.5;
+    }
     // 🚨 El tope del cordón nunca por debajo del suelo, ni el techo por encima del tope: si el
     // techo pide un cordón que el tope no deja, manda el tope y lo paga k.
     P.max_bead = std::max(P.max_bead, P.floor_w);
@@ -2002,6 +2305,7 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         if (lines.empty())
             continue;
         const size_t island_lines = lines.size();
+        const size_t cuts_before  = ns_cuts;   // s336
         n_lines += island_lines;
 
         const ExPolygons region{ island };
@@ -2208,6 +2512,8 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         total.dropped_detail += st.dropped_detail;
         total.repainted += st.repainted;
         total.caps += st.caps;
+        total.thin += st.thin;       // s336
+        total.thin_of += st.thin_of;
         for (const auto& kv : st.k_hist)
             total.k_hist[kv.first] += kv.second;
 
@@ -2216,14 +2522,16 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
             for (const auto& kv : st.k_hist)
                 kh += (kh.empty() ? "" : " ") + std::to_string(kv.first) + "x" + std::to_string(kv.second);
             const BoundingBox bb = get_extents(island);
-            char buf[512];
+            char buf[768];
             snprintf(buf, sizeof(buf),
                      "[NS] L%d isla %zu/%zu %.2fx%.2f mm area=%.2f | ramas=%zu trazos=%zu k=[%s]"
-                     " grietas=%zu rellenos=%zu repintadas=%zu tapas=%zu | lineas=%zu caminos=%zu | patin recto=%zu rodeo=%zu viaje=%zu",
+                     " grietas=%zu rellenos=%zu repintadas=%zu tapas=%zu | lineas=%zu caminos=%zu | patin recto=%zu rodeo=%zu viaje=%zu"
+                     " | giros=%d paralelas=%d kvar=%d cortes=%zu finos=%zu/%zu",
                      g.layer_id, i, islands.size(), unscale<double>(bb.size().x()), unscale<double>(bb.size().y()),
                      island.area() * SCALING_FACTOR * SCALING_FACTOR, sk_st.branches, st.strokes,
                      kh.c_str(), st.slivers, st.fills, st.repainted, st.caps, island_lines, paths.size(),
-                     skates_straight, skates_routed, skate_travels);
+                     skates_straight, skates_routed, skate_travels,
+                     int(P.cont_turns), int(P.offset_lines), int(P.var_k), ns_cuts - cuts_before, st.thin, st.thin_of);
             NeoDebug::write(NeoDebug::NEOSTROKE, buf);
         }
     }
