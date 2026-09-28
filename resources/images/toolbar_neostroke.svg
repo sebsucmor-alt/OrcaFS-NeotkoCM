@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+  <!-- NEOTKO_NEOSTROKE_TAG s337 — NeoStroke Preview: one layer seen from above, a line that
+       thins and widens (the variable-width stroke) inside the grey outer wall.
+       Fills only (nanosvg-safe); no pure black (RGB==0 reads as background in the icon recolor). -->
+  <!-- the Classic outer wall -->
+  <polygon points="4,8 36,8 36,12 8,12 8,28 36,28 36,32 4,32" style="fill:#2b3436"/>
+  <!-- the NeoStroke line: wide on the left, thin in the middle, wide again -->
+  <polygon points="11,15 17,16.5 23,18.8 29,16.5 34,15 34,25 29,23.5 23,21.2 17,23.5 11,25" style="fill:#009688"/>
+</svg>

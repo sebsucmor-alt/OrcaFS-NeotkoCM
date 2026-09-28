@@ -4896,6 +4896,11 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             _perform_layer_editing_action(&evt);
         }
 
+        // NEOTKO_NEOSTROKE_TAG s337 — candado de selección: ni selección, ni rectángulo, ni arrastre de pieza.
+        // La cámara no pasa por aquí (gira/panea en la rama de Dragging), así que sigue funcionando.
+        else if (m_neotko_selection_lock) {
+        }
+
         else {
             // BBS: define Alt key to enable volume selection mode
             m_selection.set_volume_selection_mode(evt.AltDown() ? Selection::Volume : Selection::Instance);
@@ -5382,6 +5387,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             // Let the plater know that the dragging finished, so a delayed refresh
             // of the scene with the background processing data should be performed.
             post_event(SimpleEvent(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED));
+        }
+        // NEOTKO_NEOSTROKE_TAG s337 — candado de selección: el clic suelto no deselecciona, no cambia de placa y
+        // el derecho no selecciona ni abre el menú contextual.
+        else if (m_neotko_selection_lock) {
         }
         else if (evt.LeftUp() && m_picking_enabled && m_rectangle_selection.is_dragging() && m_layers_editing.state != LayersEditing::Editing) {
             //BBS: don't use alt as de-select

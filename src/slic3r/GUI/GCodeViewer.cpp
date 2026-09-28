@@ -8061,6 +8061,8 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
 
     lit_shader->start_using();
     lit_shader->set_uniform("emission_factor", 0.1f);
+    // NEOTKO_NEOSTROKE_TAG s337 — el recorte en Z de las piezas, como en gouraud (ver shells_lit.fs).
+    lit_shader->set_uniform("u_z_range", Vec2f(volumes.get_z_range()[0], volumes.get_z_range()[1]));
     // NEOTKO_PHOTOMODE_TAG s242: every lighting constant shells_lit.vs used to hold as a #define
     // is now a uniform. Sent once per pass, not per volume — the lights are a property of the
     // frame. With Photo Mode off this pushes the original values, which is the whole "off ==

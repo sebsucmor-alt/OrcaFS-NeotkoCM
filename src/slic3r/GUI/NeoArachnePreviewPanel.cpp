@@ -45,6 +45,7 @@
 #include "../../libslic3r/libslic3r.h"
 
 #include "../../libslic3r/NeoArachne/Preview/PreviewConfigSnapshot.hpp"
+#include "../../libslic3r/NeoArachne/Preview/PreviewEffectiveConfig.hpp"   // s337 — compute_flows
 #include "../../libslic3r/NeoArachne/Preview/PreviewGeometrySource.hpp"
 #include "../../libslic3r/NeoArachne/Preview/PreviewSlicer.hpp"
 
@@ -155,38 +156,14 @@ NPrev::ConfigSnapshot capture_snapshot_from_tab(Tab* tab)
     snap.object = static_cast<const PrintObjectConfig&>(full);
     snap.print  = static_cast<const PrintConfig&>(full);
 
-    // NEOTKO_NEOSTROKE_TAG s335 — 🚨 NEOTKO_CONFIG_MIRROR_TAG. `neotko_libre_mode` NO VIVE EN NINGÚN
-    //    PRESET: para el laminado de verdad lo inyecta `Plater::neotko_full_config()` desde
-    //    app_config, y `live_merged_config()` de aquí arriba sale de `full_config()` en crudo, que
-    //    lo trae con su DEFAULT (false).
-    //    Sin esta línea el candado de NeoStroke (NeoArachnePlan::run) está CERRADO para siempre
-    //    dentro del Preview Lab, aunque LibreMode esté encendido: el visor cae a la ruta normal y
-    //    dibuja caminos de Classic mientras el G-code real sale de NeoStroke. Es exactamente el
-    //    divorcio que se vio en s335, y la razón de ser de la regla del config mirror.
-    if (wxGetApp().app_config != nullptr)
-        snap.object.neotko_libre_mode.value =
-            wxGetApp().app_config->get_bool("neotko_libre_mode");
-
+    // NEOTKO_NEOSTROKE_TAG s337 — fuera la copia de `neotko_libre_mode` que se puso en s335: desde s336 el
+    // candado de NeoStroke es sólo el canal NEOSTROKE y ya no mira LibreMode (A3 del pre-plan del visor).
     snap.layer_height = snap.object.layer_height.value > 0.0 ? snap.object.layer_height.value : 0.2;
 
     snap.force_isolated_layer_defaults();
 
-    const int   extruder_idx  = std::max(0, snap.region.wall_filament.value - 1);
-    const float nozzle_d      = float(snap.print.nozzle_diameter.get_at(extruder_idx));
-    const float h             = float(snap.layer_height);
-
-    const ConfigOptionFloatOrPercent& ext_w = snap.region.outer_wall_line_width.value > 0
-        ? snap.region.outer_wall_line_width : snap.object.line_width;
-    const ConfigOptionFloatOrPercent& inn_w = snap.region.inner_wall_line_width.value > 0
-        ? snap.region.inner_wall_line_width : snap.object.line_width;
-    const ConfigOptionFloatOrPercent& sol_w = snap.region.internal_solid_infill_line_width.value > 0
-        ? snap.region.internal_solid_infill_line_width : snap.object.line_width;
-
-    snap.ext_perimeter_flow         = Flow::new_from_config_width(frExternalPerimeter, ext_w, nozzle_d, h);
-    snap.perimeter_flow             = Flow::new_from_config_width(frPerimeter,         inn_w, nozzle_d, h);
-    snap.solid_infill_flow          = Flow::new_from_config_width(frSolidInfill,       sol_w, nozzle_d, h);
-    snap.overhang_flow              = snap.perimeter_flow.with_flow_ratio(snap.region.bridge_flow);
-    snap.smaller_ext_perimeter_flow = snap.ext_perimeter_flow;
+    // s337 — los flujos, en un solo sitio (lo usa también el gizmo del visor).
+    NPrev::compute_flows(snap);
 
     return snap;
 }

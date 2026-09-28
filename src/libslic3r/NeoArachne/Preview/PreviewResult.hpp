@@ -63,6 +63,13 @@ struct OrderedSegment {
     ExtrusionRole role          = erNone;
     bool          is_travel     = false;
     bool          from_multipath= false; // for color parity with static view
+    // NEOTKO_NEOSTROKE_TAG s337 — lo que necesitan la huella real y las cifras del gizmo, por tramo.
+    float         height        = 0.f;   // mm, la altura del camino (la de la capa)
+    double        mm3_per_mm    = 0.0;   // 0 = tramo SIN extrusión (el patinaje de C6 sale así)
+    // true = lo puso NeoStroke. Con NeoStroke activo, el muro exterior (erExternalPerimeter) es de Classic
+    // y TODO lo demás (erPerimeter) es NeoStroke: el motor fija outer=Classic, inner=NeoStroke, gap=Off
+    // (`NeoArachnePlan.cpp`, el candado). Se marca en `preview_slice`, que sabe si el candado estaba abierto.
+    bool          neostroke     = false;
 };
 
 struct PreviewResult {
@@ -97,6 +104,9 @@ struct PreviewResult {
     // `needs_pick` = hay que elegir antes de poder laminar.
     ExPolygons                  islands_all;
     bool                        needs_pick = false;
+
+    // NEOTKO_NEOSTROKE_TAG s337 — este corte se laminó con NeoStroke de verdad (wall_generator + candado).
+    bool                        neostroke_active = false;
 };
 
 }}} // namespace Slic3r::NeoArachne::Preview

@@ -47,15 +47,8 @@ struct Config {
     double neostroke_width_ref      = 0.0;    // mm
     // s331 — curva de overlap: 0 = apagada. % de ancho (y por tanto de material) que se le suma a
     // un cordón que es a la vez más ancho que el cabezal y está en curva. Ver NeoStroke.cpp.
-    double neostroke_curve_overlap = 0.0;     // %
+    double neostroke_curve_overlap = 15.0;    // % (s336d: igual que el default del perfil)
     // La FORMA de las dos rampas. Sólo hacen algo con el overlap encendido.
-    double neostroke_overlap_width_end = 125.0;   // % del cabezal; la rampa empieza siempre en 100
-    double neostroke_overlap_turn_min  = 4.0;     // grados/mm: por debajo, se considera recto
-    double neostroke_overlap_turn_max  = 15.0;    // grados/mm: por encima, el overlap entero
-    double neostroke_overlap_span      = 1.0;     // mm sobre los que se mide el giro
-    double neostroke_overlap_straight  = 100.0;   // % de la rampa que se aplica en recto
-    // s331d — costura de la vuelta en U: factor sobre el hueco CALCULADO de la tapa. 100 % = exacto.
-    double neostroke_cap_join          = 100.0;   // %
     // s331b — tope duro del cordón (% del cabezal) y ancho máximo de un trazo (mm).
     double neostroke_max_bead_pct      = 150.0;
     double neostroke_max_stroke_width  = 5.0;
@@ -66,9 +59,12 @@ struct Config {
     bool   neostroke_skate         = false;   // C6: patinar sobre lo ya puesto entre caminos
     double neostroke_skate_detour  = 5.0;     // largo máximo del patín / salto recto (como S3D)
     // s336 (2_47) — las tres mejoras de camino, apagadas = 2_46
-    bool   neostroke_continuous_turns = false;
-    bool   neostroke_offset_lines     = false;
-    bool   neostroke_variable_k       = false;
+    bool   neostroke_continuous_turns = true;
+    bool   neostroke_variable_k       = true;    // s336d: v2 ON por defecto
+    // s339 — TEST25, apagadas = el G-code de hoy
+    double neostroke_lane_overlap     = 0.0;     // % de caudal uniforme en cada carril
+    bool   neostroke_end_at_junctions = false;   // acabar en los cruces, arrancar por el extremo libre
+    double neostroke_lead_in          = 0.0;     // mm de arranque adelantado (s339b)
 
     // ── Edge Closure params (Fase 3.0 — S3D heritage) ───────────────────────
     // Defaults reflect "PA-safe" starting point; user adjusts via UI.

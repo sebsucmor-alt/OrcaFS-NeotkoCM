@@ -30,6 +30,9 @@ enum class GeometryKind {
     W,           // hardcoded letraW.stl cross-section, 2D contour (Z ignored)
     Wedge,       // hardcoded triangular wedge, 2D contour (Z ignored)
     FromMesh,    // frozen ModelVolume snapshot, sliced at slice_z_mm
+    // NEOTKO_NEOSTROKE_TAG s337 — el gizmo: el corte ya hecho, en coordenadas de PLACA (escaladas) y SIN
+    // trasladar. Cada objeto de la placa se dibuja donde está, así que aquí no se mueve nada al origen.
+    FromSlices,
 };
 
 struct PreviewGeometrySource {
@@ -46,10 +49,18 @@ struct PreviewGeometrySource {
     // 🚨 Y por PUNTO, nunca por índice: las islas se recalculan en cada corte y su orden cambia.
     std::vector<Point>                    island_picks;
 
+    // NEOTKO_NEOSTROKE_TAG s337 — sólo FromSlices: el corte y sus topes. Los topes del panel viejo
+    // (8 islas, 2000 vértices) eran para no colgar un panel wx que relaminaba en cada tic; el gizmo lamina
+    // cuando se le pide, así que los sube. Por encima del tope de vértices se simplifica igual que antes.
+    ExPolygons                            slices;
+    size_t                                max_islands = 8;
+    size_t                                max_verts   = 2000;
+
     // Convenience factories — keep call sites short and self-documenting.
     static PreviewGeometrySource w();
     static PreviewGeometrySource wedge();
     static PreviewGeometrySource from_mesh(std::shared_ptr<const TriangleMesh> m, double slice_z_mm);
+    static PreviewGeometrySource from_slices(ExPolygons slices, size_t max_islands, size_t max_verts);
 };
 
 struct GeometryBuildResult {

@@ -934,17 +934,15 @@ static std::vector<std::string> s_Preset_print_options {
      "neoarachne_spine", "neoarachne_spine_min_width_pct", "neoarachne_spine_max_width_pct",
      "neoarachne_spine_min_length", "neoarachne_spine_sliver_pct",
      "neostroke_bead_min_pct", "neostroke_layer_jitter",   // NEOTKO_NEOSTROKE_TAG s332
-     "neostroke_continuous_turns", "neostroke_offset_lines", "neostroke_variable_k",   // NEOTKO_NEOSTROKE_TAG s336
+     "neostroke_continuous_turns", "neostroke_variable_k",   // NEOTKO_NEOSTROKE_TAG s336
      "neostroke_corner_hooks",   // NEOTKO_NEOSTROKE_TAG C5b (s325)
      "neostroke_min_width_pct", "neostroke_max_width_pct",   // NEOTKO_NEOSTROKE_TAG s326
      "neostroke_detail_min_pct",   // NEOTKO_NEOSTROKE_TAG s329
      "neostroke_width_ref",   // NEOTKO_NEOSTROKE_TAG s331c
-     "neostroke_curve_overlap", "neostroke_overlap_width_end",   // NEOTKO_NEOSTROKE_TAG s331
-     "neostroke_overlap_turn_min", "neostroke_overlap_turn_max", "neostroke_overlap_span",
-     "neostroke_overlap_straight",   // NEOTKO_NEOSTROKE_TAG s331b
-     "neostroke_cap_join",   // NEOTKO_NEOSTROKE_TAG s331d
+     "neostroke_curve_overlap",   // NEOTKO_NEOSTROKE_TAG s331 (s336h: los cinco `overlap_*` de forma, retirados)
      "neostroke_max_bead_pct", "neostroke_max_stroke_width",
      "neostroke_skate", "neostroke_skate_detour",   // NEOTKO_NEOSTROKE_TAG C6 (s326)
+     "neostroke_lane_overlap", "neostroke_end_at_junctions", "neostroke_lead_in",   // NEOTKO_NEOSTROKE_TAG s339
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "min_length_factor",
      "small_perimeter_speed", "small_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","default_junction_deviation",

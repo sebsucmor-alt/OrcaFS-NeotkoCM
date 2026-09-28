@@ -1088,31 +1088,21 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         && config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::NeoStroke;
     const bool neostroke_on = neostroke_gen
                               || (ns_gate_open && have_neoarachne && inner_src == NeoArachneWallSource::NeoStroke);
-    for (auto el : { "neostroke_bead_min_pct", "neostroke_corner_hooks", "neostroke_width_ref",
-                     "neostroke_min_width_pct", "neostroke_max_width_pct", "neostroke_detail_min_pct",
+    // s338 — fuera `corner_hooks`, `min_width_pct`, `detail_min_pct`, `continuous_turns` y `variable_k`: ya no
+    //        tienen línea en la pestaña ni en la ventana (el planificador por campo no los usa).
+    for (auto el : { "neostroke_bead_min_pct", "neostroke_width_ref",
+                     "neostroke_max_width_pct",
                      "neostroke_curve_overlap", "neostroke_max_bead_pct", "neostroke_max_stroke_width",
-                     "neostroke_cap_join", "neostroke_layer_jitter", "neostroke_skate", "neostroke_skate_detour",
-                     "neostroke_continuous_turns", "neostroke_offset_lines", "neostroke_variable_k",   // s336
+                     "neostroke_layer_jitter", "neostroke_skate", "neostroke_skate_detour",
+                     "neostroke_lane_overlap", "neostroke_end_at_junctions", "neostroke_lead_in",   // s339
                      // NEOTKO_NEOSTROKE_TAG s335 — el BOTÓN de la ventana de Avanzado. No es una
                      // clave de config: es la `neotko_toggle_key` de su línea de widget, y se
                      // enseña/oculta con el mismo criterio que los mandos que abre.
                      "neostroke_advanced_dialog" })
         toggle_line(el, neostroke_on);
-    // NEOTKO_NEOSTROKE_TAG s331 — la FORMA de la curva no pinta nada con el overlap apagado.
-    // 🚨🚨 NUNCA `opt_float()` (ni `opt_int()`) sobre una clave `coPercent`. `ConfigOptionPercent`
-    // SÍ hereda de `ConfigOptionFloat`, pero `ConfigBase::option<T>()` NO hace `dynamic_cast`:
-    // compara `opt->type()` con `T::static_type()` y devuelve null si no son EXACTAMENTE iguales
-    // (Config.hpp:2090). Un `coPercent` nunca es `coFloat`, así que `opt_float` devolvía null y
-    // `->value` lo desreferenciaba: EXC_BAD_ACCESS en 0x8, que es justo el offset de `value`.
-    // Y `config->has()` no salva de nada, porque es `options.count(k) > 0` y no mira el tipo.
-    // Se lee con el tipo EXACTO. Y si no se puede leer, se ENSEÑAN los mandos: esconder uno por
-    // no poder leerlo es peor que enseñarlo de más.
-    const auto* ovl_opt = config->option<ConfigOptionPercent>("neostroke_curve_overlap");
-    const bool overlap_on = neostroke_on && (ovl_opt == nullptr || ovl_opt->value > 0.);
-    for (auto el : { "neostroke_overlap_width_end", "neostroke_overlap_straight",
-                     "neostroke_overlap_turn_min", "neostroke_overlap_turn_max",
-                     "neostroke_overlap_span" })
-        toggle_line(el, overlap_on);
+    // NEOTKO_NEOSTROKE_TAG s336h — los cinco mandos de FORMA de la rampa (`neostroke_overlap_*`) se retiraron:
+    //    su bloque de visibilidad se fue con ellos. 🚨 La lección se queda: NUNCA `opt_float()` sobre una
+    //    clave `coPercent` (`option<T>()` compara el tipo EXACTO y devuelve null → EXC_BAD_ACCESS en 0x8).
     const bool inner_is_arachne =
         inner_src == NeoArachneWallSource::ArachneStock ||
         inner_src == NeoArachneWallSource::ArachneNeotkoEdge;

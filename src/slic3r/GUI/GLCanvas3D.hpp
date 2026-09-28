@@ -563,6 +563,10 @@ private:
     std::array<ClippingPlane, 2> m_clipping_planes;
     ClippingPlane m_camera_clipping_plane;
     bool m_use_clipping_planes;
+    // NEOTKO_NEOSTROKE_TAG s337 — candado de selección: con él puesto, un clic (izq. o der.) sobre un objeto o en
+    // el vacío NO selecciona, no deselecciona, no mueve y no abre el menú; la cámara sigue igual. Lo pone un
+    // gizmo que necesita que la selección no cambie mientras se mira (el visor de NeoStroke).
+    bool m_neotko_selection_lock{ false };
     std::array<SlaCap, 2> m_sla_caps;
     std::string m_sidebar_field;
     // when true renders an extra frame by not resetting m_dirty to false
@@ -946,6 +950,8 @@ public:
     }
     void reset_clipping_planes_cache() { m_sla_caps[0].triangles.clear(); m_sla_caps[1].triangles.clear(); }
     void set_use_clipping_planes(bool use) { m_use_clipping_planes = use; }
+    void set_neotko_selection_lock(bool lock) { m_neotko_selection_lock = lock; }   // NEOTKO_NEOSTROKE_TAG s337
+    bool neotko_selection_lock() const { return m_neotko_selection_lock; }
 
     bool                                get_use_clipping_planes() const { return m_use_clipping_planes; }
     const std::array<ClippingPlane, 2> &get_clipping_planes() const { return m_clipping_planes; };

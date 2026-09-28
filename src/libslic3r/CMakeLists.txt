@@ -65,6 +65,8 @@ set(lisbslic3r_sources
     NeoArachne/NeoStroke.hpp
     NeoArachne/NeoStrokeSkeleton.cpp
     NeoArachne/NeoStrokeSkeleton.hpp
+    NeoArachne/NeoStrokeField.cpp
+    NeoArachne/NeoStrokeField.hpp
     NeoArachne/NeoStrokeLink.hpp
     # NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab backend (mini-slicer for the reactive canvas).
     NeoArachne/Preview/PreviewWGeometry.hpp
@@ -76,6 +78,10 @@ set(lisbslic3r_sources
     NeoArachne/Preview/PreviewResult.hpp
     NeoArachne/Preview/PreviewSlicer.hpp
     NeoArachne/Preview/PreviewSlicer.cpp
+    NeoArachne/Preview/PreviewEffectiveConfig.hpp
+    NeoArachne/Preview/PreviewEffectiveConfig.cpp
+    NeoArachne/Preview/PreviewMetrics.hpp
+    NeoArachne/Preview/PreviewMetrics.cpp
     Arachne/SkeletalTrapezoidation.cpp
     Arachne/SkeletalTrapezoidationEdge.hpp
     Arachne/SkeletalTrapezoidationGraph.cpp

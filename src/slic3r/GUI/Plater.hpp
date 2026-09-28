@@ -410,6 +410,10 @@ public:
     void reset_window_layout();
     void float_params_panel(bool do_float); // NeotkoLIBRE — s133: detachable Process panel
     void set_neotko_libre_cached(bool v);   // NeotkoLIBRE — s133: slice-time LibreMode flag cache
+    // NEOTKO_NEOSTROKE_TAG s337 — la config COMPLETA con las claves espejo, la misma que recibe
+    // Print::apply(). El visor de NeoStroke (gizmo) la necesita para montar la config de cada objeto
+    // igual que el laminado; con `full_config()` en crudo las claves espejo llegan con su default.
+    DynamicPrintConfig neotko_full_config() const;
 
     // Called after the Preferences dialog is closed and the program settings are saved.
     // Update the UI based on the current preferences.

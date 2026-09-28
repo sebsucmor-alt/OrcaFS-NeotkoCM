@@ -1428,13 +1428,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercent, neostroke_detail_min_pct))
     // NEOTKO_NEOSTROKE_TAG s331 — curva de overlap: 0 = apagada, y la FORMA de sus dos rampas.
     ((ConfigOptionPercent, neostroke_curve_overlap))
-    ((ConfigOptionPercent, neostroke_overlap_width_end))   // % del cabezal; empieza siempre en 100
-    ((ConfigOptionFloat,   neostroke_overlap_turn_min))    // grados/mm: por debajo, es recto
-    ((ConfigOptionFloat,   neostroke_overlap_turn_max))    // grados/mm: por encima, overlap entero
-    ((ConfigOptionFloat,   neostroke_overlap_span))        // mm sobre los que se mide el giro
-    ((ConfigOptionPercent, neostroke_overlap_straight))    // % de la rampa que se aplica en recto
     // NEOTKO_NEOSTROKE_TAG s331d — costura de la vuelta en U; 100 % = el hueco calculado exacto.
-    ((ConfigOptionPercent, neostroke_cap_join))
     // NEOTKO_NEOSTROKE_TAG s331b — tope duro del cordón y frontera del motor.
     ((ConfigOptionPercent, neostroke_max_bead_pct))        // % del cabezal; lo paga k, no el ancho
     ((ConfigOptionFloat,   neostroke_max_stroke_width))    // mm de hueco útil; más ancho = relleno
@@ -1444,10 +1438,13 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // NEOTKO_NEOSTROKE_TAG C6 (s326) — patinaje sobre lo ya puesto y su factor de rodeo.
     ((ConfigOptionBool,    neostroke_skate))
     ((ConfigOptionFloat,   neostroke_skate_detour))
+    // NEOTKO_NEOSTROKE_TAG s339 — tres mejoras del TEST25 (fotos contra G-code), POR OBJETO, apagadas = G-code de hoy:
+    ((ConfigOptionPercent, neostroke_lane_overlap))        // solape lateral fijo entre carriles (caudal uniforme)
+    ((ConfigOptionBool,    neostroke_end_at_junctions))    // los tramos ACABAN en los cruces, arrancan por el extremo libre
+    ((ConfigOptionFloat,   neostroke_lead_in))             // mm: el tramo arranca ANTES, sobre su propio carril (s339b)
     // NEOTKO_NEOSTROKE_TAG s336 (2_47) — tres mejoras de camino, cada una con su interruptor y
     // APAGADAS por defecto: con las tres en false el G-code es el de 2_46. Ver NeoStroke.cpp.
     ((ConfigOptionBool,    neostroke_continuous_turns))
-    ((ConfigOptionBool,    neostroke_offset_lines))
     ((ConfigOptionBool,    neostroke_variable_k))
     ((ConfigOptionFloat,   neoarachne_transition_filter_dist_mm))
 

@@ -8905,7 +8905,7 @@ void PrintConfigDef::init_fff_params()
     // pre-plan). Interruptor de prueba: cambia dos puertas a la vez, la poda del esqueleto y el
     // largo mínimo de una línea que nace en un cruce.
     def = this->add("neostroke_corner_hooks", coBool);
-    def->label = L("NS — corner hooks");
+    def->label = L("NS — reach into corners");
     def->category = L("Quality");
     def->tooltip = L("Print the short skeleton spurs that die into a junction: the armpits of an H, "
         "the corners of a flat stem end. They are wedges that start thin and grow, and they weld the "
@@ -8917,34 +8917,33 @@ void PrintConfigDef::init_fff_params()
 
     // NEOTKO_NEOSTROKE_TAG s326 — suelo y techo del ancho de NeoStroke.
     def = this->add("neostroke_min_width_pct", coPercent);
-    def->label = L("NS — minimum width");
+    def->label = L("NS — thinnest line at tips");
     def->category = L("Quality");
-    def->tooltip = L("Thinnest a NeoStroke line may get inside a continuous path, as a percentage of the nozzle "
-        "diameter. Short detail paths are never thinner than the nozzle regardless of this value.");
-    def->sidetext = L("% of nozzle");
+    def->tooltip = L("Thinnest a NeoStroke line may get inside a continuous path, as a percentage of the reference line width. Short detail paths follow NS — thinnest small detail instead.");
+    def->sidetext = "% of reference";
     def->min = 1;
     def->max = 100;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(23));
 
     def = this->add("neostroke_max_width_pct", coPercent);
-    def->label = L("NS — maximum width");
+    def->label = L("NS — target line width");
     def->category = L("Quality");
-    def->tooltip = L("Widest a NeoStroke line may get, as a percentage of the nozzle diameter. This decides how "
+    def->tooltip = L("Widest a NeoStroke line may get, as a percentage of the reference line width. This decides how "
         "many lines a stroke gets: a stroke is split into as many lines as needed to keep each one under this "
         "width. Lower = more, thinner lines.");
-    def->sidetext = L("% of nozzle");
+    def->sidetext = "% of reference";
     def->min = 50;
     def->max = 300;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(117));
+    def->set_default_value(new ConfigOptionPercent(100));
 
     // NEOTKO_NEOSTROKE_TAG s331c — la referencia contra la que se miden TODOS los % de NeoStroke.
     def = this->add("neostroke_width_ref", coFloat);
-    def->label = L("NS — width reference");
+    def->label = L("NS — reference line width");
     def->category = L("Quality");
     def->tooltip = L("The width that every NeoStroke percentage is measured against: the minimum and maximum "
-        "width, the thinnest bead of a detail, the hard bead limit and the start of the flow ramp. 0 means "
+        "width, the thinnest small detail, the widest line allowed and the start of the extra flow. 0 means "
         "automatic, which is the internal solid infill line width, the flow NeoStroke actually prints with. Set "
         "a value in millimetres to decide what 100 % means yourself, which is what a different nozzle needs. "
         "Note that what is compared against it is the SPACING of a line, not its printed width: the printed "
@@ -8954,19 +8953,19 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 5;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.3));
+    def->set_default_value(new ConfigOptionFloat(0.32));
 
     // NEOTKO_NEOSTROKE_TAG s329 — el cordón más fino que la máquina sabe hacer de verdad.
     def = this->add("neostroke_detail_min_pct", coPercent);
-    def->label = L("NS — thinnest bead");
+    def->label = L("NS — thinnest small detail");
     def->category = L("Quality");
-    def->tooltip = L("Thinnest line NeoStroke may lay for a detail, as a percentage of the nozzle diameter. A "
+    def->tooltip = L("Thinnest line NeoStroke may lay for a detail, as a percentage of the reference line width. A "
         "detail is a short path or a residual fill: a gap that cannot take a line at least this wide is left "
         "empty instead of being widened over material that is already there. A 0.4 nozzle can lay about 0.25, so "
-        "the default is 60 %. Raise it towards 100 % if thin details come out broken; lower it if small gaps are "
+        "the default is 70 %. Raise it towards 100 % if thin details come out broken; lower it if small gaps are "
         "being left unfilled. This does not affect the lines of a stroke, which are governed by the minimum and "
         "maximum width.");
-    def->sidetext = L("% of nozzle");
+    def->sidetext = "% of reference";
     def->min = 20;
     def->max = 150;
     def->mode = comAdvanced;
@@ -8974,7 +8973,7 @@ void PrintConfigDef::init_fff_params()
 
     // NEOTKO_NEOSTROKE_TAG s331 — curva de overlap. Ver `curve_overlap()` en NeoStroke.cpp.
     def = this->add("neostroke_curve_overlap", coPercent);
-    def->label = L("NS — curve overlap");
+    def->label = L("NS — extra flow on wide lines");
     def->category = L("Quality");
     def->tooltip = L("Extra overlap between NeoStroke lines, where a line is both wider than the nozzle and "
         "following a curve. The plan already covers the gap exactly at any ceiling, but a bead wider than the "
@@ -8987,96 +8986,65 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 50;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(15));
+    def->set_default_value(new ConfigOptionPercent(2));
 
-    // NEOTKO_NEOSTROKE_TAG s331 — la FORMA de la curva. Solo hacen algo con el overlap encendido.
-    def = this->add("neostroke_overlap_width_end", coPercent);
-    def->label = L("NS — overlap: width ramp end");
+    // NEOTKO_NEOSTROKE_TAG s339 — TEST25: tres mejoras, apagadas por defecto (= el G-code de hoy).
+    def = this->add("neostroke_lane_overlap", coPercent);
+    def->label = L("NS — overlap between lines");
     def->category = L("Quality");
-    def->tooltip = L("Where the width ramp of the curve overlap reaches its full value, as a percentage of the "
-        "nozzle diameter. The ramp always starts at 100 %, the nozzle itself: a line at or below nozzle width "
-        "never gets any overlap. Lower values make the overlap kick in sooner, so more shapes get it; higher "
-        "values reserve it for the widest beads only. The width being compared is the line spacing, not the "
-        "printed footprint.");
-    def->sidetext = L("% of nozzle");
-    def->min = 101;
-    def->max = 400;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(125));
-
-    def = this->add("neostroke_overlap_turn_min", coFloat);
-    def->label = L("NS — overlap: turn ramp start");
-    def->category = L("Quality");
-    def->tooltip = L("Below this much sustained turning, a path counts as straight and gets no overlap at all. "
-        "Degrees per millimetre of path: a circle of radius R turns at 57.3 / R degrees per mm, so a 4 mm "
-        "radius is about 14. Keep this above zero, because a sampled path always carries a little turning "
-        "noise and zero would switch the overlap on along straight lines.");
-    def->sidetext = L("deg/mm");
-    def->min = 0;
-    def->max = 180;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(4.));
-
-    def = this->add("neostroke_overlap_turn_max", coFloat);
-    def->label = L("NS — overlap: turn ramp end");
-    def->category = L("Quality");
-    def->tooltip = L("Above this much sustained turning, the full overlap is applied. Degrees per millimetre of "
-        "path: a circle of radius R turns at 57.3 / R degrees per mm. Raise it to reserve the overlap for tight "
-        "curves only; lower it to give gentle curves the full amount as well. If it ends up below the ramp "
-        "start it is pushed back above it, so the ramp is never inverted.");
-    def->sidetext = L("deg/mm");
-    def->min = 0.1;
-    def->max = 360;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(15.));
-
-    // NEOTKO_NEOSTROKE_TAG s331d — la costura de la vuelta en U. Ver `uturn_flow()` en NeoStroke.cpp.
-    def = this->add("neostroke_cap_join", coPercent);
-    def->label = L("NS — end-cap join");
-    def->category = L("Quality");
-    def->tooltip = L("Fills the notch left at the flat end of a stroke, where one line turns back into the next "
-        "one. Each line ends in a round tip, and two neighbouring tips interlock in the middle of the seam but "
-        "not in the outer corner, so a small triangular notch is left at every seam of every end cap. The "
-        "amount is worked out from the geometry of those two round tips, not guessed, and it comes out at "
-        "roughly 8 % of the flow of a normal line. This setting scales it: 100 % is exactly what is missing, "
-        "below that falls short, above that deliberately overfills. 0 turns it off and brings back the "
-        "behaviour of leaving that turn unextruded.");
+    def->tooltip = L("NeoStroke plans its lines exactly side by side: they touch but do not overlap, and on glossy "
+        "filament the join shows as a groove, or lets light through against a lamp. This adds the same small "
+        "percentage of plastic to every NeoStroke line, so each one reaches a little over its neighbour. Unlike "
+        "extra flow in curves, it is spread evenly and does not pile up where the path turns tight. "
+        "0 disables it. Try 3-5 % with the curve extra flow at 0.");
     def->sidetext = "%";
     def->min = 0;
-    def->max = 200;
+    def->max = 20;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(0));
 
-    def = this->add("neostroke_overlap_straight", coPercent);
-    def->label = L("NS — overlap: amount on straight runs");
+    def = this->add("neostroke_end_at_junctions", coBool);
+    def->label = L("NS — end paths at junctions");
     def->category = L("Quality");
-    def->tooltip = L("How much of the flow ramp is applied where the path is NOT turning, as a percentage of the "
-        "full amount. At 100 % the ramp depends only on line width and a straight wide line gets the same extra "
-        "flow as a curved one. At 0 % only curves get it, and the turn ramp below decides how much. Anything in "
-        "between blends the two.");
-    def->sidetext = "%";
-    def->min = 0;
-    def->max = 100;
+    def->tooltip = L("Where several NeoStroke paths meet (a fork, a change in the number of lines), print them so "
+        "they END there and start at their free end. A path that starts has no pressure yet after the travel; "
+        "two or three starting in the same spot leave a hole (TEST25, the top of every ring). Paths that end "
+        "together arrive with pressure and close. Off: paths start on their wide side.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(30));
+    def->set_default_value(new ConfigOptionBool(true));
 
-    // NEOTKO_NEOSTROKE_TAG s331b — tope duro del cordón y frontera del motor, las dos medidas.
-    def = this->add("neostroke_max_bead_pct", coPercent);
-    def->label = L("NS — hard bead limit");
+    // s339b (TEST26) — sustituye al refuerzo de caudal del arranque, que hacía el hueco de la G (zonas 5, 6 y 7).
+    def = this->add("neostroke_lead_in", coFloat);
+    def->label = L("NS — lead-in before each start");
     def->category = L("Quality");
-    def->tooltip = L("No NeoStroke line is ever wider than this, as a percentage of the nozzle diameter. A bead "
+    def->tooltip = L("After a travel the nozzle has no pressure yet, and the first bit of a NeoStroke line comes out "
+        "short or not at all: a small hole at every start. With a lead-in, each path starts this far AHEAD on its "
+        "own line and runs back to the real start before going on. The weak first bit lands on a stretch that is "
+        "printed again right after, so the real start already has pressure. Glossy PLA needs it more than matte "
+        "PLA, which spreads and closes on its own. 0 disables it.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.4));
+
+    // NEOTKO_NEOSTROKE_TAG s331 — la FORMA de la curva. Solo hacen algo con el overlap encendido.
+    def = this->add("neostroke_max_bead_pct", coPercent);
+    def->label = L("NS — widest line allowed");
+    def->category = L("Quality");
+    def->tooltip = L("No NeoStroke line is ever wider than this, as a percentage of the reference line width. A bead "
         "much wider than the nozzle does not lie flat and its edges do not merge with the neighbour, so this is "
         "a physical limit of the hot end, not a preference. It is enforced by using MORE lines, never by "
         "trimming a line: trimming would leave the gap the lines were placed to fill. It also caps the tips, the "
         "details and the residual fills, where there is nothing to share and a wide line is just a blob.");
-    def->sidetext = L("% of nozzle");
+    def->sidetext = "% of reference";
     def->min = 50;
     def->max = 250;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(175));
+    def->set_default_value(new ConfigOptionPercent(155));
 
     def = this->add("neostroke_max_stroke_width", coFloat);
-    def->label = L("NS — widest stroke");
+    def->label = L("NS — widest shape handled");
     def->category = L("Quality");
     def->tooltip = L("Widest gap NeoStroke will treat as a stroke, in millimetres, measured after the outer wall "
         "is taken out. Anything wider is a solid area of an ordinary part, not a stroke, and is left to the "
@@ -9089,23 +9057,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5.));
 
-    def = this->add("neostroke_overlap_span", coFloat);
-    def->label = L("NS — overlap: turn measured over");
-    def->category = L("Quality");
-    def->tooltip = L("How much path the turning is measured over. It is not measured from one sample to the "
-        "next: at the 0.15 mm sampling step a single degree of noise already reads as almost 7 degrees per mm, "
-        "and straight lines would switch the overlap on by themselves. Too short and noise gets through; too "
-        "long and the start and the end of a real curve are smeared into the straight parts next to them.");
-    def->sidetext = L("mm");
-    def->min = 0.2;
-    def->max = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    // NEOTKO_NEOSTROKE_TAG C6 (s326) — patinaje: ir de un camino al siguiente POR ENCIMA de lo ya puesto.
-    // NEOTKO_NEOSTROKE_TAG s332 — el cordón más fino que la máquina saca DE VERDAD.
     def = this->add("neostroke_bead_min_pct", coPercent);
-    def->label = L("NS — real minimum bead");
+    def->label = L("NS — thinnest printable line");
     def->category = L("Quality");
     def->tooltip = L("The thinnest bead this printer can actually lay down, as a percentage of the nozzle "
         "diameter. A 0.4 nozzle reaches about 0.25, because the material stretches once it is stuck to the "
@@ -9113,15 +9066,15 @@ void PrintConfigDef::init_fff_params()
         "bead thinner than this: where the shape is too narrow it uses fewer, wider beads instead of "
         "splitting the room into threads that never come out. Only used when the outer wall is set to "
         "NeoStroke.");
-    def->sidetext = L("%");
+    def->sidetext = "% of nozzle";
     def->min = 20;
     def->max = 200;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(70));
+    def->set_default_value(new ConfigOptionPercent(60));
 
     // NEOTKO_NEOSTROKE_TAG s332 — desapilar los cortes de flujo en Z. Ver NeoStroke.cpp.
     def = this->add("neostroke_layer_jitter", coBool);
-    def->label = L("NS — vary start per layer");
+    def->label = L("NS — new start point each layer");
     def->category = L("Quality");
     def->tooltip = L("Start each layer from a different point of the shape instead of always from the same "
         "one. NeoStroke plans every layer identically, so the few places where it stops and restarts the "
@@ -9133,7 +9086,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("neostroke_skate", coBool);
-    def->label = L("NS — skate over printed lines");
+    def->label = L("NS — glide over printed lines");
     def->category = L("Quality");
     def->tooltip = L("Inside an island, move from one NeoStroke path to the next over the lines already printed "
         "on this layer, without extruding and without retracting. If no route over printed material fits the "
@@ -9143,7 +9096,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("neostroke_skate_detour", coFloat);
-    def->label = L("NS — skate detour factor");
+    def->label = L("NS — glide: longest detour");
     def->category = L("Quality");
     def->tooltip = L("Longest skate allowed, relative to the straight distance between the end of a path and the "
         "start of the next one. 1 = only straight skates; 5 = the skate may be up to five times longer than the "
@@ -9154,35 +9107,26 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5.));
 
-    // NEOTKO_NEOSTROKE_TAG s336 (2_47) — tres mejoras de camino, apagadas por defecto para poder
-    // imprimir la misma placa con y sin. Ver NeoStroke.cpp.
+    // NEOTKO_NEOSTROKE_TAG s336 (2_47) — mejoras de camino. s336b, tras el TEST18: giros continuos
+    // ENCENDIDO por defecto; `neostroke_offset_lines` retirado (no se vio en plástico). Ver NeoStroke.cpp.
     def = this->add("neostroke_continuous_turns", coBool);
-    def->label = L("NS — continuous U-turns");
+    def->label = L("NS — join line ends (no flow stops)");
     def->category = L("Quality");
     def->tooltip = L("Print the turn between two neighbouring lines of a stroke as a small arc, inside the same "
         "path, instead of stopping the flow and starting again on the next line. Every stop and restart of "
         "the flow can leave a small dent, and a stroke with several lines has one at each turn. Off = the "
-        "behaviour of 2.46.");
+        "behaviour of 2.46. Rings always keep one line count, so they stay tidy.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("neostroke_offset_lines", coBool);
-    def->label = L("NS — wall-parallel lines");
-    def->category = L("Quality");
-    def->tooltip = L("Place each line of a stroke at its distance from the wall, so it runs parallel to it, instead "
-        "of pushing it sideways from the centre line of the stroke. Helps where a stroke gets wider or "
-        "narrower, near junctions, and in tight curves. Off = the behaviour of 2.46.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("neostroke_variable_k", coBool);
-    def->label = L("NS — variable line count");
+    def->label = L("NS — fewer lines where it narrows");
     def->category = L("Quality");
     def->tooltip = L("Let the number of lines change along a stroke: fewer lines where it gets narrow, so no line "
-        "goes below the thinnest bead the nozzle really prints (NS — real minimum bead). Off = one line count "
+        "goes below the thinnest line the nozzle really prints (NS — thinnest printable line). Off = one line count "
         "for the whole stroke, as in 2.46.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("wall_transition_length", coPercent);
     def->label = L("Wall transition length");

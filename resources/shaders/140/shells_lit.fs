@@ -25,6 +25,10 @@ uniform float emission_factor;
 // (see shells_gbuffer.fs / ensure_shells_ao_fbo's clear color).
 uniform sampler2D u_gbuffer;
 uniform vec2 u_viewport;    // canvas size in px — u_gbuffer is native-resolution, no supersampling here
+// NEOTKO_NEOSTROKE_TAG s337 — el recorte en Z de GLVolumeCollection (el mismo z_range que usa gouraud).
+// Sin esto, con LibreMode encendido (shells_lit pinta las piezas) el "Cut the object" del visor de NeoStroke
+// no cortaba nada. (-FLT_MAX, FLT_MAX) = sin recorte.
+uniform vec2 u_z_range;
 uniform float u_ao_radius;  // px
 uniform float u_ao_strength;
 uniform float u_ao_bias_mm; // NEOTKO_SMOOTHNORMALS_TAG s229
@@ -361,6 +365,8 @@ vec3 weave_color(vec3 base)
 
 void main()
 {
+    if (v_world_pos.z < u_z_range.x || v_world_pos.z > u_z_range.y)
+        discard;
     vec2 uv = gl_FragCoord.xy / u_viewport;
     float ao = compute_ao(uv);
 

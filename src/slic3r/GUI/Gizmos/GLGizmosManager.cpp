@@ -33,6 +33,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoPrecisionALH.hpp" // NEOTKO_PRECISIONALH_TAG
 #include "slic3r/GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp" // NEOTKO_HAE_TAG
 #include "slic3r/GUI/Gizmos/GLGizmoSupportZones.hpp" // NEOTKO_SUPPORTZONES_TAG s286
+#include "slic3r/GUI/Gizmos/GLGizmoNeoStroke.hpp" // NEOTKO_NEOSTROKE_TAG s337
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -201,6 +202,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::SupportZones): // NEOTKO_SUPPORTZONES_TAG s286
             gizmo->set_icon_filename(m_is_dark ? "toolbar_support_zones_dark.svg" : "toolbar_support_zones.svg");
             break;
+        case (EType::NeoStroke): // NEOTKO_NEOSTROKE_TAG s337
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_neostroke_dark.svg" : "toolbar_neostroke.svg");
+            break;
         }
 
     }
@@ -259,6 +263,9 @@ bool GLGizmosManager::init()
     // HeightAdaptiveEffects there. 🚨 The two SVGs must exist: GLGizmoBase::init() fails on a
     // missing icon and the loop below then clears EVERY gizmo, not just this one.
     m_gizmos.emplace_back(new GLGizmoSupportZones(m_parent, m_is_dark ? "toolbar_support_zones_dark.svg" : "toolbar_support_zones.svg", EType::SupportZones));
+    // NEOTKO_NEOSTROKE_TAG s337 — el visor de NeoStroke. Va justo detrás de SupportZones, igual que en EType.
+    // 🚨 Los dos SVG tienen que existir: si falta uno, init() falla y se caen TODOS los gizmos.
+    m_gizmos.emplace_back(new GLGizmoNeoStroke(m_parent, m_is_dark ? "toolbar_neostroke_dark.svg" : "toolbar_neostroke.svg", EType::NeoStroke));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));

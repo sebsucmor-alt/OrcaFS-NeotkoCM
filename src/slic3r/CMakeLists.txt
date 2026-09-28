@@ -146,6 +146,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoAlignStack.cpp
     GUI/Gizmos/GLGizmoAlignStack.hpp
     GUI/Gizmos/GLGizmoPrecisionALH.cpp
+    GUI/Gizmos/GLGizmoNeoStroke.cpp
+    GUI/Gizmos/GLGizmoNeoStroke.hpp
     GUI/Gizmos/GLGizmoPrecisionALH.hpp
     GUI/Gizmos/GLGizmoHeightAdaptiveEffects.cpp
     GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp

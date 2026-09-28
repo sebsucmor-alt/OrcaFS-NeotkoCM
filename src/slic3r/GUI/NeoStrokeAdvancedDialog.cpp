@@ -18,33 +18,35 @@
 
 namespace Slic3r { namespace GUI {
 
-// Los mandos avanzados (quince de s332 + tres de s336), en el MISMO orden en el que estaban en la pestaña (s332). El orden
-// no es decorativo: va de lo que decide el cordón a lo que decide el camino, y así se lee.
-// 🚨 `neostroke_wall_eat` y `neostroke_perimeter` NO están: se fueron con NeoWall en s335.
-static const std::vector<std::string>& ns_advanced_keys()
+// NEOTKO_NEOSTROKE_TAG s336g — los mandos avanzados, AGRUPADOS por lo que deciden (antes era una fila de
+// dieciocho). El orden de los grupos va de lo que decide el cordón a lo que decide el camino.
+// 🚨 `neostroke_wall_eat`, `neostroke_perimeter` (s335), `neostroke_cap_join` y `neostroke_offset_lines`
+//    (s336) ya NO existen. `continuous_turns`, el mínimo y el tope duro viven en la pestaña, no aquí.
+struct NsAdvGroup { const char* title; std::vector<std::string> keys; };
+static const std::vector<NsAdvGroup>& ns_advanced_groups()
 {
-    static const std::vector<std::string> keys = {
-        "neostroke_bead_min_pct",       // el cordón más fino que el cabezal saca de verdad
-        "neostroke_width_ref",          // la referencia de todos los %
-        "neostroke_max_width_pct",
-        "neostroke_detail_min_pct",
-        "neostroke_max_stroke_width",
-        "neostroke_corner_hooks",
-        "neostroke_curve_overlap",      // 0 = curva de overlap apagada
-        "neostroke_overlap_width_end",
-        "neostroke_overlap_straight",
-        "neostroke_overlap_turn_min",
-        "neostroke_overlap_turn_max",
-        "neostroke_overlap_span",
-        "neostroke_layer_jitter",
-        "neostroke_skate",
-        "neostroke_skate_detour",
-        // s336 (2_47) — pruebas: las tres mejoras de camino, apagadas = 2_46
-        "neostroke_continuous_turns",
-        "neostroke_offset_lines",
-        "neostroke_variable_k",
+    static const std::vector<NsAdvGroup> groups = {
+        // NEOTKO_NEOSTROKE_TAG s338 — objetivo y mínimo pasan a la pestaña (son dos de los tres límites del campo);
+        // `detail_min`, `variable_k` y `corner_hooks` salen de la vista: el planificador por campo no los usa.
+        { "NeoStroke — line widths", {
+            "neostroke_width_ref",          // la referencia de todos los %
+        } },
+        { "NeoStroke — shape", {
+            "neostroke_max_stroke_width",
+        } },
+        { "NeoStroke — extra flow", {
+            "neostroke_curve_overlap",      // 0 = apagado
+            "neostroke_lane_overlap",       // s339 — 0 = apagado
+            "neostroke_lead_in",            // s339b — 0 = apagado
+        } },
+        { "NeoStroke — path order and travel", {
+            "neostroke_end_at_junctions",   // s339
+            "neostroke_layer_jitter",
+            "neostroke_skate",
+            "neostroke_skate_detour",
+        } },
     };
-    return keys;
+    return groups;
 }
 
 // NEOTKO_NEOSTROKE_TAG s335 — el ancho de muro de CLASSIC, aquí dentro y a propósito.
@@ -58,6 +60,9 @@ static const std::vector<std::string>& ns_classic_width_keys()
     static const std::vector<std::string> keys = {
         "outer_wall_line_width",
         "inner_wall_line_width",
+        // s336g — el MISMO solape que usa el relleno de Classic es el que NeoStroke usa contra el muro:
+        // cierra las bolsas de las esquinas interiores (TEST20). Aquí, al lado del visor.
+        "infill_wall_overlap",
     };
     return keys;
 }
@@ -121,8 +126,10 @@ NeoStrokeAdvancedDialog::NeoStrokeAdvancedDialog(wxWindow* parent, Tab* tab)
     left->SetBackgroundColour(*wxWHITE);
     auto* left_sizer = new wxBoxSizer(wxVERTICAL);
 
-    m_groups.push_back(make_group(left, _L("NeoStroke — Advanced"), ns_advanced_keys()));
-    left_sizer->Add(m_groups.back()->sizer, 0, wxEXPAND | wxALL, 4);
+    for (const NsAdvGroup& grp : ns_advanced_groups()) {   // s336g — un grupo por tema
+        m_groups.push_back(make_group(left, _(grp.title), grp.keys));
+        left_sizer->Add(m_groups.back()->sizer, 0, wxEXPAND | wxALL, 4);
+    }
 
     left_sizer->Add(new wxStaticLine(left), 0, wxEXPAND | wxTOP | wxBOTTOM, 6);
 
@@ -136,7 +143,7 @@ NeoStrokeAdvancedDialog::NeoStrokeAdvancedDialog(wxWindow* parent, Tab* tab)
         left_sizer->Add(note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
     }
 
-    m_groups.push_back(make_group(left, _L("Classic wall width (experimental)"), ns_classic_width_keys()));
+    m_groups.push_back(make_group(left, _L("Classic wall and its overlap"), ns_classic_width_keys()));
     left_sizer->Add(m_groups.back()->sizer, 0, wxEXPAND | wxALL, 4);
 
     left->SetSizer(left_sizer);

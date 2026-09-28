@@ -44,6 +44,16 @@ PreviewGeometrySource PreviewGeometrySource::from_mesh(std::shared_ptr<const Tri
     return s;
 }
 
+PreviewGeometrySource PreviewGeometrySource::from_slices(ExPolygons slices, size_t max_islands, size_t max_verts)
+{
+    PreviewGeometrySource s;
+    s.kind        = GeometryKind::FromSlices;
+    s.slices      = std::move(slices);
+    s.max_islands = max_islands;
+    s.max_verts   = max_verts;
+    return s;
+}
+
 namespace {
 
 // Triangular wedge 6 × 4 mm — narrow tip at the top. Picked as a second
@@ -210,6 +220,41 @@ std::unique_ptr<SurfaceCollection> build_from_mesh(const TriangleMesh& mesh, dou
     return sc;
 }
 
+// NEOTKO_NEOSTROKE_TAG s337 — el corte del gizmo. Mismos topes que `build_from_mesh` pero con los
+// límites que trae la fuente, y SIN trasladar: las coordenadas son las de la placa y así se quedan.
+std::unique_ptr<SurfaceCollection> build_from_slices(const PreviewGeometrySource& src, ExPolygons& islands_all,
+                                                     std::string& err)
+{
+    ExPolygons polys = src.slices;
+    islands_all      = polys;
+    if (polys.empty()) {
+        err = "preview: this layer has no section";
+        return nullptr;
+    }
+    if (polys.size() > src.max_islands) {
+        err = "preview: slice has " + std::to_string(polys.size()) + " islands (>" +
+              std::to_string(src.max_islands) + ")";
+        return nullptr;
+    }
+    size_t verts  = count_verts(polys);
+    double tol_mm = kSimplifyTolStartMm;
+    while (verts > src.max_verts && tol_mm <= kSimplifyTolMaxMm) {
+        const double tol_scaled = scaled<double>(tol_mm);
+        for (ExPolygon& e : polys) e.douglas_peucker(tol_scaled);
+        verts   = count_verts(polys);
+        tol_mm *= 2.0;
+    }
+    if (verts > src.max_verts) {
+        err = "preview: slice has " + std::to_string(verts) + " vertices after simplification";
+        return nullptr;
+    }
+    auto sc = std::make_unique<SurfaceCollection>();
+    sc->surfaces.reserve(polys.size());
+    for (ExPolygon& e : polys)
+        sc->surfaces.emplace_back(stInternal, std::move(e));
+    return sc;
+}
+
 } // namespace
 
 // ─── dispatch ───────────────────────────────────────────────────────────────
@@ -235,6 +280,10 @@ GeometryBuildResult build_surface_collection(const PreviewGeometrySource& src)
                 }
                 out.surfaces = build_from_mesh(*src.mesh, src.slice_z_mm, src.island_picks,
                                                out.islands_all, out.needs_pick, out.error);
+                break;
+            }
+            case GeometryKind::FromSlices: {
+                out.surfaces = build_from_slices(src, out.islands_all, out.error);
                 break;
             }
         }

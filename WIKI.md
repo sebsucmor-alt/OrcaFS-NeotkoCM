@@ -2400,17 +2400,15 @@ job: small raised lettering and thin strokes, the case where the other three lea
 > engine works is part of using it. If you are not going to check the G-code before you print, this
 > is not for you.
 >
-> It takes **two keys at once**:
+> Since 2.4.7 it takes **one key**: tick **Preferences → Enable NeoStroke wall generator (unstable)**.
+> Libre Mode is no longer needed. (In 2.4.6 the checkbox was missing from the Preferences window.)
 >
-> 1. **Libre Mode** on (§4a), and
-> 2. **NeoStroke** ticked in **Preferences → Enable NeoStroke wall generator (unstable)**.
+> The same key can be turned with the environment variable **`ORCA_DEBUG_NEOSTROKE=1`** before Orca
+> starts (`ORCA_DEBUG_ALL=1` covers it too). The checkbox and the variable do the same thing: they
+> open the same channel. The checkbox applies straight away, no restart.
 >
-> The second key can also be turned with the environment variable **`ORCA_DEBUG_NEOSTROKE=1`**
-> before Orca starts (`ORCA_DEBUG_ALL=1` covers it too). The checkbox and the variable do the same
-> thing: they open the same channel. The checkbox applies straight away, no restart.
->
-> With either key missing, picking **NeoStroke** in the wall generator dropdown shows a warning and
-> offers to put the setting back to Arachne. The engine has the same check, so a project file or a
+> Without the key, picking **NeoStroke** in the wall generator dropdown shows a warning and offers
+> to put the setting back to Arachne. The engine has the same check, so a project file or a
 > command line carrying `wall_generator = neostroke` falls back to the normal NeoArachne path and
 > says so in the log.
 
@@ -2429,11 +2427,10 @@ The outer wall is always Classic. There is no setting for it.
 
 ### 26b. Turning it on
 
-1. Enable **Libre Mode** (§4a).
-2. In **Preferences**, tick **Enable NeoStroke wall generator (unstable)**, right under the Libre
-   Mode switch. (Or start Orca with `ORCA_DEBUG_NEOSTROKE=1` instead; same effect.)
-3. **Quality → Wall generator** now accepts **NeoStroke**.
-4. The **NeoStroke** section appears below the dropdown with three controls, and a button for the
+1. In **Preferences**, tick **Enable NeoStroke wall generator (unstable)**. (Or start Orca with
+   `ORCA_DEBUG_NEOSTROKE=1` instead; same effect.)
+2. **Quality → Wall generator** now accepts **NeoStroke**.
+3. The **NeoStroke** section appears below the dropdown with three controls, and a button for the
    rest.
 
 The probe line for each layer is written to `/tmp/neotko_logs/neostroke.log`: island count, stroke
@@ -2444,9 +2441,24 @@ and the widths that came out. That file is the first thing to read when a layer 
 
 | Control | Default | What it does |
 |---------|---------|--------------|
-| **NS — minimum width** | **23%** of nozzle | The floor under a bead's width. Below this the bead is not emitted at all. |
-| **NS — hard bead limit** | **175%** of nozzle | No bead is ever wider than this. A bead much wider than the nozzle does not lie flat and its edges stop merging with the neighbour. |
-| **NS — end-cap join** | **0%** | Closes the gap at the turn of a U. 0 leaves it open. |
+| **NS — thinnest line at tips** | **23%** of reference | How thin the tip of a stroke may get. |
+| **NS — widest line allowed** | **175%** of reference | No line is ever wider than this. A line much wider than the nozzle does not lie flat and its edges stop merging with the neighbour. |
+| **NS — join line ends (no flow stops)** | **on** | The lines of a stroke are joined at its ends and printed in one go, instead of stopping and restarting the flow at every turn. The join runs straight across the end. |
+
+"Reference" is **NS — reference line width** (0.3 mm by default), the width every NeoStroke
+percentage is measured against, except **NS — thinnest printable line**, which is a percentage of
+the nozzle.
+
+**Two things that changed in 2.4.7 and matter more than any single control:**
+
+- **NS — fewer lines where it narrows** (Advanced, on). A stroke no longer keeps the same number of
+  lines along its whole length. Where it narrows, lines drop out so none goes below **NS — thinnest
+  printable line**, and a dropped line tapers out while its neighbours take its room. Rings keep one
+  count all the way round.
+- **Infill/Wall overlap now applies to NeoStroke.** NeoStroke reaches under Classic's outer wall by
+  that percentage. That closes the small pockets the wall leaves at inside corners, which were the
+  holes in letters like B and E. 20 % worked best on our test plates; 35 % started to push neighbouring
+  letters into each other.
 
 Everything else lives behind **Advanced options…**, in a window with the path viewer beside it
 (§26d). The defaults there are the ones from the best test plate to date, so a first slice needs
@@ -2454,19 +2466,20 @@ nothing changed.
 
 ### 26d. The path viewer
 
-The **Advanced options…** button opens the fifteen remaining controls next to a live drawing of the
+The **Advanced options…** button opens the remaining controls, grouped (line widths, shape, extra
+flow, path order and travel), next to a live drawing of the
 paths NeoStroke plans, without slicing. Change a number on the left and the drawing on the right
 follows. It is the same panel that used to sit under *Wall generator* as the NeoArachne
 **Preview Lab** (§8d), pointed at NeoStroke instead.
 
-The window also carries **Classic wall width**, marked experimental. Those are Orca's own
-`outer_wall_line_width` and `inner_wall_line_width`. They are there because the width Classic takes
+The window also carries **Classic wall and its overlap**: Orca's own `outer_wall_line_width`,
+`inner_wall_line_width` and **Infill/Wall overlap**. They are there because the width Classic takes
 for the outer wall is exactly the room NeoStroke does not get, so it is the one number that moves
 every path at once, and it is worth seeing that happen.
 
 **What the drawing shows.** The viewer draws each bead at the width its **flow** implies, not at the
 width written in the G-code comment. They are usually the same, but a few settings add material
-without changing the stated width (NeoStroke's **curve overlap** is one), and on those the stated
+without changing the stated width (NeoStroke's **extra flow on wide lines** is one), and on those the stated
 width would tell you nothing. The dump prints both: `w=` is what goes into `;WIDTH:`, `flow_w=` is
 what actually lands.
 
@@ -2528,7 +2541,7 @@ This is why it is behind the gate. When it prints reliably the gate comes off.
 | Penultimate layers / density | Strength → Top/bottom shells |
 | Neoweaving (WIP) | *Not wired in this build* |
 | Overhang Shadow (§25) | Speed → Overhang speed → **Slow down inner walls next to overhangs** *(Libre Mode only)* |
-| NeoStroke (§26) | Quality → **Wall generator → NeoStroke** *(needs Libre Mode **and** the NeoStroke switch)* |
+| NeoStroke (§26) | Quality → **Wall generator → NeoStroke** *(needs the NeoStroke switch in Preferences)* |
 | NeoStroke unlock switch | **Preferences → Enable NeoStroke wall generator (unstable)** *(or `ORCA_DEBUG_NEOSTROKE=1`)* |
 | NeoStroke advanced controls + path viewer | Quality → NeoStroke → **Advanced options…** |
 | Libre Mode master switch | **Preferences → Enable Neotko LibreMode (requires restart)** |

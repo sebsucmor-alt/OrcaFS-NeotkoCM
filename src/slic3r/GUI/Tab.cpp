@@ -4515,9 +4515,13 @@ void TabPrint::build()
         // un grupo entero con una sola fila y un botón era una cabecera de más, y encima no se
         // ocultaba con el resto (un grupo sin opciones no pasa por `update_visibility`).
         optgroup = page->new_optgroup(L("NeoStroke"), L"param_wall_generator");
-        optgroup->append_single_option_line("neostroke_min_width_pct",        "quality_settings_wall_generator#neostroke");   // NEOTKO_NEOSTROKE_TAG s326
-        optgroup->append_single_option_line("neostroke_max_bead_pct",         "quality_settings_wall_generator#neostroke");   // NEOTKO_NEOSTROKE_TAG s331b
-        optgroup->append_single_option_line("neostroke_cap_join",             "quality_settings_wall_generator#neostroke");   // NEOTKO_NEOSTROKE_TAG s331d
+        // NEOTKO_NEOSTROKE_TAG s338 — con el planificador por CAMPO los tres básicos son los tres LÍMITES del cordón,
+        // que es lo único que el campo lee de aquí. Fuera de la vista (las claves siguen, las usa el planificador de
+        // trazos de reserva y los 3mf viejos las traen): *Thinnest line at tips*, *Join line ends*, *Thinnest small
+        // detail*, *Fewer lines where it narrows* y *Reach into corners*. Ver NEOSTROKE.md §17.
+        optgroup->append_single_option_line("neostroke_max_bead_pct",         "quality_settings_wall_generator#neostroke");   // Widest line allowed
+        optgroup->append_single_option_line("neostroke_max_width_pct",        "quality_settings_wall_generator#neostroke");   // Target line width
+        optgroup->append_single_option_line("neostroke_bead_min_pct",         "quality_settings_wall_generator#neostroke");   // Thinnest printable line
 
         // NEOTKO_NEOSTROKE_TAG s335 — los quince mandos avanzados ya NO están en fila aquí: vivían
         // debajo de los básicos y eran una pared de campos que empujaba el resto de la página.

@@ -4,6 +4,7 @@
 #include "PreviewGeometrySource.hpp"
 
 #include "../NeoArachnePlan.hpp"
+#include "../../NeoDebug.hpp"   // s337 — el candado de NeoStroke
 
 #include "../../PerimeterGenerator.hpp"
 #include "../../SurfaceCollection.hpp"
@@ -145,7 +146,8 @@ void compute_print_order(PreviewResult& r)
     double cum       = 0.0;
 
     auto push_seg = [&](const Point& a, const Point& b, bool travel,
-                        ExtrusionRole role, float width, float width_flow, bool from_mp) {
+                        ExtrusionRole role, float width, float width_flow, bool from_mp,
+                        float height = 0.f, double mm3 = 0.0) {
         if (a == b) return;
         OrderedSegment seg;
         seg.from           = a;
@@ -157,6 +159,8 @@ void compute_print_order(PreviewResult& r)
         seg.path_width      = width;
         seg.path_width_flow = width_flow > 0.f ? width_flow : width;
         seg.from_multipath = from_mp;
+        seg.height         = height;       // s337
+        seg.mm3_per_mm     = travel ? 0.0 : mm3;
         cum += seg.length_scaled;
         r.total_chain_scaled += seg.length_scaled;
         if (!travel) r.total_length_scaled += seg.length_scaled;
@@ -185,6 +189,8 @@ void compute_print_order(PreviewResult& r)
         Points             pts;
         std::vector<float> seg_w;    // nominal, el de `;WIDTH:`
         std::vector<float> seg_wf;   // s335 — el deducido del caudal, el que se dibuja
+        std::vector<float>  seg_h;   // s337 — altura por tramo
+        std::vector<double> seg_q;   // s337 — caudal por tramo (0 = sin extrusión)
         ExtrusionRole role     = e.role();
         float         width    = 0.f;   // máximo, sólo como reserva
         bool          from_mp  = false;
@@ -201,6 +207,8 @@ void compute_print_order(PreviewResult& r)
                 pts.push_back(pp[i]);
                 seg_w.push_back(p.width);
                 seg_wf.push_back(wf);
+                seg_h.push_back(p.height);
+                seg_q.push_back(p.mm3_per_mm);
             }
             if (p.width > width) width = p.width;
         };
@@ -216,6 +224,8 @@ void compute_print_order(PreviewResult& r)
                 // El cierre pertenece al final del recorrido: hereda el ancho del último tramo.
                 seg_w.push_back(seg_w.empty() ? width : seg_w.back());
                 seg_wf.push_back(seg_wf.empty() ? width : seg_wf.back());
+                seg_h.push_back(seg_h.empty() ? 0.f : seg_h.back());
+                seg_q.push_back(seg_q.empty() ? 0.0 : seg_q.back());
             }
             is_loop = true;
         } else if (const auto* mp = dynamic_cast<const ExtrusionMultiPath*>(&e)) {
@@ -229,6 +239,8 @@ void compute_print_order(PreviewResult& r)
                 seg_w.assign(pts.size() - 1, path->width);
                 seg_wf.assign(pts.size() - 1,
                               flow_equivalent_width(path->mm3_per_mm, path->width, path->height));
+                seg_h.assign(pts.size() - 1, path->height);
+                seg_q.assign(pts.size() - 1, path->mm3_per_mm);
             }
         }
 
@@ -247,7 +259,9 @@ void compute_print_order(PreviewResult& r)
         for (size_t i = 1; i < pts.size(); ++i)
             push_seg(pts[i-1], pts[i], /*travel=*/false, role,
                      (i - 1) < seg_w.size()  ? seg_w[i - 1]  : width,
-                     (i - 1) < seg_wf.size() ? seg_wf[i - 1] : width, from_mp);
+                     (i - 1) < seg_wf.size() ? seg_wf[i - 1] : width, from_mp,
+                     (i - 1) < seg_h.size()  ? seg_h[i - 1]  : 0.f,
+                     (i - 1) < seg_q.size()  ? seg_q[i - 1]  : 0.0);
 
         cursor = pts.back();
     };
@@ -367,6 +381,13 @@ PreviewResult preview_slice(const ConfigSnapshot& snap, const PreviewGeometrySou
             r.input_slices.push_back(s.expolygon);
         r.metrics         = compute_metrics(r);
         compute_print_order(r);   // v3 — fills ordered_segments / seam_points / total_*_scaled
+        // NEOTKO_NEOSTROKE_TAG s337 — quién es quién. Mismo criterio que el candado del motor
+        // (`NeoArachnePlan.cpp`): wall_generator de OBJETO = NeoStroke y el canal NEOSTROKE abierto.
+        r.neostroke_active = snap.object.wall_generator.value == PerimeterGeneratorType::NeoStroke
+                          && NeoDebug::enabled(NeoDebug::NEOSTROKE);
+        if (r.neostroke_active)
+            for (OrderedSegment& sg : r.ordered_segments)
+                sg.neostroke = !sg.is_travel && sg.role != erExternalPerimeter;
         r.ok              = true;
     } catch (const std::exception& ex) {
         r.error = std::string("preview: exception — ") + ex.what();

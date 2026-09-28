@@ -387,12 +387,6 @@ void Plan::run(PerimeterGenerator& g)
     cfg.neostroke_detail_min_pct = original_cfg->neostroke_detail_min_pct.value;   // NEOTKO_NEOSTROKE_TAG s329
     cfg.neostroke_width_ref      = original_cfg->neostroke_width_ref.value;       // NEOTKO_NEOSTROKE_TAG s331c
     cfg.neostroke_curve_overlap     = original_cfg->neostroke_curve_overlap.value;      // NEOTKO_NEOSTROKE_TAG s331
-    cfg.neostroke_overlap_width_end = original_cfg->neostroke_overlap_width_end.value;
-    cfg.neostroke_overlap_turn_min  = original_cfg->neostroke_overlap_turn_min.value;
-    cfg.neostroke_overlap_turn_max  = original_cfg->neostroke_overlap_turn_max.value;
-    cfg.neostroke_overlap_span      = original_cfg->neostroke_overlap_span.value;
-    cfg.neostroke_overlap_straight  = original_cfg->neostroke_overlap_straight.value;     // s331b
-    cfg.neostroke_cap_join          = original_cfg->neostroke_cap_join.value;            // s331d
     cfg.neostroke_max_bead_pct      = original_cfg->neostroke_max_bead_pct.value;
     cfg.neostroke_max_stroke_width  = original_cfg->neostroke_max_stroke_width.value;
     cfg.neostroke_bead_min_pct  = original_cfg->neostroke_bead_min_pct.value;   // s332
@@ -400,8 +394,10 @@ void Plan::run(PerimeterGenerator& g)
     cfg.neostroke_skate         = original_cfg->neostroke_skate.value;
     cfg.neostroke_skate_detour  = original_cfg->neostroke_skate_detour.value;
     cfg.neostroke_continuous_turns = original_cfg->neostroke_continuous_turns.value;   // s336
-    cfg.neostroke_offset_lines     = original_cfg->neostroke_offset_lines.value;
     cfg.neostroke_variable_k       = original_cfg->neostroke_variable_k.value;
+    cfg.neostroke_lane_overlap     = original_cfg->neostroke_lane_overlap.value;       // s339
+    cfg.neostroke_end_at_junctions = original_cfg->neostroke_end_at_junctions.value;
+    cfg.neostroke_lead_in          = original_cfg->neostroke_lead_in.value;
     // pin_outer_width is gated upstream by neotko_edge_active anyway (ConfigManipulation
     // hides the control unless outer or inner wall source is ArachneNeotkoEdge).
     // Merge global advanced toggles from Runtime singleton (Fase 6 will fill these).

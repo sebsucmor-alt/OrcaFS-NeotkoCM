@@ -19355,6 +19355,7 @@ Sidebar::DockingState Plater::get_sidebar_docking_state() const { return p->get_
 void Plater::reset_window_layout() { p->reset_window_layout(); }
 void Plater::float_params_panel(bool do_float) { p->float_params_panel(do_float); } // NeotkoLIBRE — s133
 void Plater::set_neotko_libre_cached(bool v) { p->set_neotko_libre_cached(v); } // NeotkoLIBRE — s133
+DynamicPrintConfig Plater::neotko_full_config() const { return p->neotko_full_config(); } // NEOTKO_NEOSTROKE_TAG s337
 
 //BBS
 void Plater::select_curr_plate_all() { p->select_curr_plate_all(); }
