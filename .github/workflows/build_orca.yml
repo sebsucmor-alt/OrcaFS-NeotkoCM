@@ -102,48 +102,29 @@ jobs:
 
 #   Mac
       - name: Install tools mac
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-14'
         run: |
-          sudo xcode-select -s /Applications/Xcode.app
-          xcodebuild -version
-          sw_vers
           brew install libtool
           brew list
           mkdir -p ${{ github.workspace }}/deps/build
 
       - name: Free disk space
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-14'
         run: |
-          df -h
-          XCODE_DEV="$(xcode-select -p)"
-          XCODE_APP="$(cd "${XCODE_DEV}/../.." && pwd -P)"
-          echo "Keeping selected Xcode: $XCODE_APP"
-          for app in /Applications/Xcode_*.app; do
-            [ -e "$app" ] || continue
-            APP_REAL="$(cd "$app" && pwd -P)"
-            if [ "$APP_REAL" = "$XCODE_APP" ]; then
-              echo "Keeping $app"
-            else
-              echo "Removing unused $app"
-              sudo rm -rf "$app"
-            fi
-          done
+          df -hI /dev/disk3s1s1
+          sudo find /Applications -maxdepth 1 -type d -name "Xcode_*.app" ! -name "Xcode_15.4.app" -exec rm -rf {} +
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
-          df -h
+          df -hI /dev/disk3s1s1
 
       - name: Build slicer mac
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-14'
         working-directory: ${{ github.workspace }}
         run: |
           ./build_release_macos.sh -s -n -x -a universal -t 10.15 -1
 
  # Thanks to RaySajuuk, it's working now
       - name: Sign app and notary
-<<<<<<< /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LU1vP6zKvD/o
         if: ${{ github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/2.3.4') && inputs.os == 'macos-14' }}
-=======
-        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_') || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'macos-15'
->>>>>>> /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LFYVQt8nRl/t
         working-directory: ${{ github.workspace }}
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
@@ -196,11 +177,7 @@ jobs:
           fi
 
       - name: Create DMG without notary
-<<<<<<< /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LU1vP6zKvD/o
         if: ${{ inputs.os == 'macos-14' && (github.repository != 'Snapmaker/OrcaSlicer' || (github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') && github.ref != 'refs/heads/2.3.4')) }}
-=======
-        if: github.ref != 'refs/heads/main' && inputs.os == 'macos-15' && github.ref != 'refs/heads/2.3.0-final' && !startsWith(github.ref, 'refs/heads/release_')
->>>>>>> /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LFYVQt8nRl/t
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg
@@ -219,14 +196,14 @@ jobs:
           fi
 
       - name: Upload artifacts mac
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-14'
         uses: actions/upload-artifact@v4
         with:
           name: Snapmaker_Orca_Mac_universal_${{ env.ver }}
           path: ${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg
 
       - name: Upload Snapmaker_Orca_profile_validator DMG mac
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-14'
         uses: actions/upload-artifact@v4
         with:
           name: Snapmaker_Orca_profile_validator_Mac_universal_DMG_${{ env.ver }}
@@ -234,7 +211,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload dSYM artifacts mac
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-14'
         uses: actions/upload-artifact@v4
         with:
           name: dSYM_Mac_${{ env.ver }}
@@ -242,11 +219,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Deploy Mac release
-<<<<<<< /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LU1vP6zKvD/o
         if: ${{ github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.4') && inputs.os == 'macos-14' }}
-=======
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'macos-15'
->>>>>>> /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LFYVQt8nRl/t
         uses: WebFreak001/deploy-nightly@v3.2.0
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
@@ -257,11 +230,7 @@ jobs:
           max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
 
       - name: Check if profile validator DMG exists
-<<<<<<< /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LU1vP6zKvD/o
         if: ${{ github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.4') && inputs.os == 'macos-14' }}
-=======
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'macos-15'
->>>>>>> /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LFYVQt8nRl/t
         id: check_dmg
         working-directory: ${{ github.workspace }}
         run: |
@@ -275,11 +244,7 @@ jobs:
         shell: bash
 
       - name: Deploy Mac Snapmaker_Orca_profile_validator DMG release
-<<<<<<< /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LU1vP6zKvD/o
         if: ${{ github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.4') && inputs.os == 'macos-14' && steps.check_dmg.outputs.exists == 'true' }}
-=======
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'macos-15' && steps.check_dmg.outputs.exists == 'true'
->>>>>>> /var/folders/lg/8fffv_1d1z3_yw5xmcl6c2q00000gn/T/tmp.LFYVQt8nRl/t
         uses: WebFreak001/deploy-nightly@v3.2.0
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
