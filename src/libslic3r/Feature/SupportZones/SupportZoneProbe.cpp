@@ -55,7 +55,7 @@ struct MeshAndTree
     bool empty() const { return its.indices.empty(); }
 };
 
-MeshAndTree collect(const ModelObject &object, bool model_parts, const ModelVolume *only)
+MeshAndTree collect(const ModelObject &object, bool model_parts, const ModelVolume *only, const Transform3d &orient)
 {
     MeshAndTree out;
     for (const ModelVolume *v : object.volumes) {
@@ -67,7 +67,9 @@ MeshAndTree collect(const ModelObject &object, bool model_parts, const ModelVolu
         indexed_triangle_set part = v->mesh().its;
         if (part.indices.empty())
             continue;
-        its_transform(part, v->get_matrix());
+        // s343 — la orientación de la instancia DELANTE del volumen: el rayo +Z y el filtro de
+        // normal tienen que medir el abajo del MUNDO, no el del objeto.
+        its_transform(part, orient * v->get_matrix());
         its_merge(out.its, part);
     }
     if (! out.its.indices.empty())
@@ -88,14 +90,15 @@ Vec3f facet_normal(const indexed_triangle_set &its, int face_id)
 
 } // namespace
 
-ZoneProbe probe_zone(const ModelObject &object, const ModelVolume &enforcer, float grid_step_mm)
+ZoneProbe probe_zone(const ModelObject &object, const ModelVolume &enforcer, float grid_step_mm,
+                     const Transform3d &orient)
 {
     ZoneProbe probe;
 
-    const MeshAndTree zone = collect(object, false, &enforcer);
+    const MeshAndTree zone = collect(object, false, &enforcer, orient);
     if (zone.empty())
         return probe;
-    const MeshAndTree parts = collect(object, true, nullptr);
+    const MeshAndTree parts = collect(object, true, nullptr, orient);
     if (parts.empty())
         return probe;
 
@@ -176,11 +179,12 @@ ZoneProbe probe_zone(const ModelObject &object, const ModelVolume &enforcer, flo
     return probe;
 }
 
-CoverageProbe probe_object_coverage(const ModelObject &object, float grid_step_mm, float max_normal_z)
+CoverageProbe probe_object_coverage(const ModelObject &object, float grid_step_mm, float max_normal_z,
+                                    const Transform3d &orient)
 {
     CoverageProbe probe;
 
-    const MeshAndTree parts = collect(object, true, nullptr);
+    const MeshAndTree parts = collect(object, true, nullptr, orient);
     if (parts.empty())
         return probe;
 
@@ -191,7 +195,7 @@ CoverageProbe probe_object_coverage(const ModelObject &object, float grid_step_m
     std::vector<MeshAndTree> zones;
     for (const ModelVolume *v : object.volumes)
         if (v->is_support_enforcer()) {
-            MeshAndTree z = collect(object, false, v);
+            MeshAndTree z = collect(object, false, v, orient);
             if (! z.empty())
                 zones.emplace_back(std::move(z));
         }
@@ -260,11 +264,12 @@ CoverageProbe probe_object_coverage(const ModelObject &object, float grid_step_m
     return probe;
 }
 
-std::vector<const ModelVolume*> sterile_zones(const ModelObject &object, float grid_step_mm)
+std::vector<const ModelVolume*> sterile_zones(const ModelObject &object, float grid_step_mm,
+                                              const Transform3d &orient)
 {
     std::vector<const ModelVolume*> sterile;
     for (const ModelVolume *v : object.volumes)
-        if (v->is_support_enforcer() && probe_zone(object, *v, grid_step_mm).sterile())
+        if (v->is_support_enforcer() && probe_zone(object, *v, grid_step_mm, orient).sterile())
             sterile.push_back(v);
     return sterile;
 }

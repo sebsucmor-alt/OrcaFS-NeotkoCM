@@ -6,6 +6,9 @@ else()
     set(_build_static ON)
 endif()
 
+# get relative path of CMAKE_BINARY_DIR against root source directory
+file(RELATIVE_PATH BINARY_DIR_REL  ${CMAKE_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR})
+
 if (IN_GIT_REPO)
     set(OPENVDB_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_OpenVDB-prefix/src/dep_OpenVDB)
 endif ()
@@ -31,6 +34,17 @@ Snapmaker_Orca_add_cmake_project(OpenVDB
         -DOPENVDB_BUILD_VDB_PRINT=ON
         -DDISABLE_DEPENDENCY_VERSION_CHECKS=ON # Centos6 has old zlib
 )
+
+ExternalProject_Get_Property(dep_OpenVDB SOURCE_DIR)
+# Clang (Apple/Xcode) rejects OpT::template eval(...) without template args
+# (-Wmissing-template-arg-list-after-template-kw). Same OpenVDB sources on all macOS arch.
+if (APPLE)
+    ExternalProject_Add_Step(dep_OpenVDB fix_template_syntax
+        DEPENDEES configure
+        DEPENDERS build
+        COMMAND bash -c "cd '${SOURCE_DIR}/openvdb/openvdb/tree' && sed -i '' 's|OpT::template eval|OpT::eval|g' NodeManager.h"
+    )
+endif ()
 
 if (MSVC)
     if (${DEP_DEBUG})

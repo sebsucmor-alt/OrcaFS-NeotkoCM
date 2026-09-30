@@ -319,6 +319,51 @@ static const ModelVolume* volume_for_mesh_id(const ModelObject* mo, int mesh_id)
     return nullptr;
 }
 
+// s342 (Stickers v2, Fase 0b) — raycast contra el volumen bajo el cursor, SIN activar
+// su objeto. El volumen lo decide el picking de escena del canvas (el mismo que da
+// get_first_hover_volume_idx, ya con el plano de corte aplicado); aquí solo se busca
+// la faceta con un MeshRaycaster propio del ModelVolume (cacheado).
+bool GLGizmoColorStitchPainter::raycast_under_cursor(CursorHit& out)
+{
+    const int hovered = m_parent.get_first_hover_volume_idx();
+    const GLVolumePtrs& volumes = m_parent.get_volumes().volumes;
+    if (hovered < 0 || hovered >= (int)volumes.size() || !volumes[hovered])
+        return false;
+    const GLVolume* glv   = volumes[hovered];
+    const Model*    model = m_parent.get_selection().get_model();
+    const int oid = glv->object_idx(), vid = glv->volume_idx();
+    if (!model || oid < 0 || oid >= (int)model->objects.size())
+        return false;
+    const ModelObject* mo = model->objects[oid];
+    if (vid < 0 || vid >= (int)mo->volumes.size() || !mo->volumes[vid]->is_model_part())
+        return false;
+    const ModelVolume* mv = mo->volumes[vid];
+
+    int mesh_id = 0;   // ordinal entre model_parts, el mismo orden que m_triangle_selectors
+    for (int i = 0; i < vid; ++i)
+        if (mo->volumes[i]->is_model_part()) ++mesh_id;
+
+    CursorRaycaster& c = m_cursor_rc[mv->id().id];
+    if (!c.rc || c.mesh != mv->mesh_ptr()) {
+        c.mesh = mv->mesh_ptr();
+        c.rc   = std::make_unique<MeshRaycaster>(c.mesh);
+    }
+    const ClippingPlane* clp = m_c->object_clipper() ? m_c->object_clipper()->get_clipping_plane() : nullptr;
+    Vec3f  hit, normal;
+    size_t facet = 0;
+    if (!c.rc->unproject_on_mesh(m_parent.get_local_mouse_position(), glv->world_matrix(),
+                                 wxGetApp().plater()->get_camera(), hit, normal, clp, &facet))
+        return false;
+
+    out.obj_idx = oid;
+    out.mv      = mv;
+    out.mesh_id = mesh_id;
+    out.hit     = hit;
+    out.normal  = normal;
+    out.facet   = int(facet);
+    return true;
+}
+
 bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
 {
     // NEOTKO_COLORSTITCH_TAG — s118: el botón derecho es SOLO cámara aquí (no pinta,
@@ -333,37 +378,33 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
         return true;
 
     // NEOTKO_COLORSTITCH_TAG — s118: eyedropper. Lee el slot de la FACETA bajo el
-    // cursor (m_rr del raycast de la base) y enlaza su receta. Pre-activa el objeto
-    // al pasar por encima (igual que el modo pintar) para (a) marcarlo/seleccionarlo
-    // visualmente y (b) dejar su raycaster listo ≥1 frame antes del click.
+    // cursor y enlaza su receta. s342 (Stickers v2, Fase 0b): YA NO pre-activa en
+    // hover. Antes cada objeto que cruzaba el ratón se marcaba para siempre y robaba
+    // la selección (ObjectList, barra lateral, reconstrucción de selectores); ahora
+    // el cuentagotas LEE con raycast_under_cursor() y no toca ni selección ni marcas.
     if (m_pick_mode) {
-        if ((mouse_event.Moving() || mouse_event.LeftDown()) && !mouse_event.Dragging()) {
-            const int hovered = m_parent.get_first_hover_volume_idx();
-            int obj_idx = -1;
-            if (hovered >= 0) {
-                const GLVolumePtrs& volumes = m_parent.get_volumes().volumes;
-                if (hovered < (int)volumes.size() && volumes[hovered])
-                    obj_idx = volumes[hovered]->object_idx();
+        if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
+            CursorHit ch;
+            if (!raycast_under_cursor(ch))
+                return true;   // vacío: consumir
+            const int active_oid = m_parent.get_selection().get_object_idx();
+            int picked_slot = 0;   // 0 = sin pintar; 1..MAX-1 = slot
+            if (ch.obj_idx == active_oid && ch.mesh_id < (int)m_triangle_selectors.size()
+                && m_triangle_selectors[ch.mesh_id]) {
+                // Activo: sus selectores vivos (pintura aún sin volcar al modelo).
+                picked_slot = (int)m_triangle_selectors[ch.mesh_id]->get_state_at(ch.hit, ch.facet);
+            } else {
+                // No activo: selector de SOLO LECTURA desde la pintura guardada.
+                TriangleSelector ts(ch.mv->mesh());
+                ts.deserialize(ch.mv->colorstitch_paint_facets.get_data(), false,
+                               static_cast<EnforcerBlockerType>(MAX_SLOTS - 1));
+                picked_slot = (int)ts.get_state_at(ch.hit, ch.facet);
             }
-            if (obj_idx >= 0 && obj_idx != m_parent.get_selection().get_object_idx())
-                switch_active_object(obj_idx);   // marca + carga selectores/raycaster
-
-            if (mouse_event.LeftDown()) {
-                if (obj_idx < 0) return true;   // vacío: consumir
-                // Estado (slot) de la faceta bajo el cursor en el objeto activo.
-                int picked_slot = 0;
-                const int mid = rr_mesh_id();
-                if (mid >= 0 && mid < (int)m_triangle_selectors.size()
-                    && m_triangle_selectors[mid]) {
-                    const EnforcerBlockerType st = m_triangle_selectors[mid]
-                        ->get_state_at(rr_hit(), rr_facet());
-                    picked_slot = (int)st;   // 0 = sin pintar; 1..MAX-1 = slot
-                }
-                // s232 — se pasa TAMBIÉN el volumen del raycast: el slot es por
-                // volumen (ver la nota del .hpp).
-                pick_recipe_from_object(obj_idx, picked_slot, mid);
-                return true;   // consumir: el pick no debe pintar
-            }
+            NEOTKO_LOG(PROFILE, "PICK_NOACTIVATE obj_idx=" << ch.obj_idx << " active=" << active_oid
+                << " mesh_id=" << ch.mesh_id << " facet=" << ch.facet << " slot=" << picked_slot);
+            // s232 — se pasa TAMBIÉN el volumen del raycast: el slot es por volumen.
+            pick_recipe_from_object(ch.obj_idx, picked_slot, ch.mesh_id);
+            return true;   // consumir: el pick no debe pintar
         }
         return false;   // resto de eventos: cámara/hover normales
     }
@@ -416,28 +457,24 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
             return consumed;
         }
 
-        if ((mouse_event.Moving() || mouse_event.LeftDown()) && !mouse_event.Dragging()) {
-            const int hovered = m_parent.get_first_hover_volume_idx();
-            int obj_idx = -1;
-            if (hovered >= 0) {
-                const GLVolumePtrs& volumes = m_parent.get_volumes().volumes;
-                if (hovered < (int)volumes.size() && volumes[hovered])
-                    obj_idx = volumes[hovered]->object_idx();
-            }
-            if (obj_idx >= 0 && obj_idx != m_parent.get_selection().get_object_idx())
-                switch_active_object(obj_idx);
-
-            if (mouse_event.LeftDown()) {
-                if (obj_idx < 0 || m_pending_sticker_svg.empty())
-                    return true;   // vacío, o nada cargado para colocar: consumir sin pintar
-                const int mid = rr_mesh_id();
-                const ModelObject* mo_c = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
-                if (mid >= 0 && mo_c) {
-                    const ModelVolume* hit_mv = volume_for_mesh_id(mo_c, mid);
-                    if (hit_mv) place_sticker_at(hit_mv, rr_hit());
-                }
-                return true;   // consumir: colocar no debe además pintar
-            }
+        // s342 (Fase 0b): colocar tampoco pre-activa en hover. El click RAYCASTEA el
+        // objeto bajo el cursor; si no es el activo, lo activa (gesto deliberado) y
+        // coloca en el MISMO click, con el ModelObject resuelto a mano (no depende de
+        // que selection_info() ya se haya refrescado).
+        if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
+            if (m_pending_sticker_svg.empty())
+                return true;   // nada cargado para colocar: consumir sin pintar
+            CursorHit ch;
+            if (!raycast_under_cursor(ch))
+                return true;   // vacío: consumir
+            Model* model = m_parent.get_selection().get_model();
+            if (!model || ch.obj_idx >= (int)model->objects.size())
+                return true;
+            ModelObject* mo_hit = model->objects[ch.obj_idx];
+            if (ch.obj_idx != m_parent.get_selection().get_object_idx())
+                switch_active_object(ch.obj_idx);
+            place_sticker_at(mo_hit, ch.mv, ch.hit);
+            return true;   // consumir: colocar no debe además pintar
         }
         return false;   // resto de eventos: cámara/hover normales
     }
@@ -4929,9 +4966,8 @@ bool GLGizmoColorStitchPainter::load_sticker_svg_dialog()
 // lo lleva al frame-objeto compartido — el MISMO frame que `sticker_footprint_slice_frame`
 // espera (ver comentario en Model.hpp: ColorStitchSticker::transform). Se apila al FINAL
 // (back() = tope de la pila = ocluye a las demás, convención fijada en ColorStitch.cpp).
-void GLGizmoColorStitchPainter::place_sticker_at(const ModelVolume* mv, const Vec3f& hit_local)
+void GLGizmoColorStitchPainter::place_sticker_at(ModelObject* mo, const ModelVolume* mv, const Vec3f& hit_local)
 {
-    ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (!mo || !mv || m_pending_sticker_svg.empty()) return;
     // s231 F1 — un sticker es pintado por-cara: si MixedFilament gobierna el objeto, el
     // motor lo ignora igual que al resto. No colocar en vez de colocar algo inerte.

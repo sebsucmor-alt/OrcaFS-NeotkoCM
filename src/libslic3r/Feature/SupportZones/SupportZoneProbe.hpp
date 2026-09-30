@@ -84,7 +84,12 @@ struct ZoneProbe
 // ⚠️ This builds an AABB tree over the object's parts on every call. Callers that ask per frame
 // must cache: the natural key is the object's mesh identity plus the volume transforms. Keeping
 // the cache OUT of here is deliberate — the GUI knows when the model changed, this does not.
-ZoneProbe probe_zone(const ModelObject &object, const ModelVolume &enforcer, float grid_step_mm);
+// 🚨 s343 — `orient` es la ORIENTACIÓN de la instancia (su matriz sin la traslación). Sin ella la
+// sonda miraba «hacia abajo» en el espacio del OBJETO: con una pieza girada 90° (la tabla de surf
+// de canto) el abajo del mapa era un costado. Las muestras salen ya orientadas; quien dibuja sólo
+// les suma la traslación de la instancia. Sin pasar nada = identidad = lo de antes.
+ZoneProbe probe_zone(const ModelObject &object, const ModelVolume &enforcer, float grid_step_mm,
+                     const Transform3d &orient = Transform3d::Identity());
 
 // NEOTKO_SUPPORTZONES_TAG s286b — "esto se te ha quedado sin sujetar".
 //
@@ -113,11 +118,13 @@ struct CoverageProbe
 // `max_normal_z` es el corte del umbral: cuenta la superficie cuya normal tiene z <= ese valor.
 // Se pasa desde fuera a propósito, para que el mapa y el sombreado de voladizos del canvas usen el
 // MISMO número y no puedan discrepar en pantalla.
-CoverageProbe probe_object_coverage(const ModelObject &object, float grid_step_mm, float max_normal_z);
+CoverageProbe probe_object_coverage(const ModelObject &object, float grid_step_mm, float max_normal_z,
+                                    const Transform3d &orient = Transform3d::Identity());
 
 // Convenience for the warning path: every SUPPORT_ENFORCER volume of the object that catches
 // nothing. Returns pointers into `object.volumes`, in list order.
-std::vector<const ModelVolume*> sterile_zones(const ModelObject &object, float grid_step_mm);
+std::vector<const ModelVolume*> sterile_zones(const ModelObject &object, float grid_step_mm,
+                                              const Transform3d &orient = Transform3d::Identity());
 
 // NEOTKO_SUPPORTZONES_TAG s286 — the brake of §3, in one place.
 //

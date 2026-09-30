@@ -21,6 +21,7 @@
 #include <boost/filesystem/path.hpp>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/NeoDebug.hpp"
@@ -48,7 +49,6 @@ namespace {
 // deslizador wx; aquí se lamina cuando cambia algo y en otro hilo, así que caben placas enteras.
 constexpr size_t kMaxIslands = 400;
 constexpr size_t kMaxVerts   = 400000;
-constexpr int    kMaxSpan    = 10;
 constexpr double kPollSec    = 0.4;
 
 double now_sec()
@@ -77,6 +77,7 @@ const std::vector<ParamGroup>& param_groups()
         } },
         { "Shape", {
             "neostroke_max_stroke_width",
+            "neostroke_band_mm",            // s340 — 0 = auto
         } },
         { "Extra flow", {
             "neostroke_curve_overlap",
@@ -241,6 +242,7 @@ void GLGizmoNeoStroke::on_set_state()
             m_plate_hidden = true;
         }
         m_parent.set_neotko_selection_lock(m_locked);   // el candado se recuerda entre aperturas
+        m_targets.clear();   // s342b — al abrir, siempre «objetos nuevos»: arranca en la última capa
         rebuild_targets();
         m_last_poll = 0.0;   // lamina en el primer frame
     } else if (get_state() == Off) {
@@ -250,6 +252,8 @@ void GLGizmoNeoStroke::on_set_state()
         release_clipping();
         m_hover_key.clear();
         m_zone_pick = m_zone_dragging = false;
+        m_island_pick = false;   // s342
+        m_edit_island = -1;
         // 🚨 El candado vive en el lienzo: si no se suelta aquí, el lienzo se queda sin poder seleccionar nada.
         m_parent.set_neotko_selection_lock(false);
         // B4 — la placa vuelve a verse al cerrar. El modelo externo se conserva para la próxima vez.
@@ -346,6 +350,9 @@ void GLGizmoNeoStroke::rebuild_targets()
         if (t.meshes.empty())
             continue;
         t.world_min_z = zmin;
+        // s342 — ajustes por isla: las anclas van en coordenadas del objeto y el gizmo corta en las de la placa.
+        t.obj_to_world[0] = inst_m(0, 0); t.obj_to_world[1] = inst_m(0, 1); t.obj_to_world[2] = inst_m(0, 3);
+        t.obj_to_world[3] = inst_m(1, 0); t.obj_to_world[4] = inst_m(1, 1); t.obj_to_world[5] = inst_m(1, 3);
         t.grid        = NSPrev::object_layer_grid(full, *mo);
         // La casilla de ocultar sobrevive a una selección nueva del mismo objeto.
         for (const Target& o : old)
@@ -353,14 +360,29 @@ void GLGizmoNeoStroke::rebuild_targets()
         m_targets.push_back(std::move(t));
     }
     const int n = ref_layer_count();
+    // s342b — objetos NUEVOS a la vista = se empieza por la ÚLTIMA capa (la cara de arriba es lo que se mira casi
+    // siempre). Si son los mismos (un deshacer, un cambio de ajuste), la capa elegida se respeta.
+    bool same = old.size() == m_targets.size();
+    for (size_t i = 0; same && i < old.size(); ++i)
+        same = old[i].object_id == m_targets[i].object_id && old[i].inst_idx == m_targets[i].inst_idx;
     if (n > 0)
-        m_layer = std::clamp(m_layer, 1, n);
+        m_layer = same ? std::clamp(m_layer, 1, n) : std::max(1, top_filled_layer());
+    if (!same) {
+        m_edit_island  = -1;
+        m_island_hover = -1;
+    }
     if (m_edit_target >= int(m_targets.size()))
         m_edit_target = 0;
 }
 
 int GLGizmoNeoStroke::ref_target() const
 {
+    // s342c — la capa va por las capas del objeto ELEGIDO («Object» en Settings), no por el que más capas tiene
+    // (Neotko: «elegir un objeto, ver su última capa y elegir cuál de SUS capas ver»). Los demás enseñan la capa
+    // que cae a esa misma altura, o nada si ya se han acabado.
+    if (m_edit_target >= 0 && m_edit_target < int(m_targets.size()) && m_targets[size_t(m_edit_target)].visible
+        && !m_targets[size_t(m_edit_target)].grid.layers.empty())
+        return m_edit_target;
     int best = -1;
     size_t best_n = 0;
     for (size_t i = 0; i < m_targets.size(); ++i)
@@ -375,6 +397,27 @@ int GLGizmoNeoStroke::ref_layer_count() const
 {
     const int r = ref_target();
     return r < 0 ? 0 : int(m_targets[size_t(r)].grid.layers.size());
+}
+
+int GLGizmoNeoStroke::top_filled_layer() const
+{
+    const int r = ref_target();
+    if (r < 0)
+        return 0;
+    const Target& R = m_targets[size_t(r)];
+    const int     n = int(R.grid.layers.size());
+    MeshSlicingParamsEx msp;
+    for (int li = n - 1; li >= 0; --li) {
+        const double z = R.world_min_z + 0.5 * (R.grid.layers[size_t(li)].first + R.grid.layers[size_t(li)].second);
+        for (const auto& m : R.meshes) {
+            if (!m || m->bounding_box().max.z() < z)
+                continue;
+            const std::vector<ExPolygons> sl = slice_mesh_ex(m->its, std::vector<float>{ float(z) }, msp);
+            if (!sl.empty() && !sl.front().empty())
+                return li + 1;
+        }
+    }
+    return n;
 }
 
 int GLGizmoNeoStroke::layer_for_target(size_t t, int ref_layer_1based) const
@@ -432,6 +475,7 @@ std::vector<GLGizmoNeoStroke::Task> GLGizmoNeoStroke::build_tasks(size_t& key) c
             task.print_z       = L.second + T.grid.print_z_offset;
             task.warn_level    = double(m_warn_level_pct) / 100.0;
             task.closure_mm    = double(m_closure_mm);
+            std::copy(std::begin(T.obj_to_world), std::end(T.obj_to_world), std::begin(task.obj_to_world));
             mix(key, std::hash<int>()(int(std::lround(m_warn_level_pct))));
             mix(key, std::hash<int>()(int(std::lround(m_closure_mm * 1000.f))));
             mix(key, std::hash<size_t>()(T.object_id.id));
@@ -481,7 +525,13 @@ std::shared_ptr<GLGizmoNeoStroke::JobOut> GLGizmoNeoStroke::run_tasks(std::vecto
         for (const VolumeTask& vt : task.vols) {
             if (!vt.mesh)
                 continue;
-            std::vector<ExPolygons> sl = vt.mesh->slice(std::vector<double>{ task.slice_z_world });
+            // 🚨 s340 — cortar como `PrintObjectSlice`: `slice_closing_radius` + `resolution`. Con
+            //    `TriangleMesh::slice()` (cierre 0.0004 mm) los picos agudos de los agujeros no se aplanaban y
+            //    el plan cambiaba (la A de NeoStroke-TEST: el gizmo pintaba una diagonal que no se imprime).
+            MeshSlicingParamsEx msp;
+            msp.closing_radius = float(std::max(0.0004, double(vt.snap.object.slice_closing_radius.value)));
+            msp.resolution     = vt.snap.print.resolution.value <= 0.001 ? 0.0 : 0.0025;
+            std::vector<ExPolygons> sl = slice_mesh_ex(vt.mesh->its, std::vector<float>{ float(task.slice_z_world) }, msp);
             if (sl.empty() || sl.front().empty())
                 continue;
             auto it = std::find_if(groups.begin(), groups.end(), [&](const Group& g) { return g.hash == vt.snap_hash; });
@@ -499,7 +549,10 @@ std::shared_ptr<GLGizmoNeoStroke::JobOut> GLGizmoNeoStroke::run_tasks(std::vecto
             if (g.slices.empty())
                 continue;
             NSPrev::PreviewGeometrySource src = NSPrev::PreviewGeometrySource::from_slices(std::move(g.slices), kMaxIslands, kMaxVerts);
+            std::copy(std::begin(task.obj_to_world), std::end(task.obj_to_world), std::begin(src.obj_to_slice));
+            const double t_sl0 = now_sec();   // s342f — sonda: laminar frente a las cifras
             NSPrev::PreviewResult r = NSPrev::preview_slice(*g.snap, src);
+            const double t_sl = now_sec() - t_sl0;
             if (!r.ok) {
                 if (!lo.error.empty()) lo.error += "; ";
                 lo.error += r.error;
@@ -508,10 +561,17 @@ std::shared_ptr<GLGizmoNeoStroke::JobOut> GLGizmoNeoStroke::run_tasks(std::vecto
             lo.neostroke_active = lo.neostroke_active || r.neostroke_active;
             // s337b — la velocidad de NeoStroke (muro interior) de ESTE objeto: decide el riesgo de punta.
             NSPrev::MetricsOptions mopt;
-            mopt.speed_mm_s = g.snap->region.inner_wall_speed.value;
+            mopt.speed_mm_s = g.snap->region.inner_wall_speed.get_at(0); // Upstream Snapmaker #794: variante estándar
             mopt.level      = task.warn_level;
             mopt.closure_mm = task.closure_mm;
+            const double t_me0 = now_sec();
             NSPrev::MetricsResult mr = NSPrev::compute_layer_metrics(r, mopt);
+            if (NeoDebug::enabled(NeoDebug::NEOSTROKE)) {
+                char tb[200];
+                snprintf(tb, sizeof(tb), "[NS-GIZMO] capa %d: laminar %.0f ms, cifras %.0f ms (islas %zu)",
+                         task.layer_idx, 1000.0 * t_sl, 1000.0 * (now_sec() - t_me0), r.input_slices.size());
+                NeoDebug::write(NeoDebug::NEOSTROKE, tb);
+            }
             lo.metrics.m.add(mr.m);
             for (NSPrev::Gap& gp : mr.gaps) lo.metrics.gaps.push_back(std::move(gp));
             for (NSPrev::Run& rn : mr.runs) lo.metrics.runs.push_back(rn);
@@ -622,6 +682,8 @@ size_t GLGizmoNeoStroke::view_key() const
                             (m_show_hills ? 64 : 0)));
     for (const Target& t : m_targets)
         mix(k, std::hash<int>()(t.visible ? 1 : 0));
+    mix(k, std::hash<int>()(m_edit_island));   // s342 — el contorno de la isla que se edita
+    mix(k, std::hash<int>()(m_edit_target));
     return k;
 }
 
@@ -876,7 +938,8 @@ void GLGizmoNeoStroke::on_render()
     update_clipping();
     if (shown() != m_models_for || m_hover_key != m_models_hover || view_key() != m_models_view_key)
         rebuild_models();
-    if (m_buckets.empty())
+    rebuild_glow();   // s342b — barato: sólo rehace si cambia isla, capa, ancla u objeto
+    if (m_buckets.empty() && m_glow.empty())
         return;
 
     const Camera&      camera = wxGetApp().plater()->get_camera();
@@ -905,6 +968,13 @@ void GLGizmoNeoStroke::on_render()
         for (const auto& b : m_buckets)
             if (!b->lit)
                 b->model.render();
+        // s342b — el resplandor, ENCIMA de todo (sin profundidad): tiene que leerse aunque lo tapen los tubos.
+        if (!m_glow.empty()) {
+            glsafe(::glDisable(GL_DEPTH_TEST));
+            for (const auto& b : m_glow)
+                b->model.render();
+            glsafe(::glEnable(GL_DEPTH_TEST));
+        }
         glsafe(::glDisable(GL_BLEND));
         glsafe(::glEnable(GL_CULL_FACE));
         sh->stop_using();
@@ -947,6 +1017,10 @@ const ParamHelp* param_help(const std::string& key)
           "The line count drops where the stroke narrows (3, 2, 1), so no line goes under the thinnest printable." },
         { "neostroke_max_stroke_width", "Widest shape (mm)",
           "Shapes wider than this are not strokes: they go to the normal infill." },
+        { "neostroke_band_mm",          "Limit to a band (mm)",
+          "0 = auto: NeoStroke fills every stroke from wall to wall. Above 0 it only fills this far inside the "
+          "wall and the middle of wide areas goes to the normal infill. Strokes narrower than twice this are "
+          "still filled completely, so small letters do not change." },
         { "neostroke_corner_hooks",     "Reach into corners",
           "Short spurs that reach into inside corners, like the armpits of an H, to weld them." },
         { "neostroke_curve_overlap",    "Extra flow in curves",
@@ -1081,6 +1155,16 @@ void draw_param_diagram(ImDrawList* dl, const ImVec2& p, float W, float H, const
         dl->AddRect(P(0.50f, 0.10f), P(0.94f, 0.90f), hi, 3.f, 0, 1.5f);
         for (int i = 0; i < 7; ++i) dl->AddLine(P(0.52f + i * 0.06f, 0.86f), P(0.56f + i * 0.06f, 0.14f), wall, 1.f);
         text(0.54f, 0.00f, "wider: infill", hi);
+    } else if (key == "neostroke_band_mm") {   // s340 — banda junto al muro, centro de relleno
+        dl->AddRect(P(0.06f, 0.10f), P(0.94f, 0.90f), wall, 3.f, 0, 1.5f);
+        for (int k = 0; k < 2; ++k) {
+            const float m = 0.05f + 0.06f * k;
+            dl->AddRect(P(0.06f + m, 0.10f + 1.6f * m), P(0.94f - m, 0.90f - 1.6f * m), line, 3.f, 0, Lw);
+        }
+        for (int i = 0; i < 6; ++i)
+            dl->AddLine(P(0.28f + i * 0.08f, 0.66f), P(0.34f + i * 0.08f, 0.34f), hi, 1.f);
+        text(0.30f, 0.44f, "infill", hi);
+        text(0.08f, 0.00f, "band = NeoStroke", dim);
     } else if (key == "neostroke_corner_hooks") {
         seg(0.20f, 0.10f, 0.20f, 0.90f, 1.4f * u, wall); seg(0.80f, 0.10f, 0.80f, 0.90f, 1.4f * u, wall);
         seg(0.20f, 0.50f, 0.80f, 0.50f, 1.4f * u, wall);
@@ -1357,8 +1441,12 @@ void GLGizmoNeoStroke::render_layer()
         v = std::clamp(v, lo, hi);
         ImGui::PopID();
     };
-    row("top", _u8L("Top"), m_layer, 1, n, _u8L("The highest layer shown. Nothing above it is drawn, and the object is cut there."));
-    row("dep", _u8L("Depth"), m_span, 0, kMaxSpan, _u8L("How many layers below the top one are drawn too"));
+    row("top", _u8L("Layer"), m_layer, 1, n, _u8L("The layer shown, counted on the object chosen in Settings > Object.\n"
+                                                  "Other objects show their layer at the same height.\n"
+                                                  "The object is cut there: below it you see the part."));
+    // s342b — «Depth» RETIRADO (Neotko): laminar varias capas de abajo costaba tiempo y enredaba el elegir. Se
+    // lamina SÓLO la capa elegida; lo de abajo se ve como pieza (el corte va en esa capa).
+    m_span = 0;
 
     const int r = ref_target();
     if (r >= 0) {
@@ -1370,7 +1458,8 @@ void GLGizmoNeoStroke::render_layer()
             snprintf(buf, sizeof(buf), "%s %d-%d / %d  ·  ;Z %.3f  ·  h %.2f", _u8L("Layers").c_str(), lo, m_layer, n,
                      L.second + R.grid.print_z_offset + R.world_min_z, L.second - L.first);
         else
-            snprintf(buf, sizeof(buf), "%s %d / %d  ·  ;Z %.3f  ·  h %.2f", _u8L("Layer").c_str(), m_layer, n,
+            snprintf(buf, sizeof(buf), "%d / %d %s  ·  ;Z %.3f  ·  h %.2f", m_layer, n,
+                     m_targets.size() > 1 ? fit_text(R.name, 5.f * u).c_str() : "",
                      L.second + R.grid.print_z_offset + R.world_min_z, L.second - L.first);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + lab);
         ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
@@ -1751,8 +1840,14 @@ void GLGizmoNeoStroke::render_params_section()
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     if (ImGui::BeginCombo("##edit_obj", fit_text(m_targets[size_t(m_edit_target)].name, 16.f * u).c_str())) {
         for (size_t i = 0; i < m_targets.size(); ++i)
-            if (ImGui::Selectable((m_targets[i].name + "##" + std::to_string(i)).c_str(), int(i) == m_edit_target))
+            if (ImGui::Selectable((m_targets[i].name + "##" + std::to_string(i)).c_str(), int(i) == m_edit_target)) {
+                if (int(i) != m_edit_target) {   // s342 — otro objeto: sin isla elegida y en SU última capa (s342c)
+                    m_edit_island = -1; m_island_pick = false; m_edit_buf.clear();
+                    m_edit_target = int(i);
+                    m_layer       = std::max(1, top_filled_layer());
+                }
                 m_edit_target = int(i);
+            }
         ImGui::EndCombo();
     }
     // s337b — con varios objetos, los cambios van a TODOS (Neotko: se aplicaban sólo al de la lista y no se notaba).
@@ -1769,16 +1864,21 @@ void GLGizmoNeoStroke::render_params_section()
     const int li = std::max(0, layer_for_target(size_t(m_edit_target), m_layer));
     const NSPrev::ConfigSnapshot s = NSPrev::snapshot_for_volume(wxGetApp().plater()->neotko_full_config(), *mo,
                                                                  *mo->volumes[size_t(T.part_volume_idxs.front())], T.grid, li);
-    // ── s337b — PRESETS: lo aprendido en TEST20-22 (letras pequeñas, boquilla 0.4, PLA), en un clic ──
-    // Extra flow 15 % en los TRES (Neotko: con 10 % salen agujeros; mejor que sobre un poco). Infill/Wall overlap 20 %
-    // (TEST20). Lo que cambia es la velocidad de NeoStroke (muro interior) y, en Fast, el ancho: 200 % de max_bead
-    // = 0.6 mm, justo en el umbral de raja (TEST22 Z6). Fast rompe puntas sueltas: el modo Risks lo enseña.
-    {
-        struct Preset { const char* name; const char* tip; double speed, max_w, max_b; };
+    // s342 — ajustes por isla. Con una isla elegida sólo se ven los mandos que pueden ser por isla, sin presets.
+    if (!T.external)
+        render_islands_section(T, *mo);
+    const bool isl_mode = m_edit_island >= 0;
+    // ── s337b — PRESETS. 🔄 s342: con los VALORES POR DEFECTO de s340 (PrintConfig.cpp), no con los de TEST20-22
+    //    (175/117/70 %, curvas 15 %, solape muro 20 %), que metían demasiado plástico (Neotko). Los tres llevan los
+    //    mismos anchos y flujos; sólo cambia la velocidad de NeoStroke (muro interior). Infill/Wall overlap 18 % =
+    //    lo recomendado para letras en el 2_47 (es clave de Orca, va en el perfil). Si cambian los defaults de
+    //    `neostroke_*`, cambiar también aquí.
+    if (!isl_mode) {
+        struct Preset { const char* name; const char* tip; double speed; };
         static const Preset presets[] = {
-            { "Detail",   "15 mm/s: loose tips hold (TEST22 zone 3). Base widths. Slowest, most closed.", 15.0, 117.0, 175.0 },
-            { "Standard", "30 mm/s with the base widths: the 2.4.7 defaults (TEST21 zone 1).",            30.0, 117.0, 175.0 },
-            { "Fast",     "45 mm/s and wider lines (fewer lines, fewer starts). Loose tips will break.",  45.0, 150.0, 200.0 },
+            { "Detail",   "15 mm/s: loose tips hold (TEST22 zone 3). Default widths and flows. Slowest, most closed.", 15.0 },
+            { "Standard", "30 mm/s with the default widths and flows.",                                                30.0 },
+            { "Fast",     "45 mm/s with the default widths and flows. Loose tips can break.",                          45.0 },
         };
         ImGui::AlignTextToFramePadding();
         ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
@@ -1788,13 +1888,15 @@ void GLGizmoNeoStroke::render_params_section()
             ImGui::SameLine(0.f, 0.4f * u);
             if (neo_text_button(_u8L(pr.name).c_str())) {
                 std::vector<std::pair<std::string, std::shared_ptr<ConfigOption>>> o;
-                o.emplace_back("inner_wall_speed",           std::make_shared<ConfigOptionFloat>(pr.speed));
-                o.emplace_back("neostroke_max_width_pct",    std::make_shared<ConfigOptionPercent>(pr.max_w));
-                o.emplace_back("neostroke_max_bead_pct",     std::make_shared<ConfigOptionPercent>(pr.max_b));
-                o.emplace_back("neostroke_curve_overlap",    std::make_shared<ConfigOptionPercent>(15.0));
-                o.emplace_back("infill_wall_overlap",        std::make_shared<ConfigOptionPercent>(20.0));
+                o.emplace_back("inner_wall_speed",           std::make_shared<ConfigOptionFloats>(std::vector<double>{ pr.speed })); // #794: vector; 1 valor vale para todas las variantes
+                o.emplace_back("neostroke_max_bead_pct",     std::make_shared<ConfigOptionPercent>(155.0));
+                o.emplace_back("neostroke_max_width_pct",    std::make_shared<ConfigOptionPercent>(100.0));
+                o.emplace_back("neostroke_bead_min_pct",     std::make_shared<ConfigOptionPercent>(60.0));
                 o.emplace_back("neostroke_min_width_pct",    std::make_shared<ConfigOptionPercent>(23.0));
-                o.emplace_back("neostroke_bead_min_pct",     std::make_shared<ConfigOptionPercent>(70.0));
+                o.emplace_back("neostroke_curve_overlap",    std::make_shared<ConfigOptionPercent>(2.0));
+                o.emplace_back("neostroke_lane_overlap",     std::make_shared<ConfigOptionPercent>(0.0));
+                o.emplace_back("neostroke_lead_in",          std::make_shared<ConfigOptionFloat>(0.4));
+                o.emplace_back("infill_wall_overlap",        std::make_shared<ConfigOptionPercent>(18.0));
                 o.emplace_back("neostroke_continuous_turns", std::make_shared<ConfigOptionBool>(true));
                 o.emplace_back("neostroke_variable_k",       std::make_shared<ConfigOptionBool>(true));
                 commit_options(T.obj_idx, std::string("NeoStroke preset: ") + pr.name, std::move(o));
@@ -1807,7 +1909,8 @@ void GLGizmoNeoStroke::render_params_section()
     ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
     ImGui::TextWrapped("%s", T.external
         ? _u8L("External model: changes stay inside the preview.").c_str()
-        : _u8L("Changes go to this object. Filled dot: its own value (click to go back to global).").c_str());
+        : isl_mode ? _u8L("Changes go to this island only. Filled dot: its own value (click to go back to the object's).").c_str()
+                   : _u8L("Changes go to this object. Filled dot: its own value (click to go back to global).").c_str());
     ImGui::PopStyleColor();
 
     // 🚨 La única parte larga del panel: va en un hueco con su propio desplazamiento, del alto que quede hasta
@@ -1819,9 +1922,17 @@ void GLGizmoNeoStroke::render_params_section()
     }
     // s337b — el hueco mide lo que MIDE su contenido (grupos + mandos abiertos) y sólo se desplaza si no cabe
     // hasta el borde de la ventana. Antes iba siempre hasta abajo aunque hubiera tres filas.
-    size_t rows_g = groups.size(), rows_p = 0;
-    for (size_t gi = 0; gi < groups.size(); ++gi)
-        if (m_group_open[gi]) rows_p += groups[gi].keys.size();
+    // s342 — en modo isla, sólo las claves de la lista blanca (el resto es del objeto).
+    auto shown_key = [&](const std::string& k) { return !isl_mode || NeoArachne::is_island_override_key(k); };
+    auto group_shown = [&](size_t gi) {
+        return std::any_of(groups[gi].keys.begin(), groups[gi].keys.end(), shown_key);
+    };
+    size_t rows_g = 0, rows_p = 0;
+    for (size_t gi = 0; gi < groups.size(); ++gi) {
+        if (!group_shown(gi)) continue;
+        ++rows_g;
+        if (m_group_open[gi]) rows_p += size_t(std::count_if(groups[gi].keys.begin(), groups[gi].keys.end(), shown_key));
+    }
     const float sp     = ImGui::GetStyle().ItemSpacing.y;
     const float needed = float(rows_g) * (ImGui::GetTextLineHeight() + sp)
                        + float(rows_p) * (ImGui::GetFrameHeight() + sp) + 0.5f * u;
@@ -1829,6 +1940,8 @@ void GLGizmoNeoStroke::render_params_section()
     const float h      = std::max(6.f * u, std::min(needed, avail));
     ImGui::BeginChild("##params", ImVec2(0.f, h), false);
     for (size_t gi = 0; gi < groups.size(); ++gi) {
+        if (!group_shown(gi))
+            continue;
         ImGui::PushID(int(gi));
         const bool open = m_group_open[gi];
         if (neo_glyph_toggle("##g", ImGui::GetTextLineHeight(), false, open ? Glyph::ChevD : Glyph::ChevR, nullptr))
@@ -1841,7 +1954,8 @@ void GLGizmoNeoStroke::render_params_section()
             m_group_open[gi] = !open;
         if (m_group_open[gi])
             for (const std::string& k : groups[gi].keys)
-                render_param(k, s, *mo);
+                if (shown_key(k))
+                    render_param(k, s, *mo);
         ImGui::PopID();
     }
     ImGui::EndChild();
@@ -1853,10 +1967,35 @@ bool GLGizmoNeoStroke::render_param(const std::string& key, const NSPrev::Config
     const ConfigOption*    cur = snap_option(snap, key);
     if (def == nullptr || cur == nullptr)
         return false;
-    const bool   own   = mo.config.has(key);
+    // s342 — con una isla elegida, el valor que se ve y se guarda es el de la ISLA (si no lo tiene, el del objeto).
+    const bool isl = m_edit_island >= 0 && NeoArachne::is_island_override_key(key);
+    std::vector<NeoArachne::NsIslandOverride> anchors;
+    std::unique_ptr<ConfigOption>             isl_opt;
+    bool isl_own = false;
+    if (isl) {
+        anchors = anchors_of(mo);
+        if (m_edit_island < int(anchors.size()))
+            if (const std::string* v = anchors[size_t(m_edit_island)].find(key)) {
+                isl_opt.reset(cur->clone());
+                try { isl_opt->deserialize(*v); cur = isl_opt.get(); isl_own = true; } catch (...) {}
+            }
+    }
+    const bool   own   = isl ? isl_own : mo.config.has(key);
     const float  u     = neo_u();
     const float  col   = 9.5f * u;   // s337b — panel más estrecho
     const int    obj_idx = m_targets[size_t(m_edit_target)].obj_idx;
+    // Guardar: en el objeto, o en el ancla de la isla (nullptr = quitar el valor propio).
+    auto put = [&](std::shared_ptr<ConfigOption> o) {
+        if (!isl) {
+            commit_option(obj_idx, key, std::move(o));
+            return;
+        }
+        if (m_edit_island >= int(anchors.size()))
+            return;
+        if (o) anchors[size_t(m_edit_island)].set(key, o->serialize());
+        else   anchors[size_t(m_edit_island)].erase(key);
+        commit_anchors(anchors, "NeoStroke island: " + key);
+    };
 
     ImGui::PushID(key.c_str());
     // «del objeto» / «global»: un punto de acento cuando el objeto tiene su propio valor.
@@ -1871,10 +2010,12 @@ bool GLGizmoNeoStroke::render_param(const std::string& key, const NSPrev::Config
         else     dl->AddCircle(c, 0.2f * d, neo_col_u32(NeoCol::SurfaceHi), 12, 1.2f);
     }
     if (ImGui::IsItemHovered())
-        neo_tip(own ? _u8L("This object's own value. Click to go back to the global value.").c_str()
-                                    : _u8L("Global value (process preset)"));
+        neo_tip(isl ? (own ? _u8L("This island's own value. Click to go back to the object's value.")
+                           : _u8L("The object's value"))
+                    : own ? _u8L("This object's own value. Click to go back to the global value.").c_str()
+                          : _u8L("Global value (process preset)"));
     if (own && ImGui::IsItemClicked())
-        commit_option(obj_idx, key, nullptr);
+        put(nullptr);
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     // s337b — el nombre corto del gizmo (sin «NS —»); si el mando no tiene ayuda propia, el de Orca.
@@ -1892,7 +2033,7 @@ bool GLGizmoNeoStroke::render_param(const std::string& key, const NSPrev::Config
         bool v = static_cast<const ConfigOptionBool*>(cur)->value;
         now_line = v ? "on" : "off";
         if (ImGui::Checkbox("##v", &v))
-            commit_option(obj_idx, key, std::make_shared<ConfigOptionBool>(v)), changed = true;
+            put(std::make_shared<ConfigOptionBool>(v)), changed = true;
         break;
     }
     case coFloat:
@@ -1923,7 +2064,7 @@ bool GLGizmoNeoStroke::render_param(const std::string& key, const NSPrev::Config
             if (def->type == coPercent)             o = std::make_shared<ConfigOptionPercent>(it->second);
             else if (def->type == coFloat)          o = std::make_shared<ConfigOptionFloat>(it->second);
             else                                    o = std::make_shared<ConfigOptionFloatOrPercent>(it->second, pct);
-            commit_option(obj_idx, key, o);
+            put(o);
             changed = true;
         } else if (!active && !edited) {
             it->second = v;
@@ -1937,6 +2078,12 @@ bool GLGizmoNeoStroke::render_param(const std::string& key, const NSPrev::Config
             ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
             ImGui::Text("%.3f mm", mm);
             ImGui::PopStyleColor();
+        } else if (key == "neostroke_band_mm") {   // s340 — 0 = auto
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+            ImGui::TextUnformatted(v <= 1e-6 ? "auto (no limit)" : "then infill");
+            ImGui::PopStyleColor();
+            if (v <= 1e-6) now_line += "  (auto)";
         } else if (key == "neostroke_width_ref" && v <= 1e-6) {
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
@@ -1968,7 +2115,9 @@ bool GLGizmoNeoStroke::render_param(const std::string& key, const NSPrev::Config
         }
         if (!now_line.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
-            ImGui::TextUnformatted((_u8L("Now") + ": " + now_line + (own ? "  (" + _u8L("this object") + ")" : "  (" + _u8L("global") + ")")).c_str());
+            const std::string whose = isl ? (own ? _u8L("this island") : _u8L("object"))
+                                          : (own ? _u8L("this object") : _u8L("global"));
+            ImGui::TextUnformatted((_u8L("Now") + ": " + now_line + "  (" + whose + ")").c_str());
             ImGui::PopStyleColor();
         }
         ImGui::PopTextWrapPos();
@@ -2006,6 +2155,53 @@ bool GLGizmoNeoStroke::mouse_to_bed(const Vec2d& mpos, Vec2d& out)
 
 bool GLGizmoNeoStroke::on_mouse(const wxMouseEvent& mouse_event)
 {
+    // s342 — elegir isla con clic: el rayo del ratón contra el plano de la capa elegida, y la isla que contiene el
+    // punto. Si ya tiene ancla, se edita esa; si no, se crea una en el punto del clic.
+    if (m_island_pick) {
+        if (mouse_event.LeftDown()) {
+            double top = 0.0;
+            const std::vector<LayerIsland> isl = edit_layer_islands(&top);
+            const Linef3 ray = m_parent.mouse_ray(Point(coord_t(mouse_event.GetX()), coord_t(mouse_event.GetY())));
+            const double dz  = ray.b.z() - ray.a.z();
+            if (std::abs(dz) > 1e-9 && !isl.empty()) {
+                const double t = (top - ray.a.z()) / dz;
+                const Vec3d  p = ray.a + t * (ray.b - ray.a);
+                const Point  pt(scaled<coord_t>(p.x()), scaled<coord_t>(p.y()));
+                for (const LayerIsland& li : isl)
+                    if (li.poly.contains(pt)) {
+                        if (li.anchor >= 0)
+                            m_edit_island = li.anchor;
+                        else
+                            add_anchor_in(li.poly, Vec2d(p.x(), p.y()), true);
+                        m_edit_buf.clear();
+                        m_island_pick  = false;
+                        m_island_hover = -1;
+                        break;
+                    }
+            }
+            m_parent.set_as_dirty();
+            return true;   // 🚨 consumido: si llega al lienzo, deselecciona y cierra el gizmo
+        }
+        if (mouse_event.Moving()) {   // s342b — resaltar la isla bajo el ratón mientras se elige
+            double top = 0.0;
+            const std::vector<LayerIsland> isl = edit_layer_islands(&top);
+            int hov = -1;
+            const Linef3 ray = m_parent.mouse_ray(Point(coord_t(mouse_event.GetX()), coord_t(mouse_event.GetY())));
+            const double dz  = ray.b.z() - ray.a.z();
+            if (std::abs(dz) > 1e-9) {
+                const Vec3d p = ray.a + ((top - ray.a.z()) / dz) * (ray.b - ray.a);
+                const Point pt(scaled<coord_t>(p.x()), scaled<coord_t>(p.y()));
+                for (size_t k = 0; k < isl.size(); ++k)
+                    if (isl[k].poly.contains(pt)) { hov = int(k); break; }
+            }
+            if (hov != m_island_hover) {
+                m_island_hover = hov;
+                m_parent.set_as_dirty();
+            }
+            return false;   // el movimiento sigue siendo de la cámara
+        }
+        return mouse_event.LeftUp();
+    }
     if (!m_zone_pick)
         return false;   // fuera del modo zona el ratón es de la cámara y de la selección, como siempre
     const Vec2d mpos(mouse_event.GetX(), mouse_event.GetY());
@@ -2156,7 +2352,8 @@ void GLGizmoNeoStroke::set_locked(bool v)
 }
 
 void GLGizmoNeoStroke::commit_options(int obj_idx, const std::string& snapshot_name,
-                                      std::vector<std::pair<std::string, std::shared_ptr<ConfigOption>>> opts)
+                                      std::vector<std::pair<std::string, std::shared_ptr<ConfigOption>>> opts,
+                                      bool only_edit_target)
 {
     // A quién: el objeto editado, o todos los mirados si la casilla está puesta (cada objeto una vez, aunque tenga
     // varias instancias). Diferido por la re-entrada; todo en UN snapshot de deshacer.
@@ -2166,7 +2363,7 @@ void GLGizmoNeoStroke::commit_options(int obj_idx, const std::string& snapshot_n
         for (const Dest& d : dests) if (d.external == t.external && d.obj_idx == t.obj_idx) return;
         dests.push_back({ t.external, t.obj_idx, t.object_id });
     };
-    if (m_edit_all && m_targets.size() > 1) {
+    if (m_edit_all && m_targets.size() > 1 && !only_edit_target) {
         for (const Target& t : m_targets) if (t.visible) push(t);
     } else if (m_edit_target >= 0 && m_edit_target < int(m_targets.size())) {
         push(m_targets[size_t(m_edit_target)]);
@@ -2202,6 +2399,304 @@ void GLGizmoNeoStroke::commit_options(int obj_idx, const std::string& snapshot_n
         for (const auto& kv : opts) m_edit_buf.erase(kv.first);
         m_last_poll = 0.0;
     });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// s342 — AJUSTES POR ISLA (B.3). Formato y reglas en `NeoStrokeIslands.hpp`; el motor en `NeoStroke.cpp`.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+std::vector<NeoArachne::NsIslandOverride> GLGizmoNeoStroke::anchors_of(const ModelObject& mo) const
+{
+    // Sólo el valor PROPIO del objeto: las anclas son puntos de ESTE objeto, un valor global no significa nada.
+    const auto* o = dynamic_cast<const ConfigOptionString*>(mo.config.option("neostroke_island_overrides"));
+    return o ? NeoArachne::parse_island_overrides(o->value) : std::vector<NeoArachne::NsIslandOverride>{};
+}
+
+Vec2d GLGizmoNeoStroke::obj_to_world(const Target& t, double x, double y) const
+{
+    const double* T = t.obj_to_world;
+    return Vec2d(T[0] * x + T[1] * y + T[2], T[3] * x + T[4] * y + T[5]);
+}
+
+Vec2d GLGizmoNeoStroke::world_to_obj(const Target& t, const Vec2d& w) const
+{
+    const double* T   = t.obj_to_world;
+    const double  det = T[0] * T[4] - T[1] * T[3];
+    if (std::abs(det) < 1e-12)
+        return w;
+    const double dx = w.x() - T[2], dy = w.y() - T[5];
+    return Vec2d(( T[4] * dx - T[1] * dy) / det, (-T[3] * dx + T[0] * dy) / det);
+}
+
+std::vector<GLGizmoNeoStroke::LayerIsland> GLGizmoNeoStroke::edit_layer_islands(double* top_z) const
+{
+    std::vector<LayerIsland> out;
+    if (m_edit_target < 0 || m_edit_target >= int(m_targets.size()))
+        return out;
+    const Target& T  = m_targets[size_t(m_edit_target)];
+    const int     li = layer_for_target(size_t(m_edit_target), m_layer);
+    if (li < 0 || li >= int(T.grid.layers.size()) || T.meshes.empty())
+        return out;
+    const auto&  L       = T.grid.layers[size_t(li)];
+    const double slice_z = T.world_min_z + 0.5 * (L.first + L.second);
+    const double top     = T.world_min_z + L.second;
+    if (top_z) *top_z = top;
+    // 🔑 s342b — cortar la malla aquí mismo, como el hilo del visor (`slice_closing_radius`), pero sin esperar a
+    //    que termine: elegir isla no puede depender de que el laminado haya acabado.
+    size_t key = 0;
+    mix(key, std::hash<size_t>()(T.object_id.id));
+    mix(key, std::hash<int>()(li));
+    for (const auto& m : T.meshes) mix(key, std::hash<const void*>()(m.get()));
+    ExPolygons isl;
+    if (key == m_isl_cache_key && !m_isl_cache.empty()) {
+        for (const LayerIsland& c : m_isl_cache) isl.push_back(c.poly);
+    } else {
+        MeshSlicingParamsEx msp;
+        msp.closing_radius = 0.049f;
+        if (const auto* o = wxGetApp().plater()->neotko_full_config().option<ConfigOptionFloat>("slice_closing_radius"))
+            msp.closing_radius = float(std::max(0.0004, o->value));
+        ExPolygons all;
+        for (const auto& m : T.meshes) {
+            std::vector<ExPolygons> sl = slice_mesh_ex(m->its, std::vector<float>{ float(slice_z) }, msp);
+            if (!sl.empty()) append(all, std::move(sl.front()));
+        }
+        isl = union_ex(all);
+    }
+    // De izquierda a derecha (una línea de texto); a igual X, de arriba abajo.
+    std::sort(isl.begin(), isl.end(), [](const ExPolygon& a, const ExPolygon& b) {
+        const BoundingBox ba = a.contour.bounding_box(), bb = b.contour.bounding_box();
+        if (ba.min.x() != bb.min.x()) return ba.min.x() < bb.min.x();
+        return ba.max.y() > bb.max.y();
+    });
+    out.reserve(isl.size());
+    for (ExPolygon& e : isl)
+        out.push_back({ std::move(e), -1 });
+    // La isla de cada ancla: la PRIMERA de la lista gana, igual que en el motor.
+    if (const ModelObject* mo = object_of(T)) {
+        const auto anchors = anchors_of(*mo);
+        for (size_t a = 0; a < anchors.size(); ++a) {
+            const Vec2d w = obj_to_world(T, anchors[a].x, anchors[a].y);
+            const Point p(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()));
+            for (LayerIsland& L : out)
+                if (L.poly.contains(p)) {
+                    if (L.anchor < 0) L.anchor = int(a);
+                    break;
+                }
+        }
+    }
+    if (key != m_isl_cache_key || m_isl_cache.empty()) {
+        m_isl_cache     = out;
+        m_isl_cache_key = key;
+        m_isl_cache_top = top;
+    }
+    return out;
+}
+
+void GLGizmoNeoStroke::commit_anchors(const std::vector<NeoArachne::NsIslandOverride>& list, const std::string& undo_name)
+{
+    if (m_edit_target < 0 || m_edit_target >= int(m_targets.size()))
+        return;
+    std::vector<std::pair<std::string, std::shared_ptr<ConfigOption>>> o;
+    o.emplace_back("neostroke_island_overrides",
+                   list.empty() ? std::shared_ptr<ConfigOption>()
+                                : std::make_shared<ConfigOptionString>(NeoArachne::write_island_overrides(list)));
+    commit_options(m_targets[size_t(m_edit_target)].obj_idx, undo_name, std::move(o), /*only_edit_target=*/true);
+}
+
+void GLGizmoNeoStroke::add_anchor_in(const ExPolygon& island_world, const Vec2d& at_world, bool use_point)
+{
+    if (m_edit_target < 0 || m_edit_target >= int(m_targets.size()))
+        return;
+    const Target&      T  = m_targets[size_t(m_edit_target)];
+    const ModelObject* mo = object_of(T);
+    if (mo == nullptr)
+        return;
+    Vec2d w = at_world;
+    if (!use_point) {
+        // Un punto DENTRO de la isla: el centro si cae dentro (una O no), si no, un punto del borde encogido.
+        Point p = island_world.contour.centroid();
+        if (!island_world.contains(p)) {
+            const ExPolygons in = offset_ex(island_world, -float(scaled<double>(0.05)));
+            p = !in.empty() && !in.front().contour.points.empty() ? in.front().contour.points.front()
+                                                                  : island_world.contour.points.front();
+        }
+        w = Vec2d(unscale<double>(p.x()), unscale<double>(p.y()));
+    }
+    auto anchors = anchors_of(*mo);
+    NeoArachne::NsIslandOverride a;
+    const Vec2d o = world_to_obj(T, w);
+    a.x = o.x();
+    a.y = o.y();
+    for (int n = int(anchors.size()) + 1;; ++n) {   // nombre libre
+        const std::string name = "Island " + std::to_string(n);
+        if (std::none_of(anchors.begin(), anchors.end(), [&](const auto& x) { return x.name == name; })) {
+            a.name = name;
+            break;
+        }
+    }
+    anchors.push_back(std::move(a));
+    m_edit_island = int(anchors.size()) - 1;
+    m_island_wait = 30;
+    m_edit_buf.clear();
+    commit_anchors(anchors, "NeoStroke: add island");
+}
+
+void GLGizmoNeoStroke::render_islands_section(const Target& T, const ModelObject& mo)
+{
+    const float u = neo_u();
+    auto anchors  = anchors_of(mo);
+    if (m_island_wait > 0)
+        --m_island_wait;
+    else if (m_edit_island >= int(anchors.size()))
+        m_edit_island = -1;
+    const std::vector<LayerIsland> isl = edit_layer_islands();
+
+    // Estado de cada ancla EN ESTA CAPA: -1 = fuera; si no, la isla. `owner` = quién gana esa isla.
+    std::vector<int> where(anchors.size(), -1);
+    for (size_t a = 0; a < anchors.size(); ++a) {
+        const Vec2d w = obj_to_world(T, anchors[a].x, anchors[a].y);
+        const Point p(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()));
+        for (size_t k = 0; k < isl.size(); ++k)
+            if (isl[k].poly.contains(p)) { where[a] = int(k); break; }
+    }
+    auto label_of = [&](size_t a) {
+        std::string l = anchors[a].name.empty() ? "Island" : anchors[a].name;
+        if (!anchors[a].values.empty())
+            l += "  (" + std::to_string(anchors[a].values.size()) + ")";
+        if (where[a] < 0)
+            l += "  - " + _u8L("not in this layer");
+        else if (isl[size_t(where[a])].anchor != int(a))
+            l += "  - " + _u8L("shares with") + " " + anchors[size_t(isl[size_t(where[a])].anchor)].name;
+        return l;
+    };
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+    ImGui::TextUnformatted(_u8L("Island").c_str());
+    ImGui::PopStyleColor();
+    ImGui::SameLine(3.f * u);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    const bool editing = m_edit_island >= 0 && m_edit_island < int(anchors.size());
+    const std::string cur = editing ? label_of(size_t(m_edit_island)) : _u8L("Whole object");
+    if (ImGui::BeginCombo("##edit_island", fit_text(cur, 16.f * u).c_str())) {
+        if (ImGui::Selectable(_u8L("Whole object").c_str(), !editing)) {
+            m_edit_island = -1;
+            m_edit_buf.clear();
+        }
+        for (size_t a = 0; a < anchors.size(); ++a)
+            if (ImGui::Selectable((label_of(a) + "##a" + std::to_string(a)).c_str(), int(a) == m_edit_island)) {
+                m_edit_island = int(a);
+                m_edit_buf.clear();
+            }
+        // Las islas de esta capa que aún no tienen ajustes: elegir una la añade.
+        bool sep = false;
+        for (size_t k = 0; k < isl.size(); ++k) {
+            if (isl[k].anchor >= 0)
+                continue;
+            if (!sep) { ImGui::Separator(); sep = true; }
+            if (ImGui::Selectable((_u8L("Add") + ": " + _u8L("island") + " " + std::to_string(k + 1) + "##i" + std::to_string(k)).c_str(), false))
+                add_anchor_in(isl[k].poly, Vec2d::Zero(), false);
+            if (ImGui::IsItemHovered())
+                neo_tip(_u8L("Islands of this layer, left to right. Pick one to give it its own settings.").c_str());
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        neo_tip(_u8L("Give a single island (a letter, a piece of a logo) its own NeoStroke settings.\n"
+                     "The island is found by a point inside it, on every layer.\n"
+                     "If two letters join in a layer, the first one in the list wins there.").c_str());
+
+    // Clic en la vista, nombre y quitar.
+    if (neo_text_button(m_island_pick ? _u8L("Click an island...").c_str() : _u8L("Pick in view").c_str()))
+        m_island_pick = !m_island_pick;
+    if (ImGui::IsItemHovered())
+        neo_tip(_u8L("Then click a letter in the 3D view, on the layer shown.\n"
+                     "If it has no settings yet, it is added.").c_str());
+    if (editing) {
+        if (m_island_name_for != m_edit_island) {
+            m_island_name_buf = anchors[size_t(m_edit_island)].name;
+            m_island_name_for = m_edit_island;
+        }
+        ImGui::SameLine(0.f, 0.4f * u);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s", m_island_name_buf.c_str());
+        ImGui::SetNextItemWidth(6.f * u);
+        if (ImGui::InputText("##island_name", buf, sizeof(buf)))
+            m_island_name_buf = buf;
+        if (ImGui::IsItemDeactivatedAfterEdit() && m_island_name_buf != anchors[size_t(m_edit_island)].name) {
+            anchors[size_t(m_edit_island)].name = m_island_name_buf;
+            commit_anchors(anchors, "NeoStroke: rename island");
+        }
+        if (ImGui::IsItemHovered())
+            neo_tip(_u8L("Name of this island").c_str());
+        ImGui::SameLine(0.f, 0.4f * u);
+        if (neo_text_button(_u8L("Remove").c_str())) {
+            anchors.erase(anchors.begin() + m_edit_island);
+            m_edit_island     = -1;
+            m_island_name_for = -2;
+            m_edit_buf.clear();
+            commit_anchors(anchors, "NeoStroke: remove island");
+        }
+        if (ImGui::IsItemHovered())
+            neo_tip(_u8L("This island goes back to the object's settings").c_str());
+    }
+}
+
+
+// s342b — RESPLANDOR de isla, como el realce de los Sandwich: una franja blanca por fuera del borde que se
+// desvanece (dos anillos: fuerte pegado al borde, suave más lejos) y un velo tenue encima. Blanco porque en el
+// visor no hay nada blanco: el rojo, el rosa y el azul ya son contornos y caminos (Neotko: «muy parecido a otros»).
+void GLGizmoNeoStroke::rebuild_glow()
+{
+    int sel_idx = -1;   // índice en `edit_layer_islands` de la isla elegida
+    double top = 0.0;
+    const std::vector<LayerIsland> isl = (m_edit_island >= 0 || m_island_pick) ? edit_layer_islands(&top)
+                                                                              : std::vector<LayerIsland>{};
+    for (size_t k = 0; k < isl.size(); ++k)
+        if (m_edit_island >= 0 && isl[k].anchor == m_edit_island) { sel_idx = int(k); break; }
+    const int hov_idx = (m_island_pick && m_island_hover >= 0 && m_island_hover < int(isl.size())
+                         && m_island_hover != sel_idx) ? m_island_hover : -1;
+    size_t key = 0;
+    mix(key, m_isl_cache_key);
+    mix(key, std::hash<int>()(sel_idx));
+    mix(key, std::hash<int>()(hov_idx));
+    mix(key, std::hash<double>()(top));
+    if (key == m_glow_key && (sel_idx >= 0 || hov_idx >= 0) == !m_glow.empty())
+        return;
+    m_glow_key = key;
+    m_glow.clear();
+
+    auto add_fill = [&](const ExPolygons& area, const ColorRGBA& col, double z) {
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        for (const ExPolygon& e : area) {
+            const std::vector<Vec3d> tri = triangulate_expolygon_3d(e, z);
+            for (size_t i = 0; i + 2 < tri.size(); i += 3) {
+                const unsigned int i0 = unsigned(g.vertices_count());
+                for (size_t j = 0; j < 3; ++j)
+                    g.add_vertex(Vec3f(tri[i + j].cast<float>()));
+                g.add_triangle(i0, i0 + 1, i0 + 2);
+            }
+        }
+        if (g.is_empty())
+            return;
+        auto b = std::make_unique<Bucket>();
+        b->color = col; b->lit = false; b->lines = false;
+        b->model.init_from(std::move(g));
+        b->model.set_color(col);
+        m_glow.push_back(std::move(b));
+    };
+    auto glow = [&](const ExPolygon& poly, float strength) {
+        const ExPolygons base{ poly };
+        const ExPolygons r1 = offset_ex(base, float(scaled<double>(0.35)));
+        const ExPolygons r2 = offset_ex(base, float(scaled<double>(0.90)));
+        add_fill(diff_ex(r2, r1),   ColorRGBA(1.f, 1.f, 1.f, 0.22f * strength), top + 0.06);
+        add_fill(diff_ex(r1, base), ColorRGBA(1.f, 1.f, 1.f, 0.70f * strength), top + 0.07);
+        add_fill(base,              ColorRGBA(1.f, 1.f, 1.f, 0.12f * strength), top + 0.08);
+    };
+    if (sel_idx >= 0) glow(isl[size_t(sel_idx)].poly, 1.0f);
+    if (hov_idx >= 0) glow(isl[size_t(hov_idx)].poly, 0.55f);
 }
 
 }} // namespace Slic3r::GUI

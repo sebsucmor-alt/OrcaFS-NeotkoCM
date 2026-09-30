@@ -152,6 +152,11 @@ private:
         // 🔑 El testigo del candado: el `offset` que el gizmo le dejó puesto al volumen. Si ya no
         // coincide, alguien lo movió por fuera.
         Vec3d     lock_offset   { Vec3d::Zero() };
+        // NEOTKO_SUPPORTZONES_TAG s343 M1 — pincel «sólo voladizo» y el umbral con que se pintó.
+        // Un gesto sin estas claves (todos los anteriores a s343) se repinta con el filtro APAGADO,
+        // o sea idéntico a como se guardó.
+        bool      overhang_only { false };
+        float     overhang_cut_deg { 30.f };
     };
     static std::string gesture_to_json(const ZoneGesture &g);
     static bool        gesture_from_json(const std::string &text, ZoneGesture &out);
@@ -244,6 +249,14 @@ private:
     // interior de una pared sin haberlo pedido. DENTRO existe porque sujetar una superficie interna
     // es legítimo, pero tiene que ser una decisión.
     bool                   m_paint_inside = false;
+    // NEOTKO_SUPPORTZONES_TAG s343 M1 — el pincel sólo MARCA lo que se pasa del umbral de voladizo.
+    // Medido en la tabla de surf (soporte-surf.3mf): sin esto el 38 % de lo pintado era la pared
+    // del canto, que la esfera del pincel arrastra y que sube la caja hasta la cubierta. El
+    // recorrido sigue pasando por las paredes, así que el trazo no se corta; sólo no se marcan.
+    // `m_paint_cut_deg` es el umbral CONGELADO de este gesto: se guarda con la zona para que al
+    // reabrirla se pinte igual aunque el mando de voladizos haya cambiado.
+    bool                   m_paint_overhang_only = true;
+    float                  m_paint_cut_deg       = 30.f;
     Vec2d                  m_cand_mouse { Vec2d(-1e9, -1e9) };
     Transform3d            m_cand_trafo { Transform3d::Identity() };
     Vec2d                  m_hover_mouse_pos { Vec2d::Zero() };
@@ -664,6 +677,29 @@ private:
     // aquí arriba, y por eso vive aparte — calcularla dos veces es cómo se separan dos números que
     // tenían que ser el mismo.
     bool   block_tree_head_z(double &z_bot, double &z_top) const;
+    // NEOTKO_SUPPORTZONES_TAG s343 M6 — CABEZA Y PIE, un solo dueño.
+    //
+    // 🔑 Medido en la tabla de surf: lo pintado bajaba hasta la cama, la cabeza empezaba en z=0 y
+    // los tocones acababan a 2 mm, así que el hueco salía negativo y el motor NO veía un árbol
+    // (los 5 tocones no hacían nada). Lo pintado por debajo del SUELO (tapa del tocón más alta
+    // + 1 mm) deja de ser cabeza y pasa a PIE: un prisma que sube desde la cama y que el motor,
+    // al estar en la banda de abajo, toma como un tocón más (SupportMaterial.cpp, zone_stumps).
+    struct HeadFoot {
+        bool       ok        { false };
+        ExPolygons head;                  // huella de la cabeza, sin el mando `head` aplicado
+        double     head_bot  { 0. };
+        double     head_top  { 0. };      // ya con el medio milímetro de techo
+        ExPolygons foot;                  // vacío si nada cae bajo el suelo
+        double     foot_bot  { 0. };
+        double     foot_top  { 0. };
+        double     floor_z   { 0. };      // -inf si no hay tocones
+    };
+    const HeadFoot &head_foot() const;
+    mutable HeadFoot    m_hf_cache;
+    mutable size_t      m_hf_stamp  { size_t(-1) };
+    mutable Transform3d m_hf_trafo  { Transform3d::Identity() };
+    mutable double      m_hf_floor  { 0. };
+    mutable double      m_hf_fbot   { 0. };
     // Los ADICIONALES. El primario es `m_landing_world_pos` / `m_landing_on_bed`, que ya existen,
     // ya se siembran a plomo (`resolve_landing_plumb`, s300g) y ya se guardan en el gesto.
     std::vector<StumpSpot> m_extra_stumps;
@@ -832,6 +868,32 @@ private:
     void    render_reach();
     // Adds the pillar as a SUPPORT_ENFORCER volume of the current object.
     void create_pillar();
+    // ------------------------------------------------------------------------
+    // NEOTKO_SUPPORTZONES_TAG s343e — EL CORTE («cut supports»)
+    // ------------------------------------------------------------------------
+    // Un polígono dibujado en PANTALLA, extruido en la dirección en que miras a través de toda la
+    // pieza, como un WireLine de Rhino. Se guarda como SUPPORT_BLOCKER con `neotko_support_cut=1`,
+    // y el motor lo resta de todas las capas de soporte (PrintObjectSupportMaterial::generate), así
+    // que corta también las columnas que bajan desde arriba. El gesto es el del polígono del
+    // Painter Pro (GLGizmoPainterBase): clic añade vértice, clic en el primero cierra, clic derecho
+    // cancela. Los puntos son de pantalla, así que girar la vista a medio dibujo los descarta.
+    bool                m_cut_mode = false;
+    std::vector<Vec2d>  m_cut_points;
+    GLModel             m_cut_overlay;
+    static constexpr double CUT_CLOSE_RADIUS_PX = 8.;
+    void   render_cut_polygon();
+    bool   build_cut_mesh(const std::vector<Vec2d> &screen_pts, TriangleMesh &out_world) const;
+    void   create_cut(std::vector<Vec2d> screen_pts);
+    int    last_cut_volume_idx() const;   // -1 si el objeto no tiene cortes
+    int    count_cuts() const;
+    // s343f — «aplicar» los cortes, las dos variantes que pidió el dueño:
+    //   · fundir: todos los cortes del objeto en UNO (mismo resultado, lista limpia);
+    //   · restar: se quitan de la malla de CADA zona y los cortes desaparecen. Las zonas dejan de
+    //     ser reeditables y el soporte automático ya no se corta: eso lo dice el tooltip.
+    bool   cuts_union_world(TriangleMesh &out, std::vector<int> &cut_idxs) const;
+    void   merge_cuts();
+    void   subtract_cuts_from_zones();
+    std::string m_cut_status;   // una línea para el panel: qué pasó con el último «aplicar»
     // s288 — la mitad de `create_pillar()` que NO crea el volumen: mete la malla en espacio del
     // objeto, la centra, coloca el `offset`, y escribe el gesto. Partido para que editar una zona
     // ya existente sea exactamente lo mismo sobre un volumen que ya está.

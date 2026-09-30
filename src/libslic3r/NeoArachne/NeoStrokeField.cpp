@@ -490,12 +490,31 @@ std::vector<FieldLane> field_lanes(const ExPolygon& island, const FieldParams& p
     std::vector<FieldLane> lanes;
     // 🚨 s338 — primero la frontera: sección más ancha que *Widest shape handled* (medida como el motor viejo, sobre
     //    el hueco útil, ya sin el muro) = pieza. Sin esto las piezas anchas de la placa entraban enteras en el campo.
-    if (!offset_ex(island, -float(scaled<double>(p.outer_w + 0.5 * p.max_stroke_w))).empty()) {
+    // 🏁 s340 — en MODO BANDA la frontera no aplica: la banda ya deja fino lo que el campo ve, y el centro se lo
+    //    queda el relleno. Sin saltarla, justo las piezas anchas (para las que existe el modo) se iban enteras al viejo.
+    const bool band_mode = p.band > 0.;
+    if (!band_mode && !offset_ex(island, -float(scaled<double>(p.outer_w + 0.5 * p.max_stroke_w))).empty()) {
         st.skipped = true;
         return lanes;
     }
     // zona útil = la isla menos la banda del muro de Classic
-    const ExPolygons Uex = offset_ex(island, -float(scaled<double>(p.outer_w)));
+    ExPolygons Uex = offset_ex(island, -float(scaled<double>(p.outer_w)));
+    // 🏁 s340 — MODO BANDA: fuera el núcleo que queda a más de `band` del muro. Un trazo más fino que 2 × band no
+    //    tiene núcleo y sale igual que en auto; sólo cambian las zonas anchas. Borde del núcleo redondo (offset
+    //    redondo de Clipper), para que el relleno case con una línea suave.
+    if (band_mode) {
+        ExPolygons core = offset_ex(island, -float(scaled<double>(p.outer_w + p.band)));
+        // 🚨 s340 (TEST30, la A) — sólo es relleno un núcleo ANCHO: si le cabe un disco del ancho de la banda
+        //    (mín. 0.8 mm). Una tira fina (la diagonal de la A) el relleno la rechaza por no caberle una línea
+        //    y NeoStroke ya no la tenía: quedaba HUECO, y su borde dentado sembraba colas (164 centrales, 162
+        //    colas en esa isla). Apertura morfológica: las tiras finas vuelven a NeoStroke como en auto.
+        if (!core.empty()) {
+            const float r = float(scaled<double>(std::max(0.5 * p.band, 0.4)));
+            core = offset_ex(offset_ex(core, -r), r);
+        }
+        if (!core.empty())
+            Uex = diff_ex(Uex, core);
+    }
     if (Uex.empty())
         return lanes;
     BoundingBox bb = get_extents(island);
@@ -709,8 +728,13 @@ std::vector<FieldLane> field_lanes(const ExPolygon& island, const FieldParams& p
     for (size_t ci = 0; ci < chain.size(); ++ci) {
         const auto& cs = chain[ci];
         std::vector<double> cw(cs.size());
-        for (size_t t = 0; t < cs.size(); ++t)
-            cw[t] = std::clamp(2. * free_d[size_t(cs[t])], 0., p.wmax);
+        // 🚨 s340 (BASE-EFFECT-NEW-X02) — acotado también por la zona útil (d = edt(notU)): en un trazo fino SIN pares
+        //    `pair_cov` está vacío, free_d sale infinito y el central salía a `wmax` pisando el muro de Classic
+        //    (73 % del inner encima del outer, 13.6 mm³ frente a 8.6 de Classic en la misma capa).
+        for (size_t t = 0; t < cs.size(); ++t) {
+            const size_t c = size_t(cs[t]);
+            cw[t] = std::clamp(2. * std::min(free_d[c], d[c]), 0., p.wmax);
+        }
         size_t a = 0;
         while (a < cs.size()) {
             while (a < cs.size() && cw[a] <= 0.02)

@@ -18,6 +18,8 @@
 #include "../../ShortestPath.hpp"
 #include "../../libslic3r.h"
 
+#include <chrono>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <iterator>
@@ -365,8 +367,12 @@ PreviewResult preview_slice(const ConfigSnapshot& snap, const PreviewGeometrySou
         g.upper_slices               = nullptr;
         g.lower_slices               = nullptr;
         g.upper_slices_same_region   = nullptr;
+        for (int k = 0; k < 6; ++k)   // s342 — ajustes por isla: el marco de las anclas
+            g.ns_obj_to_slice[k] = src.obj_to_slice[k];
 
+        const auto ns_c0 = std::chrono::steady_clock::now();   // s342f — sonda de tiempos del visor
         NeoArachne::Plan::run(g);
+        const auto ns_c1 = std::chrono::steady_clock::now();
 
         r.bbox            = get_extents(slices.surfaces);
         r.loops           = loops;
@@ -379,8 +385,19 @@ PreviewResult preview_slice(const ConfigSnapshot& snap, const PreviewGeometrySou
         r.input_slices.reserve(slices.surfaces.size());
         for (const Surface& s : slices.surfaces)
             r.input_slices.push_back(s.expolygon);
+        const auto ns_c2 = std::chrono::steady_clock::now();
         r.metrics         = compute_metrics(r);
+        const auto ns_c3 = std::chrono::steady_clock::now();
         compute_print_order(r);   // v3 — fills ordered_segments / seam_points / total_*_scaled
+        if (NeoDebug::enabled(NeoDebug::NEOSTROKE)) {   // s342f
+            const auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            char tb[220];
+            snprintf(tb, sizeof(tb), "[NS-VISOR] motor=%.0f copia=%.0f cifras_viejas=%.0f orden=%.0f ms",
+                     ms(ns_c0, ns_c1), ms(ns_c1, ns_c2), ms(ns_c2, ns_c3), ms(ns_c3, std::chrono::steady_clock::now()));
+            NeoDebug::write(NeoDebug::NEOSTROKE, tb);
+        }
         // NEOTKO_NEOSTROKE_TAG s337 — quién es quién. Mismo criterio que el candado del motor
         // (`NeoArachnePlan.cpp`): wall_generator de OBJETO = NeoStroke y el canal NEOSTROKE abierto.
         r.neostroke_active = snap.object.wall_generator.value == PerimeterGeneratorType::NeoStroke

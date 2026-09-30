@@ -5809,6 +5809,48 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
 // NEOTKO_SUPPORTZONES_TAG s286 F2 — T2: the same slicing, one stream per volume.
 // docs/FUTURE/SUPPORT_ZONES_PLAN.md §5 T2.
 //
+// NEOTKO_SUPPORTZONES_TAG s343e — LOS CORTES, rebanados aparte.
+//
+// Un corte es un SUPPORT_BLOCKER con `neotko_support_cut=1`. Como bloqueador ya entra en
+// `slice_support_blockers()` y quita semillas; esto lo rebana OTRA VEZ sólo para la resta final de
+// `PrintObjectSupportMaterial::generate()`, que es la que corta también las columnas que bajan desde
+// arriba (un bloqueador normal deja que lo atraviesen). Misma escalera de Z que las zonas: indexado
+// por capa de objeto. Sin cortes, vector vacío y nadie hace nada.
+std::vector<Polygons> PrintObject::slice_support_cutters() const
+{
+    std::vector<Polygons> out;
+    const ModelObject *mo = this->model_object();
+    if (mo == nullptr)
+        return out;
+    auto is_cutter = [](const ModelVolume *v) {
+        if (v->type() != ModelVolumeType::SUPPORT_BLOCKER)
+            return false;
+        const auto *o = dynamic_cast<const ConfigOptionBool *>(v->config.option("neotko_support_cut"));
+        return o != nullptr && o->value;
+    };
+    if (std::none_of(mo->volumes.begin(), mo->volumes.end(), is_cutter))
+        return out;
+
+    std::vector<float> zs = zs_from_layers(this->layers());
+    const Print       *print = this->print();
+    auto               throw_on_cancel_callback = std::function<void()>([print](){ print->throw_if_canceled(); });
+    MeshSlicingParamsEx params;
+    params.trafo = this->trafo_centered();
+
+    out.assign(zs.size(), Polygons());
+    for (const ModelVolume *v : mo->volumes) {
+        if (! is_cutter(v))
+            continue;
+        std::vector<ExPolygons> sl = slice_volume(*v, zs, params, throw_on_cancel_callback);
+        for (size_t i = 0; i < sl.size() && i < out.size(); ++ i)
+            polygons_append(out[i], to_polygons(std::move(sl[i])));
+    }
+    for (Polygons &p : out)
+        if (! p.empty())
+            p = union_(p);
+    return out;
+}
+
 // Deliberately a sibling of slice_support_volumes() rather than a refactor of it: that function is
 // shared with the blockers and with tree support, and a zone is only a thing for the enforcers.
 // The two share the early out — no volume of the type, empty vector, and every caller downstream

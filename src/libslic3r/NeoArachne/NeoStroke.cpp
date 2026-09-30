@@ -6,6 +6,7 @@
 #include "NeoStrokeSkeleton.hpp"
 #include "NeoStrokeField.hpp"   // s338 — el planificador por campo
 #include "NeoStrokeLink.hpp"
+#include "NeoStrokeIslands.hpp"   // s342 — ajustes por isla
 #include "NeoArachnePlan.hpp"   // set_no_spiral_lift_recursive
 
 #include "../NeoDebug.hpp"
@@ -19,6 +20,10 @@
 #include "../VariableWidth.hpp"
 #include "../ShortestPath.hpp"
 #include "../libslic3r.h"
+
+#include <oneapi/tbb/blocked_range.h>   // s342e — islas en paralelo
+#include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/task_arena.h>
 
 #include <algorithm>
 #include <chrono>
@@ -105,6 +110,7 @@ struct NsParams {
     // en el TEST11), y a techo 0.600 pedia k=8 y salia limpio. Lo ancho que es una forma no
     // depende del techo, asi que el limite tampoco puede depender de el.
     double max_stroke_w   = 5.0;    // mm de hueco util: mas ancho que esto es una pieza, no un trazo
+    double band           = 0.0;    // s340 — MODO BANDA: mm junto al muro que cubre NeoStroke; 0 = auto (todo)
     int    k_hard         = 40;     // tope de cordura de k, para que no se dispare nunca
     // NEOTKO_NEOSTROKE_TAG s332 — DESAPILAR los cortes de flujo en Z.
     // 🔑 El TEST14 cerró CUATRO frentes de golpe: cambiar la ordenación de la costura (4 posiciones
@@ -1223,7 +1229,15 @@ static std::vector<NsPath> plan_island_field(const ExPolygon& island, const Poly
 {
     FieldParams fp;
     fp.outer_w = P.outer_w;
+    {   // s342f — MANDO DE SESIÓN: la rejilla del campo en mm (0.01 de fábrica). Más gruesa = menos memoria y menos
+        //    tiempo por isla (10 islas a la vez a 0.01 se pelean por la memoria: cada letra grande ~150 MB). Sin tocar
+        //    el 3mf ni recompilar, para medir cuánto cambia el G-code antes de decidir nada.
+        double v;
+        if (ns_env_get("ORCA_NS_CELL", 0.005, 0.05, v))
+            fp.cell = v;
+    }
     fp.max_stroke_w = P.max_stroke_w;   // *Widest shape handled*: lo más ancho es una pieza, no una letra
+    fp.band         = P.band;           // s340 — modo banda
     // Los límites son los MISMOS mandos de hoy, pasados a separación (el campo trabaja con lo que el cordón
     // cubre de verdad): máximo = *Widest line allowed*, mínimo = *Thinnest printable line*, objetivo =
     // *Target line width*.
@@ -2427,54 +2441,11 @@ static void emit_skate(const std::vector<Vec2d>& route, PerimeterGenerator& g, E
     out.emplace_back(new ExtrusionPath(std::move(p)));
 }
 
-// ── C1-C5: el despacho de una capa ──────────────────────────────────────────
-void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionConfig* original_cfg)
+// NEOTKO_NEOSTROKE_TAG s342 — los NsParams de una config, sacados de `run_neostroke` para poder rehacerlos POR ISLA
+// (ajustes por isla: la misma receta sobre una copia de la Config con las claves de la isla pisadas). Sin cambios de
+// contenido respecto al bloque de antes: el G-code sin anclas es el mismo byte a byte.
+static NsParams make_params(PerimeterGenerator& g, const Config& cfg, const PrintRegionConfig* original_cfg)
 {
-    // Sonda de tiempos (s326): ms por fase, una línea [NS-T] por capa en DISPATCH.
-    using ns_clk = std::chrono::steady_clock;
-    const auto ns_ms = [](ns_clk::time_point a) { return std::chrono::duration<double, std::milli>(ns_clk::now() - a).count(); };
-    const ns_clk::time_point t_start = ns_clk::now();
-    double t_classic = 0., t_plan = 0., t_stitch = 0., t_order = 0., t_ground = 0., t_route = 0., t_emit = 0., t_cover = 0., t_fill = 0.;
-    ns_probe_seg_calls = ns_probe_raster_rows = ns_probe_astar = 0;
-    ns_t_skel = ns_t_strokes = ns_t_tips = ns_t_residual = ns_t_details = ns_t_stitch_only = ns_t_flow = 0.;
-    ns_ov_runs = ns_ov_touched = 0;   // s331 — la sonda de la curva de overlap, por laminado
-    ns_ov_vol_in = ns_ov_vol_out = 0.;
-    ns_cuts = 0;                      // s336
-    ns_gap_n0 = ns_gap_n1 = ns_gap_moved = 0;   // s338 — el cierre de huecos
-    ns_gap_a0 = ns_gap_a1 = ns_gap_mat0 = ns_gap_mat1 = 0.;
-    ns_gap_dbg = NeoDebug::enabled(NeoDebug::NEOSTROKE);
-    int walls = original_cfg->wall_loops.value;
-    if (walls < 1) {
-        g.process_classic();
-        return;
-    }
-
-    // 1. Muro exterior Classic, y sólo el exterior. Igual que la v3 (run_classic_spine).
-    PrintRegionConfig modified_cfg = *original_cfg;
-    modified_cfg.wall_loops.value           = 1;
-    modified_cfg.gap_infill_speed.value     = 0;   // el interior por trazos sustituye al gap-fill
-    modified_cfg.alternate_extra_wall.value = false;
-
-    ExPolygons original_slice;
-    original_slice.reserve(g.slices->surfaces.size());
-    for (const Surface& s : g.slices->surfaces)
-        original_slice.push_back(s.expolygon);
-
-    const size_t loops_before = g.loops->entities.size();
-    g.config = &modified_cfg;
-    { const auto t0 = ns_clk::now(); g.process_classic(); t_classic = ns_ms(t0); }
-    g.config = original_cfg;
-    size_t loops_after_outer = g.loops->entities.size();
-
-    // Lo que tapa el muro exterior, medido por su separación (como lo mide Classic). Sin esto, ni
-    // el recorte del relleno ni la sonda saben lo que ya está puesto.
-    Polygons outer_cov;
-    for (size_t i = loops_before; i < loops_after_outer; ++i)
-        g.loops->entities[i]->polygons_covered_by_spacing(outer_cov, float(SCALED_EPSILON));
-    const ExPolygons outer_cov_ex = union_ex(outer_cov);
-
-    // 2. Parámetros. El muro exterior se come una banda medida como la mide Classic (su
-    //    separación): es lo que hay que descontar para saber el hueco útil.
     NsParams P;
     P.nozzle     = g.print_config->nozzle_diameter.get_at(0);
     P.outer_w    = g.ext_perimeter_flow.spacing();
@@ -2519,6 +2490,7 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
     // de ningún ajuste.
     P.max_bead     = std::max(0.05, std::min(250., cfg.neostroke_max_bead_pct) / 100. * P.w_ref);
     P.max_stroke_w = std::max(0.5,  std::min(30.,  cfg.neostroke_max_stroke_width));
+    P.band         = std::clamp(cfg.neostroke_band_mm, 0., 30.);   // s340
     {   // los env var pisan, uno a uno y solo el que este puesto
         const NsOvlEnv& E = ns_ovl_env();
         if (E.has_pct)  P.ovl_pct      = E.pct / 100.;
@@ -2564,6 +2536,157 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         if (ns_env_get("ORCA_NS_LEAD_IN", 0., 3., v))        P.lead_in = v;
         if (ns_env_get("ORCA_NS_LEAD_IN_FLOW", 0., 1.5, v))  P.lead_in_flow = v;
     }
+    return P;
+}
+
+// s342 — pisa en `c` UNA clave de la lista blanca (`island_override_keys()`). Valor mal escrito = se ignora (false).
+static bool apply_island_override(Config& c, const std::string& key, const std::string& val)
+{
+    // Lo escribe el gizmo con `serialize()` de la opción: un % sale como «15%» y un sí/no como «1»/«0».
+    char* end = nullptr;
+    const double v = std::strtod(val.c_str(), &end);
+    if (end == val.c_str())
+        return false;
+    while (end && (*end == '%' || *end == ' '))
+        ++end;
+    if (!end || *end != '\0')
+        return false;
+    const bool b = v > 0.5;
+    if      (key == "neostroke_min_width_pct")    c.neostroke_min_width_pct    = v;
+    else if (key == "neostroke_max_width_pct")    c.neostroke_max_width_pct    = v;
+    else if (key == "neostroke_detail_min_pct")   c.neostroke_detail_min_pct   = v;
+    else if (key == "neostroke_bead_min_pct")     c.neostroke_bead_min_pct     = v;
+    else if (key == "neostroke_max_bead_pct")     c.neostroke_max_bead_pct     = v;
+    else if (key == "neostroke_max_stroke_width") c.neostroke_max_stroke_width = v;
+    else if (key == "neostroke_band_mm")          c.neostroke_band_mm          = v;
+    else if (key == "neostroke_curve_overlap")    c.neostroke_curve_overlap    = v;
+    else if (key == "neostroke_lane_overlap")     c.neostroke_lane_overlap     = v;
+    else if (key == "neostroke_lead_in")          c.neostroke_lead_in          = v;
+    else if (key == "neostroke_end_at_junctions") c.neostroke_end_at_junctions = b;
+    else if (key == "neostroke_continuous_turns") c.neostroke_continuous_turns = b;
+    else if (key == "neostroke_variable_k")       c.neostroke_variable_k       = b;
+    else if (key == "neostroke_corner_hooks")     c.neostroke_corner_hooks     = b;
+    else return false;
+    return true;
+}
+
+// NEOTKO_NEOSTROKE_TAG s342e — los contadores `thread_local` de las sondas, para las islas en paralelo. Cada isla
+// guarda lo que ELLA sumó en el hilo que la hizo y deja ese hilo como estaba (así da igual qué hilo coja qué isla, y
+// el propio hilo que llama también puede hacer islas); el total se suma después en el hilo de la capa.
+struct NsCounters {
+    size_t probe_seg = 0, probe_rows = 0, probe_astar = 0, ov_runs = 0, ov_touched = 0, cuts = 0, gap_n0 = 0, gap_n1 = 0, gap_moved = 0;
+    double t_skel = 0., t_strokes = 0., t_tips = 0., t_residual = 0., t_details = 0., t_stitch_only = 0., t_flow = 0.;
+    double ov_in = 0., ov_out = 0., gap_a0 = 0., gap_a1 = 0., gap_mat0 = 0., gap_mat1 = 0.;
+    static NsCounters now()
+    {
+        NsCounters c;
+        c.probe_seg = ns_probe_seg_calls; c.probe_rows = ns_probe_raster_rows; c.probe_astar = ns_probe_astar;
+        c.ov_runs = ns_ov_runs; c.ov_touched = ns_ov_touched; c.cuts = ns_cuts;
+        c.gap_n0 = ns_gap_n0; c.gap_n1 = ns_gap_n1; c.gap_moved = ns_gap_moved;
+        c.t_skel = ns_t_skel; c.t_strokes = ns_t_strokes; c.t_tips = ns_t_tips; c.t_residual = ns_t_residual;
+        c.t_details = ns_t_details; c.t_stitch_only = ns_t_stitch_only; c.t_flow = ns_t_flow;
+        c.ov_in = ns_ov_vol_in; c.ov_out = ns_ov_vol_out;
+        c.gap_a0 = ns_gap_a0; c.gap_a1 = ns_gap_a1; c.gap_mat0 = ns_gap_mat0; c.gap_mat1 = ns_gap_mat1;
+        return c;
+    }
+    void set_this_thread() const
+    {
+        ns_probe_seg_calls = probe_seg; ns_probe_raster_rows = probe_rows; ns_probe_astar = probe_astar;
+        ns_ov_runs = ov_runs; ns_ov_touched = ov_touched; ns_cuts = cuts;
+        ns_gap_n0 = gap_n0; ns_gap_n1 = gap_n1; ns_gap_moved = gap_moved;
+        ns_t_skel = t_skel; ns_t_strokes = t_strokes; ns_t_tips = t_tips; ns_t_residual = t_residual;
+        ns_t_details = t_details; ns_t_stitch_only = t_stitch_only; ns_t_flow = t_flow;
+        ns_ov_vol_in = ov_in; ns_ov_vol_out = ov_out;
+        ns_gap_a0 = gap_a0; ns_gap_a1 = gap_a1; ns_gap_mat0 = gap_mat0; ns_gap_mat1 = gap_mat1;
+    }
+    // this = b − a
+    void diff(const NsCounters& b, const NsCounters& a)
+    {
+        probe_seg = b.probe_seg - a.probe_seg; probe_rows = b.probe_rows - a.probe_rows; probe_astar = b.probe_astar - a.probe_astar;
+        ov_runs = b.ov_runs - a.ov_runs; ov_touched = b.ov_touched - a.ov_touched; cuts = b.cuts - a.cuts;
+        gap_n0 = b.gap_n0 - a.gap_n0; gap_n1 = b.gap_n1 - a.gap_n1; gap_moved = b.gap_moved - a.gap_moved;
+        t_skel = b.t_skel - a.t_skel; t_strokes = b.t_strokes - a.t_strokes; t_tips = b.t_tips - a.t_tips;
+        t_residual = b.t_residual - a.t_residual; t_details = b.t_details - a.t_details;
+        t_stitch_only = b.t_stitch_only - a.t_stitch_only; t_flow = b.t_flow - a.t_flow;
+        ov_in = b.ov_in - a.ov_in; ov_out = b.ov_out - a.ov_out;
+        gap_a0 = b.gap_a0 - a.gap_a0; gap_a1 = b.gap_a1 - a.gap_a1; gap_mat0 = b.gap_mat0 - a.gap_mat0; gap_mat1 = b.gap_mat1 - a.gap_mat1;
+    }
+    void add_to_this_thread() const
+    {
+        ns_probe_seg_calls += probe_seg; ns_probe_raster_rows += probe_rows; ns_probe_astar += probe_astar;
+        ns_ov_runs += ov_runs; ns_ov_touched += ov_touched; ns_cuts += cuts;
+        ns_gap_n0 += gap_n0; ns_gap_n1 += gap_n1; ns_gap_moved += gap_moved;
+        ns_t_skel += t_skel; ns_t_strokes += t_strokes; ns_t_tips += t_tips; ns_t_residual += t_residual;
+        ns_t_details += t_details; ns_t_stitch_only += t_stitch_only; ns_t_flow += t_flow;
+        ns_ov_vol_in += ov_in; ns_ov_vol_out += ov_out;
+        ns_gap_a0 += gap_a0; ns_gap_a1 += gap_a1; ns_gap_mat0 += gap_mat0; ns_gap_mat1 += gap_mat1;
+    }
+};
+// Al empezar la isla: foto del hilo y el interruptor de la sonda de huecos (sólo lo pone el hilo de la capa). Al
+// acabar (también por un `return` temprano): lo sumado va a `out` y el hilo vuelve a como estaba.
+struct NsCounterGuard {
+    NsCounters& out;
+    NsCounters  start;
+    bool        gap_dbg_before;
+    NsCounterGuard(NsCounters& o, bool gap_dbg) : out(o), start(NsCounters::now()), gap_dbg_before(ns_gap_dbg) { ns_gap_dbg = gap_dbg; }
+    ~NsCounterGuard()
+    {
+        out.diff(NsCounters::now(), start);
+        start.set_this_thread();
+        ns_gap_dbg = gap_dbg_before;
+    }
+};
+
+// ── C1-C5: el despacho de una capa ──────────────────────────────────────────
+void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionConfig* original_cfg)
+{
+    // Sonda de tiempos (s326): ms por fase, una línea [NS-T] por capa en DISPATCH.
+    using ns_clk = std::chrono::steady_clock;
+    const auto ns_ms = [](ns_clk::time_point a) { return std::chrono::duration<double, std::milli>(ns_clk::now() - a).count(); };
+    const ns_clk::time_point t_start = ns_clk::now();
+    double t_classic = 0., t_plan = 0., t_stitch = 0., t_order = 0., t_ground = 0., t_route = 0., t_emit = 0., t_cover = 0., t_fill = 0.;
+    ns_probe_seg_calls = ns_probe_raster_rows = ns_probe_astar = 0;
+    ns_t_skel = ns_t_strokes = ns_t_tips = ns_t_residual = ns_t_details = ns_t_stitch_only = ns_t_flow = 0.;
+    ns_ov_runs = ns_ov_touched = 0;   // s331 — la sonda de la curva de overlap, por laminado
+    ns_ov_vol_in = ns_ov_vol_out = 0.;
+    ns_cuts = 0;                      // s336
+    ns_gap_n0 = ns_gap_n1 = ns_gap_moved = 0;   // s338 — el cierre de huecos
+    ns_gap_a0 = ns_gap_a1 = ns_gap_mat0 = ns_gap_mat1 = 0.;
+    ns_gap_dbg = NeoDebug::enabled(NeoDebug::NEOSTROKE);
+    int walls = original_cfg->wall_loops.value;
+    if (walls < 1) {
+        g.process_classic();
+        return;
+    }
+
+    // 1. Muro exterior Classic, y sólo el exterior. Igual que la v3 (run_classic_spine).
+    PrintRegionConfig modified_cfg = *original_cfg;
+    modified_cfg.wall_loops.value           = 1;
+    std::fill(modified_cfg.gap_infill_speed.values.begin(), modified_cfg.gap_infill_speed.values.end(), 0.); // Upstream Snapmaker #794: todas las variantes
+    // (el interior por trazos sustituye al gap-fill)
+    modified_cfg.alternate_extra_wall.value = false;
+
+    ExPolygons original_slice;
+    original_slice.reserve(g.slices->surfaces.size());
+    for (const Surface& s : g.slices->surfaces)
+        original_slice.push_back(s.expolygon);
+
+    const size_t loops_before = g.loops->entities.size();
+    g.config = &modified_cfg;
+    { const auto t0 = ns_clk::now(); g.process_classic(); t_classic = ns_ms(t0); }
+    g.config = original_cfg;
+    size_t loops_after_outer = g.loops->entities.size();
+
+    // Lo que tapa el muro exterior, medido por su separación (como lo mide Classic). Sin esto, ni
+    // el recorte del relleno ni la sonda saben lo que ya está puesto.
+    Polygons outer_cov;
+    for (size_t i = loops_before; i < loops_after_outer; ++i)
+        g.loops->entities[i]->polygons_covered_by_spacing(outer_cov, float(SCALED_EPSILON));
+    const ExPolygons outer_cov_ex = union_ex(outer_cov);
+
+    // 2. Parámetros. El muro exterior se come una banda medida como la mide Classic (su
+    //    separación): es lo que hay que descontar para saber el hueco útil.
+    const NsParams P = make_params(g, cfg, original_cfg);
     SkeletonParams skp;               // los de C1, verificados contra el prototipo
     if (P.corner_hooks)
         skp.prune_mm = P.hook_prune;  // sin esto las ramitas de esquina ni existen
@@ -2572,6 +2695,68 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
     //    que impide que la impresora salte de letra en letra a medio rellenar una.
     const ExPolygons islands = union_ex(original_slice);
     std::vector<ExtrusionEntityCollection> per_island(islands.size());
+
+    // NEOTKO_NEOSTROKE_TAG s342 — AJUSTES POR ISLA (NeoStrokeIslands.hpp). Cada ancla es un punto en coordenadas del
+    // OBJETO; se pasa al marco de laminado (`g.ns_obj_to_slice` = XY de `trafo_centered()`) y la isla que lo CONTIENE
+    // en ESTA capa usa sus ajustes. Dos anclas en la misma isla (letras que se juntan en alguna capa): gana la
+    // PRIMERA de la lista. Ancla que no cae en ninguna isla (la letra se estrecha, curva fuerte): la capa usa los del
+    // objeto. Sin anclas, `island_P` queda vacío y todo sale con `P`: el G-code de antes, byte a byte.
+    std::vector<NsParams>       island_P;
+    std::vector<SkeletonParams> island_skp;
+    std::vector<int>            island_anchor(islands.size(), -1);
+    if (!cfg.neostroke_island_overrides.empty() && !islands.empty()) {
+        size_t skipped = 0;
+        const std::vector<NsIslandOverride> anchors = parse_island_overrides(cfg.neostroke_island_overrides, &skipped);
+        const double* T = g.ns_obj_to_slice;
+        size_t lost = 0, shared = 0;
+        for (size_t a = 0; a < anchors.size(); ++a) {
+            const double sx = T[0] * anchors[a].x + T[1] * anchors[a].y + T[2];
+            const double sy = T[3] * anchors[a].x + T[4] * anchors[a].y + T[5];
+            const Point  pt(scaled<coord_t>(sx), scaled<coord_t>(sy));
+            int hit = -1;
+            for (size_t k = 0; k < islands.size() && hit < 0; ++k)
+                if (islands[k].contains(pt))
+                    hit = int(k);
+            const char* what = "";
+            if (hit < 0) {
+                ++lost;
+                what = " FUERA (la capa usa los del objeto)";
+            } else if (island_anchor[hit] >= 0) {
+                ++shared;
+                what = " COMPARTE isla con otra ancla (gana la primera)";
+            } else
+                island_anchor[hit] = int(a);
+            if (NeoDebug::enabled(NeoDebug::NEOSTROKE)) {
+                char ab[320];
+                snprintf(ab, sizeof(ab), "[NS] L%d ancla %zu «%s» obj(%.3f,%.3f) -> slice(%.3f,%.3f) isla=%d claves=%zu%s",
+                         g.layer_id, a, anchors[a].name.c_str(), anchors[a].x, anchors[a].y, sx, sy, hit,
+                         anchors[a].values.size(), what);
+                NeoDebug::write(NeoDebug::NEOSTROKE, ab);
+            }
+        }
+        if (skipped > 0 && NeoDebug::enabled(NeoDebug::NEOSTROKE)) {
+            char ab[120];
+            snprintf(ab, sizeof(ab), "[NS] L%d anclas: %zu entradas o claves descartadas al leer", g.layer_id, skipped);
+            NeoDebug::write(NeoDebug::NEOSTROKE, ab);
+        }
+        (void)lost; (void)shared;
+        island_P.assign(islands.size(), P);
+        island_skp.assign(islands.size(), SkeletonParams{});
+        for (size_t k = 0; k < islands.size(); ++k) {
+            island_skp[k] = skp;
+            if (island_anchor[k] < 0)
+                continue;
+            island_skp[k] = SkeletonParams{};   // la poda depende de los ganchos, que la isla puede cambiar
+            Config ci = cfg;
+            for (const auto& kv : anchors[island_anchor[k]].values)
+                apply_island_override(ci, kv.first, kv.second);
+            island_P[k] = make_params(g, ci, original_cfg);
+            if (island_P[k].corner_hooks)
+                island_skp[k].prune_mm = island_P[k].hook_prune;
+        }
+    }
+    const auto params_of = [&](size_t k) -> const NsParams& { return k < island_P.size() ? island_P[k] : P; };
+    const auto skel_of   = [&](size_t k) -> const SkeletonParams& { return k < island_skp.size() ? island_skp[k] : skp; };
     Polygons covered_all;
     StrokeStats  total;
     size_t n_paths = 0, n_lines = 0;
@@ -2585,12 +2770,60 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
     const bool dbg = NeoDebug::enabled(NeoDebug::NEOSTROKE);
     // C6: el muro exterior sólo es suelo para patinar si se imprime ANTES que el interior.
     const bool outer_first = original_cfg->wall_sequence.value == WallSequence::OuterInner;
-    for (size_t i = 0; i < islands.size(); ++i) {
+    // NEOTKO_NEOSTROKE_TAG s342e — LAS ISLAS EN PARALELO. Cada isla se planifica, se ordena y se emite sin mirar a
+    // las demás (su cubo `per_island[i]`, su suelo de patín, su cabeza), así que el trabajo va en hilos y lo común
+    // (huellas, sumas, tiempos, líneas del log) se guarda en `IslandOut` y se junta DESPUÉS, en el orden de siempre:
+    // el G-code sale igual byte a byte. Los contadores `thread_local` de las sondas se restauran en el hilo que
+    // hizo la isla y se suman aquí (ver `NsCounters`). `ORCA_NS_SERIAL` = una isla detrás de otra, para comparar.
+    struct IslandOut {
+        Polygons                 covered;
+        double                   cov_sum = 0., emitted_mm = 0.;
+        size_t                   n_paths = 0, n_lines = 0;
+        double                   t_plan = 0., t_stitch = 0., t_order = 0., t_ground = 0., t_route = 0., t_emit = 0., t_cover = 0.;
+        StrokeStats              total;
+        NsCounters               cnt;
+        std::vector<std::string> log;
+    };
+    std::vector<IslandOut> island_out(islands.size());
+    const bool gap_dbg_main = ns_gap_dbg;
+    const auto process_island = [&](size_t i) {
+        IslandOut&     io = island_out[i];
+        NsCounterGuard guard(io.cnt, gap_dbg_main);
+        // s342 — ajustes por isla: dentro del bucle `P` y `skp` son los de ESTA isla (los del objeto si no tiene ancla).
+        const NsParams&       P   = params_of(i);
+        const SkeletonParams& skp = skel_of(i);
         const ExPolygon& island = islands[i];
         StrokeStats   st;
         SkeletonStats sk_st;
         // Sólo el trozo de muro de ESTA isla: lo demás sobra en cada resta.
         const Polygons island_outer = to_polygons(intersection_ex(outer_cov_ex, ExPolygons{ island }));
+        // 🔎 s340 SONDA — visor y laminado dan la MISMA isla por área/celdas y aun así distinto plan (la A de
+        //    NeoStroke-TEST: pares=2 en el laminado, 0 en el visor). Vuelca la isla y el muro EXACTOS de la capa
+        //    `ORCA_NS_DUMP_ISLAND=<layer_id>` para compararlos punto a punto. Sólo con el canal NEOSTROKE.
+        if (dbg) {
+            static const int dump_layer = std::getenv("ORCA_NS_DUMP_ISLAND") ? std::atoi(std::getenv("ORCA_NS_DUMP_ISLAND")) : -1;
+            if (dump_layer == g.layer_id) {
+                auto dump_poly = [&](const char* tag, const Polygon& pg) {
+                    std::string s = std::string("[NS-ISLA] ") + tag + " n=" + std::to_string(pg.points.size()) + " :";
+                    char pb[48];
+                    for (const Point& q : pg.points) {
+                        snprintf(pb, sizeof(pb), " %.4f,%.4f", unscale<double>(q.x()), unscale<double>(q.y()));
+                        s += pb;
+                    }
+                    io.log.emplace_back(s.c_str());
+                };
+                char hb[160];
+                snprintf(hb, sizeof(hb), "[NS-ISLA] L%d isla %zu area=%.5f holes=%zu muro_polys=%zu outer_w(plan)=%.4f",
+                         g.layer_id, i, island.area() * SCALING_FACTOR * SCALING_FACTOR, island.holes.size(),
+                         island_outer.size(), P.outer_w);
+                io.log.emplace_back(hb);
+                dump_poly("contour", island.contour);
+                for (const Polygon& h : island.holes)
+                    dump_poly("hole", h);
+                for (const Polygon& m : island_outer)
+                    dump_poly("muro", m);
+            }
+        }
         auto t0 = ns_clk::now();
         // NEOTKO_NEOSTROKE_TAG s338 — con `ORCA_NS_FIELD` los caminos salen del CAMPO, ya cosidos. Si la isla
         // es demasiado grande para la rejilla (fs.skipped), se cae al planificador de trazos de siempre.
@@ -2612,27 +2845,27 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
                          g.layer_id, i, islands.size(), fs.skipped ? " (pieza/grande: trazos)" : (paths.empty() ? " (vacío: trazos)" : ""), fs.cells, fs.pair_lanes,
                          fs.center_lanes, fs.pruned, fs.tails_cut, fs.joints, fs.splices, fs.tramos, fs.wide_starts, fs.junction_ends,
                          fs.t_eje, fs.t_campo, fs.t_carriles, fs.t_remate, fs.t_costura, ns_ms(t0));
-                NeoDebug::write(NeoDebug::NEOSTROKE, fb);
+                io.log.emplace_back(fb);
             }
         }
         const size_t cuts_before = ns_cuts;   // s336
         const ExPolygons region{ island };
         if (!by_field) {
             NsLines lines = plan_island(island, island_outer, P, skp, st, &sk_st);
-            t_plan += ns_ms(t0);
+            io.t_plan += ns_ms(t0);
             if (lines.empty())
-                continue;
+                return;
             island_lines = lines.size();
             t0 = ns_clk::now();
             paths = stitch(std::move(lines), region, P);
             ns_t_stitch_only += ns_ms(t0);
         } else {
-            t_plan += ns_ms(t0);
+            io.t_plan += ns_ms(t0);
             if (paths.empty())
-                continue;
+                return;
             t0 = ns_clk::now();
         }
-        n_lines += island_lines;
+        io.n_lines += island_lines;
         const auto t_fr = ns_clk::now();
         size_t dropped = 0;
         // 🚨 s338 — los caminos del CAMPO no pasan por la regla de detalles. Esa regla se hizo para los restos sueltos
@@ -2644,7 +2877,7 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         if (!by_field)
             paths = flow_rules(std::move(paths), island, P, dropped);
         ns_t_flow += ns_ms(t_fr);
-        t_stitch += ns_ms(t0);
+        io.t_stitch += ns_ms(t0);
         st.dropped_detail += dropped;
         // NEOTKO_NEOSTROKE_TAG s335 — `wall_paths` sale SIEMPRE vacío desde que NeoWall se fue: no
         // hay camino `Kind::Outer`. Se conserva el reparto porque es la pieza que respeta
@@ -2663,7 +2896,7 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
             }
             paths = std::move(inner);
         }
-        n_paths += paths.size() + wall_paths.size();
+        io.n_paths += paths.size() + wall_paths.size();
 
         // Orden dentro de la isla: al vecino más cercano, empezando por el camino más largo.
         // 🚨 Aquí es donde engancha C6 (NeoStrokeLink.hpp): hoy cada salto es un viaje y el
@@ -2704,17 +2937,17 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         // las líneas planificadas (trampa 8).
         const auto emit_and_account = [&](NsPath& path) {
             auto t_e = ns_clk::now();
-            emit_path(path, g, per_island[i].entities, emitted_mm, P);
-            t_emit += ns_ms(t_e);
+            emit_path(path, g, per_island[i].entities, io.emitted_mm, P);
+            io.t_emit += ns_ms(t_e);
             t_e = ns_clk::now();
             Polygons mine;
             for (const NsLine& l : path)
                 append(mine, line_poly(l));
-            append(covered_all, mine);
+            append(io.covered, mine);
             const ExPolygons mine_u = union_ex(mine);
-            cov_sum += area_mm2(mine_u);
+            io.cov_sum += area_mm2(mine_u);
             covered_idx.add(mine_u);
-            t_cover += ns_ms(t_e);
+            io.t_cover += ns_ms(t_e);
         };
         // s333 — 🚨 el muro NO toca `head`: quien elige por dónde empieza el interior es el ancla de
         //    capa, y con `head` puesto el interior arrancaría siempre pegado al final del muro, o sea
@@ -2758,7 +2991,7 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
             const std::vector<Vec2d> pl = path_polyline(paths[best]);
             if (pl.empty())
                 continue;
-            t_order += ns_ms(t_sel);
+            io.t_order += ns_ms(t_sel);
             if (has_head && link_planner()) {
                 LinkContext lc;
                 const Polyline bead = to_polyline(last_bead);
@@ -2804,19 +3037,19 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
                     };
                     auto t_g = ns_clk::now();
                     ExPolygons ground = build_ground(P.nozzle);
-                    t_ground += ns_ms(t_g);
+                    io.t_ground += ns_ms(t_g);
                     std::vector<Vec2d> route;
                     auto t_r = ns_clk::now();
                     if (skate_seg_ok(head, to, ground))
                         route = { head, to };
-                    t_route += ns_ms(t_r);
+                    io.t_route += ns_ms(t_r);
                     if (route.empty() && max_len > direct * 1.0001) {
                         t_g = ns_clk::now();
                         ground = build_ground(0.5 * (max_len - direct) + P.nozzle);
-                        t_ground += ns_ms(t_g);
+                        io.t_ground += ns_ms(t_g);
                         t_r = ns_clk::now();
                         route = skate_route(head, to, ground, max_len, 0.25 * P.nozzle);
-                        t_route += ns_ms(t_r);
+                        io.t_route += ns_ms(t_r);
                     }
                     if (route.size() >= 2) {
                         emit_skate(route, g, per_island[i].entities);
@@ -2836,17 +3069,21 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         if (!outer_first)
             for (NsPath& wp : wall_paths)
                 emit_and_account(wp);
-        total.strokes += st.strokes;
-        total.slivers += st.slivers;
-        total.fills   += st.fills;
-        total.too_wide += st.too_wide;
-        total.dropped_detail += st.dropped_detail;
-        total.repainted += st.repainted;
-        total.caps += st.caps;
-        total.thin += st.thin;       // s336
-        total.thin_of += st.thin_of;
+        // s342f — la huella de la isla, YA unida, en su hilo. Luego la capa junta 15 formas limpias en vez de las miles
+        // de huellas sueltas de sus líneas (esa unión única se comía 1.6 s en el relleno y otra igual en las bolsitas).
+        // Mismo territorio: sólo cambia CUÁNDO se une.
+        io.covered = to_polygons(union_ex(io.covered));
+        io.total.strokes += st.strokes;
+        io.total.slivers += st.slivers;
+        io.total.fills   += st.fills;
+        io.total.too_wide += st.too_wide;
+        io.total.dropped_detail += st.dropped_detail;
+        io.total.repainted += st.repainted;
+        io.total.caps += st.caps;
+        io.total.thin += st.thin;       // s336
+        io.total.thin_of += st.thin_of;
         for (const auto& kv : st.k_hist)
-            total.k_hist[kv.first] += kv.second;
+            io.total.k_hist[kv.first] += kv.second;
 
         if (dbg) {
             std::string kh;
@@ -2863,8 +3100,48 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
                      kh.c_str(), st.slivers, st.fills, st.repainted, st.caps, island_lines, paths.size(),
                      skates_straight, skates_routed, skate_travels,
                      int(P.cont_turns), int(P.var_k), ns_cuts - cuts_before, st.thin, st.thin_of);
-            NeoDebug::write(NeoDebug::NEOSTROKE, buf);
+            io.log.emplace_back(buf);
         }
+    };
+    {
+        static const bool serial = std::getenv("ORCA_NS_SERIAL") != nullptr;
+        if (serial || islands.size() < 2) {
+            for (size_t i = 0; i < islands.size(); ++i)
+                process_island(i);
+        } else {
+            // 🚨 `isolate`: mientras espera, este hilo no puede coger OTRA capa del laminado (el bucle de capas de
+            //    Orca también es tbb); si la cogiera, su `run_neostroke` pondría a cero los contadores de ÉSTA.
+            tbb::this_task_arena::isolate([&] {
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, islands.size(), 1),
+                                  [&](const tbb::blocked_range<size_t>& r) {
+                                      for (size_t i = r.begin(); i != r.end(); ++i)
+                                          process_island(i);
+                                  });
+            });
+        }
+    }
+    for (IslandOut& io : island_out) {   // lo común, en el orden de las islas
+        append(covered_all, std::move(io.covered));
+        cov_sum    += io.cov_sum;
+        emitted_mm += io.emitted_mm;
+        n_paths    += io.n_paths;
+        n_lines    += io.n_lines;
+        t_plan += io.t_plan; t_stitch += io.t_stitch; t_order += io.t_order; t_ground += io.t_ground;
+        t_route += io.t_route; t_emit += io.t_emit; t_cover += io.t_cover;
+        total.strokes += io.total.strokes;
+        total.slivers += io.total.slivers;
+        total.fills   += io.total.fills;
+        total.too_wide += io.total.too_wide;
+        total.dropped_detail += io.total.dropped_detail;
+        total.repainted += io.total.repainted;
+        total.caps += io.total.caps;
+        total.thin += io.total.thin;
+        total.thin_of += io.total.thin_of;
+        for (const auto& kv : io.total.k_hist)
+            total.k_hist[kv.first] += kv.second;
+        io.cnt.add_to_this_thread();
+        for (const std::string& l : io.log)
+            NeoDebug::write(NeoDebug::NEOSTROKE, l.c_str());
     }
 
     // NEOTKO_NEOSTROKE_TAG s337b — LAS BOLSITAS LAS RELLENA NEOSTROKE, NO EL RELLENO.
@@ -2886,17 +3163,21 @@ void run_neostroke(PerimeterGenerator& g, const Config& cfg, const PrintRegionCo
         const ExPolygons left_over = offset_ex(offset_ex(diff_ex(original_slice, covered_now), -half), half);
         const Flow&      fl        = g.solid_infill_flow;
         const float      sp        = float(fl.scaled_spacing());
-        const float      wide_half = float(scaled<double>(P.max_stroke_w / 2.));
+        // 🚨 s340 — en MODO BANDA el centro que deja la banda ES relleno: sólo es bolsita lo más estrecho que la banda.
+        // s342 — la banda y el ancho máximo son de la ISLA de cada bolsita (ajustes por isla): se busca la isla ANTES.
+        const auto wide_half_of = [&](const NsParams& Q) {
+            return float(scaled<double>((Q.band > 0. ? std::min(Q.max_stroke_w, Q.band) : Q.max_stroke_w) / 2.));
+        };
         if (sp > 0.f)
             for (const ExPolygon& pk : left_over) {
-                if (!offset_ex(pk, -wide_half).empty())
-                    continue;   // más ancha que un trazo: es relleno de verdad
                 size_t isl = 0;
                 for (size_t k = 0; k < islands.size(); ++k)
                     if (islands[k].contains(pk.contour.points.front()) || islands[k].contains(pk.contour.centroid())) {
                         isl = k;
                         break;
                     }
+                if (!offset_ex(pk, -wide_half_of(params_of(isl))).empty())
+                    continue;   // más ancha que un trazo: es relleno de verdad
                 ExtrusionEntityCollection coll;
                 coll.no_sort = true;
                 ExPolygons ring = offset_ex(pk, -0.5f * sp);

@@ -5,6 +5,12 @@
 #include "../../BoundingBox.hpp"
 #include "../../Polyline.hpp"
 #include "../../libslic3r.h"
+#include "../../NeoDebug.hpp"   // s342f — sonda de tiempos
+
+#include <chrono>
+#include <oneapi/tbb/parallel_for.h>   // s342g — la unión de huellas por trozos
+#include <cstdio>
+#include <string>
 
 #include <algorithm>
 #include <functional>
@@ -76,6 +82,14 @@ bool touches(const Polygons& grown, const BoundingBox& gbb, const std::vector<Pi
 MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions& opt)
 {
     MetricsResult out;
+    // s342f — sonda de tiempos por parte (canal NEOSTROKE). `ns_mark` cierra la parte anterior.
+    std::vector<std::pair<const char*, double>> ns_times;
+    auto ns_t0 = std::chrono::steady_clock::now();
+    auto ns_mark = [&](const char* name) {
+        const auto now = std::chrono::steady_clock::now();
+        ns_times.emplace_back(name, std::chrono::duration<double, std::milli>(now - ns_t0).count());
+        ns_t0 = now;
+    };
     LayerMetrics& m = out.m;
     // s339 — NIVEL DE AVISO: un solo número mueve todos los umbrales. > 1 avisa antes, < 1 sólo lo claro.
     const double lvl            = std::clamp(opt.level, 0.25, 4.0);
@@ -137,6 +151,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
     if (r.input_slices.empty())
         return out;
 
+    ns_mark("recorridos");   // s342f — sonda de tiempos
     // ── huecos (s336_huecos_junta.py) ──
     // El script pinta la capa y busca píxeles negros encerrados; aquí es exacto: el corte menos la unión
     // de todas las huellas. Lo que queda y es pequeño (< gap_max_mm2) es un hueco; lo grande es una
@@ -154,8 +169,26 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
         all.insert(all.end(), p.polys.begin(), p.polys.end());
         (s.neostroke ? neo : classic).push_back(std::move(p));
     }
-    const ExPolygons covered = union_ex(all);
+    // s342g — 2.9 de los 3.1 s de las cifras eran ESTA unión (miles de huellas de tramo de golpe). Por trozos
+    // consecutivos (el orden de impresión va isla a isla, así que cada trozo es casi una letra) unidos en paralelo, y
+    // luego los trozos: el mismo territorio. Sólo es medida del visor; el G-code no pasa por aquí.
+    ExPolygons covered;
+    {
+        const size_t n_chunks = std::clamp<size_t>(all.size() / 400, 1, 32);
+        std::vector<Polygons> part(n_chunks);
+        const size_t per = (all.size() + n_chunks - 1) / n_chunks;
+        tbb::parallel_for(size_t(0), n_chunks, [&](size_t k) {
+            const size_t a = k * per, b = std::min(all.size(), a + per);
+            if (a < b)
+                part[k] = to_polygons(union_ex(Polygons(all.begin() + a, all.begin() + b)));
+        });
+        Polygons merged;
+        for (Polygons& pp : part)
+            append(merged, std::move(pp));
+        covered = union_ex(merged);
+    }
 
+    ns_mark("union");   // s342f — sonda de tiempos
     // ── regla de vecinos ──
     // Para cada tramo fino de NeoStroke se sondea a los DOS lados, justo pasado su borde (sep/2 + neighbour_mm):
     // si los dos puntos caen dentro de la huella de algún otro cordón, está entre vecinos. Si falta uno, es una
@@ -202,6 +235,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
             else               { out.seg_flags[i] |= sfThinLoose;    m.thin_loose_mm    += l; }
         }
 
+        ns_mark("vecinos");   // s342f — sonda de tiempos
         // ── riesgo de punta (TEST22 Z3/Z4/Z7) ──
         // El final del muro de Classic deja la punta de la cuña a NeoStroke solo: una línea sin nada a los lados
         // que ARRANCA ahí. A 15 mm/s agarra; a 30 y 60 la boquilla tira antes de que pegue y el cuello se rompe.
@@ -233,6 +267,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
             }
         }
 
+        ns_mark("punta");   // s342f — sonda de tiempos
         // ── s338: nudo de puntas (TEST24, la onda) ──
         // Un ARRANQUE de NeoStroke que (1) empieza en COLA AFILADA (ancho al arrancar < `knot_thin` × el ancho que
         // alcanza en su primer medio milímetro) y (2) tiene al menos `knot_others` puntas de OTROS recorridos
@@ -240,6 +275,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
         // 🚨 Sin (1) y con una sola punta vecina marcaba el 43 % de los arranques del TEST24: el camino siguiente que
         //    empieza donde acabó el anterior es lo normal y no deja hoyo. Con las dos condiciones marca el 26 %, que
         //    es real: casi todos los caminos del campo arrancaban en cola. Transliteración: `campo/nudos.py`.
+        ns_mark("nudo");   // s342f — sonda de tiempos
         // ── s339: racimo de ARRANQUES (TEST25, el agujero de arriba de los anillos en las 8 zonas) ──
         // Las puntas de NS (arranques y paradas) se encadenan si están a menos de `knot_chain_mm` (enlace simple). Un racimo
         // con ≥ `knot_starts` arranques deja agujero aunque los arranques sean anchos: tras el viaje la presión no ha
@@ -331,6 +367,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
             }
         }
 
+        ns_mark("racimo");   // s342f — sonda de tiempos
         // ── s339: CONTACTO con el vecino (TEST25, los surcos y la luz a contraluz de la zona 1) ──
         // Muestras cada `contact_step_mm` sobre el eje de TODO lo que extruye (NS y muro). Para cada muestra de NS se busca,
         // a cada lado, el vecino más cercano de lado (casi perpendicular, no del mismo recorrido a menos de 1,5 mm) y su
@@ -397,6 +434,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
                 }
         }
 
+        ns_mark("contacto");   // s342f — sonda de tiempos
         // ── riesgo de raja entre cordones anchos (TEST22 Z6) ──
         {
             Polygons wide;
@@ -437,6 +475,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
             }
         }
 
+        ns_mark("raja");   // s342f — sonda de tiempos
         // ── doble pasada (TEST22 Z3: relieve de «ironing» en la punta) ──
         // El centro de un tramo cae dentro de la huella de otro puesto ANTES en esta capa (no de sus vecinos
         // inmediatos del mismo recorrido): pasa por encima de lo que ya hay. Rejilla de 1 mm para no mirar todo.
@@ -494,6 +533,7 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
             }
         }
     }
+    ns_mark("doble");   // s342f — sonda de tiempos
     // ── batiburrillo: mapa de densidad de plástico de NeoStroke ──
     // Verificado por transliteración sobre el G-code del TEST22 (capa 1.08). Tres decisiones, cada una medida:
     //  · DENSIDAD, no reparto: cada celda recibe la densidad real del tramo (mm³/mm ÷ ancho) por su área. Repartir
@@ -613,6 +653,14 @@ MetricsResult compute_layer_metrics(const PreviewResult& r, const MetricsOptions
         const bool t_cl = touches(grown, gbb, classic);
         const bool t_ns = touches(grown, gbb, neo);
         add_gap(ex, (t_cl && t_ns) ? GapKind::Joint : (t_ns ? GapKind::NeoStrokeOnly : GapKind::ClassicOnly), a);
+    }
+    ns_mark("montana");
+    if (NeoDebug::enabled(NeoDebug::NEOSTROKE)) {   // s342f — dónde se van las cifras del visor
+        std::string s = "[NS-CIFRAS]";
+        char b[64];
+        for (const auto& t : ns_times) { snprintf(b, sizeof(b), " %s=%.0f", t.first, t.second); s += b; }
+        s += " ms";
+        NeoDebug::write(NeoDebug::NEOSTROKE, s.c_str());
     }
     return out;
 }

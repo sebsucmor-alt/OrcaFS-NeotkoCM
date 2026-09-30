@@ -9,6 +9,7 @@
 #include "GLGizmoPainterBase.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GLModel.hpp"                 // NEOTKO_COLORSTITCH_TAG s111 — caja-marca ×1.15
+#include "slic3r/GUI/MeshUtils.hpp"               // s342 — MeshRaycaster del raycast sin activar
 #include "libslic3r/ColorSci/ColorPredict.hpp"   // NEOTKO_COLORSTITCH_TAG — PR.2 palette strips
 #include <map>
 #include <unordered_map>
@@ -350,6 +351,31 @@ private:
     // primer volumen que tuviera ese número.
     void pick_recipe_from_object(int object_idx, int picked_slot, int picked_mesh_id = -1);
 
+    // NEOTKO_COLORSTITCH_TAG — s342 (Stickers v2, Fase 0b): LEER sin ACTIVAR. El
+    // cuentagotas y la colocación de stickers pre-activaban en hover el objeto bajo el
+    // cursor (switch_active_object: lo marcaba para siempre + cambiaba la selección del
+    // canvas, el ObjectList y la barra lateral) solo porque el raycaster de la base
+    // existe para el objeto ACTIVO. Barrer el ratón hasta el objeto que querías leer
+    // iba robando el foco a todos los que cruzabas. Este raycast propio contra el
+    // volumen bajo el cursor (el mismo que da get_first_hover_volume_idx) sirve para
+    // CUALQUIER objeto, activo o no, y no toca selección ni marcas.
+    struct CursorHit {
+        int                obj_idx = -1;
+        const ModelVolume* mv      = nullptr;
+        int                mesh_id = -1;              // ordinal model_part (= rr_mesh_id)
+        Vec3f              hit     = Vec3f::Zero();   // frame de la malla del volumen
+        Vec3f              normal  = Vec3f::Zero();
+        int                facet   = -1;
+    };
+    bool raycast_under_cursor(CursorHit& out);
+    // Caché de raycasters por volumen: la clave es el ObjectID del ModelVolume y se
+    // descarta si la malla cambió (otro shared_ptr).
+    struct CursorRaycaster {
+        std::shared_ptr<const TriangleMesh>  mesh;
+        std::unique_ptr<MeshRaycaster>       rc;
+    };
+    std::unordered_map<size_t, CursorRaycaster> m_cursor_rc;
+
     // NEOTKO_STICKER_TAG — herramienta Sticker: coloca un SVG de 1 color como
     // pegatina plana sobre una cara (sin deformar el mesh), con una receta
     // Sandwich propia (ver ColorStitchSticker en Model.hpp + Fill.cpp Fase 6c v2).
@@ -360,7 +386,7 @@ private:
     std::string m_pending_sticker_svg;    // SVG cargado, aún sin colocar
     std::string m_pending_sticker_name;   // nombre a mostrar (stem del fichero)
     bool load_sticker_svg_dialog();       // abre file picker, rellena m_pending_sticker_*
-    void place_sticker_at(const ModelVolume* mv, const Vec3f& hit_local);
+    void place_sticker_at(ModelObject* mo, const ModelVolume* mv, const Vec3f& hit_local);
     void render_sticker_section();        // sección "Stickers (SVG)" en Palette
 
     // NEOTKO_STICKER_TAG — modo edición (mover/rotar) de un sticker YA colocado,

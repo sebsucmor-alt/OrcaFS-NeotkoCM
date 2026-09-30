@@ -653,6 +653,9 @@ public:
     // block starts or stops covering a layer. That is the degradation F0 documented and the reason
     // this variant exists: same slicing, no union across volumes, identity kept.
     std::vector<SupportZoneSlices> slice_support_enforcers_per_zone() const;
+    // NEOTKO_SUPPORTZONES_TAG s343e — los SUPPORT_BLOCKER marcados como corte, unidos, por capa de
+    // objeto. Vacío si no hay ninguno. Lo consume la resta final de PrintObjectSupportMaterial.
+    std::vector<Polygons>          slice_support_cutters() const;
 
     // NEOTKO_SUPPORTZONES_TAG s286c F4 — el material por zona necesita que la identidad SOBREVIVA
     // hasta el toolpath, y hoy no lo hace: bottom_contact_layers_and_layer_support_areas() calcula

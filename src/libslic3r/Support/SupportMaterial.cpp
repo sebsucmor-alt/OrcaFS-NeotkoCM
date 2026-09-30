@@ -581,6 +581,49 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
 //    intermediate_layers.clear();
 //    interface_layers.clear();
 
+    // NEOTKO_SUPPORTZONES_TAG s343e — LOS CORTES, restados de TODAS las capas de soporte.
+    //
+    // 🔑 Un bloqueador de Orca sólo quita semillas (voladizos y techos): una columna que baja desde
+    // arriba lo atraviesa, porque para entonces ya es soporte y nadie vuelve a mirarlo. Un corte
+    // (SUPPORT_BLOCKER con `neotko_support_cut`) se resta aquí, en el último punto en que el soporte
+    // todavía son polígonos por capa — contacto, interfaz, base, raft — y antes de las trayectorias.
+    // La capa de objeto se busca por `print_z`: las de soporte no están sincronizadas con las del
+    // objeto (se funden y recortan en generate_base_layers).
+    {
+        const std::vector<Polygons> cutters = object.slice_support_cutters();
+        if (! cutters.empty() && object.layer_count() > 0) {
+            std::vector<double> obj_z;
+            obj_z.reserve(object.layer_count());
+            for (const Layer *l : object.layers())
+                obj_z.push_back(l->print_z);
+            auto cut_one = [&](SupportGeneratorLayer *sl) {
+                if (sl == nullptr || sl->polygons.empty())
+                    return;
+                // La capa de objeto que contiene la mitad de la capa de soporte.
+                const double zmid = sl->print_z - 0.5 * sl->height;
+                auto it = std::lower_bound(obj_z.begin(), obj_z.end(), zmid);
+                if (it == obj_z.end())
+                    it = std::prev(obj_z.end());
+                const size_t idx = size_t(it - obj_z.begin());
+                if (idx >= cutters.size() || cutters[idx].empty())
+                    return;
+                const double before = area(sl->polygons);
+                sl->polygons = diff(sl->polygons, cutters[idx]);
+                const double removed = before - area(sl->polygons);
+                if (removed > 0. && Slic3r::NeoDebug::enabled(Slic3r::NeoDebug::WAVESUPPORT)) {
+                    std::ostringstream o;
+                    o << std::fixed << std::setprecision(3) << "[CUT] capa_objeto=" << idx
+                      << " z=" << sl->print_z << " quitado=" << unscale<double>(unscale<double>(removed)) << "mm2";
+                    Slic3r::NeoDebug::write(Slic3r::NeoDebug::WAVESUPPORT, o.str());
+                }
+            };
+            for (SupportGeneratorLayersPtr *v : { &raft_layers, &bottom_contacts, &top_contacts, &intermediate_layers,
+                                                  &interface_layers, &base_interface_layers })
+                for (SupportGeneratorLayer *sl : *v)
+                    cut_one(sl);
+        }
+    }
+
 #ifdef SLIC3R_DEBUG
     SupportGeneratorLayersPtr layers_sorted =
 #endif // SLIC3R_DEBUG
@@ -3497,7 +3540,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
                 Polygons all_stumps;
                 for (const ZoneStump &st : zone_stumps[zi])
                     polygons_append(all_stumps, st.poly);
-                size_t n_unreached = 0;
+                size_t   n_unreached = 0;
                 for (const ExPolygon &isl : union_ex(projection)) {
                     const Polygons part = to_polygons(isl);
                     if (! intersection(part, all_stumps).empty())
@@ -3518,6 +3561,57 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
                         << "  🚨 esta raíz no da para todo: " << n_unreached
                         << " isla(s) no alcanzan ningún tocón con " << zone_stumps[zi].size()
                         << " plantado(s) — planta otro tocón bajo esa zona, o sube el ángulo");
+                // NEOTKO_SUPPORTZONES_TAG s343 — LO QUE NO CABE EN LOS TOCONES, BAJA A PLOMO.
+                //
+                // 🚨 Medido en la tabla de surf (dos slices del dueño). Primero fueron 19 islas de la
+                // cola que no llegaban a ningún tocón. Al arreglar sólo ésas, seguía fallando: en la
+                // capa de abajo `fuera_sin_v=53.97 mm2` de 57.95. La columna SÍ tocaba sus tocones,
+                // pero llegaba ancha: el tramo guiado eran 2 capas (hueco de 1 mm a 45°), sin tiempo
+                // para contraerse, y el recorte contra la banda de tocones se comía todo lo que
+                // sobresalía de ellos. En la cama: el soporte acababa a 2.6 mm, flotando.
+                //
+                // 🔑 Así que la regla es de área, no de isla: en la tapa del tocón, TODO lo que queda
+                // fuera de los tocones pasa al flujo GENERAL (`overhangs_projection`), el de los
+                // voladizos automáticos, que baja recto y que el motor ya recorta contra la pieza
+                // capa a capa. Lo que sí cae sobre un tocón sigue por el tocón. El aviso de arriba
+                // sigue diciendo qué islas no llegaron.
+                {
+                    const Polygons overflow = diff(projection, all_stumps);
+                    if (! overflow.empty()) {
+                        const double overflow_area = area(overflow);
+                        projection = intersection(projection, all_stumps);
+                        // Con «sólo sobre la cama» la base del soporte sale de `enforcers_projection`
+                        // (ver `base` más abajo), así que ahí también, o se perdería igual.
+                        if (buildplate_only)
+                            polygons_append(enforcers_projection, overflow);
+                        polygons_append(overhangs_projection, overflow);
+                        CORRIDOR_LOG("[CORRIDOR] layer=" << layer_id << " zona=" << zones[zi].priority
+                            << " s343 fuera_de_tocones=" << unscale<double>(unscale<double>(overflow_area)) << "mm2"
+                            << " (islas_sin_tocon=" << n_unreached << ")"
+                            << " -> bajan a plomo por el flujo general (soporte normal hasta la cama)");
+                    }
+                }
+            }
+            // NEOTKO_SUPPORTZONES_TAG s343g — Y POR DEBAJO DE LA TAPA, LO MISMO, CAPA A CAPA.
+            //
+            // 🚨 Medido en el tercer slice de la tabla: la tapa (capa 12) bajó a plomo 134 mm², pero
+            // en la capa 11 se perdieron otros 43 (`fuera_sin_v=43.41`). Es contacto NUEVO que el
+            // pie siembra justo ahí, expandido por la rejilla un poco más allá de la banda de
+            // tocones; el recorte de la capa siguiente se lo comía y quedaba un soporte colgando a
+            // un par de milímetros de la cama. Así que en toda la banda de tocones, lo que sobresale
+            // de su sección pasa al flujo general antes del recorte, igual que en la tapa.
+            if (zone_guided[zi] != 0 && layer_id < zone_stump_top[zi] && ! corridor_here.empty()) {
+                const Polygons overflow = diff(projection, corridor_here);
+                if (! overflow.empty()) {
+                    const double overflow_area = area(overflow);
+                    projection = intersection(projection, corridor_here);
+                    if (buildplate_only)
+                        polygons_append(enforcers_projection, overflow);
+                    polygons_append(overhangs_projection, overflow);
+                    CORRIDOR_LOG("[CORRIDOR] layer=" << layer_id << " zona=" << zones[zi].priority
+                        << " s343g banda_de_tocones fuera=" << unscale<double>(unscale<double>(overflow_area))
+                        << "mm2 -> baja a plomo por el flujo general");
+                }
             }
             if (corridor_above.empty())
                 continue;

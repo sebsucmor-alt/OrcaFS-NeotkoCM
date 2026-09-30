@@ -10,6 +10,7 @@
 #include "../../ExPolygon.hpp"
 #include "../../BoundingBox.hpp"
 #include "../../TriangleMesh.hpp"
+#include "../../TriangleMeshSlicer.hpp"
 #include "../../libslic3r.h"
 
 #include <algorithm>
@@ -111,6 +112,7 @@ size_t count_verts(const ExPolygons& polys)
 // request is out of range or unset). Applies the three guards and a
 // progressive Douglas-Peucker pass; returns null + error on failure.
 std::unique_ptr<SurfaceCollection> build_from_mesh(const TriangleMesh& mesh, double slice_z_mm,
+                                                   double closing_radius_mm, double resolution_mm,
                                                    const std::vector<Point>& picks,
                                                    ExPolygons& islands_all, bool& needs_pick,
                                                    std::string& err)
@@ -152,7 +154,11 @@ std::unique_ptr<SurfaceCollection> build_from_mesh(const TriangleMesh& mesh, dou
         return nullptr;
     }
 
-    std::vector<ExPolygons> layers = mesh.slice(std::vector<double>{z});
+    // 🚨 s340 — el MISMO corte que `PrintObjectSlice` (cierre + resolución), no `TriangleMesh::slice()`.
+    MeshSlicingParamsEx sp;
+    sp.closing_radius = float(std::max(0.0004, closing_radius_mm));
+    sp.resolution     = std::max(0.0, resolution_mm);
+    std::vector<ExPolygons> layers = slice_mesh_ex(mesh.its, std::vector<float>{ float(z) }, sp);
     if (layers.empty() || layers.front().empty()) {
         err = "preview: slice plane missed the mesh — try a different layer";
         return nullptr;
@@ -278,7 +284,7 @@ GeometryBuildResult build_surface_collection(const PreviewGeometrySource& src)
                     out.error = "preview: FromMesh source has no mesh snapshot";
                     break;
                 }
-                out.surfaces = build_from_mesh(*src.mesh, src.slice_z_mm, src.island_picks,
+                out.surfaces = build_from_mesh(*src.mesh, src.slice_z_mm, src.closing_radius_mm, src.resolution_mm, src.island_picks,
                                                out.islands_all, out.needs_pick, out.error);
                 break;
             }

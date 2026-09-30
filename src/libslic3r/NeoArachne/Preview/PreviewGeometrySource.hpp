@@ -39,6 +39,12 @@ struct PreviewGeometrySource {
     GeometryKind                          kind        = GeometryKind::W;
     std::shared_ptr<const TriangleMesh>   mesh;            // only used when kind == FromMesh
     double                                slice_z_mm  = -1.0;  // only honoured by FromMesh; <0 means "use mid-Z"
+    // 🚨 s340 — FromMesh cortaba con `TriangleMesh::slice()` (cierre 0.0004 mm) y el laminado con
+    //    `slice_closing_radius` (0.049 por defecto) + `resolution`. El cierre aplana los picos agudos de
+    //    los agujeros (la A de NeoStroke-TEST: vértice del agujero ~0.1 mm más bajo) y con eso el plan de
+    //    NeoStroke cambiaba (pares=2 en el laminado, 0 en el visor). Lo rellena el panel desde la config.
+    double                                closing_radius_mm = 0.049;
+    double                                resolution_mm     = 0.0025;
 
     // NEOTKO_NEOSTROKE_TAG s335 — ISLAS ELEGIDAS. Vacío = todas (el comportamiento de siempre).
     // Una isla se conserva si CONTIENE alguno de estos puntos.
@@ -48,6 +54,11 @@ struct PreviewGeometrySource {
     //    el deslizador se estuvieran mirando otras islas sin enterarse.
     // 🚨 Y por PUNTO, nunca por índice: las islas se recalculan en cada corte y su orden cambia.
     std::vector<Point>                    island_picks;
+
+    // NEOTKO_NEOSTROKE_TAG s342 — AJUSTES POR ISLA: objeto → marco del corte (XY afín, como
+    // `PerimeterGenerator::ns_obj_to_slice`). El gizmo corta en coordenadas de PLACA, así que aquí va la XY de la
+    // matriz de la instancia. Identidad = el visor no sabe dónde caen las anclas (las islas usan los del objeto).
+    double                                obj_to_slice[6] = { 1., 0., 0., 0., 1., 0. };
 
     // NEOTKO_NEOSTROKE_TAG s337 — sólo FromSlices: el corte y sus topes. Los topes del panel viejo
     // (8 islas, 2000 vértices) eran para no colgar un panel wx que relaminaba en cada tic; el gizmo lamina

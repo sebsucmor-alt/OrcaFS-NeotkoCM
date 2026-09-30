@@ -43,6 +43,9 @@ struct FieldParams {
     // 🚨 s338 — la frontera de siempre (*Widest shape handled*): una isla con alguna sección más ancha que esto es
     //    una PIEZA, no una letra. El campo no la toca y la hace el planificador viejo, que deja lo ancho al relleno.
     double max_stroke_w = 5.0;
+    // 🏁 s340 — MODO BANDA (`neostroke_band_mm`): > 0 = la zona útil se queda en esta franja junto al muro y el centro
+    //    va al relleno normal (paso 4 de NeoStroke.cpp, que ya cede todo lo no cubierto). 0 = auto, como siempre.
+    double band = 0.0;
     // 🚨 s338 — paso de los carriles. Las curvas de nivel salen con un punto por CELDA (0.01 mm): el remate
     //    (`close_gaps`) mira cada punto y une cada segmento, y en el primer laminado se comió el 90 % del tiempo
     //    (209 de 226 ms en una letra, 100-170 s en una isla grande). El motor viejo trabaja a 0.15.

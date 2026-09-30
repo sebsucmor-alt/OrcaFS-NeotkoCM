@@ -113,8 +113,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/Field.hpp
     GUI/FilamentColorUtils.cpp
     GUI/FilamentColorUtils.hpp
+    GUI/FilamentGroupDialog.cpp
+    GUI/FilamentGroupDialog.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
+    GUI/FlowTypeHelper.cpp
+    GUI/FlowTypeHelper.hpp
+    GUI/HighFlowCompat.cpp
+    GUI/HighFlowCompat.hpp
     GUI/filamentsync/FilamentColorMapBox.cpp
     GUI/filamentsync/FilamentColorMapBox.hpp
     GUI/filamentsync/FilamentColorMapBoxGroup.cpp
@@ -366,6 +372,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/NeotkoBedNozzleExtras.cpp
     GUI/NeotkoBedNozzleExtras.hpp
     GUI/MixedFilamentDialog.hpp
+    GUI/MixedFilamentBatchDialog.cpp
+    GUI/MixedFilamentBatchDialog.hpp
     GUI/MixedGradientSelector.hpp
     GUI/MixedGradientSelector.cpp
     GUI/MixedColorMatchPanel.cpp
@@ -456,6 +464,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SingleChoiceDialog.hpp
     GUI/SliceInfoPanel.cpp
     GUI/SliceInfoPanel.hpp
+    GUI/SliceModePopup.cpp
+    GUI/SliceModePopup.hpp
     GUI/SlicingProgressNotification.cpp
     GUI/SlicingProgressNotification.hpp
     GUI/StatusPanel.cpp
@@ -479,6 +489,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/TaskManager.hpp
     GUI/TextLines.cpp
     GUI/TextLines.hpp
+    GUI/ThumbnailView.hpp
     GUI/TickCode.cpp
     GUI/TickCode.hpp
     GUI/UnsavedChangesDialog.cpp
@@ -578,10 +589,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/SMPhysicalPrinterDialog.cpp
     GUI/SSWCP.cpp
     GUI/SSWCP.hpp
+    GUI/WebSocketDebugServer.cpp
+    GUI/WebSocketDebugServer.hpp
     GUI/DownloadManager.cpp
     GUI/DownloadManager.hpp
     GUI/GenericDownloadDialog.cpp
     GUI/GenericDownloadDialog.hpp
+    GUI/Timelapse/TimelapseDownloadPopup.cpp
+    GUI/Timelapse/TimelapseDownloadPopup.hpp
     GUI/WebPresetDialog.hpp
     GUI/WebPresetDialog.cpp
     GUI/WebSMUserLoginDialog.cpp
@@ -617,6 +632,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/ESP3D.hpp
     Utils/FileHelp.cpp
     Utils/FileHelp.hpp
+    Utils/FileDecrypt.cpp
+    Utils/FileDecrypt.hpp
     Utils/FixModelByWin10.cpp
     Utils/FixModelByWin10.hpp
     Utils/FlashAir.cpp
@@ -639,6 +656,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MKS.hpp
     Utils/NetworkAgent.cpp
     Utils/NetworkAgent.hpp
+    Utils/SnapLogClient.cpp
+    Utils/SnapLogClient.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp

@@ -257,7 +257,7 @@ private:
 
     void onLeftDown(wxMouseEvent& evt)
     {
-        int row = hitTestRow(evt.GetY() / GetDPIScaleFactor(),
+        int row = hitTestRow(ToDIP(evt.GetY()),
                              static_cast<int>(m_dataList.size()));
         if (row < 0) {
             return;

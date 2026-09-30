@@ -155,6 +155,10 @@ public:
     // even when layer_id <= raft_layers, WITHOUT relaxing it for ordinary raft/bed layers (where
     // this stays false). Set in LayerRegion::make_perimeters(); default false = stock behaviour.
     bool                         has_gravity_floor = false;
+    // NEOTKO_NEOSTROKE_TAG s342 — AJUSTES POR ISLA: objeto → marco de laminado, sólo la parte XY de
+    // `PrintObject::trafo_centered()` (x' = a·x + b·y + c; y' = d·x + e·y + f). Las anclas viven en coordenadas del
+    // objeto; las islas, en el marco de laminado. Identidad = nadie lo ha puesto (visor, tests).
+    double                       ns_obj_to_slice[6] = { 1., 0., 0., 0., 1., 0. };
     double                       layer_height;
     int                          layer_id;
     coordf_t                     slice_z;

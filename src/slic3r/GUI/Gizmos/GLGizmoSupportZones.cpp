@@ -23,6 +23,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Feature/SupportZones/SupportZoneProbe.hpp"
 #include "libslic3r/NeoDebug.hpp"
+#include "libslic3r/MeshBoolean.hpp"   // s343f — aplicar los cortes
 
 #include <nlohmann/json.hpp>
 
@@ -152,6 +153,9 @@ void GLGizmoSupportZones::on_set_state()
         //
         // La lección, que ya está pagada dos veces en esta sesión: dentro de `on_set_state(Off)` no
         // se puede dar por hecho que el modelo siga entero.
+        // s343e — el corte a medio dibujar no sobrevive a cerrar el gizmo (sus puntos son de pantalla).
+        m_cut_mode = false;
+        m_cut_points.clear();
         clear_pick();
         m_forced_snug       = false;
         m_lean_angle_seeded = false;
@@ -266,7 +270,11 @@ void GLGizmoSupportZones::rebuild_zone_rows()
         row.priority   = priority ++;
         row.name       = v->name.empty() ? std::string("?") : v->name;
 
-        const SupportZones::ZoneProbe probe = SupportZones::probe_zone(*mo, *v, step);
+        // s343 — con la orientación de la instancia: el «¿coge algo?» de la tarjeta mira el abajo
+        // del mundo, igual que el mapa.
+        Transform3d orient = mo->instances.empty() ? Transform3d::Identity() : mo->instances.front()->get_matrix();
+        orient.translation() = Vec3d::Zero();
+        const SupportZones::ZoneProbe probe = SupportZones::probe_zone(*mo, *v, step, orient);
         row.cells_in_zone = probe.cells_inside_zone;
         row.lit           = probe.lit.size();
         row.sterile       = probe.sterile();
@@ -859,7 +867,7 @@ void GLGizmoSupportZones::on_render()
     //
     // Se hace por frame a propósito: los modos cambian desde el panel, desde el teclado y desde el
     // propio ratón, y un solo sitio que lo sincroniza no se puede olvidar de ninguno.
-    m_parent.enable_moving(! (m_target_pick_mode || m_landing_pick_mode || m_painting));
+    m_parent.enable_moving(! (m_target_pick_mode || m_landing_pick_mode || m_painting || m_cut_mode));
 
     // Re-assert the shading the way GLGizmoFdmSupports does: anything else in the app may have
     // turned it off between frames, and it silently going away mid-session reads as a bug.
@@ -870,6 +878,7 @@ void GLGizmoSupportZones::on_render()
     render_pick_overlays();
     render_reach();
     render_preview();
+    render_cut_polygon();   // s343e — va en pantalla, encima de todo
 
     // NEOTKO_SUPPORTZONES_TAG s299f — LA TAPA DEL CORTE.
     //
@@ -1035,6 +1044,52 @@ bool GLGizmoSupportZones::resolve_landing_plumb(Vec3d &out_pos, bool &out_on_bed
 
 bool GLGizmoSupportZones::on_mouse(const wxMouseEvent &mouse_event)
 {
+    // NEOTKO_SUPPORTZONES_TAG s343e — EL CORTE va primero y aparte: es un modo propio, con su gesto,
+    // y no debe mezclarse con los picks de la zona.
+    if (m_cut_mode) {
+        const Vec2d cpos(mouse_event.GetX(), mouse_event.GetY());
+        if (mouse_event.LeftDown()) {
+            // Igual que el resto del gizmo: el DOWN sólo se recuerda, así que arrastrar gira la vista.
+            m_mouse_down_pos = cpos;
+            m_mouse_down     = true;
+            return false;
+        }
+        if (mouse_event.Moving() || mouse_event.Dragging()) {
+            m_parent.set_as_dirty();   // la goma elástica hasta el cursor
+            return false;
+        }
+        if (mouse_event.LeftUp()) {
+            const bool was_down = m_mouse_down;
+            m_mouse_down = false;
+            if (was_down && (cpos - m_mouse_down_pos).norm() > CLICK_SLOP_PX) {
+                // Eso fue un giro de cámara: los vértices son de PANTALLA y ya no apuntan a lo
+                // mismo. Mejor empezar de cero que cortar algo que no es lo que se dibujó.
+                m_cut_points.clear();
+                m_parent.set_as_dirty();
+                return false;
+            }
+            if (m_cut_points.size() >= 3 && (cpos - m_cut_points.front()).norm() <= CUT_CLOSE_RADIUS_PX) {
+                // 🚨 Tocar el modelo fuera del camino del ratón: mismo motivo que borrar o duplicar
+                // una zona (re-entrada de la lista de objetos, lección de s299).
+                std::vector<Vec2d> pts = std::move(m_cut_points);
+                m_cut_points.clear();
+                wxGetApp().CallAfter([this, pts]() { create_cut(pts); });
+            } else {
+                m_cut_points.push_back(cpos);
+            }
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (mouse_event.RightDown())
+            return ! m_cut_points.empty();
+        if (mouse_event.RightUp() && ! m_cut_points.empty()) {
+            m_cut_points.clear();
+            m_parent.set_as_dirty();
+            return true;
+        }
+        return false;
+    }
+
     const bool picking = m_target_pick_mode || (m_landing_pick_mode && m_has_target)
                       || (m_stump_pick_mode && m_has_target);
     if (! picking) {
@@ -1589,6 +1644,20 @@ size_t GLGizmoSupportZones::paint_facets(int seed, const Vec3d &hit_world, doubl
               + m_world_trafo * m_mesh.its.vertices[t[2]].cast<double>()) / 3.;
     };
 
+    // NEOTKO_SUPPORTZONES_TAG s343 M1 — el filtro de voladizo. Mismo número que el mapa rojo
+    // (`overhang_normal_z_cut()`), pero con el umbral CONGELADO del gesto. La goma no filtra: lo que
+    // hay que poder quitar es lo que esté marcado, sea lo que sea.
+    const bool     filter  = ! erase && m_paint_overhang_only;
+    const double   cut     = - std::cos(Geometry::deg2rad(double(m_paint_cut_deg)));
+    const Matrix3d nrm_mat = m_world_trafo.linear().inverse().transpose();
+    auto leans_enough = [&](int f) -> bool {
+        if (f >= int(m_face_normals.size()))
+            return false;
+        Vec3d n = nrm_mat * m_face_normals[f].cast<double>();
+        const double l = n.norm();
+        return l > 1e-12 && n.z() / l <= cut;
+    };
+
     size_t changed = 0;
     std::vector<int> stack { seed };
     m_visit_stamp[seed] = m_visit_epoch;
@@ -1601,7 +1670,9 @@ size_t GLGizmoSupportZones::paint_facets(int seed, const Vec3d &hit_world, doubl
         ++ visits;
         if ((centroid(f) - hit_world).squaredNorm() > r2)
             continue;                    // fuera del pincel: ni se pinta ni se sigue por aquí
-        if (m_painted[f] != want) {
+        // 🔑 Fuera del filtro se SIGUE andando por aquí (las paredes llevan de una panza a otra),
+        // sólo no se marca.
+        if (m_painted[f] != want && (! filter || leans_enough(f))) {
             m_painted[f] = want;
             if (want)
                 m_painted_list.push_back(f);
@@ -2197,6 +2268,10 @@ bool GLGizmoSupportZones::paint_at(const Vec2d &mouse_pos, bool erase)
             && std::abs(m_stamps.back().r - r) < 1e-6)
             return false;
         if (m_stamps.empty()) {
+            // s343 M1 — una zona NUEVA congela el umbral del mando en su primera pincelada. Al
+            // editar una guardada se queda el suyo (`begin_edit_zone`).
+            if (m_editing_volume_idx < 0)
+                m_paint_cut_deg = m_overhang_threshold_deg;
             m_brush_seed_facet    = live->facet_idx;
             m_target_facet_idx    = live->facet_idx;
             m_target_world_pos    = live->world_pos;
@@ -2400,22 +2475,104 @@ std::vector<GLGizmoSupportZones::StumpSpot> GLGizmoSupportZones::all_stumps() co
 // constructor y el aviso del hueco— y porque el `0.4` de abajo es una regla, no un detalle.
 bool GLGizmoSupportZones::block_tree_head_z(double &z_bot, double &z_top) const
 {
-    if (! m_has_target)
+    // s343 M6 — la cota sale de `head_foot()`, que es el único que sabe qué parte de lo pintado es
+    // cabeza. Antes se leía del mapa de alturas de TODA la máscara, y por ahí la franja pegada a la
+    // cama arrastraba `z_bot` hasta cero.
+    const HeadFoot &hf = head_foot();
+    if (! hf.ok || hf.head.empty())
         return false;
-    const ZoneMask *mk = mask(m_target_facet_idx,
-                              Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
-    if (mk == nullptr || mk->area.empty())
-        return false;
-    // El mismo medio milímetro de siempre: el techo del bloque se levanta por encima de la frontera
-    // de capa para que la primera capa de contacto caiga dentro y no justo en el borde.
-    z_top = mk->z_high + 0.5;
-    z_bot = mk->z_low;
-    // Un área pintada sobre una cara plana da `z_low == z_high` y el prisma saldría sin altura. Se
-    // le da el mínimo para que exista y se pueda rebanar; el motor no necesita más de la cabeza que
-    // saber dónde agarra.
-    if (z_top - z_bot < 0.4)
-        z_bot = z_top - 0.4;
+    z_bot = hf.head_bot;
+    z_top = hf.head_top;
     return true;
+}
+
+// NEOTKO_SUPPORTZONES_TAG s343 M6 — CABEZA Y PIE
+//
+// Reparte los triángulos pintados en dos: los que quedan ENTEROS por debajo del suelo (tapa del
+// tocón más alta + 1 mm) son pie; el resto, cabeza. Se decide por triángulo y no recortando la
+// huella en XY, porque en XY la franja baja y la cabeza se solapan (el canto de la tabla).
+//
+// 🔑 Cotas, y por qué esas:
+//   · cabeza: de max(su z más baja, suelo) a su z más alta + 0.5 (el medio milímetro de siempre),
+//     y como mínimo 0.4 mm de alto, creciendo HACIA ARRIBA para no invadir el hueco;
+//   · pie: de la cama (−0.5, como el tocón) o de la base del tocón más bajo, hasta suelo − 0.4.
+//     Queda pegado a la banda de tocones (el motor lo toma por uno más) y deja ≥ 0.4 mm de capas
+//     vacías bajo la cabeza, que es lo que reconoce el árbol.
+// Sin tocones no hay suelo (−inf): todo es cabeza y esto da lo mismo que antes.
+const GLGizmoSupportZones::HeadFoot &GLGizmoSupportZones::head_foot() const
+{
+    const std::vector<StumpSpot> stumps = all_stumps();
+    double floor_z  = - std::numeric_limits<double>::max();
+    double foot_bot =   std::numeric_limits<double>::max();
+    for (const StumpSpot &st : stumps) {
+        floor_z  = std::max(floor_z, st.p.z() + STUMP_HEIGHT_MM + 1.0);
+        foot_bot = std::min(foot_bot, st.on_bed ? -0.5 : st.p.z());
+    }
+    if (m_hf_stamp == m_stamp_stamp && m_hf_trafo.isApprox(m_world_trafo)
+        && m_hf_floor == floor_z && m_hf_fbot == foot_bot)
+        return m_hf_cache;
+
+    HeadFoot hf;
+    hf.floor_z  = floor_z;
+    hf.foot_bot = foot_bot;
+    Polygons head_tris, foot_tris;
+    double hz0 = std::numeric_limits<double>::max(), hz1 = std::numeric_limits<double>::lowest();
+    for (int f : m_painted_list) {
+        if (f < 0 || f >= int(m_mesh.its.indices.size()))
+            continue;
+        const Vec3i32 t = m_mesh.its.indices[f];
+        Points p;
+        p.reserve(3);
+        double z0 = std::numeric_limits<double>::max(), z1 = std::numeric_limits<double>::lowest();
+        for (int k = 0; k < 3; ++ k) {
+            const Vec3d w = m_world_trafo * m_mesh.its.vertices[t[k]].cast<double>();
+            p.emplace_back(scaled<coord_t>(w.x()), scaled<coord_t>(w.y()));
+            z0 = std::min(z0, w.z());
+            z1 = std::max(z1, w.z());
+        }
+        Polygon q(std::move(p));
+        if (q.area() == 0.)
+            continue;                    // de canto: en XY es una línea (igual que painted_area_world)
+        if (! q.is_counter_clockwise())
+            q.reverse();
+        if (z1 < floor_z) {
+            foot_tris.emplace_back(std::move(q));
+        } else {
+            hz0 = std::min(hz0, z0);
+            hz1 = std::max(hz1, z1);
+            head_tris.emplace_back(std::move(q));
+        }
+    }
+    // El mismo micro-offset que cierra las costuras en `painted_area_world`.
+    auto to_area = [](const Polygons &tris) {
+        ExPolygons out;
+        if (tris.empty())
+            return out;
+        out = union_ex(offset(tris, scaled<float>(0.002f)));
+        // Con el filtro de voladizo quedan migas de uno o dos triángulos sueltos (medido en la
+        // tabla: 4-12 islas de menos de 1 mm²). Un prisma por miga no sujeta nada y ensucia el
+        // corte: fuera.
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [](const ExPolygon &e) { return e.area() < scaled<double>(1.0) * scaled<double>(1.0); }),
+                  out.end());
+        return out;
+    };
+    hf.head = to_area(head_tris);
+    hf.foot = to_area(foot_tris);
+    if (! hf.head.empty()) {
+        hf.head_bot = std::max(hz0, floor_z);
+        hf.head_top = std::max(hz1 + 0.5, hf.head_bot + 0.4);
+    }
+    if (! hf.foot.empty())
+        hf.foot_top = floor_z - 0.4;
+    hf.ok = ! hf.head.empty() || ! hf.foot.empty();
+
+    m_hf_cache = std::move(hf);
+    m_hf_stamp = m_stamp_stamp;
+    m_hf_trafo = m_world_trafo;
+    m_hf_floor = floor_z;
+    m_hf_fbot  = foot_bot;
+    return m_hf_cache;
 }
 
 double GLGizmoSupportZones::block_tree_gap_mm() const
@@ -2446,17 +2603,16 @@ bool GLGizmoSupportZones::build_block_tree_mesh(TriangleMesh &out_world) const
 {
     if (! m_has_target)
         return false;
-    const ZoneMask *mk = mask(m_target_facet_idx,
-                              Vec2d(m_target_world_pos.x(), m_target_world_pos.y()));
-    if (mk == nullptr || mk->area.empty())
-        return false;
     const std::vector<StumpSpot> stumps = all_stumps();
     if (stumps.empty())
         return false;
-
-    double head_bot = 0., head_top = 0.;
-    if (! block_tree_head_z(head_bot, head_top))
+    // s343 M6 — la cabeza y el pie salen del mismo dueño. La cabeza puede faltar (todo lo pintado
+    // cae bajo el suelo): entonces la zona es pie + tocones y el panel lo avisa.
+    const HeadFoot &hf = head_foot();
+    if (! hf.ok)
         return false;
+    const double head_bot = hf.head_bot;
+    const double head_top = hf.head_top;
 
     // --- la cabeza ------------------------------------------------------------------------------
     // El mando `head` se conserva y sigue significando lo mismo: meter o sacar el borde de lo
@@ -2464,9 +2620,9 @@ bool GLGizmoSupportZones::build_block_tree_mesh(TriangleMesh &out_world) const
     // metiendo devuelve VACÍO, que es una respuesta y no un sólido imposible (s299).
     const double     e   = double(m_footprint_shrink_mm);
     const ExPolygons raw = (std::abs(e) < 1e-6)
-        ? mk->area
-        : offset_ex(mk->area, scaled<float>(- e), ClipperLib::jtRound);
-    if (raw.empty())
+        ? hf.head
+        : offset_ex(hf.head, scaled<float>(- e), ClipperLib::jtRound);
+    if (! hf.head.empty() && raw.empty())
         return false;
 
     // 🚨 s301b — Y SE SIMPLIFICA, QUE NO ES COSMÉTICA. Medido en el primer build: la cabeza salía
@@ -2480,12 +2636,13 @@ bool GLGizmoSupportZones::build_block_tree_mesh(TriangleMesh &out_world) const
     // `ring_outline_world()` dibuja el contorno del panel: por debajo de la extrusión, o sea
     // invisible en la pieza y en el preview.
     const ExPolygons head = expolygons_simplify(raw, scaled<double>(0.05));
-    if (head.empty())
+    if (! hf.head.empty() && head.empty())
         return false;
 
     indexed_triangle_set its;
-    zone_extrude_prism(head, head_bot, head_top, its);
-    if (its.indices.empty())
+    if (! head.empty())
+        zone_extrude_prism(head, head_bot, head_top, its);
+    if (! hf.head.empty() && its.indices.empty())
         return false;
     const size_t head_tris = its.indices.size();
     // 🔎 El desnivel del techo, MEDIDO y no afirmado. Es el número con el que se juzga si el
@@ -2498,6 +2655,19 @@ bool GLGizmoSupportZones::build_block_tree_mesh(TriangleMesh &out_world) const
         roof_lo = std::min(roof_lo, double(its.vertices[i].z()));
         roof_hi = std::max(roof_hi, double(its.vertices[i].z()));
     }
+
+    // --- el pie (s343 M6) -----------------------------------------------------------------------
+    // Lo pintado bajo el suelo, como prisma desde la cama. No lleva el mando `head`: no es la cabeza
+    // y encogerlo dejaría sin sujetar justo la franja que se ha pintado.
+    double foot_area_mm2 = 0.;
+    if (! hf.foot.empty() && hf.foot_top - hf.foot_bot >= 0.2) {
+        const ExPolygons foot = expolygons_simplify(hf.foot, scaled<double>(0.05));
+        for (const ExPolygon &ep : foot)
+            foot_area_mm2 += unscaled<double>(unscaled<double>(ep.area()));
+        zone_extrude_prism(foot, hf.foot_bot, hf.foot_top, its);
+    }
+    if (its.indices.empty())
+        return false;
 
     // --- los tocones ----------------------------------------------------------------------------
     // Redondos y todos del mismo tamaño: un tocón no es una forma que se dibuje, es un sitio donde
@@ -2546,15 +2716,18 @@ bool GLGizmoSupportZones::build_block_tree_mesh(TriangleMesh &out_world) const
         //
         // Y el `desnivel` tiene que ser 0.00 EXACTO. Con el techo plano ya no es «por debajo de
         // 1 mm»: cualquier otra cosa significa que alguien le devolvió el mapa de alturas.
-        char b[320];
+        char b[420];
+        // s343 — `pie=` y `suelo=`: lo pintado bajo el suelo que se volvió pie (M6), y el
+        // `voladizo=` del pincel (M1), con su umbral congelado.
         std::snprintf(b, sizeof(b),
                       "cabeza    %s  verts=%d tris=%d (cabeza %d)  aristas_abiertas=%d"
                       "  huella=%.1fx%.1f mm  techo=%.2f..%.2f (desnivel %.2f)"
-                      "  tocones=%d ø%.1f  hueco=%.2f mm%s",
+                      "  tocones=%d ø%.1f  hueco=%.2f mm  pie=%.0f mm2 suelo=%.2f  voladizo=%s(%.0f°)%s",
                       open_edges == 0 ? "cerrada" : "🚨 MALLA ABIERTA",
                       int(its.vertices.size()), int(its.indices.size()), int(head_tris), int(open_edges),
                       bx1 - bx0, by1 - by0, roof_lo, roof_hi, roof_hi - roof_lo,
                       int(n_stumps), double(m_stump_size_mm), gap,
+                      foot_area_mm2, hf.floor_z, m_paint_overhang_only ? "on" : "off", double(m_paint_cut_deg),
                       flipped ? "  🚨 el sólido salió del revés y se ha volteado" : "");
         NeoDebug::write(NeoDebug::SUPPORTZONES, b);
         if (gap <= 0.)
@@ -3719,6 +3892,11 @@ std::string GLGizmoSupportZones::gesture_to_json(const ZoneGesture &g)
     r["ef"]  = g.edge_foot_mm;
     r["la"]  = g.lean_deg;
     r["lo"]  = { g.lock_offset.x(), g.lock_offset.y(), g.lock_offset.z() };
+    // s343 M1 — sólo si está encendido: un gesto sin filtro sigue produciendo el mismo JSON.
+    if (g.overhang_only) {
+        r["oo"] = true;
+        r["oc"] = g.overhang_cut_deg;
+    }
     return r.dump();
 }
 
@@ -3772,6 +3950,8 @@ bool GLGizmoSupportZones::gesture_from_json(const std::string &text, ZoneGesture
         // s301 — los tocones adicionales. Un gesto v1-v3 no los trae y se queda con la lista vacía,
         // que es exactamente lo que era: su único apoyo es el aterrizaje.
         g.stump_size_mm = r.value("tz", 8.f);
+        g.overhang_only    = r.value("oo", false);
+        g.overhang_cut_deg = r.value("oc", 30.f);
         if (r.contains("tk") && r["tk"].is_array())
             for (const auto &q : r["tk"])
                 if (q.is_array() && q.size() >= 3)
@@ -3838,6 +4018,8 @@ GLGizmoSupportZones::ZoneGesture GLGizmoSupportZones::current_gesture(const Tran
     g.edge_patch_mm = m_footprint_shrink_mm;
     g.edge_foot_mm  = m_footprint_base_mm;
     g.lean_deg      = m_lean_angle_deg;
+    g.overhang_only    = block_tree_mode() && m_paint_overhang_only;
+    g.overhang_cut_deg = m_paint_cut_deg;
     return g;
 }
 
@@ -4029,6 +4211,10 @@ bool GLGizmoSupportZones::begin_edit_zone(int row_idx)
     }
     for (const Vec4d &q : g.stamps)
         m_stamps.push_back({ inst * Vec3d(q.x(), q.y(), q.z()), q.w() });
+    // s343 M1 — el filtro y el umbral DEL GESTO, antes de repintar. Una zona anterior a s343 no los
+    // trae y se repinta sin filtro, igual que se guardó.
+    m_paint_overhang_only = g.overhang_only;
+    m_paint_cut_deg       = g.overhang_cut_deg;
     repaint_from_stamps();
     // s301 — y los tocones vuelven a mundo. Un gesto anterior a la v4 llega sin ellos y se queda
     // con el aterrizaje como único apoyo, que es lo que era.
@@ -4072,6 +4258,10 @@ void GLGizmoSupportZones::end_edit()
 {
     m_editing_volume_idx = -1;
     clear_pick();
+    // s343 M1 — la zona siguiente vuelve al defecto (encendido, con el umbral del mando), aunque la
+    // que se editaba fuera una vieja sin filtro.
+    m_paint_overhang_only = true;
+    m_paint_cut_deg       = m_overhang_threshold_deg;
     m_parent.set_as_dirty();
 }
 
@@ -4278,6 +4468,362 @@ void GLGizmoSupportZones::dump_geometry(const char *why, const TriangleMesh *sol
         L("solid     obj -> " + path);
     }
     L("");
+}
+
+// NEOTKO_SUPPORTZONES_TAG s343e — EL CORTE: dibujo en pantalla (copiado del polígono del Painter
+// Pro, GLGizmoPainterBase::render_cursor_polygon) con la goma hasta el cursor.
+void GLGizmoSupportZones::render_cut_polygon()
+{
+    if (! m_cut_mode || m_cut_points.empty())
+        return;
+    const Size  cnv_size   = m_parent.get_canvas_size();
+    const float cnv_width  = float(cnv_size.get_width());
+    const float cnv_height = float(cnv_size.get_height());
+    if (cnv_width == 0.f || cnv_height == 0.f)
+        return;
+    auto to_ndc = [cnv_width, cnv_height](const Vec2d &p) {
+        return Vec2f(2.f * (float(p.x()) / cnv_width - 0.5f), -2.f * (float(p.y()) / cnv_height - 0.5f));
+    };
+    glsafe(::glLineWidth(1.5f));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    m_cut_overlay.reset();
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::LineStrip, GLModel::Geometry::EVertexLayout::P2 };
+    init_data.color  = { 1.0f, 0.35f, 0.25f, 1.0f };   // rojizo: esto QUITA, no pone
+    const size_t n = m_cut_points.size() + 1;
+    init_data.reserve_vertices(n);
+    init_data.reserve_indices(n);
+    for (size_t i = 0; i < m_cut_points.size(); ++ i) {
+        init_data.add_vertex(to_ndc(m_cut_points[i]));
+        init_data.add_index((unsigned int) i);
+    }
+    init_data.add_vertex(to_ndc(m_parent.get_local_mouse_position()));
+    init_data.add_index((unsigned int) m_cut_points.size());
+    m_cut_overlay.init_from(std::move(init_data));
+    if (GLShaderProgram *shader = wxGetApp().get_shader("flat"); shader != nullptr) {
+        shader->start_using();
+        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+        shader->set_uniform("projection_matrix", Transform3d::Identity());
+        m_cut_overlay.render();
+        shader->stop_using();
+    }
+    glsafe(::glEnable(GL_DEPTH_TEST));
+}
+
+// El sólido del corte: cada vértice de pantalla es un RAYO de cámara; se toma el tramo que cruza
+// la caja del objeto (+5 mm), así que vale igual en perspectiva (sale un tronco de pirámide) que en
+// ortográfica (un prisma). Tapas por triangulación del polígono, paredes entre los dos anillos.
+bool GLGizmoSupportZones::build_cut_mesh(const std::vector<Vec2d> &screen_pts, TriangleMesh &out_world) const
+{
+    const ModelObject *mo = current_object();
+    if (mo == nullptr || mo->instances.empty() || screen_pts.size() < 3)
+        return false;
+    // Un contorno limpio: el usuario puede cruzar las líneas; Clipper lo deshace y nos quedamos con
+    // la isla más grande, sin agujeros (un corte con agujero no es algo que se dibuje así).
+    Points ipts;
+    ipts.reserve(screen_pts.size());
+    for (const Vec2d &p : screen_pts)
+        ipts.emplace_back(scaled<coord_t>(p.x()), scaled<coord_t>(p.y()));
+    ExPolygons ex = union_ex(Polygons{ Polygon(ipts) });
+    if (ex.empty())
+        return false;
+    std::sort(ex.begin(), ex.end(), [](const ExPolygon &a, const ExPolygon &b) { return a.area() > b.area(); });
+    Polygon contour = ex.front().contour;
+    if (contour.points.size() < 3)
+        return false;
+
+    BoundingBoxf3 bb = mo->instance_bounding_box(0);
+    bb.offset(5.);
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    const size_t n = contour.points.size();
+    std::vector<Vec3d> near_ring(n), far_ring(n);
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec2d sp(unscaled<double>(contour.points[i].x()), unscaled<double>(contour.points[i].y()));
+        Vec3d src, dir;
+        CameraUtils::ray_from_screen_pos(camera, sp, src, dir);
+        dir.normalize();
+        // El tramo del rayo dentro de la caja: proyección de sus 8 esquinas sobre el rayo.
+        double t0 = std::numeric_limits<double>::max(), t1 = std::numeric_limits<double>::lowest();
+        for (int c = 0; c < 8; ++ c) {
+            const Vec3d corner((c & 1) ? bb.max.x() : bb.min.x(),
+                               (c & 2) ? bb.max.y() : bb.min.y(),
+                               (c & 4) ? bb.max.z() : bb.min.z());
+            const double t = (corner - src).dot(dir);
+            t0 = std::min(t0, t);
+            t1 = std::max(t1, t);
+        }
+        near_ring[i] = src + dir * t0;
+        far_ring[i]  = src + dir * t1;
+    }
+
+    indexed_triangle_set its;
+    its.vertices.reserve(2 * n);
+    for (const Vec3d &p : near_ring) its.vertices.emplace_back(p.cast<float>());
+    for (const Vec3d &p : far_ring)  its.vertices.emplace_back(p.cast<float>());
+    const std::vector<Vec3i32> cap = Triangulation::triangulate(contour);
+    for (const Vec3i32 &t : cap) {
+        its.indices.emplace_back(t[0], t[1], t[2]);                                 // tapa cercana
+        its.indices.emplace_back(int(n) + t[2], int(n) + t[1], int(n) + t[0]);      // tapa lejana, al revés
+    }
+    for (size_t i = 0; i < n; ++ i) {
+        const int a = int(i), b = int((i + 1) % n);
+        its.indices.emplace_back(a, int(n) + a, int(n) + b);
+        its.indices.emplace_back(a, int(n) + b, b);
+    }
+    // El sentido de las tapas depende de si la pantalla tiene la Y hacia abajo y de hacia dónde
+    // mira la cámara: en vez de adivinarlo, se mide el volumen y se voltea (mismo remate que la cabeza).
+    if (its_volume(its) < 0.f)
+        its_flip_triangles(its);
+    if (its.indices.empty())
+        return false;
+    out_world = TriangleMesh(std::move(its));
+    return ! out_world.empty();
+}
+
+void GLGizmoSupportZones::create_cut(std::vector<Vec2d> screen_pts)
+{
+    if (get_state() != On)
+        return;
+    TriangleMesh mesh;
+    if (! build_cut_mesh(screen_pts, mesh))
+        return;
+    Model *model = m_parent.get_selection().get_model();
+    const int obj_idx = current_object_idx();
+    if (model == nullptr || obj_idx < 0 || obj_idx >= int(model->objects.size()))
+        return;
+    ModelObject *mo = model->objects[obj_idx];
+    if (mo == nullptr || mo->instances.empty())
+        return;
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Add support cut"));
+    // Mismo truco que create_pillar(): add_volume() centra la malla, así que entra un marcador y la
+    // malla de verdad se pone después con nuestras coordenadas.
+    ModelVolume *nv = mo->add_volume(make_cube(1., 1., 1.), ModelVolumeType::SUPPORT_BLOCKER);
+    if (nv == nullptr)
+        return;
+    const Transform3d inst = mo->instances.front()->get_matrix();
+    mesh.transform(inst.inverse());
+    const Vec3d local_centre = mesh.bounding_box().center();
+    mesh.translate(float(- local_centre.x()), float(- local_centre.y()), float(- local_centre.z()));
+    nv->set_mesh(std::move(mesh));
+    nv->calculate_convex_hull();
+    nv->invalidate_convex_hull_2d();
+    nv->set_new_unique_id();
+    nv->set_transformation(Geometry::Transformation());
+    nv->set_offset(local_centre);
+    nv->config.set_key_value("neotko_support_cut", new ConfigOptionBool(true));
+    nv->name = into_u8(_L("Support cut"));
+    nv->source.is_from_builtin_objects = true;
+    Slic3r::save_object_mesh(*mo);
+
+    if (NeoDebug::enabled(NeoDebug::SUPPORTZONES)) {
+        char b[160];
+        std::snprintf(b, sizeof(b), "cut       creado  vertices_pantalla=%d  cortes_en_objeto=%d",
+                      int(screen_pts.size()), count_cuts());
+        NeoDebug::write(NeoDebug::SUPPORTZONES, b);
+    }
+    wxGetApp().obj_list()->add_volumes_to_object_in_list(size_t(obj_idx));
+    wxGetApp().obj_list()->update_info_items(size_t(obj_idx));
+    wxGetApp().plater()->update();
+    m_parent.set_as_dirty();
+}
+
+static bool zone_volume_is_cut(const ModelVolume *v)
+{
+    if (v == nullptr || ! v->is_support_blocker())
+        return false;
+    const auto *o = dynamic_cast<const ConfigOptionBool *>(v->config.option("neotko_support_cut"));
+    return o != nullptr && o->value;
+}
+
+int GLGizmoSupportZones::last_cut_volume_idx() const
+{
+    const ModelObject *mo = current_object();
+    if (mo == nullptr)
+        return -1;
+    for (int i = int(mo->volumes.size()) - 1; i >= 0; -- i)
+        if (zone_volume_is_cut(mo->volumes[i]))
+            return i;
+    return -1;
+}
+
+int GLGizmoSupportZones::count_cuts() const
+{
+    const ModelObject *mo = current_object();
+    if (mo == nullptr)
+        return 0;
+    return int(std::count_if(mo->volumes.begin(), mo->volumes.end(), zone_volume_is_cut));
+}
+
+// NEOTKO_SUPPORTZONES_TAG s343f — APLICAR LOS CORTES.
+//
+// La malla de un volumen en MUNDO: instancia × volumen. Los cortes se crearon con la matriz de la
+// instancia de entonces; al fundir o restar se trabaja en mundo y se vuelve a local al escribir.
+static TriangleMesh zone_volume_world_mesh(const ModelVolume &v, const Transform3d &inst)
+{
+    TriangleMesh m = v.mesh();
+    m.transform(inst * v.get_matrix());
+    return m;
+}
+
+// Escribe una malla de MUNDO en un volumen, con el mismo reparto que write_pillar_into(): malla
+// centrada en local, sin rotación ni escala propias, el centro en el offset.
+static void zone_place_world_mesh(ModelVolume &v, TriangleMesh &&world, const Transform3d &inst)
+{
+    TriangleMesh mesh = std::move(world);
+    mesh.transform(inst.inverse());
+    const Vec3d c = mesh.bounding_box().center();
+    mesh.translate(float(- c.x()), float(- c.y()), float(- c.z()));
+    v.set_mesh(std::move(mesh));
+    v.calculate_convex_hull();
+    v.invalidate_convex_hull_2d();
+    v.set_new_unique_id();
+    v.set_transformation(Geometry::Transformation());
+    v.set_offset(c);
+}
+
+bool GLGizmoSupportZones::cuts_union_world(TriangleMesh &out, std::vector<int> &cut_idxs) const
+{
+    cut_idxs.clear();
+    const ModelObject *mo = current_object();
+    if (mo == nullptr || mo->instances.empty())
+        return false;
+    const Transform3d inst = mo->instances.front()->get_matrix();
+    bool first = true;
+    for (int i = 0; i < int(mo->volumes.size()); ++ i) {
+        if (! zone_volume_is_cut(mo->volumes[i]))
+            continue;
+        TriangleMesh w = zone_volume_world_mesh(*mo->volumes[i], inst);
+        if (first) {
+            out   = std::move(w);
+            first = false;
+        } else {
+            MeshBoolean::cgal::plus(out, w);   // puede lanzar: lo recoge quien llama
+        }
+        cut_idxs.push_back(i);
+    }
+    return ! cut_idxs.empty() && ! out.empty();
+}
+
+void GLGizmoSupportZones::merge_cuts()
+{
+    if (get_state() != On)
+        return;
+    Model *model = m_parent.get_selection().get_model();
+    const int obj_idx = current_object_idx();
+    if (model == nullptr || obj_idx < 0 || obj_idx >= int(model->objects.size()))
+        return;
+    ModelObject *mo = model->objects[obj_idx];
+    if (mo == nullptr || mo->instances.empty() || count_cuts() < 2) {
+        m_cut_status = _u8L("Nothing to merge: you need two cuts or more.");
+        return;
+    }
+    TriangleMesh merged;
+    std::vector<int> idxs;
+    try {
+        if (! cuts_union_world(merged, idxs))
+            return;
+    } catch (...) {
+        // 🚨 CGAL no perdona una malla rara (dos cortes que se tocan justo en una arista). Se deja
+        // todo como estaba y se dice; los cortes siguen funcionando por separado.
+        m_cut_status = _u8L("Could not merge the cuts (the meshes did not combine). They still work separately.");
+        NeoDebug::write(NeoDebug::SUPPORTZONES, "cut       🚨 fundir falló en CGAL; no se toca nada");
+        return;
+    }
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Merge support cuts"));
+    const Transform3d inst = mo->instances.front()->get_matrix();
+    // El superviviente es el PRIMER corte: se le escribe la unión y se borran los demás. Así no hay
+    // que crear un volumen nuevo ni tocar su nombre ni su config.
+    ModelVolume *keep = mo->volumes[idxs.front()];
+    zone_place_world_mesh(*keep, std::move(merged), inst);
+    Slic3r::save_object_mesh(*mo);
+    std::vector<ItemForDelete> dels;
+    for (size_t k = 1; k < idxs.size(); ++ k)
+        dels.emplace_back(itVolume, obj_idx, idxs[k]);
+    const int n = int(idxs.size());
+    if (wxGetApp().obj_list() != nullptr && ! dels.empty())
+        wxGetApp().obj_list()->delete_from_model_and_list(dels);
+    char b[96];
+    std::snprintf(b, sizeof(b), "%d %s", n, _u8L("cuts merged into one.").c_str());
+    m_cut_status = b;
+    NeoDebug::write(NeoDebug::SUPPORTZONES, std::string("cut       fundidos=") + std::to_string(n));
+    wxGetApp().plater()->update();
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoSupportZones::subtract_cuts_from_zones()
+{
+    if (get_state() != On)
+        return;
+    Model *model = m_parent.get_selection().get_model();
+    const int obj_idx = current_object_idx();
+    if (model == nullptr || obj_idx < 0 || obj_idx >= int(model->objects.size()))
+        return;
+    ModelObject *mo = model->objects[obj_idx];
+    if (mo == nullptr || mo->instances.empty())
+        return;
+    const Transform3d inst = mo->instances.front()->get_matrix();
+
+    // Todo se calcula ANTES de tocar el modelo: si CGAL falla a medias, no queda nada a medio hacer.
+    TriangleMesh cuts;
+    std::vector<int> cut_idxs;
+    std::vector<std::pair<int, TriangleMesh>> results;
+    try {
+        if (! cuts_union_world(cuts, cut_idxs)) {
+            m_cut_status = _u8L("There are no cuts to apply.");
+            return;
+        }
+        for (int i = 0; i < int(mo->volumes.size()); ++ i) {
+            const ModelVolume *v = mo->volumes[i];
+            if (v == nullptr || ! v->is_support_enforcer())
+                continue;
+            TriangleMesh w = zone_volume_world_mesh(*v, inst);
+            MeshBoolean::cgal::minus(w, cuts);
+            results.emplace_back(i, std::move(w));
+        }
+    } catch (...) {
+        m_cut_status = _u8L("Could not subtract the cuts (the meshes did not combine). Nothing was changed.");
+        NeoDebug::write(NeoDebug::SUPPORTZONES, "cut       🚨 restar falló en CGAL; no se toca nada");
+        return;
+    }
+    if (results.empty()) {
+        m_cut_status = _u8L("There are no zones to subtract the cuts from.");
+        return;
+    }
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Apply support cuts to zones"));
+    std::vector<ItemForDelete> dels;
+    int n_zones = 0;
+    for (auto &[vi, mesh] : results) {
+        ModelVolume *v = mo->volumes[vi];
+        if (mesh.empty()) {
+            // El corte se comió la zona entera: se borra con los cortes.
+            dels.emplace_back(itVolume, obj_idx, vi);
+            continue;
+        }
+        zone_place_world_mesh(*v, std::move(mesh), inst);
+        // 🔑 El gesto ya no describe esta malla: se quita, así la tarjeta la trata como una malla
+        // cualquiera (sin «editar») en vez de ofrecer reabrir algo que ya no se puede reconstruir.
+        v->config.erase("neotko_support_zone_gesture");
+        ++ n_zones;
+    }
+    for (int ci : cut_idxs)
+        dels.emplace_back(itVolume, obj_idx, ci);
+    Slic3r::save_object_mesh(*mo);
+    if (editing())
+        end_edit();
+    m_selected_zone = -1;
+    m_zones_dirty   = true;
+    if (wxGetApp().obj_list() != nullptr && ! dels.empty())
+        wxGetApp().obj_list()->delete_from_model_and_list(dels);
+    char b[128];
+    std::snprintf(b, sizeof(b), "%s %d.", _u8L("Cuts applied to zones:").c_str(), n_zones);
+    m_cut_status = b;
+    NeoDebug::write(NeoDebug::SUPPORTZONES, std::string("cut       restados_de_zonas=") + std::to_string(n_zones)
+                                             + " cortes_borrados=" + std::to_string(cut_idxs.size()));
+    wxGetApp().plater()->update();
+    m_parent.set_as_dirty();
 }
 
 void GLGizmoSupportZones::create_pillar()
@@ -5328,6 +5874,31 @@ void GLGizmoSupportZones::render_view_strip()
         m_show_gaps = ! m_show_gaps;
         m_parent.set_support_zone_gaps(m_show_gaps && get_state() == On, overhang_normal_z_cut(), m_gap_step_mm);
     }
+    // NEOTKO_SUPPORTZONES_TAG s343 M4 — ver desde abajo. Lo que hay que sujetar mira hacia abajo, y
+    // desde arriba no se ve: en la tabla de surf había que girar la vista sin parar. Es la vista
+    // «bottom» de siempre (tecla 2), a un clic desde el panel. No es un estado: siempre sale apagado.
+    ImGui::SameLine(0.f, 6.f);
+    if (neo_glyph_toggle("##vbottom", sz, false, Glyph::Landing,
+                         (_u8L("View from below") + "\n\n" +
+                          _u8L("Puts the camera under the part, where the surfaces") + "\n" +
+                          _u8L("that need holding face you. Same as the Bottom view.")).c_str()))
+        m_parent.select_view("bottom");
+
+    // NEOTKO_SUPPORTZONES_TAG s343e — CORTAR SOPORTE con un polígono desde la vista.
+    ImGui::SameLine(0.f, 6.f);
+    if (neo_glyph_toggle("##vcut", sz, m_cut_mode, Glyph::Erase,
+                         (_u8L("Cut supports") + "\n\n" +
+                          _u8L("Draw a polygon on screen: click to add points,") + "\n" +
+                          _u8L("click the first point again to close it.") + "\n" +
+                          _u8L("All support behind it, in the direction you are looking,") + "\n" +
+                          _u8L("is not printed, even a column coming from above.") + "\n\n" +
+                          _u8L("Turn the view first: the cut goes through the whole part.") + "\n" +
+                          _u8L("Right click cancels the polygon. Dragging turns the view") + "\n" +
+                          _u8L("and throws away the points drawn so far.")).c_str())) {
+        m_cut_mode = ! m_cut_mode;
+        m_cut_points.clear();
+        m_parent.set_as_dirty();
+    }
 
     // El estado de las zonas, en la misma fila: dos píldoras que dicen cuántas hay y cuántas no
     // cogen nada. Es lo primero que se quiere saber al abrir el gizmo.
@@ -5353,6 +5924,15 @@ void GLGizmoSupportZones::render_view_strip()
                            _u8L("Highlight overhangs").c_str())) {
             m_overhang_model_dirty = true;
             apply_overhang_highlight();
+            // s343 M1 — con el pincel «sólo voladizo», el mismo mando decide qué se queda pintado:
+            // moverlo repinta los toques con el umbral nuevo, y así se ve en vivo cuánto agarra.
+            if (block_tree_mode() && m_paint_overhang_only && ! m_stamps.empty()) {
+                m_paint_cut_deg = m_overhang_threshold_deg;
+                repaint_from_stamps();
+                invalidate_patch();
+                m_preview_dirty         = true;
+                m_footprint_model_dirty = true;
+            }
             // Mismo número para el sombreado y para el mapa: no pueden discrepar en pantalla.
             if (m_show_gaps)
                 m_parent.set_support_zone_gaps(true, overhang_normal_z_cut(), m_gap_step_mm);
@@ -5472,8 +6052,13 @@ void GLGizmoSupportZones::render_issue_tray()
     // contiguo y baja como un pilar corriente. No es un fallo —sale una zona válida— pero es otra
     // cosa que la que el panel está prometiendo, así que se dice.
     if (block_tree_mode() && m_has_target && ! all_stumps().empty() && block_tree_gap_mm() <= 0.)
-        neo_warn_row("##w_nogap", _u8L("The stump reaches the area").c_str(),
-                     _u8L("The stump reaches the area: with nothing in between there is no stretch for the column to grow through, so this comes out as a plain block instead of a tree. Lower the stump, or aim at a surface higher up.").c_str());
+        // s343 — con el pie (M6) esto sólo salta si TODO lo pintado cae bajo el suelo, o sea si la
+        // zona no tiene cabeza. Y se dice lo que de verdad pasa: los tocones no se usan.
+        neo_warn_row("##w_nogap", _u8L("Not a tree: stumps unused").c_str(),
+                     (_u8L("Everything you painted sits at stump height or below,") + "\n" +
+                      _u8L("so there is no stretch for the column to grow through.") + "\n" +
+                      _u8L("It prints as a plain block and the stumps do nothing.") + "\n\n" +
+                      _u8L("Paint a surface higher up, or lower the stump.")).c_str());
 
     if (landing_out_of_reach()) {
         // Ámbar ganado: este enlace pide más inclinación de la que el motor puede seguir, y la
@@ -5544,6 +6129,55 @@ void GLGizmoSupportZones::render_panel_body()
 
     // --- Los modos de vista ---------------------------------------------------
     render_view_strip();
+    // s343e — los cortes del objeto: cuántos hay y quitar el último. Se borran también desde la
+    // lista de objetos, como cualquier bloqueador («Support cut»).
+    if (m_cut_mode || count_cuts() > 0) {
+        char t[96];
+        std::snprintf(t, sizeof(t), "%s: %d", _u8L("cuts on this object").c_str(), count_cuts());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(t);
+        const int last = last_cut_volume_idx();
+        if (last >= 0) {
+            ImGui::SameLine(0.f, 8.f);
+            if (ImGui::SmallButton(_u8L("remove last cut").c_str())) {
+                const int obj_idx = current_object_idx();
+                // Borrar por el camino de siempre y fuera del frame de ImGui (lección de s299).
+                wxGetApp().CallAfter([obj_idx, last]() {
+                    if (wxGetApp().obj_list() != nullptr)
+                        wxGetApp().obj_list()->delete_from_model_and_list(itVolume, obj_idx, last);
+                });
+            }
+        }
+        // s343f — aplicar: fundir los cortes en uno, o restarlos de las zonas.
+        if (count_cuts() >= 2) {
+            if (ImGui::SmallButton(_u8L("merge cuts").c_str()))
+                wxGetApp().CallAfter([this]() { merge_cuts(); });
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", (_u8L("Joins every cut of this object into a single one.") + "\n" +
+                                         _u8L("It cuts exactly the same; the list just gets shorter.")).c_str());
+            ImGui::SameLine(0.f, 8.f);
+        }
+        if (count_cuts() >= 1) {
+            if (ImGui::SmallButton(_u8L("apply to zones").c_str()))
+                wxGetApp().CallAfter([this]() { subtract_cuts_from_zones(); });
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", (_u8L("Takes the cuts out of every support zone of this object") + "\n" +
+                                         _u8L("and then deletes the cuts.") + "\n\n" +
+                                         _u8L("Afterwards: the zones can no longer be reopened to edit,") + "\n" +
+                                         _u8L("automatic support is not cut any more, and a guided column") + "\n" +
+                                         _u8L("that comes in from the side can pass there again.") + "\n" +
+                                         _u8L("Undo brings everything back.")).c_str());
+        }
+        if (! m_cut_status.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+            ImGui::TextWrapped("%s", m_cut_status.c_str());
+            ImGui::PopStyleColor();
+        }
+        if (m_cut_mode && is_tree(effective_support_type()))
+            neo_warn_row("##w_cut_tree", _u8L("Cuts do not apply to tree supports").c_str(),
+                         (_u8L("The cut is taken out of normal and snug supports.") + "\n" +
+                          _u8L("Tree supports are built another way and ignore it.")).c_str());
+    }
 
     // --- Las zonas que ya existen ---------------------------------------------
     neo_section(_u8L("Zones on this object").c_str());
@@ -5918,6 +6552,23 @@ void GLGizmoSupportZones::render_panel_body()
                             _u8L("On: the pick goes through the wall, so you can grab a surface inside a hollow part. Use the section view to see what you are doing.")).c_str())) {
             m_cand_mouse = Vec2d(-1e9, -1e9);   // la lista de candidatos se rehace con la regla nueva
             invalidate_patch();
+            m_parent.set_as_dirty();
+        }
+
+        // NEOTKO_SUPPORTZONES_TAG s343 M1 — pincel «sólo voladizo».
+        if (m_foot_shape == FootShape::Brush
+            && neo_row_toggle("##ovhonly", _u8L("overhang only").c_str(), &m_paint_overhang_only,
+                              (_u8L("On: the brush only marks surface that leans past the overhang angle.") + "\n" +
+                               _u8L("Walls and the top side it sweeps over are left out,") + "\n" +
+                               _u8L("so painting along an edge no longer drags the box up.") + "\n\n" +
+                               _u8L("The angle is the one of 'Highlight overhangs'.") + "\n" +
+                               _u8L("Turn that on and move 'overhangs' to grab more or less:") + "\n" +
+                               _u8L("what you painted is redone live.") + "\n\n" +
+                               _u8L("Off: it marks everything the brush touches.")).c_str())) {
+            repaint_from_stamps();
+            invalidate_patch();
+            m_preview_dirty         = true;
+            m_footprint_model_dirty = true;
             m_parent.set_as_dirty();
         }
 

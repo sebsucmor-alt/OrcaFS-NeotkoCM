@@ -109,7 +109,8 @@ static void run_classic_spine(PerimeterGenerator& g, const Config& cfg, const Pr
     // laminándose en paralelo.
     PrintRegionConfig modified_cfg = *original_cfg;
     modified_cfg.wall_loops.value           = 1;      // Classic sólo el exterior
-    modified_cfg.gap_infill_speed.value     = 0;      // la espina sustituye al gap-fill de Classic
+    std::fill(modified_cfg.gap_infill_speed.values.begin(), modified_cfg.gap_infill_speed.values.end(), 0.); // Upstream Snapmaker #794: todas las variantes
+    // (la espina sustituye al gap-fill de Classic)
     modified_cfg.alternate_extra_wall.value = false;  // los muros interiores los decide la regla S3D
 
     ExPolygons original_slice;
@@ -389,6 +390,7 @@ void Plan::run(PerimeterGenerator& g)
     cfg.neostroke_curve_overlap     = original_cfg->neostroke_curve_overlap.value;      // NEOTKO_NEOSTROKE_TAG s331
     cfg.neostroke_max_bead_pct      = original_cfg->neostroke_max_bead_pct.value;
     cfg.neostroke_max_stroke_width  = original_cfg->neostroke_max_stroke_width.value;
+    cfg.neostroke_band_mm           = original_cfg->neostroke_band_mm.value;   // s340
     cfg.neostroke_bead_min_pct  = original_cfg->neostroke_bead_min_pct.value;   // s332
     cfg.neostroke_layer_jitter  = original_cfg->neostroke_layer_jitter.value;   // s332
     cfg.neostroke_skate         = original_cfg->neostroke_skate.value;
@@ -398,6 +400,7 @@ void Plan::run(PerimeterGenerator& g)
     cfg.neostroke_lane_overlap     = original_cfg->neostroke_lane_overlap.value;       // s339
     cfg.neostroke_end_at_junctions = original_cfg->neostroke_end_at_junctions.value;
     cfg.neostroke_lead_in          = original_cfg->neostroke_lead_in.value;
+    cfg.neostroke_island_overrides = original_cfg->neostroke_island_overrides.value;   // s342
     // pin_outer_width is gated upstream by neotko_edge_active anyway (ConfigManipulation
     // hides the control unless outer or inner wall source is ArachneNeotkoEdge).
     // Merge global advanced toggles from Runtime singleton (Fase 6 will fill these).
@@ -512,7 +515,7 @@ void Plan::run(PerimeterGenerator& g)
     }
     // ── Capture originals from the live config ──────────────────────────────
     const int    orig_wall_loops = original_cfg->wall_loops.value;
-    const double orig_gap_speed  = original_cfg->gap_infill_speed.value;
+    const double orig_gap_speed  = original_cfg->gap_infill_speed.get_at(0);
 
     // ── Build a thread-local copy with the two knobs mutated ────────────────
     // Strategy (A) from session s91: do NOT modify the shared config (other
@@ -520,7 +523,7 @@ void Plan::run(PerimeterGenerator& g)
     // an independent stack copy, swap the pointer, restore on exit.
     PrintRegionConfig modified_cfg = *original_cfg;
     modified_cfg.wall_loops.value           = 1;     // Classic emits only the outer.
-    modified_cfg.gap_infill_speed.value     = 0;     // Suppress Classic medial-axis gap fill
+    std::fill(modified_cfg.gap_infill_speed.values.begin(), modified_cfg.gap_infill_speed.values.end(), 0.); // Upstream Snapmaker #794: todas las variantes Suppress Classic medial-axis gap fill
                                                      // (Arachne integrates gap into the
                                                      // interior beading).
     // s91 fix — bug "capa sí capa no": alternate_extra_wall fires on odd layers

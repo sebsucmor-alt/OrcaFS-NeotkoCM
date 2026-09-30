@@ -33,6 +33,7 @@ static const std::vector<NsAdvGroup>& ns_advanced_groups()
         } },
         { "NeoStroke — shape", {
             "neostroke_max_stroke_width",
+            "neostroke_band_mm",            // s340 — 0 = auto
         } },
         { "NeoStroke — extra flow", {
             "neostroke_curve_overlap",      // 0 = apagado

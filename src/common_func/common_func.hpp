@@ -15,14 +15,14 @@
 #define SLIC3R_APP_DATA_KEY "SnapMaker-NeotkoCM"
 #define SLIC3R_APP_LEGACY_DATA_KEY "Snapmaker_Orca"
 #define SLIC3R_VERSION "01.10.01.50"
-#define Snapmaker_VERSION "2.3.5"
-// Upstream Snapmaker #775 (5417538a1c): las U1 con firmware < 1.6.0 ya no se soportan.
-// Sólo lo consume AboutDialog.cpp para escribir el texto informativo; no cierra ninguna puerta.
-#define MIN_FIRM_VER "1.6.0"
+#define Snapmaker_VERSION "2.4.0"
+// Upstream Snapmaker #775 → 1.6.0 y #862 (8df75340d8) → 2.0.0. Sólo lo consume AboutDialog.cpp para
+// escribir el texto informativo; no cierra ninguna puerta (las U1 en 1.6 siguen funcionando).
+#define MIN_FIRM_VER "2.0.0"
 #ifndef GIT_COMMIT_HASH
 #define GIT_COMMIT_HASH "0000000" // 0000000 means uninitialized
 #endif
-#define SLIC3R_BUILD_ID "2.3.5"
+#define SLIC3R_BUILD_ID "2.4.0"
 // #define SLIC3R_RC_VERSION "01.10.01.50"
 #define BBL_RELEASE_TO_PUBLIC 1
 #define BBL_INTERNAL_TESTING 0

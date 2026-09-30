@@ -276,6 +276,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         fill_no_overlap
     );
     
+    // NEOTKO_NEOSTROKE_TAG s342 — ajustes por isla: las anclas van en coordenadas del objeto; 🚨 trafo_centered(),
+    // NUNCA trafo() (es el marco en el que se laminan las islas).
+    {
+        const Transform3d t = this->layer()->object()->trafo_centered();
+        g.ns_obj_to_slice[0] = t(0, 0); g.ns_obj_to_slice[1] = t(0, 1); g.ns_obj_to_slice[2] = t(0, 3);
+        g.ns_obj_to_slice[3] = t(1, 0); g.ns_obj_to_slice[4] = t(1, 1); g.ns_obj_to_slice[5] = t(1, 3);
+    }
     if (this->layer()->lower_layer != nullptr)
         // Cummulative sum of polygons over all the regions.
         g.lower_slices = &this->layer()->lower_layer->lslices;

@@ -1,4 +1,6 @@
-#include <catch2/catch.hpp>
+// Upstream Snapmaker #749: migrado de Catch2 v2 a v3.
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/ColorSci/ColorSci.hpp"
 
@@ -56,7 +58,7 @@ ColorSci::Layer make_layer(float r, float g, float b, float td, float ratio)
 
 TEST_CASE("RealColor front-to-back accumulate matches ColorSci::blend_stacked", "[RealColor][ColorSci]")
 {
-    using WithinAbs;
+    using Catch::Matchers::WithinAbs;
 
     const float black_bg[3] = { 0.f, 0.f, 0.f };
 

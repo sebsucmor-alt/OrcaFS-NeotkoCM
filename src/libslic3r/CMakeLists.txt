@@ -66,6 +66,8 @@ set(lisbslic3r_sources
     NeoArachne/NeoStrokeSkeleton.cpp
     NeoArachne/NeoStrokeSkeleton.hpp
     NeoArachne/NeoStrokeField.cpp
+    NeoArachne/NeoStrokeIslands.cpp
+    NeoArachne/NeoStrokeIslands.hpp
     NeoArachne/NeoStrokeField.hpp
     NeoArachne/NeoStrokeLink.hpp
     # NEOTKO_NEOARACHNE_TAG Inc3 (port s134) — Preview Lab backend (mini-slicer for the reactive canvas).
@@ -186,6 +188,8 @@ set(lisbslic3r_sources
     Feature/Interlocking/VoxelUtils.cpp
     Feature/Interlocking/VoxelUtils.hpp
     FileParserError.hpp
+    AllowlistManager.cpp
+    AllowlistManager.hpp
     FilamentColorLibrary.cpp
     FilamentColorLibrary.hpp
     FilamentHotBedNozzleRules.cpp
@@ -453,6 +457,8 @@ set(lisbslic3r_sources
     PresetBundle.hpp
     Preset.cpp
     Preset.hpp
+    PresetFlowVariant.cpp
+    PresetFlowVariant.hpp
     PrincipalComponents2D.cpp
     PrincipalComponents2D.hpp
     PrintApply.cpp
@@ -465,6 +471,8 @@ set(lisbslic3r_sources
     PrintObject.cpp
     PrintObjectSlice.cpp
     PrintRegion.cpp
+    ProjectSchemaVersion.cpp
+    ProjectSchemaVersion.hpp
     ProjectTask.cpp
     ProjectTask.hpp
     QuadricEdgeCollapse.cpp
@@ -544,6 +552,8 @@ set(lisbslic3r_sources
     Surface.hpp
     SurfaceMesh.hpp
     SVG.cpp
+    SSWCPProtocol.cpp
+    SSWCPProtocol.hpp
     SVG.hpp
     Technologies.hpp
     Tesselate.cpp
@@ -638,6 +648,7 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
 set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
+target_link_libraries(libslic3r PUBLIC nlohmann_json)
 
 find_package(JPEG REQUIRED)
 
@@ -700,7 +711,9 @@ target_link_libraries(libslic3r
         ZLIB::ZLIB
     )
 
-if(NOT WIN32)
+if (WIN32)
+    target_link_libraries(libslic3r PRIVATE OpenSSL::Crypto crypt32 ws2_32)
+else()
     # Link freetype for OCCT dependency (CAD operations need font rendering)
     target_link_libraries(libslic3r PRIVATE ${FREETYPE_LIBRARIES})
     target_link_libraries(libslic3r PRIVATE OpenSSL::Crypto)

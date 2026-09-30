@@ -1571,6 +1571,14 @@ NPrev::PreviewGeometrySource NeoArachnePreviewPanel::current_source() const
                 NPrev::PreviewGeometrySource src =
                     NPrev::PreviewGeometrySource::from_mesh(m_mesh_snapshot, slice_z_world);
                 src.island_picks = m_island_picks;   // s335 — vacío = todas
+                // 🚨 s340 — cortar como el laminado: su cierre y su resolución (ver PrintObjectSlice).
+                {
+                    const DynamicPrintConfig cfg = live_merged_config(m_tab);
+                    if (const ConfigOptionFloat* o = cfg.option<ConfigOptionFloat>("slice_closing_radius"))
+                        src.closing_radius_mm = o->value;
+                    if (const ConfigOptionFloat* o = cfg.option<ConfigOptionFloat>("resolution"))
+                        src.resolution_mm = o->value <= 0.001 ? 0.0 : 0.0025;
+                }
                 return src;
             }
             // Fallthrough — no snapshot yet, fall back to W so the canvas

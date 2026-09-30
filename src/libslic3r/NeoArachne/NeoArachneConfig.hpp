@@ -5,6 +5,7 @@
 #define slic3r_NeoArachneConfig_hpp_
 
 #include <cstdint>
+#include <string>
 #include "../PrintConfig.hpp"   // for NeoArachneWallSource (top-level Slic3r::)
 
 namespace Slic3r { namespace NeoArachne {
@@ -52,6 +53,7 @@ struct Config {
     // s331b — tope duro del cordón (% del cabezal) y ancho máximo de un trazo (mm).
     double neostroke_max_bead_pct      = 150.0;
     double neostroke_max_stroke_width  = 5.0;
+    double neostroke_band_mm           = 0.0;   // s340 — modo banda (0 = auto)
     // s332: el cordon minimo real del cabezal (% del cabezal)
     double neostroke_bead_min_pct = 70.0;
     // s332: que cada capa arranque por otro sitio, para que los cortes de flujo no se apilen en Z
@@ -65,6 +67,7 @@ struct Config {
     double neostroke_lane_overlap     = 0.0;     // % de caudal uniforme en cada carril
     bool   neostroke_end_at_junctions = false;   // acabar en los cruces, arrancar por el extremo libre
     double neostroke_lead_in          = 0.0;     // mm de arranque adelantado (s339b)
+    std::string neostroke_island_overrides;       // s342 — ajustes por isla (NeoStrokeIslands.hpp)
 
     // ── Edge Closure params (Fase 3.0 — S3D heritage) ───────────────────────
     // Defaults reflect "PA-safe" starting point; user adjusts via UI.

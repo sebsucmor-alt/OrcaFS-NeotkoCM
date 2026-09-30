@@ -233,6 +233,96 @@ int build_dark_bundle(const std::string& in, const std::string& palette_class, s
     return converted;
 }
 
+// NEOTKO_FLUTTERDARK_TAG s345 — Flutter 3.27+ (their web 2.3.3x, Snapmaker 2.4.0) builds most
+// colors through the wide-gamut constructor instead of the ARGB integer one:
+//     new A.V(1,1,0.23137254901960785,0.18823529411764706,B.n)     // alpha, r, g, b, colorSpace
+// 228 of those against 137 integer ones in 2.3.38, and the page background is among them, so
+// with only the integer pass the page stayed white. Same idea as the integer pass: the class is
+// found by shape (five args, four literal numbers in 0..1, a B.<ident> last), never by name.
+bool parse_unit_number(const std::string& in, size_t& p, double& v)
+{
+    const size_t b = p;
+    while (p < in.size() && ((in[p] >= '0' && in[p] <= '9') || in[p] == '.'))
+        ++p;
+    if (p == b || p - b > 24)
+        return false;
+    try { v = std::stod(in.substr(b, p - b)); } catch (...) { return false; }
+    return v >= 0.0 && v <= 1.0;
+}
+
+// visit(class, a, r, g, b, offset just past "new A.<class>(", offset of the ',' before B.)
+template<typename F> void scan_float_constructions(const std::string& in, F visit)
+{
+    size_t pos = 0;
+    while (true) {
+        const size_t hit = in.find(kCtorPrefix, pos);
+        if (hit == std::string::npos)
+            return;
+        pos         = hit + kCtorPrefixLen;
+        size_t p    = pos;
+        while (p < in.size() && is_ident_char(in[p]))
+            ++p;
+        if (p == pos || p >= in.size() || in[p] != '(')
+            continue;
+        const std::string name = in.substr(pos, p - pos);
+        const size_t args_begin = ++p;
+        double c[4];
+        bool   ok = true;
+        for (int i = 0; i < 4 && ok; ++i) {
+            ok = parse_unit_number(in, p, c[i]) && p < in.size() && in[p] == ',';
+            if (ok) ++p;
+        }
+        if (!ok || in.compare(p, 2, "B.") != 0)
+            continue;
+        size_t q = p + 2;
+        while (q < in.size() && is_ident_char(in[q]))
+            ++q;
+        if (q == p + 2 || q >= in.size() || in[q] != ')')
+            continue;
+        visit(name, c[0], c[1], c[2], c[3], args_begin, p - 1);
+        pos = q;
+    }
+}
+
+std::string fmt_unit(double v)
+{
+    std::ostringstream o;
+    o.precision(17);
+    o << v;
+    return o.str();
+}
+
+// Darkens every wide-gamut literal of the dominant class. Returns how many were converted.
+int build_dark_floats(const std::string& in, std::string& out, std::string& cls)
+{
+    std::map<std::string, int> tallies;
+    scan_float_constructions(in, [&](const std::string& n, double, double, double, double, size_t, size_t) { ++tallies[n]; });
+    cls.clear();
+    int best = 0;
+    for (const auto& kv : tallies)
+        if (kv.second >= kMinPaletteSize && kv.second > best) { best = kv.second; cls = kv.first; }
+    if (cls.empty())
+        return 0;
+
+    out.clear();
+    out.reserve(in.size() + in.size() / 64);
+    int    converted = 0;
+    size_t copied    = 0;
+    scan_float_constructions(in, [&](const std::string& n, double a, double r, double g, double b, size_t args_begin, size_t comma) {
+        if (n != cls)
+            return;
+        const uint32_t argb = ((uint32_t) to_byte(a) << 24) | ((uint32_t) to_byte(r) << 16) | ((uint32_t) to_byte(g) << 8) | (uint32_t) to_byte(b);
+        const uint32_t d    = darken_argb(argb);
+        out.append(in, copied, args_begin - copied);
+        out += fmt_unit(a) + "," + fmt_unit(((d >> 16) & 0xFF) / 255.0) + "," + fmt_unit(((d >> 8) & 0xFF) / 255.0) + "," +
+               fmt_unit((d & 0xFF) / 255.0);
+        copied = comma; // keeps ",B.<space>)"
+        ++converted;
+    });
+    out.append(in, copied, std::string::npos);
+    return converted;
+}
+
 // NEOTKO_FLUTTERDARK_TAG s252 — silent unless asked for. It was written unconditionally while a
 // field report was open and it is what closed it: one line named the class we picked and the
 // bundle version the reporter actually had. Kept, gated, because their bundle updates itself on
@@ -289,9 +379,30 @@ void NeotkoFlutterDark::set_dark(bool dark)
 
 bool NeotkoFlutterDark::is_dark() { return g_dark.load(std::memory_order_relaxed); }
 
+// Their bundle used to be "main.dart.js". Since flutter_web 2.3.3x (Snapmaker 2.4.0) it is
+// content-hashed, "main.<hex>.js", and index.html / flutter_bootstrap.<hex>.js point at it.
+// Upstream #818 serves those hashed names as immutable, so this must match both spellings or the
+// bundle is neither patched nor kept out of the cache.
+static bool is_bundle(const std::string& file_path)
+{
+    if (ends_with(file_path, kBundleName))
+        return true;
+    const size_t slash = file_path.find_last_of("/\\");
+    const std::string name = slash == std::string::npos ? file_path : file_path.substr(slash + 1);
+    const std::string pre = "main.", suf = ".js";
+    if (name.size() <= pre.size() + suf.size() || name.compare(0, pre.size(), pre) != 0 || !ends_with(name, suf.c_str()))
+        return false;
+    for (size_t i = pre.size(); i < name.size() - suf.size(); ++i) {
+        const char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
 bool NeotkoFlutterDark::must_not_be_cached(const std::string& file_path)
 {
-    return ends_with(file_path, kBundleName) || ends_with(file_path, kServiceWorkerName);
+    return is_bundle(file_path) || ends_with(file_path, kServiceWorkerName);
 }
 
 bool NeotkoFlutterDark::neutralize_service_worker(const std::string& file_path, std::string& content)
@@ -307,7 +418,7 @@ bool NeotkoFlutterDark::neutralize_service_worker(const std::string& file_path, 
 
 bool NeotkoFlutterDark::maybe_patch(const std::string& file_path, std::string& content)
 {
-    if (!ends_with(file_path, kBundleName))
+    if (!is_bundle(file_path))
         return false;
 
     // NEOTKO_FLUTTERDARK_TAG s252 — diagnostic. Logged before the dark check so a machine that
@@ -331,7 +442,17 @@ bool NeotkoFlutterDark::maybe_patch(const std::string& file_path, std::string& c
         const std::string palette_class  = detect_palette_class(content, detected_count);
 
         std::string patched;
-        const int   converted = palette_class.empty() ? 0 : build_dark_bundle(content, palette_class, patched);
+        int         converted = palette_class.empty() ? 0 : build_dark_bundle(content, palette_class, patched);
+
+        // s345: second pass over the wide-gamut constructor, on top of the integer pass.
+        std::string float_cls, patched2;
+        const int   converted_f = build_dark_floats(converted > 0 ? patched : content, patched2, float_cls);
+        if (converted_f > 0) {
+            patched = std::move(patched2);
+            converted += converted_f;
+        }
+        log("[palette] float class=" + (float_cls.empty() ? std::string("<none>") : "A." + float_cls) +
+            " converted=" + std::to_string(converted_f));
 
         // Diagnostic: the decisive line. Their bundle updates itself per user and the class name
         // is renumbered on every build of theirs, so this records which one we settled on here.

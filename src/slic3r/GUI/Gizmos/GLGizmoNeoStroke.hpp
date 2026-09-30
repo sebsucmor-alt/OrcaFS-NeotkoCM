@@ -30,6 +30,7 @@
 #include "libslic3r/NeoArachne/Preview/PreviewEffectiveConfig.hpp"
 #include "libslic3r/NeoArachne/Preview/PreviewMetrics.hpp"
 #include "libslic3r/NeoArachne/Preview/PreviewResult.hpp"
+#include "libslic3r/NeoArachne/NeoStrokeIslands.hpp"   // s342 — ajustes por isla
 
 #include <atomic>
 #include <map>
@@ -76,6 +77,7 @@ private:
         bool        external = false;            // B4: vive en m_ext_model, no en la placa
         bool        has_modifiers = false;   // modificadores o volúmenes negativos: el visor no los aplica
         double      world_min_z   = 0.0;     // la base de la pieza en la placa: z relativa 0 del laminado
+        double      obj_to_world[6] = { 1., 0., 0., 0., 1., 0. };   // s342 — XY de la instancia: anclas de isla → placa
         Slic3r::NeoArachne::Preview::ObjectLayerGrid grid;
         std::vector<int>                                 part_volume_idxs;
         std::vector<std::shared_ptr<const TriangleMesh>> meshes;   // en coordenadas de PLACA, una por pieza
@@ -96,6 +98,7 @@ private:
         std::vector<VolumeTask> vols;
         double                  warn_level = 1.0;   // s339 — nivel de aviso (1 = 100 %)
         double                  closure_mm = 0.0;   // s339 — cierre del material
+        double                  obj_to_world[6] = { 1., 0., 0., 0., 1., 0. };   // s342 — ver Target
     };
     struct LayerOut {
         size_t      target    = 0;
@@ -204,11 +207,20 @@ private:
     std::string   m_models_hover;
     size_t        m_models_view_key = 0;
     bool          m_clip_active = false;
+    // s342b — el resplandor de la isla elegida (fuerte) y de la isla bajo el ratón al elegir (suave). Va aparte de
+    // `m_buckets` porque no depende del laminado: se ve aunque el visor no haya terminado.
+    std::vector<std::unique_ptr<Bucket>> m_glow;
+    size_t        m_glow_key = 0;
+    void   rebuild_glow();
 
     // ── pasos ──
     void   rebuild_targets();
     int    ref_target() const;
     int    ref_layer_count() const;
+    // s342d — la última capa (1-based) del objeto de referencia que CORTA algo. La rejilla sale de la altura total
+    // del objeto y puede acabar por encima de las piezas (hotel1: 5 capas en la rejilla, 4 con material): esa capa
+    // lamina vacío y no deja elegir isla. Es la capa por defecto.
+    int    top_filled_layer() const;
     // Capa (0-based) del objeto t que cae a la altura de la capa `ref_layer_1based` de la referencia; -1 si no.
     int    layer_for_target(size_t t, int ref_layer_1based) const;
     std::vector<Task> build_tasks(size_t& key) const;
@@ -244,8 +256,35 @@ private:
                         const ModelObject& mo);
     void   commit_option(int obj_idx, const std::string& key, std::shared_ptr<ConfigOption> opt);
     // s337b — varios mandos de golpe, en UN solo deshacer (los presets Detail / Standard / Fast).
+    // `only_edit_target` = sólo al objeto elegido aunque «Apply to all» esté puesto (las anclas de isla son de UN objeto).
     void   commit_options(int obj_idx, const std::string& snapshot_name,
-                          std::vector<std::pair<std::string, std::shared_ptr<ConfigOption>>> opts);
+                          std::vector<std::pair<std::string, std::shared_ptr<ConfigOption>>> opts,
+                          bool only_edit_target = false);
+
+    // ── s342 — AJUSTES POR ISLA (docs/WIP/NEOSTROKE_AJUSTES_POR_ISLA_PLAN.md, B.3) ──────────────────────
+    // Cada isla con ajustes propios es un ANCLA: un punto dentro de la letra (coordenadas del objeto) + las claves
+    // que cambia. Viven en la clave de texto `neostroke_island_overrides` del objeto; el motor y el visor las leen.
+    // Con una isla elegida, los mandos de la pestaña editan ESA isla; sin ninguna, el objeto entero.
+    struct LayerIsland { ExPolygon poly; int anchor = -1; };   // en coordenadas de PLACA, escaladas
+    int         m_edit_island  = -1;      // índice en las anclas del objeto editado; -1 = el objeto entero
+    bool        m_island_pick  = false;   // esperando el clic en la vista
+    std::string m_island_name_buf;
+    int         m_island_name_for = -2;   // de qué ancla es el buffer del nombre
+    int         m_island_wait = 0;        // fotogramas de gracia: el ancla nueva llega con el guardado diferido
+    int         m_island_hover = -1;      // isla (de `edit_layer_islands`) bajo el ratón mientras se elige
+    // s342b — las islas NO salen del laminado del visor (si no ha terminado, no había nada que elegir): se corta la
+    // malla del objeto editado en la capa elegida, al momento, y se guarda por (objeto, capa, malla).
+    mutable std::vector<LayerIsland> m_isl_cache;
+    mutable double                   m_isl_cache_top = 0.0;
+    mutable size_t                   m_isl_cache_key = 0;
+    std::vector<NeoArachne::NsIslandOverride> anchors_of(const ModelObject& mo) const;
+    // Las islas de la capa elegida del objeto editado, de izquierda a derecha, con el ancla que cae en cada una.
+    std::vector<LayerIsland> edit_layer_islands(double* top_z = nullptr) const;
+    Vec2d  obj_to_world(const Target& t, double x, double y) const;
+    Vec2d  world_to_obj(const Target& t, const Vec2d& w) const;
+    void   commit_anchors(const std::vector<NeoArachne::NsIslandOverride>& list, const std::string& undo_name);
+    void   add_anchor_in(const ExPolygon& island_world, const Vec2d& at_world, bool use_point);
+    void   render_islands_section(const Target& T, const ModelObject& mo);
     std::string params_summary() const;
 };
 

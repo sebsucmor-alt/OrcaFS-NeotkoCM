@@ -181,6 +181,24 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
     const PrintRegionConfig& config       = a.config();
     const PrintRegionConfig& other_config = b.config();
 
+    // 🚨 NEOTKO_NEOSTROKE_TAG s340 — las claves de NeoStroke también separan regiones. Sin esto, un modificador que
+    //    sólo cambiaba ajustes de NeoStroke se fundía con la región de base y `make_perimeters` usaba la config de
+    //    UNA de las dos: los ajustes del modificador se perdían en silencio. Se sacan todas las `neostroke_*` de la
+    //    definición (una vez), para que una clave nueva no se olvide aquí.
+    static const std::vector<std::string> ns_keys = [] {
+        std::vector<std::string> out;
+        for (const std::string& k : PrintRegionConfig().keys())
+            if (k.rfind("neostroke_", 0) == 0)
+                out.push_back(k);
+        return out;
+    }();
+    for (const std::string& k : ns_keys) {
+        const ConfigOption* oa = config.option(k);
+        const ConfigOption* ob = other_config.option(k);
+        if (oa != nullptr && ob != nullptr && !(*oa == *ob))
+            return false;
+    }
+
     return config.wall_filament             == other_config.wall_filament
 		&& config.wall_loops                  == other_config.wall_loops
 		&& config.wall_sequence               == other_config.wall_sequence
@@ -188,7 +206,7 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.inner_wall_speed             == other_config.inner_wall_speed
 		&& config.outer_wall_speed    == other_config.outer_wall_speed
 		&& config.small_perimeter_speed    == other_config.small_perimeter_speed
-        && config.gap_infill_speed.value == other_config.gap_infill_speed.value
+        && config.gap_infill_speed == other_config.gap_infill_speed
         && config.filter_out_gap_fill.value == other_config.filter_out_gap_fill.value
 		&& config.detect_overhang_wall                   == other_config.detect_overhang_wall
 		&& config.overhang_reverse                       == other_config.overhang_reverse

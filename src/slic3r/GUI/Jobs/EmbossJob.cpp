@@ -374,6 +374,7 @@ void CreateObjectJob::finalize(bool canceled, std::exception_ptr &eptr)
         // bed even in Gravity mode). Floating is the Gravity axis now.
         if (!gravity_allow_free_z())
             new_object->ensure_on_bed();
+        model.InitializeAssemblyPositions({new_object}); // Upstream Snapmaker #663
 
         // Actualize right panel and set inside of selection
         app.obj_list()->paste_objects_into_list({model.objects.size() - 1});

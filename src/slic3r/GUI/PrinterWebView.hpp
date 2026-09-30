@@ -45,6 +45,7 @@ public:
     void reload();
     void update_mode();
     bool isSnapmakerPage();
+    bool is_u1_device_page();
     void sendMessage(const std::string& msg);
     wxWebView* get_browser() const { return m_browser; }
 
@@ -54,7 +55,6 @@ private:
     wxWebView* m_browser;
     long m_zoomFactor;
     wxString m_apikey;
-    bool m_apikey_sent;
 
     // DECLARE_EVENT_TABLE()
 };

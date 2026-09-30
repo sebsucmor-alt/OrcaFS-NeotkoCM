@@ -28,17 +28,18 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 
     wxBoxSizer* topsizer = new wxBoxSizer(wxVERTICAL);
 
-    wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) + "/web/flutter_web/index.html?path=2");
-    auto     real_url = wxGetApp().get_international_url(url);
-      // Create the webview
-    m_browser = WebView::CreateWebView(this, real_url);
+    wxGetApp().start_flutter_wcp_timeout_watch();
+    // Load the real URL only in load_url(). Creating with Flutter here races the later
+    // missing_connection / path=2 LoadURL and cancels the in-flight document (-999).
+    m_browser = WebView::CreateWebView(this, "about:blank");
     if (m_browser == nullptr) {
         wxLogError("Could not init m_browser");
         return;
     }
 
-    m_browser->Bind(wxEVT_WEBVIEW_ERROR, &PrinterWebView::OnError, this);
-    m_browser->Bind(wxEVT_WEBVIEW_LOADED, &PrinterWebView::OnLoaded, this);
+    // Panel bind so WebViewWebKit's navigation gate (also on the webview) still sees LOADED/ERROR.
+    Bind(wxEVT_WEBVIEW_ERROR, &PrinterWebView::OnError, this, m_browser->GetId());
+    Bind(wxEVT_WEBVIEW_LOADED, &PrinterWebView::OnLoaded, this, m_browser->GetId());
     m_browser->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &PrinterWebView::OnScriptMessage, this, m_browser->GetId());
 
     SetSizer(topsizer);
@@ -72,8 +73,7 @@ void PrinterWebView::load_url(wxString& url, wxString apikey)
     if (m_browser == nullptr)
         return;
     m_apikey = apikey;
-    m_apikey_sent = false;
-    
+
     if (url.find("path=2") != std::string::npos) {
         wxGetApp().fltviews().add_printer_view(this, url, apikey);
     } else {
@@ -97,6 +97,14 @@ bool PrinterWebView::isSnapmakerPage()
         return false;
     auto url = m_browser->GetCurrentURL();
     return (url.find("flutter_web") != std::string::npos);
+}
+
+bool PrinterWebView::is_u1_device_page()
+{
+    if (m_browser == nullptr)
+        return false;
+    auto url = m_browser->GetCurrentURL();
+    return url.find("flutter_web") != std::string::npos && url.find("path=2") != std::string::npos;
 }
 
 void PrinterWebView::sendMessage(const std::string& msg) {
@@ -125,29 +133,72 @@ void PrinterWebView::OnClose(wxCloseEvent& evt)
 
 void PrinterWebView::SendAPIKey()
 {
-    if (m_apikey_sent || m_apikey.IsEmpty())
+    if (m_apikey.IsEmpty())
         return;
-    m_apikey_sent   = true;
+
+    // Re-inject on every document load (e.g. context-menu Reload). Idempotent
+    // JS-level marker avoids stacking fetch/XHR wrappers if LOADED fires more than once.
     wxString script = wxString::Format(R"(
-    // Check if window.fetch exists before overriding
-    if (window.fetch) {
-        const originalFetch = window.fetch;
-        window.fetch = function(input, init = {}) {
-            init.headers = init.headers || {};
-            init.headers['X-API-Key'] = '%s';
-            return originalFetch(input, init);
+    (function() {
+        if (window.__sm_apikey_hooked) return;
+        window.__sm_apikey_hooked = true;
+        var apiKey = '%s';
+        // Override fetch to inject X-API-Key header
+        if (window.fetch) {
+            var originalFetch = window.fetch;
+            window.fetch = function(input, init) {
+                init = init || {};
+                init.headers = init.headers || {};
+                if (!init.headers['X-API-Key']) {
+                    init.headers['X-API-Key'] = apiKey;
+                }
+                return originalFetch(input, init);
+            };
+        }
+        // Override XMLHttpRequest to inject X-API-Key header.
+        // Preserves prototype chain and static constants for compatibility
+        // with libraries that check instanceof or readyState constants.
+        var OrigXHR = window.XMLHttpRequest;
+        var newXHR = function() {
+            var xhr = new OrigXHR();
+            var origOpen = xhr.open;
+            var headersSet = false;
+            xhr.open = function(method, url) {
+                origOpen.apply(xhr, arguments);
+                if (!headersSet) {
+                    xhr.setRequestHeader('X-API-Key', apiKey);
+                    headersSet = true;
+                }
+            };
+            return xhr;
         };
-    }
+        newXHR.prototype = OrigXHR.prototype;
+        newXHR.DONE = OrigXHR.DONE;
+        newXHR.UNSENT = OrigXHR.UNSENT;
+        newXHR.OPENED = OrigXHR.OPENED;
+        newXHR.HEADERS_RECEIVED = OrigXHR.HEADERS_RECEIVED;
+        newXHR.LOADING = OrigXHR.LOADING;
+        window.XMLHttpRequest = newXHR;
+    })();
 )",
                                        m_apikey);
-    m_browser->RemoveAllUserScripts();
 
+    // Inject immediately into the current page on all platforms.
+    WebView::RunScript(m_browser, script);
+
+#ifndef __WXMAC__
+    // On Windows/Linux: also install a persistent user script so the
+    // API key is injected at document start on future navigations.
+    // AddUserScript works correctly on these platforms (Edge WebView2, WebKitGTK).
+    // Do NOT call Reload() — the current page is already handled by RunScript above.
+    m_browser->RemoveAllUserScripts();
     m_browser->AddUserScript(script);
-    m_browser->Reload();
+#endif
 }
 
 void PrinterWebView::OnError(wxWebViewEvent &evt)
 {
+    evt.Skip();
     auto e = "unknown error";
     switch (evt.GetInt()) {
       case wxWEBVIEW_NAV_ERR_CONNECTION:
@@ -180,7 +231,10 @@ void PrinterWebView::OnError(wxWebViewEvent &evt)
 
 void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
 {
+    evt.Skip();
     if (evt.GetURL().IsEmpty())
+        return;
+    if (evt.GetURL() != m_browser->GetCurrentURL())
         return;
     SendAPIKey();
 }
@@ -192,6 +246,7 @@ void PrinterWebView::OnScriptMessage(wxWebViewEvent& evt) {
     //     wxLogMessage("Script message received; value = %s, handler = %s", evt.GetString(), evt.GetMessageHandler());
 
     // test
+    wxGetApp().on_flutter_wcp_received();
     SSWCP::handle_web_message(evt.GetString().ToUTF8().data(), m_browser);
 }
 
