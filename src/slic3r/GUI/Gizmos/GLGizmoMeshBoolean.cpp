@@ -12,6 +12,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
 #include <imgui/imgui_internal.h>
+#include <wx/busyinfo.h>
+#include <wx/glcanvas.h>
 namespace Slic3r {
 namespace GUI {
 
@@ -422,6 +424,16 @@ void GLGizmoMeshBoolean::on_save(cereal::BinaryOutputArchive &ar) const
 }
 
 void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMesh& mesh_result) {
+
+    // Keeping the painting can take a few seconds on big meshes. Shown (and painted, with a yield)
+    // before the model changes, so the yield never draws it half done; GLCanvas3D::render() skips
+    // a nested call anyway.
+    std::unique_ptr<wxBusyInfo> busy;
+    if (PaintTransfer::has_painting(*m_src.mv) || PaintTransfer::has_painting(*m_tool.mv) ||
+        PaintTransfer::effective_filament(*m_src.mv) != PaintTransfer::effective_filament(*m_tool.mv)) {
+        busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), m_parent.get_wxglcanvas());
+        wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+    }
 
     wxGetApp().plater()->take_snapshot("Mesh Boolean");
 
