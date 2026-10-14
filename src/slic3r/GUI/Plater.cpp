@@ -60,6 +60,7 @@
 #include <wx/numdlg.h>
 #include <wx/debug.h>
 #include <wx/busyinfo.h>
+#include "libslic3r/PaintTransfer.hpp"
 #include <wx/dcbuffer.h>
 #include <wx/scrolwin.h>
 #include <wx/event.h>
@@ -13241,7 +13242,15 @@ void Plater::priv::split_object()
 
     wxBusyCursor wait;
     ModelObjectPtrs new_objects;
+    // split() keeps the painting of the pieces now: tell the user to wait on a big painted mesh.
+    std::unique_ptr<wxBusyInfo> paint_busy;
+    if (std::any_of(current_model_object->volumes.begin(), current_model_object->volumes.end(),
+                    [](const ModelVolume *v) { return PaintTransfer::has_painting(*v); })) {
+        paint_busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), q->get_current_canvas3D()->get_wxglcanvas());
+        wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+    }
     current_model_object->split(&new_objects);
+    paint_busy.reset();
     if (new_objects.size() == 1)
         // #ysFIXME use notification
         Slic3r::GUI::warning_catcher(q, _L("The selected object couldn't be split."));

@@ -15,6 +15,9 @@
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PaintTransfer.hpp"
+
+#include <wx/busyinfo.h>
+#include <wx/glcanvas.h>
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "PartPlate.hpp"
@@ -2772,7 +2775,14 @@ void ObjectList::split()
 
     take_snapshot("Split to parts");
 
+    // split() keeps the painting of the pieces now: tell the user to wait on a big painted mesh.
+    std::unique_ptr<wxBusyInfo> busy;
+    if (PaintTransfer::has_painting(*volume)) {
+        busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), wxGetApp().plater()->get_current_canvas3D()->get_wxglcanvas());
+        wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+    }
     volume->split(filament_cnt);
+    busy.reset();
 
     wxBusyCursor wait;
 
@@ -3124,6 +3134,26 @@ void ObjectList::boolean()
     get_selection_indexes(obj_idxs, vol_idxs);
     if (obj_idxs.empty() && vol_idxs.empty())
         return;
+
+    // Keeping the painting (below) can take a few seconds on big meshes. Shown (and painted, with a
+    // yield) before the model changes, so the yield never draws it half done.
+    std::unique_ptr<wxBusyInfo> busy;
+    {
+        const ModelObject* obj = (*m_objects)[obj_idxs.front()];
+        bool               worth = false;
+        int                first_filament = -1;
+        for (const ModelVolume* v : obj->volumes)
+            if (v->is_model_part()) {
+                const int fil = PaintTransfer::effective_filament(*v);
+                worth = worth || PaintTransfer::has_painting(*v) || (first_filament >= 0 && fil != first_filament);
+                if (first_filament < 0)
+                    first_filament = fil;
+            }
+        if (worth) {
+            busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), wxGetApp().plater()->get_current_canvas3D()->get_wxglcanvas());
+            wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+        }
+    }
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
