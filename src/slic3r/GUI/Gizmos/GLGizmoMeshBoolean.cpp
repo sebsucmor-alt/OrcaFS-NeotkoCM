@@ -3,6 +3,7 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -428,6 +429,9 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
 
     // generate new volume
     ModelVolume* new_volume = curr_model_object->add_volume(std::move(mesh_result));
+    // add_volume() centres the mesh; this maps it back to the object frame the boolean ran in
+    // (the frame of m_src.trafo / m_tool.trafo).
+    const Transform3d result_to_object = new_volume->get_matrix();
 
     // assign to new_volume from old_volume
     ModelVolume* old_volume = m_src.mv;
@@ -449,12 +453,26 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
     new_volume->config.apply(old_volume->config);
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
+
+    // Keep the painting of both inputs. Where the result has the tool's skin it keeps the tool's
+    // painting and filament, except in a Difference, where that skin is the wall of the cut and
+    // stays unpainted.
+    {
+        std::vector<PaintTransfer::Source> sources(2);
+        sources[0].volume   = m_src.mv;
+        sources[0].to_world = m_src.trafo;
+        sources[0].filament = PaintTransfer::effective_filament(*m_src.mv);
+        sources[1].volume   = m_tool.mv;
+        sources[1].to_world = m_tool.trafo;
+        sources[1].filament = PaintTransfer::effective_filament(*m_tool.mv);
+        sources[1].cutter   = m_operation_mode == MeshBooleanOperation::Difference;
+        const PaintTransfer::Stats st = PaintTransfer::transfer(sources, *new_volume, result_to_object, PaintTransfer::effective_filament(*new_volume));
+        BOOST_LOG_TRIVIAL(debug) << "Mesh boolean: painting carried over, layers " << st.layers << ", samples " << st.samples
+                                 << ", searches " << st.searches << ", " << st.resample_ms << " ms";
+    }
     new_volume->set_offset(old_volume->get_transformation().get_offset());
     //Vec3d translate_z = { 0,0, (new_volume->source.mesh_offset - old_volume->source.mesh_offset).z() };
     //new_volume->translate(new_volume->get_transformation().get_matrix_no_offset() * translate_z);
-    //new_volume->supported_facets.assign(old_volume->supported_facets);
-    //new_volume->seam_facets.assign(old_volume->seam_facets);
-    //new_volume->mmu_segmentation_facets.assign(old_volume->mmu_segmentation_facets);
 
     // delete old_volume
     std::swap(curr_model_object->volumes[m_src.volume_idx], curr_model_object->volumes.back());
