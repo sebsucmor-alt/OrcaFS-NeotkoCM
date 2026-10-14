@@ -470,7 +470,6 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
         BOOST_LOG_TRIVIAL(debug) << "Mesh boolean: painting carried over, layers " << st.layers << ", samples " << st.samples
                                  << ", searches " << st.searches << ", " << st.resample_ms << " ms";
     }
-    new_volume->set_offset(old_volume->get_transformation().get_offset());
     //Vec3d translate_z = { 0,0, (new_volume->source.mesh_offset - old_volume->source.mesh_offset).z() };
     //new_volume->translate(new_volume->get_transformation().get_matrix_no_offset() * translate_z);
 
