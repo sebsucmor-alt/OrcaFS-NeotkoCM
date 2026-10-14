@@ -14,6 +14,7 @@
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "PartPlate.hpp"
@@ -3137,6 +3138,27 @@ void ObjectList::boolean()
     if (new_object->instances.empty())
         new_object->add_instance();
     ModelVolume* new_volume = new_object->add_volume(mesh);
+
+    // Keep the painting of every part, and the filament each part had. combine_mesh_fff() works in
+    // world coordinates over every instance, so every instance is a source; the skin left by a
+    // negative part is the wall of its cut and stays unpainted.
+    {
+        std::vector<PaintTransfer::Source> sources;
+        for (const ModelInstance* inst : object->instances)
+            for (const ModelVolume* v : object->volumes)
+                if ((v->is_model_part() || v->is_negative_volume()) && !v->mesh().empty()) {
+                    PaintTransfer::Source src;
+                    src.volume   = v;
+                    src.to_world = inst->get_matrix() * v->get_matrix();
+                    src.filament = PaintTransfer::effective_filament(*v);
+                    src.cutter   = v->is_negative_volume();
+                    sources.push_back(src);
+                }
+        const PaintTransfer::Stats st = PaintTransfer::transfer(sources, *new_volume, new_volume->get_matrix(),
+                                                                PaintTransfer::effective_filament(*new_volume));
+        BOOST_LOG_TRIVIAL(debug) << "Mesh boolean (object list): painting carried over, layers " << st.layers
+                                 << ", samples " << st.samples << ", " << st.resample_ms << " ms";
+    }
 
     // BBS: ensure on bed but no need to ensure locate in the center around origin
     new_object->ensure_on_bed();
