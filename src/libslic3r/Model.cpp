@@ -32,6 +32,7 @@
 
 // BBS: for segment
 #include "MeshBoolean.hpp"
+#include "PaintTransfer.hpp"
 #include "Format/3mf.hpp"
 
 // Transtltion
@@ -2146,6 +2147,9 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         volume_mesh_begin += mesh_info.second;
 
         size_t counter = 1;
+        // The painted volume, matched once for all its pieces (and prepared for a fallback).
+        std::unique_ptr<PaintTransfer::FacetMatcher> facet_matcher;
+        std::unique_ptr<PaintTransfer::Transfer>     paint_carry;
         for (TriangleMesh& mesh : meshes) {
             // FIXME: crashes if not satisfied
             if (mesh.facets_count() < 3)
@@ -2173,13 +2177,43 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
             new_object->instances.reserve(this->instances.size());
             for (const ModelInstance* model_instance : this->instances)
                 new_object->add_instance(*model_instance);
+            // A piece cut out of one mesh: carry over its share of the painting, which used to be
+            // dropped. Match it to the original while both are still in the same coordinates
+            // (add_volume() centres it).
+            const bool       volume_painted = PaintTransfer::has_painting(*volume);
+            std::vector<int> piece_map;
+            if (!is_multi_volume_object && volume_painted) {
+                if (!facet_matcher)
+                    facet_matcher = std::make_unique<PaintTransfer::FacetMatcher>(volume->mesh().its);
+                piece_map = facet_matcher->match(mesh.its);
+            }
             ModelVolume* new_vol = new_object->add_volume(*volume, std::move(mesh));
+            if (!is_multi_volume_object && volume_painted &&
+                !PaintTransfer::copy_painting(*volume, *new_vol, piece_map)) {
+                // Not every facet matched (should not happen): resample instead.
+                if (!paint_carry) {
+                    PaintTransfer::Source src;
+                    src.volume   = volume;
+                    src.to_world = volume->get_matrix();
+                    src.filament = PaintTransfer::effective_filament(*volume);
+                    paint_carry  = std::make_unique<PaintTransfer::Transfer>(std::vector<PaintTransfer::Source>{ src });
+                }
+                paint_carry->to(*new_vol, new_vol->get_matrix(), PaintTransfer::effective_filament(*volume));
+            }
 
             if (is_multi_volume_object) {
                 // BBS: volume geometry not changed, so we can keep the color paint facets
                 if (new_vol->mmu_segmentation_facets.timestamp() == volume->mmu_segmentation_facets.timestamp())
                     new_vol->mmu_segmentation_facets.reset(); // BBS: let next assign take effect
                 new_vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
+                // The other paint layers survive the same way (same mesh, so the facet indices
+                // still hold); only the colour was carried before.
+                for (FacetsAnnotation ModelVolume::*layer : { &ModelVolume::supported_facets, &ModelVolume::seam_facets,
+                                                             &ModelVolume::fuzzy_skin_facets }) {
+                    if ((new_vol->*layer).timestamp() == (volume->*layer).timestamp())
+                        (new_vol->*layer).reset();
+                    (new_vol->*layer).assign(volume->*layer);
+                }
             }
 
             // BBS: clear volume's config, as we already set them into object
@@ -2833,6 +2867,19 @@ size_t ModelVolume::split(unsigned int max_extruders)
     unsigned int extruder_counter = 0;
     const Vec3d offset = this->get_offset();
 
+    // Keep the painted original (it shares the old mesh) so that each piece gets its share of the
+    // painting, which used to be dropped. Each piece keeps the very same triangles, so its painting
+    // is copied facet by facet.
+    std::unique_ptr<ModelVolume>             painted_original;
+    std::unique_ptr<PaintTransfer::Transfer> paint_carry; // only if a piece cannot be matched facet by facet
+    std::vector<std::vector<int>>            facet_maps;  // per piece: its facets in the original mesh
+    if (PaintTransfer::has_painting(*this)) {
+        painted_original.reset(new ModelVolume(this->object, *this));
+        const PaintTransfer::FacetMatcher matcher(this->mesh().its);
+        for (const TriangleMesh &piece : meshes)
+            facet_maps.emplace_back(matcher.match(piece.its));
+    }
+
     for (TriangleMesh &mesh : meshes) {
         if (mesh.empty())
             // Repair may have removed unconnected triangles, thus emptying the mesh.
@@ -2856,6 +2903,20 @@ size_t ModelVolume::split(unsigned int max_extruders)
         }
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
+
+        // The piece is still in the coordinates of the original mesh.
+        if (painted_original) {
+            ModelVolume &piece = *this->object->volumes[ivolume];
+            if (!PaintTransfer::copy_painting(*painted_original, piece, facet_maps[size_t(&mesh - meshes.data())])) {
+                if (!paint_carry) {
+                    PaintTransfer::Source src;
+                    src.volume   = painted_original.get();
+                    src.filament = PaintTransfer::effective_filament(*painted_original);
+                    paint_carry  = std::make_unique<PaintTransfer::Transfer>(std::vector<PaintTransfer::Source>{ src });
+                }
+                paint_carry->to(piece, Transform3d::Identity(), PaintTransfer::effective_filament(*painted_original));
+            }
+        }
 
         this->object->volumes[ivolume]->set_offset(Vec3d::Zero());
         this->object->volumes[ivolume]->center_geometry_after_creation();
