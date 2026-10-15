@@ -2442,6 +2442,36 @@ void ObjectList::load_shape_object(const std::string &type_name)
     wxGetApp().mainframe->update_title();
 }
 
+// A mesh given in WORLD coordinates becomes a new part of object obj_idx, exactly where it is
+// (used by Align & Construct). Returns the new part, nullptr when nothing was added.
+ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name)
+{
+    if (m_objects == nullptr || obj_idx < 0 || obj_idx >= (int)m_objects->size() || mesh_world.empty())
+        return nullptr;
+    ModelObject &model_object = *(*m_objects)[obj_idx];
+    if (model_object.instances.empty())
+        return nullptr;
+
+    // add_volume() centres the mesh and leaves the centre as the volume's offset, which here is
+    // still a WORLD position. Undoing the instance matrix puts the part back where it was drawn.
+    ModelVolume *new_volume = model_object.add_volume(std::move(mesh_world), ModelVolumeType::MODEL_PART);
+    const Transform3d placed = model_object.instances.front()->get_matrix().inverse() * new_volume->get_matrix();
+    new_volume->set_transformation(placed);
+    new_volume->name = name;
+    const int extruder_id = model_object.config.has("extruder") ? model_object.config.opt_int("extruder") : 0;
+    new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
+    new_volume->source.is_from_builtin_objects = true;
+    model_object.invalidate_bounding_box();
+
+    Slic3r::save_object_mesh(model_object);
+
+    // Rebuilds the object's rows in the list and calls changed_object().
+    reorder_volumes_and_get_selection(obj_idx);
+    wxGetApp().plater()->get_view3D_canvas3D()->update_instance_printable_state_for_object((size_t)obj_idx);
+    notify_instance_updated(obj_idx);
+    return new_volume;
+}
+
 void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center)
 {
     // Add mesh to model as a new object
