@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SVG Stickers — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Load a vector drawing, put it on the top or bottom face, and every colour of it becomes a recipe from your four filaments. Then swap any of those recipes for a pattern of your own.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .sl { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 700px) { .sl { grid-template-columns: 1fr; } }
+  .sl__grp { border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+             padding: .5rem .55rem; display: grid; gap: .45rem; }
+  .sl__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em; text-transform: uppercase; color: var(--ink-faint); }
+  .sl__read { font-family: var(--mono); font-size: .72rem; line-height: 1.55; color: var(--ink-faint); margin: 0; }
+  .sl__read b { color: var(--ink); font-weight: 500; }
+  .sl__sw { display: inline-block; width: 1.6em; height: 1em; border-radius: 3px; vertical-align: -2px; border: 1px solid var(--rule); }
+  .steps { counter-reset: st; list-style: none; padding: 0; display: grid; gap: 1.6rem; }
+  .steps > li { counter-increment: st; }
+  .steps > li > p:first-child::before { content: counter(st, decimal-leading-zero); font-family: var(--mono);
+       color: var(--accent); margin-right: .55rem; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour" aria-current="page">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§6 — Colour</p>
+    <h1>SVG stickers</h1>
+    <p class="lede">
+      Load a vector drawing, click the top or the bottom face of a part, and every colour of the
+      drawing becomes a recipe made from your four filaments. That is the quick part. The fun part
+      is that any of those recipes can be swapped for one of your own: a stripe, a weave, a ramp.
+      A HueForge kind of result, with vectors and sharp edges, on any flat face.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--risk">experimental</li>
+      <li class="badge badge--ver badge--plain">2.3.8, own tab and multicolour 2.4.8</li>
+    </ul>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>ColorStitch Painter</b><span class="sep">›</span><b>Sticker tool</b><span class="sep">›</span><b>Load SVG…</b><span class="sep">›</span><b>Stickers tab</b>
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="what" data-short="What a sticker is">What a sticker is</h2>
+
+    <p>
+      A sticker is not geometry. The SVG becomes a flat mask on the face, and each colour region of
+      it carries a Sandwich recipe that is worked out when you slice. Nothing is added to the model,
+      nothing to boolean, nothing to clean up afterwards. Stack several and the topmost wins where
+      they overlap.
+    </p>
+
+    <ul>
+      <li><b>Multicolour.</b> Every colour of the drawing gets its own recipe from your four
+        filaments, Flat or ColorStitch. Backgrounds are dropped, see through shapes are merged, CSS
+        colours are read, and linear gradients print as bands or as one ColorStitch ramp.</li>
+      <li><b>Top or bottom.</b> It sits on the top face or on the bottom one (the face on the bed,
+        or the underside of an overhang). Bottom recipes are worked out as seen from the bed.</li>
+      <li><b>You can see it.</b> Every sticker shows in the painter and in the normal 3D view, cut
+        to the face it sits on.</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="example" data-short="Step by step">From an SVG to a pattern, step by step</h2>
+
+    <p>
+      A rainbow on a white disc, four filaments loaded: white, magenta, yellow and cyan. The drawing
+      asks for six colours, none of which is in a spool.
+      <a href="../examples/Sticker-Example.3mf" download>Download the example project</a> and follow
+      along.
+    </p>
+
+    <div class="note note--warn">
+      <span class="note__t">Before you slice the example</span>
+      <p style="margin:0">
+        After opening it, turn <b>Enable prime tower</b> off and on again, or the tower may not show
+        up. It is an odd bug we still have to look into.
+      </p>
+    </div>
+
+    <ol class="steps">
+      <li>
+        <p><b>Put the sticker on.</b> Pick the Sticker tool, press <b>Load SVG…</b>, keep
+        <b>Use the SVG colours</b> ticked and click the top face. In the <b>Place</b> tab you can
+        rotate it, size it, mirror it or fit it to the object, and drag it across the face.</p>
+        <figure>
+          <img src="../images/Sticker-Example-01-Place.png" width="1840" height="1450" alt="The rainbow sticker placed on the disc, with the Stickers tab open on Place: side, rotate, size and the layer list" loading="lazy">
+          <figcaption>The sticker on the disc. One layer, six colours, a recipe for each.</figcaption>
+        </figure>
+      </li>
+      <li>
+        <p><b>Slice and look at it in RealColor.</b> The preview mixes the passes with the TD of
+        each filament, so you see roughly what the print will look like before you print it. Every
+        band came out as a soft tone made from the four spools.</p>
+        <figure>
+          <img src="../images/Sticker-Example-02-Slice.webp" width="1588" height="1616" alt="The sliced disc in RealColor: the six bands of the rainbow as soft tones mixed from white, magenta, yellow and cyan" loading="lazy">
+          <figcaption>The automatic recipes, sliced, in RealColor.</figcaption>
+        </figure>
+      </li>
+      <li>
+        <p><b>Pick the colour you want to change.</b> In <b>Colours</b>, each square is one colour of
+        the drawing: the top half is what the SVG asks for, the bottom half what your filaments give.
+        Click one and you see its recipe, how far it is from the target (ΔE) and the closest other
+        recipes.</p>
+        <figure>
+          <img src="../images/Sticker-Example-03-Colours.png" width="1846" height="1534" alt="The Colours tab of the sticker: six squares, the blue one selected, its recipe drawn as Top and Penultimate passes, and its distance to the target" loading="lazy">
+          <figcaption>The blue band selected: what the SVG wanted, what the spools give, and the recipe behind it.</figcaption>
+        </figure>
+      </li>
+      <li>
+        <p><b>Change its recipe for the effect you want.</b> <b>Edit in Pro</b> opens that recipe in
+        the Pro tab. Here the band became two ColorStitch passes of white and magenta at 45° on top
+        and another underneath: a stripe, not a tone. <b>Back to sticker</b> takes you back.</p>
+        <figure>
+          <img src="../images/Sticker-Example-04-Recipe.png" width="1850" height="1478" alt="Pro tab editing a recipe of the sticker: Top with two ColorStitch passes of white and magenta at 45 degrees and a Penultimate ColorStitch pass" loading="lazy">
+          <figcaption>The same band, now a ColorStitch stripe of white and magenta.</figcaption>
+        </figure>
+      </li>
+      <li>
+        <p><b>Slice again.</b> That one band now prints as a pink and white stripe, while the rest
+        of the rainbow keeps its tones.</p>
+        <figure>
+          <img src="../images/Sticker-Example-05-Slice.webp" width="1704" height="1468" alt="The sliced disc in RealColor after the change: one band of the rainbow is now a fine pink and white stripe" loading="lazy">
+          <figcaption>Five bands as tones, one as a pattern.</figcaption>
+        </figure>
+      </li>
+    </ol>
+
+    <div class="note note--key">
+      <span class="note__t">Patterns, not only tones</span>
+      <p style="margin:0">
+        The automatic recipes get you close to the drawing's colours. Every recipe is still a
+        recipe, so any colour region can become a stripe, a weave, a gradient or a solid of one
+        spool. The drawing decides <em>where</em>; you decide <em>what</em> prints there.
+      </p>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="lab" data-short="★ Try it">Try it on the rainbow</h2>
+
+    <div class="demo bleed" id="stickerlab-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Each colour of the SVG becomes a recipe</span>
+        <span class="demo__hint">click a band, change its recipe</span>
+      </div>
+      <div class="demo__body" data-demo="stickerlab">
+        <noscript><p class="noscript">This demo needs JavaScript. Each colour of the rainbow is matched to the closest recipe from four filaments; any band can be switched to a ColorStitch stripe.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        The colours are mixed with the tour's port of the app's optics (<code>ColorSci.cpp</code>,
+        <span class="seal">real algorithm</span>), TD 5 for the three colours, over a white part.
+        The search here tries one or two passes of 0.04 to 0.28 mm each; the app's own search tries
+        more and can pick a different recipe. The stripe uses the pattern engine
+        (<code>SurfaceColorMix.cpp</code>). Drawing: Fluent Emoji, MIT.
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <h2 id="editing" data-short="Editing a sticker">Editing a sticker</h2>
+
+    <p>
+      The pencil on a layer opens its controls right under the layer list, in the same tab.
+      <b>Place</b> has the side, rotation, size, mirror and a button to restore its proportion if
+      the object was scaled unevenly. <b>Colours</b> has the row of squares, each recipe drawn as in
+      Pro, the closest other recipes, <b>Edit in Pro</b>, and a cap on how many recipes the sticker
+      may use, with <b>Reduce</b> to merge the closest ones. <b>Recompute all</b> redoes every
+      recipe as Flat or as ColorStitch, with the number of bands for gradients.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="The catch">The catch</h2>
+
+    <ul>
+      <li><strong>A sticker covers everything under it.</strong> Hand painted zones and MMU paint
+        both: it is applied last.</li>
+      <li><strong>The 3D view draws each colour as a flat swatch.</strong> A weave or a smooth
+        gradient shows in the recipe and in the slice, not yet on the model. RealColor in the
+        preview is the place to judge it.</li>
+      <li><strong>Gradients:</strong> linear ones are read. Radial gradients, which many emoji
+        sets use, are not a promise; try the SVG first.</li>
+      <li><strong>Wall recolouring recipes don't recolour walls on a sticker.</strong> The Place
+        tab warns.</li>
+      <li><strong>Booleans and Split don't keep stickers yet.</strong> The painting carries over,
+        the stickers do not.</li>
+      <li>Sliced and checked in the G-code; not yet proven over many prints.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="painter.html"><small>Back</small><b>The ColorStitch Painter</b></a>
+      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.4.0.</p>
+      <p class="small">This page covers the stickers of <b>§6</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="map.html">Feature map</a></p>
+      <p>Rainbow drawing: <a href="https://github.com/microsoft/fluentui-emoji">Fluent Emoji</a>, © Microsoft, MIT License.</p>
+    </div>
+  </div>
+</footer>
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* stickerlab — the rainbow of Fluent Emoji (MIT), each colour matched to
+   the closest recipe over a white part with the Optics port, and any band
+   switchable to a ColorStitch stripe drawn with the Stitch port. */
+Tour.demo('stickerlab', function (host) {
+  var el = Tour.el;
+  var LH = 0.2, TD = 5;
+  var BASE = '#f2f0eb';
+  var FIL = [
+    { name: 'white',   hex: '#f2f0eb' },
+    { name: 'magenta', hex: '#d6177a' },
+    { name: 'yellow',  hex: '#f5d90a' },
+    { name: 'cyan',    hex: '#1c9ad6' }
+  ];
+  var BANDS = [
+    { hex: '#F8312F', d: 'M30 4.00001C30 2.89544 29.1033 1.99257 28.0016 2.07146C21.3098 2.55057 14.9767 5.42328 10.2 10.2C5.42328 14.9767 2.55057 21.3098 2.07146 28.0016C1.99257 29.1033 2.89545 30 4.00001 30C4.00001 30 4.60992 30.0185 5 30C7 21.5 7.64001 18.01 12.32 13.32C17.01 8.63 23.5 6 30 5L30 4.00001Z' },
+    { hex: '#FFB02E', d: 'M30 8V5C23.37 5 17.01 7.63 12.32 12.32C7.64001 17.01 5 23.37 5 30H8C9 26 11.32 19.57 15.44 15.44C19.56 11.32 23.5 9.5 30 8Z' },
+    { hex: '#FFF478', d: 'M30 8V11C25 11.5 21.12 14 17.56 17.56C14 21.13 12 25 11 30H8C8 24.17 10.32 18.57 14.44 14.44C18.56 10.32 24.16 8 30 8Z' },
+    { hex: '#00D26A', d: 'M19.69 19.69C16.69 22.69 15 26 14 30H11C11 24.96 13 20.13 16.56 16.56C20.12 13 24.96 11 30 11V14C25.5 15 22.69 16.69 19.69 19.69Z' },
+    { hex: '#3F5FFF', d: 'M30 17V14C25.76 14 21.69 15.69 18.69 18.69C15.69 21.69 14 25.76 14 30H17C17 26.55 18.37 23.24 20.81 20.81C23.25 18.37 26.56 17 30 17Z' },
+    { hex: '#8D65C5', d: 'M30 18C30 19.1046 29.0955 19.9791 28.0128 20.1975C24.0842 20.9896 20.9896 24.0842 20.1975 28.0128C19.9791 29.0955 19.1046 30 18 30L17 30C17 26.55 18.37 23.24 20.81 20.81C23.25 18.37 26.56 17 30 17V18Z' }
+  ];
+  BANDS.forEach(function (b) { b.path = new Path2D(b.d); });
+
+  var tdMm = Optics.tdToMm(TD, LH);
+  function mix(passes) {   // passes: [{f, t}], bottom first
+    return Optics.blendStacked(passes.map(function (p) { return { colorHex: FIL[p.f].hex, thickness: p.t, tdMm: tdMm }; }), BASE);
+  }
+  // The search: one pass or two passes, 0.04 to 0.28 mm each, over the white part.
+  var CANDS = [], TS = [0.04, 0.08, 0.12, 0.2, 0.28];
+  for (var a = 1; a < 4; a++) TS.forEach(function (ta) {
+    CANDS.push([{ f: a, t: ta }]);
+    for (var b = 1; b < 4; b++) if (b !== a) TS.forEach(function (tb) { CANDS.push([{ f: b, t: tb }, { f: a, t: ta }]); });
+  });
+  CANDS.forEach(function (c) { c.rgb = mix(c); c.lab = Optics.linearToLab(c.rgb); });
+  function best(hex) {
+    var lab = Optics.linearToLab(Optics.hexToLinear(hex)), win = null, wd = 1e9;
+    CANDS.forEach(function (c) { var d = Optics.deltaE2000(lab, c.lab); if (d < wd) { wd = d; win = c; } });
+    return { cand: win, dE: wd };
+  }
+  BANDS.forEach(function (b) { b.auto = best(b.hex); b.mode = 'auto'; b.pair = [0, 1]; b.pattern = '12'; });
+
+  var S = { sel: 4, showSvg: false };
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [el('span', { text: 'The sticker on a white part' }), el('span', { 'data-snote': true })]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  function stripeFill(ctx, b, size) {
+    var seq = Stitch.fromPattern(64, b.pattern), pitch = Math.max(2.2, size / 90);
+    var cols = b.pair.map(function (f) { return Optics.linearToCss(mix([{ f: f, t: 0.28 }, { f: f, t: 0.28 }])); });
+    ctx.save(); ctx.clip(b.path);
+    ctx.rotate(-Math.PI / 4);
+    for (var i = -260; i < 260; i++) {
+      ctx.fillStyle = cols[seq[(i % seq.length + seq.length) % seq.length] % 2];
+      ctx.fillRect(-80, i * pitch / (size / 32), 160, pitch / (size / 32) + 0.02);
+    }
+    ctx.restore();
+  }
+
+  var geo = { ox: 0, oy: 0, k: 1 };
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface'); ctx.fillRect(0, 0, w, h);
+    var R = Math.min(w, h) * 0.46, cx = w / 2, cy = h / 2;
+    ctx.fillStyle = BASE; ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+    var size = R * 1.55, k = size / 32;
+    geo = { ox: cx - size * 0.56, oy: cy - size * 0.56, k: k };
+    ctx.save(); ctx.translate(geo.ox, geo.oy); ctx.scale(k, k);
+    BANDS.forEach(function (b, i) {
+      if (S.showSvg) { ctx.fillStyle = b.hex; ctx.fill(b.path); return; }
+      if (b.mode === 'stripe') stripeFill(ctx, b, size);
+      else { ctx.fillStyle = Optics.linearToCss(b.auto.cand.rgb); ctx.fill(b.path); }
+    });
+    var s = BANDS[S.sel];
+    ctx.lineWidth = 2.2 / k; ctx.strokeStyle = Tour.token('--accent'); ctx.stroke(s.path);
+    ctx.restore();
+  }, { height: 300, cursor: 'pointer' });
+
+  cv.canvas.addEventListener('click', function (ev) {
+    var p = Tour.localPoint(ev, cv.canvas), ctx = cv.ctx;
+    var x = (p.x - geo.ox) / geo.k, y = (p.y - geo.oy) / geo.k;
+    for (var i = BANDS.length - 1; i >= 0; i--) {
+      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+      var hit = ctx.isPointInPath(BANDS[i].path, x, y); ctx.restore();
+      if (hit) { S.sel = i; rebuild(); return; }
+    }
+  });
+
+  function sw(css) { return '<span class="sl__sw" style="background:' + css + '"></span>'; }
+  function recipeText(c) {
+    return c.map(function (p) { return FIL[p.f].name + ' ' + p.t.toFixed(2); }).reverse().join(' over ') + ' mm';
+  }
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  var info = el('p.sl__read'), ctrls = el('div', { style: 'display:grid;gap:.45rem' });
+  side.appendChild(el('div.sl__grp', null, [el('span.sl__gt', { text: 'Selected colour' }), info]));
+  side.appendChild(el('div.sl__grp', null, [el('span.sl__gt', { text: 'Its recipe' }), ctrls]));
+  side.appendChild(el('div.sl__grp', null, [el('span.sl__gt', { text: 'View' }),
+    Tour.toggle({ label: 'Show the SVG colours', value: false, onChange: function (v) { S.showSvg = v; cv.render(); } })]));
+  host.appendChild(el('div.sl', null, [box, side]));
+
+  function rebuild() {
+    var b = BANDS[S.sel];
+    ctrls.innerHTML = '';
+    ctrls.appendChild(Tour.segmented({ value: b.mode, options: [['auto', 'Closest tone'], ['stripe', 'ColorStitch']],
+      onChange: function (v) { b.mode = v; rebuild(); } }));
+    if (b.mode === 'stripe') {
+      var pairs = [['0,1', 'white + magenta'], ['0,2', 'white + yellow'], ['0,3', 'white + cyan'], ['1,2', 'magenta + yellow'], ['1,3', 'magenta + cyan'], ['2,3', 'yellow + cyan']];
+      ctrls.appendChild(Tour.select({ label: 'Filaments', value: b.pair.join(','), options: pairs,
+        onChange: function (v) { b.pair = v.split(',').map(Number); update(); } }));
+      ctrls.appendChild(Tour.select({ label: 'Pattern', value: b.pattern, options: [['12', '12'], ['1122', '1122'], ['112', '112'], ['111222', '111222']],
+        onChange: function (v) { b.pattern = v; update(); } }));
+    }
+    update();
+  }
+  function update() {
+    cv.render();
+    var b = BANDS[S.sel], n = host.querySelector('[data-snote]');
+    var line1 = sw(b.hex) + ' the SVG asks for <b>' + b.hex + '</b><br>';
+    if (b.mode === 'auto') {
+      info.innerHTML = line1 + sw(Optics.linearToCss(b.auto.cand.rgb)) + ' the spools give <b>' + Optics.linearToHex(b.auto.cand.rgb) + '</b><br>' +
+        recipeText(b.auto.cand) + '<br>ΔE <b>' + b.auto.dE.toFixed(1) + '</b>' + (b.auto.dE > 10 ? ' · out of reach of these four, the closest wins' : '');
+    } else {
+      info.innerHTML = line1 + 'ColorStitch <b>' + FIL[b.pair[0]].name + ' / ' + FIL[b.pair[1]].name + '</b>, pattern <b>' + b.pattern + '</b> at 45°<br>a stripe instead of a tone';
+    }
+    if (n) n.textContent = 'band ' + (S.sel + 1) + ' of 6';
+  }
+
+  rebuild();
+  Tour.attract({
+    host: host, period: 9000,
+    hint: 'playing · click a band to take over', idleHint: 'click a band, change its recipe',
+    onFrame: function (k, phase) {
+      var sel = Math.min(5, Math.floor(phase * 6)), b = BANDS[4];
+      var want = phase > 0.5 ? 'stripe' : 'auto';
+      if (S.sel !== sel || b.mode !== want) { S.sel = sel; b.mode = want; rebuild(); }
+    },
+    render: function () { cv.render(); }
+  });
+});
+</script>
+
+</body>
+</html>

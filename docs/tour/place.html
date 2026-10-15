@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Align &amp; Stack · Gravity — Neotko for Snapmaker Orca</title>
+<title>Align &amp; Construct · Gravity — Neotko for Snapmaker Orca</title>
 <meta name="description" content="Place one object precisely against another, then make the slicer believe it: a face resting on another object prints as solid contact instead of a false bridge over thin air.">
 <link rel="stylesheet" href="assets/tour.css">
 <style>
@@ -56,7 +56,7 @@
   <main class="article" id="main">
 
     <p class="eyebrow">§7 · §17 — Placing</p>
-    <h1>Align &amp; Stack, and Gravity</h1>
+    <h1>Align &amp; Construct, and Gravity</h1>
     <p class="lede">
       Stock slicing assumes a few things that are only true when an object sits alone on the bed:
       that layer 0 is the bed, that below me is only my own previous layer, that support grows
@@ -67,7 +67,7 @@
     <ul class="badges">
       <li class="badge badge--gate">True Objects</li>
       <li class="badge badge--gate">Libre Mode opens the door</li>
-      <li class="badge badge--ver badge--plain">2.3.9, extended 2.4.0 and 2.4.3</li>
+      <li class="badge badge--ver badge--plain">2.3.9, extended 2.4.0, 2.4.3 and 2.4.8</li>
     </ul>
 
     <!-- ================================================================= -->
@@ -315,63 +315,260 @@
     </p>
 
     <!-- ================================================================= -->
-    <h2 id="alignstack" data-short="Align &amp; Stack">Align &amp; Stack</h2>
+    <h2 id="alignstack" data-short="Align &amp; Construct">Align &amp; Construct</h2>
 
     <p class="where">
       <span class="where__label">Where</span>
-      <b>Left-side gizmo toolbar</b><span class="sep">›</span><b>Align &amp; Stack</b>
+      <b>Top toolbar</b><span class="sep">›</span><b>Align &amp; Construct</b>
     </p>
 
     <p>
-      Snap &amp; Drag is for placing by hand. Align &amp; Stack is for placing exactly. Click two
-      objects in the scene: <strong>#1</strong>, clicked first, is the anchor; <strong>#2</strong>
-      is the one that moves. Click a third to swap out #2, since the gizmo only ever relates two
-      objects and there is no chain to manage.
+      Snap &amp; Drag is for placing by hand. Align &amp; Construct is for placing exactly, and since
+      2.4.8 it also builds: it extrudes a face into a new solid and runs booleans between two
+      objects, or between two parts of the same object. It used to be called Align &amp; Stack and
+      it used to need Libre Mode. It does not any more: everyone has it.
     </p>
 
     <div class="tbl-wrap">
     <table>
-      <thead><tr><th>Mode</th><th>What it does</th></tr></thead>
+      <thead><tr><th>Job</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td><b>Place against</b></td><td>#2 comes to rest touching the chosen face of #1. This is the stacking mode.</td></tr>
-        <tr><td><b>Align flush</b></td><td>#2's same-side face becomes coplanar with #1's, the way alignment works in a drawing program.</td></tr>
+        <tr><td><b>Place #2</b></td><td>Puts one object or part against another: next to it, on top, centred, or with an edge lined up.</td></tr>
+        <tr><td><b>Face of #1</b></td><td>Pick a flat face of #1 and drop #2 on it.</td></tr>
+        <tr><td><b>Extrude from the face</b></td><td>Turns any flat face into a new solid, grown or shrunk around its outline.</td></tr>
+        <tr><td><b>Boolean</b></td><td>Union, Difference or Intersection of #1 with #2, without assembling them first.</td></tr>
       </tbody>
     </table>
     </div>
 
+    <h3 id="ac-pick" data-short="Picking">Picking #1 and #2, and parts</h3>
+
     <p>
-      A row of face and centre buttons picks which face or centre axis to work against, and the
-      tooltip changes with the mode. <b>Z gap (mm)</b> sets a controllable gap between stacked
-      objects, and <b>Drop to bed (Z = 0)</b> puts every ordered object back on the plate.
+      Click an object and it becomes <strong>#1</strong>, the one that stays. Click another and it
+      is <strong>#2</strong>, the one that moves. <b>Swap</b> trades them. In an assembled object the
+      first click takes the whole object; click it again and you get just the part under the mouse,
+      and the rest of the assembly turns see through so the part stands out. #1 and #2 can be two
+      parts of the same object. What you picked gets a layer of its colour: orange for #1, yellow
+      for #2.
+    </p>
+
+    <h3 id="ac-place" data-short="Place, with ghosts">Place, and see where it lands</h3>
+
+    <p>
+      The pad is the bed seen from above: four arrows that follow the bed axes (red is X, green is
+      Y) and a centre button. Three more buttons handle height: <b>On top</b>, <b>Centre in
+      height</b> and <b>To bed</b>. <b>Next to</b> leaves #2 beside #1, touching it; <b>Align
+      edge</b> lines up the edge on that side.
+    </p>
+
+    <p>
+      <strong>Hover any of those buttons and #2 shows up as a ghost where it would land</strong>,
+      with a dotted line to a target mark. The line and the mark keep their size on screen, so a
+      3 mm part reads as easily as a big one. Click, and it lands exactly there.
     </p>
 
     <figure>
-      <img src="../images/AlignStack.gif" width="800" height="420" alt="With anchor #1 and object #2 picked, every possible landing spot is drawn as a translucent ghost in the viewport, each with a clickable cube icon at the seam" loading="lazy">
-      <figcaption>With #1 and #2 picked, <b>every possible placement is previewed at once</b> as a translucent ghost of #2, each with a clickable mini-cube floating at the seam.</figcaption>
+      <img src="../images/Align-Construct.gif" width="400" height="271" alt="Two cubes in Align &amp; Construct: hovering the arrows and the height buttons shows #2 as a ghost where it would land, then Union fuses both into one solid" loading="lazy">
+      <figcaption>Hover a button and #2 appears as a ghost where it would land. At the end, <b>Union</b> fuses both into one solid.</figcaption>
+    </figure>
+
+    <h3 id="ac-extrude" data-short="Extrude a face">Extrude from the face</h3>
+
+    <p>
+      Turn on <b>Pick a face</b> and click a flat face of #1. It lights up whole, holes included.
+      Any flat face works, at any angle, and the new solid grows straight out of it.
+    </p>
+
+    <ul>
+      <li><b>Face</b> extrudes the face as it is. <b>Holes</b> extrudes only its holes, filled: pick
+        the flat face around a screw hole and you get the plug of that hole.</li>
+      <li><b>Height</b> is how thick the new solid is, 5 mm to start. <b>Offset</b> grows its
+        outline, or shrinks it with a negative value.</li>
+      <li><b>Both directions</b> puts half the height out of the face and half into the model, so
+        the new solid passes through the face. Handy as a cutter for a boolean.</li>
+      <li><b>Part</b> keeps it inside the same object, in place. <b>Object</b> makes a separate one.
+        <b>Create</b> does it, and one undo removes it.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/Align-Construct-Extrude.gif" width="400" height="271" alt="Picking the top face of a part, which lights up whole, then Extrude from the face with a Height and a negative Offset, and the new solid sitting on that face" loading="lazy">
+      <figcaption>Pick the top face, set a Height and a negative Offset, and the new solid sits on that face.</figcaption>
     </figure>
 
     <p>
-      That preview is the part worth knowing about. All five face operations and the three centring
-      ones are drawn live, at exactly the position they would land, computed with the same maths the
-      click would run, so the preview cannot lie. Hover a cube for a tooltip, click it to run that
-      placement immediately. No going back to the side panel to work out which abstract X− / X+
-      button means "behind".
+      A real use: a 0.05 mm sheet of white over the stickers of a keyring, to soften very opaque
+      matte colours. It used to mean going back to the CAD program. Now it is a click on the top
+      face. The new solid is a plain mesh, so if you change the model afterwards, make it again.
     </p>
+
+    <h3 id="ac-boolean" data-short="★ Boolean">Boolean: #1 with #2</h3>
+
+    <p>
+      <b>Union</b> joins them, <b>Difference</b> carves the shape of #2 out of #1, and
+      <b>Intersection</b> keeps only what they share. Two separate objects give a new object in the
+      same place; two parts of the same object give a part of that object, in place, so the
+      assembly stays together. With <b>Keep #1 and #2</b> off, the result replaces both. If they do
+      not overlap, or one is not a closed solid, it tells you and leaves the scene alone.
+    </p>
+
+    <div class="demo bleed" id="boolean-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">Union, Difference, Intersection, and who gives the colour</span>
+        <span class="demo__hint">drag #2, pick an operation</span>
+      </div>
+      <div class="demo__body" data-demo="boolean">
+        <noscript><p class="noscript">This demo needs JavaScript. Union joins the two shapes, Difference carves #2 out of #1 and Intersection keeps the overlap; the inside of the result takes the filament of #1.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> in two dimensions. The real tool runs a mesh boolean on the 3D solids.
+        The colour rules are the ones the app follows: the painting of both stays, unpainted skin
+        keeps the filament of its own part, and the inside takes the filament of #1.
+      </div>
+    </div>
+
+    <p>
+      Since 2.4.8 the result <strong>keeps the painting</strong>, here and in the Mesh boolean tool
+      and in <b>Split › To Parts / To Objects</b>. Every stroke stays where it was (colour, fuzzy
+      skin, support and seam painting), and the skin you never painted keeps the filament of its own
+      part. <b>#1 gives the base filament</b>, the one that fills the inside: in a Union, pick the
+      big part as #1. In a Difference, the walls of the cut take the base filament.
+    </p>
+
+    <figure>
+      <img src="../images/Boolean-keeps-paint.png" width="1516" height="484" alt="Two painted cubes: before, a Union came out plain grey; now it keeps every stroke and the colour of each cube" loading="lazy">
+      <figcaption>Two painted cubes. Before 2.4.8 a Union came out plain grey; now it keeps every stroke and the colour of each cube.</figcaption>
+    </figure>
 
     <p class="small">
-      Ghosts only show for a #1 + #2 pair currently on screen. From a camera angle where a given
-      ghost is not really visible, its icon simply does not appear rather than showing up somewhere
-      meaningless.
+      On a big painted model it takes a few seconds, and a small window says <b>Keeping the
+      painting...</b> while it works. Measured: a 218k triangle sea slug with all its skin painted
+      merges in about 9 s and slices to the same G-code as the assembled one, 0.06 g apart.
+      ColorStitch recipes, Texture Bump zones and stickers do not carry over yet.
     </p>
 
+    <h3 id="ac-hole" data-short="★ A looser hole">Example: a looser hole for a screw</h3>
+
+    <p>
+      A downloaded cabinet handle whose screw holes come out too tight. No CAD needed: extrude a
+      wider peg from the floor of the hole, then subtract it.
+    </p>
+
+    <ol>
+      <li>Open <b>Align &amp; Construct</b> and click the handle. It becomes #1.</li>
+      <li>Turn on <b>Pick a face</b> and click the floor of the hole. The rest of the model turns see
+        through, so you can see inside it.</li>
+      <li>In <b>Extrude from the face</b>, set <b>Height</b> 25 and <b>Offset</b> 1, keep
+        <b>Part</b> and press <b>Create</b>. A peg 1 mm wider all round appears inside the hole.</li>
+      <li>Click the handle again to take just its body as #1, then click the peg: #2. Press
+        <b>Difference</b>.</li>
+      <li>The handle comes back as one part with a wider hole, in its place.</li>
+    </ol>
+
+    <figure>
+      <img src="../images/Align-Construct-Hole-Example.jpg" width="2436" height="1464" alt="The cabinet handle example: picking the floor of the screw hole, extruding a wider peg, and the handle after Difference with a wider hole" loading="lazy">
+      <figcaption>The whole example: pick the floor of the hole, extrude a wider peg as a part, subtract it.</figcaption>
+    </figure>
+
+    <div class="demo bleed" id="hole-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">How much looser the hole gets</span>
+        <span class="demo__hint">move Offset and Height</span>
+      </div>
+      <div class="demo__body" data-demo="hole">
+        <noscript><p class="noscript">This demo needs JavaScript. The peg grows its outline by Offset on every side, so the hole after Difference is twice the Offset wider.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A section through the handle. The arithmetic is the tool's: the peg's outline is the hole's
+        outline grown by <b>Offset</b> on every side, and with <b>Both directions</b> half the Height
+        goes into the model. The handle's shape is drawn, not loaded.
+      </div>
+    </div>
+
+    <figure>
+      <img src="../images/Align-Construct-Hole-Example-Closeup.jpg" width="3356" height="1020" alt="Close up of the handle: the floor of the hole picked, the wider peg inside it, and the wider hole after Difference" loading="lazy">
+      <figcaption>Close up of the three steps on the real handle.</figcaption>
+    </figure>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Changed from Align &amp; Stack</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td>To bed</td><td>Drops #2 only. It used to drop every object you had picked.</td></tr>
+        <tr><td>Centre</td><td>Centres #2 on #1 in X and Y together.</td></tr>
+        <tr><td>On top</td><td>Leaves #1 where it is. The "#1 to bed first" checkbox is gone.</td></tr>
+        <tr><td>Libre Mode</td><td>Not needed. A whole object you lift up still drops to the bed without it, as everywhere else in Orca; a part moves inside its own object.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
     <div class="note note--good">
-      <span class="note__t">These two are meant to be used together</span>
+      <span class="note__t">Meant to be used with Gravity</span>
       <p style="margin:0">
-        Align &amp; Stack places the pieces exactly. <b>Gravity</b> is what then makes the slicer
-        treat the touching face honestly instead of as a false bridge. Either one alone leaves half
-        the job undone.
+        Align &amp; Construct places the pieces exactly. <b>Gravity</b> is what then makes the
+        slicer treat the touching face honestly instead of as a false bridge.
       </p>
     </div>
+
+    <!-- ================================================================= -->
+    <h2 id="reallayers" data-short="★ Stacked: real layers">Stacked objects: real layers</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Prime tower</b><span class="sep">›</span><b>Tower type: NeoTower</b><span class="sep">›</span><b>Variable layer height</b><span class="sep">›</span><b>Stacked objects: real layers</b>
+    </p>
+
+    <p>
+      A slicer lays every object on one grid of layers that starts at the bed. A part resting on top
+      of another one starts wherever that grid happens to fall, up to half a layer above or below the
+      surface it sits on. Above, you get an air gap and the first layer prints as a bridge. Below, it
+      digs into the part underneath. And the part underneath has the same problem at its top: a
+      2.3 mm part at 0.2 stops at 2.25, so whatever sits on it hangs 0.05 in the air.
+    </p>
+
+    <p>
+      The usual trick was nudging the layer height by a few hundredths until a boundary landed in
+      the right place. It worked until you moved or resized anything. With this box ticked:
+    </p>
+
+    <ul>
+      <li>A part that does not touch the bed starts its layers at its own base. The empty stretch
+        under it is split into equal layers that end exactly there; nothing prints in it.</li>
+      <li>From its base up, the part uses its real layer height. 0.2 stays 0.2.</li>
+      <li>A part with something resting on its top prints up to its real height. Its last five
+        layers change by a few hundredths to get there. The first layer is never touched.</li>
+      <li>It follows the scene: put a part on top, take it off or move it, and the parts involved
+        are sliced again.</li>
+    </ul>
+
+    <div class="demo bleed" id="layers-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">Where the layers of a stacked part land</span>
+        <span class="demo__hint">change the heights, flip the box</span>
+      </div>
+      <div class="demo__body" data-demo="reallayers">
+        <noscript><p class="noscript">This demo needs JavaScript. Without the box, the top part starts on the bed's grid and leaves a gap or digs in; with it, both parts meet exactly.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> of the rule as the release notes state it, with the arithmetic done live:
+        the grid from the bed, the last five layers of the lower part stretched to its real top, and
+        the upper part starting at its own base. Not a port of the slicing code.
+      </div>
+    </div>
+
+    <ul class="small">
+      <li>Off by default. It only shows with NeoTower and <b>Variable layer height</b>, which is what
+        lets the tower follow objects whose layers sit at different heights. It also needs Libre Mode
+        and parts resting on other parts.</li>
+      <li>It adjusts the top of a part, its highest point. Something resting on a lower step is not
+        covered yet.</li>
+      <li>A sheet with nothing on top of it still needs its own <b>Layer height</b>.</li>
+      <li><b>"Conflicts of G-code paths"</b> can show up when stacked parts use different layer
+        heights. If the G-code preview looks right, it is right.</li>
+    </ul>
+
 
     <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
@@ -404,7 +601,7 @@
 <footer class="foot">
   <div class="foot__in">
     <div>
-      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.4.0.</p>
       <p class="small">This page covers <b>§7</b> and <b>§17</b> of the
         <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
     </div>
@@ -655,6 +852,313 @@ Tour.demo('gravity', function (host) {
     hint: 'playing · drag the block to take over',
     idleHint: 'drag the block',
     onFrame: function (k) { S.x = Math.max(S.w / 2, Math.min(1 - S.w / 2, 0.16 + k * 0.68)); },
+    render: update
+  });
+  update();
+});
+
+/* ===================================================================
+   boolean — Union / Difference / Intersection on two shapes, with the
+   colour rules of 2.4.8: painting stays, unpainted skin keeps its own
+   part's filament, the inside (and the cut walls) take #1's.
+   =================================================================== */
+Tour.demo('boolean', function (host) {
+  var el = Tour.el;
+  var F = Optics.DEFAULT_FILAMENTS;
+  var COL = { a: F[1].hex, b: F[3].hex, paint: F[2].hex };   // #1 blue, #2 yellow, a magenta stroke on #1
+  var S = { op: 'union', cx: 0.60, cy: 0.45 };
+  var R1 = { x0: 0.18, x1: 0.62, y0: 0.30, y1: 0.80 };       // #1, in box fractions
+  var RAD = 0.21;                                            // #2 radius, as a fraction of the height
+
+  function sdRect(x, y, W, H) {
+    var cx = (R1.x0 + R1.x1) / 2 * W, cy = (R1.y0 + R1.y1) / 2 * H;
+    var hx = (R1.x1 - R1.x0) / 2 * W, hy = (R1.y1 - R1.y0) / 2 * H;
+    var dx = Math.abs(x - cx) - hx, dy = Math.abs(y - cy) - hy;
+    var ox = Math.max(dx, 0), oy = Math.max(dy, 0);
+    return Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(dx, dy), 0);
+  }
+  function sdCirc(x, y, W, H) {
+    var dx = x - S.cx * W, dy = y - S.cy * H;
+    return Math.sqrt(dx * dx + dy * dy) - RAD * H;
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [el('span', { text: 'Section through the two solids' }), el('span', { 'data-bnote': true })]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface'); ctx.fillRect(0, 0, w, h);
+    var cell = 3, wall = 7, inside = Optics.linearToCss(
+      Optics.hexToLinear(COL.a).map(function (c) { return c * 0.45 + 0.30; }));
+    var paintX0 = (R1.x0 + 0.04) * w, paintX1 = (R1.x0 + 0.22) * w;
+    for (var y = 0; y < h; y += cell) for (var x = 0; x < w; x += cell) {
+      var px = x + cell / 2, py = y + cell / 2;
+      var d1 = sdRect(px, py, w, h), d2 = sdCirc(px, py, w, h), d;
+      if (S.op === 'union') d = Math.min(d1, d2);
+      else if (S.op === 'difference') d = Math.max(d1, -d2);
+      else d = Math.max(d1, d2);
+      if (d > 0) continue;
+      var c = inside;
+      if (d > -wall) {
+        var from1 = Math.abs(d - d1) < 1e-6 && !(S.op === 'difference' && Math.abs(d + d2) < 1e-6 && -d2 >= d1);
+        if (S.op === 'difference') c = COL.a;                 // #1's own skin and the walls of the cut
+        else c = from1 ? COL.a : COL.b;
+        if (from1 && Math.abs(py - R1.y0 * h) < wall + 1 && px > paintX0 && px < paintX1) c = COL.paint;
+      }
+      ctx.fillStyle = c; ctx.fillRect(x, y, cell, cell);
+    }
+    // the inputs, dashed
+    ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.strokeStyle = Tour.token('--ink-faint');
+    ctx.strokeRect(R1.x0 * w, R1.y0 * h, (R1.x1 - R1.x0) * w, (R1.y1 - R1.y0) * h);
+    ctx.beginPath(); ctx.arc(S.cx * w, S.cy * h, RAD * h, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    ctx.font = '600 12px ' + Tour.token('--mono'); ctx.fillStyle = Tour.token('--ink');
+    ctx.fillText('#1', R1.x0 * w + 6, R1.y1 * h - 8);
+    ctx.fillText('#2', S.cx * w - 8, S.cy * h + 4);
+  }, { height: 240, cursor: 'move' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: move, onMove: move
+  });
+  function move(p) {
+    S.cx = Math.max(0.08, Math.min(0.92, p.x / cv.width));
+    S.cy = Math.max(0.12, Math.min(0.88, p.y / cv.height));
+    update();
+  }
+
+  var read = el('p.gv__read', { style: 'margin:0' });
+  var seg = Tour.segmented({ label: 'Operation', value: S.op,
+    options: [['union', 'Union'], ['difference', 'Difference'], ['intersection', 'Intersection']],
+    onChange: function (v) { S.op = v; update(); } });
+
+  function sw(hex, t) { return '<span style="display:inline-block;width:.8em;height:.8em;border-radius:2px;vertical-align:-1px;background:' + hex + '"></span> ' + t; }
+  function update() {
+    cv.render();
+    var n = host.querySelector('[data-bnote]');
+    if (n) n.textContent = S.op;
+    var txt = {
+      union: 'Both become one solid. Each keeps its own skin colour.',
+      difference: '#2 is carved out of #1. The walls of the cut take #1’s filament.',
+      intersection: 'Only what both share is left. Skin from each side keeps its colour.'
+    }[S.op];
+    read.innerHTML = txt + '<br>' + sw(COL.a, 'inside and #1’s skin: filament of #1') + '<br>' +
+      (S.op === 'difference' ? '' : sw(COL.b, '#2’s skin: filament of #2') + '<br>') +
+      sw(COL.paint, 'a stroke painted on #1: stays');
+  }
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Boolean' }), seg]));
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Where the colour comes from' }), read]));
+  host.appendChild(el('div.gv', null, [box, side]));
+
+  var OPS = ['union', 'difference', 'intersection'], lastOp = -1;
+  Tour.attract({
+    host: host, period: 10500,
+    hint: 'playing · drag #2 to take over', idleHint: 'drag #2, pick an operation',
+    onFrame: function (k, phase) {
+      var a = phase * Math.PI * 2;
+      S.cx = 0.60 + Math.cos(a) * 0.08; S.cy = 0.52 + Math.sin(a) * 0.12;
+      var i = Math.min(2, Math.floor(phase * 3));
+      if (i !== lastOp) { lastOp = i; S.op = OPS[i];
+        seg.querySelectorAll('button').forEach(function (b, j) { b.setAttribute('aria-pressed', String(j === i)); }); }
+    },
+    render: update
+  });
+  update();
+});
+
+/* ===================================================================
+   hole — the cabinet handle example. Peg outline = hole outline grown
+   by Offset; Difference widens the hole wherever the peg reaches.
+   =================================================================== */
+Tour.demo('hole', function (host) {
+  var el = Tour.el;
+  var D = 4.0, DEPTH = 14, BODY_W = 22, BODY_H = 18;        // mm
+  var S = { off: 1.0, hgt: 25, both: false };
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [el('span', { text: 'Section through the screw hole' }), el('span', { 'data-hnote': true })]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  function geom() {
+    var pegW = D + 2 * S.off;
+    var z0 = S.both ? -S.hgt / 2 : 0, z1 = S.both ? S.hgt / 2 : S.hgt;   // from the hole floor, up
+    return { pegW: pegW, z0: z0, z1: z1 };
+  }
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface'); ctx.fillRect(0, 0, w, h);
+    var g = geom();
+    var sc = Math.min((w * 0.46) / BODY_W, (h - 30) / (BODY_H + 8));
+    var ox = w * 0.27, floorY = h - 14 - (BODY_H - DEPTH) * sc;   // y of the hole floor
+    function X(mm) { return ox + mm * sc; }
+    function Y(z) { return floorY - z * sc; }
+    var body = Tour.token('--ink-faint');
+    // body, then the hole after Difference
+    ctx.fillStyle = Optics.DEFAULT_FILAMENTS[1].hex;
+    ctx.fillRect(X(-BODY_W / 2), Y(DEPTH), BODY_W * sc, BODY_H * sc);
+    ctx.fillStyle = Tour.token('--surface');
+    ctx.fillRect(X(-D / 2), Y(DEPTH), D * sc, DEPTH * sc);                 // the original hole
+    var cutLo = Math.max(g.z0, -(BODY_H - DEPTH)), cutHi = Math.min(g.z1, DEPTH);
+    if (g.pegW > D && cutHi > cutLo) {
+      ctx.fillStyle = Tour.token('--surface');
+      ctx.fillRect(X(-g.pegW / 2), Y(cutHi), g.pegW * sc, (cutHi - cutLo) * sc);
+    }
+    // the peg, dashed
+    ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = Optics.DEFAULT_FILAMENTS[3].hex;
+    ctx.strokeRect(X(-g.pegW / 2), Y(g.z1), g.pegW * sc, (g.z1 - g.z0) * sc);
+    ctx.setLineDash([]);
+    // the picked face
+    ctx.strokeStyle = '#e8803a'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(X(-D / 2), Y(0)); ctx.lineTo(X(D / 2), Y(0)); ctx.stroke();
+    // labels
+    ctx.font = '11px ' + Tour.token('--mono'); ctx.fillStyle = Tour.token('--ink');
+    ctx.fillText('picked face', X(BODY_W / 2) + 10, Y(0) + 4);
+    ctx.fillText('peg', X(g.pegW / 2) + 6, Y(Math.min(g.z1, DEPTH + 6)) + 12);
+    ctx.fillStyle = body;
+    ctx.fillText('handle', X(-BODY_W / 2) + 4, Y(-(BODY_H - DEPTH)) - 6);
+  }, { height: 260 });
+
+  var read = el('p.gv__read', { style: 'margin:0' });
+  var sOff = Tour.slider({ label: 'Offset', min: -1, max: 2, step: 0.1, value: S.off,
+    format: function (v) { return (v > 0 ? '+' : '') + v.toFixed(1) + ' mm'; },
+    onInput: function (v) { S.off = v; update(); } });
+  var sH = Tour.slider({ label: 'Height', min: 2, max: 30, step: 1, value: S.hgt,
+    format: function (v) { return v + ' mm'; }, onInput: function (v) { S.hgt = v; update(); } });
+  var tBoth = Tour.toggle({ label: 'Both directions', value: false, onChange: function (v) { S.both = v; update(); } });
+
+  function update() {
+    cv.render();
+    var g = geom(), n = host.querySelector('[data-hnote]');
+    var reach = Math.min(g.z1, DEPTH) - Math.max(g.z0, 0);
+    if (g.pegW <= D) {
+      read.innerHTML = 'peg <b>' + g.pegW.toFixed(1) + ' mm</b>, no wider than the hole.<br>' +
+        '<span class="air">Difference changes nothing.</span>';
+      if (n) n.textContent = 'no change';
+      return;
+    }
+    read.innerHTML = 'hole <b>' + D.toFixed(1) + '</b> → <b class="hit">' + g.pegW.toFixed(1) + ' mm</b>, ' +
+      (S.off).toFixed(1) + ' mm looser per side<br>' +
+      (reach >= DEPTH - 1e-6 ? 'the whole ' + DEPTH + ' mm of the hole is widened'
+        : 'only the bottom <b>' + Math.max(0, reach).toFixed(1) + ' mm</b> of the hole is widened') +
+      (g.z0 < 0 ? '<br><span class="air">' + (-g.z0).toFixed(1) + ' mm goes below the floor into the handle</span>' : '');
+    if (n) n.textContent = 'after Difference';
+  }
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Extrude from the face' }), sOff, sH, tBoth]));
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Result' }), read]));
+  host.appendChild(el('div.gv', null, [box, side]));
+
+  Tour.attract({
+    host: host, period: 8000,
+    hint: 'playing · touch anything to take over', idleHint: 'move Offset and Height',
+    onFrame: function (k) { S.off = Math.round((-0.6 + k * 2.2) * 10) / 10; sOff.set(S.off); },
+    render: update
+  });
+  update();
+});
+
+/* ===================================================================
+   reallayers — where a stacked part's layers land, with the box off
+   (one grid from the bed) and on (own base, last five stretched).
+   =================================================================== */
+Tour.demo('reallayers', function (host) {
+  var el = Tour.el;
+  var FIRST = 0.2;
+  var S = { h1: 2.3, lh1: 0.2, lh2: 0.15, on: false };
+
+  // Lower part: layer tops from the bed. A layer prints while its middle is inside the part.
+  function lowerTops() {
+    var t = [FIRST], z = FIRST;
+    while (z + S.lh1 / 2 < S.h1 - 1e-9) { z = +(z + S.lh1).toFixed(6); t.push(z); }
+    if (t[t.length - 1] - S.lh1 / 2 >= S.h1) t.pop();
+    if (S.on && t.length > 6) {
+      var k = t.length - 1, base = t[k - 5], step = (S.h1 - base) / 5;
+      for (var i = 1; i <= 5; i++) t[k - 5 + i] = base + step * i;
+    }
+    return t;
+  }
+  // Upper part: off = on the bed's grid with its own height; on = starts at its base.
+  function upperBottom() {
+    if (S.on) return S.h1;
+    var z = FIRST;
+    while (z + S.lh2 / 2 < S.h1 - 1e-9) z += S.lh2;
+    return z;      // bottom of its first printed layer
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [el('span', { text: 'Side view, around the joint' }), el('span', { 'data-lnote': true })]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface'); ctx.fillRect(0, 0, w, h);
+    var lo = S.h1 - 1.3, hi = S.h1 + 1.1, sc = (h - 20) / (hi - lo);
+    function Y(z) { return h - 10 - (z - lo) * sc; }
+    var A = Optics.DEFAULT_FILAMENTS[1].hex, B = Optics.DEFAULT_FILAMENTS[3].hex;
+    var x0 = w * 0.08, x1 = w * 0.62, ux0 = w * 0.22, ux1 = w * 0.50;
+    // the real surface
+    ctx.strokeStyle = Tour.token('--ink'); ctx.setLineDash([6, 4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(4, Y(S.h1)); ctx.lineTo(w - 4, Y(S.h1)); ctx.stroke(); ctx.setLineDash([]);
+    // lower part layers
+    var t = lowerTops(), prev = 0;
+    t.forEach(function (top, i) {
+      var b = i ? t[i - 1] : 0;
+      if (top < lo) return;
+      ctx.fillStyle = A; ctx.fillRect(x0, Y(top) + 0.5, x1 - x0, Math.max(1, (top - b) * sc - 1));
+    });
+    var lowTop = t[t.length - 1];
+    // upper part layers
+    var ub = upperBottom(), z = ub, lh = S.lh2;
+    while (z < hi) { ctx.fillStyle = B; ctx.fillRect(ux0, Y(z + lh) + 0.5, ux1 - ux0, Math.max(1, lh * sc - 1)); z += lh; }
+    // gap or overlap
+    var g0 = Math.min(lowTop, ub), g1 = Math.max(lowTop, ub);
+    if (g1 - g0 > 1e-4) {
+      ctx.fillStyle = Tour.token('--alert'); ctx.globalAlpha = 0.55;
+      ctx.fillRect(ux0 - 6, Y(g1), ux1 - ux0 + 12, (g1 - g0) * sc); ctx.globalAlpha = 1;
+    }
+    ctx.font = '11px ' + Tour.token('--mono'); ctx.fillStyle = Tour.token('--ink');
+    ctx.fillText('real top of the lower part  ' + S.h1.toFixed(2), x1 + 10, Y(S.h1) - 4);
+    ctx.fillText('lower part ends ' + lowTop.toFixed(2), x1 + 10, Y(lowTop) + 14);
+    ctx.fillText('upper part starts ' + ub.toFixed(2), x1 + 10, Y(ub) + 28);
+  }, { height: 250 });
+
+  var read = el('p.gv__read', { style: 'margin:0' });
+  var sH1 = Tour.slider({ label: 'Lower part height', min: 1.5, max: 3.5, step: 0.05, value: S.h1,
+    format: function (v) { return v.toFixed(2) + ' mm'; }, onInput: function (v) { S.h1 = v; update(); } });
+  var seg2 = Tour.segmented({ label: 'Upper part layer', value: '0.15',
+    options: [['0.1', '0.10'], ['0.15', '0.15'], ['0.2', '0.20'], ['0.28', '0.28']],
+    onChange: function (v) { S.lh2 = +v; update(); } });
+  var tOn = Tour.toggle({ label: 'Stacked objects: real layers', value: S.on, onChange: function (v) { S.on = v; update(); } });
+
+  function update() {
+    cv.render();
+    var t = lowerTops(), lowTop = t[t.length - 1], ub = upperBottom(), n = host.querySelector('[data-lnote]');
+    var miss = ub - lowTop;
+    if (Math.abs(miss) < 1e-4) {
+      var off = lowTop - S.h1;
+      if (Math.abs(off) < 1e-4)
+        read.innerHTML = '<span class="hit">They meet, at the height you modelled.</span><br>' +
+          (S.on ? 'the last five layers of the lower part are ' + ((S.h1 - t[t.length - 6]) / 5).toFixed(3) + ' mm' : 'by luck: the grid landed on the joint');
+      else
+        read.innerHTML = 'They meet, but <span class="air">' + Math.abs(off).toFixed(2) + ' mm ' + (off > 0 ? 'above' : 'below') +
+          '</span> the height you modelled.<br>The lower part prints ' + (off > 0 ? 'taller' : 'shorter') + ' than it is.';
+    } else if (miss > 0) {
+      read.innerHTML = '<span class="air">' + miss.toFixed(2) + ' mm of air</span> under the upper part.<br>Its first layer prints as a bridge.';
+    } else {
+      read.innerHTML = '<span class="air">' + (-miss).toFixed(2) + ' mm dug in</span> into the lower part.';
+    }
+    if (n) n.textContent = S.on ? 'box on' : 'box off';
+  }
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Stack' }), sH1, seg2, tOn]));
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'At the joint' }), read]));
+  host.appendChild(el('div.gv', null, [box, side]));
+
+  Tour.attract({
+    host: host, period: 9000,
+    hint: 'playing · touch anything to take over', idleHint: 'change the heights, flip the box',
+    onFrame: function (k) { S.h1 = Math.round((2.0 + k * 0.6) * 20) / 20; sH1.set(S.h1); },
     render: update
   });
   update();

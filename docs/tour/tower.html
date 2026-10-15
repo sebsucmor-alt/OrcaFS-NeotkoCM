@@ -228,8 +228,15 @@
     <p>
       The wipe-tower issue that used to leave empty or short tower layers, including the
       "empty first layer" abort, was fixed in 2.3.1: the tower stays coherent under variable layer
-      height now. The capability was proven on the older 2.2 line and is consistent on this 2.3.5
+      height now. The capability was proven on the older 2.2 line and is consistent on the current
       base too. It stays flagged experimental, so review the G-code before long multi-tool runs.
+    </p>
+
+    <p>
+      Since 2.4.8 the same setting carries one more box, <b>Stacked objects: real layers</b>: a part
+      resting on another one starts its layers at its own base and the part under it ends at its real
+      height, so the two meet with no gap. It has its own section and demo on
+      <a href="place.html#reallayers">the Placing page</a>.
     </p>
 
     <p class="small">
@@ -267,7 +274,7 @@
 <footer class="foot">
   <div class="foot__in">
     <div>
-      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.4.0.</p>
       <p class="small">This page covers <b>§9</b> of the
         <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
     </div>

@@ -226,18 +226,32 @@
           <td>Painter › Object &amp; TD › MixedFilament Object</td>
         </tr>
         <tr data-gate="none" data-mat="risk">
-          <td><a href="painter.html#stickers">Stickers (SVG)</a> <span class="muted">§6</span></td>
+          <td><a href="stickers.html">Stickers (SVG)</a> <span class="muted">§6</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--risk">experimental, top and bottom since 2.4.8</span></td>
           <td>2.3.8</td>
           <td>Painter › Stickers (tool + tab)</td>
         </tr>
-        <tr data-gate="libre" data-mat="print">
-          <td><a href="place.html#alignstack">Align &amp; Stack</a> <span class="muted">§7</span></td>
-          <td><span class="badge badge--gate">Libre</span></td>
+        <tr data-gate="none" data-mat="print">
+          <td><a href="place.html#alignstack">Align &amp; Construct</a> <span class="muted">§7</span></td>
+          <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
-          <td>2.3.4</td>
-          <td>Left gizmo toolbar › Align &amp; Stack</td>
+          <td>2.3.4, rebuilt 2.4.8</td>
+          <td>Top toolbar › Align &amp; Construct</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="place.html#ac-boolean">Booleans and Split keep the painting</a> <span class="muted">§7</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.8</td>
+          <td>Mesh boolean, Split, Align &amp; Construct › Boolean</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="place.html#reallayers">Stacked objects: real layers</a> <span class="muted">§7</span></td>
+          <td><span class="badge badge--gate">Libre</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.8</td>
+          <td>Prime tower › NeoTower › Variable layer height</td>
         </tr>
         <tr data-gate="libre" data-mat="beta">
           <td><a href="walls.html#neoarachne">NeoArachne</a> <span class="muted">§8</span></td>
@@ -536,6 +550,10 @@
       <li><b>2.4.2</b><span>Photo Mode in Prepare.</span></li>
       <li><b>2.4.3</b><span>Height Adaptive Effects. The Snap &amp; Drag magnet panel, and Move selection as one block.</span></li>
       <li><b>2.4.4</b><span>Photo Mode inside the G-code viewer, with movable lights, cast shadows on the part's own face, and PNG export with the shadow in the alpha.</span></li>
+      <li><b>2.4.5</b><span>Hotends that finished their work switch off, and Extra Energy Save. The wall an overhang lands on slows down too. Support Zones get block trees and a placed foot.</span></li>
+      <li><b>2.4.6</b><span>PathBlend follows your lines on any shape. Patterns keep their size in mm. The Sandwich editor goes: a recipe lives where you paint it. The Painter panel is reorganised.</span></li>
+      <li><b>2.4.7</b><span>The previews cut the model like the slice does. Support Zones get easier painting and a cut tool. Moved onto Snapmaker Orca 2.4.0.</span></li>
+      <li><b>2.4.8</b><span>Stickers get their own tab, with multicolour SVG, gradients and the bottom face. Align &amp; Construct replaces Align &amp; Stack: extrude a face, booleans, parts. Booleans and Split keep the painting. Stacked objects can print with real layers.</span></li>
     </ul>
 
     <p class="small">
@@ -643,7 +661,7 @@
 <footer class="foot">
   <div class="foot__in">
     <div>
-      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.3.5.</p>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.4.0.</p>
       <p class="small">
         Features designed by <a href="https://github.com/sebsucmor-alt">Neotko</a>, who invented
         Neosanding, the thing now called <em>Ironing</em> in OrcaSlicer, PrusaSlicer, Bambu Studio

@@ -38,6 +38,12 @@ All stickers are visible, inside the painter and in the normal 3D view, under th
 colour (**Keep paint visible outside this gizmo**). The preview is cut to the face the sticker sits on, so the
 part hanging outside the object, which never prints, no longer covers other objects.
 
+**An example to open**: [Sticker-Example.3mf](docs/examples/Sticker-Example.3mf), a rainbow sticker on a white
+disc, with one band changed to a ColorStitch stripe. The tour walks through it step by step.
+
+> **Note:** after opening it, turn **Enable prime tower** off and on again before slicing, or the tower may not
+> show up. It is an odd bug we still have to look into.
+
 ### Editing a sticker
 
 Press **Edit** on a layer and a block called **Sticker: name** opens under the layers, inside the same tab. No
