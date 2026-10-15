@@ -148,7 +148,7 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
     const float         tie  = std::max(1e-4f, float(bbox.size().norm()) * 1e-6f);
     // The result's skin lies on the skin of the sources (the boolean only nudges vertices a few
     // microns). Anything farther than this has no source and stays unpainted.
-    const float         far  = std::max(0.05f, float(bbox.size().norm()) * 1e-3f);
+    const float         max_dist  = std::max(0.05f, float(bbox.size().norm()) * 1e-3f);
     const Transform3f   t2w  = target_to_world.cast<float>();
     const float         world_to_target_area = 1.f / float(std::pow(std::abs(target_to_world.linear().determinant()), 2. / 3.));
 
@@ -287,7 +287,7 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
                 best.local  = prepared[i].to_local * on_mesh;
             }
         }
-        if (best.source >= 0 && best_d > far)
+        if (best.source >= 0 && best_d > max_dist)
             best.source = -1;
         if (best.source >= 0)
             hint = HintCache{ &prepared, this_call, best.source, best.facet };
