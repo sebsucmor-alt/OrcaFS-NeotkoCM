@@ -25,6 +25,8 @@ static std::string pass_pattern(const SurfacePass& p, bool penu,
     return fallback_pattern;
 }
 
+std::string pass_pattern_of(const SurfacePass& p, bool penu) { return pass_pattern(p, penu, ""); }
+
 std::vector<Slice> flatten_stack(const SurfacePassStack& st,
                                  bool penu,
                                  const std::string& fallback_pattern)
@@ -116,51 +118,107 @@ bool sandwich_colour_legacy(const SurfacePassStack& top,
     return true;
 }
 
-// Colapsa un pass a una capa Beer-Lambert equivalente (ver nota del .hpp
-// sobre la aproximación del td en passes ColorStitch/PathBlend).
-static bool pass_to_layer(const SurfacePass& p, bool penu,
-                          const Material mats[4], Layer& out)
-{
-    const float r_pass = std::max(0.f, (float)p.ratio);
-    if (r_pass < 1e-6f)
-        return false;
+// s350 — MODELO LÍNEA A LÍNEA. Antes una pasada ColorStitch/PathBlend se colapsaba a UNA capa con
+// el color medio y el TD MEDIO (pass_to_layer): la transparencia no es lineal, así que una línea
+// opaca + una translúcida no se portan como dos «medio translúcidas» (ej.: 50/50 negro TD 0.3 mm
+// + blanco TD 3 mm sobre rojo daba (0.88,0.12,0.12); lo real, línea a línea, (0.61,0.07,0.07)).
+// Ahora cada línea de la pasada se compone con su propio filamento y TD.
+//
+// Beer-Lambert es AFÍN en lo de debajo: acc = E + T·acc_debajo, con E = c·(1−t) y T = t (lineal,
+// por canal). Las líneas de pasadas distintas se cruzan en ángulo ⇒ independientes ⇒ la MEDIA
+// exacta sobre todas las combinaciones de líneas sale apilando, por pasada, la E media y la T
+// media de sus líneas (la esperanza de un producto de independientes = producto de esperanzas).
+// Mismo coste que antes y exacto bajo esa hipótesis (el tour, sandwich-builder, asume líneas
+// ALINEADAS entre pasadas; coincide con esto cuando sólo hay una pasada rayada).
+namespace {
+struct Eff { float E[3] = { 0.f, 0.f, 0.f }; float T[3] = { 1.f, 1.f, 1.f }; };
 
-    if (p.kind == SurfacePassKind::Solid) {
-        const Material& m = mats[std::clamp(p.solid_tool, 0, 3)];
-        out.rgb = m.rgb;
-        out.td  = m.td;
-        out.ratio = r_pass;
+// Una capa maciza de `ratio` (fracción de la altura de capa) del material m.
+Eff eff_solid(const Material& m, float ratio)
+{
+    Eff e;
+    for (int c = 0; c < 3; ++c) {
+        const float lc = srgb_to_linear(m.rgb[c]);
+        if (ratio <= 0.f) { e.E[c] = 0.f; e.T[c] = 1.f; continue; }
+        if (m.td[c] < 1e-6f) { e.E[c] = lc; e.T[c] = 0.f; continue; }   // opaco
+        const float t = std::pow(0.1f, ratio / m.td[c]);
+        e.E[c] = lc * (1.f - t);
+        e.T[c] = t;
+    }
+    return e;
+}
+// `up` encima de `down`.
+Eff eff_over(const Eff& up, const Eff& down)
+{
+    Eff e;
+    for (int c = 0; c < 3; ++c) {
+        e.E[c] = up.E[c] + up.T[c] * down.E[c];
+        e.T[c] = up.T[c] * down.T[c];
+    }
+    return e;
+}
+void eff_acc(Eff& sum, const Eff& e, float w)
+{
+    for (int c = 0; c < 3; ++c) { sum.E[c] += w * e.E[c]; sum.T[c] += w * e.T[c]; }
+}
+float ease(int mode, float t)
+{
+    switch (mode) {
+    case 1:  return t * t;
+    case 2:  return 1.f - (1.f - t) * (1.f - t);
+    case 3:  return t < 0.5f ? 2.f * t * t : 1.f - 2.f * (1.f - t) * (1.f - t);
+    default: return t;
+    }
+}
+
+bool pass_to_eff(const SurfacePass& p, bool penu, const Material mats[4], Eff& out)
+{
+    const float r = std::max(0.f, (float)p.ratio);
+    if (r < 1e-6f) return false;
+    switch (p.kind) {
+    case SurfacePassKind::Solid:
+        out = eff_solid(mats[std::clamp(p.solid_tool, 0, 3)], r);
+        return true;
+    case SurfacePassKind::ColorStitch: {
+        // Cada línea es de UN filamento y ocupa toda la altura de la pasada; peso = su frecuencia
+        // en el patrón real de la receta.
+        const std::string pat = pass_pattern(p, penu, "");
+        int cnt[4] = { 0, 0, 0, 0 }, total = 0;
+        for (char ch : pat) { const int t = (int)ch - '1'; if (t >= 0 && t < 4) { ++cnt[t]; ++total; } }
+        if (total == 0) return false;
+        Eff sum; for (int c = 0; c < 3; ++c) { sum.E[c] = 0.f; sum.T[c] = 0.f; }
+        for (int t = 0; t < 4; ++t)
+            if (cnt[t]) eff_acc(sum, eff_solid(mats[t], r), float(cnt[t]) / float(total));
+        out = sum;
         return true;
     }
-    if (p.kind == SurfacePassKind::None)
-        return false;
-
-    // ColorStitch / PathBlend: franjas → color paralelo + td medio ponderado.
-    SurfacePassStack one;
-    one.enabled = true;
-    one.passes.push_back(p);
-    const std::vector<Slice> slices = flatten_stack(one, penu, "");
-    if (slices.empty())
-        return false;
-
-    float rgb[3];
-    blend_parallel(slices, mats, rgb);
-    out.rgb = { rgb[0], rgb[1], rgb[2] };
-
-    float wsum = 0.f, td[3] = { 0.f, 0.f, 0.f };
-    for (const Slice& s : slices) {
-        const Material& m = mats[std::clamp(s.tool, 0, 3)];
-        for (int c = 0; c < 3; ++c)
-            td[c] += m.td[c] * s.ratio;
-        wsum += s.ratio;
+    case SurfacePassKind::PathBlend: {
+        // Rampa: en la posición t la línea lleva tool_bottom con altura h = r·ease(t) y, en Full,
+        // tool_top encima con el resto (r − h). Media sobre 16 posiciones. (Aproximación: la
+        // rampa va de 0 a la pasada entera; floor_mm / mid_end_mm se ignoran — están en mm y aquí
+        // las alturas van en fracción de capa.)
+        PathBlendPassConfig pb;
+        auto it = p.pathblend.kv.find("blob");
+        if (it != p.pathblend.kv.end() && !it->second.empty()) pb = PathBlendPassConfig::from_blob_json(it->second);
+        const bool  full = pb.mode == PathBlendPassConfig::Mode::Full && pb.tool_top >= 0;
+        const Material& mb = mats[std::clamp(pb.tool_bottom, 0, 3)];
+        const Material& mt = mats[std::clamp(full ? pb.tool_top : 0, 0, 3)];
+        constexpr int K = 16;
+        Eff sum; for (int c = 0; c < 3; ++c) { sum.E[c] = 0.f; sum.T[c] = 0.f; }
+        for (int k = 0; k < K; ++k) {
+            const float h = r * ease(pb.ease_mode, (float(k) + 0.5f) / float(K));
+            const Eff bot = eff_solid(mb, h);
+            eff_acc(sum, full ? eff_over(eff_solid(mt, r - h), bot) : bot, 1.f / float(K));
+        }
+        out = sum;
+        return true;
     }
-    if (wsum > 1e-6f)
-        for (int c = 0; c < 3; ++c)
-            td[c] /= wsum;
-    out.td    = { td[0], td[1], td[2] };
-    out.ratio = r_pass;
-    return true;
+    case SurfacePassKind::None:
+        break;
+    }
+    return false;
 }
+} // namespace
 
 void sandwich_colour_stacked(const SurfacePassStack& top,
                              const SurfacePassStack& penu,
@@ -169,24 +227,38 @@ void sandwich_colour_stacked(const SurfacePassStack& top,
                              float out_rgb[3],
                              float* out_transmit)
 {
-    std::vector<Layer> layers;
-    layers.reserve(SurfacePassStack::kMaxPasses * 2);
-    // penu primero (más profundo), luego top; dentro de cada zona el orden
-    // del stack ya es bottom→top (passes[0] = abajo — mismo convenio que el
-    // sweep del Designer: [SOLID B, SOLID A]).
-    if (penu.enabled)
-        for (const SurfacePass& p : penu.passes) {
-            Layer l;
-            if (pass_to_layer(p, true, mats, l))
-                layers.push_back(l);
+    // penu primero (más profundo), luego top; dentro de cada zona el orden del stack ya es
+    // bottom→top (passes[0] = abajo — mismo convenio que el sweep del Designer).
+    float acc[3], transmit[3] = { 1.f, 1.f, 1.f };
+    for (int c = 0; c < 3; ++c) acc[c] = srgb_to_linear(bg_rgb[c]);
+    auto apply = [&](const SurfacePassStack& st, bool is_penu) {
+        if (!st.enabled) return;
+        for (const SurfacePass& p : st.passes) {
+            Eff e;
+            if (!pass_to_eff(p, is_penu, mats, e)) continue;
+            for (int c = 0; c < 3; ++c) {
+                acc[c]      = e.E[c] + e.T[c] * acc[c];
+                transmit[c] = transmit[c] * e.T[c];
+            }
         }
-    if (top.enabled)
-        for (const SurfacePass& p : top.passes) {
-            Layer l;
-            if (pass_to_layer(p, false, mats, l))
-                layers.push_back(l);
-        }
-    blend_stacked(layers, bg_rgb, out_rgb, out_transmit);
+    };
+    apply(penu, true);
+    apply(top, false);
+    for (int c = 0; c < 3; ++c) out_rgb[c] = std::clamp(linear_to_srgb(acc[c]), 0.f, 1.f);
+    if (out_transmit) *out_transmit = (transmit[0] + transmit[1] + transmit[2]) / 3.f;
+}
+
+SurfacePassStack reversed_stack(const SurfacePassStack& st)
+{
+    SurfacePassStack r = st;
+    std::reverse(r.passes.begin(), r.passes.end());
+    return r;
+}
+
+void sandwich_colour_bottom(const SurfacePassStack& bottom, const Material mats[4],
+                            const float bg_rgb[3], float out_rgb[3])
+{
+    sandwich_colour_stacked(reversed_stack(bottom), SurfacePassStack{}, mats, bg_rgb, out_rgb);
 }
 
 } // namespace ColorSci

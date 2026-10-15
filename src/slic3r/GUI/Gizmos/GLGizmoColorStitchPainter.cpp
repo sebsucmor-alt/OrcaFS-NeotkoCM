@@ -1,4 +1,5 @@
 // NEOTKO_PROFILE_TAG_START
+#include <chrono>
 #include "GLGizmoColorStitchPainter.hpp"
 #include "GizmoNeotkoStyle.hpp"   // s318 — el lenguaje de panel compartido (Zonas de Soporte, s287)
 
@@ -27,7 +28,8 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Tab.hpp" // NEOTKO_NEOTOWER_TAG — auto-promote tower type from the painter
-#include "slic3r/GUI/ColorStitchPaintPreview.hpp" // s233 — colores de slot compartidos con la vista 3D normal
+#include "slic3r/GUI/ColorStitchPaintPreview.hpp"
+#include "slic3r/GUI/ColorStitchStickerPreview.hpp" // s348 — stickers siempre visibles // s233 — colores de slot compartidos con la vista 3D normal
 #include "slic3r/GUI/ColorStitchPatternLauncher.hpp" // NEOTKO_COLORSTITCH_TAG — botón ADV → editor de patrón
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -201,6 +203,9 @@ void GLGizmoColorStitchPainter::on_set_state()
         return;
 
     m_marked_objects.clear();
+    // s348 — la herramienta se reinicia al abrir: no dejar la pestaña Stickers huérfana de ella.
+    if (m_department == DEP_STICKERS) m_department = DEP_PALETTE;
+    m_tool_before_stickers = -1;
     m_select_mode = false;                // (se decide abajo, ya con el set sembrado)
     m_erase_mode  = false;
 
@@ -230,7 +235,7 @@ void GLGizmoColorStitchPainter::on_set_state()
             const auto* opt = dynamic_cast<const ConfigOptionBool*>(
                 mo->config.option("mixed_filament_sandwich_mode"));
             if (opt && opt->value)
-                m_department = 3;
+                m_department = DEP_OBJECT;
         }
     }
 
@@ -411,7 +416,7 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
 
     // NEOTKO_STICKER_TAG — herramienta Sticker, dos sub-modos:
     //  (a) edición de un sticker YA colocado (m_editing_sticker_idx>=0, entrado
-    //      vía "Edit placement" en la lista de Palette): arrastrar mueve su
+    //      vía el botón Edit de su capa, pestaña Stickers): arrastrar mueve su
     //      posición (raycast por frame, sin realinear a la normal — v1.5, ver
     //      nota del header) y consume TODO para no pintar/seleccionar mientras
     //      se edita. La rotación Z se controla con un slider en el panel, no
@@ -428,7 +433,11 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
             // coloca un sticker.
             bool consumed = false;
             if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
+                // s348 — un arrastre entero = un paso de undo. s349 (auditoría #9): el snapshot
+                // se toma al MOVER de verdad (abajo), no aquí: un clic fuera del objeto dejaba
+                // un paso vacío.
                 m_sticker_dragging = true;
+                m_sticker_drag_snapshotted = false;
                 consumed = true;
             } else if (m_sticker_dragging && mouse_event.Dragging()) {
                 consumed = true;
@@ -445,10 +454,22 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
                     const ModelVolume* hit_mv = volume_for_mesh_id(mo_c, mid);
                     if (hit_mv) {
                         const Vec3d hit_obj = hit_mv->get_matrix() * rr_hit().cast<double>();
+                        if (!m_sticker_drag_snapshotted) {
+                            Plater::TakeSnapshot snap(wxGetApp().plater(), _u8L("Move sticker"),
+                                                      UndoRedo::SnapshotType::GizmoAction);
+                            m_sticker_drag_snapshotted = true;
+                        }
                         ColorStitchSticker& st = mo_c->colorstitch_stickers[m_editing_sticker_idx];
-                        const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
-                        st.transform = Eigen::Translation3d(hit_obj) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
-                                     * Eigen::Scaling(double(m_editing_scale));
+                        // s350 — se desliza por la cara de SU lado (proyección), conservando giro,
+                        // tamaño, lado y espejo (antes se reconstruía sin volteo ni espejo).
+                        ColorStitch::StickerPose pose = ColorStitch::sticker_decompose(st.transform);
+                        Vec3d proj;
+                        if (sticker_project(mo_c, hit_obj, pose.bottom, proj)) {
+                            pose.pos      = proj;
+                            pose.spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
+                            pose.scale    = double(m_editing_scale);
+                            st.transform  = ColorStitch::sticker_compose(pose, sticker_obj_scale(mo_c));
+                        }
                         m_parent.set_as_dirty();
                         m_parent.request_extra_frame();
                     }
@@ -462,11 +483,16 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
         // coloca en el MISMO click, con el ModelObject resuelto a mano (no depende de
         // que selection_info() ya se haya refrescado).
         if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
-            if (m_pending_sticker_svg.empty())
-                return true;   // nada cargado para colocar: consumir sin pintar
             CursorHit ch;
             if (!raycast_under_cursor(ch))
                 return true;   // vacío: consumir
+            if (m_pending_sticker_svg.empty()) {
+                // s349 (auditoría #7): sin SVG cargado el clic se tragaba y no había forma
+                // de cambiar de objeto. Ahora selecciona el objeto clicado; no coloca nada.
+                if (ch.obj_idx != m_parent.get_selection().get_object_idx())
+                    switch_active_object(ch.obj_idx);
+                return true;
+            }
             Model* model = m_parent.get_selection().get_model();
             if (!model || ch.obj_idx >= (int)model->objects.size())
                 return true;
@@ -586,7 +612,7 @@ void GLGizmoColorStitchPainter::ensure_neotower_tower_type()
 {
     auto& cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto* t = cfg.option<ConfigOptionEnum<NeoTowerType>>("neotko_tower_type");
-    if (!t || t->value == nttNeoTower)
+    if (!t || t->value == nttNeoTower || t->value == nttPrivate)   // both run on the NeoTower planner
         return;
     t->value = nttNeoTower;
     // Reflect in the Print Settings tab (refresh the combo + mark the preset modified).
@@ -660,6 +686,12 @@ void GLGizmoColorStitchPainter::render_painter_gizmo()
     }
 
     render_marked_paint();
+    // s348 — Fase A: TODOS los stickers de la escena, menos el que está en edición (ese lo
+    // dibuja render_sticker_edit_overlay con su contorno, justo después).
+    if (const Model* model = selection.get_model())
+        ColorStitchStickerPreview::render(*model, wxGetApp().plater()->get_camera(),
+                                          m_editing_sticker_idx >= 0 ? selection.get_object_idx() : -1,
+                                          m_editing_sticker_idx);
     render_sticker_edit_overlay();   // NEOTKO_STICKER_TAG — no-op si no hay sticker en edición
     render_slot_highlight();         // s232 — realce del slot activo / bajo el cursor
     // s280d — el marcador de auto va DESPUÉS del realce: si una zona es a la vez la
@@ -3752,6 +3784,100 @@ static bool object_has_mixed_filament(const ModelObject* mo)
     return extruder_id > (int)num_physical;
 }
 
+// s350 — LA RECETA DE CERCA (fase C): cada píxel apila, de abajo arriba (Penu y luego Top), la
+// línea de cada pasada que le cae encima, con su filamento y su TD (Beer-Lambert por canal). Cada
+// pasada con su ángulo (el suyo, o auto: Top 45°, Penu 135°, y las siguientes de la misma zona
+// giradas 90°) y su patrón ColorStitch REAL, así que Top y Penu se CRUZAN como en la pieza.
+// Es el mismo modelo que sandwich_colour_stacked (que es la MEDIA de esto sobre la superficie).
+static void draw_recipe_texture(ImDrawList* dl, const ImVec2& a, const ImVec2& b,
+                                const Slic3r::SurfacePassStack& top, const Slic3r::SurfacePassStack& penu,
+                                const Slic3r::ColorSci::Material mats[4], const float bg[3])
+{
+    namespace CS = Slic3r::ColorSci;
+    using Slic3r::SurfacePassKind;
+    struct PL { SurfacePassKind kind; std::vector<int> seq; int tool = 0; float r = 0.f; float ca = 1.f, sa = 0.f;
+                int pbb = 0, pbt = -1, ease = 0; };
+    std::vector<PL> pls;
+    auto add_zone = [&](const Slic3r::SurfacePassStack& st, bool is_penu) {
+        if (!st.enabled) return;
+        int k = 0;
+        for (const Slic3r::SurfacePass& p : st.passes) {
+            PL l;
+            l.kind = p.kind;
+            l.r    = std::max(0.f, float(p.ratio));
+            if (l.r < 1e-6f || p.kind == SurfacePassKind::None) continue;
+            const float deg = p.angle >= 0 ? float(p.angle) : (is_penu ? 135.f : 45.f) + 90.f * float(k);
+            l.ca = std::cos(deg * float(M_PI) / 180.f);
+            l.sa = std::sin(deg * float(M_PI) / 180.f);
+            l.tool = std::clamp(p.solid_tool, 0, 3);
+            if (p.kind == SurfacePassKind::ColorStitch) {
+                for (char ch : CS::pass_pattern_of(p, is_penu)) { const int t = int(ch) - '1'; if (t >= 0 && t < 4) l.seq.push_back(t); }
+                if (l.seq.empty()) continue;
+            } else if (p.kind == SurfacePassKind::PathBlend) {
+                Slic3r::PathBlendPassConfig pb;
+                const auto it = p.pathblend.kv.find("blob");
+                if (it != p.pathblend.kv.end() && !it->second.empty()) pb = Slic3r::PathBlendPassConfig::from_blob_json(it->second);
+                l.pbb  = std::clamp(pb.tool_bottom, 0, 3);
+                l.pbt  = (pb.mode == Slic3r::PathBlendPassConfig::Mode::Full && pb.tool_top >= 0) ? std::clamp(pb.tool_top, 0, 3) : -1;
+                l.ease = pb.ease_mode;
+            }
+            pls.push_back(std::move(l));
+            ++k;
+        }
+    };
+    add_zone(penu, true);
+    add_zone(top, false);
+    const float W = b.x - a.x, H = b.y - a.y;
+    if (W < 2.f || H < 2.f) return;
+    const float lw   = std::max(3.f, std::min(W, H) / 11.f);   // ancho de línea en pantalla
+    const float cell = std::max(1.5f, std::min(W, H) / 40.f);
+    const float cx = 0.5f * (a.x + b.x), cy = 0.5f * (a.y + b.y), span = std::max(W, H);
+    auto lay = [&](float acc[3], int tool, float r) {   // una capa maciza encima de acc (lineal)
+        const CS::Material& m = mats[std::clamp(tool, 0, 3)];
+        for (int c = 0; c < 3; ++c) {
+            const float lc = CS::srgb_to_linear(m.rgb[c]);
+            if (r <= 0.f) continue;
+            if (m.td[c] < 1e-6f) { acc[c] = lc; continue; }
+            const float t = std::pow(0.1f, r / m.td[c]);
+            acc[c] = lc * (1.f - t) + acc[c] * t;
+        }
+    };
+    auto ease = [](int mode, float t) {
+        switch (mode) { case 1: return t * t; case 2: return 1.f - (1.f - t) * (1.f - t);
+                        case 3: return t < 0.5f ? 2.f * t * t : 1.f - 2.f * (1.f - t) * (1.f - t); default: return t; }
+    };
+    for (float y = a.y; y < b.y; y += cell)
+        for (float x = a.x; x < b.x; x += cell) {
+            const float px = x + 0.5f * cell - cx, py = y + 0.5f * cell - cy;
+            float acc[3];
+            for (int c = 0; c < 3; ++c) acc[c] = CS::srgb_to_linear(bg[c]);
+            for (const PL& l : pls) {
+                const float s = px * l.ca + py * l.sa;   // a lo ancho de las líneas
+                switch (l.kind) {
+                case SurfacePassKind::Solid: lay(acc, l.tool, l.r); break;
+                case SurfacePassKind::ColorStitch: {
+                    const int n = int(l.seq.size());
+                    const int i = ((int(std::floor(s / lw)) % n) + n) % n;
+                    lay(acc, l.seq[size_t(i)], l.r);
+                    break;
+                }
+                case SurfacePassKind::PathBlend: {
+                    const float t = std::clamp(s / span + 0.5f, 0.f, 1.f);
+                    const float h = l.r * ease(l.ease, t);
+                    lay(acc, l.pbb, h);
+                    if (l.pbt >= 0) lay(acc, l.pbt, l.r - h);
+                    break;
+                }
+                default: break;
+                }
+            }
+            const ImU32 col = IM_COL32(int(std::clamp(CS::linear_to_srgb(acc[0]), 0.f, 1.f) * 255.f),
+                                       int(std::clamp(CS::linear_to_srgb(acc[1]), 0.f, 1.f) * 255.f),
+                                       int(std::clamp(CS::linear_to_srgb(acc[2]), 0.f, 1.f) * 255.f), 255);
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(std::min(x + cell, b.x), std::min(y + cell, b.y)), col);
+        }
+}
+
 // s318 — LA CABECERA DEL PRO. Un corte de la pieza: Top, Penultimate, un trozo rayado que es la pieza
 // y Bottom, cada zona con su banda de pases (draw_zone, la misma que usaban Recipe y el tooltip de
 // la rejilla) y, a la derecha, el Result grande con halo. Es un ESQUEMA y lo dice en su cara (cada
@@ -3759,10 +3885,13 @@ static bool object_has_mixed_filament(const ModelObject* mo)
 // forma parte del color.
 static void draw_pro_hero(const Slic3r::SurfacePassStack& top, const Slic3r::SurfacePassStack& penu,
                           const Slic3r::SurfacePassStack& bottom, const float out[3],
-                          const std::vector<std::string>& fcolors, double layer_h)
+                          const std::vector<std::string>& fcolors, double layer_h, float width = -1.f,
+                          const Slic3r::ColorSci::Material* tex_mats = nullptr, const float* tex_bg = nullptr)
 {
     const float  u       = neo_u();
-    const float  w       = ImGui::GetContentRegionAvail().x;
+    // s350 — ancho opcional: el panel de colores del sticker lo dibuja en una columna fija (con el
+    // ancho disponible, una ventana AlwaysAutoResize se ensancha sola sin fin).
+    const float  w       = width > 0.f ? width : ImGui::GetContentRegionAvail().x;
     const float  pad     = 0.6f * u;
     const float  bh      = 1.35f * u;
     const float  ph      = 1.0f * u;
@@ -3829,9 +3958,24 @@ static void draw_pro_hero(const Slic3r::SurfacePassStack& top, const Slic3r::Sur
     {
         const float  ry = p0.y + (h - rs) * 0.5f - 0.3f * u;
         const ImVec2 r0(x_res, ry), r1(x_res + rs, ry + rs);
-        dl->AddRectFilled(r0, r1, IM_COL32((int)std::min(255.f, out[0] * 255.f),
-                                           (int)std::min(255.f, out[1] * 255.f),
-                                           (int)std::min(255.f, out[2] * 255.f), 255), 5.f);
+        const ImU32 flat = IM_COL32((int)std::min(255.f, out[0] * 255.f),
+                                    (int)std::min(255.f, out[1] * 255.f),
+                                    (int)std::min(255.f, out[2] * 255.f), 255);
+        if (tex_mats && tex_bg) {
+            // s350 — arriba la receta DE CERCA (líneas cruzadas, TD), abajo la franja DE LEJOS.
+            const float split = r0.y + rs * 0.72f;
+            dl->PushClipRect(r0, r1, true);
+            const bool bot_only = top.passes.empty() && penu.passes.empty() && !bottom.passes.empty();   // s350
+            draw_recipe_texture(dl, r0, ImVec2(r1.x, split), bot_only ? Slic3r::ColorSci::reversed_stack(bottom) : top,
+                                bot_only ? Slic3r::SurfacePassStack{} : penu, tex_mats, tex_bg);
+            dl->AddRectFilled(ImVec2(r0.x, split), r1, flat);
+            dl->PopClipRect();
+            if (ImGui::IsMouseHoveringRect(r0, r1))
+                ImGui::SetTooltip("%s", _u8L("Top: up close, the lines as they print\n"
+                                             "(Top over Penultimate, crossing, each filament with its TD).\n"
+                                             "Bottom strip: the colour you see from a distance.").c_str());
+        } else
+            dl->AddRectFilled(r0, r1, flat, 5.f);
         neo_halo(dl, r0, r1, 5.f);
         const float lfs = 0.66f * u;
         const std::string res = _u8L("Result");
@@ -3843,6 +3987,101 @@ static void draw_pro_hero(const Slic3r::SurfacePassStack& top, const Slic3r::Sur
     }
     ImGui::Dummy(ImVec2(w, h));
 }
+
+// s350 — LA TARJETA DE UNA RECETA (boceto de Neotko, WIP/PALETTE_HOVER_TOOLTIP_MOCKUP_s349.png):
+// izquierda, columna con las zonas en miniatura (Top, Penu, la pieza, Bottom) con el patrón REAL de
+// cada pasada (el mismo dibujo que el Pro); derecha, el cuadro grande con la receta de cerca (líneas
+// cruzadas, TD) y una franja con el color de lejos; el ángulo, encima, abajo a la izquierda. Dueño
+// único: tooltip de Palette y tramos/colores del panel de stickers. Se llama DENTRO de un tooltip.
+void GLGizmoColorStitchPainter::draw_recipe_card(const SurfacePassStack& st_top, const SurfacePassStack& st_penu,
+                                                 const SurfacePassStack& st_bot, bool auto_generated)
+{
+    std::vector<std::string> fcolors;
+    { Slic3r::ColorSci::Material mm[4]; gizmo_materials(mm, fcolors); }
+
+    namespace CS = Slic3r::ColorSci;
+    const float u  = neo_u();
+    const float big = 5.2f * u, gl = 0.85f * u, colw = 2.6f * u, gap = 0.25f * u;
+    const float zh = (big - 3.f * gap) / 4.f;
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    ImDrawList* tdl = ImGui::GetWindowDrawList();
+    
+    const double tlh = GLGizmoColorStitchPainter_layer_height();
+    auto zone = [&](float y, const SurfacePassStack& st, bool is_penu, Glyph g, bool dim) {
+        draw_glyph(tdl, ImVec2(o.x, y + (zh - gl) * 0.5f), gl, g, neo_col_u32(NeoCol::TextDim));
+        const ImVec2 za(o.x + gl + 0.2f * u, y), zb(o.x + gl + 0.2f * u + colw, y + zh);
+        if (st.passes.empty()) { neo_card_dashed(tdl, za, zb); return; }
+        double tot = 0.0;
+        for (const SurfacePass& sp2 : st.passes) tot += std::max(0.0, sp2.ratio);
+        if (tot < 1e-6) tot = 1.0;
+        float yy = za.y;
+        for (int k = int(st.passes.size()) - 1; k >= 0; --k) {
+            const float hk = (k == 0) ? (zb.y - yy) : zh * float(std::max(0.0, st.passes[size_t(k)].ratio) / tot);
+            if (hk > 0.5f) pro_pass_preview(tdl, ImVec2(za.x, yy), ImVec2(zb.x, yy + hk), st.passes[size_t(k)], is_penu, fcolors, tlh);
+            yy += hk;
+        }
+        tdl->AddRect(za, zb, IM_COL32(0, 0, 0, 110), 2.f);
+        if (dim) tdl->AddRectFilled(za, zb, neo_fade(NeoCol::Canvas, 0.45f), 2.f);
+    };
+    float y = o.y;
+    zone(y, st_top,  false, Glyph::ZoneTop,  false); y += zh + gap;
+    zone(y, st_penu, true,  Glyph::ZonePenu, false); y += zh + gap;
+    hatch_rect(tdl, ImVec2(o.x + gl + 0.2f * u, y), ImVec2(o.x + gl + 0.2f * u + colw, y + zh),
+               neo_fade(NeoCol::TextDim, 0.25f), 6.f);
+    y += zh + gap;
+    zone(y, st_bot,  false, Glyph::ZoneBottom, true);
+    // El cuadro grande: de cerca arriba, de lejos en la franja de abajo.
+    const ImVec2 r0(o.x + gl + 0.2f * u + colw + 0.35f * u, o.y), r1(r0.x + big, r0.y + big);
+    CS::Material tm[4];
+    std::vector<std::string> tfc;
+    gizmo_materials(tm, tfc);
+    float tbg[3] = { 0.f, 0.f, 0.f };
+    resolve_object_base_bg(tm, tbg);
+    const float split = r0.y + big * 0.78f;
+    tdl->PushClipRect(r0, r1, true);
+    // s350 — receta sólo Bottom: la textura y el color, vistos desde la cama.
+    const bool bot_only = st_top.passes.empty() && st_penu.passes.empty() && !st_bot.passes.empty();
+    draw_recipe_texture(tdl, r0, ImVec2(r1.x, split), bot_only ? CS::reversed_stack(st_bot) : st_top,
+                        bot_only ? SurfacePassStack{} : st_penu, tm, tbg);
+    uint32_t argb = predict_argb_for(st_top, st_penu);
+    if (bot_only) {
+        float bc[3] = { 0.f, 0.f, 0.f };
+        CS::sandwich_colour_bottom(st_bot, tm, tbg, bc);
+        CS::ColorRecipe br; br.rgb = { bc[0], bc[1], bc[2] };
+        argb = recipe_argb(br);
+    }
+    tdl->AddRectFilled(ImVec2(r0.x, split), r1, IM_COL32((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255));
+    tdl->PopClipRect();
+    tdl->AddRect(r0, r1, neo_col_u32(NeoCol::TextDim), 3.f, 0, 1.f);
+    // Ángulo encima, abajo a la izquierda del cuadro de cerca.
+    {
+        int ang_t = 0, ang_p = 0;
+        const bool has_t = cs_zone_angle(st_top,  false, ang_t);
+        const bool has_p = !st_penu.passes.empty() && cs_zone_angle(st_penu, true, ang_p);
+        std::string at;
+        auto one = [&](const char* tag, int deg) {
+            if (!at.empty()) at += " ";
+            at += tag + (deg < 0 ? _u8L("auto") : std::to_string(deg) + "\xc2\xb0");
+        };
+        if (has_t) one("T", ang_t);
+        if (has_p) one("P", ang_p);
+        if (!at.empty()) {
+            const float fs = 0.62f * u;
+            ImFont* f = ImGui::GetFont();
+            const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.f, at.c_str());
+            const ImVec2 ta(r0.x + 2.f, split - ts.y - 3.f);
+            tdl->AddRectFilled(ImVec2(ta.x - 1.f, ta.y - 1.f), ImVec2(ta.x + ts.x + 3.f, ta.y + ts.y + 1.f),
+                               IM_COL32(0, 0, 0, 170), 2.f);
+            tdl->AddText(f, fs, ImVec2(ta.x + 1.f, ta.y), IM_COL32(235, 235, 235, 255), at.c_str());
+        }
+    }
+    if (auto_generated) {   // color de trabajo: la muesca de la muestra, también aquí
+        const float k = 0.7f * u;
+        tdl->AddTriangleFilled(r0, ImVec2(r0.x + k, r0.y), ImVec2(r0.x, r0.y + k), neo_fade(NeoCol::Ink, 0.85f));
+    }
+    ImGui::Dummy(ImVec2(r1.x - o.x, big));
+}
+
 
 // NEOTKO_COLORSTITCH_TAG — Bandeja "pro mode": compone Top/Penu + TD y muestra
 // el color resultante en vivo (sandwich_colour_stacked, mismo motor que el
@@ -3856,6 +4095,36 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     // s169 F1 — el CollapsingHeader "Pro mode" se retiró: el departamento Pro DEL
     // selector segmentado ya hace de gate (solo se llama a esta función cuando
     // m_department==2), así que su contenido se dibuja siempre que se invoque.
+
+    // s364 — se llegó con «Edit in Pro» desde el editor de un sticker: decirlo y dar la vuelta.
+    // El sticker sigue en edición (y su color late en 3D); el color y el tramo elegidos se conservan.
+    if (m_pro_from_sticker) {
+        const ModelObject* smo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+        if (!smo || m_editing_sticker_idx < 0 || m_editing_sticker_idx >= (int)smo->colorstitch_stickers.size())
+            m_pro_from_sticker = false;
+        else {
+            const std::string& nm = smo->colorstitch_stickers[size_t(m_editing_sticker_idx)].name;
+            const std::string back = _u8L("Back to sticker");
+            const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+            const float bw    = ImGui::CalcTextSize(back.c_str()).x + 2.5f * neo_u();
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::AccentBright));
+            ImGui::TextUnformatted(fit_text(_u8L("Editing a recipe of sticker:") + " " + (nm.empty() ? std::string("?") : nm),
+                                            std::max(4.f * neo_u(), right - ImGui::GetCursorScreenPos().x - bw - neo_u())).c_str());
+            ImGui::PopStyleColor();
+            neo_same_line_at(right - bw);
+            if (neo_text_button((back + "##pro_back_stk").c_str(), NeoBtn::Normal, true, Glyph::Sticker)) {
+                m_pro_from_sticker = false;
+                m_department       = DEP_STICKERS;
+                m_stkc_block_open  = true;
+                if (smo->colorstitch_stickers[size_t(m_editing_sticker_idx)].is_multicolor()) m_stkc_tab = 1;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Return to the Stickers tab, on the same colour.\n"
+                                             "What you change here is already on the sticker.").c_str());
+            ImGui::Separator();
+        }
+    }
 
     std::vector<std::string> fcolors;
     CS::Material mats[4];
@@ -3915,7 +4184,7 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     // pieza, Bottom) y el Result grande con halo. Sustituye a las cajitas Recipe | Result de s230.
     // Mismos datos: out[] es el sandwich_colour_stacked de arriba; Bottom se ve atenuado porque NO
     // entra en el color (NEOTKO_BOTTOM_TAG).
-    draw_pro_hero(m_pro_top, m_pro_penu, m_pro_bottom, out, fcolors, lh);
+    draw_pro_hero(m_pro_top, m_pro_penu, m_pro_bottom, out, fcolors, lh, -1.f, mats, bg);   // s350: + textura
     ImGui::Dummy(ImVec2(0.f, 0.3f * neo_u()));
 
     // s230 — las TRES zonas seguidas en un solo sitio (antes Bottom vivía tras un
@@ -4087,6 +4356,10 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     pro_backfill_cm(m_pro_penu, /*penu=*/true);
     pro_backfill_cm(m_pro_bottom, /*penu=*/false);   // NEOTKO_BOTTOM_TAG — Fase 0 (WIP)
 
+    // s350 — RECALCULAR aquí: `out` se calculó ARRIBA, antes de los mandos de este fotograma, y
+    // guardaba el color de ANTES del cambio (preview_argb siempre un cambio por detrás: la vista 3D
+    // y el panel de colores del sticker enseñaban el color viejo; el Pro no, porque recalcula).
+    CS::sandwich_colour_stacked(m_pro_top, m_pro_penu, mats, bg, out);
     CS::ColorRecipe recipe;
     recipe.top  = m_pro_top;
     recipe.penu = m_pro_penu;                 // disabled/empty → to_json() == "" (sin penu)
@@ -4472,6 +4745,14 @@ void GLGizmoColorStitchPainter::garbage_collect_auto_profiles()
                 if (mv->colorstitch_slot_to_profile_id[s] != 0)
                     referenced.insert(mv->colorstitch_slot_to_profile_id[s]);
         }
+        // s348 — los stickers también referencian perfiles (y uno por color si son multicolor).
+        for (const ColorStitchSticker& st : mo->colorstitch_stickers) {
+            if (st.profile_id) referenced.insert(st.profile_id);
+            for (const ColorStitchStickerColor& c : st.colors) {
+                if (c.profile_id) referenced.insert(c.profile_id);
+                for (const int bp : c.band_profiles) if (bp) referenced.insert(bp);   // s349 — bandas
+            }
+        }
     }
 
     auto& mgr = SurfaceEffectProfileManager::get();
@@ -4626,7 +4907,7 @@ void GLGizmoColorStitchPainter::duplicate_active_as_new()
         m_has_active_recipe   = true;
         load_recipe_into_pro(r);
         set_tool(TOOL_PAINT);
-        m_department = 2;      // Pro: la copia se crea para editarla
+        m_department = DEP_PRO;      // Pro: la copia se crea para editarla
         refresh_selector_palettes();
     }
 }
@@ -4752,7 +5033,7 @@ static void cs_department_tabs(const char* const* labels, const char* const* tip
 // neo_label_col_for). neo_row_slider la pide al pintar cada fila.
 static float cs_label_col()
 {
-    return neo_label_col_for({ _u8L("Smart fill angle"), _u8L("Section view"), _u8L("Rotate"), _u8L("Scale") });
+    return neo_label_col_for({ _u8L("Smart fill angle"), _u8L("Section view"), _u8L("Rotate"), _u8L("Scale"), _u8L("Size") });
 }
 
 // s318 — el "⚠ " con que empiezan algunas cadenas traducidas sobra en la bandeja: allí el triángulo
@@ -4804,9 +5085,20 @@ void GLGizmoColorStitchPainter::render_tool_row()
         set_tool(TOOL_PICK);
     ImGui::SameLine(0.f, gap);
     if (neo_glyph_toggle("##t_sticker", bs, m_sticker_mode, Glyph::Sticker,
-                         _u8L("Sticker — click a flat top face to place the loaded SVG "
-                              "(load it below, in the Palette panel)").c_str()))
+                         _u8L("Sticker — load an SVG with the button that appears\n"
+                              "next to it, then click the object to place it").c_str())) {
         set_tool(TOOL_STICKER);
+        m_department = DEP_STICKERS;   // s348 — la herramienta vive en su pestaña
+    }
+    // s350 — «Load SVG…» al lado de la herramienta Sticker, sólo con ella activa (antes estaba
+    // abajo, en la pestaña: así esa zona queda corta y cabe el editor del sticker, s364).
+    if (m_sticker_mode) {
+        ImGui::SameLine(0.f, pad + 0.6f * u);   // fuera del marco de las herramientas
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(ImVec2(c.x, c.y + 0.5f * (bs - ImGui::GetFrameHeight())));
+        if (neo_text_button((_u8L("Load SVG...") + "##stk_load").c_str(), NeoBtn::Ghost, true, Glyph::Load))
+            load_sticker_svg_dialog();
+    }
 
     ImGui::SetCursorScreenPos(p0);
     ImGui::Dummy(ImVec2(w, bs + 2.f * pad));
@@ -4936,6 +5228,16 @@ void GLGizmoColorStitchPainter::pick_recipe_from_object(int object_idx, int pick
 // ese .cpp, sin declaración en su .hpp — replicar aquí ~10 líneas es más barato
 // y seguro que exponerla, y mantiene el painter sin blast radius sobre el gizmo
 // SVG compartido, mismo criterio que los iconos privados de s173).
+// s349 — aplanar (fondo, transparencias) y sacar colores + recetas del SVG pendiente.
+void GLGizmoColorStitchPainter::prepare_pending_sticker()
+{
+    m_pending_sticker_svg = ColorStitch::svg_flatten_for_sticker(
+        m_pending_sticker_svg_raw, m_sticker_keep_background, &m_pending_flatten);
+    m_pending_gradients = ColorStitch::sticker_svg_gradients(m_pending_sticker_svg);   // s349
+    detect_pending_sticker_colors();   // s348
+    solve_pending_sticker_recipes();
+}
+
 bool GLGizmoColorStitchPainter::load_sticker_svg_dialog()
 {
     wxWindow* parent = nullptr;
@@ -4953,12 +5255,20 @@ bool GLGizmoColorStitchPainter::load_sticker_svg_dialog()
     ss << f.rdbuf();
     if (ss.str().empty()) return false;
 
-    m_pending_sticker_svg  = ss.str();
-    m_pending_sticker_name = boost::filesystem::path(path).stem().string();
+    m_pending_sticker_svg_raw = ColorStitch::svg_inline_css_classes(ss.str());   // s349: colores por clase CSS
+    m_pending_sticker_name    = boost::filesystem::path(path).stem().string();
+    prepare_pending_sticker();
     NEOTKO_LOG(PROFILE, "STICKER_LOAD name='" << m_pending_sticker_name
-        << "' bytes=" << m_pending_sticker_svg.size());
+        << "' bytes=" << m_pending_sticker_svg.size() << " colors=" << m_pending_svg_colors.size());
     return true;
 }
+
+// s350 — ámbito «recetas para la zona Bottom» (m_solve_bottom), restaurado al salir.
+struct CsBottomSolve {
+    bool& f; bool old;
+    CsBottomSolve(bool& flag, bool v) : f(flag), old(flag) { f = v; }
+    ~CsBottomSolve() { f = old; }
+};
 
 // NEOTKO_STICKER_TAG — coloca el SVG pendiente como nueva pegatina: plana en el
 // plano XY del frame-objeto (v1, sin rotación), en la posición del click. `hit_local`
@@ -4975,12 +5285,50 @@ void GLGizmoColorStitchPainter::place_sticker_at(ModelObject* mo, const ModelVol
 
     const Vec3d hit_obj = mv->get_matrix() * hit_local.cast<double>();
 
+    // s348 — undo antes de mutar el objeto.
+    Plater::TakeSnapshot snap(wxGetApp().plater(), _u8L("Place sticker"), UndoRedo::SnapshotType::GizmoAction);
+    // s350 — a la cara plana de su LADO en esa vertical (ver sticker_project).
+    Vec3d place_pos;
+    if (!sticker_project(mo, hit_obj, m_place_bottom, place_pos)) {
+        m_sticker_place_msg = m_place_bottom ? _u8L("No flat face facing down here.")
+                                             : _u8L("No flat face facing up here.");
+        return;
+    }
+    m_sticker_place_msg.clear();
     ColorStitchSticker st;
     st.name       = m_pending_sticker_name;
     st.svg_data   = m_pending_sticker_svg;
     st.profile_id = m_selected_profile_id;   // misma fuente que "con qué color pinto ahora"
-    st.transform  = Transform3d::Identity();
-    st.transform.pretranslate(hit_obj);
+    // s348 — multicolor: un perfil por color detectado (dedup: colocar copias no duplica perfiles).
+    if (m_import_multicolor && !m_pending_svg_colors.empty()
+        && m_pending_recipes.size() == m_pending_svg_colors.size()) {
+        CsBottomSolve bottom_scope(m_solve_bottom, m_place_bottom);   // s350: recetas de su lado
+        for (size_t j = 0; j < m_pending_svg_colors.size(); ++j) {
+            char hex[8];
+            std::snprintf(hex, sizeof(hex), "#%06X", (unsigned)m_pending_svg_colors[j]);
+            ColorStitchStickerColor c;
+            c.rgb        = m_pending_svg_colors[j];
+            c.zone       = int(j);   // s350 — m_pending_svg_colors ES la lista de zonas
+            const bool is_grad = j < m_pending_svg_grad.size() && m_pending_svg_grad[j];
+            if (m_import_grad_bands && is_grad)   // s349 — degradado del SVG ⇒ bandas planas
+                c.band_profiles = make_band_profiles(c.rgb, m_pending_gradients, m_import_color_mode,
+                                                     m_pending_sticker_name + " " + hex);
+            c.profile_id = c.band_profiles.empty()
+                ? profile_from_sticker_recipe(m_place_bottom ? solve_sticker_color(c.rgb, m_import_color_mode, nullptr)
+                                                             : m_pending_recipes[j],
+                                              m_pending_sticker_name + " " + hex)
+                : c.band_profiles.front();
+            st.colors.push_back(c);
+        }
+        st.color_mode = m_import_color_mode;
+        st.profile_id = st.colors.front().profile_id;   // respaldo (lista / lectores viejos)
+    }
+    {
+        ColorStitch::StickerPose pose;
+        pose.pos    = place_pos;
+        pose.bottom = m_place_bottom;
+        st.transform = ColorStitch::sticker_compose(pose, sticker_obj_scale(mo));
+    }
     mo->colorstitch_stickers.push_back(std::move(st));
 
     m_preview_dirty = true;
@@ -4988,7 +5336,7 @@ void GLGizmoColorStitchPainter::place_sticker_at(ModelObject* mo, const ModelVol
     m_parent.request_extra_frame();
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
     NEOTKO_LOG(PROFILE, "STICKER_PLACE obj='" << mo->name << "' name='" << m_pending_sticker_name
-        << "' profile_id=" << m_selected_profile_id
+        << "' profile_id=" << mo->colorstitch_stickers.back().profile_id << " colors=" << mo->colorstitch_stickers.back().colors.size()
         << " pos=(" << hit_obj.x() << "," << hit_obj.y() << "," << hit_obj.z() << ")"
         << " pile_size=" << mo->colorstitch_stickers.size());
 }
@@ -5008,10 +5356,100 @@ void GLGizmoColorStitchPainter::enter_sticker_edit(int idx)
     m_sticker_dragging    = false;
 
     const ColorStitchSticker& st = mo->colorstitch_stickers[idx];
-    m_editing_spin_deg = float(std::atan2(st.transform(1, 0), st.transform(0, 0)) * 180.0 / M_PI);
-    m_editing_scale    = float(st.transform.linear().col(0).norm());
+    {   // s350 — de la pose (con volteo y espejo), no de la columna 0 a pelo.
+        const ColorStitch::StickerPose pose = ColorStitch::sticker_decompose(st.transform);
+        m_editing_spin_deg = float(pose.spin_rad * 180.0 / M_PI);
+        m_editing_scale    = float(pose.scale);
+    }
     m_sticker_overlay_built_for = -1;   // fuerza reconstruir el overlay para ESTE sticker
+    // s364 — editar un sticker (cualquiera) despliega su editor en la pestaña Stickers, por la
+    // pestaña Place, y la cámara mira su lado. Al pegarlo, no: primero se ve qué sale.
+    reset_sticker_editor(mo, idx);
+    m_stkc_tab         = 0;
+    m_stkc_block_open  = true;
+    m_pro_from_sticker = false;
+    if (ColorStitch::sticker_faces_down(st)) sticker_view_side(true);
+    {   // s348 — tamaño del SVG a escala 1, para el "% del objeto"
+        const Polygons rings = ColorStitch::sticker_rings_in_transform(st, Transform3d::Identity());
+        const BoundingBox bb = get_extents(rings);
+        m_edit_svg_w = bb.defined ? unscale<double>(bb.size().x()) : 0.0;
+        m_edit_svg_h = bb.defined ? unscale<double>(bb.size().y()) : 0.0;
+    }
 
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+}
+
+// s348 — escala a la que el SVG (girado `spin_rad`) cabe en la caja XY del objeto con un 10 % de
+// margen. Caja en frame OBJETO (raw_mesh_bounding_box): la instancia escala objeto y sticker por
+// igual, así que "cabe" sigue siendo verdad al escalar el objeto. 0 si no se puede calcular.
+double GLGizmoColorStitchPainter::sticker_fit_scale(const ModelObject* mo, double spin_rad) const
+{
+    if (!mo || m_edit_svg_w <= 0.0 || m_edit_svg_h <= 0.0) return 0.0;
+    const BoundingBoxf3 bb = mo->raw_mesh_bounding_box();
+    if (!bb.defined) return 0.0;
+    const double c = std::abs(std::cos(spin_rad)), s = std::abs(std::sin(spin_rad));
+    const double W = c * m_edit_svg_w + s * m_edit_svg_h;
+    const double H = s * m_edit_svg_w + c * m_edit_svg_h;
+    const Vec3d sz = bb.size();
+    if (W <= 0.0 || H <= 0.0 || sz.x() <= 0.0 || sz.y() <= 0.0) return 0.0;
+    return 0.9 * std::min(sz.x() / W, sz.y() / H);
+}
+
+// s350 — escala de la instancia en los ejes del objeto (la que deforma al sticker si no es uniforme).
+Vec3d GLGizmoColorStitchPainter::sticker_obj_scale(const ModelObject* mo)
+{
+    if (!mo || mo->instances.empty()) return Vec3d::Ones();
+    return mo->instances.front()->get_scaling_factor().cwiseAbs();
+}
+
+// s350 — PROYECCIÓN: el punto `p_obj` (frame objeto) se lleva a la cara PLANA del lado pedido que
+// hay en su misma vertical. Bottom: la cara que mira abajo más alta que quede por debajo de p (la
+// de debajo del clic); top: la que mira arriba más baja que quede por encima. Si no hay en ese
+// sentido, la más cercana. Plana = |nz| ≥ 0.98 (≈ 11°): en una cara inclinada no se coloca.
+bool GLGizmoColorStitchPainter::sticker_project(const ModelObject* mo, const Vec3d& p, bool bottom, Vec3d& out) const
+{
+    if (!mo) return false;
+    constexpr double kFlat = 0.98, kEps = 1e-3;
+    bool   have_side = false, have_any = false;
+    double z_side = 0.0, z_any = 0.0;
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv || !mv->is_model_part()) continue;
+        const Transform3d m = mv->get_matrix();
+        const bool flip = m.linear().determinant() < 0.0;
+        const indexed_triangle_set& its = mv->mesh().its;
+        for (const stl_triangle_vertex_indices& f : its.indices) {
+            const Vec3d a = m * its.vertices[f[0]].cast<double>();
+            const Vec3d b = m * its.vertices[f[1]].cast<double>();
+            const Vec3d c = m * its.vertices[f[2]].cast<double>();
+            Vec3d n = (b - a).cross(c - a);
+            const double len = n.norm();
+            if (len < 1e-12) continue;
+            n /= len;
+            if (flip) n = -n;
+            if (bottom ? (n.z() > -kFlat) : (n.z() < kFlat)) continue;
+            // ¿(p.x, p.y) dentro del triángulo en planta? Baricéntricas 2D.
+            const double d = (b.y() - c.y()) * (a.x() - c.x()) + (c.x() - b.x()) * (a.y() - c.y());
+            if (std::abs(d) < 1e-14) continue;
+            const double l1 = ((b.y() - c.y()) * (p.x() - c.x()) + (c.x() - b.x()) * (p.y() - c.y())) / d;
+            const double l2 = ((c.y() - a.y()) * (p.x() - c.x()) + (a.x() - c.x()) * (p.y() - c.y())) / d;
+            const double l3 = 1.0 - l1 - l2;
+            if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9) continue;
+            const double z = l1 * a.z() + l2 * b.z() + l3 * c.z();
+            const bool on_side = bottom ? (z <= p.z() + kEps) : (z >= p.z() - kEps);
+            if (on_side && (!have_side || (bottom ? z > z_side : z < z_side))) { z_side = z; have_side = true; }
+            if (!have_any || std::abs(z - p.z()) < std::abs(z_any - p.z())) { z_any = z; have_any = true; }
+        }
+    }
+    if (!have_side && !have_any) return false;
+    out = Vec3d(p.x(), p.y(), have_side ? z_side : z_any);
+    return true;
+}
+
+// s350 — la cámara mira la cara del lado (bottom: desde abajo).
+void GLGizmoColorStitchPainter::sticker_view_side(bool bottom)
+{
+    m_parent.select_view(bottom ? "bottom" : "top");
     m_parent.set_as_dirty();
     m_parent.request_extra_frame();
 }
@@ -5019,6 +5457,7 @@ void GLGizmoColorStitchPainter::enter_sticker_edit(int idx)
 void GLGizmoColorStitchPainter::exit_sticker_edit()
 {
     m_editing_sticker_idx = -1;
+    m_pro_from_sticker    = false;   // s364
     m_sticker_dragging    = false;
     m_parent.set_as_dirty();
 }
@@ -5038,23 +5477,23 @@ void GLGizmoColorStitchPainter::ensure_sticker_overlay_built(const ColorStitchSt
 
     m_sticker_overlay_fill.reset();
     m_sticker_overlay_outline.reset();
+    m_sticker_overlay_color_fills.clear();
+    m_sticker_overlay_color_idx.clear();
 
+    // s348 — sonda: si la conversión se cuelga, el log ya dice QUÉ sticker era (antes no había nada).
+    NEOTKO_LOG(PROFILE, "STICKER_OVERLAY begin idx=" << m_editing_sticker_idx << " name='" << sticker.name
+        << "' bytes=" << sticker.svg_data.size());
+    const auto t0 = std::chrono::steady_clock::now();
     const Polygons rings = ColorStitch::sticker_rings_in_transform(sticker, Transform3d::Identity());
+    size_t npts = 0;
+    for (const Polygon& r : rings) npts += r.points.size();
+    const double ov_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    NEOTKO_LOG(PROFILE, "STICKER_OVERLAY end rings=" << rings.size() << " pts=" << npts << " ms=" << ov_ms);
     if (rings.empty()) return;
 
     m_sticker_overlay_outline.init_from(rings, 0.f);
-
-    const ExPolygons local_expolys = union_ex(rings);
-    const std::vector<Vec2f> tris2d = triangulate_expolygons_2f(local_expolys);
-    if (tris2d.size() >= 3) {
-        indexed_triangle_set its;
-        its.vertices.reserve(tris2d.size());
-        for (const Vec2f& p : tris2d) its.vertices.emplace_back(p.x(), p.y(), 0.f);
-        its.indices.reserve(tris2d.size() / 3);
-        for (size_t i = 0; i + 2 < tris2d.size(); i += 3)
-            its.indices.emplace_back(int(i), int(i + 1), int(i + 2));
-        m_sticker_overlay_fill.init_from(its);
-    }
+    // s349 — los RELLENOS ya no se construyen aquí: los dibuja ColorStitchStickerPreview::render_one,
+    // recortados a la cara del objeto y rehechos al mover (aquí sólo se construían una vez).
 }
 
 // NEOTKO_STICKER_TAG — dibuja el sticker en edición con SU color asignado (no
@@ -5072,8 +5511,6 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
 
     const ColorStitchSticker& st = mo->colorstitch_stickers[m_editing_sticker_idx];
     ensure_sticker_overlay_built(st);
-    if (!m_sticker_overlay_outline.is_initialized() && !m_sticker_overlay_fill.is_initialized()) return;
-
     GLShaderProgram* shader = wxGetApp().get_shader("flat");
     if (!shader) return;
 
@@ -5083,9 +5520,30 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
     // — mismo truco que GLGizmoFlatten::update_planes ("Raise a bit above the
     // object surface to avoid flickering"), aplicado tras el resto de la cadena
     // para que sea robusto a la orientación de la instancia.
-    const Transform3d lift = Geometry::translation_transform(Vec3d(0.0, 0.0, 0.05));
+    const Transform3d lift = Geometry::translation_transform(
+        Vec3d(0.0, 0.0, ColorStitchStickerPreview::sticker_lift_mm(st, m_editing_sticker_idx)));   // s348 — escalonado por pila; s350: con el lado
     const Transform3d model_matrix = lift * mi->get_transformation().get_matrix() * st.transform;
     const Transform3d view_model_matrix = camera.get_view_matrix() * model_matrix;
+
+    // s349 — rellenos: el mismo camino que la vista normal (recortados a la cara del objeto, lo
+    // que ves es lo que sale). Opacidad 0.8: se ve el color Y lo que hay debajo.
+    // s350 — con los colores de ESTE sticker a la vista, el color (o tramo) elegido late y el resto
+    // se apaga: «estás cambiando esta zona». Latido de ~1.2 s; sólo entonces se pide repintado
+    // continuo (el canvas de Orca repinta bajo demanda). s364: «a la vista» = la pestaña Colours
+    // del editor se dibujó en el último fotograma, o se está retocando su receta en Pro.
+    int   focus = -1;
+    float pulse = 0.f;
+    if (m_stkc_obj_id == mo->id().id && st.is_multicolor()
+        && (m_stkc_colours_shown || (m_pro_from_sticker && m_department == DEP_PRO))) {
+        focus = m_stkc_cur;
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        pulse = 0.5f + 0.5f * float(std::sin(t * 2.0 * M_PI / 1.2));
+        m_parent.schedule_animation_frame(40);   // s350: el temporizador SÍ repinta
+    }
+    ColorStitchStickerPreview::render_one(*mo, m_editing_sticker_idx, mi->get_transformation().get_matrix(),
+                                          camera, st.is_multicolor() ? 0.8f : 0.55f,
+                                          focus, focus >= 0 ? m_stkc_focus_b0 : -1, focus >= 0 ? m_stkc_focus_b1 : -1, pulse);
+    if (!m_sticker_overlay_outline.is_initialized()) return;
 
     shader->start_using();
     shader->set_uniform("view_model_matrix", view_model_matrix);
@@ -5096,13 +5554,6 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-    const SurfaceEffectProfile* p = st.profile_id ? SurfaceEffectProfileManager::get().find(st.profile_id) : nullptr;
-    ColorRGBA fill_col = p ? color_for_profile(*p) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
-    fill_col[3] = 0.55f;   // semi-transparente: se ve el color Y lo que hay debajo
-    if (m_sticker_overlay_fill.is_initialized()) {
-        m_sticker_overlay_fill.set_color(fill_col);
-        m_sticker_overlay_fill.render();
-    }
     if (m_sticker_overlay_outline.is_initialized()) {
         m_sticker_overlay_outline.set_color(ColorRGBA(1.f, 1.f, 1.f, 0.9f));
         m_sticker_overlay_outline.render();
@@ -5113,40 +5564,1581 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
     shader->stop_using();
 }
 
-// NEOTKO_STICKER_TAG — sección del departamento Palette: cargar SVG + lista de
-// pegatinas del objeto activo (orden = pila, back()=tope). Mostrada TOP-DOWN
-// (el primer row de la lista es el que OCLUYE a los de abajo) para que coincida
-// con el modelo mental de "apilar pegatinas" del plan.
-void GLGizmoColorStitchPainter::render_sticker_section()
+// ---------------------------------------------------------------------------
+// s348 — SVG MULTICOLOR → una receta por color.
+// ---------------------------------------------------------------------------
+static ImU32 cs_rgb_u32(uint32_t rgb)
 {
-    // s318 — sección plegable del lenguaje nuevo; acciones de cada pegatina como glifos en su fila.
-    if (!neo_section_toggle("##stk_sec", _u8L("Stickers (SVG)").c_str(), Glyph::Sticker, &m_stickers_open,
-                            _u8L("Place a 1-colour SVG shape on a flat top face and give it "
-                                 "its own Sandwich recipe. Stack several — the topmost "
-                                 "occludes the ones below (no blending).").c_str()))
+    return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, 255);
+}
+
+// Colores del SVG pendiente = sus ZONAS (s350, ColorStitch::sticker_svg_zones): los casi iguales
+// (ΔE2000 < 2) ya vienen juntos, y un degradado es su propia zona aunque su media se parezca a un
+// plano. La entrada j del sticker guarda zone = j, así el motor no tiene que adivinar por RGB.
+void GLGizmoColorStitchPainter::detect_pending_sticker_colors()
+{
+    m_pending_svg_colors.clear();
+    m_pending_svg_grad.clear();
+    m_pending_recipes.clear();
+    for (const ColorStitch::StickerZone& z : ColorStitch::sticker_svg_zones(m_pending_sticker_svg)) {
+        m_pending_svg_colors.push_back(z.rgb);
+        m_pending_svg_grad.push_back(z.grad);
+    }
+}
+
+static std::string cs_hex(uint32_t rgb);   // s350 (definida con el panel de colores)
+// s350 — receta BOTTOM: vista desde la cama, la pasada 0 (la primera impresa) delante. Plano: las
+// mismas parejas de 1-2 Solid que la paleta plana, puestas al revés (la visible primero). ColorStitch:
+// una pasada de dither. Cumple los límites de la zona Bottom (2 Solid + 1 ColorStitch).
+Slic3r::ColorSci::ColorRecipe GLGizmoColorStitchPainter::solve_sticker_color_bottom(uint32_t rgb, int mode) const
+{
+    namespace CS = Slic3r::ColorSci;
+    CS::Material mats[4];
+    std::vector<std::string> fcolors;
+    gizmo_materials(mats, fcolors);
+    CS::PredictOptions o;
+    o.layer_height = GLGizmoColorStitchPainter_layer_height();
+    float bg[3] = { 0.f, 0.f, 0.f };
+    if (resolve_object_base_bg(mats, bg)) { o.bg_rgb[0] = bg[0]; o.bg_rgb[1] = bg[1]; o.bg_rgb[2] = bg[2]; }
+    const float target[3] = { ((rgb >> 16) & 0xFF) / 255.f, ((rgb >> 8) & 0xFF) / 255.f, (rgb & 0xFF) / 255.f };
+    const CS::Lab tlab = CS::rgb_to_lab(target);
+    CS::ColorRecipe best;
+    best.delta_e = 1e9f;
+    auto consider = [&](SurfacePassStack bot) {
+        if (bot.passes.empty()) return;
+        bot.enabled = true;
+        float c[3] = { 0.f, 0.f, 0.f };
+        CS::sandwich_colour_bottom(bot, mats, o.bg_rgb, c);
+        const float de = CS::delta_e2000(tlab, CS::rgb_to_lab(c));
+        if (de < best.delta_e) { best.bottom = std::move(bot); best.rgb = { c[0], c[1], c[2] }; best.delta_e = de; }
+    };
+    if (mode == 1) {
+        float de = -1.f;
+        consider(CS::suggest_dither_single(target, mats, o, &de));
+    } else {
+        CS::PredictOptions wide = o;
+        wide.max_entries = 1 << 30;
+        wide.dedup_de    = 0.f;
+        wide.ratio_steps = std::max(o.ratio_steps, 12);
+        for (const CS::ColorRecipe& r : CS::predict_flat_palette(mats, wide))
+            consider(CS::reversed_stack(r.top));   // la pasada visible arriba pasa a ser la 0
+    }
+    best.desc = "bottom";
+    NEOTKO_LOG(PROFILE, "STICKER_BOTTOM_SOLVE rgb=" << cs_hex(rgb) << " mode=" << mode
+        << " passes=" << best.bottom.passes.size() << " dE=" << best.delta_e);
+    return best;
+}
+
+Slic3r::ColorSci::ColorRecipe GLGizmoColorStitchPainter::solve_sticker_color(uint32_t rgb, int mode,
+    const std::map<uint32_t, ColorStitch::StickerGradient>* grads) const
+{
+    namespace CS = Slic3r::ColorSci;
+    if (m_solve_bottom) return solve_sticker_color_bottom(rgb, mode);   // s350 (sin rampa suave en bottom)
+    CS::Material mats[4];
+    std::vector<std::string> fcolors;
+    gizmo_materials(mats, fcolors);
+    CS::PredictOptions o;
+    o.layer_height = GLGizmoColorStitchPainter_layer_height();
+    float bg_rgb[3] = { 0.f, 0.f, 0.f };
+    if (resolve_object_base_bg(mats, bg_rgb)) { o.bg_rgb[0] = bg_rgb[0]; o.bg_rgb[1] = bg_rgb[1]; o.bg_rgb[2] = bg_rgb[2]; }
+    const float target[3] = { ((rgb >> 16) & 0xFF) / 255.f, ((rgb >> 8) & 0xFF) / 255.f, (rgb & 0xFF) / 255.f };
+    // s349b — DEGRADADO LINEAL del SVG → sandwich de DOS sub-pasadas en la capa Top (la misma
+    // estructura que el solucionador plano: abajo gruesa, arriba fina y visible, con la MISMA
+    // proporción de alturas en todo el sticker), y CADA sub-pasada con su propio degradado
+    // ColorStitch entre dos filamentos (o sólida si no cambia). Así un rojo claro → rojo oscuro,
+    // imposible entre dos filamentos, sale como «rojo fino encima de un fondo que va de blanco a
+    // negro». Se buscan los filamentos por muestra (t = 0, ½, 1) para cada proporción, se
+    // predice el color de la receta CONSTRUIDA en las tres muestras y gana la de menor error
+    // máximo. Rampa = easing t² (EaseIn) al 50 %: con el lineal el Bresenham reparte a densidad
+    // constante (mezcla uniforme). Eje y recorrido: los pone el motor desde el SVG.
+    if (grads) {
+        const auto git = grads->find(rgb);
+        if (git != grads->end() && git->second.nstops == 3) {
+            const ColorStitch::StickerGradient& g = git->second;
+            CS::Lab tl[3];
+            for (int k = 0; k < 3; ++k) {
+                const float tg[3] = { ((g.stops[k] >> 16) & 0xFF) / 255.f, ((g.stops[k] >> 8) & 0xFF) / 255.f,
+                                      (g.stops[k] & 0xFF) / 255.f };
+                tl[k] = CS::rgb_to_lab(tg);
+            }
+            const SurfacePassStack no_penu;
+            auto predict = [&](const SurfacePassStack& top) {
+                float c[3] = { 0.f, 0.f, 0.f };
+                CS::sandwich_colour_stacked(top, no_penu, mats, o.bg_rgb, c);
+                return CS::rgb_to_lab(c);
+            };
+            // Pasada sólida, o mezcla a pct_b (sólo para PREDECIR el medio de una rampa).
+            auto pass_of = [](int a, int b, int pct_b, double ratio) {
+                SurfacePass p;
+                p.ratio = ratio; p.solid_tool = a; p.angle = -1; p.fan = -1; p.speed_pct = 100;
+                if (a == b || pct_b <= 0) { p.kind = SurfacePassKind::Solid; return p; }
+                if (pct_b >= 100) { p.kind = SurfacePassKind::Solid; p.solid_tool = b; return p; }
+                p.kind = SurfacePassKind::ColorStitch;
+                p.colorstitch.present = true;
+                constexpr int L = 8;
+                const int nb = std::clamp((int)std::lround(pct_b * L / 100.0), 0, L);
+                std::string pat; int acc = 0;
+                for (int i = 0; i < L; ++i) { acc += nb; if (acc >= L) { acc -= L; pat += char('1' + b); } else pat += char('1' + a); }
+                p.colorstitch.kv["interlayer_colormix_pattern_top"] = pat;
+                p.colorstitch.kv["interlayer_colormix_tool_a"] = std::to_string(a);
+                p.colorstitch.kv["interlayer_colormix_tool_b"] = std::to_string(b);
+                return p;
+            };
+            // Pasada FINAL de la receta: rampa from→to (sólida si no cambia).
+            auto ramp_pass = [](int from, int to, double ratio) {
+                SurfacePass p;
+                p.ratio = ratio; p.solid_tool = from; p.angle = -1; p.fan = -1; p.speed_pct = 100;
+                if (from == to) { p.kind = SurfacePassKind::Solid; return p; }
+                p.kind = SurfacePassKind::ColorStitch;
+                p.colorstitch.present = true;
+                auto& kv = p.colorstitch.kv;
+                kv["interlayer_colormix_pattern_top"]       = std::string(1, char('1' + from)) + char('1' + to);
+                kv["interlayer_colormix_mode"]              = "1";
+                kv["interlayer_colormix_tool_a"]            = std::to_string(from);
+                kv["interlayer_colormix_tool_b"]            = std::to_string(to);
+                kv["interlayer_colormix_pct_a"]             = "50";
+                kv["interlayer_colormix_easing"]            = "1";   // EaseIn (t²) = rampa de densidad
+                kv["interlayer_colormix_gradient_span_mm"]  = "0";
+                kv["interlayer_colormix_repetitions"]       = "1";
+                kv["interlayer_colormix_invert"]            = "0";
+                kv["interlayer_colormix_min_surface_lines"] = "0";
+                kv["interlayer_colormix_angle"]             = "-1";
+                return p;
+            };
+            const int steps = std::max(2, o.ratio_steps);
+            const double ra_lo = o.min_top_visible_mm / o.layer_height;
+            const double ra_hi = 1.0 - o.min_pass_mm / o.layer_height;
+            // s349c — criterio: error MEDIO en las 3 muestras (con el máximo, un extremo inalcanzable
+            // empataba todo en «malo» y ganaba lo que no cambia). Y se compara con la mejor receta
+            // PLANA en esas mismas muestras: el degradado gana si se parece más al SVG, sin tope
+            // absoluto («acercarse con lo que hay», pedido suyo).
+            float best_err = 1e9f, best_e[3] = { 0, 0, 0 }, flat_err = 1e9f;
+            double best_ra = 1.0; int bt[2] = { 0, 0 }, bb[2] = { 0, 0 };
+            // ra = 1 → una sola pasada (sin fondo); el resto, fondo + visible con la proporción ra.
+            for (int s = -1; s <= steps; ++s) {
+                const bool single = (s < 0);
+                if (!single && !(ra_hi > ra_lo)) break;
+                const double ra = single ? 1.0 : ra_lo + (ra_hi - ra_lo) * double(s) / steps;
+                // Para cada extremo, el mejor (arriba, abajo) con ESA proporción.
+                int ta[2], tb[2];
+                for (int e = 0; e < 2; ++e) {
+                    const int k = e ? 2 : 0;
+                    float be = 1e9f;
+                    for (int a = 0; a < 4; ++a)
+                        for (int b = 0; b < (single ? 1 : 4); ++b) {
+                            if (!single && a == b) continue;
+                            SurfacePassStack st; st.enabled = true;
+                            if (!single) st.passes.push_back(pass_of(b, b, 0, 1.0 - ra));
+                            st.passes.push_back(pass_of(a, a, 0, ra));
+                            const float d = CS::delta_e2000(tl[k], predict(st));
+                            if (d < be) { be = d; ta[e] = a; tb[e] = single ? a : b; }
+                        }
+                }
+                // Error de la receta construida en t = 0, ½ y 1 (el medio = mezcla al 50 % en cada pasada).
+                float err[3];
+                for (int k = 0; k < 3; ++k) {
+                    const int pct = k * 50;
+                    SurfacePassStack st; st.enabled = true;
+                    if (!single) st.passes.push_back(pass_of(tb[0], tb[1], pct, 1.0 - ra));
+                    st.passes.push_back(pass_of(ta[0], ta[1], pct, ra));
+                    err[k] = CS::delta_e2000(tl[k], predict(st));
+                }
+                const float mean = (err[0] + err[1] + err[2]) / 3.f;
+                // Referencia plana con esta proporción: los filamentos que mejor hacen el MEDIO, fijos.
+                for (int a = 0; a < 4; ++a)
+                    for (int b = 0; b < (single ? 1 : 4); ++b) {
+                        if (!single && a == b) continue;
+                        SurfacePassStack st; st.enabled = true;
+                        if (!single) st.passes.push_back(pass_of(b, b, 0, 1.0 - ra));
+                        st.passes.push_back(pass_of(a, a, 0, ra));
+                        const CS::Lab pl = predict(st);
+                        const float fm = (CS::delta_e2000(tl[0], pl) + CS::delta_e2000(tl[1], pl)
+                                        + CS::delta_e2000(tl[2], pl)) / 3.f;
+                        flat_err = std::min(flat_err, fm);
+                    }
+                const bool chg = (ta[0] != ta[1]) || (!single && tb[0] != tb[1]);
+                if (chg && mean < best_err) {
+                    best_err = mean; best_ra = ra;
+                    bt[0] = ta[0]; bt[1] = ta[1]; bb[0] = tb[0]; bb[1] = tb[1];
+                    for (int k = 0; k < 3; ++k) best_e[k] = err[k];
+                }
+            }
+            const bool changes = best_err < 1e8f;
+            NEOTKO_LOG(PROFILE, "STICKER_GRAD_SOLVE rgb=" << std::hex << rgb << std::dec
+                << " ra=" << best_ra << " top=F" << bt[0] + 1 << "->F" << bt[1] + 1   // s350: F1..F4 (F1 = T0)
+                << " fondo=F" << bb[0] + 1 << "->F" << bb[1] + 1
+                << " dE=[" << best_e[0] << "," << best_e[1] << "," << best_e[2] << "]"
+                << " medio=" << best_err << " plano=" << flat_err
+                << " → " << (!changes ? "plano (ninguna rampa)" : best_err < flat_err ? "degradado" : "plano (se parece más)"));
+            if (changes && best_err < flat_err) {
+                CS::ColorRecipe r;
+                r.top.enabled = true;
+                if (best_ra < 1.0) r.top.passes.push_back(ramp_pass(bb[0], bb[1], 1.0 - best_ra));
+                r.top.passes.push_back(ramp_pass(bt[0], bt[1], best_ra));
+                r.delta_e = best_err;
+                // s350 — color predicho de la rampa (su media, como la imprime), no el del SVG.
+                CS::sandwich_colour_stacked(r.top, SurfacePassStack{}, mats, o.bg_rgb, r.rgb.data());
+                r.desc = "gradient";
+                return r;
+            }
+        }
+    }
+    if (mode == 1) {
+        // ColorStitch: el color se resuelve en XY dentro de UNA pasada (dos tools alternados).
+        CS::ColorRecipe r;
+        float de = -1.f;
+        r.top     = CS::suggest_dither_single(target, mats, o, &de);
+        r.delta_e = de;
+        // s350 — el color PREDICHO de la receta, no el objetivo: antes se guardaba el color del SVG
+        // («el dither no devuelve su rgb») y la vista 3D enseñaba colores imposibles (azules sin
+        // filamento azul) y las candidatas decían dE 0.
+        CS::sandwich_colour_stacked(r.top, SurfacePassStack{}, mats, o.bg_rgb, r.rgb.data());
+        r.delta_e = CS::delta_e2000(CS::rgb_to_lab(target), CS::rgb_to_lab(r.rgb.data()));
+        return r;
+    }
+    return CS::suggest_sandwich(target, mats, o);   // s349: con Penultimate sólida si ayuda
+}
+
+std::vector<int> GLGizmoColorStitchPainter::make_band_profiles(uint32_t rgb,
+    const std::map<uint32_t, ColorStitch::StickerGradient>& grads, int mode, const std::string& base_name)
+{
+    std::vector<int> out;
+    const auto git = grads.find(rgb);
+    if (git == grads.end() || git->second.ramp.size() < 2) return out;
+    const std::vector<uint32_t>& ramp = git->second.ramp;
+    const int N = std::clamp(m_grad_band_count, 2, 32);
+    namespace CS = Slic3r::ColorSci;
+    // Mismos materiales, opciones y fondo que solve_sticker_color, para PREDECIR cómo queda una
+    // receta en el color de otra banda.
+    CS::Material mats[4];
+    std::vector<std::string> fcolors;
+    gizmo_materials(mats, fcolors);
+    CS::PredictOptions o;
+    o.layer_height = GLGizmoColorStitchPainter_layer_height();
+    { float bg[3] = { 0.f, 0.f, 0.f };
+      if (resolve_object_base_bg(mats, bg)) { o.bg_rgb[0] = bg[0]; o.bg_rgb[1] = bg[1]; o.bg_rgb[2] = bg[2]; } }
+    auto lab_of = [](uint32_t c) {
+        const float f[3] = { ((c >> 16) & 0xFF) / 255.f, ((c >> 8) & 0xFF) / 255.f, (c & 0xFF) / 255.f };
+        return CS::rgb_to_lab(f);
+    };
+
+    // 1) Cada banda propone su mejor receta ⇒ candidatas (sin repetir).
+    std::vector<uint32_t>         target(static_cast<size_t>(N));
+    std::vector<CS::ColorRecipe>  cand;
+    std::vector<std::string>      cand_key;
+    for (int b = 0; b < N; ++b) {
+        const double t = (double(b) + 0.5) / N;
+        target[size_t(b)] = ramp[size_t(std::lround(t * double(ramp.size() - 1)))];
+        CS::ColorRecipe r = solve_sticker_color(target[size_t(b)], mode, nullptr);   // plana: sin rama de degradado
+        const std::string key = r.top.to_json() + "|" + r.penu.to_json() + "|" + r.bottom.to_json();   // s350: + bottom
+        if (std::find(cand_key.begin(), cand_key.end(), key) == cand_key.end()) {
+            cand_key.push_back(key);
+            cand.push_back(std::move(r));
+        }
+    }
+    // 2) s349 — SUAVIZADO: error de cada candidata en cada banda, y se elige la secuencia que
+    //    minimiza Σ dE + λ·(cambios de receta). Sin esto, dos recetas casi empatadas se alternaban
+    //    banda a banda (amarillo/naranja/amarillo…). λ en unidades de dE: un cambio debe ganar al
+    //    menos eso para merecer una costura.
+    constexpr float kSwitch = 2.5f;
+    const int K = int(cand.size());
+    std::vector<CS::Lab> pred(static_cast<size_t>(K));
+    for (int k = 0; k < K; ++k) {
+        float c[3] = { 0.f, 0.f, 0.f };
+        if (m_solve_bottom) CS::sandwich_colour_bottom(cand[size_t(k)].bottom, mats, o.bg_rgb, c);   // s350
+        else                CS::sandwich_colour_stacked(cand[size_t(k)].top, cand[size_t(k)].penu, mats, o.bg_rgb, c);
+        pred[size_t(k)] = CS::rgb_to_lab(c);
+    }
+    std::vector<std::vector<float>> cost(size_t(N), std::vector<float>(size_t(K), 0.f));
+    std::vector<std::vector<int>>   from(size_t(N), std::vector<int>(size_t(K), -1));
+    for (int b = 0; b < N; ++b) {
+        const CS::Lab tl = lab_of(target[size_t(b)]);
+        for (int k = 0; k < K; ++k) {
+            const float e = CS::delta_e2000(tl, pred[size_t(k)]);
+            if (b == 0) { cost[0][size_t(k)] = e; continue; }
+            float best = 1e30f; int arg = 0;
+            for (int q = 0; q < K; ++q) {
+                const float v = cost[size_t(b - 1)][size_t(q)] + (q == k ? 0.f : kSwitch);
+                if (v < best) { best = v; arg = q; }
+            }
+            cost[size_t(b)][size_t(k)] = best + e;
+            from[size_t(b)][size_t(k)] = arg;
+        }
+    }
+    std::vector<int> pick(static_cast<size_t>(N), 0);
+    { int k = 0; float best = 1e30f;
+      for (int q = 0; q < K; ++q) if (cost[size_t(N - 1)][size_t(q)] < best) { best = cost[size_t(N - 1)][size_t(q)]; k = q; }
+      for (int b = N - 1; b >= 0; --b) { pick[size_t(b)] = k; if (b > 0) k = from[size_t(b)][size_t(k)]; } }
+
+    // 3) Perfiles sólo para las candidatas que quedan en uso.
+    std::map<int, int> pid_of;
+    for (int b = 0; b < N; ++b) {
+        const int k = pick[size_t(b)];
+        auto it = pid_of.find(k);
+        if (it == pid_of.end()) {
+            char hex[8];
+            std::snprintf(hex, sizeof(hex), "#%06X", unsigned(target[size_t(b)]));
+            it = pid_of.emplace(k, profile_from_sticker_recipe(cand[size_t(k)], base_name + " b" + std::to_string(b + 1) + " " + hex)).first;
+        }
+        out.push_back(it->second);
+    }
+    int switches = 0;
+    for (int b = 1; b < N; ++b) switches += (pick[size_t(b)] != pick[size_t(b - 1)]);
+    std::map<int, int>& by_json = pid_of;   // (para el log de abajo: recetas distintas en uso)
+    NEOTKO_LOG(PROFILE, "STICKER_BANDS_SMOOTH candidatas=" << K << " cambios=" << switches);
+    NEOTKO_LOG(PROFILE, "STICKER_BANDS rgb=" << std::hex << rgb << std::dec << " N=" << N
+        << " recetas_distintas=" << by_json.size());
+    return out;
+}
+
+const std::map<uint32_t, ColorStitch::StickerGradient>& GLGizmoColorStitchPainter::sticker_gradients_cached(const std::string& svg)
+{
+    const size_t key = std::hash<std::string>{}(svg);
+    if (key != m_grad_cache_key) {
+        m_grad_cache     = ColorStitch::sticker_svg_gradients(svg);
+        m_grad_cache_key = key;
+    }
+    return m_grad_cache;
+}
+
+void GLGizmoColorStitchPainter::solve_pending_sticker_recipes()
+{
+    m_pending_recipes.clear();
+    for (size_t j = 0; j < m_pending_svg_colors.size(); ++j)   // s350: degradado sólo si la zona lo es
+        m_pending_recipes.push_back(solve_sticker_color(m_pending_svg_colors[j], m_import_color_mode,
+            (j < m_pending_svg_grad.size() && m_pending_svg_grad[j]) ? &m_pending_gradients : nullptr));
+}
+
+// Receta → perfil GUARDADO del grupo activo (no auto: el GC no lo toca). Dedup por pilas, igual
+static uint32_t    cs_f3_rgb(const float c[3]);   // s350 (definidas con el panel de colores)
+static std::string cs_hex(uint32_t rgb);
+
+// que save_active_as_palette: el mismo color resuelto igual reutiliza su perfil.
+int GLGizmoColorStitchPainter::profile_from_sticker_recipe(const Slic3r::ColorSci::ColorRecipe& r,
+                                                          const std::string& name)
+{
+    if (m_solve_bottom) {   // s350 — receta de la zona BOTTOM (sin top/penu)
+        if (r.bottom.passes.empty()) return 0;
+        const std::string bot_json = r.bottom.to_json();
+        const std::string bname = name + " (bottom)";
+        auto& bmgr = SurfaceEffectProfileManager::get();
+        for (const SurfaceEffectProfile& p : bmgr.list())
+            if (p.stack_bottom_json == bot_json && p.stack_top_json.empty() && cs_strip_group(p.name) == bname) {
+                if (SurfaceEffectProfile* mp = bmgr.find_mut(p.id)) mp->auto_generated = false;
+                return p.id;
+            }
+        SurfaceEffectProfile p;
+        p.name              = cs_with_group(bname, m_active_group);
+        p.stack_bottom_json = bot_json;
+        p.preview_argb      = recipe_argb(r);
+        p.auto_generated    = false;
+        const int id = bmgr.add(std::move(p));
+        refresh_selector_palettes();
+        return id;
+    }
+    if (r.top.passes.empty()) return 0;
+    const std::string top_json  = r.top.to_json();
+    const std::string penu_json = r.penu.to_json();
+    auto& mgr = SurfaceEffectProfileManager::get();
+    for (const SurfaceEffectProfile& p : mgr.list())
+        // Dedup SOLO con el mismo nombre (= mismo color del SVG): dos colores distintos que caen
+        // en la misma receta quedan como perfiles separados, si no el azul salía llamado "#FF0000".
+        if (p.stack_top_json == top_json && p.stack_penu_json == penu_json && p.stack_bottom_json.empty()
+            && cs_strip_group(p.name) == name) {
+            if (SurfaceEffectProfile* mp = mgr.find_mut(p.id)) mp->auto_generated = false;
+            return p.id;
+        }
+    SurfaceEffectProfile p;
+    p.name            = cs_with_group(name, m_active_group);
+    p.stack_top_json  = top_json;
+    p.stack_penu_json = penu_json;
+    p.preview_argb    = recipe_argb(r);
+    p.auto_generated  = false;
+    SurfaceEffectProfileManager::payload_from_stacks(r.top, r.penu, p);
+    const int id = mgr.add(std::move(p));
+    refresh_selector_palettes();
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// s350 — colores del SVG (un color por zona). s364: dentro del editor de la pestaña Stickers.
+// ---------------------------------------------------------------------------
+// s364 — el siguiente botón de texto sigue en la misma línea sólo si cabe hasta `right` (x de
+// pantalla); si no, baja. El panel es AlwaysAutoResize: un botón que se sale lo ensancha (s319).
+static void cs_same_line_if_fits(const std::string& label, bool has_glyph, float right)
+{
+    const float u = neo_u();
+    const float w = ImGui::CalcTextSize(label.c_str(), neo_label_end(label.c_str())).x
+                  + (has_glyph ? 1.3f * u : 0.f) + 1.2f * u;
+    if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + w <= right) ImGui::SameLine();
+}
+
+static float cs_de_rgb(uint32_t a, const float b[3])
+{
+    namespace CS = Slic3r::ColorSci;
+    const float fa[3] = { ((a >> 16) & 0xFF) / 255.f, ((a >> 8) & 0xFF) / 255.f, (a & 0xFF) / 255.f };
+    return CS::delta_e2000(CS::rgb_to_lab(fa), CS::rgb_to_lab(b));
+}
+
+static uint32_t cs_f3_rgb(const float c[3])
+{
+    auto q = [](float v) { return uint32_t(std::clamp(std::lround(v * 255.f), 0L, 255L)); };
+    return (q(c[0]) << 16) | (q(c[1]) << 8) | q(c[2]);
+}
+
+// s350 — materiales y fondo del fotograma, para que el panel de colores calcule el color de cada
+// receta DESDE SUS CAPAS (como el Pro) y no se fíe de preview_argb, que puede estar viejo.
+static bool                          g_stkc_live = false;
+static Slic3r::ColorSci::Material    g_stkc_mats[4];
+static float                         g_stkc_bg[3] = { 0.f, 0.f, 0.f };
+
+static bool cs_profile_rgb(int pid, float out[3])
+{
+    const SurfaceEffectProfile* p = pid ? SurfaceEffectProfileManager::get().find(pid) : nullptr;
+    if (!p) return false;
+    if (g_stkc_live && p->stack_top_json.empty() && !p->stack_bottom_json.empty()) {   // s350: sólo Bottom
+        Slic3r::ColorSci::sandwich_colour_bottom(SurfacePassStack::from_json(p->stack_bottom_json), g_stkc_mats, g_stkc_bg, out);
+        return true;
+    }
+    if (g_stkc_live && !p->stack_top_json.empty()) {
+        Slic3r::ColorSci::sandwich_colour_stacked(SurfacePassStack::from_json(p->stack_top_json),
+                                                  SurfacePassStack::from_json(p->stack_penu_json),
+                                                  g_stkc_mats, g_stkc_bg, out);
+        return true;
+    }
+    const ColorRGBA c = color_for_profile(*p);
+    out[0] = c.r(); out[1] = c.g(); out[2] = c.b();
+    return true;
+}
+
+static std::string cs_hex(uint32_t rgb)
+{
+    char hex[8];
+    std::snprintf(hex, sizeof(hex), "#%06X", unsigned(rgb & 0xFFFFFF));
+    return hex;
+}
+
+void GLGizmoColorStitchPainter::reset_sticker_editor(const ModelObject* mo, int sticker_idx)
+{
+    if (!mo || sticker_idx < 0 || sticker_idx >= (int)mo->colorstitch_stickers.size()) return;
+    m_stkc_obj_id     = mo->id().id;
+    m_stkc_idx        = sticker_idx;
+    m_stkc_cur        = 0;
+    m_stkc_band       = -1;
+    m_stkc_sel.assign(mo->colorstitch_stickers[sticker_idx].colors.size(), 0);
+    m_stkc_cand_color = -1;
+    m_stkc_cand_band  = -2;
+    m_stkc_cands.clear();
+}
+
+void GLGizmoColorStitchPainter::edit_profile_in_pro(int pid)
+{
+    const SurfaceEffectProfile* p = pid ? SurfaceEffectProfileManager::get().find(pid) : nullptr;
+    if (!p) return;
+    // Mismo enlace que el cuentagotas: el Pro reescribe EN VIVO el perfil seleccionado, así que el
+    // sticker (y sus copias, que comparten perfil) cambia según se edita.
+    const Slic3r::ColorSci::ColorRecipe r = recipe_from_profile(*p);
+    const std::string top_before  = p->stack_top_json, penu_before = p->stack_penu_json;
+    invalidate_active_binding(/*keep_recipe=*/true);
+    m_selected_profile_id = pid;
+    m_active_recipe       = r;
+    m_active_style        = cs_strip_group(p->name);
+    m_has_active_recipe   = true;
+    load_recipe_into_pro(r);
+    {   // s350 — recetas guardadas con el color viejo (el Pro lo guardaba un cambio por detrás):
+        // al abrirla se corrige su preview_argb desde sus capas.
+        namespace CS = Slic3r::ColorSci;
+        CS::Material mats[4]; std::vector<std::string> fc; gizmo_materials(mats, fc);
+        float bg[3] = { 0.f, 0.f, 0.f }; resolve_object_base_bg(mats, bg);
+        float rj[3] = { 0.f, 0.f, 0.f };
+        CS::sandwich_colour_stacked(SurfacePassStack::from_json(top_before), SurfacePassStack::from_json(penu_before), mats, bg, rj);
+        // Recetas guardadas con el color viejo (el Pro lo guardaba un cambio por detrás): se corrige.
+        if (SurfaceEffectProfile* mp = SurfaceEffectProfileManager::get().find_mut(pid)) {
+            const uint32_t fixed = 0xFF000000u | cs_f3_rgb(rj);
+            if (mp->preview_argb != fixed) { mp->preview_argb = fixed; m_sticker_overlay_built_for = -1; }
+        }
+    }
+    // s364 — viniendo del editor de un sticker, Pro enseña «Back to sticker» (la edición sigue viva).
+    m_pro_from_sticker = m_editing_sticker_idx >= 0;
+    m_department = DEP_PRO;
+    refresh_selector_palettes();
+}
+
+void GLGizmoColorStitchPainter::sticker_colours_changed(ColorStitchSticker& st)
+{
+    if (!st.colors.empty()) st.profile_id = st.colors.front().profile_id;
+    m_sticker_overlay_built_for = -1;
+    m_stkc_cand_color = -1;   // las alternativas dependen de la receta actual
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+}
+
+// ¿La entrada c es un degradado? Con zona (s350) lo dice la zona; sin ella, si su RGB es la media
+// de algún degradado del SVG (lo de antes).
+static bool cs_color_is_grad(const ColorStitchStickerColor& c, const std::vector<ColorStitch::StickerZone>& zones,
+                             const std::map<uint32_t, ColorStitch::StickerGradient>& grads)
+{
+    if (c.zone >= 0 && c.zone < (int)zones.size()) return zones[size_t(c.zone)].grad;
+    return grads.count(c.rgb) > 0;
+}
+
+// TRAMOS: bandas seguidas con la misma receta.
+struct CsRun { int b0 = 0, b1 = 0, pid = 0; };
+static std::vector<CsRun> cs_runs(const std::vector<int>& bands)
+{
+    std::vector<CsRun> out;
+    for (int b = 0; b < (int)bands.size(); ++b) {
+        if (!out.empty() && out.back().pid == bands[size_t(b)]) out.back().b1 = b;
+        else out.push_back({ b, b, bands[size_t(b)] });
+    }
+    return out;
+}
+static int cs_run_of(const std::vector<CsRun>& runs, int band)
+{
+    for (int r = 0; r < (int)runs.size(); ++r)
+        if (band >= runs[size_t(r)].b0 && band <= runs[size_t(r)].b1) return r;
+    return runs.empty() ? -1 : 0;
+}
+// Color objetivo de un tramo [b0, b1] de N bandas: la rampa en su centro.
+static uint32_t cs_span_target(const std::vector<uint32_t>& ramp, int b0, int b1, int N)
+{
+    if (ramp.empty() || N <= 0) return 0;
+    const double t = (double(b0) + double(b1) + 1.0) * 0.5 / double(N);
+    const int k = int(std::lround(t * double(ramp.size() - 1)));
+    return ramp[size_t(std::clamp(k, 0, int(ramp.size()) - 1))];
+}
+static std::string cs_run_letter(int r)
+{
+    std::string s;
+    do { s.insert(s.begin(), char('A' + r % 26)); r = r / 26 - 1; } while (r >= 0);
+    return s;
+}
+
+void GLGizmoColorStitchPainter::build_sticker_candidates(const ColorStitchSticker& st, int color, int band)
+{
+    m_stkc_cands.clear();
+    m_stkc_cand_color = color;
+    m_stkc_cand_band  = band;
+    if (color < 0 || color >= (int)st.colors.size()) return;
+    const ColorStitchStickerColor& c = st.colors[size_t(color)];
+    const auto& grads = sticker_gradients_cached(st.svg_data);
+    const auto zones  = ColorStitch::sticker_svg_zones(st.svg_data);
+    const bool grad   = cs_color_is_grad(c, zones, grads);
+    uint32_t target = c.rgb;
+    if (band >= 0 && !c.band_profiles.empty()) {
+        const auto it = grads.find(c.rgb);
+        const std::vector<CsRun> runs = cs_runs(c.band_profiles);
+        const int r = cs_run_of(runs, band);
+        if (it != grads.end() && r >= 0)
+            target = cs_span_target(it->second.ramp, runs[size_t(r)].b0, runs[size_t(r)].b1, int(c.band_profiles.size()));
+    }
+    // Un tramo es un color plano; el color entero con degradado se resuelve como rampa.
+    const std::map<uint32_t, ColorStitch::StickerGradient>* g = (band < 0 && grad) ? &grads : nullptr;
+    for (int mode = 0; mode <= 1; ++mode) {
+        StkCand k;
+        k.recipe      = solve_sticker_color(target, mode, g);
+        if ((m_solve_bottom ? k.recipe.bottom : k.recipe.top).passes.empty()) continue;   // s350
+        k.from_recipe = true;
+        k.label       = mode == 0 ? _u8L("Auto: flat") : _u8L("Auto: ColorStitch");
+        k.rgb         = cs_f3_rgb(k.recipe.rgb.data());
+        k.de          = cs_de_rgb(target, k.recipe.rgb.data());
+        m_stkc_cands.push_back(std::move(k));
+    }
+    // Colores guardados de la paleta, por cercanía.
+    std::vector<StkCand> saved;
+    for (const SurfaceEffectProfile& p : SurfaceEffectProfileManager::get().list()) {
+        if (p.auto_generated) continue;
+        // s350 — un sticker bottom sólo puede usar recetas con zona Bottom (y sin Top: su color
+        // mostrado es el de la cara de abajo); uno top, recetas con Top.
+        if (m_solve_bottom ? (!p.stack_top_json.empty() || !SurfacePassStack::from_json(p.stack_bottom_json).any_effect())
+                           : p.stack_top_json.empty()) continue;
+        float rgb[3];
+        if (!cs_profile_rgb(p.id, rgb)) continue;
+        StkCand k;
+        k.pid   = p.id;
+        k.label = cs_strip_group(p.name);
+        k.rgb   = cs_f3_rgb(rgb);
+        k.de    = cs_de_rgb(target, rgb);
+        saved.push_back(std::move(k));
+    }
+    std::sort(saved.begin(), saved.end(), [](const StkCand& a, const StkCand& b) { return a.de < b.de; });
+    // s350 — sin repetidos: muchas recetas guardadas dan el MISMO color (las de otros stickers);
+    // de cada color se queda la primera. Las automáticas tampoco se repiten en la lista.
+    {
+        std::vector<StkCand> uniq;
+        auto same = [](uint32_t a, uint32_t b) {
+            const float fb[3] = { ((b >> 16) & 0xFF) / 255.f, ((b >> 8) & 0xFF) / 255.f, (b & 0xFF) / 255.f };
+            return cs_de_rgb(a, fb) < 1.f;
+        };
+        for (StkCand& k : saved) {
+            bool dup = false;
+            for (const StkCand& q : m_stkc_cands) dup |= same(k.rgb, q.rgb);
+            for (const StkCand& q : uniq)         dup |= same(k.rgb, q.rgb);
+            if (!dup) uniq.push_back(std::move(k));
+        }
+        saved = std::move(uniq);
+    }
+    if (saved.size() > 8) saved.resize(8);
+    for (StkCand& k : saved) m_stkc_cands.push_back(std::move(k));
+}
+
+// s350 — recalcular TODAS las recetas de un sticker multicolor en `mode` (0 plano, 1 ColorStitch),
+// para el lado al que mira (bottom ⇒ recetas de la zona Bottom). Los colores en bandas rehacen sus
+// bandas; el resto, una receta (rampa suave si es un degradado, sólo en top).
+void GLGizmoColorStitchPainter::recompute_sticker_colours(ColorStitchSticker& st, int mode)
+{
+    CsBottomSolve bottom_scope(m_solve_bottom, ColorStitch::sticker_faces_down(st));
+    const auto grads = sticker_gradients_cached(st.svg_data);   // copia: el bucle crea perfiles
+    const auto zones = ColorStitch::sticker_svg_zones(st.svg_data);
+    for (ColorStitchStickerColor& c : st.colors) {
+        const bool grad = cs_color_is_grad(c, zones, grads);
+        if (grad && !c.band_profiles.empty()) {
+            std::vector<int> bp = make_band_profiles(c.rgb, grads, mode, st.name + " " + cs_hex(c.rgb));
+            if (!bp.empty()) { c.band_profiles = std::move(bp); c.profile_id = c.band_profiles.front(); }
+            continue;
+        }
+        const int pid = profile_from_sticker_recipe(solve_sticker_color(c.rgb, mode, grad ? &grads : nullptr),
+                                                    st.name + " " + cs_hex(c.rgb));
+        if (pid) { c.profile_id = pid; c.band_profiles.clear(); }
+    }
+    st.color_mode = mode;
+    if (!st.colors.empty()) st.profile_id = st.colors.front().profile_id;
+}
+
+// s350 — pestaña PLACE del editor del sticker: lo que antes iba en la fila de la capa (nombre, giro,
+// tamaño, Fit) + LADO, ESPEJO y PROPORCIÓN. Todo reconstruye el transform con sticker_compose.
+void GLGizmoColorStitchPainter::render_sticker_place_body(ModelObject* mo, ColorStitchSticker& st, int idx)
+{
+    const float u = neo_u();
+    const float row_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;   // s364
+    auto snapshot = [](const std::string& what) {
+        Plater::TakeSnapshot snap(wxGetApp().plater(), what, UndoRedo::SnapshotType::GizmoAction);
+    };
+    auto set_pose = [&](const ColorStitch::StickerPose& pose) {
+        st.transform = ColorStitch::sticker_compose(pose, sticker_obj_scale(mo));
+        m_parent.set_as_dirty();
+        m_parent.request_extra_frame();
+    };
+    auto reslice = [&]() { m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS)); };
+    ColorStitch::StickerPose pose = ColorStitch::sticker_decompose(st.transform);
+    // Si no estamos editando ESTE sticker, los deslizadores salen de la pose.
+    if (idx != m_editing_sticker_idx) {
+        m_editing_spin_deg = float(pose.spin_rad * 180.0 / M_PI);
+        m_editing_scale    = float(pose.scale);
+    }
+
+    // ---- Nombre ----
+    {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "%s", st.name.c_str());
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        if (ImGui::InputText("##stk_name", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue) && st.name != buf) {
+            snapshot(_u8L("Rename sticker"));
+            st.name = buf;
+        }
+    }
+
+    // ---- Lado ----
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(_u8L("Side").c_str());
+    ImGui::SameLine(cs_label_col());
+    int side = pose.bottom ? 1 : 0;
+    for (int k = 0; k < 2; ++k) {
+        if (k) ImGui::SameLine();
+        const std::string lbl = (k ? _u8L("Bottom") : _u8L("Top")) + (k ? "##stk_sideb" : "##stk_sidet");
+        if (neo_text_button(lbl.c_str(), side == k ? NeoBtn::Accent : NeoBtn::Ghost, true, k ? Glyph::ZoneBottom : Glyph::ZoneTop)
+            && side != k) {
+            Vec3d proj;
+            if (sticker_project(mo, pose.pos, k == 1, proj)) {
+                snapshot(_u8L("Sticker side"));
+                pose.pos    = proj;
+                pose.bottom = (k == 1);
+                set_pose(pose);
+                // Las recetas de un lado no valen en el otro (zona Top/Penu ⇄ zona Bottom).
+                if (st.is_multicolor()) recompute_sticker_colours(st, st.color_mode);
+                sticker_view_side(pose.bottom);
+                reslice();
+                m_sticker_place_msg.clear();
+            } else
+                m_sticker_place_msg = k ? _u8L("No flat face facing down under it.") : _u8L("No flat face facing up over it.");
+        }
+    }
+    ImGui::SameLine();
+    if (neo_glyph_button("##stk_look", 1.3f * u, Glyph::Eye, false, _u8L("Look at this side").c_str()))
+        sticker_view_side(pose.bottom);
+    if (!m_sticker_place_msg.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
+        ImGui::TextUnformatted(m_sticker_place_msg.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    // ---- Girar ----
+    const std::string spin_fmt = std::string("%.0f") + I18N::translate_utf8("°", "deg");
+    if (neo_row_slider("##stk_spin", _u8L("Rotate").c_str(), &m_editing_spin_deg, -180.f, 180.f,
+                       spin_fmt.c_str(), _u8L("Rotate it on its face").c_str())) {
+        pose.spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
+        set_pose(pose);
+    }
+    if (ImGui::IsItemActivated()) snapshot(_u8L("Rotate sticker"));
+    if (ImGui::IsItemDeactivatedAfterEdit()) reslice();
+
+    // ---- Tamaño (% del objeto) ----
+    const double fit = sticker_fit_scale(mo, pose.spin_rad);
+    auto apply_scale = [&](double sc) { m_editing_scale = float(sc); pose.scale = sc; set_pose(pose); };
+    if (fit > 0.0) {
+        float pct = float(100.0 * double(m_editing_scale) / fit);
+        if (neo_row_slider("##stk_size", _u8L("Size").c_str(), &pct, 2.f, 400.f, "%.0f%%",
+                           _u8L("Size relative to the object:\n"
+                                "100% = fits on its face (with a small margin).").c_str(),
+                           -1.f, ImGuiSliderFlags_Logarithmic))
+            apply_scale(fit * double(std::max(0.5f, pct)) / 100.0);
+    } else if (neo_row_slider("##stk_scale", _u8L("Scale").c_str(), &m_editing_scale, 0.01f, 10.0f, "%.3fx",
+                              _u8L("Resize the sticker (uniform)").c_str(), -1.f, ImGuiSliderFlags_Logarithmic))
+        apply_scale(double(std::max(0.001f, m_editing_scale)));
+    if (ImGui::IsItemActivated()) snapshot(_u8L("Scale sticker"));
+    if (ImGui::IsItemDeactivatedAfterEdit()) reslice();
+
+    // ---- Botones: Fit · espejo · proporción ----
+    ImGui::Dummy(ImVec2(cs_label_col(), 0.f));
+    ImGui::SameLine(cs_label_col());
+    if (fit > 0.0) {
+        if (neo_text_button((_u8L("Fit to object") + "##stk_fit").c_str(), NeoBtn::Ghost)) {
+            snapshot(_u8L("Fit sticker"));
+            const BoundingBoxf3 obb = mo->raw_mesh_bounding_box();
+            Vec3d proj;
+            if (sticker_project(mo, Vec3d(obb.center().x(), obb.center().y(), pose.pos.z()), pose.bottom, proj))
+                pose.pos = proj;
+            apply_scale(fit);
+            reslice();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Centre it on the object and size it to 100%\n(fits on its face).").c_str());
+        cs_same_line_if_fits(_u8L("Mirror") + " \xe2\x86\x94", false, row_right);
+    }
+    if (neo_text_button((_u8L("Mirror") + " \xe2\x86\x94##stk_mh").c_str(), pose.mirror ? NeoBtn::Accent : NeoBtn::Ghost)) {
+        snapshot(_u8L("Mirror sticker"));
+        pose.mirror = !pose.mirror;
+        set_pose(pose);
+        reslice();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _u8L("Flip left-right").c_str());
+    cs_same_line_if_fits(_u8L("Mirror") + " \xe2\x86\x95", false, row_right);
+    if (neo_text_button((_u8L("Mirror") + " \xe2\x86\x95##stk_mv").c_str(), NeoBtn::Ghost)) {
+        // Arriba-abajo = espejo izquierda-derecha + media vuelta.
+        snapshot(_u8L("Mirror sticker"));
+        pose.mirror   = !pose.mirror;
+        pose.spin_rad = std::remainder(pose.spin_rad + M_PI, 2.0 * M_PI);
+        m_editing_spin_deg = float(pose.spin_rad * 180.0 / M_PI);
+        set_pose(pose);
+        reslice();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _u8L("Flip top-bottom").c_str());
+
+    // ---- Proporción: ¿está deformado en la pieza (escala del objeto)? ----
+    {
+        const Transform3d world = (mo->instances.empty() ? Transform3d::Identity()
+                                                          : mo->instances.front()->get_transformation().get_matrix())
+                                * st.transform;
+        const double ax = world.linear().col(0).norm(), ay = world.linear().col(1).norm();
+        const double dev = std::abs(ax - ay) / std::max(1e-9, 0.5 * (ax + ay));
+        if (dev > 0.01) {
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
+            ImGui::TextUnformatted((_u8L("Stretched") + " " + std::to_string(int(std::lround(dev * 100.0))) + "%").c_str());
+            ImGui::PopStyleColor();
+            cs_same_line_if_fits(_u8L("Restore proportion"), false, row_right);
+            if (neo_text_button((_u8L("Restore proportion") + "##stk_prop").c_str(), NeoBtn::Normal)) {
+                snapshot(_u8L("Restore sticker proportion"));
+                set_pose(pose);   // sticker_compose compensa la escala del objeto
+                reslice();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("The object was scaled unevenly after placing the sticker,\n"
+                                             "so the sticker got stretched with it. This gives it back\n"
+                                             "its own shape (same average size).").c_str());
+        }
+    }
+
+    // ---- Color (sticker de 1 color) ----
+    if (!st.is_multicolor()) {
+        ImGui::Separator();
+        auto& mgr = SurfaceEffectProfileManager::get();
+        const SurfaceEffectProfile* p = st.profile_id ? mgr.find(st.profile_id) : nullptr;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Colour").c_str());
+        ImGui::SameLine(cs_label_col());
+        ImGui::TextDisabled("%s", fit_text(p ? cs_strip_group(p->name) : _u8L("(no profile)"),
+                                           std::max(2.f * u, row_right - ImGui::GetCursorScreenPos().x)).c_str());
+        ImGui::Dummy(ImVec2(cs_label_col(), 0.f));   // el botón, en su línea y en la columna de los mandos
+        ImGui::SameLine(cs_label_col());
+        if (neo_text_button((_u8L("Use Palette colour") + "##stk_asg1").c_str(), NeoBtn::Ghost, true, Glyph::Target)
+            && m_selected_profile_id != 0 && st.profile_id != m_selected_profile_id) {
+            snapshot(_u8L("Assign sticker colour"));
+            st.profile_id = m_selected_profile_id;
+            reslice();
+        }
+        // s350 — en la cara de abajo sólo cuenta la zona Bottom de la receta.
+        if (pose.bottom && p && !SurfacePassStack::from_json(p->stack_bottom_json).any_effect()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
+            ImGui::TextWrapped("%s", _u8L("This recipe has no Bottom zone: it won't print here.").c_str());
+            ImGui::PopStyleColor();
+            if (neo_text_button((_u8L("Make a Bottom version") + "##stk_mkbot").c_str(), NeoBtn::Normal)) {
+                // El color que da la receta en top, resuelto para la cara de abajo.
+                float rgb[3] = { 0.5f, 0.5f, 0.5f };
+                const ColorRGBA pc = color_for_profile(*p);
+                rgb[0] = pc.r(); rgb[1] = pc.g(); rgb[2] = pc.b();
+                CsBottomSolve bottom_scope(m_solve_bottom, true);
+                const uint32_t tgt = cs_f3_rgb(rgb);
+                const int pid = profile_from_sticker_recipe(solve_sticker_color(tgt, 0, nullptr), cs_strip_group(p->name));
+                if (pid) {
+                    snapshot(_u8L("Sticker bottom recipe"));
+                    st.profile_id = pid;
+                    reslice();
+                }
+            }
+        }
+    }
+
+    // ---- Aviso: el muro no se recolorea en stickers ----
+    {
+        bool has_ov = false;
+        for (const int pid : ColorStitch::sticker_live_profiles(st))
+            if (const SurfaceEffectProfile* pp = SurfaceEffectProfileManager::get().find(pid))
+                has_ov |= SurfacePassStack::from_json(pp->stack_top_json).perimeter_override
+                       || SurfacePassStack::from_json(pp->stack_penu_json).perimeter_override;
+        if (has_ov) {
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
+            ImGui::PushTextWrapPos(0.f);
+            ImGui::TextUnformatted(_u8L("A recipe here recolours the wall. Stickers "
+                                        "don't do that yet: the wall keeps its colour.").c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+    }
+    if (idx == m_editing_sticker_idx) {
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+        ImGui::TextWrapped("%s", _u8L("Drag on the model to move it (it slides on its side's face).").c_str());
+        ImGui::PopStyleColor();
+    }
+}
+
+// s364 — EDITOR DEL STICKER, dentro de la pestaña Stickers y bajo la lista de capas (antes, s350,
+// una ventana flotante aparte). Bloque plegable «Sticker: nombre» con las pestañas Place (lado,
+// giro, tamaño, espejo, proporción) y Colours (sólo multicolor). Existe mientras hay un sticker
+// en edición; se cierra con el mismo botón Edit de su capa.
+void GLGizmoColorStitchPainter::render_sticker_editor()
+{
+    const float u = neo_u();
+    ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (m_editing_sticker_idx < 0) {
+        if (mo && !mo->colorstitch_stickers.empty()) {
+            ImGui::Dummy(ImVec2(0.f, 0.2f * u));
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+            ImGui::TextWrapped("%s", _u8L("Press Edit on a layer to move it or change its colours.").c_str());
+            ImGui::PopStyleColor();
+        }
         return;
+    }
+    // Otro objeto activo, o la capa ya no existe: se acabó la edición.
+    if (!mo || m_editing_sticker_idx >= (int)mo->colorstitch_stickers.size() || m_stkc_obj_id != mo->id().id) {
+        exit_sticker_edit();
+        return;
+    }
+    m_stkc_idx = m_editing_sticker_idx;   // reordenar capas mueve el índice en edición
+    ColorStitchSticker& st = mo->colorstitch_stickers[size_t(m_stkc_idx)];
+    if (!st.is_multicolor()) m_stkc_tab = 0;   // 1 color: sólo Place
+    if (m_stkc_sel.size() != st.colors.size()) m_stkc_sel.assign(st.colors.size(), 0);
+    m_stkc_cur = std::clamp(m_stkc_cur, 0, std::max(0, int(st.colors.size()) - 1));
 
+    ImGui::Dummy(ImVec2(0.f, 0.2f * u));
+    const std::string title = fit_text(_u8L("Sticker") + ": " + (st.name.empty() ? std::string("?") : st.name),
+                                       std::max(4.f * u, ImGui::GetContentRegionAvail().x - 4.f * u));
+    if (!neo_section_toggle("##stk_editor", title.c_str(), Glyph::Sticker, &m_stkc_block_open,
+                            _u8L("The sticker being edited. Click to fold or unfold;\n"
+                                 "the Edit button of its layer closes it.").c_str()))
+        return;
+    // Pestañas: Place y Colours (multicolor).
+    if (neo_text_button((_u8L("Place") + "##stkc_tab0").c_str(), m_stkc_tab == 0 ? NeoBtn::Accent : NeoBtn::Ghost))
+        m_stkc_tab = 0;
+    if (st.is_multicolor()) {
+        ImGui::SameLine();
+        if (neo_text_button((_u8L("Colours") + "##stkc_tab1").c_str(), m_stkc_tab == 1 ? NeoBtn::Accent : NeoBtn::Ghost))
+            m_stkc_tab = 1;
+    }
+    ImGui::Dummy(ImVec2(0.f, 0.15f * u));
+    if (m_stkc_tab == 1 && st.is_multicolor()) {
+        m_stkc_colours_shown = true;
+        render_sticker_colours_body(st);
+    } else
+        render_sticker_place_body(mo, st, m_stkc_idx);
+}
+
+void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& st)
+{
+    CsBottomSolve bottom_scope(m_solve_bottom, ColorStitch::sticker_faces_down(st));   // s350
+    namespace CSP = Slic3r::GUI::ColorStitchStickerPreview;
     const float u  = neo_u();
-    const float gb = 1.4f * u;
+    const float gb = 1.3f * u;
+    const float fh = ImGui::GetFrameHeight();
+    auto& mgr = SurfaceEffectProfileManager::get();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto snapshot = [](const std::string& what) {
+        Plater::TakeSnapshot snap(wxGetApp().plater(), what, UndoRedo::SnapshotType::GizmoAction);
+    };
+    const auto& grads = sticker_gradients_cached(st.svg_data);
+    const std::vector<ColorStitch::StickerZone> zones = ColorStitch::sticker_svg_zones(st.svg_data);
+    auto ramp_of = [&](const ColorStitchStickerColor& c) -> const std::vector<uint32_t>* {
+        if (!cs_color_is_grad(c, zones, grads)) return nullptr;
+        const auto it = grads.find(c.rgb);
+        return (it == grads.end() || it->second.ramp.size() < 2) ? nullptr : &it->second.ramp;
+    };
+    auto pid_rgb_u32 = [](int pid) {
+        float rgb[3];
+        return cs_profile_rgb(pid, rgb) ? cs_rgb_u32(cs_f3_rgb(rgb)) : IM_COL32(128, 128, 128, 255);
+    };
+    std::vector<std::string> fcolors;
+    gizmo_materials(g_stkc_mats, fcolors);
+    g_stkc_bg[0] = g_stkc_bg[1] = g_stkc_bg[2] = 0.f;
+    resolve_object_base_bg(g_stkc_mats, g_stkc_bg);
+    g_stkc_live = true;   // hasta el final del cuerpo: cs_profile_rgb calcula desde las capas
+    struct LiveOff { ~LiveOff() { g_stkc_live = false; } } live_off;
+    const double lh = GLGizmoColorStitchPainter_layer_height();
+    // La tarjeta de la receta (la misma que Palette) dentro de un tooltip, más unas líneas de texto.
+    auto card_tip = [&](int pid, const std::string& text) {
+        ImGui::BeginTooltip();
+        if (const SurfaceEffectProfile* cp = pid ? mgr.find(pid) : nullptr)
+            draw_recipe_card(SurfacePassStack::from_json(cp->stack_top_json), SurfacePassStack::from_json(cp->stack_penu_json),
+                             SurfacePassStack::from_json(cp->stack_bottom_json), cp->auto_generated);
+        if (!text.empty()) ImGui::TextUnformatted(text.c_str());
+        ImGui::EndTooltip();
+    };
+    bool changed = false;
+    // s364 — UNA columna, al ancho del panel (antes: lista a la izquierda y detalle a la derecha en
+    // una ventana de 46 em). Todo ancho sale de full_w: el panel es AlwaysAutoResize (s319).
+    const float full_w    = ImGui::GetContentRegionAvail().x;
+    const float gap       = 0.6f * u;
+    const float det_w     = full_w;
+    const float row_right = ImGui::GetCursorScreenPos().x + full_w;
+    // dE de un color entero (media de sus bandas si va en tramos; -1 si es una rampa suave) y nº de tramos.
+    auto color_de = [&](const ColorStitchStickerColor& c, int& nruns) {
+        nruns = 0;
+        const std::vector<uint32_t>* ramp = ramp_of(c);
+        float rgb[3];
+        if (ramp && !c.band_profiles.empty()) {
+            const int N = int(c.band_profiles.size());
+            const std::vector<CsRun> runs = cs_runs(c.band_profiles);
+            nruns = int(runs.size());
+            float sum = 0.f; int nde = 0;
+            for (const CsRun& r : runs)
+                if (cs_profile_rgb(r.pid, rgb))
+                    for (int b = r.b0; b <= r.b1; ++b) { sum += cs_de_rgb(cs_span_target(*ramp, b, b, N), rgb); ++nde; }
+            return nde ? sum / float(nde) : -1.f;
+        }
+        return (!ramp && cs_profile_rgb(c.profile_id, rgb)) ? cs_de_rgb(c.rgb, rgb) : -1.f;
+    };
+    auto de_text = [&](float de, int nruns, bool ramp, bool banded) {
+        std::string t = de >= 0.f ? ("dE " + std::to_string(int(std::lround(de)))) : std::string("dE ~");
+        t += banded ? ("  " + std::to_string(nruns) + " " + (nruns == 1 ? _u8L("part") : _u8L("parts")))
+                    : (ramp ? "  " + _u8L("smooth") : std::string());
+        return t;
+    };
 
-    if (neo_text_button((_u8L("Load SVG...") + "##stk_load").c_str(), NeoBtn::Ghost, true, Glyph::Load))
-        load_sticker_svg_dialog();
+    // ======== Miniaturas: lo que pide / lo que sale (clic = elegir color y tramo) ========
+    {
+        const CSP::Flat2D& f = CSP::flat_2d(st);
+        size_t nv = 0;
+        for (const auto& t : f.tris) nv += t.size();
+        const Vec2f ext = f.bb_max - f.bb_min;
+        if (nv >= 3 && ext.x() > 1e-3f && ext.y() > 1e-3f && nv < 24000) {
+            const float bw = 0.5f * (full_w - gap) - 4.f, bh = 6.5f * u;
+            const float sc = std::min(bw / ext.x(), bh / ext.y());
+            const ImVec2 sz(ext.x() * sc, ext.y() * sc);
+            const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+            auto dim = [](ImU32 c) {   // los colores no seleccionados, apagados
+                const ImVec4 v = ImGui::ColorConvertU32ToFloat4(c);
+                return ImGui::ColorConvertFloat4ToU32(ImVec4(0.35f * v.x + 0.2f, 0.35f * v.y + 0.2f, 0.35f * v.z + 0.2f, 1.f));
+            };
+            auto split = [](int cidx, int& ci, int& bi) {
+                ci = cidx >= ColorStitch::kBandStride ? cidx % ColorStitch::kBandStride : cidx;
+                bi = cidx >= ColorStitch::kBandStride ? cidx / ColorStitch::kBandStride - 1 : -1;
+            };
+            auto draw = [&](const ImVec2& o, bool want) {
+                dl->AddRectFilled(ImVec2(o.x - 2.f, o.y - 2.f), ImVec2(o.x + bw + 2.f, o.y + bh + 2.f), neo_col_u32(NeoCol::Canvas), 3.f);
+                const ImVec2 oo(o.x + 0.5f * (bw - sz.x), o.y + 0.5f * (bh - sz.y));
+                for (size_t k = 0; k < f.tris.size(); ++k) {
+                    int ci, bi; split(f.color_idx[k], ci, bi);
+                    if (ci < 0 || ci >= (int)st.colors.size()) continue;
+                    const ColorStitchStickerColor& c = st.colors[size_t(ci)];
+                    const std::vector<uint32_t>* ramp = want ? ramp_of(c) : nullptr;
+                    ImU32 flat = want ? cs_rgb_u32(ramp && bi >= 0 ? cs_span_target(*ramp, bi, bi, int(c.band_profiles.size())) : c.rgb)
+                                      : pid_rgb_u32(ColorStitch::sticker_profile_for(st, f.color_idx[k]));
+                    const bool off = ci != m_stkc_cur;
+                    const bool smooth = want && ramp && bi < 0 && f.grad[k];
+                    const Vec2d g0 = f.g0[k], gd = f.g1[k] - f.g0[k];
+                    const double gl2 = gd.squaredNorm();
+                    const std::vector<Vec2f>& tr = f.tris[k];
+                    const int nn = int(tr.size() / 3 * 3);
+                    dl->PrimReserve(nn, nn);
+                    for (int i = 0; i < nn; ++i) {
+                        const Vec2f& p = tr[size_t(i)];
+                        ImU32 col = flat;
+                        if (smooth && gl2 > 1e-12) {
+                            const double t = std::clamp((Vec2d(p.x(), p.y()) - g0).dot(gd) / gl2, 0.0, 1.0);
+                            col = cs_rgb_u32((*ramp)[size_t(std::lround(t * double(ramp->size() - 1)))]);
+                        }
+                        if (off) col = dim(col);
+                        dl->PrimVtx(ImVec2(oo.x + (p.x() - f.bb_min.x()) * sc, oo.y + (f.bb_max.y() - p.y()) * sc), uv, col);
+                    }
+                }
+                return oo;
+            };
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImGui::TextDisabled("%s", _u8L("The SVG asks for").c_str());
+            ImGui::SameLine(bw + gap + 4.f);
+            ImGui::TextDisabled("%s", _u8L("Your filaments give").c_str());
+            const float ly = ImGui::GetCursorScreenPos().y + 2.f;
+            const ImVec2 oa = draw(ImVec2(p0.x + 2.f, ly), true);
+            const ImVec2 ob = draw(ImVec2(p0.x + bw + gap + 4.f, ly), false);
+            ImGui::InvisibleButton("##stkc_thumbs", ImVec2(full_w, bh + 4.f));
+            if (ImGui::IsItemHovered()) {
+                // ¿Qué pieza hay bajo el ratón? (en cualquiera de las dos)
+                const ImVec2 m = ImGui::GetIO().MousePos;
+                const ImVec2 o = (m.x >= ob.x - 2.f) ? ob : oa;
+                const Vec2f q(f.bb_min.x() + (m.x - o.x) / sc, f.bb_max.y() - (m.y - o.y) / sc);
+                int hit = -1;
+                for (size_t k = 0; k < f.tris.size() && hit < 0; ++k) {
+                    const std::vector<Vec2f>& tr = f.tris[k];
+                    for (size_t i = 0; i + 2 < tr.size(); i += 3) {
+                        auto cr = [](const Vec2f& a, const Vec2f& b, const Vec2f& c) {
+                            return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x()); };
+                        const float d1 = cr(tr[i], tr[i + 1], q), d2 = cr(tr[i + 1], tr[i + 2], q), d3 = cr(tr[i + 2], tr[i], q);
+                        if (!(((d1 < 0) || (d2 < 0) || (d3 < 0)) && ((d1 > 0) || (d2 > 0) || (d3 > 0)))) { hit = int(k); break; }
+                    }
+                }
+                if (hit >= 0) {
+                    int ci, bi; split(f.color_idx[size_t(hit)], ci, bi);
+                    if (ci >= 0 && ci < (int)st.colors.size()) {
+                        ImGui::SetTooltip("%s", (cs_hex(st.colors[size_t(ci)].rgb) + "\n" + _u8L("Click: show this colour")).c_str());
+                        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { m_stkc_cur = ci; m_stkc_band = bi; }
+                    }
+                }
+            }
+        } else if (nv >= 24000) {
+            ImGui::TextDisabled("%s", _u8L("Too detailed to draw here (the print is not affected).").c_str());
+        }
+    }
+    ImGui::Separator();
+
+    // ======== Los colores: una fila de cuadritos (arriba lo que pide, abajo lo que sale) ========
+    {
+        const float cw = 2.4f * u, ch = fh, cg = 0.3f * u;
+        const float x_left = ImGui::GetCursorScreenPos().x;
+        float x = x_left;
+        for (size_t j = 0; j < st.colors.size(); ++j) {
+            ColorStitchStickerColor& c = st.colors[j];
+            ImGui::PushID(int(3000 + j));
+            if (j > 0) {
+                if (x + cg + cw <= x_left + full_w) { ImGui::SameLine(0.f, cg); x += cg; }
+                else                                x = x_left;
+            }
+            x += cw;
+            const std::vector<uint32_t>* ramp = ramp_of(c);
+            const bool banded = ramp && !c.band_profiles.empty();
+            const bool is_cur = int(j) == m_stkc_cur, marked = m_stkc_sel[j] != 0;
+            const ImVec2 r0 = ImGui::GetCursorScreenPos();
+            if (ImGui::InvisibleButton("##chip", ImVec2(cw, ch))) {
+                if (ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift) m_stkc_sel[j] = marked ? 0 : 1;
+                else { m_stkc_cur = int(j); m_stkc_band = -1; }
+            }
+            const bool hv = ImGui::IsItemHovered();
+            const ImVec2 a(r0.x + 2.f, r0.y + 2.f), z(r0.x + cw - 2.f, r0.y + ch - 2.f);
+            const float  sw = z.x - a.x, my = 0.5f * (a.y + z.y);
+            if (ramp) {
+                const int M = 12;
+                for (int k = 0; k < M; ++k)
+                    dl->AddRectFilled(ImVec2(a.x + sw * k / M, a.y), ImVec2(a.x + sw * (k + 1) / M, my),
+                                      cs_rgb_u32((*ramp)[size_t(k * (ramp->size() - 1) / (M - 1))]));
+            } else
+                dl->AddRectFilled(a, ImVec2(z.x, my), cs_rgb_u32(c.rgb));
+            if (banded) {
+                const int N = int(c.band_profiles.size());
+                for (const CsRun& r : cs_runs(c.band_profiles))
+                    dl->AddRectFilled(ImVec2(a.x + sw * r.b0 / N, my), ImVec2(a.x + sw * (r.b1 + 1) / N, z.y), pid_rgb_u32(r.pid));
+            } else
+                dl->AddRectFilled(ImVec2(a.x, my), z, pid_rgb_u32(c.profile_id));
+            if (c.hidden) dl->AddRectFilled(a, z, IM_COL32(0, 0, 0, 150));
+            int nruns = 0;
+            const float de = color_de(c, nruns);
+            if (de > 10.f) {   // se aleja mucho de lo pedido
+                dl->AddCircleFilled(ImVec2(z.x - 0.25f * u, a.y + 0.25f * u), 0.24f * u, IM_COL32(0, 0, 0, 200));
+                dl->AddCircleFilled(ImVec2(z.x - 0.25f * u, a.y + 0.25f * u), 0.17f * u, neo_col_u32(NeoCol::Warn));
+            }
+            if (is_cur)      dl->AddRect(r0, ImVec2(r0.x + cw, r0.y + ch), neo_col_u32(NeoCol::Ink), 3.f, 0, 2.f);
+            else if (marked) dl->AddRect(r0, ImVec2(r0.x + cw, r0.y + ch), neo_col_u32(NeoCol::AccentBright), 3.f, 0, 2.f);
+            else if (hv)     dl->AddRect(r0, ImVec2(r0.x + cw, r0.y + ch), neo_fade(NeoCol::Ink, 0.5f), 3.f);
+            if (hv) {
+                const std::string t = cs_hex(c.rgb) + "   " + de_text(de, nruns, ramp != nullptr, banded) + (c.hidden ? "   (" + _u8L("hidden") + ")" : std::string())
+                                    + "\n" + _u8L("Top: what the SVG asks for. Bottom: what prints.\n"
+                                                  "dE: how far apart (under 3 hard to tell, over 10 clearly different).\n"
+                                                  "Ctrl/Shift-click: mark several");
+                if (banded) ImGui::SetTooltip("%s", t.c_str());   // varias recetas: se ven por tramo, abajo
+                else        card_tip(c.profile_id, t);
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::Dummy(ImVec2(0.f, 0.1f * u));
+
+    // ======== El detalle del color elegido ========
+    {
+        ColorStitchStickerColor& c = st.colors[size_t(m_stkc_cur)];
+        const std::vector<uint32_t>* ramp = ramp_of(c);
+        const bool banded = ramp && !c.band_profiles.empty();
+        const int  N      = int(c.band_profiles.size());
+        std::vector<CsRun> runs = banded ? cs_runs(c.band_profiles) : std::vector<CsRun>{};
+        if (banded && (m_stkc_band < 0 || m_stkc_band >= N)) m_stkc_band = 0;
+        const int  ri     = banded ? cs_run_of(runs, m_stkc_band) : -1;
+        const int  sel_band = banded ? m_stkc_band : -1;
+        m_stkc_focus_b0 = (banded && ri >= 0) ? runs[size_t(ri)].b0 : -1;   // s350: resaltar en 3D
+        m_stkc_focus_b1 = (banded && ri >= 0) ? runs[size_t(ri)].b1 : -1;
+
+        // Cabecera: ojo · #hex · qué es · dE
+        if (neo_glyph_button("##stkc_eye", gb, Glyph::Eye, false,
+                             c.hidden ? _u8L("Hidden: this colour is not printed,\nwhat is underneath shows").c_str()
+                                      : _u8L("Visible: click to hide this colour").c_str(),
+                             NeoCol::AccentBright, !c.hidden)) {
+            snapshot(_u8L("Toggle sticker colour"));
+            c.hidden = !c.hidden;
+            changed = true;
+        }
+        ImGui::SameLine(0.f, 0.4f * u);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(cs_hex(c.rgb).c_str());
+        ImGui::SameLine();
+        {
+            int   nr = 0;
+            const float de = color_de(c, nr);
+            const std::string what = (ramp ? (banded ? _u8L("gradient in flat parts") : _u8L("gradient, smooth ColorStitch ramp"))
+                                           : _u8L("flat colour"))
+                                   + "   " + de_text(de, nr, false, false);
+            ImGui::PushStyleColor(ImGuiCol_Text, de > 10.f ? neo_col(NeoCol::Warn) : neo_col(NeoCol::TextDim));
+            ImGui::TextUnformatted(fit_text(what, std::max(2.f * u, row_right - ImGui::GetCursorScreenPos().x)).c_str());
+            ImGui::PopStyleColor();
+        }
+        if (ramp) {
+            // Dos tiras: la rampa que pide el SVG y, debajo, los TRAMOS (clic = elegir tramo).
+            const float lw = 3.5f * u, tw = det_w - lw, th = 0.9f * u;
+            const ImVec2 q0 = ImGui::GetCursorScreenPos();
+            dl->AddText(ImVec2(q0.x, q0.y), neo_col_u32(NeoCol::TextDim), _u8L("Asks").c_str());
+            const int M = 48;
+            for (int k = 0; k < M; ++k)
+                dl->AddRectFilled(ImVec2(q0.x + lw + tw * k / M, q0.y), ImVec2(q0.x + lw + tw * (k + 1) / M, q0.y + th),
+                                  cs_rgb_u32((*ramp)[size_t(k * (ramp->size() - 1) / (M - 1))]));
+            const float y1 = q0.y + th + 2.f;
+            dl->AddText(ImVec2(q0.x, y1 + 0.2f * u), neo_col_u32(NeoCol::TextDim), _u8L("Gives").c_str());
+            if (banded) {
+                for (int r = 0; r < (int)runs.size(); ++r) {
+                    const CsRun& rr = runs[size_t(r)];
+                    const ImVec2 b0(q0.x + lw + tw * rr.b0 / N, y1), b1(q0.x + lw + tw * (rr.b1 + 1) / N, y1 + 1.4f * th);
+                    dl->AddRectFilled(b0, b1, pid_rgb_u32(rr.pid));
+                    const std::string L = cs_run_letter(r);
+                    const ImVec2 ts = ImGui::CalcTextSize(L.c_str());
+                    if (b1.x - b0.x > ts.x + 4.f) {
+                        dl->AddText(ImVec2(0.5f * (b0.x + b1.x - ts.x) + 1.f, 0.5f * (b0.y + b1.y - ts.y) + 1.f), IM_COL32(0, 0, 0, 160), L.c_str());
+                        dl->AddText(ImVec2(0.5f * (b0.x + b1.x - ts.x), 0.5f * (b0.y + b1.y - ts.y)), IM_COL32(255, 255, 255, 230), L.c_str());
+                    }
+                    if (r == ri) dl->AddRect(ImVec2(b0.x - 1.f, b0.y - 1.f), ImVec2(b1.x + 1.f, b1.y + 1.f), IM_COL32(255, 255, 255, 255), 2.f, 0, 2.f);
+                    if (ImGui::IsMouseHoveringRect(b0, b1)) {
+                        dl->AddRect(b0, b1, IM_COL32(255, 255, 255, 140));
+                        float rgb[3];
+                        std::string tip = _u8L("Part") + " " + L + "  (" + _u8L("bands") + " " + std::to_string(rr.b0 + 1)
+                                        + "-" + std::to_string(rr.b1 + 1) + ")";
+                        if (cs_profile_rgb(rr.pid, rgb))
+                            tip += "  dE " + std::to_string(int(std::lround(cs_de_rgb(cs_span_target(*ramp, rr.b0, rr.b1, N), rgb))));
+                        card_tip(rr.pid, tip + "\n" + _u8L("Click: show this part"));
+                        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) m_stkc_band = rr.b0;
+                    }
+                }
+            } else {
+                dl->AddRectFilled(ImVec2(q0.x + lw, y1), ImVec2(q0.x + lw + tw, y1 + 1.4f * th), pid_rgb_u32(c.profile_id));
+            }
+            ImGui::Dummy(ImVec2(det_w, th + 2.f + 1.4f * th + 2.f));
+            // Mandos del degradado.
+            if (neo_text_button((banded ? _u8L("Make it a smooth ramp") : _u8L("Make it flat parts")).append("##stkc_mode").c_str(), NeoBtn::Ghost)) {
+                snapshot(_u8L("Sticker gradient mode"));
+                if (banded) {
+                    const int pid = profile_from_sticker_recipe(solve_sticker_color(c.rgb, 1, &grads), st.name + " " + cs_hex(c.rgb));
+                    if (pid) { c.band_profiles.clear(); c.profile_id = pid; }
+                } else {
+                    std::vector<int> bp = make_band_profiles(c.rgb, grads, st.color_mode, st.name + " " + cs_hex(c.rgb));
+                    if (!bp.empty()) { c.band_profiles = std::move(bp); c.profile_id = c.band_profiles.front(); }
+                }
+                m_stkc_band = -1;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", (banded ? _u8L("One ColorStitch ramp between two filaments, no steps.")
+                                                : _u8L("Cut into bands, each with the closest recipe;\n"
+                                                       "neighbours with the same recipe make one part.")).c_str());
+            if (banded && ri >= 0) {
+                // (Sin disabled_begin: el departamento ya tiene uno abierto y no se anida; se atenúa
+                // con Alpha y se veta el clic.)
+                const CsRun rr = runs[size_t(ri)];
+                cs_same_line_if_fits(_u8L("Split"), false, row_right);
+                const bool can_split = rr.b1 > rr.b0;
+                if (!can_split) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+                const bool split_clicked = neo_text_button((_u8L("Split") + "##stkc_split").c_str(), NeoBtn::Ghost);
+                if (!can_split) ImGui::PopStyleVar();
+                if (split_clicked && can_split) {
+                    // La 2.ª mitad se resuelve aparte, con su propio color objetivo.
+                    const int mid = (rr.b0 + rr.b1 + 1) / 2;
+                    const uint32_t tgt = cs_span_target(*ramp, mid, rr.b1, N);
+                    int pid = 0;
+                    for (int mode : { st.color_mode, 1 - st.color_mode }) {
+                        pid = profile_from_sticker_recipe(solve_sticker_color(tgt, mode, nullptr),
+                                                          st.name + " " + cs_hex(c.rgb) + " b" + std::to_string(mid + 1) + " " + cs_hex(tgt));
+                        if (pid && pid != rr.pid) break;
+                    }
+                    NEOTKO_LOG(PROFILE, "STICKER_PART split color=" << m_stkc_cur << " bands=" << rr.b0 << "-" << rr.b1
+                        << " mid=" << mid << " pid=" << rr.pid << "->" << pid);
+                    if (pid && pid != rr.pid) {
+                        snapshot(_u8L("Split sticker part"));
+                        for (int b = mid; b <= rr.b1; ++b) c.band_profiles[size_t(b)] = pid;
+                        c.profile_id = c.band_profiles.front();
+                        m_stkc_band = mid;
+                        changed = true;
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L("Cut this part in two: the second half gets\n"
+                                                 "its own recipe for its own colour.").c_str());
+                cs_same_line_if_fits(_u8L("Join with next"), false, row_right);
+                const bool can_join = ri + 1 < (int)runs.size();
+                if (!can_join) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+                const bool join_clicked = neo_text_button((_u8L("Join with next") + "##stkc_join").c_str(), NeoBtn::Ghost);
+                if (!can_join) ImGui::PopStyleVar();
+                if (join_clicked && can_join) {
+                    snapshot(_u8L("Join sticker parts"));
+                    const CsRun nx = runs[size_t(ri + 1)];
+                    for (int b = nx.b0; b <= nx.b1; ++b) c.band_profiles[size_t(b)] = rr.pid;
+                    c.profile_id = c.band_profiles.front();
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L("The next part takes this part's recipe\n(one recipe less).").c_str());
+            }
+        }
+
+        // ---- La receta de la selección, como en el Pro ----
+        const int sel_pid = (banded && ri >= 0) ? runs[size_t(ri)].pid : c.profile_id;
+        ImGui::Dummy(ImVec2(0.f, 0.2f * u));
+        ImGui::TextDisabled("%s", (banded && ri >= 0 ? (_u8L("Recipe of part") + " " + cs_run_letter(ri)) : _u8L("Recipe")).c_str());
+        const SurfaceEffectProfile* sp = sel_pid ? mgr.find(sel_pid) : nullptr;
+        if (sp) {
+            const SurfacePassStack top  = SurfacePassStack::from_json(sp->stack_top_json);
+            const SurfacePassStack penu = SurfacePassStack::from_json(sp->stack_penu_json);
+            const SurfacePassStack bot  = SurfacePassStack::from_json(sp->stack_bottom_json);
+            float out[3] = { 0.5f, 0.5f, 0.5f };
+            cs_profile_rgb(sel_pid, out);   // desde las capas, como el Pro
+            draw_pro_hero(top, penu, bot, out, fcolors, lh, det_w, g_stkc_mats, g_stkc_bg);
+            std::string desc = cs_strip_group(sp->name) + ":  Top " + zone_desc(top);
+            if (!penu.passes.empty()) desc += " / Penu " + zone_desc(penu);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + det_w);
+            ImGui::TextDisabled("%s", desc.c_str());
+            ImGui::PopTextWrapPos();
+        } else
+            ImGui::TextDisabled("%s", _u8L("(no recipe: this colour is not printed)").c_str());
+
+        if (neo_text_button((_u8L("Edit in Pro") + "##stkc_pro").c_str(), NeoBtn::Normal, true, Glyph::Edit) && sp)
+            edit_profile_in_pro(sel_pid);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Open this recipe in Pro. The sticker changes as you edit\n"
+                                         "(copies of this sticker share it).").c_str());
+        int nmark = 0;
+        for (const char s : m_stkc_sel) nmark += s ? 1 : 0;
+        const bool can_use = m_selected_profile_id != 0;
+        const std::string use_lbl = (nmark > 0 ? _u8L("Use Palette colour on marked") + " (" + std::to_string(nmark) + ")"
+                                               : _u8L("Use Palette colour")) + "##stkc_use";
+        cs_same_line_if_fits(use_lbl, true, row_right);
+        if (!can_use) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+        const bool use_clicked = neo_text_button(use_lbl.c_str(), NeoBtn::Ghost, true, Glyph::Target);
+        if (!can_use) ImGui::PopStyleVar();
+        if (use_clicked && can_use) {
+            snapshot(_u8L("Assign sticker colour"));
+            if (nmark > 0) {
+                for (size_t j = 0; j < st.colors.size(); ++j)
+                    if (m_stkc_sel[j]) { st.colors[j].profile_id = m_selected_profile_id; st.colors[j].band_profiles.clear(); }
+            } else if (banded && ri >= 0) {
+                for (int b = runs[size_t(ri)].b0; b <= runs[size_t(ri)].b1; ++b) c.band_profiles[size_t(b)] = m_selected_profile_id;
+                c.profile_id = c.band_profiles.front();
+            } else {
+                c.profile_id = m_selected_profile_id;
+                c.band_profiles.clear();
+            }
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("The colour selected in Palette goes to this part\n"
+                                         "(or to the marked colours, Ctrl/Shift-click in the list).").c_str());
+
+        // ---- Alternativas (plegadas de entrada: alargan el panel; al pasar por encima se ve su receta).
+        // Sólo se calculan con la sección abierta.
+        const bool alts_open = neo_section_toggle("##stkc_alts", _u8L("Other recipes, closest first").c_str(),
+                                                  Glyph::TabPalette, &m_stkc_alts_open);
+        if (alts_open && (m_stkc_cand_color != m_stkc_cur || m_stkc_cand_band != sel_band))
+            build_sticker_candidates(st, m_stkc_cur, sel_band);
+        const float sq = 0.9f * u;
+        for (size_t k = 0; alts_open && k < m_stkc_cands.size(); ++k) {
+            const StkCand& cand = m_stkc_cands[k];
+            if (k > 0 && !cand.from_recipe && m_stkc_cands[k - 1].from_recipe) ImGui::Separator();
+            ImGui::PushID(int(k));
+            const ImVec2 q = ImGui::GetCursorScreenPos();
+            const bool now = !cand.from_recipe && cand.pid == sel_pid;
+            const std::string lbl = "      " + fit_text(cand.label, det_w - 6.f * u) + "  dE " + std::to_string(int(std::lround(cand.de)))
+                                  + (now ? "  (" + _u8L("now") + ")" : std::string());
+            if (ImGui::Selectable(lbl.c_str(), now, 0, ImVec2(det_w, 0.f))) {
+                const uint32_t tgt = cand.rgb;
+                const int pid = cand.from_recipe
+                    ? profile_from_sticker_recipe(cand.recipe, st.name + " " + cs_hex(c.rgb)
+                                                  + (banded && ri >= 0 ? " b" + std::to_string(runs[size_t(ri)].b0 + 1) + " " + cs_hex(tgt) : std::string()))
+                    : cand.pid;
+                if (pid && pid != sel_pid) {
+                    snapshot(_u8L("Sticker colour recipe"));
+                    if (banded && ri >= 0) {
+                        for (int b = runs[size_t(ri)].b0; b <= runs[size_t(ri)].b1; ++b) c.band_profiles[size_t(b)] = pid;
+                        c.profile_id = c.band_profiles.front();
+                    } else {
+                        c.band_profiles.clear();
+                        c.profile_id = pid;
+                    }
+                    changed = true;
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                if (cand.from_recipe) draw_recipe_card(cand.recipe.top, cand.recipe.penu, cand.recipe.bottom, false);   // s350: + bottom
+                else if (const SurfaceEffectProfile* cp = mgr.find(cand.pid))
+                    draw_recipe_card(SurfacePassStack::from_json(cp->stack_top_json), SurfacePassStack::from_json(cp->stack_penu_json),
+                                     SurfacePassStack::from_json(cp->stack_bottom_json), cp->auto_generated);
+                ImGui::EndTooltip();
+            }
+            dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(ImVec2(q.x + 2.f, q.y + 1.f), ImVec2(q.x + 2.f + sq, q.y + 1.f + sq), cs_rgb_u32(cand.rgb), 2.f);
+            ImGui::PopID();
+        }
+    }
+
+    // ======== Abajo: recuento, presupuesto, regenerar ========
+    ImGui::Separator();
+    std::map<int, int> uses;
+    for (const ColorStitchStickerColor& c : st.colors) {
+        if (c.hidden) continue;
+        if (c.band_profiles.empty()) { if (c.profile_id) ++uses[c.profile_id]; }
+        else for (const int bp : c.band_profiles) if (bp) ++uses[bp];
+    }
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, (int)uses.size() > m_stkc_budget ? neo_col(NeoCol::Warn) : neo_col(NeoCol::TextDim));
+    ImGui::TextUnformatted((std::to_string(uses.size()) + " " + _u8L("recipes in use")).c_str());
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Each recipe is its own set of passes on the top layers:\n"
+                                     "more recipes = more tool changes and more purge.").c_str());
+    ImGui::SameLine(0.f, u);
+    ImGui::SetNextItemWidth(5.f * u);
+    ImGui::SliderInt("##stkc_budget", &m_stkc_budget, 1, 24, "max %d");
+    ImGui::SameLine();
+    const bool can_reduce = (int)uses.size() > m_stkc_budget;
+    if (!can_reduce) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
+    const bool reduce_clicked = neo_text_button((_u8L("Reduce") + "##stkc_reduce").c_str(), NeoBtn::Ghost);
+    if (!can_reduce) ImGui::PopStyleVar();
+    if (reduce_clicked && can_reduce) {
+        // Juntar, de dos en dos, las dos recetas más parecidas (ΔE entre lo que imprimen); se queda
+        // la que más se usa. Hasta caber en el máximo.
+        snapshot(_u8L("Reduce sticker recipes"));
+        std::map<int, int> u2 = uses;
+        int merged = 0;
+        while ((int)u2.size() > m_stkc_budget) {
+            int ka = 0, kb = 0; float best = std::numeric_limits<float>::max();
+            for (auto ia = u2.begin(); ia != u2.end(); ++ia) {
+                float ra[3];
+                if (!cs_profile_rgb(ia->first, ra)) continue;
+                for (auto ib = std::next(ia); ib != u2.end(); ++ib) {
+                    float rb[3];
+                    if (!cs_profile_rgb(ib->first, rb)) continue;
+                    const float d = cs_de_rgb(cs_f3_rgb(ra), rb);
+                    if (d < best) { best = d; ka = ia->first; kb = ib->first; }
+                }
+            }
+            if (ka == 0) break;
+            const int keep = u2[ka] >= u2[kb] ? ka : kb, drop = keep == ka ? kb : ka;
+            for (ColorStitchStickerColor& c : st.colors) {
+                if (c.profile_id == drop) c.profile_id = keep;
+                for (int& bp : c.band_profiles) if (bp == drop) bp = keep;
+            }
+            u2[keep] += u2[drop];
+            u2.erase(drop);
+            ++merged;
+        }
+        NEOTKO_LOG(PROFILE, "STICKER_BUDGET name='" << st.name << "' before=" << uses.size()
+            << " after=" << u2.size() << " merged=" << merged);
+        changed = merged > 0;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Merge the two most alike recipes, again and again,\n"
+                                     "until there are no more than the max.").c_str());
+    // (segunda línea, s364: en una sola no cabe en el panel)
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", _u8L("Recompute all:").c_str());
+    ImGui::SameLine();
+    int mode = -1;
+    if (neo_text_button((_u8L("Flat") + "##stkc_flat").c_str(), st.color_mode == 0 ? NeoBtn::Normal : NeoBtn::Ghost)) mode = 0;
+    ImGui::SameLine();
+    if (neo_text_button((_u8L("ColorStitch") + "##stkc_cs").c_str(), st.color_mode == 1 ? NeoBtn::Normal : NeoBtn::Ghost)) mode = 1;
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(5.f * u);
+    ImGui::SliderInt("##stkc_gbn", &m_grad_band_count, 4, 32, "%d bands");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Bands per gradient when recomputing\n(neighbours with the same recipe join into one part)").c_str());
+    if (mode >= 0) {
+        snapshot(_u8L("Recompute sticker colours"));
+        recompute_sticker_colours(st, mode);
+        m_stkc_band = -1;
+        changed = true;
+    }
+
+    if (changed) sticker_colours_changed(st);
+}
+
+// NEOTKO_STICKER_TAG — s348: pestaña Stickers (antes, sección plegable al final de Palette).
+// Arriba "Importar" (cargar SVG + qué color va a llevar), abajo las CAPAS del objeto activo
+// (orden = pila, back()=tope, mostradas TOP-DOWN: la primera fila es la que OCLUYE a las de abajo).
+// Toda mutación toma snapshot de undo ANTES de cambiar (antes no había ninguno).
+void GLGizmoColorStitchPainter::render_stickers_department()
+{
+    const float u = neo_u();
+
+    // ---- Importar ---- (s350: el botón «Load SVG…» vive junto a la herramienta Sticker; aquí sólo
+    // las opciones del SVG cargado, y sólo mientras hay uno)
     if (!m_pending_sticker_svg.empty()) {
-        ImGui::SameLine(0.f, 0.5f * u);
         ImGui::AlignTextToFramePadding();
         ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::AccentBright));
         ImGui::TextUnformatted((_u8L("Loaded:") + " " + m_pending_sticker_name).c_str());
         ImGui::PopStyleColor();
+        // s349 — soltar el SVG cargado: sin esto se quedaba "pegado" y cada clic ponía otra copia.
+        ImGui::SameLine(0.f, 0.4f * u);
+        if (neo_glyph_button("##stk_unload", 1.3f * u, Glyph::Trash, false,
+                             _u8L("Unload this SVG (stickers already placed stay)").c_str())) {
+            m_pending_sticker_svg.clear();
+            m_pending_sticker_svg_raw.clear();
+            m_pending_flatten = {};
+            m_pending_sticker_name.clear();
+            m_pending_svg_colors.clear();
+            m_pending_svg_grad.clear();
+            m_pending_recipes.clear();
+        }
+        // s350 — LADO del sticker que se va a pegar. Cambia la cámara a ese lado; el clic se proyecta
+        // a la cara de ese lado en la misma vertical (se puede pinchar el objeto desde donde sea).
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Side").c_str());
+        ImGui::SameLine();
+        for (int k = 0; k < 2; ++k) {
+            if (k) ImGui::SameLine();
+            const std::string lbl = (k ? _u8L("Bottom") : _u8L("Top")) + (k ? "##stk_pb" : "##stk_pt");
+            if (neo_text_button(lbl.c_str(), int(m_place_bottom) == k ? NeoBtn::Accent : NeoBtn::Ghost, true,
+                                k ? Glyph::ZoneBottom : Glyph::ZoneTop)
+                && int(m_place_bottom) != k) {
+                m_place_bottom = (k == 1);
+                m_sticker_place_msg.clear();
+                sticker_view_side(m_place_bottom);
+            }
+        }
         ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
-        ImGui::TextWrapped("%s", _u8L("Pick the Sticker tool above, then click a flat top face to place it.").c_str());
+        ImGui::TextWrapped("%s", (m_sticker_mode
+            ? (m_place_bottom ? _u8L("Click the object: the sticker goes on the face underneath at that spot. Each click places a copy.")
+                              : _u8L("Click the object: the sticker goes on the top face at that spot. Each click places a copy."))
+            : _u8L("Pick the Sticker tool, then click the object to place it.")).c_str());
         ImGui::PopStyleColor();
-        // s231 F6 — un sticker hereda el color ACTIVO al colocarse. Sin color enlazado nacía
-        // "(no profile)": se avisa ANTES de colocarlo. s318: a la bandeja.
-        if (m_selected_profile_id == 0)
+        if (!m_sticker_place_msg.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::Warn));
+            ImGui::TextWrapped("%s", m_sticker_place_msg.c_str());
+            ImGui::PopStyleColor();
+        }
+        // s348 — modo de importación: colores del SVG (una receta por color) o 1 color (el activo).
+        // s349 — lo que hizo el aplanado, y la opción de conservar el fondo.
+        if (m_pending_flatten.background_dropped || m_sticker_keep_background) {
+            if (ImGui::Checkbox((_u8L("Keep background") + "##stk_bg").c_str(), &m_sticker_keep_background))
+                prepare_pending_sticker();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("This SVG has a shape covering the whole drawing\n"
+                                             "(a background). Off: it is removed, so the sticker\n"
+                                             "is only the drawing. On: it is printed too.").c_str());
+        }
+        if (m_pending_flatten.translucent > 0) {
+            ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+            ImGui::TextWrapped("%s", (std::to_string(m_pending_flatten.translucent) + " "
+                + _u8L("see-through shapes were merged into solid colours (a print can't be transparent).")).c_str());
+            ImGui::PopStyleColor();
+        }
+        if (!m_pending_gradients.empty()) {   // s349 — cómo van los degradados del SVG
+            ImGui::Checkbox((_u8L("Gradients as bands") + "##stk_gb").c_str(), &m_import_grad_bands);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("On: each gradient is cut into flat bands, each one with\n"
+                                             "the closest recipe your filaments can make.\n"
+                                             "Off: one smooth ColorStitch ramp between filaments.").c_str());
+            if (m_import_grad_bands) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(6.f * u);
+                ImGui::SliderInt("##stk_gbn", &m_grad_band_count, 4, 32, "%d bands");
+            }
+        }
+        if (ImGui::Checkbox((_u8L("Use the SVG colours") + "##stk_mc").c_str(), &m_import_multicolor)) {}
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("On: every colour of the SVG gets its own recipe,\n"
+                                         "made from your 4 filaments.\n"
+                                         "Off: the whole SVG is one colour (the one selected in Palette).").c_str());
+        if (m_import_multicolor) {
+            ImGui::SameLine(0.f, u);
+            int mode = m_import_color_mode;
+            ImGui::RadioButton((_u8L("Flat") + "##stk_m0").c_str(), &mode, 0);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Solid passes stacked in Z (1-2 colours seen\n"
+                                             "through each other). Best match, top faces only.").c_str());
+            ImGui::SameLine();
+            ImGui::RadioButton((_u8L("ColorStitch") + "##stk_m1").c_str(), &mode, 1);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Two filaments alternated line by line\n"
+                                             "in ONE pass (dither). Also works on bridges.").c_str());
+            if (mode != m_import_color_mode) { m_import_color_mode = mode; solve_pending_sticker_recipes(); }
+
+            // s350 — el listado de colores se quitó de aquí: vive en la pestaña Colours del editor
+            // (al editar el sticker), con la receta completa y para afinarla.
+            if (m_pending_svg_colors.empty())
+                tray(_u8L("No fill colours found in this SVG."));
+        } else if (m_selected_profile_id == 0) {
+            // s231 F6 — un sticker de 1 color hereda el color ACTIVO al colocarse.
             tray(_u8L("No colour selected: the sticker will be placed without a recipe. "
-                      "Pick a saved colour first (or assign one afterwards with "
+                      "Pick a saved colour in Palette first (or assign one afterwards with "
                       "\"Assign active\")."));
+        }
     }
+
+    ImGui::Dummy(ImVec2(0.f, 0.3f * u));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.f, 0.2f * u));
+
+    // ---- Capas ----
+    ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+    ImGui::TextUnformatted(_u8L("Layers (top covers the ones below)").c_str());
+    ImGui::PopStyleColor();
+    render_sticker_section();
+    render_sticker_editor();   // s364 — los mandos de la capa en edición, aquí debajo (antes, ventana aparte)
+}
+
+// NEOTKO_STICKER_TAG — lista de capas del objeto activo (s170, movida a la pestaña Stickers en s348).
+void GLGizmoColorStitchPainter::render_sticker_section()
+{
+    const float u  = neo_u();
+    const float gb = 1.4f * u;
 
     ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (!mo || mo->colorstitch_stickers.empty()) {
@@ -5154,13 +7146,19 @@ void GLGizmoColorStitchPainter::render_sticker_section()
         return;
     }
 
+    // s348 — undo: snapshot ANTES de mutar. Los deslizadores lo toman al EMPEZAR a moverse
+    // (IsItemActivated), así un arrastre entero es un único paso de undo.
+    auto snapshot = [](const std::string& what) {
+        Plater::TakeSnapshot snap(wxGetApp().plater(), what, UndoRedo::SnapshotType::GizmoAction);
+    };
+
     ImGui::Dummy(ImVec2(0.f, 0.2f * u));
     auto& mgr = SurfaceEffectProfileManager::get();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float fh = ImGui::GetFrameHeight();
     const size_t n = mo->colorstitch_stickers.size();
     int move_from = -1, move_to = -1;
-    int remove_idx = -1;
+    int remove_idx = -1, dup_idx = -1;
     for (size_t disp = 0; disp < n; ++disp) {
         const size_t i = n - 1 - disp;   // top-down: back() (tope) primero
         ColorStitchSticker& st = mo->colorstitch_stickers[i];
@@ -5170,19 +7168,47 @@ void GLGizmoColorStitchPainter::render_sticker_section()
         const float  rw = ImGui::GetContentRegionAvail().x;
         const SurfaceEffectProfile* p = st.profile_id ? mgr.find(st.profile_id) : nullptr;
         const ColorRGBA sw_col = p ? color_for_profile(*p) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+        const bool  editing = ((int)i == m_editing_sticker_idx);
+        if (editing)
+            dl->AddRectFilled(ImVec2(r0.x - 2.f, r0.y - 1.f), ImVec2(r0.x + rw, r0.y + fh + 1.f),
+                              neo_col_u32(NeoCol::Surface), 4.f);
         {
             const float  sq = 1.2f * u;
             const ImVec2 a(r0.x, r0.y + (fh - sq) * 0.5f), z(a.x + sq, a.y + sq);
-            dl->AddRectFilled(a, z, ImGui::ColorConvertFloat4ToU32(ImVec4(sw_col.r(), sw_col.g(), sw_col.b(), 1.f)), 3.f);
+            if (st.is_multicolor()) {
+                // s348 — una franja por color (el de su receta).
+                const size_t nc = st.colors.size();
+                for (size_t j = 0; j < nc; ++j) {
+                    const SurfaceEffectProfile* cp = st.colors[j].profile_id ? mgr.find(st.colors[j].profile_id) : nullptr;
+                    const ColorRGBA cc = cp ? color_for_profile(*cp) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+                    const float x0 = a.x + sq * float(j) / float(nc), x1 = a.x + sq * float(j + 1) / float(nc);
+                    dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x1, z.y),
+                                      ImGui::ColorConvertFloat4ToU32(ImVec4(cc.r(), cc.g(), cc.b(), 1.f)));
+                }
+            } else
+                dl->AddRectFilled(a, z, ImGui::ColorConvertFloat4ToU32(ImVec4(sw_col.r(), sw_col.g(), sw_col.b(), 1.f)), 3.f);
+            if (st.hidden)
+                dl->AddRectFilled(a, z, IM_COL32(0, 0, 0, 160), 3.f);
             ImGui::Dummy(ImVec2(sq, fh));
         }
-        const bool  editing = ((int)i == m_editing_sticker_idx);
-        const int   nbtn    = 5;
+        const int   nbtn    = 6;   // s350: asignar color pasó al panel (Place)
         const float btns_w  = float(nbtn) * gb + float(nbtn - 1) * 2.f + 0.5f * u;
-        ImGui::SameLine(0.f, 0.45f * u);
+        ImGui::SameLine(0.f, 0.3f * u);
+        {   // s350 — el lado del sticker
+            const ImVec2 gp = ImGui::GetCursorScreenPos();
+            const float  gs = 0.9f * u;
+            draw_glyph(dl, ImVec2(gp.x, gp.y + (fh - gs) * 0.5f), gs,
+                       ColorStitch::sticker_faces_down(st) ? Glyph::ZoneBottom : Glyph::ZoneTop, neo_col_u32(NeoCol::TextDim));
+            ImGui::Dummy(ImVec2(gs, fh));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", (ColorStitch::sticker_faces_down(st) ? _u8L("Bottom face") : _u8L("Top face")).c_str());
+        }
+        ImGui::SameLine(0.f, 0.3f * u);
         {
             const std::string nm   = st.name.empty() ? "?" : st.name;
-            const std::string prof = p ? cs_strip_group(p->name) : _u8L("(no profile)");
+            const std::string prof = st.is_multicolor()
+                ? (std::to_string(st.colors.size()) + " " + _u8L("colours"))
+                : (p ? cs_strip_group(p->name) : _u8L("(no profile)"));
             const float room = std::max(2.f * u, r0.x + rw - btns_w - ImGui::GetCursorScreenPos().x - 0.3f * u);
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(fit_text(nm, room * 0.55f).c_str());
@@ -5191,77 +7217,63 @@ void GLGizmoColorStitchPainter::render_sticker_section()
         }
         neo_same_line_at(r0.x + rw - btns_w + 0.5f * u);
         ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, r0.y + (fh - gb) * 0.5f));
-        if (neo_glyph_button("##stk_assign", gb, Glyph::Target, false,
-                             _u8L("Assign the currently selected palette profile "
-                                  "(the one you'd paint with) to this sticker").c_str()))
-            st.profile_id = m_selected_profile_id;
+        // s348 — ojo de la capa: oculta = no se corta (se ve lo de debajo).
+        if (neo_glyph_button("##stk_eye", gb, Glyph::Eye, false,
+                             st.hidden ? _u8L("Hidden: not printed").c_str() : _u8L("Visible: click to hide").c_str(),
+                             NeoCol::AccentBright, !st.hidden)) {
+            snapshot(_u8L("Toggle sticker"));
+            st.hidden = !st.hidden;
+            m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+        }
         ImGui::SameLine(0.f, 2.f);
         // (Sin disabled_begin: aquí dentro ya hay uno abierto por el departamento y no se anida.)
         const bool can_up = disp != 0, can_dn = disp != n - 1;
         if (!can_up) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
-        if (neo_glyph_button("##stk_up", gb, Glyph::Up, false, nullptr) && can_up) { move_from = (int)i; move_to = (int)i + 1; }
+        if (neo_glyph_button("##stk_up", gb, Glyph::Up, false, _u8L("Move up (covers more)").c_str()) && can_up) { move_from = (int)i; move_to = (int)i + 1; }
         if (!can_up) ImGui::PopStyleVar();
         ImGui::SameLine(0.f, 2.f);
         if (!can_dn) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.3f);
-        if (neo_glyph_button("##stk_dn", gb, Glyph::Down, false, nullptr) && can_dn) { move_from = (int)i; move_to = (int)i - 1; }
+        if (neo_glyph_button("##stk_dn", gb, Glyph::Down, false, _u8L("Move down").c_str()) && can_dn) { move_from = (int)i; move_to = (int)i - 1; }
         if (!can_dn) ImGui::PopStyleVar();
         ImGui::SameLine(0.f, 2.f);
         // NEOTKO_STICKER_TAG — mover/rotar/escalar: "Edit placement" entra en el modo de on_mouse
         // (arrastrar mueve); los deslizadores rotan Z y escalan. Encendido = teal, como el editar de Zonas.
         if (neo_glyph_button("##stk_edit", gb, Glyph::Edit, false,
                              editing ? _u8L("Done").c_str()
-                                     : _u8L("Drag on the model to move it, then use the "
-                                            "slider to rotate — the colour preview shows "
-                                            "how it will land against everything else.").c_str(),
+                                     : _u8L("Edit: shows its controls below (side, rotate,\n"
+                                            "size, mirror, colours) and lets you drag it\n"
+                                            "on the model to move it.").c_str(),
                              NeoCol::AccentBright, editing)) {
             if (editing) exit_sticker_edit();
             else         enter_sticker_edit((int)i);
         }
         ImGui::SameLine(0.f, 2.f);
+        if (neo_glyph_button("##stk_dup", gb, Glyph::Copy, false,
+                             _u8L("Duplicate (the copy goes on top, same place)").c_str()))
+            dup_idx = (int)i;
+        ImGui::SameLine(0.f, 2.f);
         if (neo_glyph_button("##stk_rm", gb, Glyph::Trash, true, _u8L("Remove").c_str()))
             remove_idx = (int)i;
 
-        if (editing) {
-            // Cada deslizador reescribe transform EN VIVO conservando lo demás y sólo agenda
-            // re-slice al soltar (IsItemDeactivatedAfterEdit), como el arrastre en LeftUp.
-            ImGui::Indent(1.65f * u);
-            const std::string spin_fmt = std::string("%.0f") + I18N::translate_utf8("°", "deg");
-            if (neo_row_slider("##stk_spin", _u8L("Rotate").c_str(), &m_editing_spin_deg, -180.f, 180.f,
-                               spin_fmt.c_str(), _u8L("Rotate around the vertical axis").c_str())) {
-                const Vec3d pos = st.transform.translation();
-                const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
-                st.transform = Eigen::Translation3d(pos) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
-                             * Eigen::Scaling(double(m_editing_scale));
-                m_parent.set_as_dirty();
-                m_parent.request_extra_frame();
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-            if (neo_row_slider("##stk_scale", _u8L("Scale").c_str(), &m_editing_scale, 0.2f, 5.0f, "%.2fx",
-                               _u8L("Resize the sticker (uniform)").c_str())) {
-                const Vec3d pos = st.transform.translation();
-                const double spin_rad = double(m_editing_spin_deg) * M_PI / 180.0;
-                st.transform = Eigen::Translation3d(pos) * Eigen::AngleAxisd(spin_rad, Vec3d::UnitZ())
-                             * Eigen::Scaling(double(m_editing_scale));
-                // La geometría del overlay vive en frame LOCAL: el tamaño en pantalla sale del
-                // view_model_matrix (que ya incluye la escala), releído cada frame.
-                m_parent.set_as_dirty();
-                m_parent.request_extra_frame();
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-            ImGui::Unindent(1.65f * u);
-        }
         ImGui::PopID();
     }
 
     if (move_from >= 0 && move_to >= 0 && move_to < (int)n) {
+        snapshot(_u8L("Reorder stickers"));
         std::swap(mo->colorstitch_stickers[move_from], mo->colorstitch_stickers[move_to]);
         if (m_editing_sticker_idx == move_from) m_editing_sticker_idx = move_to;
         else if (m_editing_sticker_idx == move_to) m_editing_sticker_idx = move_from;
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
     }
+    if (dup_idx >= 0 && dup_idx < (int)mo->colorstitch_stickers.size()) {
+        snapshot(_u8L("Duplicate sticker"));
+        ColorStitchSticker copy = mo->colorstitch_stickers[dup_idx];
+        mo->colorstitch_stickers.push_back(std::move(copy));
+        enter_sticker_edit((int)mo->colorstitch_stickers.size() - 1);   // la copia, lista para moverla
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    }
     if (remove_idx >= 0 && remove_idx < (int)mo->colorstitch_stickers.size()) {
+        snapshot(_u8L("Remove sticker"));
         mo->colorstitch_stickers.erase(mo->colorstitch_stickers.begin() + remove_idx);
         if (remove_idx == m_editing_sticker_idx) exit_sticker_edit();
         else if (remove_idx < m_editing_sticker_idx) --m_editing_sticker_idx;
@@ -5527,7 +7539,7 @@ void GLGizmoColorStitchPainter::render_header()
         recipe.top.passes.push_back(sp);
         recipe.top.enabled = true;
         set_active_recipe(recipe, _u8L("Custom"));
-        m_department = 2;   // saltar a Pro para editar la receta recién creada
+        m_department = DEP_PRO;   // saltar a Pro para editar la receta recién creada
     }
     ImGui::SameLine(0.f, 2.f);
     // s174 — "Save" (= save_active_as_palette, antes "Pin to palette").
@@ -5775,55 +7787,13 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
                 // consulta que antes no tenía respuesta: el tooltip decía "(s3)"
                 // pero no dónde está el s3.
                 hover_slot(slot_of(p.id));
+                // s350 — la tarjeta del boceto de Neotko (WIP/PALETTE_HOVER_TOOLTIP_MOCKUP_s349.png):
+                // izquierda, columna con las zonas en miniatura (Top, Penu, la pieza, Bottom) con el
+                // patrón REAL de cada pasada (el mismo dibujo que el Pro); derecha, el cuadro grande
+                // con la receta de cerca (líneas cruzadas, TD) y una franja con el color de lejos; el
+                // ángulo, encima, abajo a la izquierda. Los textos largos, fuera.
                 ImGui::BeginTooltip();
-                const ImVec2 tp = ImGui::GetCursorScreenPos();
-                const float zw = 64.f, zh = 44.f;
-                ImGui::Dummy(ImVec2(zw, zh));
-                ImDrawList* tdl = ImGui::GetWindowDrawList();
-                if (st_penu.passes.empty()) {
-                    draw_zone(tdl, tp, ImVec2(tp.x + zw, tp.y + zh), st_top, false, fcolors);
-                } else {
-                    const float midy = tp.y + zh * 0.5f;
-                    draw_zone(tdl, tp, ImVec2(tp.x + zw, midy - 1.f), st_top,  false, fcolors);
-                    draw_zone(tdl, ImVec2(tp.x, midy + 1.f), ImVec2(tp.x + zw, tp.y + zh), st_penu, true, fcolors);
-                }
-                ImGui::TextUnformatted(cs_strip_group(p.name).c_str());   // s137
-                if (p.auto_generated)   // s118: aclara que es color de trabajo
-                    ImGui::TextColored(ImVec4(0.9f, 0.63f, 0.16f, 1.f), "%s",
-                                       _u8L("working colour (not saved) — right-click to delete").c_str());
-                const int slot = slot_of(p.id);
-                std::string d = "T:" + zone_desc(st_top);
-                if (!st_penu.passes.empty()) d += "  P:" + zone_desc(st_penu);
-                if (slot) d += "  (s" + std::to_string(slot) + ")";
-                ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.f), "%s", d.c_str());
-                // NEOTKO_COLORSTITCH_TAG — s280f: el ÁNGULO de cada zona. Hasta ahora sólo
-                // se veía entrando en Pro, así que repartir ángulos distintos entre recetas
-                // era a ciegas. En línea propia y no pegado a `d` porque "auto" va en violeta
-                // —el mismo violeta del contorno pulsante del viewport— y un TextColored no
-                // puede llevar dos colores.
-                {
-                    int ang_t = 0, ang_p = 0;
-                    const bool has_t = cs_zone_angle(st_top,  false, ang_t);
-                    const bool has_p = !st_penu.passes.empty() && cs_zone_angle(st_penu, true, ang_p);
-                    if (has_t || has_p) {
-                        ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.f), "%s",
-                                           _u8L("angle:").c_str());
-                        auto one = [&](const char* tag, int deg) {
-                            ImGui::SameLine(0.f, 6.f);
-                            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.f), "%s", tag);
-                            ImGui::SameLine(0.f, 3.f);
-                            if (deg < 0)
-                                ImGui::TextColored(ImVec4(0.78f, 0.36f, 0.96f, 1.f), "%s",
-                                                   _u8L("auto").c_str());
-                            else
-                                ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.f), "%d\xc2\xb0", deg);
-                        };
-                        if (has_t) one("T", ang_t);
-                        if (has_p) one("P", ang_p);
-                    }
-                }
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.f), "%s",
-                                   _u8L("Right-click: delete").c_str());
+                draw_recipe_card(st_top, st_penu, SurfacePassStack::from_json(p.stack_bottom_json), p.auto_generated);
                 ImGui::EndTooltip();
             }
 
@@ -5882,7 +7852,7 @@ void GLGizmoColorStitchPainter::render_paint_palette_grid()
                 m_active_style        = cs_strip_group(np->name);
                 m_has_active_recipe   = true;
                 load_recipe_into_pro(r);
-                m_department = 2;
+                m_department = DEP_PRO;
             }
             refresh_selector_palettes();
             m_parent.set_as_dirty();
@@ -6457,6 +8427,45 @@ void GLGizmoColorStitchPainter::on_render_input_window(float x, float y, float b
 void GLGizmoColorStitchPainter::render_panel_body(float x, float y)
 {
     m_tray.clear();
+    m_stkc_colours_shown = false;   // s364 — lo enciende render_sticker_editor si dibuja Colours
+    {   // s350 — el color GUARDADO de cada receta (preview_argb: vista 3D, stickers) al día con el
+        // modelo línea a línea y con los filamentos/TD/fondo actuales. Palette ya lo recalcula en
+        // vivo; esto es para lo que lee el guardado. Sólo cuando algo cambia (clave).
+        namespace CS = Slic3r::ColorSci;
+        CS::Material mats[4];
+        std::vector<std::string> fc;
+        gizmo_materials(mats, fc);
+        float bg[3] = { 0.f, 0.f, 0.f };
+        resolve_object_base_bg(mats, bg);
+        auto& mgr = SurfaceEffectProfileManager::get();
+        size_t key = mgr.list().size();
+        auto mix = [&key](float v) { key ^= std::hash<long>{}(std::lround(v * 10000.f)) + 0x9e3779b97f4a7c15ull + (key << 6) + (key >> 2); };
+        for (const CS::Material& m : mats) for (int c = 0; c < 3; ++c) { mix(m.rgb[c]); mix(m.td[c]); }
+        for (int c = 0; c < 3; ++c) mix(bg[c]);
+        static size_t s_argb_key = 0;
+        if (key != s_argb_key) {
+            s_argb_key = key;
+            std::vector<int> ids;
+            for (const SurfaceEffectProfile& p : mgr.list())
+                if (!p.stack_top_json.empty() || !p.stack_bottom_json.empty()) ids.push_back(p.id);
+            int changed = 0;
+            for (const int id : ids)
+                if (SurfaceEffectProfile* p = mgr.find_mut(id)) {
+                    float out[3] = { 0.f, 0.f, 0.f };
+                    if (p->stack_top_json.empty())   // s350: receta sólo Bottom → vista desde la cama
+                        CS::sandwich_colour_bottom(SurfacePassStack::from_json(p->stack_bottom_json), mats, bg, out);
+                    else
+                        CS::sandwich_colour_stacked(SurfacePassStack::from_json(p->stack_top_json),
+                                                    SurfacePassStack::from_json(p->stack_penu_json), mats, bg, out);
+                    CS::ColorRecipe r;
+                    r.rgb = { out[0], out[1], out[2] };
+                    const uint32_t argb = recipe_argb(r);
+                    if (p->preview_argb != argb) { p->preview_argb = argb; ++changed; }
+                }
+            if (changed) { m_preview_dirty = true; m_sticker_overlay_built_for = -1; }
+            NEOTKO_LOG(PROFILE, "PREVIEW_ARGB_REFRESH profiles=" << ids.size() << " changed=" << changed);
+        }
+    }
     const float u = neo_u();
 
     float caption_max = 0.f;
@@ -6601,44 +8610,74 @@ void GLGizmoColorStitchPainter::render_panel_body(float x, float y)
     // ---- Departamentos (s169; nombres s169; s318 con glifo) ----
     {
         const std::string lbl0 = _u8L("Palette"),   lbl1 = _u8L("Generator"),
-                           lbl2 = _u8L("Pro"),       lbl3 = _u8L("Object & TD");
+                           lbl2 = _u8L("Pro"),       lbl3 = _u8L("Object & TD"),
+                           lbl4 = _u8L("Stickers");
         const std::string tip0 = _u8L("Paint / erase / pick colours on the model");
         const std::string tip1 = _u8L("Generated palettes: gradient ramp / flat colour");
         const std::string tip2 = _u8L("Compose Top / Penultimate / Bottom");
         const std::string tip3 = _u8L("MixedFilament Object — object-wide sandwich + Transmission Distance");
-        const char* labels[4] = { lbl0.c_str(), lbl1.c_str(), lbl2.c_str(), lbl3.c_str() };
-        const char* tips[4]   = { tip0.c_str(), tip1.c_str(), tip2.c_str(), tip3.c_str() };
-        const Glyph glyphs[4] = { Glyph::TabPalette, Glyph::TabGen, Glyph::TabPro, Glyph::Cube };
-        cs_department_tabs(labels, tips, glyphs, 4, m_department);
+        const std::string tip4 = _u8L("SVG stickers on the model:\n"
+                                      "load, place, move, rotate, scale\n"
+                                      "and order them as layers (top one covers the rest)");
+        const char* labels[5] = { lbl0.c_str(), lbl1.c_str(), lbl2.c_str(), lbl3.c_str(), lbl4.c_str() };
+        const char* tips[5]   = { tip0.c_str(), tip1.c_str(), tip2.c_str(), tip3.c_str(), tip4.c_str() };
+        const Glyph glyphs[5] = { Glyph::TabPalette, Glyph::TabGen, Glyph::TabPro, Glyph::Cube, Glyph::Sticker };
+        const int dep_before = m_department;
+        cs_department_tabs(labels, tips, glyphs, 5, m_department);
+        // s348 — entrar en Stickers enciende la herramienta Sticker; salir devuelve la que había
+        // (si seguía siendo Sticker: si el usuario cambió de herramienta dentro, se respeta).
+        // s364 — «Edit in Pro» deja la edición del sticker viva estando en Pro: salir de Pro a mano
+        // cuenta como salir de Stickers (antes la herramienta se quedaba en Sticker, huérfana).
+        if (dep_before != m_department) {
+            const bool was_sticker_ctx = dep_before == DEP_STICKERS || (dep_before == DEP_PRO && m_pro_from_sticker);
+            m_pro_from_sticker = false;
+            if (m_department == DEP_STICKERS) {
+                if (!was_sticker_ctx) {
+                    m_tool_before_stickers = (int)current_tool();
+                    set_tool(TOOL_STICKER);
+                }
+            } else if (was_sticker_ctx) {
+                if (m_editing_sticker_idx >= 0) exit_sticker_edit();
+                if (current_tool() == TOOL_STICKER)
+                    set_tool(m_tool_before_stickers >= 0 && m_tool_before_stickers != TOOL_STICKER
+                                 ? (Tool)m_tool_before_stickers : TOOL_PAINT);
+                m_tool_before_stickers = -1;
+            }
+        }
     }
     ImGui::Dummy(ImVec2(0.f, 0.2f * u));
 
     // s169 F3 — el banner de MixedFilament: a la bandeja (s318), una vez, en los tres departamentos
     // que deshabilita. Object & TD es el que gestiona el interruptor y nunca se deshabilita.
-    if (mf_mode_on && m_department != 3)
+    if (mf_mode_on && m_department != DEP_OBJECT)
         tray(_u8L("MixedFilament Object governs this object — painting is disabled"));
 
     switch (m_department) {
-    case 0: { // Palette — biblioteca (grupo + rejilla), slots en uso y stickers.
+    case DEP_PALETTE: { // Palette — biblioteca (grupo + rejilla) y slots en uso. Stickers: pestaña propia (s348).
         // s318 — TD ya NO vive aquí: sólo en Object & TD (decisión del usuario, s318). La rejilla
         // se sigue prediciendo con esos TD; lo dice el tooltip de la sección Library.
         m_imgui->disabled_begin(mf_mode_on);
         render_group_selector();          // s318 — incluye "Save all" (antes, suelto aquí)
         render_paint_palette_grid();
         render_slots_in_use();            // s231 F6
-        render_sticker_section();         // NEOTKO_STICKER_TAG — s170
         m_imgui->disabled_end();
         break;
     }
-    case 1: { // Generator — elige entre paletas GENERADAS (no crea nada).
+    case DEP_GENERATOR: { // Generator — elige entre paletas GENERADAS (no crea nada).
         m_imgui->disabled_begin(mf_mode_on);
         render_palette_panel(ImGui::GetContentRegionAvail().x);
         m_imgui->disabled_end();
         break;
     }
-    case 2: { // Pro
+    case DEP_PRO: { // Pro
         m_imgui->disabled_begin(mf_mode_on);
         render_pro_mode_panel();
+        m_imgui->disabled_end();
+        break;
+    }
+    case DEP_STICKERS: { // s348 — Stickers (SVG): cargar + capas
+        m_imgui->disabled_begin(mf_mode_on);
+        render_stickers_department();
         m_imgui->disabled_end();
         break;
     }

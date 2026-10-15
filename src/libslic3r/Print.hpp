@@ -737,6 +737,9 @@ public:
         const ConfigOptionResolver &old_config, const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys);
     // If ! m_slicing_params.valid, recalculate.
     void                    update_slicing_parameters();
+    // NEOTKO_GRAVITY_TAG s363 — fija SlicingParameters::neotko_floating_bottom_z / neotko_land_top;
+    // true si algo ha cambiado (el llamador invalida posSlice).
+    bool                    neotko_set_stack_landing(double floating_bottom_z, bool land_top);
 
     static PrintObjectConfig object_config_from_model_object(const PrintObjectConfig &default_object_config, const ModelObject &object, size_t num_extruders);
 
@@ -768,7 +771,8 @@ private:
     void detect_surfaces_type();
     void process_external_surfaces();
     void discover_vertical_shells();
-    void bridge_over_infill();
+    // NeotkoLIBRE: build_infill_data_only = LibreMode, build the cubic octrees / lightning generator but no bridges.
+    void bridge_over_infill(bool build_infill_data_only = false);
     void clip_fill_surfaces();
     void discover_horizontal_shells();
     // NEOTKO_PAINTERPRO_TAG (Idea A) — force solid infill under/over painted surfaces up to

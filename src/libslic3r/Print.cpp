@@ -50,6 +50,8 @@ using namespace nlohmann;
 // Mark string for localization and translate.
 #define L(s) Slic3r::I18N::translate(s)
 
+#include "NeoTowerLocalZ.hpp"   // NEOTKO_LOCALZ_TAG s355
+
 namespace Slic3r {
 
 template class PrintState<PrintStep, psCount>;
@@ -505,6 +507,51 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
 
 } // namespace
 
+// NEOTKO_LOCALZ_TAG s355 — see NeoTowerLocalZ.hpp. Same walk as the Classic branch of
+// Print::_make_wipe_tower (layers_to_print cursor + collect_local_z_wipe_tower_toolchanges).
+struct NeotkoLocalZPlanner::Impl
+{
+    const Print&                                                              print;
+    bool                                                                      enabled { false };
+    std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>>        layers_to_print;
+    size_t                                                                    idx { 0 };
+    explicit Impl(const Print& p) : print(p) {}
+};
+
+NeotkoLocalZPlanner::NeotkoLocalZPlanner(const Print& print) : m(new Impl(print))
+{
+    // s356i — NOT gated on "Subdivide Mix Layer" (dithering_local_z_mode): a mixed filament
+    // splits its layers in Local-Z passes without it too, and the Classic tower plans those
+    // toolchanges unconditionally. Gated, they were left unplanned: direct extruder switches,
+    // away from the tower, no purge.
+    for (const PrintObject* object : print.objects())
+        if (object != nullptr && !object->local_z_intervals().empty()) {
+            m->enabled = true;
+            break;
+        }
+    if (m->enabled)
+        m->layers_to_print = GCode::collect_layers_to_print(print);
+}
+
+NeotkoLocalZPlanner::~NeotkoLocalZPlanner() = default;
+
+bool NeotkoLocalZPlanner::enabled() const { return m->enabled; }
+
+std::vector<std::pair<unsigned int, unsigned int>> NeotkoLocalZPlanner::at(double print_z, int start_extruder)
+{
+    std::vector<std::pair<unsigned int, unsigned int>> out;
+    if (!m->enabled || m->layers_to_print.empty())
+        return out;
+    while (m->idx + 1 < m->layers_to_print.size() && m->layers_to_print[m->idx].first + EPSILON < print_z)
+        ++m->idx;
+    if (std::abs(m->layers_to_print[m->idx].first - print_z) > EPSILON)
+        return out;
+    for (const LocalZWipeTowerToolchange& tc :
+         collect_local_z_wipe_tower_toolchanges(m->print, m->layers_to_print[m->idx].second, start_extruder))
+        out.emplace_back(tc.old_tool, tc.new_tool);
+    return out;
+}
+
 //BBS
 // ORCA: Now this is a parameter
 //float Print::min_skirt_length = 0;
@@ -790,6 +837,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "neotko_tower_type"         // NEOTKO_NEOTOWER_TAG s104 — s130 port
             || opt_key == "neotower_zigurat"          // NEOTKO_NEOTOWER_TAG s104 — s130 port
             || opt_key == "neotower_no_ramming"       // NEOTKO_NEOTOWER_TAG s310
+            NEOTKO_PRIVATE_TOWER_INVALIDATES(opt_key)
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "flush_volumes_matrix"
             || opt_key == "prime_volume"
@@ -1629,6 +1677,7 @@ boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.
 static bool   neotko_any_multi_tool_active(const PrintRegionPtrs& print_regions);
 static bool   neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects);
 static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects);
+static void   neotko_separate_sublayer_keys(const PrintObjectPtrs& objects);   // s357, defined next to it
 static size_t neotko_estimated_virtual_tool_count(const PrintRegionPtrs& print_regions);
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
 //BBS: refine seq-print validation logic
@@ -1650,10 +1699,14 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         && (neotko_any_multi_tool_active(m_print_regions) || neotko_any_profile_with_mp_active(m_objects))
         && neotko_estimated_virtual_tool_count(m_print_regions) >= 2
         && !NeoTower::is_enabled(m_config)) {
+#ifdef NEOTKO_PRIVATE_TOWER
+        return {L(NEOTKO_PRIVATE_MSG_SANDWICH_NEEDS_TOWER), nullptr, "neotko_tower_type"};
+#else
         return {L("Surface Sandwich / MultiPass / ColorStitch require the NeoTower tower type: "
                   "their sub-layer purges use variable layer heights that the Classic wipe tower "
                   "cannot handle.\nSet Prime tower → Tower type to \"NeoTower\"."),
                 nullptr, "neotko_tower_type"};
+#endif
     }
 
     if (m_config.print_sequence == PrintSequence::ByObject) {
@@ -1762,7 +1815,7 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     // NeoTower planner is selected, relax the prime-tower uniform-layer-height blocks below:
     // NeoTower purges every toolchange at the real per-layer delta-Z, so a scene may mix objects
     // of different layer heights and may combine adaptive/variable layer height with multiple
-    // filaments. The option is exposed only under NeoTower + LibreMode (see Tab/ConfigManipulation);
+    // filaments. The option is exposed with the NeoTower planner (see Tab/ConfigManipulation; s361: no LibreMode lock);
     // we still require NeoTower::is_enabled here so the Classic wipe tower never silently relaxes.
     const auto* _neotko_var_lh_opt = m_config.option<ConfigOptionBool>("neotower_variable_layer_height");
     const bool  _neotko_var_lh     = NeoTower::is_enabled(m_config) && _neotko_var_lh_opt && _neotko_var_lh_opt->value;
@@ -1771,12 +1824,14 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     // variable-height purges. The Classic wipe tower cannot do it, so block unless the NeoTower
     // Variable Layer Height (Experimental) option is on.
     if (this->has_wipe_tower() && extruders.size() > 1 && has_custom_layering && !_neotko_var_lh) {
-        return {L("Adaptive/variable layer height combined with multiple filaments requires the "
-                  "NeoTower tower type with \"Variable layer height (Experimental)\" enabled "
-                  "(per-layer variable-height purging).\n"
-                  "Enable it under Prime tower (Tower type = NeoTower, LibreMode), "
-                  "or disable variable layer height."),
+#ifdef NEOTKO_PRIVATE_TOWER
+        return {L(NEOTKO_PRIVATE_MSG_VARIABLE_LAYER_NEEDS_TOWER), nullptr, "neotower_variable_layer_height"};
+#else
+        return {L("Adaptive/variable layer height combined with multiple filaments needs the "
+                  "NeoTower tower type with \"Variable layer height\" enabled.\n"
+                  "Set it under Prime tower, or disable variable layer height."),
                 nullptr, "neotower_variable_layer_height"};
+#endif
     }
 
     if (this->has_wipe_tower() && ! m_objects.empty()) {
@@ -2745,7 +2800,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
     if (this->set_started(psWipeTower)) {
         m_wipe_tower_data.clear();
+        // NEOTKO_NEOTOWER_TAG — the NeoTower of the PREVIOUS slice must die with its tower data:
+        // GCode treats neo_tower() != nullptr as "the NeoTower planner is on", so a stale one left
+        // behind after switching Tower type back to Classic dispatched the old plan (broken tower).
+        m_neo_tower.reset();
         m_tool_ordering.clear();
+        neotko_separate_sublayer_keys(m_objects);   // NEOTKO_SANDWICH_TAG s357 — before anyone reads the keys
         if (this->has_wipe_tower()) {
             this->_make_wipe_tower();
         } else if (this->config().print_sequence != PrintSequence::ByObject) {
@@ -3346,6 +3406,83 @@ static bool neotko_any_profile_with_mp_active(const PrintObjectPtrs& objects)
 // Coherente con el consumidor: `neotko_forces_tower` pide `>= 2` = "hay cambio de
 // herramienta". Un sandwich cuya pasada usa la MISMA herramienta que el cuerpo sigue dando
 // 1 → sigue sin forzar torre, que es lo correcto (no hay nada que purgar).
+// NEOTKO_SANDWICH_TAG s357 — keep Sandwich sublayer Z keys apart from the real layers of OTHER objects.
+//
+// The passes of one lámina are co-planar; Fill.cpp gives them print_z values 1 um apart, just under
+// their layer (nominal - 0.2 um, - 1.2 um, ...). Those are ORDERING KEYS, not heights. ToolOrdering
+// fuses every Z within EPSILON (0.1 um) into one plane, and the whole chain (ToolOrdering, the tower
+// plan, GCode) assumes a sublayer never shares a plane with a real layer (NeoTowerZ.hpp: "sublayer <->
+// real stay separate"). That only held against the sublayer's OWN nominal layer. With objects on
+// different layer ladders (adaptive layer height per object, scaled copies) a real layer of another
+// object can land within 0.1 um of a sublayer key: a "mixed group" the tower plans as pure Sandwich
+// while GCode prints both (BIGTEST scaled in Z: 2 of 120 sublayer planes; 0 of 120 with one ladder).
+//
+// So, before anybody reads the keys (ToolOrdering, NeoTower and GCode all read
+// PrintObject::multipass_sublayers()), a lámina with a key closer than 1.1 x EPSILON to a real
+// layer of the print gets new keys (see below). One that finds no free slot is left alone and
+// counted: the emission still resolves it (WT_OVERFLOW_HIT).
+static void neotko_separate_sublayer_keys(const PrintObjectPtrs& objects)
+{
+    std::vector<double> real_z;
+    for (const PrintObject* obj : objects) {
+        if (obj == nullptr) continue;
+        for (const Layer* l : obj->layers())                 real_z.push_back(l->print_z);
+        for (const SupportLayer* l : obj->support_layers())  real_z.push_back(l->print_z);
+    }
+    if (real_z.empty()) return;
+    std::sort(real_z.begin(), real_z.end());
+    auto nearest = [&](double z) {   // distance to the nearest real layer
+        const auto it = std::lower_bound(real_z.begin(), real_z.end(), z);
+        double d = std::numeric_limits<double>::max();
+        if (it != real_z.end())   d = std::min(d, std::abs(*it - z));
+        if (it != real_z.begin()) d = std::min(d, std::abs(*(it - 1) - z));
+        return d;
+    };
+    // "Are you near another one? No: carry on. Yes: here is a new plan." The whole lámina the key
+    // belongs to (the keys within SAME_PLANE_MAX_OFF of it) is moved down together, a whole number
+    // of microns, until none of its keys is near a real layer. Whole microns keep the keys in their
+    // 1 um pattern, so their order and their micron keys stay unique; a few microns is nothing
+    // against the 20 um that tell a lámina from a staircase plane, and the passes still come before
+    // the layer that covers them.
+    int moved = 0, stuck = 0, total = 0;
+    for (PrintObject* obj : objects) {
+        if (obj == nullptr || obj->get_shared_object() != nullptr) continue;   // copies read the source's list
+        for (auto& layer_subs : obj->multipass_sublayers())
+            for (size_t a = 0; a < layer_subs.size(); ++a) {
+                ++total;
+                const double z = layer_subs[a].print_z;
+                // Only what ToolOrdering would really fuse (EPSILON), plus 10 % for the float copies of
+                // these Z the tower works with. (1.5 x EPSILON also moved a lámina 0.137 um from a
+                // foreign layer on BIGTEST: not fused, never a problem, and moving it across that layer
+                // reordered the planes and cost two toolchanges.)
+                if (nearest(z) >= 1.1 * EPSILON) continue;
+                std::vector<size_t> group;   // the lámina of this key
+                for (size_t b = 0; b < layer_subs.size(); ++b)
+                    if (std::abs(layer_subs[b].print_z - z) < double(NeoTowerZ::SAME_PLANE_MAX_OFF)) group.push_back(b);
+                int shift_um = 0;
+                for (int m = 1; m <= 8 && shift_um == 0; ++m) {
+                    bool clear = true;
+                    for (size_t b : group)
+                        if (nearest(layer_subs[b].print_z - m * 1e-3) < 2. * EPSILON) { clear = false; break; }
+                    if (clear) shift_um = m;
+                }
+                if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+                    std::ostringstream o;
+                    o << std::setprecision(8) << (shift_um ? "SUBLAYER_KEY_MOVED z=" : "SUBLAYER_KEY_STUCK z=") << z
+                      << " tool=T" << layer_subs[a].tool_id << " real layer " << nearest(z) * 1000. << " um away, lamina of "
+                      << group.size() << " keys" << (shift_um ? " moved down " + std::to_string(shift_um) + " um" : " (no free slot in 8 um: left to the emission)");
+                    NeoDebug::write(NeoDebug::WIPETOWER, o.str());
+                }
+                if (shift_um == 0) { ++stuck; continue; }
+                for (size_t b : group) layer_subs[b].print_z -= shift_um * 1e-3;
+                ++moved;
+            }
+    }
+    if (NeoDebug::enabled(NeoDebug::WIPETOWER))
+        NeoDebug::write(NeoDebug::WIPETOWER, "SUBLAYER_KEYS total=" + std::to_string(total) + " moved=" + std::to_string(moved)
+                                             + " stuck=" + std::to_string(stuck));
+}
+
 static size_t neotko_virtual_tool_count(const PrintObjectPtrs& objects)
 {
     std::set<int> tool_ids;
@@ -3536,6 +3673,12 @@ void Print::_make_wipe_tower()
 
         m_neo_tower->collect_and_plan(*this);
         m_neo_tower->generate(m_wipe_tower_data.tool_changes);
+        // NEOTKO_LOCALZ_TAG s355 — FS Local-Z toolchanges, one positional list per plan layer
+        // (same indexing as tool_changes). GCode consumes them in order, like the Classic tower.
+        // local_z_reserve_boxes stays empty: there are no unplanned reserves with NeoTower.
+        m_wipe_tower_data.local_z_tool_changes = m_neo_tower->local_z_result();
+        if (NeoTower::is_private_tower(m_config))                                   // optional private tower
+            m_neo_tower->private_rewrite(m_wipe_tower_data.tool_changes);
 
         m_wipe_tower_data.depth                 = m_neo_tower->get_depth();
         m_wipe_tower_data.brim_width            = m_neo_tower->get_brim_width();

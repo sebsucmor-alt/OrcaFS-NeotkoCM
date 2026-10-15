@@ -913,6 +913,20 @@ if(DEFINED DEPS_SRC_DIR)
 else()
     add_subdirectory(deps_src)
 endif()
+
+# NEOTKO — optional private extensions. Their sources live in a folder that is not part of
+# the public tree; the build is complete without it. -DNEOTKO_PRIVATE=OFF forces the public
+# build even when the folder is present (used to check the public tree before publishing).
+option(NEOTKO_PRIVATE "Build the optional private extensions when their folder is present" ON)
+if (NEOTKO_PRIVATE AND EXISTS "${CMAKE_SOURCE_DIR}/src/libslic3r/neotko_private/sources.cmake")
+    set(NEOTKO_PRIVATE_ENABLED ON)
+    add_compile_definitions(NEOTKO_PRIVATE_TOWER=1)
+    message(STATUS "NEOTKO: private extensions ON")
+else()
+    set(NEOTKO_PRIVATE_ENABLED OFF)
+    message(STATUS "NEOTKO: private extensions OFF (public build)")
+endif()
+
 add_subdirectory(src)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Snapmaker_Orca_app_gui)
 

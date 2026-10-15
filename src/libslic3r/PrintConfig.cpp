@@ -577,6 +577,7 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeTowerWallType)
 static const t_config_enum_values s_keys_map_NeoTowerType{
     {"classic", nttClassic},
     {"neotower", nttNeoTower},
+    NEOTKO_PRIVATE_TOWER_TYPE_KEY
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoTowerType)
 // NEOTKO_NEOTOWER_TAG_END
@@ -7696,7 +7697,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 50.0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0)); // NEOTKO_COLORSTITCH_TAG — default 0: colour every line
+    def->set_default_value(new ConfigOptionFloat(0.5)); // s348 — 0.5: con 3 mm (valor de muchos presets) las piezas pequeñas de stickers/letras quedaban sin repartir
 
     def = this->add("interlayer_colormix_pattern_top", coString);
     def->label = L("Top surface pattern");
@@ -8497,7 +8498,11 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("wipe_tower_extra_spacing", coPercent);
     def->label = L("Wipe tower purge lines spacing");
-    def->tooltip = L("Spacing of purge lines on the wipe tower.");
+    def->tooltip = L("Spacing of purge lines on the wipe tower.\n"
+                     "100 = lines touching, side by side.\n"
+                     "120 = what the Snapmaker profiles use.\n"
+                     "The purge volume does not change: wider spacing spreads\n"
+                     "the same plastic over more room, so the tower gets deeper.");
     def->sidetext = "%";
     def->mode = comAdvanced;
     def->min = 100.;
@@ -8584,6 +8589,9 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.emplace_back("neotower");
     def->enum_labels.emplace_back("Classic");
     def->enum_labels.emplace_back("NeoTower");
+#ifdef NEOTKO_PRIVATE_TOWER
+#include "neotko_private/print_config_tower_type.inc"
+#endif
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<NeoTowerType>(nttClassic));
 
@@ -8598,6 +8606,10 @@ void PrintConfigDef::init_fff_params()
                      "the cost of rings partially supported by the sparse grid.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+#ifdef NEOTKO_PRIVATE_TOWER
+#include "neotko_private/print_config_defs.inc"
+#endif
 
     // NEOTKO_NEOTOWER_TAG s310 — "visit the tower, deposit nothing". On a multi-tool
     // machine the real filament swap is done by the printer macro (SM_PRINT_PREEXTRUDE_
@@ -8620,21 +8632,44 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    // NEOTKO_NEOTOWER_TAG — Variable Layer Height (Experimental). NeoTower + LibreMode only.
+    // NEOTKO_NEOTOWER_TAG — Variable Layer Height (Experimental). NeoTower planner (s361: no longer LibreMode only).
     // When on, the slicer drops the prime-tower uniform-layer-height blocks: it no longer
     // refuses to slice a scene that mixes objects of different layer heights, nor a scene that
     // combines adaptive/variable layer height with more than one filament. NeoTower purges at
     // per-layer delta-Z so it can handle those layouts; the Classic wipe tower cannot, which is
-    // why this is gated to the NeoTower planner and exposed only under LibreMode.
+    // why this is gated to the NeoTower planner.
     def = this->add("neotower_variable_layer_height", coBool);
-    def->label = L("Variable layer height (Experimental)");
+    def->label = L("Variable layer height");
     def->category = L("Prime tower");
-    def->tooltip = L("Experimental. NeoTower + LibreMode only. When enabled, the slicer stops "
-                     "blocking the wipe tower when the scene mixes objects with different layer "
-                     "heights, and when adaptive/variable layer height is combined with more than "
-                     "one filament. NeoTower purges each toolchange at the real per-layer height; "
-                     "the Classic wipe tower cannot, so this only takes effect with Tower type = "
-                     "NeoTower. Leave off unless your scene depends on it.");
+    def->tooltip = L("NeoTower tower type only.\n"
+                     "When enabled, the slicer stops blocking the wipe tower when:\n"
+                     "- the scene mixes objects with different layer heights,\n"
+                     "- adaptive/variable layer height is used with more than\n"
+                     "  one filament.\n"
+                     "NeoTower purges each toolchange at the real height of\n"
+                     "its layer. The Classic tower cannot, so this does nothing\n"
+                     "with Tower type = Classic.");
+#ifdef NEOTKO_PRIVATE_TOWER
+#include "neotko_private/print_config_tooltips.inc"
+#endif
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // NEOTKO_GRAVITY_TAG s363 — «Stacked objects: real layers». Mando único de las capas de las
+    // piezas apiladas (Gravity::land_layers_on_base / land_layers_on_top): la que apoya en otra
+    // nace en su base y la que tiene otra encima acaba en su techo. Sólo actúa con True Objects y
+    // con «Variable layer height» en una torre del planificador NeoTower (lo comprueba Print::apply()).
+    def = this->add("neotko_stacked_real_layers", coBool);
+    def->label = L("Stacked objects: real layers");
+    def->category = L("Prime tower");
+    def->tooltip = L("For objects stacked on top of each other (True Objects).\n"
+                     "An object resting on another starts its layers exactly\n"
+                     "at its own base, and the object underneath prints up to\n"
+                     "its real height, so nothing is left hanging in the air\n"
+                     "or printed as a bridge.\n"
+                     "To do that the last layers of the lower object change\n"
+                     "height slightly, and each object keeps its own layer\n"
+                     "height. That is why it needs \"Variable layer height\".");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
     // NEOTKO_NEOTOWER_TAG_END

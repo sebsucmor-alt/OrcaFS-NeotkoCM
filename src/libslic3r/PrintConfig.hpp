@@ -572,9 +572,23 @@ enum CounterboreHoleBridgingOption {
 // neotko_forces_tower regardless of this setting).
 enum NeoTowerType {
     nttClassic = 0,
-    nttNeoTower
+    nttNeoTower,
+    nttPrivate      // optional private tower type; never selectable in the public build
 };
 // NEOTKO_NEOTOWER_TAG_END
+
+// NEOTKO — optional private extensions (folder not distributed, see the top-level
+// CMakeLists.txt). With them the header below fills these plugs; without them they are empty.
+#ifdef NEOTKO_PRIVATE_TOWER
+#include "neotko_private/PrivateConfig.hpp"
+#else
+#define NEOTKO_PRIVATE_PRINT_CONFIG_OPTIONS
+#define NEOTKO_PRIVATE_TOWER_TYPE_KEY
+#define NEOTKO_PRIVATE_PRESET_KEYS
+#define NEOTKO_PRIVATE_TOWER_INVALIDATES(opt_key)
+#define NEOTKO_PRIVATE_TOWER_TAB_LINES(optgroup)
+#define NEOTKO_PRIVATE_TOWER_TOGGLE_LINES(config, is_private)
+#endif
 
 static std::string bed_type_to_gcode_string(const BedType type)
 {
@@ -2101,7 +2115,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              neotower_purge_compaction))
     ((ConfigOptionEnum<NeoTowerType>, neotko_tower_type))
     ((ConfigOptionBool,               neotower_zigurat))
+    NEOTKO_PRIVATE_PRINT_CONFIG_OPTIONS
     ((ConfigOptionBool,               neotower_variable_layer_height))
+    ((ConfigOptionBool,               neotko_stacked_real_layers)) // NEOTKO_GRAVITY_TAG s363
     ((ConfigOptionBool,               neotower_no_ramming))
     // NEOTKO_NEOTOWER_TAG_END
 
@@ -2159,6 +2175,19 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
     FullPrintConfig,
     (PrintObjectConfig, PrintRegionConfig, PrintConfig)
 )
+
+// NEOTKO_NEOTOWER_TAG s352o — SINGLE OWNER of "how much does a Sandwich sublayer toolchange
+// purge" (MultiPass / ColorStitch / PathBlend sublayers). Every reader goes through here:
+//   private tower  → the print's "Prime volume": one purge knob for every toolchange, and the
+//                    hidden "Sandwich Purge" can no longer switch the sublayer primes off.
+//   Classic / NeoTower → the region's "Sandwich Purge" (multipass_prime_volume), as always.
+// 0 still means "no sublayer prime on the tower".
+inline float neotko_sandwich_purge_volume(const PrintConfig& print_config, const PrintRegionConfig& region_config)
+{
+    if (print_config.neotko_tower_type.value == nttPrivate)
+        return float(std::max(0., print_config.prime_volume.value));
+    return float(region_config.multipass_prime_volume.value);
+}
 
 // Validate the FullPrintConfig. Returns an empty string on success, otherwise an error message is returned.
 std::map<std::string, std::string> validate(const FullPrintConfig &config, bool under_cli = false);

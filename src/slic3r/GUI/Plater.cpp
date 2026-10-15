@@ -72,6 +72,7 @@
 #include <wx/numdlg.h>
 #include <wx/debug.h>
 #include <wx/busyinfo.h>
+#include "libslic3r/PaintTransfer.hpp" // NEOTKO_PAINTCARRY_TAG s366
 #include <wx/dcbuffer.h>
 #include <wx/scrolwin.h>
 #include <wx/event.h>
@@ -101,6 +102,7 @@
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ColorStitch.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
+#include "libslic3r/NeotkoImportCarry.hpp" // NEOTKO_IMPORT_TAG — s362
 #include "libslic3r/SLA/Hollowing.hpp"
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
@@ -13096,14 +13098,19 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
             if (_lmo_libre) {
                 new_instances.emplace_back(object->add_instance());
             } else {
+                // NEOTKO_IMPORT_TAG — s362: el centrado mueve los volúmenes, no las pegatinas.
+                const Vec3d _stk_origin = object->origin_translation;
                 object->center_around_origin();
+                NeotkoImportCarry::shift_stickers(*object, object->origin_translation - _stk_origin);
                 new_instances.emplace_back(object->add_instance());
             }
 #else /* AUTOPLACEMENT_ON_LOAD */
             // if object has no defined position(s) we need to rearrange everything after loading
             // need_arrange = true;
              // add a default instance and center object around origin
+            const Vec3d _stk_origin = object->origin_translation; // NEOTKO_IMPORT_TAG — s362
             object->center_around_origin();  // also aligns object to Z = 0
+            NeotkoImportCarry::shift_stickers(*object, object->origin_translation - _stk_origin);
             ModelInstance* instance = object->add_instance();
 
             //BBS calc transformation
@@ -13745,7 +13752,16 @@ void Plater::priv::split_object()
 
     wxBusyCursor wait;
     ModelObjectPtrs new_objects;
+    // NEOTKO_PAINTCARRY_TAG s366 — split() carries the painting over to the pieces now.
+    std::unique_ptr<wxBusyInfo> paint_busy;
+    if (std::any_of(current_model_object->volumes.begin(), current_model_object->volumes.end(),
+                    [](const ModelVolume *v) { return PaintTransfer::has_painting(*v); }))
+    {
+        paint_busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), q->get_current_canvas3D()->get_wxglcanvas());
+        wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+    }
     current_model_object->split(&new_objects);
+    paint_busy.reset();
     NEOTKO_LOG(PROFILE, "SPLIT_OBJECTS_RESULT new_objects=" << new_objects.size());
     if (new_objects.size() == 1)
         // #ysFIXME use notification

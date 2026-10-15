@@ -94,6 +94,16 @@ public:
 			return e_length;
 		}
 		bool force_travel = false;
+		// NEOTKO — set only by the optional private tower type (NeoTower::private_place).
+		// priv_z: Z this TCR is emitted at. print_z stays the nominal layer Z: GCode/NeoTower
+		// look TCRs up by it. -1 = unused.
+		float priv_z = -1.f;
+		// Wipe target of the outgoing tool, tower coordinates like start_pos. Only valid with
+		// priv_has_park.
+		Vec2f priv_park = Vec2f::Zero();
+		bool  priv_has_park = false;
+		// The outgoing tool must arrive primed at this toolchange.
+		bool  priv_ram = false;
 	};
 
     struct box_coordinates

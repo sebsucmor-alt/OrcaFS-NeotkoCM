@@ -1332,7 +1332,8 @@ NeoWipeTower::NeoWipeTower(const PrintConfig&                     config,
     , m_extra_spacing_ramming(float(config.wipe_tower_extra_spacing / 100.))
     , m_local_z_wipe_tower_purge_lines(float(config.local_z_wipe_tower_purge_lines))
     , m_neo_purge_compaction(float(config.neotower_purge_compaction)) // NEOTKO_NEOTOWER_TAG s104
-    , m_neo_zigurat(config.neotower_zigurat.value)                    // NEOTKO_NEOTOWER_TAG s104
+    // Never with the private tower type: the zigurat is a safety net for NeoTower's own walls.
+    , m_neo_zigurat(config.neotower_zigurat.value && config.neotko_tower_type.value != nttPrivate) // NEOTKO_NEOTOWER_TAG s104
     , m_neo_no_ramming(config.neotower_no_ramming.value)              // NEOTKO_NEOTOWER_TAG s310
     , m_y_shift(0.f)
     , m_z_pos(0.f)
@@ -1353,7 +1354,9 @@ NeoWipeTower::NeoWipeTower(const PrintConfig&                     config,
     , m_use_gap_wall(config.wipe_tower_wall_gap.value)
     , m_rib_width(config.wipe_tower_rib_width)
     , m_extra_rib_length(config.wipe_tower_extra_rib_length)
-    , m_wall_type((int) config.wipe_tower_wall_type)
+    // The private tower type handles the wall itself: its TCRs keep the plain rectangle
+    // geometry here (Rib would square the tower width).
+    , m_wall_type(config.neotko_tower_type.value == nttPrivate ? (int) wtwRectangle : (int) config.wipe_tower_wall_type)
 {
     // Read absolute value of first layer speed, if given as percentage,
     // it is taken over following default. Speeds from config are not
@@ -2975,6 +2978,23 @@ void NeoWipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned
         // (NeoTower knows; we no longer infer from float gaps).
         m_plan.back().is_synthetic  = synthetic;
         m_plan.back().is_same_plane = synthetic && same_plane;
+        // NEOTKO_NEOTOWER_TAG s351 — §35.14: el PRIMER plano de la torre va sobre la cama y
+        // no tiene canónica debajo, así que no puede ser una sintética (cajón con inset, sin
+        // brim, fuera de la propagación «abajo ≥ arriba»). Pasa cuando hay subcapas por debajo
+        // del primer plano real (bottom / sticker bottom en la cama): sin esto la capa 0 de la
+        // torre eran franjas sueltas sobre la cama, sin base y sin brim. Promovido a real hereda
+        // lo de stock en primera capa: profundidad de toda la torre, relleno sólido y brim.
+        // Inerte cuando el primer plano ya es real (cualquier impresión sin subcapas en la cama).
+        if (synthetic && m_plan.size() == 1) {
+            m_plan.back().is_synthetic  = false;
+            m_plan.back().is_same_plane = false;
+            if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+                std::ofstream _bb(NeoDebug::log_path(NeoDebug::WIPETOWER), std::ios::app);
+                _bb << "[NEOTOWER] BED_BASE s351 z=" << z_par << " h=" << layer_height_par
+                    << " old=T" << old_tool << " new=T" << new_tool
+                    << " → primer plano de la torre promovido a real (base + brim de primera capa)\n";
+            }
+        }
     } else if (!m_plan.empty()) {
         if (!synthetic) {
             // A real-plane event landing on an existing entry promotes it to real.
@@ -3071,7 +3091,12 @@ void NeoWipeTower::plan_local_z_toolchange(float z_par, float layer_height_par, 
 {
     assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON);
 
-    if (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par)
+    // NEOTKO_LOCALZ_TAG s355 — the SAME new-layer epsilon as plan_toolchange() (Z_EPS_PLAN), not
+    // WT_EPSILON (1e-3): a sandwich sublayer entry sits 2e-4 below its real layer, and with the
+    // coarse epsilon the Local-Z toolchanges would hang on that entry — one plan layer too early,
+    // out of step with GCode's positional consumption. (Same lesson as NEOTOWER.md §24.2: one
+    // decision, one constant.)
+    if (m_plan.empty() || m_plan.back().z + NeoTowerZ::Z_EPS_PLAN < z_par)
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
     if (m_first_layer_idx == size_t(-1) && (!m_no_sparse_layers || old_tool != new_tool || m_plan.size() == 1))

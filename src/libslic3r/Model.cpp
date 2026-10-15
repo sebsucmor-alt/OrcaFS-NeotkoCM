@@ -10,6 +10,9 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 #include "SurfaceEffectProfile.hpp" // NEOTKO_COLORSTITCH_TAG — huella de contenido de perfiles (re-slice on edit)
+#include "NeotkoImportCarry.hpp"    // NEOTKO_IMPORT_TAG — s362
+#include "PaintTransfer.hpp" // NEOTKO_PAINTCARRY_TAG s366
+#include <chrono>
 #include "NeoDebug.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-recipe-loss instrumentation (s212 bug-hunt)
 #include "Feature/TextureBump/TextureBumpZone.hpp" // NEOTKO_TEXTUREBUMP_TAG — same reason, own zone registry
 
@@ -927,6 +930,9 @@ void Model::convert_multipart_object(unsigned int max_extruders)
     // commented-out to fix #2868
 //    object->add_instance();
 //    object->instances[0]->set_offset(object->raw_mesh_bounding_box().center());
+
+    // NEOTKO_IMPORT_TAG — s362: las pegatinas son del OBJETO; sin esto se quedaban en los que se borran.
+    NeotkoImportCarry::stickers_into_multipart(this->objects, *object);
 
     this->clear_objects();
     this->objects.push_back(object);
@@ -2218,6 +2224,10 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         volume_mesh_begin += mesh_info.second;
 
         size_t counter = 1;
+        // NEOTKO_PAINTCARRY_TAG s366 — the painted volume, prepared once for all its pieces.
+        std::unique_ptr<PaintTransfer::Transfer>     paint_carry;
+        std::unique_ptr<PaintTransfer::FacetMatcher> facet_matcher;
+        long paint_ms = 0;
         for (TriangleMesh& mesh : meshes) {
             // FIXME: crashes if not satisfied
             if (mesh.facets_count() < 3)
@@ -2256,13 +2266,49 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
             new_object->instances.reserve(this->instances.size());
             for (const ModelInstance* model_instance : this->instances)
                 new_object->add_instance(*model_instance);
+            // NEOTKO_PAINTCARRY_TAG s366 — match the piece to the original while both are still in
+            // the same coordinates (add_volume() centres it).
+            const bool volume_painted = volume->is_fdm_support_painted() || volume->is_seam_painted() ||
+                                        volume->is_mm_painted() || volume->is_fuzzy_skin_painted();
+            std::vector<int> piece_map;
+            if (!is_multi_volume_object && volume_painted) {
+                if (!facet_matcher)
+                    facet_matcher = std::make_unique<PaintTransfer::FacetMatcher>(volume->mesh().its);
+                piece_map = facet_matcher->match(mesh.its);
+            }
             ModelVolume* new_vol = new_object->add_volume(*volume, std::move(mesh));
+
+            // NEOTKO_PAINTCARRY_TAG s366 — a piece cut out of one mesh: carry over its share of
+            // the painting, which Orca used to drop. Both matrices map into the old object frame
+            // here (before the offset of new_vol is moved into the instances below).
+            if (!is_multi_volume_object && volume_painted) {
+                const auto t = std::chrono::steady_clock::now();
+                if (!PaintTransfer::copy_painting(*volume, *new_vol, piece_map)) {
+                    if (!paint_carry) {
+                        PaintTransfer::Source src;
+                        src.volume   = volume;
+                        src.to_world = volume->get_matrix();
+                        src.filament = PaintTransfer::effective_filament(*volume);
+                        paint_carry  = std::make_unique<PaintTransfer::Transfer>(std::vector<PaintTransfer::Source>{ src });
+                    }
+                    paint_carry->to(*new_vol, new_vol->get_matrix(), PaintTransfer::effective_filament(*volume));
+                }
+                paint_ms += long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count());
+            }
 
             if (is_multi_volume_object) {
                 // BBS: volume geometry not changed, so we can keep the color paint facets
                 if (new_vol->mmu_segmentation_facets.timestamp() == volume->mmu_segmentation_facets.timestamp())
                     new_vol->mmu_segmentation_facets.reset(); // BBS: let next assign take effect
                 new_vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
+                // NEOTKO_PAINTCARRY_TAG s366 — the other paint layers survive the same way (the mesh is
+                // the same, so the facet indices still hold); Orca only carried the colour.
+                for (FacetsAnnotation ModelVolume::*layer : { &ModelVolume::supported_facets, &ModelVolume::seam_facets,
+                                                             &ModelVolume::fuzzy_skin_facets }) {
+                    if ((new_vol->*layer).timestamp() == (volume->*layer).timestamp())
+                        (new_vol->*layer).reset();
+                    (new_vol->*layer).assign(volume->*layer);
+                }
                 // NEOTKO_PROFILE_TAG — mirror color_mix paint facets + slot table
                 if (new_vol->colorstitch_paint_facets.timestamp() == volume->colorstitch_paint_facets.timestamp())
                     new_vol->colorstitch_paint_facets.reset();
@@ -2332,6 +2378,12 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
             // reset the source to disable reload from disk
             new_vol->source = ModelVolume::Source();
             new_objects->emplace_back(new_object);
+        }
+        // NEOTKO_PAINTCARRY_TAG s366
+        if (paint_carry && NeoDebug::enabled(NeoDebug::GRAVITY)) {
+            std::ostringstream os;
+            os << "SPLIT_OBJECTS_PAINT vol='" << volume->name << "' pieces=" << meshes.size() << " paint_ms=" << paint_ms;
+            NeoDebug::write(NeoDebug::GRAVITY, os.str());
         }
     }
 }
@@ -2945,6 +2997,7 @@ std::string ModelVolume::type_to_string(const ModelVolumeType t)
 // This is useful to assign different materials to different volumes of an object.
 size_t ModelVolume::split(unsigned int max_extruders)
 {
+    const auto split_start = std::chrono::steady_clock::now(); // NEOTKO_PAINTCARRY_TAG s366
     std::vector<TriangleMesh> meshes = this->mesh().split();
     if (meshes.size() <= 1)
         return 1;
@@ -2959,6 +3012,20 @@ size_t ModelVolume::split(unsigned int max_extruders)
 
     unsigned int extruder_counter = 0;
     const Vec3d offset = this->get_offset();
+
+    // NEOTKO_PAINTCARRY_TAG s366 — keep the painted original (it shares the old mesh) so that
+    // each piece gets its share of the painting, which Orca used to drop.
+    long       paint_ms    = 0;
+    size_t     paint_samples = 0;
+    std::unique_ptr<ModelVolume>             painted_original;
+    std::unique_ptr<PaintTransfer::Transfer> paint_carry; // only if a piece cannot be matched facet by facet
+    std::vector<std::vector<int>>            facet_maps;  // per piece: its facets in the original mesh
+    if (this->is_fdm_support_painted() || this->is_seam_painted() || this->is_mm_painted() || this->is_fuzzy_skin_painted()) {
+        painted_original.reset(new ModelVolume(this->object, *this));
+        const PaintTransfer::FacetMatcher matcher(this->mesh().its);
+        for (const TriangleMesh &piece : meshes)
+            facet_maps.emplace_back(matcher.match(piece.its));
+    }
 
     for (TriangleMesh &mesh : meshes) {
         if (mesh.empty())
@@ -2985,6 +3052,22 @@ size_t ModelVolume::split(unsigned int max_extruders)
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
 
+        // NEOTKO_PAINTCARRY_TAG s366 — the piece is still in the coordinates of the original mesh.
+        if (painted_original) {
+            const auto   t     = std::chrono::steady_clock::now();
+            ModelVolume &piece = *this->object->volumes[ivolume];
+            if (!PaintTransfer::copy_painting(*painted_original, piece, facet_maps[size_t(&mesh - meshes.data())])) {
+                if (!paint_carry) {
+                    PaintTransfer::Source src;
+                    src.volume   = painted_original.get();
+                    src.filament = PaintTransfer::effective_filament(*painted_original);
+                    paint_carry  = std::make_unique<PaintTransfer::Transfer>(std::vector<PaintTransfer::Source>{ src });
+                }
+                paint_samples += paint_carry->to(piece, Transform3d::Identity(), PaintTransfer::effective_filament(*painted_original)).samples;
+            }
+            paint_ms += long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count());
+        }
+
         this->object->volumes[ivolume]->set_offset(Vec3d::Zero());
         this->object->volumes[ivolume]->center_geometry_after_creation();
         this->object->volumes[ivolume]->translate(offset);
@@ -3008,6 +3091,13 @@ size_t ModelVolume::split(unsigned int max_extruders)
         ++i;
     }
 
+    // NEOTKO_PAINTCARRY_TAG s366
+    if (painted_original && NeoDebug::enabled(NeoDebug::GRAVITY)) {
+        std::ostringstream os;
+        os << "SPLIT_PARTS_PAINT vol='" << name << "' pieces=" << idx << " paint_ms=" << paint_ms << " paint_samples=" << paint_samples
+           << " total_ms=" << long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - split_start).count());
+        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+    }
     return idx;
 }
 
@@ -4039,16 +4129,23 @@ static uint64_t colorstitch_sticker_profiles_fingerprint_of(const ModelObject& m
 {
     auto& mgr = SurfaceEffectProfileManager::get();
     std::string acc;
-    for (const ColorStitchSticker& st : mo.colorstitch_stickers) {
-        if (st.profile_id == 0) continue;
-        acc += std::to_string(st.profile_id) + ":";
-        if (const SurfaceEffectProfile* p = mgr.find(st.profile_id)) {
+    auto add_pid = [&](int pid) {
+        if (pid == 0) return;
+        acc += std::to_string(pid) + ":";
+        if (const SurfaceEffectProfile* p = mgr.find(pid)) {
             acc += p->stack_top_json;  acc += "|";  acc += p->stack_penu_json;
             acc += "|";  acc += p->stack_bottom_json;
         } else {
             acc += "#deleted#";
         }
         acc += ";";
+    };
+    for (const ColorStitchSticker& st : mo.colorstitch_stickers) {
+        add_pid(st.profile_id);
+        for (const ColorStitchStickerColor& c : st.colors) {   // s348 — multicolour recipes
+            add_pid(c.profile_id);
+            for (const int bp : c.band_profiles) add_pid(bp);    // s349 — bandas del degradado
+        }
     }
     return (uint64_t)std::hash<std::string>{}(acc);
 }

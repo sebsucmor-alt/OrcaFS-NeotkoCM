@@ -5,6 +5,7 @@
 #include "SlicingAdaptive.hpp"
 #include "PrintConfig.hpp"
 #include "Model.hpp"
+#include "Feature/Gravity/GravityLayering.hpp" // NEOTKO_GRAVITY_TAG s362
 
 // #define SLIC3R_DEBUG
 
@@ -840,8 +841,17 @@ std::vector<coordf_t> generate_object_layers(
         out.push_back(print_z);
     }
 
+    // NEOTKO_GRAVITY_TAG s362 — objeto que no toca la cama: sus capas nacen en su base (y, con
+    // «Precise Z height», el ajuste de arriba lo hace sobre capas reales). Sin True Objects no entra.
+    // s363 — si otro objeto apoya en el techo de este, se pide el mismo ajuste aunque la casilla
+    // «Precise Z height» esté sin marcar.
+    if (Gravity::land_layers_on_base(slicing_params, out, is_precise_z_height || slicing_params.neotko_land_top))
+        return out;
+
     if (is_precise_z_height)
         adjust_layer_series_to_align_object_height(slicing_params, out);
+    else if (slicing_params.neotko_land_top)
+        Gravity::land_layers_on_top(slicing_params, out); // NEOTKO_GRAVITY_TAG s363
     return out;
 }
 

@@ -16,6 +16,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/3DScene.hpp
     GUI/ColorStitchPaintPreview.cpp
     GUI/ColorStitchPaintPreview.hpp
+    GUI/ColorStitchStickerPreview.cpp
+    GUI/ColorStitchStickerPreview.hpp
     GUI/AboutDialog.cpp
     GUI/AboutDialog.hpp
     GUI/AmsMappingPopup.cpp

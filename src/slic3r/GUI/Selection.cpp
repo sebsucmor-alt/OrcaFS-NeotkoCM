@@ -2058,6 +2058,11 @@ void Selection::copy_to_clipboard()
         dst_object->layer_config_ranges  = src_object->layer_config_ranges;     // #ys_FIXME_experiment
         dst_object->layer_height_profile.assign(src_object->layer_height_profile);
         dst_object->origin_translation   = src_object->origin_translation;
+        // NEOTKO_STICKER_TAG — this copy is field by field (not assign_copy), so object-level
+        // data has to be listed here or paste loses it: the sticker pile and the Texture Bump plane.
+        dst_object->colorstitch_stickers = src_object->colorstitch_stickers;
+        dst_object->colorstitch_sticker_profiles_fingerprint = src_object->colorstitch_sticker_profiles_fingerprint;
+        dst_object->texture_bump_plane_transform = src_object->texture_bump_plane_transform; // NEOTKO_TEXTUREBUMP_TAG
 
         for (int i : object.second) {
             dst_object->add_instance(*src_object->instances[i]);

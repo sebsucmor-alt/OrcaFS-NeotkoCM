@@ -90,6 +90,15 @@ void SurfaceEffectProfileManager::clear()
     m_next_id = 1;
 }
 
+// NEOTKO_IMPORT_TAG — s362: ver la declaración en el header.
+void SurfaceEffectProfileManager::restore(std::vector<SurfaceEffectProfile> profiles, int next_id)
+{
+    m_profiles = std::move(profiles);
+    m_next_id  = std::max(1, next_id);
+    for (const auto& p : m_profiles)
+        m_next_id = std::max(m_next_id, p.id + 1);
+}
+
 SurfaceEffectPayload
 SurfaceEffectProfileManager::snapshot_keys(const DynamicPrintConfig& cfg,
                                           const std::vector<std::string>& keys)

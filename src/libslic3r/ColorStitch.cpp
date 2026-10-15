@@ -13,13 +13,22 @@
 #include "ClipperUtils.hpp"           // NEOTKO_PROFILE_TAG — Fase 6c: union_ex for footprint mask
 #include "SurfaceEffectProfile.hpp"   // NEOTKO_PROFILE_TAG — painted-profile lookup
 #include "NSVGUtils.hpp"              // NEOTKO_STICKER_TAG — SVG → ExPolygons (sticker masks)
+#include "ColorSci/ColorSci.hpp"      // s350: zonas del sticker (ΔE2000)
 #include "GCodeWriter.hpp"  // NEOTKO_NEOWEAVING_TAG — must be outside namespace Slic3r
 #include <cstdlib>
+#include <iomanip>
+#include <locale>
+#include <cstring>  // s349: svg_inline_css_classes
+#include <cctype>
+#include <map>
 #include <fstream>
 #include <cmath>
 #include <algorithm>
 #include <limits>
 #include <set>      // NEOTKO_COLORSTITCH: unique-tool check in build_tool_list_from_pattern
+#include <array>    // s350: paradas de las zonas
+#include <unordered_map> // s350: caché de máscaras
+#include <memory>   // s350: caché del SVG local
 #include <mutex>    // NEOTKO_DEBUG: NeoDebug::write thread safety
 #include <atomic>   // NEOTKO_DEBUG s79h: session-banner monotonic counter
 #include <ctime>    // NEOTKO_DEBUG s79h: localtime + strftime for banner timestamp
@@ -422,6 +431,15 @@ static std::vector<int> build_tool_list_from_pattern(
     // Fallback check: need at least 2 UNIQUE physical tools (repetitions don't count).
     {
         std::set<int> unique_tools(tools.begin(), tools.end());
+        // s364 — un patrón de UN solo filamento ("33", "333") es ese filamento en todas las
+        // líneas, no el reparto legacy de 4 (salían rayas T0-T3 que nadie pidió). Se devuelve
+        // duplicado para pasar el guard de `tools.size() < 2`; el short-circuit de un único tool
+        // conserva el zig-zag. Espejo: parse_colorstitch_pattern_1based (ToolOrdering.cpp).
+        if (unique_tools.size() == 1) {
+            const int t = *unique_tools.begin();
+            NEOTKO_LOG(COLORSTITCH, "PATTERN_SINGLE pattern=\"" << pattern << "\" → T" << t);
+            return { t, t };
+        }
         if (unique_tools.size() < 2) {
             NEOTKO_LOG(COLORSTITCH, "PATTERN_FALLBACK pattern=\"" << pattern
                 << "\" (unique=" << unique_tools.size() << ") → using legacy tool_a/b/c/d");
@@ -513,6 +531,10 @@ int ColorStitch::dominant_painted_slot_in_z_range(const PrintObject* po,
 
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
+        // s356j — nothing painted on this volume: skip. get_facets() builds a TriangleSelector over
+        // the WHOLE mesh on every call (normals + neighbour index), per slot, per layer: on a
+        // 1M-triangle model with no paint the infill step crawled (SLUG, sampled: its_face_normals).
+        if (mv->colorstitch_paint_facets.empty()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
         for (int slot = 1; slot < ModelVolume::COLORSTITCH_SLOT_COUNT; ++slot) {   // NEOTKO_COLORSTITCH_TAG s112
             // NEOTKO_COLORSTITCH_TAG s137b — IGNORAR slots pintados que NO mapean a
@@ -654,6 +676,10 @@ ExPolygons ColorStitch::painted_footprint_in_z_range(const PrintObject* po, int 
 
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
+        // s356j — nothing painted on this volume: skip. get_facets() builds a TriangleSelector over
+        // the WHOLE mesh on every call (normals + neighbour index), per slot, per layer: on a
+        // 1M-triangle model with no paint the infill step crawled (SLUG, sampled: its_face_normals).
+        if (mv->colorstitch_paint_facets.empty()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
         const indexed_triangle_set its = mv->colorstitch_paint_facets.get_facets(
             *mv, static_cast<EnforcerBlockerType>(slot));
@@ -716,6 +742,10 @@ std::vector<int> ColorStitch::enumerate_painted_slots_in_z_range(
 
     for (const ModelVolume* mv : mo->volumes) {
         if (!mv || !mv->is_model_part()) continue;
+        // s356j — nothing painted on this volume: skip. get_facets() builds a TriangleSelector over
+        // the WHOLE mesh on every call (normals + neighbour index), per slot, per layer: on a
+        // 1M-triangle model with no paint the infill step crawled (SLUG, sampled: its_face_normals).
+        if (mv->colorstitch_paint_facets.empty()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
         for (int slot = 1; slot < ModelVolume::COLORSTITCH_SLOT_COUNT; ++slot) {   // NEOTKO_COLORSTITCH_TAG s112
             if (present[slot]) continue; // already known
@@ -768,6 +798,10 @@ int ColorStitch::painted_slot_owner_volume_index_in_z_range(const PrintObject* p
     for (size_t vi = 0; vi < mo->volumes.size(); ++vi) {
         const ModelVolume* mv = mo->volumes[vi];
         if (!mv || !mv->is_model_part()) continue;
+        // s356j — nothing painted on this volume: skip. get_facets() builds a TriangleSelector over
+        // the WHOLE mesh on every call (normals + neighbour index), per slot, per layer: on a
+        // 1M-triangle model with no paint the infill step crawled (SLUG, sampled: its_face_normals).
+        if (mv->colorstitch_paint_facets.empty()) continue;
         const Transform3d vt = trafo * mv->get_matrix();
         const indexed_triangle_set its = mv->colorstitch_paint_facets.get_facets(
             *mv, static_cast<EnforcerBlockerType>(slot));
@@ -811,16 +845,53 @@ bool ColorStitch::object_has_any_colorstitch_stickers(const ModelObject* mo)
     for (const ColorStitchSticker& st : mo->colorstitch_stickers) {
         // Ghost filter (mirrors the s137b slot filter): a sticker without svg,
         // without profile, or pointing at a deleted profile must not flip the
-        // object into painter mode on its own.
-        if (st.svg_data.empty() || st.profile_id == 0) continue;
-        if (Slic3r::SurfaceEffectProfileManager::get().find(st.profile_id) == nullptr) continue;
+        // object into painter mode on its own. s348: hidden layers and multicolour
+        // stickers go through sticker_live_profiles (any live colour counts).
+        if (st.svg_data.empty()) continue;
+        if (sticker_live_profiles(st).empty()) continue;
         return true;
     }
     return false;
 }
 
+Transform3d ColorStitch::sticker_compose(const StickerPose& p, const Vec3d& obj_scale)
+{
+    Transform3d t = Transform3d::Identity();
+    const double sx = std::max(1e-9, std::abs(obj_scale.x())), sy = std::max(1e-9, std::abs(obj_scale.y()));
+    const double k = 0.5 * (sx + sy);
+    Eigen::Matrix3d L = Eigen::Matrix3d::Identity();
+    L = Eigen::Vector3d(k / sx, k / sy, 1.0).asDiagonal();                                   // C
+    if (p.bottom) L = L * Eigen::AngleAxisd(M_PI, Vec3d::UnitX()).toRotationMatrix();         // F
+    L = L * Eigen::AngleAxisd(p.spin_rad, Vec3d::UnitZ()).toRotationMatrix();                 // Rz
+    if (p.mirror) L = L * Eigen::Vector3d(-1.0, 1.0, 1.0).asDiagonal();                        // M
+    L = L * std::max(1e-6, p.scale);                                                          // S
+    t.linear()      = L;
+    t.translation() = p.pos;
+    return t;
+}
+
+ColorStitch::StickerPose ColorStitch::sticker_decompose(const Transform3d& t)
+{
+    StickerPose p;
+    p.pos = t.translation();
+    Eigen::Matrix3d L = t.linear();
+    p.bottom = L.col(2).z() < 0.0;
+    if (p.bottom) L = Eigen::Vector3d(1.0, -1.0, -1.0).asDiagonal() * L;   // F⁻¹ (diagonal: conmuta con C)
+    Eigen::Matrix2d A = L.topLeftCorner<2, 2>();
+    p.mirror = A.determinant() < 0.0;
+    if (p.mirror) A.col(0) = -A.col(0);
+    p.scale    = std::sqrt(std::max(1e-12, std::abs(A.determinant())));
+    p.spin_rad = std::atan2(A(1, 0), A(0, 0));
+    return p;
+}
+
+bool ColorStitch::sticker_faces_down(const ColorStitchSticker& st)
+{
+    return st.transform.linear().col(2).z() < 0.0;
+}
+
 std::vector<size_t> ColorStitch::enumerate_stickers_in_z_range(
-    const PrintObject* po, double z_min, double z_max)
+    const PrintObject* po, double z_min, double z_max, bool downward)
 {
     std::vector<size_t> out;
     if (!po) return out;
@@ -837,8 +908,7 @@ std::vector<size_t> ColorStitch::enumerate_stickers_in_z_range(
         // unconditional per-sticker trace (unlike the summary log below, gated on
         // !out.empty()), so a sticker that fails EVERY band gets its failure reason
         // recorded at least once instead of silently never appearing in any log.
-        const bool profile_found = st.profile_id != 0
-            && Slic3r::SurfaceEffectProfileManager::get().find(st.profile_id) != nullptr;
+        const bool profile_found = !sticker_live_profiles(st).empty();   // s348: multicolour + eye
         const Vec3d anchor_dbg = trafo * st.transform * Vec3d(0.0, 0.0, 0.0);
         if (NeoDebug::enabled(NeoDebug::PROFILE))
             NEOTKO_LOG(PROFILE, "STICKER_CHECK idx=" << k << " name='" << st.name << "'"
@@ -848,6 +918,7 @@ std::vector<size_t> ColorStitch::enumerate_stickers_in_z_range(
                 << " profile_found=" << (profile_found ? "1" : "0")
                 << " anchor=[" << anchor_dbg.x() << "," << anchor_dbg.y() << "," << anchor_dbg.z() << "]");
         if (st.svg_data.empty() || !profile_found) continue;
+        if (sticker_faces_down(st) != downward) continue;   // s350 — sólo los de ESTE lado
         const double anchor_z = anchor_dbg.z();
         if (anchor_z >= z_min - z_tol && anchor_z <= z_max + z_tol)
             out.push_back(k);
@@ -859,35 +930,115 @@ std::vector<size_t> ColorStitch::enumerate_stickers_in_z_range(
     return out;
 }
 
-Polygons ColorStitch::sticker_rings_in_transform(const ColorStitchSticker& sticker,
-                                                     const Transform3d& to_target)
+// s348 — nanosvg packs colours as 0xAABBGGRR; we keep 0xRRGGBB everywhere else.
+static uint32_t cs_nsvg_rgb(unsigned int c)
 {
-    Polygons rings;
-    if (sticker.svg_data.empty()) return rings;
-
-    // nanosvg parses a private copy of the string (see NSVGUtils::nsvgParse) —
-    // safe under the parallel make_fills / GUI render thread. Top/penu layers
-    // are few per object (and GUI overlays only rebuild on edit), so the
-    // per-call parse is acceptable (revisit with a cache if a pile of many
-    // stickers ever shows up in a profile trace).
-    NSVGimage_ptr image = nsvgParse(sticker.svg_data, "mm", 96.0f);
-    if (image == nullptr || image->shapes == nullptr) {
-        NEOTKO_LOG(PROFILE, "STICKER_MASK parse FAILED name='" << sticker.name << "'");
-        return rings;
+    return ((c & 0xFFu) << 16) | (((c >> 8) & 0xFFu) << 8) | ((c >> 16) & 0xFFu);
+}
+static uint32_t cs_nsvg_paint_rgb(const NSVGpaint& paint)
+{
+    if (paint.type == NSVG_PAINT_COLOR) return cs_nsvg_rgb(paint.color);
+    if ((paint.type == NSVG_PAINT_LINEAR_GRADIENT || paint.type == NSVG_PAINT_RADIAL_GRADIENT)
+        && paint.gradient && paint.gradient->nstops > 0) {
+        // Degradado: media de sus paradas (v1 — un sticker es de colores planos).
+        unsigned r = 0, g = 0, b = 0;
+        const int n = paint.gradient->nstops;
+        for (int i = 0; i < n; ++i) {
+            const uint32_t c = cs_nsvg_rgb(paint.gradient->stops[i].color);
+            r += (c >> 16) & 0xFFu; g += (c >> 8) & 0xFFu; b += c & 0xFFu;
+        }
+        return ((r / n) << 16) | ((g / n) << 8) | (b / n);
     }
-    // Same tesselation as GLGizmoSVG::select_shape: 0.1 mm tolerance, expressed
-    // in scaled^2 units (see get_tesselation_tolerance, GLGizmoSVG.cpp:87).
+    return 0;
+}
+
+// s349 — extremos (t=0, t=1) de un degradado LINEAL de 2-3 paradas, en las coordenadas de salida
+// de nanosvg (mm, Y hacia abajo). nanosvg guarda la matriz salida→degradado con t = v; su inversa
+// lleva (0,0) y (0,1) a los extremos (comprobado con x1/x2 en userSpaceOnUse y en objectBoundingBox).
+static bool cs_linear_grad_endpoints(const NSVGpaint& paint, Vec2d& p0, Vec2d& p1)
+{
+    if (paint.type != NSVG_PAINT_LINEAR_GRADIENT || paint.gradient == nullptr) return false;
+    const int n = paint.gradient->nstops;
+    if (n < 2) return false;   // s349b: cualquier nº de paradas (la receta las muestrea en 0/½/1)
+    const float* t = paint.gradient->xform;
+    const double det = double(t[0]) * t[3] - double(t[2]) * t[1];
+    if (std::abs(det) < 1e-12) return false;
+    // inversa de [a c e; b d f]
+    const double ia =  t[3] / det, ib = -t[1] / det, ic = -t[2] / det, id = t[0] / det;
+    const double ie = -(ia * t[4] + ic * t[5]), iff = -(ib * t[4] + id * t[5]);
+    p0 = Vec2d(ie, iff);
+    p1 = Vec2d(ic + ie, id + iff);
+    return (p1 - p0).squaredNorm() > 1e-12;
+}
+
+// s349 — color de un degradado en t (interpolación lineal entre las paradas que lo rodean; antes de
+// la primera y después de la última, el del extremo, como spread="pad").
+static uint32_t cs_grad_sample(const NSVGgradient& gr, float t)
+{
+    int k = 0;
+    while (k + 1 < gr.nstops && gr.stops[k + 1].offset < t) ++k;
+    const NSVGgradientStop& s0 = gr.stops[k];
+    const NSVGgradientStop& s1 = gr.stops[std::min(k + 1, gr.nstops - 1)];
+    const float span = s1.offset - s0.offset;
+    float w = (span > 1e-6f) ? (t - s0.offset) / span : 0.f;
+    w = std::clamp(w, 0.f, 1.f);
+    if (t <= gr.stops[0].offset) w = 0.f;
+    const uint32_t c0 = cs_nsvg_rgb(s0.color), c1 = cs_nsvg_rgb(s1.color);
+    uint32_t out_c = 0;
+    for (int sh8 = 0; sh8 <= 16; sh8 += 8) {
+        const float v = (1.f - w) * float((c0 >> sh8) & 0xFF) + w * float((c1 >> sh8) & 0xFF);
+        out_c |= uint32_t(std::clamp(std::lround(v), 0L, 255L)) << sh8;
+    }
+    return out_c;
+}
+
+static ColorSci::Lab cs_lab_of(uint32_t c)
+{
+    const float f[3] = { ((c >> 16) & 0xFF) / 255.f, ((c >> 8) & 0xFF) / 255.f, (c & 0xFF) / 255.f };
+    return ColorSci::rgb_to_lab(f);
+}
+
+// s350 — el SVG de un sticker PARSEADO UNA VEZ, en su frame local (mm escalados, z=0): formas,
+// zona de cada forma y lista de zonas. svg_data no cambia tras colocar el sticker, así que esto es
+// lo mismo para todas las capas, todos los objetos y la vista; antes se parseaba y teselaba en
+// cada capa top/penu de cada sticker (auditoría #5). Caché con mutex: make_fills va en paralelo.
+namespace {
+struct CsLocalSvg {
+    std::string                            svg;
+    std::vector<ColorStitch::StickerShape> shapes;       // frame local; puede haber formas sin anillos
+    std::vector<int>                       shape_zone;   // 1:1 con shapes
+    std::vector<ColorStitch::StickerZone>  zones;
+};
+std::mutex                                     g_cs_local_mtx;
+std::vector<std::shared_ptr<const CsLocalSvg>> g_cs_local;   // las más recientes al final
+}
+
+static std::shared_ptr<CsLocalSvg> cs_build_local_svg(const std::string& svg_data)
+{
+    auto loc = std::make_shared<CsLocalSvg>();
+    loc->svg = svg_data;
+    std::vector<ColorStitch::StickerShape>& out = loc->shapes;
+    if (svg_data.empty()) return loc;
+    NSVGimage_ptr image = nsvgParse(svg_data, "mm", 96.0f);
+    if (image == nullptr || image->shapes == nullptr) {
+        NEOTKO_LOG(PROFILE, "STICKER_MASK parse FAILED bytes=" << svg_data.size());
+        return loc;
+    }
+    using StickerShape = ColorStitch::StickerShape;
+    const Transform3d to_target = Transform3d::Identity();
+    // Misma teselación que sticker_rings_in_transform (0.1 mm).
     const double tol_mm = 0.1;
     NSVGLineParams params{ (tol_mm * tol_mm) / SCALING_FACTOR / SCALING_FACTOR };
-    const ExPolygonsWithIds shapes = create_shape_with_ids(*image, params);
-    if (shapes.empty()) return rings;
+    const ExPolygonsWithIds shapes = create_shape_with_ids(*image, params);   // UNA pasada: mismo centrado
+    if (shapes.empty()) return loc;
 
-    // An XY mirror (negative determinant of the 2D linear part) flips ring
-    // orientation; reverse the rings so contour/hole winding stays consistent
-    // for a NonZero union downstream (whichever caller does it).
+    // id = 2*shape_index (+1 si es trazo) → colores del NSVGshape correspondiente.
+    std::vector<const NSVGshape*> by_index;
+    for (NSVGshape* sh = image->shapes; sh != nullptr; sh = sh->next) by_index.push_back(sh);
+    std::vector<std::array<uint32_t, 3>> zone_stops;   // s350: paradas muestreadas de cada zona (0/½/1)
+
     const double det_xy = to_target(0, 0) * to_target(1, 1) - to_target(0, 1) * to_target(1, 0);
-
-    auto push_ring = [&](const Polygon& src) {
+    auto project = [&](const Polygon& src, Polygons& dst) {
         Polygon p;
         p.points.reserve(src.points.size());
         for (const Point& q : src.points) {
@@ -895,15 +1046,768 @@ Polygons ColorStitch::sticker_rings_in_transform(const ColorStitchSticker& stick
             p.points.emplace_back(coord_t(scale_(v.x())), coord_t(scale_(v.y())));
         }
         if (det_xy < 0.0) std::reverse(p.points.begin(), p.points.end());
-        if (std::abs(p.area()) < SCALED_EPSILON) return; // degenerate
-        rings.push_back(std::move(p));
+        if (std::abs(p.area()) < SCALED_EPSILON) return;
+        dst.push_back(std::move(p));
     };
-    for (const ExPolygonsWithId& sh : shapes)
-        for (const ExPolygon& ep : sh.expoly) {
-            push_ring(ep.contour);
-            for (const Polygon& h : ep.holes) push_ring(h);
+    for (const ExPolygonsWithId& sh : shapes) {
+        StickerShape ss;
+        ss.is_stroke = (sh.id & 1u) != 0;
+        const size_t si = sh.id / 2;
+        if (si < by_index.size())
+            ss.rgb = cs_nsvg_paint_rgb(ss.is_stroke ? by_index[si]->stroke : by_index[si]->fill);
+        Vec2d gp0, gp1;
+        if (!ss.is_stroke && si < by_index.size() && !sh.expoly.empty()
+            && cs_linear_grad_endpoints(by_index[si]->fill, gp0, gp1)) {
+            // create_shape_with_ids centra el dibujo y no dice cuánto movió: el desplazamiento
+            // sale de ESTA forma (centro de su caja teselada menos el de sus `bounds` de nanosvg,
+            // con la Y invertida). Error ≤ la tolerancia de teselado, de sobra para los extremos.
+            const NSVGshape& ns = *by_index[si];
+            const BoundingBox bb = get_extents(sh.expoly);
+            const Vec2d c_int = unscale(bb.center()).cast<double>();
+            const Vec2d c_svg(0.5 * (ns.bounds[0] + ns.bounds[2]), -0.5 * (ns.bounds[1] + ns.bounds[3]));
+            const Vec2d off = c_int - c_svg;
+            auto to_tgt = [&](const Vec2d& q) {
+                const Vec3d v = to_target * Vec3d(q.x() + off.x(), -q.y() + off.y(), 0.0);
+                return Vec2d(v.x(), v.y());
+            };
+            ss.grad = true;
+            ss.g0 = to_tgt(gp0);
+            ss.g1 = to_tgt(gp1);
         }
+        for (const ExPolygon& ep : sh.expoly) {
+            project(ep.contour, ss.rings);
+            for (const Polygon& h : ep.holes) project(h, ss.rings);
+        }
+        if (ss.rings.empty()) continue;
+        // s350 — zona de la forma. Planos: el primero de la lista a ΔE2000 < 2 (mismo criterio que
+        // usaba la importación). Degradados: sólo con otro degradado de paradas casi iguales.
+        uint32_t gs[3] = { 0, 0, 0 };
+        if (ss.grad) {
+            const NSVGgradient& gr = *by_index[si]->fill.gradient;
+            gs[0] = cs_grad_sample(gr, 0.f); gs[1] = cs_grad_sample(gr, 0.5f); gs[2] = cs_grad_sample(gr, 1.f);
+        }
+        int z = -1;
+        for (size_t zi = 0; zi < loc->zones.size() && z < 0; ++zi) {
+            const ColorStitch::StickerZone& zz = loc->zones[zi];
+            if (zz.grad != ss.grad) continue;
+            if (!ss.grad) {
+                if (ColorSci::delta_e2000(cs_lab_of(ss.rgb), cs_lab_of(zz.rgb)) < 2.f) z = int(zi);
+            } else {
+                bool same = true;
+                for (int k = 0; k < 3 && same; ++k)
+                    same = ColorSci::delta_e2000(cs_lab_of(gs[k]), cs_lab_of(zone_stops[zi][size_t(k)])) < 2.f;
+                if (same) z = int(zi);
+            }
+        }
+        if (z < 0) {
+            z = int(loc->zones.size());
+            loc->zones.push_back({ ss.rgb, ss.grad, 0 });
+            zone_stops.push_back({ gs[0], gs[1], gs[2] });
+        }
+        ++loc->zones[size_t(z)].shapes;
+        loc->shape_zone.push_back(z);
+        out.push_back(std::move(ss));
+    }
+    return loc;
+}
+
+static std::shared_ptr<const CsLocalSvg> cs_local_svg(const std::string& svg_data)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_cs_local_mtx);
+        for (size_t i = g_cs_local.size(); i-- > 0; )
+            if (g_cs_local[i]->svg.size() == svg_data.size() && g_cs_local[i]->svg == svg_data)
+                return g_cs_local[i];
+    }
+    // Fuera del cerrojo: dos hilos pueden construir el mismo a la vez (sale igual), mejor que
+    // tener a todo make_fills esperando a un parseo.
+    std::shared_ptr<const CsLocalSvg> built = cs_build_local_svg(svg_data);
+    std::lock_guard<std::mutex> lk(g_cs_local_mtx);
+    for (const auto& e : g_cs_local)
+        if (e->svg.size() == svg_data.size() && e->svg == svg_data) return e;
+    if (g_cs_local.size() >= 16) g_cs_local.erase(g_cs_local.begin());
+    g_cs_local.push_back(built);
+    return built;
+}
+
+// Formas locales → frame de destino (anillos y extremos del degradado). Conserva el 1:1 con la
+// lista local (una forma que se queda sin anillos sigue ahí, vacía).
+static std::vector<ColorStitch::StickerShape> cs_transform_shapes(const std::vector<ColorStitch::StickerShape>& loc,
+                                                                  const Transform3d& to_target)
+{
+    std::vector<ColorStitch::StickerShape> out;
+    out.reserve(loc.size());
+    const double det_xy = to_target(0, 0) * to_target(1, 1) - to_target(0, 1) * to_target(1, 0);
+    for (const ColorStitch::StickerShape& ls : loc) {
+        ColorStitch::StickerShape ss;
+        ss.rgb = ls.rgb; ss.is_stroke = ls.is_stroke; ss.grad = ls.grad;
+        if (ls.grad) {
+            const Vec3d a = to_target * Vec3d(ls.g0.x(), ls.g0.y(), 0.0);
+            const Vec3d b = to_target * Vec3d(ls.g1.x(), ls.g1.y(), 0.0);
+            ss.g0 = Vec2d(a.x(), a.y()); ss.g1 = Vec2d(b.x(), b.y());
+        }
+        ss.rings.reserve(ls.rings.size());
+        for (const Polygon& src : ls.rings) {
+            Polygon p;
+            p.points.reserve(src.points.size());
+            for (const Point& q : src.points) {
+                const Vec3d v = to_target * Vec3d(unscale<double>(q.x()), unscale<double>(q.y()), 0.0);
+                p.points.emplace_back(coord_t(scale_(v.x())), coord_t(scale_(v.y())));
+            }
+            if (det_xy < 0.0) std::reverse(p.points.begin(), p.points.end());
+            if (std::abs(p.area()) < SCALED_EPSILON) continue;
+            ss.rings.push_back(std::move(p));
+        }
+        out.push_back(std::move(ss));
+    }
+    return out;
+}
+
+std::vector<ColorStitch::StickerShape> ColorStitch::sticker_shapes_in_transform(const std::string& svg_data,
+                                                                                const Transform3d& to_target)
+{
+    if (svg_data.empty()) return {};
+    return cs_transform_shapes(cs_local_svg(svg_data)->shapes, to_target);
+}
+
+std::vector<ColorStitch::StickerZone> ColorStitch::sticker_svg_zones(const std::string& svg_data)
+{
+    if (svg_data.empty()) return {};
+    return cs_local_svg(svg_data)->zones;
+}
+
+std::vector<int> ColorStitch::sticker_shape_zones(const std::string& svg_data)
+{
+    if (svg_data.empty()) return {};
+    return cs_local_svg(svg_data)->shape_zone;
+}
+
+Polygons ColorStitch::sticker_rings_in_transform(const ColorStitchSticker& sticker,
+                                                     const Transform3d& to_target)
+{
+    // s350 — de la caché del SVG local (antes: nanosvg + teselado en cada llamada). Mismos anillos
+    // en el mismo orden: todas las formas, rellenos y trazos, contorno y huecos.
+    Polygons rings;
+    if (sticker.svg_data.empty()) return rings;
+    for (StickerShape& sh : cs_transform_shapes(cs_local_svg(sticker.svg_data)->shapes, to_target))
+        polygons_append(rings, std::move(sh.rings));
     return rings;
+}
+
+
+std::string ColorStitch::svg_inline_css_classes(const std::string& svg)
+{
+    const auto npos = std::string::npos;
+    auto trim = [](std::string v) {
+        const size_t b = v.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return std::string();
+        const size_t e = v.find_last_not_of(" \t\r\n");
+        return v.substr(b, e - b + 1);
+    };
+    // 1) Reglas `.clase { decl }` de todos los <style>. Selectores compuestos (`.a .b`,
+    //    `g.a`, `#id`, `:hover`) se ignoran: nanosvg tampoco sabría qué hacer con ellos.
+    std::map<std::string, std::string> cls;
+    for (size_t pos = svg.find("<style"); pos != npos; pos = svg.find("<style", pos)) {
+        const size_t gt = svg.find('>', pos);
+        if (gt == npos) break;
+        const size_t end = svg.find("</style", gt);
+        if (end == npos) break;
+        std::string css = svg.substr(gt + 1, end - gt - 1);
+        for (const char* tok : { "<![CDATA[", "]]>" })
+            for (size_t k = css.find(tok); k != npos; k = css.find(tok)) css.erase(k, std::strlen(tok));
+        for (size_t k = css.find("/*"); k != npos; k = css.find("/*")) {
+            const size_t ke = css.find("*/", k + 2);
+            css.erase(k, ke == npos ? npos : ke + 2 - k);
+        }
+        for (size_t i = 0;;) {
+            const size_t ob = css.find('{', i);
+            if (ob == npos) break;
+            const size_t cb = css.find('}', ob);
+            if (cb == npos) break;
+            std::string decl = trim(css.substr(ob + 1, cb - ob - 1));
+            std::replace(decl.begin(), decl.end(), '"', '\'');   // va dentro de style="…"
+            std::replace(decl.begin(), decl.end(), '\n', ' ');
+            if (!decl.empty() && decl.back() != ';') decl += ';';
+            const std::string sels = css.substr(i, ob - i);
+            size_t a0 = 0;
+            while (a0 <= sels.size()) {
+                size_t a1 = sels.find(',', a0);
+                if (a1 == npos) a1 = sels.size();
+                const std::string sel = trim(sels.substr(a0, a1 - a0));
+                if (sel.size() > 1 && sel[0] == '.' && sel.find_first_of(" >:+~[#.", 1) == npos)
+                    cls[sel.substr(1)] += decl;
+                a0 = a1 + 1;
+            }
+            i = cb + 1;
+        }
+        pos = end;
+    }
+    if (cls.empty()) return svg;
+
+    // Valor de un atributo dentro de una etiqueta: [ini, fin) del texto entre comillas.
+    auto find_attr = [&](const std::string& tag, const char* name, size_t& vb, size_t& ve) {
+        const size_t nl = std::strlen(name);
+        for (size_t k = tag.find(name); k != npos; k = tag.find(name, k + 1)) {
+            if (k == 0 || !std::isspace((unsigned char)tag[k - 1])) continue;
+            size_t e = k + nl;
+            while (e < tag.size() && std::isspace((unsigned char)tag[e])) ++e;
+            if (e >= tag.size() || tag[e] != '=') continue;
+            ++e;
+            while (e < tag.size() && std::isspace((unsigned char)tag[e])) ++e;
+            if (e >= tag.size() || (tag[e] != '"' && tag[e] != '\'')) continue;
+            const size_t close = tag.find(tag[e], e + 1);
+            if (close == npos) return false;
+            vb = e + 1; ve = close;
+            return true;
+        }
+        return false;
+    };
+
+    // 2) Reescribir cada etiqueta de apertura con class="…": las declaraciones de la clase
+    //    van al PRINCIPIO de su style (el style propio del elemento sigue ganando, como en CSS)
+    //    o en un style nuevo al final (gana a fill="…", también como en CSS).
+    std::string out;
+    out.reserve(svg.size() + svg.size() / 4);
+    int n_rewritten = 0;
+    size_t i = 0;
+    while (i < svg.size()) {
+        const size_t lt = svg.find('<', i);
+        if (lt == npos) { out.append(svg, i, npos); break; }
+        out.append(svg, i, lt - i);
+        size_t skip_to = npos;
+        if (svg.compare(lt, 4, "<!--") == 0) {
+            const size_t e = svg.find("-->", lt);
+            skip_to = (e == npos) ? svg.size() : e + 3;
+        } else if (svg.compare(lt, 9, "<![CDATA[") == 0) {
+            const size_t e = svg.find("]]>", lt);
+            skip_to = (e == npos) ? svg.size() : e + 3;
+        } else if (svg.compare(lt, 6, "<style") == 0) {
+            const size_t e0 = svg.find("</style", lt);
+            const size_t e  = (e0 == npos) ? npos : svg.find('>', e0);
+            skip_to = (e == npos) ? svg.size() : e + 1;
+        }
+        if (skip_to != npos) { out.append(svg, lt, skip_to - lt); i = skip_to; continue; }
+        // Fin de la etiqueta respetando comillas.
+        size_t j = lt + 1;
+        char q = 0;
+        for (; j < svg.size(); ++j) {
+            const char c = svg[j];
+            if (q) { if (c == q) q = 0; }
+            else if (c == '"' || c == '\'') q = c;
+            else if (c == '>') break;
+        }
+        if (j >= svg.size()) { out.append(svg, lt, npos); break; }
+        std::string tag = svg.substr(lt, j - lt);   // sin el '>'
+        size_t cb = 0, ce = 0;
+        if (tag.size() > 1 && tag[1] != '/' && tag[1] != '!' && tag[1] != '?'
+            && find_attr(tag, "class", cb, ce)) {
+            std::string decls;
+            const std::string names = tag.substr(cb, ce - cb);
+            size_t k = 0;
+            while (k < names.size()) {
+                while (k < names.size() && std::isspace((unsigned char)names[k])) ++k;
+                size_t e = k;
+                while (e < names.size() && !std::isspace((unsigned char)names[e])) ++e;
+                if (e > k) {
+                    const auto it = cls.find(names.substr(k, e - k));
+                    if (it != cls.end()) decls += it->second;
+                }
+                k = e;
+            }
+            if (!decls.empty()) {
+                size_t sb = 0, se = 0;
+                if (find_attr(tag, "style", sb, se)) {
+                    tag.insert(sb, decls);
+                } else {
+                    size_t ins = tag.size();
+                    if (ins > 0 && tag[ins - 1] == '/') --ins;
+                    tag.insert(ins, " style=\"" + decls + "\"");
+                }
+                ++n_rewritten;
+            }
+        }
+        out += tag;
+        out += '>';
+        i = j + 1;
+    }
+    NEOTKO_LOG(PROFILE, "STICKER_CSS classes=" << cls.size() << " elements=" << n_rewritten);
+    return out;
+}
+
+std::string ColorStitch::svg_flatten_for_sticker(const std::string& svg, bool keep_background,
+                                                SvgFlattenInfo* info)
+{
+    SvgFlattenInfo inf;
+    if (info) *info = inf;
+    // Lienzo: se mete como PRIMERA forma un rectángulo del tamaño del viewBox. Pasa por la misma
+    // teselación y el mismo centrado que el resto, así que su polígono ES el lienzo en el mismo
+    // sistema de coordenadas. Sin viewBox no hay lienzo fiable: no se recorta.
+    std::string src = svg;
+    bool has_canvas = false;
+    if (const size_t st = src.find("<svg"); st != std::string::npos) {
+        size_t j = st + 4; char q = 0;
+        for (; j < src.size(); ++j) {
+            const char c = src[j];
+            if (q) { if (c == q) q = 0; }
+            else if (c == '"' || c == '\'') q = c;
+            else if (c == '>') break;
+        }
+        const size_t vb = src.find("viewBox", st);
+        if (j < src.size() && src[j - 1] != '/' && vb != std::string::npos && vb < j) {
+            const size_t q0 = src.find_first_of("\"'", vb);
+            const size_t q1 = (q0 == std::string::npos) ? q0 : src.find(src[q0], q0 + 1);
+            if (q1 != std::string::npos && q1 < j) {
+                std::string nums = src.substr(q0 + 1, q1 - q0 - 1);
+                std::replace(nums.begin(), nums.end(), ',', ' ');
+                std::istringstream is(nums);
+                is.imbue(std::locale::classic());
+                double v[4];
+                if ((is >> v[0] >> v[1] >> v[2] >> v[3]) && v[2] > 0.0 && v[3] > 0.0) {
+                    std::ostringstream r;
+                    r.imbue(std::locale::classic());
+                    r << "<rect x=\"" << v[0] << "\" y=\"" << v[1] << "\" width=\"" << v[2]
+                      << "\" height=\"" << v[3] << "\" fill=\"#010203\"/>";
+                    src.insert(j + 1, r.str());
+                    has_canvas = true;
+                }
+            }
+        }
+    }
+    NSVGimage_ptr image = nsvgParse(src, "mm", 96.0f);
+    if (image == nullptr || image->shapes == nullptr) return svg;
+    // Misma teselación que el resto de stickers (0.1 mm). Coordenadas: mm escalados, Y invertida.
+    const double tol_mm = 0.1;
+    NSVGLineParams params{ (tol_mm * tol_mm) / SCALING_FACTOR / SCALING_FACTOR };
+    const ExPolygonsWithIds shapes = create_shape_with_ids(*image, params);
+    if (shapes.empty()) return svg;
+    std::vector<const NSVGshape*> by_index;
+    for (NSVGshape* sh = image->shapes; sh != nullptr; sh = sh->next) by_index.push_back(sh);
+
+    BoundingBox all_bb;
+    for (const ExPolygonsWithId& sh : shapes) all_bb.merge(get_extents(sh.expoly));
+    double all_area = all_bb.defined ? double(all_bb.size().x()) * double(all_bb.size().y()) : 0.0;
+    ExPolygons canvas;
+    if (has_canvas) {
+        for (const ExPolygonsWithId& sh : shapes)
+            if (sh.id == 0) { canvas = sh.expoly; break; }
+        if (canvas.empty()) has_canvas = false;
+        else { all_area = 0.0; for (const ExPolygon& e : canvas) all_area += e.area(); }
+    }
+
+    struct Region { uint32_t rgb; ExPolygons area; BoundingBox bb; int grad = -1; };
+    std::vector<Region> regs;
+    // s349 — degradados lineales que sobreviven al aplanado (extremos en mm del sistema interno:
+    // centrado y con la Y invertida, el mismo que los puntos). -1 = color plano.
+    // s349 — paradas en vector: un degradado puede tener muchas (las barras de stock, 7-8). Con
+    // arrays de 3 se escribía fuera y se corrompían los degradados aplanados.
+    struct GradDesc { Vec2d p0, p1; std::vector<uint32_t> col; std::vector<float> off; };
+    std::vector<GradDesc> grads;
+    auto blend = [](uint32_t under, uint32_t over, float a) {
+        uint32_t out = 0;
+        for (int sh = 0; sh <= 16; sh += 8) {
+            const float u = float((under >> sh) & 0xFF), o = float((over >> sh) & 0xFF);
+            out |= uint32_t(std::clamp(std::lround(a * o + (1.f - a) * u), 0L, 255L)) << sh;
+        }
+        return out;
+    };
+    bool first = true;
+    for (const ExPolygonsWithId& sh : shapes) {
+        const size_t si = sh.id / 2;
+        if (si >= by_index.size() || sh.expoly.empty()) continue;
+        const bool stroke = (sh.id & 1u) != 0;
+        const NSVGshape& ns = *by_index[si];
+        if (has_canvas && si == 0) continue;   // el propio lienzo
+        const NSVGpaint& paint = stroke ? ns.stroke : ns.fill;
+        // Opacidad = la de la forma × el alfa del color (fill-opacity / stroke-opacity van ahí).
+        float a = ns.opacity;
+        if (paint.type == NSVG_PAINT_COLOR) a *= float((paint.color >> 24) & 0xFF) / 255.f;
+        const uint32_t rgb = cs_nsvg_paint_rgb(paint);
+        ExPolygons S = sh.expoly;
+        if (has_canvas) {
+            double a0 = 0.0, a1 = 0.0;   // a0 sobre la UNIÓN: una forma puede solaparse consigo misma
+            for (const ExPolygon& e : union_ex(S)) a0 += e.area();
+            S = intersection_ex(S, canvas);
+            for (const ExPolygon& e : S) a1 += e.area();
+            if (a1 < a0 * 0.999) ++inf.clipped;
+            if (S.empty()) continue;
+        }
+        const BoundingBox sbb = get_extents(S);
+        if (first) {
+            first = false;
+            if (!keep_background && all_area > 0.0) {
+                double ar = 0.0;
+                for (const ExPolygon& e : S) ar += e.area();
+                if (ar >= 0.95 * all_area) { inf.background_dropped = true; continue; }
+            }
+        }
+        if (a < 0.05f) { ++inf.translucent; continue; }   // invisible: no tapa nada
+        // ≥ 0.8 cuenta como OPACA: los SVG de stock usan 0.87-0.91 como «casi sólido» (WHACK) y
+        // mezclarlos inventaba colores que el diseñador no pidió. La mezcla es para sombras/brillos.
+        if (a >= 0.8f) {
+            for (Region& r : regs)
+                if (r.bb.overlap(sbb)) r.area = diff_ex(r.area, S);
+            int gi = -1;
+            Vec2d gp0, gp1;
+            if (!stroke && cs_linear_grad_endpoints(ns.fill, gp0, gp1)) {
+                // Mismo desplazamiento de centrado que en sticker_shapes_in_transform.
+                const BoundingBox bb = get_extents(sh.expoly);
+                const Vec2d off = unscale(bb.center()).cast<double>()
+                                - Vec2d(0.5 * (ns.bounds[0] + ns.bounds[2]), -0.5 * (ns.bounds[1] + ns.bounds[3]));
+                GradDesc g;
+                g.p0 = Vec2d(gp0.x(), -gp0.y()) + off;
+                g.p1 = Vec2d(gp1.x(), -gp1.y()) + off;
+                for (int k = 0; k < ns.fill.gradient->nstops; ++k) {
+                    g.col.push_back(cs_nsvg_rgb(ns.fill.gradient->stops[k].color));
+                    g.off.push_back(ns.fill.gradient->stops[k].offset);
+                }
+                gi = int(grads.size());
+                grads.push_back(g);
+            }
+            regs.push_back({ rgb, S, sbb, gi });
+            continue;
+        }
+        ++inf.translucent;
+        std::vector<Region> add;
+        for (Region& r : regs) {
+            if (r.area.empty() || !r.bb.overlap(sbb)) continue;
+            ExPolygons in = intersection_ex(r.area, S);
+            if (in.empty()) continue;
+            r.area = diff_ex(r.area, S);
+            const BoundingBox ibb = get_extents(in);
+            add.push_back({ blend(r.rgb, rgb, a), std::move(in), ibb });
+        }
+        if (a >= 0.5f) {
+            ExPolygons rest = S;
+            for (const Region& r : add) if (!rest.empty()) rest = diff_ex(rest, r.area);
+            if (!rest.empty()) { const BoundingBox rbb = get_extents(rest); add.push_back({ rgb, std::move(rest), rbb }); }
+        }
+        for (Region& r : add) regs.push_back(std::move(r));
+    }
+    if (!inf.background_dropped && inf.translucent == 0 && inf.clipped == 0) {
+        if (info) *info = inf;
+        return svg;   // nada que aplanar
+    }
+
+    // Un color = una región; se tiran las migas (< 0.01 mm²).
+    std::map<std::pair<uint32_t, int>, ExPolygons> by_col;   // (color, degradado o -1)
+    for (Region& r : regs)
+        if (!r.area.empty()) expolygons_append(by_col[{ r.rgb, r.grad }], std::move(r.area));
+    const double min_area = 0.01 / (SCALING_FACTOR * SCALING_FACTOR);
+    BoundingBox out_bb;
+    for (auto& kv : by_col) {
+        ExPolygons u = union_ex(kv.second);
+        u.erase(std::remove_if(u.begin(), u.end(), [&](const ExPolygon& e) { return e.area() < min_area; }), u.end());
+        kv.second = std::move(u);
+        out_bb.merge(get_extents(kv.second));
+    }
+    if (!out_bb.defined) return svg;   // se ha quedado vacío: mejor el original que nada
+
+    // SVG en mm. Las coordenadas internas llevan la Y invertida (NSVGLineParams::is_y_negative),
+    // así que se deshace al escribir: y_svg = -y.
+    // Margen de 0.01 mm: el viewBox de salida es también el lienzo si se vuelve a aplanar, y sin
+    // margen el redondeo recortaba astillas del borde.
+    const double pad = 0.01;
+    const double x0 = unscale<double>(out_bb.min.x()) - pad, y0 = -unscale<double>(out_bb.max.y()) - pad;
+    const double w  = unscale<double>(out_bb.size().x()) + 2 * pad, h = unscale<double>(out_bb.size().y()) + 2 * pad;
+    std::ostringstream o;
+    o.imbue(std::locale::classic());
+    o << std::fixed << std::setprecision(4);
+    o << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << w << "mm\" height=\"" << h
+      << "mm\" viewBox=\"" << x0 << " " << y0 << " " << w << " " << h << "\">\n";
+    o << "<!-- Neotko sticker: aplanado (fondo/transparencias) -->\n";
+    auto ring = [&o](const Polygon& pg) {
+        for (size_t k = 0; k < pg.points.size(); ++k)
+            o << (k ? " L" : "M") << unscale<double>(pg.points[k].x()) << " " << -unscale<double>(pg.points[k].y());
+        o << " Z ";
+    };
+    int ncol = 0;
+    // s349 — degradados usados, en <defs>, con los extremos en los mismos mm que los puntos.
+    {
+        std::set<int> used;
+        for (const auto& kv : by_col) if (!kv.second.empty() && kv.first.second >= 0) used.insert(kv.first.second);
+        if (!used.empty()) {
+            o << "<defs>\n";
+            for (const int gi : used) {
+                const GradDesc& g = grads[size_t(gi)];
+                o << "<linearGradient id=\"g" << gi << "\" gradientUnits=\"userSpaceOnUse\" x1=\"" << g.p0.x()
+                  << "\" y1=\"" << -g.p0.y() << "\" x2=\"" << g.p1.x() << "\" y2=\"" << -g.p1.y() << "\">";
+                for (size_t k = 0; k < g.col.size(); ++k) {
+                    char sh[8];
+                    std::snprintf(sh, sizeof(sh), "#%06X", unsigned(g.col[k]));
+                    o << "<stop offset=\"" << g.off[k] << "\" stop-color=\"" << sh << "\"/>";
+                }
+                o << "</linearGradient>\n";
+            }
+            o << "</defs>\n";
+        }
+    }
+    for (const auto& kv : by_col) {
+        if (kv.second.empty()) continue;
+        ++ncol;
+        char hex[16];
+        if (kv.first.second >= 0) std::snprintf(hex, sizeof(hex), "url(#g%d)", kv.first.second);
+        else                      std::snprintf(hex, sizeof(hex), "#%06X", unsigned(kv.first.first));
+        // UN <path> por región y regla nonzero (contorno y huecos con giro opuesto, que invertir
+        // la Y conserva). Con un solo path evenodd por color, Emboss::heal_polygons no lo reparaba
+        // (healed=0) y se inventaba marcos rectangulares (s349, hada).
+        for (const ExPolygon& e : kv.second) {
+            o << "<path fill=\"" << hex << "\" d=\"";
+            ring(e.contour);
+            for (const Polygon& hpg : e.holes) ring(hpg);
+            o << "\"/>\n";
+        }
+    }
+    o << "</svg>\n";
+    inf.changed = true;
+    inf.colors_out = ncol;
+    if (info) *info = inf;
+    NEOTKO_LOG(PROFILE, "STICKER_FLATTEN bg_dropped=" << inf.background_dropped
+        << " translucent=" << inf.translucent << " clipped=" << inf.clipped << " colors_out=" << ncol
+        << " size_mm=" << w << "x" << h);
+    return o.str();
+}
+
+std::vector<uint32_t> ColorStitch::sticker_svg_colors(const std::string& svg_data)
+{
+    std::vector<uint32_t> out;
+    NSVGimage_ptr image = nsvgParse(svg_data, "mm", 96.0f);
+    if (image == nullptr) return out;
+    auto add = [&](uint32_t c) { if (std::find(out.begin(), out.end(), c) == out.end()) out.push_back(c); };
+    for (NSVGshape* sh = image->shapes; sh != nullptr; sh = sh->next) {
+        if (!(sh->flags & NSVG_FLAGS_VISIBLE)) continue;
+        if (sh->fill.type != NSVG_PAINT_NONE) add(cs_nsvg_paint_rgb(sh->fill));
+        if (sh->stroke.type != NSVG_PAINT_NONE && sh->strokeWidth > 1e-5f) add(cs_nsvg_paint_rgb(sh->stroke));
+    }
+    return out;
+}
+
+std::map<uint32_t, ColorStitch::StickerGradient> ColorStitch::sticker_svg_gradients(const std::string& svg_data)
+{
+    std::map<uint32_t, StickerGradient> out;
+    NSVGimage_ptr image = nsvgParse(svg_data, "mm", 96.0f);
+    if (image == nullptr) return out;
+    for (NSVGshape* sh = image->shapes; sh != nullptr; sh = sh->next) {
+        if (!(sh->flags & NSVG_FLAGS_VISIBLE)) continue;
+        Vec2d p0, p1;
+        if (!cs_linear_grad_endpoints(sh->fill, p0, p1)) continue;
+        const uint32_t key = cs_nsvg_paint_rgb(sh->fill);
+        if (out.count(key)) continue;
+        // Color del degradado en t: interpolación lineal entre las paradas que lo rodean (antes de
+        // la primera y después de la última, el color del extremo, como spread="pad").
+        const NSVGgradient& gr = *sh->fill.gradient;
+        auto sample = [&gr](float t) -> uint32_t {
+            int k = 0;
+            while (k + 1 < gr.nstops && gr.stops[k + 1].offset < t) ++k;
+            const NSVGgradientStop& s0 = gr.stops[k];
+            const NSVGgradientStop& s1 = gr.stops[std::min(k + 1, gr.nstops - 1)];
+            const float span = s1.offset - s0.offset;
+            float w = (span > 1e-6f) ? (t - s0.offset) / span : 0.f;
+            w = std::clamp(w, 0.f, 1.f);
+            if (t <= gr.stops[0].offset) w = 0.f;
+            const uint32_t c0 = cs_nsvg_rgb(s0.color), c1 = cs_nsvg_rgb(s1.color);
+            uint32_t out_c = 0;
+            for (int sh8 = 0; sh8 <= 16; sh8 += 8) {
+                const float v = (1.f - w) * float((c0 >> sh8) & 0xFF) + w * float((c1 >> sh8) & 0xFF);
+                out_c |= uint32_t(std::clamp(std::lround(v), 0L, 255L)) << sh8;
+            }
+            return out_c;
+        };
+        StickerGradient g;
+        g.nstops   = 3;
+        g.stops[0] = sample(0.f);
+        g.stops[1] = sample(0.5f);
+        g.stops[2] = sample(1.f);
+        g.ramp.resize(64);
+        for (int k = 0; k < 64; ++k) g.ramp[size_t(k)] = sample(float(k) / 63.f);
+        out.emplace(key, g);
+    }
+    return out;
+}
+
+int ColorStitch::sticker_color_index_for_rgb(const ColorStitchSticker& sticker, uint32_t rgb)
+{
+    if (sticker.colors.empty()) return -1;
+    int best = 0; long best_d = std::numeric_limits<long>::max();
+    for (size_t j = 0; j < sticker.colors.size(); ++j) {
+        const uint32_t c = sticker.colors[j].rgb;
+        const long dr = long((c >> 16) & 0xFF) - long((rgb >> 16) & 0xFF);
+        const long dg = long((c >> 8) & 0xFF) - long((rgb >> 8) & 0xFF);
+        const long db = long(c & 0xFF) - long(rgb & 0xFF);
+        const long d = dr * dr + dg * dg + db * db;
+        if (d < best_d) { best_d = d; best = int(j); }
+    }
+    return best;
+}
+
+int ColorStitch::sticker_profile_for(const ColorStitchSticker& sticker, int color_idx)
+{
+    if (color_idx < 0) return sticker.profile_id;
+    if (color_idx >= kBandStride) {   // s349 — banda de un color con degradado
+        const int ci = color_idx % kBandStride, bi = color_idx / kBandStride - 1;
+        if (ci >= (int)sticker.colors.size()) return 0;
+        const ColorStitchStickerColor& c = sticker.colors[ci];
+        if (c.hidden || bi < 0 || bi >= (int)c.band_profiles.size()) return 0;
+        return c.band_profiles[size_t(bi)];
+    }
+    if (color_idx >= (int)sticker.colors.size()) return 0;
+    const ColorStitchStickerColor& c = sticker.colors[color_idx];
+    return c.hidden ? 0 : c.profile_id;
+}
+
+std::vector<int> ColorStitch::sticker_live_profiles(const ColorStitchSticker& sticker)
+{
+    std::vector<int> out;
+    if (sticker.hidden) return out;
+    auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+    auto add = [&](int pid) {
+        if (pid != 0 && mgr.find(pid) != nullptr && std::find(out.begin(), out.end(), pid) == out.end())
+            out.push_back(pid);
+    };
+    if (sticker.colors.empty()) add(sticker.profile_id);
+    else for (const ColorStitchStickerColor& c : sticker.colors) if (!c.hidden) {
+        add(c.profile_id);
+        for (const int bp : c.band_profiles) add(bp);   // s349 — bandas
+    }
+    return out;
+}
+
+// s350 — caché de máscaras por (SVG, transform, colores/recetas/ojos, recetas que existen). En el
+// laminado la máscara de un sticker es la MISMA en todas sus capas top/penu (sólo cambia el recorte
+// con la superficie, que hace Fill.cpp después): antes se recalculaba entera en cada capa.
+namespace {
+inline void cs_hmix(size_t& h, size_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); }
+std::mutex                                                                     g_cs_masks_mtx;
+std::unordered_map<size_t, std::vector<ColorStitch::StickerColorMask>>        g_cs_masks;
+}
+
+std::vector<ColorStitch::StickerColorMask> ColorStitch::sticker_color_masks(const ColorStitchSticker& sticker,
+                                                                            const Transform3d& to_target)
+{
+    if (sticker.hidden || sticker.svg_data.empty()) return {};
+    auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+    size_t h = std::hash<std::string>{}(sticker.svg_data);
+    for (int i = 0; i < 16; ++i) cs_hmix(h, std::hash<long long>{}(std::llround(to_target.matrix().data()[i] * 1e6)));
+    auto pid_mix = [&](int pid) { cs_hmix(h, std::hash<int>{}(pid)); cs_hmix(h, (pid != 0 && mgr.find(pid)) ? 11u : 5u); };
+    pid_mix(sticker.profile_id);
+    cs_hmix(h, sticker.colors.size());
+    for (const ColorStitchStickerColor& c : sticker.colors) {
+        cs_hmix(h, c.rgb); cs_hmix(h, c.hidden ? 7u : 3u); cs_hmix(h, std::hash<int>{}(c.zone));
+        pid_mix(c.profile_id);
+        cs_hmix(h, c.band_profiles.size());
+        for (const int bp : c.band_profiles) pid_mix(bp);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_cs_masks_mtx);
+        const auto it = g_cs_masks.find(h);
+        if (it != g_cs_masks.end()) return it->second;
+    }
+    std::vector<StickerColorMask> out = sticker_color_masks_uncached(sticker, to_target);
+    std::lock_guard<std::mutex> lk(g_cs_masks_mtx);
+    if (g_cs_masks.size() >= 256) g_cs_masks.clear();
+    g_cs_masks.emplace(h, out);
+    return out;
+}
+
+std::vector<ColorStitch::StickerColorMask> ColorStitch::sticker_color_masks_uncached(const ColorStitchSticker& sticker,
+                                                                                     const Transform3d& to_target)
+{
+    std::vector<StickerColorMask> out;
+    if (sticker.hidden || sticker.svg_data.empty()) return out;
+    auto& mgr = Slic3r::SurfaceEffectProfileManager::get();
+    if (sticker.colors.empty()) {
+        // Clásico: TODO el SVG = un único perfil (comportamiento pre-s348, mismo union_ex).
+        const Polygons rings = sticker_rings_in_transform(sticker, to_target);
+        if (rings.empty()) return out;
+        out.push_back({ -1, union_ex(rings) });
+        return out;
+    }
+    const std::shared_ptr<const CsLocalSvg> loc = cs_local_svg(sticker.svg_data);
+    const std::vector<StickerShape> shapes = cs_transform_shapes(loc->shapes, to_target);
+    // s350 — zona → entrada de colors. Si el sticker trae zonas (s350+), cada forma va a la entrada
+    // de SU zona; si no (stickers anteriores), al RGB más cercano como siempre.
+    std::vector<int> zone_to_color(loc->zones.size(), -1);
+    for (size_t j = 0; j < sticker.colors.size(); ++j) {
+        const int z = sticker.colors[j].zone;
+        if (z >= 0 && z < (int)zone_to_color.size() && zone_to_color[size_t(z)] < 0) zone_to_color[size_t(z)] = int(j);
+    }
+    std::vector<ExPolygons> per_color(sticker.colors.size());
+    std::vector<const StickerShape*> grad_of(sticker.colors.size(), nullptr);   // s349
+    Polygons covered;   // lo ya tapado por formas POSTERIORES (encima en el SVG)
+    // De la última forma a la primera: la de encima reclama su área antes que las de debajo.
+    for (size_t k = shapes.size(); k-- > 0; ) {
+        const StickerShape& sh = shapes[k];
+        const int zk = (k < loc->shape_zone.size()) ? loc->shape_zone[k] : -1;
+        const int j  = (zk >= 0 && zone_to_color[size_t(zk)] >= 0) ? zone_to_color[size_t(zk)]
+                                                                   : sticker_color_index_for_rgb(sticker, sh.rgb);
+        if (j < 0) continue;
+        const int pid = sticker_profile_for(sticker, j);
+        if (pid == 0 || mgr.find(pid) == nullptr) continue;   // oculto / sin receta = transparente
+        ExPolygons piece = covered.empty() ? union_ex(sh.rings) : diff_ex(union_ex(sh.rings), covered);
+        polygons_append(covered, sh.rings);
+        covered = union_(covered);
+        if (!piece.empty()) {
+            if (sh.grad && grad_of[j] == nullptr) grad_of[j] = &sh;   // s349: el de más arriba que se vea
+            expolygons_append(per_color[j], std::move(piece));
+        }
+    }
+    for (size_t j = 0; j < per_color.size(); ++j)
+        if (!per_color[j].empty()) {
+            StickerColorMask m{ int(j), union_ex(per_color[j]) };
+            const StickerShape* g = grad_of[j];
+            const std::vector<int>& bands = sticker.colors[j].band_profiles;
+            if (g != nullptr && !bands.empty()) {
+                // s349 — BANDAS: el área del color se parte en N franjas perpendiculares al
+                // degradado, de g0 (t=0) a g1 (t=1); las de los extremos se alargan hasta el infinito
+                // (spread="pad"). Cada franja es una pieza con su receta plana. Bandas vecinas con la
+                // misma receta se juntan en una pieza (menos costuras, menos cambios).
+                const Vec2d d = g->g1 - g->g0;
+                const double len = d.norm();
+                if (len > 1e-6) {
+                    const Vec2d u = d / len, n(-u.y(), u.x());
+                    const int N = int(bands.size());
+                    const double big = 1e4;   // mm
+                    auto strip = [&](double s0, double s1) {
+                        Polygon pg;
+                        for (const Vec2d& q : { Vec2d(g->g0 + u * s0 - n * big), Vec2d(g->g0 + u * s1 - n * big),
+                                                Vec2d(g->g0 + u * s1 + n * big), Vec2d(g->g0 + u * s0 + n * big) })
+                            pg.points.emplace_back(coord_t(scale_(q.x())), coord_t(scale_(q.y())));
+                        if (pg.area() < 0) pg.reverse();
+                        return pg;
+                    };
+                    for (int b0 = 0; b0 < N; ) {
+                        int b1 = b0;
+                        while (b1 + 1 < N && bands[size_t(b1 + 1)] == bands[size_t(b0)]) ++b1;
+                        const double s0 = (b0 == 0)     ? -big : len * double(b0) / N;
+                        const double s1 = (b1 == N - 1) ?  big : len * double(b1 + 1) / N;
+                        ExPolygons piece = intersection_ex(m.mask, Polygons{ strip(s0, s1) });
+                        if (!piece.empty() && bands[size_t(b0)] != 0)
+                            out.push_back({ band_color_idx(int(j), b0), std::move(piece) });
+                        b0 = b1 + 1;
+                    }
+                    continue;
+                }
+            }
+            if (g) { m.grad = true; m.g0 = g->g0; m.g1 = g->g1; }
+            out.push_back(std::move(m));
+        }
+    return out;
+}
+
+std::vector<ColorStitch::StickerColorMask> ColorStitch::sticker_color_masks_slice_frame(const ColorStitchSticker& sticker,
+                                                                                        const PrintObject* po)
+{
+    if (!po) return {};
+    std::vector<StickerColorMask> out = sticker_color_masks(sticker, po->trafo_centered() * sticker.transform);
+    if (sticker.is_multicolor() && NeoDebug::enabled(NeoDebug::PROFILE)) {
+        std::ostringstream os;
+        os << "STICKER_COLOR name='" << sticker.name << "' colors=" << sticker.colors.size() << " masks=[";
+        for (size_t i = 0; i < out.size(); ++i)
+            os << (i ? "," : "") << out[i].color_idx << ":pid" << sticker_profile_for(sticker, out[i].color_idx)
+               << ":n" << out[i].mask.size();
+        os << "]";
+        NeoDebug::write(NeoDebug::PROFILE, os.str());
+    }
+    return out;
 }
 
 ExPolygons ColorStitch::sticker_footprint_slice_frame(const ColorStitchSticker& sticker,
@@ -1370,6 +2274,14 @@ bool ColorStitch::object_painter_wants_bottom(const ModelObject* mo)
                 return true;
         }
     }
+    // s350 — un sticker BOTTOM (mira hacia abajo) con alguna receta que tenga zona Bottom también
+    // abre la puerta del bottom (si no, el pre-split y la resolución ni lo miraban).
+    for (const ColorStitchSticker& st : mo->colorstitch_stickers) {
+        if (st.svg_data.empty() || !sticker_faces_down(st)) continue;
+        for (const int pid : sticker_live_profiles(st))
+            if (const SurfaceEffectProfile* p = mgr.find(pid))
+                if (SurfacePassStack::from_json(p->stack_bottom_json).any_effect()) return true;
+    }
     return false;
 }
 
@@ -1832,10 +2744,14 @@ int ColorStitch::assign_and_group_tools(
             gv.tool_c    = config.interlayer_colormix_penu_tool_c.value;
             gv.tool_d    = config.interlayer_colormix_penu_tool_d.value;
             gv.repetitions = config.interlayer_colormix_penu_repetitions.value;
-            // s235b — mismo criterio que Fill.cpp al resolver el ángulo del penúltimo:
-            // si la clave penu no trae ángulo propio (-1), hereda el del top.
+            // s354 — el penúltimo NO hereda el ángulo del top. Fill.cpp tiende las líneas del
+            // penúltimo con SU clave tal cual: -1 = auto = rotación natural de Orca (90° por capa).
+            // Aquí se heredaba el del top (el 45 por defecto de la región) ⇒ las líneas salían a
+            // 135° y el campo repartía colores con un eje de 45°, PERPENDICULAR a ellas: cada
+            // línea cruzaba todos los carriles y el patrón salía a manchas (COLOR-01-penu, log:
+            // "PATTERN_FIELD role=Penu axis=45deg" con "MONO_AXIS_DIAG dominant=135deg").
+            // Con -1 el eje se MIDE de las líneas reales, que es lo que hace el top en auto.
             gv.angle       = config.interlayer_colormix_penu_angle.value;
-            if (gv.angle < 0) gv.angle = config.interlayer_colormix_angle.value;
         }
 
         // NEOTKO_PROFILE_TAG — Fase D: painted-profile override.
@@ -2092,7 +3008,42 @@ int ColorStitch::assign_and_group_tools(
                         sa_y += (2.0 * ux * uy) * l;
                     }
                 }
-                const double sang = 0.5 * std::atan2(sa_y, sa_x);
+                double sang = 0.5 * std::atan2(sa_y, sa_x);
+                // NEOTKO_COLORSTITCH_TAG s354 — AFINADO del eje. La media de arriba incluye los
+                // conectores, que siguen el contorno y la desvían 1-2° (medido en penu Monotonic:
+                // -46/-47° con líneas a -45°). Con 2° una línea de 10 mm se sale 0,35 mm de su
+                // carril, más que el umbral de medio ancho, y el troceado la toma por conector
+                // (sonda: connectors=345 en un trazo de 164 carriles, runs=33). Segunda vuelta
+                // sólo con los segmentos a menos de 15° de la primera estimación: quedan las
+                // líneas, que son paralelas, y el eje sale exacto.
+                {
+                    const double c2 = std::cos(2.0 * sang), s2 = std::sin(2.0 * sang);
+                    const double cos30 = std::cos(M_PI / 6.0);
+                    double ra_x = 0.0, ra_y = 0.0;
+                    for (auto* e : sub->entities) {
+                        const auto* p = dynamic_cast<const ExtrusionPath*>(e);
+                        if (!p) continue;
+                        const Points& pp = p->polyline.points;
+                        for (size_t i = 1; i < pp.size(); ++i) {
+                            const double dx = double(pp[i].x() - pp[i - 1].x());
+                            const double dy = double(pp[i].y() - pp[i - 1].y());
+                            const double l  = std::sqrt(dx * dx + dy * dy);
+                            if (l < 1e-6) continue;
+                            const double ux = dx / l, uy = dy / l;
+                            const double dx2 = ux * ux - uy * uy, dy2 = 2.0 * ux * uy;
+                            if (dx2 * c2 + dy2 * s2 < cos30) continue;   // > 15° del eje
+                            ra_x += dx2 * l;
+                            ra_y += dy2 * l;
+                        }
+                    }
+                    if (ra_x * ra_x + ra_y * ra_y > 1e-12) {
+                        const double refined = 0.5 * std::atan2(ra_y, ra_x);
+                        NEOTKO_LOG(COLORSTITCH, "  MONO_SURF_AXIS_REFINE layer=" << layer_idx
+                            << " raw=" << (sang * 180.0 / M_PI) << "deg"
+                            << " refined=" << (refined * 180.0 / M_PI) << "deg");
+                        sang = refined;
+                    }
+                }
                 surf_ax = std::cos(sang);
                 surf_ay = std::sin(sang);
                 NEOTKO_LOG(COLORSTITCH, "  MONO_SURF_AXIS layer=" << layer_idx
@@ -2104,6 +3055,33 @@ int ColorStitch::assign_and_group_tools(
                 if (!p) continue;
                 if (split_monotonic) {
                     auto mono_runs = split_monotonic_path_into_runs(*p, surf_ax, surf_ay);
+                    if (mono_runs.size() > 1)   // s354 — trazo fundido: aviso "usa Monotonic line"
+                        fused_monotonic_seen().store(true, std::memory_order_relaxed);
+                    // NEOTKO_COLORSTITCH_TAG s354 (sonda) — ¿el troceado saca tantas líneas como
+                    // carriles cruza el trazo? `lanes` = recorrido ⊥ / ancho; si runs << lanes, los
+                    // conectores van en varios segmentos cortos (max_scan_dperp cerca del umbral
+                    // sin pasarlo) y el trazo fundido se queda entero con UN color.
+                    if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
+                        const Points& _pp = p->polyline.points;
+                        const double _px = -surf_ay, _py = surf_ax;
+                        const double _thr = 0.5 * std::max(1.0, double(p->width) * 1e6);
+                        double _mn = 0, _mx = 0, _max_sub = 0; int _conn = 0;
+                        for (size_t _i = 0; _i < _pp.size(); ++_i) {
+                            const double _c = double(_pp[_i].x()) * _px + double(_pp[_i].y()) * _py;
+                            if (_i == 0) { _mn = _mx = _c; continue; }
+                            _mn = std::min(_mn, _c); _mx = std::max(_mx, _c);
+                            const double _d = std::abs(double(_pp[_i].x() - _pp[_i - 1].x()) * _px
+                                                     + double(_pp[_i].y() - _pp[_i - 1].y()) * _py);
+                            if (_d >= _thr) ++_conn; else _max_sub = std::max(_max_sub, _d);
+                        }
+                        NEOTKO_LOG(COLORSTITCH, "    MONO_SPLIT_PATH layer=" << layer_idx
+                            << " pts=" << _pp.size() << " runs=" << mono_runs.size()
+                            << " lanes=" << ((_mx - _mn) / 1e6 / std::max(1e-3, double(p->width)))
+                            << " connectors=" << _conn
+                            << " thresh_mm=" << (_thr / 1e6)
+                            << " max_scan_dperp_mm=" << (_max_sub / 1e6)
+                            << " width=" << p->width);
+                    }
                     for (auto& mr : mono_runs) {
                         double len_mm = static_cast<double>(mr.scan.length()) / 1e6;
                         if (len_mm < min_length_mm) continue;
@@ -2219,7 +3197,23 @@ int ColorStitch::assign_and_group_tools(
                     anchor_x_mm, anchor_y_mm, gv.invert,
                     NeoDebug::enabled(NeoDebug::COLORSTITCH) ? &field_summary : nullptr);
 
-                if (fg.t_of_group.size() >= 2) {
+                if (!fg.t_of_global.empty() && fg.global_of_group.size() == fg.t_of_group.size()) {
+                    // s349 — pieza de sticker: dither sobre TODOS los carriles del área y cada
+                    // grupo toma el suyo. Presupuesto del área, sin racha al empezar la pieza, y
+                    // dos piezas que comparten carril le dan el mismo color.
+                    const std::vector<int> full = (cm_mode == 1)
+                        ? build_dithered_tools_2color_at(
+                              fg.t_of_global, tools[0], tools[1], gv.pct_a, easing, gamma)
+                        : build_dithered_tools_3color_at(
+                              fg.t_of_global, tools[0], tools[1],
+                              (tools.size() > 2 ? tools[2] : tools[1]),
+                              gv.pct_a, gv.pct_b, easing, gamma, gv.overlap);
+                    std::vector<int> per_group(fg.t_of_group.size());
+                    for (size_t g = 0; g < per_group.size(); ++g)
+                        per_group[g] = full[static_cast<size_t>(fg.global_of_group[g])];
+                    tools = std::move(per_group);
+                    grad_field_order = fg.group_of_line;
+                } else if (fg.t_of_group.size() >= 2) {
                     if (cm_mode == 1)
                         tools = build_dithered_tools_2color_at(
                             fg.t_of_group, tools[0], tools[1], gv.pct_a, easing, gamma);
@@ -2240,7 +3234,8 @@ int ColorStitch::assign_and_group_tools(
                         << " role=" << (gv_is_top_role ? "Top" : "Penu")
                         << " mode=" << cm_mode << " (" << field_summary << ")"
                         << " reps=" << reps << " period=" << period
-                        << " groups=" << fg.t_of_group.size() << h.str());
+                        << " groups=" << fg.t_of_group.size()
+                        << " global=" << fg.t_of_global.size() << h.str());
                 }
                 // NEOTKO_COLORSTITCH_TAG_END — s315
             }
@@ -2251,6 +3246,14 @@ int ColorStitch::assign_and_group_tools(
             // leer) y el mode 3 va por la red de bandas en mm. Los builders viejos SIGUEN en el
             // árbol porque los usan los previews de la GUI.
         }
+
+        // NEOTKO_COLORSTITCH_TAG s354 — publica la secuencia de la receta (sin repetidos) para que
+        // Fill.cpp ordene las pasadas de la lámina. Sólo la primera superficie de la llamada.
+        if (last_tool_order_tls().empty())
+            for (int t : tools)
+                if (std::find(last_tool_order_tls().begin(), last_tool_order_tls().end(), t)
+                        == last_tool_order_tls().end())
+                    last_tool_order_tls().push_back(t);
 
         if (NeoDebug::enabled(NeoDebug::COLORSTITCH)) {
             std::ostringstream _s;
@@ -2555,6 +3558,11 @@ int ColorStitch::assign_and_group_tools(
         if (unique_tool_order.size() == 1) {
             for (auto& kv : tool_blocks)
                 for (auto* p : kv.second) delete p;
+            // s364 — el zig-zag original se conserva, pero CON EL TOOL elegido: sin codificar
+            // salía con el extrusor por defecto de la región (un "33" pintado imprimía en T0).
+            for (auto* e : sub->entities)
+                if (auto* p = dynamic_cast<ExtrusionPath*>(e))
+                    if (p->mm3_per_mm < 10.0) encode_tool_in_path(p, unique_tool_order[0]);
             NEOTKO_LOG(COLORSTITCH, "SHORT_CIRCUIT layer=" << layer_idx
                 << " role=" << ExtrusionEntity::role_to_string(first_path->role())
                 << " n_paths_before=" << n_paths
@@ -3214,27 +4222,10 @@ bool ColorStitch::any_painted_profile_has_perim_override(
         if (p->multipass.present && painted_perim_override_from_profile(p->multipass))
             return true;
     }
-    // NEOTKO_STICKER_TAG — a sticker's stack can carry perimeter_override too;
-    // this feeds the SAME ToolOrdering prepass (fill_wipe_tower_partitions-adjacent
-    // MixedFilament pre-block) that the painted scan above feeds, so a sticker-only
-    // object must be scanned here as well (else that prepass silently misses it —
-    // same class of Plan/Emisión desync the s118 fix above closed for paint).
-    const ModelObject* mo = po->model_object();
-    if (mo && !mo->colorstitch_stickers.empty()) {
-        for (const bool is_penu : { false, true }) {
-            const double z_lo = is_penu ? print_z : (print_z - height);
-            const double z_hi = is_penu ? (print_z + height) : print_z;
-            for (size_t si : enumerate_stickers_in_z_range(po, z_lo, z_hi)) {
-                const ColorStitchSticker& stk = mo->colorstitch_stickers[si];
-                const SurfaceEffectProfile* p = mgr.find(stk.profile_id);
-                if (!p) continue;
-                const std::string& js = is_penu ? p->stack_penu_json : p->stack_top_json;
-                const SurfacePassStack st = SurfacePassStack::from_json(js);
-                if (st.any_effect() && st.perimeter_override)
-                    return true;
-            }
-        }
-    }
+    // NEOTKO_STICKER_TAG — s349 (auditoría #1): aquí se escaneaban también los stickers,
+    // porque su pila podía llevar perimeter_override. Fill.cpp lo IGNORA ahora en las
+    // piezas de sticker (re-coloreaba el anillo entero del objeto; la fase 2b robará sólo
+    // el trozo), así que el prepass tampoco debe contarlo: Plan == Emisión == TCR.
     return false;
 }
 

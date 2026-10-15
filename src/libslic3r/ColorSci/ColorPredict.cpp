@@ -226,6 +226,35 @@ ColorRecipe suggest_flat(const float target_rgb[3],
     return best;
 }
 
+ColorRecipe suggest_sandwich(const float target_rgb[3],
+                             const Material mats[4],
+                             const PredictOptions& opt)
+{
+    const Lab tlab = rgb_to_lab(target_rgb);
+    PredictOptions wide = opt;
+    wide.max_entries = 1 << 30;
+    wide.dedup_de    = 0.f;
+    wide.ratio_steps = std::max(opt.ratio_steps, 12);
+    const std::vector<ColorRecipe> tops = predict_flat_palette(mats, wide);
+    ColorRecipe best;
+    best.delta_e = 1e9f;
+    for (int p = -1; p < 4; ++p) {
+        const SurfacePassStack penu = (p < 0) ? SurfacePassStack() : solid_top(p, 1.0);
+        for (const ColorRecipe& t : tops) {
+            ColorRecipe r = t;
+            r.penu = penu;
+            predict_recipe_colour(r, mats, opt);
+            const float de = delta_e2000(tlab, rgb_to_lab(r.rgb.data()));
+            if (de < best.delta_e) {
+                best = std::move(r);
+                best.delta_e = de;
+                if (p >= 0) best.desc = "P" + std::to_string(p + 1) + " | " + best.desc;
+            }
+        }
+    }
+    return best;
+}
+
 ColorRecipe suggest_mixed(const float target_rgb[3],
                           const Material mats[4],
                           const PredictOptions& opt)

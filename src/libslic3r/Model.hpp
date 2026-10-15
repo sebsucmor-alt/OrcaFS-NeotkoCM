@@ -358,14 +358,47 @@ enum class ModelVolumeType : int {
 // composed later via PrintObject::trafo_centered() (s161 lesson — NEVER trafo()).
 // Pile order: index 0 = bottom of the pile, back() = topmost. On XY overlap the
 // topmost sticker WINS (occludes, does not blend) — resolved top-down in Fill.cpp.
+// s348 — MULTICOLOUR sticker: one entry per distinct fill colour of the SVG, each with
+// its own recipe. `colors` empty ⇒ classic 1-colour sticker (whole SVG = `profile_id`).
+// Shapes are matched to an entry by nearest `rgb` (0xRRGGBB), so the list survives
+// small colour edits of the SVG. hidden/no-profile colours are transparent (not cut).
+struct ColorStitchStickerColor
+{
+    uint32_t rgb        = 0;      // 0xRRGGBB as read from the SVG fill
+    int      profile_id = 0;      // SurfaceEffectProfile id (0 = unassigned ⇒ not cut)
+    bool     hidden     = false;  // eye off ⇒ not cut, shows what's underneath
+    // s349 — color con DEGRADADO del SVG impreso en BANDAS: una receta plana por banda, de t=0 a
+    // t=1 a lo largo del degradado. Vacío = el color va entero con profile_id (como siempre).
+    // Bandas vecinas con la misma receta comparten id. profile_id = la de la primera banda.
+    std::vector<int> band_profiles;
+    // s350 — ZONA del SVG a la que pertenece este color (índice en ColorStitch::sticker_svg_zones).
+    // Con zona, cada forma va a SU entrada aunque dos colores se parezcan o un degradado tenga de
+    // media el mismo color que un plano. -1 = sticker de antes de s350: se busca por RGB más cercano.
+    int zone = -1;
+
+    template<class Archive> void serialize(Archive& ar) { ar(rgb, profile_id, hidden, band_profiles, zone); }
+    bool operator==(const ColorStitchStickerColor& o) const
+        { return rgb == o.rgb && profile_id == o.profile_id && hidden == o.hidden && band_profiles == o.band_profiles
+              && zone == o.zone; }
+    bool operator!=(const ColorStitchStickerColor& o) const { return !(*this == o); }
+};
+
 struct ColorStitchSticker
 {
     std::string name;                                  // display label (SVG filename stem)
     std::string svg_data;                              // raw SVG text — persisted source of truth
     Transform3d transform{ Transform3d::Identity() };  // sticker-local (mm, z=0) → object frame
     int         profile_id = 0;                        // SurfaceEffectProfile id (0 = unassigned)
+    // s348 — multicolour + layer eye (see ColorStitchStickerColor). color_mode records how the
+    // recipes were generated at import (0 = flat Solid, 1 = ColorStitch) — UI only, the engine
+    // reads the profiles.
+    std::vector<ColorStitchStickerColor> colors;
+    int         color_mode = 0;
+    bool        hidden     = false;                    // whole layer off ⇒ not cut
 
-    template<class Archive> void serialize(Archive& ar) { ar(name, svg_data, transform, profile_id); }
+    bool is_multicolor() const { return !colors.empty(); }
+
+    template<class Archive> void serialize(Archive& ar) { ar(name, svg_data, transform, profile_id, colors, color_mode, hidden); }
 };
 
 inline bool operator==(const ColorStitchSticker& a, const ColorStitchSticker& b)
@@ -373,7 +406,10 @@ inline bool operator==(const ColorStitchSticker& a, const ColorStitchSticker& b)
     return a.profile_id == b.profile_id
         && a.transform.matrix() == b.transform.matrix()
         && a.name == b.name
-        && a.svg_data == b.svg_data;
+        && a.svg_data == b.svg_data
+        && a.colors == b.colors
+        && a.color_mode == b.color_mode
+        && a.hidden == b.hidden;
 }
 inline bool operator!=(const ColorStitchSticker& a, const ColorStitchSticker& b) { return !(a == b); }
 
@@ -432,7 +468,7 @@ public:
 
     // NEOTKO_STICKER_TAG — ordered pile of Sandwich Stickers (see struct above).
     // Object-level (a sticker spans volumes), mirrored in assign_copy/serialize,
-    // persisted as per-object 3mf metadata (colorstitch_stickers_b64), compared in
+    // persisted as per-object 3mf metadata (colormix_stickers_b64), compared in
     // Print::apply via model_colorstitch_sticker_data_changed().
     std::vector<ColorStitchSticker> colorstitch_stickers;
     // Derived cache — content hash of the profiles the stickers reference (the

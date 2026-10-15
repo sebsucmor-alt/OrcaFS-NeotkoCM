@@ -110,6 +110,15 @@ struct SlicingParameters
      coordf_t     object_print_z_uncompensated_max { 0 };
      // Scaling factor for compensating shrinkage in Z-axis.
      coordf_t    object_shrinkage_compensation_z { 0 };
+
+    // NEOTKO_GRAVITY_TAG s362 — base (Z de impresión) de un objeto que NO toca la cama, o 0 = rejilla
+    // de siempre. Sólo la rellena Print::apply() con «Stacked objects: real layers» (s363), True
+    // Objects y sin raft; la consume Gravity::land_layers_on_base() desde generate_object_layers().
+    coordf_t    neotko_floating_bottom_z { 0 };
+    // NEOTKO_GRAVITY_TAG s363 — otro objeto apoya en el TECHO de este: sus capas tienen que acabar
+    // en la altura real de la pieza (si no, queda aire bajo lo que apoya y sale como puente). La
+    // rellena Print::apply() con True Objects y sin raft; la consume generate_object_layers().
+    bool        neotko_land_top { false };
 };
 static_assert(IsTriviallyCopyable<SlicingParameters>::value, "SlicingParameters class is not POD (and it should be - see constructor).");
 
@@ -141,7 +150,9 @@ inline bool equal_layering(const SlicingParameters &sp1, const SlicingParameters
             sp1.raft_base_top_z                     == sp2.raft_base_top_z                      &&
             sp1.raft_interface_top_z                == sp2.raft_interface_top_z                 &&
             sp1.raft_contact_top_z                  == sp2.raft_contact_top_z                   &&
-            sp1.object_print_z_min                  == sp2.object_print_z_min;
+            sp1.object_print_z_min                  == sp2.object_print_z_min                   &&
+            sp1.neotko_floating_bottom_z            == sp2.neotko_floating_bottom_z            && // NEOTKO_GRAVITY_TAG s362
+            sp1.neotko_land_top                     == sp2.neotko_land_top; // NEOTKO_GRAVITY_TAG s363
 }
 
 typedef std::pair<coordf_t,coordf_t> t_layer_height_range;

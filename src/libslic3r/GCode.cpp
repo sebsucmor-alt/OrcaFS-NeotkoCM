@@ -711,7 +711,13 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // A phony move to the end position at the wipe tower.
     gcodegen.writer().travel_to_xy((end_pos + plate_origin_2d).cast<double>());
     gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, end_pos + plate_origin_2d));
-    if (!is_approx(z, current_z)) {
+    // Optional private tower type: it may leave the nozzle at the toolchange Z; the next
+    // extrusion lowers it at its own start point (GCode::_extrude brings Z back to m_nominal_z
+    // after the travel).
+    const bool priv_stay_up = gcodegen.m_neo_tower != nullptr &&
+        NeoTower::private_keeps_nozzle_up(gcodegen.config(), gcodegen.writer(), tcr.gcode, z, current_z);
+    if (priv_stay_up) {
+    } else if (!is_approx(z, current_z)) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(current_z, "Travel back up to the topmost object layer.");
         gcode += gcodegen.writer().unretract();
@@ -814,6 +820,11 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     const bool is_ramming       = (gcodegen.config().single_extruder_multi_material) ||
                             (!gcodegen.config().single_extruder_multi_material &&
                              get_value_at(gcodegen.config(), gcodegen.config().filament_multitool_ramming, ConfigFlowDomain::Filament, tcr.initial_tool));
+    // Optional private tower type: the outgoing tool may arrive at the tower retracted and wipe
+    // towards tcr.priv_park during the toolchange retraction.
+    const bool priv_dry_park = gcodegen.m_neo_tower != nullptr &&
+        NeoTower::private_dry_arrival(gcodegen.config(), gcodegen.writer(), tcr, new_extruder_id, needs_toolchange);
+    bool priv_arrived = false;   // the nozzle stands on start_pos (the wipe starts from last_pos)
     const bool should_travel_to_tower = !tcr.priming && (tcr.force_travel     // wipe tower says so
                                                          || !needs_toolchange // this is just finishing the tower with no toolchange
                                                          || is_ramming);
@@ -834,13 +845,19 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
         gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
                                     "Travel to a Wipe Tower");
-        gcode += gcodegen.unretract();
+        if (priv_dry_park) {
+            gcode += gcodegen.writer().unlift();   // stays retracted
+            priv_arrived = true;
+        } else
+            gcode += gcodegen.unretract();
     } else {
         // When this is multiextruder printer without any ramming, we can just change
         // the tool without travelling to the tower.
     }
 
-    if (will_go_down) {
+    if (will_go_down && priv_dry_park) {
+        gcode += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.");
+    } else if (will_go_down) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.");
         gcode += gcodegen.writer().unretract();
@@ -849,6 +866,10 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     std::string toolchange_gcode_str;
     std::string deretraction_str;
     if (tcr.priming || (new_extruder_id >= 0 && needs_toolchange)) {
+        if (priv_dry_park && priv_arrived && tcr.priv_has_park) {
+            gcodegen.m_wipe.path = Polyline{ wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d),
+                                             wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(tcr.priv_park) + plate_origin_2d) };
+        } else
         if (is_ramming)
             gcodegen.m_wipe.reset_path();                                           // We don't want wiping on the ramming lines.
         toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z); // TODO: toolchange_z vs print_z
@@ -892,7 +913,13 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // A phony move to the end position at the wipe tower.
     gcodegen.writer().travel_to_xy((end_pos + plate_origin_2d).cast<double>());
     gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, end_pos + plate_origin_2d));
-    if (!is_approx(z, current_z)) {
+    // Optional private tower type: it may leave the nozzle at the toolchange Z; the next
+    // extrusion lowers it at its own start point (GCode::_extrude brings Z back to m_nominal_z
+    // after the travel).
+    const bool priv_stay_up = gcodegen.m_neo_tower != nullptr &&
+        NeoTower::private_keeps_nozzle_up(gcodegen.config(), gcodegen.writer(), tcr.gcode, z, current_z);
+    if (priv_stay_up) {
+    } else if (!is_approx(z, current_z)) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(current_z, "Travel back up to the topmost object layer.");
         gcode += gcodegen.writer().unretract();
@@ -1133,6 +1160,13 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         const double tower_z            = local_z_nominal_layer_z >= 0. ? local_z_nominal_layer_z : current_z;
         const double toolchange_print_z = tower_z - gcodegen.config().z_offset.value;
 
+        // NEOTKO_LOCALZ_TAG s355 — preplanned Local-Z toolchanges ("Subdivide Mix Layer") first,
+        // consumed in order. The stock block lived below the NeoTower dispatch; it is now
+        // dispatch_local_z_planned() (GCode/NeoTowerDispatch.cpp) and runs BEFORE it. Classic is
+        // unchanged: the keyed dispatch between the two is a no-op without a NeoTower.
+        if (auto s = dispatch_local_z_planned(gcodegen, extruder_id, tower_z))
+            return *s;
+
         // NEOTKO_NEOTOWER_TAG_START — PASO 1: sublayer-prime dispatch via NeoTower.
         // Ported from fork GCode.cpp:1356. MUST precede the stock Local-Z path below:
         // NeoTower does NOT populate m_local_z_reserve_boxes, so that path early-returns
@@ -1148,34 +1182,6 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                 toolchange_print_z, tower_z, local_z_sublayer_ctx))
             return *s;
         // NEOTKO_NEOTOWER_TAG_END
-
-        if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_tool_changes.size() &&
-            size_t(m_layer_idx) < m_local_z_tool_change_idx.size()) {
-            size_t &local_z_tool_change_idx = m_local_z_tool_change_idx[size_t(m_layer_idx)];
-            const auto &layer_local_z_tool_changes = m_local_z_tool_changes[size_t(m_layer_idx)];
-            if (local_z_tool_change_idx < layer_local_z_tool_changes.size()) {
-                const WipeTower::ToolChangeResult &local_z_tcr = layer_local_z_tool_changes[local_z_tool_change_idx];
-                const int current_tool = gcodegen.writer().extruder() != nullptr ? int(gcodegen.writer().extruder()->id()) : -1;
-                if (local_z_tcr.new_tool == extruder_id &&
-                    (current_tool < 0 || local_z_tcr.initial_tool == current_tool)) {
-                    ++local_z_tool_change_idx;
-                    BOOST_LOG_TRIVIAL(debug) << "Local-Z toolchange emitted from preplanned wipe tower sequence"
-                                             << " layer_idx=" << m_layer_idx
-                                             << " extruder_id=" << extruder_id
-                                             << " local_z_tool_change_idx=" << (local_z_tool_change_idx - 1);
-                    return gcodegen.is_BBL_Printer() ? append_tcr(gcodegen, local_z_tcr, extruder_id, tower_z) :
-                                                       append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
-                }
-
-                BOOST_LOG_TRIVIAL(warning) << "Local-Z preplanned wipe tower sequence mismatch, falling back"
-                                           << " layer_idx=" << m_layer_idx
-                                           << " requested_extruder=" << extruder_id
-                                           << " current_tool=" << current_tool
-                                           << " planned_initial=" << local_z_tcr.initial_tool
-                                           << " planned_new=" << local_z_tcr.new_tool
-                                           << " local_z_tool_change_idx=" << local_z_tool_change_idx;
-            }
-        }
 
         if (m_layer_idx < 0 || size_t(m_layer_idx) >= m_local_z_reserve_boxes.size() ||
             size_t(m_layer_idx) >= m_local_z_reserve_slot_idx.size()) {
@@ -1376,8 +1382,22 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
     if (!gcodegen.is_BBL_Printer()) {
         if (gcodegen.writer().need_toolchange(extruder_id) || finish_layer) {
             if (m_layer_idx < (int) m_tool_changes.size()) {
-                if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size()))
+                if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size())) {
+                    // NEOTKO_NEOTOWER_TAG s357 — "mixed group" overflow. An object layer and a
+                    // Sandwich sublayer of another object within a micron of each other share one
+                    // LayerTools, so GCode asks for more toolchanges on this plan layer than
+                    // NeoTower stored on it (it filed them under the next sublayer plane): the
+                    // sequence is the same, only the layer differs. That used to abort the export
+                    // with this misleading message (BIGTEST scaled in Z, z=38.25). With NeoTower
+                    // the dispatch resolves it by tool pair on the neighbouring planes.
+                    if (gcodegen.m_neo_tower != nullptr) {
+                        if (!gcodegen.writer().need_toolchange(extruder_id))
+                            return gcode;   // finish_layer only, entries exhausted
+                        return dispatch_neotower_real_layer_tc(gcodegen, extruder_id,
+                            gcodegen.config().wipe_tower_no_sparse_layers.value ? m_last_wipe_tower_print_z : -1.);
+                    }
                     throw Slic3r::RuntimeError("Wipe tower generation failed, possibly due to empty first layer.");
+                }
 
                 // Calculate where the wipe tower layer will be printed. -1 means that print z will not change,
                 // resulting in a wipe tower with sparse layers.
@@ -1582,8 +1602,13 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
             // NEOTKO_NEOTOWER_TAG — soften throw for finish_layer-only with exhausted entries.
             // Only throw when a real TC is actually needed; a finish_layer-only call on an
             // exhausted layer (structural fill already consumed) just reports empty.
-            if (gcodegen.writer().need_toolchange(extruder_id))
+            // NEOTKO_NEOTOWER_TAG s357 — with NeoTower a real toolchange past the planned count is
+            // not empty: tool_change() resolves it by tool pair ("mixed group" overflow, see there).
+            if (gcodegen.writer().need_toolchange(extruder_id)) {
+                if (gcodegen.m_neo_tower != nullptr)
+                    return false;
                 throw Slic3r::RuntimeError("Wipe tower generation failed, possibly due to empty first layer.");
+            }
             return true;  // finish_layer only, entries exhausted → empty
         }
 
@@ -3390,6 +3415,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 // NEOTKO_NEOTOWER_TAG — bind NeoTower pointer for identity dispatch.
                 // nullptr when neotko_tower_type==Classic → all NeoTower branches inert.
                 m_neo_tower = print.neo_tower();
+                if (m_neo_tower != nullptr)
+                    m_neo_tower->private_begin_emission();       // no-op without the private tower
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 
@@ -5459,6 +5486,23 @@ LayerResult GCode::process_layer(const Print& print,
         }
         LayerResult result{"", sub_layer_id, false, last_layer};
         std::string gcode;
+        // NEOTKO_MULTIPASS_TAG s351 — §35.5: subcapas de la capa 0 sobre la cama (bottom /
+        // sticker bottom) se emiten ANTES del ;LAYER_CHANGE de la capa 0 y con m_layer = nullptr,
+        // así que on_first_layer() daba false → ACCEL=default (10000) en vez de
+        // initial_layer_acceleration, y lo mismo con jerk/velocidad/temperatura de primera capa.
+        // Mismo criterio que on_first_layer(): capa de objeto id 0 con bottom_z en la cama.
+        m_sub_on_first_layer = false;
+        for (const LayerToPrint& ltp : ltps_sorted) {
+            if (!ltp.mp_sublayer || !ltp.mp_object) continue;
+            // Mismo origen que multipass_sublayers() (L~1912): copias BBS dedup leen del objeto compartido.
+            const PrintObject* _src = ltp.mp_object->get_shared_object()
+                                      ? ltp.mp_object->get_shared_object() : ltp.mp_object;
+            const auto& _ls = _src->layers();
+            if (ltp.mp_layer_id < _ls.size() && _ls[ltp.mp_layer_id]->id() == 0
+                && std::abs(_ls[ltp.mp_layer_id]->bottom_z()) < EPSILON)
+                m_sub_on_first_layer = true;
+            break;
+        }
         for (const LayerToPrint& ltp : ltps_sorted) {
             if (!ltp.mp_sublayer || !ltp.mp_object) continue;
             const MultiPassSubLayer& sub = *ltp.mp_sublayer;
@@ -5567,7 +5611,7 @@ LayerResult GCode::process_layer(const Print& print,
                 float mp_pv = 0.f;
                 if (!ltp.mp_object->layers().empty())
                     for (const LayerRegion* lr : ltp.mp_object->layers().front()->regions())
-                        mp_pv = std::max(mp_pv, (float)lr->region().config().multipass_prime_volume.value);
+                        mp_pv = std::max(mp_pv, neotko_sandwich_purge_volume(m_config, lr->region().config()));   // s352o single owner
                 NEOTKO_LOG(WIPETOWER, "MP_PRIME_CALL: tool=" << tool_0based
                     << " sub.print_z=" << sub.print_z
                     << " writer_z=" << m_writer.get_position().z()
@@ -5794,6 +5838,7 @@ LayerResult GCode::process_layer(const Print& print,
             }
         }
 
+        m_sub_on_first_layer = false; // s351 §35.5 — sólo vale dentro de este grupo
         result.gcode = std::move(gcode);
         return result;
     }
@@ -7087,11 +7132,17 @@ LayerResult GCode::process_layer(const Print& print,
                                      << " pass_print_z=" << pass_plan.print_z
                                      << " pass_flow_height=" << pass_plan.flow_height
                                      << " extruder=" << local_extruder_id;
-            if (std::abs(m_writer.get_position().z() - pass_z) > EPSILON) {
+            // Private tower type: a pass LOWER than the nozzle is not reached by plunging in
+            // place: retract only, and _extrude lowers Z to m_nominal_z once the travel has arrived.
+            const bool priv_lower_later = m_neo_tower != nullptr && NeoTower::is_private_tower(this->config()) &&
+                                         pass_z < m_writer.get_position().z() - EPSILON;
+            if (priv_lower_later)
+                gcode += this->retract(false, false, LiftType::NormalLift);
+            else if (std::abs(m_writer.get_position().z() - pass_z) > EPSILON) {
                 gcode += this->retract(false, false, LiftType::NormalLift);
                 gcode += m_writer.travel_to_z(pass_z, "Local-Z path pass");
             }
-            if (std::abs(m_writer.get_position().z() - pass_z) > EPSILON) {
+            if (!priv_lower_later && std::abs(m_writer.get_position().z() - pass_z) > EPSILON) {
                 BOOST_LOG_TRIVIAL(warning) << "Local-Z pass z restore"
                                            << " print_z=" << print_z
                                            << " layer_id=" << pass_plan.layer_id

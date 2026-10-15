@@ -5,6 +5,7 @@
 #include <boost/log/trivial.hpp>
 #include <cstddef>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_invoke.h> // NEOTKO_PAINTCARRY_TAG
 
 #ifndef NDEBUG
 //    #define EXPENSIVE_DEBUG_CHECKS
@@ -1075,7 +1076,8 @@ void TriangleSelector::split_triangle(int facet_idx, const Vec3i32 &neighbors)
 
     // In case the object is non-uniformly scaled, transform the
     // points to world coords.
-    if (! m_cursor->uniform_scaling) {
+    // NEOTKO_PAINTCARRY_TAG: resample() splits with no cursor.
+    if (m_cursor && ! m_cursor->uniform_scaling) {
         for (size_t i=0; i<pts.size(); ++i) {
             pts_transformed[i] = m_cursor->trafo * (*pts[i]);
             pts[i] = &pts_transformed[i];
@@ -1385,6 +1387,163 @@ void TriangleSelector::reset()
     m_orig_size_vertices = int(m_vertices.size());
     m_orig_size_indices  = int(m_triangles.size());
 }
+
+// NEOTKO_PAINTCARRY_TAG_START
+// Smallest barycentric coordinate of `p` (projected on the triangle's plane). >= 0 means inside;
+// the child with the largest value is the one that best contains the point.
+static float min_barycentric(const Vec3f &p, const Vec3f &a, const Vec3f &b, const Vec3f &c)
+{
+    const Vec3f v0 = b - a, v1 = c - a, v2 = p - a;
+    const float d00 = v0.dot(v0), d01 = v0.dot(v1), d11 = v1.dot(v1);
+    const float d20 = v2.dot(v0), d21 = v2.dot(v1);
+    const float denom = d00 * d11 - d01 * d01;
+    if (std::abs(denom) < 1e-20f)
+        return -std::numeric_limits<float>::max();
+    const float v = (d11 * d20 - d01 * d21) / denom;
+    const float w = (d00 * d21 - d01 * d20) / denom;
+    return std::min({ 1.f - v - w, v, w });
+}
+
+EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area) const
+{
+    if (leaf_area)
+        *leaf_area = 0.f;
+    if (facet_idx < 0 || facet_idx >= m_orig_size_indices || ! m_triangles[facet_idx].valid())
+        return EnforcerBlockerType::NONE;
+    int idx = facet_idx;
+    while (m_triangles[idx].is_split()) {
+        const Triangle &tr         = m_triangles[idx];
+        int             best       = tr.children[0];
+        float           best_score = -std::numeric_limits<float>::max();
+        for (int i = 0; i <= tr.number_of_split_sides(); ++i) {
+            const Triangle &ch = m_triangles[tr.children[i]];
+            const float score = min_barycentric(pt, m_vertices[ch.verts_idxs[0]].v, m_vertices[ch.verts_idxs[1]].v,
+                                                m_vertices[ch.verts_idxs[2]].v);
+            if (score > best_score) {
+                best_score = score;
+                best       = tr.children[i];
+            }
+        }
+        idx = best;
+    }
+    // Only a facet split by a stroke limits the resolution; a whole facet (painted or not) has no
+    // border inside it, and its size says nothing about where strokes are.
+    if (leaf_area && idx != facet_idx) {
+        const std::array<int, 3> &v = m_triangles[idx].verts_idxs;
+        *leaf_area = 0.5f * (m_vertices[v[1]].v - m_vertices[v[0]].v).cross(m_vertices[v[2]].v - m_vertices[v[0]].v).norm();
+    }
+    return m_triangles[idx].get_state();
+}
+
+// The resampling of one facet, worked out without touching the selector so that every facet can
+// run in parallel. Each triangle is sampled at its corners, edge midpoints and centre; a triangle
+// that is one colour (and no bigger than the painting under it) becomes a leaf, the rest is split
+// in four at its edge midpoints - the split TriangleSelector does with all three sides cut and
+// special side 0, so apply_resample_plan() can replay it. The plan is written in pre-order:
+// -1 = split (four children follow), otherwise the state of a leaf. The corners of the children
+// are corners or midpoints of the parent, so their samples are passed down, not taken again.
+namespace {
+struct ResamplePlanner
+{
+    const std::function<TriangleSelector::SampledState(const Vec3f &)> &sampler;
+    float                                                               edge_limit_sqr;
+    std::vector<int16_t>                                               &plan;
+
+    using S = TriangleSelector::SampledState;
+
+    void run(const Vec3f &a, const Vec3f &b, const Vec3f &c, const S &sa, const S &sb, const S &sc, int depth)
+    {
+        const Vec3f mab = (a + b) * 0.5f, mbc = (b + c) * 0.5f, mca = (c + a) * 0.5f;
+        const S     centre = sampler((a + b + c) / 3.f);
+        const S     sab = sampler(mab), sbc = sampler(mbc), sca = sampler(mca);
+        const float area = 0.5f * (b - a).cross(c - a).norm();
+
+        // Split while the triangle is bigger than the smallest painted piece under it; on the
+        // border of a stroke, stop once it is as fine as the painting it copies.
+        bool  uniform  = true;
+        float min_leaf = 0.f;
+        for (const S *s : { &centre, &sa, &sb, &sc, &sab, &sbc, &sca }) {
+            uniform = uniform && s->state == centre.state && (s->leaf_area <= 0.f || area <= s->leaf_area);
+            if (s->leaf_area > 0.f && (min_leaf <= 0.f || s->leaf_area < min_leaf))
+                min_leaf = s->leaf_area;
+        }
+        if (! uniform && min_leaf > 0.f && area <= 0.5f * min_leaf)
+            uniform = true;
+        const float longest_sqr = std::max({ (b - a).squaredNorm(), (c - b).squaredNorm(), (a - c).squaredNorm() });
+        if (uniform || depth > 30 || longest_sqr <= edge_limit_sqr) {
+            plan.push_back(int16_t(centre.state));
+            return;
+        }
+        plan.push_back(-1);
+        if (depth < 6) {
+            // A few facets on the border of a fine stroke take far more work than the rest, and
+            // the facets are what the threads share out: split the work of a heavy facet too.
+            // Each child plans into its own list, appended in order, so the plan is the same.
+            std::array<std::vector<int16_t>, 4> sub;
+            ResamplePlanner p0{ sampler, edge_limit_sqr, sub[0] }, p1{ sampler, edge_limit_sqr, sub[1] },
+                            p2{ sampler, edge_limit_sqr, sub[2] }, p3{ sampler, edge_limit_sqr, sub[3] };
+            tbb::parallel_invoke([&] { p0.run(a, mab, mca, sa, sab, sca, depth + 1); },
+                                 [&] { p1.run(mab, b, mbc, sab, sb, sbc, depth + 1); },
+                                 [&] { p2.run(mbc, c, mca, sbc, sc, sca, depth + 1); },
+                                 [&] { p3.run(mab, mbc, mca, sab, sbc, sca, depth + 1); });
+            for (const std::vector<int16_t> &v : sub)
+                plan.insert(plan.end(), v.begin(), v.end());
+            return;
+        }
+        run(a, mab, mca, sa, sab, sca, depth + 1);
+        run(mab, b, mbc, sab, sb, sbc, depth + 1);
+        run(mbc, c, mca, sbc, sc, sca, depth + 1);
+        run(mab, mbc, mca, sab, sbc, sca, depth + 1);
+    }
+};
+} // namespace
+
+void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit)
+{
+    reset();
+    set_edge_limit(edge_limit);
+
+    // Plan every facet in parallel (the sampler must be thread safe; nothing here writes to the
+    // selector), then replay the plans, which edits the selector, in one serial pass.
+    std::vector<std::vector<int16_t>> plans(m_orig_size_indices);
+    tbb::parallel_for(tbb::blocked_range<int>(0, m_orig_size_indices), [&](const tbb::blocked_range<int> &range) {
+        for (int facet_idx = range.begin(); facet_idx < range.end(); ++facet_idx) {
+            const std::array<int, 3> &vi = m_triangles[facet_idx].verts_idxs;
+            const Vec3f a = m_vertices[vi[0]].v, b = m_vertices[vi[1]].v, c = m_vertices[vi[2]].v;
+            ResamplePlanner planner{ sampler, m_edge_limit_sqr, plans[facet_idx] };
+            planner.run(a, b, c, sampler(a), sampler(b), sampler(c), 0);
+        }
+    });
+
+    for (int facet_idx = 0; facet_idx < m_orig_size_indices; ++facet_idx) {
+        size_t pos = 0;
+        apply_resample_plan(facet_idx, m_neighbors[facet_idx], plans[facet_idx], pos);
+        if (m_triangles[facet_idx].is_split())
+            remove_useless_children(facet_idx);
+    }
+    if (m_invalid_triangles > 0)
+        garbage_collect();
+}
+
+void TriangleSelector::apply_resample_plan(int facet_idx, const Vec3i32 &neighbors, const std::vector<int16_t> &plan, size_t &pos)
+{
+    const int16_t node = plan[pos++];
+    if (node >= 0) {
+        m_triangles[facet_idx].set_state(EnforcerBlockerType(node));
+        return;
+    }
+    // Four children at the edge midpoints, in the order ResamplePlanner::run() visits them.
+    const EnforcerBlockerType state = m_triangles[facet_idx].get_state();
+    m_triangles[facet_idx].set_division(3, 0);
+    perform_split(facet_idx, neighbors, state);
+    for (int i = 0; i < 4; ++i) {
+        // Re-read: perform_split() in the children may grow m_triangles and move it.
+        const Triangle &tr    = m_triangles[facet_idx];
+        const int       child = tr.children[i];
+        apply_resample_plan(child, this->child_neighbors(tr, neighbors, i), plan, pos);
+    }
+}
+// NEOTKO_PAINTCARRY_TAG_END
 
 void TriangleSelector::set_edge_limit(float edge_limit)
 {

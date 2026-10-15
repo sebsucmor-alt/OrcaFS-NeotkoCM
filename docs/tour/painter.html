@@ -348,7 +348,7 @@
         <tr><td><span class="toolg" data-glyph="Paint"></span><b>Paint</b> (smart fill)</td><td>Click a flat face and the coplanar region floods with the active profile.</td></tr>
         <tr><td><span class="toolg" data-glyph="Erase"></span><b>Eraser</b></td><td>The same smart fill, removing paint under the cursor.</td></tr>
         <tr><td><span class="toolg" data-glyph="Pick"></span><b>Pick</b> (eyedropper)</td><td>Reads the recipe under the cursor and makes it the active colour.</td></tr>
-        <tr><td><span class="toolg" data-glyph="Sticker"></span><b>Sticker</b></td><td>Places a loaded SVG on a flat top face. <a href="#stickers">See the warning below.</a></td></tr>
+        <tr><td><span class="toolg" data-glyph="Sticker"></span><b>Sticker</b></td><td>Places a loaded SVG on a flat top or bottom face. <b>Load SVG…</b> appears next to it. <a href="#stickers">More below.</a></td></tr>
       </tbody>
     </table>
     </div>
@@ -774,34 +774,43 @@
     </p>
 
     <!-- ================================================================= -->
-    <h2 id="stickers" data-short="Stickers (rough)">Stickers <span class="badge badge--risk" style="font-size:.62rem;vertical-align:middle">experimental</span></h2>
+    <h2 id="stickers" data-short="Stickers">Stickers <span class="badge badge--risk" style="font-size:.62rem;vertical-align:middle">experimental</span></h2>
 
     <p>
-      Load an SVG in the Palette tab and the Sticker tool places it on a flat top face. It is not
-      geometry: the shape becomes a 2D mask carrying a Sandwich recipe, resolved at slice time.
-      Stack several and the topmost wins where they overlap; it occludes rather than blends.
-    </p>
-
-    <p>
-      It works and it slices. It is also the least finished part of the painter, and you should
-      know what you are getting:
+      Pick the Sticker tool, press <b>Load SVG…</b> next to it, and click the object. A sticker is not
+      geometry: the SVG becomes a 2D mask carrying Sandwich recipes, resolved at slice time. Stack several
+      and the topmost wins where they overlap; it covers rather than blends. Since 2.4.8 they have their own
+      <b>Stickers</b> tab, where you place and recolour them (see <code>NEOTKOCM_RELEASE_2_48.md</code>).
     </p>
 
     <ul>
-      <li><strong>You cannot see a sticker anywhere.</strong> Not in the normal 3D view, not inside
-        the MMU painter, and not even inside the Sandwich painter unless you are actively editing
-        that sticker. You place it, it disappears, and you find out what it did in the preview or
-        the G-code.</li>
-      <li><strong>A sticker overrides everything under it, silently.</strong> Hand-painted zones
-        and MMU paint both. It is applied last, over whatever survived. Nothing warns you.</li>
-      <li><strong>Top surfaces only.</strong> Bottom stickers were never implemented.</li>
-      <li>The wipe tower does not currently switch between a painted tower and a sticker one.</li>
+      <li><strong>Multicolour SVGs.</strong> Every colour of the drawing gets its own recipe from your four
+        filaments, Flat or ColorStitch. Backgrounds are dropped, see-through shapes are merged, CSS colours
+        are read and linear gradients print as bands (or as one ColorStitch ramp).</li>
+      <li><strong>Top or bottom.</strong> A sticker sits on the top face or on the bottom one (the face on
+        the bed, or the underside of an overhang). The click lands on the flat face of that side at the spot
+        you pick. Bottom recipes are worked out as seen from the bed.</li>
+      <li><strong>Editing a sticker.</strong> Edit on a layer opens its controls right under the layers, in
+        the same tab. Place (side, rotate, size, mirror, restore its proportion if the object was scaled
+        unevenly) and Colours, in one column: what the SVG asks for over what your filaments give, a row of
+        squares with every colour, each colour's recipe drawn as in Pro, the closest other recipes, Edit in Pro
+        (with Back to sticker to return), and a cap on how many recipes the sticker may use.</li>
+      <li><strong>You can see them.</strong> Every sticker shows in the painter and in the normal 3D view,
+        cut to the face it sits on.</li>
     </ul>
 
-    <p>
-      All of this is being handled together in a planned <em>Mask-Painting</em> section, where
-      stickers and a drawing tool become one thing. Until then, treat them as a curiosity.
-    </p>
+    <p>What to keep in mind:</p>
+
+    <ul>
+      <li><strong>A sticker covers everything under it.</strong> Hand-painted zones and MMU paint both: it
+        is applied last, over whatever is there.</li>
+      <li><strong>The 3D preview draws each colour as a flat swatch.</strong> A ColorStitch weave or a smooth
+        gradient shows in the recipe and in the slice, not yet on the model.</li>
+      <li><strong>Wall-recolouring recipes don't recolour walls on a sticker.</strong> The sticker's Place tab warns.</li>
+      <li><strong>Bottom on the bed face:</strong> the wipe tower plans the first tool change in the wrong
+        place (the print does it at the start). The part prints fine; it is on the list for the tower.</li>
+      <li>Sliced and checked in the G-code; not yet proven over many prints.</li>
+    </ul>
 
     <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
@@ -814,7 +823,6 @@
         3MF.</li>
       <li><strong>Deleting a profile leaves painted areas orphaned.</strong> The slice warns and
         carries on with no effect in those areas.</li>
-      <li><strong>Stickers are invisible until they print.</strong> See above.</li>
     </ul>
 
     <nav class="pager">
@@ -1448,7 +1456,7 @@ Tour.demo('panel-map', function (host) {
     t_paint: ['Paint', 'Smart fill. Click a flat face and the whole coplanar region fills with the active colour.', TB],
     t_erase: ['Eraser', 'The same smart fill, removing paint instead.', TB],
     t_pick: ['Eyedropper', 'Reads the recipe under the cursor and makes it the active colour.', TB],
-    t_sticker: ['Sticker', 'Places a loaded SVG on a flat top face. Experimental, see Stickers further down this page.', TB],
+    t_sticker: ['Sticker', 'Places a loaded SVG on a flat top or bottom face. Experimental, see Stickers further down this page.', TB],
     help: ['Help', 'Orca’s own help button, with the shortcuts for this gizmo.', TB],
     eraseall: ['Erase all', 'Removes all the paint from the selected objects. It asks first, and turns amber on hover so you can tell it apart from the rest.', TB],
     tab0: ['Palette', 'Paint, erase and pick colours on the model: the library, what is in use on this object, and stickers.', 'Tabs'],

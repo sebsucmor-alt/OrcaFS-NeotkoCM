@@ -1013,11 +1013,12 @@ static std::vector<std::string> s_Preset_print_options {
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      // NEOTKO_NEOTOWER_TAG_START — NeoTower post-slice planner + options
-     "neotko_wipe_tower", "neotower_purge_compaction", "neotko_tower_type", "neotower_zigurat",
+     "neotko_wipe_tower", "neotower_purge_compaction", "neotko_tower_type", "neotower_zigurat", NEOTKO_PRIVATE_PRESET_KEYS
      // NEOTKO_NEOTOWER_TAG — variable layer height (Experimental). Was missing from this
      // list, so the toggle never persisted to presets/3mf and always loaded back off
      // (user-reported s223) — an option absent here is invisible to save/load entirely.
      "neotower_variable_layer_height",
+     "neotko_stacked_real_layers", // NEOTKO_GRAVITY_TAG s363
      // NEOTKO_NEOTOWER_TAG s310 — skip-ramming (keep tower visit).
      "neotower_no_ramming",
      // NEOTKO_NEOTOWER_TAG_END

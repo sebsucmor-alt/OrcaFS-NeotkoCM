@@ -993,11 +993,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     WipeTowerWallType wipe_tower_wall_type = config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type");
     toggle_line("wipe_tower_cone_angle", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwCone);
-    toggle_line("wipe_tower_extra_rib_length", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
-    toggle_line("wipe_tower_rib_width", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
+    // With the private tower type the rib size is not the user's: both lines hidden.
+    const bool rib_size_hidden = config->has("neotko_tower_type") &&
+        config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttPrivate;
+    toggle_line("wipe_tower_extra_rib_length", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib && !rib_size_hidden);
+    toggle_line("wipe_tower_rib_width", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib && !rib_size_hidden);
     toggle_line("wipe_tower_fillet_wall", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     
-    toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
+    // The private tower type keeps its own width with Rib.
+    toggle_field("prime_tower_width", have_prime_tower && (wipe_tower_wall_type != WipeTowerWallType::wtwRib ||
+        (config->has("neotko_tower_type") && config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttPrivate)));
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
 
@@ -1006,17 +1011,29 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     {
         const bool show_tower_type = have_prime_tower && !is_BBL_Printer;
         toggle_line("neotko_tower_type", show_tower_type);
+        // The private tower type runs on the NeoTower planner: its options apply too.
         const bool is_neotower = show_tower_type &&
-            config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttNeoTower;
-        toggle_line("neotower_zigurat", is_neotower);
+            (config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttNeoTower ||
+             config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttPrivate);
+        // The zigurat is NeoTower's own: hidden (and off, NeoWipeTower.cpp) with the private tower type.
+        toggle_line("neotower_zigurat", is_neotower &&
+            config->opt_enum<NeoTowerType>("neotko_tower_type") != NeoTowerType::nttPrivate);
         toggle_line("neotower_purge_compaction", is_neotower);
-        toggle_line("neotower_no_ramming", is_neotower); // NEOTKO_NEOTOWER_TAG s310
+        // The private tower's own lines, only for it.
+        const bool is_private_tower = show_tower_type &&
+            config->opt_enum<NeoTowerType>("neotko_tower_type") == NeoTowerType::nttPrivate;
+        // NEOTKO_NEOTOWER_TAG s310. Shown with the private tower type too (s359).
+        toggle_line("neotower_no_ramming", is_neotower);
+        NEOTKO_PRIVATE_TOWER_TOGGLE_LINES(config, is_private_tower)
+        // The private tower type purges "Prime volume" on every toolchange, and the
+        // Classic tower cannot print Sandwich at all (s361): the knob is NeoTower's only.
+        toggle_line("multipass_prime_volume", is_neotower && !is_private_tower);
         // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental): visible whenever the
-        // NeoTower planner is selected so users discover it, but the field is greyed out (locked)
-        // unless LibreMode is active — it can only be switched on in LibreMode.
-        const bool libre_active_tower = wxGetApp().app_config->get_bool("neotko_libre_mode");
+        // NeoTower planner is selected. s361: no longer locked to LibreMode.
         toggle_line("neotower_variable_layer_height", is_neotower);
-        toggle_field("neotower_variable_layer_height", is_neotower && libre_active_tower);
+        toggle_field("neotower_variable_layer_height", is_neotower);
+        // NEOTKO_GRAVITY_TAG s363 — «Stacked objects: real layers» hangs from the line above.
+        toggle_line("neotko_stacked_real_layers", is_neotower && config->opt_bool("neotower_variable_layer_height"));
     }
 
     toggle_line("prime_volume",have_prime_tower && (!purge_in_primetower || !bSEMM));

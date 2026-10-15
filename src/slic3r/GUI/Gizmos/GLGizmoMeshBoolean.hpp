@@ -79,6 +79,8 @@ protected:
     void on_save(cereal::BinaryOutputArchive &ar) const override;
 
 private:
+    long m_neotko_boolean_ms = 0; // NEOTKO_PAINTCARRY_TAG — time of the last mcut boolean, for the log
+
     bool m_enable{ false };
     MeshBooleanOperation m_operation_mode;
     MeshBooleanSelectingState m_selecting_state;

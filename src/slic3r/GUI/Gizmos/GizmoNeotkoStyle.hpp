@@ -874,7 +874,7 @@ inline void neo_status_chip(const char *text, ImU32 col, bool solid)
 // Un deslizador con su etiqueta en una columna fija a la izquierda. La columna es lo que hace que
 // seis deslizadores distintos se lean como una tabla y no como seis frases.
 inline bool neo_row_slider(const char *id, const char *caption, float *v, float mn, float mx,
-                    const char *fmt, const char *tip, float label_col = -1.f)
+                    const char *fmt, const char *tip, float label_col = -1.f, ImGuiSliderFlags flags = 0)
 {
     const float col = (label_col > 0.f) ? label_col : neo_label_col_current();
     ImGui::PushID(id);
@@ -888,7 +888,7 @@ inline bool neo_row_slider(const char *id, const char *caption, float *v, float 
         ImGui::SetTooltip("%s", tip != nullptr ? tip : caption);
     ImGui::SameLine(col);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    const bool changed = ImGui::SliderFloat("##v", v, mn, mx, fmt);
+    const bool changed = ImGui::SliderFloat("##v", v, mn, mx, fmt, flags);   // s348 — flags (logarítmico) opcional
     if (tip != nullptr && ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", tip);
     ImGui::PopID();

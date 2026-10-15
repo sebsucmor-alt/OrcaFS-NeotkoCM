@@ -331,7 +331,6 @@ private:
     { m_tray.push_back(PainterTrayMsg{ text, why, amber }); }
     float m_tool_right_w = 0.f;     // s319 — ancho MEDIDO del grupo ? / Erase all (frame anterior)
     bool m_brush_open    = true;    // s318 — sección Brush & view (antes CollapsingHeader)
-    bool m_stickers_open = false;   // s318 — sección Stickers (SVG)
     // NEOTKO_NEOTOWER_TAG — al pintar, promociona el tipo de torre a NeoTower en el preset
     // de impresión (one-shot, no-op si ya está) para que la UI refleje el planificador real.
     void ensure_neotower_tower_type();
@@ -376,21 +375,19 @@ private:
     };
     std::unordered_map<size_t, CursorRaycaster> m_cursor_rc;
 
-    // NEOTKO_STICKER_TAG — herramienta Sticker: coloca un SVG de 1 color como
-    // pegatina plana sobre una cara (sin deformar el mesh), con una receta
-    // Sandwich propia (ver ColorStitchSticker en Model.hpp + Fill.cpp Fase 6c v2).
-    // v1: sin arrastre/rotación/escala en viewport — la pegatina queda plana
-    // en el plano XY del frame-objeto, en la posición del click; ajustar
-    // tamaño/rotación desde el propio SVG de origen. Pulido pendiente.
+    // NEOTKO_STICKER_TAG — herramienta Sticker: coloca un SVG (1 color o multicolor, una
+    // receta por color) como pegatina plana sobre una cara superior (sin deformar el mesh).
+    // Ver ColorStitchSticker en Model.hpp + Fill.cpp Fase 6c v2. Queda plana en el XY del
+    // frame-objeto; mover, rotar y escalar desde el modo edición (pestaña Stickers).
     bool        m_sticker_mode = false;
     std::string m_pending_sticker_svg;    // SVG cargado, aún sin colocar
     std::string m_pending_sticker_name;   // nombre a mostrar (stem del fichero)
     bool load_sticker_svg_dialog();       // abre file picker, rellena m_pending_sticker_*
     void place_sticker_at(ModelObject* mo, const ModelVolume* mv, const Vec3f& hit_local);
-    void render_sticker_section();        // sección "Stickers (SVG)" en Palette
+    void render_sticker_section();        // lista de capas (pestaña Stickers, s348)
 
     // NEOTKO_STICKER_TAG — modo edición (mover/rotar) de un sticker YA colocado,
-    // activado desde "Edit placement" en la lista de Palette. -1 = ninguno.
+    // activado desde el botón Edit de su capa (pestaña Stickers). -1 = ninguno.
     // v1.5: solo traslación (arrastre por raycast, sin realinear a la normal —
     // el propio feature asume superficies top planas, ver plan §3.2) + rotación
     // Z vía slider (no anillo 3D: GLGizmoRotate está acoplado a Selection/
@@ -411,7 +408,13 @@ private:
     // transform SIEMPRE se reconstruye como Translation*RotationZ*Scaling(s),
     // nunca escala no-uniforme ni negativa (el slider clampa a positivo).
     float m_editing_scale       = 1.f;
+    // s348 — tamaño RELATIVO: 100 % = el sticker cabe en la cara de arriba del objeto (con margen).
+    // La referencia se recalcula siempre desde la caja del objeto (frame objeto, sin instancia), así
+    // que escalar el objeto o girar el sticker no apila nada en el modelo: sólo se guarda la escala.
+    double m_edit_svg_w = 0.0, m_edit_svg_h = 0.0;   // tamaño del SVG a escala 1 (mm)
+    double sticker_fit_scale(const ModelObject* mo, double spin_rad) const;
     bool  m_sticker_dragging    = false;
+    bool  m_sticker_drag_snapshotted = false;   // s349: snapshot de undo al primer movimiento real
     void enter_sticker_edit(int idx);
     void exit_sticker_edit();
 
@@ -425,6 +428,92 @@ private:
     int     m_sticker_overlay_built_for = -1;   // idx para el que se construyó
     void ensure_sticker_overlay_built(const ColorStitchSticker& sticker);
     void render_sticker_edit_overlay();
+    // s348 — overlay MULTICOLOR: un relleno por color (índice en sticker.colors), del color de su receta.
+    std::vector<GLModel> m_sticker_overlay_color_fills;
+    std::vector<int>     m_sticker_overlay_color_idx;
+
+    // s348 — SVG multicolor: al cargar se detectan los colores del SVG y se calcula una receta
+    // por color (plana = suggest_flat, ColorStitch = suggest_dither_single). Los perfiles se
+    // crean al COLOCAR (cancelar no ensucia la biblioteca).
+    bool                                    m_import_multicolor  = true;   // false = 1 color (el activo)
+    int                                     m_import_color_mode  = 0;      // 0 plano, 1 ColorStitch
+    std::vector<uint32_t>                   m_pending_svg_colors;          // 0xRRGGBB, fusionados
+    std::vector<bool>                       m_pending_svg_grad;            // s350: 1:1, la zona j es un degradado
+    std::vector<Slic3r::ColorSci::ColorRecipe> m_pending_recipes;          // 1:1 con los colores
+    // s349 — SVG tal como vino (ya con las clases CSS en línea) y su aplanado. Se guarda el
+    // original para poder rehacer el aplanado si cambia «Keep background».
+    std::string m_pending_sticker_svg_raw;
+    bool        m_sticker_keep_background = false;
+    ColorStitch::SvgFlattenInfo m_pending_flatten;
+    void prepare_pending_sticker();      // aplanar + colores + recetas
+    void detect_pending_sticker_colors();
+    void solve_pending_sticker_recipes();
+    // s349 — `grads`: degradados del SVG (por color medio). Si `rgb` es uno y sus paradas tienen
+    // filamento cerca, sale una receta ColorStitch de degradado; si no, como siempre.
+    Slic3r::ColorSci::ColorRecipe solve_sticker_color(uint32_t rgb, int mode,
+        const std::map<uint32_t, ColorStitch::StickerGradient>* grads = nullptr) const;
+    std::map<uint32_t, ColorStitch::StickerGradient> m_pending_gradients;   // s349
+    // s349 — degradados del SVG en BANDAS planas (por defecto) o en rampa ColorStitch.
+    bool m_import_grad_bands = true;
+    int  m_grad_band_count   = 12;   // s350: 16→12 (menos recetas, casi los mismos tramos)
+    // N recetas (una por banda, resueltas como cualquier color plano/ColorStitch); las iguales
+    // comparten perfil. Vacío si el color no es un degradado.
+    std::vector<int> make_band_profiles(uint32_t rgb, const std::map<uint32_t, ColorStitch::StickerGradient>& grads,
+                                        int mode, const std::string& base_name);
+    // s349 — degradados del sticker en edición (leer el SVG en cada fotograma es caro).
+    size_t m_grad_cache_key = 0;
+    std::map<uint32_t, ColorStitch::StickerGradient> m_grad_cache;
+    const std::map<uint32_t, ColorStitch::StickerGradient>& sticker_gradients_cached(const std::string& svg);
+    int  profile_from_sticker_recipe(const Slic3r::ColorSci::ColorRecipe& r, const std::string& name);
+
+    // s364 — EDITOR DEL STICKER, dentro de la pestaña Stickers (antes, s350, ventana flotante):
+    // bloque plegable bajo la lista de capas con las pestañas Place y Colours. «Abierto» = hay un
+    // sticker en edición (m_editing_sticker_idx >= 0). Colours va en UNA columna: miniaturas,
+    // fila de cuadritos (un color cada uno), detalle del elegido (tramos del degradado, esquema de
+    // la receta como en el Pro, Edit en Pro), alternativas plegables y el pie.
+    // TRAMO = bandas seguidas con la misma receta (se editan tramos, no bandas sueltas).
+    size_t m_stkc_obj_id     = 0;      // ModelObject::id().id del sticker en edición
+    int    m_stkc_idx        = -1;     // índice en su pila
+    bool   m_stkc_block_open = true;   // el bloque «Sticker: nombre», desplegado
+    bool   m_stkc_alts_open  = false;  // «Other recipes», desplegado
+    bool   m_stkc_colours_shown = false;   // la pestaña Colours se dibujó en este fotograma (latido 3D)
+    // «Edit in Pro» desde el editor: Pro enseña el aviso con «Back to sticker».
+    bool   m_pro_from_sticker = false;
+    int    m_stkc_cur        = 0;      // color seleccionado (fila)
+    int    m_stkc_band       = -1;     // una banda del tramo seleccionado (-1 = el color entero)
+    int    m_stkc_focus_b0 = -1, m_stkc_focus_b1 = -1;   // bandas del tramo seleccionado (para resaltarlo en 3D)
+    std::vector<char> m_stkc_sel;      // filas marcadas con Ctrl/Shift (dar un color a varias)
+    // Alternativas de la selección actual (se rehacen al cambiar de selección).
+    struct StkCand { std::string label; int pid = 0; bool from_recipe = false;
+                     Slic3r::ColorSci::ColorRecipe recipe; uint32_t rgb = 0; float de = 0.f; };
+    int    m_stkc_cand_color = -1, m_stkc_cand_band = -2;
+    std::vector<StkCand> m_stkc_cands;
+    int    m_stkc_budget     = 8;      // presupuesto de recetas distintas por sticker
+    void reset_sticker_editor(const ModelObject* mo, int sticker_idx);
+    void render_sticker_editor();
+    void render_sticker_colours_body(ColorStitchSticker& st);
+    void build_sticker_candidates(const ColorStitchSticker& st, int color, int band);
+    void edit_profile_in_pro(int pid);
+    // s350 — LADO del sticker (top/bottom) y colocación por PROYECCIÓN: el clic se lleva a la cara
+    // plana de ese lado que hay en la misma vertical, así colocar/mover no depende de acertar a la
+    // cara desde un ángulo raro (ni de que la cama tape la vista desde abajo).
+    bool m_place_bottom = false;   // lado del SVG pendiente (selector de Import)
+    // s350 — recetas de sticker para la zona BOTTOM: mientras está a true, solve_sticker_color
+    // resuelve visto DESDE LA CAMA (pasada 0 delante, límites 2 Solid + 1 ColorStitch) y
+    // profile_from_sticker_recipe guarda la receta en stack_bottom_json. Se pone con un ámbito
+    // (BottomSolve) alrededor de cada sitio que crea recetas para un sticker bottom.
+    mutable bool m_solve_bottom = false;
+    Slic3r::ColorSci::ColorRecipe solve_sticker_color_bottom(uint32_t rgb, int mode) const;
+    void recompute_sticker_colours(ColorStitchSticker& st, int mode);   // s350 — todas sus recetas, del lado que mire
+    int  m_stkc_tab     = 0;       // pestaña del editor: 0 Place, 1 Colours
+    std::string m_sticker_place_msg;   // aviso del último clic que no pudo colocar/mover
+    bool sticker_project(const ModelObject* mo, const Vec3d& p_obj, bool bottom, Vec3d& out) const;
+    static Vec3d sticker_obj_scale(const ModelObject* mo);
+    void sticker_view_side(bool bottom);
+    void render_sticker_place_body(ModelObject* mo, ColorStitchSticker& st, int idx);
+    void draw_recipe_card(const SurfacePassStack& top, const SurfacePassStack& penu,
+                          const SurfacePassStack& bottom, bool auto_generated);   // s350 — tarjeta de receta (tooltip)
+    void sticker_colours_changed(ColorStitchSticker& st);
 
     // s111 — preview de pintura para los objetos marcados NO-activos: el painter
     // base solo dibuja el objeto activo, así que para ver TODOS los marcados con su
@@ -535,7 +624,13 @@ private:
     // Sustituye el layout de 2 columnas (rail+cuerpo) por un selector segmentado;
     // m_panel_col_h (altura medida del frame anterior para las 2 columnas) muere
     // con él — F1 ya no lo necesita.
-    int m_department          = 0;
+    // s348 — pestañas con nombre (antes números mágicos). Stickers al FINAL para no
+    // desplazar las otras.
+    enum Department { DEP_PALETTE = 0, DEP_GENERATOR = 1, DEP_PRO = 2, DEP_OBJECT = 3, DEP_STICKERS = 4 };
+    int m_department          = DEP_PALETTE;
+    // s348 — herramienta que había al entrar en la pestaña Stickers; se devuelve al salir.
+    int m_tool_before_stickers = -1;
+    void render_stickers_department();   // pestaña Stickers (cargar + capas)
 
     std::map<std::string, wxString> m_desc;
 };

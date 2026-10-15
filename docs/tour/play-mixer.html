@@ -181,7 +181,7 @@
     <table>
       <thead><tr><th>Readout</th><th>What it is</th></tr></thead>
       <tbody>
-        <tr><td><b>Printed</b></td><td>The composited colour, averaged across the surface the way your eye does it. This is the number the app's Result swatch shows for the same recipe.</td></tr>
+        <tr><td><b>Printed</b></td><td>The composited colour, averaged across the surface the way your eye does it. This is the number the app's Result swatch shows for the same recipe (line by line since 2.4.8). With two or more striped passes the app treats their lines as crossing and this bench lines them up, so there the two can differ a little.</td></tr>
         <tr><td><b>transmit</b></td><td>How much of the object's own fill still reaches your eye through the whole stack. High transmit means the Sandwich is a tint rather than a coat.</td></tr>
         <tr><td><b>toolchanges</b></td><td>Per layer. The engine groups a ColorStitch pass's lines by unique tool and prints one block per tool, so a dither costs one change per <em>tool</em> however finely it interleaves. What you are counting here is the tool sequence across the whole stack, which is what lands in the <a href="tower.html">wipe tower</a>.</td></tr>
         <tr><td><b>ΔE</b></td><td>CIEDE2000 between A and B. Under 2, most people will not see the difference side by side. Over 5, they are two colours.</td></tr>

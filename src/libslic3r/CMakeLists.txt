@@ -177,6 +177,8 @@ set(lisbslic3r_sources
     Feature/ZBump/ZBump.hpp
     Feature/Gravity/GravityFloor.cpp
     Feature/Gravity/GravityFloor.hpp
+    Feature/Gravity/GravityLayering.cpp   # NEOTKO s362 — las capas de un objeto flotante nacen en su base
+    Feature/Gravity/GravityLayering.hpp
     Feature/SupportZones/SupportZoneProbe.cpp
     Feature/SupportZones/SupportZoneProbe.hpp
     Feature/HeightAdaptive/HeightCurve.cpp
@@ -420,6 +422,12 @@ set(lisbslic3r_sources
     ColorStitchLegacyMigration.cpp   # NEOTKO s316 fase B — aparte para no arrastrar nanosvg al validador
     SurfaceEffectProfile.cpp
     SurfaceEffectProfile.hpp
+    NeotkoImportCarry.cpp            # NEOTKO s362 — recetas y pegatinas al IMPORTAR un 3mf
+    NeotkoImportCarry.hpp
+    NeotkoSurfaceExtrude.cpp         # NEOTKO s363 — Construct: lamina extruida de una cara plana
+    NeotkoSurfaceExtrude.hpp
+    PaintTransfer.cpp                # NEOTKO_PAINTCARRY_TAG s366 — booleans keep the painting
+    PaintTransfer.hpp
     # NEOTKO_SANDWICH_TAG_END
     NormalUtils.cpp
     NormalUtils.hpp
@@ -589,6 +597,12 @@ if (APPLE)
             Format/ModelIO.hpp
             Format/ModelIO.mm
         )
+endif ()
+
+# NEOTKO — optional private extensions (see the top-level CMakeLists.txt).
+if (NEOTKO_PRIVATE_ENABLED)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/neotko_private/sources.cmake)
+    list(APPEND lisbslic3r_sources ${NEOTKO_PRIVATE_SOURCES})
 endif ()
 
 add_library(libslic3r STATIC ${lisbslic3r_sources} 

@@ -88,6 +88,10 @@ public:
     const std::vector<SurfaceEffectProfile>&  list() const { return m_profiles; }
     size_t                                    size() const { return m_profiles.size(); }
     void                                      clear();
+    // NEOTKO_IMPORT_TAG — s362: apartar y devolver la paleta ENTERA con sus números y su contador
+    // (NeotkoImportCarry::PaletteMerge, al importar un 3mf dentro de un proyecto abierto).
+    int                                       next_id() const { return m_next_id; }
+    void                                      restore(std::vector<SurfaceEffectProfile> profiles, int next_id);
 
     // Snapshot helpers — Fase A only fills ColorStitch; the others stay `present=false`.
     // The caller picks which keys to snapshot (so we keep the manager engine-agnostic).

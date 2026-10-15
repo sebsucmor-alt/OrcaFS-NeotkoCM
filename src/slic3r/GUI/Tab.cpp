@@ -585,7 +585,7 @@ private:
         m_grad_repetitions = gi(grad_key("repetitions"), 1); // NEOTKO_COLORSTITCH_TAG — s80
         // NEOTKO_COLORSTITCH_TAG — s90: global key (NO grad_key() prefix). Both
         // Top and Penu Advanced dialogs read/write this single value.
-        m_grad_min_length  = gf("interlayer_colormix_min_length", 0.0);
+        m_grad_min_length  = gf("interlayer_colormix_min_length", 0.5);   // s348 — mismo default que PrintConfig
     }
 
     // Is the current pattern using a virtual MixedFilament digit (5-9)? If
@@ -3945,6 +3945,16 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
             plater->notify_vhl_dithering_conflict(local_z_enabled);
     }
 
+    // Choosing the private tower type also picks "Wall type" = Rib (its default). Only at the
+    // moment of the switch; the user can change it back.
+    if (opt_key == "neotko_tower_type" && boost::any_cast<int>(value) == (int)NeoTowerType::nttPrivate
+        && m_config->has("wipe_tower_wall_type")
+        && m_config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type") != WipeTowerWallType::wtwRib) {
+        DynamicPrintConfig new_conf = *m_config;
+        new_conf.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(WipeTowerWallType::wtwRib));
+        m_config_manipulation.apply(m_config, &new_conf);
+    }
+
     if (opt_key == "enable_prime_tower") {
         auto timelapse_type = m_config->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
         bool timelapse_enabled = timelapse_type->value == TimelapseType::tlSmooth;
@@ -5146,11 +5156,13 @@ void TabPrint::build()
         // hidden as a fallback for old profiles. Sandwich/MultiPass scenes use NeoTower automatically.
         optgroup->append_single_option_line("neotko_tower_type");
         optgroup->append_single_option_line("neotower_zigurat");
+        NEOTKO_PRIVATE_TOWER_TAB_LINES(optgroup)
         optgroup->append_single_option_line("neotower_purge_compaction");
         optgroup->append_single_option_line("neotower_no_ramming"); // NEOTKO_NEOTOWER_TAG s310
         // NEOTKO_NEOTOWER_TAG — Variable layer height (Experimental), shown only when
-        // Tower type = NeoTower AND LibreMode is active (toggled in ConfigManipulation).
+        // the NeoTower planner is selected (toggled in ConfigManipulation; s361: no LibreMode lock).
         optgroup->append_single_option_line("neotower_variable_layer_height");
+        optgroup->append_single_option_line("neotko_stacked_real_layers"); // NEOTKO_GRAVITY_TAG s363
         optgroup->append_single_option_line("multipass_prime_volume");
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");

@@ -37,6 +37,8 @@
 #include "DailyTips.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
+#include "slic3r/GUI/ColorStitchPaintPreview.hpp"   // s348 — show_outside_gizmo()
+#include "slic3r/GUI/ColorStitchStickerPreview.hpp" // s348 — stickers fuera del gizmo
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
 
@@ -4602,6 +4604,12 @@ void GLCanvas3D::on_render_timer(wxTimerEvent& evt)
     // right after this event, idle event is fired
     // m_dirty = true;
     // wxWakeUpIdle();
+    // s350 — un frame de animación pedido (schedule_animation_frame) sí tiene que pintarse.
+    if (m_animation_frame_pending) {
+        m_animation_frame_pending = false;
+        m_dirty = true;
+        wxWakeUpIdle();
+    }
 }
 
 void GLCanvas3D::on_set_color_timer(wxTimerEvent& evt)
@@ -8686,6 +8694,14 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                     if (!rendered_lit) {
                         m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, volume_filter,
                             partly_inside_enable);
+                    }
+                    // s348 — stickers Sandwich visibles fuera del gizmo, bajo el MISMO interruptor
+                    // que la pintura ColorStitch ("Keep paint visible outside this gizmo").
+                    if (canvas_type == ECanvasType::CanvasView3D
+                        && m_model && ColorStitchPaintPreview::show_outside_gizmo()) {
+                        shader->stop_using();
+                        ColorStitchStickerPreview::render(*m_model, camera);
+                        shader->start_using();
                     }
                 }
             }

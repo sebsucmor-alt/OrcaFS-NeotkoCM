@@ -897,7 +897,7 @@ The volume (mm³) purged before each Sandwich sub-layer toolchange (Solid / Colo
 
 Because NeoTower plans from the real post-slice toolchange list and is delta-Z aware, it is the mechanism that lets **adaptive / variable layer height + multiple tools + a Sandwich** coexist on one coherent tower. Stock Orca refuses to slice such scenes; NeoTower can purge each toolchange at the real per-layer height.
 
-A new option **Variable layer height (Experimental)** sits under **Tower type** and is exposed **only with Tower type = NeoTower and Libre Mode active** (it is visible but greyed-out otherwise). **Default: off.** When **on**, the slicer stops blocking:
+A new option **Variable layer height (Experimental)** sits under **Tower type** and shows with **Tower type = NeoTower**. Since 2.4.8 it no longer needs Libre Mode. **Default: off.** With it off, such a scene stops with a message that tells you to pick NeoTower and tick the box. When **on**, the slicer stops blocking:
 - scenes that **mix objects with different layer heights**, and
 - **adaptive / variable layer height combined with more than one filament**.
 
@@ -2568,7 +2568,7 @@ This is why it is behind the gate. When it prints reliably the gate comes off.
 | NeoArachne sources / line widths / Preview Lab | Quality → NeoArachne section |
 | NeoTower (tower type) | Quality → Prime tower → **Tower type** |
 | Zigurat / Sandwich purge compaction / Sandwich wipe reserve | Quality → Prime tower |
-| Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower (greyed unless Libre Mode) |
+| Variable layer height (Experimental) | Quality → Prime tower → **Tower type** = NeoTower |
 | PathBlend start/end zone + techo editor | PathBlend pass → **`ADV…`** (Painter Pro tray) |
 | Bump Mapping Editor (All / Painter / Top) | Left-side gizmo toolbar *(expert gate: Libre Mode active **+** `ORCA_DEBUG_TEXTUREBUMP` set, **+** `ORCA_DEBUG_ZBUMP` for Top/ZBump — see `NEOTKOCM_RELEASE_2_35.md`)* |
 | Precision Adaptive Layer Height | Left-side gizmo toolbar *(icon always visible, needs Libre Mode active to use — §11)* |
@@ -2621,7 +2621,7 @@ By design — colours you paint are *working colours* (created on demand, cleane
 
 **Q: Can I use adaptive layer height with multiple tools and a Sandwich?**
 
-Yes, as of 2.3.1 — enable **Libre Mode**, set **Tower type = NeoTower**, and turn on **Variable layer height (Experimental)** (Quality → Prime tower). The wipe-tower "missing drawers" issue that made this rough is now fixed (§9e). It is still flagged Experimental, so review G-code before long runs.
+Yes. Set **Tower type = NeoTower** and turn on **Variable layer height (Experimental)** (Quality → Prime tower). Since 2.4.8 it does not need Libre Mode. The wipe-tower "missing drawers" issue that made this rough is now fixed (§9e). It is still flagged Experimental, so review G-code before long runs.
 
 **Q: My wipe tower uses more purge than expected.**
 

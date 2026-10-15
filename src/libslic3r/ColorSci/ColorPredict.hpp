@@ -87,6 +87,14 @@ ColorRecipe suggest_flat(const float target_rgb[3],
                          const PredictOptions& opt);
 
 // Mejor receta mixed (penu dither + top solid) que minimiza ΔE2000 al target.
+// s349 — como suggest_flat (Top de 1-2 sólidos) pero probando ADEMÁS una Penultimate sólida de
+// cada filamento debajo (sandwich completo). Con TD alto la capa de debajo pesa mucho en el color:
+// sin esto, la Penultimate salía con el color del objeto y lavaba el resultado. Nunca peor que
+// suggest_flat (incluye «sin Penultimate»).
+ColorRecipe suggest_sandwich(const float target_rgb[3],
+                             const Material mats[4],
+                             const PredictOptions& opt);
+
 ColorRecipe suggest_mixed(const float target_rgb[3],
                           const Material mats[4],
                           const PredictOptions& opt);

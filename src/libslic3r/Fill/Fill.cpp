@@ -22,8 +22,10 @@
 #include "FillConcentric.hpp"
 #include "libslic3r.h"
 // NEOTKO_COLORSTITCH_TAG_START
+#include <cstdlib>   // getenv (sonda ORCA_STICKER_DUMP)
 #include <mutex>                      // NEOTKO_PATHBLEND s282: std::call_once en el log PB_KNOBS
 #include "../ColorStitch.hpp"
+#include "../SVG.hpp"   // s348 — sonda ORCA_STICKER_DUMP
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG — Fase F painter-mode MP override
 #include "../Feature/ZBump/ZBump.hpp" // NEOTKO_ZBUMP_TAG — own module, see call site below
 // NEOTKO_COLORSTITCH_TAG_END
@@ -1430,6 +1432,13 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         // MUST be consulted BEFORE _fp_tag downstream: a sticker OCCLUDES
         // whatever painted slot/natural remainder used to be under it.
         std::vector<int> _fp_sticker_tag;
+        // s348 — colour entry of that sticker (-1 = 1-colour sticker / no sticker). 1:1 with _fp_sticker_tag.
+        std::vector<int> _fp_sticker_col;
+        // s348 — área COMPLETA de cada (sticker, color) en esta capa, para que el degradado se
+        // ajuste al sticker entero y no a cada trozo (ver ColorStitch::field_fit_extent_tls).
+        std::map<std::pair<int,int>, Polygons> _stk_full_area;
+        // s349 — (sticker, color) con DEGRADADO del SVG: sus extremos en el frame de laminado.
+        std::map<std::pair<int,int>, FieldGradient> _stk_grad;
         {
             const ModelObject* _mo6c = (this->object() != nullptr)
                 ? this->object()->model_object() : nullptr;
@@ -1444,9 +1453,9 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     && (_role6c == erBottomSurface || _role6c == erBridgeInfill)
                                     && _mo6c
                                     && ColorStitch::object_painter_wants_bottom(_mo6c);
-            // NEOTKO_STICKER_TAG — v1 scope: top/penu only (mirrors the plan §8
-            // scope note — bottom stickers are not addressed in v1).
-            const bool _has_stickers6c = _is_tp && _mo6c
+            // NEOTKO_STICKER_TAG — s350: top/penu Y bottom (stickers que miran hacia abajo; la
+            // enumeración filtra por lado, ver enumerate_stickers_in_z_range).
+            const bool _has_stickers6c = (_is_tp || _is_bottom) && _mo6c
                                         && ColorStitch::object_has_any_colorstitch_stickers(_mo6c);
             // NEOTKO_PAINT_COEXIST_TAG s91 — removed `!is_mm_painted()` gate.
             // Allow painter pre-split even on MMU-painted objects: the per-piece
@@ -1720,20 +1729,37 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 // with the rebuilt `surface_fill.expolygons`.
                 if (_has_stickers6c) {
                     std::vector<size_t> _stk_idx =
-                        ColorStitch::enumerate_stickers_in_z_range(_po6c, _zlo, _zhi);
+                        ColorStitch::enumerate_stickers_in_z_range(_po6c, _zlo, _zhi, /*downward=*/_is_bottom);
+                    // s348 — una entrada por (sticker, color): el sticker multicolor aporta una
+                    // máscara por color (ya ocluidas DENTRO del sticker, disjuntas), en el
+                    // mismo orden de pila TOP-DOWN. Un sticker monocolor = una sola, col -1.
                     std::vector<size_t>     _useful_stk;
+                    std::vector<int>        _useful_stk_col;
                     std::vector<ExPolygons> _useful_stk_masks;
                     for (size_t _si : _stk_idx) {
                         const ColorStitchSticker& _stk = _mo6c->colorstitch_stickers[_si];
-                        const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(_stk.profile_id);
-                        if (!_p) continue;
-                        const std::string& _js = (_role6c == erTopSolidInfill)
-                            ? _p->stack_top_json : _p->stack_penu_json;
-                        if (SurfacePassStack::from_json(_js).passes.empty()) continue;
-                        ExPolygons _mask = ColorStitch::sticker_footprint_slice_frame(_stk, _po6c);
-                        if (_mask.empty()) continue;
-                        _useful_stk.push_back(_si);
-                        _useful_stk_masks.push_back(std::move(_mask));
+                        for (ColorStitch::StickerColorMask& _cm : ColorStitch::sticker_color_masks_slice_frame(_stk, _po6c)) {
+                            const auto* _p = Slic3r::SurfaceEffectProfileManager::get().find(
+                                ColorStitch::sticker_profile_for(_stk, _cm.color_idx));
+                            if (!_p) continue;
+                            const std::string& _js = _is_bottom ? _p->stack_bottom_json   // s350
+                                : ((_role6c == erTopSolidInfill) ? _p->stack_top_json : _p->stack_penu_json);
+                            // s349 (auditoría #2): la MISMA prueba que la resolución
+                            // (STICKER_STACK_OVERRIDE). Con `passes.empty()` una receta con
+                            // pasadas sin efecto reclamaba el área y luego no la pintaba.
+                            if (!SurfacePassStack::from_json(_js).any_effect()) continue;
+                            if (_cm.mask.empty()) continue;
+                            _useful_stk.push_back(_si);
+                            _useful_stk_col.push_back(_cm.color_idx);
+                            _stk_full_area[{ int(_si), _cm.color_idx }] = to_polygons(_cm.mask);
+                            if (_cm.grad) {
+                                _stk_grad[{ int(_si), _cm.color_idx }] = FieldGradient{ _cm.g0.x(), _cm.g0.y(), _cm.g1.x(), _cm.g1.y() };
+                                NEOTKO_LOG(PROFILE, "STICKER_GRAD z=" << this->print_z << " sticker=" << _si
+                                    << " color=" << _cm.color_idx << " p0=(" << _cm.g0.x() << "," << _cm.g0.y()
+                                    << ") p1=(" << _cm.g1.x() << "," << _cm.g1.y() << ")");
+                            }
+                            _useful_stk_masks.push_back(std::move(_cm.mask));
+                        }
                     }
                     if (!_useful_stk.empty()) {
                         // Group the CURRENT pieces by their pre-sticker tag (the
@@ -1746,6 +1772,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         surface_fill.expolygons.clear();
                         _fp_tag.clear();
                         _fp_sticker_tag.clear();
+                        _fp_sticker_col.clear();
 
                         std::map<int, ExPolygons> _tag_groups;
                         for (size_t i = 0; i < _pre_stk_polys.size(); ++i) {
@@ -1759,6 +1786,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         for (size_t si = 0; si < _useful_stk.size(); ++si) {
                             if (si) _stk_log << ",";
                             _stk_log << _useful_stk[si];
+                            if (_useful_stk_col[si] >= 0) _stk_log << "c" << _useful_stk_col[si];
                         }
                         _stk_log << "] groups=" << _tag_groups.size();
 
@@ -1773,6 +1801,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                     surface_fill.expolygons.push_back(std::move(e));
                                     _fp_tag.push_back(_grp_tag);
                                     _fp_sticker_tag.push_back(static_cast<int>(_useful_stk[si]));
+                                    _fp_sticker_col.push_back(_useful_stk_col[si]);
                                 }
                                 _remaining = diff_ex(_remaining, _useful_stk_masks[si]);
                             }
@@ -1780,6 +1809,96 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 surface_fill.expolygons.push_back(std::move(e));
                                 _fp_tag.push_back(_grp_tag);
                                 _fp_sticker_tag.push_back(-1);
+                                _fp_sticker_col.push_back(-1);
+                            }
+                        }
+                        // s348 — ASTILLAS: los bordes de stickers solapados dejan tiras más finas
+                        // que una línea; cada una se rellenaba sola y no salía NADA (EMPTY-ZONE)
+                        // ⇒ agujeros. Cada pieza menor que ~1 línea² se funde con la vecina con la
+                        // que más contacto tiene (hereda su receta); las de área 0 se tiran.
+                        // 🚨 s348b: una pasada FIJA sobre la lista original y sólo se funde si la
+                        // unión sale en UNA pieza. Antes, una unión partida re-añadía la astilla
+                        // al final y el bucle volvía a por ella para siempre (slice colgado al 35 %).
+                        {
+                            const double _sp_mm  = std::max(0.1, double(surface_fill.params.spacing));
+                            const double _min_a  = scale_(_sp_mm) * scale_(_sp_mm);
+                            const float  _touch  = float(scale_(_sp_mm * 0.5));
+                            const size_t _n      = surface_fill.expolygons.size();
+                            std::vector<double>      _area(_n);
+                            std::vector<BoundingBox> _bb(_n);
+                            for (size_t i = 0; i < _n; ++i) {
+                                _area[i] = std::abs(surface_fill.expolygons[i].area());
+                                _bb[i]   = get_extents(surface_fill.expolygons[i].contour);
+                            }
+                            std::vector<char> _dead(_n, 0);
+                            int _merged = 0, _dropped = 0, _kept = 0;
+                            for (size_t i = 0; i < _n; ++i) {
+                                if (_area[i] >= _min_a) continue;
+                                if (_area[i] < SCALED_EPSILON) { _dead[i] = 1; ++_dropped; continue; }
+                                const ExPolygons grown = offset_ex(surface_fill.expolygons[i], _touch);
+                                if (grown.empty()) { ++_kept; continue; }
+                                const BoundingBox gbb = get_extents(grown);
+                                size_t best = size_t(-1); double best_a = 0.0;
+                                for (size_t j = 0; j < _n; ++j) {
+                                    if (j == i || _dead[j] || _area[j] < _min_a) continue;
+                                    if (!gbb.overlap(_bb[j])) continue;
+                                    const double ia = area(intersection_ex(grown, ExPolygons{ surface_fill.expolygons[j] }));
+                                    if (ia > best_a) { best_a = ia; best = j; }
+                                }
+                                if (best == size_t(-1)) { ++_kept; continue; }   // aislada: se queda
+                                ExPolygons u = union_ex(ExPolygons{ surface_fill.expolygons[best], surface_fill.expolygons[i] });
+                                if (u.size() != 1) { ++_kept; continue; }         // no se tocan de verdad
+                                surface_fill.expolygons[best] = std::move(u.front());
+                                _area[best] = std::abs(surface_fill.expolygons[best].area());
+                                _bb[best]   = get_extents(surface_fill.expolygons[best].contour);
+                                _dead[i] = 1;
+                                ++_merged;
+                            }
+                            if (_merged || _dropped) {
+                                ExPolygons ne; std::vector<int> nt, ns, nc;
+                                for (size_t i = 0; i < _n; ++i) {
+                                    if (_dead[i]) continue;
+                                    ne.push_back(std::move(surface_fill.expolygons[i]));
+                                    nt.push_back(_fp_tag[i]); ns.push_back(_fp_sticker_tag[i]); nc.push_back(_fp_sticker_col[i]);
+                                }
+                                surface_fill.expolygons = std::move(ne);
+                                _fp_tag = std::move(nt); _fp_sticker_tag = std::move(ns); _fp_sticker_col = std::move(nc);
+                            }
+                            _stk_log << " slivers_merged=" << _merged << " dropped=" << _dropped
+                                     << " kept=" << _kept << " pieces=" << surface_fill.expolygons.size();
+                        }
+                        // s348 — SONDA (sólo con ORCA_STICKER_DUMP=1): dibuja el corte de esta capa
+                        // en /tmp/neotko_logs/sticker_clip_z<z>_r<rol>.svg. Relleno = de qué sticker
+                        // es cada pieza (gris = natural), borde rojo grueso = pieza más pequeña que
+                        // una línea (no se imprimirá), trazo de color = la máscara COMPLETA de cada
+                        // (sticker, color) antes de cortar. Sirve para ver de un vistazo si lo que no
+                        // sale es una astilla, un recorte entre stickers o una forma que ni llega.
+                        if (const char* _dump = std::getenv("ORCA_STICKER_DUMP"); _dump && *_dump == '1') {
+                            static const char* _pal[] = { "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+                                                          "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#008080" };
+                            BoundingBox _bb;
+                            for (const ExPolygon& e : surface_fill.expolygons) _bb.merge(get_extents(e.contour));
+                            if (_bb.defined) {
+                                char _fn[256];
+                                std::snprintf(_fn, sizeof(_fn), "/tmp/neotko_logs/sticker_clip_z%.2f_r%d.svg",
+                                              this->print_z, int(_role6c));
+                                SVG _svg(_fn, _bb);
+                                const double _sp_mm2 = std::max(0.1, double(surface_fill.params.spacing));
+                                const double _min_a2 = scale_(_sp_mm2) * scale_(_sp_mm2);
+                                for (size_t i = 0; i < surface_fill.expolygons.size(); ++i) {
+                                    const int st = (i < _fp_sticker_tag.size()) ? _fp_sticker_tag[i] : -1;
+                                    const int co = (i < _fp_sticker_col.size()) ? _fp_sticker_col[i] : -1;
+                                    const char* fill = st < 0 ? "#cccccc" : _pal[(st * 3 + std::max(0, co)) % 10];
+                                    _svg.draw(surface_fill.expolygons[i], fill, 0.85f);
+                                    const bool tiny = std::abs(surface_fill.expolygons[i].area()) < _min_a2;
+                                    _svg.draw_outline(surface_fill.expolygons[i], tiny ? "red" : "black", tiny ? "red" : "blue",
+                                                      scale_(tiny ? 0.15 : 0.02));
+                                }
+                                for (size_t k = 0; k < _useful_stk.size(); ++k)
+                                    _svg.draw_outline(_useful_stk_masks[k], _pal[(int(_useful_stk[k]) * 3 + std::max(0, _useful_stk_col[k])) % 10],
+                                                      "#666666", scale_(0.05));
+                                _svg.Close();
+                                NEOTKO_LOG(PROFILE, "STICKER_DUMP " << _fn << " pieces=" << surface_fill.expolygons.size());
                             }
                         }
                         NEOTKO_LOG(PROFILE, _stk_log.str());
@@ -1797,6 +1916,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             // NEOTKO_STICKER_TAG — Fase 4: sticker pile index of this piece
             // (-1 = no sticker here — resolve via _fp_slot_tag as before).
             const int _fp_sticker_idx = (_fp_idx < _fp_sticker_tag.size()) ? _fp_sticker_tag[_fp_idx] : -1;
+            const int _fp_sticker_c   = (_fp_idx < _fp_sticker_col.size()) ? _fp_sticker_col[_fp_idx] : -1;   // s348
             ++_fp_idx;
 
       f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
@@ -2001,11 +2121,18 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         if (!_mixed_p && _fp_sticker_idx >= 0 && _mp_mo
                             && _fp_sticker_idx < (int)_mp_mo->colorstitch_stickers.size()) {
                             const ColorStitchSticker& _stk = _mp_mo->colorstitch_stickers[_fp_sticker_idx];
-                            if (const auto* _sp = SurfaceEffectProfileManager::get().find(_stk.profile_id)) {
-                                const std::string& _sjs = (_mp_role == erTopSolidInfill)
-                                    ? _sp->stack_top_json : _sp->stack_penu_json;
+                            if (const auto* _sp = SurfaceEffectProfileManager::get().find(
+                                    ColorStitch::sticker_profile_for(_stk, _fp_sticker_c))) {   // s348
+                                const std::string& _sjs = _mp_is_bottom ? _sp->stack_bottom_json   // s350
+                                    : ((_mp_role == erTopSolidInfill) ? _sp->stack_top_json : _sp->stack_penu_json);
                                 SurfacePassStack _sst = SurfacePassStack::from_json(_sjs);
                                 if (_sst.any_effect()) {
+                                    // s349 (auditoría #1): hasta la fase 2b (robar SÓLO el
+                                    // trozo de muro), el override de muro en un sticker
+                                    // re-coloreaba el anillo ENTERO del objeto. Se ignora aquí
+                                    // y en el prepass de ToolOrdering (ColorStitch.cpp,
+                                    // Plan == Emisión == TCR).
+                                    _sst.perimeter_override = false;
                                     mp_stack          = std::move(_sst);
                                     is_mp_fill        = true;
                                     _sticker_resolved = true;
@@ -2165,6 +2292,29 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         NEOTKO_LOG(BOTTOM, "L0_BOTTOM_UNLOCK z=" << this->print_z
                             << " role=" << (int)surface_fill.params.extrusion_role
                             << " (cat.1 bed bottom allowed on layer 0 — §7)");
+                    }
+                }
+
+                // NEOTKO_LOCALZ_TAG s356 — Sandwich x "Subdivide Mix Layer" (FS Local-Z) on the SAME
+                // layer: not compatible for now. Each system splits the layer its own way and the
+                // Sandwich group is emitted first, up to the layer Z; the lower Local-Z pass of the
+                // rest of the layer then runs 0.1 mm below it, next to it (FSFD_stairs_multipass:
+                // 1 396 moves under printed material, on every step top). On a layer the Local-Z
+                // plan splits, the recipe is NOT applied: the surface goes through the normal fill
+                // path and Local-Z prints it like the rest of the object. One aggregated warning per
+                // object (PrintObject::infill), collected as a -1 in minlayer_collapsed_slots().
+                if (is_mp_fill && this->object() != nullptr) {
+                    const auto&  _lzi = this->object()->local_z_intervals();
+                    const size_t _lid = size_t(this->id());
+                    const auto   _it  = std::find_if(_lzi.begin(), _lzi.end(),
+                        [_lid](const LocalZInterval& iv) { return iv.layer_id == _lid; });
+                    if (_it != _lzi.end() && _it->has_mixed_paint && _it->sublayer_count > 1) {
+                        is_mp_fill = false;
+                        auto& _cs = this->object()->minlayer_collapsed_slots();
+                        if (this->id() < _cs.size()) _cs[this->id()].push_back(-1);
+                        NEOTKO_LOG(MULTIPASS, "FASE2_CHECK: is_mp_fill forced=false (Subdivide Mix Layer splits this layer)"
+                            << " layer=" << f->layer_id << " print_z=" << this->print_z
+                            << " local_z_passes=" << _it->sublayer_count);
                     }
                 }
 
@@ -3424,6 +3574,22 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // a MultiPass pass → NeoTower / ToolOrdering / the GCode
                             // handler schedule them with zero changes (their pass-chain
                             // + cross-product machinery already plans the toolchanges).
+                            // s348 — pieza de sticker: el degradado se ajusta al área COMPLETA de
+                            // su (sticker, color), no a este trozo.
+                            const Polygons* _fit_ext = nullptr;
+                            if (_fp_sticker_idx >= 0) {
+                                auto _it = _stk_full_area.find({ _fp_sticker_idx, _fp_sticker_c });
+                                if (_it != _stk_full_area.end()) _fit_ext = &_it->second;
+                            }
+                            FieldFitExtentScope _fit_scope(_fit_ext);
+                            // s349 — y si ese color es un degradado del SVG, la rampa es la SUYA.
+                            const FieldGradient* _svg_grad = nullptr;
+                            if (_fp_sticker_idx >= 0) {
+                                auto _git = _stk_grad.find({ _fp_sticker_idx, _fp_sticker_c });
+                                if (_git != _stk_grad.end()) _svg_grad = &_git->second;
+                            }
+                            FieldGradientScope _grad_scope(_svg_grad);
+                            last_tool_order_tls().clear();   // s354
                             ColorStitch::assign_and_group_tools(
                                 temp, *cm_eff, _sub_role, int(f->layer_id),
                                 /*allow_top=*/true, /*allow_penu=*/true,
@@ -3446,8 +3612,48 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                 // assign_and_group_tools para que NO lo pise con el payload
                                 // colapsado del profile (tools del último pase del rol).
                                 /*config_has_pass_override=*/(cm_eff == &cm_cfg_override));
+                            // s348 — las líneas que ColorStitch NO pudo repartir (pieza con todas
+                            // las líneas < min_len, o < 2 líneas: RAW_LINES collected=0) quedan sin
+                            // codificar. Antes caían al extrusor NATURAL del objeto ⇒ en un sticker
+                            // o zona pintada con ColorStitch, los trozos pequeños salían del color
+                            // del objeto ("partes que no salen"; con Plano no pasa porque cada
+                            // pasada lleva su extrusor). Ahora caen al tool A de ESTA receta, igual
+                            // que DITHER_MIN_LINES_FALLBACK hace con las de pocas líneas.
+                            const int _cm_fallback_tool = std::clamp(
+                                (_sub_role == erPenultimateInfill)
+                                    ? cm_eff->interlayer_colormix_penu_tool_a.value
+                                    : cm_eff->interlayer_colormix_tool_a.value, 0, 3);
                             auto buckets =
-                                ColorStitch::eec_to_tool_buckets(temp, natural_tool);
+                                ColorStitch::eec_to_tool_buckets(temp, _cm_fallback_tool);
+                            // NEOTKO_COLORSTITCH_TAG s354 — orden de pasadas DETERMINISTA.
+                            // eec_to_tool_buckets devuelve los buckets por primera aparición
+                            // espacial: qué color iba primero dependía de qué línea caía antes en
+                            // cada isla. Con islas gemelas en el mismo Z una empezaba en T0 y otra
+                            // en T2 ⇒ el coalescer (clave con tool_id) no las fundía y salía
+                            // T0,T2,T2,T0 (COLOR-02). Ahora manda la secuencia de la receta: su
+                            // primer color es la primera pasada. Lo que no esté en ella (fallback)
+                            // va detrás, por id.
+                            {
+                                const std::vector<int> _order = last_tool_order_tls();
+                                auto _rank = [&_order](int t) {
+                                    const auto it = std::find(_order.begin(), _order.end(), t);
+                                    return it == _order.end() ? int(_order.size()) + t
+                                                              : int(it - _order.begin());
+                                };
+                                std::stable_sort(buckets.begin(), buckets.end(),
+                                    [&_rank](const auto& a, const auto& b) {
+                                        return _rank(a.first) < _rank(b.first);
+                                    });
+                                if (NeoDebug::enabled(NeoDebug::MULTIPASS)) {
+                                    std::ostringstream _o;
+                                    _o << "  CM_PASS_ORDER layer=" << f->layer_id << " recipe=[";
+                                    for (size_t _q = 0; _q < _order.size(); ++_q) _o << (_q ? "," : "") << "T" << _order[_q];
+                                    _o << "] passes=[";
+                                    for (size_t _q = 0; _q < buckets.size(); ++_q) _o << (_q ? "," : "") << "T" << buckets[_q].first;
+                                    _o << "]";
+                                    NeoDebug::write(NeoDebug::MULTIPASS, _o.str());
+                                }
+                            }
                             const int NB = (int)buckets.size();
                             // Buckets are co-planar (one lámina). Step print_z by 1 µm
                             // so each gets a distinct LayerTools entry / z_um key; the
@@ -3676,7 +3882,8 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             // `_fp_slot_tag != 0` gate below, not fall through it.
                             const ModelObject* _smo = this->object() ? this->object()->model_object() : nullptr;
                             if (_smo && _fp_sticker_idx < (int)_smo->colorstitch_stickers.size())
-                                _sticker_angle_pid = _smo->colorstitch_stickers[_fp_sticker_idx].profile_id;
+                                _sticker_angle_pid = ColorStitch::sticker_profile_for(
+                                    _smo->colorstitch_stickers[_fp_sticker_idx], _fp_sticker_c);   // s348
                             _cm_angle_active = (_sticker_angle_pid > 0);
                         } else if (_mp_painter_mode && _fp_slot_tag != 0) {   // NEOTKO_PROFILE_TAG — Fase 6c v2: natural remainder (tag==0) keeps natural angle
                             // Painter mode: active if a painted profile resolves at this layer/role
@@ -3724,8 +3931,39 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                                           _angle_is_penu)
                                     : (!_angle_is_penu ? _cm_cfg_angle.interlayer_colormix_angle.value
                                                        : _cm_cfg_angle.interlayer_colormix_penu_angle.value);
-                            if (_cm_angle >= 0) {
-                                f->angle = Geometry::deg2rad(static_cast<float>(_cm_angle));
+                            // s349 — pieza de sticker con degradado del SVG: las líneas van
+                            // PERPENDICULARES a la rampa (cada línea, un solo color), sea cual sea
+                            // el ángulo de la receta. Gira con el sticker.
+                            int _cm_angle_eff = _cm_angle;
+                            // s349b — SÓLO si la receta de esta pieza es un degradado ColorStitch
+                            // (modo 1/2 en alguna pasada): una receta plana o de patrón sobre un
+                            // color con degradado conserva su ángulo.
+                            bool _rcp_is_grad = false;
+                            if (_sticker_angle_pid > 0)
+                                if (const auto* _gp = SurfaceEffectProfileManager::get().find(_sticker_angle_pid)) {
+                                    const SurfacePassStack _gst = SurfacePassStack::from_json(
+                                        _angle_is_penu ? _gp->stack_penu_json : _gp->stack_top_json);
+                                    for (const SurfacePass& _p : _gst.passes) {
+                                        if (_p.kind != SurfacePassKind::ColorStitch) continue;
+                                        for (const char* _k : { "interlayer_colormix_mode", "interlayer_colormix_penu_mode" }) {
+                                            auto _it = _p.colorstitch.kv.find(_k);
+                                            if (_it != _p.colorstitch.kv.end() && (_it->second == "1" || _it->second == "2"))
+                                                _rcp_is_grad = true;
+                                        }
+                                    }
+                                }
+                            if (_sticker_angle_pid > 0 && _rcp_is_grad) {
+                                auto _git = _stk_grad.find({ _fp_sticker_idx, _fp_sticker_c });
+                                if (_git != _stk_grad.end()) {
+                                    const FieldGradient& _g = _git->second;
+                                    double _deg = std::atan2(_g.p1y - _g.p0y, _g.p1x - _g.p0x) * 180.0 / M_PI + 90.0;
+                                    _deg = std::fmod(_deg, 180.0);
+                                    if (_deg < 0.0) _deg += 180.0;
+                                    _cm_angle_eff = int(std::lround(_deg)) % 180;
+                                }
+                            }
+                            if (_cm_angle_eff >= 0) {
+                                f->angle = Geometry::deg2rad(static_cast<float>(_cm_angle_eff));
                                 // NEOTKO_COLORSTITCH_TAG — fixed angle is absolute: kill the per-layer
                                 // alternation so the slice keeps the painted angle every layer.
                                 f->is_using_template_angle = true;

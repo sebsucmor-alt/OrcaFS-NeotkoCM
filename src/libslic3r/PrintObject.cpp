@@ -598,8 +598,9 @@ void PrintObject::prepare_infill()
     // stInternal, so the normal fill renders them uniformly (solid/sparse/penultimate).
     // This overrides enable_extra_bridge_layer / internal_bridge_density from the file.
     // External bridges are unaffected (detected at slicing, not here).
-    if (!this->config().neotko_libre_mode.value)
-        this->bridge_over_infill();
+    // GitHub issue #3 (naldo29): the skip also left the Support/Adaptive Cubic octrees and the
+    // Lightning generator null on a fresh object → crash in make_fills. Build them, then stop.
+    this->bridge_over_infill(this->config().neotko_libre_mode.value);
     // NeotkoLIBRE_END
     m_print->throw_if_canceled();
 
@@ -647,6 +648,7 @@ void PrintObject::infill()
         // make_fills() returns true if any region had a monotonic fill that
         // couldn't be split into individual lines for ColorStitch assignment.
         std::atomic<bool> colorstitch_unsplittable{false};
+        fused_monotonic_seen().store(false);   // s354 — ver ColorStitch.hpp
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, m_layers.size()),
             [this, &adaptive_fill_octree = adaptive_fill_octree, &support_fill_octree = support_fill_octree, &colorstitch_unsplittable](const tbb::blocked_range<size_t>& range) {
@@ -667,6 +669,16 @@ void PrintObject::infill()
                 PrintStateBase::SlicingDefaultNotification
             );
         }
+        // s354 — ColorStitch sobre Monotonic (continuo): funciona, pero pierde líneas al trocear.
+        if (fused_monotonic_seen().load()) {
+            this->active_step_add_warning(
+                PrintStateBase::WarningLevel::NON_CRITICAL,
+                L("ColorStitch: this object uses the Monotonic pattern on a ColorStitch surface. "
+                  "Some lines may lose their colour.\n"
+                  "Use Monotonic line on Top surface and Penultimate for an exact result."),
+                PrintStateBase::SlicingDefaultNotification
+            );
+        }
         // NEOTKO_COLORSTITCH_TAG_END
         // NEOTKO_MULTIPASS_MINLAYER_TAG_START — s276: UN solo aviso agregado con los slots cuya
         // receta de Sandwich se colapsó porque alguna banda no llegaba a la altura mínima
@@ -677,11 +689,30 @@ void PrintObject::infill()
         {
             std::vector<int> collapsed_slots;
             size_t           collapsed_layers = 0;
+            // s356 — a -1 is not a slot: it marks a layer where the recipe was not applied at
+            // all because "Subdivide Mix Layer" splits it (Fill.cpp). Its own warning, below.
+            size_t           local_z_layers = 0;
             for (const auto& per_layer : m_minlayer_collapsed_slots) {
                 if (per_layer.empty()) continue;
-                ++collapsed_layers;
-                collapsed_slots.insert(collapsed_slots.end(), per_layer.begin(), per_layer.end());
+                bool any_slot = false, any_local_z = false;
+                for (int s : per_layer) {
+                    if (s < 0) any_local_z = true;
+                    else { any_slot = true; collapsed_slots.push_back(s); }
+                }
+                if (any_slot) ++collapsed_layers;
+                if (any_local_z) ++local_z_layers;
             }
+            if (local_z_layers > 0)
+                this->active_step_add_warning(
+                    PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(
+                        L("Sandwich and Subdivide Mix Layer (Full domain) are not compatible for "
+                          "now. On %1% layers of this object the Sandwich recipe was not applied: "
+                          "those surfaces print with the object's mixed filament, like the rest "
+                          "of the layer. Use only one of the two on this object."),
+                        local_z_layers),
+                    PrintStateBase::SlicingDefaultNotification
+                );
             if (!collapsed_slots.empty()) {
                 std::sort(collapsed_slots.begin(), collapsed_slots.end());
                 collapsed_slots.erase(std::unique(collapsed_slots.begin(), collapsed_slots.end()),
@@ -2551,7 +2582,7 @@ template<typename T> void debug_draw(std::string name, const T& a, const T& b, c
 #endif
 
 // This method applies bridge flow to the first internal solid layer above sparse infill.
-void PrintObject::bridge_over_infill()
+void PrintObject::bridge_over_infill(bool build_infill_data_only)
 {
     BOOST_LOG_TRIVIAL(info) << "Bridge over infill - Start" << log_memory_info();
     struct CandidateSurface
@@ -2772,6 +2803,12 @@ void PrintObject::bridge_over_infill()
         }
 
         this->m_adaptive_fill_octrees = this->prepare_adaptive_infill_data(surfaces_w_bottom_z);
+
+        // NeotkoLIBRE: infill data is ready, LibreMode wants no internal bridges.
+        if (build_infill_data_only) {
+            NeoDebug::write(NeoDebug::INFILL, "bridge_over_infill: LibreMode, infill data only, no bridges");
+            return;
+        }
 
         std::vector<size_t> layers_to_generate_infill;
         for (const auto &pair : surfaces_by_layer) {
@@ -3669,9 +3706,30 @@ void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation
     if (!m_slicing_params.valid) {
+          // NEOTKO_GRAVITY_TAG s363 — los dos valores de las piezas apiladas los fija Print::apply()
+          // comparando con lo último aplicado: tienen que sobrevivir a esta regeneración. Si se
+          // perdieran, al apagar la casilla (o pasar a torre Classic) la comparación daría «sin
+          // cambios» y la pieza se quedaría con las capas del laminado anterior.
+          const coordf_t keep_floating_bottom_z = m_slicing_params.neotko_floating_bottom_z;
+          const bool     keep_land_top          = m_slicing_params.neotko_land_top;
           m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z(),
                                                                    this->object_extruders(), this->print()->shrinkage_compensation());
+          // neotko_floating_bottom_z / neotko_land_top (s362) ya no se calculan aquí: dependen de
+          // «Stacked objects: real layers» y de los demás objetos, y los fija Print::apply() justo
+          // después con neotko_set_stack_landing().
+          m_slicing_params.neotko_floating_bottom_z = keep_floating_bottom_z;
+          m_slicing_params.neotko_land_top          = keep_land_top;
       }
+}
+
+// NEOTKO_GRAVITY_TAG s363
+bool PrintObject::neotko_set_stack_landing(double floating_bottom_z, bool land_top)
+{
+    if (m_slicing_params.neotko_floating_bottom_z == floating_bottom_z && m_slicing_params.neotko_land_top == land_top)
+        return false;
+    m_slicing_params.neotko_floating_bottom_z = floating_bottom_z;
+    m_slicing_params.neotko_land_top          = land_top;
+    return true;
 }
 
 // Orca: XYZ shrinkage compensation has introduced the const Vec3d &object_shrinkage_compensation parameter to the function below

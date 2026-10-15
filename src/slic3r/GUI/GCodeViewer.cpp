@@ -9167,7 +9167,18 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             model_used_filaments_g.push_back(model_used_filament_g);
         }
 
-        offsets = calculate_offsets({ { "Extruder NNN", {""}}}, icon_size);
+        // NEOTKO fix: calculate_offsets devuelve UNA entrada por columna. Con una sola columna,
+        // offsets[1] (cabecera "Usage" y columna de gramos) leía memoria fuera del vector: en
+        // unas máquinas salía basura ancha (se veía bien), en otras ~0 y el texto se montaba.
+        {
+            std::vector<std::string> usage_cells;
+            char ubuf[64];
+            for (size_t k = 0; k < model_used_filaments_m.size(); ++k) {
+                ::sprintf(ubuf, imperial_units ? "%.2f in    %.2f g" : "%.2f m    %.2f g", model_used_filaments_m[k], model_used_filaments_g[k]);
+                usage_cells.push_back(ubuf);
+            }
+            offsets = calculate_offsets({ { _u8L("Filament"), { "Extruder NNN" } }, { _u8L("Usage"), usage_cells } }, icon_size);
+        }
         append_headers({ {_u8L("Filament"), offsets[0]}, {_u8L("Usage"), offsets[1]} });
         // NEOTKO_REALCOLOR_TAG: M6 — set expectations, this is an approximate optical
         // simulation (depth-peeled Beer-Lambert), not a guarantee of the final print color.

@@ -245,7 +245,10 @@
         </span>
         &nbsp;· the colour comes from <code>ColorSci::blend_stacked</code> and the line assignment
         from <code>build_dithered_tools_2color</code>, both ported straight across. Build a recipe
-        here and the app would give you the same swatch.
+        here and the app would give you the same swatch: since 2.4.8 the app also composites a striped
+        pass line by line, each line with its own TD. One difference: with two or more striped passes
+        this demo lines their lines up, while the app treats them as crossing (they print at different
+        angles), so there the two can differ a little.
         <br><a href="play-mixer.html">Open the full mixer in the Playground →</a>
       </div>
     </div>

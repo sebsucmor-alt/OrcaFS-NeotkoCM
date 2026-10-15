@@ -573,6 +573,7 @@ private:
     // when true renders an extra frame by not resetting m_dirty to false
     // see request_extra_frame()
     bool m_extra_frame_requested;
+    bool m_animation_frame_pending{ false };   // s350 — ver schedule_animation_frame
     bool m_event_handlers_bound{ false };
 
     GLVolumeCollection m_volumes;
@@ -1223,6 +1224,10 @@ public:
     void request_extra_frame() { m_extra_frame_requested = true; }
 
     void schedule_extra_frame(int miliseconds);
+    // s350 — como schedule_extra_frame, pero cuando vence el temporizador el canvas SÍ se repinta
+    // (schedule_extra_frame sólo despierta el idle, que no pinta si nada está sucio). Para
+    // animaciones suaves y baratas (el latido del color elegido en el panel de stickers).
+    void schedule_animation_frame(int miliseconds) { m_animation_frame_pending = true; schedule_extra_frame(miliseconds); }
     // NEOTKO_REALCOLOR_TAG: lets GCodeViewer self-drive its idle-debounce without a new param
     // threaded through _render_gcode()
     //

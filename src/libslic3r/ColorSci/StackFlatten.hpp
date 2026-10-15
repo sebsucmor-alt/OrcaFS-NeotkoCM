@@ -70,6 +70,19 @@ bool sandwich_colour_legacy(const SurfacePassStack& top,
 //         válida mientras las líneas son finas frente a la distancia de
 //         visión, que es la premisa de ColorStitch. Calibrar contra el grid
 //         físico de gen_gradient_grid.py — ver plan §4).
+// s350 — el patrón ColorStitch de una pasada («1133»…): la clave corta del editor o la larga de
+// su zona. "" si no tiene. (El mismo que usa sandwich_colour_stacked; lo usa el dibujador de la
+// textura de una receta en la interfaz.)
+std::string pass_pattern_of(const SurfacePass& p, bool penu);
+
+// s350 — color de una zona BOTTOM vista DESDE LA CAMA. En la zona Bottom la pasada 0 es la banda
+// más baja (la primera que se imprime, Fill.cpp) y es la que queda delante del ojo; detrás, las
+// siguientes y el propio objeto (bg). Es la misma composición que sandwich_colour_stacked con la
+// pila al revés.
+SurfacePassStack reversed_stack(const SurfacePassStack& st);
+void sandwich_colour_bottom(const SurfacePassStack& bottom, const Material mats[4],
+                            const float bg_rgb[3], float out_rgb[3]);
+
 // El orden de composición del sandwich completo: penu primero, top encima.
 void sandwich_colour_stacked(const SurfacePassStack& top,
                              const SurfacePassStack& penu,

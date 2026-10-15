@@ -11,6 +11,7 @@
 #include "libslic3r/PrintConfig.hpp"       // PrintConfig, PrintRegionConfig
 #include "libslic3r/GCode/ToolOrdering.hpp" // LayerTools, ToolOrdering
 #include "libslic3r/MultiPassScheduler.hpp" // NEOTKO_MPSCHEDULER_TAG s79 — canonical grouped-by-tool order
+#include "libslic3r/NeoTowerLocalZ.hpp"     // NEOTKO_LOCALZ_TAG s355 — FS Local-Z toolchanges per layer
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
@@ -177,9 +178,17 @@ bool NeoTower::is_enabled(const PrintConfig& config)
         NT_LOG("is_enabled(): key 'neotko_tower_type' NOT FOUND in config");
         return false;
     }
-    const bool en = (type_opt->value == nttNeoTower);
+    // The optional private tower type runs on this planner too.
+    const bool en = (type_opt->value == nttNeoTower || type_opt->value == nttPrivate);
     NT_LOG("is_enabled() → " << (en ? "TRUE (tower type = NeoTower)" : "FALSE (tower type = Classic)"));
     return en;
+}
+
+// Optional private tower type (never selectable in the public build).
+bool NeoTower::is_private_tower(const PrintConfig& config)
+{
+    const auto* type_opt = config.option<ConfigOptionEnum<NeoTowerType>>("neotko_tower_type");
+    return type_opt && type_opt->value == nttPrivate;
 }
 
 // NEOTKO_NEOTOWER_TAG s103-bd — "box-in-drawer" extra width.
@@ -269,6 +278,7 @@ void NeoTower::collect_all_events(const Print& print)
 {
     m_events.clear();
     m_growth_events.clear();  // NEOTKO_NEOTOWER_TAG — hardening P5
+    m_local_z_tcs.clear();    // NEOTKO_LOCALZ_TAG s355
     m_z_redirect.clear();          // NEOTKO_MPSCHEDULER_TAG
     m_z_redirect_finish.clear();   // NEOTKO_MPSCHEDULER_TAG
 
@@ -287,7 +297,7 @@ void NeoTower::collect_all_events(const Print& print)
         if (src.layers().empty()) continue;
         for (const LayerRegion* lr : src.layers().front()->regions())
             mp_prime_vol = std::max(mp_prime_vol,
-                static_cast<float>(lr->region().config().multipass_prime_volume.value));
+                neotko_sandwich_purge_volume(cfg, lr->region().config()));   // s352o single owner
     }
     // NEOTKO_NEOTOWER_TAG s160c — stash the knob so generate()'s bridge TCs can feed it
     // to resolve_wipe_volume() as the floor (see m_mp_prime_vol decl).
@@ -297,6 +307,28 @@ void NeoTower::collect_all_events(const Print& print)
     auto z_um64 = [](float z) -> uint64_t {
         return static_cast<uint64_t>(std::llround(static_cast<double>(z) * 1000.0));
     };
+
+    // NEOTKO_NEOTOWER_TAG s351 — UN solo dueño para "con qué herramienta arranca el writer".
+    // Espejo de GCode.cpp (~L2860, initial_extruder_id): non-BBL + torre + !semm_priming
+    // arranca en all_extruders().back(); si no, first_extruder(). Antes vivía copiado en
+    // 1a (s66), en el generador estructural (s103) y faltaba en el pre-pase Bug IX
+    // (sub_z_to_real_tool), que sembraba first_extruder(): con subcapas POR DEBAJO del
+    // primer plano real el plan entraba con T1 y la emisión con T0 → get_tcr MISS
+    // (NEOTOWER.md §35). Sin subcapas antes de la primera capa real la semilla del
+    // pre-pase no se lee nunca (la primera capa real la pisa con extruders.back()).
+    auto gcode_initial_writer_tool = [&]() -> size_t {
+        if (!print.is_BBL_printer() && tool_ordering.has_wipe_tower()
+            && !cfg.single_extruder_multi_material_priming.value
+            && !tool_ordering.all_extruders().empty())
+            return tool_ordering.all_extruders().back();
+        size_t t = tool_ordering.first_extruder();
+        if (t == (size_t)-1) t = m_initial_tool;
+        return t;
+    };
+    // NEOTKO_NEOTOWER_TAG s351 — V20e: herramienta con la que 1a ENTRA en cada grupo de
+    // subcapas (clave z_um64 del z_nominal). El scheduler la compara con su chain_cur.
+    std::map<uint64_t, size_t> s351_1a_group_enter;
+    m_gcode_initial_tool = gcode_initial_writer_tool();
 
     // ------------------------------------------------------------------
     // NEOTKO_NEOTOWER_TAG — Pre-build sublayer z → exit tool map.
@@ -459,14 +491,7 @@ void NeoTower::collect_all_events(const Print& print)
         const bool is_bbl_1a      = print.is_BBL_printer();
         const bool has_wt_1a      = tool_ordering.has_wipe_tower();
         const bool semm_priming   = cfg.single_extruder_multi_material_priming.value;
-        size_t current_tool;
-        if (!is_bbl_1a && has_wt_1a && !semm_priming && !tool_ordering.all_extruders().empty())
-            current_tool = tool_ordering.all_extruders().back();
-        else {
-            current_tool = tool_ordering.first_extruder();
-            if (current_tool == (size_t)-1)
-                current_tool = m_initial_tool;
-        }
+        size_t current_tool = gcode_initial_writer_tool(); // s351: dueño único
         NT_LOG("1a initial current_tool=T" << current_tool
             << " is_bbl=" << is_bbl_1a << " has_wt=" << has_wt_1a
             << " semm=" << semm_priming
@@ -484,6 +509,9 @@ void NeoTower::collect_all_events(const Print& print)
 
         bool first_real_layer_1a = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
         float last_znom_1a = -1.f;       // NEOTKO_MPSCHEDULER_TAG s79 — current sublayer group
+        // NEOTKO_LOCALZ_TAG s355 — FS "Subdivide Mix Layer": the Local-Z toolchanges of each
+        // real layer, from the very function the Classic tower uses (free when the option is off).
+        NeotkoLocalZPlanner localz_planner(print);
         bool just_exited_sublayer_group = false; // NEOTKO_MPSCHEDULER_TAG s79
 
         for (const LayerTools& lt : tool_ordering) {
@@ -530,6 +558,7 @@ void NeoTower::collect_all_events(const Print& print)
                     }
                     if (znom != last_znom_1a) {
                         size_t prev = current_tool;
+                        s351_1a_group_enter.emplace(z_um64(znom), prev); // s351 V20e
                         current_tool = (size_t)mp_group_final_tool(znom, (int)current_tool);
                         last_znom_1a = znom;
                         just_exited_sublayer_group = true;
@@ -643,6 +672,42 @@ void NeoTower::collect_all_events(const Print& print)
                 NT_LOG("  T" << e);
             NT_LOG("]");
 
+            // NEOTKO_LOCALZ_TAG s355 — Local-Z toolchanges of this layer. GCode emits them BEFORE
+            // the layer's own extruders and purges each one at the layer's nominal Z (verified on
+            // the Classic G-code). They are NOT NeoTowerEvents: the same (old, new) pair repeats
+            // within a layer, which the keyed event channel dedups / flags (V16). They travel on
+            // the writer's positional Local-Z channel instead (see generate()). Here they only
+            // move current_tool, so the layer's own rotation starts where GCode will start it.
+            bool localz_here = false;
+            if (localz_planner.enabled()) {
+                const std::vector<std::pair<unsigned int, unsigned int>> seq =
+                    localz_planner.at(lt.print_z, (int)current_tool);
+                // (s356i: the old NeoTower type without the option keeps its previous behaviour,
+                // direct extruder switches for the passes of a mixed filament, instead of an error.)
+                if (!seq.empty() && (is_private_tower(cfg) || print.config().dithering_local_z_mode.value)) {
+                    if (!is_private_tower(cfg))
+#ifdef NEOTKO_PRIVATE_TOWER
+                        throw Slic3r::RuntimeError(NEOTKO_PRIVATE_MSG_LOCAL_Z_NEEDS_TOWER);
+#else
+                        throw Slic3r::RuntimeError(
+                            "\"Subdivide Mix Layer\" needs Prime tower > Tower type = Classic. "
+                            "The NeoTower tower type cannot place its extra tool changes.");
+#endif
+                    localz_here = true;
+                    LocalZLayer& slot = m_local_z_tcs[z_um64(z_nom)];
+                    slot.z   = z_nom;
+                    slot.tcs = seq;
+                    if (NeoDebug::enabled(NeoDebug::WIPETOWER)) {
+                        std::ostringstream _lz;
+                        _lz << "LOCALZ_PLAN z=" << z_nom << " start=T" << current_tool << " n=" << seq.size() << " seq=";
+                        for (const auto& tc : seq) _lz << tc.first << ">" << tc.second << ",";
+                        NeoDebug::write(NeoDebug::WIPETOWER, _lz.str());
+                    }
+                    current_tool = seq.back().second;
+                }
+            }
+            const size_t localz_events_before = m_events.size() + m_growth_events.size();
+
             // FIX A — NEOTKO_NEOTOWER_TAG: Use 50% of nozzle diameter as a safe floor
             float lh_raw = static_cast<float>(lt.wipe_tower_layer_height > 0.
                                                        ? lt.wipe_tower_layer_height
@@ -673,7 +738,9 @@ void NeoTower::collect_all_events(const Print& print)
             // registers tools into lt.extruders (it is compiled into sublayers), so
             // the real-layer rotation can never reorder a PB ramp/cap pair. NeoTower
             // again mirrors GCode's unconditional rotation (Bug C was reverted too).
-            if (!first_real_layer_1a) {
+            // (s355: with Local-Z toolchanges before it, the writer already holds a tool even on
+            // the first real layer, so GCode does rotate there.)
+            if (!first_real_layer_1a || localz_here) {
                 auto rot_it = std::find(rotated_ext.begin(), rotated_ext.end(),
                                         (unsigned int)current_tool);
                 if (rot_it != rotated_ext.end())
@@ -757,6 +824,20 @@ void NeoTower::collect_all_events(const Print& print)
 
                 current_tool = ext_id;
             }
+            // NEOTKO_LOCALZ_TAG s355 — generate() hangs the Local-Z toolchanges on this layer's
+            // z-group: make sure there is one (a layer whose own extruders need no change).
+            if (localz_here && m_events.size() + m_growth_events.size() == localz_events_before) {
+                NeoTowerEvent ev;
+                ev.z_nominal    = z_nom;
+                ev.z_actual     = z_nom;
+                ev.layer_height = lh;
+                ev.old_tool     = current_tool;
+                ev.new_tool     = current_tool;
+                ev.wipe_volume  = 0.f;
+                ev.is_sublayer  = false;
+                m_growth_events.push_back(ev);
+                NT_LOG("LOCALZ identity event z=" << z_nom << " T" << current_tool << " (layer anchor)");
+            }
             first_real_layer_1a = false;
         }
     }
@@ -799,8 +880,8 @@ void NeoTower::collect_all_events(const Print& print)
         // each sublayer z-group.
         std::map<uint64_t, size_t> sub_z_to_real_tool;
         {
-            size_t running = tool_ordering.first_extruder();
-            if (running == (size_t)-1) running = m_initial_tool;
+            // NEOTKO_NEOTOWER_TAG s351 — era first_extruder(): el tercer espejo sin el fix s66.
+            size_t running = gcode_initial_writer_tool();
             bool first_real_layer_sub = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
             float last_znom_sub = -1.f;       // NEOTKO_MPSCHEDULER_TAG s79 — current sublayer group
             for (const LayerTools& lt : tool_ordering) {
@@ -1264,6 +1345,22 @@ void NeoTower::collect_all_events(const Print& print)
                         chain_cur = it->second;
                 }
 
+                // NEOTKO_NEOTOWER_TAG s351 — V20e: V20 compara el ORDEN de herramientas
+                // pero alimenta 1a y scheduler con el mismo chain_cur, así que no ve una
+                // herramienta de ENTRADA mal sembrada (NEOTOWER.md §35.9). Aquí se compara
+                // la entrada: la de 1a al abrir este grupo frente a chain_cur.
+                {
+                    auto ie = s351_1a_group_enter.find(z_um64(z_nom));
+                    if (ie != s351_1a_group_enter.end() && ie->second != chain_cur) {
+                        std::ostringstream _v20e;
+                        _v20e << "[VALIDATE] V20e: entry tool 1a != scheduler at z_nom=" << z_nom
+                              << " 1a_enter=T" << ie->second << " sched_enter=T" << chain_cur
+                              << " → el primer cambio del grupo no casará (get_tcr MISS)";
+                        BOOST_LOG_TRIVIAL(error) << _v20e.str();
+                        NT_LOG(_v20e.str());
+                    }
+                }
+
                 // NEOTKO_PATHBLEND_TAG — s89 · s204. Canon-aligned scheduler (the ONLY path).
                 // Uses the SAME algorithm GCode.cpp dispatches with
                 // (MultiPassScheduler::order_sublayers_by_tool_windowed), so plan order ==
@@ -1585,16 +1682,7 @@ void NeoTower::collect_all_events(const Print& print)
             // only min-z event, so chain-start = T1). With the mirrored init
             // the first event is the identity T0→T0 growth event, served via
             // get_finish_layer like every other identity layer.
-            size_t struct_tool;
-            if (!print.is_BBL_printer() && tool_ordering.has_wipe_tower()
-                && !cfg.single_extruder_multi_material_priming.value
-                && !tool_ordering.all_extruders().empty()) {
-                struct_tool = tool_ordering.all_extruders().back();
-            } else {
-                struct_tool = tool_ordering.first_extruder();
-                if (struct_tool == (size_t)-1)
-                    struct_tool = m_initial_tool;
-            }
+            size_t struct_tool = gcode_initial_writer_tool(); // s351: dueño único
             bool first_real_layer_struct = true; // NEOTKO_NEOTOWER_TAG — first-layer rotation guard
             // NEOTKO_NEOTOWER_DEBUG_TAG s303 — ultimo plano de torre emitido, para medir el
             // hueco real que le toca a cada capa (ver LH_DECIDE). Solo diagnostico.
@@ -2148,6 +2236,23 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
                 }
             }
         }
+
+        // NEOTKO_NEOTOWER_TAG s351 — §35.12: el chain-start de arriba supone que el primer
+        // cambio de la impresión es de una capa REAL. Con subcapas por debajo del primer plano
+        // real (bottom / sticker bottom en la cama) el primer cambio es de subcapa y GCode llega
+        // con el writer en la herramienta de arranque, no en el old_tool de la primera capa real.
+        // Sin esto salía un bridge-TC fantasma (T1→T0 a z=0.1855) que GCode nunca pide y la
+        // capa de la cama se quedaba sin su marco.
+        float min_sub_z = std::numeric_limits<float>::max();
+        for (const NeoTowerEvent& ev : m_events)
+            if (ev.is_sublayer && ev.old_tool != ev.new_tool)
+                min_sub_z = std::min(min_sub_z, ev.z_actual);
+        if (m_gcode_initial_tool != (size_t)-1 && min_sub_z < min_z - 1e-5f) {
+            NT_LOG("EFFECTIVE_INITIAL s351 first TC is sublayer z=" << min_sub_z
+                << " (first real TC z=" << min_z << ") → T" << m_gcode_initial_tool
+                << " (chain-start real decía T" << effective_initial << ")");
+            effective_initial = m_gcode_initial_tool;
+        }
     }
     // NEOTKO_NEOTOWER_TAG_END
 
@@ -2405,6 +2510,8 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     // GCode dispatches get_tcr() from WipeTowerPurge (fixes Bug 00_).
     float last_sublayer_z_nominal = -1.f;
 
+    std::set<uint64_t> localz_fed;   // NEOTKO_LOCALZ_TAG s355 — layers already fed to the writer
+
     size_t ei = 0;
     while (ei < all_events.size()) {
         const float z_grp = all_events[ei].z_actual;
@@ -2418,6 +2525,26 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
         grp_planned_any = false; // NEOTKO_NEOTOWER_TAG s103 — reset per z-group
 
         ++wt2_li;
+
+        // NEOTKO_LOCALZ_TAG s355 — FS Local-Z toolchanges of this real layer: planned on the
+        // writer's own Local-Z channel, BEFORE the layer's events (the Classic order: Local-Z
+        // first, then the nominal extruders starting from the tool Local-Z ended on). The
+        // exact-Z test keeps a sandwich sublayer group that quantizes to the same µm from
+        // taking them. chain_tool follows, or the chaining below would inject a bridge.
+        if (!m_local_z_tcs.empty()) {
+            auto lz = m_local_z_tcs.find(static_cast<uint64_t>(std::llround(z_grp * 1000.f)));
+            if (lz != m_local_z_tcs.end() && !lz->second.tcs.empty() && !localz_fed.count(lz->first)
+                && std::abs(lz->second.z - z_grp) <= NT_WT_EPS) {
+                const float lz_h = eff_layer_height(z_grp, all_events[ei].layer_height);
+                for (const auto& tc : lz->second.tcs)
+                    wt2.plan_local_z_toolchange(z_grp, lz_h, tc.first, tc.second,
+                                                static_cast<float>(m_print_config->prime_volume.value));
+                chain_tool = static_cast<int>(lz->second.tcs.back().second);
+                localz_fed.insert(lz->first);
+                NT_LOG("LOCALZ_FEED wt2_li=" << wt2_li << " z=" << z_grp << " n=" << lz->second.tcs.size()
+                    << " h=" << lz_h << " chain_tool=T" << chain_tool);
+            }
+        }
 
         const size_t grp_size = ei_end - ei;
         if (grp_size == 1) {
@@ -2772,6 +2899,18 @@ void NeoTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>& r
     std::vector<std::vector<WipeTower::ToolChangeResult>> local_z_result;
     wt2.generate(raw_result, local_z_result);
     m_used_filament = wt2.get_used_filament();
+    // NEOTKO_LOCALZ_TAG s355 — keep the Local-Z TCRs (they used to be dropped: nothing fed them).
+    m_local_z_result = local_z_result;
+    if (localz_fed.size() != m_local_z_tcs.size()) {
+        std::ostringstream _s;
+        _s << "[NeoTower][VALIDATE] LOCALZ_ORPHAN: " << (m_local_z_tcs.size() - localz_fed.size())
+           << " layer(s) with Local-Z toolchanges found no plan layer — those colour changes will"
+           << " get NO wipe tower visit.";
+        for (const auto& kv : m_local_z_tcs)
+            if (!localz_fed.count(kv.first)) _s << " z=" << kv.second.z;
+        BOOST_LOG_TRIVIAL(error) << _s.str();
+        NeoDebug::write(NeoDebug::WIPETOWER, _s.str());
+    }
     m_depth_by_li   = wt2.plan_layer_depths();       // s236 F1 — depth accounting
 
     // NEOTKO_DBG: dump all generated TCRs to confirm m_current_tool state per layer
@@ -3415,6 +3554,7 @@ void NeoTower::record_shadow_slot(bool merged, bool from_finish, size_t a, size_
 
 void NeoTower::finalize_shadow() const
 {
+    private_report();   // no-op without the private tower
     const auto rep = NeoTowerPure::validate_shadow_consumption(m_emission_order, m_shadow_sequence);
     for (const std::string& msg : rep.violations)
         NT_INVARIANT_WARN(msg);
@@ -4081,6 +4221,16 @@ void NeoTower::validate_plan() const
     }
 }
 // NEOTKO_NEOTOWER_TAG_END
+
+#ifndef NEOTKO_PRIVATE_TOWER
+// Build without the optional private tower: its plugs do nothing.
+void NeoTower::private_rewrite(std::vector<std::vector<WipeTower::ToolChangeResult>>&) {}
+WipeTower::ToolChangeResult NeoTower::private_place(const WipeTower::ToolChangeResult& tcr) const { return tcr; }
+void NeoTower::private_begin_emission() const {}
+void NeoTower::private_report() const {}
+bool NeoTower::private_keeps_nozzle_up(const PrintConfig&, GCodeWriter&, const std::string&, double, double) { return false; }
+bool NeoTower::private_dry_arrival(const PrintConfig&, GCodeWriter&, const WipeTower::ToolChangeResult&, int, bool) { return false; }
+#endif
 
 } // namespace Slic3r
 

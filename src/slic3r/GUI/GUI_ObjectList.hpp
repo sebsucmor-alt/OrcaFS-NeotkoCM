@@ -287,6 +287,10 @@ public:
     void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type);
     void                load_shape_object(const std::string &type_name);
     void                load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center = true);
+    // NEOTKO_CONSTRUCT_TAG s363 — adds `mesh_world` (already where it should be seen, in world
+    // coordinates) as a model part of the object, without moving anything else.
+    // s367: returns the new part (nullptr when nothing was added).
+    ModelVolume*        neotko_add_mesh_part(int obj_idx, TriangleMesh mesh_world, const std::string &name);
     // BBS
     void                switch_to_object_process();
     bool                del_object(const int obj_idx, bool refresh_immediately = true);

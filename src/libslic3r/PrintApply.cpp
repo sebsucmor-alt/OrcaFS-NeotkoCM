@@ -2185,6 +2185,56 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         m_support_used |= object->config().enable_support;
     }
 
+    // NEOTKO_GRAVITY_TAG_START s363 — «Stacked objects: real layers» (Prime tower). Las capas de las
+    // piezas apiladas: la que no toca la cama nace en su base (s362, Gravity::land_layers_on_base) y
+    // la que tiene OTRO objeto apoyado en su techo se imprime hasta su altura real
+    // (Gravity::land_layers_on_top). Pide True Objects, torre del planificador NeoTower y «Variable layer
+    // height» (sin ellos la torre no admite objetos con capas distintas). Depende de la casilla y
+    // de los demás objetos, así que se recalcula en cada apply() y, si cambia, se relamina la pieza.
+    {
+        const bool stacked_on = NeoTower::is_enabled(m_config) && m_config.neotower_variable_layer_height.value &&
+                                m_config.neotko_stacked_real_layers.value;
+        bool any_true_objects = false;
+        if (stacked_on)
+            for (const PrintObject *object : m_objects)
+                any_true_objects |= object->config().neotko_true_objects.value;
+        std::vector<BoundingBoxf3> boxes; // una por objeto del modelo, sólo si hace falta
+        if (any_true_objects) {
+            boxes.reserve(m_model.objects.size());
+            for (const ModelObject *mo : m_model.objects)
+                boxes.emplace_back(mo->instances.empty() ? BoundingBoxf3() : mo->instance_bounding_box(0));
+        }
+        // Hasta dónde se considera «apoyado»: cubre el «Z gap» máximo de Align & Construct (0,1).
+        const double contact_tol = 0.11;
+        for (PrintObject *object : m_objects) {
+            double floating_bottom_z = 0.;
+            bool   land_top          = false;
+            if (any_true_objects && object->config().neotko_true_objects.value && ! object->slicing_parameters().has_raft()) {
+                const double z_base = object->model_object()->min_z() * object->slicing_parameters().object_shrinkage_compensation_z;
+                floating_bottom_z = z_base > EPSILON ? z_base : 0.;
+                size_t self = boxes.size();
+                for (size_t i = 0; i < m_model.objects.size(); ++i)
+                    if (m_model.objects[i] == object->model_object()) { self = i; break; }
+                if (self < boxes.size() && boxes[self].defined)
+                    for (size_t i = 0; i < boxes.size() && ! land_top; ++i) {
+                        if (i == self || ! boxes[i].defined)
+                            continue;
+                        const BoundingBoxf3 &a = boxes[self], &b = boxes[i];
+                        land_top = std::abs(b.min.z() - a.max.z()) <= contact_tol &&
+                                   b.min.x() < a.max.x() && b.max.x() > a.min.x() &&
+                                   b.min.y() < a.max.y() && b.max.y() > a.min.y();
+                    }
+            }
+            if (object->neotko_set_stack_landing(floating_bottom_z, land_top)) {
+                update_apply_status(object->invalidate_step(posSlice));
+                // invalidate_step(posSlice) deja los parámetros como no válidos y el bucle de
+                // arriba ya ha pasado: se regeneran aquí (conservan los dos valores recién fijados).
+                object->update_slicing_parameters();
+            }
+        }
+    }
+    // NEOTKO_GRAVITY_TAG_END
+
     // NEOTKO_MIXEDFIL_SANDWICH_TAG — single-threaded, before any parallel Fill/
     // slice work reads SurfaceEffectProfileManager.
     resolve_mixed_filament_sandwich_profiles();

@@ -643,7 +643,7 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         if (src.layers().empty()) continue;
         for (const LayerRegion* lr : src.layers().front()->regions())
             global_mp_prime_vol = std::max(global_mp_prime_vol,
-                (float)lr->region().config().multipass_prime_volume.value);
+                neotko_sandwich_purge_volume(print.config(), lr->region().config()));   // s352o single owner
     }
     // NEOTKO_MULTIPASS_TAG_START — pre-mark LayerTools entries where MP sublayers are populated
     // AND perimeter_override is active. Must run BEFORE all collect_extruders() calls so that
@@ -1015,9 +1015,11 @@ static std::vector<unsigned int> parse_colorstitch_pattern_1based(
             }
         }
     }
-    if (tools.size() >= 2)
+    // s364 — un solo filamento en el patrón ("33") = ese filamento (espejo de PATTERN_SINGLE en
+    // ColorStitch::build_tool_list_from_pattern). Antes caía al reparto legacy A/B/C/D.
+    if (tools.size() >= 1)
         return tools;
-    // Fewer than 2 distinct physical tools — fall back to legacy A/B/C/D slots.
+    // No valid digit at all — fall back to legacy A/B/C/D slots.
     // Mirrors PATTERN_FALLBACK in ColorStitch::build_tool_list_from_pattern().
     tools.clear(); seen.clear();
     auto add = [&](int v) {
@@ -1385,7 +1387,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         if (!mp_src_ce.layers().empty()) {
             for (const LayerRegion* layerm : mp_src_ce.layers().front()->regions())
                 mp_prime_vol = std::max(mp_prime_vol,
-                    (float)layerm->region().config().multipass_prime_volume.value);
+                    neotko_sandwich_purge_volume(object.print()->config(), layerm->region().config()));   // s352o single owner
         }
     }
 

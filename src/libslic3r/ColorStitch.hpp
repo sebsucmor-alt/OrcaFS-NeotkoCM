@@ -17,6 +17,7 @@
 #include "SurfacePassKind.hpp"   // NEOTKO_SANDWICH_TAG — extracted enum (was inline)
 #include "NeoDebug.hpp"           // NEOTKO_DEBUG_TAG — extracted NeoDebug namespace
 #include "PathBlendRuntime.hpp"   // NEOTKO_PATHBLEND_TAG — extracted scheduler/dispatcher runtimes
+#include <atomic>   // s354 — fused_monotonic_seen()
 #include <utility>  // NEOTKO_SANDWICH_TAG — std::pair in eec_to_tool_buckets() return type
 #include <vector>
 #include <map>
@@ -210,8 +211,29 @@ public:
     // copy — thread-safe; top layers are few, so no cache needed yet). Empty on
     // parse failure or degenerate transform.
     static bool object_has_any_colorstitch_stickers(const ModelObject* mo);
+    // s350 — `downward`: sólo los stickers de ESE lado (bottom si true, top si false). Antes sólo se
+    // miraba la Z del ancla y un sticker top a la altura de un voladizo entraba en su banda bottom.
     static std::vector<size_t> enumerate_stickers_in_z_range(const PrintObject* po,
-                                                             double z_min, double z_max);
+                                                             double z_min, double z_max,
+                                                             bool downward = false);
+
+    // s350 — LA TRANSFORMACIÓN de un sticker, en piezas, con UN solo dueño. Todos los mandos
+    // (colocar, arrastrar, girar, tamaño, Fit, lado, espejo, proporción) la reconstruyen con
+    // sticker_compose; antes cada uno escribía «posición · giro · escala» a mano y un volteo o un
+    // espejo se perdían en la siguiente edición.
+    //   transform = T(pos) · C · F · Rz(spin) · M · S(scale)
+    //   F = volteo 180° en X si mira ABAJO (bottom) · M = espejo en X del SVG · S = escala uniforme
+    //   C = compensación de la escala NO uniforme del objeto (obj_scale = escala de la instancia en
+    //       los ejes del objeto): el sticker vive en el frame del objeto, así que si el objeto se
+    //       escala sólo en X el sticker se deformaba con él. C = diag(k/sx, k/sy, 1), k = (sx+sy)/2,
+    //       devuelve su proporción sin cambiar su tamaño medio. Con obj_scale = (1,1,1), C = I.
+    struct StickerPose { Vec3d pos = Vec3d::Zero(); double spin_rad = 0.0; double scale = 1.0;
+                         bool bottom = false; bool mirror = false; };
+    static Transform3d sticker_compose(const StickerPose& pose, const Vec3d& obj_scale = Vec3d::Ones());
+    // Lo contrario (aproximado si el transform está deformado: escala = media geométrica).
+    static StickerPose sticker_decompose(const Transform3d& t);
+    // ¿Mira hacia abajo (cara bottom)? Sale del transform: no hay campo en el modelo ni en el 3mf.
+    static bool sticker_faces_down(const ColorStitchSticker& st);
     static ExPolygons sticker_footprint_slice_frame(const ColorStitchSticker& sticker,
                                                     const PrintObject* po);
 
@@ -227,6 +249,78 @@ public:
     // reverses ring winding so orientation stays consistent either way.
     static Polygons sticker_rings_in_transform(const ColorStitchSticker& sticker,
                                                const Transform3d& to_target);
+
+    // s348 — MULTICOLOUR stickers. One parse, every SVG shape kept apart with its colour
+    // (0xRRGGBB; gradients = mean of their stops), in SVG paint order (later = on top).
+    // s349 — `grad`: relleno con degradado LINEAL de 2-3 paradas; g0/g1 = sus extremos (t=0 y
+    // t=1) en mm del frame de destino. Lo usa el motor para orientar y medir la rampa ColorStitch.
+    struct StickerShape { uint32_t rgb = 0; bool is_stroke = false; Polygons rings;
+                          bool grad = false; Vec2d g0 = Vec2d::Zero(), g1 = Vec2d::Zero(); };
+    static std::vector<StickerShape> sticker_shapes_in_transform(const std::string& svg_data,
+                                                                 const Transform3d& to_target);
+    // Distinct colours of the SVG, first appearance order (import / UI).
+    static std::vector<uint32_t> sticker_svg_colors(const std::string& svg_data);
+    // s350 — ZONAS del SVG: lo que el usuario ve como «un color» del sticker. Un color plano (los
+    // casi iguales, ΔE2000 < 2, van juntos: antialias, #FE0000/#FF0000) o UN degradado lineal (no se
+    // junta con planos aunque su media coincida; dos degradados sólo si sus paradas casan). Orden de
+    // primera aparición. El índice es la identidad estable que guarda ColorStitchStickerColor::zone
+    // (svg_data no cambia tras colocar el sticker). rgb = color plano o la media del degradado (la
+    // misma clave que sticker_svg_gradients). shapes = formas del SVG que caen en ella.
+    struct StickerZone { uint32_t rgb = 0; bool grad = false; int shapes = 0; };
+    static std::vector<StickerZone> sticker_svg_zones(const std::string& svg_data);
+    // s350 — formas del SVG que caen en cada zona (índice = forma de sticker_shapes_in_transform).
+    static std::vector<int> sticker_shape_zones(const std::string& svg_data);
+    // s349 — degradados LINEALES del SVG, por su color medio (la clave con la que los ve el resto
+    // del sticker). Para la receta automática y la UI. `stops` = el color del degradado MUESTREADO
+    // en t = 0, 0.5 y 1 (interpolando sus paradas, tenga las que tenga); nstops = 3 siempre que
+    // haya degradado (los de 2 paradas también: su medio es la mezcla).
+    struct StickerGradient { int nstops = 0; uint32_t stops[3] = { 0, 0, 0 };
+                             std::vector<uint32_t> ramp; };   // s349: 64 muestras t=0..1 (bandas)
+    // s349 — BANDAS: la pieza de la banda b del color c lleva color_idx = (b+1)*kBandStride + c
+    // (así no choca con ningún índice de color). sticker_profile_for lo decodifica.
+    static constexpr int kBandStride = 1000;
+    static int  band_color_idx(int color, int band) { return (band + 1) * kBandStride + color; }
+    static std::map<uint32_t, StickerGradient> sticker_svg_gradients(const std::string& svg_data);
+    // s349 — nanosvg NO lee <style>: un SVG que pone los colores con clases CSS (Illustrator:
+    // `.st6 { fill:#218996 }` + `class="st6"`) salía entero negro, de 1 color. Esto copia las
+    // reglas de clase simples (`.nombre`) al `style="…"` de cada elemento. Se aplica UNA vez
+    // al cargar el SVG del sticker; si no hay <style> devuelve el texto tal cual.
+    static std::string svg_inline_css_classes(const std::string& svg);
+
+    // s349 — APLANADO del SVG de un sticker al cargarlo, para que lo que imprime sea lo que se ve:
+    //  · fondo: la PRIMERA forma visible que cubre ≥95 % de la caja del dibujo se descarta
+    //    (los SVG de stock traen un rectángulo de fondo que tapaba todo), salvo keep_background;
+    //  · transparencias: de abajo arriba, una forma opaca tapa lo de debajo; una semitransparente
+    //    (opacidad < 0.8; de 0.8 para arriba cuenta como opaca)
+    //    parte lo de debajo y el solape sale con el color MEZCLADO (alfa normal; nanosvg no lee
+    //    mix-blend-mode). Sobre vacío sólo queda si su opacidad es ≥ 0.5;
+    //  · lienzo: todo se recorta al viewBox, como hace cualquier visor (nanosvg no aplica ni el
+    //    recorte del lienzo ni clip-path, y los SVG de stock dibujan fuera y lo tapan así);
+    //  · mismo color ⇒ una sola región.
+    // Devuelve un SVG nuevo de colores planos y opacos, en mm. Si no hay fondo ni transparencias
+    // devuelve el texto TAL CUAL (nada que aplanar: el corte ya resuelve el «el de arriba tapa»).
+    struct SvgFlattenInfo { bool changed = false; bool background_dropped = false;
+                            int translucent = 0; int colors_out = 0; int clipped = 0; };
+    static std::string svg_flatten_for_sticker(const std::string& svg, bool keep_background,
+                                               SvgFlattenInfo* info = nullptr);
+    // Entry of sticker.colors closest (RGB) to `rgb`; -1 if the sticker is 1-colour.
+    static int  sticker_color_index_for_rgb(const ColorStitchSticker& sticker, uint32_t rgb);
+    // Profile that paints colour `color_idx` (-1 = the classic single profile_id).
+    static int  sticker_profile_for(const ColorStitchSticker& sticker, int color_idx);
+    // Every live (existing, non-hidden) profile the sticker can paint with. Empty ⇒ inert.
+    static std::vector<int> sticker_live_profiles(const ColorStitchSticker& sticker);
+    // Masks per colour, already occluded INSIDE the sticker (later SVG shapes cover earlier
+    // ones; hidden / unassigned colours are transparent). Pieces are disjoint. A 1-colour
+    // sticker returns a single entry with color_idx = -1 (same mask as before s348).
+    struct StickerColorMask { int color_idx = -1; ExPolygons mask;
+                              bool grad = false; Vec2d g0 = Vec2d::Zero(), g1 = Vec2d::Zero(); };   // s349
+    static std::vector<StickerColorMask> sticker_color_masks(const ColorStitchSticker& sticker,
+                                                             const Transform3d& to_target);
+    // s350 — lo mismo sin pasar por la caché de máscaras (sticker_color_masks la usa por debajo).
+    static std::vector<StickerColorMask> sticker_color_masks_uncached(const ColorStitchSticker& sticker,
+                                                                      const Transform3d& to_target);
+    static std::vector<StickerColorMask> sticker_color_masks_slice_frame(const ColorStitchSticker& sticker,
+                                                                         const PrintObject* po);
 
     // NEOTKO_PAINT_COEXIST_TAG s91 — MMU governance helpers.
     //
@@ -1293,6 +1387,13 @@ inline std::vector<int> compute_slot_per_line_band_mm(
 struct FieldGroups {
     std::vector<int>    group_of_line;   // por línea → índice de grupo en [0, m)
     std::vector<double> t_of_group;      // por grupo, `t` en [0,1], ASCENDENTE
+    // s349 — sólo pieza de STICKER (modo ajustado al área): TODOS los carriles del área,
+    // k0…k1, con su `t` ascendente, y dónde cae cada grupo de esta pieza. El dither se
+    // construye sobre el área entera y cada pieza toma sus carriles: el Bresenham es
+    // acumulativo y, corrido sólo sobre la pieza, arrancaba con una racha (WIP/
+    // COLORSTITCH_GRADIENT_STICKERS_ANALYSIS.md). Vacíos fuera de ese modo.
+    std::vector<double> t_of_global;
+    std::vector<int>    global_of_group;
 };
 
 // NEOTKO_COLORSTITCH_TAG — s316 F2b: el muestreador del campo. DUEÑO ÚNICO de la
@@ -1356,13 +1457,73 @@ struct FieldSampler {
 //
 // `spacing_mm` = separación REAL entre carriles, ya resuelta (NO el ancho: ver
 // weave_top_line_spacing / Flow.cpp:183). `anchor_proj_mm` = el ancla, ya proyectada.
+// s348 — REFERENCIA DEL DEGRADADO "ajustado": por defecto, los carriles observados en la pieza.
+// Un sticker se corta en muchas piezas (letras, huecos) y cada una estiraba la rampa entera
+// ⇒ degradado a trozos. Quien conoce el área completa (Fill.cpp, pieza de sticker) la deja aquí
+// con FieldFitExtentScope mientras llama a ColorStitch; compute_field_groups la proyecta sobre
+// su eje y ajusta la rampa al área completa. Thread-local: Fill corre capas en paralelo.
+inline const Polygons*& field_fit_extent_tls()
+{
+    static thread_local const Polygons* p = nullptr;
+    return p;
+}
+struct FieldFitExtentScope {
+    explicit FieldFitExtentScope(const Polygons* ext) : prev(field_fit_extent_tls()) { field_fit_extent_tls() = ext; }
+    ~FieldFitExtentScope() { field_fit_extent_tls() = prev; }
+    FieldFitExtentScope(const FieldFitExtentScope&) = delete;
+    FieldFitExtentScope& operator=(const FieldFitExtentScope&) = delete;
+    const Polygons* prev;
+};
+
+// s354 — ORDEN DE IMPRESIÓN de las pasadas de una lámina ColorStitch: la secuencia de tools de la
+// receta tal y como la resolvió assign_and_group_tools (patrón, A/B, bandas… con invert aplicado),
+// sin repetidos. Fill.cpp la vacía antes de llamar y la lee después para ordenar los buckets, de
+// modo que el primer color de la receta es SIEMPRE la primera pasada (antes dependía de qué línea
+// caía primero en cada isla). Thread-local: Fill corre capas en paralelo.
+inline std::vector<int>& last_tool_order_tls()
+{
+    static thread_local std::vector<int> v;
+    return v;
+}
+
+// s354 — AVISO "usa Monotonic line". ColorStitch sobre el patrón Monotonic (continuo) tiene que
+// trocear trazos fundidos y pierde líneas (ver docs/SANDWICH.md §19.3);
+// Monotonic line trae cada línea suelta y sale exacto. assign_and_group_tools levanta esta
+// bandera cuando de verdad troceó un trazo fundido; PrintObject::infill() la baja antes de
+// rellenar y la lee después para emitir UN aviso amarillo por objeto.
+inline std::atomic<bool>& fused_monotonic_seen()
+{
+    static std::atomic<bool> f{false};
+    return f;
+}
+
+// s349 — DEGRADADO DEL SVG de un sticker: sus extremos (t=0 y t=1), en mm del frame de laminado.
+// Mientras está abierto, compute_field_groups usa como eje de carriles la dirección p0→p1 y fija la
+// rampa EXACTAMENTE entre los dos (lo que se sale toma el color del extremo, como spread="pad").
+// Lo abre Fill.cpp alrededor de la llamada a ColorStitch de una pieza de sticker con degradado.
+struct FieldGradient { double p0x = 0, p0y = 0, p1x = 0, p1y = 0; };
+inline const FieldGradient*& field_gradient_tls()
+{
+    static thread_local const FieldGradient* p = nullptr;
+    return p;
+}
+struct FieldGradientScope {
+    explicit FieldGradientScope(const FieldGradient* g) : prev(field_gradient_tls()) { field_gradient_tls() = g; }
+    ~FieldGradientScope() { field_gradient_tls() = prev; }
+    FieldGradientScope(const FieldGradientScope&) = delete;
+    FieldGradientScope& operator=(const FieldGradientScope&) = delete;
+    const FieldGradient* prev;
+};
+
 inline FieldGroups field_groups_from_projections(
     const std::vector<double>& proj_mm,
     double       period_mm,
     double       spacing_mm,
     double       anchor_proj_mm,
     bool         invert,
-    int*         out_lanes = nullptr)
+    int*         out_lanes = nullptr,
+    const double* fit_range_mm = nullptr,   // s348: [min,max] proyectados; sólo modo ajustado
+    bool          fit_exact    = false)     // s349: la rampa va EXACTA de fit[0] a fit[1] (degradado SVG)
 {
     FieldGroups out;
     const int n = static_cast<int>(proj_mm.size());
@@ -1393,12 +1554,37 @@ inline FieldGroups field_groups_from_projections(
     // entre los carriles observados.
     smp.k0 = group_of_key.begin()->first;
     smp.k1 = group_of_key.rbegin()->first;
+    const bool fit_override = fit_range_mm != nullptr && !smp.periodic();
+    bool exact = false;
+    if (fit_override && fit_exact) {
+        // s349 — degradado del SVG: la rampa empieza y acaba en SUS extremos, no en lo observado.
+        const long long e0 = smp.lane_of(fit_range_mm[0]), e1 = smp.lane_of(fit_range_mm[1]);
+        if (e1 > e0) { smp.k0 = e0; smp.k1 = e1; exact = true; }
+    }
+    if (fit_override && !exact) {
+        // s348 — la rampa recorre el área COMPLETA, no sólo lo que esta pieza observa.
+        smp.k0 = std::min(smp.k0, smp.lane_of(fit_range_mm[0]));
+        smp.k1 = std::max(smp.k1, smp.lane_of(fit_range_mm[1]));
+    }
     out.t_of_group.assign(static_cast<size_t>(m), 0.0);
-    if (m == 1) {
+    if (m == 1 && !fit_override) {
         out.t_of_group[0] = 0.5;
     } else {
         int g = 0;
         for (const auto& kv : group_of_key) out.t_of_group[g++] = smp.t_of_lane(kv.first);
+    }
+    if (exact)   // fuera de los extremos: el color del extremo
+        for (double& t : out.t_of_group) t = std::clamp(t, 0.0, 1.0);
+    // s349 — carriles globales del área (ver FieldGroups::t_of_global). Tope para no
+    // reservar millones de carriles con un área absurda: entonces, la ruta de siempre.
+    if (fit_override && smp.k1 > smp.k0 && (smp.k1 - smp.k0) < 20000) {
+        const int N = static_cast<int>(smp.k1 - smp.k0 + 1);
+        out.t_of_global.assign(static_cast<size_t>(N), 0.0);
+        for (int j = 0; j < N; ++j) out.t_of_global[j] = smp.t_of_lane(smp.k0 + j);
+        out.global_of_group.assign(static_cast<size_t>(m), 0);
+        int g = 0;
+        for (const auto& kv : group_of_key)
+            out.global_of_group[g++] = static_cast<int>(std::clamp<long long>(kv.first - smp.k0, 0, N - 1));
     }
 
     if (invert) {
@@ -1408,6 +1594,15 @@ inline FieldGroups field_groups_from_projections(
         std::reverse(out.t_of_group.begin(), out.t_of_group.end());
         const int last = m - 1;
         for (int i = 0; i < n; ++i) out.group_of_line[i] = last - out.group_of_line[i];
+        if (!out.t_of_global.empty()) {
+            // El mismo volteo en la lista global: `t` invertida, orden dado la vuelta, y
+            // los grupos (ya volteados arriba) apuntan al índice global volteado.
+            for (double& t : out.t_of_global) t = 1.0 - t;
+            std::reverse(out.t_of_global.begin(), out.t_of_global.end());
+            const int lastN = static_cast<int>(out.t_of_global.size()) - 1;
+            for (int& gi : out.global_of_group) gi = lastN - gi;
+            std::reverse(out.global_of_group.begin(), out.global_of_group.end());
+        }
     }
     return out;
 }
@@ -1429,8 +1624,67 @@ inline FieldGroups compute_field_groups(
     if (n <= 0) return out;
 
     double ref_ang = 0.0; bool flipped = false;
-    const LaneVec2 perp = lane_perp_axis(raw_lines, authored_angle_deg, &ref_ang, &flipped,
-                                         /*half_plane_when_authored*/ false);   // s315b
+    LaneVec2 perp = lane_perp_axis(raw_lines, authored_angle_deg, &ref_ang, &flipped,
+                                   /*half_plane_when_authored*/ false);   // s315b
+    // s348 — pieza de STICKER con ángulo automático: el eje no puede salir de la línea más
+    // larga de ESTA pieza (en trozos raros es un muñón a 80° y el degradado se tuerce respecto
+    // al resto del sticker). Se usa la dirección DOMINANTE ponderada por longitud (media de
+    // ángulos dobles, mod π): la del relleno, la misma en todas las piezas.
+    const bool dom_axis = (authored_angle_deg < 0 && field_fit_extent_tls() != nullptr);
+    if (dom_axis) {
+        // MODA por longitud (histograma de 2° en [0,π)), no la media: la media mezclaba 135°
+        // con tramos a 80° y salían 104-122°. La moda elige la dirección que domina y luego se
+        // afina con la media (ángulo doble) de los segmentos a ±8° de ella.
+        constexpr int kBins = 90;
+        double hist[kBins] = {};
+        struct Seg { double ang, len; };
+        std::vector<Seg> segs;
+        for (const auto& rl : raw_lines) {
+            const auto& pts = rl.pl.points;
+            for (size_t k = 1; k < pts.size(); ++k) {
+                const double dx = double(pts[k].x() - pts[k - 1].x());
+                const double dy = double(pts[k].y() - pts[k - 1].y());
+                const double len = std::hypot(dx, dy);
+                if (len <= 0.0) continue;
+                double a = std::atan2(dy, dx);
+                if (a < 0.0) a += M_PI;
+                if (a >= M_PI) a -= M_PI;
+                segs.push_back({ a, len });
+                hist[std::min(kBins - 1, int(a / M_PI * kBins))] += len;
+            }
+        }
+        if (!segs.empty()) {
+            int best = 0;
+            for (int b = 1; b < kBins; ++b) if (hist[b] > hist[best]) best = b;
+            const double peak = (best + 0.5) * M_PI / kBins;
+            double sx = 0.0, sy = 0.0;
+            for (const Seg& sg : segs) {
+                double d = std::fabs(sg.ang - peak);
+                d = std::min(d, M_PI - d);
+                if (d > 8.0 * M_PI / 180.0) continue;
+                sx += sg.len * std::cos(2.0 * sg.ang);
+                sy += sg.len * std::sin(2.0 * sg.ang);
+            }
+            double ang = (std::hypot(sx, sy) > 0.0) ? 0.5 * std::atan2(sy, sx) : peak;
+            if (ang < 0.0) ang += M_PI;
+            ref_ang = ang;
+            perp = LaneVec2{ -std::sin(ang), std::cos(ang) };
+            flipped = (perp.y < -1e-12) || (std::abs(perp.y) <= 1e-12 && perp.x < 0.0);
+            if (flipped) { perp.x = -perp.x; perp.y = -perp.y; }
+        }
+    }
+    // s349 — pieza de sticker con DEGRADADO DEL SVG: el eje es la dirección p0→p1, tal cual (sin
+    // canonizar: así p0 queda en t=0 y p1 en t=1, y no hace falta invertir nada).
+    const FieldGradient* svg_grad = field_gradient_tls();
+    if (svg_grad) {
+        const double dx = svg_grad->p1x - svg_grad->p0x, dy = svg_grad->p1y - svg_grad->p0y;
+        const double len = std::hypot(dx, dy);
+        if (len > 1e-6) {
+            perp    = LaneVec2{ dx / len, dy / len };
+            ref_ang = std::atan2(dy, dx) + 0.5 * M_PI;   // dirección de las LÍNEAS (para el log)
+            flipped = false;
+        } else svg_grad = nullptr;
+    }
     const double anchor_proj_mm = anchor_x_mm * perp.x + anchor_y_mm * perp.y;
     // Sin un spacing utilizable no se puede hablar de carriles; el ancho de la primera línea
     // es el mejor sustituto disponible y sigue agrupando los segmentos partidos, que es lo
@@ -1446,16 +1700,33 @@ inline FieldGroups compute_field_groups(
     }
 
     int m = 0;
-    out = field_groups_from_projections(proj_mm, period_mm, sp, anchor_proj_mm, invert, &m);
+    // s348 — área de referencia del sticker (ver field_fit_extent_tls), proyectada sobre el eje.
+    double fit_range[2] = { 0.0, 0.0 };
+    bool   has_fit = false;
+    if (const Polygons* ext = field_fit_extent_tls()) {
+        for (const Polygon& pg : *ext)
+            for (const Point& q : pg.points) {
+                const double pr = (double(q.x()) * perp.x + double(q.y()) * perp.y) / 1e6;
+                if (!has_fit) { fit_range[0] = fit_range[1] = pr; has_fit = true; }
+                else { fit_range[0] = std::min(fit_range[0], pr); fit_range[1] = std::max(fit_range[1], pr); }
+            }
+    }
+    if (svg_grad) {
+        fit_range[0] = svg_grad->p0x * perp.x + svg_grad->p0y * perp.y;
+        fit_range[1] = svg_grad->p1x * perp.x + svg_grad->p1y * perp.y;
+        has_fit = true;
+    }
+    out = field_groups_from_projections(proj_mm, period_mm, sp, anchor_proj_mm, invert, &m,
+                                        has_fit ? fit_range : nullptr, svg_grad != nullptr);
 
     if (debug_summary) {
         const bool periodic = (period_mm > 1e-4);
         std::ostringstream o;
         o << "axis=" << int(std::round(ref_ang * 180.0 / M_PI)) << "deg"
-          << " src=" << (authored_angle_deg >= 0 ? "cfg" : "geo")
+          << " src=" << (svg_grad ? "svg" : (authored_angle_deg >= 0 ? "cfg" : (dom_axis ? "dom" : "geo")))
           << " perp=(" << std::fixed << std::setprecision(2) << perp.x << "," << perp.y << ")"
           << std::defaultfloat << " cano=" << (flipped ? 1 : 0)
-          << " Field " << (periodic ? "periodic" : "fit-surface")
+          << " Field " << (periodic ? "periodic" : (has_fit ? "fit-sticker" : "fit-surface"))
           << " lines=" << n << " lanes=" << m
           << " spacing=" << sp << "mm";
         if (periodic) o << " period=" << period_mm << "mm";

@@ -2,6 +2,7 @@
 #include "../Exception.hpp"
 #include "../Model.hpp"
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
+#include "../NeotkoImportCarry.hpp"    // NEOTKO_IMPORT_TAG — s362
 #include "../ColorStitch.hpp"      // NEOTKO_PROFILE_TAG — NEOTKO_LOG + NeoDebug::PROFILE
 #include "../Feature/TextureBump/TextureBumpZone.hpp" // NEOTKO_TEXTUREBUMP_TAG — Fase 3 zone registry
 #include "../MixedFilament.hpp"
@@ -337,6 +338,19 @@ static inline std::string serialize_colorstitch_stickers(const std::vector<Slic3
             for (int c = 0; c < 4; ++c)
                 t.push_back(st.transform.matrix()(r, c));
         j["t"] = std::move(t);
+        // s348 — multicolour + eye; omitted when default so old readers/files stay identical.
+        if (!st.colors.empty()) {
+            nlohmann::json c = nlohmann::json::array();
+            for (const Slic3r::ColorStitchStickerColor& col : st.colors) {
+                nlohmann::json jc = { { "rgb", col.rgb }, { "p", col.profile_id }, { "h", col.hidden ? 1 : 0 } };
+                if (!col.band_profiles.empty()) jc["b"] = col.band_profiles;   // s349: bandas del degradado
+                if (col.zone >= 0) jc["z"] = col.zone;                          // s350: zona del SVG
+                c.push_back(std::move(jc));
+            }
+            j["c"]  = std::move(c);
+            j["cm"] = st.color_mode;
+        }
+        if (st.hidden) j["h"] = 1;
         arr.push_back(std::move(j));
     }
     return colorstitch_profiles_b64_encode(arr.dump());
@@ -361,6 +375,19 @@ static inline void parse_colorstitch_stickers(const std::string& b64, std::vecto
                     for (int c = 0; c < 4; ++c)
                         st.transform.matrix()(r, c) = j["t"][k++].get<double>();
             }
+            if (j.contains("c") && j["c"].is_array())
+                for (const auto& jc : j["c"]) {
+                    Slic3r::ColorStitchStickerColor col;
+                    col.rgb        = jc.value("rgb", 0u);
+                    col.profile_id = jc.value("p", 0);
+                    col.hidden     = jc.value("h", 0) != 0;
+                    if (jc.contains("b") && jc["b"].is_array())   // s349
+                        for (const auto& jb : jc["b"]) col.band_profiles.push_back(jb.get<int>());
+                    col.zone       = jc.value("z", -1);   // s350
+                    st.colors.push_back(col);
+                }
+            st.color_mode = j.value("cm", 0);
+            st.hidden     = j.value("h", 0) != 0;
             if (!st.svg_data.empty())
                 stickers.push_back(std::move(st));
         }
@@ -8876,6 +8903,12 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
     if (path == nullptr || config == nullptr || model == nullptr)
         return false;
 
+    // NEOTKO_IMPORT_TAG — s362: IMPORTAR (modelo sin config) no puede pisar la paleta del proyecto
+    // abierto. Todo lo de abajo carga la del fichero en una paleta vacía; finish() las junta.
+    const bool neotko_load_model  = strategy & LoadStrategy::LoadModel;
+    const bool neotko_load_config = strategy & LoadStrategy::LoadConfig;
+    Slic3r::NeotkoImportCarry::PaletteMerge neotko_palette_merge(neotko_load_model && !neotko_load_config);
+
     // All import should use "C" locales for number formatting.
     CNumericLocalesSetter locales_setter;
     _BBS_3MF_Importer importer;
@@ -8969,6 +9002,10 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
                 << "] mgr_size=" << mgr.size());
         }
     }
+
+    // NEOTKO_IMPORT_TAG — s362: aquí la paleta del fichero ya está completa (migrada + huérfanos).
+    if (res && model)
+        neotko_palette_merge.finish(*model);
 
     // NEOTKO_TEXTUREBUMP_TAG — Fase 3: restore the Texture Bump zone registry, same b64-JSON
     // project-level metadata pattern as the Surface Effect Profile list above, own key/manager.

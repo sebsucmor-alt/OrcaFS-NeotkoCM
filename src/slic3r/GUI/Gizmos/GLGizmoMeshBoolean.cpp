@@ -1,8 +1,13 @@
 #include "GLGizmoMeshBoolean.hpp"
+#include <chrono> // NEOTKO_PAINTCARRY_TAG
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/PaintTransfer.hpp" // NEOTKO_PAINTCARRY_TAG
+#include "libslic3r/NeoDebug.hpp"      // NEOTKO_PAINTCARRY_TAG
+#include <wx/busyinfo.h> // NEOTKO_PAINTCARRY_TAG
+#include <wx/glcanvas.h> // NEOTKO_PAINTCARRY_TAG — wxBusyInfo needs the canvas as a wxWindow
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -344,7 +349,9 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
             TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
             temp_tool_mesh.transform(m_tool.trafo);
             std::vector<TriangleMesh> temp_mesh_resuls;
+            { const auto t_bool = std::chrono::steady_clock::now(); // NEOTKO_PAINTCARRY_TAG
             Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "UNION");
+            m_neotko_boolean_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_bool).count()); }
             if (temp_mesh_resuls.size() != 0) {
                 generate_new_volume(true, *temp_mesh_resuls.begin());
                 wxGetApp().notification_manager()->close_plater_warning_notification(warning_text);
@@ -362,7 +369,9 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
             TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
             temp_tool_mesh.transform(m_tool.trafo);
             std::vector<TriangleMesh> temp_mesh_resuls;
+            { const auto t_bool = std::chrono::steady_clock::now(); // NEOTKO_PAINTCARRY_TAG
             Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "A_NOT_B");
+            m_neotko_boolean_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_bool).count()); }
             if (temp_mesh_resuls.size() != 0) {
                 generate_new_volume(m_diff_delete_input, *temp_mesh_resuls.begin());
                 wxGetApp().notification_manager()->close_plater_warning_notification(warning_text);
@@ -380,7 +389,9 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
             TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
             temp_tool_mesh.transform(m_tool.trafo);
             std::vector<TriangleMesh> temp_mesh_resuls;
+            { const auto t_bool = std::chrono::steady_clock::now(); // NEOTKO_PAINTCARRY_TAG
             Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "INTERSECTION");
+            m_neotko_boolean_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_bool).count()); }
             if (temp_mesh_resuls.size() != 0) {
                 generate_new_volume(m_inter_delete_input, *temp_mesh_resuls.begin());
                 wxGetApp().notification_manager()->close_plater_warning_notification(warning_text);
@@ -422,12 +433,24 @@ void GLGizmoMeshBoolean::on_save(cereal::BinaryOutputArchive &ar) const
 
 void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMesh& mesh_result) {
 
+    // NEOTKO_PAINTCARRY_TAG — keeping the painting can take a few seconds on big meshes. Shown
+    // (and painted, with a yield) before the model changes, so the yield never draws it half done.
+    std::unique_ptr<wxBusyInfo> busy;
+    if (PaintTransfer::has_painting(*m_src.mv) || PaintTransfer::has_painting(*m_tool.mv) ||
+        PaintTransfer::effective_filament(*m_src.mv) != PaintTransfer::effective_filament(*m_tool.mv)) {
+        busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), m_parent.get_wxglcanvas());
+        wxSafeYield(nullptr, true);
+    }
+
     wxGetApp().plater()->take_snapshot("Mesh Boolean");
 
     ModelObject* curr_model_object = m_c->selection_info()->model_object();
 
     // generate new volume
     ModelVolume* new_volume = curr_model_object->add_volume(std::move(mesh_result));
+    // NEOTKO_PAINTCARRY_TAG — add_volume() centres the mesh; this maps it back to the object
+    // frame the boolean ran in (the frame of m_src.trafo / m_tool.trafo).
+    const Transform3d result_to_object = new_volume->get_matrix();
 
     // assign to new_volume from old_volume
     ModelVolume* old_volume = m_src.mv;
@@ -449,12 +472,44 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
     new_volume->config.apply(old_volume->config);
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
-    new_volume->set_offset(old_volume->get_transformation().get_offset());
+
+    // NEOTKO_PAINTCARRY_TAG_START — keep the painting of both inputs. Where the result has the
+    // tool's skin it keeps the tool's painting and filament, except in a Difference, where that
+    // skin is the wall of the cut and stays unpainted.
+    {
+        std::vector<PaintTransfer::Source> sources(2);
+        sources[0].volume   = m_src.mv;
+        sources[0].to_world = m_src.trafo;
+        sources[0].filament = PaintTransfer::effective_filament(*m_src.mv);
+        sources[1].volume   = m_tool.mv;
+        sources[1].to_world = m_tool.trafo;
+        sources[1].filament = PaintTransfer::effective_filament(*m_tool.mv);
+        sources[1].cutter   = m_operation_mode == MeshBooleanOperation::Difference;
+        const auto t_paint = std::chrono::steady_clock::now();
+        const PaintTransfer::Stats st = PaintTransfer::transfer(sources, *new_volume, result_to_object, PaintTransfer::effective_filament(*new_volume));
+        const long paint_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_paint).count());
+        if (NeoDebug::enabled(NeoDebug::GRAVITY)) {
+            std::ostringstream os;
+            os << "MESHBOOL_PAINT op=" << int(m_operation_mode) << " src='" << m_src.mv->name << "' src_vol=" << m_src.volume_idx
+               << " src_mmu_empty=" << m_src.mv->mmu_segmentation_facets.empty() << " src_fil=" << sources[0].filament
+               << " tool='" << m_tool.mv->name << "' tool_vol=" << m_tool.volume_idx
+               << " tool_mmu_empty=" << m_tool.mv->mmu_segmentation_facets.empty() << " tool_fil=" << sources[1].filament
+               << " base=" << PaintTransfer::effective_filament(*new_volume) << " layers=" << st.layers << " samples=" << st.samples << " searches=" << st.searches << " tie_searches=" << st.tie_searches
+               << " prepare_ms=" << st.prepare_ms << " load_ms=" << st.load_ms << " resample_ms=" << st.resample_ms
+               << " store_ms=" << st.store_ms
+               << " result_mmu_empty=" << new_volume->mmu_segmentation_facets.empty()
+               << " result_tris=" << new_volume->mesh().facets_count() << " paint_ms=" << paint_ms
+               << " boolean_ms=" << m_neotko_boolean_ms;
+            NeoDebug::write(NeoDebug::GRAVITY, os.str());
+        }
+    }
+    // NEOTKO_PAINTCARRY_TAG_END
+    // NEOTKO_PAINTCARRY_TAG s366 — stock Orca moved the result here so that its centre sat where
+    // Part 1's centre was. add_volume() has already placed it where the boolean put it (offset =
+    // centre of the result in the object frame), so the result jumped by the difference.
+    // new_volume->set_offset(old_volume->get_transformation().get_offset());
     //Vec3d translate_z = { 0,0, (new_volume->source.mesh_offset - old_volume->source.mesh_offset).z() };
     //new_volume->translate(new_volume->get_transformation().get_matrix_no_offset() * translate_z);
-    //new_volume->supported_facets.assign(old_volume->supported_facets);
-    //new_volume->seam_facets.assign(old_volume->seam_facets);
-    //new_volume->mmu_segmentation_facets.assign(old_volume->mmu_segmentation_facets);
 
     // delete old_volume
     std::swap(curr_model_object->volumes[m_src.volume_idx], curr_model_object->volumes.back());
@@ -473,6 +528,14 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
     //curr_model_object->sort_volumes(true);
 
     wxGetApp().plater()->update();
+    // NEOTKO_PAINTCARRY_TAG — does the painting survive the deletes and the update?
+    if (NeoDebug::enabled(NeoDebug::GRAVITY)) {
+        std::ostringstream os;
+        os << "MESHBOOL_PAINT_AFTER volumes=" << curr_model_object->volumes.size();
+        for (const ModelVolume *mv : curr_model_object->volumes)
+            os << " ['" << mv->name << "' mmu_empty=" << mv->mmu_segmentation_facets.empty() << " is_new=" << (mv == new_volume) << "]";
+        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+    }
     wxGetApp().obj_list()->select_item([this, new_volume]() {
         wxDataViewItem sel_item;
 

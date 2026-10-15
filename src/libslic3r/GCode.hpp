@@ -225,6 +225,10 @@ private:
     std::optional<std::string> dispatch_neotower_sublayer_prime(
         GCode &gcodegen, int extruder_id, double toolchange_print_z, double tower_z,
         bool local_z_sublayer_ctx);
+    // NEOTKO_LOCALZ_TAG s355 — preplanned Local-Z toolchange ("Subdivide Mix Layer"), consumed
+    // in order from m_local_z_tool_changes[m_layer_idx]. The stock block, moved to the NeoTower
+    // dispatch; std::nullopt = nothing pending or it does not match the request.
+    std::optional<std::string> dispatch_local_z_planned(GCode &gcodegen, int extruder_id, double tower_z);
 
     // Postprocesses gcode: rotates and moves G1 extrusions and returns result
     std::string post_process_wipe_tower_moves(const WipeTower::ToolChangeResult& tcr, const Vec2f& translation, float angle) const;
@@ -895,7 +899,13 @@ private:
     void _print_first_layer_extruder_temperatures(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);
     // On the first printing layer. This flag triggers first layer speeds.
     //BBS
-    bool    on_first_layer() const { return m_layer != nullptr && m_layer->id() == 0 && abs(m_layer->bottom_z()) < EPSILON; }
+    // NEOTKO_MULTIPASS_TAG s351 — la rama de subcapas pone m_layer = nullptr; si el grupo es de la
+    // capa 0 (sticker/pintura bottom en la cama) manda m_sub_on_first_layer (NEOTOWER.md §35.5).
+    bool    on_first_layer() const {
+        if (m_layer == nullptr) return m_sub_on_first_layer;
+        return m_layer->id() == 0 && abs(m_layer->bottom_z()) < EPSILON;
+    }
+    bool    m_sub_on_first_layer = false;
     int layer_id() const {
         if (m_layer == nullptr)
             return -1;
@@ -934,6 +944,7 @@ private:
     friend class WipeTowerIntegration;
     friend class PressureEqualizer;
     friend class Print;
+    friend class NeotkoLocalZPlanner;   // NEOTKO_LOCALZ_TAG s355 — collect_layers_to_print (NeoTowerLocalZ.hpp)
     friend class SmallAreaInfillFlowCompensator;
 };
 

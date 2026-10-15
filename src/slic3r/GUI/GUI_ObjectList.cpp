@@ -16,6 +16,10 @@
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/NeoDebug.hpp"
+#include "libslic3r/PaintTransfer.hpp" // NEOTKO_PAINTCARRY_TAG s366
+#include <wx/busyinfo.h> // NEOTKO_PAINTCARRY_TAG
+#include <wx/glcanvas.h> // NEOTKO_PAINTCARRY_TAG — wxBusyInfo needs the canvas as a wxWindow
+#include <chrono>
 #include "libslic3r/ColorStitch.hpp" // NEOTKO_PROFILE_TAG — split() sandwich-loss warning
 #include <sstream>
 #include "GLCanvas3D.hpp"
@@ -2442,6 +2446,36 @@ void ObjectList::load_shape_object(const std::string &type_name)
     wxGetApp().mainframe->update_title();
 }
 
+// NEOTKO_CONSTRUCT_TAG_START s363
+ModelVolume* ObjectList::neotko_add_mesh_part(int obj_idx, TriangleMesh mesh_world, const std::string &name)
+{
+    if (m_objects == nullptr || obj_idx < 0 || obj_idx >= (int)m_objects->size() || mesh_world.empty())
+        return nullptr;
+    ModelObject &model_object = *(*m_objects)[obj_idx];
+    if (model_object.instances.empty())
+        return nullptr;
+
+    // add_volume() centres the mesh and leaves the centre as the volume's offset, which here is
+    // still a WORLD position. Undoing the instance matrix puts the part back where it was drawn.
+    ModelVolume *new_volume = model_object.add_volume(std::move(mesh_world), ModelVolumeType::MODEL_PART);
+    const Transform3d placed = model_object.instances.front()->get_matrix().inverse() * new_volume->get_matrix();
+    new_volume->set_transformation(placed);
+    new_volume->name = name;
+    const int extruder_id = model_object.config.has("extruder") ? model_object.config.opt_int("extruder") : 0;
+    new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
+    new_volume->source.is_from_builtin_objects = true;
+    model_object.invalidate_bounding_box();
+
+    Slic3r::save_object_mesh(model_object);
+
+    // Rebuilds the object's rows in the list and calls changed_object().
+    reorder_volumes_and_get_selection(obj_idx);
+    wxGetApp().plater()->get_view3D_canvas3D()->update_instance_printable_state_for_object((size_t)obj_idx);
+    notify_instance_updated(obj_idx);
+    return new_volume;
+}
+// NEOTKO_CONSTRUCT_TAG_END
+
 void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center)
 {
     // Add mesh to model as a new object
@@ -2790,7 +2824,15 @@ void ObjectList::split()
 
     take_snapshot("Split to parts");
 
+    // NEOTKO_PAINTCARRY_TAG s366 — split() carries the painting over to the pieces now.
+    std::unique_ptr<wxBusyInfo> busy;
+    if (PaintTransfer::has_painting(*volume))
+    {
+        busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), wxGetApp().plater()->get_current_canvas3D()->get_wxglcanvas());
+        wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+    }
     volume->split(filament_cnt);
+    busy.reset();
 
     wxBusyCursor wait;
 
@@ -3296,10 +3338,32 @@ void ObjectList::boolean()
     if (obj_idxs.empty() && vol_idxs.empty())
         return;
 
+    // NEOTKO_PAINTCARRY_TAG — see the painting block below. Shown (and painted, with a yield)
+    // before the model changes, so the yield never draws it half done.
+    std::unique_ptr<wxBusyInfo> busy;
+    {
+        const ModelObject* obj = (*m_objects)[obj_idxs.front()];
+        bool               worth = false;
+        int                first_filament = -1;
+        for (const ModelVolume* v : obj->volumes)
+            if (v->is_model_part()) {
+                const int fil = PaintTransfer::effective_filament(*v);
+                worth = worth || PaintTransfer::has_painting(*v) || (first_filament >= 0 && fil != first_filament);
+                if (first_filament < 0)
+                    first_filament = fil;
+            }
+        if (worth) {
+            busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), wxGetApp().plater()->get_current_canvas3D()->get_wxglcanvas());
+            wxSafeYield(nullptr, true);
+        }
+    }
+
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
     ModelObject* object = (*m_objects)[obj_idxs.front()];
+    const auto t_bool = std::chrono::steady_clock::now(); // NEOTKO_PAINTCARRY_TAG
     TriangleMesh mesh = Plater::combine_mesh_fff(*object, -1, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
+    const long boolean_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_bool).count());
 
     // add mesh to model as a new object, keep the original object's name and config
     Model* model = object->get_model();
@@ -3309,6 +3373,36 @@ void ObjectList::boolean()
     if (new_object->instances.empty())
         new_object->add_instance();
     ModelVolume* new_volume = new_object->add_volume(mesh);
+
+    // NEOTKO_PAINTCARRY_TAG_START s366 — keep the painting of every part, and the filament each
+    // part had. combine_mesh_fff() works in world coordinates over every instance, so every
+    // instance is a source; the skin left by a negative part is the wall of its cut and stays
+    // unpainted.
+    {
+        std::vector<PaintTransfer::Source> sources;
+        for (const ModelInstance* inst : object->instances)
+            for (const ModelVolume* v : object->volumes)
+                if ((v->is_model_part() || v->is_negative_volume()) && !v->mesh().empty()) {
+                    PaintTransfer::Source src;
+                    src.volume   = v;
+                    src.to_world = inst->get_matrix() * v->get_matrix();
+                    src.filament = PaintTransfer::effective_filament(*v);
+                    src.cutter   = v->is_negative_volume();
+                    sources.push_back(src);
+                }
+        const auto t_paint = std::chrono::steady_clock::now();
+        const PaintTransfer::Stats st = PaintTransfer::transfer(sources, *new_volume, new_volume->get_matrix(),
+                                                                PaintTransfer::effective_filament(*new_volume));
+        if (NeoDebug::enabled(NeoDebug::GRAVITY)) {
+            std::ostringstream os;
+            const long paint_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_paint).count());
+            os << "OBJLIST_BOOLEAN_PAINT obj='" << object->name << "' sources=" << sources.size() << " boolean_ms=" << boolean_ms << " paint_ms=" << paint_ms
+               << " layers=" << st.layers << " samples=" << st.samples << " searches=" << st.searches
+               << " result_mmu_empty=" << new_volume->mmu_segmentation_facets.empty();
+            NeoDebug::write(NeoDebug::GRAVITY, os.str());
+        }
+    }
+    // NEOTKO_PAINTCARRY_TAG_END
 
     // BBS: ensure on bed but no need to ensure locate in the center around origin
     // NeotkoLIBRE — Assembled Boolean of floating objects keeps the combined Z (the source
