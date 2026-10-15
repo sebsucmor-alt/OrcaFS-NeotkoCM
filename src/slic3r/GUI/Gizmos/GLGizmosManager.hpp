@@ -91,6 +91,7 @@ public:
         Simplify,
         BrimEars,
         ImageProjection,
+        AlignStack,
         //SlaSupports,
         // BBS
         //FaceRecognition,

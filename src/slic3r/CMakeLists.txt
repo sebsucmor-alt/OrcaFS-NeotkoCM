@@ -143,6 +143,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GCodeViewer.hpp
     GUI/Gizmos/GizmoObjectManipulation.cpp
     GUI/Gizmos/GizmoObjectManipulation.hpp
+    GUI/Gizmos/GLGizmoAlignStack.cpp
+    GUI/Gizmos/GLGizmoAlignStack.hpp
     GUI/Gizmos/GLGizmoAssembly.cpp
     GUI/Gizmos/GLGizmoAssembly.hpp
     GUI/Gizmos/GLGizmoBase.cpp
