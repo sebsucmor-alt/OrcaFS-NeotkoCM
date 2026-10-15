@@ -1060,6 +1060,8 @@ void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
     // before content_length, which has to match what we send.
     NeotkoFlutterDark::maybe_patch(file_path, fileContent);
     NeotkoFlutterDark::neutralize_service_worker(file_path, fileContent);
+    // s368: new URLs for the bootstrap and the bundle, so WebKit cannot answer from its year-long cache.
+    NeotkoFlutterDark::bust_cached_urls(file_path, fileContent);
 
     size_t content_length = fileContent.size(); // 字节长度，非字符数
 

@@ -68,6 +68,15 @@ public:
     // bundle, and the palette is recognized. Results are cached: the bundle is ~5 MB and is
     // re-requested on every page load.
     static bool maybe_patch(const std::string& file_path, std::string& content);
+
+    // NEOTKO_FLUTTERDARK_TAG s368 — since their web 2.3.3x the bundle is "main.<hex>.js",
+    // loaded by "flutter_bootstrap.<hex>.js", and both are served "immutable": WebKit keeps the
+    // first copy it got for a year and never asks again, so maybe_patch never runs (field log,
+    // 16-oct-2026: only [theme] lines, no [bundle]). index.html is always re-requested, so we
+    // add "?nd=<token>" to the bootstrap URL there, and to mainJsPath inside the bootstrap. New
+    // URLs, nothing cached under them; the server drops the query, so the same files are read.
+    // The token changes with the theme and with each start of the app.
+    static bool bust_cached_urls(const std::string& file_path, std::string& content);
 };
 
 }} // namespace Slic3r::GUI

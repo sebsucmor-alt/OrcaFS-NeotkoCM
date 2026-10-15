@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -400,9 +401,76 @@ static bool is_bundle(const std::string& file_path)
     return true;
 }
 
+// "<prefix><hex>.js" as a whole file name, e.g. flutter_bootstrap.8411d9d1e47b24e7.js.
+static bool is_hashed_name(const std::string& name, const std::string& prefix)
+{
+    const std::string suf = ".js";
+    if (name.size() <= prefix.size() + suf.size() || name.compare(0, prefix.size(), prefix) != 0 || !ends_with(name, suf.c_str()))
+        return false;
+    for (size_t i = prefix.size(); i < name.size() - suf.size(); ++i) {
+        const char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+static std::string base_name(const std::string& file_path)
+{
+    const size_t slash = file_path.find_last_of("/\\");
+    return slash == std::string::npos ? file_path : file_path.substr(slash + 1);
+}
+
+static bool is_flutter_index(const std::string& file_path)
+{
+    return base_name(file_path) == "index.html" && file_path.find("flutter_web") != std::string::npos;
+}
+
+static bool is_bootstrap(const std::string& file_path)
+{
+    return is_hashed_name(base_name(file_path), "flutter_bootstrap.");
+}
+
 bool NeotkoFlutterDark::must_not_be_cached(const std::string& file_path)
 {
-    return is_bundle(file_path) || ends_with(file_path, kServiceWorkerName);
+    // s368: index.html and the bootstrap carry the theme token, so their bytes depend on it too.
+    return is_bundle(file_path) || ends_with(file_path, kServiceWorkerName) || is_flutter_index(file_path) ||
+           is_bootstrap(file_path);
+}
+
+// Appends "?nd=<token>" after every "<prefix><hex>.js" in `content` that is not already
+// followed by a query. Returns how many it changed.
+static int add_token_after(std::string& content, const std::string& prefix, const std::string& token)
+{
+    int    changed = 0;
+    size_t pos     = 0;
+    while ((pos = content.find(prefix, pos)) != std::string::npos) {
+        size_t p = pos + prefix.size();
+        const size_t hex_begin = p;
+        while (p < content.size() && ((content[p] >= '0' && content[p] <= '9') || (content[p] >= 'a' && content[p] <= 'f')))
+            ++p;
+        if (p - hex_begin >= 8 && content.compare(p, 3, ".js") == 0 && (p + 3 >= content.size() || content[p + 3] != '?')) {
+            content.insert(p + 3, "?nd=" + token);
+            ++changed;
+        }
+        pos = p;
+    }
+    return changed;
+}
+
+bool NeotkoFlutterDark::bust_cached_urls(const std::string& file_path, std::string& content)
+{
+    static const std::string session = std::to_string((long long) std::time(nullptr));
+    const std::string        token   = (is_dark() ? "d" : "l") + session;
+    int changed = 0;
+    if (is_flutter_index(file_path))
+        changed = add_token_after(content, "flutter_bootstrap.", token);
+    else if (is_bootstrap(file_path))
+        changed = add_token_after(content, "\"mainJsPath\":\"main.", token);
+    else
+        return false;
+    log("[bust] " + base_name(file_path) + " token=" + token + " changed=" + std::to_string(changed));
+    return changed > 0;
 }
 
 bool NeotkoFlutterDark::neutralize_service_worker(const std::string& file_path, std::string& content)

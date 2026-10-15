@@ -14,7 +14,7 @@ struct ColorStitchSticker;
 class Model;
 class ModelObject;
 namespace GUI {
-class Camera;
+struct Camera;
 namespace ColorStitchStickerPreview {
 
 // Dibuja los stickers de todos los objetos (todas sus instancias). Un relleno por color, con la
