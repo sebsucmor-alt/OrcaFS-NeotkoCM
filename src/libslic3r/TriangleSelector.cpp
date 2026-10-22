@@ -2458,6 +2458,21 @@ static bool point_in_screen_triangle(const Vec2f &p, const Vec2f &t1, const Vec2
     return !(has_neg && has_pos);
 }
 
+// How much of a triangle the camera sees, sampling its 3 vertices and its centroid.
+enum class TriangleSeen { All, Some, None };
+static TriangleSeen triangle_seen(const TriangleSelector::Cursor &cursor, const Vec3f &p1, const Vec3f &p2, const Vec3f &p3)
+{
+    if (!cursor.has_visibility_test())
+        return TriangleSeen::All;
+    int seen = 0;
+    for (const Vec3f *p : { &p1, &p2, &p3 })
+        if (cursor.is_point_seen(*p))
+            ++seen;
+    if (cursor.is_point_seen((p1 + p2 + p3) / 3.f))
+        ++seen;
+    return seen == 4 ? TriangleSeen::All : seen == 0 ? TriangleSeen::None : TriangleSeen::Some;
+}
+
 bool TriangleSelector::RectangleProjectionCursor::project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const
 {
     return project_mesh_point_to_screen(trafo, m_view_projection_matrix, m_viewport, mesh_point, out_screen);
@@ -2468,7 +2483,7 @@ bool TriangleSelector::RectangleProjectionCursor::is_mesh_point_inside(const Vec
     Vec2f screen;
     return project_to_screen(point, screen) && screen.x() >= m_rect_min.x() && screen.x() <= m_rect_max.x()
         && screen.y() >= m_rect_min.y() && screen.y() <= m_rect_max.y()
-        && is_mesh_point_not_clipped(point, clipping_plane);
+        && is_mesh_point_not_clipped(point, clipping_plane) && is_point_seen(point);
 }
 
 static bool point_in_screen_rect(const Vec2f &p, const Vec2f &rect_min, const Vec2f &rect_max)
@@ -2501,14 +2516,25 @@ bool TriangleSelector::RectangleProjectionCursor::is_pointer_in_triangle(const V
         Vec2f(m_rect_min.x(), m_rect_min.y()), Vec2f(m_rect_max.x(), m_rect_min.y()),
         Vec2f(m_rect_max.x(), m_rect_max.y()), Vec2f(m_rect_min.x(), m_rect_max.y())
     };
-    return std::any_of(corners.begin(), corners.end(), [&triangle](const Vec2f &corner) {
-        return point_in_screen_triangle(corner, triangle[0], triangle[1], triangle[2]);
+    const TriangleSeen seen = triangle_seen(*this, p1, p2, p3);
+    if (seen == TriangleSeen::None)
+        return false;
+    if (std::any_of(corners.begin(), corners.end(), [&triangle](const Vec2f &corner) {
+            return point_in_screen_triangle(corner, triangle[0], triangle[1], triangle[2]);
+        }))
+        return true;
+    // Partly hidden triangle touching the rectangle: subdivide along the occlusion edge.
+    return seen == TriangleSeen::Some && std::any_of(triangle.begin(), triangle.end(), [this](const Vec2f &v) {
+        return point_in_screen_rect(v, m_rect_min, m_rect_max);
     });
 }
 
 bool TriangleSelector::RectangleProjectionCursor::is_edge_inside_cursor(const Triangle &tr,
                                                                          const std::vector<Vertex> &vertices) const
 {
+    if (triangle_seen(*this, vertices[tr.verts_idxs[0]].v, vertices[tr.verts_idxs[1]].v, vertices[tr.verts_idxs[2]].v) == TriangleSeen::None)
+        return false;
+
     std::array<Vec2f, 3> points;
     std::array<bool, 3> valid;
     for (int i = 0; i < 3; ++i)
@@ -2558,12 +2584,15 @@ bool TriangleSelector::PolygonProjectionCursor::is_mesh_point_inside(const Vec3f
 {
     Vec2f screen;
     return project_to_screen(point, screen) && point_in_screen_polygon(screen, m_polygon)
-        && is_mesh_point_not_clipped(point, clipping_plane);
+        && is_mesh_point_not_clipped(point, clipping_plane) && is_point_seen(point);
 }
 
 bool TriangleSelector::PolygonProjectionCursor::is_edge_inside_cursor(const Triangle &tr,
                                                                        const std::vector<Vertex> &vertices) const
 {
+    if (triangle_seen(*this, vertices[tr.verts_idxs[0]].v, vertices[tr.verts_idxs[1]].v, vertices[tr.verts_idxs[2]].v) == TriangleSeen::None)
+        return false;
+
     std::array<Vec2f, 3> points;
     std::array<bool, 3> valid;
     for (int i = 0; i < 3; ++i)
@@ -2582,6 +2611,15 @@ bool TriangleSelector::PolygonProjectionCursor::is_pointer_in_triangle(const Vec
     std::array<Vec2f, 3> triangle;
     if (!project_to_screen(p1, triangle[0]) || !project_to_screen(p2, triangle[1]) || !project_to_screen(p3, triangle[2]))
         return false;
+
+    const TriangleSeen seen = triangle_seen(*this, p1, p2, p3);
+    if (seen == TriangleSeen::None)
+        return false;
+    // Partly hidden triangle touching the polygon: subdivide along the occlusion edge.
+    if (seen == TriangleSeen::Some)
+        for (const Vec2f &v : triangle)
+            if (point_in_screen_polygon(v, m_polygon))
+                return true;
 
     for (const Vec2f &polygon_vertex : m_polygon)
         if (point_in_screen_triangle(polygon_vertex, triangle[0], triangle[1], triangle[2]))

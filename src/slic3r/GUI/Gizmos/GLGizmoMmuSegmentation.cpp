@@ -706,8 +706,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
             m_rectangle_mask_active = false;
             m_polygon_mask_active = false;
             m_rect_dragging = false;
-            m_polygon_points.clear();
-            m_polygon_dragged_vertex = -1;
+            shape_clear();
             if (changed_tool) {
                 for (auto &triangle_selector : m_triangle_selectors) {
                     triangle_selector->seed_fill_unselect_all_triangles();
@@ -903,21 +902,76 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     if (m_imgui->bbl_checkbox(_L("Rectangle mask"), m_rectangle_mask_active)) {
         m_polygon_mask_active = false;
-        m_polygon_points.clear();
-        m_polygon_dragged_vertex = -1;
         m_rect_dragging = false;
+        shape_clear();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Drag a screen-space rectangle to paint front-facing facets inside it. Shift-drag erases; right-click cancels.").c_str());
+        ImGui::SetTooltip("%s", _u8L("Drag a screen-space rectangle to paint the facets you can see inside it. Shift-drag erases; right-click cancels.").c_str());
 
-    if (m_imgui->bbl_checkbox(_L("Polygon mask"), m_polygon_mask_active)) {
+    if (m_imgui->bbl_checkbox(_L("Shape mask"), m_polygon_mask_active)) {
         m_rectangle_mask_active = false;
         m_rect_dragging = false;
-        m_polygon_points.clear();
-        m_polygon_dragged_vertex = -1;
+        shape_clear();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Click to place vertices, drag an existing vertex to edit it, then click the first vertex to paint. Right-click cancels.").c_str());
+        ImGui::SetTooltip("%s", _u8L("Draw a shape on screen and paint the facets you can see inside it.\n"
+            "Click: corner point.  Click and drag: curved point.\n"
+            "Click the first point to close the shape, then Apply.\n"
+            "Drag points or handles to edit.  Click on the outline to add a point.\n"
+            "Alt+click a point: corner <-> curve.  Alt+drag a handle: break the curve.\n"
+            "Right-click: cancel.").c_str());
+
+    if (m_polygon_mask_active) {
+        ImGui::Indent();
+        m_imgui->bbl_checkbox(_L("Lock view"), m_shape_view_lock);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Freeze the camera while you draw: no zoom, orbit or pan.\n"
+                "The shape is drawn on screen, so it only fits the object from this view.\n"
+                "With the lock off, moving the camera drops an unfinished shape.").c_str());
+
+        if (m_shape_lost_to_camera)
+            m_imgui->warning_text(_L("The view moved, the shape was dropped."));
+        else if (m_shape_nodes.empty())
+            m_imgui->text(_L("Click on the object to start a shape."));
+        else
+            m_imgui->text(GUI::format(m_shape_closed ? _L("%1% points, closed") : _L("%1% points, open"), m_shape_nodes.size()));
+
+        m_imgui->disabled_begin(!m_shape_closed);
+        if (m_imgui->button(_L("Apply")))
+            shape_apply(get_left_button_state_type(), std::string(handle_snapshot_action_name(false, Button::Left).ToUTF8().data()));
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Paint the shape with the selected filament.").c_str());
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Erase")))
+            shape_apply(EnforcerBlockerType::NONE, std::string(handle_snapshot_action_name(true, Button::Left).ToUTF8().data()));
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Remove the paint inside the shape.").c_str());
+        m_imgui->disabled_end();
+
+        ImGui::SameLine();
+        m_imgui->disabled_begin(m_shape_nodes.empty());
+        if (m_imgui->button(_L("Cancel"))) {
+            shape_clear();
+            m_parent.set_as_dirty();
+        }
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Undo point"))) {
+            if (m_shape_closed)
+                m_shape_closed = false;
+            else if (!m_shape_nodes.empty())
+                m_shape_nodes.pop_back();
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Reopen a closed shape, or remove the last point of an open one.").c_str());
+        m_imgui->disabled_end();
+
+        m_imgui->bbl_checkbox(_L("Keep shape after Apply"), m_shape_keep_after_apply);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Leave the shape on screen after Apply,\n"
+                "to paint it again with another filament or tweak it.").c_str());
+        ImGui::Unindent();
+    }
 
     if (m_rectangle_mask_active)
         m_tool_type = ToolType::RECTANGLE;
@@ -1154,6 +1208,14 @@ void GLGizmoMmuSegmentation::on_set_state()
         if (mo) Slic3r::save_object_mesh(*mo);
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_FORCE_UPDATE));
     }
+}
+
+ColorRGBA GLGizmoMmuSegmentation::get_shape_fill_color() const
+{
+    ColorRGBA color = m_selected_extruder_idx < m_extruders_colors.size() ?
+        m_extruders_colors[m_selected_extruder_idx] : ColorRGBA(0.0f, 1.0f, 0.3f, 1.0f);
+    color.a(0.35f);
+    return color;
 }
 
 wxString GLGizmoMmuSegmentation::handle_snapshot_action_name(bool shift_down, GLGizmoPainterBase::Button button_down) const
