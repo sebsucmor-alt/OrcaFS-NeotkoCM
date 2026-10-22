@@ -96,6 +96,15 @@ public:
 
         static bool is_facet_visible(const Cursor &cursor, int facet_idx, const std::vector<Vec3f> &face_normals);
 
+        // Optional occlusion test, mesh coords -> true if the camera really sees that point.
+        // is_facet_visible() only rejects back faces; a front face hidden behind another part of
+        // the object (inside of a ring, a wall behind a handle) would still be painted by the
+        // screen-space masks. Only the Rectangle/Polygon projection cursors use it.
+        using VisibilityTest = std::function<bool(const Vec3f &)>;
+        void set_visibility_test(VisibilityTest test) { m_visibility_test = std::move(test); }
+        bool is_point_seen(const Vec3f &point) const { return !m_visibility_test || m_visibility_test(point); }
+        bool has_visibility_test() const { return bool(m_visibility_test); }
+
     protected:
         explicit Cursor(const Vec3f &source_, float radius_world, const Transform3d &trafo_, const ClippingPlane &clipping_plane_);
 
@@ -109,6 +118,8 @@ public:
         Vec3f       dir = Vec3f(0.f, 0.f, 0.f);
 
         ClippingPlane clipping_plane; // Clipping plane to limit painting to not clipped facets only
+
+        VisibilityTest m_visibility_test;
 
         friend TriangleSelector;
     };
@@ -249,6 +260,8 @@ public:
         {
             return TriangleSelector::Cursor::is_facet_visible(*this, facet_idx, face_normals);
         }
+        // With an occlusion test the masked area has holes, so it's no longer convex.
+        bool all_vertices_inside_implies_whole_triangle_inside() const override { return !has_visibility_test(); }
 
     private:
         bool project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const;

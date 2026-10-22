@@ -288,9 +288,48 @@ protected:
     Vec2d m_rect_end_corner   = Vec2d::Zero();
     bool  m_rect_dragging     = false;
 
-    std::vector<Vec2d> m_polygon_points;
-    int m_polygon_dragged_vertex = -1;
-    static constexpr float PolygonCloseRadiusPx = 8.f;
+    // POLYGON tool state, a closed shape
+    // made of nodes with optional Bezier handles (screen-space, canvas-local coords). Click adds a
+    // corner node, click+drag adds a curved one. Closing the shape (click the first node with 3+
+    // placed) no longer paints: the shape stays editable until shape_apply() (panel Apply), and
+    // right-click / Cancel clears it. Curves are flattened to a polyline right before painting,
+    // so TriangleSelector::PolygonProjectionCursor is fed a plain polygon exactly like before.
+    struct ShapeNode
+    {
+        Vec2d p   = Vec2d::Zero();
+        // Handle offsets relative to p. Both zero = sharp corner.
+        Vec2d in  = Vec2d::Zero();
+        Vec2d out = Vec2d::Zero();
+        // Smooth node: dragging one handle mirrors the other (Alt-drag breaks it).
+        bool  smooth = false;
+        bool  is_curved() const { return !in.isZero() || !out.isZero(); }
+    };
+    enum class ShapeDrag { None, NewNodeHandle, Node, HandleIn, HandleOut };
+    std::vector<ShapeNode> m_shape_nodes;
+    bool      m_shape_closed           = false;
+    bool      m_shape_view_lock        = true;
+    bool      m_shape_keep_after_apply = false;
+    // Set when the camera moved under an unlocked, unfinished shape and it had to be dropped.
+    bool      m_shape_lost_to_camera   = false;
+    ShapeDrag m_shape_drag             = ShapeDrag::None;
+    int       m_shape_drag_idx         = -1;
+    // Camera view*projection when the first node was placed: the nodes are screen-space, so they
+    // only mean something for this exact view.
+    Matrix4d  m_shape_view_projection  = Matrix4d::Identity();
+    static constexpr float  PolygonCloseRadiusPx       = 8.f;
+    static constexpr double ShapeFlattenTolerancePx    = 0.25;
+    static constexpr int    ShapeFlattenMaxSegments    = 64;
+    static constexpr double ShapeCurveDragThresholdPx  = 3.0;
+
+    void shape_clear();
+    // Shape as a polyline (curves subdivided until flat within ShapeFlattenTolerancePx).
+    std::vector<Vec2d> shape_flatten(bool closed) const;
+    // Camera input is swallowed while drawing a shape with Lock view on.
+    bool shape_view_locked() const { return m_tool_type == ToolType::POLYGON && m_shape_view_lock; }
+    // Paints the closed shape with new_state as a single undo step.
+    void shape_apply(EnforcerBlockerType new_state, const std::string &snapshot_name);
+    // Translucent preview fill of a closed shape; the MMU gizmo uses the selected filament colour.
+    virtual ColorRGBA get_shape_fill_color() const { return { 0.0f, 1.0f, 0.3f, 0.25f }; }
 
     bool     m_paint_on_overhangs_only          = false;
     float    m_highlight_by_angle_threshold_deg = 0.f;
@@ -302,6 +341,8 @@ protected:
     Vec2d m_old_rect_start_corner = Vec2d::Zero();
     Vec2d m_old_rect_end_corner   = Vec2d::Zero();
     GLModel m_polygon_overlay;
+    GLModel m_polygon_fill_overlay;
+    GLModel m_polygon_handles_overlay;
     static constexpr float SmartFillAngleMin  = 0.0f;
     static constexpr float SmartFillAngleMax  = 90.f;
     static constexpr float SmartFillAngleStep = 1.f;
@@ -337,6 +378,9 @@ private:
 
     void apply_rectangle_mask(EnforcerBlockerType new_state);
     void apply_polygon_mask(EnforcerBlockerType new_state);
+    // Occlusion test for the rectangle/polygon masks on mesh mesh_idx (mesh coords): a ray from
+    // the point towards the camera must not hit any model part of the object. Cached per point.
+    TriangleSelector::Cursor::VisibilityTest make_visibility_test(size_t mesh_idx, const std::vector<Transform3d> &trafo_matrices) const;
 
     bool is_mesh_point_clipped(const Vec3d& point, const Transform3d& trafo) const;
     void update_raycast_cache(const Vec2d& mouse_position,

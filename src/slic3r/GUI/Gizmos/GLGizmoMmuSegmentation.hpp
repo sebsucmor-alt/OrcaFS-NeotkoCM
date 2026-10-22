@@ -101,6 +101,8 @@ protected:
     bool on_is_activable() const override;
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
+    // Shape mask preview fill in the selected filament colour.
+    ColorRGBA get_shape_fill_color() const override;
 
     std::string get_gizmo_entering_text() const override { return "Entering color painting"; }
     std::string get_gizmo_leaving_text() const override { return "Leaving color painting"; }
