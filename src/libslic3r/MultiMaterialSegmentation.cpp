@@ -1350,6 +1350,13 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                 //BBS: the extrusion line width is outer wall rather than inner wall
                 const double nozzle_diameter = print_object.print()->config().nozzle_diameter.get_at(0);
                 double outer_wall_line_width = config.get_abs_value("outer_wall_line_width", nozzle_diameter);
+                // 0 means "default" everywhere else (line_width, then auto from the nozzle), but here
+                // it was read raw: an object with Outer wall = 0 got a 0 mm width, the spacing went
+                // negative and the whole slice aborted as soon as the object had multi-material paint.
+                if (outer_wall_line_width <= 0.)
+                    outer_wall_line_width = print_object.config().line_width.get_abs_value(nozzle_diameter); // line_width lives in PrintObjectConfig
+                if (outer_wall_line_width <= 0.)
+                    outer_wall_line_width = Flow::auto_extrusion_width(frExternalPerimeter, float(nozzle_diameter));
                 out.extrusion_width     = std::max<float>(out.extrusion_width, outer_wall_line_width);
                 out.top_shell_layers    = std::max<int>(out.top_shell_layers, config.top_shell_layers);
                 out.bottom_shell_layers = std::max<int>(out.bottom_shell_layers, config.bottom_shell_layers);
