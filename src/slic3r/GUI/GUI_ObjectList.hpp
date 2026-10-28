@@ -287,8 +287,9 @@ public:
     void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type);
     void                load_shape_object(const std::string &type_name);
     void                load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center = true);
-    // A world-space mesh as a new part of obj_idx, in place. Returns the new part (nullptr: none).
-    ModelVolume*        add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name);
+    // A world-space mesh as a new part of obj_idx, in place (a negative part with `negative`).
+    // Returns the new part (nullptr: none).
+    ModelVolume*        add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name, bool negative = false);
     // BBS
     void                switch_to_object_process();
     bool                del_object(const int obj_idx, bool refresh_immediately = true);

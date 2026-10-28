@@ -125,12 +125,13 @@ Transfer::Transfer(std::vector<Source> sources) : m(new Impl)
 
 Transfer::~Transfer() = default;
 
-Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament)
+Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament,
+               float reach)
 {
     const auto t0 = std::chrono::steady_clock::now();
     Transfer   transfer(sources);
     const long prepare_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
-    Stats      stats      = transfer.to(target, target_to_world, base_filament);
+    Stats      stats      = transfer.to(target, target_to_world, base_filament, nullptr, reach);
     stats.prepare_ms      = prepare_ms;
     return stats;
 }
@@ -148,7 +149,8 @@ static std::unordered_map<int, std::pair<int, int>> bits_by_facet(const Triangle
     return bits;
 }
 
-Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map)
+Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map,
+                   float reach)
 {
     Stats stats;
     const std::vector<Source>         &sources  = m->sources;
@@ -172,7 +174,10 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
     const float         tie  = std::max(1e-4f, float(bbox.size().norm()) * 1e-6f);
     // The result's skin lies on the skin of the sources (the boolean only nudges vertices a few
     // microns). Anything farther than this has no source and stays unpainted.
-    const float         max_dist  = std::max(0.05f, float(bbox.size().norm()) * 1e-3f);
+    const float         max_dist  = std::max({ 0.05f, float(bbox.size().norm()) * 1e-3f, reach });
+    // How far off a remembered source facet a point may lie and still take it without a search
+    // (a remeshed skin never lies exactly on the old one).
+    const float         hint_tol  = std::max(tie, reach);
     const Transform3f   t2w  = target_to_world.cast<float>();
     const float         world_to_target_area = 1.f / float(std::pow(std::abs(target_to_world.linear().determinant()), 2. / 3.));
 
@@ -210,7 +215,7 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
 
     // Whether `world` lies on facet `facet` of source `src` (within the tie distance of its plane,
     // inside its edges); if so, the projected point and the distance.
-    auto on_facet = [&](int src, int facet, const Vec3f &world, Vec3f &proj, float &dist) {
+    auto on_facet = [&](int src, int facet, const Vec3f &world, Vec3f &proj, float &dist, float tol) {
         const PreparedSource              &p = prepared[src];
         const stl_triangle_vertex_indices &f = p.world_its.indices[facet];
         const Vec3f a = p.world_its.vertices[f[0]], b = p.world_its.vertices[f[1]], c = p.world_its.vertices[f[2]];
@@ -220,7 +225,7 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
             return false;
         n /= len;
         dist = (world - a).dot(n);
-        if (std::abs(dist) > tie)
+        if (std::abs(dist) > tol)
             return false;
         proj = world - n * dist;
         // Barycentric coordinates of the projected point.
@@ -242,11 +247,11 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
         Vec3f proj;
         float dist  = 0.f;
         int   facet = hint.facet;
-        if (! on_facet(hint.source, facet, world, proj, dist)) {
+        if (! on_facet(hint.source, facet, world, proj, dist, hint_tol)) {
             facet = -1;
             for (int k = 0; k < 3 && facet < 0; ++k) {
                 const int nb = p.neighbors[hint.facet](k);
-                if (nb >= 0 && on_facet(hint.source, nb, world, proj, dist))
+                if (nb >= 0 && on_facet(hint.source, nb, world, proj, dist, hint_tol))
                     facet = nb;
             }
             if (facet < 0)

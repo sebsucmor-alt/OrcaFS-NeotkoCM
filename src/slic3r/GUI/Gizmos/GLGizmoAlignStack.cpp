@@ -12,7 +12,10 @@
 #include "libslic3r/SurfaceExtrude.hpp"
 #include "libslic3r/MeshBoolean.hpp"
 #include "libslic3r/PaintTransfer.hpp"
+#include "libslic3r/SLA/Hollowing.hpp"
+#include "libslic3r/QuadricEdgeCollapse.hpp"
 #include <wx/busyinfo.h>
+#include <wx/progdlg.h>
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 
 #include <imgui/imgui.h>
@@ -22,6 +25,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <thread>
 #include <cmath>
 #include <set>
 #include <sstream>
@@ -755,13 +762,18 @@ void GLGizmoAlignStack::render_face_highlights()
             m_hover_face_model.reset();
         m_hover_model_facet = m_hover_facet_idx;
     }
-    if (m_picked_facet_idx != m_picked_model_facet) {
+    // With Hollow opening by Angle, the green shows the grown face.
+    const float picked_cos = m_remesh_hollow && m_remesh_open_face && m_remesh_opening == RemeshOpening::Angle
+                                 ? std::cos(float(m_remesh_open_angle) * float(M_PI) / 180.f)
+                                 : kPickedFaceCos;
+    if (m_picked_facet_idx != m_picked_model_facet || picked_cos != m_picked_model_cos) {
         if (m_picked_facet_idx >= 0)
             build_face_model(m_picked_face_model, m_picked_facet_idx,
-                             ColorRGBA(0.16f, 0.85f, 0.30f, 0.60f), kPickedFaceCos); // green picked
+                             ColorRGBA(0.16f, 0.85f, 0.30f, 0.60f), picked_cos); // green picked
         else
             m_picked_face_model.reset();
         m_picked_model_facet = m_picked_facet_idx;
+        m_picked_model_cos   = picked_cos;
     }
 
     if (!m_hover_face_model.is_initialized() && !m_picked_face_model.is_initialized())
@@ -1271,6 +1283,313 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
     GizmoImguiEnd();
 }
 
+// Remesh (voxels). #1 is voxelized whole and rebuilt as one closed
+// solid: holes, open shells and flipped faces are gone (Orca's repair is Windows only). Offset moves
+// the surface; Hollow takes the inside away, Wall under the new surface, and with a picked face
+// opens it through that face (a mouth: the face shrunk by the wall, from 2 walls deep to 1 mm out).
+void GLGizmoAlignStack::apply_remesh()
+{
+    if (m_remesh_running)
+        return;
+    m_remesh_error.clear();
+    prune_dead_objects();
+    if (m_ordered.empty())
+        return;
+    const Pick pa = m_ordered[0];
+    Model& model = wxGetApp().plater()->model();
+    const ModelObject* a = pick_object(pa);
+    if (a == nullptr)
+        return;
+    const bool   hollow = m_remesh_hollow;
+    const double wall   = (double)m_hollow_wall;
+    const double offset = (double)m_remesh_offset;
+    const RemeshOut out = hollow ? m_remesh_out
+                                 : (m_remesh_out == RemeshOut::NegativePart ? RemeshOut::Replace : m_remesh_out);
+    if (hollow && wall <= offset) {
+        m_remesh_error = _u8L("The wall must be thicker than the offset.");
+        return;
+    }
+
+    // The mouth, built like Construct builds its sheet: face turned to +Z, prism, turned back.
+    indexed_triangle_set mouth;     // deep, clipped to the solid Wall mm in
+    indexed_triangle_set mouth_top; // short, from the face to just past one wall: goes through the face
+    const int n_face = (int)m_face_mesh.its.indices.size();
+    if (hollow && m_remesh_open_face && m_has_picked_face && m_picked_facet_idx >= 0 && m_picked_facet_idx < n_face &&
+        (int)m_face_normals.size() == n_face && (int)m_face_neighbors.size() == n_face) {
+        const Matrix3d lin     = m_face_raycaster_world_trafo.linear();
+        const Vec3d    world_n = (lin.inverse().transpose() * m_face_normals[m_picked_facet_idx].cast<double>()).normalized();
+        if (!world_n.allFinite()) {
+            m_remesh_error = _u8L("That face has no usable outline.");
+            return;
+        }
+        Transform3d to_flat = Transform3d::Identity();
+        to_flat.linear()    = Eigen::Quaterniond::FromTwoVectors(world_n, Vec3d::UnitZ()).toRotationMatrix();
+        // The opening's outline, flat: the picked face (Face), the face grown to the neighbours
+        // within Angle (Angle, for curved skins), or a circle of Diameter round the click (Circle).
+        // zlo/zhi: how far the skin under it goes down and up, so the plug starts above all of it.
+        ExPolygons outline;
+        double     zlo = 0., zhi = 0., inset = -wall;
+        if (m_remesh_opening == RemeshOpening::Circle) {
+            const Vec3d  c = to_flat * m_picked_face_world_pos;
+            const double r = 0.5 * (double)m_remesh_hole_d;
+            Polygon      circle;
+            for (int i = 0; i < 64; ++i) {
+                const double a = 2. * M_PI * i / 64.;
+                circle.points.emplace_back(scale_(c.x() + r * std::cos(a)), scale_(c.y() + r * std::sin(a)));
+            }
+            outline.emplace_back(std::move(circle));
+            // The skin round the click can curve away by up to the radius; the hole is the circle itself.
+            zlo   = c.z() - r;
+            zhi   = c.z() + r;
+            inset = 0.;
+        } else {
+            const float cos_t = m_remesh_opening == RemeshOpening::Angle ? std::cos(float(m_remesh_open_angle) * float(M_PI) / 180.f)
+                                                                         : kPickedFaceCos;
+            const std::vector<int> region = SurfaceExtrude::coplanar_region(m_face_normals, m_face_neighbors,
+                                                                            m_picked_facet_idx, cos_t);
+            const Transform3d flat = to_flat * m_face_raycaster_world_trafo;
+            double mean_z = 0.;
+            outline = SurfaceExtrude::region_outline(m_face_mesh.its, region, flat, &mean_z);
+            zlo = zhi = mean_z;
+            for (int f : region)
+                for (int k = 0; k < 3; ++k) {
+                    const double z = (flat * m_face_mesh.its.vertices[m_face_mesh.its.indices[f][k]].cast<double>()).z();
+                    zlo = std::min(zlo, z);
+                    zhi = std::max(zhi, z);
+                }
+        }
+        // Deep enough to reach the inside however much Smooth sinks it; the mouth is clipped to the
+        // solid Wall mm in later, so going deep never thins a wall where the outside curves in.
+        const double depth = 2. * wall + 2. * (double)m_hollow_smooth + std::abs(offset) + 1.;
+        const double top   = wall + 2. * (double)m_remesh_voxel + 0.5 + std::abs(offset);
+        if (!outline.empty()) {
+            mouth     = SurfaceExtrude::extrude_outline(outline, inset, zlo - depth, zhi - zlo + depth + 1.);
+            mouth_top = SurfaceExtrude::extrude_outline(outline, inset, zlo - top, zhi - zlo + top + 1.);
+        }
+        if (mouth.indices.empty()) {
+            m_remesh_error = _u8L("The face is too small for that wall.");
+            return;
+        }
+        its_transform(mouth, to_flat.inverse());
+        its_transform(mouth_top, to_flat.inverse());
+    }
+
+    TriangleMesh mesh_a = pick_mesh(pa);
+    mesh_a.transform(pick_trafo(pa));
+
+    const size_t mouth_tris = mouth.indices.size();
+    auto fail = [this](const std::string& msg) { m_remesh_error = msg; };
+
+    // Hollow, opening and subtraction all happen on the voxels: no mesh boolean.
+    sla::RemeshParams rp;
+    rp.voxel      = (double)m_remesh_voxel;
+    rp.offset     = offset;
+    rp.hollow     = hollow;
+    rp.wall       = wall;
+    rp.smooth     = (double)m_hollow_smooth;
+    rp.want_outer = out != RemeshOut::NegativePart;
+    rp.adaptivity = (double)m_remesh_adaptive;
+    rp.fast_smooth = m_remesh_fast_smooth;
+    if (mouth_tris > 0) {
+        rp.mouth = &mouth;
+        rp.plug  = &mouth_top;
+    }
+
+    // The heavy part runs on its own thread; this one keeps a progress window with Cancel. One
+    // OpenVDB step can't be stopped halfway, so Cancel takes effect at the next step.
+    // The window lists every step of this run: done ones ticked, the current one marked, the
+    // rest waiting, so it shows how much is left (the bar only says it is alive).
+    struct Step { const char* key; std::string label; };
+    std::vector<Step> steps { { "voxels", _u8L("Voxelizing") } };
+    if (hollow) {
+        steps.push_back({ "inside", _u8L("Shrinking the inside") });
+        steps.push_back({ "smooth", _u8L("Smoothing the inside") });
+        if (mouth_tris > 0)
+            steps.push_back({ "opening", _u8L("Opening the face") });
+    }
+    steps.push_back({ "mesh", _u8L("Building the mesh") });
+    steps.push_back({ "simplify", _u8L("Simplifying") });
+    std::atomic<bool> cancel { false }, done { false };
+    std::atomic<int>  cur_step { 0 };
+    auto set_step = [&](const char* key) {
+        for (int i = 0; i < int(steps.size()); ++i)
+            if (std::strcmp(steps[i].key, key) == 0 && i > cur_step.load())
+                cur_step = i;
+    };
+    rp.cancel = [&cancel]() { return cancel.load(); };
+    rp.status = [&](int, const char* what) { set_step(what); };
+    auto step_list = [&](int cur) {
+        wxString msg;
+        for (int i = 0; i < int(steps.size()); ++i) {
+            msg += i < cur ? wxString::FromUTF8("\u2713  ") : i == cur ? wxString::FromUTF8("\u25B8  ") : wxString("     ");
+            msg += from_u8(steps[i].label);
+            if (i == cur)
+                msg += cancel.load() ? wxString(" - ") + _L("stopping...") : wxString("...");
+            msg += "\n";
+        }
+        return msg;
+    };
+    const uint32_t     max_tris  = uint32_t(std::max(1000, m_remesh_max_tris));
+    const bool         drop_bits = m_remesh_drop_bits;
+    const double       voxel3    = rp.voxel * rp.voxel * rp.voxel;
+    sla::RemeshResult  rr;
+    size_t             bits_dropped = 0;
+    bool               worker_failed = false;
+    m_remesh_running = true;
+    std::thread worker([&]() {
+        try {
+            rr = sla::neo_remesh(mesh_a.its, rp);
+            indexed_triangle_set& keep = rp.want_outer ? rr.outer : rr.cavity;
+            if (!rr.cancelled && keep.indices.size() > max_tris) {
+                // Simplified to Max triangles; flat zones go first, so the shape stays.
+                set_step("simplify");
+                its_quadric_edge_collapse(keep, max_tris, nullptr,
+                                          [&cancel]() { if (cancel.load()) throw std::runtime_error("cancelled"); });
+            }
+            // Loose bits: shells far smaller than the biggest one (leftovers of hidden geometry).
+            // The inside of a closed hollow is a big shell of its own and stays.
+            if (!rr.cancelled && drop_bits && !keep.indices.empty()) {
+                std::vector<indexed_triangle_set> shells = its_split(keep);
+                if (shells.size() > 1) {
+                    double biggest = 0.;
+                    std::vector<double> vols(shells.size());
+                    for (size_t i = 0; i < shells.size(); ++i)
+                        biggest = std::max(biggest, vols[i] = std::abs(double(its_volume(shells[i]))));
+                    const double min_vol = std::max(2e-3 * biggest, 8. * voxel3);
+                    indexed_triangle_set kept;
+                    for (size_t i = 0; i < shells.size(); ++i) {
+                        if (vols[i] < min_vol) { ++bits_dropped; continue; }
+                        its_merge(kept, shells[i]);
+                    }
+                    if (bits_dropped > 0 && !kept.indices.empty())
+                        keep = std::move(kept);
+                    else
+                        bits_dropped = 0;
+                }
+            }
+        } catch (const std::exception&) {
+            if (cancel.load())
+                rr.cancelled = true;
+            else
+                worker_failed = true;
+        }
+        done = true;
+    });
+    {
+        // Built with the whole list so the window is tall enough for it. The bar pulses: it shows
+        // the work is alive, the list shows what is left.
+        wxProgressDialog dlg(_L("Remesh"), step_list(0), 100, m_parent.get_wxglcanvas()->GetParent(),
+                             wxPD_APP_MODAL | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+        while (!done.load()) {
+            if (!dlg.Pulse(step_list(cur_step.load())))
+                cancel = true;
+            wxMilliSleep(100);
+        }
+    }
+    worker.join();
+    m_remesh_running = false;
+    if (rr.cancelled) {
+        m_remesh_error = _u8L("Cancelled.");
+        return;
+    }
+    if (worker_failed)
+        return fail(_u8L("The remesh failed. Try a coarser quality."));
+    if (hollow && !rr.has_cavity)
+        return fail(_u8L("Nothing is left inside with that wall. Try a thinner wall."));
+    if (rp.want_outer && rr.outer.indices.empty())
+        return fail(_u8L("Nothing came out. Try a finer quality or a smaller negative offset."));
+    if (!rp.want_outer && rr.cavity.indices.empty())
+        return fail(_u8L("Nothing is left inside with that wall. Try a thinner wall."));
+
+    // Negative part: #1 and its painting untouched, the slicer takes the inside away.
+    if (out == RemeshOut::NegativePart) {
+        const std::string neg_name = pick_name(pa) + " - " + _u8L("hollow");
+        {
+            Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Construct: hollow (negative part)");
+            const int obj = pa.obj;
+            clear_face_pick();
+            clear_order();
+            wxGetApp().obj_list()->add_mesh_part_in_place(obj, TriangleMesh(std::move(rr.cavity)), neg_name, true);
+        }
+        refresh_highlight();
+        return;
+    }
+
+    TriangleMesh result(std::move(rr.outer));
+
+    // Into the scene, with #1's painting.
+    const std::string name     = pick_name(pa) + " - " + (hollow ? _u8L("hollow") : _u8L("remesh"));
+    const int         extruder = pa.is_part() ? PaintTransfer::effective_filament(*pick_volume(pa))
+                                              : (a->config.has("extruder") ? a->config.opt_int("extruder") : 0);
+    const Vec3d       result_centre = result.bounding_box().center();
+    std::vector<PaintTransfer::Source> paint_sources;
+    if (m_remesh_keep_paint) {
+        if (pa.is_part()) {
+            PaintTransfer::Source src;
+            src.volume   = a->volumes[pa.vol];
+            src.to_world = pick_trafo(pa);
+            src.filament = PaintTransfer::effective_filament(*src.volume);
+            paint_sources.push_back(src);
+        } else
+            PaintTransfer::append_object_sources(*a, false, paint_sources);
+    }
+    const bool         replace = out == RemeshOut::Replace;
+    const ModelObject* del_obj = a;
+    const ModelVolume* del_vol = pick_volume(pa);
+    {
+        Plater::TakeSnapshot snap(wxGetApp().plater(), "Align & Construct: remesh");
+        clear_face_pick();
+        clear_order();
+
+        ModelVolume* res_vol    = nullptr;
+        int          result_obj = -1;
+        Transform3d  result_to_world = Transform3d::Identity();
+        if (pa.is_part() && replace) {
+            result_obj = pa.obj;
+            res_vol    = wxGetApp().obj_list()->add_mesh_part_in_place(result_obj, result, name);
+            if (res_vol != nullptr) {
+                if (extruder > 0)
+                    res_vol->config.set_key_value("extruder", new ConfigOptionInt(extruder));
+                result_to_world = model.objects[result_obj]->instances.front()->get_matrix() * res_vol->get_matrix();
+            }
+        } else {
+            wxGetApp().obj_list()->load_mesh_object(result, from_u8(name), false);
+            if (extruder > 0 && !model.objects.empty())
+                model.objects.back()->config.set_key_value("extruder", new ConfigOptionInt(extruder));
+            if (!model.objects.empty() && !model.objects.back()->volumes.empty()) {
+                result_obj      = int(model.objects.size()) - 1;
+                res_vol         = model.objects.back()->volumes.front();
+                result_to_world = Geometry::translation_transform(result_centre) * res_vol->get_matrix();
+            }
+        }
+        if (res_vol != nullptr && PaintTransfer::worth_transferring(paint_sources)) {
+            // The rebuilt skin lies up to about a voxel off the old one (more with an offset).
+            const float reach = 1.5f * m_remesh_voxel + std::abs(float(offset)) + 0.05f;
+            const PaintTransfer::Stats paint_stats = PaintTransfer::transfer(paint_sources, *res_vol, result_to_world,
+                                                                             PaintTransfer::effective_filament(*res_vol), reach);
+            if (paint_stats.layers > 0)
+                wxGetApp().obj_list()->update_info_items(size_t(result_obj));
+        }
+
+        // Replace: delete #1 (by pointer: indices may have moved).
+        if (replace)
+            for (size_t oi = 0; oi < model.objects.size(); ++oi) {
+                if (model.objects[oi] != del_obj)
+                    continue;
+                if (del_vol == nullptr) {
+                    wxGetApp().obj_list()->delete_from_model_and_list(ItemType::itObject, int(oi), -1);
+                } else {
+                    const ModelVolumePtrs& vols = model.objects[oi]->volumes;
+                    for (size_t vi = 0; vi < vols.size(); ++vi)
+                        if (vols[vi] == del_vol) { wxGetApp().obj_list()->delete_from_model_and_list(ItemType::itVolume, int(oi), int(vi)); break; }
+                }
+                break;
+            }
+    }
+
+    refresh_highlight();
+}
+
 // The panel in plain ImGui, like Orca's own gizmos.
 void GLGizmoAlignStack::render_panel_body()
 {
@@ -1451,6 +1770,184 @@ void GLGizmoAlignStack::render_panel_body()
             ImGui::TextWrapped("%s", m_construct_block_reason.c_str());
             ImGui::PopStyleColor();
         }
+    }
+
+    // --- Remesh (voxels) ---------------------------------------------------------------
+    section(_u8L("Remesh (voxels)"));
+    if (n == 0) {
+        hint(_u8L("Pick #1 first."));
+    } else {
+        const float fw   = 5.f * ImGui::GetFontSize();
+        auto        warn = [](const std::string& text) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.65f, 0.2f, 1.f));
+            ImGui::TextWrapped("%s", text.c_str());
+            ImGui::PopStyleColor();
+        };
+        // Surface of #1, for the estimate (only when #1 changes).
+        {
+            const Pick& p0  = m_ordered[0];
+            const void* key = pick_volume(p0) != nullptr ? (const void*)pick_volume(p0) : (const void*)pick_object(p0);
+            if (key != m_remesh_area_key && key != nullptr) {
+                TriangleMesh mw = pick_mesh(p0);
+                mw.transform(pick_trafo(p0));
+                double area = 0.;
+                for (const stl_triangle_vertex_indices& f : mw.its.indices) {
+                    const Vec3d v0 = mw.its.vertices[f[0]].cast<double>();
+                    area += 0.5 * (mw.its.vertices[f[1]].cast<double>() - v0).cross(mw.its.vertices[f[2]].cast<double>() - v0).norm();
+                }
+                m_remesh_area     = area;
+                m_remesh_area_key = key;
+            }
+        }
+
+        // Quality: presets + the number.
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Quality").c_str());
+        tip(_u8L("Voxel size, in mm. Smaller keeps more detail\nbut takes longer and needs more memory.\nDetails thinner than one voxel are lost,\nsharp edges round off by half a voxel."));
+        {
+            struct Q { std::string label; float v; };
+            const Q qs[] = { { _u8L("Draft"), 0.5f }, { _u8L("Normal"), 0.2f }, { _u8L("High"), 0.1f }, { _u8L("Extreme"), 0.05f } };
+            for (int i = 0; i < 4; ++i) {
+                ImGui::SameLine();
+                if (ImGui::RadioButton(qs[i].label.c_str(), std::abs(m_remesh_voxel - qs[i].v) < 1e-4f))
+                    m_remesh_voxel = qs[i].v;
+                char mm[16];
+                snprintf(mm, sizeof(mm), "%.2f mm", qs[i].v);
+                tip(qs[i].label + ": " + mm + (i == 3 ? "\n" + _u8L("Heavy: big objects take minutes\nand gigabytes of memory.") : std::string()));
+            }
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Voxel").c_str());
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fw);
+        ImGui::InputFloat("##rq_voxel", &m_remesh_voxel, 0.0f, 0.0f, "%.3f mm");
+        tip(_u8L("Any size you like, from 0.02 to 2 mm."));
+        m_remesh_voxel = std::clamp(m_remesh_voxel, 0.02f, 2.f);
+        {
+            // Estimate: the surface in voxels, about 3 triangles each before simplifying; the
+            // grid keeps about 6 voxels across the surface.
+            const double vx2   = double(m_remesh_voxel) * double(m_remesh_voxel);
+            const double cells = m_remesh_area / vx2;
+            const double mb    = cells * 220. / (1024. * 1024.);
+            char buf[160];
+            snprintf(buf, sizeof(buf), "~%.1f M %s, ~%.0f MB", 3. * cells / 1e6, _u8L("triangles").c_str(), mb);
+            ImGui::SameLine();
+            hint(buf);
+            if (mb > 1500.)
+                warn(_u8L("Very heavy: this can take minutes and a lot of memory."));
+        }
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Offset").c_str());
+        tip(_u8L("Moves the whole surface, in mm.\n+ makes it fatter (thin walls get printable),\n- makes it thinner (room for a fit).\n0 just repairs. Big offsets blur the painting."));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fw);
+        ImGui::InputFloat("##rq_offset", &m_remesh_offset, 0.0f, 0.0f, "%.2f mm");
+        m_remesh_offset = std::clamp(m_remesh_offset, -10.f, 10.f);
+
+        ImGui::Checkbox(_u8L("Hollow").c_str(), &m_remesh_hollow);
+        tip(_u8L("Takes the inside away, leaving walls\nof Wall mm under the new surface."));
+        if (m_remesh_hollow) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(_u8L("Wall").c_str());
+            tip(_u8L("How thick the walls stay, in mm.\nThe inside comes out smoothed and the\nwall is approximate. Parts thinner than\ntwo walls stay solid."));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(fw);
+            ImGui::InputFloat("##as_wall", &m_hollow_wall, 0.0f, 0.0f, "%.2f mm");
+            m_hollow_wall = std::clamp(m_hollow_wall, 0.4f, 50.f);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(_u8L("Smooth").c_str());
+            tip(_u8L("Smooths the inside, in mm.\n0 follows every bump of the outside.\nHigher fills bumps and thin spots,\nso the wall never gets thinner than Wall."));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(fw);
+            ImGui::InputFloat("##as_smooth", &m_hollow_smooth, 0.0f, 0.0f, "%.1f mm");
+            m_hollow_smooth = std::clamp(m_hollow_smooth, 0.f, 30.f);
+
+            m_imgui->disabled_begin(!m_has_picked_face);
+            ImGui::Checkbox(_u8L("Open through the picked face").c_str(), &m_remesh_open_face);
+            tip(_u8L("Opens the hollow through the picked face,\nleaving a rim of one wall.\nOff: a closed hollow inside."));
+            if (m_has_picked_face && m_remesh_open_face) {
+                if (ImGui::RadioButton(_u8L("Face").c_str(), m_remesh_opening == RemeshOpening::Face)) m_remesh_opening = RemeshOpening::Face;
+                tip(_u8L("The flat face you picked, less one wall\nall round (a rim stays)."));
+                ImGui::SameLine();
+                if (ImGui::RadioButton(_u8L("Angle").c_str(), m_remesh_opening == RemeshOpening::Angle)) m_remesh_opening = RemeshOpening::Angle;
+                tip(_u8L("The face grown to its neighbours while\nthey turn less than Angle: for curved skins.\nThe green shows what it takes.\nToo much may come out odd."));
+                ImGui::SameLine();
+                if (ImGui::RadioButton(_u8L("Circle").c_str(), m_remesh_opening == RemeshOpening::Circle)) m_remesh_opening = RemeshOpening::Circle;
+                tip(_u8L("A round hole of Diameter where you clicked,\nstraight into the surface. Works anywhere,\nlike a drain hole."));
+                if (m_remesh_opening == RemeshOpening::Angle) {
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(_u8L("Angle").c_str());
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(fw);
+                    ImGui::InputFloat("##rq_ang", &m_remesh_open_angle, 0.0f, 0.0f, "%.0f deg");
+                    tip(_u8L("How much the surface may turn and\nstill be part of the opening."));
+                    m_remesh_open_angle = std::clamp(m_remesh_open_angle, 1.f, 80.f);
+                } else if (m_remesh_opening == RemeshOpening::Circle) {
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(_u8L("Diameter").c_str());
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(fw);
+                    ImGui::InputFloat("##rq_hole", &m_remesh_hole_d, 0.0f, 0.0f, "%.1f mm");
+                    tip(_u8L("Size of the round hole, in mm."));
+                    m_remesh_hole_d = std::clamp(m_remesh_hole_d, 1.f, 200.f);
+                }
+            }
+            m_imgui->disabled_end();
+            if (!m_has_picked_face || !m_remesh_open_face)
+                hint(m_has_picked_face ? _u8L("Closed hollow: sealed inside, it looks the same from outside.")
+                                       : _u8L("Closed hollow: sealed inside. Pick a flat face to open it there."));
+            ImGui::Checkbox(_u8L("Fast smooth").c_str(), &m_remesh_fast_smooth);
+            tip(_u8L("Builds the inside on coarser voxels\n(about Smooth / 10). It is smoothed anyway,\nso it looks the same, and a big Smooth\ntakes seconds instead of minutes.\nThe outside keeps the chosen Quality."));
+        }
+
+        ImGui::Checkbox(_u8L("Keep painting").c_str(), &m_remesh_keep_paint);
+        tip(_u8L("Paints the new mesh like #1.\nBorders between colours follow the\nnew triangles."));
+
+        // Fine tuning, folded: the defaults work.
+        if (ImGui::TreeNode(_u8L("Advanced").c_str())) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(_u8L("Max triangles").c_str());
+            tip(_u8L("The result is simplified down to this.\nMore keeps finer detail, files get bigger."));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(1.2f * fw);
+            ImGui::InputInt("##rq_max", &m_remesh_max_tris, 0, 0);
+            m_remesh_max_tris = std::clamp(m_remesh_max_tris, 1000, 20000000);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(_u8L("Adaptive").c_str());
+            tip(_u8L("Bigger triangles where the surface is flat,\nsmall ones only on curves and details.\n0 makes them all the voxel size.\nFewer triangles slice faster.\nToo high softens fine detail."));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(fw);
+            ImGui::InputFloat("##rq_adapt", &m_remesh_adaptive, 0.0f, 0.0f, "%.2f");
+            m_remesh_adaptive = std::clamp(m_remesh_adaptive, 0.f, 1.f);
+            ImGui::Checkbox(_u8L("Remove loose bits").c_str(), &m_remesh_drop_bits);
+            tip(_u8L("Deletes tiny separate pieces left over\nfrom hidden geometry inside the model,\nso the result is one clean solid.\nThe inside of a closed hollow stays."));
+            ImGui::TreePop();
+        }
+
+        if (!m_remesh_hollow && m_remesh_out == RemeshOut::NegativePart)
+            m_remesh_out = RemeshOut::Replace;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Result").c_str());
+        ImGui::SameLine();
+        if (ImGui::RadioButton(_u8L("Replace").c_str(), m_remesh_out == RemeshOut::Replace)) m_remesh_out = RemeshOut::Replace;
+        tip(_u8L("The new mesh takes #1's place."));
+        ImGui::SameLine();
+        if (ImGui::RadioButton(_u8L("New object").c_str(), m_remesh_out == RemeshOut::NewObject)) m_remesh_out = RemeshOut::NewObject;
+        tip(_u8L("The new mesh as a separate object.\n#1 stays as it was."));
+        ImGui::SameLine();
+        m_imgui->disabled_begin(!m_remesh_hollow);
+        if (ImGui::RadioButton(_u8L("Neg. part").c_str(), m_remesh_out == RemeshOut::NegativePart)) m_remesh_out = RemeshOut::NegativePart;
+        m_imgui->disabled_end();
+        tip(_u8L("Hollow without touching #1: the inside\nbecomes a negative part of #1's object and\nthe slicer takes it away. Move it, cut it,\nor delete it to undo. Needs Hollow."));
+
+        m_imgui->disabled_begin(m_remesh_running);
+        if (ImGui::Button(_u8L("Remesh").c_str()))
+            apply_remesh();
+        m_imgui->disabled_end();
+        tip(_u8L("Rebuilds #1 from voxels as one closed solid:\nholes, loose shells and flipped faces are gone.\nBig meshes take a while."));
+        if (!m_remesh_error.empty())
+            warn(m_remesh_error);
     }
 
     // --- Boolean -----------------------------------------------------------------------

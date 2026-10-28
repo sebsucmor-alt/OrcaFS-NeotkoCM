@@ -50,9 +50,23 @@ openvdb::FloatGrid::Ptr mesh_to_grid(const indexed_triangle_set &    mesh,
                                      float voxel_scale,
                                      float exteriorBandWidth,
                                      float interiorBandWidth,
-                                     int   flags)
+                                     int   flags,
+                                     VdbInterrupt *interrupt)
 {
     openvdb::initialize();
+
+    // The whole mesh, not split into shells.
+    if (flags & MeshToGridWhole) {
+        auto whole = interrupt != nullptr
+            ? openvdb::tools::meshToVolume<openvdb::FloatGrid>(*interrupt,
+                  TriangleMeshDataAdapter{mesh, voxel_scale}, tr, exteriorBandWidth,
+                  interiorBandWidth, flags & ~MeshToGridWhole)
+            : openvdb::tools::meshToVolume<openvdb::FloatGrid>(
+                  TriangleMeshDataAdapter{mesh, voxel_scale}, tr, exteriorBandWidth,
+                  interiorBandWidth, flags & ~MeshToGridWhole);
+        if (whole) whole->insertMeta("voxel_scale", openvdb::FloatMetadata(voxel_scale));
+        return whole;
+    }
 
     std::vector<indexed_triangle_set> meshparts = its_split(mesh);
 
@@ -122,10 +136,14 @@ indexed_triangle_set grid_to_mesh(const openvdb::FloatGrid &grid,
 openvdb::FloatGrid::Ptr redistance_grid(const openvdb::FloatGrid &grid,
                                         double                    iso,
                                         double                    er,
-                                        double                    ir)
+                                        double                    ir,
+                                        VdbInterrupt             *interrupt)
 {
-    auto new_grid = openvdb::tools::levelSetRebuild(grid, float(iso),
-                                                    float(er), float(ir));
+    auto new_grid = interrupt != nullptr
+        ? openvdb::tools::levelSetRebuild(grid, float(iso), float(er), float(ir), nullptr, interrupt)
+        : openvdb::tools::levelSetRebuild(grid, float(iso), float(er), float(ir));
+    if (!new_grid)
+        return new_grid;
 
     // Copies voxel_scale metadata, if it exists.
     new_grid->insertMeta(*grid.deepCopyMeta());
