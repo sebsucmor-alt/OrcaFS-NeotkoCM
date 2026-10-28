@@ -8,6 +8,8 @@
 #include <functional>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
+#include "PolygonMask2D.hpp"
+#include <memory>
 
 namespace Slic3r {
 
@@ -310,6 +312,60 @@ public:
         Matrix4d           m_view_projection_matrix;
         std::array<int, 4> m_viewport;
         std::vector<Vec2f> m_polygon;
+    };
+
+    // Screen-space mask made of several rings with holes (an SVG), painted in ONE select_patch() pass. Same tests as
+    // PolygonProjectionCursor, but (1) every query goes through PolygonMask2D's grid instead of
+    // walking all the edges, and (2) the cheap geometric test runs first: occlusion rays are only
+    // cast for triangles that actually touch the mask. Holes stay unpainted (they are not painted
+    // with NONE afterwards, which also wiped paint that was already there).
+    class PolygonSetProjectionCursor : public SinglePointCursor
+    {
+    public:
+        PolygonSetProjectionCursor() = delete;
+        ~PolygonSetProjectionCursor() override = default;
+
+        // mask: screen-space rings in pixels (Y down, matches mouse coords), shared by every mesh.
+        explicit PolygonSetProjectionCursor(const Vec3f &camera_pos_mesh, const Vec3f &camera_target_mesh,
+                                             const Matrix4d &view_projection_matrix, const std::array<int, 4> &viewport,
+                                             std::shared_ptr<const PolygonMask2D> mask,
+                                             const Transform3d &trafo_, const ClippingPlane &clipping_plane_)
+            : SinglePointCursor(camera_target_mesh, camera_pos_mesh, 1.f, trafo_, clipping_plane_)
+            , m_view_projection_matrix(view_projection_matrix)
+            , m_viewport(viewport)
+            , m_mask(std::move(mask))
+        {
+            assert(m_mask);
+        }
+
+        static std::unique_ptr<Cursor> cursor_factory(const Vec3f &camera_pos_mesh, const Vec3f &camera_target_mesh,
+                                                       const Matrix4d &view_projection_matrix, const std::array<int, 4> &viewport,
+                                                       std::shared_ptr<const PolygonMask2D> mask,
+                                                       const Transform3d &trafo_matrix, const ClippingPlane &clipping_plane)
+        {
+            return std::make_unique<TriangleSelector::PolygonSetProjectionCursor>(camera_pos_mesh, camera_target_mesh,
+                view_projection_matrix, viewport, std::move(mask), trafo_matrix, clipping_plane);
+        }
+
+        bool is_mesh_point_inside(const Vec3f &point) const override;
+        bool is_pointer_in_triangle(const Vec3f &p1, const Vec3f &p2, const Vec3f &p3) const override;
+        bool is_edge_inside_cursor(const Triangle &tr, const std::vector<Vertex> &vertices) const override;
+        bool is_facet_visible(int facet_idx, const std::vector<Vec3f> &face_normals) const override
+        {
+            return m_any_facing || TriangleSelector::Cursor::is_facet_visible(*this, facet_idx, face_normals);
+        }
+        // "through": facets facing away from the eye are painted too.
+        void set_any_facing(bool on) { m_any_facing = on; }
+        // Concave and holed: 3 vertices inside never proves the whole triangle is inside.
+        bool all_vertices_inside_implies_whole_triangle_inside() const override { return false; }
+
+    private:
+        bool project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const;
+
+        Matrix4d                              m_view_projection_matrix;
+        std::array<int, 4>                    m_viewport;
+        std::shared_ptr<const PolygonMask2D>  m_mask;
+        bool                                  m_any_facing = false;
     };
 
     class Capsule3D : public DoublePointCursor

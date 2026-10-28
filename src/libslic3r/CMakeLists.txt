@@ -355,6 +355,7 @@ set(lisbslic3r_sources
     PaintTransfer.hpp
     SvgPaint.cpp
     SvgPaint.hpp
+    PolygonMask2D.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     Print.cpp
