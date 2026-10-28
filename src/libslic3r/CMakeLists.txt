@@ -414,6 +414,8 @@ set(lisbslic3r_sources
     PrintBase.hpp
     PaintTransfer.cpp
     PaintTransfer.hpp
+    SvgPaint.cpp
+    SvgPaint.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     Print.cpp
