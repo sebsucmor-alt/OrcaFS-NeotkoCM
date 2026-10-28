@@ -51,6 +51,9 @@ int effective_filament(const ModelVolume &volume);
 // Every model part of `object`, placed with its first instance.
 void append_object_sources(const ModelObject &object, bool cutter, std::vector<Source> &out);
 
+// In a facet map of Transfer::to(): a new facet that stays unpainted.
+constexpr int FACET_UNPAINTED = -2;
+
 // The sources prepared once (search trees, painting loaded) for several targets, as when one
 // mesh is split into many pieces.
 class Transfer
@@ -58,8 +61,11 @@ class Transfer
 public:
     explicit Transfer(std::vector<Source> sources);
     ~Transfer();
-    // See transfer() below.
-    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament);
+    // See transfer() below. With one source, `facet_map` (from FacetMatcher::match()) may say
+    // which facets of the target are facets of the source: their painting is copied as it is and
+    // only the rest is resampled (a cut, where only the facets along the plane are new).
+    // FACET_UNPAINTED in the map leaves that facet unpainted without sampling it (the cap of a cut).
+    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map = nullptr);
 
 private:
     struct Impl;

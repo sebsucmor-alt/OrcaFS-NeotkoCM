@@ -17,6 +17,9 @@
 #include "slic3r/GUI/Field.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
 #include "FixModelByWin10.hpp"
+#include "libslic3r/PaintTransfer.hpp"
+#include <wx/busyinfo.h>
+#include <wx/glcanvas.h>
 
 namespace Slic3r {
 namespace GUI {
@@ -3344,6 +3347,13 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         apply_connectors_in_model(cut_mo , dowels_count);
 
         wxBusyCursor wait;
+        // The cut carries the painting over to the pieces.
+        std::unique_ptr<wxBusyInfo> paint_busy;
+        if (std::any_of(cut_mo->volumes.begin(), cut_mo->volumes.end(),
+                        [](const ModelVolume *v) { return PaintTransfer::has_painting(*v); })) {
+            paint_busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), plater->get_current_canvas3D()->get_wxglcanvas());
+            wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+        }
 
         ModelObjectCutAttributes attributes = only_if(has_connectors ? true : m_keep_upper, ModelObjectCutAttribute::KeepUpper) |
                                               only_if(has_connectors ? true : m_keep_lower, ModelObjectCutAttribute::KeepLower) |
@@ -3362,6 +3372,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
                                                                  cut.perform_with_plane();
+        paint_busy.reset();
 
         // fix_non_manifold_edges
 #ifdef HAS_WIN10SDK
